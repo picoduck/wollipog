@@ -838,6 +838,128 @@ function notificationHandlers(driver: CodexAppServerDriver): Map<string, (params
   return notifications;
 }
 
+test("reattached child recovers its own model before a new turn without replaying usage", async () => {
+  const h = makeHarness({ config: { model: "parent-model", serviceTier: "fast" } });
+  const d = h.driver as any;
+  d.threadId = "root";
+  const notifications = notificationHandlers(h.driver);
+  const requests: unknown[] = [];
+  d.peer = { requestWithDeadline: async (method: string, params: unknown) => {
+    requests.push({ method, params });
+    return { thread: { id: "child", model: "child-model", status: { type: "idle" } } };
+  } };
+  const attach = { threadId: "root", item: {
+    type: "collabAgentToolCall", id: "resume", tool: "resumeAgent", status: "completed",
+    senderThreadId: "root", receiverThreadIds: ["child"],
+    agentsStates: { child: { status: "running" } },
+  } };
+  notifications.get("item/completed")!(attach);
+  await nextTask();
+  notifications.get("turn/started")!({ threadId: "child", turn: { id: "new-turn" } });
+  const report = { threadId: "child", turnId: "new-turn", tokenUsage: {
+    last: { inputTokens: 100, outputTokens: 5 }, total: { inputTokens: 100, outputTokens: 5 },
+  } };
+  notifications.get("thread/tokenUsage/updated")!(report);
+  notifications.get("turn/started")!({ threadId: "child", turn: { id: "new-turn" } });
+  notifications.get("thread/tokenUsage/updated")!(report);
+  const usage = h.events.filter((event) => event.kind === "token_usage");
+  assert.equal(usage.length, 1);
+  assert.equal(usage[0]?.model, "child-model");
+  assert.deepEqual(usage[0]?.pricingContext, { requestInputTokens: 100, serviceTier: "fast" });
+  assert.deepEqual(requests, [{ method: "thread/read", params: { threadId: "child", includeTurns: false } }]);
+  assert.equal(d.config.model, "parent-model");
+});
+
+test("replayed child starts and old usage cannot acquire the next turn's recovered model", async () => {
+  const h = makeHarness({ config: { model: "parent" } });
+  const d = h.driver as any;
+  d.threadId = "root";
+  const handlers = notificationHandlers(h.driver);
+  d.peer = { requestWithDeadline: async () => ({ thread: { id: "child", model: "model-one", status: { type: "idle" } } }) };
+  handlers.get("item/completed")!({ threadId: "root", item: {
+    type: "collabAgentToolCall", id: "resume", tool: "resumeAgent", status: "completed", receiverThreadIds: ["child"],
+  } });
+  await nextTask();
+  const start = (id: string) => handlers.get("turn/started")!({ threadId: "child", turn: { id } });
+  const report = (turnId: string, n: number) => handlers.get("thread/tokenUsage/updated")!({
+    threadId: "child", turnId, tokenUsage: { last: { inputTokens: n, outputTokens: 1 } },
+  });
+  start("first");
+  report("first", 10);
+  start("first");
+  report("first", 10);
+  handlers.get("thread/settings/updated")!({ threadId: "child", threadSettings: { model: "model-two" } });
+  start("second");
+  start("first");
+  report("first", 20);
+  report("second", 30);
+  const usage = h.events.filter((e) => e.kind === "token_usage");
+  assert.deepEqual(usage.map((e) => [e.model, e.inputTokens]), [["model-one", 10], ["model-two", 30]]);
+});
+
+test("late child metadata cannot relabel an active request and concurrent replies stay isolated", async () => {
+  const h = makeHarness({ config: { model: "parent" } });
+  const d = h.driver as any;
+  d.threadId = "root";
+  const handlers = notificationHandlers(h.driver);
+  const replies = new Map<string, (value: unknown) => void>();
+  d.peer = { requestWithDeadline: (_: string, params: { threadId: string }) =>
+    new Promise((resolve) => replies.set(params.threadId, resolve)) };
+  for (const child of ["one", "two"]) {
+    handlers.get("item/completed")!({ threadId: "root", item: {
+      type: "collabAgentToolCall", id: `resume-${child}`, tool: "sendInput", status: "completed",
+      receiverThreadIds: [child], senderThreadId: "root",
+    } });
+    handlers.get("turn/started")!({ threadId: child, turn: { id: `turn-${child}` } });
+  }
+  const report = (child: string, turn: string, n: number) => handlers.get("thread/tokenUsage/updated")!({
+    threadId: child, turnId: turn, tokenUsage: { last: { inputTokens: 10, outputTokens: 1 }, total: { inputTokens: n, outputTokens: n / 10 } },
+  });
+  report("one", "turn-one", 10);
+  replies.get("two")!({ thread: { id: "two", model: "model-two", status: { type: "active" } } });
+  replies.get("one")!({ thread: { id: "one", model: "model-one", status: { type: "active" } } });
+  await nextTask();
+  report("one", "turn-one", 20);
+  report("two", "turn-two", 10);
+  for (const child of ["one", "two"]) {
+    handlers.get("turn/completed")!({ threadId: child, turn: { id: `turn-${child}`, status: "completed" } });
+    handlers.get("turn/started")!({ threadId: child, turn: { id: `next-${child}` } });
+    report(child, `next-${child}`, child === "one" ? 30 : 20);
+  }
+  const usage = h.events.filter((e) => e.kind === "token_usage");
+  assert.deepEqual(usage.map((e) => e.model), ["<unknown-subagent>", "<unknown-subagent>", "<unknown-subagent>", "model-one", "model-two"]);
+  assert.deepEqual(usage.map((e) => e.parentToolUseId), ["resume-one", "resume-one", "resume-two", "resume-one", "resume-two"]);
+});
+
+for (const unavailable of ["unsupported", "notLoaded", "wrong-thread", "null-model", "settings-race"]) {
+  test(`child metadata recovery remains unpriced for ${unavailable}`, async () => {
+    const h = makeHarness({ config: { model: "parent" } });
+    const d = h.driver as any;
+    d.threadId = "root";
+    const handlers = notificationHandlers(h.driver);
+    let finish!: (value: unknown) => void;
+    d.peer = { requestWithDeadline: async () => {
+      if (unavailable === "unsupported") throw new Error("unsupported");
+      return new Promise((resolve) => { finish = resolve; });
+    } };
+    handlers.get("item/completed")!({ threadId: "root", item: {
+      type: "collabAgentToolCall", id: "resume", tool: "resumeAgent", status: "completed", receiverThreadIds: ["child"],
+    } });
+    if (unavailable === "settings-race") handlers.get("thread/settings/updated")!({ threadId: "child", threadSettings: { model: "actual-new-model" } });
+    if (unavailable !== "unsupported") finish({ thread: {
+      id: unavailable === "wrong-thread" ? "foreign" : "child", model: unavailable === "null-model" ? null : "stale-model",
+      status: { type: unavailable === "notLoaded" ? "notLoaded" : "idle" },
+    } });
+    await nextTask();
+    handlers.get("turn/started")!({ threadId: "child", turn: { id: "new" } });
+    handlers.get("thread/tokenUsage/updated")!({ threadId: "child", turnId: "new",
+      tokenUsage: { last: { inputTokens: 10, outputTokens: 1 }, total: { inputTokens: 10, outputTokens: 1 } } });
+    const event = h.events.find((e) => e.kind === "token_usage");
+    assert.equal(event?.model, unavailable === "settings-race" ? "actual-new-model" : "<unknown-subagent>");
+    assert.notEqual(event?.model, "parent");
+  });
+}
+
 test("account/rateLimits/updated forwards sparse usage without creating transcript events", () => {
   const h = makeHarness();
   const notifications = notificationHandlers(h.driver);
@@ -1285,7 +1407,7 @@ test("dispose interrupts, cancels parked approvals, then closes transport withou
 test("dispose records active subagents as unreachable without deleting their durable threads", () => {
   const h = makeHarness({ resumeId: "thread-1" });
   (h.driver as any).threadId = "thread-1";
-  (h.driver as any).peer = { notify: () => {}, dispose: () => {} };
+  (h.driver as any).peer = { notify: () => {}, dispose: () => {}, requestWithDeadline: async () => { throw new Error("unsupported"); } };
   const notifications = notificationHandlers(h.driver);
   notifications.get("item/completed")!({
     threadId: "thread-1",
@@ -4332,7 +4454,7 @@ test("Codex child accounting requires a known model and follows shared root tier
   notifications.get("turn/started")!({ threadId: "child", turn: { id: "next-child-turn" } });
   report(400);
   const usage = h.events.filter((event) => event.kind === "token_usage");
-  assert.deepEqual(usage.map((event) => event.model), ["<unknown-subagent>", "gpt-6.1-sol", "gpt-6.1-sol", "gpt-6.1-sol"]);
+  assert.deepEqual(usage.map((event) => event.model), ["<unknown-subagent>", "<unknown-subagent>", "<unknown-subagent>", "gpt-6.1-sol"]);
   assert.deepEqual(usage.map((event) => event.pricingContext?.serviceTier), ["fast", "fast", "unknown", "default"]);
 });
 

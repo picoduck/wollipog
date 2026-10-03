@@ -954,6 +954,43 @@ test("runner cancels a Codex turn when the acknowledged priced cost crosses its 
   }
 });
 
+test("revision-aware cost correction persists and stale acknowledgements cannot restore the old amount", () => {
+  const h = harness({ costBudgetUsd: 5 });
+  try {
+    h.sm.syncPricedSessionCost("s_governance", 3);
+    h.sm.syncPricedSessionCost("s_governance", 2, 1, -1);
+    assert.equal(h.store.readMeta("s_governance")!.costUsd, 2);
+    assert.equal(h.store.readMeta("s_governance")!.costReconciliationRevision, 1);
+    h.sm.syncPricedSessionCost("s_governance", 3);
+    h.sm.syncPricedSessionCost("s_governance", 3, 0);
+    assert.equal(h.store.readMeta("s_governance")!.costUsd, 2);
+    h.sm.syncPricedSessionCost("s_governance", 2.5, 1, -1);
+    h.sm.syncPricedSessionCost("s_governance", 2, 1, -1);
+    assert.equal(h.store.readMeta("s_governance")!.costUsd, 2.5);
+    assert.equal(h.cancels(), 0);
+    const runtime = h.sent.filter((m) => m.type === "session_runtime_updated").at(-1);
+    assert.ok(runtime?.type === "session_runtime_updated");
+    assert.equal(runtime.snapshot.costReconciliationRevision, 1);
+  } finally { h.cleanup(); }
+});
+
+test("a correction preserves usage accrued before acknowledgement and applies skipped revisions once", () => {
+  const h = harness({ costBudgetUsd: 10 });
+  try {
+    h.store.patchMeta("s_governance", { costUsd: 4 });
+    h.sm.syncPricedSessionCost("s_governance", 2, 1, -1);
+    assert.equal(h.store.readMeta("s_governance")!.costUsd, 3);
+    h.sm.syncPricedSessionCost("s_governance", 2, 1, -1);
+    assert.equal(h.store.readMeta("s_governance")!.costUsd, 3);
+    h.store.patchMeta("s_governance", { costUsd: 4 });
+    h.sm.syncPricedSessionCost("s_governance", 1, 3, -2);
+    assert.equal(h.store.readMeta("s_governance")!.costUsd, 3);
+    assert.equal(h.store.readMeta("s_governance")!.costReconciliationDeltaUsd, -2);
+    h.sm.syncPricedSessionCost("s_governance", 1, 3, -3);
+    assert.equal(h.store.readMeta("s_governance")!.costUsd, 3, "conflicting delta for an acknowledged revision is refused");
+  } finally { h.cleanup(); }
+});
+
 test("a governance-cancelled prompt settles idle so the control plane can park its policy card", async () => {
   const h = harness({ maxToolCalls: 1 });
   try {

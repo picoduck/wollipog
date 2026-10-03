@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { applyClaudeReconciliation, previewClaudeReconciliation, reconciliationDeltaUsd, reconciliationRevision } from "./claude-cost-reconciliation.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { runnerSupportsProtocol } from "@wollipog/protocol";
 import { HourlyUsageUnavailableError, type ControlPlaneDb } from "./db.js";
@@ -18,9 +19,63 @@ export function registerUsageRoutes(
   app: FastifyInstance,
   db: ControlPlaneDb,
   requestPrincipal: (request: FastifyRequest) => AuthPrincipal | null,
-  hub?: Pick<Hub, "requestFromRunner">,
+  hub?: Pick<Hub, "requestFromRunner"> & Partial<Pick<Hub, "sendToRunner" | "sessionChangedById">>,
   pricing?: Pick<UsageRateTableService, "ensure" | "status">,
 ): void {
+  // Accounting-only imports are explicit, human-admin scoped, bounded and preview-bound.
+  // They never read a provider directory, prompt, transcript, credential, or current rate table.
+  app.post("/api/usage/claude-reconciliation/preview", async (request, reply) => {
+    const principal = requestPrincipal(request);
+    if (!principal || principal.kind !== "human" || !canAdministerIdentity(principal.role)) {
+      return reply.code(403).send({ error: "organization owner or admin permission is required" });
+    }
+    try { return previewClaudeReconciliation(db, principal, request.body); }
+    catch { return reply.code(400).send({ error: "invalid or unavailable accounting evidence" }); }
+  });
+  app.get("/api/usage/claude-reconciliation/audit", async (request, reply) => {
+    const principal = requestPrincipal(request);
+    if (!principal || principal.kind !== "human" || !canAdministerIdentity(principal.role)) {
+      return reply.code(403).send({ error: "organization owner or admin permission is required" });
+    }
+    const query = request.query as { sessionId?: unknown };
+    if (typeof query.sessionId !== "string" || !db.canAccessSession(principal, query.sessionId)) {
+      return reply.code(404).send({ error: "accounting audit is unavailable" });
+    }
+    return { reconciliations: db.raw().prepare(`SELECT digest, revision, delta_microusd AS deltaMicrousd,
+      actor_id AS actorId, source_sha256 AS sourceSha256, evidence_json AS evidenceJson,
+      result_json AS resultJson, created_at AS createdAt FROM usage_cost_reconciliations
+      WHERE session_id=? AND organization_id=? ORDER BY revision DESC LIMIT 20`).all(query.sessionId, principal.organizationId) };
+  });
+  app.post("/api/usage/claude-reconciliation/apply", async (request, reply) => {
+    const principal = requestPrincipal(request);
+    if (!principal || principal.kind !== "human" || !canAdministerIdentity(principal.role)) {
+      return reply.code(403).send({ error: "organization owner or admin permission is required" });
+    }
+    const body = request.body as { evidence?: unknown; approvedDigest?: unknown; approved?: unknown } | undefined;
+    if (!body || body.approved !== true || typeof body.approvedDigest !== "string" ||
+        Object.keys(body).some((key) => !["evidence", "approvedDigest", "approved"].includes(key))) {
+      return reply.code(400).send({ error: "explicit approval of an exact reconciliation preview is required" });
+    }
+    if (!hub?.sendToRunner) return reply.code(503).send({ error: "revision-aware cost synchronization is unavailable" });
+    let result: ReturnType<typeof applyClaudeReconciliation>;
+    try { result = applyClaudeReconciliation(db, principal, body.evidence, body.approvedDigest); }
+    catch { return reply.code(409).send({ error: "reconciliation is unavailable or changed; review a fresh preview" }); }
+    const session = db.getSession(result.sessionId)!;
+    // A durable revision makes resend safe after interruption or a disconnected runner.
+    // Replays of an older apply use the latest total and revision, never its old amount.
+    let synchronized = false;
+    try {
+      synchronized = hub.sendToRunner(session.runnerId, {
+        type: "priced_session_cost", sessionId: session.id, costUsd: db.sessionCostUsd(session.id),
+        costReconciliationRevision: reconciliationRevision(db, session.id),
+        costReconciliationDeltaUsd: reconciliationDeltaUsd(db, session.id),
+      });
+    } catch { /* The correction committed. Reconnect or exact retry resends its revision. */ }
+    hub.sessionChangedById?.(session.id);
+    return { ...result, synchronized, costUsd: db.sessionCostUsd(session.id),
+      revision: reconciliationRevision(db, session.id) };
+  });
+
   app.get("/api/usage", async (request, reply) => {
     const principal = requestPrincipal(request);
     if (!principal || principal.kind !== "human") {

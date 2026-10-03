@@ -5,6 +5,7 @@
  */
 
 import { DatabaseSync } from "node:sqlite";
+import { CLAUDE_RECONCILIATION_SCHEMA, normalizeReconciledSnapshot } from "./claude-cost-reconciliation.js";
 import { priceUsage, resolveCostSource, type RateTable } from "./usage-pricing.js";
 import { collapseAgentSpawnObservations, type StructuredAgentSpawnObservation } from "./child-session-registry.js";
 import { mkdirSync } from "node:fs";
@@ -2337,6 +2338,8 @@ CREATE TABLE IF NOT EXISTS usage_session_state (
   updated_at          INTEGER NOT NULL,
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
+
+${CLAUDE_RECONCILIATION_SCHEMA}
 
 CREATE TABLE IF NOT EXISTS usage_daily_budget (
   organization_id TEXT PRIMARY KEY,
@@ -11868,10 +11871,17 @@ export class ControlPlaneDb {
                          cost_microusd=cost_microusd+excluded.cost_microusd,
                          ${USAGE_LEDGER_ACCUMULATE_SQL}`,
         ).run(policy.organization_id, hourlyCutoff);
+        this.stmt(`UPDATE usage_cost_receipts SET attribution_json=json_set(attribution_json, '$.granularity', 'day')
+          WHERE json_extract(attribution_json,'$.organizationId')=?
+            AND json_extract(attribution_json,'$.bucketTs')<?
+            AND COALESCE(json_extract(attribution_json,'$.granularity'),'hour')='hour'`).run(policy.organization_id, hourlyCutoff);
         this.stmt("DELETE FROM usage_hourly WHERE organization_id=? AND bucket_ts < ?")
           .run(policy.organization_id, hourlyCutoff);
         this.stmt("DELETE FROM usage_daily WHERE organization_id=? AND bucket_ts < ?")
           .run(policy.organization_id, dailyCutoff);
+        this.stmt(`UPDATE usage_cost_receipts SET attribution_json=json_set(attribution_json, '$.granularity', 'pruned')
+          WHERE json_extract(attribution_json,'$.organizationId')=?
+            AND json_extract(attribution_json,'$.bucketTs')<?`).run(policy.organization_id, dailyCutoff);
         this.stmt(
           `UPDATE usage_retention_policy
               SET coverage_started_at=MAX(coverage_started_at, ?), updated_at=MAX(updated_at, ?)
@@ -11919,6 +11929,23 @@ export class ControlPlaneDb {
   sessionCostUsd(sessionId: string): number {
     const row = this.stmt("SELECT cost_usd FROM sessions WHERE id=?").get(sessionId) as { cost_usd: number } | undefined;
     return Number(row?.cost_usd ?? 0);
+  }
+
+  /** Only an approved reconciliation may release a proven overcount from a child's peak. */
+  applyHistoricalCostCorrectionInTransaction(sessionId: string, deltaMicrousd: number): void {
+    if (!(this.db as DatabaseSync & { isTransaction?: boolean }).isTransaction) {
+      throw new Error("historical correction requires an existing write transaction");
+    }
+    this.stmt(`UPDATE sessions SET
+      cost_usd=(SELECT (cost_microusd + cost_remainder_picousd / 1000000.0) / 1000000.0 FROM usage_session_state WHERE session_id=?),
+      usage_peak_cost_usd=MAX(usage_peak_cost_usd+?,
+        (SELECT (cost_microusd + cost_remainder_picousd / 1000000.0) / 1000000.0 FROM usage_session_state WHERE session_id=?))
+      WHERE id=?`).run(sessionId, deltaMicrousd / 1_000_000, sessionId, sessionId);
+    this.stmt(`UPDATE sessions SET child_cost_reserved_usd=MAX(0, child_cost_reserved_usd+(
+      SELECT ${childCostChargeSql("child")}-child.parent_charged_cost_usd FROM sessions child WHERE child.id=?))
+      WHERE id=(SELECT parent_session_id FROM sessions WHERE id=?)`).run(sessionId, sessionId);
+    this.stmt(`UPDATE sessions SET parent_charged_cost_usd=${childCostChargeSql("sessions")}
+      WHERE id=? AND parent_session_id IS NOT NULL`).run(sessionId);
   }
 
   private recordUsageDeltaInTransaction(
@@ -12006,6 +12033,7 @@ export class ControlPlaneDb {
     payload: SessionEventPayload,
     occurredAt: number,
     source?: { historyEpoch: number | null; runnerSeq: number },
+    eventId?: number,
   ): void {
     if (source) {
       let state = this.stmt(
@@ -12088,6 +12116,16 @@ export class ControlPlaneDb {
         modelPricedRecords: counted && priced.costSource === "modelPriced" ? 1 : 0,
         unpricedRecords: counted && priced.costSource === "unpriced" ? 1 : 0,
       }, occurredAt, true, dimensions);
+      if (eventId !== undefined && dimensions?.driver === "claude-code" && counted && priced.costSource === "providerReported") {
+        const owner = dimensions.scope.owner;
+        this.stmt("INSERT OR IGNORE INTO usage_cost_receipts VALUES (?, ?, ?, ?, ?)").run(
+          eventId, sessionId, JSON.stringify({ organizationId: dimensions.scope.organizationId,
+            ownerKind: owner.kind, ownerId: owner.kind === "organization" ? owner.organizationId : owner.kind === "user" ? owner.userId : owner.teamId,
+            runnerId: dimensions.runnerId, workspaceId: dimensions.workspaceId, agentId: dimensions.agentId,
+            driver: dimensions.driver, model: dimensions.model, bucketTs: Math.floor(occurredAt / 3_600_000) * 3_600_000, granularity: "hour" }),
+          cost.microusd + carryMicrousd, counted && priced.costSource === "providerReported" ? 1 : 0,
+        );
+      }
       this.stmt(
         `INSERT INTO usage_session_state
            (session_id, input_tokens, output_tokens, cost_microusd, cost_remainder_picousd, revision, updated_at)
@@ -13386,6 +13424,7 @@ export class ControlPlaneDb {
     now: number,
     replayKind: "registration" | "runtime",
   ): RunnerHistoryReconciliation | null {
+    snap = normalizeReconciledSnapshot(this, snap);
     const snapshotFingerprint = ControlPlaneDb.sessionSnapshotFingerprint(snap);
     if (isTerminal(snap.status)) {
       // A terminal snapshot is runner evidence that no provider process remains, even when it
@@ -20909,6 +20948,7 @@ export class ControlPlaneDb {
           options.runnerSeq !== undefined
             ? { runnerSeq: options.runnerSeq, historyEpoch: options.historyEpoch ?? null }
             : undefined,
+          Number(info.lastInsertRowid),
         );
       }
 
@@ -21049,6 +21089,7 @@ export class ControlPlaneDb {
           event.payload,
           event.ts,
           { historyEpoch: expected.historyEpoch, runnerSeq: event.seq },
+          rowId,
         );
       }
       this.stmt("UPDATE fts_state SET last_rowid=? WHERE id=1 AND last_rowid<?")

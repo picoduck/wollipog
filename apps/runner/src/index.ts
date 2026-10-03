@@ -2458,7 +2458,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       sessions.rearmGovernance(msg.sessionId, msg.config, msg.holdFor);
       break;
     case "priced_session_cost":
-      sessions.syncPricedSessionCost(msg.sessionId, msg.costUsd);
+      sessions.syncPricedSessionCost(msg.sessionId, msg.costUsd, msg.costReconciliationRevision, msg.costReconciliationDeltaUsd);
       break;
     case "delete_session":
       sessionStarts.cancel(msg.sessionId);

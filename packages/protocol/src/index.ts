@@ -619,7 +619,8 @@
 //      campaign to read the GitHub pull requests its work items name (`campaign_forge_observe`)
 //      through the runner's existing `gh` login, and the runner answers with status data only.
 //      Older runners are never asked; their campaigns show `unavailable{runner_unsupported}`.
-export const PROTOCOL_VERSION = 198;
+// 199: revision-aware historical cost corrections survive runner replay and reconnect.
+export const PROTOCOL_VERSION = 199;
 export const PROJECT_MEMORY_MIN_PROTOCOL = 195;
 /** Only Claude versions whose directory override we have verified are advertised as supported.
  * Codex native memory combines projects in a database and cannot be shared project by project. */
@@ -951,6 +952,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   controlPlaneQueueHold: 105,
   /** v106 runners enforce the control-plane-priced cumulative cost during the active turn. */
   pricedSessionCost: 106,
+  costReconciliation: 199,
   /** v129 runners report the exact threshold that cancelled a turn. */
   governanceTripReporting: 129,
   /** v107 runners durably resume non-secret structured-question answers after process loss. */
@@ -6646,6 +6648,8 @@ export interface SessionSnapshot {
   costUsd: number;
   /** Protocol 197: SDK-computed cost retains estimate provenance during snapshot catch-up. */
   costIsEstimate?: true;
+  /** Protocol 199: last acknowledged historical cost correction. */
+  costReconciliationRevision?: number;
   /** True for sessions adopted from an external CLI transcript (gates the reprocess action). */
   adopted?: boolean;
   /** Highest event seq the runner holds for this session (its own monotonic counter). */
@@ -8651,6 +8655,10 @@ export interface PricedSessionCostMessage {
   type: "priced_session_cost";
   sessionId: string;
   costUsd: number;
+  /** Protocol 199: durable correction coordinate; older acknowledgements cannot undo it. */
+  costReconciliationRevision?: number;
+  /** Cumulative correction from revision zero, applied relative to the runner's acknowledged delta. */
+  costReconciliationDeltaUsd?: number;
 }
 
 export interface ResolvePermissionMessage {

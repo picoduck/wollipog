@@ -1519,11 +1519,42 @@ export class CodexAppServerDriver implements Driver {
   }
 
   private readonly usageThreadSettings = new Map<string, { model?: string }>();
+  /** Settings are sampled before a turn; reads arriving later apply only to a future turn. */
+  private readonly childTurnModels = new Map<string, string | undefined>();
+  private readonly childSettingsRevisions = new Map<string, number>();
+  private readonly childMetadataReads = new Set<string>();
+  private readonly childTurnIds = new Map<string, string>();
+  private readonly seenChildTurnIds = new Map<string, Set<string>>();
+
+  private recoverChildSettings(threadId: string): void {
+    const peer = this.peer;
+    if (!peer || this.childMetadataReads.has(threadId)) return;
+    this.childMetadataReads.add(threadId);
+    const revision = this.childSettingsRevisions.get(threadId) ?? 0;
+    // No resume, configuration mutation, transcript read, or provider-home access. Older
+    // providers can reject this optional summary read without blocking the agent.
+    void peer.requestWithDeadline<Json>("thread/read", { threadId, includeTurns: false }, Date.now() + 5_000)
+      .then((result) => {
+        if (this.peer !== peer || !this.subagentToolByThread.has(threadId) ||
+            (this.childSettingsRevisions.get(threadId) ?? 0) !== revision ||
+            result?.thread?.id !== threadId || typeof result.thread.model !== "string" ||
+            !result.thread.model.trim() || result.thread.model.length > 128) return;
+        // This is current/persisted configuration, not proof of an active request's model.
+        // Only loaded settings are current. A persisted notLoaded summary may be stale.
+        if (!["idle", "active"].includes(result.thread.status?.type)) return;
+        this.usageThreadSettings.set(threadId, { model: result.thread.model });
+      })
+      .catch(() => { /* Unavailable metadata remains explicitly unpriced. */ })
+      .finally(() => this.childMetadataReads.delete(threadId));
+  }
 
   private emitPendingSubagentUsage(threadId: string, requestInputTokens?: number): void {
     const usage = this.pendingSubagentUsage.get(threadId);
     const parentToolUseId = this.subagentToolByThread.get(threadId);
     if (!usage || !parentToolUseId) return;
+    if (!this.childTurnModels.has(threadId)) {
+      this.childTurnModels.set(threadId, this.usageThreadSettings.get(threadId)?.model);
+    }
     const delta = subtractUsage(usage, this.emittedSubagentUsage.get(threadId) ?? {});
     this.emittedSubagentUsage.set(threadId, maxUsage(this.emittedSubagentUsage.get(threadId) ?? null, usage));
     if (!hasUsage(delta)) return;
@@ -1534,7 +1565,8 @@ export class CodexAppServerDriver implements Driver {
       cachedInputTokens: delta.cached,
       ...(typeof delta.cacheCreation === "number" ? { cacheCreationInputTokens: delta.cacheCreation } : {}),
       ...(typeof delta.reasoning === "number" ? { reasoningOutputTokens: delta.reasoning } : {}),
-      model: this.ambiguousChildModels.has(threadId) ? "<unknown-request-model>" : this.usageThreadSettings.get(threadId)?.model ?? "<unknown-subagent>",
+      model: this.ambiguousChildModels.has(threadId) ? "<unknown-request-model>" :
+        (this.childTurnModels.has(threadId) ? this.childTurnModels.get(threadId) : this.usageThreadSettings.get(threadId)?.model) ?? "<unknown-subagent>",
       parentToolUseId,
       independentUsage: true,
       pricingContext: { requestInputTokens: delta.input === requestInputTokens ? requestInputTokens : undefined,
@@ -1569,6 +1601,7 @@ export class CodexAppServerDriver implements Driver {
         for (const threadId of reattached) {
           this.subagentToolByThread.set(threadId, id);
           this.subagentLifecycleByThread.set(threadId, lifecycle);
+          this.recoverChildSettings(threadId);
         }
       } else {
         this.emitTool(
@@ -1591,12 +1624,14 @@ export class CodexAppServerDriver implements Driver {
     this.emitTool(id, title, "agent", subagentToolStatus(lifecycle), parentToolUseId, lifecycle);
     this.subagentParentByTool.set(id, parentToolUseId);
     for (const threadId of receivers) {
+      const alreadyAdmitted = this.subagentToolByThread.has(threadId);
       this.subagentToolByThread.set(threadId, id);
       // A role can select a different default model. An omitted spawn model is not
       // evidence that the child used the parent's model.
-      this.usageThreadSettings.set(threadId, {
+      if (!alreadyAdmitted) this.usageThreadSettings.set(threadId, {
         model: typeof item.model === "string" && item.model ? item.model : undefined,
       });
+      if (!this.usageThreadSettings.get(threadId)?.model) this.recoverChildSettings(threadId);
       this.subagentLifecycleByThread.set(threadId, lifecycle);
     }
     this.updateSubagentStates(item?.agentsStates);
@@ -1848,6 +1883,15 @@ export class CodexAppServerDriver implements Driver {
     peer.onNotification("turn/started", (p: Json) => {
       if (p?.threadId && p.threadId !== this.threadId) {
         if (this.subagentToolByThread.has(p.threadId)) {
+          const turnId = p?.turn?.id;
+          if (typeof turnId === "string" && turnId) {
+            const seen = this.seenChildTurnIds.get(p.threadId) ?? new Set<string>();
+            if (seen.has(turnId)) return;
+            seen.add(turnId);
+            this.seenChildTurnIds.set(p.threadId, seen);
+            this.childTurnIds.set(p.threadId, turnId);
+          }
+          this.childTurnModels.set(p.threadId, this.usageThreadSettings.get(p.threadId)?.model);
           this.ambiguousChildTiers.delete(p.threadId);
           this.ambiguousChildModels.delete(p.threadId);
           this.pendingSubagentUsage.delete(p.threadId);
@@ -1873,6 +1917,7 @@ export class CodexAppServerDriver implements Driver {
         if (!this.subagentToolByThread.has(p?.threadId)) return;
         const settings = p.threadSettings ?? {};
         const before = this.usageThreadSettings.get(p.threadId);
+        this.childSettingsRevisions.set(p.threadId, (this.childSettingsRevisions.get(p.threadId) ?? 0) + 1);
         if (before?.model && typeof settings.model === "string" && before.model !== settings.model) {
           this.ambiguousChildModels.add(p.threadId);
         }
@@ -1910,6 +1955,8 @@ export class CodexAppServerDriver implements Driver {
         ? p.threadId
         : this.threadId ?? "root";
       const notificationTurnId = typeof p?.turnId === "string" && p.turnId ? p.turnId : null;
+      if (context.parentToolUseId && notificationTurnId && this.childTurnIds.has(usageThreadId) &&
+          this.childTurnIds.get(usageThreadId) !== notificationTurnId) return;
       const replayedSettledTurn = context.parentToolUseId
         ? notificationTurnId != null && this.completedSubagentTurnIds.get(usageThreadId) === notificationTurnId
         : notificationTurnId != null && (

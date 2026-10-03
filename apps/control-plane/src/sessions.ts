@@ -1,4 +1,5 @@
 import { normalizeIssueClosureSnapshot, issueClosureActiveChildren } from "./github-issue-closure.js";
+import { normalizeReconciledSnapshot, reconciliationDeltaUsd, reconciliationRevision } from "./claude-cost-reconciliation.js";
 import type { GithubIssueClosureRequest, GithubIssueClosureResult } from "@wollipog/protocol";
 /**
  * Session orchestration: the control-plane brain that turns UI commands into
@@ -12496,6 +12497,9 @@ export class SessionsService {
           type: "priced_session_cost",
           sessionId,
           costUsd: this.db.sessionCostUsd(sessionId),
+          ...(runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "costReconciliation") && reconciliationRevision(this.db, sessionId) > 0
+            ? { costReconciliationRevision: reconciliationRevision(this.db, sessionId),
+              costReconciliationDeltaUsd: reconciliationDeltaUsd(this.db, sessionId) } : {}),
         });
       }
       // Guardrail card gate: pause + ask once a policy rule trips. A v47 runner independently
@@ -13150,6 +13154,7 @@ export class SessionsService {
       const terminalBatchIndexes = new Set(terminalBatch.map(({ snapshotIndex }) => snapshotIndex));
       const terminalHistories = this.db.updateSessionsFromSnapshots(terminalBatch.map(({ snap }) => snap), now);
       for (const [index, { snap }] of terminalBatch.entries()) {
+        this.synchronizeCostReconciliation(snap.id, snap.costReconciliationRevision ?? 0);
         if (terminalHistories[index]?.reset) {
           const reset = this.db.getSession(snap.id)!;
           this.hub.sessionEventsReset(snap.id, this.db.listEvents(snap.id), reset.eventEpoch ?? 0);
@@ -13225,6 +13230,7 @@ export class SessionsService {
         } else {
           this.db.createSessionFromSnapshot(snap, runnerId, now);
         }
+        this.synchronizeCostReconciliation(snap.id, snap.costReconciliationRevision ?? 0);
         // A provisional disconnect clears projected cards while durable policy state survives.
         // Hydration is the settle-like moment that re-derives guardrails and restores typed cards.
         // gateOnPolicy is idempotent and no-ops when a runner card holds the slot or nothing is tripped.
@@ -13310,6 +13316,8 @@ export class SessionsService {
   applySessionRuntimeUpdate(runnerId: string, snapshot: SessionSnapshot, batch?: RunnerAttentionBatch): void {
     const existing = this.db.getSession(snapshot.id);
     if (!existing || existing.runnerId !== runnerId || this.db.isTombstoned(snapshot.id)) return;
+    const unacknowledgedRevision = snapshot.costReconciliationRevision ?? 0;
+    snapshot = normalizeReconciledSnapshot(this.db, snapshot);
     const runtimeSnapshot = snapshot.costUsd < existing.costUsd
       ? { ...snapshot, costUsd: existing.costUsd }
       : snapshot;
@@ -13354,6 +13362,7 @@ export class SessionsService {
       this.db.clearPolicyResumeStatus(snapshot.id);
     }
     const history = this.db.updateSessionFromSnapshot(snapshot.id, runtimeSnapshot, now);
+    this.synchronizeCostReconciliation(snapshot.id, unacknowledgedRevision);
     if (history?.reset) {
       const reset = this.db.getSession(snapshot.id)!;
       this.hub.sessionEventsReset(snapshot.id, this.db.listEvents(snapshot.id), reset.eventEpoch ?? 0);
@@ -13372,6 +13381,16 @@ export class SessionsService {
     this.deliverHeldRestartNotices(snapshot.id, now);
     this.hub.sessionChangedById(snapshot.id);
     this.publishCampaignAttentionTransition(campaignBefore, batch);
+  }
+
+  private synchronizeCostReconciliation(sessionId: string, acknowledgedRevision: number): void {
+    const revision = reconciliationRevision(this.db, sessionId);
+    if (revision <= acknowledgedRevision) return;
+    const session = this.db.getSession(sessionId);
+    if (!session || !runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "costReconciliation")) return;
+    this.hub.sendToRunner(session.runnerId, { type: "priced_session_cost", sessionId,
+      costUsd: this.db.sessionCostUsd(sessionId), costReconciliationRevision: revision,
+      costReconciliationDeltaUsd: reconciliationDeltaUsd(this.db, sessionId) });
   }
 
   /** Lazy-hydrate a session's event timeline from the runner (the box owns the log). Called when a
