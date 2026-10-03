@@ -155,8 +155,6 @@ export interface SessionMeta {
   title: string;
   titleSource?: SessionTitleSource;
   providerUpdatedAt?: string;
-  /** Runner-private original provider instructions; never projected in snapshots. */
-  artifactDeveloperInstructions?: { threadId: string; instructions: string };
   artifactUploads?: import("@wollipog/protocol").ArtifactUploadPreference;
   projectMemory?: import("@wollipog/protocol").SessionProjectMemory;
   config: SessionConfig;

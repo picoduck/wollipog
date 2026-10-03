@@ -4513,83 +4513,40 @@ test("resolved default Codex model prices usage without pinning future requests"
 });
 
 
-test("artifact guidance appends effective fresh-thread instructions and preserves resume policy", async () => {
-  for (const resume of [false, true]) {
-    const h = makeHarness({ artifactGuidance: "artifact guidance", ...(resume ? { resumeId: "thread" } : {}) });
+for (const lifecycle of ["fresh", "resume", "fork"] as const) {
+  test(`artifact guidance uses current turn context and preserves ${lifecycle} developer policy`, async () => {
+    const currentGuidance = lifecycle === "fresh" ? "Automatic: relevant evidence only" : "Manual: no upload authority";
+    const threadId = lifecycle === "fork" ? "forked-thread" : "thread";
+    const h = makeHarness({ artifactGuidance: currentGuidance, ...(lifecycle !== "fresh" ? { resumeId: threadId } : {}) });
     const calls: Array<{ method: string; params: any }> = [];
+    const notifications = notificationHandlers(h.driver);
+    let turnNumber = 0;
     (h.driver as any).peer = {
       request: async (method: string, params: any) => {
         calls.push({ method, params });
-        return { thread: { id: "thread", status: { type: "idle" } } };
+        return method === "turn/start" ? { turn: { id: `current-turn-${++turnNumber}`, status: "inProgress" } }
+          : { thread: { id: method === "thread/fork" ? "next-fork" : threadId, status: { type: "idle" } } };
       },
-      requestWithDeadline: async (method: string, params: any) => {
-        calls.push({ method, params });
-        return method === "config/read" ? { config: { developer_instructions: "user instructions" } } : { data: [] };
+      requestWithDeadline: async (method: string) => {
+        assert.notEqual(method, "config/read", "discovery never needs to read or override developer policy");
+        return { data: [] };
       },
     };
-    assert.equal(await h.driver.newSession("/project"), "thread");
-    const launch = calls.find((call) => call.method === (resume ? "thread/resume" : "thread/start"))!;
-    assert.equal(launch.params.developerInstructions, resume ? undefined : "user instructions\n\nartifact guidance");
-    assert.equal((h.driver as any).artifactPromptGuidance, resume ? "artifact guidance" : undefined);
-    if (resume) assert.ok(!calls.some((call) => call.method === "config/read"));
-  }
-});
-
-for (const kind of ["unsupported", "malformed"]) test(`artifact discovery preserves fresh launch when config/read is ${kind}`, async () => {
-  const h = makeHarness({ artifactGuidance: "artifact guidance" });
-  const calls: Array<{ method: string; params: any }> = [];
-  (h.driver as any).peer = {
-    request: async (method: string, params: any) => { calls.push({ method, params }); return { thread: { id: "fresh" } }; },
-    requestWithDeadline: async (method: string) => {
-      if (method === "config/read") {
-        if (kind === "unsupported") throw new Error("unsupported method");
-        return { config: { developer_instructions: { invalid: true } } };
-      }
-      return { data: [] };
-    },
-  };
-  assert.equal(await h.driver.newSession("/project"), "fresh");
-  assert.ok(!("developerInstructions" in calls.find((call) => call.method === "thread/start")!.params));
-  assert.equal((h.driver as any).artifactPromptGuidance, "artifact guidance");
-});
-
-
-test("owned artifact guidance replaces its previous policy only on the pinned resumed thread", async () => {
-  for (const pinned of [true, false]) {
-    const h = makeHarness({ resumeId: "resumed", artifactGuidance: "Manual: no upload authority",
-      artifactDeveloperInstructions: { threadId: pinned ? "resumed" : "other-thread", instructions: "original user rules" } });
-    const calls: Array<{ method: string; params: any }> = [];
-    const pinnedBases: unknown[] = [];
-    (h.driver as any).cb.onArtifactDeveloperInstructions = (value: unknown) => pinnedBases.push(value);
-    (h.driver as any).peer = {
-      request: async (method: string, params: any) => {
-        calls.push({ method, params }); return { thread: { id: "resumed", status: { type: "idle" } } };
-      },
-      requestWithDeadline: async () => ({ data: [] }),
-    };
-    await h.driver.newSession("/project");
-    const launch = calls.find((call) => call.method === "thread/resume")!;
-    if (pinned) {
-      assert.equal(launch.params.developerInstructions, "original user rules\n\nManual: no upload authority");
-      assert.deepEqual(pinnedBases, [{ threadId: "resumed", instructions: "original user rules" }]);
-      assert.equal((h.driver as any).artifactPromptGuidance, undefined);
-    } else {
-      assert.ok(!("developerInstructions" in launch.params));
-      assert.deepEqual(pinnedBases, []);
-      assert.equal((h.driver as any).artifactPromptGuidance, "Manual: no upload authority");
+    assert.equal(await h.driver.newSession("/project"), threadId);
+    if (lifecycle === "fork") assert.equal(await h.driver.forkSession("historical-turn", "/fork"), "next-fork");
+    for (const call of calls.filter((call) => ["thread/start", "thread/resume", "thread/fork"].includes(call.method))) {
+      assert.ok(!("developerInstructions" in call.params), "upload authorization must not survive as higher-priority provider policy");
     }
-  }
-});
-
-test("fresh artifact instruction ownership records only original text after exact thread creation", async () => {
-  const h = makeHarness({ artifactGuidance: "Wollipog policy" });
-  const bases: unknown[] = [];
-  (h.driver as any).cb.onArtifactDeveloperInstructions = (value: unknown) => bases.push(value);
-  (h.driver as any).peer = {
-    request: async () => ({ thread: { id: "created" } }),
-    requestWithDeadline: async (method: string) => method === "config/read"
-      ? { config: { developer_instructions: "original instructions" } } : { data: [] },
-  };
-  await h.driver.newSession("/project");
-  assert.deepEqual(bases, [{ threadId: "created", instructions: "original instructions" }]);
-});
+    for (let turn = 0; turn < 2; turn++) {
+      const pending = h.driver.prompt("original task");
+      await nextTask();
+      const request = calls.filter((call) => call.method === "turn/start").at(-1)!;
+      assert.deepEqual(request.params.input, [
+        { type: "text", text: "original task" },
+        { type: "text", text: currentGuidance },
+      ]);
+      notifications.get("turn/completed")!({ threadId, turn: { id: `current-turn-${turnNumber}`, status: "completed" } });
+      assert.equal(await pending, "end_turn");
+    }
+  });
+}
