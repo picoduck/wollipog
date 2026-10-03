@@ -330,7 +330,7 @@ export function UsageView() {
     return map;
   }, [data]);
   const notices = data
-    ? coverageMessages({ offlineMachines, unpricedRecords: data.totals.unpricedRecords ?? 0, pricing: data.pricing })
+    ? coverageMessages({ offlineMachines, legacyClaudeCostRecords: data.legacyClaudeCostRecords, unpricedRecords: data.totals.unpricedRecords ?? 0, pricing: data.pricing })
     : [];
   const includesCodexAppServer = Boolean(data && (
     data.byDriver.some((row) => row.key === "codex-app-server") ||

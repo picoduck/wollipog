@@ -1311,7 +1311,7 @@ test("cancel emits already-consumed per-turn usage once before settling", () => 
   (h.driver as any).beginRootTurnUsage();
   (h.driver as any).pendingTurnUsage = { input: 7, output: 4, cached: 2 };
   h.driver.cancel();
-  assert.deepEqual(h.events, [{ kind: "token_usage", inputTokens: 7, outputTokens: 4, cachedInputTokens: 2 }]);
+  assert.deepEqual(h.events, [{ kind: "token_usage", inputTokens: 7, outputTokens: 4, cachedInputTokens: 2, pricingContext: { requestInputTokens: undefined, serviceTier: "default" },}]);
   h.driver.cancel();
   assert.equal(h.events.length, 1);
 });
@@ -1330,7 +1330,7 @@ test("late usage and completion after cancel cannot double-count the settled tur
     tokenUsage: { last: { inputTokens: 11, outputTokens: 6, cachedInputTokens: 3 } },
   });
   notifications.get("turn/completed")!({});
-  assert.deepEqual(h.events, [{ kind: "token_usage", inputTokens: 7, outputTokens: 4, cachedInputTokens: 2 }]);
+  assert.deepEqual(h.events, [{ kind: "token_usage", inputTokens: 7, outputTokens: 4, cachedInputTokens: 2, pricingContext: { requestInputTokens: undefined, serviceTier: "default" },}]);
 });
 
 test("failed turn/completed maps to refusal and surfaces one nested error", async () => {
@@ -1753,7 +1753,7 @@ test("real NDJSON child resumes and continues without replaying history or cumul
       ["continued"],
     );
     const usage = events.filter((event) => event.kind === "token_usage");
-    assert.deepEqual(usage, [{ kind: "token_usage", inputTokens: 3, outputTokens: 2, cachedInputTokens: 1 }]);
+    assert.deepEqual(usage, [{ kind: "token_usage", inputTokens: 3, outputTokens: 2, cachedInputTokens: 1, pricingContext: { requestInputTokens: 3, serviceTier: "default" },}]);
   } finally {
     driver.dispose();
   }
@@ -2190,6 +2190,7 @@ test("structured Codex collaboration items expose recursive live subagent output
       cacheCreationInputTokens: 1,
       reasoningOutputTokens: 2,
       parentToolUseId: childItemId("child-thread", "spawn-inner"),
+       pricingContext: { requestInputTokens: 9, serviceTier: "default" }, independentUsage: true, model: "<unknown-subagent>",
     },
     {
       kind: "token_usage",
@@ -2199,6 +2200,7 @@ test("structured Codex collaboration items expose recursive live subagent output
       cacheCreationInputTokens: 2,
       reasoningOutputTokens: 3,
       parentToolUseId: childItemId("child-thread", "spawn-inner"),
+       pricingContext: { requestInputTokens: 11, serviceTier: "default" }, independentUsage: true, model: "<unknown-subagent>",
     },
   ], "subagent usage is attributed and visible before the child turn settles");
   // App Server can replay the same cumulative update around transport recovery. The cumulative
@@ -4069,6 +4071,7 @@ test("multi-response usage publishes replay-safe live deltas while context uses 
     cacheCreationInputTokens: 100,
     reasoningOutputTokens: 200,
     model: "gpt-5.5-codex",
+    pricingContext: { requestInputTokens: 11_000, serviceTier: "default" },
   }], "the first response is observable before turn completion");
   notifications.get("thread/tokenUsage/updated")!({
     threadId: "t1",
@@ -4092,7 +4095,7 @@ test("multi-response usage publishes replay-safe live deltas while context uses 
       cacheCreationInputTokens: 100,
       reasoningOutputTokens: 200,
       model: "gpt-5.5-codex",
-    },
+       pricingContext: { requestInputTokens: 11_000, serviceTier: "default" },},
     {
       kind: "token_usage",
       inputTokens: 12_000,
@@ -4101,7 +4104,7 @@ test("multi-response usage publishes replay-safe live deltas while context uses 
       cacheCreationInputTokens: 50,
       reasoningOutputTokens: 300,
       model: "gpt-5.5-codex",
-    },
+       pricingContext: { requestInputTokens: 12_000, serviceTier: "default" },},
   ], "a repeated flush cannot double-count already published live usage");
 
   const unpinned = makeHarness({ config: { model: "default" } as DriverOptions["config"] });
@@ -4139,7 +4142,7 @@ test("resumed thread totals establish a baseline and replayed history is never b
   });
   assert.deepEqual(h.events, [{
     kind: "token_usage", inputTokens: 10, outputTokens: 3, cachedInputTokens: 5, reasoningOutputTokens: 1,
-  }]);
+    pricingContext: { requestInputTokens: 10, serviceTier: "default" },}]);
 });
 
 test("resumed history received before the first prompt establishes a baseline without rebilling", () => {
@@ -4167,7 +4170,7 @@ test("resumed history received before the first prompt establishes a baseline wi
   });
   assert.deepEqual(h.events, [{
     kind: "token_usage", inputTokens: 10, outputTokens: 3, cachedInputTokens: 5,
-  }]);
+    pricingContext: { requestInputTokens: 10, serviceTier: "default" },}]);
 });
 
 test("failed and interrupted turns emit the complete cumulative usage exactly once", async () => {
@@ -4203,8 +4206,8 @@ test("failed and interrupted turns emit the complete cumulative usage exactly on
     });
     assert.equal(await stopped, expectedStop);
     assert.deepEqual(h.events.filter((event) => event.kind === "token_usage"), [
-      { kind: "token_usage", inputTokens: 4, outputTokens: 2, cachedInputTokens: 3, reasoningOutputTokens: 1 },
-      { kind: "token_usage", inputTokens: 6, outputTokens: 3, cachedInputTokens: 4, reasoningOutputTokens: 2 },
+      { kind: "token_usage", inputTokens: 4, outputTokens: 2, cachedInputTokens: 3, reasoningOutputTokens: 1, pricingContext: { requestInputTokens: 4, serviceTier: "default" },},
+      { kind: "token_usage", inputTokens: 6, outputTokens: 3, cachedInputTokens: 4, reasoningOutputTokens: 2, pricingContext: { requestInputTokens: 6, serviceTier: "default" },},
     ], "settlement adds no duplicate usage");
   }
 });
@@ -4226,8 +4229,8 @@ test("legacy last-only usage accumulates distinct responses and ignores exact no
   });
   (h.driver as any).emitPendingTurnUsage();
   assert.deepEqual(h.events, [
-    { kind: "token_usage", inputTokens: 7, outputTokens: 3, cachedInputTokens: 2, reasoningOutputTokens: 2 },
-    { kind: "token_usage", inputTokens: 5, outputTokens: 2, cachedInputTokens: 1, reasoningOutputTokens: 2 },
+    { kind: "token_usage", inputTokens: 7, outputTokens: 3, cachedInputTokens: 2, reasoningOutputTokens: 2, pricingContext: { requestInputTokens: 7, serviceTier: "default" },},
+    { kind: "token_usage", inputTokens: 5, outputTokens: 2, cachedInputTokens: 1, reasoningOutputTokens: 2, pricingContext: { requestInputTokens: 5, serviceTier: "default" },},
   ], "distinct responses publish live while exact notification replay stays idempotent");
 });
 
@@ -4250,8 +4253,8 @@ test("legacy lastTurn snapshots replace rather than add their running turn total
   });
   (h.driver as any).emitPendingTurnUsage();
   assert.deepEqual(h.events, [
-    { kind: "token_usage", inputTokens: 12, outputTokens: 5, cachedInputTokens: 4 },
-    { kind: "token_usage", inputTokens: 3, outputTokens: 2, cachedInputTokens: 2 },
+    { kind: "token_usage", inputTokens: 12, outputTokens: 5, cachedInputTokens: 4, pricingContext: { requestInputTokens: undefined, serviceTier: "default" },},
+    { kind: "token_usage", inputTokens: 3, outputTokens: 2, cachedInputTokens: 2, pricingContext: { requestInputTokens: undefined, serviceTier: "default" },},
   ]);
 });
 
@@ -4281,10 +4284,54 @@ test("fields omitted from cumulative totals accumulate from distinct per-respons
     {
       kind: "token_usage", inputTokens: 7, outputTokens: 3, cachedInputTokens: undefined,
       cacheCreationInputTokens: 2,
-    },
+       pricingContext: { requestInputTokens: 7, serviceTier: "default" },},
     {
       kind: "token_usage", inputTokens: 5, outputTokens: 2, cachedInputTokens: undefined,
       cacheCreationInputTokens: 1,
-    },
+       pricingContext: { requestInputTokens: 5, serviceTier: "default" },},
   ]);
+});
+
+
+test("queued Codex model and tier changes do not reprice an in-flight response", () => {
+  const h = makeHarness({ config: { model: "gpt-6-sol", serviceTier: "fast" } });
+  const d = h.driver as any;
+  d.threadId = "root";
+  const notifications = notificationHandlers(h.driver);
+  d.beginRootTurnUsage();
+  h.driver.setConfig({ model: "gpt-6.1-sol", serviceTier: "default" });
+  notifications.get("thread/tokenUsage/updated")!({ threadId: "root", tokenUsage: {
+    last: { inputTokens: 100, outputTokens: 5 }, total: { inputTokens: 100, outputTokens: 5 },
+  } });
+  const usage = h.events.find((event) => event.kind === "token_usage");
+  assert.equal(usage?.model, "gpt-6-sol");
+  assert.equal(usage?.pricingContext?.serviceTier, "fast");
+  d.closeTurnUsage();
+  assert.equal(d.routingServiceTier, "fast", "queued config does not change background child routing");
+});
+
+test("Codex child accounting requires a known model and follows shared root tier changes conservatively", () => {
+  const h = makeHarness({ config: { model: "gpt-6-sol", serviceTier: "fast" } });
+  const d = h.driver as any;
+  d.threadId = "root";
+  const notifications = notificationHandlers(h.driver);
+  d.beginRootTurnUsage();
+  notifications.get("item/completed")!({ threadId: "root", item: {
+    type: "collabAgentToolCall", id: "spawn", tool: "spawnAgent", senderThreadId: "root",
+    receiverThreadIds: ["child"], status: "completed", agentsStates: { child: { status: "running" } },
+  } });
+  const report = (total: number) => notifications.get("thread/tokenUsage/updated")!({ threadId: "child", tokenUsage: {
+    last: { inputTokens: 100, outputTokens: 5 }, total: { inputTokens: total, outputTokens: total / 20 },
+  } });
+  report(100);
+  notifications.get("thread/settings/updated")!({ threadId: "child", threadSettings: { model: "gpt-6.1-sol", serviceTier: null } });
+  report(200);
+  notifications.get("thread/settings/updated")!({ threadId: "root", threadSettings: { serviceTier: null } });
+  report(300);
+  d.closeTurnUsage();
+  notifications.get("turn/started")!({ threadId: "child", turn: { id: "next-child-turn" } });
+  report(400);
+  const usage = h.events.filter((event) => event.kind === "token_usage");
+  assert.deepEqual(usage.map((event) => event.model), ["<unknown-subagent>", "gpt-6.1-sol", "gpt-6.1-sol", "gpt-6.1-sol"]);
+  assert.deepEqual(usage.map((event) => event.pricingContext?.serviceTier), ["fast", "fast", "unknown", "default"]);
 });

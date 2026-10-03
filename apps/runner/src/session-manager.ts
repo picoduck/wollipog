@@ -7536,6 +7536,37 @@ export class SessionManager {
           context: meta.context,
           capabilities: meta.capabilities,
           resumeId,
+          agentVersion: meta.agentVersion,
+          claudeUsageCheckpoint: (() => {
+            if (meta.driver !== "claude-code") return undefined;
+            // An appended result can survive a crash before its metadata flush. Only read that
+            // uncovered suffix, not the whole retained conversation on each launch.
+            let checkpoint = meta.claudeUsageCheckpoint;
+            const tail = this.store.logTailSeqResult(sessionId);
+            if (!tail.ok) throw new Error("Cannot read durable Claude usage history");
+            let cursor = meta.claudeUsageCheckpointSeq;
+            if (cursor === undefined) {
+              // First accounting-aware launch: old events contain no raw baselines. Persist the
+              // cutover before provider work so a first-result crash has a bounded recovery floor.
+              cursor = tail.seq;
+              this.store.patchMeta(sessionId, { claudeUsageCheckpointSeq: cursor });
+            }
+            if (tail.seq <= cursor) return checkpoint?.sessionId === resumeId ? checkpoint : undefined;
+            let frozen: { logEpoch: number; throughSeq: number } | undefined;
+            while (true) {
+              const page = this.store.readEventPage(sessionId, { afterSeq: cursor, limit: HISTORY_PAGE_MAX_EVENTS, ...frozen });
+              if (!page.ok) throw new Error(`Cannot recover Claude usage checkpoint: ${page.code} (${page.error})`);
+              for (const event of page.events) {
+                if (event.payload.kind === "token_usage" && event.payload.claudeUsageCheckpoint?.sessionId === resumeId) {
+                  checkpoint = event.payload.claudeUsageCheckpoint;
+                }
+              }
+              if (!page.page.hasMore) break;
+              cursor = page.page.nextAfterSeq;
+              frozen = { logEpoch: page.page.logEpoch, throughSeq: page.page.throughSeq };
+            }
+            return checkpoint?.sessionId === resumeId ? checkpoint : undefined;
+          })(),
           acpSessionContext: meta.acpSessionContext,
           isolation,
           sessionStateDir: this.store.sessionPath(sessionId),
@@ -7550,6 +7581,11 @@ export class SessionManager {
         {
         supportsWorkerAttention: () => runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "workerAttention"),
         onEvent: (p) => this.onDriverEvent(sessionId, p),
+        onClaudeUsageCheckpoint: (checkpoint) => {
+          if (this.active.get(sessionId)?.client !== client) return;
+          const current = this.store.readMeta(sessionId);
+          if (current) this.store.patchMeta(sessionId, { claudeUsageCheckpoint: checkpoint, claudeUsageCheckpointSeq: current.seq });
+        },
         onStderr: (t) => this.onDriverStderr(sessionId, t),
         onExit: (code) => this.onDriverExit(sessionId, code, client),
         onBackgroundWork: (update) => {
@@ -18293,15 +18329,16 @@ export class SessionManager {
           ? "input_required" : resolvedAsync && !live?.running && !live?.providerInitiatedTurnActive
             ? before?.status === "input_required" ? "idle" : before?.status ?? "idle" : "running",
       });
-    } else if (payload.kind === "token_usage" && !payload.parentToolUseId) {
-      // Subagent usage is retained in the event log for UI rollups; the parentless provider result
-      // is the authoritative total and already includes delegated work.
+    } else if (payload.kind === "token_usage" && (!payload.parentToolUseId || payload.independentUsage === true)) {
+      // Claude's per-model root records include children; Codex child threads are independent.
+      // Only explicitly independent parented records contribute to session billing.
       const m = this.store.readMeta(sessionId);
       if (!m) return;
       this.store.patchMeta(sessionId, {
         tokensIn: m.tokensIn + (payload.inputTokens ?? 0),
         tokensOut: m.tokensOut + (payload.outputTokens ?? 0),
         costUsd: m.costUsd + (payload.costUsd ?? 0),
+        ...(payload.claudeUsageCheckpoint ? { claudeUsageCheckpoint: payload.claudeUsageCheckpoint, claudeUsageCheckpointSeq: m.seq } : {}),
       });
     }
   }

@@ -529,9 +529,10 @@ The lifetime policy is quiescence-aware and fail-safe:
 - Events received without an active turn, including stray terminal results, are ignored with a
   diagnostic. Only the single active turn can consume its next terminal result, so output from turn
   N cannot settle turn N+1.
-- Claude reports token usage per turn but `total_cost_usd` cumulatively within one persistent
-  process. The driver emits a cost delta at each result and resets that baseline when a new process
-  starts, preserving the SessionManager's existing additive accounting contract.
+- Claude `modelUsage` and `total_cost_usd` include the whole query tree. In CLI 2.1.277+ they
+  restore cumulative conversation totals on resume and fork; older CLIs scope them to the process.
+  The driver subtracts raw per-model checkpoints and reconciles the prefix a replacement process
+  will restore with a zero-inference local `/context` probe. See `usage-cost-aggregation.md`.
 - All three lifetime controls are runner-only and are scrubbed from native, WSL, and standalone
   TUI child environments.
 

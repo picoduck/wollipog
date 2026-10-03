@@ -261,7 +261,8 @@ export function axisLabelIndexes(count: number, limit = 8): number[] {
 export interface CoverageNotice {
   offlineMachines: string[];
   unpricedRecords: number;
-  pricing: UsageAggregationResponse["pricing"];
+  legacyClaudeCostRecords?: number;
+  pricing?: UsageAggregationResponse["pricing"];
 }
 
 /** The sentences the coverage block shows; empty when totals are complete and fully priced. */
@@ -270,8 +271,11 @@ export function coverageMessages(notice: CoverageNotice): string[] {
   if (notice.offlineMachines.length > 0) {
     messages.push(`${notice.offlineMachines.join(", ")} ${notice.offlineMachines.length === 1 ? "is" : "are"} offline; usage it has not yet reported is missing from these totals.`);
   }
+  if ((notice.legacyClaudeCostRecords ?? 0) > 0) {
+    messages.push("Some Claude Code costs use an older accounting method. Resumed spending may be counted more than once; these historical costs have not been reconciled.");
+  }
   if (notice.unpricedRecords > 0) {
-    messages.push(`${notice.unpricedRecords.toLocaleString("en-US")} ${notice.unpricedRecords === 1 ? "record has" : "records have"} tokens but no price, so cost is a lower bound.`);
+    messages.push(`${notice.unpricedRecords.toLocaleString("en-US")} usage ${notice.unpricedRecords === 1 ? "record could" : "records could"} not be fully priced; their missing cost is excluded.`);
   }
   if (notice.pricing?.status === "unavailable") {
     messages.push("No model rate table is loaded; usage without a provider-reported cost is unpriced.");

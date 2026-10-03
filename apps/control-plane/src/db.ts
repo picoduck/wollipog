@@ -11922,7 +11922,7 @@ export class ControlPlaneDb {
       }
       if (source.runnerSeq <= state.covered_through_seq) return;
     }
-    if (payload.kind === "token_usage" && !payload.parentToolUseId) {
+    if (payload.kind === "token_usage" && (!payload.parentToolUseId || payload.independentUsage === true)) {
       const sessionDimensions = this.usageDimensions(sessionId);
       // A v104 runner names the model that produced the record; that beats the session's current
       // model, which may already have moved on by the time a late usage event lands.
@@ -11946,14 +11946,16 @@ export class ControlPlaneDb {
       const reported = typeof payload.costUsd === "number" && Number.isFinite(payload.costUsd) && payload.costUsd >= 0
         ? payload.costUsd
         : null;
-      const priced = priceUsage(this.usageRateTable, dimensions?.model, buckets, reported);
+      const priced = payload.accountingIncomplete
+        ? { costUsd: 0, costSource: "unpriced" as const, cacheSavingsUsd: 0 }
+        : priceUsage(this.usageRateTable, dimensions?.model, buckets, reported, payload.pricingContext, payload.costIsEstimate);
       const cost = ControlPlaneDb.usageCostParts(priced.costUsd);
       const remainderRow = this.stmt(
         "SELECT cost_remainder_picousd FROM usage_session_state WHERE session_id=?",
       ).get(sessionId) as { cost_remainder_picousd: number } | undefined;
       const combinedRemainder = (remainderRow?.cost_remainder_picousd ?? 0) + cost.remainderPicousd;
       const carryMicrousd = Math.round(combinedRemainder / 1_000_000);
-      const counted = hasTokens || reported !== null;
+      const counted = hasTokens || reported !== null || payload.accountingIncomplete === true;
       this.recordUsageDeltaInTransaction(sessionId, {
         inputTokens,
         costMicrousd: cost.microusd + carryMicrousd,
@@ -12156,6 +12158,7 @@ export class ControlPlaneDb {
       processed_tokens: number;
     };
     const processedTokens = Number(row.processed_tokens);
+    if (Number(row.unpriced_records) > 0) return "unpriced";
     if (processedTokens < liveProcessedTokens || processedTokens === 0) return undefined;
     return resolveCostSource({
       providerReported: Number(row.provider_reported_records),
@@ -12353,6 +12356,7 @@ export class ControlPlaneDb {
     return {
       granularity,
       hourlyDataAvailable: !hasRolledRows,
+      legacyClaudeCostRecords: Number(aggregateRows.find((row) => row.kind === "driver" && row.key === "claude-code")?.provider_reported_records ?? 0),
       since,
       through: query.through,
       retention: policy,

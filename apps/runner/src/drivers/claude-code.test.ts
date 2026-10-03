@@ -961,6 +961,57 @@ test("persistent cost baseline resets when an evicted process resumes", async ()
   driver.dispose();
 });
 
+test("Claude 2.1.277+ resumes charge only newly accrued conversation cost", async () => {
+  const children: any[] = [];
+  const events: SessionEventPayload[] = [];
+  let idleCallback: (() => void) | null = null;
+  const driver = new ClaudeCodeDriver(
+    { ...baseOpts, agentVersion: "2.1.287", env: { [CLAUDE_PERSISTENT_FLAG]: "1" }, config: { permissionMode: "acceptEdits" } },
+    { ...noopCb, onEvent: (event) => events.push(event) },
+    {
+      spawn: (options: any) => {
+        const child = fakeProcess();
+        if (options.args.includes("--tools")) {
+          const id = options.args[options.args.indexOf("--resume") + 1];
+          child.stdin.on("data", () => {
+            child.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: id }) + "\n");
+            child.stdout.write(JSON.stringify({ type: "result", subtype: "success", session_id: id, total_cost_usd: 0.01, usage: {} }) + "\n");
+            setImmediate(() => child.emit("close", 0));
+          });
+          return child;
+        }
+        children.push(child);
+        return child;
+      },
+      kill: () => {},
+      setTimer: (cb: () => void) => {
+        idleCallback = cb;
+        return { unref() {} } as any;
+      },
+      clearTimer: () => { idleCallback = null; },
+    } as any,
+  );
+  const first = driver.prompt("one");
+  await nextTask();
+  children[0].stdout.write(JSON.stringify({ type: "result", subtype: "success", total_cost_usd: 0.01 }) + "\n");
+  await first;
+  (idleCallback as unknown as () => void)();
+
+  const resumed = driver.prompt("two");
+  await nextTask();
+  assert.equal(children.length, 1, "the replacement waits for confirmed old-process close");
+  children[0].emit("close", 0);
+  await nextTask();
+  await nextTask();
+  children[1].stdout.write(JSON.stringify({ type: "result", subtype: "success", total_cost_usd: 0.02 }) + "\n");
+  await resumed;
+  const costs = events
+    .filter((event): event is Extract<SessionEventPayload, { kind: "token_usage" }> => event.kind === "token_usage")
+    .map((event) => event.costUsd);
+  assert.deepEqual(costs, [0.01, 0.01]);
+  driver.dispose();
+});
+
 test("persistent interactive approvals reuse stdin across two turns", async () => {
   const child = fakeProcess();
   const writes: string[] = [];
@@ -3326,7 +3377,7 @@ test("Claude fork fails closed if the local bootstrap reports model cost", async
   child.stdout.write(JSON.stringify({
     type: "result", subtype: "success", session_id: target, total_cost_usd: 0.01,
   }) + "\n");
-  await assert.rejects(fork, /zero model cost/);
+  await assert.rejects(fork, /zero new token usage/);
   assert.deepEqual(killed, [child]);
   driver.dispose();
 });
@@ -3804,6 +3855,8 @@ test("result event -> token_usage then end_turn", () => {
       outputTokens: 42,
       cachedInputTokens: 80,
       costUsd: 0.0123,
+      costIsEstimate: true,
+      claudeUsageCheckpoint: { sessionId: (h.driver as any).sessionId, totalCostUsd: 0.0123, models: Object.create(null) },
     },
   ]);
 });
@@ -5178,4 +5231,55 @@ test("Claude explains a provider rejection of the 1M context window instead of a
   assert.equal(claudeContextWindowRejection({ is_error: true, api_error_status: 400, result: "prompt is too long" }, "claude-opus-5[1m]"), null);
   assert.match(claudeContextWindowRejection({ is_error: true, api_error_status: 400, result: "Long context is unavailable" }, null) ?? "", /for the selected model/);
   assert.equal(claudeContextWindowRejection({ is_error: false, api_error_status: 400 }, "claude-opus-5[1m]"), null);
+});
+
+test("a resumed Claude process whose saved totals lag the last result charges new work after the saved prefix", async () => {
+  const events: SessionEventPayload[] = [];
+  const children: any[] = [];
+  const driver = new ClaudeCodeDriver({ ...baseOpts, agentVersion: "2.1.287", resumeId: "saved-session",
+    env: { [CLAUDE_PERSISTENT_FLAG]: "1" }, config: { permissionMode: "acceptEdits" },
+    claudeUsageCheckpoint: { sessionId: "saved-session", totalCostUsd: 0.03, models: {} } },
+    { ...noopCb, onEvent: (event) => events.push(event) },
+    { spawn: (options: any) => {
+      const child = fakeProcess();
+      if (options.args.includes("--tools")) {
+        child.stdin.on("data", () => {
+          child.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "saved-session" }) + "\n");
+          child.stdout.write(JSON.stringify({ type: "result", subtype: "success", session_id: "saved-session", total_cost_usd: 0.01, usage: {} }) + "\n");
+          setImmediate(() => child.emit("close", 0));
+        });
+      } else children.push(child);
+      return child;
+    }, kill: () => {} } as any);
+  await driver.initialize();
+  assert.equal(events.length, 0, "restored historical prefix is neither added nor subtracted from the ledger");
+  const turn = driver.prompt("new work");
+  await nextTask();
+  children[0].stdout.write(JSON.stringify({ type: "result", subtype: "success", total_cost_usd: 0.02, usage: { input_tokens: 20 } }) + "\n");
+  await turn;
+  const usage = events.filter((event) => event.kind === "token_usage");
+  assert.equal(usage.length, 1);
+  assert.equal(usage[0]!.costUsd, 0.01);
+  assert.equal(usage[0]!.claudeUsageCheckpoint?.totalCostUsd, 0.02);
+  driver.dispose();
+});
+
+test("child results never advance the root Claude cumulative cost baseline", () => {
+  const h = makeHarness({ agentVersion: "2.1.287" });
+  h.feed({ type: "result", subtype: "success", total_cost_usd: 0.02 });
+  h.feed({ type: "result", subtype: "success", total_cost_usd: 10, parent_tool_use_id: "child" });
+  h.feed({ type: "result", subtype: "success", total_cost_usd: 0.03 });
+  const root = h.events.filter((event) => event.kind === "token_usage" && !event.parentToolUseId);
+  assert.ok(Math.abs(root.reduce((sum, event) => sum + (event.costUsd ?? 0), 0) - 0.03) < 1e-9);
+});
+
+
+test("Claude conversation reset persists the new resume coordinate and resets its cost baseline", () => {
+  const h = makeHarness({ agentVersion: "2.1.287", resumeId: "before-clear" });
+  h.feed({ type: "result", subtype: "success", session_id: "before-clear", total_cost_usd: 0.03 });
+  h.feed({ type: "conversation_reset", new_conversation_id: "after-clear", session_id: "before-clear" });
+  h.feed({ type: "result", subtype: "success", session_id: "after-clear", total_cost_usd: 0.01 });
+  assert.deepEqual(h.establishedSessions, ["after-clear"]);
+  assert.equal(h.driver.agentSessionId(), "after-clear");
+  assert.deepEqual(h.events.filter((e) => e.kind === "token_usage").map((e) => e.costUsd), [0.03, 0.01]);
 });

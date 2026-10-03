@@ -109,6 +109,9 @@ export interface SessionMeta {
   providerAccountSwitchFailure?: ProviderAccountSwitchFailureView;
   /** Discovered adapter/CLI version, refreshed before launch for capability gates and telemetry; never an auth source. */
   agentVersion?: string;
+  claudeUsageCheckpoint?: import("./drivers/claude-usage-accounting.js").ClaudeUsageCheckpoint;
+  /** Durable event coverage for the raw baseline; generic seq repair must not advance it. */
+  claudeUsageCheckpointSeq?: number;
   /** Discovery-verified optional CLI flags/modes, retained for restart and runner-side defense. */
   capabilities?: AgentCapabilities;
   /** Session-root command catalog. Undefined preserves the live agent catalog; [] explicitly clears it. */

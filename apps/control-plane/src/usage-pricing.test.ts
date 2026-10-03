@@ -88,3 +88,48 @@ test("mixed provenance resolves to the weakest source", () => {
   assert.equal(resolveCostSource({ providerReported: 3, modelPriced: 1, unpriced: 1 }), "unpriced");
   assert.equal(resolveCostSource({ providerReported: 0, modelPriced: 0, unpriced: 0 }), "unpriced");
 });
+
+test("request tier and long-context rates apply to every billable bucket and cache savings", () => {
+  const raw: Record<string, number> = {};
+  const fields = ["input_cost_per_token", "output_cost_per_token", "cache_read_input_token_cost", "cache_creation_input_token_cost"];
+  for (const [suffix, rates] of [["", [2, 10, 0.1, 2.5]], ["_priority", [4, 20, 0.2, 5]],
+    ["_above_272k_tokens", [4, 15, 0.2, 5]], ["_above_272k_tokens_priority", [8, 30, 0.4, 10]]] as const) {
+    fields.forEach((field, i) => { raw[field + suffix] = rates[i]! / 1e6; });
+  }
+  const table = parseRateTable({ "test-model": raw });
+  const buckets = { uncachedInputTokens: 100000, cachedInputTokens: 200000, cacheCreationTokens: 10000, outputTokens: 1000 };
+  const standard = priceUsage(table, "test-model", buckets, null, { requestInputTokens: 272000, serviceTier: "default" });
+  const long = priceUsage(table, "test-model", buckets, null, { requestInputTokens: 272001, serviceTier: "default" });
+  const priority = priceUsage(table, "test-model", buckets, null, { requestInputTokens: 272001, serviceTier: "priority" });
+  assert.ok(Math.abs(standard.costUsd - 0.255) < 1e-10);
+  assert.ok(Math.abs(long.costUsd - 0.505) < 1e-10);
+  assert.ok(Math.abs(priority.costUsd - 1.01) < 1e-10);
+  assert.ok(Math.abs(priority.cacheSavingsUsd - 1.52) < 1e-10);
+  assert.equal(priceUsage(table, "test-model", buckets, null, { serviceTier: "priority" }).costSource, "unpriced");
+  assert.equal(priceUsage(table, "test-model", buckets, null, { requestInputTokens: 10, serviceTier: "unknown" }).costSource, "unpriced");
+  assert.equal(priceUsage(table, "test-model", buckets, 42, { serviceTier: "unknown" }).costUsd, 42);
+  assert.equal(priceUsage(table, "test-model", buckets, 42, undefined, true).costSource, "modelPriced");
+});
+
+test("a missing combined context/tier rate cannot fall back to a cheaper short-context tier", () => {
+  const raw: Record<string, number> = {};
+  for (const field of ["input_cost_per_token", "output_cost_per_token", "cache_read_input_token_cost", "cache_creation_input_token_cost"]) {
+    raw[field] = 1;
+    raw[field + "_priority"] = 2;
+    raw[field + "_above_272k_tokens"] = 3;
+  }
+  const table = parseRateTable({ example: raw });
+  const value = priceUsage(table, "example", { uncachedInputTokens: 1, cachedInputTokens: 0, cacheCreationTokens: 0, outputTokens: 1 },
+    null, { serviceTier: "priority", requestInputTokens: 300000 });
+  assert.equal(value.costSource, "unpriced");
+});
+
+
+test("an incomplete published context premium stays unpriced instead of disappearing", () => {
+  const table = parseRateTable({ example: { input_cost_per_token: 1, output_cost_per_token: 1,
+    input_cost_per_token_above_272k_tokens: 2, output_cost_per_token_above_272k_tokens: 3 } });
+  const buckets = { uncachedInputTokens: 1, cachedInputTokens: 0, cacheCreationTokens: 0, outputTokens: 1 };
+  assert.equal(priceUsage(table, "example", buckets, null, { serviceTier: "default", requestInputTokens: 300000 }).costSource, "unpriced");
+  assert.equal(priceUsage(table, "example", buckets, null, { serviceTier: "default" }).costSource, "unpriced");
+  assert.equal(priceUsage(table, "example", buckets, null, { serviceTier: "default", requestInputTokens: 100 }).costUsd, 2);
+});

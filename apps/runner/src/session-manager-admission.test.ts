@@ -3303,7 +3303,7 @@ test("orphan recovery cannot release a lock retained by failed provider retireme
       () => {}, () => {}, store, "runner", undefined, factory as never, root, 1,
     );
     const spec = { ...launchSpec(repo, "retirement-orphan-fence"), useWorktree: true };
-    assert.equal(await manager.start(spec), true);
+    assert.equal(await manager.start(spec), true, JSON.stringify(store.readEvents(spec.sessionId).filter((event) => event.payload.kind === "error")));
     store.patchMeta(spec.sessionId, {
       agentSessionId: "provider-orphan",
       orphanedWork: { pendingTaskIds: ["task-1"], markedAt: 1, reason: "process_exit" },

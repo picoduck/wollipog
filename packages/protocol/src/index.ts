@@ -614,7 +614,8 @@
 //      operations that grant no publication, dispatch, merge, or decision authority. The contract
 //      is docs/campaign-work-ledger.md. Older control planes omit `OrchestratorCampaignProjection.work`
 //      and `SessionView.campaignMembership`, which clients present as unsupported, never as empty.
-export const PROTOCOL_VERSION = 196;
+// 197: request pricing coordinates, independent child usage, and raw cumulative Claude checkpoints.
+export const PROTOCOL_VERSION = 197;
 export const PROJECT_MEMORY_MIN_PROTOCOL = 195;
 /** Only Claude versions whose directory override we have verified are advertised as supported.
  * Codex native memory combines projects in a database and cannot be shared project by project. */
@@ -4860,6 +4861,15 @@ export type AuthoritativeSubagentLifecycle =
  * Normalized streaming event taxonomy (brief-aligned). The runner maps ACP
  * `session/update` notifications onto these; the control plane assigns id/seq/ts.
  */
+export interface ClaudeUsageCheckpoint {
+  sessionId: string;
+  totalCostUsd: number;
+  models: Record<string, {
+    inputTokens: number; outputTokens: number; cacheReadInputTokens: number;
+    cacheCreationInputTokens: number; costUSD?: number; canonicalModel?: string; thinkingTokens?: number;
+  }>;
+}
+
 export type SessionEventPayload =
   // `final` marks a COMPLETE message (one whole turn), not a streaming chunk. Live drivers emit
   // many chunk events that the UI coalesces into one bubble; backfill/adopt emits whole messages
@@ -5004,6 +5014,16 @@ export type SessionEventPayload =
       /** Provider-reported cost for this record. Absent when the provider bills opaquely; the
        * control plane then prices the tokens from its rate table. */
       costUsd?: number;
+      /** SDK-computed list-price estimate, rather than authoritative billing. */
+      costIsEstimate?: true;
+      /** Provider counters were unavailable; this record is incomplete rather than free. */
+      accountingIncomplete?: true;
+      /** Content-free provider baseline, retained for crash recovery and accounting audits. */
+      claudeUsageCheckpoint?: ClaudeUsageCheckpoint;
+      /** This child thread is billed independently of its parent thread. */
+      independentUsage?: true;
+      /** Request-level pricing coordinates; token deltas alone cannot identify a context tier. */
+      pricingContext?: { requestInputTokens?: number; serviceTier?: string };
       /** The spawning agent/task tool when this usage belongs to a subagent (v31+). */
       parentToolUseId?: string;
       /** Provider-reported subagent duration when available; otherwise the UI uses tool timestamps. */
@@ -5147,6 +5167,8 @@ export interface UsageAggregationResponse {
   /** False when authorized daily rollups overlap this exact filtered window, so an hourly request
    * would be incomplete even if the configured hourly retention was later expanded. */
   hourlyDataAvailable?: boolean;
+  /** Native Claude records from the older accounting path, still requiring reconciliation. */
+  legacyClaudeCostRecords?: number;
   since: number;
   through: number;
   retention: UsageRetentionPolicy;

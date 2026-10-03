@@ -17,6 +17,7 @@
  * See docs/DRIVERS.md §2 for the stream-json → SessionEventPayload mapping.
  */
 
+import { ClaudeUsageAccounting, claudeRestoresUsage, claudeUsageCheckpoint } from "./claude-usage-accounting.js";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -565,8 +566,9 @@ export class ClaudeCodeDriver implements Driver {
   private persistentTransport = false;
   private persistentFingerprint: string | null = null;
   private persistentGeneration = 0;
-  /** Claude's total_cost_usd is cumulative within one streaming-input process. */
-  private persistentLastCostUsd = 0;
+  private readonly usageAccounting: ClaudeUsageAccounting;
+  private usageBaselinePrepared = false;
+  private usageBaselinePreparing = false;
   /** The model on the most recent top-level assistant record; stamped on the turn's usage. Claude
    * records the model per message, and the terminal `result` carries none. */
   private turnModel: string | null = null;
@@ -672,6 +674,7 @@ export class ClaudeCodeDriver implements Driver {
     private readonly cb: DriverCallbacks,
     deps: Partial<ClaudeDriverDeps> = {},
   ) {
+    this.usageAccounting = new ClaudeUsageAccounting(claudeRestoresUsage(opts.agentVersion), opts.claudeUsageCheckpoint);
     this.cwd = opts.cwd;
     this.config = opts.config;
     // Phase 2 resume: reuse the persisted claude session id (→ `--resume` from the first turn);
@@ -798,6 +801,7 @@ export class ClaudeCodeDriver implements Driver {
   }
 
   async initialize(): Promise<void> {
+    if (this.opts.resumeId && this.usageAccounting.restoresUsage) await this.prepareResumeUsageBaseline();
     // Publish launch-time process truth even when discovery did not verify steering. Without an
     // explicit false overlay, a later catalog refresh can make this already-running driver appear
     // steerable even though its immutable launch capabilities still reject every submission.
@@ -808,6 +812,34 @@ export class ClaudeCodeDriver implements Driver {
     // completed work until the pending ceiling. Unreadable or oversized ledgers retain the ids.
     if (this.pendingBackgroundTasks.size === 0) return;
     await this.reconcilePendingTaskFilesInContext();
+  }
+
+  /** Read the prefix THIS process will restore. After a crash it may be behind our last
+   * observed result; after background work it may be ahead. Neither case justifies rebilling it. */
+  private async prepareResumeUsageBaseline(): Promise<void> {
+    const result = await this.readConversationUsage(this.cwd, this.sessionId);
+    if (this.disposed) throw new Error("Claude accounting probe was cancelled");
+    const checkpoint = claudeUsageCheckpoint(this.sessionId, result);
+    if (!checkpoint) throw new Error("Claude resume did not provide a usage baseline");
+    const previous = this.usageAccounting.checkpoint;
+    if (previous?.sessionId === this.sessionId && checkpoint.totalCostUsd > previous.totalCostUsd) {
+      // The retired provider persisted work after its last streamed result. Account that suffix
+      // at observation time before using the restored total as the next process's baseline.
+      this.emitUsageResult(result);
+    }
+    this.usageAccounting.checkpoint = checkpoint;
+    this.usageBaselinePrepared = true;
+    this.cb.onClaudeUsageCheckpoint?.(checkpoint);
+  }
+
+  private emitUsageResult(result: Json): void {
+    const events = this.usageAccounting.result(this.sessionId, result, this.turnModel);
+    events.forEach((event, index) => this.cb.onEvent({ ...event,
+      ...(index === events.length - 1 && typeof result.duration_ms === "number" ? { durationMs: result.duration_ms } : {}),
+      ...(index === events.length - 1 && this.usageAccounting.checkpoint && !event.accountingIncomplete
+        ? { claudeUsageCheckpoint: this.usageAccounting.checkpoint } : {}),
+    }));
+    if (this.usageAccounting.checkpoint) this.cb.onClaudeUsageCheckpoint?.(this.usageAccounting.checkpoint);
   }
 
   async newSession(cwd: string): Promise<string> {
@@ -825,6 +857,12 @@ export class ClaudeCodeDriver implements Driver {
     }
 
     const targetSessionId = randomUUID();
+    await this.readConversationUsage(cwd, targetSessionId);
+    return targetSessionId;
+  }
+
+  private async readConversationUsage(cwd: string, targetSessionId: string): Promise<Json> {
+    const isFork = targetSessionId !== this.sessionId;
     // /context is a local zero-cost command. It makes Claude persist the fork immediately so the
     // target app session can safely store a real resumable id without running a hidden model turn.
     const args = [
@@ -832,9 +870,7 @@ export class ClaudeCodeDriver implements Driver {
       "-p",
       "--resume",
       this.sessionId,
-      "--fork-session",
-      "--session-id",
-      targetSessionId,
+      ...(isFork ? ["--fork-session", "--session-id", targetSessionId] : []),
       "--input-format",
       "stream-json",
       "--output-format",
@@ -873,7 +909,8 @@ export class ClaudeCodeDriver implements Driver {
     }
     this.auxiliaryChildren.add(child);
 
-    return new Promise<string>((resolve, reject) => {
+    return new Promise<Json>((resolve, reject) => {
+      let result: Json = null;
       let initSeen = false;
       let resultSeen = false;
       let settled = false;
@@ -911,10 +948,11 @@ export class ClaudeCodeDriver implements Driver {
             fail(new Error(`Claude fork failed (${String(msg.subtype ?? "unknown result")})`));
             return;
           }
-          if (msg.total_cost_usd !== 0) {
-            fail(new Error("Claude fork bootstrap did not confirm zero model cost"));
+          if ((!this.usageAccounting.restoresUsage && msg.total_cost_usd !== 0) || !claudeUsageCheckpoint(targetSessionId, msg) || Object.values(msg.usage ?? {}).some((value) => typeof value === "number" && value > 0)) {
+            fail(new Error("Claude local accounting probe did not confirm zero new token usage"));
             return;
           }
+          result = msg;
           resultSeen = true;
           try {
             child.stdin.end();
@@ -946,7 +984,7 @@ export class ClaudeCodeDriver implements Driver {
         if (settled) return;
         cleanup();
         settled = true;
-        if (code === 0 && initSeen && resultSeen) resolve(targetSessionId);
+        if (code === 0 && initSeen && resultSeen) resolve(result);
         else reject(new Error(`Claude fork exited before persistence was confirmed (code ${String(code)})`));
       });
 
@@ -1086,7 +1124,11 @@ export class ClaudeCodeDriver implements Driver {
     return this.prompt(command.argumentText, [], command.commandName);
   }
 
-  private promptOneShot(text: string, images?: PromptImage[], slashCommand?: string): Promise<StopReason> {
+  private async promptOneShot(text: string, images?: PromptImage[], slashCommand?: string): Promise<StopReason> {
+    if (!this.firstTurn && this.usageAccounting.restoresUsage && !this.usageBaselinePrepared) await this.prepareResumeUsageBaseline();
+    if (this.disposed) return "cancelled";
+    this.usageBaselinePrepared = false;
+    this.usageAccounting.beginProcess();
     return new Promise<StopReason>((resolve) => {
       this.cancelled = false;
       this.pendingApprovals.clear();
@@ -1354,6 +1396,19 @@ export class ClaudeCodeDriver implements Driver {
       }
       return;
     }
+    if (!this.child && !this.firstTurn && this.usageAccounting.restoresUsage && !this.usageBaselinePrepared) {
+      if (this.usageBaselinePreparing) return;
+      this.usageBaselinePreparing = true;
+      void this.prepareResumeUsageBaseline().then(() => {
+        this.usageBaselinePreparing = false;
+        this.startPersistentTurn(turn);
+      }).catch(() => {
+        this.usageBaselinePreparing = false;
+        this.cb.onEvent({ kind: "error", message: "Claude resume accounting baseline could not be recovered." });
+        this.settlePersistentTurn(turn, "refusal");
+      });
+      return;
+    }
     const cfg = this.config;
     // The prepared argv establishes whether the managed-worktree guard is active for this spawn,
     // so it must be resolved BEFORE the permission mode that depends on it.
@@ -1450,7 +1505,8 @@ export class ClaudeCodeDriver implements Driver {
         (line) => this.processPersistentLine(line),
         () => this.cb.onStderr("discarded oversized NDJSON record from persistent Claude stdout"),
       );
-      this.persistentLastCostUsd = 0;
+      this.usageBaselinePrepared = false;
+      this.usageAccounting.beginProcess();
       this.intentionalPersistentStop = false;
       this.attachPersistentTransport(child, ++this.persistentGeneration);
     }
@@ -2645,6 +2701,10 @@ export class ClaudeCodeDriver implements Driver {
     const parentId = typeof msg.parent_tool_use_id === "string" && msg.parent_tool_use_id ? msg.parent_tool_use_id : null;
     const pp = parentId ? { parentToolUseId: parentId } : null;
     switch (msg.type) {
+      case "conversation_reset":
+        if (!parentId) this.usageAccounting.checkpoint = null;
+        return null;
+
       case "rate_limit_event":
         this.cb.onSubscriptionUsage?.({ provider: "claude", kind: "sparse", payload: msg });
         return null;
@@ -3082,25 +3142,20 @@ export class ClaudeCodeDriver implements Driver {
         // A subagent's result ends only its own lane.
         if (!parentId) this.modelTaskStops.clear();
         const usage = msg.usage ?? {};
-        let costUsd = msg.total_cost_usd;
-        if (this.persistentTransport && typeof costUsd === "number" && Number.isFinite(costUsd)) {
-          const cumulative = costUsd;
-          costUsd = Math.max(0, cumulative - this.persistentLastCostUsd);
-          this.persistentLastCostUsd = cumulative;
+        if (!parentId && typeof msg.session_id === "string" && msg.session_id && msg.session_id !== this.sessionId) {
+          this.sessionId = msg.session_id;
+          this.sessionEstablished = false;
+          this.markSessionEstablished();
         }
-        this.cb.onEvent({
-          kind: "token_usage",
-          inputTokens: usage.input_tokens,
-          outputTokens: usage.output_tokens,
-          cachedInputTokens: usage.cache_read_input_tokens,
-          ...(typeof usage.cache_creation_input_tokens === "number"
-            ? { cacheCreationInputTokens: usage.cache_creation_input_tokens }
-            : {}),
-          ...(this.turnModel && !parentId ? { model: this.turnModel } : {}),
-          costUsd,
-          ...(typeof msg.duration_ms === "number" ? { durationMs: msg.duration_ms } : {}),
-          ...pp,
-        });
+        if (parentId) {
+          // UI-only: root modelUsage includes this child. Do not move the root baseline.
+          this.cb.onEvent({ kind: "token_usage", inputTokens: usage.input_tokens, outputTokens: usage.output_tokens,
+            cachedInputTokens: usage.cache_read_input_tokens, costUsd: msg.total_cost_usd,
+            ...(typeof usage.cache_creation_input_tokens === "number" ? { cacheCreationInputTokens: usage.cache_creation_input_tokens } : {}),
+            ...(typeof msg.duration_ms === "number" ? { durationMs: msg.duration_ms } : {}), ...pp });
+        } else {
+          this.emitUsageResult(msg);
+        }
         // Token usage on a top-level result is proof the provider actually answered over the API,
         // which is what subscription usage needs to tell "never ran" apart from "reports nothing".
         // A subagent result or a turn that failed before any request proves neither.

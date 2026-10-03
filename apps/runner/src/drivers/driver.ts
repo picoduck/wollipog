@@ -157,6 +157,7 @@ export interface DriverCallbacks {
   /** Negotiated control-plane capability; absence retains legacy request replacement. */
   supportsWorkerAttention?: () => boolean;
   onEvent: (payload: SessionEventPayload) => void;
+  onClaudeUsageCheckpoint?: (checkpoint: import("./claude-usage-accounting.js").ClaudeUsageCheckpoint) => void;
   onStderr: (text: string) => void;
   onExit: (code: number | null) => void;
   /** Claude-only lifecycle signal. The session manager persists it before process teardown. */
@@ -221,6 +222,8 @@ export interface DriverOptions {
   capabilities?: AgentCapabilities;
   /** An agent-native session/thread id to resume (Claude UUID, Codex thread id, or ACP session id). */
   resumeId?: string;
+  agentVersion?: string;
+  claudeUsageCheckpoint?: import("./claude-usage-accounting.js").ClaudeUsageCheckpoint;
   /** Runner-owned session directory used for bounded hold sentinels and lifecycle reconciliation. */
   sessionStateDir?: string;
   /** Durable Claude task ids that a resumed transport must reconcile before declaring quiescence. */

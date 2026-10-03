@@ -6872,3 +6872,26 @@ test("cancelling recovery during deferred launch preparation releases its lock",
     h.cleanup();
   }
 });
+
+
+test("Claude resume recovers the latest raw checkpoint from a paged crash suffix", async () => {
+  const h = harness({ driver: "claude-code", command: "claude", agentId: "claude-native", agentVersion: "2.1.287",
+    agentSessionId: "claude-conversation", claudeUsageCheckpointSeq: 0 });
+  const checkpoint = { sessionId: "claude-conversation", totalCostUsd: 0.03, models: {} };
+  try {
+    for (let index = 0; index < 205; index++) {
+      h.store.appendEvent("resume-session", { kind: "agent_thought", text: "fixture" });
+    }
+    h.store.appendEvent("resume-session", { kind: "token_usage", costUsd: 0.03, claudeUsageCheckpoint: checkpoint });
+    h.store.patchMeta("resume-session", { seq: 0 }); // metadata lost its final flush at the crash
+    (h.store as any).readEvents = () => { throw new Error("launch must use bounded history pages"); };
+    h.manager.prompt("resume-session", "resume");
+    for (let index = 0; index < 20 && h.launches.length === 0; index++) await tick();
+    assert.equal(h.launches.length, 1);
+    assert.equal(h.launches[0]!.options.agentVersion, "2.1.287");
+    assert.deepEqual(h.launches[0]!.options.claudeUsageCheckpoint, checkpoint);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});

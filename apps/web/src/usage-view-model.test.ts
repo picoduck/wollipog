@@ -136,8 +136,15 @@ test("coverage messages name offline machines, unpriced records, and rate-table 
   });
   assert.equal(messages.length, 3);
   assert.match(messages[0]!, /Build Box is offline/);
-  assert.match(messages[1]!, /3 records have tokens but no price/);
+  assert.match(messages[1]!, /3 usage records could not be fully priced/);
   assert.match(messages[2]!, /could not be refreshed/);
   assert.match(coverageMessages({ offlineMachines: [], unpricedRecords: 0, pricing: { status: "unavailable", source: "disabled", fetchedAt: null, knownModels: 0 } })[0]!, /No model rate table/);
   assert.deepEqual(coverageMessages({ offlineMachines: [], unpricedRecords: 0, pricing: undefined }), [], "a pre-v103 plane sends no pricing block");
+});
+
+test("historical Claude records disclose possible duplicate spending without relabeling new estimates", () => {
+  const messages = coverageMessages({ offlineMachines: [], unpricedRecords: 0, legacyClaudeCostRecords: 2 });
+  assert.equal(messages.length, 1);
+  assert.match(messages[0]!, /Resumed spending may be counted more than once/);
+  assert.deepEqual(coverageMessages({ offlineMachines: [], unpricedRecords: 0, legacyClaudeCostRecords: 0 }), []);
 });

@@ -8616,3 +8616,34 @@ test("follow-up recommendations survive their origin child's deletion after the 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("independent Codex child requests contribute to session billing exactly once", () => {
+  const db = withRunner();
+  db.setUsageRateTable(parseRateTable(rateDocument));
+  db.createSession(newSession({ driver: "codex-app-server", config: { model: "gpt-5.5-codex" } }));
+  const payload = { kind: "token_usage" as const, inputTokens: 1000, cachedInputTokens: 600, outputTokens: 100,
+    model: "gpt-5.5-codex", parentToolUseId: "child", independentUsage: true as const };
+  db.appendEvent("sess-1", payload, 3600100, { accrueUsage: true, runnerSeq: 1 });
+  assert.throws(() => db.appendEvent("sess-1", payload, 3600200, { accrueUsage: true, runnerSeq: 1 }), /UNIQUE/);
+  db.appendEvent("sess-1", { ...payload, independentUsage: undefined }, 3600300, { accrueUsage: true, runnerSeq: 2 });
+  const totals = db.queryUsageAggregation(localOwner(), { since: 0, through: 10000000, granularity: "hour" }).totals;
+  assert.equal(totals.inputTokens, 1000);
+  assert.equal(totals.cachedInputTokens, 600);
+  assert.equal(totals.costUsd, 0.00192);
+  assert.equal(db.getSession("sess-1")!.costUsd, 0.00192);
+});
+
+test("zeroed provider accounting is unpriced and historical Claude estimates remain disclosed", () => {
+  const db = withRunner();
+  db.createSession(newSession({ driver: "claude-code", config: { model: "claude-fable-5-1" } }));
+  db.appendEvent("sess-1", { kind: "token_usage", accountingIncomplete: true }, 3600100, { accrueUsage: true });
+  let usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10000000, granularity: "hour" });
+  assert.equal(usage.totals.unpricedRecords, 1);
+  assert.equal(usage.totals.costUsd, 0);
+  assert.equal(db.getSession("sess-1")!.costSource, "unpriced");
+  db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 10, costUsd: 1 }, 3600200, { accrueUsage: true });
+  db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 10, costUsd: 0.1, costIsEstimate: true }, 3600300, { accrueUsage: true });
+  usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10000000, granularity: "hour" });
+  assert.equal(usage.legacyClaudeCostRecords, 1);
+  assert.equal(usage.totals.costUsd, 1.1);
+});

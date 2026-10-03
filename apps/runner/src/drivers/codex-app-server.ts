@@ -432,6 +432,12 @@ export class CodexAppServerDriver implements Driver {
   private turnUsageBaseline: FlatUsage | null = null;
   /** Once a turn settles, ignore late usage/completion notifications from its interrupt race. */
   private turnUsageClosed = true;
+  // setConfig queues the next turn; it cannot relabel a request already running.
+  private usageModel: string | undefined;
+  private usageServiceTier: string | undefined;
+  private routingServiceTier: string | undefined;
+  private readonly ambiguousChildModels = new Set<string>();
+  private readonly ambiguousChildTiers = new Set<string>();
   private readonly seenItems = new Set<string>();
   private readonly seenAsyncQuestionItems = new Set<string>();
   private readonly emittedErrors = new Set<string>();
@@ -694,6 +700,7 @@ export class CodexAppServerDriver implements Driver {
   }
 
   private reconcileServiceTier(serviceTier: string | null): void {
+    this.routingServiceTier = serviceTier ?? "default";
     this.config = { ...this.config, serviceTier: serviceTier ?? undefined };
     this.cb.onServiceTierResolved?.(serviceTier);
   }
@@ -1432,7 +1439,9 @@ export class CodexAppServerDriver implements Driver {
     this.lastOnlyUsageFingerprints.delete(threadId);
   }
 
-  private emitPendingSubagentUsage(threadId: string): void {
+  private readonly usageThreadSettings = new Map<string, { model?: string }>();
+
+  private emitPendingSubagentUsage(threadId: string, requestInputTokens?: number): void {
     const usage = this.pendingSubagentUsage.get(threadId);
     const parentToolUseId = this.subagentToolByThread.get(threadId);
     if (!usage || !parentToolUseId) return;
@@ -1446,8 +1455,11 @@ export class CodexAppServerDriver implements Driver {
       cachedInputTokens: delta.cached,
       ...(typeof delta.cacheCreation === "number" ? { cacheCreationInputTokens: delta.cacheCreation } : {}),
       ...(typeof delta.reasoning === "number" ? { reasoningOutputTokens: delta.reasoning } : {}),
-      ...(this.eventModel()),
+      model: this.ambiguousChildModels.has(threadId) ? "<unknown-request-model>" : this.usageThreadSettings.get(threadId)?.model ?? "<unknown-subagent>",
       parentToolUseId,
+      independentUsage: true,
+      pricingContext: { requestInputTokens: delta.input === requestInputTokens ? requestInputTokens : undefined,
+        serviceTier: this.ambiguousChildTiers.has(threadId) ? "unknown" : this.routingServiceTier ?? this.config.serviceTier ?? "default" },
     });
   }
 
@@ -1501,6 +1513,11 @@ export class CodexAppServerDriver implements Driver {
     this.subagentParentByTool.set(id, parentToolUseId);
     for (const threadId of receivers) {
       this.subagentToolByThread.set(threadId, id);
+      // A role can select a different default model. An omitted spawn model is not
+      // evidence that the child used the parent's model.
+      this.usageThreadSettings.set(threadId, {
+        model: typeof item.model === "string" && item.model ? item.model : undefined,
+      });
       this.subagentLifecycleByThread.set(threadId, lifecycle);
     }
     this.updateSubagentStates(item?.agentsStates);
@@ -1743,6 +1760,8 @@ export class CodexAppServerDriver implements Driver {
     peer.onNotification("turn/started", (p: Json) => {
       if (p?.threadId && p.threadId !== this.threadId) {
         if (this.subagentToolByThread.has(p.threadId)) {
+          this.ambiguousChildTiers.delete(p.threadId);
+          this.ambiguousChildModels.delete(p.threadId);
           this.pendingSubagentUsage.delete(p.threadId);
           this.emittedSubagentUsage.delete(p.threadId);
           const known = this.threadUsageTotals.get(p.threadId);
@@ -1762,10 +1781,35 @@ export class CodexAppServerDriver implements Driver {
       // App Server notifications are allowed to arrive before the turn/start response.
     });
     peer.onNotification("thread/settings/updated", (p: Json) => {
-      if (p?.threadId !== this.threadId) return;
+      if (p?.threadId !== this.threadId) {
+        if (!this.subagentToolByThread.has(p?.threadId)) return;
+        const settings = p.threadSettings ?? {};
+        const before = this.usageThreadSettings.get(p.threadId);
+        if (before?.model && typeof settings.model === "string" && before.model !== settings.model) {
+          this.ambiguousChildModels.add(p.threadId);
+        }
+        this.usageThreadSettings.set(p.threadId, {
+          model: typeof settings.model === "string" ? settings.model : before?.model,
+        });
+        return;
+      }
+      const model = p?.threadSettings?.model;
+      if (typeof model === "string") {
+        this.usageModel = !this.turnUsageClosed && this.usageModel && this.usageModel !== model
+          ? "<unknown-request-model>" : model;
+        this.config = { ...this.config, model };
+      }
       const serviceTier = p?.threadSettings?.serviceTier;
-      if (typeof serviceTier === "string" && serviceTier) this.reconcileServiceTier(serviceTier);
-      else if (serviceTier === null) this.reconcileServiceTier(null);
+      if ((typeof serviceTier === "string" && serviceTier) || serviceTier === null) {
+        const tier = serviceTier ?? "default";
+        if (this.usageServiceTier && this.usageServiceTier !== tier) {
+          // Codex shares the root tier with children. A settings notification does not
+          // identify whether an in-flight response used the old or new tier.
+          for (const id of this.subagentToolByThread.keys()) this.ambiguousChildTiers.add(id);
+          this.usageServiceTier = this.turnUsageClosed ? tier : "unknown";
+        } else this.usageServiceTier = tier;
+        this.reconcileServiceTier(serviceTier);
+      }
     });
     peer.onNotification("thread/tokenUsage/updated", (p: Json) => {
       const lastIsPerResponse = p?.tokenUsage?.last != null;
@@ -1822,7 +1866,7 @@ export class CodexAppServerDriver implements Driver {
             );
           }
         }
-        this.emitPendingSubagentUsage(usageThreadId);
+        this.emitPendingSubagentUsage(usageThreadId, lastIsPerResponse ? last?.input : undefined);
       } else if (!this.turnUsageClosed) {
         if (usableTotal) {
           const baseline = this.turnUsageBaseline
@@ -1851,7 +1895,7 @@ export class CodexAppServerDriver implements Driver {
             this.pendingTurnUsage = addUsage(this.pendingTurnUsage, last);
           }
         }
-        this.emitPendingTurnUsage();
+        this.emitPendingTurnUsage(lastIsPerResponse ? last?.input : undefined);
         // App-server reports the model's context window beside the usage. The last request's
         // input (cache included) plus its output is what sits in the window now, which is the
         // same figure the Codex CLI's own "context left" reads from.
@@ -1964,7 +2008,7 @@ export class CodexAppServerDriver implements Driver {
     else this.cb.onStderr("provider authentication is required");
   }
 
-  private emitPendingTurnUsage(): void {
+  private emitPendingTurnUsage(requestInputTokens?: number): void {
     const u = this.pendingTurnUsage;
     if (u) {
       const delta = subtractUsage(u, this.emittedTurnUsage ?? {});
@@ -1978,24 +2022,33 @@ export class CodexAppServerDriver implements Driver {
         ...(typeof delta.cacheCreation === "number" ? { cacheCreationInputTokens: delta.cacheCreation } : {}),
         ...(typeof delta.reasoning === "number" ? { reasoningOutputTokens: delta.reasoning } : {}),
         ...(this.eventModel()),
+        pricingContext: { requestInputTokens: delta.input === requestInputTokens ? requestInputTokens : undefined, serviceTier: this.usageServiceTier ?? this.config.serviceTier ?? "default" },
       });
     }
   }
 
   /** The configured model, as the attribution for a usage record; app-server reports none itself. */
   private eventModel(): { model?: string } {
-    return this.config.model && this.config.model !== "default" ? { model: this.config.model } : {};
+    const model = this.turnUsageClosed ? this.usageModel ?? this.config.model : this.usageModel;
+    return model && model !== "default" ? { model } : {};
   }
 
   private closeTurnUsage(): void {
     if (this.turnUsageClosed) return;
     this.turnUsageClosed = true;
     this.emitPendingTurnUsage();
+    this.usageServiceTier = this.routingServiceTier ?? "default";
     this.pendingTurnUsage = null;
     this.emittedTurnUsage = null;
   }
 
   private beginRootTurnUsage(): void {
+    if (this.usageServiceTier && this.usageServiceTier !== (this.config.serviceTier ?? "default")) {
+      for (const id of this.subagentToolByThread.keys()) this.ambiguousChildTiers.add(id);
+    }
+    this.usageModel = this.config.model;
+    this.usageServiceTier = this.config.serviceTier ?? "default";
+    this.routingServiceTier = this.usageServiceTier;
     this.pendingTurnUsage = null;
     this.emittedTurnUsage = null;
     this.turnUsageBaseline = this.threadId ? this.threadUsageTotals.get(this.threadId) ?? null : null;
