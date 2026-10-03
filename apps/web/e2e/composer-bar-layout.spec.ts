@@ -516,6 +516,45 @@ for (const forcedColors of [false, true]) {
   });
 }
 
+/** What a plain disabled secondary button paints inside the composer: the ink every disabled control keeps. */
+async function disabledInk(page: Page): Promise<string> {
+  return page.evaluate(() => {
+    const probe = document.createElement("button");
+    probe.className = "btn";
+    probe.disabled = true;
+    probe.textContent = "Probe";
+    document.querySelector(".composer-box")!.append(probe);
+    const color = getComputedStyle(probe).color;
+    probe.remove();
+    return color;
+  });
+}
+
+test("controls disabled while open or unrestricted take the disabled ink (#2174)", async ({ page }) => {
+  await openFixture(page, 1440, "codex", "&unsafe=1");
+  const plus = page.getByRole("button", { name: "Add and Modes" });
+  await plus.click();
+  await expect(plus).toHaveAttribute("aria-expanded", "true");
+  // The runner drops while the menu is open: the trigger is disabled with its menu still showing.
+  await page.evaluate(() => window.setSessionUsageRunnerOnline(false));
+  await expect(plus).toBeDisabled();
+  const ink = await disabledInk(page);
+  const shield = page.getByRole("button", { name: /^Permission Mode:/ });
+  await expect(shield).toBeDisabled();
+  const chip = page.getByRole("button", { name: /^Model Settings:/ });
+  await expect(chip).toBeDisabled();
+  await page.evaluate(() => Promise.all(document.getAnimations()
+    .filter((animation) => animation instanceof CSSTransition)
+    .map((animation) => animation.finished.catch(() => undefined))));
+  const painted = {
+    plus: await plus.evaluate((element) => getComputedStyle(element).color),
+    shieldIcon: await shield.locator(".cbar-approvals").evaluate((element) => getComputedStyle(element).color),
+    model: await chip.locator(".cbar-model").evaluate((element) => getComputedStyle(element).color),
+    context: await chip.locator(".cbar-context").evaluate((element) => getComputedStyle(element).color),
+  };
+  expect(painted).toEqual({ plus: ink, shieldIcon: ink, model: ink, context: ink });
+});
+
 test.describe("390px phone with Plan on", () => {
   test.use({ hasTouch: true });
 

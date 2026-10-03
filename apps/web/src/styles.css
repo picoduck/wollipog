@@ -5838,8 +5838,9 @@ textarea {
   border-color: var(--control-outline);
   color: var(--text);
 }
-/* An open menu keeps its trigger in the hover state, like the context and cost triggers. */
-:is(.cbar-trigger, .plus-btn)[aria-expanded="true"] {
+/* An open menu keeps its trigger in the hover state, like the context and cost triggers. A trigger
+   disabled while its menu is open (the runner went offline) shows the disabled ink instead. */
+:is(.cbar-trigger, .plus-btn)[aria-expanded="true"]:not(:disabled) {
   background: var(--bg-elev-2);
   color: var(--text);
 }
@@ -5868,7 +5869,8 @@ textarea {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.model-chip:disabled .cbar-model { color: inherit; }
+/* A disabled chip reads in the disabled ink throughout; the effort is already the faint tier. */
+.model-chip:disabled :is(.cbar-model, .cbar-context) { color: inherit; }
 .cbar-model-label {
   display: inline-flex;
   min-width: 0;
@@ -5895,7 +5897,8 @@ textarea {
 .cbar-approvals {
   display: inline-flex;
 }
-.cbar-approvals.unrestricted {
+/* Amber only on a control that can act: a disabled shield takes the disabled ink like the rest. */
+:not(:disabled) > .cbar-approvals.unrestricted {
   color: var(--amber);
 }
 /* An Orchestrator's fixed mode is a mark, not a control, on the same square. */
