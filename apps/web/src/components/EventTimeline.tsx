@@ -2062,8 +2062,8 @@ function SubagentSummary({ tool, open, onToggle, onOpen }: {
         <span className="tl-step-icon"><BotIcon size={16} /></span>
         <span className="tl-agent-name">{name}</span>
         <span className="tl-agent-meta">
-          {role && <span>{role}</span>}
-          <span>{stepCount}</span>
+          {role && <span className="tl-agent-role">{role}</span>}
+          <span className="tl-agent-steps">{stepCount}</span>
         </span>
         <StatusBadge meta={status} inline={!status.pulse} className="tl-agent-status" />
         {span.description && <span id={timingId} className="sr-only">{span.description}</span>}

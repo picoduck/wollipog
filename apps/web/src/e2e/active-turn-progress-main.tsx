@@ -77,11 +77,12 @@ const filler = Array.from({ length: 20 }, (_, index): TimelineItem => ({
 
 const permissionEventId = events.at(-1)!.seq;
 const at = (secondsAgo: number) => fixtureNow - secondsAgo * 1_000;
-/** One turn that spawned a running agent (which spawned a nested one) and a completed agent. */
+/** One turn that spawned a running agent (which spawned a nested one) and a completed agent.
+ * `?role=` replaces the running agent's role, to try a long provider role. */
 const agentItems: TimelineItem[] = [
   { kind: "user_message", id: 1, text: "Finish compatibility validation and prepare the release.", createdAt: turnStartedAt },
   { kind: "tool_call", id: 2, toolCallId: "inspect", title: "Inspect Release Metadata", toolKind: "read", status: "completed", text: "Release metadata is present.", startedAt: at(400), lastActivityAt: at(398), completedAt: at(398) },
-  { kind: "tool_call", id: 3, toolCallId: "release-audit-agent", title: "Coordinate Release Audit", toolKind: "agent", status: "in_progress", subagentLifecycle: "running", subagentRole: "explorer", text: "", startedAt: at(360), lastActivityAt: at(4) },
+  { kind: "tool_call", id: 3, toolCallId: "release-audit-agent", title: "Coordinate Release Audit", toolKind: "agent", status: "in_progress", subagentLifecycle: "running", subagentRole: params.get("role") ?? "explorer", text: "", startedAt: at(360), lastActivityAt: at(4) },
   { kind: "agent_message", id: 4, text: "Auditing compatibility gates and packaged artifacts.", parentToolUseId: "release-audit-agent", createdAt: at(350) },
   { kind: "tool_call", id: 5, toolCallId: "audit-read", title: "Read: release/manifest.json", toolKind: "read", status: "completed", text: "", parentToolUseId: "release-audit-agent", startedAt: at(340), lastActivityAt: at(339), completedAt: at(339) },
   { kind: "tool_call", id: 6, toolCallId: "gates-agent", title: "Check Compatibility Gates", toolKind: "agent", status: "completed", subagentLifecycle: "completed", text: "All four gates pass.", parentToolUseId: "release-audit-agent", startedAt: at(330), lastActivityAt: at(240), completedAt: at(240) },

@@ -132,9 +132,9 @@ test("a pending approval outranks progress and Review moves focus to the request
 });
 
 /** Open the turn's work group so its agents' rows are on screen. */
-async function openAgents(page: Page, viewport: { width: number; height: number }) {
+async function openAgents(page: Page, viewport: { width: number; height: number }, query = "") {
   await page.setViewportSize(viewport);
-  await page.goto("/active-turn-progress-e2e.html?scenario=agents");
+  await page.goto(`/active-turn-progress-e2e.html?scenario=agents${query}`);
   const ledger = page.locator(".tl-work > .disclosure-trigger");
   await ledger.click();
   await expect(ledger).toHaveAttribute("aria-expanded", "true");
@@ -200,5 +200,36 @@ test.describe("on a coarse pointer at 390px", () => {
     await expectNoHorizontalOverflow(page);
     await agents.first().getByRole("button", { name: "Open Coordinate Release Audit" }).tap();
     await expect(page.getByTestId("opened-subagent")).toHaveText("release-audit-agent");
+  });
+});
+
+test.describe("a long provider role on a coarse pointer at 390px", () => {
+  test.use({ hasTouch: true, isMobile: true });
+
+  test("the role ellipsizes; the name, step count and status stay whole (#2183)", async ({ page }) => {
+    // Providers send roles of up to 48 characters.
+    const role = "Security Architecture and Compliance Reviewer";
+    const agents = await openAgents(page, { width: 390, height: 844 }, `&role=${encodeURIComponent(role)}`);
+    const row = agents.first();
+    await expect(row.locator(".tl-agent-name")).toHaveText("Coordinate Release Audit");
+    await expect(row.locator(".tl-agent-toggle")).toHaveAccessibleName(
+      `Coordinate Release Audit · ${role} · 3 Steps · Running`);
+    const layout = await row.evaluate((element) => {
+      const toggle = element.querySelector<HTMLElement>(".tl-agent-toggle")!;
+      const end = toggle.getBoundingClientRect().right - Number.parseFloat(getComputedStyle(toggle).paddingRight);
+      const name = element.querySelector(".tl-agent-name")!;
+      const roleSpan = element.querySelector<HTMLElement>(".tl-agent-role")!;
+      const steps = element.querySelector(".tl-agent-steps")!.getBoundingClientRect();
+      const status = element.querySelector(".tl-agent-status")!.getBoundingClientRect();
+      return {
+        nameWhole: name.scrollWidth <= name.clientWidth + 1,
+        roleEllipsized: roleSpan.scrollWidth > roleSpan.clientWidth,
+        stepsWhole: steps.right <= end + 1 && steps.width > 20,
+        statusWhole: status.right <= end + 1,
+        oneFactLine: Math.abs(steps.top - status.top) <= 4 && steps.top >= name.getBoundingClientRect().bottom - 1,
+      };
+    });
+    expect(layout).toEqual({ nameWhole: true, roleEllipsized: true, stepsWhole: true, statusWhole: true, oneFactLine: true });
+    await expectNoHorizontalOverflow(page);
   });
 });

@@ -7168,6 +7168,13 @@ textarea,
   font: var(--type-small);
   font-variant-numeric: tabular-nums;
 }
+/* A long provider role (up to 48 characters) ellipsizes; the step count never gives way. */
+.tl-agent-role {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tl-agent-steps { flex: none; }
 .tl-agent-status {
   flex: none;
   margin-inline-start: auto;
@@ -7183,10 +7190,13 @@ textarea,
   .tl-agent-name {
     flex: 1 1 calc(100% - var(--icon-sm) - var(--icon) - 2 * var(--space-2) - 1px);
   }
+  /* The second line: the meta takes what the status leaves, so the status never wraps to a third
+     line, and a long role ellipsizes before the step count does. */
   .tl-agent-meta {
+    flex: 1 1 0;
+    min-width: 0;
     margin-inline-start: calc(var(--icon-sm) + var(--icon) + 2 * var(--space-2));
   }
-  .tl-agent-status { margin-inline-start: 0; }
 }
 .tl-plan {
   min-width: 0;
