@@ -513,6 +513,12 @@ function workflowDecisionResolutionPrompt(decision: WorkflowDecisionView): strin
   ].join("\n");
 }
 
+/** Why a session whose ancestry the campaign walk refuses can neither request nor keep a typed
+ * workflow decision (#2451). No Orchestrator can be named as its controller. */
+const MALFORMED_ANCESTRY_DECISION_REFUSAL =
+  "this session's ancestry is malformed (a cycle, a missing parent session, or more than 64 levels of " +
+  "nesting), so no Orchestrator can control its workflow decisions";
+
 /** What a restarted child is told about the decisions its restart revoked (#1779). Revocation on a
  * lifecycle end is deliberate and stays: a relaunched provider must never act on a grant made to the
  * process it replaced. Naming each occurrence lets the child request again what it still needs,
@@ -2641,7 +2647,7 @@ export class SessionsService {
     const campaignBefore = new Map<string, SessionView>();
     const rememberCampaign = (session: SessionView | null): void => {
       const controller = session?.parentSessionId
-        ? this.orchestratorCampaignController(this.db.getSession(session.parentSessionId))
+        ? this.campaignEventController(this.db.getSession(session.parentSessionId))
         : null;
       if (controller && !campaignBefore.has(controller.id)) campaignBefore.set(controller.id, controller);
     };
@@ -6513,7 +6519,7 @@ export class SessionsService {
       );
       if (unsupported) return unsupported;
     }
-    const campaignBefore = this.orchestratorCampaignController(session) ?? session;
+    const campaignBefore = this.campaignEventController(session) ?? session;
     this.db.updateSessionParentControl(sessionId, mode, Date.now());
     for (const childId of this.db.campaignDescendantIds(sessionId)) this.hub.sessionChangedById(childId);
     this.publishCampaignAttentionTransition(campaignBefore);
@@ -6545,7 +6551,7 @@ export class SessionsService {
       );
       if (unsupported) return unsupported;
     }
-    const campaignBefore = this.orchestratorCampaignController(session) ?? session;
+    const campaignBefore = this.campaignEventController(session) ?? session;
     const now = Date.now();
     const policy = this.db.updateSessionParentControlPolicy(sessionId, decisions, now, expectedRevision);
     if (!policy) return fail("Parent Control policy revision is stale", 409);
@@ -6803,10 +6809,20 @@ export class SessionsService {
     return controller;
   }
 
+  /** The campaign whose events and attention a change at or below `start` belongs to: the
+   * projection's own root (#2451), so a continuation or attention event is filed only where
+   * get_campaign reads it. A refused ancestry, or a root whose policy is unreadable, has no campaign
+   * to wake. Fixed child behavior and Parent Control authority still resolve through
+   * orchestratorCampaignController, so this never loosens either. */
+  private campaignEventController(start: SessionView | null): SessionView | null {
+    const root = start ? this.db.campaignAncestryRoot(start.id) : "none";
+    return typeof root === "object" && root.hasPolicy ? this.db.getSession(root.id) : null;
+  }
+
   private campaignAttentionController(session: SessionView | null, batch?: RunnerAttentionBatch): SessionView | null {
     if (batch) return batch.capture(session);
     return session?.parentSessionId
-      ? this.orchestratorCampaignController(this.db.getSession(session.parentSessionId))
+      ? this.campaignEventController(this.db.getSession(session.parentSessionId))
       : null;
   }
 
@@ -6815,7 +6831,7 @@ export class SessionsService {
     if (!before) return;
     // A yielded batch may outlive deletion or reparenting of its controlling campaign. Do not
     // write continuation events for a stale owner (or a deleted row's foreign key).
-    if (this.orchestratorCampaignController(this.db.getSession(before.id))?.id !== before.id) return;
+    if (this.campaignEventController(this.db.getSession(before.id))?.id !== before.id) return;
     const now = Date.now();
     const humanRequests = this.descendantRequests(before.id, () => true, "human", false);
     if (humanRequests.ok && humanRequests.data) {
@@ -7316,7 +7332,11 @@ export class SessionsService {
       return fail("use request_github_issue_closure for server-verified issue evidence", 403);
     }
     const controller = this.workflowDecisionController(child, normalized.data.category);
-    if (!controller) return fail("this session has no controlling Orchestrator ancestor", 409);
+    if (!controller) {
+      return fail(this.decisionControllerRoot(child) === "refused"
+        ? MALFORMED_ANCESTRY_DECISION_REFUSAL
+        : "this session has no controlling Orchestrator ancestor", 409);
+    }
     if (isTerminal(controller.session.status)) {
       return fail("a terminal Orchestrator cannot control a new workflow decision", 409);
     }
@@ -7975,25 +7995,26 @@ export class SessionsService {
     if (category === "issue_closure" && sessionRole(child) === "orchestrator" && child.parentControlPolicy) {
       return { session: child, policy: child.parentControlPolicy };
     }
-    const seen = new Set<string>([child.id]);
-    let parentId = child.parentSessionId ?? null;
-    let controller: { session: SessionView; policy: ParentControlPolicy } | null = null;
-    for (let depth = 0; parentId && depth < 64 && !seen.has(parentId); depth += 1) {
-      seen.add(parentId);
-      const parent = this.db.getSession(parentId);
-      if (!parent) return null;
-      if (sessionRole(parent) === "orchestrator") {
-        controller = {
-          session: parent,
-          policy: parent.parentControlPolicy ?? {
-            revision: 0,
-            decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY },
-          },
-        };
-      }
-      parentId = parent.parentSessionId ?? null;
-    }
+    // The outermost Orchestrator above the child owns its gates, found by the same walk the
+    // campaign projection uses (#2451). An Orchestrator whose campaign policy is unreadable still
+    // owns them, human-only unless its Parent Control policy says otherwise, so no shape moves a
+    // gate toward an agent; a refused ancestry has no controller at all.
+    const root = this.decisionControllerRoot(child);
+    const parent = typeof root === "object" ? this.db.getSession(root.id) : null;
+    const controller = parent ? {
+      session: parent,
+      policy: parent.parentControlPolicy ?? {
+        revision: 0,
+        decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY },
+      },
+    } : null;
     return controller;
+  }
+
+  /** A child's gates resolve from its parent, exactly as its campaign attention does, so a gate
+   * and the events about it never disagree about the same ancestry, including at the bound. */
+  private decisionControllerRoot(child: SessionView): ReturnType<ControlPlaneDb["campaignAncestryRoot"]> {
+    return child.parentSessionId ? this.db.campaignAncestryRoot(child.parentSessionId) : "none";
   }
 
   private effectiveWorkflowDecisionAuthority(
@@ -8282,12 +8303,14 @@ export class SessionsService {
     return ok(resolution);
   }
 
-  private revokeWorkflowDecision(decision: WorkflowDecisionView, actor: GovernanceActor, oweRestartNotice = false): void {
+  private revokeWorkflowDecision(
+    decision: WorkflowDecisionView, actor: GovernanceActor, oweRestartNotice = false, rationale?: string,
+  ): void {
     const now = Date.now();
     const controllerBefore = this.db.getSession(decision.controllingSessionId);
     this.db.markWorkflowDecisionRevoked(decision.occurrenceId, now, oweRestartNotice);
     this.settleWorkflowDecisionPause(decision.sessionId, decision.occurrenceId, now);
-    this.recordWorkflowDecisionAudit(decision, "revoked", actor, now);
+    this.recordWorkflowDecisionAudit(decision, "revoked", actor, now, rationale);
     this.hub.sessionChangedById(decision.sessionId);
     this.publishCampaignAttentionTransition(controllerBefore);
   }
@@ -8651,7 +8674,18 @@ export class SessionsService {
           decision.policyRevision !== controller.policy.revision ||
           !this.workflowDecisionAuthorityCurrent(controller.session, controller.policy, decision)) {
         pending = removePendingRequest(pending, decision.occurrenceId);
-        this.revokeWorkflowDecision(decision, { kind: "system", id: "workflow-recovery" });
+        // A refused ancestry leaves no controller to restore the card to. Say why in the audit and
+        // in the child's transcript, so the card does not just vanish (#2451).
+        const malformed = !controller && this.decisionControllerRoot(child) === "refused";
+        this.revokeWorkflowDecision(decision, { kind: "system", id: "workflow-recovery" }, false,
+          malformed ? MALFORMED_ANCESTRY_DECISION_REFUSAL : undefined);
+        if (malformed) {
+          this.hub.sessionEvent(this.db.appendEvent(sessionId, {
+            kind: "error",
+            message: `Workflow decision ${decision.occurrenceId} (${decision.category}) was revoked: ` +
+              MALFORMED_ANCESTRY_DECISION_REFUSAL,
+          }, Date.now()));
+        }
         continue;
       }
       if (pendingRequests(pending).some((request) => request.requestId === decision.occurrenceId)) continue;
@@ -9087,7 +9121,7 @@ export class SessionsService {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
     const campaignBefore = session.parentSessionId
-      ? this.orchestratorCampaignController(this.db.getSession(session.parentSessionId))
+      ? this.campaignEventController(this.db.getSession(session.parentSessionId))
       : null;
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
     const pending = pendingRequests(session.pendingApproval).find((request) => request.requestId === requestId) ?? session.pendingApproval;
@@ -9238,7 +9272,7 @@ export class SessionsService {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
     const campaignBefore = session.parentSessionId
-      ? this.orchestratorCampaignController(this.db.getSession(session.parentSessionId))
+      ? this.campaignEventController(this.db.getSession(session.parentSessionId))
       : null;
     // Only resolve the approval the session is actually waiting on. A stale click,
     // duplicate POST, or wrong id must not clear pendingApproval / unblock the column
@@ -12020,7 +12054,7 @@ export class SessionsService {
       payload.kind === "permission_request" || payload.kind === "question_request" ||
       payload.kind === "permission_resolved" || payload.kind === "question_resolved"
     ) && session.parentSessionId
-      ? this.orchestratorCampaignController(this.db.getSession(session.parentSessionId))
+      ? this.campaignEventController(this.db.getSession(session.parentSessionId))
       : null;
     const incomingRequest: PendingApproval | null = payload.kind === "permission_request" ? {
       ...(payload.ownerToolUseId ? { ownerToolUseId: payload.ownerToolUseId } : {}),

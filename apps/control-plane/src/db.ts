@@ -15549,37 +15549,55 @@ export class ControlPlaneDb {
     };
   }
 
+  /** The one ancestry walk every campaign read and write resolves through (#2451): the outermost
+   * Orchestrator-role session at or above `sessionId`. Ordinary sessions anywhere in the chain are
+   * walked through, not stopped at. `refused`
+   * means the ancestry is malformed (a cycle, a missing session, or more than 64 parent hops), so
+   * no caller may name a campaign for it; `none` means it is sound but holds no Orchestrator.
+   * `hasPolicy` is false only for a legacy or unreadable campaign policy: that root still owns its
+   * typed gates (human-only by default) but has no campaign to project. */
+  campaignAncestryRoot(sessionId: string): { id: string; hasPolicy: boolean } | "none" | "refused" {
+    const read = (id: string) => this.stmt(
+      "SELECT id, parent_session_id, session_role, permission_mode, orchestrator_policy FROM sessions WHERE id=?",
+    ).get(id) as {
+      id: string; parent_session_id: string | null; session_role: string | null;
+      permission_mode: string | null; orchestrator_policy: string | null;
+    } | undefined;
+    const isOrchestrator = (row: NonNullable<ReturnType<typeof read>>) =>
+      sessionRole({ role: row.session_role as SessionRole | null, permissionMode: row.permission_mode }) === "orchestrator";
+    let current = read(sessionId);
+    if (!current) return "refused";
+    let root = isOrchestrator(current) ? current : null;
+    const seen = new Set<string>([current.id]);
+    for (let depth = 0; current.parent_session_id; depth += 1) {
+      // A walk cut off by the bound has not found the root; naming the Orchestrator it stopped at
+      // would key rows to a campaign that a shallower caller resolves past (#1462).
+      if (depth >= 64 || seen.has(current.parent_session_id)) return "refused";
+      const parent = read(current.parent_session_id);
+      if (!parent) return "refused";
+      seen.add(parent.id);
+      if (isOrchestrator(parent)) root = parent;
+      current = parent;
+    }
+    return root
+      ? { id: root.id, hasPolicy: orchestratorCampaignPolicyFromJson(root.orchestrator_policy) !== null }
+      : "none";
+  }
+
   /** The campaign every projection and every campaign-keyed write must resolve to: the outermost
-   * Orchestrator above this session, or null when the ancestry is malformed. Nested Orchestrators
-   * carry a creation-time policy snapshot for assignment continuity, but the outermost campaign
-   * remains the live authority, so a root revision or newly human-owned descendant decision cannot
-   * be hidden by the copied child snapshot. The bounded/seen walk fails closed for malformed legacy
-   * ancestry. Resolving writes through this same walk keeps rows where the projection counts them. */
+   * Orchestrator above this session, or null when the ancestry is refused or that Orchestrator's
+   * policy is unreadable. Nested Orchestrators carry a creation-time policy snapshot for assignment
+   * continuity, but the outermost campaign remains the live authority, so a root revision or newly
+   * human-owned descendant decision cannot be hidden by the copied child snapshot. */
   private resolvedCampaignSession(campaignSessionId: string): SessionRow | null {
-    let campaign = this.stmt("SELECT * FROM sessions WHERE id=?").get(campaignSessionId) as unknown as
+    const campaign = this.stmt("SELECT * FROM sessions WHERE id=?").get(campaignSessionId) as unknown as
       | SessionRow
       | undefined;
     if (!campaign || !orchestratorCampaignPolicyFromJson(campaign.orchestrator_policy)) return null;
-    const seen = new Set<string>([campaign.id]);
-    let depth = 0;
-    for (; campaign.parent_session_id && depth < 64; depth += 1) {
-      if (seen.has(campaign.parent_session_id)) return null;
-      seen.add(campaign.parent_session_id);
-      const parent = this.stmt("SELECT * FROM sessions WHERE id=?").get(campaign.parent_session_id) as unknown as
-        | SessionRow
-        | undefined;
-      if (!parent) return null;
-      if (orchestratorCampaignPolicyFromJson(parent.orchestrator_policy)) campaign = parent;
-      else if (parent.parent_session_id) {
-        campaign = parent;
-        continue;
-      }
-      if (!parent.parent_session_id) break;
-    }
-    // A walk cut off by the bound has not found the root. Naming the Orchestrator it stopped at
-    // would key rows to a campaign that a shallower caller resolves past (#1462).
-    if (depth >= 64 && campaign.parent_session_id) return null;
-    return orchestratorCampaignPolicyFromJson(campaign.orchestrator_policy) ? campaign : null;
+    const root = this.campaignAncestryRoot(campaign.id);
+    if (typeof root !== "object" || !root.hasPolicy) return null;
+    return root.id === campaign.id ? campaign
+      : this.stmt("SELECT * FROM sessions WHERE id=?").get(root.id) as unknown as SessionRow;
   }
 
   /** The campaign id every campaign-keyed write must use, so rows land where the projection
