@@ -63,11 +63,17 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       // Scrolled to the top, the first row starts below the notice and is fully readable.
       await reader.evaluate((element) => { element.scrollTop = 0; });
       await expect.poll(() => reader.evaluate((element) => element.scrollTop)).toBe(0);
-      // The virtual list re-renders its window after the jump, so wait for the head row to settle.
-      await expect.poll(() => reader.evaluate((element) => {
-        const rows = [...element.querySelectorAll<HTMLElement>("[data-virtual-row]")];
-        return Math.min(...rows.map((row) => row.getBoundingClientRect().top));
-      })).toBeGreaterThanOrEqual(box.y + box.height);
+      // The virtual list re-renders its window and corrects its anchor as rows are measured, which
+      // can move the reader off the top after a single jump. Each poll returns to the top, then reads
+      // the head row (index 0); until it is mounted the poll reads null and keeps waiting, so an
+      // empty window can never pass.
+      const headRowTop = () => reader.evaluate((element) => {
+        element.scrollTop = 0;
+        const head = element.querySelector<HTMLElement>("[data-virtual-row][data-index='0']");
+        return head && element.scrollTop === 0 ? head.getBoundingClientRect().top : null;
+      });
+      await expect.poll(headRowTop).not.toBeNull();
+      await expect.poll(headRowTop).toBeGreaterThanOrEqual(box.y + box.height);
       expect((await notice.boundingBox())!.y).toBe(box.y);
       await notice.getByRole("button", { name: "Show Details" }).click();
       await expect(notice.locator(".notice-details-body")).toHaveText("Could not load complete session activity.");
