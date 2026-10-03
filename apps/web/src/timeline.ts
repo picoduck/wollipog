@@ -1293,8 +1293,12 @@ export class TimelineBuilder {
         // (turn-progress.ts reads the same boundary).
         if (p.startsTurn) this.endTurnPlan();
         let idx = this.permIndex.get(p.requestId);
-        // A provider may reuse a request id; the runner's occurrence names the exact question.
-        if (p.occurrenceId && idx != null && (this.items[idx] as { occurrenceId?: string }).occurrenceId !== p.occurrenceId) {
+        // A provider may reuse a request id; the runner's occurrence names the exact question. A
+        // resolution never lands on a question that names a different occurrence, even when its own
+        // question lies outside the loaded history.
+        const candidateOccurrence = idx != null ? (this.items[idx] as { occurrenceId?: string }).occurrenceId : undefined;
+        if (p.occurrenceId && candidateOccurrence !== undefined && candidateOccurrence !== p.occurrenceId) {
+          idx = undefined;
           for (let index = this.items.length - 1; index >= 0; index -= 1) {
             const item = this.items[index]!;
             if (item.kind === "question" && item.requestId === p.requestId && item.occurrenceId === p.occurrenceId) {

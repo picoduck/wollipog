@@ -170,6 +170,13 @@ test("a resolution names its occurrence, so a reused request id never moves an a
   ]).filter((item): item is QuestionItem => item.kind === "question");
   assert.deepEqual(items.map((item) => [item.answered, item.answers?.[0]?.selected]),
     [[true, ["Destination 1 (Production)"]], [undefined, undefined]]);
+
+  // Its own question outside the loaded history, the resolution leaves the other occurrence alone.
+  const windowed = deriveTimeline([
+    event({ kind: "question_request", requestId: "reused", occurrenceId: "request_new", questions: [destination] }, ASKED),
+    answered([{ questionId: "destination", selected: ["Destination 1 (Production)"] }], { occurrenceId: "request_old" }, "reused"),
+  ]).filter((item): item is QuestionItem => item.kind === "question");
+  assert.deepEqual(windowed.map((item) => [item.answered, item.answers]), [[undefined, undefined]]);
 });
 
 test("replaced, expired and provider-resolved questions keep their outcome words", () => {
