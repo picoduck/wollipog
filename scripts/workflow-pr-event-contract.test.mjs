@@ -32,8 +32,8 @@ function workflowContract(path) {
   assert.ok(jobIds.length >= 1, `${path}: expected at least one job`);
   assert.equal(jobGuards.length, jobIds.length, `${path}: every job needs a job-level if guard (${jobGuards.length} of ${jobIds.length} jobs have one)`);
   assert.match(text, /^  cancel-in-progress: true$/m, `${path}: concurrency must cancel in progress`);
-  // Every job carries the same draft guard. An aggregating job may wrap it in
-  // `always() && (...)` so it still reports when the jobs it needs fail or are cancelled.
+  // Every job carries the same draft guard. The aggregator wraps it in !cancelled() so
+  // active failures still report, but whole-workflow cancellation can release concurrency.
   const guards = [...new Set(jobGuards.map((match) => unwrapAggregatorGuard(match[1].trim())))];
   assert.equal(guards.length, 1, `${path}: every job must carry the same draft guard, got ${JSON.stringify(guards)}`);
 
@@ -45,7 +45,7 @@ function workflowContract(path) {
 }
 
 function unwrapAggregatorGuard(expression) {
-  const wrapped = expression.match(/^\$\{\{\s*always\(\)\s*&&\s*\((.+)\)\s*\}\}$/);
+  const wrapped = expression.match(/^\$\{\{\s*!cancelled\(\)\s*&&\s*\((.+)\)\s*\}\}$/);
   return wrapped ? wrapped[1].trim() : expression;
 }
 
@@ -289,8 +289,8 @@ test("the required CI check aggregates parallel jobs that each own a time budget
   assert.match(byId.checks, /^      - name: Unit Tests$/m);
   assert.match(byId.check, /^    name: Typecheck, Test & Sidecar Bundle$/m, "the required context is the aggregator");
   assert.match(byId.check, /^    needs: \[checks, browser, win32\]$/m, "the aggregator must wait for every work job");
-  assert.match(byId.check, /^    if: \$\{\{ always\(\) && \(/m,
-    "the aggregator must run when a needed job failed or was cancelled, or the required context never reports");
+  assert.match(byId.check, /^    if: \$\{\{ !cancelled\(\) && \(/m,
+    "the aggregator must report active dependency failures while remaining cancellable with the workflow");
   assert.match(byId.check, /needs\.checks\.result/, "the aggregator must inspect the checks job result");
   assert.match(byId.check, /needs\.browser\.result/, "the aggregator must inspect the browser job result");
   // The win32 job is the draft guard, its name and the call, and nothing else. Its path scoping lives
