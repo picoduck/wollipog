@@ -133,7 +133,10 @@ test("a destination with no tier catalog still offers a way out of a carried tie
 });
 
 test("a carried tier is named as the source's catalog names it", async () => {
-  const fixture = await mount([codex([{ id: "flex", name: "Flex Processing" }]), claude([{ id: "priority", name: "Priority" }])], "flex");
+  // Another installation of the source's provider, listed first, names the same id differently: the
+  // session's own agent (sourceAgentId "codex") is the one that names it.
+  const otherInstallation = { ...codex([{ id: "flex", name: "Batch" }]), id: "codex-other", name: "Codex (Other)" };
+  const fixture = await mount([otherInstallation, codex([{ id: "flex", name: "Flex Processing" }]), claude([{ id: "priority", name: "Priority" }])], "flex");
   try {
     assert.equal(fixture.tierTrigger()!.getAttribute("aria-label"), "Service Tier: Flex Processing");
     await act(async () => { fixture.tierTrigger()!.click(); });
@@ -277,11 +280,19 @@ test("an agent that signs out while chosen asks for another agent rather than cl
       onClose={() => {}} onCreate={async () => {}} />,
   );
   const reason = () => container.querySelector(".modal-foot .handoff-reason")?.textContent ?? null;
+  const live = () => container.querySelector(".handoff-dialog-body > .sr-only[role=status]");
   try {
     await act(async () => render([claude(), other]));
     assert.equal(reason(), null);
+    // The change is announced: a polite region present before it, since the disabled Create Handoff
+    // it describes can't take focus to be read.
+    const region = live();
+    assert.ok(region, "the live region exists before the reason does");
+    assert.equal(region.textContent, "");
     await act(async () => render([{ ...claude(), authStatus: "unauthenticated" }, other]));
     assert.equal(reason(), "Choose an agent.");
+    assert.equal(live(), region, "the same region, so the change is announced");
+    assert.equal(region.textContent, "Choose an agent.");
     await act(async () => render([{ ...claude(), authStatus: "unauthenticated" }]));
     assert.equal(reason(), "No agent can take this hand-off.");
   } finally {

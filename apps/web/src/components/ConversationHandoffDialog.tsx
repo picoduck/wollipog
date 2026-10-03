@@ -76,9 +76,10 @@ export function ConversationHandoffDialog({ agents, sourceDriver, sourceAgentId,
   // tier catalog at all — every Claude model — still needs the control when a tier was carried in,
   // or the refusal has no remedy and Create stays disabled forever.
   const showServiceTier = advertisedTiers.length > 0 || carriedTierUnsupported;
-  // The carried tier is named as the source's own catalog names it, never by its provider id.
+  // The carried tier is named as the source agent's own catalog names it, never by its provider id.
+  // Only that agent's catalog: another installation of the same provider may name the id differently.
   const carriedTierName = config.serviceTier ? agents
-    .filter((item) => item.driver === sourceDriver)
+    .filter((item) => (sourceAgentId ? item.id === sourceAgentId : item.driver === sourceDriver))
     .flatMap((item) => item.capabilities?.models ?? [])
     .flatMap((item) => item.serviceTiers ?? [])
     .find((tier) => tier.id === config.serviceTier)?.name || serviceTierLabel(config.serviceTier) : undefined;
@@ -159,6 +160,10 @@ export function ConversationHandoffDialog({ agents, sourceDriver, sourceAgentId,
       </div>
       {refusal !== null && <p className="handoff-refusal" id={REFUSAL_ID} role="status">{refusal}</p>}
       {error && <Notice tone="danger" role="alert">{error}</Notice>}
+      {/* The footer reason changes while the dialog is open (the chosen agent signs out, its runner
+          updates), and a disabled Create Handoff can't take focus to be read. This region, present
+          from the start so the change is announced, says it politely. */}
+      <span className="sr-only" role="status">{footerReason ?? ""}</span>
     </div>
   </Modal>;
 }
