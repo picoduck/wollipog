@@ -273,14 +273,6 @@ const ICON_ONLY = new Set([
   // The microphone GLYPH, not the button: scoping the exemption to the svg makes it structurally
   // true, so giving the control a visible label later cannot silently inherit the looser bar.
   ".voice-btn.voice-recording > svg",
-  // An unavailable message action's `<summary>`, whose only content is the action's icon: its name
-  // is an aria-label and its reason sits in a sibling span, which EventTimeline.test.ts pins. The
-  // colour lives on the summary rather than the svg because the slash's `currentColor` reads it.
-  [
-    ".tl-message-action-unavailable > .tl-message-icon",
-    ".tl-message-action-unavailable > .tl-message-icon:hover",
-    ".tl-message-action-unavailable > .tl-message-icon:focus-visible",
-  ].join(", "),
   // Onboarding status marks: each renders one aria-hidden glyph (✓, ! or △) beside a heading or
   // label that states the status in text, which OnboardRunnerDialog.test.tsx pins. They are measured
   // over their own `--bg-elev-3` disc as colour-only rules on a base fill.
@@ -463,10 +455,10 @@ test("every declared colour/fill pair clears WCAG AA in both themes", () => {
 });
 
 test("a faded glyph on a transparent fill fails in every palette, even at the glyph floor", () => {
-  // #1880's first pass, verbatim: the unavailable message action faded to 45% of --text-faint.
-  // It rendered at 1.9–2.7:1, so it fails even the 3:1 bar its icon-only selector is held to.
+  // #1880's first pass, verbatim: an unavailable message action faded to 45% of --text-faint.
+  // It rendered at 1.9–2.7:1, so it fails even the 3:1 bar an icon-only selector is held to.
   const faded = "color-mix(in srgb, var(--text-faint) 45%, transparent)";
-  const unavailable = [...ICON_ONLY].find((selector) => selector.startsWith(".tl-message-action-unavailable"))!;
+  const unavailable = [...ICON_ONLY].find((selector) => selector.startsWith(".voice-btn"))!;
   for (const fill of ["transparent", "none"]) {
     for (const rule of [
       { selector: unavailable, declarations: { color: faded, background: fill } },

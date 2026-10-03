@@ -343,7 +343,7 @@ test.describe("Answer Mode ownership", () => {
 
     await expect(page.getByText("Answer Mode", { exact: true })).toBeVisible();
     await page.screenshot({ path: `${SHOT}/answer-mode-before.png` });
-    await page.getByRole("button", { name: "Edit User Message as a New Turn" }).last().click();
+    await page.getByRole("button", { name: "Edit as a New Turn" }).last().click();
     await page.getByLabel("Message", { exact: true }).fill("Prepared follow-up from an earlier turn");
     await page.getByRole("button", { name: "Load into Composer" }).click();
 

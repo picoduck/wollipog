@@ -114,6 +114,9 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `ComputerIcon` | Lucide | `Monitor` | Local computer. |
 | `BranchIcon` | Lucide | `GitBranch` | Git branch. |
 | `ThreadForkIcon` | Lucide | `GitFork` | Conversation fork. |
+| `EditInForkIcon` | Lucide | `GitBranchPlus` | Edit a message in a new conversation fork; `GitBranch` already means a Git branch. |
+| `RewindFilesIcon` | Lucide | `FileClock` | Rewind files to a turn's checkpoint. |
+| `HandOffIcon` | Lucide | `ArrowRightLeft` | Hand a conversation off to another provider. |
 | `DialIcon` | Lucide | `CircleGauge` | Model or effort setting. |
 | `PullRequestIcon` | Lucide | `GitPullRequest` | Pull request. |
 | `DiffIcon` | Lucide | `FileDiff` | Changed files in the Review panel. |

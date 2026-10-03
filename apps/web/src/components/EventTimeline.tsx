@@ -24,7 +24,10 @@ import {
 import { CopyButton } from "./common.js";
 import { accountLabelText } from "../personal-identifiers.js";
 import { GovernanceDecisionFacts } from "./GovernanceDecision.js";
-import { ChevronRightIcon, EditIcon, FileEditIcon, FolderUpIcon, ShareIcon, ThoughtIcon, ThreadForkIcon } from "./Icons.js";
+import { ChevronRightIcon, CopyIcon, EditIcon, EditInForkIcon, FileEditIcon, HandOffIcon, RewindFilesIcon, ThoughtIcon, ThreadForkIcon } from "./Icons.js";
+import { markdownPlainText } from "./markdown-plain-text.js";
+import { TranscriptActionMenu, transcriptActionAvailable, type TranscriptAction } from "./TranscriptActions.js";
+import { useIsCoarsePointer } from "./useIsMobile.js";
 import { formatClock, formatTokens, formatCost, formatDuration, formatRecordedRelativeTime, formatRecordedTimestamp, titleCaseLabel } from "../format.js";
 import {
   activitySpanDescription,
@@ -52,6 +55,7 @@ import { StructuredQuestionText, structuredQuestionSummary } from "./StructuredQ
 import type { ConversationForkAvailability, EditInForkAvailability } from "../session-actions.js";
 
 type ToolItem = Extract<TimelineItem, { kind: "tool_call" }>;
+type UserMessageItem = Extract<TimelineItem, { kind: "user_message" }>;
 
 function TranscriptArtifact({ artifact }: { artifact: WorkflowArtifactView }) {
   const [load, setLoad] = useState(false);
@@ -257,6 +261,8 @@ export interface TurnFooterSummary {
   responseParts: readonly string[];
   /** The conversation checkpoint this turn's response established, for Fork and Hand Off. */
   forkTurn?: number;
+  /** The message that opened the turn, whose actions the turn menu lists under Your Message. */
+  prompt?: UserMessageItem;
 }
 
 export interface TurnSegment extends TurnFooterSummary {
@@ -346,6 +352,7 @@ export function summarizeTimelineTurns(
     if (startsTurn(item) && item.kind === "user_message") {
       segment = {
         ...emptySegment(item.id, true),
+        prompt: item,
         ...(item.turn != null ? { turn: item.turn } : {}),
         ...(Number.isFinite(item.createdAt) ? { startedAt: item.createdAt } : {}),
         ...(item.durationMs != null ? { durationMs: item.durationMs } : {}),
@@ -776,6 +783,14 @@ function EventTimelineBody({
           summary={footer}
           onFork={onFork}
           forkAvailability={footer.forkTurn == null ? undefined : forkAvailabilityByTurn?.get(footer.forkTurn)}
+          prompt={footer.prompt}
+          onRewind={onRewind}
+          rewindTurn={footer.prompt ? rewindTurns.get(footer.prompt.id) : undefined}
+          rewindUnavailableReason={rewindUnavailableReason}
+          onEditAndResend={onEditAndResend}
+          editAndResendUnavailableReason={editAndResendUnavailableReason}
+          onEditInFork={onEditInFork}
+          editInForkAvailability={footer.prompt ? editInForkAvailabilityByItem?.get(footer.prompt.id) : undefined}
         />
       </>
     );
@@ -2027,7 +2042,6 @@ const TimelineRow = memo(function TimelineRow({
   const timingDescriptionId = useId();
   const sessionActive = useContext(TimelineActivityContext);
   const mediaSettled = timelineMediaSettled(item, sessionActive);
-  const editInForkTurn = editInForkAvailability?.available ? editInForkAvailability.forkTurn : undefined;
   switch (item.kind) {
     case "artifact_attached":
       return <TranscriptArtifact artifact={item.artifact} />;
@@ -2118,14 +2132,14 @@ const TimelineRow = memo(function TimelineRow({
               {item.text && <div className="bubble-text"><Markdown profile="inline" highlightEligible={highlightEligible}>{item.text}</Markdown></div>}
             </div>
             <UserMessageActions
-              copyText={item.text}
-              onRewind={onRewind && rewindTurn != null ? () => onRewind(rewindTurn) : undefined}
+              item={item}
+              onRewind={onRewind}
+              rewindTurn={rewindTurn}
               rewindUnavailableReason={rewindUnavailableReason}
-              onEditAndResend={onEditAndResend ? () => onEditAndResend(item) : undefined}
+              onEditAndResend={onEditAndResend}
               editAndResendUnavailableReason={editAndResendUnavailableReason}
-              onEditInFork={onEditInFork && editInForkTurn != null ? () => onEditInFork(item, editInForkTurn) : undefined}
-              editInForkUnavailableReason={onEditInFork && editInForkAvailability?.available === false &&
-                editInForkAvailability.offered ? editInForkAvailability.reason : undefined}
+              onEditInFork={onEditInFork}
+              editInForkAvailability={editInForkAvailability}
             />
           </div>
         </div>
@@ -2138,7 +2152,7 @@ const TimelineRow = memo(function TimelineRow({
           <Markdown highlightEligible={highlightEligible} inlineMedia settled={mediaSettled}>{item.text}</Markdown>
           {standaloneCopy && item.text && (
             <div className="tl-message-actions tl-reply-actions" role="group" aria-label="Message Actions">
-              <CopyButton text={item.text} iconOnly ariaLabel="Copy Reply" className="tl-message-icon" />
+              <CopyButton text={item.text} format={markdownPlainText} iconOnly ariaLabel="Copy Response" className="icon-btn sm" />
             </div>
           )}
         </div>
@@ -2642,81 +2656,79 @@ function turnUsageLabel(usage: TurnUsage, driver: AgentDriverKind | undefined): 
   return { text: parts.join(" · "), title: `Turn usage: ${detail}` };
 }
 
-/** The user message's own actions, beside its bubble. Its time, duration and usage belong to the
- * turn and appear once in the turn's footer. */
-function UserMessageActions({
-  copyText,
-  onEditAndResend,
-  editAndResendUnavailableReason,
-  onEditInFork,
-  editInForkUnavailableReason,
-  onRewind,
-  rewindUnavailableReason,
-}: {
-  copyText: string;
-  onEditAndResend?: () => void;
-  editAndResendUnavailableReason?: string;
-  onEditInFork?: () => void;
-  /** Shown as a disabled Edit in Fork when it applies to this message but cannot be used now. */
-  editInForkUnavailableReason?: string;
-  onRewind?: () => void;
+/** What a user message's actions need: the handlers and availability its row already receives. */
+interface MessageActionInput {
+  onRewind?: (turn: number) => void;
+  rewindTurn?: number;
   rewindUnavailableReason?: string;
-}) {
-  const editInFork = Boolean(onEditInFork || editInForkUnavailableReason);
-  if (!copyText && !onRewind && !onEditAndResend && !editInFork) return null;
+  onEditAndResend?: (item: UserMessageItem) => void;
+  editAndResendUnavailableReason?: string;
+  onEditInFork?: (item: UserMessageItem, forkTurn: number) => void;
+  editInForkAvailability?: EditInForkAvailability;
+}
+
+/** The Your Message group, in menu order. An action that does not apply to this message (no handler,
+ * no checkpoint, a provider that cannot edit history) is absent; one that applies but cannot be used
+ * now stays, with its reason. */
+export function messageActions(item: UserMessageItem, input: MessageActionInput): TranscriptAction[] {
+  const actions: TranscriptAction[] = [{
+    key: "copy-message",
+    label: "Copy Message",
+    icon: <CopyIcon size={16} />,
+    ...(item.text
+      ? { copy: { text: item.text, copied: "Message copied.", failed: "Couldn't copy the message." } }
+      : { unavailableReason: "This message has no text to copy." }),
+  }];
+  const { onEditAndResend, onEditInFork, editInForkAvailability: fork, onRewind, rewindTurn } = input;
+  if (onEditAndResend) {
+    actions.push({
+      key: "edit",
+      label: "Edit as a New Turn",
+      icon: <EditIcon size={16} />,
+      unavailableReason: input.editAndResendUnavailableReason,
+      onSelect: () => onEditAndResend(item),
+    });
+  }
+  if (onEditInFork && fork && (fork.available || fork.offered)) {
+    actions.push({
+      key: "edit-in-fork",
+      label: "Edit in a Fork…",
+      icon: <EditInForkIcon size={16} />,
+      ...(fork.available
+        ? { onSelect: () => onEditInFork(item, fork.forkTurn) }
+        : { unavailableReason: fork.reason }),
+    });
+  }
+  if (onRewind && rewindTurn != null) {
+    actions.push({
+      key: "rewind",
+      label: "Rewind Files to Before This Turn…",
+      icon: <RewindFilesIcon size={16} />,
+      unavailableReason: input.rewindUnavailableReason,
+      onSelect: () => onRewind(rewindTurn),
+    });
+  }
+  return actions;
+}
+
+/** Beside the user bubble on a fine pointer only (§15.3): Copy Message, Edit as a New Turn when it can
+ * be used, and More Message Actions. It is drawn to the bubble's left, takes no height, and stays
+ * transparent until the message is hovered, focused within or its menu is open. On a coarse pointer
+ * the turn's More Turn Actions holds the same actions, so nothing renders here. */
+function UserMessageActions({ item, ...input }: MessageActionInput & { item: UserMessageItem }) {
+  const coarsePointer = useIsCoarsePointer();
+  if (coarsePointer) return null;
+  const actions = messageActions(item, input);
+  const edit = actions.find((action) => action.key === "edit");
   return (
     <div className="tl-message-actions tl-user-actions" role="group" aria-label="Message Actions">
-      {copyText && <CopyButton text={copyText} iconOnly ariaLabel="Copy Message" className="tl-message-icon" />}
-      {onRewind && (
-        <MessageAction
-          label="Rewind Files to Before This Turn"
-          description="Restore files from before this turn without changing conversation history."
-          reason={rewindUnavailableReason}
-          onClick={onRewind}
-        >
-          <FolderUpIcon size={14} />
-        </MessageAction>
-      )}
-      {onEditAndResend && editAndResendUnavailableReason !== undefined && (
-        <MessageAction
-          label="Edit User Message as a New Turn"
-          description="Edit this message and load it into the composer as a new turn."
-          reason={editAndResendUnavailableReason}
-        >
-          <EditIcon size={14} />
-        </MessageAction>
-      )}
-      {onEditAndResend && editAndResendUnavailableReason === undefined && (
-        <button
-          type="button"
-          className="tl-message-icon"
-          onClick={onEditAndResend}
-          title="Edit & Resend"
-          aria-label="Edit User Message as a New Turn"
-        >
-          <EditIcon size={14} />
+      {item.text && <CopyButton text={item.text} iconOnly ariaLabel="Copy Message" className="icon-btn sm" />}
+      {edit && transcriptActionAvailable(edit) && (
+        <button type="button" className="icon-btn sm" onClick={edit.onSelect} title={edit.label} aria-label={edit.label}>
+          <EditIcon size={16} />
         </button>
       )}
-      {onEditInFork && (
-        <button
-          type="button"
-          className="tl-message-icon"
-          onClick={onEditInFork}
-          title="Edit in Fork"
-          aria-label="Edit User Message in a New Conversation Fork"
-        >
-          <ThreadForkIcon size={14} />
-        </button>
-      )}
-      {!onEditInFork && editInForkUnavailableReason && (
-        <MessageAction
-          label="Edit User Message in a New Conversation Fork"
-          description="Edit this message in a new fork from the checkpoint before it."
-          reason={editInForkUnavailableReason}
-        >
-          <ThreadForkIcon size={14} />
-        </MessageAction>
-      )}
+      <TranscriptActionMenu label="More Message Actions" groups={[{ label: "Your Message", actions }]} />
     </div>
   );
 }
@@ -2727,24 +2739,83 @@ export function turnSpanDescription(summary: Pick<TurnFooterSummary, "startedAt"
   return activitySpanDescription(summary.startedAt, summary.finishedAt);
 }
 
-/** One footer per settled turn (§11.3): Turn N, its finishing clock time, tokens and cost, and the
- * turn's own actions at the trailing end. */
-function TurnFooter({ summary, onFork, forkAvailability }: {
+/** The This Turn group, in menu order. Fork and Hand Off appear where the turn established a
+ * conversation checkpoint, disabled with their reason when they cannot be used now. */
+export function turnActions({ responseText, forkAvailability, onFork, forkTurn, handoff }: {
+  responseText: string;
+  forkAvailability?: ConversationForkAvailability;
+  onFork?: (turn: number) => void;
+  forkTurn?: number;
+  handoff?: { open: (turn: number) => void; reason?: string };
+}): TranscriptAction[] {
+  const noResponse = "This turn has no response to copy.";
+  const actions: TranscriptAction[] = [
+    {
+      key: "copy-response",
+      label: "Copy Response",
+      icon: <CopyIcon size={16} />,
+      ...(responseText
+        ? { copy: { text: responseText, format: markdownPlainText, copied: "Response copied.", failed: "Couldn't copy the response." } }
+        : { unavailableReason: noResponse }),
+    },
+    {
+      key: "copy-response-markdown",
+      label: "Copy Response as Markdown",
+      icon: <CopyIcon size={16} />,
+      ...(responseText
+        ? { copy: { text: responseText, copied: "Response copied as Markdown.", failed: "Couldn't copy the response." } }
+        : { unavailableReason: noResponse }),
+    },
+  ];
+  if (forkAvailability) {
+    actions.push({
+      key: "fork",
+      label: "Fork After This Turn…",
+      icon: <ThreadForkIcon size={16} />,
+      ...(forkAvailability.available && onFork && forkTurn != null
+        ? { onSelect: () => onFork(forkTurn) }
+        : { unavailableReason: forkAvailability.available ? "This action is unavailable." : forkAvailability.reason }),
+    });
+  }
+  if (handoff && forkTurn != null) {
+    actions.push({
+      key: "handoff",
+      label: "Hand Off After This Turn…",
+      icon: <HandOffIcon size={16} />,
+      unavailableReason: handoff.reason,
+      onSelect: () => handoff.open(forkTurn),
+    });
+  }
+  return actions;
+}
+
+/** One footer per settled turn (§11.3): Turn N, its finishing clock time, tokens and cost, then the
+ * turn's actions at the trailing end. More Turn Actions stays visible at rest on every pointer, so
+ * every action, Rewind included, is found without hovering (#599); on a fine pointer, Copy Response
+ * and a usable Fork After This Turn sit before it and show on hover or focus. */
+function TurnFooter({ summary, onFork, forkAvailability, prompt, ...messageInput }: MessageActionInput & {
   summary: TurnFooterSummary;
   onFork?: (turn: number) => void;
   forkAvailability?: ConversationForkAvailability;
+  prompt?: UserMessageItem;
 }) {
   const driver = useContext(TimelineDriverContext);
   const handoff = useContext(HandoffContext);
+  const coarsePointer = useIsCoarsePointer();
   const tooltipId = useId();
   const { forkTurn } = summary;
   const clockAt = summary.finishedAt ?? summary.startedAt;
   const clock = formatClock(clockAt);
   const span = turnSpanDescription(summary);
   const usage = summary.usage ? turnUsageLabel(summary.usage, driver) : null;
-  const onHandoff = handoff && forkTurn != null ? () => handoff.open(forkTurn) : undefined;
   const responseText = useMemo(() => turnResponseText(summary), [summary.responseParts]);
-  const hasActions = Boolean(responseText || forkAvailability || onHandoff);
+  const actions = turnActions({ responseText, forkAvailability, onFork, forkTurn, handoff });
+  const fork = actions.find((action) => action.key === "fork");
+  const forkUsable = fork !== undefined && transcriptActionAvailable(fork);
+  const groups = [
+    ...(prompt ? [{ label: "Your Message", actions: messageActions(prompt, messageInput) }] : []),
+    { label: "This Turn", actions },
+  ];
   return (
     <div className="tl-turn-footer" data-turn-footer={summary.turn ?? ""}>
       {summary.turn !== undefined && <span className="tl-turn-label">Turn {summary.turn}</span>}
@@ -2759,73 +2830,18 @@ function TurnFooter({ summary, onFork, forkAvailability }: {
           {usage.text}
         </span>
       )}
-      {hasActions && (
-        <div className="tl-message-actions tl-turn-actions" role="group" aria-label="Turn Actions">
-          {responseText && (
-            <CopyButton text={responseText} iconOnly ariaLabel="Copy Reply" className="tl-message-icon" />
-          )}
-          {forkAvailability && (
-            <MessageAction
-              label="Fork Conversation After This Turn"
-              description="Fork with the same provider and its native conversation history."
-              reason={forkAvailability.available ? undefined : forkAvailability.reason}
-              onClick={forkAvailability.available && onFork && forkTurn != null ? () => onFork(forkTurn) : undefined}
-            >
-              <ThreadForkIcon size={14} />
-            </MessageAction>
-          )}
-          {onHandoff && (
-            <MessageAction
-              label="Hand Off After This Turn"
-              description="Hand off to a different provider in a fresh conversation with portable context."
-              reason={handoff?.reason}
-              onClick={onHandoff}
-            >
-              <ShareIcon size={14} />
-            </MessageAction>
-          )}
-        </div>
-      )}
+      <div className="tl-message-actions tl-turn-actions" role="group" aria-label="Turn Actions">
+        {!coarsePointer && responseText && (
+          <CopyButton text={responseText} format={markdownPlainText} iconOnly ariaLabel="Copy Response" className="icon-btn sm tl-hover-action" />
+        )}
+        {!coarsePointer && forkUsable && (
+          <button type="button" className="icon-btn sm tl-hover-action" onClick={fork.onSelect} title="Fork After This Turn" aria-label="Fork After This Turn">
+            <ThreadForkIcon size={16} />
+          </button>
+        )}
+        <TranscriptActionMenu label="More Turn Actions" groups={groups} />
+      </div>
     </div>
-  );
-}
-
-function MessageAction({ label, description, reason, onClick, children }: {
-  label: string;
-  description: string;
-  reason?: string;
-  onClick?: () => void;
-  children: ReactNode;
-}) {
-  const descriptionId = useId();
-  if (reason || !onClick) {
-    const unavailableReason = reason ?? "This action is unavailable.";
-    return (
-      <details className="tl-message-action-unavailable">
-        <summary
-          className="tl-message-icon"
-          aria-label={`${label} Unavailable`}
-          aria-describedby={descriptionId}
-          title={`${description} ${unavailableReason}`}
-        >
-          {children}
-        </summary>
-        <span id={descriptionId} role="status"><strong>{label}:</strong> {description} {unavailableReason}</span>
-      </details>
-    );
-  }
-  return (
-    <button
-      type="button"
-      className="tl-message-icon"
-      onClick={onClick}
-      title={description}
-      aria-label={label}
-      aria-describedby={descriptionId}
-    >
-      {children}
-      <span id={descriptionId} className="sr-only">{description}</span>
-    </button>
   );
 }
 

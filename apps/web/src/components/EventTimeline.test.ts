@@ -13,10 +13,12 @@ import {
   flattenTimelineRows,
   IncrementalTimelineRows,
   layoutTurns,
+  messageActions,
   stabilizeTimelineRowKeys,
   summarizeTimelineTurns,
   TIMELINE_ROW_GAP,
   TIMELINE_TURN_GAP,
+  turnActions,
   turnResponseText,
   turnSpanDescription,
   stabilizeWorkGroupKeys,
@@ -346,53 +348,70 @@ test("delegated question and approval histories identify the controlling parent"
   assert.match(html, /Approved by Parent parent-session/);
 });
 
-test("each settled turn's footer owns fork and handoff while its prompt keeps rewind", () => {
+test("each settled turn has one More Turn Actions menu with Your Message then This Turn, and distinct glyphs", () => {
+  const items: TimelineItem[] = [
+    { kind: "user_message", id: 1, text: "First question" },
+    { kind: "checkpoint", id: 2, turn: 1 },
+    { kind: "agent_message", id: 3, text: "First answer" },
+    { kind: "conversation_checkpoint", id: 4, turn: 1 },
+    { kind: "user_message", id: 5, text: "Second question" },
+    { kind: "checkpoint", id: 6, turn: 2 },
+    { kind: "agent_message", id: 7, text: "Second answer" },
+    { kind: "conversation_checkpoint", id: 8, turn: 2 },
+  ];
   const html = renderToStaticMarkup(React.createElement(EventTimeline, {
-    items: [
-      { kind: "user_message", id: 1, text: "First question" },
-      { kind: "checkpoint", id: 2, turn: 1 },
-      { kind: "agent_message", id: 3, text: "First answer" },
-      { kind: "conversation_checkpoint", id: 4, turn: 1 },
-      { kind: "user_message", id: 5, text: "Second question" },
-      { kind: "checkpoint", id: 6, turn: 2 },
-      { kind: "agent_message", id: 7, text: "Second answer" },
-      { kind: "conversation_checkpoint", id: 8, turn: 2 },
-    ],
+    items,
     onRewind: () => {},
     onFork: () => {},
     handoff: { open: () => {} },
     forkAvailabilityByTurn: new Map([
-      [1, { available: false, reason: "Claude Code can fork only its latest completed conversation checkpoint." }],
+      [1, { available: false, offered: true, reason: "Claude Code can fork only its latest completed conversation checkpoint." }],
       [2, { available: true, forkTurn: 2 }],
     ]),
   }));
 
-  assert.equal((html.match(/aria-label="Rewind Files to Before This Turn"/g) ?? []).length, 2);
-  assert.equal((html.match(/aria-label="Fork Conversation After This Turn/g) ?? []).length, 2);
-  assert.equal((html.match(/aria-label="Hand Off After This Turn/g) ?? []).length, 2);
-  assert.equal((html.match(/lucide-git-fork/g) ?? []).length, 2,
-    "plain historical forks use the shared Lucide fork glyph");
-  assert.equal((html.match(/lucide-share/g) ?? []).length, 2,
-    "Hand Off uses a distinct shared glyph");
-  assert.match(html, /aria-label="Copy Reply"[\s\S]*?aria-label="Fork Conversation After This Turn/,
-    "Fork follows Copy in the turn footer");
   assert.equal((html.match(/class="tl-turn-footer"/g) ?? []).length, 2, "one footer per settled turn");
+  assert.equal((html.match(/aria-label="More Turn Actions"/g) ?? []).length, 2, "one turn menu per footer");
   assert.match(html, /<span class="tl-turn-label">Turn 1<\/span>[\s\S]*<span class="tl-turn-label">Turn 2<\/span>/);
-  assert.match(html, /aria-label="Message Actions"[^>]*>[\s\S]*?aria-label="Rewind Files to Before This Turn"/,
-    "Rewind stays beside the prompt it rewinds to");
-  assert.match(html, /<details class="tl-message-action-unavailable">[\s\S]*?Claude Code can fork only its latest completed conversation checkpoint\./);
-  // light-theme.test.ts holds the unavailable summary to the 3:1 glyph floor, which is sound only
-  // while it renders the icon alone: its name is the aria-label and its reason the sibling span.
-  const summaries = [...html.matchAll(/<summary(?=[\s>])[^>]*>([\s\S]*?)<\/summary>/g)].map((match) => match[1]!);
-  assert.ok(summaries.length > 0, "an unavailable action renders a summary");
-  for (const content of summaries) {
-    assert.match(content, /^<svg[\s\S]*<\/svg>$/, "the summary holds only its icon");
-    assert.equal(content.replace(/<[^>]*>/g, "").trim(), "", "the summary renders no text");
-  }
-  assert.match(html, /title="Fork with the same provider and its native conversation history\."/);
-  assert.match(html, /title="Hand off to a different provider in a fresh conversation with portable context\."/);
-  assert.doesNotMatch(html, /Rewind Files to Here|Hand Off to Another Agent/,
-    "checkpoint dividers no longer own heavy text actions");
+  assert.equal((html.match(/aria-label="Fork After This Turn"/g) ?? []).length, 1,
+    "the footer's hover cluster offers Fork only where it can be used");
+  assert.match(html, /aria-label="Copy Response"[\s\S]*?aria-label="Fork After This Turn"[\s\S]*?aria-label="More Turn Actions"/,
+    "Copy Response and Fork come before More Turn Actions");
+  assert.match(html, /aria-label="More Message Actions"/, "each prompt has its own hover menu");
+  assert.doesNotMatch(html, /<details|<summary|lucide-share|lucide-corner-up-left/,
+    "no disclosure popover, and no borrowed Share or parent-folder glyph");
+
+  const rewindTurns = userRewindTurns(items);
+  const yourMessage = messageActions(items[0] as Extract<TimelineItem, { kind: "user_message" }>, {
+    onRewind: () => {},
+    rewindTurn: rewindTurns.get(1),
+    onEditAndResend: () => {},
+    onEditInFork: () => {},
+    editInForkAvailability: { available: false, offered: true, reason: "Reconnect the runner before creating a fork." },
+  });
+  assert.deepEqual(yourMessage.map((action) => action.label),
+    ["Copy Message", "Edit as a New Turn", "Edit in a Fork…", "Rewind Files to Before This Turn…"]);
+  const thisTurn = turnActions({
+    responseText: "First answer",
+    forkAvailability: { available: false, offered: true, reason: "Claude Code can fork only its latest completed conversation checkpoint." },
+    onFork: () => {},
+    forkTurn: 1,
+    handoff: { open: () => {} },
+  });
+  assert.deepEqual(thisTurn.map((action) => action.label),
+    ["Copy Response", "Copy Response as Markdown", "Fork After This Turn…", "Hand Off After This Turn…"]);
+  assert.equal(thisTurn[2]!.unavailableReason, "Claude Code can fork only its latest completed conversation checkpoint.");
+
+  const glyph = (actions: readonly { key: string; icon: React.ReactNode }[], key: string) =>
+    /class="lucide (lucide-[a-z-]+)/.exec(renderToStaticMarkup(actions.find((action) => action.key === key)!.icon))?.[1];
+  const glyphs = [
+    glyph(thisTurn, "fork"),
+    glyph(yourMessage, "edit-in-fork"),
+    glyph(yourMessage, "rewind"),
+    glyph(thisTurn, "handoff"),
+  ];
+  assert.deepEqual(glyphs, ["lucide-git-fork", "lucide-git-branch-plus", "lucide-file-clock", "lucide-arrow-right-left"]);
+  assert.equal(new Set(glyphs).size, 4, "Fork, Edit in a Fork, Rewind and Hand Off each draw their own glyph");
 });
 
 test("checkpoints stay in the model but render no Start Turn or End Turn separator", () => {
@@ -1190,7 +1209,7 @@ test("message rows carry no time; the turn footer holds one clock time, its span
   assert.doesNotMatch(html.replace(/<span[^>]*role="tooltip">[^<]*<\/span>/, ""), /Recorded|Started|Last Activity|→|Ago/,
     "outside the footer's tooltip, no row names a time range or timestamp label");
   assert.match(html, /aria-label="Copy Message"/);
-  assert.match(html, /aria-label="Copy Reply"/);
+  assert.match(html, /aria-label="Copy Response"/);
   assert.match(html, /<strong>raw assistant text<\/strong>/);
 });
 
@@ -1279,7 +1298,8 @@ test("an automatic continuation without a prompt is its own turn with its own fo
     onFork: () => {},
     forkAvailabilityByTurn: new Map([1, 2].map((turn) => [turn, { available: true as const, forkTurn: turn }])),
   }));
-  assert.equal((html.match(/aria-label="Fork Conversation After This Turn"/g) ?? []).length, 2);
+  assert.equal((html.match(/aria-label="Fork After This Turn"/g) ?? []).length, 2);
+  assert.equal((html.match(/aria-label="More Turn Actions"/g) ?? []).length, 2);
 });
 
 test("a continuation's usage report times the continuation, not the turn before it", () => {
@@ -1452,7 +1472,7 @@ test("replies no turn footer copies keep their own Copy", () => {
   const subagentOutput = renderToStaticMarkup(React.createElement(EventTimeline, {
     items: [{ kind: "agent_message", id: 1, text: "Subagent finding", parentToolUseId: "task" }],
   }));
-  assert.equal((subagentOutput.match(/aria-label="Copy Reply"/g) ?? []).length, 1,
+  assert.equal((subagentOutput.match(/aria-label="Copy Response"/g) ?? []).length, 1,
     "a subagent transcript has no prompt, so no footer, and its reply keeps Copy");
   assert.doesNotMatch(subagentOutput, /tl-turn-footer/);
 
@@ -1463,80 +1483,111 @@ test("replies no turn footer copies keep their own Copy", () => {
       { kind: "conversation_checkpoint", id: 3, turn: 1 },
     ],
   }));
-  assert.equal((session.match(/aria-label="Copy Reply"/g) ?? []).length, 1,
+  assert.equal((session.match(/aria-label="Copy Response"/g) ?? []).length, 1,
     "a turn's own replies are copied once, from its footer");
-  assert.match(session, /class="tl-turn-footer"[\s\S]*aria-label="Copy Reply"/);
+  assert.match(session, /class="tl-turn-footer"[\s\S]*aria-label="Copy Response"/);
+});
+
+test("every message and turn action button's accessible name equals its tooltip (#2167)", () => {
+  const html = renderToStaticMarkup(React.createElement(EventTimeline, {
+    items: [
+      { kind: "user_message", id: 1, text: "Prompt" },
+      { kind: "checkpoint", id: 2, turn: 1 },
+      { kind: "agent_message", id: 3, text: "Answer" },
+      { kind: "conversation_checkpoint", id: 4, turn: 1 },
+    ],
+    onRewind: () => {},
+    onFork: () => {},
+    onEditAndResend: () => {},
+    handoff: { open: () => {} },
+    forkAvailabilityByTurn: new Map([[1, { available: true as const, forkTurn: 1 }]]),
+  }));
+  const groups = [...html.matchAll(/<div class="tl-message-actions[^"]*"[^>]*>([\s\S]*?)<\/div>/g)].map((match) => match[1]!);
+  assert.equal(groups.length, 2, "the message cluster and the footer's actions");
+  const buttons = groups.flatMap((group) => [...group.matchAll(/<button\b[^>]*>/g)].map((match) => match[0]));
+  const names = buttons.map((button) => {
+    const name = /aria-label="([^"]+)"/.exec(button)?.[1];
+    assert.equal(/title="([^"]+)"/.exec(button)?.[1], name, `${button} names itself as its tooltip does`);
+    return name;
+  });
+  assert.deepEqual(names, [
+    "Copy Message", "Edit as a New Turn", "More Message Actions",
+    "Copy Response", "Fork After This Turn", "More Turn Actions",
+  ]);
 });
 
 test("user rows prepare deliberate resend and expose edit-in-fork only for an eligible predecessor", () => {
+  const items: TimelineItem[] = [
+    { kind: "user_message", id: 1, text: "first", turn: 1 },
+    { kind: "conversation_checkpoint", id: 2, turn: 1 },
+    { kind: "user_message", id: 3, text: "second", turn: 2 },
+    { kind: "conversation_checkpoint", id: 4, turn: 2 },
+  ];
+  const availability = new Map<number, EditInForkAvailability>([[3, { available: true, forkTurn: 1 }]]);
   const html = renderToStaticMarkup(React.createElement(EventTimeline, {
-    items: [
-      { kind: "user_message", id: 1, text: "first", turn: 1 },
-      { kind: "conversation_checkpoint", id: 2, turn: 1 },
-      { kind: "user_message", id: 3, text: "second", turn: 2 },
-      { kind: "conversation_checkpoint", id: 4, turn: 2 },
-    ],
+    items,
     onEditAndResend: () => {},
     onEditInFork: () => {},
-    editInForkAvailabilityByItem: new Map([[3, { available: true, forkTurn: 1 }]]),
+    editInForkAvailabilityByItem: availability,
   }));
 
-  assert.equal((html.match(/aria-label="Edit User Message as a New Turn"/g) ?? []).length, 2);
-  assert.equal((html.match(/aria-label="Edit User Message in a New Conversation Fork"/g) ?? []).length, 1);
-  assert.equal((html.match(/lucide-git-fork/g) ?? []).length, 1,
-    "Edit in Fork uses the same fork glyph language as plain Fork");
-  assert.match(html, /Edit &amp; Resend/);
-  assert.match(html, /Edit in Fork/);
+  assert.equal((html.match(/aria-label="Edit as a New Turn"/g) ?? []).length, 2, "each prompt's hover cluster offers it");
+  assert.equal((html.match(/title="Edit as a New Turn"/g) ?? []).length, 2, "its tooltip matches its name");
+  assert.equal((html.match(/aria-label="More Message Actions"/g) ?? []).length, 2);
+  const labels = (id: number) => messageActions(items.find((item) => item.id === id) as Extract<TimelineItem, { kind: "user_message" }>, {
+    onEditAndResend: () => {},
+    onEditInFork: () => {},
+    editInForkAvailability: availability.get(id),
+  }).map((action) => action.label);
+  assert.deepEqual(labels(1), ["Copy Message", "Edit as a New Turn"]);
+  assert.deepEqual(labels(3), ["Copy Message", "Edit as a New Turn", "Edit in a Fork…"]);
 });
 
-test("an offered but unusable Edit in Fork stays visible, disabled and says why (#1869)", () => {
+test("an offered but unusable Edit in Fork stays listed, disabled and says why (#1869)", () => {
   const reason = "Reconnect the runner before creating a fork.";
-  const render = (availability: EditInForkAvailability) => renderToStaticMarkup(React.createElement(EventTimeline, {
-    items: [
-      { kind: "user_message", id: 1, text: "first", turn: 1 },
-      { kind: "conversation_checkpoint", id: 2, turn: 1 },
-      { kind: "user_message", id: 3, text: "second", turn: 2 },
-      { kind: "conversation_checkpoint", id: 4, turn: 2 },
-    ],
+  const item = { kind: "user_message", id: 3, text: "second", turn: 2 } as Extract<TimelineItem, { kind: "user_message" }>;
+  const editInFork = (availability: EditInForkAvailability) => messageActions(item, {
     onEditInFork: () => { throw new Error("an unavailable Edit in Fork must not open"); },
-    editInForkAvailabilityByItem: new Map([[3, availability]]),
-  }));
+    editInForkAvailability: availability,
+  }).find((action) => action.key === "edit-in-fork");
 
-  const offered = render({ available: false, offered: true, reason });
-  assert.doesNotMatch(offered, /aria-label="Edit User Message in a New Conversation Fork"/, "no enabled button");
-  const summary = /<summary class="tl-message-icon" aria-label="Edit User Message in a New Conversation Fork Unavailable" aria-describedby="([^"]+)" title="([^"]+)">/
-    .exec(offered);
-  assert.ok(summary, "the control is shown as unavailable");
-  assert.match(summary[2], /Reconnect the runner before creating a fork\./);
-  assert.match(offered, new RegExp(`<span id="${summary[1]}" role="status"><strong>Edit User Message in a New Conversation Fork:</strong>[^<]*${reason.replace(/\./g, "\\.")}</span>`));
-  assert.equal((offered.match(/lucide-git-fork/g) ?? []).length, 1, "only the second message offers it");
+  const offered = editInFork({ available: false, offered: true, reason });
+  assert.ok(offered, "the action stays listed");
+  assert.equal(offered.label, "Edit in a Fork…");
+  assert.equal(offered.unavailableReason, reason);
+  assert.equal(offered.onSelect, undefined, "it cannot be selected");
 
-  const hidden = render({ available: false, offered: false, reason: "Historical edit-and-fork is available only for Codex App Server sessions." });
-  assert.doesNotMatch(hidden, /Edit User Message in a New Conversation Fork/);
-  assert.doesNotMatch(hidden, /lucide-git-fork/);
+  assert.equal(editInFork({
+    available: false, offered: false, reason: "Historical edit-and-fork is available only for Codex App Server sessions.",
+  }), undefined, "a message that can never be edited in a fork does not list it");
 });
 
-test("an unusable Edit & Resend stays visible on every user message, disabled and says why (#1876)", () => {
+test("an unusable Edit as a New Turn stays listed on every user message, disabled and says why (#1876)", () => {
   const reason = "Runner is offline.";
+  const items: TimelineItem[] = [
+    { kind: "user_message", id: 1, text: "first", turn: 1 },
+    { kind: "user_message", id: 2, text: "second", turn: 2 },
+  ];
   const render = (editAndResendUnavailableReason?: string) => renderToStaticMarkup(React.createElement(EventTimeline, {
-    items: [
-      { kind: "user_message", id: 1, text: "first", turn: 1 },
-      { kind: "user_message", id: 2, text: "second", turn: 2 },
-    ],
-    onEditAndResend: () => { throw new Error("an unavailable Edit & Resend must not open"); },
+    items,
+    onEditAndResend: () => { throw new Error("an unavailable Edit as a New Turn must not open"); },
     editAndResendUnavailableReason,
   }));
 
   const blocked = render(reason);
-  assert.doesNotMatch(blocked, /aria-label="Edit User Message as a New Turn"/, "no enabled button");
-  const summaries = [...blocked.matchAll(/<summary class="tl-message-icon" aria-label="Edit User Message as a New Turn Unavailable" aria-describedby="([^"]+)" title="([^"]+)">/g)];
-  assert.equal(summaries.length, 2, "every user message keeps the control");
-  assert.match(summaries[0]![2]!, /Runner is offline\./);
-  assert.match(blocked, new RegExp(`<span id="${summaries[0]![1]}" role="status"><strong>Edit User Message as a New Turn:</strong>[^<]*Runner is offline\\.</span>`));
+  assert.doesNotMatch(blocked, /aria-label="Edit as a New Turn"/,
+    "no hover button for an action that cannot be used; the menu says why");
+  assert.equal((blocked.match(/aria-label="More Message Actions"/g) ?? []).length, 2, "every message keeps its menu");
+  for (const item of items) {
+    const edit = messageActions(item as Extract<TimelineItem, { kind: "user_message" }>, {
+      onEditAndResend: () => {},
+      editAndResendUnavailableReason: reason,
+    }).find((action) => action.key === "edit");
+    assert.equal(edit?.unavailableReason, reason);
+  }
 
   const usable = render();
-  assert.equal((usable.match(/aria-label="Edit User Message as a New Turn"/g) ?? []).length, 2);
-  assert.doesNotMatch(usable, /Edit User Message as a New Turn Unavailable/);
+  assert.equal((usable.match(/aria-label="Edit as a New Turn"/g) ?? []).length, 2);
 });
 
 test("only never-offered runner authentication outcomes get readable resolution labels", () => {

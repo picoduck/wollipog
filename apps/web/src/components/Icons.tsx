@@ -2,6 +2,7 @@ import React, { type SVGProps, useId } from "react";
 import {
   Archive as LucideArchive,
   ArrowDown as LucideArrowDown,
+  ArrowRightLeft as LucideArrowRightLeft,
   ArrowUp as LucideArrowUp,
   BookOpen as LucideBookOpen,
   Bot as LucideBot,
@@ -28,6 +29,7 @@ import {
   ExternalLink as LucideExternalLink,
   Eye as LucideEye,
   EyeOff as LucideEyeOff,
+  FileClock as LucideFileClock,
   FileDiff as LucideFileDiff,
   FilePen as LucideFilePen,
   FileSearch as LucideFileSearch,
@@ -39,6 +41,7 @@ import {
   FolderKanban as LucideFolderKanban,
   Gauge as LucideGauge,
   GitBranch as LucideGitBranch,
+  GitBranchPlus as LucideGitBranchPlus,
   GitCommitVertical as LucideGitCommitVertical,
   GitFork as LucideGitFork,
   GitPullRequest as LucideGitPullRequest,
@@ -603,6 +606,18 @@ export function BranchIcon(props: IconProps) {
 
 export function ThreadForkIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideGitFork} {...props} />;
+}
+
+export function EditInForkIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideGitBranchPlus} {...props} />;
+}
+
+export function RewindFilesIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideFileClock} {...props} />;
+}
+
+export function HandOffIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideArrowRightLeft} {...props} />;
 }
 
 export function DialIcon(props: IconProps) {

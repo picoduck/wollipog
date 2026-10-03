@@ -3,8 +3,12 @@ import { useState } from "react";
 import { EventTimeline } from "../components/EventTimeline.js";
 import "../styles.css";
 
+// `?unavailable` shows every per-turn action that applies but cannot be used now, each with its
+// reason, as a runner that went offline after the turn would.
+const unavailable = new URLSearchParams(window.location.search).has("unavailable");
+
 function Fixture() {
-  const [rewoundTurn, setRewoundTurn] = useState<number | null>(null);
+  const [requested, setRequested] = useState<string | null>(null);
   return (
     <main className="app" style={{ minHeight: "100vh", background: "var(--bg)", padding: 32 }}>
       <section style={{ maxWidth: 760, margin: "0 auto" }}>
@@ -12,7 +16,7 @@ function Fixture() {
           items={[
             { kind: "user_message", id: 1, text: "Inspect the checkpoint controls." },
             { kind: "checkpoint", id: 2, turn: 4 },
-            { kind: "agent_message", id: 3, text: "The checkpoint is ready." },
+            { kind: "agent_message", id: 3, text: "The checkpoint is **ready**." },
             { kind: "conversation_checkpoint", id: 4, turn: 4 },
             { kind: "checkpoint_restored", id: 5, turn: 4 },
             { kind: "conversation_forked", id: 6, sourceSessionId: "source", turn: 4 },
@@ -25,9 +29,20 @@ function Fixture() {
               },
             },
           ]}
-          onRewind={setRewoundTurn}
+          onRewind={(turn) => setRequested(`Rewind requested for turn ${turn}.`)}
+          rewindUnavailableReason={unavailable ? "Reconnect the runner before restoring files." : undefined}
+          onFork={(turn) => setRequested(`Fork requested after turn ${turn}.`)}
+          forkAvailabilityByTurn={new Map([[4, unavailable
+            ? { available: false, offered: true, reason: "Reconnect the runner before creating a fork." }
+            : { available: true, forkTurn: 4 }]])}
+          handoff={{
+            open: (turn) => setRequested(`Hand off requested after turn ${turn}.`),
+            reason: unavailable ? "Reconnect the runner before creating a handoff." : undefined,
+          }}
+          onEditAndResend={() => setRequested("Edit requested.")}
+          editAndResendUnavailableReason={unavailable ? "Runner is offline." : undefined}
         />
-        {rewoundTurn != null && <p role="status">Rewind requested for turn {rewoundTurn}.</p>}
+        {requested != null && <p role="status">{requested}</p>}
       </section>
     </main>
   );

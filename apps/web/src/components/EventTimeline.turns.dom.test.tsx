@@ -100,7 +100,8 @@ test("rows inside a turn are 12px apart and each new turn opens 32px below the p
     assert.match(footer.querySelector("time")?.textContent ?? "", /^\d{1,2}:\d{2}\s?[AP]M$/, "a clock time without seconds");
     assert.match(footer.querySelector("[role='tooltip']")?.textContent ?? "",
       /^Started \d{1,2}:\d{2}:00\s?[AP]M, finished \d{1,2}:\d{2}:26\s?[AP]M \(26s\)$/);
-    assert.ok(footer.querySelector("[aria-label='Copy Reply']"));
+    assert.ok(footer.querySelector("[aria-label='Copy Response']"));
+    assert.ok(footer.querySelector("[aria-label='More Turn Actions']"));
   }
   for (const row of rows) {
     assert.doesNotMatch(row.textContent?.replace(/Started .*\(\d+s\)/, "") ?? "", /Recorded|Started|Last Activity|→/,

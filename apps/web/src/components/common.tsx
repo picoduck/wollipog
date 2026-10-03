@@ -64,6 +64,7 @@ export const COPY_RESULT_MS = 2000;
  */
 export function CopyButton({
   text,
+  format,
   label = "Copy",
   onResult,
   className = "copy-btn",
@@ -73,6 +74,8 @@ export function CopyButton({
   iconOnly = false,
 }: {
   text: string;
+  /** Turns `text` into what is copied, run only when the button is pressed (Copy Response's plain text). */
+  format?: (text: string) => string;
   label?: string;
   onResult?: (copied: boolean) => void;
   className?: string;
@@ -110,10 +113,11 @@ export function CopyButton({
   }, []);
   const copy = async () => {
     const copiedText = text;
+    const value = format ? format(copiedText) : copiedText;
     const request = ++requestRef.current;
     let ok = false;
     try {
-      await navigator.clipboard.writeText(copiedText);
+      await navigator.clipboard.writeText(value);
       ok = true;
     } catch {
       if (!copyResultIsCurrent({
@@ -124,7 +128,7 @@ export function CopyButton({
         currentText: textRef.current,
       })) return;
       const fallback = document.createElement("textarea");
-      fallback.value = copiedText;
+      fallback.value = value;
       fallback.readOnly = true;
       fallback.style.position = "fixed";
       fallback.style.opacity = "0";

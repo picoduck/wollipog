@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import * as React from "react";
 import ts from "typescript";
 import type { SessionReminderView } from "@wollipog/protocol";
 import { ApiError } from "./api.js";
@@ -28,6 +29,7 @@ import {
   openDestinationLabel,
 } from "./components/EditorSelect.js";
 import { TERMINAL_UPDATE_NOTE } from "./components/SessionPanelToggles.js";
+import { messageActions, turnActions } from "./components/EventTimeline.js";
 import { shareCreatedLabel, shareExpiryLabel, shareMoment } from "./transcript-share-time.js";
 
 const SOURCE_ROOT = path.resolve("apps/web/src");
@@ -776,6 +778,57 @@ test("the session menus' labels are Title Case, with an ellipsis only where a di
   for (const sentence of sentences.filter((text) => !/^[X\s]*$/.test(text))) {
     assert.ok(isSentenceCase(sentence.replace(/\bWollipog\b/g, "wollipog")), `${sentence} is sentence case`);
     assert.match(sentence, /\.$/, `${sentence} is a full sentence`);
+  }
+});
+
+test("message and turn action names are Title Case, with an ellipsis only before a dialog or confirmation (#2167)", () => {
+  // The actions carry their icons as elements; direct Node rendering needs the classic JSX global.
+  (globalThis as typeof globalThis & { React: typeof React }).React = React;
+  const prompt = { kind: "user_message", id: 1, text: "Prompt" } as const;
+  const yourMessage = messageActions(prompt, {
+    onRewind: () => {},
+    rewindTurn: 1,
+    onEditAndResend: () => {},
+    onEditInFork: () => {},
+    editInForkAvailability: { available: true, forkTurn: 1 },
+  });
+  const thisTurn = turnActions({
+    responseText: "Answer",
+    forkAvailability: { available: true, forkTurn: 1 },
+    onFork: () => {},
+    forkTurn: 1,
+    handoff: { open: () => {} },
+  });
+  // Each name, and whether a dialog or a confirmation follows it. Edit as a New Turn loads the
+  // composer (#2185), so it takes no ellipsis.
+  const expected: ReadonlyArray<readonly [string, boolean]> = [
+    ["Copy Message", false],
+    ["Edit as a New Turn", false],
+    ["Edit in a Fork…", true],
+    ["Rewind Files to Before This Turn…", true],
+    ["Copy Response", false],
+    ["Copy Response as Markdown", false],
+    ["Fork After This Turn…", true],
+    ["Hand Off After This Turn…", true],
+  ];
+  assert.deepEqual([...yourMessage, ...thisTurn].map((action) => action.label), expected.map(([label]) => label));
+  for (const [label, opensDialog] of expected) {
+    assert.ok(isTitleCase(label.replace(/…$/, "")), `${label} is Title Case`);
+    assert.equal(label.endsWith("…"), opensDialog, `${label} ends in an ellipsis only before a dialog or confirmation`);
+  }
+  for (const label of ["More Message Actions", "More Turn Actions", "Your Message", "This Turn", "Fork After This Turn"]) {
+    assert.ok(isTitleCase(label), `${label} is Title Case`);
+  }
+
+  // A reason the turn's own copy supplies, and each copy toast, is a sentence.
+  const empty = { kind: "user_message", id: 2, text: "" } as const;
+  const sentences = [
+    messageActions(empty, {})[0]!.unavailableReason!,
+    turnActions({ responseText: "" })[0]!.unavailableReason!,
+    ...[...yourMessage, ...thisTurn].flatMap((action) => action.copy ? [action.copy.copied, action.copy.failed] : []),
+  ];
+  for (const sentence of sentences) {
+    assert.ok(isSentenceCase(sentence.replace(/\bMarkdown\b/g, "markdown")) && /\.$/.test(sentence), `${sentence} is a sentence`);
   }
 });
 

@@ -15,6 +15,7 @@ import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreActions, useStoreSelector } from "../store.js";
+import { readTranscriptAction } from "../dom-test-transcript-actions.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { FeedbackContext } from "./FeedbackProvider.js";
 import { SessionDetail } from "./SessionDetail.js";
@@ -609,14 +610,14 @@ test("a missing worktree ranks first and renders the recovery card in the slot",
 });
 
 // #2037: the composer says why it cannot send by naming the condition the slot shows first, and
-// Edit & Resend says the same.
+// Edit as a New Turn says the same.
 async function mountWithMessage(session: SessionView, online = true) {
   const fixture = await mount(session, { online, events: [{ kind: "user_message", text: "original prompt", images: [] }] });
   const composer = () => fixture.container.querySelector(".composer-box textarea") as HTMLTextAreaElement;
-  const resendReason = () => {
-    const summary = fixture.container.querySelector('[aria-label="Edit User Message as a New Turn Unavailable"]');
-    assert.ok(summary, "Edit & Resend stays visible, unavailable");
-    return describedText(fixture.container, summary as HTMLElement)[0];
+  const resendReason = async () => {
+    const edit = await readTranscriptAction(fixture.container, "More Message Actions", "Edit as a New Turn");
+    assert.ok(edit?.disabled, "Edit as a New Turn stays listed, unavailable");
+    return edit.reason;
   };
   return { ...fixture, composer, resendReason };
 }
@@ -629,14 +630,14 @@ test("with a quarantined conversation and a failed account switch, the composer 
     const quarantined = "Conversation quarantined. Recover this session to continue.";
     assert.equal(fixture.composer().placeholder, quarantined, "the placeholder names the notice the slot shows");
     assert.equal(fixture.composer().disabled, true);
-    assert.ok(fixture.resendReason()?.endsWith(quarantined), "Edit & Resend states the same reason");
+    assert.ok((await fixture.resendReason())?.endsWith(quarantined), "Edit as a New Turn states the same reason");
 
     // Once the quarantine resolves, both surfaces move to the account switch together.
     await fixture.update({ ...session, updatedAt: 2, historyQuarantine: undefined });
     assert.equal(fixture.notices()[0]!.getAttribute("aria-label"), "Account Switch Failed");
     const chooseAccount = "Choose another account before sending another message.";
     assert.equal(fixture.composer().placeholder, chooseAccount);
-    assert.ok(fixture.resendReason()?.endsWith(chooseAccount));
+    assert.ok((await fixture.resendReason())?.endsWith(chooseAccount));
   } finally {
     await fixture.unmount();
   }
@@ -655,7 +656,7 @@ test("with a missing worktree and a quarantined conversation, the composer names
     assert.equal(fixture.notices()[0]!.getAttribute("aria-label"), "Worktree Missing");
     const recovery = "Worktree recovery is required before sending another message.";
     assert.equal(fixture.composer().placeholder, recovery);
-    assert.ok(fixture.resendReason()?.endsWith(recovery));
+    assert.ok((await fixture.resendReason())?.endsWith(recovery));
   } finally {
     await fixture.unmount();
   }

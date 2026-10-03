@@ -197,7 +197,7 @@ for (const theme of ["dark", "light"] as const) {
       await page.getByRole("button", { name: /Alpha Session/ }).click();
       const expand = page.getByRole("button", { name: "Expand Session" });
       if (await expand.isVisible()) await expand.click();
-      await page.getByRole("button", { name: "Edit User Message as a New Turn" }).last().click();
+      await page.getByRole("button", { name: "Edit as a New Turn" }).last().click();
       await expectUnchanged(page, page.getByRole("dialog").locator(".field-label"), "0px 0px 6px");
     });
   });

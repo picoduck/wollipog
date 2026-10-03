@@ -6838,7 +6838,6 @@ textarea,
   white-space: pre-wrap;
   word-break: break-word;
 }
-.tl-user-actions { justify-self: end; }
 /* A reply no turn footer copies (a subagent's) keeps its own Copy under its last line. */
 .tl-reply-actions { display: flex; margin-top: var(--space-1); }
 
@@ -6928,106 +6927,33 @@ textarea,
 .tl-timestamp-value { min-inline-size: 128px; }
 .tl-timestamp-duration { min-inline-size: 96px; }
 .tl-timestamp-label { color: var(--text-dim); }
-/* Copy / Rewind / Fork / Hand Off / Edit & Resend / Edit in Fork are quiet icon-only targets; each
-   action's name lives in its tooltip and accessible label. Hover brightens the glyph AND raises a
-   surface so the affordance never dissolves into the backdrop. */
+/* Message and turn actions (§9.1, §15.3): one More Turn Actions menu per turn, visible at rest in
+   --text-faint on every pointer, plus small hover clusters on a fine pointer. The user message's
+   cluster sits to the bubble's left, bottom-aligned, and takes no height; the footer's sits before
+   More Turn Actions. Both stay transparent until their message or footer is hovered, focused within
+   or its menu is open (the menu is portalled, so an open menu is read from its trigger). */
 .tl-message-actions {
   display: inline-flex;
   align-items: center;
+  gap: var(--space-1);
   flex: none;
 }
-.tl-message-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  margin: 0;
-  border: 0;
-  border-radius: var(--radius-xs);
-  background: transparent;
-  color: var(--text-faint);
-  cursor: pointer;
-  transition: color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out);
-}
-.tl-message-icon svg { width: 14px; height: 14px; }
-/* Adjacent icon targets read as one tool group: pull them together so the glyph-to-glyph distance
-   matches the row's text rhythm instead of doubling it with both buttons' hit-area insets. */
-.tl-message-icon + .tl-message-icon { margin-left: -6px; }
-.tl-message-action-unavailable {
-  position: relative;
-  display: inline-flex;
-  margin-left: -6px;
-}
-.tl-message-action-unavailable + .tl-message-icon { margin-left: -6px; }
-.tl-message-action-unavailable summary {
-  list-style: none;
-}
-.tl-message-action-unavailable summary::-webkit-details-marker { display: none; }
-.tl-message-action-unavailable[open] > span {
+.tl-message-stack.user { position: relative; }
+.tl-user-actions {
   position: absolute;
-  right: 0;
-  bottom: calc(100% + 4px);
-  z-index: var(--z-popover);
-  width: min(280px, 72vw);
-  padding: 10px;
-  white-space: normal;
-  color: var(--text);
-  background: var(--bg-elev-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  box-shadow: var(--shadow);
+  inset-inline-end: calc(100% + var(--space-1));
+  bottom: 0;
 }
-.tl-message-icon:hover,
-.tl-message-icon:focus-visible {
-  color: var(--text);
-  background: var(--bg-elev-2);
+.tl-user-actions,
+.tl-hover-action {
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-out);
 }
-/* Every unavailable action (Rewind, Fork, Hand Off, Edit & Resend, Edit in Fork) stays focusable
-   and pressable so it can disclose its reason, but reads as unavailable before it is pressed: a
-   slashed glyph that neither brightens nor raises a surface on hover, focus or open. It is still a
-   control, so the glyph keeps the 3:1 non-text token rather than fading below it; the slash, not
-   a lower contrast, is what sets it apart. No `opacity`, so the focus ring keeps full contrast.
-   The slash's --bg halo matches the transcript it sits on and parts it from the glyph's strokes. */
-.tl-message-action-unavailable > .tl-message-icon,
-.tl-message-action-unavailable > .tl-message-icon:hover,
-.tl-message-action-unavailable > .tl-message-icon:focus-visible {
-  position: relative;
-  color: var(--control-outline);
-  background: transparent;
-  cursor: help;
-}
-.tl-message-action-unavailable > .tl-message-icon::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  width: 18px;
-  height: 1.5px;
-  margin: auto;
-  background: currentColor;
-  box-shadow: 0 0 0 1px var(--bg);
-  transform: rotate(45deg);
-  pointer-events: none;
-}
-/* Forced colors repaints the slash's currentColor background as Canvas and drops its box-shadow
-   halo, so it would cut a gap through the glyph instead of crossing it, and the <summary> glyph
-   would take LinkText. Author system colors survive forcing, so glyph and slash name the system's
-   own "unavailable" ink, and an outline (kept, unlike box-shadow) redraws the Canvas halo. Hover,
-   focus and open stay unchanged, as outside forced colors. */
-@media (forced-colors: active) {
-  .tl-message-action-unavailable > .tl-message-icon,
-  .tl-message-action-unavailable > .tl-message-icon:hover,
-  .tl-message-action-unavailable > .tl-message-icon:focus-visible {
-    color: GrayText;
-  }
-  .tl-message-action-unavailable > .tl-message-icon::after {
-    background: GrayText;
-    outline: 1px solid Canvas;
-  }
-}
-.tl-message-icon.copy-status-copied { color: var(--positive-text); }
-.tl-message-icon.copy-status-failed { color: var(--danger-text); }
+.tl-row.user:is(:hover, :focus-within) .tl-user-actions,
+.tl-user-actions:has([aria-expanded="true"]),
+.tl-turn-footer:is(:hover, :focus-within) .tl-hover-action,
+.tl-turn-footer:has([aria-expanded="true"]) .tl-hover-action { opacity: 1; }
+.tl-more-actions { color: var(--text-faint); }
 .pending-prompt-bubble { border-style: dashed; border-color: var(--border-strong); }
 .pending-prompt-meta,
 .pending-prompt-actions {

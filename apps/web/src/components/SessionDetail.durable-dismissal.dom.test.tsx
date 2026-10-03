@@ -14,6 +14,7 @@ import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreActions, useStoreSelector } from "../store.js";
+import { chooseTranscriptAction, readTranscriptAction } from "../dom-test-transcript-actions.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { SessionDetail } from "./SessionDetail.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
@@ -43,6 +44,7 @@ for (const [name, value] of Object.entries({
   localStorage: domWindow.localStorage,
   Element: domWindow.Element,
   HTMLElement: domWindow.HTMLElement,
+  HTMLButtonElement: domWindow.HTMLButtonElement,
   HTMLTextAreaElement: domWindow.HTMLTextAreaElement,
   Node: domWindow.Node,
   Event: domWindow.Event,
@@ -674,12 +676,12 @@ test("a Viewer's per-turn Rewind, Fork and Hand Off are unavailable and say why 
     ],
   });
   try {
-    for (const label of ["Rewind Files to Before This Turn", "Fork Conversation After This Turn", "Hand Off After This Turn"]) {
-      assertNoDomNode(button(fixture, label), `${label} is not offered as a button`);
-      const summary = fixture.container.querySelector(`summary[aria-label="${label} Unavailable"]`);
-      assert.ok(summary, `${label} is shown as unavailable`);
-      const description = fixture.container.querySelector(`[id="${summary.getAttribute("aria-describedby")}"]`);
-      assert.match(description?.textContent ?? "", /Your Viewer role is read-only\./u, `${label} says why`);
+    assertNoDomNode(button(fixture, "Fork After This Turn"), "no hover Fork for an action that cannot be used");
+    for (const label of ["Rewind Files to Before This Turn…", "Fork After This Turn…", "Hand Off After This Turn…"]) {
+      const action = await readTranscriptAction(fixture.container, "More Turn Actions", label);
+      assert.ok(action, `${label} is listed`);
+      assert.equal(action.disabled, true, `${label} is unavailable`);
+      assert.match(action.reason ?? "", /Your Viewer role is read-only\./u, `${label} says why`);
     }
   } finally {
     await unmountFixture(fixture);
@@ -700,9 +702,9 @@ test("a refusal that arrives while Edit in Fork is open disables Create Fork and
     ],
   });
   try {
-    const edit = button(fixture, "Edit User Message in a New Conversation Fork");
-    assert.ok(edit, "Edit in Fork is offered while forking is allowed");
-    await act(async () => { edit.click(); });
+    const edit = await readTranscriptAction(fixture.container, "More Message Actions", "Edit in a Fork…", 1);
+    assert.equal(edit?.disabled, false, "Edit in a Fork is offered while forking is allowed");
+    await chooseTranscriptAction(fixture.container, "More Message Actions", "Edit in a Fork…", 1);
     const createFork = () => [...document.querySelectorAll<HTMLButtonElement>("button")]
       .find((candidate) => candidate.textContent === "Create Fork");
     assert.equal(createFork()?.disabled, false);
@@ -719,9 +721,9 @@ test("a refusal that arrives while Edit in Fork is open disables Create Fork and
   }
 });
 
-test("an Edit in Fork that applies but is blocked stays visible and says why, and never applies elsewhere (#1869)", async () => {
+test("an Edit in Fork that applies but is blocked stays listed and says why, and never applies elsewhere (#1869)", async () => {
   const reason = "Your Viewer role is read-only.";
-  const edit = "Edit User Message in a New Conversation Fork";
+  const edit = "Edit in a Fork…";
   const fixture = await mountFixture({
     sessionPatch: {
       status: "idle",
@@ -741,39 +743,41 @@ test("an Edit in Fork that applies but is blocked stays visible and says why, an
       { kind: "conversation_checkpoint", turn: 2 },
     ],
   });
-  const unavailable = () => [...fixture.container.querySelectorAll(`summary[aria-label="${edit} Unavailable"]`)];
-  const describedBy = (summary: Element) =>
-    fixture.container.querySelector(`[id="${summary.getAttribute("aria-describedby")}"]`)?.textContent ?? "";
+  // Each user message's own menu: the first has no earlier checkpoint to fork from.
+  const read = (index: number) => readTranscriptAction(fixture.container, "More Message Actions", edit, index);
   try {
-    assertNoDomNode(button(fixture, edit), "a Viewer gets no Edit in Fork button");
-    assert.equal(unavailable().length, 1, "only the message with an earlier checkpoint shows it");
-    assert.match(describedBy(unavailable()[0]!), /Your Viewer role is read-only\./u);
+    assert.equal(await read(0), null, "the message with no earlier checkpoint does not list it");
+    const blocked = await read(1);
+    assert.equal(blocked?.disabled, true, "a Viewer gets no usable Edit in a Fork");
+    assert.match(blocked?.reason ?? "", /Your Viewer role is read-only\./u);
+    // The second turn's menu lists the same action for its own prompt, with the same reason.
+    const fromTurn = await readTranscriptAction(fixture.container, "More Turn Actions", edit, 1);
+    assert.equal(fromTurn?.disabled, true);
+    assert.match(fromTurn?.reason ?? "", /Your Viewer role is read-only\./u);
 
     await fixture.pushSession({ commandPermissions: {
       stop: { allowed: true }, restart: { allowed: true }, stopBackgroundJob: { allowed: true }, fork: { allowed: true },
     } });
-    assert.equal(unavailable().length, 0);
-    assert.ok(button(fixture, edit), "an allowed person gets the working button back");
+    assert.equal((await read(1))?.disabled, false, "an allowed person gets the working action back");
 
     await fixture.pushSession({ status: "running" });
-    assertNoDomNode(button(fixture, edit));
-    assert.equal(unavailable().length, 1);
-    assert.match(describedBy(unavailable()[0]!), /Wait for the current turn or approval before creating a fork\./u);
+    const running = await read(1);
+    assert.equal(running?.disabled, true);
+    assert.match(running?.reason ?? "", /Wait for the current turn or approval before creating a fork\./u);
 
     await fixture.pushSession({ status: "idle", driver: "claude-code", commandPermissions: {
       stop: { allowed: false, reason }, restart: { allowed: false, reason }, stopBackgroundJob: { allowed: false, reason },
       fork: { allowed: false, reason },
     } });
-    assertNoDomNode(button(fixture, edit));
-    assert.equal(unavailable().length, 0, "a provider that cannot edit history never offers it, even to a Viewer");
+    assert.equal(await read(1), null, "a provider that cannot edit history never lists it, even to a Viewer");
   } finally {
     await unmountFixture(fixture);
   }
 });
 
-test("Edit & Resend stays visible and says why while the composer cannot send, and its open dialog names the reason (#1876)", async () => {
+test("Edit as a New Turn stays listed and says why while the composer cannot send, and its open dialog names the reason (#1876)", async () => {
   const reason = "Your Viewer role is read-only.";
-  const edit = "Edit User Message as a New Turn";
+  const edit = "Edit as a New Turn";
   const fixture = await mountFixture({
     sessionPatch: {
       status: "idle",
@@ -789,25 +793,25 @@ test("Edit & Resend stays visible and says why while the composer cannot send, a
       { kind: "agent_message", text: "two", final: true },
     ],
   });
-  const unavailable = () => [...fixture.container.querySelectorAll<HTMLElement>(`summary[aria-label="${edit} Unavailable"]`)];
-  const describedBy = (summary: Element) =>
-    fixture.container.querySelector(`[id="${summary.getAttribute("aria-describedby")}"]`)?.textContent ?? "";
+  const read = (index: number) => readTranscriptAction(fixture.container, "More Message Actions", edit, index);
   const dialog = () => document.querySelector('[role="dialog"]');
   const loadIntoComposer = () => [...document.querySelectorAll<HTMLButtonElement>("button")]
     .find((candidate) => candidate.textContent === "Load into Composer");
   try {
-    assertNoDomNode(button(fixture, edit), "a Viewer gets no working Edit & Resend");
-    assert.equal(unavailable().length, 2, "every user message keeps the control");
-    assert.match(describedBy(unavailable()[0]!), /Your Viewer role is read-only\./u);
-    await act(async () => { unavailable()[0]!.click(); });
-    assertNoDomNode(dialog(), "the unavailable control opens no dialog");
+    assertNoDomNode(button(fixture, edit), "a Viewer gets no hover Edit as a New Turn");
+    for (const index of [0, 1]) {
+      const blocked = await read(index);
+      assert.equal(blocked?.disabled, true, "every user message keeps the action, unavailable");
+      assert.match(blocked?.reason ?? "", /Your Viewer role is read-only\./u);
+    }
+    assertNoDomNode(dialog(), "an unavailable action opens no dialog");
 
     await fixture.pushSession({ commandPermissions: {
       stop: { allowed: true }, restart: { allowed: true }, stopBackgroundJob: { allowed: true }, prompt: { allowed: true },
     } });
-    assert.equal(unavailable().length, 0);
+    assert.equal((await read(0))?.disabled, false);
     const working = button(fixture, edit);
-    assert.ok(working, "an allowed person gets the working button back");
+    assert.ok(working, "an allowed person gets the hover button back");
     await act(async () => { working.click(); });
     assert.ok(dialog(), "the working control opens its dialog");
     assert.equal(loadIntoComposer()?.disabled, false);
@@ -818,7 +822,6 @@ test("Edit & Resend stays visible and says why while the composer cannot send, a
     assert.match(dialog()?.textContent ?? "", /Session is stopped\./u, "the dialog names the specific reason");
     assert.doesNotMatch(dialog()?.textContent ?? "", /cannot accept a new turn right now/u);
     assertNoDomNode(button(fixture, edit));
-    assert.match(describedBy(unavailable()[0]!), /Session is stopped\./u);
   } finally {
     await unmountFixture(fixture);
   }

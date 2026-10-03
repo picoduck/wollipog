@@ -4293,7 +4293,7 @@ test("an ordinary-composer handoff does not arm focus theft for a later question
     await resolveDraft(draft, "existing draft");
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
     const edit = fixture.container.querySelector(
-      'button[aria-label="Edit User Message as a New Turn"]',
+      'button[aria-label="Edit as a New Turn"]',
     ) as HTMLButtonElement | null;
     assert.ok(edit);
     await act(async () => { edit.click(); });
@@ -4352,9 +4352,9 @@ test("SessionDetail prepares Edit & Resend text with accessible focus and an end
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
 
     const edit = fixture.container.querySelector(
-      'button[aria-label="Edit User Message as a New Turn"]',
+      'button[aria-label="Edit as a New Turn"]',
     ) as HTMLButtonElement | null;
-    assert.ok(edit, "the real timeline exposes Edit & Resend with an accessible name");
+    assert.ok(edit, "the real timeline exposes Edit as a New Turn with an accessible name");
     await act(async () => {
       edit.focus();
       edit.click();
@@ -4427,7 +4427,7 @@ test("Load into Composer exits Answer Mode and reveals the prepared message", { 
     assert.ok(fixture.container.querySelector(".composer-answer-input"));
 
     const edit = fixture.container.querySelector(
-      'button[aria-label="Edit User Message as a New Turn"]',
+      'button[aria-label="Edit as a New Turn"]',
     ) as HTMLButtonElement | null;
     assert.ok(edit);
     await act(async () => {

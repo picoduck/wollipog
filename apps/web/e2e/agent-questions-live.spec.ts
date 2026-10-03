@@ -489,7 +489,7 @@ for (const style of ["interactive", "composer"] as const) test(`Codex structured
       const submit = page.getByRole("button", { name: "Submit" });
       await expect(submit).toBeDisabled();
       await page.getByRole("radio", { name: /Staging/ }).click();
-      await page.getByLabel("Response").fill("Ship after checks pass");
+      await page.getByRole("textbox").and(page.getByLabel("Response")).fill("Ship after checks pass");
       await expect(submit).toBeEnabled();
       await submit.click();
     } else {
@@ -799,7 +799,7 @@ for (const provider of ["claude", "codex"] as const) {
               await page.getByRole("checkbox", { name: /Browser Tests/ }).click();
             } else {
               await page.getByRole("radio", { name: /Staging/ }).click();
-              await page.getByLabel("Response").fill("Ship after checks pass");
+              await page.getByRole("textbox").and(page.getByLabel("Response")).fill("Ship after checks pass");
             }
             await expect(submit).toBeEnabled();
             await submit.scrollIntoViewIfNeeded();

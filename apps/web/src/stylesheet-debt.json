@@ -1315,7 +1315,6 @@
     "|.tl-error|padding|13px",
     "|.tl-governance-head|padding|2px",
     "|.tl-interrupted|padding|7px",
-    "|.tl-message-action-unavailable[open]>span|padding|10px",
     "|.tl-output pre,.tl-stderr pre|padding|12px",
     "|.tl-output pre,.tl-stderr pre|padding|9px",
     "|.tl-perm|padding|11px",

@@ -44,6 +44,7 @@ import { deleteSessionMessage, signOutOfAgentMessage, stopSessionMessage } from 
 import { sessionAgentLabel } from "./agent-options.js";
 import { sessionArchiveActionRefusal, sessionCommandRefusal } from "../session-command-permissions.js";
 import { unarchiveSession } from "../session-unarchive.js";
+import { writeClipboardText } from "../clipboard.js";
 import { sessionStatusSummary } from "../status-meta.js";
 import { SessionStatusButton } from "./SessionStatusButton.js";
 import { useBackgroundDeliveryStep } from "./useBackgroundDeliveryStep.js";
@@ -53,33 +54,6 @@ const BUSY_REASON = "Available when the current action finishes.";
 const NO_SESSION_LINK_REASON = "Open Wollipog in a browser to copy a link.";
 /** A contributor hint, shown by development builds only (§17.2 keeps env var names out of releases). */
 const DEVELOPMENT_LINK_HINT = "Development builds can set VITE_DASHBOARD_ORIGIN.";
-
-/** Copies `text`, falling back to a selected hidden field where the Clipboard API is unavailable
- * (a plain-HTTP dashboard). The fallback moves focus, which the caller restores. A refused write
- * settles late; when `current()` says the person has moved on by then, the fallback is skipped so
- * it cannot take focus from what they opened since, and the result is `null`. */
-async function writeClipboardText(text: string, current: () => boolean): Promise<boolean | null> {
-  try {
-    await navigator.clipboard.writeText(text);
-    return true;
-  } catch {
-    if (!current()) return null;
-    const fallback = document.createElement("textarea");
-    fallback.value = text;
-    fallback.readOnly = true;
-    fallback.style.position = "fixed";
-    fallback.style.opacity = "0";
-    document.body.appendChild(fallback);
-    fallback.select();
-    try {
-      return document.execCommand("copy");
-    } catch {
-      return false;
-    } finally {
-      fallback.remove();
-    }
-  }
-}
 
 /**
  * The responsive Session bar (docs/design-system.md §4.3). Desktop keeps one 48px row: Back, the

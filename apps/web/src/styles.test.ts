@@ -415,66 +415,35 @@ test("the permission-mode menu keeps rows compact while long labels can wrap", (
   assert.match(soleRuleBody(".cbar-permission-details-trigger"), /width: 28px;/);
 });
 
-test("message metadata actions keep one compact target width on phones", () => {
-  assert.match(soleRuleBody(".tl-message-icon"), /width: 24px;/);
-  assert.match(soleRuleBody(".tl-message-icon"), /height: 24px;/);
-  const phoneOverrides = mediaBlocks(css).filter((block) =>
-    block.maxWidths.some((width) => width <= 760) && block.containsSelector(".tl-message-icon"));
-  assert.deepEqual(phoneOverrides, [],
-    "Message actions must not change width independently at phone sizes");
+test("message and turn actions use the shared small icon button and never size themselves", () => {
+  // .icon-btn.sm is 28px on a fine pointer and 36px with a 44px hit area on a coarse one (§2.8);
+  // a local width, height or margin would undo that, or overlap neighbouring hit areas again.
+  const sized = allDeclarations(css).filter((declaration) =>
+    ["width", "height", "min-width", "min-height", "margin", "margin-left", "margin-right", "margin-inline-start"]
+      .includes(declaration.prop) &&
+    declaration.selectors.some((selector) => /\.tl-(message-actions|user-actions|more-actions|hover-action)\b[^,]*$/.test(selector)));
+  assert.deepEqual(sized, [], "transcript actions take their size from .icon-btn.sm");
+  assert.doesNotMatch(css, /\.tl-message-icon|\.tl-message-action-unavailable/, "the old 24px targets are gone");
 });
 
-test("unavailable message actions share one slashed state that hover and focus cannot lift", () => {
-  const shared = [
-    ".tl-message-action-unavailable > .tl-message-icon",
-    ".tl-message-action-unavailable > .tl-message-icon:hover",
-    ".tl-message-action-unavailable > .tl-message-icon:focus-visible",
-  ].join(", ");
-  const slash = ".tl-message-action-unavailable > .tl-message-icon::after";
-  const unavailable = soleRuleBody(shared);
-  // Still a pressable control, so its glyph keeps the 3:1 non-text token instead of fading below it.
-  assert.match(unavailable, /color: var\(--control-outline\);/);
-  assert.match(unavailable, /background: transparent;/);
-  // Opacity would also fade the global focus ring drawn on the same element.
-  assert.doesNotMatch(unavailable, /opacity/);
-  const mark = soleRuleBody(slash);
-  assert.match(mark, /content: "";/);
-  assert.match(mark, /background: currentColor;/);
-  assert.match(mark, /rotate\(45deg\)/);
-  // The shared rule outranks the enabled hover/focus rule only while that one stays class-only.
-  assert.equal(soleRuleBody(".tl-message-icon:hover, .tl-message-icon:focus-visible"),
-    "color: var(--text);\nbackground: var(--bg-elev-2);");
-  const competing = allDeclarations(css).filter((declaration) =>
-    ["color", "background", "opacity", "cursor", "filter", "content"].includes(declaration.prop) &&
-    declaration.selectors.some((selector) =>
-      selector.includes(".tl-message-action-unavailable") && !selector.endsWith("> span")) &&
-    declaration.selector !== shared && declaration.selector !== slash);
-  assert.deepEqual(competing, [],
-    "every unavailable message action must take its look from the one shared rule");
-});
-
-test("unavailable message actions keep their slash in forced colors", () => {
-  const states = [
-    ".tl-message-action-unavailable > .tl-message-icon",
-    ".tl-message-action-unavailable > .tl-message-icon:hover",
-    ".tl-message-action-unavailable > .tl-message-icon:focus-visible",
-  ];
-  const slash = ".tl-message-action-unavailable > .tl-message-icon::after";
-  const blocks = mediaBlocks(css).filter((block) =>
-    [...states, slash].some((selector) => block.containsSelector(selector)));
-  assert.deepEqual(blocks.map((block) => block.params), ["(forced-colors: active)"],
-    "the forced-colors block must be the only conditional restyle of an unavailable action");
-  const [forced] = blocks;
-  // Forced colors would otherwise give the <summary> glyph LinkText; hover and focus must not lift it.
-  for (const selector of states) {
-    assert.deepEqual(forced!.declarationsForSelector(selector), new Map([["color", ["GrayText"]]]), selector);
-  }
-  // A currentColor fill would be forced to Canvas and the box-shadow halo dropped; a system-color
-  // fill and an outline halo both survive forcing.
-  assert.deepEqual(forced!.declarationsForSelector(slash), new Map([
-    ["background", ["GrayText"]],
-    ["outline", ["1px solid Canvas"]],
-  ]));
+test("hover clusters take no height and show on hover, focus within or an open menu", () => {
+  const user = soleRuleBody(".tl-user-actions");
+  assert.match(user, /position: absolute;/, "the user cluster sits beside the bubble, not under it");
+  assert.match(user, /bottom: 0;/, "bottom-aligned with the bubble");
+  assert.match(user, /inset-inline-end: calc\(100% \+ var\(--space-1\)\);/, "to the bubble's left");
+  assert.match(soleRuleBody(".tl-user-actions, .tl-hover-action"), /opacity: 0;/);
+  assert.equal(soleRuleBody([
+    ".tl-row.user:is(:hover, :focus-within) .tl-user-actions",
+    ".tl-user-actions:has([aria-expanded=\"true\"])",
+    ".tl-turn-footer:is(:hover, :focus-within) .tl-hover-action",
+    ".tl-turn-footer:has([aria-expanded=\"true\"]) .tl-hover-action",
+  ].join(", ")), "opacity: 1;");
+  // More Turn Actions is never part of a hover cluster: it stays visible at rest, quietly (#599).
+  assert.equal(soleRuleBody(".tl-more-actions"), "color: var(--text-faint);");
+  const hidesMenu = allDeclarations(css).filter((declaration) =>
+    ["opacity", "visibility", "display"].includes(declaration.prop) &&
+    declaration.selectors.some((selector) => selector.includes(".tl-more-actions")));
+  assert.deepEqual(hidesMenu, [], "nothing hides More Turn Actions");
 });
 
 test("the phone Session status control leads its line without pushing the fixed actions", () => {
