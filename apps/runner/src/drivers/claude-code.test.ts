@@ -5377,3 +5377,35 @@ test("resume accounting probe authentication failure signals existing recovery",
   assert.equal(failures, 1);
   driver.dispose();
 });
+
+for (const persistent of [false, true]) {
+  for (const lifecycle of ["fresh", "resume-manual", "resume-external"] as const) {
+    test(`Claude ${persistent ? "persistent" : "one-shot"} ${lifecycle} delivers current artifact preference after exact task text`, async () => {
+      const child = fakeProcess();
+      const writes: string[] = [];
+      child.stdin.on("data", (chunk: Buffer) => writes.push(chunk.toString("utf8")));
+      const note = lifecycle === "fresh" ? "Automatic: relevant task evidence" : lifecycle === "resume-manual"
+        ? "Manual: awareness grants no upload authority" : "External: never silently fall back";
+      const sourceArgs = ["--append-system-prompt", "original policy", "--append-system-prompt-file", "provider-policy.txt"];
+      let launchArgs: string[] = [];
+      const driver = new ClaudeCodeDriver({ ...baseOpts, args: sourceArgs, artifactGuidance: note,
+        env: { [CLAUDE_PERSISTENT_FLAG]: persistent ? "1" : "0" }, config: { permissionMode: "acceptEdits" },
+        ...(lifecycle !== "fresh" ? { resumeId: "existing-session" } : {}) }, noopCb,
+        { spawn: (spec: { args: string[] }) => { launchArgs = spec.args; return child; }, kill: () => {} } as any);
+      const pending = driver.prompt("focus", [], "review");
+      await nextTask();
+      const messages = writes.join("").trim().split("\n").map((line) => JSON.parse(line));
+      const user = messages.find((message) => message.type === "user");
+      assert.ok(user, "fixed-rule one-shot also uses stream-json when guidance requires separate context");
+      assert.deepEqual(user.message.content, [{ type: "text", text: "/review focus" }, { type: "text", text: note }]);
+      assert.ok(launchArgs.includes("--input-format"));
+      assert.ok(!launchArgs.some((arg) => arg.includes(note)), "mutable upload authority never enters sticky system argv");
+      assert.deepEqual(launchArgs.slice(0, sourceArgs.length), sourceArgs, "original inline and file append flags remain exact");
+      if (lifecycle !== "fresh") assert.ok(launchArgs.includes("--resume"));
+      child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+      if (!persistent) child.emit("close", 0);
+      assert.equal(await pending, "end_turn");
+      driver.dispose();
+    });
+  }
+}

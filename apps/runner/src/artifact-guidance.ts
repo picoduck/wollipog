@@ -23,18 +23,5 @@ export function artifactGuidance(meta: Pick<SessionMeta, "driver" | "env" | "con
     : preference === "external_hosting"
       ? "Artifact Uploads: Use External Hosting. Follow the user's configured external hosting workflow. Do not silently fall back to Wollipog, invent a destination, or provision credentials. If that workflow is missing, request the needed configuration."
       : "Artifact Uploads: Manual (default). Awareness alone does not authorize transferring any file. Upload only when explicitly requested by the user or authorized by applicable project instructions.";
-  return `[Wollipog Artifact Guidance]\n${capability}\n${policy} Explicit task and project hosting requirements take precedence. Hosting preference does not grant evidence-review or merge authority, and existing privacy and approval rules still apply. Preference changes apply at the next session launch or resume.\n[/Wollipog Artifact Guidance]`;
-}
-
-/** Add an ephemeral Claude instruction while preserving its effective append text. */
-export function appendArtifactSystemPrompt(args: readonly string[], guidance: string): string[] {
-  const result: string[] = [];
-  let existing = "";
-  for (let index = 0; index < args.length; index++) {
-    const arg = args[index]!;
-    if (arg === "--append-system-prompt") existing = args[++index] ?? "";
-    else if (arg.startsWith("--append-system-prompt=")) existing = arg.slice("--append-system-prompt=".length);
-    else result.push(arg);
-  }
-  return [...result, "--append-system-prompt", [existing, guidance].filter(Boolean).join("\n\n")];
+  return `[Wollipog Artifact Guidance] ${capability} ${policy} Explicit task and project hosting requirements take precedence. Hosting preference does not grant evidence-review or merge authority, and existing privacy and approval rules still apply. Preference changes apply at the next session launch or resume. [/Wollipog Artifact Guidance]`;
 }
