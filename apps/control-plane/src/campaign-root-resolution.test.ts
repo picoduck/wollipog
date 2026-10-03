@@ -50,14 +50,16 @@ function harness() {
   });
   type Walks = {
     campaignEventController(start: SessionView | null): SessionView | null;
-    orchestratorCampaignController(start: SessionView | null): SessionView | null;
+    orchestratorCampaignController(start: SessionView | null): SessionView | null | "refused";
   };
   /** Where campaign continuation and attention events are filed. */
   const campaignController = (sessionId: string): string | null =>
     (svc as unknown as Walks).campaignEventController(db.getSession(sessionId))?.id ?? null;
-  /** Whose fixed child behavior and Parent Control authority apply; deliberately not changed. */
-  const behaviorController = (sessionId: string): string | null =>
-    (svc as unknown as Walks).orchestratorCampaignController(db.getSession(sessionId))?.id ?? null;
+  /** Whose fixed child behavior and Parent Control authority apply (refused on malformed ancestry, #2468). */
+  const behaviorController = (sessionId: string): string | null => {
+    const controller = (svc as unknown as Walks).orchestratorCampaignController(db.getSession(sessionId));
+    return controller === "refused" ? "refused" : controller?.id ?? null;
+  };
   return { db, svc, make, ask, campaignController, behaviorController };
 }
 
@@ -135,8 +137,8 @@ test("a cyclic ancestry is refused by every campaign path (#2451)", () => {
     assert.match(refused.error ?? "", /ancestry is malformed/);
     assert.equal(db.resolvedCampaignSessionId("b"), null);
     assert.equal(campaignController("b"), null);
-    assert.notEqual(behaviorController("b"), null,
-      "Parent Control authority and fixed behavior are not dropped for a cycle, so it gains no authority");
+    assert.equal(behaviorController("b"), "refused",
+      "Parent Control authority and fixed behavior refuse a cycle rather than dropping or guessing (#2468)");
   } finally {
     db.close();
   }

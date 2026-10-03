@@ -534,6 +534,12 @@ const MALFORMED_ANCESTRY_DECISION_REFUSAL =
   "this session's ancestry is malformed (a cycle, a missing parent session, or more than 64 levels of " +
   "nesting), so no Orchestrator can control its workflow decisions";
 
+/** Why campaign policy and Parent Control authority are refused beneath an ancestry the campaign
+ * walk refuses (#2468): naming an arbitrary controller would apply the wrong campaign's rules. */
+const MALFORMED_ANCESTRY_AUTHORITY_REFUSAL =
+  "this session's ancestry is malformed (a cycle, a missing parent session, or more than 64 levels of " +
+  "nesting), so its campaign policy and Parent Control authority cannot be determined";
+
 /** What a restarted child is told about the decisions its restart revoked (#1779). Revocation on a
  * lifecycle end is deliberate and stays: a relaunched provider must never act on a grant made to the
  * process it replaced. Naming each occurrence lets the child request again what it still needs,
@@ -3405,7 +3411,9 @@ export class SessionsService {
     if (!parent || !["starting", "running", "input_required"].includes(parent.status)) {
       return fail("the creating parent session is no longer active", 409);
     }
-    const campaignBehavior = this.orchestratorCampaignController(parent)?.orchestratorPolicy?.behavior;
+    const campaignAuthority = this.orchestratorCampaignController(parent);
+    if (campaignAuthority === "refused") return fail(MALFORMED_ANCESTRY_AUTHORITY_REFUSAL, 409);
+    const campaignBehavior = campaignAuthority?.orchestratorPolicy?.behavior;
     const reserved = { ...this.db.childSessionAllocations(parentSessionId) };
     if (configs.length > (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - reserved.liveCount) {
       const remaining = Math.max(0, (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - reserved.liveCount);
@@ -3535,7 +3543,9 @@ export class SessionsService {
       if ("error" in guarded) return fail(guarded.error, 409);
       req = { ...req, config: guarded.config };
     }
-    const campaignController = this.orchestratorCampaignController(parentSession);
+    const campaignAuthority = this.orchestratorCampaignController(parentSession);
+    if (campaignAuthority === "refused") return fail(MALFORMED_ANCESTRY_AUTHORITY_REFUSAL, 409);
+    const campaignController = campaignAuthority;
     if (req.config?.maxChildSessions !== undefined &&
         (!Number.isSafeInteger(req.config.maxChildSessions) || req.config.maxChildSessions < 0 ||
           req.config.maxChildSessions > 64)) {
@@ -4404,8 +4414,11 @@ export class SessionsService {
     const controller = this.orchestratorCampaignController(
       session.parentSessionId ? this.db.getSession(session.parentSessionId) : null,
     );
-    const campaign = controller ? this.db.campaignProjection(controller.id) : null;
-    return controller && campaign ? this.campaignAssignment(controller, campaign, text) : text;
+    // A refused ancestry has no campaign to describe, so its text goes unwrapped rather than carrying
+    // an arbitrary Orchestrator's preamble; child creation and behavior changes beneath it refuse.
+    if (!controller || controller === "refused") return text;
+    const campaign = this.db.campaignProjection(controller.id);
+    return campaign ? this.campaignAssignment(controller, campaign, text) : text;
   }
 
   /** Admit a message for a session that may already be mid-turn.
@@ -7003,8 +7016,12 @@ export class SessionsService {
 
   /** Resolve the outermost controlling campaign while including the immediate parent. A nested
    * Orchestrator has an inspectable inherited policy but cannot shadow a root campaign update or
-   * let descendants escape fixed behavior by adding another level. */
-  private orchestratorCampaignController(start: SessionView | null): SessionView | null {
+   * let descendants escape fixed behavior by adding another level. Malformed ancestry (a cycle, a
+   * missing parent, or more than 64 sessions, as the shared campaign walk judges it) is `refused`
+   * rather than resolved to whichever Orchestrator the loop saw last; every caller must then refuse
+   * its operation (#2468). A sound chain never exceeds the loop's bound, so its result is unchanged. */
+  private orchestratorCampaignController(start: SessionView | null): SessionView | null | "refused" {
+    if (start && this.db.campaignAncestryRoot(start.id) === "refused") return "refused";
     const seen = new Set<string>();
     let current = start;
     let controller: SessionView | null = null;
@@ -7156,12 +7173,15 @@ export class SessionsService {
       "delegatedParentControl",
     )) return false;
     const controller = this.orchestratorCampaignController(this.db.getSession(session.parentSessionId));
-    return Boolean(controller && parentControlRequestEligible(controller.parentControl ?? "off", request));
+    // Beneath a refused ancestry no Orchestrator owns the request; it stays with the human.
+    return Boolean(controller && controller !== "refused" &&
+      parentControlRequestEligible(controller.parentControl ?? "off", request));
   }
 
   private campaignChildBehaviorError(session: SessionView, config: SessionConfig | undefined): string | null {
     if (!session.parentSessionId || !config) return null;
     const controller = this.orchestratorCampaignController(this.db.getSession(session.parentSessionId));
+    if (controller === "refused") return MALFORMED_ANCESTRY_AUTHORITY_REFUSAL;
     const behavior = controller?.orchestratorPolicy?.behavior;
     if (behavior && behavior.childModel !== null && config.model !== undefined && config.model !== behavior.childModel) {
       return `child model is fixed by campaign policy at ${behavior.childModel}`;
@@ -8338,6 +8358,7 @@ export class SessionsService {
     const parent = this.db.getSession(parentSessionId);
     if (!parent) return fail("session not found", 404);
     const rootCampaign = this.orchestratorCampaignController(parent);
+    if (rootCampaign === "refused") return fail(MALFORMED_ANCESTRY_AUTHORITY_REFUSAL, 409);
     if (rootCampaign && rootCampaign.id !== parent.id) {
       return fail("Parent Control for this descendant belongs to the root campaign Orchestrator", 403);
     }
@@ -9162,6 +9183,7 @@ export class SessionsService {
     const parent = this.db.getSession(parentSessionId);
     if (!parent) return fail("session not found", 404);
     const rootCampaign = this.orchestratorCampaignController(parent);
+    if (rootCampaign === "refused") return fail(MALFORMED_ANCESTRY_AUTHORITY_REFUSAL, 409);
     if (rootCampaign && rootCampaign.id !== parent.id) {
       return fail("Parent Control for this descendant belongs to the root campaign Orchestrator", 403);
     }
@@ -9248,6 +9270,7 @@ export class SessionsService {
     const parent = this.db.getSession(parentSessionId);
     if (!parent) return fail("session not found", 404);
     const rootCampaign = this.orchestratorCampaignController(parent);
+    if (rootCampaign === "refused") return fail(MALFORMED_ANCESTRY_AUTHORITY_REFUSAL, 409);
     if (rootCampaign && rootCampaign.id !== parent.id) {
       return fail("Parent Control for this descendant belongs to the root campaign Orchestrator", 403);
     }
