@@ -1,0 +1,1 @@
+|.bubble-images|gap|6px

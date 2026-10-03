@@ -1,0 +1,2 @@
+@media (max-width: 760px)|.modal-head|padding|2px
+@media (max-width: 760px)|.modal-head|padding|2px

@@ -1,0 +1,1 @@
+|.dir-entry|font-size|13

@@ -1,0 +1,1 @@
+|.diff-hunk-lines|font-family|"Cascadia Code", "Consolas", ui-monospace, monospace

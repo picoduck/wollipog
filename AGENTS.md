@@ -21,6 +21,17 @@
 - `.agents/skills/` holds contributor-only skills for this repository. Read
   `skills/using-wollipog/SKILL.md` when working with Wollipog's agent-facing tools.
 
+## Stylesheet Debt Inventory
+
+- `apps/web/src/stylesheet-guardrails.test.ts` compares the stylesheet's measured debt with the
+  inventory in `apps/web/src/stylesheet-debt/`: one file per recorded entry, so concurrent branches
+  that pay down different entries delete different files and merge without conflicts.
+- Never edit that directory by hand. After paying debt down, run `pnpm regenerate:stylesheet-debt`
+  and commit the result in the same commit. New debt is fixed in the source, not by regenerating.
+- To resolve a conflict or a rebase that touches the inventory (including a branch that still edits
+  the retired `stylesheet-debt.json`), drop that side's inventory changes, run
+  `pnpm regenerate:stylesheet-debt` on the resolved tree, and commit what it writes.
+
 ## GitHub Issues
 
 - When asked to draft, report, log, file, or create a GitHub issue, read and follow

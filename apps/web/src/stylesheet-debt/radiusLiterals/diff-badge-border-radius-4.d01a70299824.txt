@@ -1,0 +1,1 @@
+|.diff-badge|border-radius|4

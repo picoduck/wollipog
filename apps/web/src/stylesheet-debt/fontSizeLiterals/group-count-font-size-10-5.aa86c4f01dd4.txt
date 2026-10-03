@@ -1,0 +1,1 @@
+|.group-count|font-size|10.5

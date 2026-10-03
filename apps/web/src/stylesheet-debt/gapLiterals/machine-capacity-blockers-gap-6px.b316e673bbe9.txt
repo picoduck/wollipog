@@ -1,0 +1,1 @@
+|.machine-capacity-blockers|gap|6px

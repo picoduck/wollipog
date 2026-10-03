@@ -1,0 +1,1 @@
+@media (max-width: 760px)|.runner-card|padding|14px

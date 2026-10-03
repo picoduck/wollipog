@@ -1,0 +1,1 @@
+|.question-option .question-desc|font-size|12

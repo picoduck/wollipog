@@ -1,0 +1,1 @@
+|.dir-entry|padding|7px

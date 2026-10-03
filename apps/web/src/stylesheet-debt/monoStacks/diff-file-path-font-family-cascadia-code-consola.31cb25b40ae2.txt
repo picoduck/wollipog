@@ -1,0 +1,1 @@
+|.diff-file-path|font-family|"Cascadia Code", "Consolas", ui-monospace, monospace

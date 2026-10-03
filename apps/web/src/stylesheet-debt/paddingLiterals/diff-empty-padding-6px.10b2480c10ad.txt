@@ -1,0 +1,1 @@
+|.diff-empty|padding|6px

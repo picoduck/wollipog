@@ -1,0 +1,1 @@
+|.column-body|padding|10px

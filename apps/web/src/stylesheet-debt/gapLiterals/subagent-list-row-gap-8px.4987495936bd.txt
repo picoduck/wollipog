@@ -1,0 +1,1 @@
+|.subagent-list-row|gap|8px

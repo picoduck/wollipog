@@ -1,0 +1,2 @@
+|.shell-tab>button|padding|3px
+|.shell-tab>button|padding|3px

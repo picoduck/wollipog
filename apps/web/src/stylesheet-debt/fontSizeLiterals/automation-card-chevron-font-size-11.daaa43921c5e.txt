@@ -1,0 +1,1 @@
+|.automation-card-chevron|font-size|11

@@ -1,0 +1,1 @@
+|.onboard-local-icon|font-size|20

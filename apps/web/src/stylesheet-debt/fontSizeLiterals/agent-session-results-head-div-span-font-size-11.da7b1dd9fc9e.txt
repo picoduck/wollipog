@@ -1,0 +1,1 @@
+|.agent-session-results-head>div span|font-size|11.5

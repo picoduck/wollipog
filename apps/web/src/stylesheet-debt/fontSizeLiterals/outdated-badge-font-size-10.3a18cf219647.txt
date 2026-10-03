@@ -1,0 +1,1 @@
+|.outdated-badge|font-size|10

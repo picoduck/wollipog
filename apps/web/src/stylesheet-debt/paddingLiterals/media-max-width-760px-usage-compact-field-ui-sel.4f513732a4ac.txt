@@ -1,0 +1,1 @@
+@media (max-width: 760px)|.usage-compact-field .ui-select-trigger|padding-inline|8px

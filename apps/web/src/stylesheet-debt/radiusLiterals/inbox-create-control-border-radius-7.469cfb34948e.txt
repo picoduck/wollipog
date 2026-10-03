@@ -1,0 +1,1 @@
+|.inbox-create-control|border-radius|7

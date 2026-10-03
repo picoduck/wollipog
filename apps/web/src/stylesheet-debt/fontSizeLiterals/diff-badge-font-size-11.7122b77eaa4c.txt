@@ -1,0 +1,1 @@
+|.diff-badge|font-size|11

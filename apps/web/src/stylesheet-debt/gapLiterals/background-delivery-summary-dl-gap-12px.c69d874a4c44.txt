@@ -1,0 +1,1 @@
+|.background-delivery-summary dl|gap|12px

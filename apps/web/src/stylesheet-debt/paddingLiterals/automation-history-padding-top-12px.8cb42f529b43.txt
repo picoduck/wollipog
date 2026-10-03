@@ -1,0 +1,1 @@
+|.automation-history|padding-top|12px

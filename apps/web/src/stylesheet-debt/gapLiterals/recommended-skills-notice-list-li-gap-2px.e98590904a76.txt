@@ -1,0 +1,1 @@
+|.recommended-skills-notice-list>li|gap|2px

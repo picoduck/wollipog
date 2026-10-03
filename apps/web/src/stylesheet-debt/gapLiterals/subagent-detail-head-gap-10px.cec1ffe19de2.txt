@@ -1,0 +1,1 @@
+|.subagent-detail-head|gap|10px

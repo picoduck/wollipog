@@ -1,0 +1,2 @@
+|.rail-item.active::before|border-radius|3
+|.rail-item.active::before|border-radius|3

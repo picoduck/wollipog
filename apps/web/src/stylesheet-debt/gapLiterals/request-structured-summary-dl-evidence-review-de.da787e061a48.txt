@@ -1,0 +1,1 @@
+|.request-structured-summary dl,.evidence-review-details dl|gap|8px

@@ -1,0 +1,1 @@
+|.context-popover-head|gap|10px

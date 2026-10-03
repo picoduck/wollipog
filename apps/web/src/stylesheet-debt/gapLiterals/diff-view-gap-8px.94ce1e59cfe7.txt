@@ -1,0 +1,1 @@
+|.diff-view|gap|8px

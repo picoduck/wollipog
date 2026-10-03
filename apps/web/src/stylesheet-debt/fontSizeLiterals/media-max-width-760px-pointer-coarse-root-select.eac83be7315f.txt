@@ -1,0 +1,1 @@
+@media (max-width: 760px), (pointer: coarse)|:root select,:root input,:root textarea,:root .ui-select-trigger,:root .composer-input|font-size|16

@@ -1,0 +1,1 @@
+|.governance-decision-facts|gap|2px

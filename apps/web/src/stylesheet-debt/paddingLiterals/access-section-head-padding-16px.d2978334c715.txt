@@ -1,0 +1,1 @@
+|.access-section-head|padding|16px

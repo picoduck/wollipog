@@ -1,0 +1,1 @@
+|.ext-badges|gap|6px

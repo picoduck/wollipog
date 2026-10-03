@@ -1,0 +1,1 @@
+|.usage-chart-readout dl>div|gap|6px

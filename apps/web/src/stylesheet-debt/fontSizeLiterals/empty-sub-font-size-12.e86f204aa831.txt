@@ -1,0 +1,1 @@
+|.empty-sub|font-size|12

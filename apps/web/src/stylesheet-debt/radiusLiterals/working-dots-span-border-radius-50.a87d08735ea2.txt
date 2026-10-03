@@ -1,0 +1,1 @@
+|.working-dots span|border-radius|50

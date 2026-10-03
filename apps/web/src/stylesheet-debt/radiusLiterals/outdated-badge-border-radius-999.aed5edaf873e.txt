@@ -1,0 +1,1 @@
+|.outdated-badge|border-radius|999

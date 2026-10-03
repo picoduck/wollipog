@@ -1,0 +1,1 @@
+|.approval-context|font-size|12

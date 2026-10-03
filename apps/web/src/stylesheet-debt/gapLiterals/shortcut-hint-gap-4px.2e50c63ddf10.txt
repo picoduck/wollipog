@@ -1,0 +1,1 @@
+|.shortcut-hint|gap|4px

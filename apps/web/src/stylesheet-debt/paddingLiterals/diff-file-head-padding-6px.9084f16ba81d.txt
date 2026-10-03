@@ -1,0 +1,1 @@
+|.diff-file-head|padding|6px

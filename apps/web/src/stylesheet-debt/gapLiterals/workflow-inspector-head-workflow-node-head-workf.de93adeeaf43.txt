@@ -1,0 +1,1 @@
+|.workflow-inspector-head,.workflow-node-head,.workflow-gate-actions|gap|8px

@@ -1,0 +1,1 @@
+|.dir-path-input|font-family|"Cascadia Code", "Consolas", ui-monospace, monospace

@@ -1,0 +1,1 @@
+|.right-panel-resizer|border-radius|4

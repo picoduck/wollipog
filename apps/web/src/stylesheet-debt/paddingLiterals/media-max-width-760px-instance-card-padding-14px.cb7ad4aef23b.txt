@@ -1,0 +1,1 @@
+@media (max-width: 760px)|.instance-card|padding|14px

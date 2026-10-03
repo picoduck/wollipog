@@ -1,0 +1,1 @@
+|.agent-details-command code|padding|10px

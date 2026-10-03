@@ -1,0 +1,1 @@
+|.onboard-local-agents>span|font-size|12

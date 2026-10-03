@@ -1,0 +1,1 @@
+|.ext-foot|gap|10px

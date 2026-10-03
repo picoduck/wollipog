@@ -1,0 +1,1 @@
+|.composer-question-waiting|padding-bottom|8px

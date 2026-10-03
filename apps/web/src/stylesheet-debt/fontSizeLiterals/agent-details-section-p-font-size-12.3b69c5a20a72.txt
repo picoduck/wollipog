@@ -1,0 +1,1 @@
+|.agent-details-section p|font-size|12

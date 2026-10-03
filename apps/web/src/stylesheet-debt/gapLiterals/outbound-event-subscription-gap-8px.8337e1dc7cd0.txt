@@ -1,0 +1,1 @@
+|.outbound-event-subscription|gap|8px

@@ -1,0 +1,1 @@
+|.tl-timestamp-meta|gap|2px

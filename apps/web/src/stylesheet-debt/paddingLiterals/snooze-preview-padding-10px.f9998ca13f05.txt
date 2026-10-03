@@ -1,0 +1,1 @@
+|.snooze-preview|padding|10px

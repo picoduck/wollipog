@@ -1,0 +1,1 @@
+|.artifact-preview-meta|font-size|11

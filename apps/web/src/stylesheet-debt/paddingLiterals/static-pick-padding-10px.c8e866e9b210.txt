@@ -1,0 +1,1 @@
+|.static-pick|padding|10px

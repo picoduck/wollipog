@@ -1,0 +1,1 @@
+|.os-badge|text-transform|uppercase

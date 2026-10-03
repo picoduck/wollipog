@@ -1,0 +1,1 @@
+|.static-pick|gap|8px

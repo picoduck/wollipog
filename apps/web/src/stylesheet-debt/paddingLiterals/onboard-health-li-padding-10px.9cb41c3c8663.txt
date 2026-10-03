@@ -1,0 +1,1 @@
+|.onboard-health>li|padding|10px

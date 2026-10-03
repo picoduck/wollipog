@@ -1,0 +1,1 @@
+|.outbound-event-receipts>div|gap|2px

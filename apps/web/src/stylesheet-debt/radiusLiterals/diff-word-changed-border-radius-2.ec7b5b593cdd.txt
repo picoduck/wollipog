@@ -1,0 +1,1 @@
+|.diff-word-changed|border-radius|2

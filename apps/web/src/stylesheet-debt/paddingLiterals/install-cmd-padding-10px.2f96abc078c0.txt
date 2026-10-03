@@ -1,0 +1,1 @@
+|.install-cmd|padding|10px

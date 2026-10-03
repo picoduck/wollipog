@@ -1,0 +1,1 @@
+|.onboard-local-agents>span|padding|8px

@@ -1,0 +1,1 @@
+|.diff-comment-editor,.diff-inline-finding|border-radius|7

@@ -1,0 +1,1 @@
+|.snooze-conflict|gap|6px

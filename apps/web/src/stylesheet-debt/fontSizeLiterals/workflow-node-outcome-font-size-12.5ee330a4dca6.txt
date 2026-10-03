@@ -1,0 +1,1 @@
+|.workflow-node-outcome|font-size|12

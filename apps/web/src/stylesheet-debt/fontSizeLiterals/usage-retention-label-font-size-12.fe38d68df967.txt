@@ -1,0 +1,1 @@
+|.usage-retention label|font-size|12

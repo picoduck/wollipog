@@ -1,0 +1,1 @@
+|.hunk-staged-chip|font-size|11

@@ -1,0 +1,1 @@
+|.automation-execution|padding|10px

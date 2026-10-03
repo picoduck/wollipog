@@ -1,0 +1,1 @@
+@media (max-width: 760px)|.inbox-activity-footer|gap|6px

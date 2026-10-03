@@ -1,0 +1,1 @@
+|.static-pick|font-size|13

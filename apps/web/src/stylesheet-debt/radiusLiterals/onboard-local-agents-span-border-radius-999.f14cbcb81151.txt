@@ -1,0 +1,1 @@
+|.onboard-local-agents>span|border-radius|999

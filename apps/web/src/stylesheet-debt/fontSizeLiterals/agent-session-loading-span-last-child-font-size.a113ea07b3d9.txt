@@ -1,0 +1,1 @@
+|.agent-session-loading span:last-child|font-size|12

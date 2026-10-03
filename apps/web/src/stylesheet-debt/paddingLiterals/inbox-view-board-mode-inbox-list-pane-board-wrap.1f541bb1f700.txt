@@ -1,0 +1,3 @@
+|.inbox-view.board-mode>.inbox-list-pane>.board-wrap|padding|14px
+|.inbox-view.board-mode>.inbox-list-pane>.board-wrap|padding|14px
+|.inbox-view.board-mode>.inbox-list-pane>.board-wrap|padding|14px

@@ -1,0 +1,1 @@
+|.agent-session-selected-agent|border-radius|9

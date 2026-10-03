@@ -1,0 +1,1 @@
+|.composer-answer-mode|text-transform|uppercase

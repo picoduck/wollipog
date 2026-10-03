@@ -47,10 +47,10 @@ Two classes the first sweeps re-derived independently, now named so no run deriv
   reachable lines. This was 149 of 168 export candidates in one run. Separate the two cases with
   `git grep -c -w "<symbol>" -- "<its own file>"`: a count of 1 (declaration only) is the real
   dead-code signal; more means the symbol is alive and at most the export modifier is noise.
-- Manual-run tooling under `scripts/` is not dead. `scripts/regenerate-stylesheet-debt.mjs` and
-  `scripts/generate-pwa-icons.mjs` are deliberately caller-less generators whose outputs are
-  committed; nothing in any `package.json` invokes them by design. Two runs derived this from
-  scratch.
+- Manual-run tooling under `scripts/` is not dead. `scripts/generate-pwa-icons.mjs` is a
+  deliberately caller-less generator whose output is committed; nothing in any `package.json`
+  invokes it by design. `scripts/regenerate-stylesheet-debt.mjs` is the same kind of generator,
+  run by hand through `pnpm regenerate:stylesheet-debt`. Two runs derived this from scratch.
 - knip's "Duplicate exports" flags live aliases where BOTH names have consumers (three of five in
   one run — `buildInboxSplits`/`deriveInboxSplits`, `requestBlobDownload`/`requestTranscriptDownload`,
   and the protocol constant pairs). An alias is dead only when one name has no consumer at all.

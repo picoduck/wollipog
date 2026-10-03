@@ -1,0 +1,1 @@
+|.os-badge|padding|3px

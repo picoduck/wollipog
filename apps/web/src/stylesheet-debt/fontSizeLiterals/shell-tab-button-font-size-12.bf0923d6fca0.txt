@@ -1,0 +1,1 @@
+|.shell-tab>button|font-size|12

@@ -1,0 +1,1 @@
+|.instance-card-message,.instance-card-error|padding|9px

@@ -1,0 +1,1 @@
+|.automation-trigger|border-radius|8

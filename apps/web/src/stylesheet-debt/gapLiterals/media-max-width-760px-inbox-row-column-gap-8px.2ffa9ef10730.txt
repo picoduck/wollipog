@@ -1,0 +1,1 @@
+@media (max-width: 760px)|.inbox-row|column-gap|8px

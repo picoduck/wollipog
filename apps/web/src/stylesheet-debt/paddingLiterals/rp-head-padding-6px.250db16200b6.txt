@@ -1,0 +1,2 @@
+|.rp-head|padding|6px
+|.rp-head|padding|6px

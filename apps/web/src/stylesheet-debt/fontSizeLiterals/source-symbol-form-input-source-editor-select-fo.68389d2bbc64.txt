@@ -1,0 +1,1 @@
+|.source-symbol-form input,.source-editor-select|font-size|12

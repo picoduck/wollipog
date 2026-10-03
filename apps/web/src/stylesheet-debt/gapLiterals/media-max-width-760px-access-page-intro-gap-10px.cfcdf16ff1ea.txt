@@ -1,0 +1,1 @@
+@media (max-width: 760px)|.access-page-intro|gap|10px

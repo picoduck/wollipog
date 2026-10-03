@@ -1,0 +1,1 @@
+|.inbox-shortcut-rail button|border-radius|4

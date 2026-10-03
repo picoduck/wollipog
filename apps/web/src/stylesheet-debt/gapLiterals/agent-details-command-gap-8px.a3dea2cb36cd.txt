@@ -1,0 +1,1 @@
+|.agent-details-command|gap|8px

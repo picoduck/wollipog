@@ -1,0 +1,1 @@
+|.sidechat-timeline|padding|2px

@@ -1,0 +1,1 @@
+|.copy-btn.icon-only-copy|padding|5px

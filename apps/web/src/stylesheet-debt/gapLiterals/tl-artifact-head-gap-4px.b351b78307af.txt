@@ -1,0 +1,1 @@
+|.tl-artifact-head|gap|4px

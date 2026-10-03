@@ -1,0 +1,1 @@
+|.rp-launcher|padding|16px

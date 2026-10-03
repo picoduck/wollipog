@@ -1,0 +1,1 @@
+|.instance-meta dt|text-transform|uppercase

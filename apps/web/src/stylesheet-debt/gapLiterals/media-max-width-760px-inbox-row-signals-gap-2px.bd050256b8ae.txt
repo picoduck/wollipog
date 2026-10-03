@@ -1,0 +1,1 @@
+@media (max-width: 760px)|.inbox-row-signals|gap|2px

@@ -1,0 +1,1 @@
+|.outdated-badge|padding|7px

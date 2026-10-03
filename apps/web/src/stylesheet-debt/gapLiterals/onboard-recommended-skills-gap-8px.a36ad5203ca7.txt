@@ -1,0 +1,1 @@
+|.onboard-recommended-skills|gap|8px

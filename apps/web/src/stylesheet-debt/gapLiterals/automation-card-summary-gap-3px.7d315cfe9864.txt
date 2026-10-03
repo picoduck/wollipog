@@ -1,0 +1,1 @@
+|.automation-card-summary|gap|3px

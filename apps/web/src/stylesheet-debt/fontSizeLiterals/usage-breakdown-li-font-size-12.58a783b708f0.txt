@@ -1,0 +1,1 @@
+|.usage-breakdown li|font-size|12

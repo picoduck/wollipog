@@ -1,0 +1,1 @@
+@media (max-width: 760px)|.access-row|gap|10px

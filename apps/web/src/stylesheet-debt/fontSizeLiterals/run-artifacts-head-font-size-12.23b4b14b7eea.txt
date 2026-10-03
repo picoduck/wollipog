@@ -1,0 +1,1 @@
+|.run-artifacts-head|font-size|12

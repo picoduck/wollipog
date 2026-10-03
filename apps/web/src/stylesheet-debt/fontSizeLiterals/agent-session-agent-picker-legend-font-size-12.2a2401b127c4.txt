@@ -1,0 +1,1 @@
+|.agent-session-agent-picker legend|font-size|12

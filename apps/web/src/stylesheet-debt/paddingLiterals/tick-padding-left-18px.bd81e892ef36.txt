@@ -1,0 +1,1 @@
+|.tick|padding-left|18px

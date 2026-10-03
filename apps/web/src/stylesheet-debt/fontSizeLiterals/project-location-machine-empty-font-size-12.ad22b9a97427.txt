@@ -1,0 +1,1 @@
+|.project-location-machine-empty|font-size|12

@@ -1,0 +1,1 @@
+|.diff-hunk-lines|font-size|12

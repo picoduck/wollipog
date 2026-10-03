@@ -1,0 +1,1 @@
+|.runner-agents>summary|font-size|12.5

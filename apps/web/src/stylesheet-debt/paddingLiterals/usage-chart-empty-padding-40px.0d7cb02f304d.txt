@@ -1,0 +1,1 @@
+|.usage-chart-empty|padding|40px

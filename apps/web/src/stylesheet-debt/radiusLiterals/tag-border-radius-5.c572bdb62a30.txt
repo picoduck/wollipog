@@ -1,0 +1,1 @@
+|.tag|border-radius|5

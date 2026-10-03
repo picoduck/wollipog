@@ -1,0 +1,1 @@
+|.workflow-node-head span|text-transform|capitalize

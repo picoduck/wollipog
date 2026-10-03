@@ -1,0 +1,1 @@
+|.runner-update-result|padding|11px

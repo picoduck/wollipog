@@ -1,0 +1,1 @@
+|.inbox-list|padding|7px

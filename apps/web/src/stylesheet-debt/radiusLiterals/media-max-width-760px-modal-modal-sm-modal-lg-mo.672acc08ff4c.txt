@@ -1,0 +1,2 @@
+@media (max-width: 760px)|.modal,.modal.sm,.modal.lg,.modal.full,.menu,.popover|border-radius|0
+@media (max-width: 760px)|.modal,.modal.sm,.modal.lg,.modal.full,.menu,.popover|border-radius|0

@@ -1,0 +1,1 @@
+|.shell-dock-body|gap|8px

@@ -1,0 +1,1 @@
+|.agent-session-agent-meta|font-size|11.5

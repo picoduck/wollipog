@@ -1,0 +1,1 @@
+|.detail-actions|gap|7px

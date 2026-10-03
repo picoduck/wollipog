@@ -1,0 +1,1 @@
+|.project-hidden-badge,.project-default-badge,.project-visibility-state|padding|6px

@@ -1,0 +1,1 @@
+|.approval-review-details|padding-top|12px

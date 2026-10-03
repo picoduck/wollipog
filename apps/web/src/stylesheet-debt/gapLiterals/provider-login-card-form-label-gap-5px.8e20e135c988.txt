@@ -1,0 +1,1 @@
+|.provider-login-card form label|gap|5px

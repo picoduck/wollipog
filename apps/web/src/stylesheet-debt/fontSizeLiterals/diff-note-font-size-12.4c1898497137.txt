@@ -1,0 +1,1 @@
+|.diff-note|font-size|12

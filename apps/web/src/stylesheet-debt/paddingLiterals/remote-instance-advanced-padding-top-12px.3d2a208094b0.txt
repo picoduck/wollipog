@@ -1,0 +1,1 @@
+|.remote-instance-advanced|padding-top|12px

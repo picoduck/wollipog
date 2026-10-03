@@ -1,0 +1,1 @@
+|.card-approval|padding|8px

@@ -1,0 +1,1 @@
+|.project-detail-heading h2|font-size|20

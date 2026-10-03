@@ -1,0 +1,1 @@
+|.diff-staged-count|padding-right|2px

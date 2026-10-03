@@ -1,0 +1,1 @@
+@media (max-width: 760px)|.usage-compact-field|gap|4px

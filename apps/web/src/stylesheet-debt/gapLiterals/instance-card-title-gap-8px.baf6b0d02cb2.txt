@@ -1,0 +1,1 @@
+|.instance-card-title|gap|8px

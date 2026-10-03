@@ -1,0 +1,1 @@
+|.pod-reconcile-receipt-head,.pod-reconcile-heads|gap|6px

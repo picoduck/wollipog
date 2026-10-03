@@ -1,0 +1,1 @@
+|.connection-details-list|gap|14px

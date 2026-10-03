@@ -1,0 +1,1 @@
+|.inbox-unread-badge|padding|5px

@@ -1,0 +1,1 @@
+|.card-top-trailing|gap|7px

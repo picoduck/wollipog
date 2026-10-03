@@ -1,0 +1,1 @@
+|.card-approval|border-radius|6

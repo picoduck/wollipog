@@ -1,0 +1,1 @@
+|.diff-badge|font-family|"Cascadia Code", "Consolas", ui-monospace, monospace

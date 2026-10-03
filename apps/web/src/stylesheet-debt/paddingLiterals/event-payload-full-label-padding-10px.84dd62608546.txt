@@ -1,0 +1,1 @@
+|.event-payload-full-label|padding|10px

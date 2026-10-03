@@ -1,0 +1,1 @@
+|.automation-trigger span,.automation-trigger small,.automation-trigger p|font-size|12

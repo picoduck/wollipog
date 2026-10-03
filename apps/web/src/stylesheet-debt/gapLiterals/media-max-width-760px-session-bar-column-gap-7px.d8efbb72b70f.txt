@@ -1,0 +1,1 @@
+@media (max-width: 760px)|.session-bar|column-gap|7px

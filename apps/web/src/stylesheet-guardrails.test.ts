@@ -5,6 +5,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import postcss from "postcss";
 import ts from "typescript";
+import { readInventory, REGENERATE_COMMAND } from "../../../scripts/stylesheet-debt-store.mjs";
 import { KEYBOARD_EDITABLE } from "./mobile-viewport.js";
 
 /**
@@ -630,24 +631,30 @@ function withoutEach(left: readonly string[], right: readonly string[]): string[
  */
 export function assertInventoryMatches(recorded: Record<string, readonly string[]>, measured: Record<string, readonly string[]>): void {
   for (const key of new Set([...Object.keys(measured), ...Object.keys(recorded)])) {
-    assert.ok(key in measured, `${key}: stylesheet-debt.json records an inventory nothing measures; remove the key`);
+    assert.ok(key in measured, `${key}: the stylesheet debt inventory records an inventory nothing measures; ` +
+      `run \`${REGENERATE_COMMAND}\` to remove it`);
     assert.ok(Array.isArray(recorded[key]),
-      `${key}: stylesheet-debt.json has no ${key} inventory; regenerate it when the rule is introduced`);
+      `${key}: the stylesheet debt inventory has no ${key} inventory; run \`${REGENERATE_COMMAND}\` when the rule is introduced`);
     const guidance = DEBT_GUIDANCE[key as keyof DebtInventory] ?? "fix the source";
     const added = withoutEach(measured[key]!, recorded[key]!);
     assert.deepEqual(added, [],
-      `${key}: new debt that is not in stylesheet-debt.json — ${guidance}. Adding it to the inventory is not the fix.`);
+      `${key}: new debt that is not in apps/web/src/stylesheet-debt/ — ${guidance}. Adding it to the inventory is not the fix.`);
     const paid = withoutEach(recorded[key]!, measured[key]!);
     assert.deepEqual(paid, [],
-      `${key}: ${paid.length} entries are recorded but no longer present. Good — regenerate ` +
-      "stylesheet-debt.json in this commit so the inventory keeps matching the tree.");
+      `${key}: ${paid.length} entries are recorded but no longer present. Good — run \`${REGENERATE_COMMAND}\` ` +
+      "in this commit so the inventory keeps matching the tree.");
   }
 }
 
-const RECORDED = JSON.parse(readFileSync(join(WEB, "src/stylesheet-debt.json"), "utf8")) as DebtInventory;
+/**
+ * Read when a test asks, never at import: `scripts/regenerate-stylesheet-debt.mjs` imports this
+ * module to measure the tree, and has to run while the recorded directory is wrong — that is when
+ * it is needed.
+ */
+const recordedDebt = () => readInventory() as unknown as DebtInventory;
 
 test("no debt is added, and none is traded for other debt", () => {
-  assertInventoryMatches(RECORDED as unknown as Record<string, string[]>, measureDebt() as unknown as Record<string, string[]>);
+  assertInventoryMatches(recordedDebt() as unknown as Record<string, string[]>, measureDebt() as unknown as Record<string, string[]>);
 });
 
 test("window.confirm is never called; confirmations use the in-app dialog", () => {
@@ -3230,7 +3237,7 @@ const RENDERED = (() => {
 
 /*
  * Both class directions are non-zero, for reasons that are not the same, and both are recorded by
- * identity in `stylesheet-debt.json` rather than by count.
+ * identity in `apps/web/src/stylesheet-debt/` rather than by count.
  *
  * A static scan cannot resolve a COMPOSED class: `status-${state}`, `agent-${provider}` and
  * `col-${id}` reach the DOM as real names and the stem matches nothing. So the dead list mixes
@@ -3511,11 +3518,11 @@ test("the ratchet checks identity and multiplicity, not totals", () => {
   // Paying debt without regenerating fails with the regenerate instruction.
   const paid = cssDebtOf(".a { gap: var(--space-2); padding: 6px; } .b { color: red; }");
   assert.throws(() => assertInventoryMatches(recorded, paid),
-    failsNaming("gapLiterals: 1 entries are recorded but no longer present", "regenerate stylesheet-debt.json in this commit"));
+    failsNaming("gapLiterals: 1 entries are recorded but no longer present", "run `pnpm regenerate:stylesheet-debt` in this commit"));
   // Deleting an inventory's key does not switch its check off.
   const withoutGap = { ...recorded };
   delete withoutGap.gapLiterals;
-  assert.throws(() => assertInventoryMatches(withoutGap, recorded), failsNaming("stylesheet-debt.json has no gapLiterals"));
+  assert.throws(() => assertInventoryMatches(withoutGap, recorded), failsNaming("inventory has no gapLiterals inventory"));
 });
 
 test("the literal rules read px sizes only, and read them wherever they sit in a value", () => {
@@ -3558,7 +3565,7 @@ test("the mono-stack rule exempts only the two font tokens and reads only styles
   }
   // The TypeScript xterm stack in terminal-font.ts is out of scope by construction: the rule takes a
   // parsed stylesheet, and the production guard hands it styles.css and nothing else.
-  assert.ok(RECORDED.monoStacks.every((identity) => !identity.includes("terminal-font")));
+  assert.ok(recordedDebt().monoStacks.every((identity) => !identity.includes("terminal-font")));
 });
 
 test("flex-end with horizontal overflow is reported per rule, and the safe keyword is not", () => {

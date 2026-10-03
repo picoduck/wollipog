@@ -1,0 +1,2 @@
+|.shell-tab-close|padding|3px
+|.shell-tab-close|padding|3px

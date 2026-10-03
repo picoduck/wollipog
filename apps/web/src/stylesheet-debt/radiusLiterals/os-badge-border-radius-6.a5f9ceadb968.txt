@@ -1,0 +1,1 @@
+|.os-badge|border-radius|6

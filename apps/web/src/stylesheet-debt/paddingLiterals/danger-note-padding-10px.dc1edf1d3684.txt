@@ -1,0 +1,1 @@
+|.danger-note|padding|10px

@@ -1,0 +1,1 @@
+|.instance-card-head|gap|10px

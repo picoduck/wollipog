@@ -1,0 +1,1 @@
+|.workflow-role-bindings label>span|font-family|ui-monospace, SFMono-Regular, Consolas, monospace

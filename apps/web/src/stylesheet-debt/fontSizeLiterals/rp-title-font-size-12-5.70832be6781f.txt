@@ -1,0 +1,1 @@
+|.rp-title|font-size|12.5

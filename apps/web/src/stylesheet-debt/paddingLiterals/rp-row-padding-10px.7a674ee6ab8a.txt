@@ -1,0 +1,1 @@
+|.rp-row|padding|10px

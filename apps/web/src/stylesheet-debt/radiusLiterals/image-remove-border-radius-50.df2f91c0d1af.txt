@@ -1,0 +1,1 @@
+|.image-remove|border-radius|50

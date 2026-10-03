@@ -1,0 +1,1 @@
+|.workflow-node|gap|6px

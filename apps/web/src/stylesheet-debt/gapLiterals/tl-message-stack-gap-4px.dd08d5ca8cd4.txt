@@ -1,0 +1,1 @@
+|.tl-message-stack|gap|4px

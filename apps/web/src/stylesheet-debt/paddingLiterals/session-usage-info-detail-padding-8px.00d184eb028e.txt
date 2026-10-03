@@ -1,0 +1,1 @@
+|.session-usage-info-detail|padding|8px

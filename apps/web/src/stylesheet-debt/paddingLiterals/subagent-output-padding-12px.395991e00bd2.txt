@@ -1,0 +1,1 @@
+|.subagent-output|padding|12px

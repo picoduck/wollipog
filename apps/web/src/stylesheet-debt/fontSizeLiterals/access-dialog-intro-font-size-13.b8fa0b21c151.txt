@@ -1,0 +1,1 @@
+|.access-dialog-intro|font-size|13

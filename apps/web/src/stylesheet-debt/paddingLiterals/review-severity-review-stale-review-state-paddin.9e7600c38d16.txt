@@ -1,0 +1,1 @@
+|.review-severity,.review-stale,.review-state|padding|7px

@@ -1,0 +1,1 @@
+|.session-usage-info>button|padding|1px

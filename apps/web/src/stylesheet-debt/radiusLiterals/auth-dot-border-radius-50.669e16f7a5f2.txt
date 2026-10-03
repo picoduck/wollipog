@@ -1,0 +1,1 @@
+|.auth-dot|border-radius|50

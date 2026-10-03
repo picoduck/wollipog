@@ -1,0 +1,1 @@
+|.provider-login-device-code code|padding|5px

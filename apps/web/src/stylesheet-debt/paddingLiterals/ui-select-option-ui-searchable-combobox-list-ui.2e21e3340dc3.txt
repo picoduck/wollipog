@@ -1,0 +1,1 @@
+|.ui-select-option,.ui-searchable-combobox-list .ui-inline-listbox-option|padding|8px

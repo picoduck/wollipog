@@ -1,0 +1,1 @@
+|.ps-check-dot|border-radius|50

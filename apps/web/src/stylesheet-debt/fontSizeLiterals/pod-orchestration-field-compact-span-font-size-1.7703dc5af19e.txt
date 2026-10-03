@@ -1,0 +1,1 @@
+|.pod-orchestration .field.compact>span|font-size|10

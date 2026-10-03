@@ -1,0 +1,1 @@
+|.connection-details-list dd|font-size|12.5

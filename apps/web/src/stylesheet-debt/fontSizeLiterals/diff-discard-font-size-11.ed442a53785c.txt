@@ -1,0 +1,1 @@
+|.diff-discard|font-size|11

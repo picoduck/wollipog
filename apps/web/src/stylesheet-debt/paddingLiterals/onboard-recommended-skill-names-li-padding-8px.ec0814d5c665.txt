@@ -1,0 +1,1 @@
+|.onboard-recommended-skill-names>li|padding|8px

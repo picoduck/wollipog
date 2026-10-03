@@ -1,0 +1,1 @@
+|.queued-edit-banner|padding|7px

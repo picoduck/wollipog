@@ -1,0 +1,1 @@
+|.column-count|font-size|11

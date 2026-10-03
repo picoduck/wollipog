@@ -1,0 +1,1 @@
+|.usage-privacy|font-size|11

@@ -1,0 +1,1 @@
+|.tl-request-card|padding|12px

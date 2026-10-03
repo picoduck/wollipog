@@ -1,0 +1,1 @@
+|.automation-trigger|padding|10px

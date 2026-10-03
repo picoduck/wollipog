@@ -1,0 +1,1 @@
+@media (max-width: 760px)|.pairing-controls input|font-size|16

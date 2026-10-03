@@ -1,0 +1,1 @@
+|.approval-bar .approval-main|gap|10px

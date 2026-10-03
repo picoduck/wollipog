@@ -1,0 +1,1 @@
+|.rp-back,.rp-close|padding|8px

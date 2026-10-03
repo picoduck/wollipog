@@ -1,0 +1,1 @@
+|.approval-bar|padding|14px

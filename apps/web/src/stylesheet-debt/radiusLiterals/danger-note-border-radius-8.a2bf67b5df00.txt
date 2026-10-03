@@ -1,0 +1,1 @@
+|.danger-note|border-radius|8

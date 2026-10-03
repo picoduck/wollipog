@@ -1,0 +1,1 @@
+|.shell-tab>button|padding|8px

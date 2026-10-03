@@ -1,0 +1,1 @@
+|.automation-trigger>div:first-child|gap|2px

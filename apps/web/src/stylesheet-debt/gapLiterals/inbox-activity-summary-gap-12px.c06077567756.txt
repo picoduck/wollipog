@@ -1,0 +1,1 @@
+|.inbox-activity-summary|gap|12px

@@ -1,0 +1,1 @@
+|.machine-settings-dialog .modal-body|gap|20px

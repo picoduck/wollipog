@@ -1,0 +1,1 @@
+|.access-form label small|font-size|11.5

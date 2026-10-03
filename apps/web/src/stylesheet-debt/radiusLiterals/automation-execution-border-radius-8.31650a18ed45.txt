@@ -1,0 +1,1 @@
+|.automation-execution|border-radius|8

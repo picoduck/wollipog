@@ -1,0 +1,1 @@
+|.agent-session-results-head strong|font-size|13

@@ -1,0 +1,1 @@
+@media (max-width: 760px)|.composer-box.idle-collapsed .composer-idle-preview|padding|4px

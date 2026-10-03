@@ -1,0 +1,1 @@
+|.machine-name-row|gap|10px

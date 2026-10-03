@@ -1,0 +1,1 @@
+|.automation-card-name|font-size|15

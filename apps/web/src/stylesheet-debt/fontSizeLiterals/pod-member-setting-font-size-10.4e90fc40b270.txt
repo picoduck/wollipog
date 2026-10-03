@@ -1,0 +1,1 @@
+|.pod-member-setting|font-size|10

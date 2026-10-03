@@ -1,0 +1,1 @@
+|.access-pairing-qr-frame|padding|6px

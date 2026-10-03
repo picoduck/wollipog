@@ -1,0 +1,2 @@
+|.inbox-row-shell.stalled::before|border-radius|0
+|.inbox-row-shell.stalled::before|border-radius|0

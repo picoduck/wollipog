@@ -1,0 +1,1 @@
+|.run-artifact-preview pre|padding|10px

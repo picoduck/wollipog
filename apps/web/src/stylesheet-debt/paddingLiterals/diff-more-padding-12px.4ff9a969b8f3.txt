@@ -1,0 +1,1 @@
+|.diff-more|padding|12px

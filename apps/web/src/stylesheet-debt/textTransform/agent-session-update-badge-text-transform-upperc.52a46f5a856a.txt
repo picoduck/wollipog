@@ -1,0 +1,1 @@
+|.agent-session-update-badge|text-transform|uppercase

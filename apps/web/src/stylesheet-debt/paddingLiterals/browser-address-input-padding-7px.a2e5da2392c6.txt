@@ -1,0 +1,1 @@
+|.browser-address input|padding|7px

@@ -1,0 +1,1 @@
+|.composer-box|padding|12px

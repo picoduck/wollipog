@@ -1,0 +1,1 @@
+|.status-dot|border-radius|50

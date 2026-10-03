@@ -1,0 +1,1 @@
+|.rail-brand img|border-radius|10

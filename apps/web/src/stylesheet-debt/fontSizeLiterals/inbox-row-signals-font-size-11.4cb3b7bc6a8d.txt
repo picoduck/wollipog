@@ -1,0 +1,1 @@
+|.inbox-row-signals|font-size|11

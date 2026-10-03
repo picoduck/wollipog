@@ -1,0 +1,1 @@
+|.browser-panel,.browser-web,.browser-artifacts,.browser-artifact-detail,.artifact-preview|gap|10px

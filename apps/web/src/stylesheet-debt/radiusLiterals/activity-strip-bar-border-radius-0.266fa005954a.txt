@@ -1,0 +1,2 @@
+|.activity-strip-bar|border-radius|0
+|.activity-strip-bar|border-radius|0

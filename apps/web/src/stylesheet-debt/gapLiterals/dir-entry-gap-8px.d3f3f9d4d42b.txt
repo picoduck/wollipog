@@ -1,0 +1,1 @@
+|.dir-entry|gap|8px

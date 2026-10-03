@@ -1,0 +1,1 @@
+|.access-pairing-address small|font-size|11.5

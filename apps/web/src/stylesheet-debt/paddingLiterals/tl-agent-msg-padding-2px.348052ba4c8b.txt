@@ -1,0 +1,1 @@
+|.tl-agent-msg|padding|2px

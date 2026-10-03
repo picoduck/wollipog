@@ -1,0 +1,1 @@
+|.workspace-reference-remove|padding|8px

@@ -1,0 +1,3 @@
+|.recommended-skills-notice-list>li|padding|2px
+|.recommended-skills-notice-list>li|padding|2px
+|.recommended-skills-notice-list>li|padding|2px

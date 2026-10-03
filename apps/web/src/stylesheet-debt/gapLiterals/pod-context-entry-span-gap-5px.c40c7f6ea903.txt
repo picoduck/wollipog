@@ -1,0 +1,1 @@
+|.pod-context-entry>span|gap|5px

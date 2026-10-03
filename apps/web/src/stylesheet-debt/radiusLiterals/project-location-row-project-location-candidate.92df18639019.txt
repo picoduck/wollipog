@@ -1,0 +1,1 @@
+|.project-location-row,.project-location-candidate|border-radius|9

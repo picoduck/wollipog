@@ -1,0 +1,1 @@
+@media (max-width: 760px)|.inbox-thread-family|padding-right|5px

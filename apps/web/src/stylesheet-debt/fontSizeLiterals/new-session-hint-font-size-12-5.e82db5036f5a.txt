@@ -1,0 +1,1 @@
+|.new-session-hint|font-size|12.5

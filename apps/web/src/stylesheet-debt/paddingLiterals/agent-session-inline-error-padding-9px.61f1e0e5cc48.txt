@@ -1,0 +1,1 @@
+|.agent-session-inline-error|padding|9px

@@ -1,0 +1,1 @@
+|.modal-heading|gap|2px

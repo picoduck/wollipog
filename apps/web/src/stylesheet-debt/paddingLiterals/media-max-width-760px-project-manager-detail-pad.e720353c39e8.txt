@@ -1,0 +1,1 @@
+@media (max-width: 760px)|.project-manager-detail|padding|14px

@@ -1,0 +1,1 @@
+|.usage-granularity-notes|gap|4px

@@ -1,0 +1,1 @@
+|.shell-dock-empty|padding|12px
