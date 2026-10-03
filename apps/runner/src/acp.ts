@@ -568,7 +568,10 @@ export class AcpClient {
     }
     const promptText = slashCommand ? `/${slashCommand}${text ? ` ${text}` : ""}` : text;
     if (promptText) content.push({ type: "text", text: promptText });
-    if (this.artifactGuidance) content.push({ type: "text", text: this.artifactGuidance });
+    // ACP providers differ in native slash parsing; command turns are not instruction updates.
+    if (this.artifactGuidance && !slashCommand && !promptText.trimStart().startsWith("/")) {
+      content.push({ type: "text", text: this.artifactGuidance });
+    }
     if (images.length) {
       if (this.supportsImages) {
         for (const img of images) {

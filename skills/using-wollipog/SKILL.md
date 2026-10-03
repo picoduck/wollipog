@@ -163,7 +163,8 @@ connected from another device. The runner uploads the file directly to private c
 storage; the bytes do not pass through the model context. Attaching does not assign this skill or
 change any hosting preference.
 
-Supported managed harnesses receive capability and preference guidance when they launch or resume.
+Supported managed harnesses receive capability and preference guidance with ordinary tasks after launch or resume.
+Native slash-command turns preserve provider input; guidance arrives with the next ordinary task.
 Native TUI sessions have no reliable additive mechanism for updating mutable upload preferences;
 use explicit task instructions or this opt-in skill there. Awareness alone grants no transfer authority.
 
