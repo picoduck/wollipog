@@ -712,6 +712,51 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     "the provider sign-in projection in the authenticated Machine view",
   );
   assert.equal(projectedProviderLogins?.length, 1);
+  const dismissUrl = `${httpBase}/api/runners/runner-ui-route/provider-logins/${providerLogin.operationId}/dismiss`;
+  assert.equal((await fetchWithBearer(dismissUrl, operatorToken, { method: "PUT" })).status, 403);
+  assert.equal((await fetchWithBearer(dismissUrl, ownerToken, { method: "PUT" })).status, 409,
+    "an active sign-in cannot be acknowledged as a failed notice");
+  const failedLogin = { ...providerLogin, status: "failed", expectsCode: false, verificationUrl: undefined };
+  runner.send(JSON.stringify({ type: "provider_logins_updated", runnerId: "runner-ui-route", logins: [failedLogin] }));
+  await waitForValue(
+    async () => (await (await fetchWithBearer(`${httpBase}/api/runners`, ownerToken)).json() as {
+      runners: Array<{ runnerId: string; providerLogins?: Array<{ status: string }> }>;
+    }).runners.find(candidate => candidate.runnerId === "runner-ui-route")?.providerLogins?.[0]?.status,
+    status => status === "failed", "failed provider sign-in notice",
+  );
+  assert.equal((await fetchWithBearer(dismissUrl, ownerToken, { method: "PUT" })).status, 200);
+  assert.equal((await fetchWithBearer(dismissUrl, ownerToken, { method: "PUT" })).status, 200,
+    "acknowledgment is idempotent");
+  const loginProjection = async () => (await (await fetchWithBearer(`${httpBase}/api/runners`, ownerToken)).json() as {
+    runners: Array<{ runnerId: string; providerLogins?: Array<{ operationId: string }> }>;
+  }).runners.find(candidate => candidate.runnerId === "runner-ui-route")?.providerLogins;
+  assert.deepEqual(await loginProjection(), [], "reload reads a durable acknowledgment");
+  const { socket: dismissalUi, inbox: dismissalInbox } = await openSocketWithInbox(authenticatedUiUrl(wsBase, ownerToken));
+  try {
+    const dismissalSnapshot = await dismissalInbox.take(message => message.type === "snapshot");
+    assert.deepEqual((dismissalSnapshot.runners as Array<{ runnerId: string; providerLogins?: unknown[] }>)
+      .find(candidate => candidate.runnerId === "runner-ui-route")?.providerLogins, [],
+      "a fresh WebSocket connection projects the persisted acknowledgment");
+    runner.send(JSON.stringify({ type: "provider_logins_updated", runnerId: "runner-ui-route", logins: [failedLogin] }));
+    const dismissalDelta = await dismissalInbox.take(message => message.type === "runner_upsert" &&
+      (message.runner as { runnerId: string }).runnerId === "runner-ui-route");
+    assert.deepEqual((dismissalDelta.runner as { providerLogins: unknown[] }).providerLogins, [],
+      "runner updates cannot resurrect the dismissed attempt");
+  } finally {
+    dismissalUi.close();
+  }
+  const subsequentLogin = { ...failedLogin, operationId: "login_subsequent-failure" };
+  runner.send(JSON.stringify({ type: "provider_logins_updated", runnerId: "runner-ui-route",
+    logins: [failedLogin, subsequentLogin] }));
+  await waitForValue(loginProjection,
+    logins => logins?.length === 1 && logins[0]?.operationId === subsequentLogin.operationId,
+    "a subsequent failure is visible while the dismissed attempt stays hidden");
+  runner.send(JSON.stringify({ type: "provider_logins_updated", runnerId: "runner-ui-route",
+    logins: [{ ...failedLogin, sessionId: "session-recovery" }] }));
+  await waitForValue(loginProjection, logins => logins?.length === 1, "session recovery is preserved");
+  assert.equal((await fetchWithBearer(dismissUrl, ownerToken, { method: "PUT" })).status, 409,
+    "session authentication recovery is outside machine-notice dismissal");
+
   const ordinaryProviderLogins = (await (await fetchWithBearer(
     `${httpBase}/api/runners`, operatorToken,
   )).json() as { runners: Array<{ runnerId: string; providerLogins?: unknown[] }> })

@@ -676,6 +676,7 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
     routePath === "/api/runners/:id/capacity" ||
     routePath === "/api/runners/:id/provider-logins" ||
     routePath === "/api/runners/:id/provider-logins/:operationId/code" ||
+    routePath === "/api/runners/:id/provider-logins/:operationId/dismiss" ||
     routePath === "/api/runners/:id/provider-logins/:operationId" ||
     routePath === "/api/runners/:id/skills/sync" ||
     routePath === "/api/runners/:id/skill-snapshots" ||
@@ -2813,6 +2814,31 @@ app.post("/api/runners/:id/provider-logins/:operationId/code", async (req, reply
   } catch (error) {
     return reply.code(504).send({ error: (error as Error).message });
   }
+});
+
+app.put("/api/runners/:id/provider-logins/:operationId/dismiss", async (req, reply) => {
+  const { id, operationId } = req.params as { id: string; operationId: string };
+  if (!/^login_[A-Za-z0-9-]{1,122}$/u.test(operationId)) {
+    return reply.code(400).send({ error: "operationId is invalid" });
+  }
+  const principal = requestHuman(req);
+  if (!principal || !db.canManageRunner(principal, id)) {
+    return reply.code(403).send({ error: "Machine owner or organization admin permission is required" });
+  }
+  const runner = db.getRunner(id);
+  if (!runner) return reply.code(404).send({ error: "runner not found" });
+  const login = runner.providerLogins?.find(candidate => candidate.operationId === operationId);
+  if (!login) return reply.code(404).send({ error: "provider sign-in not found" });
+  if (login.sessionId || (login.status !== "failed" && login.status !== "timed_out")) {
+    return reply.code(409).send({ error: "Only completed machine sign-in failures can be dismissed." });
+  }
+  db.dismissProviderLoginNotice(principal.userId, id, operationId);
+  // Existing per-principal projections synchronize every connected device without touching the
+  // runner's account inventory or sending a cancellation command.
+  hub.runnerChanged(id);
+  req.log.info({ event: "provider_login_notice_dismissed", runnerId: id, operationId },
+    "Provider sign-in failure notice dismissed");
+  return { dismissed: true };
 });
 
 app.delete("/api/runners/:id/provider-logins/:operationId", async (req, reply) => {

@@ -997,6 +997,14 @@ CREATE TABLE IF NOT EXISTS worktree_setup_notice_dismissals (
   PRIMARY KEY (user_id, project_id)
 );
 
+CREATE TABLE IF NOT EXISTS provider_login_notice_dismissals (
+  user_id TEXT NOT NULL REFERENCES identity_users(user_id) ON DELETE CASCADE,
+  runner_id TEXT NOT NULL REFERENCES runners(runner_id) ON DELETE CASCADE,
+  operation_id TEXT NOT NULL,
+  dismissed_at INTEGER NOT NULL,
+  PRIMARY KEY (user_id, runner_id, operation_id)
+);
+
 -- User-submitted prompts and recovered question answers use the runner's durable receipt lane.
 -- Unlike scheduler-owned automation commands these rows belong directly to a session and remain
 -- recoverable across a control-plane restart without manufacturing an automation execution.
@@ -9979,6 +9987,24 @@ export class ControlPlaneDb {
     return scope ? this.principalCanAccessScope(principal, scope) : false;
   }
 
+  dismissProviderLoginNotice(userId: string, runnerId: string, operationId: string, now = Date.now()): void {
+    this.stmt(
+      `INSERT INTO provider_login_notice_dismissals (user_id, runner_id, operation_id, dismissed_at)
+       VALUES (?, ?, ?, ?) ON CONFLICT(user_id, runner_id, operation_id) DO NOTHING`,
+    ).run(userId, runnerId, operationId, now);
+  }
+
+  private providerLoginsForPrincipal(principal: AuthPrincipal, runner: RunnerView): RunnerView["providerLogins"] {
+    if (principal.kind !== "human" || !runner.providerLogins?.length) return runner.providerLogins;
+    const dismissed = new Set((this.stmt(
+      "SELECT operation_id FROM provider_login_notice_dismissals WHERE user_id=? AND runner_id=?",
+    ).all(principal.userId, runner.runnerId) as Array<{ operation_id: string }>).map(row => row.operation_id));
+    // Acknowledgment affects only the completed machine notice, never an active operation or
+    // session authentication recovery, even if the runner republishes the same operation id.
+    return runner.providerLogins.filter(login => login.sessionId ||
+      (login.status !== "failed" && login.status !== "timed_out") || !dismissed.has(login.operationId));
+  }
+
   listRunnersForPrincipal(principal: AuthPrincipal): RunnerView[] {
     const administers = principal.kind === "human" && (principal.role === "owner" || principal.role === "admin");
     return this.listRunners()
@@ -10005,7 +10031,7 @@ export class ControlPlaneDb {
           runtime: administers ? runner.runtime : undefined,
           // Verification URLs and device codes are bearer-like authentication material. Keep the
           // complete operation projection available only to principals who can mutate this Machine.
-          providerLogins: canManage ? runner.providerLogins : undefined,
+          providerLogins: canManage ? this.providerLoginsForPrincipal(principal, runner) : undefined,
         };
       });
   }

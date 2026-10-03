@@ -1894,6 +1894,46 @@ test("provider sign-in projections are validated, version-gated, and replace ato
   assert.equal(db.getRunner("runner-1")?.providerLogins, undefined);
 });
 
+test("machine sign-in dismissals persist per user, runner, and completed attempt", () => {
+  const temp = mkdtempSync(join(tmpdir(), "wollipog-login-dismiss-"));
+  const location = join(temp, "control-plane.db");
+  let db = ControlPlaneDb.open(location);
+  try {
+    const failed = {
+      operationId: "login_failed-first", accountId: "work", label: "Work",
+      provider: "claude" as const, status: "failed" as const, expectsCode: false, startedAt: 500,
+      error: "The provider did not confirm authentication.",
+    };
+    const next = { ...failed, operationId: "login_failed-next", status: "timed_out" as const };
+    db.registerRunner(meta({ providerLogins: [failed, next] }), 500, PROTOCOL_VERSION);
+    db.registerRunner(meta({ runnerId: "runner-2", providerLogins: [failed] }), 500, PROTOCOL_VERSION);
+    const visible = (principal = localOwner(), runnerId = "runner-1") =>
+      db.listRunnersForPrincipal(principal).find(runner => runner.runnerId === runnerId)?.providerLogins;
+    db.dismissProviderLoginNotice(localOwner().userId, "runner-1", failed.operationId, 600);
+    db.dismissProviderLoginNotice(localOwner().userId, "runner-1", failed.operationId, 601);
+    assert.deepEqual(visible()?.map(login => login.operationId), [next.operationId]);
+    assert.equal(visible({ ...localOwner(), userId: "another-user" })?.length, 2);
+    assert.equal(visible(localOwner(), "runner-2")?.length, 1);
+    assert.deepEqual(db.getRunner("runner-1")?.providerLogins, [failed, next],
+      "acknowledgment does not modify runner-owned operations");
+    db.close();
+    db = ControlPlaneDb.open(location);
+    assert.deepEqual(visible()?.map(login => login.operationId), [next.operationId],
+      "a database restart preserves the acknowledgment");
+    db.registerRunner(meta({ providerLogins: [failed, next] }), 700, PROTOCOL_VERSION);
+    assert.deepEqual(visible()?.map(login => login.operationId), [next.operationId],
+      "a runner reconnect cannot resurrect a dismissed failure");
+    db.updateRunnerProviderLogins("runner-1", [
+      { ...failed, status: "waiting_for_provider", error: undefined },
+      { ...next, sessionId: "session-recovery" },
+    ], 800);
+    assert.equal(visible()?.length, 2, "active and session recovery attempts are never suppressed");
+  } finally {
+    db.close();
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
 test("agentsRefreshed: register resets the marker, a discovery push sets it (gap 15 gating)", () => {
   const db = withRunner();
   // Fresh register: discovery hasn't reported yet — an empty agent list means "probing", so the

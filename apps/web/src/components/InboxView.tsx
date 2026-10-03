@@ -1463,7 +1463,7 @@ export function InboxView({
         {machineProviderLogins.length > 0 && (
           <section className="inbox-provider-logins" aria-label="Machine Provider Sign-Ins">
             {machineProviderLogins.map(({ runnerId, login }) => (
-              <ProviderLoginCard key={login.operationId} runnerId={runnerId} login={login} />
+              <ProviderLoginCard key={JSON.stringify([runnerId, login.operationId])} runnerId={runnerId} login={login} />
             ))}
           </section>
         )}

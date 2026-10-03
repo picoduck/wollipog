@@ -1310,6 +1310,12 @@ export function createApiClient(transport: ApiTransport) {
       { method: "POST", body: JSON.stringify({ code }) },
     ),
 
+  dismissProviderLoginNotice: (runnerId: string, operationId: string) =>
+    req<{ dismissed: true }>(
+      `/api/runners/${encodeURIComponent(runnerId)}/provider-logins/${encodeURIComponent(operationId)}/dismiss`,
+      { method: "PUT" },
+    ),
+
   cancelProviderLogin: (runnerId: string, operationId: string) =>
     req<{ login: ProviderLoginView }>(
       `/api/runners/${encodeURIComponent(runnerId)}/provider-logins/${encodeURIComponent(operationId)}`,

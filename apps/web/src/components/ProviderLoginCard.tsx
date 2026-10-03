@@ -36,6 +36,18 @@ export function ProviderLoginCard({ runnerId, login }: { runnerId: string; login
     }
   };
 
+  const dismiss = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.dismissProviderLoginNotice(runnerId, login.operationId);
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const cancel = async () => {
     setBusy(true);
     setError(null);
@@ -59,6 +71,10 @@ export function ProviderLoginCard({ runnerId, login }: { runnerId: string; login
           <strong><PersonalIdentifier value={login.label} label="Account Email" /></strong>
           <span>{login.provider === "claude" ? "Claude" : "Codex"} · {statusLabel(login.status)}</span>
         </div>
+        {!login.sessionId && (login.status === "failed" || login.status === "timed_out") && (
+          <button type="button" className="btn ghost provider-login-dismiss" disabled={busy}
+            onClick={() => void dismiss()}>Dismiss</button>
+        )}
         {active && <button type="button" className="btn ghost sm" disabled={busy} onClick={() => void cancel()}>Cancel</button>}
       </div>
       {login.verificationUrl && (

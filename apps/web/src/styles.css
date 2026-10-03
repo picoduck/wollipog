@@ -8451,6 +8451,11 @@ textarea,
   display: grid;
   gap: 3px;
 }
+.provider-login-dismiss {
+  min-width: 44px;
+  min-height: 44px;
+  flex-shrink: 0;
+}
 .provider-login-head span,
 .provider-login-device-code span {
   color: var(--text-dim);

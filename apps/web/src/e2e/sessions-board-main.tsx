@@ -6,6 +6,7 @@ import {
   type BoardColumn,
   type ControlPlaneToUi,
   type RunnerView,
+  type ProviderLoginView,
   type SessionReminderView,
   type SessionView,
   type UiSnapshotMessage,
@@ -50,6 +51,17 @@ const runner: RunnerView = {
   connectedAt: 1,
   lastSeen: 1,
 };
+
+const providerLoginScenario = new URLSearchParams(location.search).has("provider-logins");
+if (providerLoginScenario) {
+  runner.providerLogins = [
+    { operationId: "login_failed-first", accountId: "work", label: "Work",
+      provider: "claude", status: "failed", expectsCode: false, startedAt: 1,
+      error: "The provider did not confirm authentication." },
+    { operationId: "login_active", accountId: "team", label: "Team",
+      provider: "codex", status: "waiting_for_provider", expectsCode: false, startedAt: 2 },
+  ];
+}
 
 function session(id: string, title: string, column: BoardColumn, overrides: Partial<SessionView> = {}): SessionView {
   return {
@@ -260,11 +272,20 @@ declare global {
     __setColumnCalls: Array<{ sessionId: string; column: BoardColumn }>;
     __approveCalls: string[];
     __reminderWriteCalls: number;
+    __providerLoginCalls: string[];
+    __publishProviderLogins: (logins: ProviderLoginView[]) => void;
+    __replayProviderLoginSnapshot: () => void;
   }
 }
 window.__setColumnCalls = [];
 window.__approveCalls = [];
 window.__reminderWriteCalls = 0;
+window.__providerLoginCalls = [];
+window.__publishProviderLogins = logins => {
+  runner.providerLogins = structuredClone(logins);
+  socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
+};
+window.__replayProviderLoginSnapshot = () => socket?.push(snapshot());
 
 const reconciledReminder: SessionReminderView = {
   ...reminders.find((candidate) => candidate.sessionId === "s-snoozed")!,
@@ -279,6 +300,22 @@ const reconciledReminder: SessionReminderView = {
 
 const client = {
   ...api,
+  dismissProviderLoginNotice: async (runnerId: string, operationId: string) => {
+    window.__providerLoginCalls.push(`dismiss:${operationId}`);
+    const result = await api.dismissProviderLoginNotice(runnerId, operationId);
+    runner.providerLogins = runner.providerLogins?.filter(login => login.operationId !== operationId);
+    socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
+    return result;
+  },
+  cancelProviderLogin: async (_runnerId: string, operationId: string) => {
+    window.__providerLoginCalls.push(`cancel:${operationId}`);
+    const login = runner.providerLogins?.find(login => login.operationId === operationId);
+    if (!login) throw new Error("missing provider login");
+    login.status = "cancelled";
+    socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
+    return { login };
+  },
+  listSkills: async () => ({ skills: [] }),
   setColumn: async (sessionId: string, column: BoardColumn) => {
     window.__setColumnCalls.push({ sessionId, column });
     const moved = sessions.find((candidate) => candidate.id === sessionId);
