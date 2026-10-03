@@ -4,21 +4,25 @@ import {
   COMPOSER_COMMAND_GROUPS,
   buildComposerCommandRegistry,
   composerCommandsForTrigger,
+  composerCommandsInPickerOrder,
   composerCommandsIncludeSkills,
   findComposerCommandTrigger,
   groupComposerCommands,
+  groupRankedComposerCommands,
   mapProviderComposerCommands,
   rankComposerCommands,
   replaceComposerCommandTrigger,
   resolveComposerCommandInvocation,
   retainActiveComposerCommandId,
+  stepComposerCommandId,
   type ComposerCommand,
+  type ComposerCommandContext,
   type ProviderComposerCommand,
 } from "./composer-commands.js";
 
 function registry(
   providerCommands: readonly ProviderComposerCommand[] = [],
-  context = { planSupported: true, canStopTurn: true },
+  context: ComposerCommandContext = { planSupported: true, canStopTurn: true },
 ) {
   return buildComposerCommandRegistry({ context, providerCommands });
 }
@@ -32,12 +36,14 @@ function command(commands: readonly ComposerCommand[], id: string): ComposerComm
 test("the registry exposes stable typed app commands and explicit gate reasons", () => {
   const enabled = registry();
   assert.deepEqual(COMPOSER_COMMAND_GROUPS, [
-    { id: "app", label: "App Commands", order: 0 },
-    { id: "provider", label: "Harness Commands", order: 1 },
+    { id: "app", label: "Wollipog", order: 0 },
+    { id: "provider", label: "Agent", order: 1 },
+    { id: "skill", label: "Skills", order: 1 },
   ]);
   assert.equal(command(enabled, "app:rename-session").description, "Rename this session from its conversation.");
   assert.equal(command(enabled, "app:rename-session").label, "/rename-session");
-  assert.equal(command(enabled, "app:rename-session").displayName, "Rename Session");
+  assert.equal("displayName" in command(enabled, "app:rename-session"), false,
+    "the picker shows the typed token, not a separate action name");
   assert.deepEqual(command(enabled, "app:plan"), {
     id: "app:plan",
     name: "plan",
@@ -51,7 +57,7 @@ test("the registry exposes stable typed app commands and explicit gate reasons",
     argumentHint: "[on|off]",
     attachmentPolicy: "preserve",
     groupId: "app",
-    groupLabel: "App Commands",
+    groupLabel: "Wollipog",
   });
   assert.equal(command(enabled, "app:stop").available, true);
   assert.equal(command(enabled, "app:stop").attachmentPolicy, "preserve");
@@ -69,7 +75,7 @@ test("the registry exposes stable typed app commands and explicit gate reasons",
       { id: "app:rename-session", available: true, disabledReason: undefined },
       { id: "app:plan", available: false, disabledReason: "Plan mode is unavailable for this provider." },
       { id: "app:respond", available: false, disabledReason: "There is no pending question." },
-      { id: "app:stop", available: false, disabledReason: "There is no active turn to stop." },
+      { id: "app:stop", available: false, disabledReason: "There's no turn to stop right now." },
     ],
   );
 });
@@ -112,7 +118,7 @@ test("provider commands retain metadata and app collisions receive durable alias
     argumentHint: "<goal>",
     attachmentPolicy: "forbid",
     groupId: "provider",
-    groupLabel: "Harness Commands",
+    groupLabel: "Agent",
   });
   assert.equal(command(commands, "provider:builtin:review").invocationAlias, "review");
   assert.equal(command(commands, "provider:builtin:review").sourceLabel, "Built-In");
@@ -539,20 +545,72 @@ test("grouping and active-id retention preserve stable ranked selection", () => 
       commands: grouped.map((candidate) => candidate.id),
     })),
     [
-      { id: "app", label: "App Commands", order: 0, commands: ["app:rename-session", "app:plan", "app:respond", "app:stop"] },
+      { id: "app", label: "Wollipog", order: 0, commands: ["app:rename-session", "app:plan", "app:respond", "app:stop"] },
       {
         id: "provider",
-        label: "Harness Commands",
+        label: "Agent",
         order: 1,
         commands: ["provider:builtin:review", "provider:plugin:deploy"],
       },
     ],
   );
-  assert.equal(retainActiveComposerCommandId("provider:plugin:deploy", ranked), "provider:plugin:deploy",
-    "a disabled row may remain active so its reason is readable");
+  assert.equal(retainActiveComposerCommandId("provider:builtin:review", ranked), "provider:builtin:review");
+  assert.equal(retainActiveComposerCommandId("provider:plugin:deploy", ranked), "app:rename-session",
+    "an unavailable row is never active: its reason is already visible on its row");
   assert.equal(retainActiveComposerCommandId("removed", ranked), "app:rename-session",
-    "fallback chooses the first available ranked row while unavailable rows remain selectable");
+    "fallback chooses the first available row");
+  assert.equal(retainActiveComposerCommandId(null, ranked.filter((candidate) => !candidate.available)), null,
+    "nothing is active when nothing can run");
   assert.equal(retainActiveComposerCommandId(null, []), null);
+});
+
+test("arrow steps skip unavailable rows and wrap at either end", () => {
+  const commands = registry([
+    { name: "review", providerSource: "builtin" },
+    { name: "deploy", providerSource: "plugin", available: false },
+    { name: "zebra", providerSource: "builtin" },
+  ], { planSupported: false, canStopTurn: false });
+  const offered = composerCommandsInPickerOrder(rankComposerCommands(commands, "").map(({ command: candidate }) => candidate));
+  const runnable = offered.filter((candidate) => candidate.available).map((candidate) => candidate.id);
+  assert.deepEqual(runnable, ["app:rename-session", "provider:builtin:review", "provider:builtin:zebra"]);
+  assert.equal(stepComposerCommandId("app:rename-session", offered, 1), "provider:builtin:review");
+  assert.equal(stepComposerCommandId("provider:builtin:review", offered, 1), "provider:builtin:zebra",
+    "skips the unavailable deploy row");
+  assert.equal(stepComposerCommandId("provider:builtin:zebra", offered, 1), "app:rename-session");
+  assert.equal(stepComposerCommandId("app:rename-session", offered, -1), "provider:builtin:zebra");
+  assert.equal(stepComposerCommandId(null, offered, 1), "app:rename-session");
+  assert.equal(stepComposerCommandId(null, offered, -1), "provider:builtin:zebra");
+  assert.equal(stepComposerCommandId(null, offered.filter((candidate) => !candidate.available), 1), null);
+  assert.equal(stepComposerCommandId(null, [], 1), null);
+});
+
+test("groups name the source once each, in the order their best command ranks", () => {
+  const commands = registry([
+    { name: "review", providerSource: "builtin" },
+    { name: "release-notes", providerSource: "skill" },
+    { name: "summarize", providerSource: "user" },
+  ], { planSupported: true, canStopTurn: true, agentLabel: "Codex" });
+  assert.equal(command(commands, "provider:builtin:review").groupLabel, "Codex");
+  assert.equal(command(commands, "provider:user:summarize").groupLabel, "Codex");
+  assert.equal(command(commands, "provider:skill:release-notes").groupId, "skill");
+  assert.equal(command(commands, "provider:skill:release-notes").groupLabel, "Skills");
+  assert.equal(registry([{ name: "review", providerSource: "builtin" }], { planSupported: true, canStopTurn: true, agentLabel: "  " })
+    .find((candidate) => candidate.name === "review")?.groupLabel, "Agent", "a blank agent name falls back");
+
+  const ranked = rankComposerCommands(commands, "re").map(({ command: candidate }) => candidate);
+  const sections = groupRankedComposerCommands(ranked);
+  assert.deepEqual(sections.map((section) => section.label), [...new Set(ranked.map((candidate) => candidate.groupLabel))]);
+  assert.equal(sections[0]!.label, ranked[0]!.groupLabel, "the best match's group leads");
+  assert.equal(new Set(sections.map((section) => section.groupId)).size, sections.length);
+  assert.deepEqual(composerCommandsInPickerOrder(ranked).map((candidate) => candidate.id).sort(),
+    ranked.map((candidate) => candidate.id).sort(), "grouping drops nothing");
+  // Interleaved groups are gathered under their first appearance.
+  const interleaved = [command(commands, "provider:builtin:review"), command(commands, "app:plan"),
+    command(commands, "provider:user:summarize")];
+  assert.deepEqual(groupRankedComposerCommands(interleaved).map((section) => [section.label, section.commands.map((candidate) => candidate.name)]), [
+    ["Codex", ["review", "summarize"]],
+    ["Wollipog", ["plan"]],
+  ]);
 });
 
 test("invalid command names are excluded before they can become path-like aliases", () => {

@@ -93,6 +93,8 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `CommandLineIcon` | Lucide | `SquareTerminal` | Command-line destination; the session bar's Terminal toggle. |
 | `GlobeIcon` | Lucide | `Globe` | Remote host; a web fetch step in the transcript. |
 | `FolderIcon` | Lucide | `Folder` | Generic directory. |
+| `FileIcon` | Lucide | `File` | Generic file; a file row in the @ picker beside the folder row. |
+| `BanIcon` | Lucide | `Ban` | Why a choice can't be made: a disabled command's reason in the / picker. |
 | `FolderUpIcon` | Lucide | `CornerUpLeft` | Navigate to the parent directory. |
 | `HelpIcon` | Lucide | `MessageCircleQuestion` | Contextual help. |
 | `MicIcon` | Lucide | `Mic` | Dictation action. |

@@ -2,6 +2,8 @@ import React from "react";
 import { StatusBadge } from "../components/StatusBadge.js";
 import { CountBadge } from "../components/CountBadge.js";
 import { InboxIcon } from "../components/Icons.js";
+import { SlashCommandMenu } from "../components/SlashCommandMenu.js";
+import { buildComposerCommandRegistry } from "../composer-commands.js";
 import { PROTOCOL_VERSION, type BoxView, type RunnerView } from "@wollipog/protocol";
 import { createRoot } from "react-dom/client";
 import { ApiProvider } from "../api-context.js";
@@ -50,7 +52,7 @@ if (params.get("settle") === "manual") {
   document.documentElement.setAttribute("data-contrast-fixture-pending", "true");
   const pendingStyle = document.createElement("style");
   pendingStyle.textContent = `
-    [data-contrast-fixture-pending] .slash-detail-disabled,
+    [data-contrast-fixture-pending] .picker-reason,
     [data-contrast-fixture-pending] .diff-sign {
       color: var(--bg-elev-1) !important;
     }
@@ -97,11 +99,19 @@ const box: BoxView = {
   triple: "x86_64-unknown-linux-gnu",
 };
 
+const PICKER_COMMANDS = buildComposerCommandRegistry({
+  context: { planSupported: true, canStopTurn: false, agentLabel: "Claude Code" },
+  providerCommands: [
+    { id: "project:review", name: "review", providerSource: "project", description: "Open the review panel for this session", argumentHint: "[focus]" },
+    { id: "builtin:compact", name: "compact", providerSource: "builtin", description: "Summarise the transcript so far" },
+  ],
+}).filter((command) => command.source === "provider" || command.name === "stop");
+
 const noopRunnerAction = () => {};
 const noopBoxAction = async () => {};
 
 const contrastSelectors = [
-  ".slash-detail-disabled",
+  ".picker-reason",
   ".diff-line-add .diff-sign",
   ".diff-line-del .diff-sign",
   ".status.t-info",
@@ -175,38 +185,18 @@ function Sample() {
               the two pairings it was built to measure were not styled at all — it measured
               inherited colours on unstyled markup and reported ten green palettes. That is the
               fixture-divergence failure this campaign has already paid for twice. */}
-          <div className="slash-palette">
-            <div className="slash-command-list" role="listbox" aria-label="Slash Commands">
-              <div className="slash-section" role="group" aria-label="Harness Commands">
-                <div className="slash-section-label">Harness Commands</div>
-                <button type="button" role="option" aria-selected className="slash-item active">
-                  <span className="slash-item-main">
-                    <span className="slash-name">/review</span>
-                    <span className="slash-desc">Open the review panel for this session</span>
-                  </span>
-                  <span className="slash-src">Project</span>
-                </button>
-                <button type="button" role="option" aria-selected={false} className="slash-item">
-                  <span className="slash-item-main">
-                    <span className="slash-name">/compact</span>
-                    <span className="slash-desc">Summarise the transcript so far</span>
-                  </span>
-                  <span className="slash-src">Built-In</span>
-                </button>
-              </div>
-            </div>
-            <div className="slash-detail">
-              <div className="slash-detail-head">
-                <span className="slash-detail-name">/review</span>
-                <span className="slash-detail-source">Project</span>
-              </div>
-              <p className="slash-detail-description">Open the review panel for this session</p>
-              <div className="slash-detail-argument">
-                <span className="slash-detail-argument-label">Arguments</span>
-                <code>[focus]</code>
-              </div>
-              <p className="slash-detail-disabled">This command is unavailable in this workspace.</p>
-            </div>
+          {/* The real component, so the measured markup is the markup the composer renders: an
+              active row and a disabled row whose reason is a visible second line. Positioned in
+              flow, since the picker anchors above whatever contains it. */}
+          <div style={{ position: "relative", marginTop: 220 }}>
+            <SlashCommandMenu
+              listboxId="contrast-slash"
+              query="/"
+              commands={PICKER_COMMANDS}
+              activeCommandId="provider:project:review"
+              onActiveCommandChange={() => {}}
+              onSelectCommand={() => {}}
+            />
           </div>
 
           <div className="diff-view">

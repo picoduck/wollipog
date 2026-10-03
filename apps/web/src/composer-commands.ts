@@ -11,12 +11,15 @@ export type ComposerCommandExecutionMode = "app" | "structured" | "passthrough";
  */
 export type ComposerCommandAttachmentPolicy = "preserve" | "send" | "forbid";
 
-export type ComposerCommandGroupId = "app" | "provider";
+/** The picker's groups name a command's source: Wollipog itself, the agent, or the agent's skills. */
+export type ComposerCommandGroupId = "app" | "provider" | "skill";
 
 export interface ComposerCommandContext {
   planSupported: boolean;
   canStopTurn: boolean;
   canRespond?: boolean;
+  /** The agent's display name, which labels its own commands' group. */
+  agentLabel?: string;
 }
 
 export interface ProviderComposerCommand {
@@ -40,10 +43,8 @@ export interface ComposerCommand {
   id: string;
   /** Dispatch name without the leading slash; provider-advertised casing is preserved. */
   name: string;
-  /** User-visible invocation label, including the leading slash. */
+  /** User-visible invocation label, including the leading slash: the token the picker shows. */
   label: string;
-  /** Optional Title Case action name shown in the command menu. */
-  displayName?: string;
   /** Durable token inserted after the slash. Collisions use an explicit namespace. */
   invocationAlias: string;
   description?: string;
@@ -108,9 +109,14 @@ export interface RankedComposerCommand {
   score: number;
 }
 
+/** The provider group's label when the agent has no display name. */
+export const AGENT_COMMAND_GROUP_FALLBACK_LABEL = "Agent";
+
+// Skills share the provider order, so splitting them into their own group changes no ranking.
 export const COMPOSER_COMMAND_GROUPS: readonly ComposerCommandGroupMetadata[] = [
-  { id: "app", label: "App Commands", order: 0 },
-  { id: "provider", label: "Harness Commands", order: 1 },
+  { id: "app", label: "Wollipog", order: 0 },
+  { id: "provider", label: AGENT_COMMAND_GROUP_FALLBACK_LABEL, order: 1 },
+  { id: "skill", label: "Skills", order: 1 },
 ] as const;
 
 const GROUP_BY_ID = new Map(COMPOSER_COMMAND_GROUPS.map((group) => [group.id, group]));
@@ -154,7 +160,6 @@ function appCommands(context: ComposerCommandContext): ComposerCommand[] {
       id: "app:rename-session",
       name: "rename-session",
       label: commandLabel("rename-session"),
-      displayName: "Rename Session",
       invocationAlias: "rename-session",
       description: "Rename this session from its conversation.",
       source: "app",
@@ -185,7 +190,6 @@ function appCommands(context: ComposerCommandContext): ComposerCommand[] {
       id: "app:respond",
       name: "respond",
       label: commandLabel("respond"),
-      displayName: "Respond to Question",
       invocationAlias: "respond",
       description: "Enter Answer Mode for the pending structured question.",
       source: "app",
@@ -207,7 +211,7 @@ function appCommands(context: ComposerCommandContext): ComposerCommand[] {
       sourceLabel: "App",
       executionMode: "app",
       available: context.canStopTurn,
-      ...(context.canStopTurn ? {} : { disabledReason: "There is no active turn to stop." }),
+      ...(context.canStopTurn ? {} : { disabledReason: "There's no turn to stop right now." }),
       attachmentPolicy: "preserve",
       groupId: appGroup.id,
       groupLabel: appGroup.label,
@@ -321,6 +325,8 @@ export function buildComposerCommandRegistry(input: {
     sanitizedQualifierCounts.set(qualifierKey, (sanitizedQualifierCounts.get(qualifierKey) ?? 0) + 1);
   }
   const providerGroup = GROUP_BY_ID.get("provider")!;
+  const skillGroup = GROUP_BY_ID.get("skill")!;
+  const agentGroupLabel = optionalText(input.context.agentLabel) ?? providerGroup.label;
   const providerCommands = providers.map(({ input: provider, id, name, comparisonName }): ComposerCommand => {
     const duplicateProviderName = (providersByName.get(comparisonName) ?? 0) > 1;
     const collidesWithApp = appNames.has(comparisonName);
@@ -357,8 +363,9 @@ export function buildComposerCommandRegistry(input: {
         : {}),
       ...(optionalText(provider.argumentHint) ? { argumentHint: optionalText(provider.argumentHint) } : {}),
       attachmentPolicy: provider.attachmentPolicy ?? "send",
-      groupId: providerGroup.id,
-      groupLabel: providerGroup.label,
+      ...(provider.providerSource === "skill"
+        ? { groupId: skillGroup.id, groupLabel: skillGroup.label }
+        : { groupId: providerGroup.id, groupLabel: agentGroupLabel }),
     };
   });
 
@@ -551,10 +558,50 @@ export function groupComposerCommands(commands: readonly ComposerCommand[]): Com
   });
 }
 
+/**
+ * The picker's sections for a ranked list. Each group appears once, in the order its first command
+ * ranks, so the best match's group leads; within a group the ranked order is kept.
+ */
+export function groupRankedComposerCommands(
+  commands: readonly ComposerCommand[],
+): Array<{ groupId: ComposerCommandGroupId; label: string; commands: ComposerCommand[] }> {
+  const sections = new Map<string, { groupId: ComposerCommandGroupId; label: string; commands: ComposerCommand[] }>();
+  for (const command of commands) {
+    const section = sections.get(command.groupId);
+    if (section) section.commands.push(command);
+    else sections.set(command.groupId, { groupId: command.groupId, label: command.groupLabel, commands: [command] });
+  }
+  return [...sections.values()];
+}
+
+/** The commands in the order the picker shows them, which is the order arrow keys walk. */
+export function composerCommandsInPickerOrder(commands: readonly ComposerCommand[]): ComposerCommand[] {
+  return groupRankedComposerCommands(commands).flatMap((section) => section.commands);
+}
+
+/** Keep the active command while it is still offered and can run; otherwise the first that can.
+ * Unavailable commands are never active: their reason is always visible on their row. */
 export function retainActiveComposerCommandId(
   activeId: string | null | undefined,
   commands: readonly ComposerCommand[],
 ): string | null {
-  if (activeId && commands.some((command) => command.id === activeId)) return activeId;
-  return commands[0]?.id ?? null;
+  if (activeId && commands.some((command) => command.id === activeId && command.available)) return activeId;
+  return commands.find((command) => command.available)?.id ?? null;
+}
+
+/** The next command arrow keys move to, skipping unavailable rows and wrapping at either end. */
+export function stepComposerCommandId(
+  activeId: string | null | undefined,
+  commands: readonly ComposerCommand[],
+  direction: 1 | -1,
+): string | null {
+  const count = commands.length;
+  if (!count) return null;
+  const current = commands.findIndex((command) => command.id === activeId);
+  for (let step = 1; step <= count; step += 1) {
+    const start = current < 0 ? (direction === 1 ? -1 : 0) : current;
+    const candidate = commands[(((start + direction * step) % count) + count) % count]!;
+    if (candidate.available) return candidate.id;
+  }
+  return null;
 }

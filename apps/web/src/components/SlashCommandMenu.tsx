@@ -1,13 +1,19 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useMemo } from "react";
 import {
   DURABLE_COMMAND_ATTACHMENT_NOTICE,
   durableCommandPreservesAttachments,
+  groupRankedComposerCommands,
   type ComposerCommand,
 } from "../composer-commands.js";
+import { ComposerListbox, ComposerListboxState } from "./ComposerListbox.js";
+import { BanIcon, SearchIcon } from "./Icons.js";
 
 export interface SlashCommandMenuProps {
   listboxId: string;
+  /** Ranked matches; the menu groups them, each group once, best match's group first. */
   commands: readonly ComposerCommand[];
+  /** The typed token, sigil included, for the no-match row. */
+  query: string;
   activeCommandId?: string | null;
   hasAttachments?: boolean;
   onActiveCommandChange: (commandId: string) => void;
@@ -23,128 +29,77 @@ export function slashCommandOptionId(listboxId: string, commandId: string): stri
   return `${listboxId}-option-${safeIdSuffix(commandId)}`;
 }
 
-function slashCommandGroupLabelId(
-  listboxId: string,
-  groupId: string,
-  sectionIndex: number,
-): string {
-  return `${listboxId}-group-${groupId}-${sectionIndex}`;
-}
-
-function slashCommandDetailId(listboxId: string): string {
-  return `${listboxId}-detail`;
-}
-
 export function SlashCommandMenu({
   listboxId,
   commands,
+  query,
   activeCommandId,
   hasAttachments = false,
   onActiveCommandChange,
   onSelectCommand,
 }: SlashCommandMenuProps) {
-  const optionRefs = useRef(new Map<string, HTMLButtonElement>());
-  const activeCommand = useMemo(
-    () => commands.find((command) => command.id === activeCommandId),
-    [activeCommandId, commands],
-  );
-  const commandSections = useMemo(() => {
-    const sections: Array<{
-      groupId: ComposerCommand["groupId"];
-      label: string;
-      commands: ComposerCommand[];
-    }> = [];
-    for (const command of commands) {
-      const current = sections.at(-1);
-      if (current?.groupId === command.groupId) current.commands.push(command);
-      else sections.push({ groupId: command.groupId, label: command.groupLabel, commands: [command] });
-    }
-    return sections;
-  }, [commands]);
-  const detailId = slashCommandDetailId(listboxId);
-  const attachmentNotice = durableCommandPreservesAttachments(activeCommand, hasAttachments);
+  const sections = useMemo(() => groupRankedComposerCommands(commands).map((section) => ({
+    key: section.groupId,
+    label: section.label,
+    items: section.commands,
+  })), [commands]);
 
-  useEffect(() => {
-    if (!activeCommandId) return;
-    optionRefs.current.get(activeCommandId)?.scrollIntoView({ block: "nearest" });
-  }, [activeCommandId]);
+  // The second line: a disabled command's reason always, or the active row's attachment note.
+  const secondLine = (command: ComposerCommand) => !command.available
+    ? command.disabledReason ?? "This command is unavailable."
+    : command.id === activeCommandId && durableCommandPreservesAttachments(command, hasAttachments)
+      ? DURABLE_COMMAND_ATTACHMENT_NOTICE
+      : null;
 
   return (
-    <div className="slash-palette">
-      <div className="slash-command-list" id={listboxId} role="listbox" aria-label="Slash Commands">
-        {commandSections.map(({ groupId, label, commands: sectionCommands }, sectionIndex) => {
-          const labelId = slashCommandGroupLabelId(listboxId, groupId, sectionIndex);
-          return (
-            <div
-              className="slash-section"
-              role="group"
-              aria-labelledby={labelId}
-              key={`${groupId}-${sectionIndex}`}
-            >
-              <div className="slash-section-label" id={labelId}>{label}</div>
-              {sectionCommands.map((command) => {
-                const active = command.id === activeCommandId;
-                const describedBy = active && (
-                  command.description || command.argumentHint || command.disabledReason || attachmentNotice
-                )
-                  ? detailId
-                  : undefined;
-                return (
-                  <button
-                    key={command.id}
-                    ref={(element) => {
-                      if (element) optionRefs.current.set(command.id, element);
-                      else optionRefs.current.delete(command.id);
-                    }}
-                    id={slashCommandOptionId(listboxId, command.id)}
-                    className={`slash-item${active ? " active" : ""}`}
-                    type="button"
-                    role="option"
-                    tabIndex={-1}
-                    aria-selected={active}
-                    aria-disabled={!command.available || undefined}
-                    aria-describedby={describedBy}
-                    onMouseEnter={() => onActiveCommandChange(command.id)}
-                    onMouseDown={(event) => {
-                      event.preventDefault();
-                      onSelectCommand(command);
-                    }}
-                  >
-                    <span className="slash-item-main">
-                      <span className="slash-name">{command.displayName ?? command.label}</span>
-                      {command.description && <span className="slash-desc">{command.description}</span>}
-                    </span>
-                    <span className="slash-src">{command.sourceLabel}</span>
-                  </button>
-                );
-              })}
-            </div>
-          );
-        })}
-      </div>
-      {activeCommand && (
-        activeCommand.description || activeCommand.argumentHint || activeCommand.disabledReason || attachmentNotice
-      ) && (
-        <div className="slash-detail" id={detailId}>
-          <div className="slash-detail-head">
-            <span className="slash-detail-name">{activeCommand.displayName ?? activeCommand.label}</span>
-            <span className="slash-detail-source">{activeCommand.sourceLabel}</span>
-          </div>
-          {activeCommand.description && <p className="slash-detail-description">{activeCommand.description}</p>}
-          {activeCommand.argumentHint && (
-            <div className="slash-detail-argument">
-              <span className="slash-detail-argument-label">Arguments</span>
-              <code>{activeCommand.argumentHint}</code>
-            </div>
+    <ComposerListbox
+      listboxId={listboxId}
+      label="Slash Commands"
+      sections={sections}
+      getKey={(command) => command.id}
+      getOptionId={(command) => slashCommandOptionId(listboxId, command.id)}
+      activeKey={activeCommandId ?? null}
+      isDisabled={(command) => !command.available}
+      getOptionProps={(command) => {
+        const optionId = slashCommandOptionId(listboxId, command.id);
+        const described = [
+          command.description ? `${optionId}-desc` : null,
+          secondLine(command) ? `${optionId}-reason` : null,
+        ].filter(Boolean).join(" ");
+        return {
+          "aria-labelledby": `${optionId}-token`,
+          ...(described ? { "aria-describedby": described } : {}),
+        };
+      }}
+      renderItem={(command) => {
+        const optionId = slashCommandOptionId(listboxId, command.id);
+        const reason = secondLine(command);
+        return <>
+          <span className="picker-line">
+            <span className="picker-token" id={`${optionId}-token`}>
+              {command.label}
+              {command.argumentHint && <span className="picker-hint"> {command.argumentHint}</span>}
+            </span>
+            {command.description && (
+              <span className="picker-desc" id={`${optionId}-desc`}>{command.description}</span>
+            )}
+          </span>
+          {reason && (
+            <span className={`picker-reason${command.available ? " is-note" : ""}`} id={`${optionId}-reason`}>
+              {!command.available && <BanIcon size={14} />}
+              {reason}
+            </span>
           )}
-          {!activeCommand.available && activeCommand.disabledReason && (
-            <p className="slash-detail-disabled">{activeCommand.disabledReason}</p>
-          )}
-          {attachmentNotice && (
-            <p className="slash-detail-attachments">{DURABLE_COMMAND_ATTACHMENT_NOTICE}</p>
-          )}
-        </div>
+        </>;
+      }}
+      onActiveChange={(command) => onActiveCommandChange(command.id)}
+      onSelect={onSelectCommand}
+      states={commands.length === 0 && (
+        <ComposerListboxState icon={<SearchIcon size={16} />} role="status">
+          No commands match “{query}”.
+        </ComposerListboxState>
       )}
-    </div>
+      enterLabel="Run or Insert"
+    />
   );
 }

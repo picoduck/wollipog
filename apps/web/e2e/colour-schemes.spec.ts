@@ -567,8 +567,8 @@ test("gradient sample density cannot satisfy the distinct-label vacuity guard", 
 
 test("rendered contrast waits for final fixture styles", async ({ page }) => {
   await page.goto("/colour-schemes-e2e.html?scheme=wollipog&theme=dark&settle=manual");
-  await expect(page.locator(".slash-item.active")).toBeVisible();
-  await expect(page.locator(".slash-detail-disabled")).toHaveCSS("color", "rgb(18, 26, 36)");
+  await expect(page.locator(".picker-item.is-active")).toBeVisible();
+  await expect(page.locator(".picker-reason")).toHaveCSS("color", "rgb(18, 26, 36)");
 
   await expect(measure(page)).rejects.toThrow("Contrast fixture is not settled");
   await page.evaluate(() => window.dispatchEvent(new Event("contrast-fixture-release")));
@@ -583,21 +583,21 @@ test("rendered contrast waits for final fixture styles", async ({ page }) => {
 
 test("CSS color-space serialization is normalized before contrast measurement", async ({ page }) => {
   await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
-  const disabledDetail = page.locator(".slash-detail-disabled");
+  const disabledDetail = page.locator(".picker-reason");
   await disabledDetail.evaluate((element) => {
     (element as HTMLElement).style.transition = "none";
     (element as HTMLElement).style.color = "oklab(1 0 0)";
   });
 
   const { results: measured } = await measure(page);
-  const entry = measured.find((result) => result.label.startsWith("p.slash-detail-disabled"));
+  const entry = measured.find((result) => result.label.startsWith("span.picker-reason"));
   expect(entry?.foreground).toBe("oklab(1 0 0)");
   expect(entry?.ratio).toBeGreaterThan(10);
 });
 
 test("non-RGB gradient stops cannot false-pass against their fallback", async ({ page }) => {
   await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
-  const disabledDetail = page.locator(".slash-detail-disabled");
+  const disabledDetail = page.locator(".picker-reason");
   const computedImage = await disabledDetail.evaluate((element) => {
     const html = element as HTMLElement;
     html.style.transition = "none";
@@ -611,7 +611,7 @@ test("non-RGB gradient stops cannot false-pass against their fallback", async ({
   expect(computedImage).toContain("color(srgb 1 1 1)");
   const { results: measured, unsupported } = await measure(page);
   expect(unsupported).toEqual([]);
-  const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
+  const entries = measured.filter((result) => result.label.startsWith("span.picker-reason"));
   expect(entries).toHaveLength(257);
   expect(entries.every((entry) => entry.ratio < AA)).toBe(true);
   expect(entries.every((entry) => entry.background.startsWith("rgb(255.00 255.00 255.00"))).toBe(true);
@@ -619,7 +619,7 @@ test("non-RGB gradient stops cannot false-pass against their fallback", async ({
 
 test("implicit non-legacy gradient interpolation fails closed", async ({ page }) => {
   await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
-  const disabledDetail = page.locator(".slash-detail-disabled");
+  const disabledDetail = page.locator(".picker-reason");
   await disabledDetail.evaluate((element) => {
     const html = element as HTMLElement;
     html.style.transition = "none";
@@ -630,13 +630,13 @@ test("implicit non-legacy gradient interpolation fails closed", async ({ page })
 
   const { unsupported } = await measure(page);
   expect(unsupported).toContainEqual(expect.stringMatching(
-    /^p\.slash-detail-disabled: implicit Oklab interpolation for non-legacy stops is not modelled:/,
+    /^span\.picker-reason: implicit Oklab interpolation for non-legacy stops is not modelled:/,
   ));
 });
 
 test("equal-position hard stops do not invent intermediate grounds", async ({ page }) => {
   await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
-  const disabledDetail = page.locator(".slash-detail-disabled");
+  const disabledDetail = page.locator(".picker-reason");
   await disabledDetail.evaluate((element) => {
     const html = element as HTMLElement;
     html.style.transition = "none";
@@ -646,7 +646,7 @@ test("equal-position hard stops do not invent intermediate grounds", async ({ pa
 
   const { results: measured, unsupported } = await measure(page);
   expect(unsupported).toEqual([]);
-  const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
+  const entries = measured.filter((result) => result.label.startsWith("span.picker-reason"));
   expect(entries.map((entry) => entry.background)).toEqual([
     "rgb(255.00 0.00 255.00 / 1.000)",
     "rgb(0.00 255.00 0.00 / 1.000)",
@@ -656,7 +656,7 @@ test("equal-position hard stops do not invent intermediate grounds", async ({ pa
 
 test("decreasing gradient positions use CSS stop fix-up", async ({ page }) => {
   await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
-  const disabledDetail = page.locator(".slash-detail-disabled");
+  const disabledDetail = page.locator(".picker-reason");
   await disabledDetail.evaluate((element) => {
     const html = element as HTMLElement;
     html.style.transition = "none";
@@ -668,7 +668,7 @@ test("decreasing gradient positions use CSS stop fix-up", async ({ page }) => {
 
   const { results: measured, unsupported } = await measure(page);
   expect(unsupported).toEqual([]);
-  const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
+  const entries = measured.filter((result) => result.label.startsWith("span.picker-reason"));
   expect(entries).toHaveLength(514);
   expect(entries.some((entry) =>
     entry.background === "rgb(0.00 128.00 0.00 / 1.000)",
@@ -677,7 +677,7 @@ test("decreasing gradient positions use CSS stop fix-up", async ({ page }) => {
 
 test("multi-position and repeating hard stops keep only painted colours", async ({ page }) => {
   await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
-  const disabledDetail = page.locator(".slash-detail-disabled");
+  const disabledDetail = page.locator(".picker-reason");
   const gradients = [
     "linear-gradient(rgb(255 0 0) 0% 50%, rgb(0 0 255) 50% 100%)",
     "repeating-linear-gradient(rgb(255 0 0) 0% 25%, rgb(0 0 255) 25% 50%)",
@@ -691,7 +691,7 @@ test("multi-position and repeating hard stops keep only painted colours", async 
     }, gradient);
     const { results: measured, unsupported } = await measure(page);
     expect(unsupported).toEqual([]);
-    const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
+    const entries = measured.filter((result) => result.label.startsWith("span.picker-reason"));
     expect(entries).toHaveLength(514);
     expect(new Set(entries.map((entry) => entry.background))).toEqual(new Set([
       "rgb(255.00 0.00 0.00 / 1.000)",
@@ -702,7 +702,7 @@ test("multi-position and repeating hard stops keep only painted colours", async 
 
 test("repeating periods wider than the paint line sample each visible copy", async ({ page }) => {
   await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
-  const disabledDetail = page.locator(".slash-detail-disabled");
+  const disabledDetail = page.locator(".picker-reason");
   await disabledDetail.evaluate((element) => {
     const html = element as HTMLElement;
     html.style.transition = "none";
@@ -713,7 +713,7 @@ test("repeating periods wider than the paint line sample each visible copy", asy
 
   const { results: measured, unsupported } = await measure(page);
   expect(unsupported).toEqual([]);
-  const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
+  const entries = measured.filter((result) => result.label.startsWith("span.picker-reason"));
   expect(entries).toHaveLength(514);
   expect(entries[0]?.background).toBe("rgb(85.00 0.00 170.00 / 1.000)");
   expect(entries[256]?.background).toBe("rgb(0.00 0.00 255.00 / 1.000)");
@@ -723,7 +723,7 @@ test("repeating periods wider than the paint line sample each visible copy", asy
 
 test("off-canvas gradient intervals contribute only their painted edge colour", async ({ page }) => {
   await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
-  const disabledDetail = page.locator(".slash-detail-disabled");
+  const disabledDetail = page.locator(".picker-reason");
   await disabledDetail.evaluate((element) => {
     const html = element as HTMLElement;
     html.style.transition = "none";
@@ -732,14 +732,14 @@ test("off-canvas gradient intervals contribute only their painted edge colour", 
 
   const { results: measured, unsupported } = await measure(page);
   expect(unsupported).toEqual([]);
-  const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
+  const entries = measured.filter((result) => result.label.startsWith("span.picker-reason"));
   expect(entries).toHaveLength(1);
   expect(entries[0]?.background).toBe("rgb(0.00 0.00 255.00 / 1.000)");
 });
 
 test("position units requiring element geometry fail closed", async ({ page }) => {
   await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
-  const disabledDetail = page.locator(".slash-detail-disabled");
+  const disabledDetail = page.locator(".picker-reason");
   await disabledDetail.evaluate((element) => {
     const html = element as HTMLElement;
     html.style.transition = "none";
@@ -748,13 +748,13 @@ test("position units requiring element geometry fail closed", async ({ page }) =
 
   const { unsupported } = await measure(page);
   expect(unsupported).toContainEqual(expect.stringMatching(
-    /^p\.slash-detail-disabled: gradient stop position 10px is not modelled for linear-gradient:/,
+    /^span\.picker-reason: gradient stop position 10px is not modelled for linear-gradient:/,
   ));
 });
 
 test("radial sizes with geometry-dependent visible extents fail closed", async ({ page }) => {
   await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
-  const disabledDetail = page.locator(".slash-detail-disabled");
+  const disabledDetail = page.locator(".picker-reason");
   const geometries = [
     "circle closest-side",
     "circle closest-corner",
@@ -773,14 +773,14 @@ test("radial sizes with geometry-dependent visible extents fail closed", async (
     }, geometry);
     const { unsupported } = await measure(page);
     expect(unsupported[0]).toMatch(
-      /^p\.slash-detail-disabled: radial gradient geometry .+ is not modelled:/,
+      /^span\.picker-reason: radial gradient geometry .+ is not modelled:/,
     );
   }
 });
 
 test("centered farthest-corner radial gradients retain a normalized extent", async ({ page }) => {
   await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
-  const disabledDetail = page.locator(".slash-detail-disabled");
+  const disabledDetail = page.locator(".picker-reason");
   await disabledDetail.evaluate((element) => {
     const html = element as HTMLElement;
     html.style.transition = "none";
@@ -791,14 +791,14 @@ test("centered farthest-corner radial gradients retain a normalized extent", asy
 
   const { results: measured, unsupported } = await measure(page);
   expect(unsupported).toEqual([]);
-  const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
+  const entries = measured.filter((result) => result.label.startsWith("span.picker-reason"));
   expect(entries).toHaveLength(1);
   expect(entries[0]?.background).toBe("rgb(255.00 255.00 255.00 / 1.000)");
 });
 
 test("conic angle positions normalize to one painted turn", async ({ page }) => {
   await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
-  const disabledDetail = page.locator(".slash-detail-disabled");
+  const disabledDetail = page.locator(".picker-reason");
   await disabledDetail.evaluate((element) => {
     const html = element as HTMLElement;
     html.style.transition = "none";
@@ -809,7 +809,7 @@ test("conic angle positions normalize to one painted turn", async ({ page }) => 
 
   const { results: measured, unsupported } = await measure(page);
   expect(unsupported).toEqual([]);
-  const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
+  const entries = measured.filter((result) => result.label.startsWith("span.picker-reason"));
   expect(entries).toHaveLength(514);
   expect(new Set(entries.map((entry) => entry.background))).toEqual(new Set([
     "rgb(255.00 0.00 0.00 / 1.000)",
@@ -819,7 +819,7 @@ test("conic angle positions normalize to one painted turn", async ({ page }) => 
 
 test("off-center conic geometry fails closed", async ({ page }) => {
   await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
-  const disabledDetail = page.locator(".slash-detail-disabled");
+  const disabledDetail = page.locator(".picker-reason");
   await disabledDetail.evaluate((element) => {
     const html = element as HTMLElement;
     html.style.transition = "none";
@@ -830,13 +830,13 @@ test("off-center conic geometry fails closed", async ({ page }) => {
 
   const { unsupported } = await measure(page);
   expect(unsupported).toContainEqual(expect.stringMatching(
-    /^p\.slash-detail-disabled: off-center conic gradient geometry is not modelled:/,
+    /^span\.picker-reason: off-center conic gradient geometry is not modelled:/,
   ));
 });
 
 test("gradient interiors cannot false-pass when both endpoints clear AA", async ({ page }) => {
   await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
-  const disabledDetail = page.locator(".slash-detail-disabled");
+  const disabledDetail = page.locator(".picker-reason");
   await disabledDetail.evaluate((element) => {
     const html = element as HTMLElement;
     html.style.transition = "none";
@@ -847,7 +847,7 @@ test("gradient interiors cannot false-pass when both endpoints clear AA", async 
 
   const { results: measured, unsupported } = await measure(page);
   expect(unsupported).toEqual([]);
-  const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
+  const entries = measured.filter((result) => result.label.startsWith("span.picker-reason"));
   expect(entries).toHaveLength(257);
   expect(entries[0]?.ratio).toBeGreaterThan(AA);
   expect(entries.at(-1)?.ratio).toBeGreaterThan(AA);
@@ -857,7 +857,7 @@ test("gradient interiors cannot false-pass when both endpoints clear AA", async 
 
 test("explicit sRGB gradients use sRGB interpolation", async ({ page }) => {
   await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
-  const disabledDetail = page.locator(".slash-detail-disabled");
+  const disabledDetail = page.locator(".picker-reason");
   await disabledDetail.evaluate((element) => {
     const html = element as HTMLElement;
     html.style.transition = "none";
@@ -869,7 +869,7 @@ test("explicit sRGB gradients use sRGB interpolation", async ({ page }) => {
 
   const { results: measured, unsupported } = await measure(page);
   expect(unsupported).toEqual([]);
-  const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
+  const entries = measured.filter((result) => result.label.startsWith("span.picker-reason"));
   expect(entries).toHaveLength(514);
   expect(entries[128]?.background).toBe("rgb(127.50 127.50 0.00 / 1.000)");
   expect(entries[385]?.background).toBe("rgb(0.00 127.50 127.50 / 1.000)");
@@ -877,7 +877,7 @@ test("explicit sRGB gradients use sRGB interpolation", async ({ page }) => {
 
 test("gradient alpha interpolation is premultiplied before compositing", async ({ page }) => {
   await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
-  const disabledDetail = page.locator(".slash-detail-disabled");
+  const disabledDetail = page.locator(".picker-reason");
   await disabledDetail.evaluate((element) => {
     const html = element as HTMLElement;
     html.style.transition = "none";
@@ -887,14 +887,14 @@ test("gradient alpha interpolation is premultiplied before compositing", async (
 
   const { results: measured, unsupported } = await measure(page);
   expect(unsupported).toEqual([]);
-  const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
+  const entries = measured.filter((result) => result.label.startsWith("span.picker-reason"));
   expect(entries).toHaveLength(257);
   expect(entries[128]?.background).toBe("rgb(0.00 0.00 127.50 / 1.000)");
 });
 
 test("RGB gradient stops retain alpha while compositing over their fallback", async ({ page }) => {
   await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
-  const disabledDetail = page.locator(".slash-detail-disabled");
+  const disabledDetail = page.locator(".picker-reason");
   await disabledDetail.evaluate((element) => {
     const html = element as HTMLElement;
     html.style.transition = "none";
@@ -905,7 +905,7 @@ test("RGB gradient stops retain alpha while compositing over their fallback", as
 
   const { results: measured, unsupported } = await measure(page);
   expect(unsupported).toEqual([]);
-  const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
+  const entries = measured.filter((result) => result.label.startsWith("span.picker-reason"));
   expect(entries).toHaveLength(257);
   expect(entries.every((entry) => entry.background.startsWith("rgb(127.50 127.50 127.50"))).toBe(true);
 });
@@ -915,7 +915,7 @@ test("translucent gradient fallbacks retain the ancestor background", async ({ p
     scheme: "wollipog",
     theme: "light",
   });
-  const disabledDetail = page.locator(".slash-detail-disabled");
+  const disabledDetail = page.locator(".picker-reason");
   await disabledDetail.evaluate((element) => {
     const html = element as HTMLElement;
     html.style.transition = "none";
@@ -930,7 +930,7 @@ test("translucent gradient fallbacks retain the ancestor background", async ({ p
 
   const { results: measured, unsupported } = await measure(page);
   expect(unsupported).toEqual([]);
-  const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
+  const entries = measured.filter((result) => result.label.startsWith("span.picker-reason"));
   expect(entries).toHaveLength(257);
   for (const entry of entries) {
     const channel = Number(entry.background.match(/^rgb\(([\d.]+)/)?.[1]);
@@ -941,7 +941,7 @@ test("translucent gradient fallbacks retain the ancestor background", async ({ p
 
 test("descendant fills are painted above an ancestor gradient", async ({ page }) => {
   await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
-  const disabledDetail = page.locator(".slash-detail-disabled");
+  const disabledDetail = page.locator(".picker-reason");
   await disabledDetail.evaluate((element) => {
     const html = element as HTMLElement;
     const parent = html.parentElement as HTMLElement;
@@ -956,14 +956,14 @@ test("descendant fills are painted above an ancestor gradient", async ({ page })
 
   const { results: measured, unsupported } = await measure(page);
   expect(unsupported).toEqual([]);
-  const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
+  const entries = measured.filter((result) => result.label.startsWith("span.picker-reason"));
   expect(entries).toHaveLength(257);
   expect(entries.every((entry) => entry.background.startsWith("rgb(127.50 127.50 127.50"))).toBe(true);
 });
 
 test("transparent gradient stops measure the background showing through", async ({ page }) => {
   await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
-  const disabledDetail = page.locator(".slash-detail-disabled");
+  const disabledDetail = page.locator(".picker-reason");
   await disabledDetail.evaluate((element) => {
     const html = element as HTMLElement;
     html.style.transition = "none";
@@ -974,7 +974,7 @@ test("transparent gradient stops measure the background showing through", async 
 
   const { results: measured, unsupported } = await measure(page);
   expect(unsupported).toEqual([]);
-  const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
+  const entries = measured.filter((result) => result.label.startsWith("span.picker-reason"));
   expect(entries).toHaveLength(257);
   expect(entries.some((entry) => entry.ratio > 20)).toBe(true);
   expect(entries.some((entry) => entry.ratio === 1)).toBe(true);
@@ -982,7 +982,7 @@ test("transparent gradient stops measure the background showing through", async 
 
 test("linear-sRGB gradient stops use browser colour conversion", async ({ page }) => {
   await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
-  const disabledDetail = page.locator(".slash-detail-disabled");
+  const disabledDetail = page.locator(".picker-reason");
   await disabledDetail.evaluate((element) => {
     const html = element as HTMLElement;
     html.style.transition = "none";
@@ -993,14 +993,14 @@ test("linear-sRGB gradient stops use browser colour conversion", async ({ page }
 
   const { results: measured, unsupported } = await measure(page);
   expect(unsupported).toEqual([]);
-  const entries = measured.filter((result) => result.label.startsWith("p.slash-detail-disabled"));
+  const entries = measured.filter((result) => result.label.startsWith("span.picker-reason"));
   expect(entries).toHaveLength(257);
   expect(entries.every((entry) => entry.background.startsWith("rgb(124.00 124.00 124.00"))).toBe(true);
 });
 
 test("unmodelled gradient interpolation methods fail with an actionable diagnostic", async ({ page }) => {
   await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
-  const disabledDetail = page.locator(".slash-detail-disabled");
+  const disabledDetail = page.locator(".picker-reason");
   await disabledDetail.evaluate((element) => {
     const html = element as HTMLElement;
     html.style.transition = "none";
@@ -1009,13 +1009,13 @@ test("unmodelled gradient interpolation methods fail with an actionable diagnost
 
   const { unsupported } = await measure(page);
   expect(unsupported).toContainEqual(expect.stringMatching(
-    /^p\.slash-detail-disabled: gradient interpolation method oklab is not modelled:/,
+    /^span\.picker-reason: gradient interpolation method oklab is not modelled:/,
   ));
 });
 
 test("sRGB interpolation rejects gradient stops that require unclamped conversion", async ({ page }) => {
   await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
-  const disabledDetail = page.locator(".slash-detail-disabled");
+  const disabledDetail = page.locator(".picker-reason");
   await disabledDetail.evaluate((element) => {
     const html = element as HTMLElement;
     html.style.transition = "none";
@@ -1026,13 +1026,13 @@ test("sRGB interpolation rejects gradient stops that require unclamped conversio
 
   const { unsupported } = await measure(page);
   expect(unsupported).toContainEqual(expect.stringMatching(
-    /^p\.slash-detail-disabled: gradient stops cannot be modelled accurately with sRGB interpolation:/,
+    /^span\.picker-reason: gradient stops cannot be modelled accurately with sRGB interpolation:/,
   ));
 });
 
 test("explicit sRGB interpolation rejects out-of-range sRGB stops", async ({ page }) => {
   await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
-  const disabledDetail = page.locator(".slash-detail-disabled");
+  const disabledDetail = page.locator(".picker-reason");
   await disabledDetail.evaluate((element) => {
     const html = element as HTMLElement;
     html.style.transition = "none";
@@ -1043,13 +1043,13 @@ test("explicit sRGB interpolation rejects out-of-range sRGB stops", async ({ pag
 
   const { unsupported } = await measure(page);
   expect(unsupported).toContainEqual(expect.stringMatching(
-    /^p\.slash-detail-disabled: gradient stops cannot be modelled accurately with sRGB interpolation:/,
+    /^span\.picker-reason: gradient stops cannot be modelled accurately with sRGB interpolation:/,
   ));
 });
 
 test("gradient stops with missing components fail closed", async ({ page }) => {
   await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
-  const disabledDetail = page.locator(".slash-detail-disabled");
+  const disabledDetail = page.locator(".picker-reason");
   await disabledDetail.evaluate((element) => {
     const html = element as HTMLElement;
     html.style.transition = "none";
@@ -1060,13 +1060,13 @@ test("gradient stops with missing components fail closed", async ({ page }) => {
 
   const { unsupported } = await measure(page);
   expect(unsupported).toContainEqual(expect.stringMatching(
-    /^p\.slash-detail-disabled: gradient stops with missing colour components are not modelled:/,
+    /^span\.picker-reason: gradient stops with missing colour components are not modelled:/,
   ));
 });
 
 test("unsupported rendered gradient syntax fails with an actionable diagnostic", async ({ page }) => {
   await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
-  const disabledDetail = page.locator(".slash-detail-disabled");
+  const disabledDetail = page.locator(".picker-reason");
   await disabledDetail.evaluate((element) => {
     (element as HTMLElement).style.backgroundImage = [
       "linear-gradient(rgb(0 0 0), rgb(255 255 255))",
@@ -1076,13 +1076,13 @@ test("unsupported rendered gradient syntax fails with an actionable diagnostic",
 
   const { unsupported } = await measure(page);
   expect(unsupported).toContainEqual(expect.stringMatching(
-    /^p\.slash-detail-disabled: multiple background-image layers are not modelled:/,
+    /^span\.picker-reason: multiple background-image layers are not modelled:/,
   ));
 });
 
 test("nested rendered gradients fail instead of ignoring the lower image", async ({ page }) => {
   await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
-  const disabledDetail = page.locator(".slash-detail-disabled");
+  const disabledDetail = page.locator(".picker-reason");
   await disabledDetail.evaluate((element) => {
     const html = element as HTMLElement;
     const parent = html.parentElement as HTMLElement;
@@ -1095,24 +1095,24 @@ test("nested rendered gradients fail instead of ignoring the lower image", async
 
   const { unsupported } = await measure(page);
   expect(unsupported).toContainEqual(expect.stringMatching(
-    /^p\.slash-detail-disabled: nested background image is not modelled:/,
+    /^span\.picker-reason: nested background image is not modelled:/,
   ));
 });
 
 test("settled contrast measurement still reports genuine failures", async ({ page }) => {
   await openContrastFixture(page, "/colour-schemes-e2e.html?scheme=wollipog&theme=dark");
-  const disabledDetail = page.locator(".slash-detail-disabled");
+  const disabledDetail = page.locator(".picker-reason");
   await disabledDetail.evaluate((element) => {
     (element as HTMLElement).style.color = "var(--bg-elev-1)";
   });
   await expect(disabledDetail).toHaveCSS("color", "rgb(18, 26, 36)");
 
   const { results: measured } = await measure(page);
-  const failure = measured.find((entry) => entry.label.startsWith("p.slash-detail-disabled"));
+  const failure = measured.find((entry) => entry.label.startsWith("span.picker-reason"));
   expect(failure?.ratio).toBeLessThan(AA);
   expect(failure?.foreground).toMatch(/^(rgb|color)\(/);
   expect(failure?.background).toMatch(/^rgb\(/);
-  expect(failure?.ancestry.some((entry) => entry.startsWith("p.slash-detail-disabled{"))).toBe(true);
+  expect(failure?.ancestry.some((entry) => entry.startsWith("span.picker-reason{"))).toBe(true);
 });
 
 for (const scheme of SCHEMES) {

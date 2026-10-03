@@ -6200,173 +6200,187 @@ textarea,
   cursor: not-allowed;
 }
 
-/* --- Slash-command palette --- */
-.slash-palette {
+/* --- Composer pickers (§9.1, #2155) ---
+   The / and @ pickers are one listbox, `ComposerListbox`, anchored above the composer at every
+   width. Phones keep it here rather than in a bottom sheet (a deliberate exception to §9.2): a sheet
+   would cover the caret and compete with the software keyboard while typing. The list scrolls past
+   320px and the footer stays below it, in view. */
+.picker {
   position: absolute;
-  bottom: calc(100% + 6px);
+  bottom: calc(100% + var(--space-2));
   left: 0;
   right: 0;
-  max-height: 220px;
-  overflow: hidden;
   display: flex;
   flex-direction: column;
-  background: var(--bg-elev-2);
+  /* Never taller than the room above the composer on a short or keyboard-shrunk phone screen. */
+  max-height: min(400px, 50dvh);
+  overflow: hidden;
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  box-shadow: var(--shadow);
-  padding: 4px;
+  border-radius: var(--radius-md);
+  background: var(--bg-elev);
+  box-shadow: var(--elev-2);
+  color: var(--text);
+  font: var(--type-body);
   /* Deliberately below --z-panel: the mobile right panel is a full-width fixed overlay, and a
      popover that outranks it keeps painting and receiving clicks through it. */
   z-index: var(--z-sticky);
 }
-.slash-command-list {
+.picker-list {
+  flex: 0 1 auto;
   min-height: 0;
+  max-height: 320px;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--space-1);
 }
-.workspace-reference-picker {
-  position: absolute;
-  bottom: calc(100% + 6px);
-  left: 0;
-  right: 0;
-  z-index: var(--z-sticky);
-  max-height: min(280px, 45vh);
-  overflow-y: auto;
-  display: grid;
-  gap: 2px;
-  padding: 4px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  background: var(--bg-elev-2);
-  box-shadow: var(--shadow);
-}
-.workspace-reference-picker .ui-inline-listbox-option {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  min-width: 0;
-  padding: 7px 10px;
-  border: 0;
-  border-radius: var(--radius-xs);
-  background: transparent;
-  color: var(--text);
-  cursor: pointer;
-  font: inherit;
-  text-align: left;
-}
-.workspace-reference-picker .ui-inline-listbox-option span:last-child {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.workspace-reference-picker .ui-inline-listbox-option.is-active { background: color-mix(in srgb, var(--accent) 16%, transparent); }
-.workspace-reference-picker .ui-inline-listbox-option:focus-visible { outline: var(--focus-width) solid var(--focus); outline-offset: -2px; }
-.workspace-reference-empty { padding: 8px 10px; color: var(--text-dim); font-size: var(--text-sm); }
-.slash-section + .slash-section {
+.picker-list:empty { display: none; }
+.picker-group + .picker-group {
   border-top: 1px solid var(--border);
   margin-top: var(--space-1);
   padding-top: var(--space-1);
 }
-.slash-section-label {
-  padding: var(--space-1) var(--space-2);
-  color: var(--text-dim);
-  font-size: var(--text-xs);
-  font-weight: var(--weight-semibold);
-}
-.slash-item {
+.picker-group-label {
   display: flex;
-  align-items: baseline;
-  gap: 10px;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 var(--space-2);
+  color: var(--text-dim);
+  font: var(--type-label);
+}
+.picker-item {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--space-0-5);
   width: 100%;
-  text-align: left;
-  padding: 7px 10px;
+  min-height: var(--control-h);
+  padding: var(--space-1) var(--space-2);
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text);
   cursor: pointer;
   font: inherit;
+  text-align: left;
 }
-.slash-item[aria-disabled="true"] {
+/* The active row is drawn with the control edge, not a teal wash: teal means "selected" (§9.1). */
+.picker-item.is-active {
+  background: var(--bg-elev-3);
+  box-shadow: inset 0 0 0 1px var(--control-outline);
+}
+@media (hover: hover) {
+  .picker-item:hover:not(.is-active, [aria-disabled="true"]) { background: var(--bg-elev-2); }
+}
+.picker-item[aria-disabled="true"] {
+  color: var(--text-faint);
   cursor: not-allowed;
 }
-.slash-item.active {
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-}
-.slash-item-main {
+.picker-line {
   display: flex;
   align-items: baseline;
   gap: var(--space-2);
   min-width: 0;
-  flex: 1;
 }
-.slash-name {
-  font-family: "Cascadia Code", monospace;
-  font-size: 13px;
-  color: var(--code-accent);
+.picker-line > svg {
+  flex: none;
+  align-self: center;
+  color: var(--text-dim);
+}
+.picker-token {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
   white-space: nowrap;
 }
-.slash-src {
-  font-size: 10.5px;
-  /* The ACTIVE row paints a 16% accent wash behind this, and the flat-surface tier reads
-     4.22:1 on it. Same defect as the diff gutter below, same fix. */
-  color: var(--text-faint-on-tint);
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  padding: 1px 5px;
+.picker-hint { color: var(--text-dim); }
+.picker-desc,
+.picker-path {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-dim);
+  font: var(--type-small);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.slash-desc {
-  font-size: 12px;
-  color: var(--text-dim-on-tint);
+.picker-desc { flex: 1; }
+.picker-name {
+  flex: none;
+  max-width: 60%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.slash-detail {
-  display: grid;
-  gap: var(--space-1);
-  margin-top: var(--space-1);
-  padding: var(--space-2);
-  border-top: 1px solid var(--border-strong);
-  background: var(--bg-elev-1);
+/* A long folder loses its start ("…/nested/directory"): the box runs right to left, so the ellipsis
+   lands on the left, and the `<bdi>` inside keeps the path itself left to right. */
+.picker-path {
+  flex: 1;
+  direction: rtl;
+  text-align: left;
 }
-.slash-detail-head,
-.slash-detail-argument {
+.picker-item mark {
+  background: none;
+  color: inherit;
+  text-decoration: underline;
+}
+.picker-item[aria-disabled="true"] :is(.picker-hint, .picker-desc) { color: var(--text-faint); }
+/* The second line: a disabled command's reason (always) or the active row's attachment note. */
+.picker-reason {
   display: flex;
-  align-items: baseline;
-  gap: var(--space-2);
-}
-.slash-detail-name {
-  color: var(--text);
-  font-family: var(--font-mono);
-  font-size: var(--text-sm);
-  font-weight: var(--weight-semibold);
-}
-.slash-detail-source,
-.slash-detail-argument-label {
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
   color: var(--text-faint);
-  font-size: var(--text-xs);
+  font: var(--type-small);
 }
-.slash-detail-description,
-.slash-detail-disabled,
-.slash-detail-attachments {
-  margin: 0;
-  font-size: var(--text-xs);
-}
-.slash-detail-description {
+.picker-reason.is-note { color: var(--amber-on-tint); }
+.picker-reason > svg { flex: none; }
+.picker-empty {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--control-h);
+  padding: var(--space-1) var(--space-3);
   color: var(--text-dim);
 }
-.slash-detail-disabled {
-  color: var(--amber-on-tint);
+.picker-empty > svg { flex: none; }
+.picker-empty.t-danger { color: var(--danger-text); }
+.picker-empty-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
 }
-.slash-detail-attachments {
-  color: var(--amber-on-tint);
+.picker-empty-detail {
+  color: var(--text-dim);
+  font: var(--type-small);
 }
-.slash-detail-argument code {
-  color: var(--code-accent);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
+.picker-foot {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  padding: var(--space-1) var(--space-3);
+  border-top: 1px solid var(--border);
+  background: var(--bg-elev);
+}
+.picker-note {
+  margin: 0;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.picker-keys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  margin-inline-start: auto;
+}
+@media (forced-colors: active) {
+  .picker-line > svg { color: inherit; }
+}
+/* Keys are for a keyboard; a touch pointer keeps the footer only for its note (§11.5). */
+@media (pointer: coarse) {
+  .picker-keys { display: none; }
+  .picker-foot:not(:has(.picker-note)) { display: none; }
 }
 
 /* ---------------------- In-session controls bar ------------------------- */
@@ -15634,10 +15648,7 @@ body.shell-dock-dragging * {
 /* The primary tier on a tinted row.
    Every rule here paints, or sits inside, a 16% wash. The tiers below it (`--text-dim-on-tint`,
    `--text-faint-on-tint`) are derived to sit under this value on those grounds, so the row reads
-   in the intended order instead of the line number outshouting the line. `.slash-name` joins them:
-   it was accent ink at 4.70:1, quieter than the description beside it, and the active row already
-   signals selection with its wash — the name does not need to be tinted as well as outranked. */
-.slash-item.active .slash-name,
+   in the intended order instead of the line number outshouting the line. */
 .files-source-line.is-target,
 .diff-line-add,
 .diff-line-del {

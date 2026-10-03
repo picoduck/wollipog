@@ -34,16 +34,22 @@ test("the typed command menu groups, ranks, selects, and dispatches provider com
   await composer.fill("/");
   const listbox = page.getByRole("listbox", { name: "Slash Commands" });
   await expect(listbox).toBeVisible();
-  await expect(listbox.getByText("App Commands", { exact: true })).toBeVisible();
-  await expect(listbox.getByText("Harness Commands", { exact: true })).toBeVisible();
-  await expect(listbox.getByText("Built-In", { exact: true })).toBeVisible();
-  await expect(listbox.getByText("Plugin", { exact: true })).toBeVisible();
+  // Groups name the source; rows carry no source badge.
+  await expect(listbox.getByRole("group", { name: "Wollipog" })).toBeVisible();
+  await expect(listbox.getByRole("group", { name: "Codex" })).toBeVisible();
+  await expect(listbox.getByText("Built-In", { exact: true })).toHaveCount(0);
+  await expect(listbox.getByText("Plugin", { exact: true })).toHaveCount(0);
+  // App commands show the token you type, not an action name.
+  await expect(page.getByRole("option", { name: "/rename-session" })).toBeVisible();
+  await expect(listbox.getByText("Rename Session", { exact: true })).toHaveCount(0);
 
   await composer.fill("/rev");
   const review = page.getByRole("option", { name: /\/review/ });
   await expect(review).toHaveAttribute("aria-selected", "true");
-  await expect(page.locator(".slash-detail")).toContainText("Review the current changes");
-  await expect(page.locator(".slash-detail-argument")).toContainText("[focus]");
+  // The argument hint follows the token and the description follows both, on the row itself.
+  await expect(review.locator(".picker-token")).toHaveText("/review [focus]");
+  await expect(review.locator(".picker-desc")).toHaveText("Review the current changes");
+  await expect(page.locator(".slash-detail")).toHaveCount(0);
   await page.keyboard.press("Home");
   await expect.poll(() => composer.evaluate((element) => (element as HTMLTextAreaElement).selectionStart)).toBe(0);
   await page.keyboard.press("End");
@@ -115,7 +121,7 @@ test("authorized provider commands use durable dispatch and preserve attachments
   await expect(page.getByRole("button", { name: "Remove Image" })).toBeVisible();
 });
 
-test("Codex prompts and skills are labeled by source and $name dispatches the same skill as /name", async ({ page }) => {
+test("Codex prompts and skills are grouped by source and $name dispatches the same skill as /name", async ({ page }) => {
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([
     {
       name: "summarize",
@@ -135,13 +141,13 @@ test("Codex prompts and skills are labeled by source and $name dispatches the sa
   const composer = page.locator(".composer-input");
   await composer.fill("/");
   const listbox = page.getByRole("listbox", { name: "Slash Commands" });
-  await expect(page.getByRole("option", { name: /\/summarize/ })).toContainText("User");
-  await expect(page.getByRole("option", { name: /\/review/ })).toContainText("Skill");
+  await expect(listbox.getByRole("group", { name: "Codex" }).getByRole("option", { name: /\/summarize/ })).toBeVisible();
+  await expect(listbox.getByRole("group", { name: "Skills" }).getByRole("option", { name: /\/review/ })).toBeVisible();
 
   await composer.fill("$");
   await expect(listbox).toBeVisible();
   await expect(page.getByRole("option")).toHaveCount(1);
-  await expect(page.getByRole("option", { name: /\$review/ })).toContainText("Skill");
+  await expect(listbox.getByRole("group", { name: "Skills" }).getByRole("option", { name: /\$review/ })).toBeVisible();
   await page.keyboard.press("Tab");
   await expect(composer).toHaveValue("$review ");
   await composer.fill("$review pr 42");
@@ -428,7 +434,9 @@ test("programmatic clear and history recall cannot open or hijack the slash menu
 test("description-only fuzzy text sends literally instead of rewriting the command", async ({ page }) => {
   const composer = page.locator(".composer-input");
   await composer.fill("/no");
-  await expect(page.getByRole("listbox", { name: "Slash Commands" })).toHaveCount(0);
+  // The no-match row says so, but Enter still sends the text as typed (#2176 changes that).
+  await expect(page.locator(".picker-empty")).toHaveText("No commands match “/no”.");
+  await expect(page.getByRole("option")).toHaveCount(0);
   await page.keyboard.press("Enter");
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests()[0]?.text))
     .toBe("/no");
@@ -486,7 +494,7 @@ test("rename-session moves into a retryable status receipt without disturbing th
   await composer.fill("/stop");
   await page.keyboard.press("Enter");
   const composerError = page.locator('.composer > .notice.t-danger[role="alert"]');
-  await expect(composerError).toContainText("There is no active turn to stop.");
+  await expect(composerError).toContainText("There's no turn to stop right now.");
   // The receipt is in the transcript, so the composer's own error never shares its space.
   const [errorBox, receiptBox] = await Promise.all([composerError.boundingBox(), receipt.boundingBox()]);
   expect(errorBox).not.toBeNull();
@@ -508,7 +516,7 @@ test("rename-session moves into a retryable status receipt without disturbing th
   ]);
   await expect(receipt).toContainText("Renaming session…");
   await expect(receipt).toBeFocused();
-  await expect(composerError).toContainText("There is no active turn to stop.");
+  await expect(composerError).toContainText("There's no turn to stop right now.");
   await expect(composer).toHaveValue("Draft I care about");
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleDeferredRetitle({
     title: "Retitled Session",
@@ -762,27 +770,136 @@ test("unknown commands and absolute paths stay plaintext while command triggers 
 });
 
 test("IME owns menu keys and unavailable commands explain without dispatching", async ({ page }) => {
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([
+    { name: "status", source: "builtin", description: "Show the session status" },
+  ]));
   const composer = page.locator(".composer-input");
-  await composer.fill("/stop");
+  await composer.fill("/st");
   const stop = page.getByRole("option", { name: /\/stop/ });
+  const status = page.getByRole("option", { name: /\/status/ });
+  // The reason is a visible second line without arrowing onto the row, and the row is never active.
   await expect(stop).toHaveAttribute("aria-disabled", "true");
-  await expect(stop).toHaveAttribute("aria-selected", "true");
-  await expect(page.locator(".slash-detail-disabled")).toHaveText("There is no active turn to stop.");
-  const activeDescendant = await composer.getAttribute("aria-activedescendant");
+  await expect(stop.locator(".picker-reason")).toHaveText("There's no turn to stop right now.");
+  await expect(stop).toHaveAttribute("aria-selected", "false");
+  await expect(status).toHaveAttribute("aria-selected", "true");
+  for (const key of ["ArrowDown", "ArrowUp"]) {
+    await page.keyboard.press(key);
+    await expect(status, `${key} skips the disabled row`).toHaveAttribute("aria-selected", "true");
+  }
+  // Playwright refuses to click an aria-disabled element without force; a person can still try.
+  await stop.click({ force: true });
+  await expect(composer).toHaveValue("/st");
+  await expect(page.locator('.composer > .notice.t-danger[role="alert"]')).toHaveCount(0);
 
-  await stop.dispatchEvent("mousedown", { button: 0 });
-  await expect(page.locator('.composer > .notice.t-danger[role="alert"]')).toHaveText("There is no active turn to stop.");
+  await composer.fill("/stop");
+  await expect(stop).toHaveAttribute("aria-selected", "false");
+  await expect(composer).not.toHaveAttribute("aria-activedescendant");
 
   for (const key of ["ArrowDown", "Escape", "Enter"]) {
     await composer.dispatchEvent("keydown", { key, code: key, keyCode: 229, isComposing: true });
   }
   await expect(page.getByRole("listbox", { name: "Slash Commands" })).toBeVisible();
-  await expect(composer).toHaveAttribute("aria-activedescendant", activeDescendant!);
   await expect(composer).toHaveValue("/stop");
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests().length)).toBe(0);
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.cancelTurnCount())).toBe(0);
 
   await page.keyboard.press("Enter");
-  await expect(page.locator('.composer > .notice.t-danger[role="alert"]')).toHaveText("There is no active turn to stop.");
+  await expect(page.locator('.composer > .notice.t-danger[role="alert"]')).toHaveText("There's no turn to stop right now.");
   await expect(composer).toHaveValue("/stop");
+});
+
+test("with seven commands the footer stays in view and the seventh row is reachable by scrolling", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([
+    { name: "review", source: "builtin", description: "Review the current changes", argumentHint: "[focus]" },
+    { name: "compact", source: "builtin", description: "Summarize the conversation so far" },
+    { name: "init", source: "builtin", description: "Write an AGENTS.md for this project" },
+    { name: "summarize", source: "user", description: "Summarize the branch for review" },
+    { name: "zebra", source: "project", description: "The last command in the list" },
+  ], ["plan"]));
+  const composer = page.locator(".composer-input");
+  await composer.fill("/");
+  const listbox = page.getByRole("listbox", { name: "Slash Commands" });
+  const options = listbox.getByRole("option");
+  await expect(options).toHaveCount(7);
+  const foot = page.locator(".picker-foot");
+  await expect(foot).toBeVisible();
+  await expect(foot.locator(".shortcut-hint-label")).toHaveText(["Move", "Run or Insert", "Complete", "Close"]);
+
+  const list = page.locator(".picker-list");
+  const listBox = (await list.boundingBox())!;
+  expect(listBox.height).toBeLessThanOrEqual(320);
+  // ArrowUp from the first row wraps to the seventh, which the list scrolls into its own view.
+  await page.keyboard.press("ArrowUp");
+  const seventh = options.nth(6);
+  await expect(seventh).toHaveAttribute("aria-selected", "true");
+  await expect(composer).toHaveAttribute("aria-activedescendant", (await seventh.getAttribute("id"))!);
+  await expect.poll(async () => {
+    const [row, view] = await Promise.all([seventh.boundingBox(), list.boundingBox()]);
+    return row!.y >= view!.y - 1 && row!.y + row!.height <= view!.y + view!.height + 1;
+  }).toBe(true);
+  const [footBox, finalList] = await Promise.all([foot.boundingBox(), list.boundingBox()]);
+  expect(footBox!.y).toBeGreaterThanOrEqual(finalList!.y + finalList!.height - 1);
+  // The picker sits above the composer, inside the viewport.
+  const [pickerBox, composerBox] = await Promise.all([page.locator(".picker").boundingBox(), composer.boundingBox()]);
+  expect(pickerBox!.y).toBeGreaterThanOrEqual(0);
+  expect(pickerBox!.y + pickerBox!.height).toBeLessThanOrEqual(composerBox!.y);
+});
+
+test("a slash query that matches nothing keeps the picker open until Escape or a space", async ({ page }) => {
+  const composer = page.locator(".composer-input");
+  await composer.fill("/zzzz");
+  await expect(page.locator(".picker")).toBeVisible();
+  // The empty listbox stays in the DOM for aria-controls, but takes no room above the row.
+  await expect(page.getByRole("listbox", { name: "Slash Commands", includeHidden: true })).toBeAttached();
+  await expect(page.locator(".picker-empty")).toHaveText("No commands match “/zzzz”.");
+  await expect(composer).toHaveAttribute("aria-expanded", "true");
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".picker")).toHaveCount(0);
+  await expect(composer).toHaveValue("/zzzz");
+
+  // Dismissal holds for that exact text; a new query opens the row again.
+  await composer.fill("/zzz");
+  await expect(page.locator(".picker-empty")).toBeVisible();
+  await page.keyboard.type(" ");
+  await expect(page.locator(".picker")).toHaveCount(0);
+  await expect(composer).toHaveValue("/zzz ");
+});
+
+test.describe("on a phone", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  test("both pickers open above the composer inside the viewport, with 44px rows and no footer keys", async ({ page }) => {
+    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([
+      { name: "review", source: "builtin", description: "Review the current changes with a long description that has to truncate", argumentHint: "[focus]" },
+    ], ["plan"]));
+    const composer = page.locator(".composer-input");
+    const expectAnchored = async () => {
+      const picker = page.locator(".picker");
+      await expect(picker).toBeVisible();
+      const [pickerBox, composerBox] = await Promise.all([picker.boundingBox(), composer.boundingBox()]);
+      expect(pickerBox!.y).toBeGreaterThanOrEqual(0);
+      expect(pickerBox!.x).toBeGreaterThanOrEqual(0);
+      expect(pickerBox!.x + pickerBox!.width).toBeLessThanOrEqual(390);
+      expect(pickerBox!.y + pickerBox!.height).toBeLessThanOrEqual(composerBox!.y);
+      for (const option of await page.getByRole("option").all()) {
+        expect((await option.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+      }
+      await expect(page.locator(".picker-keys")).toBeHidden();
+      await expect(page.locator(".picker-foot")).toBeHidden();
+    };
+
+    // The idle phone composer is a one-line capsule; a tap opens it.
+    const idlePreview = page.getByRole("button", { name: /^Edit Message:/ });
+    if (await idlePreview.isVisible()) await idlePreview.tap();
+    await composer.focus();
+    await composer.fill("/");
+    await expect(page.getByRole("option", { name: /\/review/ })).toBeVisible();
+    await expectAnchored();
+
+    await composer.fill("");
+    await composer.pressSequentially("Review @src");
+    await expect(page.getByRole("option", { name: /src\/session\.ts/ })).toBeVisible();
+    await expectAnchored();
+  });
 });

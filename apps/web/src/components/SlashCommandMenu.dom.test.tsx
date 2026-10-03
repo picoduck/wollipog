@@ -3,7 +3,13 @@ import { test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { ComposerCommand } from "../composer-commands.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
+import {
+  buildComposerCommandRegistry,
+  composerCommandsInPickerOrder,
+  rankComposerCommands,
+  type ComposerCommand,
+} from "../composer-commands.js";
 import { SlashCommandMenu, slashCommandOptionId } from "./SlashCommandMenu.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -18,249 +24,189 @@ for (const [name, value] of Object.entries({
   IS_REACT_ACT_ENVIRONMENT: true,
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
 
-const commands: ComposerCommand[] = [
-  {
-    id: "app:plan",
-    name: "plan",
-    label: "/plan",
-    invocationAlias: "plan",
-    description: "Toggle plan mode without editing files.",
-    source: "app",
-    sourceLabel: "App",
-    argumentHint: "[on|off]",
-    executionMode: "app",
-    available: true,
-    attachmentPolicy: "preserve",
-    groupId: "app",
-    groupLabel: "App Commands",
-  },
-  {
-    id: "harness:builtin:review",
-    name: "review",
-    label: "/review",
-    invocationAlias: "review",
-    description: "Review the current changes.",
-    source: "provider",
-    sourceLabel: "Built-In",
-    providerSource: "builtin",
-    executionMode: "passthrough",
-    available: true,
-    attachmentPolicy: "send",
-    groupId: "provider",
-    groupLabel: "Harness Commands",
-  },
-  {
-    id: "harness:user:stop/unsafe value",
-    name: "stop",
-    label: "/harness:stop",
-    invocationAlias: "harness:stop",
-    source: "provider",
-    sourceLabel: "User",
-    providerSource: "user",
-    executionMode: "passthrough",
-    available: false,
-    disabledReason: "There is no active turn to stop.",
-    attachmentPolicy: "forbid",
-    groupId: "provider",
-    groupLabel: "Harness Commands",
-  },
-];
+/** A session with app, harness and skill commands whose names share prefixes across groups. */
+const registry = buildComposerCommandRegistry({
+  context: { planSupported: true, canStopTurn: false, canRespond: false, agentLabel: "Claude Code" },
+  providerCommands: [
+    { name: "review", providerSource: "builtin", description: "Review the current changes.", argumentHint: "[focus]" },
+    { name: "resume", providerSource: "builtin", description: "Resume a conversation." },
+    { name: "release-notes", providerSource: "skill", description: "Write release notes." },
+    { name: "refactor", providerSource: "skill", description: "Refactor a module." },
+    { name: "plan-review", providerSource: "user", description: "Review the plan." },
+    {
+      name: "deploy",
+      providerSource: "plugin",
+      available: false,
+      disabledReason: "Deploys are paused for this workspace.",
+    },
+  ],
+});
 
-function mountMenu(overrides: Partial<React.ComponentProps<typeof SlashCommandMenu>> = {}) {
+function command(id: string): ComposerCommand {
+  const found = registry.find((candidate) => candidate.id === id);
+  assert.ok(found, `missing ${id}`);
+  return found;
+}
+
+/** What the composer offers for a typed query: ranked, then grouped into picker order. */
+function offered(query: string): ComposerCommand[] {
+  const ranked = rankComposerCommands(registry, query).map((match) => match.command);
+  return composerCommandsInPickerOrder(query ? ranked : ranked.filter((candidate) => candidate.available));
+}
+
+async function render(props: Partial<React.ComponentProps<typeof SlashCommandMenu>>) {
   const host = domWindow.document.createElement("div");
   domWindow.document.body.append(host);
   const container = host as unknown as HTMLDivElement;
   const root = createRoot(container);
-  const props: React.ComponentProps<typeof SlashCommandMenu> = {
+  const full: React.ComponentProps<typeof SlashCommandMenu> = {
     listboxId: "session-slash-test",
-    commands,
-    activeCommandId: "harness:builtin:review",
+    commands: [],
+    query: "/",
+    activeCommandId: null,
     onActiveCommandChange: () => {},
     onSelectCommand: () => {},
-    ...overrides,
+    ...props,
   };
-  return { container, root, props };
+  await act(async () => root.render(<SlashCommandMenu {...full} />));
+  return {
+    container,
+    rerender: (next: Partial<React.ComponentProps<typeof SlashCommandMenu>>) =>
+      act(async () => root.render(<SlashCommandMenu {...full} {...next} />)),
+    async unmount() {
+      await act(async () => root.unmount());
+      container.remove();
+    },
+  };
 }
 
-test("menu groups commands with stable listbox semantics and an active detail card", async () => {
-  const { container, root, props } = mountMenu();
+const groupLabels = (container: HTMLElement) =>
+  [...container.querySelectorAll(".picker-group-label")].map((label) => label.textContent);
+
+test("every prefix of every command name renders each group label at most once", async () => {
+  const queries = new Set<string>([""]);
+  for (const candidate of registry) {
+    for (let length = 1; length <= candidate.invocationAlias.length; length += 1) {
+      queries.add(candidate.invocationAlias.slice(0, length));
+    }
+  }
+  const view = await render({});
   try {
-    await act(async () => root.render(<SlashCommandMenu {...props} />));
-    const listbox = container.querySelector('[role="listbox"]')!;
-    assert.equal(listbox.id, "session-slash-test");
-    assert.equal(listbox.getAttribute("aria-label"), "Slash Commands");
-    assert.deepEqual(
-      [...container.querySelectorAll(".slash-section-label")].map((label) => label.textContent),
-      ["App Commands", "Harness Commands"],
-    );
-
-    const options = [...container.querySelectorAll<HTMLButtonElement>('[role="option"]')];
-    assert.equal(options.length, 3);
-    assert.equal(options.every((option) => option.tabIndex === -1), true);
-    assert.match(options[1]!.textContent ?? "", /\/review.*Built-In/);
-    assert.match(options[2]!.textContent ?? "", /\/harness:stop.*User/);
-    assert.equal(options[0]!.id, slashCommandOptionId(props.listboxId, "app:plan"));
-    assert.match(options[2]!.id, /^[A-Za-z][A-Za-z0-9_-]*$/);
-    assert.equal(new Set(options.map((option) => option.id)).size, options.length);
-
-    const active = options[1]!;
-    assert.equal(active.getAttribute("aria-selected"), "true");
-    assert.equal(active.getAttribute("aria-describedby"), "session-slash-test-detail");
-    assert.match(container.querySelector(".slash-detail")?.textContent ?? "", /Review the current changes\./);
-    assert.equal(options[2]!.disabled, false);
-    assert.equal(options[2]!.getAttribute("aria-disabled"), "true");
+    for (const query of queries) {
+      const commands = offered(query);
+      await view.rerender({ commands, query: `/${query}` });
+      const labels = groupLabels(view.container);
+      assert.equal(new Set(labels).size, labels.length, `/${query} repeated a group: ${labels.join(", ")}`);
+      // Grouping keeps every offered command, in the order the arrow keys walk.
+      assert.deepEqual(
+        [...view.container.querySelectorAll('[role="option"]')].map((option) => option.id),
+        commands.map((candidate) => slashCommandOptionId("session-slash-test", candidate.id)),
+      );
+    }
+    // "/re" interleaves all three sources in rank order; each still appears once, best match first.
+    await view.rerender({ commands: offered("re"), query: "/re" });
+    assert.deepEqual(groupLabels(view.container), ["Wollipog", "Skills", "Claude Code"]);
   } finally {
-    await act(async () => root.unmount());
-    container.remove();
+    await view.unmount();
   }
 });
 
-test("interleaved ranked results keep their visual and DOM order", async () => {
-  const rankedCommands = [commands[1]!, commands[0]!, commands[2]!];
-  const { container, root, props } = mountMenu({ commands: rankedCommands });
+test("the best match's group leads", async () => {
+  const view = await render({ commands: offered("rel"), query: "/rel" });
   try {
-    await act(async () => root.render(<SlashCommandMenu {...props} />));
-    assert.deepEqual(
-      [...container.querySelectorAll('[role="option"]')].map((option) =>
-        option.querySelector(".slash-name")?.textContent),
-      ["/review", "/plan", "/harness:stop"],
-    );
-    assert.deepEqual(
-      [...container.querySelectorAll(".slash-section-label")].map((label) => label.textContent),
-      ["Harness Commands", "App Commands", "Harness Commands"],
-    );
-    const sectionLabelIds = [...container.querySelectorAll(".slash-section-label")]
-      .map((label) => label.id);
-    assert.equal(new Set(sectionLabelIds).size, sectionLabelIds.length);
+    assert.equal(groupLabels(view.container)[0], "Skills");
   } finally {
-    await act(async () => root.unmount());
-    container.remove();
+    await view.unmount();
   }
 });
 
-test("command-owned group metadata renders even before the menu knows a new registry group", async () => {
-  const future = {
-    ...commands[1]!,
-    id: "future:review",
-    groupId: "future",
-    groupLabel: "Future Commands",
-  } as unknown as ComposerCommand;
-  const { container, root, props } = mountMenu({ commands: [future], activeCommandId: future.id });
+test("rows show the typed token, its argument hint and description, and no source badge", async () => {
+  const commands = [command("app:rename-session"), command("app:plan"), command("provider:builtin:review")];
+  const view = await render({ commands, activeCommandId: "app:plan" });
   try {
-    await act(async () => root.render(<SlashCommandMenu {...props} />));
-    assert.equal(container.querySelectorAll('[role="option"]').length, 1);
-    assert.equal(container.querySelector(".slash-section-label")?.textContent, "Future Commands");
-    assert.equal(container.querySelector('[role="option"]')?.textContent?.includes("/review"), true);
+    const options = [...view.container.querySelectorAll<HTMLElement>('[role="option"]')];
+    assert.deepEqual(options.map((option) => option.querySelector(".picker-token")?.textContent), [
+      "/rename-session",
+      "/plan [on|off]",
+      "/review [focus]",
+    ]);
+    assert.equal(options[1]!.querySelector(".picker-hint")?.textContent, " [on|off]");
+    assert.equal(options[0]!.textContent?.includes("Rename Session"), false);
+    for (const badge of ["App", "Built-In", "Harness"]) {
+      assert.equal(options.some((option) => option.textContent?.includes(badge)), false, `badge ${badge}`);
+    }
+    // Named by the token, described by the description.
+    const planId = slashCommandOptionId("session-slash-test", "app:plan");
+    assert.equal(options[1]!.getAttribute("aria-labelledby"), `${planId}-token`);
+    assert.equal(options[1]!.getAttribute("aria-describedby"), `${planId}-desc`);
+    assertNoDomNode(view.container.querySelector(".slash-detail, .slash-src, .slash-palette"));
   } finally {
-    await act(async () => root.unmount());
-    container.remove();
+    await view.unmount();
   }
 });
 
-test("active argument and disabled details explain the highlighted command", async () => {
-  const { container, root, props } = mountMenu({ activeCommandId: "app:plan" });
+test("a disabled command shows its reason as a visible second line on every row", async () => {
+  const stop = command("app:stop");
+  const deploy = command("provider:plugin:deploy");
+  const view = await render({
+    commands: [command("provider:builtin:review"), stop, deploy],
+    activeCommandId: "provider:builtin:review",
+  });
   try {
-    await act(async () => root.render(<SlashCommandMenu {...props} activeCommandId="app:plan" />));
-    assert.match(container.querySelector(".slash-detail")?.textContent ?? "", /Arguments\[on\|off\]/);
-
-    await act(async () => root.render(
-      <SlashCommandMenu {...props} activeCommandId="harness:user:stop/unsafe value" />,
-    ));
-    assert.match(
-      container.querySelector(".slash-detail-disabled")?.textContent ?? "",
-      /There is no active turn to stop\./,
-    );
+    const reasons = [...view.container.querySelectorAll(".picker-reason")].map((reason) => reason.textContent);
+    // Deploy joins review's group, which leads; stop's group follows.
+    assert.deepEqual(reasons, ["Deploys are paused for this workspace.", "There's no turn to stop right now."]);
+    const stopOption = view.container.querySelector<HTMLElement>(`#${slashCommandOptionId("session-slash-test", stop.id)}`)!;
+    assert.equal(stopOption.getAttribute("aria-disabled"), "true");
+    assert.equal(stopOption.getAttribute("aria-selected"), "false");
+    assert.ok(stopOption.querySelector(".picker-reason svg"), "the reason leads with the ban icon");
+    assert.match(stopOption.getAttribute("aria-describedby") ?? "", /-reason$/);
   } finally {
-    await act(async () => root.unmount());
-    container.remove();
+    await view.unmount();
   }
 });
 
-test("authorized commands warn that attached images remain for the next prompt", async () => {
+test("the active row notes that an authorized command keeps attached images", async () => {
   const durableReview: ComposerCommand = {
-    ...commands[1]!,
+    ...command("provider:builtin:review"),
     providerCommandId: "provider-command-review",
     catalogRevision: "catalog-7",
     attachmentPolicy: "preserve",
   };
-  const { container, root, props } = mountMenu({
-    commands: [durableReview],
-    activeCommandId: durableReview.id,
-    hasAttachments: true,
-  });
+  const view = await render({ commands: [durableReview], activeCommandId: durableReview.id, hasAttachments: true });
   try {
-    await act(async () => root.render(<SlashCommandMenu {...props} />));
-    assert.match(
-      container.querySelector(".slash-detail-attachments")?.textContent ?? "",
-      /Attached images will not be sent.*remain for your next prompt\./,
-    );
-    assert.equal(
-      container.querySelector('[role="option"]')?.getAttribute("aria-describedby"),
-      "session-slash-test-detail",
-    );
+    const note = view.container.querySelector(".picker-reason.is-note");
+    assert.match(note?.textContent ?? "", /Attached images will not be sent.*remain for your next prompt\./);
+    await view.rerender({ activeCommandId: null });
+    assertNoDomNode(view.container.querySelector(".picker-reason"), "only the active row carries the note");
   } finally {
-    await act(async () => root.unmount());
-    container.remove();
+    await view.unmount();
   }
 });
 
-test("mouse-down selection preserves composer focus and forwards unavailable options for an explanation", async () => {
-  const selected: string[] = [];
-  const hovered: string[] = [];
-  const composer = domWindow.document.createElement("textarea");
-  domWindow.document.body.append(composer);
-  composer.focus();
-  const { container, root, props } = mountMenu({
-    onActiveCommandChange: (commandId) => hovered.push(commandId),
-    onSelectCommand: (command) => selected.push(command.id),
-  });
+test("a query that matches nothing keeps the picker open on a no-match row", async () => {
+  const view = await render({ commands: [], query: "/zzzz" });
   try {
-    await act(async () => root.render(<SlashCommandMenu {...props} />));
-    const review = container.querySelector<HTMLButtonElement>(
-      `#${slashCommandOptionId(props.listboxId, "harness:builtin:review")}`,
-    )!;
-    const enter = new domWindow.MouseEvent("mouseover", { bubbles: true });
-    review.dispatchEvent(enter as unknown as Event);
-    const down = new domWindow.MouseEvent("mousedown", { bubbles: true, cancelable: true });
-    review.dispatchEvent(down as unknown as Event);
-    assert.equal(down.defaultPrevented, true);
-    assert.equal(domWindow.document.activeElement, composer);
-    assert.deepEqual(hovered, ["harness:builtin:review"]);
-    assert.deepEqual(selected, ["harness:builtin:review"]);
-
-    const unavailable = container.querySelectorAll<HTMLButtonElement>('[role="option"]')[2]!;
-    unavailable.dispatchEvent(
-      new domWindow.MouseEvent("mousedown", { bubbles: true, cancelable: true }) as unknown as Event,
-    );
-    assert.deepEqual(selected, ["harness:builtin:review", "harness:user:stop/unsafe value"]);
+    assert.ok(view.container.querySelector('[role="listbox"][aria-label="Slash Commands"]'));
+    assert.equal(view.container.querySelectorAll('[role="option"]').length, 0);
+    const empty = view.container.querySelector(".picker-empty");
+    assert.equal(empty?.textContent, "No commands match “/zzzz”.");
+    assert.equal(empty?.getAttribute("role"), "status");
   } finally {
-    await act(async () => root.unmount());
-    container.remove();
-    composer.remove();
+    await view.unmount();
   }
 });
 
-test("active option changes scroll the keyboard target into the nearest view", async () => {
-  const scrolled: Array<{ id: string; options: ScrollIntoViewOptions | undefined }> = [];
-  Object.defineProperty(domWindow.HTMLElement.prototype, "scrollIntoView", {
-    configurable: true,
-    value(this: HTMLElement, options?: ScrollIntoViewOptions) {
-      scrolled.push({ id: this.id, options });
-    },
-  });
-  const { container, root, props } = mountMenu({ activeCommandId: "app:plan" });
+test("group labels and footer keys are Title Case; descriptions and reasons are sentences", async () => {
+  const view = await render({ commands: offered("re"), query: "/re" });
   try {
-    await act(async () => root.render(<SlashCommandMenu {...props} activeCommandId="app:plan" />));
-    scrolled.length = 0;
-    await act(async () => root.render(
-      <SlashCommandMenu {...props} activeCommandId="harness:builtin:review" />,
-    ));
-    assert.deepEqual(scrolled, [{
-      id: slashCommandOptionId(props.listboxId, "harness:builtin:review"),
-      options: { block: "nearest" },
-    }]);
+    const footer = [...view.container.querySelectorAll(".picker-keys .shortcut-hint-label")].map((label) => label.textContent);
+    assert.deepEqual(footer, ["Move", "Run or Insert", "Complete", "Close"]);
+    for (const label of groupLabels(view.container)) assert.match(label ?? "", /^[A-Z]/);
+    for (const description of view.container.querySelectorAll(".picker-desc")) {
+      assert.match(description.textContent ?? "", /^[A-Z][^]*\.$/);
+    }
   } finally {
-    await act(async () => root.unmount());
-    container.remove();
+    await view.unmount();
   }
 });

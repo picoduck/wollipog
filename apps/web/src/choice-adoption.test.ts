@@ -118,9 +118,10 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
      #2044, which took both files' last raw-choice entries off. */
   ["components/SessionApproval.tsx", "raw-radiogroup", 2],
   ["components/CommandPalette.tsx", "raw-radiogroup", 2],
-  // Like CommandPalette, this is transient command navigation rather than a persisted setting or
-  // one-of-N form choice. Listbox/option is the correct combobox popup contract for its textarea.
-  ["components/SlashCommandMenu.tsx", "raw-radiogroup", 2],
+  // Like CommandPalette, the composer's / and @ pickers (#2155) are transient command and path
+  // navigation rather than a persisted setting or one-of-N form choice. Listbox/option is the
+  // correct combobox popup contract for its textarea; both pickers render through this one file.
+  ["components/ComposerListbox.tsx", "raw-radiogroup", 2],
   ["components/ComposerControls.tsx", "raw-radiogroup", 2],
   // View Options (#1961) is §9.1's radio-like menu: MenuItem rows with the trailing check, one per
   // Show and Group By choice, which reset with the page. A view switch in a menu, not a form choice.

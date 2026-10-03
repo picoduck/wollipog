@@ -212,6 +212,7 @@ import {
   DURABLE_COMMAND_ATTACHMENT_NOTICE,
   buildComposerCommandRegistry,
   composerCommandsForTrigger,
+  composerCommandsInPickerOrder,
   composerCommandsIncludeSkills,
   durableCommandPreservesAttachments,
   findComposerCommandTrigger,
@@ -220,11 +221,12 @@ import {
   replaceComposerCommandTrigger,
   resolveComposerCommandInvocation,
   retainActiveComposerCommandId,
+  stepComposerCommandId,
   type ComposerCommand,
   type ProviderComposerCommand,
 } from "../composer-commands.js";
 import { SlashCommandMenu, slashCommandOptionId } from "./SlashCommandMenu.js";
-import { WorkspaceReferencePicker } from "./WorkspaceReferencePicker.js";
+import { WorkspaceReferencePicker, workspaceReferenceOptionId } from "./WorkspaceReferencePicker.js";
 import {
   captureComposerFocus,
   focusComposerAtEnd,
@@ -4139,13 +4141,15 @@ function SessionDetailLoaded({
   // Codex silently falls back to a writable sandbox for an unknown mode, so exposing it there would
   // let "plan" edit files despite the "no edits" copy — only offer it when the driver supports it.
   const planSupported = (agentCaps?.permissionModes ?? []).includes("plan");
+  const composerAgentLabel = sessionAgentLabel(session.agentName, session.driver, session.agentId);
   const composerCommands = useMemo(() => buildComposerCommandRegistry({
-    context: { planSupported, canStopTurn, canRespond: canAnswerPendingQuestion },
+    context: { planSupported, canStopTurn, canRespond: canAnswerPendingQuestion, agentLabel: composerAgentLabel },
     providerCommands: mapProviderComposerCommands(
       agentCaps?.slashCommands ?? [],
       providerCommandAttachmentPolicy,
     ),
-  }), [agentCaps?.slashCommands, canAnswerPendingQuestion, canStopTurn, planSupported, providerCommandAttachmentPolicy]);
+  }), [agentCaps?.slashCommands, canAnswerPendingQuestion, canStopTurn, composerAgentLabel, planSupported,
+    providerCommandAttachmentPolicy]);
   const composerSkillSigil = useMemo(() => composerCommandsIncludeSkills(composerCommands), [composerCommands]);
   // A receipt outlives catalog rotation. The kind of every submission this view sent is known
   // exactly; otherwise a current skill command id, then a name only skills use, identifies a skill.
@@ -4187,8 +4191,10 @@ function SessionDetailLoaded({
       return;
     }
     let current = true;
+    // Busy from the keystroke, not from the debounced request: a query is never reported as
+    // matching nothing before it has been searched.
+    setWorkspaceSearchBusy(true);
     const timer = window.setTimeout(() => {
-      setWorkspaceSearchBusy(true);
       setWorkspaceSearchError(null);
       void api.searchWorkspaceReferences(sessionId, workspaceTrigger.query).then((result) => {
         if (!current) return;
@@ -4241,15 +4247,18 @@ function SessionDetailLoaded({
     if (!slashTrigger) return [];
     const ranked = rankComposerCommands(composerCommandsForTrigger(composerCommands, slashTrigger), slashTrigger.query)
       .map((match) => match.command);
-    return slashTrigger.query ? ranked : ranked.filter((command) => command.available);
+    // The picker's order (each group once, best match's group first) is the order arrows walk.
+    return composerCommandsInPickerOrder(slashTrigger.query ? ranked : ranked.filter((command) => command.available));
   }, [composerCommands, slashTrigger]);
   const slashDismissKey = slashTrigger ? `${text}\u0000${composerSelection.start}` : null;
-  const paletteOpen = !workspacePickerOpen && canPrompt && slashMatches.length > 0 && slashDismissedFor !== slashDismissKey;
+  // A slash query that matches nothing keeps the picker open on its no-match row, so a typo does
+  // not look like an ordinary message; Escape or a space closes it. A `$` stays ordinary text.
+  const slashNoMatch = slashTrigger !== null && slashTrigger.sigil !== "$" && slashTrigger.query !== "" &&
+    slashMatches.length === 0;
+  const paletteOpen = !workspacePickerOpen && canPrompt && (slashMatches.length > 0 || slashNoMatch) &&
+    slashDismissedFor !== slashDismissKey;
   const selectedSlashCommandId = retainActiveComposerCommandId(activeSlashCommandId, slashMatches);
   const selectedSlashCommand = slashMatches.find((command) => command.id === selectedSlashCommandId);
-  const selectedSlashCommandIndex = selectedSlashCommand
-    ? slashMatches.findIndex((command) => command.id === selectedSlashCommand.id)
-    : -1;
   const composerCommandResolution = resolveComposerCommandInvocation(text, composerCommands);
   const commandPreservesAttachedImages = composerCommandResolution.kind === "command" &&
     durableCommandPreservesAttachments(composerCommandResolution.command, images.length > 0);
@@ -5056,18 +5065,18 @@ function SessionDetailLoaded({
         setSlashDismissedFor(slashDismissKey);
         return;
       }
-      if ((e.key === "ArrowDown" || e.key === "ArrowUp") && plainKey) {
+      // The no-match row has nothing to move to or choose: Enter sends the text as typed, as it
+      // did before the row existed, and Tab leaves the composer.
+      if ((e.key === "ArrowDown" || e.key === "ArrowUp") && plainKey && slashMatches.length) {
         e.preventDefault();
-        const currentIndex = Math.max(0, selectedSlashCommandIndex);
-        const nextIndex = e.key === "ArrowDown"
-          ? (currentIndex + 1) % slashMatches.length
-          : (currentIndex - 1 + slashMatches.length) % slashMatches.length;
-        setActiveSlashCommandId(slashMatches[nextIndex]?.id ?? null);
+        setActiveSlashCommandId(stepComposerCommandId(selectedSlashCommandId, slashMatches,
+          e.key === "ArrowDown" ? 1 : -1));
         return;
       }
-      if ((e.key === "Tab" || e.key === "Enter") && plainKey) {
+      if ((e.key === "Tab" || e.key === "Enter") && plainKey && slashMatches.length) {
         e.preventDefault();
-        if (selectedSlashCommand) commitSlashCommand(selectedSlashCommand);
+        // Every match is unavailable: the best one explains why instead of sending the token.
+        commitSlashCommand(selectedSlashCommand ?? slashMatches[0]!);
         return;
       }
     }
@@ -5993,6 +6002,7 @@ function SessionDetailLoaded({
                 <SlashCommandMenu
                   listboxId={slashListboxId}
                   commands={slashMatches}
+                  query={slashTrigger?.raw ?? ""}
                   activeCommandId={selectedSlashCommandId}
                   hasAttachments={images.length > 0}
                   onActiveCommandChange={setActiveSlashCommandId}
@@ -6008,7 +6018,11 @@ function SessionDetailLoaded({
                   error={workspaceSearchError}
                   truncated={workspaceSearchTruncated}
                   query={workspaceTrigger?.query ?? ""}
+                  workspaceName={session.workspaceName || session.projectName || "this workspace"}
+                  machineName={runnerDisp.name || "This machine"}
+                  machineOnline={runnerOnline}
                   onSelect={selectWorkspaceCandidate}
+                  onActiveIndexChange={setActiveWorkspaceResult}
                 />
               )}
               <ImageStrip
@@ -6042,7 +6056,7 @@ function SessionDetailLoaded({
                 aria-busy={steeringRequestBusy || retitlePending || undefined}
                 aria-controls={workspacePickerOpen ? workspaceListboxId : paletteOpen ? slashListboxId : undefined}
                 aria-activedescendant={workspacePickerOpen && workspaceResults[activeWorkspaceResult]
-                  ? `${workspaceListboxId}-${activeWorkspaceResult}`
+                  ? workspaceReferenceOptionId(workspaceListboxId, activeWorkspaceResult)
                   : paletteOpen && selectedSlashCommandId
                     ? slashCommandOptionId(slashListboxId, selectedSlashCommandId)
                     : undefined}

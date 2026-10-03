@@ -4,6 +4,7 @@ import {
   ArrowDown as LucideArrowDown,
   ArrowRightLeft as LucideArrowRightLeft,
   ArrowUp as LucideArrowUp,
+  Ban as LucideBan,
   BookOpen as LucideBookOpen,
   Bot as LucideBot,
   Brain as LucideBrain,
@@ -29,6 +30,7 @@ import {
   ExternalLink as LucideExternalLink,
   Eye as LucideEye,
   EyeOff as LucideEyeOff,
+  File as LucideFile,
   FileClock as LucideFileClock,
   FileDiff as LucideFileDiff,
   FilePen as LucideFilePen,
@@ -395,6 +397,15 @@ export function GlobeIcon(props: IconProps) {
 
 export function FolderIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideFolder} {...props} />;
+}
+
+export function FileIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideFile} {...props} />;
+}
+
+/** Why a choice can't be made: a disabled command's reason (#2155). */
+export function BanIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideBan} {...props} />;
 }
 
 export function FolderUpIcon(props: IconProps) {

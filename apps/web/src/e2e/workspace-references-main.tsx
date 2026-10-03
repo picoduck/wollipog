@@ -8,6 +8,37 @@ import "../styles.css";
 
 const query = new URLSearchParams(window.location.search);
 const after = query.get("state") !== "before";
+/** The @ picker's state for #2155: results (default), truncated, busy, error, offline, noquery, none. */
+const pickerState = query.get("picker") ?? "results";
+
+const PICKER_RESULTS = [
+  { path: "src/session.ts", isDirectory: false },
+  { path: "src/components", isDirectory: true },
+  { path: "apps/web/src/components/session/index.ts", isDirectory: false },
+  { path: "packages/protocol/src/session/nested/directory/with/a/long/name/session-index.ts", isDirectory: false },
+];
+
+function pickerProps() {
+  const base = {
+    results: PICKER_RESULTS,
+    busy: false,
+    error: null as string | null,
+    truncated: false,
+    query: "session",
+    workspaceName: "wollipog",
+    machineName: "Studio Mac",
+    machineOnline: true,
+  };
+  switch (pickerState) {
+    case "truncated": return { ...base, truncated: true };
+    case "busy": return { ...base, results: [], busy: true };
+    case "error": return { ...base, results: [], error: "socket closed unexpectedly (ECONNRESET)" };
+    case "offline": return { ...base, results: [], error: "runner is offline", machineOnline: false };
+    case "noquery": return { ...base, results: [], query: "" };
+    case "none": return { ...base, results: [], query: "zzzz" };
+    default: return base;
+  }
+}
 document.documentElement.dataset.theme = query.get("theme") === "light" ? "light" : "dark";
 
 const diffHash = "d".repeat(64);
@@ -58,6 +89,7 @@ function Fixture() {
   const [attachments, setAttachments] = useState<PromptImageInput[]>(after ? [reference({
     path: "src/session.ts", kind: "lines", startLine: 18, endLine: 21,
   }, "lines")] : []);
+  const [activeIndex, setActiveIndex] = useState(0);
   const attach = async (target: CreateWorkspaceReferenceRequest) => {
     setAttachments((current) => [...current, reference(target, `ref${current.length}`)]);
   };
@@ -70,23 +102,17 @@ function Fixture() {
       <section className="card" style={{ padding: 16, display: "grid", gap: 12 }}>
         <strong>Prompt Composer</strong>
         <ImageStrip images={attachments} onRemove={(index) => setAttachments((current) => current.filter((_, i) => i !== index))} />
-        <div style={{ position: "relative", marginTop: after ? 104 : 0 }}>
+        <div style={{ position: "relative", marginTop: after ? 240 : 0 }}>
           {after && (
             <WorkspaceReferencePicker
               listboxId="workspace-evidence-picker"
-              results={[
-                { path: "src/session.ts", isDirectory: false },
-                { path: "src/components", isDirectory: true },
-              ]}
-              activeIndex={0}
-              busy={false}
-              error={null}
-              truncated={false}
-              query="src"
+              {...pickerProps()}
+              activeIndex={activeIndex}
+              onActiveIndexChange={setActiveIndex}
               onSelect={(candidate) => void attach({ path: candidate.path, kind: candidate.isDirectory ? "directory" : "file" })}
             />
           )}
-          <textarea className="composer-textarea" aria-label="Prompt" defaultValue={after ? "Review @src" : "Review the current changes"} style={{ width: "100%", minHeight: 86 }} />
+          <textarea className="composer-textarea" aria-label="Prompt" defaultValue={after ? `Review @${pickerProps().query}` : "Review the current changes"} style={{ width: "100%", minHeight: 86 }} />
         </div>
       </section>
       <section className="card" style={{ padding: 16, minWidth: 0 }}>

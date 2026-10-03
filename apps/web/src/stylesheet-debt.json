@@ -202,9 +202,6 @@
     "|.shell-tab|font-size|12",
     "|.sidechat-boundary span,.sidechat-shortcut|font-size|11",
     "|.sidechat-boundary strong|font-size|12",
-    "|.slash-desc|font-size|12",
-    "|.slash-name|font-size|13",
-    "|.slash-src|font-size|10.5",
     "|.sm|font-size|12",
     "|.source-symbol-form input,.source-editor-select|font-size|12",
     "|.static-pick|font-size|13",
@@ -327,8 +324,6 @@
     "|.sdot|border-radius|50",
     "|.send-btn|border-radius|50",
     "|.sidechat-composer textarea|border-radius|6",
-    "|.slash-item|border-radius|6",
-    "|.slash-src|border-radius|5",
     "|.spinner|border-radius|50",
     "|.status-dot|border-radius|50",
     "|.tag|border-radius|5",
@@ -725,7 +720,6 @@
     "|.sidechat-boundary|gap|2px",
     "|.sidechat-composer|gap|8px",
     "|.sidechat-panel|gap|10px",
-    "|.slash-item|gap|10px",
     "|.snooze-conflict|gap|6px",
     "|.snooze-form|gap|10px",
     "|.snooze-presets|gap|7px",
@@ -798,9 +792,7 @@
     "|.workspace-list li|gap|1px",
     "|.workspace-list|gap|6px",
     "|.workspace-reference-details|gap|14px",
-    "|.workspace-reference-details|gap|8px",
-    "|.workspace-reference-picker .ui-inline-listbox-option|gap|8px",
-    "|.workspace-reference-picker|gap|2px"
+    "|.workspace-reference-details|gap|8px"
   ],
   "paddingLiterals": [
     "@media (max-width: 640px)|.workflow-inspector|padding|10px",
@@ -1227,11 +1219,6 @@
     "|.sidechat-composer textarea|padding|8px",
     "|.sidechat-composer textarea|padding|9px",
     "|.sidechat-timeline|padding|2px",
-    "|.slash-item|padding|10px",
-    "|.slash-item|padding|7px",
-    "|.slash-palette|padding|4px",
-    "|.slash-src|padding|1px",
-    "|.slash-src|padding|5px",
     "|.snooze-conflict|padding|10px",
     "|.snooze-preview|padding|10px",
     "|.source-symbol-form input,.source-editor-select|padding|3px",
@@ -1286,15 +1273,10 @@
     "|.workflow-node|padding|10px",
     "|.workspace-reference-chip.is-readonly|padding|4px",
     "|.workspace-reference-chip.is-readonly|padding|8px",
-    "|.workspace-reference-empty|padding|10px",
-    "|.workspace-reference-empty|padding|8px",
     "|.workspace-reference-open|padding|4px",
     "|.workspace-reference-open|padding|5px",
     "|.workspace-reference-open|padding|5px",
     "|.workspace-reference-open|padding|9px",
-    "|.workspace-reference-picker .ui-inline-listbox-option|padding|10px",
-    "|.workspace-reference-picker .ui-inline-listbox-option|padding|7px",
-    "|.workspace-reference-picker|padding|4px",
     "|.workspace-reference-remove|padding|4px",
     "|.workspace-reference-remove|padding|5px",
     "|.workspace-reference-remove|padding|5px",
@@ -1309,7 +1291,6 @@
     "|.diff-hunk-header|font-family|\"Cascadia Code\", \"Consolas\", ui-monospace, monospace",
     "|.diff-hunk-lines|font-family|\"Cascadia Code\", \"Consolas\", ui-monospace, monospace",
     "|.dir-path-input|font-family|\"Cascadia Code\", \"Consolas\", ui-monospace, monospace",
-    "|.slash-name|font-family|\"Cascadia Code\", monospace",
     "|.workflow-role-bindings label>span|font-family|ui-monospace, SFMono-Regular, Consolas, monospace",
     "|.ws-path|font-family|\"Cascadia Code\", monospace"
   ],
@@ -1444,8 +1425,6 @@
     "components/SessionApproval.tsx|🧰|🧰",
     "components/SessionDetail.tsx|📎|📎",
     "components/SessionDetail.tsx|🔐|🔐",
-    "components/SessionDetail.tsx|🖼|🖼️",
-    "components/WorkspaceReferencePicker.tsx|📁|📁",
-    "components/WorkspaceReferencePicker.tsx|📄|📄"
+    "components/SessionDetail.tsx|🖼|🖼️"
   ]
 }

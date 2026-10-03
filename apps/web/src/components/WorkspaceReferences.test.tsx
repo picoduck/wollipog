@@ -38,20 +38,52 @@ test("workspace reference chips are inspectable and removable without rendering 
   assert.doesNotMatch(html, /<img/);
 });
 
-test("the workspace picker exposes a keyboard-addressable listbox", () => {
-  const html = renderToStaticMarkup(<WorkspaceReferencePicker
+function picker(overrides: Partial<React.ComponentProps<typeof WorkspaceReferencePicker>> = {}) {
+  return renderToStaticMarkup(<WorkspaceReferencePicker
     listboxId="workspace-list"
     results={[{ path: "src/app.ts", isDirectory: false }, { path: "src", isDirectory: true }]}
     activeIndex={1}
     busy={false}
     error={null}
-    truncated
+    truncated={false}
     query="src"
+    workspaceName="wollipog"
+    machineName="Studio Mac"
+    machineOnline
     onSelect={() => {}}
+    {...overrides}
   />);
+}
+
+test("the workspace picker exposes a keyboard-addressable listbox", () => {
+  const html = picker({ truncated: true });
   assert.match(html, /role="listbox"/);
-  assert.match(html, /id="workspace-list-1" aria-selected="true"/);
-  assert.match(html, /Refine your search/);
+  assert.match(html, /id="workspace-list-1"[^>]*aria-selected="true"/);
+  assert.match(html, /class="picker-note">More matches exist\. Keep typing to narrow them\./);
+});
+
+test("workspace rows show an icon, the name before its folder, and the match underlined", () => {
+  const html = picker({ results: [{ path: "apps/web/src/index.ts", isDirectory: false }], query: "web", activeIndex: 0 });
+  assert.doesNotMatch(html, /📁|📄/u);
+  assert.match(html, /aria-label="apps\/web\/src\/index\.ts"/);
+  assert.match(html, /<span class="picker-name">index\.ts<\/span><span class="picker-path"><bdi>apps\/<mark>web<\/mark>\/src<\/bdi><\/span>/);
+  assert.match(picker({ query: "app" }), /<span class="picker-name"><mark>app<\/mark>\.ts<\/span>/);
+});
+
+test("the workspace picker shows one state at a time in plain words", () => {
+  const noQuery = picker({ query: "", results: [] });
+  assert.match(noQuery, /Type a file or folder name\./);
+  assert.match(noQuery, /Searches wollipog on Studio Mac\./);
+  assert.match(picker({ busy: true, results: [] }), /role="status"[^>]*>.*Searching the workspace…/);
+  // A search in flight keeps the previous results instead of flickering to the busy row.
+  assert.doesNotMatch(picker({ busy: true }), /Searching the workspace/);
+  assert.match(picker({ results: [], query: "zz" }), /No files or folders match “zz”\./);
+  const offline = picker({ error: "runner is offline", machineOnline: false });
+  assert.match(offline, /role="alert"/);
+  assert.match(offline, /Studio Mac is offline\. Try again when it reconnects\./);
+  assert.doesNotMatch(offline, /role="option"/);
+  assert.match(picker({ error: "socket exploded: ECONNRESET" }), /Couldn&#x27;t search the workspace\. Try again\./);
+  assert.doesNotMatch(picker({ error: "socket exploded: ECONNRESET" }), /ECONNRESET/);
 });
 
 test("Review exposes selectable added, removed, and both context sides with immutable diff identity", () => {
