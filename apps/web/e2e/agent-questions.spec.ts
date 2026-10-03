@@ -522,8 +522,14 @@ test("every question row reads its outcome and answer without arrows or emoji (#
   for (const row of await rows.all()) {
     const height = (await row.locator("summary").boundingBox())!.height;
     expect(height).toBeGreaterThanOrEqual(28);
-    expect(height).toBeLessThan(60);
+    expect(height).toBeLessThan(76);
   }
+  // A phone wraps an answer to at most two lines, so a policy's name after its answer stays readable.
+  const policyDetail = rows.nth(6).locator(".tl-step-detail");
+  const lineHeight = await policyDetail.evaluate((element) => parseFloat(getComputedStyle(element).lineHeight));
+  const detailHeight = (await policyDetail.boundingBox())!.height;
+  expect(detailHeight).toBeGreaterThan(lineHeight * 1.5);
+  expect(detailHeight).toBeLessThanOrEqual(lineHeight * 2 + 1);
 
   await rows.nth(1).locator("summary").click();
   await expect(rows.nth(1).locator("li.chosen")).toHaveText(["Unit Tests (Chosen)", "Smoke Test (Chosen)"]);

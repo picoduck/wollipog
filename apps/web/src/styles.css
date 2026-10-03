@@ -6989,6 +6989,17 @@ textarea,
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* A phone has no room for an answer on one line: it wraps to two, then ends in an ellipsis, so a
+   policy's name after its answer stays readable. */
+@media (max-width: 760px) {
+  .tl-step-detail {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+}
 /* An agent's question (#2188): each question once, its options with a check on the chosen ones,
    free text, and who answered. */
 .tl-question { min-width: 0; }
