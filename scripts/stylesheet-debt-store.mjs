@@ -20,7 +20,7 @@
  * recording something the regenerator would not.
  */
 import { createHash } from "node:crypto";
-import { lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -39,9 +39,16 @@ const HASH_LENGTH = 12;
 /** Code-unit order, so the output does not depend on the locale it was generated in. */
 const byCodeUnits = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
+/**
+ * Windows device names, which it reserves even with an extension: `con.1143da2bc54c.txt` cannot be
+ * checked out there. Only the part before the first dot counts, and for an entry that is the slug.
+ */
+const WINDOWS_DEVICE = /^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])$/;
+
 /** Lowercase ASCII words joined by `-`: safe on every filesystem, including case-insensitive ones. */
 export function slugOf(identity) {
   const slug = identity.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+/, "").slice(0, SLUG_LENGTH).replace(/-+$/, "");
+  if (WINDOWS_DEVICE.test(slug)) return `${slug}-entry`;
   return slug || "entry";
 }
 
@@ -77,6 +84,10 @@ export function inventoryFiles(inventory) {
   return files;
 }
 
+function assertRealDirectory(directory) {
+  if (!lstatSync(directory).isDirectory()) throw new Error(`stylesheet debt: ${directory} is not a directory (a link is refused)`);
+}
+
 /** Every regular file under `directory`, by `/`-separated relative path. Links and the like are refused. */
 function listFiles(directory, relative = "", found = new Map()) {
   for (const entry of readdirSync(join(directory, relative)).sort(byCodeUnits)) {
@@ -97,6 +108,8 @@ function listFiles(directory, relative = "", found = new Map()) {
  */
 export function readInventory(directory = INVENTORY_DIRECTORY) {
   const fix = `run \`${REGENERATE_COMMAND}\` instead of editing apps/web/src/stylesheet-debt/ by hand`;
+  if (!existsSync(directory)) throw new Error(`stylesheet debt: ${directory} is missing; ${fix}`);
+  assertRealDirectory(directory);
   const found = listFiles(directory);
   const manifest = found.get(MANIFEST);
   if (manifest === undefined) throw new Error(`stylesheet debt: ${MANIFEST} is missing; ${fix}`);
@@ -137,6 +150,8 @@ export function readInventory(directory = INVENTORY_DIRECTORY) {
 export function writeInventory(inventory, directory = INVENTORY_DIRECTORY) {
   const files = inventoryFiles(inventory);
   mkdirSync(directory, { recursive: true });
+  // Pruning follows the root, so a linked root would delete files wherever the link points.
+  assertRealDirectory(directory);
   const existing = listFiles(directory);
   for (const path of existing.keys()) if (!files.has(path)) rmSync(join(directory, path));
   for (const [path, contents] of files) {

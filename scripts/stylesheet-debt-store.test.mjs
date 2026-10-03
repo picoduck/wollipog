@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { devNull, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -13,12 +13,15 @@ import {
   writeInventory,
 } from "./stylesheet-debt-store.mjs";
 
-/** Every file under `directory` with its contents, by `/`-separated relative path. */
+/**
+ * Every file under `directory` with its contents, by `/`-separated relative path. Line endings are
+ * read as LF, the way `readInventory` reads them, so a `core.autocrlf` checkout compares equal.
+ */
 function snapshot(directory, relative = "", found = {}) {
   for (const entry of readdirSync(join(directory, relative)).sort()) {
     const path = relative ? `${relative}/${entry}` : entry;
     if (statSync(join(directory, path)).isDirectory()) snapshot(directory, path, found);
-    else found[path] = readFileSync(join(directory, path), "utf8");
+    else found[path] = readFileSync(join(directory, path), "utf8").replace(/\r\n/g, "\n");
   }
   return found;
 }
@@ -54,6 +57,10 @@ test("every entry name is short, lowercase ASCII and carries its hash", () => {
     "media-max-width-760px-pairing-controls-input-fon");
   assert.equal(slugOf("components/Board.tsx|❓|❓"), "components-board-tsx");
   assert.equal(slugOf("🔐"), "entry", "a name with nothing readable still has a slug");
+  for (const device of ["con", "AUX", "nul", "com1", "lpt9", "prn"]) {
+    assert.equal(slugOf(device), `${device.toLowerCase()}-entry`, `${device} is a Windows device name, even with an extension`);
+  }
+  assert.equal(slugOf("console"), "console", "only the exact device names are escaped");
   assert.notEqual(entryFileName("|.A|gap|6px"), entryFileName("|.a|gap|6px"),
     "identities differing only in case get different names, so case-insensitive filesystems keep both");
 });
@@ -130,12 +137,29 @@ test("reading refuses any directory the regenerator would not have written, nami
   }
 });
 
-test("a checkout with CRLF line endings reads the same inventory", () => {
+test("a checkout with CRLF line endings reads the same inventory, and regenerating leaves it alone", () => {
   withDirectory((root) => {
     writeInventory(SAMPLE, root);
     const expected = readInventory(root);
     for (const [path, contents] of Object.entries(snapshot(root))) writeFileSync(join(root, path), contents.replace(/\n/g, "\r\n"));
     assert.deepEqual(readInventory(root), expected);
+    assert.deepEqual(snapshot(root), Object.fromEntries(inventoryFiles(expected)));
+    writeInventory(SAMPLE, root);
+    assert.match(readFileSync(join(root, "inventories.txt"), "utf8"), /\r\n/, "unchanged files are not rewritten");
+  });
+});
+
+test("a missing or linked inventory directory is refused before anything is read or pruned", () => {
+  withDirectory((root) => {
+    assert.throws(() => readInventory(join(root, "absent")), /absent is missing; run `pnpm regenerate:stylesheet-debt`/);
+    const target = join(root, "elsewhere");
+    mkdirSync(target);
+    writeFileSync(join(target, "keep.txt"), "not debt\n");
+    const linked = join(root, "linked");
+    symlinkSync(target, linked, "dir");
+    assert.throws(() => writeInventory({}, linked), /is not a directory \(a link is refused\)/);
+    assert.throws(() => readInventory(linked), /is not a directory \(a link is refused\)/);
+    assert.equal(readFileSync(join(target, "keep.txt"), "utf8"), "not debt\n", "nothing behind the link was pruned");
   });
 });
 
