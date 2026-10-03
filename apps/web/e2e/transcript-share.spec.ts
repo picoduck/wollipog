@@ -181,16 +181,29 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       // The whole row is the target (§8.4).
       expect(await height(dialog.locator("label.checkbox"))).toBeGreaterThanOrEqual(32);
 
-      // The fact follows the creation time on the same line, and only on the link that includes it.
+      // The fact follows the creation time, and only on the link that includes it. Neither is ever cut:
+      // on a desktop row they share line two; on a phone the fact wraps onto a line of its own and only
+      // that row grows, while the other rows keep the two-line height.
       const meta = rows(dialog).first().locator(".share-link-meta > span");
       await expect(meta).toHaveText(["Created today at 12:26 PM", "Includes session title"]);
       const [created, fact] = [await meta.nth(0).boundingBox(), await meta.nth(1).boundingBox()];
-      expect(Math.abs(created!.y - fact!.y)).toBeLessThanOrEqual(1);
-      expect(fact!.x).toBeGreaterThan(created!.x + created!.width);
-      // On a narrow row the creation time shortens; the fact is never cut.
-      expect(await meta.nth(1).evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+      for (const index of [0, 1]) {
+        expect(await meta.nth(index).evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+      }
       const rowBody = await rows(dialog).first().locator(".row-body").boundingBox();
       expect(fact!.x + fact!.width).toBeLessThanOrEqual(rowBody!.x + rowBody!.width + 0.5);
+      const twoLine = await height(rows(dialog).nth(1));
+      expect(twoLine).toBe(await dialog.evaluate((element) =>
+        Number.parseFloat(getComputedStyle(element).getPropertyValue("--row-h-2"))));
+      if (viewport.width >= 1440) {
+        expect(Math.abs(created!.y - fact!.y)).toBeLessThanOrEqual(1);
+        expect(fact!.x).toBeGreaterThan(created!.x + created!.width);
+        expect(await height(rows(dialog).first())).toBe(twoLine);
+      } else {
+        expect(fact!.y).toBeGreaterThanOrEqual(created!.y + created!.height - 1);
+        expect(Math.abs(fact!.x - created!.x)).toBeLessThanOrEqual(1);
+        expect(await height(rows(dialog).first())).toBeGreaterThan(twoLine);
+      }
       await expect(rows(dialog).nth(1).locator(".share-link-meta > span")).toHaveCount(1);
 
       await dialog.locator("label.checkbox").click();
