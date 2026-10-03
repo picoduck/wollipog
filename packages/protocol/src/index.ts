@@ -615,7 +615,6 @@
 //      is docs/campaign-work-ledger.md. Older control planes omit `OrchestratorCampaignProjection.work`
 //      and `SessionView.campaignMembership`, which clients present as unsupported, never as empty.
 // 197: request pricing coordinates, independent child usage, and raw cumulative Claude checkpoints.
-<<<<<<< HEAD
 // 198: campaign forge status (#2417 slice 8): the control plane asks the runner hosting a root
 //      campaign to read the GitHub pull requests its work items name (`campaign_forge_observe`)
 //      through the runner's existing `gh` login, and the runner answers with status data only.
@@ -624,12 +623,6 @@
 //      provider; commit revokes old credentials before resuming the same conversation. Older peers
 //      refuse conversion. Snapshot receipts reconcile interrupted replies without inventing roles.
 export const PROTOCOL_VERSION = 199;
-=======
-// 198: human-initiated, correlated existing-session role conversion. Prepare retires the quiet
-//      provider; commit revokes old credentials before resuming the same conversation. Older peers
-//      refuse conversion. Snapshot receipts reconcile interrupted replies without inventing roles.
-export const PROTOCOL_VERSION = 198;
->>>>>>> f03e9edc (feat: edit and preserve promotion policy before role conversion)
 export const PROJECT_MEMORY_MIN_PROTOCOL = 195;
 /** Only Claude versions whose directory override we have verified are advertised as supported.
  * Codex native memory combines projects in a database and cannot be shared project by project. */
@@ -878,11 +871,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v198 runner reads a campaign's GitHub pull-request status through its `gh` login. */
   campaignForgeStatus: 198,
   orchestratorAdditiveRole: 160,
-<<<<<<< HEAD
   sessionRoleConversion: 199,
-=======
-  sessionRoleConversion: 198,
->>>>>>> f03e9edc (feat: edit and preserve promotion policy before role conversion)
   orchestratorAdditiveCodex: 162,
   orchestratorAdditivePi: 163,
   /** Runner removes every ambient provider integration from an ADDITIVE Orchestrator launch while

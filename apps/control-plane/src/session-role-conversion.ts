@@ -79,7 +79,7 @@ export class SessionRoleConversions {
     const runner = this.db.getRunner(session.runnerId);
     if (!this.hub.isRunnerOnline(session.runnerId)) return refuse("Connect this session's Machine before changing its role.");
     if (!runnerSupportsProtocol(runner?.protocolVersion, "sessionRoleConversion")) {
-      return refuse("Update this Machine's runner to protocol v198 or later before changing the session role.");
+      return refuse("Update this Machine's runner to protocol v199 or later before changing the session role.");
     }
     const pending = this.db.sessionRoleConversion(id);
     if (pending && pending.state !== "applied") return {
@@ -199,7 +199,7 @@ export class SessionRoleConversions {
     const session = this.db.getSession(id);
     if (!intent || !session || intent.state === "applied") return;
     if (!runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "sessionRoleConversion")) {
-      throw new Error("Update this Machine's runner to protocol v198 or later to finish the role change.");
+      throw new Error("Update this Machine's runner to protocol v199 or later to finish the role change.");
     }
     const command = intent.state === "preparing" ? { ...intent.command, requestId: randomUUID() }
       : { type: "commit_session_role" as const, requestId: randomUUID(), sessionId: id, conversionId: intent.command.conversionId };

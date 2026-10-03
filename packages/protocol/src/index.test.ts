@@ -215,15 +215,13 @@ test("machine skill adoption is capability-gated per platform", () => {
   assert.equal(machineSkillAdoptionRecoveryRequirement(undefined), null);
 });
 
-test("PROTOCOL_VERSION is 198", () => {
-  assert.equal(PROTOCOL_VERSION, 198);
-<<<<<<< HEAD
+test("PROTOCOL_VERSION is 199", () => {
+  assert.equal(PROTOCOL_VERSION, 199);
   assert.equal(runnerSupportsProtocol(197, "campaignForgeStatus"), false);
   assert.equal(runnerSupportsProtocol(198, "campaignForgeStatus"), true);
-=======
   assert.equal(runnerSupportsProtocol(197, "sessionRoleConversion"), false);
-  assert.equal(runnerSupportsProtocol(198, "sessionRoleConversion"), true);
->>>>>>> f03e9edc (feat: edit and preserve promotion policy before role conversion)
+  assert.equal(runnerSupportsProtocol(198, "sessionRoleConversion"), false);
+  assert.equal(runnerSupportsProtocol(199, "sessionRoleConversion"), true);
   assert.equal(runnerSupportsProtocol(195, "campaignWorkLedger"), false);
   assert.equal(runnerSupportsProtocol(196, "campaignWorkLedger"), true);
   assert.equal(runnerSupportsProtocol(192, "archiveWorktreeRetirement"), false);
