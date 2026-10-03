@@ -12576,6 +12576,7 @@ test("an answered question stores its answer summary beside the question, and th
   const request = {
     kind: "question_request" as const,
     requestId: "ask-summary",
+    occurrenceId: "request_ask_summary",
     questions: [
       { id: "destination", header: "Destination", question: "Where should this deploy?",
         options: [{ label: "Destination 1 (Production)" }, { label: "Destination 2 (Staging)" }] },
@@ -12643,7 +12644,7 @@ test("an answered question stores its answer summary beside the question, and th
     page: { logEpoch: 1, throughSeq: 3, nextAfterSeq: 3, hasMore: false } });
   await svc.hydrateHistory(id);
   const restored = db.listEvents(id).filter((event) => event.payload.kind === "question_answered");
-  assert.equal(restored.length, 1, "the summary survives a history cache reset, and a later identical request inherits none");
+  assert.equal(restored.length, 1, "the summary survives a history cache reset, once, even when its occurrence is re-emitted");
   const firstRequest = db.listEvents(id).find((event) => event.payload.kind === "question_request")!;
   assert.deepEqual(restored[0]!.payload, { ...payload, questionEventSeq: firstRequest.seq });
   assert.equal(restored[0]!.ts, stored[0]!.ts);
@@ -12780,6 +12781,61 @@ test("an answer accepted before the runner's history epoch is known is restored 
     db.listEvents(id).find((event) => event.payload.kind === "question_request")!.seq);
 });
 
+test("a re-emitted occurrence whose answer never reached the provider is not shown as answered again (#2188)", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  const request = { kind: "question_request" as const, requestId: "retry", occurrenceId: "request_retry", async: true,
+    questions: [{ id: "q", question: "Go?", options: [{ label: "Yes" }, { label: "No" }] }] };
+  svc.onSessionEvent(id, request, 1, 100);
+  assert.ok(svc.answerQuestion(id, "retry", { q: "Yes" }, undefined, "submit", undefined, "request_retry").ok);
+  db.reconcileRunnerHistory(id, 0, 1);
+  svc.onSessionEvent(id, { kind: "question_resolved", requestId: "retry", occurrenceId: "request_retry", answered: true }, 2, 101);
+  // The runner reopens the same occurrence after a pre-provider delivery failure.
+  svc.onSessionEvent(id, request, 3, 102);
+  const summaries = () => db.listEvents(id).filter((event) => event.payload.kind === "question_answered");
+  const firstRequestSeq = () => db.listEvents(id).find((event) => event.payload.kind === "question_request")!.seq;
+  assert.equal(summaries().length, 1);
+  assert.equal(summaries()[0]!.payload.kind === "question_answered" ? summaries()[0]!.payload.questionEventSeq : null, firstRequestSeq());
+
+  db.clearSessionEvents(id);
+  db.reconcileRunnerHistory(id, 0, 3);
+  hub.requestHandler = (msg) => ({ type: "session_history_page_result", requestId: "requestId" in msg ? msg.requestId! : "history",
+    sessionId: id, ok: true, events: [
+      { seq: 1, ts: 100, payload: request },
+      { seq: 2, ts: 101, payload: { kind: "question_resolved", requestId: "retry", occurrenceId: "request_retry", answered: true } },
+      { seq: 3, ts: 102, payload: request },
+    ],
+    page: { logEpoch: 0, throughSeq: 3, nextAfterSeq: 3, hasMore: false } });
+  await svc.hydrateHistory(id);
+  assert.equal(summaries().length, 1);
+  assert.equal(summaries()[0]!.payload.kind === "question_answered" ? summaries()[0]!.payload.questionEventSeq : null, firstRequestSeq());
+});
+
+test("a snapshot-parked answer whose request arrives live before the history epoch is known survives a later reset (#2188)", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  const questions = [{ id: "q", question: "Go?", options: [{ label: "Yes" }, { label: "No" }] }];
+  const request = { kind: "question_request" as const, requestId: "parked", occurrenceId: "request_parked", questions };
+  assert.equal(db.getRunnerHistoryState(id)?.historyEpoch ?? null, null);
+  db.setPendingApproval(id, { requestId: "parked", occurrenceId: "request_parked", kind: "question", title: "Go?", options: [], questions });
+  db.updateSessionStatus(id, "input_required", Date.now());
+  assert.ok(svc.answerQuestion(id, "parked", { q: "No" }, undefined, "submit", undefined, "request_parked").ok);
+  svc.onSessionEvent(id, request, 1, 100);
+  assert.equal(db.listEvents(id).filter((event) => event.payload.kind === "question_answered").length, 1);
+
+  db.reconcileRunnerHistory(id, 0, 1);
+  db.clearSessionEvents(id);
+  db.reconcileRunnerHistory(id, 0, 1);
+  hub.requestHandler = (msg) => ({ type: "session_history_page_result", requestId: "requestId" in msg ? msg.requestId! : "history",
+    sessionId: id, ok: true, events: [{ seq: 1, ts: 100, payload: request }],
+    page: { logEpoch: 0, throughSeq: 1, nextAfterSeq: 1, hasMore: false } });
+  await svc.hydrateHistory(id);
+  const restored = db.listEvents(id).filter((event) => event.payload.kind === "question_answered");
+  assert.equal(restored.length, 1);
+  assert.deepEqual(restored[0]!.payload.kind === "question_answered" ? restored[0]!.payload.answers : null,
+    [{ questionId: "q", selected: ["No"] }]);
+});
+
 test("an older runner's snapshot-parked answer is never guessed onto an occurrence-less request (#2188)", async () => {
   const { db, hub, svc } = makeHarness();
   const questions = [{ id: "q", question: "Go?", options: [{ label: "Yes" }, { label: "No" }] }];
@@ -12828,7 +12884,8 @@ test("an older runner's snapshot-parked answer is never guessed onto an occurren
 test("restoring a stored answer never moves the session's last activity backward (#2188)", async () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);
-  const request = { kind: "question_request" as const, requestId: "ask", questions: [{ id: "q", question: "Go?", options: [{ label: "Yes" }] }] };
+  const request = { kind: "question_request" as const, requestId: "ask", occurrenceId: "request_ask",
+    questions: [{ id: "q", question: "Go?", options: [{ label: "Yes" }] }] };
   db.reconcileRunnerHistory(id, 1, 1);
   svc.onSessionEvent(id, request, 1, 100);
   assert.ok(svc.answerQuestion(id, "ask", { q: "Yes" }).ok);
