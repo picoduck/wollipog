@@ -83,7 +83,7 @@ test("Codex permission labels match the CLI/Desktop presets", () => {
   assert.equal(permissionModeLabel("on-request"), "Ask for Approval");
   assert.equal(permissionModeLabel("auto-review"), "Approve for Me");
   assert.equal(permissionModeLabel("danger-full-access"), "Full Access (No Sandbox)");
-  assert.match(permissionModeDescription("on-request") ?? "", /network access require approval/);
+  assert.match(permissionModeDescription("on-request") ?? "", /network access need approval/);
   assert.match(permissionModeDescription("orchestrator", "codex-app-server") ?? "", /Guardian reviews eligible actions/);
   assert.doesNotMatch(permissionModeDescription("orchestrator", "claude-code") ?? "", /Guardian/);
 });
@@ -94,7 +94,7 @@ test("Claude permission labels cover every installed fixed-rule mode", () => {
   assert.equal(permissionModeLabel("manual", "claude-code"), "Manual");
   assert.equal(permissionModeLabel("bypassPermissions", "claude-code"), "Full Access (No Checks)");
   assert.match(permissionModeDescription("dontAsk", "claude-code") ?? "", /blocked instead of asking you/);
-  assert.match(permissionModeDescription("manual", "claude-code") ?? "", /has not verified what this mode permits/);
+  assert.match(permissionModeDescription("manual", "claude-code") ?? "", /hasn't verified what this mode permits/);
 });
 
 test("exec Codex sandbox copy does not promise an interactive approval", () => {
@@ -102,10 +102,12 @@ test("exec Codex sandbox copy does not promise an interactive approval", () => {
   assert.equal(permissionModeEmptyLabel("codex-app-server"), "Approve for Me");
   assert.equal(permissionModeLabel("workspace-write", "codex"), "Auto (Workspace Sandbox)");
   assert.equal(permissionModeLabel("read-only", "codex"), "Read-Only");
-  assert.match(permissionModeDescription("workspace-write", "codex") ?? "", /blocked \(no prompt\)/);
-  assert.match(permissionModeDescription("read-only", "codex") ?? "", /blocked \(no prompt\)/);
+  assert.match(permissionModeDescription("workspace-write", "codex") ?? "", /network access are blocked\./);
+  assert.doesNotMatch(permissionModeDescription("workspace-write", "codex") ?? "", /approval/);
+  assert.match(permissionModeDescription("read-only", "codex") ?? "", /network access are blocked\./);
+  assert.doesNotMatch(permissionModeDescription("read-only", "codex") ?? "", /approval/);
   assert.equal(permissionModeLabel("workspace-write", "codex-app-server"), "Ask for Approval");
-  assert.match(permissionModeDescription("workspace-write", "codex-app-server") ?? "", /require approval/);
+  assert.match(permissionModeDescription("workspace-write", "codex-app-server") ?? "", /need approval/);
 });
 
 test("legacy Codex modes keep labels consistent with their effective policies", () => {

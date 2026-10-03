@@ -29,17 +29,30 @@ async function openFixture(page: Page, width: number, kind: "claude" | "codex" |
   await expect(page.locator(".composer-box")).toBeVisible();
 }
 
-test("Pi exposes verified permission choices and their delivery outcomes", async ({ page }) => {
+test("Pi describes each verified permission mode on its row and needs no delivery note", async ({ page }) => {
   await openFixture(page, 900, "pi");
   await expect(page.locator(".composer-input")).toBeVisible();
   await page.getByRole("button", { name: "Permission Mode: Ask Every Time" }).click();
   const menu = page.locator('.menu[aria-label="Permission Mode"]');
   await expect(menu).toBeVisible();
   await expect(menu).toContainText("Permission Mode");
-  await expect(menu.getByRole("menuitemradio", { name: /Default/ })).toContainText("Approvals Available");
-  await expect(menu.getByRole("menuitemradio", { name: /Don't Ask/ })).toContainText("Blocks Requests");
-  await expect(menu.getByRole("menuitemradio", { name: /Full Access/ })).toContainText("No Command Approvals");
+  await expect(menu.getByRole("menuitemradio", { name: "Default" }))
+    .toContainText("You approve each tool call before it runs.");
+  await expect(menu.getByRole("menuitemradio", { name: "Don't Ask" }))
+    .toContainText("Only actions your settings already allow run; anything else is blocked instead of asking you.");
+  await expect(menu.getByRole("menuitemradio", { name: "Full Access (No Checks)" }))
+    .toContainText("Everything runs with no command approvals. Use only in isolated environments.");
+  await expect(menu.locator(".menu-note")).toHaveCount(0);
   await page.screenshot({ path: `${EVIDENCE}/after-pi-permission-modes.png` });
+});
+
+test("an Orchestrator's fixed shield says why it can't change", async ({ page }) => {
+  await openFixture(page, 1440, "orchestrator");
+  const name = "Permission Mode: Orchestrator. Fixed for Orchestrator sessions.";
+  const badge = page.getByRole("img", { name });
+  await expect(badge).toBeVisible();
+  await expect(badge).toHaveAttribute("title", name);
+  await expect(page.getByRole("button", { name: /^Permission Mode:/ })).toHaveCount(0);
 });
 
 async function expandComposer(page: Page) {

@@ -1,5 +1,5 @@
 import React, {
-  useRef,
+  useId,
   useState,
   type ButtonHTMLAttributes,
   type PointerEvent as ReactPointerEvent,
@@ -38,12 +38,10 @@ import {
 import { useStoreSelector } from "../store.js";
 import { AgentIcon } from "./AgentIcon.js";
 import { useAccessibleMenu } from "./interactions.js";
-import { MenuItem, MenuLabel, MenuSurface } from "./Menu.js";
-import { Modal } from "./common.js";
+import { MenuItem, MenuLabel, MenuNote, MenuSurface } from "./Menu.js";
 import {
   ChevronDownIcon,
   CloseIcon,
-  InfoIcon,
   ServiceTierIcon,
   ShieldAlertIcon,
   ShieldCheckIcon,
@@ -555,47 +553,28 @@ export function ServiceTierMenuChoices({ state, apply, close }: {
   );
 }
 
-/** "Approve for me" — approval-mode picker in the composer bar. */
-export function permissionModeOutcome(
+/** A mode that runs every action without command approvals: the shield's amber risk warning. */
+function skipsApprovals(permissionMode: string | undefined): boolean {
+  return permissionMode === "bypassPermissions" || permissionMode === "danger-full-access";
+}
+
+/**
+ * Whether Wollipog has not confirmed that this mode's approval prompts reach the person. A mode that
+ * skips approvals raises none and Plan stays read-only, so only a mode that asks or blocks can be
+ * unverified. The menu names every such mode in one note instead of warning on each row.
+ */
+export function approvalDeliveryUnverified(
   permissionMode: string | undefined,
   status: ElicitationAvailability,
-  driver?: AgentDriverKind,
-): { label: string; description: string; warning: boolean } {
-  // A question or MCP elicitation channel can stay live while these policies deliberately disable
-  // command/file approval checks. Mode semantics win over transport availability: calling that
-  // combination "Approvals Available" implies a safety boundary that does not exist.
-  if (permissionMode === "bypassPermissions" || permissionMode === "danger-full-access") {
-    return {
-      label: "No Command Approvals",
-      description: status === "available"
-        ? "Questions or matching governance policies can still reach you, but actions otherwise run without sandbox or approval checks."
-        : "Actions run without sandbox or approval checks.",
-      warning: false,
-    };
-  }
-  if (permissionMode === "plan") {
-    return { label: "Read-Only", description: "The agent researches and plans without editing files.", warning: false };
-  }
-  if (permissionMode === "orchestrator") {
-    return driver === "codex" || driver === "codex-app-server"
-      ? {
-          label: "Approve for Me",
-          description: "Guardian reviews eligible actions automatically; Wollipog still governs child management and human-only requests.",
-          warning: false,
-        }
-      : {
-          label: "Harness-Enforced",
-          description: "The harness keeps implementation approvals blocked; Wollipog still governs child management and human-only requests.",
-          warning: false,
-        };
-  }
-  if (status === "available") {
-    return { label: "Approvals Available", description: "Approval requests raised through this mode reach you in Wollipog.", warning: false };
-  }
-  if (status === "unknown") {
-    return { label: "Support Unknown", description: "Wollipog has not verified approval delivery for this mode.", warning: true };
-  }
-  return { label: "Blocks Requests", description: "Actions requiring approval are blocked instead of prompting you.", warning: false };
+): boolean {
+  return status === "unknown" && !skipsApprovals(permissionMode) &&
+    permissionMode !== "plan" && permissionMode !== "orchestrator";
+}
+
+/** The menu's one note for the modes whose approval prompts may not reach the person. */
+export function unverifiedDeliveryNote(labels: readonly string[]): string {
+  const modes = new Intl.ListFormat("en-US", { type: "conjunction" }).format(labels);
+  return `Wollipog hasn't confirmed that approval prompts from ${modes} reach you here.`;
 }
 
 export function defaultPermissionModeDisplayLabel(driver: AgentDriverKind): string {
@@ -605,51 +584,52 @@ export function defaultPermissionModeDisplayLabel(driver: AgentDriverKind): stri
     : "Default";
 }
 
-function approvalOptionTitle(
-  description: string | undefined,
-  outcome: ReturnType<typeof permissionModeOutcome>,
-): string | undefined {
-  return [description, outcome.description].filter(Boolean).join(" ") || undefined;
+/** Who can still reach the person in a mode that skips approvals, by delivery channel. */
+function stillReachesYou(transports: readonly ElicitationTransport[] | undefined): string {
+  const questions = transports?.includes("app-server");
+  const governance = transports?.includes("hook");
+  if (questions && governance) return "questions and matching governance policies can still reach you";
+  if (questions) return "questions can still reach you";
+  if (governance) return "matching governance policies can still ask you before a tool runs";
+  return "questions or matching governance policies can still reach you";
 }
 
+/**
+ * A permission mode's meaning, shown as its menu row's second line. It says what runs and, when
+ * Wollipog knows, what happens to an action that needs approval. Unknown delivery is left to the
+ * menu's note.
+ */
 export function permissionModeOptionDescription(
   permissionMode: string | undefined,
   driver: AgentDriverKind,
   status: ElicitationAvailability,
-  outcome: ReturnType<typeof permissionModeOutcome>,
   transports?: readonly ElicitationTransport[],
 ): string | undefined {
-  if (permissionMode === "bypassPermissions" || permissionMode === "danger-full-access") {
-    const base = permissionModeDescription(permissionMode, driver);
-    if (status === "available") {
-      const questions = transports?.includes("app-server");
-      const governance = transports?.includes("hook");
-      const available = questions && governance
-        ? "Questions, MCP elicitations, and matching governance policies can still reach you."
-        : questions
-          ? "Questions and MCP elicitations can still reach you."
-          : governance
-            ? "Matching governance policies can still ask you before a tool runs."
-            : "Questions or matching governance policies can still reach you.";
-      return `${available} Actions otherwise run without sandbox or approval checks. Use only in isolated environments.`;
-    }
-    if (status === "unknown") {
-      return `${base ?? "Actions run without sandbox or approval checks."} Wollipog has not verified whether questions or governance prompts can reach you.`;
-    }
-    return base;
+  const base = permissionModeDescription(permissionMode ?? "", driver);
+  if (skipsApprovals(permissionMode)) {
+    if (status !== "available") return base;
+    const runs = permissionMode === "danger-full-access"
+      ? "Everything runs with no sandbox and no command approvals"
+      : "Everything runs with no command approvals";
+    return `${runs}, but ${stillReachesYou(transports)}. Use only in isolated environments.`;
   }
   if (status === "available") {
     if (permissionMode === "acceptEdits") {
       return "File edits and common file commands run without asking. Matching governance policies can ask you before other actions; otherwise those actions are blocked.";
     }
     if (permissionMode === "dontAsk") {
-      return "Matching governance policies can ask you before an action; otherwise actions requiring approval are blocked.";
+      return "Matching governance policies can ask you before an action; otherwise actions that need approval are blocked.";
     }
     if (permissionMode === "plan") {
-      return "The agent remains read-only. Matching governance policies can still ask you before a tool runs.";
+      return "The agent stays read-only. Matching governance policies can still ask you before a tool runs.";
     }
+    return base;
   }
-  return approvalOptionTitle(permissionModeDescription(permissionMode ?? "", driver), outcome);
+  // Don't Ask and exec Codex's sandbox policies block by definition, and their meaning says so.
+  if (status === "unavailable" && permissionMode !== "dontAsk" && driver !== "codex") {
+    return [base, "Actions that need approval are blocked instead of asking you."].filter(Boolean).join(" ");
+  }
+  return base;
 }
 
 export function approvalControlLabel(
@@ -663,70 +643,21 @@ export function approvalControlLabel(
   return permissionModeEmptyLabel(driver);
 }
 
-function PermissionModeOutcome({ outcome }: { outcome: ReturnType<typeof permissionModeOutcome> }) {
-  return <span className={`cbar-elicitation-state${outcome.warning ? " unknown" : ""}`}>{outcome.label}</span>;
-}
-
-export interface PermissionModeDetails {
+interface PermissionModeRow {
+  key: string;
   label: string;
-  description: string;
-  outcome: ReturnType<typeof permissionModeOutcome>;
-}
-
-export function PermissionModeDetailsDialog({ details, onClose, returnFocusRef }: {
-  details: PermissionModeDetails;
-  onClose: () => void;
-  returnFocusRef: { current: HTMLElement | null };
-}) {
-  return (
-    <Modal title={`${details.label} Details`} onClose={onClose} returnFocusRef={returnFocusRef}>
-      <div className="permission-mode-details-copy">
-        <PermissionModeOutcome outcome={details.outcome} />
-        <p>{details.description}</p>
-      </div>
-    </Modal>
-  );
-}
-
-function PermissionModeChoice({
-  label,
-  description,
-  outcome,
-  checked,
-  onSelect,
-  onDetails,
-}: PermissionModeDetails & {
+  /** The mode the row runs: the driver's resolved default for the Default row. */
+  mode: string | undefined;
   checked: boolean;
-  onSelect: () => void;
-  onDetails: (details: PermissionModeDetails, trigger: HTMLButtonElement) => void;
-}) {
-  const details = { label, description, outcome };
-  return (
-    <div className="cbar-permission-row" role="none">
-      <MenuItem
-        role="menuitemradio"
-        checked={checked}
-        data-menu-label={label}
-        description={<PermissionModeOutcome outcome={outcome} />}
-        onClick={onSelect}
-      >
-        {label}
-      </MenuItem>
-      <button
-        type="button"
-        role="menuitem"
-        className="icon-btn cbar-permission-details-trigger"
-        aria-label={`${label} Details`}
-        data-menu-label={`${label} Details`}
-        title={`${label} Details`}
-        onClick={(event) => onDetails(details, event.currentTarget)}
-      >
-        <InfoIcon size={16} />
-      </button>
-    </div>
-  );
+  select: () => void;
 }
 
+/**
+ * The permission menu (docs/design-system.md §9.1). Each mode is one two-line `menuitemradio`: its
+ * label, its meaning, and the check when selected. A mode that skips approvals carries the amber
+ * shield in its icon slot, and every mode whose approval prompts are unverified is named in one note
+ * at the bottom.
+ */
 export function ApprovalsMenuChoices({
   capabilities,
   driver,
@@ -734,7 +665,6 @@ export function ApprovalsMenuChoices({
   permVal,
   apply,
   close,
-  onDetails,
   showDefault = true,
 }: {
   capabilities: AgentCapabilities | undefined;
@@ -743,19 +673,10 @@ export function ApprovalsMenuChoices({
   permVal: string;
   apply: Apply;
   close: () => void;
-  onDetails: (details: PermissionModeDetails, trigger: HTMLButtonElement) => void;
   showDefault?: boolean;
 }) {
-  const defaultStatus = elicitationAvailability(capabilities, defaultPermissionMode(driver));
+  const noteId = `${useId().replace(/:/g, "")}-unverified`;
   const defaultMode = defaultPermissionMode(driver);
-  const defaultOutcome = permissionModeOutcome(defaultMode, defaultStatus, driver);
-  const defaultDescription = permissionModeOptionDescription(
-    defaultMode,
-    driver,
-    defaultStatus,
-    defaultOutcome,
-    defaultMode ? capabilities?.elicitation?.[defaultMode] : undefined,
-  ) ?? defaultOutcome.description;
   // Pi's named `default` mode is also Wollipog's empty-selection fallback. Present that semantic
   // choice once; clearing the explicit value still launches the same ask-before-tool behavior.
   const collapsedDefault = driver === "pi" && showDefault ? defaultMode : undefined;
@@ -767,47 +688,69 @@ export function ApprovalsMenuChoices({
     : undefined;
   const displayedModes = unlistedMode ? [unlistedMode, ...selectableModes] : selectableModes;
 
+  const rows: PermissionModeRow[] = [
+    ...(showDefault ? [{
+      key: "default-row",
+      label: defaultPermissionModeDisplayLabel(driver),
+      mode: defaultMode,
+      checked: !permVal || permVal === collapsedDefault,
+      select: () => apply({ permissionMode: "" }),
+    }] : []),
+    ...displayedModes.map((mode) => ({
+      key: `mode-${mode}`,
+      label: permissionModeLabel(mode, driver),
+      mode,
+      checked: mode === permVal,
+      select: () => {
+        if (mode !== unlistedMode) apply({ permissionMode: mode });
+      },
+    })),
+  ];
+  const described = rows.map((row) => {
+    const status = elicitationAvailability(capabilities, row.mode);
+    const description = permissionModeOptionDescription(
+      row.mode,
+      driver,
+      status,
+      row.mode ? capabilities?.elicitation?.[row.mode] : undefined,
+    );
+    return {
+      ...row,
+      // A default Wollipog cannot resolve (an ACP provider's), or a mode it has no words for, still
+      // has a second line, so the row reads like the others and its label can wrap.
+      description: description ?? (row.key === "default-row"
+        ? "Uses the agent's own default mode."
+        : "Wollipog doesn't know what this mode permits."),
+      unverified: approvalDeliveryUnverified(row.mode, status),
+    };
+  });
+  const unverified = described.filter((row) => row.unverified).map((row) => row.label);
+
   return (
     <>
       {/* The menu's name: shown on a desktop, where the menu has no title row. */}
       <MenuLabel className="repeats-title">Permission Mode</MenuLabel>
-      {showDefault && <PermissionModeChoice
-          label={defaultPermissionModeDisplayLabel(driver)}
-          description={defaultDescription}
-          outcome={defaultOutcome}
-          checked={!permVal || permVal === collapsedDefault}
-          onSelect={() => {
-            apply({ permissionMode: "" });
+      {described.map((row) => (
+        <MenuItem
+          key={row.key}
+          role="menuitemradio"
+          checked={row.checked}
+          data-menu-label={row.label}
+          // A mode that skips approvals is a risk warning: amber on the icon only (§21 item 5).
+          icon={skipsApprovals(row.mode)
+            ? <span className="permission-mode-risk"><ShieldAlertIcon size={16} /></span>
+            : undefined}
+          description={row.description}
+          aria-describedby={row.unverified ? noteId : undefined}
+          onClick={() => {
+            row.select();
             close();
           }}
-          onDetails={onDetails}
-        />}
-      {displayedModes.map((p) => {
-        const status = elicitationAvailability(capabilities, p);
-        const outcome = permissionModeOutcome(p, status, driver);
-        const description = permissionModeOptionDescription(
-          p,
-          driver,
-          status,
-          outcome,
-          capabilities?.elicitation?.[p],
-        ) ?? outcome.description;
-        const isUnlisted = p === unlistedMode;
-        return (
-          <PermissionModeChoice
-            key={p}
-            label={permissionModeLabel(p, driver)}
-            description={description}
-            outcome={outcome}
-            checked={p === permVal}
-            onSelect={() => {
-              if (!isUnlisted) apply({ permissionMode: p });
-              close();
-            }}
-            onDetails={onDetails}
-          />
-        );
-      })}
+        >
+          {row.label}
+        </MenuItem>
+      ))}
+      {unverified.length > 0 && <MenuNote id={noteId}>{unverifiedDeliveryNote(unverified)}</MenuNote>}
     </>
   );
 }
@@ -818,72 +761,49 @@ export function ApprovalsControl({ session, apply, disabledReason = null }: {
   /** Why the signed-in person may not change approvals mode (#1857). */
   disabledReason?: string | null;
 }) {
-  const [details, setDetails] = useState<PermissionModeDetails | null>(null);
-  const detailsReturnFocusRef = useRef<HTMLElement | null>(null);
   const { caps, permModes, permVal, showDefaultPermissionMode } = useSessionConfig(session);
   if (permModes.length === 0) return null;
   const currentMode = permVal || defaultPermissionMode(session.driver);
   const currentStatus = elicitationAvailability(caps, currentMode);
-  const currentOutcome = permissionModeOutcome(
-    currentMode,
-    currentStatus,
-    session.driver,
-  );
   const currentLabel = approvalControlLabel(session.driver, permVal, currentStatus);
-  const unrestricted = currentMode === "bypassPermissions" || currentMode === "danger-full-access";
+  const unrestricted = skipsApprovals(currentMode);
   const accessibleLabel = `Permission Mode: ${currentLabel}`;
   if (permModes.length === 1 && permModes[0] === "orchestrator") {
+    // A mark, not a control: its name says why nobody changes it here.
+    const fixed = `${accessibleLabel}. Fixed for Orchestrator sessions.`;
     return (
-      <span
-        className="cbar-permission-badge"
-        role="img"
-        aria-label={accessibleLabel}
-        title={approvalOptionTitle(`${accessibleLabel}. Fixed for this Orchestrator session.`, currentOutcome)}
-      >
+      <span className="cbar-permission-badge" role="img" aria-label={fixed} title={fixed}>
         <ShieldCheckIcon size={16} />
       </span>
     );
   }
   return (
-    <>
-      <BarMenu
-        permissionMode
-        menuLabel="Permission Mode"
-        showCaret={false}
-        label={
-          // A mode that skips approvals is a risk warning, not a request: amber on the icon only,
-          // never a pill (docs/design-system.md §21 item 5).
-          <span className={`cbar-approvals${unrestricted ? " unrestricted" : ""}`}>
-            {unrestricted ? <ShieldAlertIcon size={16} /> : <ShieldIcon size={16} />}
-          </span>
-        }
-        ariaLabel={accessibleLabel}
-        title={approvalOptionTitle(`${accessibleLabel}. Applies to the next turn.`, currentOutcome)}
-        disabledReason={disabledReason}
-      >
-        {(close) => (
-          <ApprovalsMenuChoices
-            capabilities={caps}
-            driver={session.driver}
-            permModes={permModes}
-            permVal={permVal}
-            apply={apply}
-            close={close}
-            onDetails={(nextDetails, trigger) => {
-              detailsReturnFocusRef.current = trigger;
-              setDetails(nextDetails);
-            }}
-            showDefault={showDefaultPermissionMode}
-          />
-        )}
-      </BarMenu>
-      {details && (
-        <PermissionModeDetailsDialog
-          details={details}
-          onClose={() => setDetails(null)}
-          returnFocusRef={detailsReturnFocusRef}
+    <BarMenu
+      permissionMode
+      menuLabel="Permission Mode"
+      showCaret={false}
+      label={
+        // A mode that skips approvals is a risk warning, not a request: amber on the icon only,
+        // never a pill (docs/design-system.md §21 item 5).
+        <span className={`cbar-approvals${unrestricted ? " unrestricted" : ""}`}>
+          {unrestricted ? <ShieldAlertIcon size={16} /> : <ShieldIcon size={16} />}
+        </span>
+      }
+      ariaLabel={accessibleLabel}
+      title={`${accessibleLabel}. Applies to the next turn.`}
+      disabledReason={disabledReason}
+    >
+      {(close) => (
+        <ApprovalsMenuChoices
+          capabilities={caps}
+          driver={session.driver}
+          permModes={permModes}
+          permVal={permVal}
+          apply={apply}
+          close={close}
+          showDefault={showDefaultPermissionMode}
         />
       )}
-    </>
+    </BarMenu>
   );
 }

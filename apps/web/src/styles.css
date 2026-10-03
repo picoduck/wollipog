@@ -5921,45 +5921,12 @@ textarea {
   .model-chip .cbar-context { display: none; }
   .composer-bar:has(.plan-toggle) .model-chip :is(.agent-icon, .cbar-effort, .cbar-caret) { display: none; }
 }
-.cbar-permission-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 30px;
-  align-items: center;
-}
-.cbar-elicitation-state {
-  flex: none;
-  color: var(--text-faint);
-  font-size: 10.5px;
-  font-weight: 500;
-  white-space: nowrap;
-}
-.cbar-elicitation-state.unknown {
-  color: var(--danger-text);
-}
-.cbar-permission-details-trigger {
-  width: 28px;
-  height: 28px;
-  color: var(--text-faint);
-}
-@media (hover: hover) {
-  .cbar-permission-details-trigger:hover {
-    color: var(--text);
-  }
-}
-.cbar-permission-details-trigger:focus-visible {
-  color: var(--text);
-}
-.permission-mode-details-copy {
-  display: grid;
-  gap: 12px;
-}
-.permission-mode-details-copy .cbar-elicitation-state {
-  justify-self: start;
-}
-.permission-mode-details-copy p {
-  margin: 0;
-  color: var(--text-dim);
-  line-height: 1.55;
+/* A permission menu row whose mode skips approvals carries the shield's risk warning: amber on the
+   icon only, never the row's words, fill or edge (§21 item 5). The glyph inherits it, so forced
+   colors turns it the row's system colour with the words. */
+.menu-icon > .permission-mode-risk {
+  display: inline-flex;
+  color: var(--amber);
 }
 /* ---------------------------- Broad polish sweep ------------------------- */
 /* Smooth interactive transitions across the common controls */

@@ -111,7 +111,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `DevinDesktopIcon` | Custom Exception | `Official Devin Mark` | Cognition's compact product mark; Lucide excludes vendor logos. |
 | `ZedEditorIcon` | Custom Exception | `Simple Icons 16.29.0: Zed Industries` | Canonical monochrome product mark; Lucide excludes vendor logos. |
 | `ShieldIcon` | Lucide | `Shield` | Generic approval status, intentionally filled. |
-| `ShieldAlertIcon` | Lucide | `ShieldAlert` | A permission mode that skips approval checks: the composer bar's shield, amber on the icon only. |
+| `ShieldAlertIcon` | Lucide | `ShieldAlert` | A permission mode that skips approval checks: the composer bar's shield and that mode's permission menu row, amber on the icon only. |
 | `ShieldCheckIcon` | Lucide | `ShieldCheck` | An Orchestrator's fixed permission mode in the composer bar. |
 | `PlanIcon` | Lucide | `ListTodo` | A plan: the composer bar's Plan toggle and a transcript plan card's head; `ListChecks` already means the background job list. |
 | `ArrowUpIcon` | Lucide | `ArrowUp` | Generic upward action. |

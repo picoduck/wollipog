@@ -8,7 +8,6 @@ import {
   ApprovalsMenuChoices,
   BarMenu,
   ModelEffortMenuChoices,
-  type PermissionModeDetails,
 } from "./ComposerControls.js";
 import { handleMenuKeyDown } from "./interactions.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
@@ -41,10 +40,8 @@ after(() => {
   }
 });
 
-test("permission details are keyboard reachable and do not select the mode", async () => {
+test("each permission row is one menu radio: arrows move between modes and choosing one applies it and closes", async () => {
   const applied: Partial<SessionConfig>[] = [];
-  const opened: PermissionModeDetails[] = [];
-  let openedBy: HTMLButtonElement | null = null;
   let closeCount = 0;
 
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
@@ -60,54 +57,64 @@ test("permission details are keyboard reachable and do not select the mode", asy
             slashCommands: [],
             supportsImages: true,
             supportsApprovals: true,
-            permissionModes: ["danger-full-access"],
+            permissionModes: ["auto-review", "danger-full-access"],
             elicitation: { "danger-full-access": ["app-server"] },
           }}
           driver="codex-app-server"
-          permModes={["danger-full-access"]}
-          permVal=""
+          permModes={["auto-review", "danger-full-access"]}
+          permVal="auto-review"
           apply={(patch) => applied.push(patch)}
           close={() => { closeCount += 1; }}
-          onDetails={(details, trigger) => {
-            opened.push(details);
-            openedBy = trigger;
-          }}
         />
       </div>,
     );
   });
 
   try {
-    const detailsButton = [
-      ...container.querySelectorAll<HTMLButtonElement>(".cbar-permission-details-trigger"),
-    ].find((button) => button.getAttribute("aria-label") === "Full Access (No Sandbox) Details");
-    assert.ok(detailsButton, "every compact row exposes a labelled details action");
-    const modeButton = detailsButton.closest(".cbar-permission-row")
-      ?.querySelector<HTMLButtonElement>('[role="menuitemradio"]');
-    assert.ok(modeButton, "the compact row keeps selection and details as separate controls");
+    const menu = container.querySelector<HTMLElement>('[role="menu"]')!;
+    const buttons = [...menu.querySelectorAll<HTMLButtonElement>("button")];
+    const radios = [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')];
+    assert.equal(radios.length, 3, "Default, Approve for Me and Full Access");
+    assert.deepEqual(buttons, radios, "every focusable row is exactly one menuitemradio");
+    for (const radio of radios) {
+      assertNoDomNode(radio.querySelector("button, [role='menuitem']"), "a row holds no control of its own");
+      assert.ok(radio.querySelector(".menu-desc")?.textContent, "every row shows its meaning as a second line");
+    }
+    const [defaultRow, approveRow, fullAccess] = radios as [HTMLButtonElement, HTMLButtonElement, HTMLButtonElement];
+    // The second line describes the row; it does not rename it.
+    assert.equal(
+      domWindow.document.getElementById(fullAccess.getAttribute("aria-labelledby")!)?.textContent,
+      "Full Access (No Sandbox)",
+    );
+    assert.match(fullAccess.querySelector(".menu-desc")!.textContent!, /no sandbox and no command approvals, but questions can still reach you/);
+    assert.ok(fullAccess.querySelector(".menu-icon .permission-mode-risk"), "Full Access carries the amber shield");
+    assertNoDomNode(approveRow.querySelector(".menu-icon"), "a mode that keeps approvals carries no warning");
+    assert.equal(approveRow.getAttribute("aria-checked"), "true");
+    assert.ok(approveRow.querySelector(".menu-check"), "the selected mode has a trailing check");
 
-    modeButton.focus();
+    // Default and Approve for Me have no reported delivery here, so one note names both; Full
+    // Access reports its own.
+    const notes = menu.querySelectorAll<HTMLElement>(".menu-note");
+    assert.equal(notes.length, 1);
+    assert.equal(menu.lastElementChild, notes[0], "the note sits at the bottom of the menu");
+    assert.equal(notes[0]!.textContent,
+      "Wollipog hasn't confirmed that approval prompts from Default and Approve for Me reach you here.");
+    for (const row of [defaultRow, approveRow]) {
+      assert.ok(row.getAttribute("aria-describedby")!.split(" ").includes(notes[0]!.id));
+    }
+    assert.ok(!fullAccess.getAttribute("aria-describedby")!.split(" ").includes(notes[0]!.id));
+
+    approveRow.focus();
     await act(async () => {
-      modeButton.dispatchEvent(
+      approveRow.dispatchEvent(
         new domWindow.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }) as unknown as Event,
       );
     });
-    assert.equal(domWindow.document.activeElement, detailsButton,
-      "ArrowDown reaches the row's details action");
+    assert.equal(domWindow.document.activeElement, fullAccess, "ArrowDown goes straight to the next mode");
 
-    await act(async () => { detailsButton.click(); });
-    assert.deepEqual(applied, [], "opening details does not select a mode");
-    assert.equal(closeCount, 0, "opening details does not dismiss the selector");
-    assert.equal(opened.length, 1);
-    assert.equal(openedBy, detailsButton, "the dialog can restore focus to its exact trigger");
-    assert.equal(opened[0]!.label, "Full Access (No Sandbox)");
-    assert.equal(opened[0]!.outcome.label, "No Command Approvals");
-    assert.match(opened[0]!.description, /Questions and MCP elicitations can still reach you/);
-    assert.match(opened[0]!.description, /without sandbox or approval checks/);
-
-    await act(async () => { modeButton.click(); });
+    await act(async () => { fullAccess.click(); });
     assert.deepEqual(applied, [{ permissionMode: "danger-full-access" }]);
-    assert.equal(closeCount, 1);
+    assert.equal(closeCount, 1, "choosing a mode closes the menu");
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();

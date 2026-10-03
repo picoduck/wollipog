@@ -589,7 +589,8 @@ export function ShieldIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideShield} fill="currentColor" stroke="none" {...props} />;
 }
 
-/** A permission mode that skips approval checks: the composer bar's shield, amber on the icon only. */
+/** A permission mode that skips approval checks: the composer bar's shield and that mode's permission
+ * menu row, amber on the icon only. */
 export function ShieldAlertIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideShieldAlert} {...props} />;
 }

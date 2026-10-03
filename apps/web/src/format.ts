@@ -218,21 +218,22 @@ const PERMISSION_LABELS: Record<string, string> = {
   "on-request": "Ask for Approval",
 };
 
-/** One-line explanation of each approval mode, used as the option's hover tooltip. */
+/** What each permission mode lets run, shown as its permission menu row's second line. What happens
+ * to an action that needs approval depends on delivery, so the menu adds that where Wollipog knows. */
 const PERMISSION_DESCRIPTIONS: Record<string, string> = {
-  default: "You approve every tool call (Allow / Reject).",
-  untrusted: "You approve every tool call (Allow / Reject).",
-  auto: "A classifier model reviews each action: safe ones run automatically; risky ones are blocked and the agent is steered to a safer path.",
-  "auto-review": "A Guardian model reviews sandbox-boundary actions: low-risk ones run automatically; risky ones are escalated to you for Allow / Reject.",
-  acceptEdits: "File edits and common file commands run without asking; other actions are blocked instead of being escalated to you.",
-  dontAsk: "Actions that require approval are blocked instead of asking you.",
-  manual: "Behavior depends on the installed Claude version; Wollipog has not verified what this mode permits.",
-  "workspace-write": "Reads, writes, and commands inside the workspace run automatically; external files and network access require approval.",
-  "read-only": "The agent can read files; edits, commands that modify files, and network access require approval.",
+  default: "You approve each tool call before it runs.",
+  untrusted: "You approve each tool call before it runs.",
+  auto: "A classifier model reviews each action: safe ones run, and risky ones are blocked so the agent tries a safer path.",
+  "auto-review": "A Guardian model reviews actions outside the sandbox: low-risk ones run, and risky ones come to you to allow or reject.",
+  acceptEdits: "File edits and common file commands run without asking.",
+  dontAsk: "Only actions your settings already allow run; anything else is blocked instead of asking you.",
+  manual: "Behavior depends on the installed Claude version; Wollipog hasn't verified what this mode permits.",
+  "workspace-write": "Reads, writes, and commands inside the workspace run automatically; files outside it and network access need approval.",
+  "read-only": "The agent can read files; edits, commands that change files, and network access need approval.",
   plan: "The agent researches and proposes a plan without editing anything.",
-  bypassPermissions: "Everything runs with no checks. Use only in isolated environments.",
-  "danger-full-access": "No sandbox — the agent can do anything. Use with caution.",
-  "on-request": "Reads, writes, and commands inside the workspace run automatically; external files and network access require approval.",
+  bypassPermissions: "Everything runs with no command approvals. Use only in isolated environments.",
+  "danger-full-access": "Everything runs with no sandbox and no command approvals. Use only in isolated environments.",
+  "on-request": "Reads, writes, and commands inside the workspace run automatically; files outside it and network access need approval.",
 };
 
 export function effortLabel(value: string): string {
@@ -261,10 +262,10 @@ export function permissionModeDescription(id: string, driver?: AgentDriverKind):
     return `Manages child sessions without its own shell or file-write tools. ${approvalBoundary}; Wollipog keeps child management and human-only requests under its own controls. Selected at session creation and fixed for that session.`;
   }
   if (driver === "codex" && id === "workspace-write") {
-    return "Reads and writes inside the workspace run automatically; external files and network access are blocked (no prompt).";
+    return "Reads and writes inside the workspace run automatically; files outside it and network access are blocked.";
   }
   if (driver === "codex" && id === "read-only") {
-    return "The agent can read files; edits and network access are blocked (no prompt).";
+    return "The agent can read files; edits and network access are blocked.";
   }
   return PERMISSION_DESCRIPTIONS[id];
 }
