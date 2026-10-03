@@ -1046,6 +1046,26 @@ test("a stored draft that loads late keeps a failure raised while it loaded", as
   }
 });
 
+test("a stop that finds the turn already ended reads as the plain no-turn sentence", async () => {
+  const fixture = await mount(sessionView({ status: "running", activeTurnId: "turn-1" }), {
+    client: {
+      cancelTurn: () => Promise.reject(new ApiError("the runner reports no active turn to stop", 409)),
+    } as Partial<ApiClient>,
+  });
+  try {
+    const stop = fixture.container.querySelector('button[aria-label="Stop Turn"]') as HTMLButtonElement | null;
+    assert.ok(stop, "the running turn can be stopped");
+    await act(async () => { stop.click(); });
+    await flush();
+    const notice = fixture.notices()[0]!;
+    assert.equal(notice.getAttribute("aria-label"), "Turn Not Stopped");
+    assert.equal(notice.querySelector(".notice-body p")?.textContent, "There's no turn to stop right now.");
+    assert.doesNotMatch(fixture.container.textContent ?? "", /runner reports/u);
+  } finally {
+    await fixture.unmount();
+  }
+});
+
 test("a server refusal keeps its words behind Show Details, not in the sentence", async () => {
   const fixture = await mount(sessionView({}), {
     client: { prompt: () => Promise.reject(new ApiError("session is not accepting prompts", 409)) } as Partial<ApiClient>,

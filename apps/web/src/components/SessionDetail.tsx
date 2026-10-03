@@ -3202,7 +3202,10 @@ function SessionDetailLoaded({
     } catch (cause) {
       if (stopTurnAttemptRef.current !== attempt) return false;
       clearStopTurnAttempt();
-      setError((cause as Error).message, "Turn Not Stopped");
+      // The turn ended before the stop reached it: the same plain sentence as stopping with no turn.
+      const noActiveTurn = cause instanceof ApiError && cause.status === 409 &&
+        /no active turn to stop/i.test(cause.message);
+      setError(noActiveTurn ? "There's no turn to stop right now." : (cause as Error).message, "Turn Not Stopped");
       return false;
     }
   }, [api, canStopTurn, cancelTurnRefusal, clearStopTurnAttempt, mutationKey, sessionId]);
