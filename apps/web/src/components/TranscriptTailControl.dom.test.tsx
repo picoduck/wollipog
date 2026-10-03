@@ -136,7 +136,9 @@ test("a touch drag on the control scrolls the reader, and only a tap jumps (#242
     touch(jump, "pointermove", 600);
     touch(jump, "pointerup", 600, 0);
     assert.deepEqual(fixture.scrolled, [-20, -80]);
-    assert.equal(fixture.readerEvents.length, 4, "the reader hears every step of the drag");
+    assert.deepEqual(fixture.readerEvents, [
+      "pointerdown:touch@500", "pointermove:touch@520", "pointermove:touch@600", "pointerup:touch@600",
+    ], "the reader hears every step of the drag");
     await act(async () => { jump.dispatchEvent(new domWindow.MouseEvent("click", { bubbles: true, cancelable: true, detail: 1 }) as unknown as Event); });
     assert.equal(fixture.jumps(), 1, "a click the browser sends after a drag is not a tap");
 
@@ -144,10 +146,30 @@ test("a touch drag on the control scrolls the reader, and only a tap jumps (#242
     await act(async () => { jump.dispatchEvent(new domWindow.MouseEvent("click", { bubbles: true, cancelable: true, detail: 0 }) as unknown as Event); });
     assert.equal(fixture.jumps(), 2);
 
+    // The control can vanish mid-drag (the drag reached the tail). The rest of the gesture lands on
+    // the reader itself, which hears it directly, and still scrolls it, in either direction.
+    fixture.scrolled.length = 0;
+    fixture.readerEvents.length = 0;
+    touch(jump, "pointerdown", 500);
+    touch(jump, "pointermove", 450);
+    await fixture.render(null);
+    touch(fixture.reader, "pointermove", 400);
+    touch(fixture.reader, "pointermove", 480);
+    touch(fixture.reader, "pointerup", 480, 0);
+    assert.deepEqual(fixture.scrolled, [50, 50, -80]);
+    assert.deepEqual(fixture.readerEvents, [
+      "pointerdown:touch@500", "pointermove:touch@450",
+      "pointermove:touch@400", "pointermove:touch@480", "pointerup:touch@480",
+    ], "input that lands on the reader is never relayed to it twice");
+    touch(fixture.reader, "pointermove", 300);
+    assert.deepEqual(fixture.scrolled, [50, 50, -80], "the gesture ends when the finger lifts");
+    await fixture.render({ kind: "jump", newRows: 0 });
+
     // A mouse press is the control's own: the reader never hears it.
     fixture.readerEvents.length = 0;
-    jump.dispatchEvent(new domWindow.PointerEvent("pointerdown", { bubbles: true, pointerType: "mouse", isPrimary: true, buttons: 1 }) as unknown as Event);
-    jump.dispatchEvent(new domWindow.PointerEvent("pointermove", { bubbles: true, pointerType: "mouse", isPrimary: true, buttons: 1, clientY: 40 }) as unknown as Event);
+    const remounted = fixture.container.querySelector("button")!;
+    remounted.dispatchEvent(new domWindow.PointerEvent("pointerdown", { bubbles: true, pointerType: "mouse", isPrimary: true, buttons: 1 }) as unknown as Event);
+    remounted.dispatchEvent(new domWindow.PointerEvent("pointermove", { bubbles: true, pointerType: "mouse", isPrimary: true, buttons: 1, clientY: 40 }) as unknown as Event);
     assert.deepEqual(fixture.readerEvents, []);
   } finally {
     await fixture.unmount();

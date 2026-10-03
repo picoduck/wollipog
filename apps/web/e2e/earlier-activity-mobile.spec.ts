@@ -52,6 +52,41 @@ test("the first native mobile touch traversal loads earlier activity", async ({ 
   await expect(control).toContainText("Loading earlier activity…");
 });
 
+test("a drag that starts on the floating tail control loads earlier activity as one beside it does (#2425)", async ({ page, context }) => {
+  await page.goto("/recovery-notice-e2e.html?pagination=1&height=720&width=412");
+
+  const reader = page.locator(".detail-scroll");
+  await expect.poll(() => page.locator("body").getAttribute("data-tail-request-count")).toBe("1");
+  await expect.poll(() => reader.evaluate((element) => element.scrollHeight - element.clientHeight))
+    .toBeGreaterThan(400);
+  await reader.dispatchEvent("wheel", { deltaY: -40 });
+  await reader.evaluate((element) => {
+    element.scrollTop = 200;
+    element.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+  const jump = page.locator(".transcript-tail-anchor > .transcript-tail-control");
+  await expect(jump).toBeVisible();
+
+  // The finger starts on the control and drags down past the head of the loaded window.
+  const box = await jump.boundingBox();
+  expect(box).not.toBeNull();
+  const client = await context.newCDPSession(page);
+  const x = box!.x + box!.width / 2;
+  const startY = box!.y + box!.height / 2;
+  await client.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y: startY, id: 1 }] });
+  for (let step = 1; step <= 10; step += 1) {
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [{ x, y: startY + 30 * step, id: 1 }],
+    });
+    await page.waitForTimeout(16);
+  }
+  await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+
+  await expect.poll(() => reader.evaluate((element) => element.scrollTop)).toBe(0);
+  await expect.poll(() => page.locator("body").getAttribute("data-tail-request-count")).toBe("2");
+});
+
 test("an event-heavy mobile opening fills itself before exposing earlier activity", async ({ page }) => {
   await page.goto(
     "/recovery-notice-e2e.html?pagination=resolve&event-heavy=1&height=720&width=412",

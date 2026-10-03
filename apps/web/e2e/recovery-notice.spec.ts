@@ -338,5 +338,29 @@ test.describe("touch", () => {
     await jump.tap();
     await expect(reader(page)).toHaveAttribute("data-follow-tail-state", "following");
     await expect(jump).toHaveCount(0);
+
+    // A drag that reaches the tail hides the control under the finger; the same gesture keeps
+    // scrolling when it turns back, without lifting.
+    await reader(page).dispatchEvent("wheel", { deltaY: -40 });
+    await reader(page).evaluate((el) => { el.scrollTop = el.scrollHeight - el.clientHeight - 150; });
+    await expect(jump).toBeVisible();
+    const near = await box(jump);
+    const x = near.left + near.width / 2;
+    const startY = near.top + near.height / 2;
+    await client.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y: startY, id: 1 }] });
+    for (let step = 1; step <= 10; step += 1) {
+      await client.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: startY - 30 * step, id: 1 }] });
+      await page.waitForTimeout(16);
+    }
+    await expect(jump, "the drag reached the tail").toHaveCount(0);
+    const atTail = await reader(page).evaluate((el) => el.scrollTop);
+    for (let step = 1; step <= 10; step += 1) {
+      await client.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: startY - 300 + 25 * step, id: 1 }] });
+      await page.waitForTimeout(16);
+    }
+    await page.waitForTimeout(150);
+    await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    expect(await settledScrollTop(page) - atTail, "turning back reads back again").toBeLessThan(-150);
+    await expect(reader(page)).toHaveAttribute("data-follow-tail-state", "paused");
   });
 });

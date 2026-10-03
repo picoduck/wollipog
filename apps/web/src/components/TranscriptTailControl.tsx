@@ -157,11 +157,19 @@ function useScrollPassThrough(
       reader.scrollBy({ top: wheelPixelsY(event, reader) });
     };
 
-    // CSS gives the control `touch-action: none`, so the browser leaves a touch on it to us.
+    // CSS gives the control `touch-action: none`, so the browser leaves a touch on it to us for
+    // the whole gesture, and we play the part of the browser's own pan. The reader hears every
+    // step of the touch as pointer events, which drive its touch handling (following pauses on the
+    // press; earlier activity loads when the drag pulls at the head). The gesture is followed on
+    // the window, not the anchor: the control can vanish mid-drag (the drag reaches the tail, or
+    // recovery ends) and the rest of it then lands on whatever is under the finger.
     let drag: { pointerId: number; startY: number; lastY: number; dragging: boolean } | null = null;
     let suppressClickUntil = 0;
+    const relayed = new WeakSet<Event>();
     const relayPointer = (reader: HTMLElement, event: PointerEvent) => {
-      reader.dispatchEvent(new view.PointerEvent(event.type, {
+      // Input that already landed in the reader reached its listeners on its own.
+      if (event.target instanceof view.Node && reader.contains(event.target)) return;
+      const copy = new view.PointerEvent(event.type, {
         bubbles: true,
         cancelable: true,
         pointerId: event.pointerId,
@@ -176,30 +184,42 @@ function useScrollPassThrough(
         width: event.width,
         height: event.height,
         pressure: event.pressure,
-      }));
-    };
-    const onPointerDown = (event: PointerEvent) => {
-      suppressClickUntil = 0;
-      const reader = readerRef.current;
-      if (!reader || event.pointerType !== "touch" || !event.isPrimary) return;
-      drag = { pointerId: event.pointerId, startY: event.clientY, lastY: event.clientY, dragging: false };
-      relayPointer(reader, event);
+      });
+      relayed.add(copy);
+      reader.dispatchEvent(copy);
     };
     const onPointerMove = (event: PointerEvent) => {
       const reader = readerRef.current;
-      if (!drag || event.pointerId !== drag.pointerId || !reader) return;
+      if (!drag || relayed.has(event) || event.pointerId !== drag.pointerId || !reader) return;
       relayPointer(reader, event);
       if (!drag.dragging && Math.abs(event.clientY - drag.startY) < TOUCH_SLOP_PX) return;
       drag.dragging = true;
       reader.scrollBy({ top: drag.lastY - event.clientY });
       drag.lastY = event.clientY;
     };
+    const endDrag = () => {
+      drag = null;
+      view.removeEventListener("pointermove", onPointerMove);
+      view.removeEventListener("pointerup", onPointerEnd);
+      view.removeEventListener("pointercancel", onPointerEnd);
+    };
     const onPointerEnd = (event: PointerEvent) => {
-      if (!drag || event.pointerId !== drag.pointerId) return;
+      if (!drag || relayed.has(event) || event.pointerId !== drag.pointerId) return;
       const reader = readerRef.current;
       if (reader) relayPointer(reader, event);
       if (drag.dragging) suppressClickUntil = event.timeStamp + DRAG_CLICK_SUPPRESS_MS;
-      drag = null;
+      endDrag();
+    };
+    const onPointerDown = (event: PointerEvent) => {
+      suppressClickUntil = 0;
+      const reader = readerRef.current;
+      if (!reader || event.pointerType !== "touch" || !event.isPrimary) return;
+      endDrag();
+      drag = { pointerId: event.pointerId, startY: event.clientY, lastY: event.clientY, dragging: false };
+      relayPointer(reader, event);
+      view.addEventListener("pointermove", onPointerMove);
+      view.addEventListener("pointerup", onPointerEnd);
+      view.addEventListener("pointercancel", onPointerEnd);
     };
     const onClickCapture = (event: MouseEvent) => {
       // A keyboard activation (detail 0) is always the person's own choice.
@@ -211,16 +231,11 @@ function useScrollPassThrough(
 
     anchor.addEventListener("wheel", onWheel, { passive: false });
     anchor.addEventListener("pointerdown", onPointerDown);
-    anchor.addEventListener("pointermove", onPointerMove);
-    anchor.addEventListener("pointerup", onPointerEnd);
-    anchor.addEventListener("pointercancel", onPointerEnd);
     anchor.addEventListener("click", onClickCapture, true);
     return () => {
+      endDrag();
       anchor.removeEventListener("wheel", onWheel);
       anchor.removeEventListener("pointerdown", onPointerDown);
-      anchor.removeEventListener("pointermove", onPointerMove);
-      anchor.removeEventListener("pointerup", onPointerEnd);
-      anchor.removeEventListener("pointercancel", onPointerEnd);
       anchor.removeEventListener("click", onClickCapture, true);
     };
   }, [anchorRef, readerRef]);
