@@ -34,6 +34,6 @@ function ScopedArtifactUploadNotice({ instanceScope }: { instanceScope: string }
     }}
     actions={hasStore ? <SettingsLink /> : <a className="btn ghost sm" href={viewPath(settingsView)}>Artifact Upload Settings</a>}>
     Wollipog can store task artifacts privately on this control plane so you can view them remotely.
-    Uploads are manual by default. Choose your preference in Settings → Behavior; dismissing this notice does not enable uploads.
+    Uploads are manual by default. Choose your preference in Settings under Behavior; dismissing this notice does not enable uploads.
   </Notice>;
 }
