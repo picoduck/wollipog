@@ -47,9 +47,12 @@ for (const theme of ["dark", "light"] as const) {
       const enabled = await ink(state(page, variant, "enabled"));
       expect(enabled.text, `${variant}: enabled text`).not.toBe("GrayText");
       expect(enabled.border, `${variant}: enabled border`).not.toBe("GrayText");
-      expect(await ink(state(page, variant, "disabled")), `${variant}: disabled`)
+      // Polled, not read once: late in a long shard the first read of a freshly loaded page can
+      // report ButtonText for a disabled button that already paints GrayText (#2481's merge queue).
+      // The expected ink is unchanged; the read only waits for the computed style to settle.
+      await expect.poll(() => ink(state(page, variant, "disabled")), { message: `${variant}: disabled` })
         .toEqual({ text: "GrayText", border: "GrayText" });
-      expect(await ink(state(page, variant, "aria-disabled")), `${variant}: aria-disabled`)
+      await expect.poll(() => ink(state(page, variant, "aria-disabled")), { message: `${variant}: aria-disabled` })
         .toEqual({ text: "GrayText", border: "GrayText" });
       const busy = state(page, variant, "busy");
       await expect(busy).toHaveAttribute("aria-busy", "true");
