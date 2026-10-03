@@ -584,7 +584,8 @@ export function ShieldCheckIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideShieldCheck} {...props} />;
 }
 
-/** Plan mode: the composer bar's Plan toggle. `ListChecks` already means the background job list. */
+/** A plan: the composer bar's Plan toggle and a transcript plan card's head (#2187). `ListChecks`
+ * already means the background job list. */
 export function PlanIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideListTodo} {...props} />;
 }
@@ -727,11 +728,6 @@ export function FileEditIcon(props: IconProps) {
 /** A file edit that created the file (#2187). */
 export function NewFileIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideFilePlus} {...props} />;
-}
-
-/** A plan card's head in the transcript (#2187). */
-export function PlanIcon(props: IconProps) {
-  return <LibraryIcon glyph={LucideListTodo} {...props} />;
 }
 
 export function DeleteIcon(props: IconProps) {
