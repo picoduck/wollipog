@@ -240,6 +240,14 @@ export function effortLabel(value: string): string {
   return labels[value] ?? value.charAt(0).toUpperCase() + value.slice(1);
 }
 
+/** Display name for a provider service-tier id, for a tier no catalog names (a carried-over tier the
+ * destination does not advertise). `default` is the provider-standard tier. Unknown ids are title
+ * cased rather than shown raw. */
+export function serviceTierLabel(id: string): string {
+  if (id === "default") return "Default";
+  return titleCaseLabel(id.replace(/[-_]+/g, " ").trim()) || id;
+}
+
 export function permissionModeLabel(id: string, driver?: AgentDriverKind): string {
   if (driver === "codex" && id === "workspace-write") return "Auto (Workspace Sandbox)";
   return PERMISSION_LABELS[id] ?? id;

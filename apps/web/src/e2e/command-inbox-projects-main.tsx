@@ -879,6 +879,13 @@ if (SCENARIO === "conversation-handoff") runner.agents.push({
       serviceTiers: [{ id: "priority", name: "Priority" }] }],
     effortLevels: ["high"], permissionModes: ["default", "plan"], supportsImages: true, supportsApprovals: true, slashCommands: [] },
 });
+// #2186: an agent that can't take the hand-off stays in the list, disabled with its reason.
+if (SCENARIO === "conversation-handoff") runner.agents.push({
+  id: "claude-work", name: "Claude Code (Work)", command: "claude", args: [], env: {}, driver: "claude-code",
+  authStatus: "unauthenticated", available: true,
+  capabilities: { models: [{ id: "opus", displayName: "Opus" }], effortLevels: ["high"], permissionModes: ["default"],
+    supportsImages: true, supportsApprovals: true, slashCommands: [] },
+});
 
 const activePod: PodView = {
   id: "pod-active",

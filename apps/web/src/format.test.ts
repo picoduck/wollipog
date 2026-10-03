@@ -9,6 +9,7 @@ import {
   effortLabel,
   permissionModeLabel,
   resolvedModelLabel,
+  serviceTierLabel,
   sshErrorHint,
   titleCaseLabel,
   relativeTime,
@@ -17,6 +18,13 @@ import {
 test("effortLabel formats provider tokens for visible UI copy", () => {
   assert.equal(effortLabel("xhigh"), "Extra High");
   assert.equal(effortLabel("max"), "Max");
+});
+
+test("serviceTierLabel names a tier no catalog names instead of showing its provider id", () => {
+  assert.equal(serviceTierLabel("flex"), "Flex");
+  assert.equal(serviceTierLabel("default"), "Default");
+  assert.equal(serviceTierLabel("on_demand"), "On Demand");
+  assert.equal(serviceTierLabel("scale-tier"), "Scale Tier");
 });
 
 test("titleCaseLabel formats trusted compact UI labels while preserving acronyms", () => {

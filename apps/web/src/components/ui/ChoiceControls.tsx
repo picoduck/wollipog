@@ -1338,6 +1338,7 @@ export function Select<T extends string>({
   noun = "options",
   createOption,
   disabled = false,
+  invalid = false,
   className,
   menuWidth,
   estimatedOptionHeight,
@@ -1374,6 +1375,9 @@ export function Select<T extends string>({
   /** An optional next step after a filter that found nothing. */
   createOption?: PickerCreateOption;
   disabled?: boolean;
+  /** The chosen value is invalid (§8.5): the trigger carries `aria-invalid`, which draws its red
+   * edge inside a `.field`. Pair it with `describedBy` pointing at the field's error. */
+  invalid?: boolean;
   className?: string;
   /** Requested open-list width; collision handling still clamps it to the viewport. */
   menuWidth?: number;
@@ -1682,6 +1686,7 @@ export function Select<T extends string>({
         aria-label={`${label}: ${selected?.label ?? placeholder}`}
         aria-describedby={describedBy}
         aria-disabled={disabled || undefined}
+        aria-invalid={invalid || undefined}
         onClick={() => { if (!disabled) (open ? popover.close(true) : openAt(options.findIndex((o) => o.value === value))); }}
         onKeyDown={(event) => {
           if (disabled) return;

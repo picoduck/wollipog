@@ -26,10 +26,23 @@ const readLongTokenLayout = (description: Locator) => description.evaluate((elem
   return layout;
 });
 
-for (const width of [1280, 390]) for (const theme of ["dark", "light"]) {
+// Right edges of the dialog's select triggers, by field, and whether each label and error fits.
+const readFieldGeometry = (dialog: Locator) => dialog.evaluate((element) => {
+  const edges: Record<string, { left: number; right: number }> = {};
+  for (const trigger of element.querySelectorAll<HTMLElement>(".ui-select-trigger")) {
+    const rect = trigger.getBoundingClientRect();
+    edges[trigger.getAttribute("aria-label")!.split(":")[0]!] = { left: rect.left, right: rect.right };
+  }
+  const clipped = [...element.querySelectorAll<HTMLElement>(".field > span, .field-error, .handoff-reason, .disclosure summary")]
+    .filter((node) => node.scrollWidth > node.clientWidth + 1)
+    .map((node) => node.textContent);
+  return { edges, clipped };
+});
+
+for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
   test(`checkpoint handoff remains unsent and reviewable at ${width}px ${theme}`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
-    const url = "/command-inbox-projects-e2e.html?scenario=conversation-handoff";
+    const url = "/command-inbox-projects-e2e.html?scenario=conversation-handoff&machineName=Studio%20Mac";
     await page.goto(url); await page.evaluate(() => localStorage.clear()); await page.goto(url);
     await page.evaluate((theme) => document.documentElement.dataset.theme = theme, theme);
     await page.getByRole("button", { name: /Alpha Session/ }).click();
@@ -56,19 +69,59 @@ for (const width of [1280, 390]) for (const theme of ["dark", "light"]) {
     await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(110));
     await more.click();
     await action.click();
-    await expect(page.getByRole("dialog")).toContainText("Creating the handoff sends nothing");
-    await page.getByRole("dialog").getByRole("button", { name: "Effort: Default", exact: true }).click();
+    const dialog = page.getByRole("dialog");
+    // #2186: one sentence, then a collapsed What Carries Over.
+    await expect(dialog).toContainText("Start a fresh conversation with another agent, using this session's files and dialogue up to Turn 1.");
+    const carries = dialog.locator("details.disclosure");
+    await expect(carries).not.toHaveAttribute("open", "");
+    await expect(dialog.getByText("Left Out", { exact: true })).toBeHidden();
+    await carries.locator("summary").click();
+    await expect(dialog.getByText("Left Out", { exact: true })).toBeVisible();
+    await expect(dialog).toContainText("Nothing is sent until you press Send in the new session.");
+    await page.screenshot({ path: test.info().outputPath("handoff-carries-over.png") });
+    await carries.locator("summary").click();
+    // Agents that can't take the hand-off are listed, disabled, with their reason.
+    await dialog.getByRole("button", { name: "Agent: Claude Code", exact: true }).click();
+    await expect(page.getByRole("option", { name: "Codex" })).toHaveAttribute("aria-disabled", "true");
+    await expect(page.getByRole("option", { name: "Codex" })).toContainText("Already this session's agent.");
+    await expect(page.getByRole("option", { name: "Claude Code (Work)" })).toContainText("Sign in on Studio Mac first.");
+    await page.screenshot({ path: test.info().outputPath("handoff-agents.png") });
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole("button", { name: "Effort: Default", exact: true }).click();
     await page.getByRole("option", { name: "High", exact: true }).click();
-    await page.getByRole("dialog").getByRole("button", { name: "Permissions: Default", exact: true }).click();
+    await dialog.getByRole("button", { name: "Permissions: Default", exact: true }).click();
     await page.getByRole("option", { name: "Plan Only (Read-Only)", exact: true }).click();
     await page.screenshot({ path: test.info().outputPath("handoff-settings.png") });
     // #875: the source runs a tier this destination does not advertise. The dialog has to say so
     // and refuse, rather than quietly creating the handoff on the destination's default tier.
-    await expect(page.getByRole("dialog")).toContainText("does not support this service tier");
+    // #2186: by the tier's display name, as a field error on Service Tier, with the footer's reason.
+    const tier = dialog.getByRole("button", { name: "Service Tier: Flex", exact: true });
+    await expect(tier).toHaveAttribute("aria-invalid", "true");
+    await expect(tier).toHaveAccessibleDescription("Claude Code doesn't offer the Flex tier. Choose another tier.");
+    await expect(dialog.locator(".modal-foot .handoff-reason")).toHaveText("Choose a supported service tier.");
     await expect(page.getByRole("button", { name: "Create Handoff", exact: true })).toBeDisabled();
+    const geometry = await readFieldGeometry(dialog);
+    expect(geometry.clipped, "labels, errors and the footer reason are never truncated").toEqual([]);
+    const { Agent: agent, Model: model, Effort: effort, "Service Tier": serviceTier, Permissions: permissions } = geometry.edges;
+    if (width === 1440) {
+      expectGeometry(Math.abs(model!.right - serviceTier!.right), "Model and Service Tier share a right edge").toBeLessThanOrEqual(0.5);
+      expectGeometry(Math.abs(effort!.right - permissions!.right), "Effort and Permissions share a right edge").toBeLessThanOrEqual(0.5);
+      expectGeometry(Math.abs(effort!.right - agent!.right), "the second column ends where Agent does").toBeLessThanOrEqual(0.5);
+      expect(effort!.left).toBeGreaterThan(model!.right);
+    } else {
+      for (const field of [model, effort, serviceTier, permissions]) {
+        expectGeometry(Math.abs(field!.left - agent!.left), "stacked fields share Agent's left edge").toBeLessThanOrEqual(0.5);
+        expectGeometry(Math.abs(field!.right - agent!.right), "stacked fields are full width").toBeLessThanOrEqual(0.5);
+      }
+    }
     await page.screenshot({ path: test.info().outputPath("handoff-tier-unsupported.png") });
-    await page.getByRole("dialog").getByRole("button", { name: "Service Tier: flex", exact: true }).click();
+    await tier.click();
     await page.getByRole("option", { name: "Priority", exact: true }).click();
+    const chosen = dialog.getByRole("button", { name: "Service Tier: Priority", exact: true });
+    await expect(chosen).not.toHaveAttribute("aria-invalid", "true");
+    await expect(dialog.locator(".field-error")).toHaveCount(0);
+    await expect(dialog.locator(".modal-foot .handoff-reason")).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Create Handoff", exact: true })).toBeEnabled();
     await page.screenshot({ path: test.info().outputPath("handoff-tier-chosen.png") });
     await page.getByRole("button", { name: "Create Handoff", exact: true }).click();
@@ -87,7 +140,7 @@ for (const width of [1280, 390]) for (const theme of ["dark", "light"]) {
       Math.abs(descriptionLayout.leftInset - descriptionLayout.rightInset),
       "the disclosure column stays horizontally centered",
     ).toBeLessThanOrEqual(0.61);
-    if (width === 1280) {
+    if (width === 1440) {
       expectGeometry(descriptionLayout.leftInset, "the 60ch cap leaves the desktop column well inside the row")
         .toBeGreaterThanOrEqual(100);
     } else {
@@ -103,7 +156,7 @@ for (const width of [1280, 390]) for (const theme of ["dark", "light"]) {
     expect(handoffs).toHaveLength(1);
     expect(handoffs[0]!.config.serviceTier).toBe("priority");
     await page.screenshot({ path: test.info().outputPath("handoff-draft.png") });
-    if (width === 1280) {
+    if (width === 1440) {
       const wideFace = await pinWidestFace(page, description);
       const wideLayout = await readDescriptionLayout(description);
       expectGeometry(wideLayout.leftInset, `the 60ch cap stays inside the row with ${wideFace}`)

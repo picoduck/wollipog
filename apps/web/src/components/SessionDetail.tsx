@@ -6748,6 +6748,7 @@ function SessionDetailLoaded({
         </Modal>
       )}
       {handoffTurn !== null && <ConversationHandoffDialog agents={runner?.agents ?? []} sourceDriver={session.driver}
+        sourceAgentId={session.agentId ?? undefined} machineName={runnerDisp.name || undefined}
         sourceServiceTier={session.serviceTier ?? undefined} turn={handoffTurn} refusal={forkRefusal}
         onClose={() => setHandoffTurn(null)} onCreate={async (agentId, config) => {
           if (forkRefusal !== null) throw new Error(forkRefusal);
