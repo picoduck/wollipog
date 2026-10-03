@@ -107,6 +107,20 @@ test("a mode's description says what runs and, where Wollipog knows, what happen
     permissionModeOptionDescription("bypassPermissions", "claude-code", "unknown"),
     "Everything runs with no command approvals. Use only in isolated environments.",
   );
+  // A mode Wollipog has no words for says so before any outcome, whatever its delivery (Claude
+  // discovery reports `none` for an unfamiliar fixed mode).
+  assert.equal(
+    permissionModeOptionDescription("provider-mode", "claude-code", "unavailable"),
+    "Wollipog doesn't know what this mode permits. Actions that need approval are blocked instead of asking you.",
+  );
+  assert.equal(
+    permissionModeOptionDescription("provider-mode", "claude-code", "unknown"),
+    "Wollipog doesn't know what this mode permits.",
+  );
+  assert.equal(
+    permissionModeOptionDescription(undefined, "acp", "unknown"),
+    "Uses the agent's own default mode.",
+  );
   for (const mode of ["default", "acceptEdits", "dontAsk", "bypassPermissions", "auto", "manual", "plan",
     "read-only", "workspace-write", "danger-full-access", "untrusted", "auto-review", "on-request"]) {
     for (const status of ["available", "unavailable", "unknown"] as const) {

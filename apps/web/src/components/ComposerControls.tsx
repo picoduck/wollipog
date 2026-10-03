@@ -597,15 +597,19 @@ function stillReachesYou(transports: readonly ElicitationTransport[] | undefined
 /**
  * A permission mode's meaning, shown as its menu row's second line. It says what runs and, when
  * Wollipog knows, what happens to an action that needs approval. Unknown delivery is left to the
- * menu's note.
+ * menu's note. An undefined mode is a Default the driver leaves to the agent (an ACP provider's).
  */
 export function permissionModeOptionDescription(
   permissionMode: string | undefined,
   driver: AgentDriverKind,
   status: ElicitationAvailability,
   transports?: readonly ElicitationTransport[],
-): string | undefined {
-  const base = permissionModeDescription(permissionMode ?? "", driver);
+): string {
+  // A mode Wollipog has no words for still says so before any outcome, so every row has a meaning
+  // line and its label can wrap.
+  const base = permissionModeDescription(permissionMode ?? "", driver) ?? (permissionMode
+    ? "Wollipog doesn't know what this mode permits."
+    : "Uses the agent's own default mode.");
   if (skipsApprovals(permissionMode)) {
     if (status !== "available") return base;
     const runs = permissionMode === "danger-full-access"
@@ -627,7 +631,7 @@ export function permissionModeOptionDescription(
   }
   // Don't Ask and exec Codex's sandbox policies block by definition, and their meaning says so.
   if (status === "unavailable" && permissionMode !== "dontAsk" && driver !== "codex") {
-    return [base, "Actions that need approval are blocked instead of asking you."].filter(Boolean).join(" ");
+    return `${base} Actions that need approval are blocked instead of asking you.`;
   }
   return base;
 }
@@ -708,19 +712,14 @@ export function ApprovalsMenuChoices({
   ];
   const described = rows.map((row) => {
     const status = elicitationAvailability(capabilities, row.mode);
-    const description = permissionModeOptionDescription(
-      row.mode,
-      driver,
-      status,
-      row.mode ? capabilities?.elicitation?.[row.mode] : undefined,
-    );
     return {
       ...row,
-      // A default Wollipog cannot resolve (an ACP provider's), or a mode it has no words for, still
-      // has a second line, so the row reads like the others and its label can wrap.
-      description: description ?? (row.key === "default-row"
-        ? "Uses the agent's own default mode."
-        : "Wollipog doesn't know what this mode permits."),
+      description: permissionModeOptionDescription(
+        row.mode,
+        driver,
+        status,
+        row.mode ? capabilities?.elicitation?.[row.mode] : undefined,
+      ),
       unverified: approvalDeliveryUnverified(row.mode, status),
     };
   });
