@@ -216,6 +216,23 @@ test("a summary restored after the runner's resolution still attaches to its own
   assert.equal(items[1]!.answered, undefined, "an identical later request stays pending");
 });
 
+test("a summary without its question's sequence never overwrites a settled occurrence of a reused request id", () => {
+  const old = ask([destination], "reused");
+  const items = deriveTimeline([
+    old,
+    event({
+      kind: "question_answered", requestId: "reused", questionEventSeq: old.seq,
+      answers: [{ questionId: "destination", selected: ["Destination 1 (Production)"] }], answeredBy: { kind: "person" },
+    }, ANSWERED),
+    event({ kind: "question_resolved", requestId: "reused", answered: true }, ANSWERED),
+    event({
+      kind: "question_answered", requestId: "reused", occurrenceId: "request_new",
+      answers: [{ questionId: "destination", selected: ["Destination 2 (Staging)"] }], answeredBy: { kind: "person" },
+    }, ANSWERED + 1),
+  ]).filter((item): item is QuestionItem => item.kind === "question");
+  assert.deepEqual(items.map((item) => item.answers?.[0]?.selected), [["Destination 1 (Production)"]]);
+});
+
 test("replaced, expired and provider-resolved questions keep their outcome words", () => {
   for (const [reason, label] of [["replaced", "Replaced"], ["expired", "Expired"], ["provider_resolved", "Resolved by Provider"]] as const) {
     const item = questionFrom([ask([destination]), event({

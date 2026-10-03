@@ -9541,8 +9541,10 @@ export class SessionsService {
         ),
         answeredBy: resolvedByParentSessionId ? { kind: "parent", sessionId: resolvedByParentSessionId } : { kind: "person" },
       };
-      if (question) this.db.recordQuestionAnswerSummary(question, payload, now);
-      this.hub.sessionEvent(this.db.appendEvent(sessionId, payload, now));
+      this.db.recordQuestionAnswerSummary(sessionId, pending.questions ?? [], question, payload, now);
+      // A question parked from a reconnect snapshot before its request event arrived has no row to
+      // attach to yet; history restores the summary right after that request when it arrives.
+      if (question) this.hub.sessionEvent(this.db.appendEvent(sessionId, payload, now));
     } catch (error) {
       this.log.warn(`question answer summary not stored for ${sessionId}: ${(error as Error).message}`);
     }
@@ -13539,15 +13541,17 @@ export class SessionsService {
     if (event.payload.kind !== "question_request") return null;
     const stored = this.db.questionPolicyAnswer(event);
     if (!stored) return null;
-    return this.db.appendEvent(event.sessionId, { ...stored.payload, questionEventSeq: event.seq }, stored.timestamp);
+    return this.db.appendEvent(event.sessionId, { ...stored.payload, questionEventSeq: event.seq }, stored.timestamp,
+      { restored: true });
   }
 
   /** Restore a stored answer summary (#2188) after a runner-history cache reset. */
   private restoreQuestionAnswerSummary(event: SessionEvent): SessionEvent | null {
     if (event.payload.kind !== "question_request") return null;
-    const stored = this.db.questionAnswerSummary(event);
+    const stored = this.db.restorableQuestionAnswerSummary(event);
     if (!stored) return null;
-    return this.db.appendEvent(event.sessionId, { ...stored.payload, questionEventSeq: event.seq }, stored.timestamp);
+    return this.db.appendEvent(event.sessionId, { ...stored.payload, questionEventSeq: event.seq }, stored.timestamp,
+      { restored: true });
   }
 
   private settleHydratedAsk(sessionId: string, trailingAsk: PendingApproval | null): void {
