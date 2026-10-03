@@ -220,6 +220,30 @@ test("campaign views carry the ledger summary and descendants carry their member
   }
 });
 
+test("a campaign from before the ledger counts its earlier follow-ups without a ledger row (#2417)", () => {
+  const { db, root, child } = campaignFixture();
+  try {
+    const worker = child(root, "Worker");
+    // Rows recorded before the ledger existed: no ledger write, so no ledger row.
+    const insert = db.raw().prepare(
+      `INSERT INTO orchestrator_campaign_follow_ups
+       (id, campaign_session_id, origin_session_id, repository, title, normalized_key, duplicate_of, created_at)
+       VALUES (?, ?, ?, 'picoduck/wollipog', ?, ?, ?, 1)`,
+    );
+    insert.run("followup_old_a", root, worker, "Old Idea", "k-a", null);
+    insert.run("followup_old_b", root, worker, "old idea", "k-a", "followup_old_a");
+    insert.run("followup_old_c", root, worker, "Other Idea", "k-c", null);
+    assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM campaign_work_ledgers").get()!.n, 0);
+    const work = db.getSession(root)!.orchestratorCampaign!.work!;
+    assert.deepEqual([work.revision, work.planState, work.counts.committed], [0, "not_recorded", 0]);
+    assert.deepEqual(work.recommendations, { awaiting_adjudication: 2, accepted: 0, rejected: 0, deferred: 0, duplicate: 1 });
+    assert.equal(work.obligations.adjudication, 2);
+    assert.deepEqual(work.coverage, { untrackedChildren: 1, predatesLedger: true });
+  } finally {
+    db.close();
+  }
+});
+
 test("the summary is cached under the revision and still follows observed status and deletion (#2417)", () => {
   const { db, svc, root, child } = campaignFixture();
   try {

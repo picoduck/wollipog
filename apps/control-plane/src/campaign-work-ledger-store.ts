@@ -1374,16 +1374,21 @@ export class CampaignWorkLedgerStore {
     },
   ): CampaignWorkSummary {
     const ledger = this.summaryPart(campaignId);
-    const attempted = this.attemptedSessionIds(campaignId);
+    // Without a ledger row nothing was ever recorded: no child has an attempt, and any child's
+    // history predates the ledger. Every campaign from before the ledger is in this state, and its
+    // summary rides on every root upsert, so it reads nothing more.
+    const recorded = ledger.ledgerCreatedAt !== null;
+    const attempted = recorded ? this.attemptedSessionIds(campaignId) : new Set<string>();
     const untrackedChildren = context.childSessionIds.filter((id) => !attempted.has(id)).length;
-    // Any child created before the ledger began (or with no ledger at all) has unrecorded history.
-    const earliestChild = context.childSessionIds.length ? (this.stmt(
+    // Any child created before the ledger began has unrecorded history.
+    const earliestChild = recorded && context.childSessionIds.length ? (this.stmt(
       `WITH RECURSIVE descendants(id) AS (
          SELECT id FROM sessions WHERE parent_session_id=?
          UNION SELECT child.id FROM sessions child JOIN descendants parent ON child.parent_session_id=parent.id
        ) SELECT MIN(sessions.created_at) AS at FROM sessions JOIN descendants USING (id)`,
     ).get(campaignId) as { at: number | null }).at : null;
-    const predatesLedger = earliestChild !== null && (ledger.ledgerCreatedAt === null || earliestChild < ledger.ledgerCreatedAt);
+    const predatesLedger = context.childSessionIds.length > 0 &&
+      (!recorded || (earliestChild !== null && earliestChild < ledger.ledgerCreatedAt!));
     // Completion is verified when the last child report or item delivery was verified.
     const completedAt = context.complete ? (this.stmt(
       `SELECT MAX(verified_at) AS at FROM (
@@ -1413,6 +1418,31 @@ export class CampaignWorkLedgerStore {
    * plus one observation per open attempt, which the live-child limit bounds.
    */
   private summaryPart(campaignId: string): LedgerSummaryPart {
+    // Every ledger write creates the ledger row, so without one there are no items or attempts;
+    // only follow-ups recorded before the ledger existed, none of them adjudicated.
+    if (!this.stmt("SELECT 1 FROM campaign_work_ledgers WHERE campaign_session_id=?").get(campaignId)) {
+      const followUps = this.stmt(
+        `SELECT SUM(CASE WHEN duplicate_of IS NULL THEN 1 ELSE 0 END) AS awaiting,
+                SUM(CASE WHEN duplicate_of IS NOT NULL THEN 1 ELSE 0 END) AS duplicate
+         FROM orchestrator_campaign_follow_ups WHERE campaign_session_id=?`,
+      ).get(campaignId) as { awaiting: number | null; duplicate: number | null };
+      return {
+        revision: 0,
+        planState: "not_recorded",
+        ledgerCreatedAt: null,
+        counts: {
+          committed: 0, delivered: 0, original: 0, followUp: 0, cancelled: 0, removed: 0,
+          byState: Object.fromEntries(CAMPAIGN_WORK_ITEM_PRIMARY_STATES.map((state) => [state, 0])) as
+            Record<CampaignWorkItemPrimaryState, number>,
+        },
+        recommendations: {
+          awaiting_adjudication: Number(followUps.awaiting ?? 0), accepted: 0, rejected: 0, deferred: 0,
+          duplicate: Number(followUps.duplicate ?? 0),
+        },
+        verification: 0,
+        publication: 0,
+      };
+    }
     const open = this.stmt(
       `SELECT id, session_id FROM campaign_work_attempts
        WHERE campaign_session_id=? AND ended_at IS NULL ORDER BY id`,

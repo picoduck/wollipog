@@ -234,7 +234,10 @@ the root. It is therefore cached per campaign under a key made of
 the ledger revision and the observed status of every open attempt's session, which together
 determine everything the ledger part of the summary derives. Checking the key costs one query plus
 one observation per open attempt (bounded by the live-child limit); only a changed key reads the
-whole ledger. Coverage and completion are read fresh in a few indexed queries. Nothing is cached
+whole ledger. Coverage and completion are read fresh in a few indexed queries. A campaign with no
+ledger row (every campaign from before the ledger, until its first write) has no items or attempts,
+so its summary costs one lookup and one follow-up count: all children are untracked, their history
+predates the ledger, and earlier follow-ups count as awaiting adjudication or duplicate. Nothing is cached
 inside a transaction, because a rolled-back write could otherwise leave a cached summary under a
 revision number a later write reuses.
 
