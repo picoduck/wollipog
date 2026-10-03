@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { viewPath } from "../src/navigation.js";
 
 async function openSession(page: Page) {
   await page.goto("/command-inbox-projects-e2e.html");
@@ -301,6 +302,38 @@ test("a policy pause does not expose Stop Turn or app-owned stop", async ({ page
   await expect.poll(() => page.evaluate(() =>
     document.activeElement?.closest("[data-session-request-id]")?.getAttribute("data-session-request-id") ?? null,
   )).toBe("budget-1");
+});
+
+test("Review on the working row reaches a worker's blocking request beside an async question", async ({ page }) => {
+  // The full Shell, so the attention route Review navigates to reaches the Agents panel.
+  const url = `/command-inbox-projects-e2e.html?fullShell=1&path=${encodeURIComponent(viewPath({ name: "session", id: "session-alpha" }))}`;
+  await page.goto(url);
+  await page.evaluate(() => localStorage.clear());
+  await page.goto(url);
+  await expect(page.locator(".session-bar")).toBeVisible();
+  await page.evaluate(() => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitUserMessage("session-alpha", "Delegate the audit", "turn-workers");
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
+      status: "input_required",
+      activeTurnId: "turn-workers",
+      pendingApproval: {
+        kind: "question", requestId: "async-question", title: "Which channel?", options: [], questions: [], async: true,
+        additionalRequests: [{
+          kind: "permission", requestId: "worker-approval", title: "Run the audit script", options: [], ownerToolUseId: "worker-1",
+        }],
+      },
+    });
+  });
+
+  // The blocking request is the worker's, which no session surface renders: Review opens the
+  // Agents panel on it rather than leaving focus where it was.
+  const workingRow = page.getByRole("region", { name: "Active Turn Progress" });
+  await expect(workingRow.locator(".status")).toHaveText("Approval Required");
+  await workingRow.getByRole("button", { name: "Review" }).click();
+  await expect.poll(() => page.evaluate(() =>
+    document.activeElement?.closest("[data-session-request-id]")?.getAttribute("data-session-request-id") ?? null,
+  )).toBe("worker-approval");
+  await expect(page.getByRole("region", { name: "Selected Worker Request" })).toContainText("Run the audit script");
 });
 
 for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
