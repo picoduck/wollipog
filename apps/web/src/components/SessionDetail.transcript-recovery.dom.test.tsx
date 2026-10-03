@@ -1877,3 +1877,30 @@ test("a steering receipt keeps its actions while the history is loading or faile
     await unmountFixture(fixture);
   }
 });
+
+test("a focused receipt stays mounted and focused when the history it waited for arrives (#2171)", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages, 0, {
+    steeringAttempts: [{
+      submissionId: "steer-focused", turnId: "turn-previous", source: "direct", text: "Stop after the build.",
+      state: "uncertain", reason: "transport_uncertain", createdAt: 2, updatedAt: 3,
+    }],
+  });
+  try {
+    assert.ok(fixture.container.querySelector(".transcript-skeleton"), "the transcript is loading");
+    const queueAgain = [...fixture.scroller.querySelectorAll<HTMLButtonElement>(
+      '[data-testid="steering-attempt-steer-focused"] button')].find((button) => button.textContent === "Queue Again");
+    assert.ok(queueAgain);
+    await act(async () => { queueAgain.focus(); });
+    assert.equal(domWindow.document.activeElement, queueAgain);
+    await act(async () => {
+      pages.releaseTail({ events: [], eventEpoch: 0, nextBefore: 0, hasMoreOlder: false, cacheComplete: true });
+    });
+    await flushAsyncWork();
+    assertNoDomNode(fixture.container.querySelector(".transcript-skeleton"), "history has arrived");
+    assert.equal(queueAgain.isConnected, true, "the receipt was not remounted");
+    assert.equal(domWindow.document.activeElement, queueAgain, "focus stays where the person left it");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});

@@ -4064,6 +4064,9 @@ function SessionDetailLoaded({
     : [];
   const hasTranscriptReceipts = (session.pendingPrompts?.length ?? 0) > 0 || steeringReceipts.length > 0 ||
     commandReceipts.length > 0 || (mode === "expanded" && retitleFeedback !== null);
+  // The rows branch of the reader: not loading, not unavailable, and not the empty state.
+  const transcriptRowsShown = transcript.body !== "skeleton" && transcript.body !== "unavailable" &&
+    !(transcript.body === "empty" && !hasTranscriptReceipts);
   // The floating tail control (#2153). Only a transcript with rows has a tail to jump to; loading,
   // history-error and empty states show nothing there.
   const transcriptHasTail = transcript.body === "timeline" ||
@@ -5614,21 +5617,22 @@ function SessionDetailLoaded({
                       </div>
                     </div>
                   )}
-                  {sentMessageReceipts}
-                  {activeTurnVisible && (
-                    <WorkingIndicator
-                      label={workingLabel}
-                      progress={activeTurnProgress}
-                      onRevealCurrentOperation={revealCurrentOperation}
-                      onOpenSubagent={mode === "expanded" ? openSubagent : undefined}
-                      onReviewPendingRequest={reviewPendingRequest}
-                    />
-                  )}
-                  {transcript.body === "timeline" && standaloneRequestCard}
                 </>
               )}
-              {/* Without a history to sit under, recovery receipts still keep their actions. */}
-              {(transcript.body === "skeleton" || transcript.body === "unavailable") && sentMessageReceipts}
+              {/* One place for every transcript state, so a receipt never remounts (and drops the
+                  focus it holds) when history arrives; while history loads or fails, recovery
+                  receipts still keep their actions. */}
+              {sentMessageReceipts}
+              {transcriptRowsShown && activeTurnVisible && (
+                <WorkingIndicator
+                  label={workingLabel}
+                  progress={activeTurnProgress}
+                  onRevealCurrentOperation={revealCurrentOperation}
+                  onOpenSubagent={mode === "expanded" ? openSubagent : undefined}
+                  onReviewPendingRequest={reviewPendingRequest}
+                />
+              )}
+              {transcriptRowsShown && transcript.body === "timeline" && standaloneRequestCard}
             </div>
             </div>
             {/* The one floating control at the reader's lower edge (#2153), where the newest
