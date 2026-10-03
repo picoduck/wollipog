@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { ArtifactUploadNotice } from "./ArtifactUploadNotice.js";
 import { Notice } from "./Notice.js";
 import { SegmentedControl } from "./ui/ChoiceControls.js";
 import type { SessionView, WorkflowArtifactView } from "@wollipog/protocol";
@@ -149,6 +150,7 @@ export function BrowserPanel({ session }: { session: SessionView }) {
         </div>
       ) : (
         <div className="browser-artifacts">
+          <ArtifactUploadNotice />
           <p className="muted sm">Session artifacts are listed without loading their bodies. Choose one to fetch and verify its exact bytes.</p>
           {listError && <Notice tone="danger" compact role="alert">{listError}</Notice>}
           <ul className="browser-artifact-list" aria-busy={listBusy}>

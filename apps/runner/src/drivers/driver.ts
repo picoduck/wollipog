@@ -154,6 +154,7 @@ export interface DriverSubscriptionUsageUpdate {
 }
 
 export interface DriverCallbacks {
+  onArtifactDeveloperInstructions?: (value: { threadId: string; instructions: string }) => void;
   /** Negotiated control-plane capability; absence retains legacy request replacement. */
   supportsWorkerAttention?: () => boolean;
   onEvent: (payload: SessionEventPayload) => void;
@@ -215,6 +216,10 @@ export interface DriverOptions {
   cwd: string;
   env: Record<string, string>;
   projectMemoryDirectory?: string;
+  /** Non-secret artifact capability/policy note, re-created at launch/resume. */
+  artifactGuidance?: string;
+  /** Runner-private original developer text for a thread whose guidance we own. */
+  artifactDeveloperInstructions?: { threadId: string; instructions: string };
   config: SessionConfig;
   orchestrator?: { strictProjectIsolation: boolean; integrationIsolation?: boolean; issueNumbers?: number[] };
   context: AgentContext;

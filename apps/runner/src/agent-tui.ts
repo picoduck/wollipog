@@ -1,6 +1,7 @@
 /** Provider TUI launch policy. A TUI shares cwd and runner-local provider credentials with the
  * manager session, but never the structured driver's process, stdio, or provider session id. */
 
+import { artifactGuidance, appendArtifactSystemPrompt } from "./artifact-guidance.js";
 import { existsSync } from "node:fs";
 import type { AgentTuiGuardProvisioning } from "./agent-tui-guard.js";
 import type { SessionMeta } from "./session-store.js";
@@ -68,7 +69,7 @@ export async function prepareAgentTuiLaunch(
     }
     const guarded = await withManagedWorktreeGuard(meta, dependencies);
     return withGuardState(
-      agentTuiLaunch(await withCodexPermissionProfile(guarded.meta, dependencies)),
+      agentTuiLaunch(withArtifactTuiGuidance(await withCodexPermissionProfile(guarded.meta, dependencies), dependencies.controlPlaneProtocolVersion)),
       guarded.guard,
     );
   }
@@ -117,10 +118,17 @@ export async function prepareAgentTuiLaunch(
   }
   const guarded = await withManagedWorktreeGuard(prepared, dependencies, cwd);
   const launch = withGuardState(
-    agentTuiLaunch(guarded.meta, { platform, comspec: process.env.ComSpec }),
+    agentTuiLaunch(withArtifactTuiGuidance(guarded.meta, dependencies.controlPlaneProtocolVersion), { platform, comspec: process.env.ComSpec }),
     guarded.guard,
   );
   return launch ? { ...launch, cwd } : null;
+}
+
+/** Claude has a safe additive TUI surface. Codex TUI has no audited append surface; exposing
+ * the preference never replaces its developer policy or starts an unrequested model turn. */
+function withArtifactTuiGuidance(meta: SessionMeta, protocolVersion: number | null): SessionMeta {
+  if (meta.driver !== "claude-code" || meta.artifactUploads === undefined) return meta;
+  return { ...meta, args: appendArtifactSystemPrompt(meta.args, artifactGuidance(meta, protocolVersion)) };
 }
 
 function withGuardState(

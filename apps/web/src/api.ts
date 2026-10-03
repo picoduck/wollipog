@@ -309,6 +309,14 @@ export function createApiClient(transport: ApiTransport) {
     return req<UsageAggregationResponse>(`/api/usage?${query.toString()}`);
   },
 
+  artifactUploadSettings: () => req<import("@wollipog/protocol").ArtifactUploadSettingsView>("/api/artifact-upload-settings"),
+
+  updateArtifactUploadSettings: (input: import("@wollipog/protocol").ArtifactUploadSettingsView) =>
+    req<import("@wollipog/protocol").ArtifactUploadSettingsView>("/api/artifact-upload-settings", {
+      method: "PUT",
+      body: JSON.stringify(input),
+    }),
+
   sessionNamingSettings: () => req<SessionNamingSettingsView>("/api/session-naming"),
 
   /** The authenticated identity probe; `appVersion` is the control plane's release. */

@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { ArtifactUploadSettings } from "./ArtifactUploadSettings.js";
 import { Notice } from "./Notice.js";
 import {
   PROTOCOL_VERSION,
@@ -432,6 +433,7 @@ export function BehaviorPanel({
         value={questionResponseStyle}
         onChange={(value) => setQuestionResponseStyle(value as QuestionResponseStyle)}
       />
+      <ArtifactUploadSettings />
       <PendingSetting
         title="Reduce Motion"
         description="Follows your system setting."

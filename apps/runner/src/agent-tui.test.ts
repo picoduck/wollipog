@@ -392,3 +392,21 @@ test("a TUI launch keeps an inline --settings JSON document and still drops a mi
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+
+test("Claude TUI gets additive artifact awareness while Codex TUI retains provider policy", async () => {
+  for (const driver of ["claude-code", "codex-app-server"] as const) {
+    const original = meta({ driver, artifactUploads: "manual" });
+    const launch = await prepareAgentTuiLaunch(original, { controlPlaneProtocolVersion: PROTOCOL_VERSION,
+      provision: () => {}, assertSessionNotDeleted: stillPresent,
+      provisionManagedWorktreeGuard: unguarded, prepareScratch: async () => "/scratch",
+      permissionProfile: async () => ({ active: false, reason: "test", args: original.args }),
+    });
+    assert.ok(launch);
+    if (driver === "claude-code") {
+      assert.match(launch.args.at(-1)!, /Manual/);
+      assert.match(launch.args.at(-1)!, /file attachment is unavailable/);
+    } else assert.deepEqual(launch.args, original.args);
+    assert.deepEqual(original.args, ["--profile", "team profile"], "durable launch metadata is unchanged");
+  }
+});

@@ -37,6 +37,7 @@ export class AcpDriver implements Driver {
         context: opts.context,
         initialCommands: opts.resumeId ? opts.capabilities?.slashCommands : undefined,
         sessionContext: opts.acpSessionContext,
+        artifactGuidance: opts.artifactGuidance,
         isolation: opts.isolation,
         containerAgentLaunch: true,
         cloudAgentLaunch: true,

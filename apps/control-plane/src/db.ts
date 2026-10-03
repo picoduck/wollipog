@@ -2466,6 +2466,12 @@ CREATE TABLE IF NOT EXISTS orchestrator_settings (
   FOREIGN KEY (user_id) REFERENCES identity_users(user_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS artifact_upload_settings (
+  user_id TEXT PRIMARY KEY,
+  preference TEXT NOT NULL CHECK (preference IN ('manual','wollipog_automatic','external_hosting')),
+  FOREIGN KEY (user_id) REFERENCES identity_users(user_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS session_naming_custom_models (
   organization_id    TEXT PRIMARY KEY,
   runner_id          TEXT NOT NULL,
@@ -9624,6 +9630,19 @@ export class ControlPlaneDb {
       },
       updatedAt: row.updated_at,
     }));
+  }
+
+  artifactUploadPreference(userId: string | undefined): import("@wollipog/protocol").ArtifactUploadPreference {
+    if (!userId) return "manual";
+    const row = this.stmt("SELECT preference FROM artifact_upload_settings WHERE user_id=?").get(userId) as
+      { preference: import("@wollipog/protocol").ArtifactUploadPreference } | undefined;
+    return row?.preference ?? "manual";
+  }
+
+  setArtifactUploadPreference(userId: string, preference: import("@wollipog/protocol").ArtifactUploadPreference): void {
+    if (!["manual", "wollipog_automatic", "external_hosting"].includes(preference)) throw new Error("invalid artifact upload preference");
+    this.stmt(`INSERT INTO artifact_upload_settings (user_id, preference) VALUES (?, ?)
+      ON CONFLICT(user_id) DO UPDATE SET preference=excluded.preference`).run(userId, preference);
   }
 
   getOrchestratorDefaults(userId: string): OrchestratorDefaultsRecord | null {
