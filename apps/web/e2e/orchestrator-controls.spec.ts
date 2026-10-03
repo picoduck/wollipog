@@ -69,7 +69,7 @@ for (const viewport of [
       await expect(facts.locator(".status")).toContainText("Awaiting Decision");
       await expect(facts).toContainText("Policy Revision 4");
       await expect(facts).toContainText("1 Verified · 2 Active · 1 Waiting for Human · 0 Blocked");
-      await expect(facts).toContainText("1 Duplicates Skipped");
+      await expect(facts).toContainText("1 Duplicate Skipped");
       await expect(dialog.locator(".modal-foot button")).toHaveText(["Done"]);
       await page.screenshot({ path: `${SHOT}/${viewport.name}-${theme}-dialog.png` });
       await facts.scrollIntoViewIfNeeded();

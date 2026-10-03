@@ -257,7 +257,9 @@ test("the dialog has three titled sections, the campaign's facts and a close-onl
   assert.match(fact("Child Harness")?.textContent ?? "", /claude · Claude Code · Native/);
   assert.match(fact("Child Model")?.textContent ?? "", /claude-opus-5.*Session Override/);
   assert.match(fact("Children")?.textContent ?? "", /1 Waiting for Human/);
-  assert.match(fact("Follow-Up Recommendations")?.textContent ?? "", /1 Duplicates Skipped/);
+  assert.match(fact("Follow-Up Recommendations")?.textContent ?? "", /1 Duplicate Skipped/, "one duplicate is singular");
+  await harness.rerender(orchestrator({ orchestratorCampaign: { ...CAMPAIGN, followUps: { unique: 2, duplicates: 2 } } }));
+  assert.match(fact("Follow-Up Recommendations")?.textContent ?? "", /2 Duplicates Skipped/);
   for (const label of ["Child Effort", "Maximum Concurrent Children", "Follow-Ups", "Completion", "Integration Isolation"]) {
     assert.ok(fact(label), `${label} is a fact`);
   }

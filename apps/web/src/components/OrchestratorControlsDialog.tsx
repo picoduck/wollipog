@@ -448,7 +448,7 @@ function CampaignBehavior({ session, titleId }: { session: SessionView; titleId:
             <Fact
               label="Follow-Up Recommendations"
               value={campaign.followUps.unique}
-              source={`${campaign.followUps.duplicates} Duplicates Skipped`}
+              source={`${campaign.followUps.duplicates} ${campaign.followUps.duplicates === 1 ? "Duplicate" : "Duplicates"} Skipped`}
             />
           </>
         )}
