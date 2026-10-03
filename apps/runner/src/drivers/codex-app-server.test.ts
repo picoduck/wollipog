@@ -4335,3 +4335,16 @@ test("Codex child accounting requires a known model and follows shared root tier
   assert.deepEqual(usage.map((event) => event.model), ["<unknown-subagent>", "gpt-6.1-sol", "gpt-6.1-sol", "gpt-6.1-sol"]);
   assert.deepEqual(usage.map((event) => event.pricingContext?.serviceTier), ["fast", "fast", "unknown", "default"]);
 });
+
+test("resolved default Codex model prices usage without pinning future requests", () => {
+  const h = makeHarness();
+  (h.driver as any).config = { model: "default" };
+  (h.driver as any).threadId = "root-default";
+  (h.driver as any).beginRootTurnUsage();
+  const handlers = notificationHandlers(h.driver);
+  handlers.get("thread/settings/updated")!({ threadId: "root-default", threadSettings: { model: "gpt-6.1-sol", serviceTier: null } });
+  handlers.get("thread/tokenUsage/updated")!({ threadId: "root-default", tokenUsage: { last: { inputTokens: 10, outputTokens: 1 }, total: { inputTokens: 10, outputTokens: 1 } } });
+  const usage = h.events.find((event) => event.kind === "token_usage");
+  assert.equal(usage?.kind === "token_usage" ? usage.model : undefined, "gpt-6.1-sol");
+  assert.equal((h.driver as any).config.model, "default", "provider resolution must not pin the user configuration");
+});

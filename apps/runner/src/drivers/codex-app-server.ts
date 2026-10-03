@@ -434,6 +434,7 @@ export class CodexAppServerDriver implements Driver {
   private turnUsageClosed = true;
   // setConfig queues the next turn; it cannot relabel a request already running.
   private usageModel: string | undefined;
+  private routingModel: string | undefined;
   private usageServiceTier: string | undefined;
   private routingServiceTier: string | undefined;
   private readonly ambiguousChildModels = new Set<string>();
@@ -1795,9 +1796,9 @@ export class CodexAppServerDriver implements Driver {
       }
       const model = p?.threadSettings?.model;
       if (typeof model === "string") {
-        this.usageModel = !this.turnUsageClosed && this.usageModel && this.usageModel !== model
+        this.usageModel = !this.turnUsageClosed && this.usageModel && this.usageModel !== "default" && this.usageModel !== model
           ? "<unknown-request-model>" : model;
-        this.config = { ...this.config, model };
+        this.routingModel = model;
       }
       const serviceTier = p?.threadSettings?.serviceTier;
       if ((typeof serviceTier === "string" && serviceTier) || serviceTier === null) {
@@ -2046,7 +2047,7 @@ export class CodexAppServerDriver implements Driver {
     if (this.usageServiceTier && this.usageServiceTier !== (this.config.serviceTier ?? "default")) {
       for (const id of this.subagentToolByThread.keys()) this.ambiguousChildTiers.add(id);
     }
-    this.usageModel = this.config.model;
+    this.usageModel = this.config.model && this.config.model !== "default" ? this.config.model : this.routingModel;
     this.usageServiceTier = this.config.serviceTier ?? "default";
     this.routingServiceTier = this.usageServiceTier;
     this.pendingTurnUsage = null;

@@ -972,6 +972,8 @@ test("Claude 2.1.277+ resumes charge only newly accrued conversation cost", asyn
       spawn: (options: any) => {
         const child = fakeProcess();
         if (options.args.includes("--tools")) {
+          assert.ok(options.args.includes("--no-session-persistence"));
+          assert.ok(options.args.includes(JSON.stringify({ disableAllHooks: true })));
           const id = options.args[options.args.indexOf("--resume") + 1];
           child.stdin.on("data", () => {
             child.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: id }) + "\n");
@@ -5339,5 +5341,39 @@ test("one-shot resume accounting probe failure resolves refusal rather than reje
   (driver as any).firstTurn = false;
   assert.equal(await driver.prompt("resume"), "refusal");
   assert.ok(events.some((event) => event.kind === "error" && event.message.includes("baseline")));
+  driver.dispose();
+});
+
+test("Stop during a one-shot baseline probe prevents launching the model turn", async () => {
+  const probe = fakeProcess();
+  let spawns = 0;
+  const killed: unknown[] = [];
+  let probeId: string;
+  const driver = new ClaudeCodeDriver({ ...baseOpts, agentVersion: "2.1.287", env: { [CLAUDE_PERSISTENT_FLAG]: "0" } }, noopCb,
+    { spawn: (options: any) => { spawns++; probeId = options.args[options.args.indexOf("--resume") + 1]; return probe; },
+      kill: (child: unknown) => { killed.push(child); } } as any);
+  (driver as any).firstTurn = false;
+  const turn = driver.prompt("must not run after Stop");
+  await nextTask();
+  driver.cancel();
+  probe.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: probeId! }) + "\n");
+  probe.stdout.write(JSON.stringify({ type: "result", subtype: "success", session_id: probeId!, total_cost_usd: 0, usage: {} }) + "\n");
+  probe.emit("close", 0);
+  assert.equal(await Promise.race([turn, new Promise((resolve) => setTimeout(() => resolve("hung"), 100))]), "cancelled");
+  assert.equal(spawns, 1);
+  assert.deepEqual(killed, [probe]);
+  driver.dispose();
+});
+
+test("resume accounting probe authentication failure signals existing recovery", async () => {
+  const child = fakeProcess();
+  let failures = 0;
+  const driver = new ClaudeCodeDriver({ ...baseOpts, agentVersion: "2.1.287", resumeId: "resume-auth" },
+    { ...noopCb, onAuthenticationFailure: () => { failures++; } }, { spawn: () => child, kill: () => {} } as any);
+  const initialized = driver.initialize();
+  child.stderr.write("authentication_failed\n");
+  child.emit("close", 1);
+  await assert.rejects(initialized);
+  assert.equal(failures, 1);
   driver.dispose();
 });

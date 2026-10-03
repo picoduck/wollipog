@@ -6623,7 +6623,7 @@ export interface SessionSnapshot {
   contextTokensUsed?: number;
   contextWindow?: number;
   costUsd: number;
-  /** Protocol 196: SDK-computed cost retains estimate provenance during snapshot catch-up. */
+  /** Protocol 197: SDK-computed cost retains estimate provenance during snapshot catch-up. */
   costIsEstimate?: true;
   /** True for sessions adopted from an external CLI transcript (gates the reprocess action). */
   adopted?: boolean;

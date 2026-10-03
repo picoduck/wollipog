@@ -534,6 +534,8 @@ export class ClaudeCodeDriver implements Driver {
   private cwd: string;
   private disposed = false;
   private cancelled = false;
+  private oneShotCancelGeneration = 0;
+  private oneShotProbeAbort: AbortController | null = null;
   private config: SessionConfig;
   private readonly deps: ClaudeDriverDeps;
   private readonly descendantOwner = {};
@@ -816,9 +818,9 @@ export class ClaudeCodeDriver implements Driver {
 
   /** Read the prefix THIS process will restore. After a crash it may be behind our last
    * observed result; after background work it may be ahead. Neither case justifies rebilling it. */
-  private async prepareResumeUsageBaseline(): Promise<void> {
-    const result = await this.readConversationUsage(this.cwd, this.sessionId);
-    if (this.disposed) throw new Error("Claude accounting probe was cancelled");
+  private async prepareResumeUsageBaseline(signal?: AbortSignal): Promise<void> {
+    const result = await this.readConversationUsage(this.cwd, this.sessionId, signal);
+    if (this.disposed || signal?.aborted) throw new Error("Claude accounting probe was cancelled");
     const checkpoint = claudeUsageCheckpoint(this.sessionId, result);
     if (!checkpoint) throw new Error("Claude resume did not provide a usage baseline");
     const previous = this.usageAccounting.checkpoint;
@@ -861,7 +863,7 @@ export class ClaudeCodeDriver implements Driver {
     return targetSessionId;
   }
 
-  private async readConversationUsage(cwd: string, targetSessionId: string): Promise<Json> {
+  private async readConversationUsage(cwd: string, targetSessionId: string, signal?: AbortSignal): Promise<Json> {
     const isFork = targetSessionId !== this.sessionId;
     // /context is a local zero-cost command. It makes Claude persist the fork immediately so the
     // target app session can safely store a real resumable id without running a hidden model turn.
@@ -870,7 +872,9 @@ export class ClaudeCodeDriver implements Driver {
       "-p",
       "--resume",
       this.sessionId,
-      ...(isFork ? ["--fork-session", "--session-id", targetSessionId] : []),
+      ...(isFork ? ["--fork-session", "--session-id", targetSessionId] : [
+        "--no-session-persistence", "--settings", JSON.stringify({ disableAllHooks: true }),
+      ]),
       "--input-format",
       "stream-json",
       "--output-format",
@@ -917,7 +921,9 @@ export class ClaudeCodeDriver implements Driver {
       const timer = this.deps.setTimer(() => fail(new Error("Claude fork timed out after 30 seconds")), 30_000);
       timer.unref?.();
 
+      const onAbort = () => fail(new Error("Claude accounting probe was cancelled"));
       const cleanup = () => {
+        signal?.removeEventListener("abort", onAbort);
         this.deps.clearTimer(timer);
         this.auxiliaryChildren.delete(child);
       };
@@ -974,7 +980,7 @@ export class ClaudeCodeDriver implements Driver {
       child.stderr.setEncoding("utf8");
       child.stderr.on("data", (chunk: string) => {
         const text = String(chunk).trim();
-        if (text) this.cb.onStderr(`Claude fork: ${text}`);
+        if (text) this.emitStderrOrAuthenticationFailure(text);
       });
       child.on("error", (err: Error) => fail(new Error(`Claude fork spawn error: ${err.message}`)));
       child.on("close", (code) => {
@@ -988,6 +994,8 @@ export class ClaudeCodeDriver implements Driver {
         else reject(new Error(`Claude fork exited before persistence was confirmed (code ${String(code)})`));
       });
 
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted) { onAbort(); return; }
       try {
         child.stdin.write(JSON.stringify(buildClaudeUserMessage("/context", [])) + "\n");
       } catch (err) {
@@ -1125,15 +1133,20 @@ export class ClaudeCodeDriver implements Driver {
   }
 
   private async promptOneShot(text: string, images?: PromptImage[], slashCommand?: string): Promise<StopReason> {
+    const cancelGeneration = this.oneShotCancelGeneration;
     if (!this.firstTurn && this.usageAccounting.restoresUsage && !this.usageBaselinePrepared) {
-      try { await this.prepareResumeUsageBaseline(); }
+      const abort = new AbortController();
+      this.oneShotProbeAbort = abort;
+      try { await this.prepareResumeUsageBaseline(abort.signal); }
       catch {
-        if (this.disposed) return "cancelled";
+        if (this.disposed || abort.signal.aborted || cancelGeneration !== this.oneShotCancelGeneration) return "cancelled";
         this.cb.onEvent({ kind: "error", message: "Claude resume accounting baseline could not be recovered." });
         return "refusal";
+      } finally {
+        if (this.oneShotProbeAbort === abort) this.oneShotProbeAbort = null;
       }
     }
-    if (this.disposed) return "cancelled";
+    if (this.disposed || cancelGeneration !== this.oneShotCancelGeneration) return "cancelled";
     this.usageBaselinePrepared = false;
     this.usageAccounting.beginProcess();
     return new Promise<StopReason>((resolve) => {
@@ -2575,6 +2588,8 @@ export class ClaudeCodeDriver implements Driver {
   }
 
   cancel(): void {
+    this.oneShotCancelGeneration++;
+    this.oneShotProbeAbort?.abort();
     this.cancelled = true;
     this.streamingMessageIds.clear();
     if (this.activePersistentTurn) {
@@ -2650,6 +2665,7 @@ export class ClaudeCodeDriver implements Driver {
     const retirements: Promise<void>[] = [];
     if (this.pendingBackgroundTasks.size > 0) this.markOrphaned("shutdown");
     this.disposed = true;
+    this.oneShotProbeAbort?.abort();
     this.streamingMessageIds.clear();
     this.pendingApprovals.clear();
     this.settleAllClaudeSteers("Claude driver was disposed before steering acknowledgement");
