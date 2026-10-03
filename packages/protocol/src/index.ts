@@ -630,7 +630,10 @@
 //      older runners receive no field they cannot apply. Upload discovery grants no authority.
 // 202: every choice question accepts custom text. Multi-select labels remain arrays;
 //      a string is an exclusive custom response, even when it equals an offered label.
-export const PROTOCOL_VERSION = 202;
+// 203: human-initiated, correlated existing-session role conversion. Prepare retires the quiet
+//      provider; commit revokes old credentials before resuming the same conversation. Older peers
+//      refuse conversion. Snapshot receipts reconcile interrupted replies without inventing roles.
+export const PROTOCOL_VERSION = 203;
 export const UNIVERSAL_QUESTION_TEXT_MIN_PROTOCOL = 202;
 
 export type ArtifactUploadPreference = "manual" | "wollipog_automatic" | "external_hosting";
@@ -884,6 +887,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v198 runner reads a campaign's GitHub pull-request status through its `gh` login. */
   campaignForgeStatus: 198,
   orchestratorAdditiveRole: 160,
+  sessionRoleConversion: 203,
   orchestratorAdditiveCodex: 162,
   orchestratorAdditivePi: 163,
   /** Runner removes every ambient provider integration from an ADDITIVE Orchestrator launch while
@@ -1867,6 +1871,8 @@ export interface AgentCapabilities {
   supportsSteering?: boolean;
   /** Provider can mint an independent conversation from its current/history checkpoint. */
   supportsConversationFork?: boolean;
+  /** Resolved Claude CLI help attests how to rebuild instructions on the same conversation. */
+  claudeMutableSystemPromptFlag?: "--system-prompt-recording" | "--system-prompt-snapshot";
   /** Approval presets (claude: default|acceptEdits|plan|…; codex: untrusted|on-request|never). */
   permissionModes?: string[];
   /** How approvals reach the UI per permission mode. Absent = not probed (unknown, not false). */
@@ -2035,6 +2041,7 @@ export interface ClaudeCodeCapabilities {
   replayUserMessages: boolean;
   /** The installed CLI advertises every fail-closed flag required by runner-hosted title generation. */
   sessionNaming?: boolean;
+  mutableSystemPromptFlag?: "--system-prompt-recording" | "--system-prompt-snapshot";
   auth: ClaudeCodeAuth;
   failure?: ClaudeCodeFailure;
 }
@@ -2096,10 +2103,64 @@ export interface SessionConfig {
   costCheckpointsUsd?: number[];
 }
 
-/** Whether a session coordinates child sessions. Fixed at creation and independent of the
+/** Whether a session coordinates child sessions. Independent of the
  * provider permission mode: an Orchestrator adds Wollipog's campaign tools, instructions, and
  * scoped credential on top of whatever the harness would otherwise receive. */
 export type SessionRole = "normal" | "orchestrator";
+
+export interface SessionRoleConversionReceipt {
+  conversionId: string;
+  state: "prepared" | "applied";
+}
+
+export interface SessionRoleConversionView {
+  targetRole: SessionRole;
+  phase: "preparing" | "committing";
+}
+
+export interface SessionRoleConversionPreview {
+  currentRole: SessionRole;
+  targetRole: SessionRole;
+  available: boolean;
+  canRetry?: boolean;
+  reason?: string;
+  permissionMode: string | null;
+  orchestratorPolicy?: OrchestratorCampaignPolicy;
+}
+
+export interface PrepareSessionRoleMessage {
+  type: "prepare_session_role";
+  requestId: string;
+  sessionId: string;
+  conversionId: string;
+  expectedRole: SessionRole;
+  targetRole: SessionRole;
+  permissionMode: string | null;
+  /** Discovery-owned baseline, with no prior runner-injected role arguments. */
+  command: string;
+  args: string[];
+  claudeMutableSystemPromptFlag?: "--system-prompt-recording" | "--system-prompt-snapshot";
+  orchestrator?: OrchestratorLaunchPolicy;
+}
+
+export interface CommitSessionRoleMessage {
+  type: "commit_session_role";
+  requestId: string;
+  sessionId: string;
+  conversionId: string;
+}
+
+export interface SessionRoleResultMessage {
+  type: "session_role_result";
+  requestId: string;
+  sessionId: string;
+  conversionId: string;
+  ok: boolean;
+  /** A provider retirement is not yet confirmed; keep the intent and retry reconciliation. */
+  pending?: boolean;
+  receipt?: SessionRoleConversionReceipt;
+  error?: string;
+}
 
 /** The legacy coupled provider policy: `permissionMode` carries this literal when the harness
  * launches with the runner-owned Orchestrator preset (strict isolation, Codex, Pi, ACP, Native
@@ -6451,9 +6512,11 @@ export interface SessionView {
   parentControl?: ParentControlMode;
   /** Independent typed workflow assignments. Legacy modes never imply these grants. */
   parentControlPolicy?: ParentControlPolicy;
-  /** Fixed session role. Omitted by control planes predating v160; use `sessionRole()` to read
+  /** Current session role. Omitted by control planes predating v160; use `sessionRole()` to read
    * it so the legacy coupled preset in `permissionMode` still resolves to the Orchestrator role. */
   role?: SessionRole;
+  /** Submission stays fenced until the runner confirms the committed role. */
+  roleConversion?: SessionRoleConversionView;
   /** Resolved campaign behavior and authority snapshot. Present only for Orchestrator sessions
    * created or migrated by a supporting control plane. */
   orchestratorPolicy?: OrchestratorCampaignPolicy;
@@ -6677,6 +6740,7 @@ export interface SideChatView {
  */
 export interface SessionSnapshot {
   id: string;
+  roleConversionReceipt?: SessionRoleConversionReceipt;
   /** Opaque CP launch identity echoed by runners that accepted a replacement start. */
   controlPlaneLaunchId?: string;
   workspaceId: string | null;
@@ -8361,6 +8425,7 @@ export type RunnerToControlPlane =
   | WorkspaceWorktreeSetupResultMessage
   | LogoutAgentResultMessage
   | SwitchSessionProviderAccountResultMessage
+  | SessionRoleResultMessage
   | InspectProviderAuthenticationResultMessage
   | SelectProviderAuthenticationAccountResultMessage
   | AcpRegistryApprovalResultMessage
@@ -10059,6 +10124,8 @@ export type ControlPlaneToRunner =
   | TestSessionNamingCustomModelMessage
   | LogoutAgentMessage
   | SwitchSessionProviderAccountMessage
+  | PrepareSessionRoleMessage
+  | CommitSessionRoleMessage
   | InspectProviderAuthenticationMessage
   | SelectProviderAuthenticationAccountMessage
   | StartProviderLoginMessage
@@ -10126,6 +10193,7 @@ export interface UiSnapshotMessage {
     worktreeSetupConfig?: boolean;
     /** Session creation accepts `role` independently of the provider permission mode. */
     orchestratorRole?: boolean;
+    sessionRoleConversion?: boolean;
   };
   runners: RunnerView[];
   boxes: BoxView[];

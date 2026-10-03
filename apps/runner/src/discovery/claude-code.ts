@@ -131,7 +131,7 @@ function optionBlock(help: string, option: string): string {
 
 /** Project only flags and enumerated values present in this installation's own help output. */
 export function parseClaudeHelp(help: string): Pick<ClaudeCodeCapabilities,
-  "effortLevels" | "permissionModes" | "streamJsonInput" | "forkSession" | "replayUserMessages" | "sessionNaming"
+  "effortLevels" | "permissionModes" | "streamJsonInput" | "forkSession" | "replayUserMessages" | "sessionNaming" | "mutableSystemPromptFlag"
 > {
   const effortBlock = optionBlock(help, "--effort");
   const permissionBlock = optionBlock(help, "--permission-mode");
@@ -151,6 +151,8 @@ export function parseClaudeHelp(help: string): Pick<ClaudeCodeCapabilities,
     forkSession: /--fork-session\b/.test(help),
     replayUserMessages: /--replay-user-messages\b/.test(help),
     sessionNaming: permissionModes.includes("plan") && namingFlags.every((flag) => help.includes(flag)),
+    mutableSystemPromptFlag: (["--system-prompt-recording", "--system-prompt-snapshot"] as const)
+      .find((flag) => /\boff\b/.test(optionBlock(help, flag))),
   };
 }
 
@@ -271,6 +273,7 @@ export function claudeCapabilitiesFromProbe(
       ? { supportsSteering: true as const }
       : {}),
     supportsConversationFork: probe.status === "ready" && probe.forkSession,
+    claudeMutableSystemPromptFlag: probe.status === "ready" ? probe.mutableSystemPromptFlag : undefined,
     // Not `streamJsonImages`: that is the prompt-input contract. This is the MCP client handing a
     // tool's image content to the model, which help output cannot show, so it rests on the releases
     // `pnpm probe:claude-mcp-image` verified against a real session. A property of the installed

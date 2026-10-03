@@ -2916,6 +2916,15 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         ),
       );
       break;
+    case "prepare_session_role":
+      runCommandTask("prepare_session_role", sessions.prepareSessionRole(msg, () => {
+        removeAgentControlFiles(msg.sessionId, agentControlHost.configDir);
+        removeClaudeHookFiles(msg.sessionId, claudeHookHost.configDir);
+      }, () => shells.snapshots().some((shell) => shell.sessionId === msg.sessionId && shell.kind === "agent_tui" && shell.status !== "exited")).then(sendUp));
+      break;
+    case "commit_session_role":
+      sendUp(sessions.commitSessionRole(msg));
+      break;
     case "inspect_provider_authentication":
       runCommandTask(
         "inspect_provider_authentication",
@@ -3262,6 +3271,7 @@ async function handleHostAction(msg: HostActionMessage): Promise<void> {
 function agentTuiSessionMeta(sessionId: string): SessionMeta {
   const current = store.readMeta(sessionId);
   if (!current || store.isDeleted(sessionId)) throw new Error("session is being deleted");
+  if (current.roleConversion && current.roleConversion.state !== "applied") throw new Error("wait for the session role change to finish");
   return current;
 }
 

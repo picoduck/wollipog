@@ -173,7 +173,7 @@ const ORCHESTRATOR_API_ROUTES = new Set([
   "POST /api/sessions/:id/worktrees/select", "POST /api/sessions/:id/worktrees/discard",
 ]);
 
-/** `role` is the credential session's fixed role; the legacy preset literal is accepted for it. */
+/** `role` is the credential session's current role; the legacy preset literal is accepted for it. */
 export function isAgentControlApiRouteAllowed(method: string, routePath: string, role?: SessionRole | string | null): boolean {
   if (role === "orchestrator") return ORCHESTRATOR_API_ROUTES.has(`${method.toUpperCase()} ${routePath}`);
   return AGENT_CONTROL_API_ROUTES.has(`${method.toUpperCase()} ${routePath}`);

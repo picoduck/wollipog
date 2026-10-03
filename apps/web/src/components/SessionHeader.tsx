@@ -36,6 +36,7 @@ import {
 import { MenuItem, MenuNote, MenuSeparator, MenuSurface } from "./Menu.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { TranscriptShareDialog } from "./TranscriptShareDialog.js";
+import { SessionRoleDialog } from "./SessionRoleDialog.js";
 import { ChevronLeftIcon, DownloadIcon, LinkIcon, MoreVerticalIcon, RefreshIcon, ShareIcon } from "./Icons.js";
 import { useIsCoarsePointer, useIsMobile } from "./useIsMobile.js";
 import { windowDragRegion } from "../desktop-window.js";
@@ -72,6 +73,7 @@ export function SessionHeader({
   runnerProtocolVersion,
   providerLogoutSupported,
   stopBeforeArchiveSupported,
+  sessionRoleConversionSupported = false,
   unarchiveAndRestartSupported = false,
   onReloadSession,
   exportReady,
@@ -118,6 +120,8 @@ export function SessionHeader({
   runnerProtocolVersion: number | null | undefined;
   providerLogoutSupported: boolean;
   stopBeforeArchiveSupported: boolean;
+  /** Explicitly advertised by the control plane; older peers fail closed. */
+  sessionRoleConversionSupported?: boolean;
   /** The control plane owns one preflighted Unarchive and Restart; absent on older control planes. */
   unarchiveAndRestartSupported?: boolean;
   /** Re-read this session from the server after an outcome the client could not confirm. */
@@ -172,6 +176,7 @@ export function SessionHeader({
   const [shareMenuOpen, setShareMenuOpen] = useState(false);
   const [statusPopoverOpen, setStatusPopoverOpen] = useState(false);
   const [moveProjectOpen, setMoveProjectOpen] = useState(false);
+  const [roleOpen, setRoleOpen] = useState(false);
   const [shareDialogOpen, setShareDialogOpen] = useState(false);
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
   const [switchAccountDialogOpen, setSwitchAccountDialogOpen] = useState(false);
@@ -395,6 +400,11 @@ export function SessionHeader({
           }}
         >
           Rename…
+        </MenuItem>,
+        <MenuItem key="role" disabled={!sessionRoleConversionSupported}
+          description={!sessionRoleConversionSupported ? "Update the control plane before changing an existing session's role." : undefined}
+          onClick={() => { closeMenu(false); setRoleOpen(true); }}>
+          Change Session Role…
         </MenuItem>,
         // Snoozing hides a session from the Sessions list, which an archived session has already left.
         onSnooze && !session.archived && (
@@ -883,6 +893,8 @@ export function SessionHeader({
           onClose: () => setMoveProjectOpen(false),
           returnFocusRef: menu.triggerRef,
         })}
+        {roleOpen && <SessionRoleDialog session={session} supported={sessionRoleConversionSupported}
+          onClose={() => setRoleOpen(false)} returnFocusRef={menu.triggerRef} />}
       </div>
     </header>
   );

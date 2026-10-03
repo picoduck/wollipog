@@ -83,6 +83,14 @@ export interface SessionMeta {
   sessionId: string;
   /** Opaque control-plane identity of the start command that created or replaced this runtime. */
   controlPlaneLaunchId?: string;
+  /** Human-correlated two-phase role change. Retiring/prepared fence every provider submission. */
+  roleConversion?: {
+    command: import("@wollipog/protocol").PrepareSessionRoleMessage;
+    state: "retiring" | "prepared" | "applied";
+    /** A restarted runner must not mistake an unconfirmed old provider for a retired one. */
+    runnerPid?: number;
+    providerPid?: number | null;
+  };
   agentId: string | null;
   /** Opaque account identity projected to the control plane. */
   providerAccountId?: string;
@@ -2963,6 +2971,10 @@ export function metaToSnapshot(
   return {
     id: m.sessionId,
     controlPlaneLaunchId: m.controlPlaneLaunchId,
+    ...(runnerSupportsProtocol(controlPlaneProtocolVersion, "sessionRoleConversion") &&
+      m.roleConversion && m.roleConversion.state !== "retiring" ? {
+        roleConversionReceipt: { conversionId: m.roleConversion.command.conversionId, state: m.roleConversion.state },
+      } : {}),
     workspaceId: m.workspaceId,
     agentId: m.agentId,
     providerAccountId: m.providerAccountId,

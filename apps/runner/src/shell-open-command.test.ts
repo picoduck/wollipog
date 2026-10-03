@@ -60,7 +60,7 @@ function harness(overrides: Partial<ShellOpenCommandDependencies> = {}) {
 }
 
 test("ownership wait fences stale TUI guard writes and spawn", async () => {
-  for (const change of ["none", "refused", "deleted", "cancelled", "epoch", "target"]) {
+  for (const change of ["none", "refused", "deleted", "cancelled", "epoch", "target", "role"]) {
     let grant!: () => void;
     let requested!: () => void;
     const waiting = new Promise<void>((resolve) => { requested = resolve; });
@@ -97,6 +97,7 @@ test("ownership wait fences stale TUI guard writes and spawn", async () => {
     if (change === "cancelled") cancelled = true;
     if (change === "epoch") epoch++;
     if (change === "target") root = "/replacement";
+    if (change === "role") source.orchestrator = { strictProjectIsolation: false, integrationIsolation: false };
     grant(); await opening;
     assert.equal(guards, change === "none" ? 1 : 0, change);
     assert.equal(state.opens, change === "none" ? 1 : 0, change);

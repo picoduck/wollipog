@@ -45,6 +45,13 @@ test("parseClaudeHelp gates flags and enumerated values from the resolved CLI", 
   assert.equal(parseClaudeHelp("--permission-mode (choices: plan)\n--output-format text").sessionNaming, false);
 });
 
+test("same-conversation instruction rebuilding requires an advertised off switch", () => {
+  assert.equal(parseClaudeHelp("--append-system-prompt <text>").mutableSystemPromptFlag, undefined);
+  assert.equal(parseClaudeHelp("  --system-prompt-recording <mode> choices: on, off").mutableSystemPromptFlag, "--system-prompt-recording");
+  assert.equal(parseClaudeHelp("  --system-prompt-snapshot <mode> choices: on, off").mutableSystemPromptFlag, "--system-prompt-snapshot");
+  assert.equal(parseClaudeHelp("  --system-prompt-recording <mode> choices: on").mutableSystemPromptFlag, undefined);
+});
+
 test("normalized Claude capabilities expose fork and per-mode elicitation only when verified", () => {
   const base = { models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: false };
   const probe = {

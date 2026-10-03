@@ -1260,6 +1260,22 @@ CREATE TABLE IF NOT EXISTS agent_control_credentials (
 CREATE INDEX IF NOT EXISTS idx_agent_control_credentials_runner
   ON agent_control_credentials(runner_id, session_id);
 
+-- Human-authored role intent survives a lost reply or reconnect. Runner receipts can only
+-- advance the exact stored conversion; they never supply campaign governance or a new role.
+CREATE TABLE IF NOT EXISTS session_role_conversions (
+  session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+  conversion_id TEXT NOT NULL,
+  command TEXT NOT NULL,
+  policy TEXT,
+  state TEXT NOT NULL CHECK (state IN ('preparing','committing','applied')),
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS role_revoked_credentials (
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  token_hash TEXT NOT NULL,
+  PRIMARY KEY (session_id, token_hash)
+);
+
 -- A hook ask must outlive a control-plane restart while the SAME Claude hook process polls.
 -- Tool input is deliberately absent: request_fingerprint binds only the minimized hook envelope.
 CREATE TABLE IF NOT EXISTS policy_hook_approvals (
@@ -18488,6 +18504,8 @@ export class ControlPlaneDb {
   /** Replace the hash-only credential accepted for one exact session's policy-hook route. */
   setPolicyHookCredential(sessionId: string, runnerId: string, tokenHash: string, now: number): boolean {
     if (!/^[0-9a-f]{64}$/u.test(tokenHash)) return false;
+    if (this.sessionRoleConversionPending(sessionId) ||
+        this.stmt("SELECT 1 FROM role_revoked_credentials WHERE session_id=? AND token_hash=?").get(sessionId, tokenHash)) return false;
     const owned = this.stmt("SELECT 1 FROM sessions WHERE id=? AND runner_id=?")
       .get(sessionId, runnerId);
     if (!owned) return false;
@@ -18504,6 +18522,7 @@ export class ControlPlaneDb {
 
   policyHookCredentialValid(sessionId: string, runnerId: string, tokenHash: string): boolean {
     if (!/^[0-9a-f]{64}$/u.test(tokenHash)) return false;
+    if (this.sessionRoleConversionPending(sessionId)) return false;
     return Boolean(this.stmt(
       `SELECT 1 FROM policy_hook_credentials
        WHERE session_id=? AND runner_id=? AND token_hash=?`,
@@ -18513,6 +18532,8 @@ export class ControlPlaneDb {
   /** Replace the hash-only credential accepted for one exact session's CLI/MCP surface. */
   setAgentControlCredential(sessionId: string, runnerId: string, tokenHash: string, now: number): boolean {
     if (!/^[0-9a-f]{64}$/u.test(tokenHash)) return false;
+    if (this.sessionRoleConversionPending(sessionId) ||
+        this.stmt("SELECT 1 FROM role_revoked_credentials WHERE session_id=? AND token_hash=?").get(sessionId, tokenHash)) return false;
     const owned = this.stmt("SELECT 1 FROM sessions WHERE id=? AND runner_id=?").get(sessionId, runnerId);
     if (!owned) return false;
     this.stmt(
@@ -18528,10 +18549,85 @@ export class ControlPlaneDb {
 
   agentControlCredentialValid(sessionId: string, runnerId: string, tokenHash: string): boolean {
     if (!/^[0-9a-f]{64}$/u.test(tokenHash)) return false;
+    if (this.sessionRoleConversionPending(sessionId)) return false;
     return Boolean(this.stmt(
       `SELECT 1 FROM agent_control_credentials
        WHERE session_id=? AND runner_id=? AND token_hash=?`,
     ).get(sessionId, runnerId, tokenHash));
+  }
+
+  sessionRoleConversion(id: string): {
+    command: import("@wollipog/protocol").PrepareSessionRoleMessage;
+    policy?: OrchestratorCampaignPolicy;
+    state: "preparing" | "committing" | "applied";
+  } | null {
+    const row = this.stmt("SELECT command, policy, state FROM session_role_conversions WHERE session_id=?")
+      .get(id) as { command: string; policy: string | null; state: "preparing" | "committing" | "applied" } | undefined;
+    return row ? { command: JSON.parse(row.command), policy: row.policy ? JSON.parse(row.policy) : undefined, state: row.state } : null;
+  }
+
+  sessionRoleConversionPending(id: string): boolean {
+    return Boolean(this.stmt("SELECT 1 FROM session_role_conversions WHERE session_id=? AND state!='applied'").get(id));
+  }
+
+  roleConversionBlocksSession(id: string): boolean {
+    const seen = new Set<string>();
+    for (let current: string | null = id; current && !seen.has(current);) {
+      seen.add(current);
+      if (this.sessionRoleConversionPending(current)) return true;
+      const parent = this.stmt("SELECT parent_session_id FROM sessions WHERE id=?").get(current) as
+        { parent_session_id: string | null } | undefined;
+      current = parent?.parent_session_id ?? null;
+    }
+    return false;
+  }
+
+  beginSessionRoleConversion(command: import("@wollipog/protocol").PrepareSessionRoleMessage,
+    policy: OrchestratorCampaignPolicy | undefined, now: number): void {
+    this.stmt(`INSERT INTO session_role_conversions (session_id, conversion_id, command, policy, state, created_at)
+      VALUES (?, ?, ?, ?, 'preparing', ?) ON CONFLICT(session_id) DO UPDATE SET
+      conversion_id=excluded.conversion_id, command=excluded.command, policy=excluded.policy,
+      state=excluded.state, created_at=excluded.created_at`)
+      .run(command.sessionId, command.conversionId, JSON.stringify(command), policy ? JSON.stringify(policy) : null, now);
+  }
+
+  abandonSessionRoleConversion(id: string, conversionId: string): void {
+    this.stmt("DELETE FROM session_role_conversions WHERE session_id=? AND conversion_id=? AND state='preparing'")
+      .run(id, conversionId);
+  }
+
+  commitSessionRoleConversion(id: string, conversionId: string, now: number): boolean {
+    const intent = this.sessionRoleConversion(id);
+    if (!intent || intent.command.conversionId !== conversionId) return false;
+    if (intent.state !== "preparing") return true;
+    const policy = intent.policy;
+    this.db.exec("BEGIN");
+    try {
+      // The retiring runtime's credential must never inherit the new role's authority. A fresh
+      // runner credential is provisioned only after commit, on the next conversation resume.
+      for (const table of ["agent_control_credentials", "policy_hook_credentials"]) {
+        this.stmt(`INSERT OR IGNORE INTO role_revoked_credentials (session_id, token_hash)
+          SELECT session_id, token_hash FROM ${table} WHERE session_id=?`).run(id);
+      }
+      this.stmt("DELETE FROM agent_control_credentials WHERE session_id=?").run(id);
+      this.stmt("DELETE FROM policy_hook_credentials WHERE session_id=?").run(id);
+      this.stmt(`UPDATE sessions SET session_role=?, orchestrator_policy=?, parent_control=?,
+        parent_control_policy=?, parent_control_policy_revision=parent_control_policy_revision+1,
+        max_child_sessions=COALESCE(?, max_child_sessions), updated_at=? WHERE id=?`)
+        .run(intent.command.targetRole, policy ? JSON.stringify(policy) : null,
+          policy?.delegation.parentControl ?? "off",
+          policy ? JSON.stringify(policy.delegation.decisions) : null,
+          policy?.behavior.maximumConcurrentChildren ?? null, now, id);
+      this.stmt("UPDATE session_role_conversions SET state='committing' WHERE session_id=? AND conversion_id=?")
+        .run(id, conversionId);
+      this.db.exec("COMMIT");
+      return true;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  finishSessionRoleConversion(id: string, conversionId: string): void {
+    this.stmt("UPDATE session_role_conversions SET state='applied' WHERE session_id=? AND conversion_id=? AND state='committing'")
+      .run(id, conversionId);
   }
 
   /** Full-text transcript search across all sessions (Cmd+K). The raw query is normalized
@@ -20550,6 +20646,12 @@ export class ControlPlaneDb {
       column,
       runId: row.run_id,
       parentSessionId: row.parent_session_id ?? null,
+      ...(() => {
+        const conversion = this.sessionRoleConversion(row.id);
+        return conversion && conversion.state !== "applied" ? {
+          roleConversion: { targetRole: conversion.command.targetRole, phase: conversion.state },
+        } : {};
+      })(),
       maxChildSessions: row.max_child_sessions ?? undefined,
       liveChildCapacity: {
         limit: row.max_child_sessions ?? DEFAULT_LIVE_CHILD_LIMIT,
