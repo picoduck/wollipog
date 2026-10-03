@@ -196,7 +196,7 @@ export const CSS_SURFACE = {
   "place-content", "place-items", "pointer-events", "position", "resize", "right", "row-gap",
   "scroll-behavior", "scroll-snap-align", "scroll-snap-type", "scrollbar-color",
   "scrollbar-width", "src", "stroke", "stroke-linecap", "stroke-width", "table-layout", "text-align",
-  "text-decoration", "text-overflow", "text-transform", "text-underline-offset", "top",
+  "text-decoration", "text-overflow", "text-transform", "top",
   "touch-action", "transform", "transform-origin", "transition", "transition-duration",
   "user-select", "vertical-align", "visibility", "white-space", "width", "word-break", "z-index",
   ],

@@ -7373,101 +7373,72 @@ textarea,
 .perm-resolved {
   color: var(--green);
 }
-/* "Agent is working" row (items 1 + 2): animated dots + current step + elapsed seconds. */
-/* The single active-turn surface: the IDEA-006 progress facts render inline at the transcript
-   tail rather than as a separate card above the composer. */
+/* Working line (#2170, §11.1, §11.3): while a turn runs, one line in a fixed order (the state, the
+   elapsed time, the current step and at most one action), plus an exception line only when
+   something went wrong. Neither line wraps: the step and the retry error clip at their end. */
 .tl-working {
   display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 4px 9px;
-  padding: 8px 4px 4px;
-  font-size: 12.5px;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: var(--space-2) var(--space-1) var(--space-1);
   color: var(--text-dim);
+  font: var(--type-body);
 }
-.tl-working-operation {
-  appearance: none;
-  border: 0;
-  border-radius: var(--radius-xs);
-  padding: 2px 4px;
-  background: transparent;
-  color: var(--text);
-  font: inherit;
-  cursor: pointer;
-  text-align: left;
-  text-decoration: underline;
-  text-underline-offset: 2px;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.tl-working-line,
+.tl-working-note {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  margin: 0;
   white-space: nowrap;
-  max-width: 40ch;
 }
-.tl-working-operation:hover,
-.tl-working-operation:focus-visible { background: var(--bg-elev-2); }
-.tl-working-subagent {
+/* The step's tooltip anchors to the line, not the step, so it never overhangs a narrow reader. */
+.tl-working-line { position: relative; }
+.tl-working-state {
   flex: none;
-  appearance: none;
-  border: 0;
-  padding: 2px 5px;
-  background: transparent;
-  color: var(--accent);
-  font: inherit;
-  font-weight: 600;
-  cursor: pointer;
+  color: var(--text);
+  font-weight: 500;
 }
-.tl-working-subagent:hover,
-.tl-working-subagent:focus-visible { color: var(--text); }
-.tl-working-waiting {
-  flex: none;
-  border: 1px solid color-mix(in srgb, var(--amber) 38%, var(--border));
-  border-radius: var(--radius-pill);
-  padding: 1px 7px;
-  color: var(--amber);
-  font-size: var(--text-xs);
-  font-weight: 600;
-}
-.tl-working-metric {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 4px;
-  flex: none;
-  font-size: var(--text-xs);
-}
-.tl-working-metric > span:first-child {
+.tl-working-attention { flex: none; }
+.tl-working-elapsed {
   flex: none;
   color: var(--text-faint);
-  font-weight: 600;
-}
-.tl-working-metric strong,
-.tl-working-metric time {
-  color: var(--text-dim);
-  font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
-.tl-working-metric.failed strong { color: var(--danger-text); }
-.tl-working-plan { min-width: 0; flex: 0 1 auto; }
-.tl-working-plan strong {
+.tl-working-step {
+  display: flex;
+  min-width: 0;
+}
+.tl-working-step-text {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: min(40vw, 320px);
+}
+.tl-working-step-text:hover + .tl-tooltip,
+.tl-working-step-text:focus-visible + .tl-tooltip {
+  visibility: visible;
+  opacity: 1;
+}
+.tl-working-step > .tl-tooltip { max-width: min(280px, 100%); }
+.tl-working-tip { display: block; }
+.tl-working-action { flex: none; }
+.tl-working-note { font: var(--type-small); }
+.tl-working-failed {
+  flex: none;
+  color: var(--danger-text);
+  font-variant-numeric: tabular-nums;
 }
 .tl-working-retry {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 5px;
   min-width: 0;
-  color: var(--danger-text);
-  font-size: var(--text-xs);
-}
-.tl-working-retry span {
-  max-width: min(34vw, 300px);
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
+.tl-working-silence { flex: none; }
 .working-dots {
   display: inline-flex;
+  flex: none;
   gap: 3px;
 }
 .working-dots span {
@@ -7482,16 +7453,6 @@ textarea,
 }
 .working-dots span:nth-child(2) {
   animation-delay: -0.12s;
-}
-.working-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 60ch;
-}
-.working-secs {
-  color: var(--text-faint);
-  font-variant-numeric: tabular-nums;
 }
 @keyframes working-bounce {
   0%,

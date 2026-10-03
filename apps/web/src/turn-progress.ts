@@ -49,6 +49,8 @@ export interface WaitingReason {
   kind: "approval" | "question";
   label: "Waiting for Approval" | "Waiting for Answer to Question";
   title: string;
+  /** The blocking request, so the working row's Review action can move focus to it. */
+  requestId: string;
 }
 
 export interface ActiveTurnProgress {
@@ -120,12 +122,14 @@ function waitingReason(pendingApproval: PendingApproval | null): WaitingReason |
       kind: "question",
       label: "Waiting for Answer to Question",
       title: blocking.title,
+      requestId: blocking.requestId,
     };
   }
   return {
     kind: "approval",
     label: "Waiting for Approval",
     title: blocking.title,
+    requestId: blocking.requestId,
   };
 }
 

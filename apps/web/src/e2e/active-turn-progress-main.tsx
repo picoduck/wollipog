@@ -7,9 +7,23 @@ import type { TimelineItem } from "../timeline.js";
 import { deriveActiveTurnProgress } from "../turn-progress.js";
 import "../styles.css";
 
+/** `?scenario=` picks the turn: running, failing (the default), silent or approval. */
+type Scenario = "running" | "failing" | "silent" | "approval";
+const requested = new URLSearchParams(window.location.search).get("scenario");
+const scenario: Scenario = requested === "running" || requested === "silent" || requested === "approval"
+  ? requested
+  : "failing";
+
 const fixtureNow = Date.now();
 const turnStartedAt = fixtureNow - 420_000;
+// A silent turn's last output is three minutes old; every other turn is still streaming.
+const latestOutputAt = scenario === "silent" ? fixtureNow - 185_000 : fixtureNow - 4_000;
 const retryError = "Release validation failed because the compatibility marker did not match the expected control-plane service identity in the packaged desktop application.";
+const planEntries = [
+  { content: "Inspect release metadata", status: "completed" as const },
+  { content: "Validate compatibility release", status: "in_progress" as const },
+  { content: "Publish verified artifacts", status: "pending" as const },
+];
 
 let nextSeq = 0;
 function event(payload: SessionEventPayload, ts: number): SessionEvent {
@@ -17,19 +31,17 @@ function event(payload: SessionEventPayload, ts: number): SessionEvent {
   return { id: seq, seq, sessionId: "active-turn-progress-e2e", ts, payload };
 }
 
-nextSeq = 0;
+const failures = scenario === "failing";
 const events: SessionEvent[] = [
   event({ kind: "user_message", text: "Finish compatibility validation and prepare the release." }, turnStartedAt),
   event({ kind: "tool_call", toolCallId: "inspect", title: "Inspect Release Metadata", toolKind: "read", status: "completed" }, fixtureNow - 380_000),
   event({ kind: "tool_call", toolCallId: "release-audit-agent", title: "Coordinate Release Audit", toolKind: "agent", status: "running" }, fixtureNow - 360_000),
-  event({ kind: "tool_call", toolCallId: "retry-1", title: "Run Compatibility Validation", toolKind: "execute", status: "failed", text: retryError }, fixtureNow - 300_000),
-  event({ kind: "tool_call", toolCallId: "retry-2", title: "Run Compatibility Validation", toolKind: "execute", status: "failed", text: retryError }, fixtureNow - 240_000),
-  event({ kind: "tool_call", toolCallId: "retry-3", title: "Run Compatibility Validation", toolKind: "execute", status: "failed", text: retryError }, fixtureNow - 180_000),
-  event({ kind: "plan", entries: [
-    { content: "Inspect release metadata", status: "completed" },
-    { content: "Validate compatibility release", status: "in_progress" },
-    { content: "Publish verified artifacts", status: "pending" },
-  ] }, fixtureNow - 60_000),
+  ...(failures ? [
+    event({ kind: "tool_call", toolCallId: "retry-1", title: "Run Compatibility Validation", toolKind: "execute", status: "failed", text: retryError }, fixtureNow - 300_000),
+    event({ kind: "tool_call", toolCallId: "retry-2", title: "Run Compatibility Validation", toolKind: "execute", status: "failed", text: retryError }, fixtureNow - 240_000),
+    event({ kind: "tool_call", toolCallId: "retry-3", title: "Run Compatibility Validation", toolKind: "execute", status: "failed", text: retryError }, fixtureNow - 180_000),
+  ] : []),
+  event({ kind: "plan", entries: planEntries }, latestOutputAt),
 ];
 
 const approval: PendingApproval = {
@@ -38,10 +50,13 @@ const approval: PendingApproval = {
   options: [],
   kind: "permission",
 };
+if (scenario === "approval") {
+  events.push(event({ kind: "permission_request", requestId: approval.requestId, title: approval.title, options: [] }, latestOutputAt));
+}
 
 const derivedProgress = deriveActiveTurnProgress({
-  status: "input_required",
-  pendingApproval: approval,
+  status: scenario === "approval" ? "input_required" : "running",
+  pendingApproval: scenario === "approval" ? approval : null,
   events,
 });
 
@@ -55,19 +70,21 @@ const filler = Array.from({ length: 20 }, (_, index): TimelineItem => ({
   createdAt: fixtureNow - 59_000 + index * 1_000,
 }));
 
+const permissionEventId = events.at(-1)!.seq;
 const items: TimelineItem[] = [
   { kind: "user_message", id: 1, text: "Finish compatibility validation and prepare the release.", createdAt: turnStartedAt },
   { kind: "tool_call", id: 2, toolCallId: "inspect", title: "Inspect Release Metadata", toolKind: "read", status: "completed", text: "Release metadata is present." },
   { kind: "tool_call", id: 3, toolCallId: "release-audit-agent", title: "Coordinate Release Audit", toolKind: "agent", status: "running", text: "" },
   { kind: "agent_message", id: 8, text: "Auditing compatibility gates and packaged artifacts.", parentToolUseId: "release-audit-agent" },
-  { kind: "tool_call", id: 4, toolCallId: "retry-1", title: "Run Compatibility Validation", toolKind: "execute", status: "failed", text: retryError },
-  { kind: "tool_call", id: 5, toolCallId: "retry-2", title: "Run Compatibility Validation", toolKind: "execute", status: "failed", text: retryError },
-  { kind: "tool_call", id: 6, toolCallId: "retry-3", title: "Run Compatibility Validation", toolKind: "execute", status: "failed", text: retryError },
-  { kind: "plan", id: 7, entries: [
-    { content: "Inspect release metadata", status: "completed" },
-    { content: "Validate compatibility release", status: "in_progress" },
-    { content: "Publish verified artifacts", status: "pending" },
-  ] },
+  ...(failures ? [
+    { kind: "tool_call", id: 4, toolCallId: "retry-1", title: "Run Compatibility Validation", toolKind: "execute", status: "failed", text: retryError },
+    { kind: "tool_call", id: 5, toolCallId: "retry-2", title: "Run Compatibility Validation", toolKind: "execute", status: "failed", text: retryError },
+    { kind: "tool_call", id: 6, toolCallId: "retry-3", title: "Run Compatibility Validation", toolKind: "execute", status: "failed", text: retryError },
+  ] satisfies TimelineItem[] : []),
+  { kind: "plan", id: 7, entries: planEntries },
+  ...(scenario === "approval"
+    ? [{ kind: "permission", id: permissionEventId, requestId: approval.requestId, title: approval.title, options: [] }] satisfies TimelineItem[]
+    : []),
   ...filler,
 ];
 
@@ -77,6 +94,17 @@ function Fixture() {
   const [openedSubagent, setOpenedSubagent] = useState("None");
   const nextReveal = useRef(0);
   const stableItems = useMemo(() => items, []);
+  // Production reveals a request row the same way it reveals a step (SessionDetail).
+  const reveal = (eventId: number) => {
+    nextReveal.current += 1;
+    setRevealRequest({
+      eventId,
+      requestId: nextReveal.current,
+      historyKey: "active-turn-progress-e2e",
+      align: "center",
+      focus: true,
+    });
+  };
 
   return (
     <main style={{ display: "grid", gridTemplateRows: "minmax(0, 1fr)", width: "100vw", height: "100vh", padding: 12, background: "var(--bg)", overflow: "hidden" }}>
@@ -101,17 +129,9 @@ function Fixture() {
         <WorkingIndicator
           progress={progress}
           now={fixtureNow}
-          onRevealCurrentOperation={(eventId) => {
-            nextReveal.current += 1;
-            setRevealRequest({
-              eventId,
-              requestId: nextReveal.current,
-              historyKey: "active-turn-progress-e2e",
-              align: "center",
-              focus: true,
-            });
-          }}
+          onRevealCurrentOperation={reveal}
           onOpenSubagent={setOpenedSubagent}
+          onReviewPendingRequest={() => reveal(permissionEventId)}
         />
       </div>
     </main>

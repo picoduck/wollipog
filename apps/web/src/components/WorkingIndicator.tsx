@@ -1,8 +1,12 @@
-import { useEffect, useState } from "react";
-import { formatDuration, formatRecordedRelativeTime, formatRecordedTimestamp } from "../format.js";
+import { useEffect, useId, useState } from "react";
+import { formatDuration } from "../format.js";
+import { statusMeta } from "../status-meta.js";
 import type { ActiveTurnProgress } from "../turn-progress.js";
+import { StatusBadge } from "./StatusBadge.js";
 
 export const ACTIVE_TURN_CLOCK_INTERVAL_MS = 1_000;
+/** No activity for this long is worth saying on the exception line ("No new output for 2m"). */
+export const ACTIVE_TURN_SILENCE_MS = 120_000;
 
 function useActiveTurnClock(enabled: boolean): number {
   const [now, setNow] = useState(() => Date.now());
@@ -15,27 +19,38 @@ function useActiveTurnClock(enabled: boolean): number {
   return now;
 }
 
+/** Whole minutes under an hour ("3m"), so a silence that is still growing does not tick each second. */
+function silenceLabel(silentMs: number): string {
+  const minutes = Math.floor(silentMs / 60_000);
+  return minutes < 60 ? `${minutes}m` : formatDuration(silentMs);
+}
+
 /** Live "agent is working" row at the tail of the transcript while a turn is in flight.
  *
- * This row is the single active-turn surface: the IDEA-006 progress facts (current operation,
- * waiting reason, elapsed, last activity, tool counts, retries, plan step) render here instead of
- * a separate card above the composer, so live state reads in the same place as the work itself. */
+ * One line in a fixed order: the state, the elapsed time, the current step (a link that reveals it
+ * in the transcript) and at most one action. A pending approval or question outranks progress: its
+ * attention badge takes the state slot and the action is Review. Failures, retries and silence get
+ * a second line only when they happen; zero counts never render (#2170). */
 export function WorkingIndicator({
   label,
   progress,
   onRevealCurrentOperation,
   onOpenSubagent,
+  onReviewPendingRequest,
   now: nowOverride,
 }: {
   label?: string;
   progress?: ActiveTurnProgress | null;
   onRevealCurrentOperation?: (eventId: number) => void;
   onOpenSubagent?: (subagentId: string) => void;
+  /** Moves focus to the pending request that is blocking the turn. */
+  onReviewPendingRequest?: (requestId: string) => void;
   /** Deterministic rendering for focused component coverage; production uses the shared clock. */
   now?: number;
 }) {
   const clockNow = useActiveTurnClock(nowOverride == null);
   const [mountedAt] = useState(() => Date.now());
+  const tooltipId = useId();
   const now = Math.max(
     nowOverride ?? clockNow,
     progress?.turnStartedAt ?? Number.NEGATIVE_INFINITY,
@@ -47,75 +62,90 @@ export function WorkingIndicator({
     ? Math.max(0, now - progress.turnStartedAt)
     : Math.max(0, (nowOverride ?? clockNow) - mountedAt);
   const elapsed = elapsedMs >= 2_000 ? formatDuration(elapsedMs) : null;
-  const lastActivity = formatRecordedTimestamp(progress?.lastActivityAt);
-  const relativeActivity = formatRecordedRelativeTime(progress?.lastActivityAt, now);
   const operation = progress?.currentOperation;
-  const operationTitle = operation?.title ?? label;
-  const retryLabel = progress?.retryGroup
-    ? `Retried ${progress.retryGroup.retries} ${progress.retryGroup.retries === 1 ? "Time" : "Times"}`
+  const step = operation?.title ?? label;
+  const waiting = progress?.waitingReason;
+  const attention = waiting
+    ? statusMeta("attention", waiting.kind === "question" ? "answer_required" : "approval_required")
     : null;
+  const failed = progress?.failedTools ?? 0;
+  const retry = progress?.retryGroup;
+  // Waiting on the person is not silence: the agent has nothing to say until they answer.
+  const quietSince = progress?.lastActivityAt ?? progress?.turnStartedAt;
+  const silentMs = !waiting && quietSince != null ? now - quietSince : 0;
+  const silence = silentMs >= ACTIVE_TURN_SILENCE_MS ? `No new output for ${silenceLabel(silentMs)}` : null;
+  const stepDetails = [
+    "Show this step in the transcript.",
+    progress?.completedTools ? `${progress.completedTools} completed.` : null,
+    progress?.currentPlanStep ? `Plan step: ${progress.currentPlanStep.content}` : null,
+  ].filter((detail): detail is string => detail !== null);
+  // Announce what changed state, never the step or the clock: a screen reader hears "Working",
+  // "Approval Required" or a new failure once, not every tool call or elapsed second.
+  const announcement = [attention?.label ?? "Working", failed > 0 ? `${failed} failed` : null]
+    .filter(Boolean)
+    .join(", ");
 
   return (
     <section className="tl-working" aria-label="Active Turn Progress">
-      <span className="working-dots" aria-hidden="true">
-        <span />
-        <span />
-        <span />
-      </span>
-      {operation && onRevealCurrentOperation ? (
-        <button
-          type="button"
-          className="tl-working-operation"
-          onClick={() => onRevealCurrentOperation(operation.eventId)}
-          title="Reveal this operation in the transcript."
-        >
-          {operation.title}
-        </button>
-      ) : (
-        <span className="working-label">{operationTitle ?? "Working"}</span>
-      )}
-      {operation?.subagentId && onOpenSubagent && (
-        <button type="button" className="tl-working-subagent" onClick={() => onOpenSubagent(operation.subagentId!)}>
-          Open Subagent
-        </button>
-      )}
-      {progress?.waitingReason && (
-        <span className={`tl-working-waiting ${progress.waitingReason.kind}`} title={progress.waitingReason.title} role="status">
-          {progress.waitingReason.label}
-        </span>
-      )}
-      {elapsed && (
-        progress ? (
-          <span className="tl-working-metric"><span>Elapsed</span><strong>{elapsed}</strong></span>
+      <div className="tl-working-line">
+        {attention ? (
+          <StatusBadge meta={attention} className="tl-working-attention" />
         ) : (
-          <span className="working-secs">{elapsed}</span>
-        )
-      )}
-      {progress && (
-        <>
-          <span className="tl-working-metric">
-            <span>Last Activity</span>
-            {lastActivity ? (
-              <time dateTime={lastActivity.dateTime} title={lastActivity.title}>{relativeActivity || "Unavailable"}</time>
-            ) : <strong>{relativeActivity || "Unavailable"}</strong>}
+          <>
+            <span className="working-dots" aria-hidden="true">
+              <span />
+              <span />
+              <span />
+            </span>
+            <span className="tl-working-state">Working</span>
+          </>
+        )}
+        {elapsed && <span className="tl-working-elapsed">{elapsed}</span>}
+        {step && (
+          <span className="tl-working-step">
+            {operation && onRevealCurrentOperation ? (
+              <>
+                <button
+                  type="button"
+                  className="link tl-working-step-text"
+                  aria-describedby={tooltipId}
+                  onClick={() => onRevealCurrentOperation(operation.eventId)}
+                >
+                  {operation.title}
+                </button>
+                <span id={tooltipId} className="tl-tooltip" role="tooltip">
+                  {stepDetails.map((detail, index) => (
+                    <span key={detail} className="tl-working-tip">{index > 0 ? " " : ""}{detail}</span>
+                  ))}
+                </span>
+              </>
+            ) : (
+              <span className="tl-working-step-text">{step}</span>
+            )}
           </span>
-          <span className="tl-working-metric"><span>Completed</span><strong>{progress.completedTools}</strong></span>
-          <span className={`tl-working-metric${progress.failedTools ? " failed" : ""}`}><span>Failed</span><strong>{progress.failedTools}</strong></span>
-          {progress.retryGroup && (
-            <span className="tl-working-retry" title={progress.retryGroup.latestError}>
-              <strong>{retryLabel}</strong>
-              <span>{progress.retryGroup.latestError}</span>
+        )}
+        {waiting && onReviewPendingRequest ? (
+          <button type="button" className="btn sm ghost tl-working-action" onClick={() => onReviewPendingRequest(waiting.requestId)}>
+            Review
+          </button>
+        ) : operation?.subagentId && onOpenSubagent ? (
+          <button type="button" className="btn sm ghost tl-working-action" onClick={() => onOpenSubagent(operation.subagentId!)}>
+            Open Agent
+          </button>
+        ) : null}
+      </div>
+      {(failed > 0 || retry || silence) && (
+        <p className="tl-working-note">
+          {failed > 0 && <span className="tl-working-failed">{failed} failed</span>}
+          {retry && (
+            <span className="tl-working-retry" title={retry.latestError}>
+              {`Retried ${retry.retries} ${retry.retries === 1 ? "time" : "times"}: ${retry.latestError}`}
             </span>
           )}
-          {progress.currentPlanStep && (
-            <span className="tl-working-metric tl-working-plan">
-              <span>Plan Step</span>
-              <strong>{progress.currentPlanStep.content}</strong>
-            </span>
-          )}
-        </>
+          {silence && <span className="tl-working-silence">{silence}</span>}
+        </p>
       )}
-      <span className="sr-only" role="status" aria-live="polite">{operationTitle ?? "Working"}</span>
+      <span className="sr-only" role="status" aria-live="polite">{announcement}</span>
     </section>
   );
 }

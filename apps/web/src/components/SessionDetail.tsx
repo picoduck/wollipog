@@ -157,7 +157,7 @@ import {
   type ConversationForkAvailability,
   type EditInForkAvailability,
 } from "../session-actions.js";
-import { SessionApprovalRegion, standaloneApprovalForReview } from "./SessionApproval.js";
+import { SessionApprovalRegion, focusSessionRequest, standaloneApprovalForReview } from "./SessionApproval.js";
 import {
   requestTypeLabel,
   sessionRequestPanelKey,
@@ -3995,6 +3995,21 @@ function SessionDetailLoaded({
     showKeyHints: !isMobile,
   }), [handlePendingQuestionAvailabilityChange, isMobile, loadSession, questionInTimeline, runnerOnline,
     session.id, timelinePendingQuestion]);
+  // The working line's Review moves focus to the request blocking the turn: its transcript row when
+  // the transcript owns it (revealed like a step, since the virtual list may not have it mounted),
+  // otherwise the request card outside the transcript.
+  const reviewPendingRequest = useCallback((requestId: string) => {
+    let row: TimelineItem | undefined;
+    for (let index = items.length - 1; index >= 0 && !row; index -= 1) {
+      const item = items[index]!;
+      if ((item.kind === "permission" && item.requestId === requestId && item.resolvedOptionId === undefined) ||
+          (item.kind === "question" && item.requestId === requestId && item.answered === undefined && questionInTimeline)) {
+        row = item;
+      }
+    }
+    if (row) revealCurrentOperation(row.id);
+    else focusSessionRequest(session.id, requestId);
+  }, [items, questionInTimeline, revealCurrentOperation, session.id]);
   const timelineApprovalContext = useMemo(() => timelineApprovalRequestId && ownApprovalHasTimelineRow ? {
       sessionId: session.id,
       requestId: timelineApprovalRequestId,
@@ -5493,6 +5508,7 @@ function SessionDetailLoaded({
                       progress={activeTurnProgress}
                       onRevealCurrentOperation={revealCurrentOperation}
                       onOpenSubagent={mode === "expanded" ? openSubagent : undefined}
+                      onReviewPendingRequest={reviewPendingRequest}
                     />
                   )}
                   {transcript.body === "timeline" && standaloneRequestCard}

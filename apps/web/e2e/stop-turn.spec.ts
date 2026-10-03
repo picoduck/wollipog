@@ -294,7 +294,13 @@ test("a policy pause does not expose Stop Turn or app-owned stop", async ({ page
   // turn's progress and waiting reason on screen (regression coverage).
   const workingRow = page.getByRole("region", { name: "Active Turn Progress" });
   await expect(workingRow).toBeVisible();
-  await expect(workingRow).toContainText("Waiting for Approval");
+  // Attention outranks progress: the attention badge takes the state slot and Review is the action.
+  await expect(workingRow.locator(".status")).toHaveText("Approval Required");
+  await expect(workingRow).not.toContainText("Working");
+  await workingRow.getByRole("button", { name: "Review" }).click();
+  await expect.poll(() => page.evaluate(() =>
+    document.activeElement?.closest("[data-session-request-id]")?.getAttribute("data-session-request-id") ?? null,
+  )).toBe("budget-1");
 });
 
 for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {

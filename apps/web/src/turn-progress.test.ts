@@ -129,6 +129,7 @@ test("pending approval and pending question expose distinct authoritative waitin
     kind: "approval",
     label: "Waiting for Approval",
     title: "Run deployment command",
+    requestId: "approval",
   });
 
   const question = derive(events, "input_required", {
@@ -142,6 +143,7 @@ test("pending approval and pending question expose distinct authoritative waitin
     kind: "question",
     label: "Waiting for Answer to Question",
     title: "Choose a release channel",
+    requestId: "question",
   });
 });
 
