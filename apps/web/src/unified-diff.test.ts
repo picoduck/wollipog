@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { diffFileIsPlain, diffLineCounts, diffMaxLineNumber, hunkLabel, parseUnifiedDiff } from "./unified-diff.js";
+import { binaryMarkerSides, diffFileIsPlain, diffLineCounts, diffMaxLineNumber, hunkLabel, parseUnifiedDiff } from "./unified-diff.js";
 
 const NEW_FILE = [
   "diff --git a/src/notes.ts b/src/notes.ts",
@@ -135,6 +135,33 @@ test("binary metadata with no diff --git header still makes a binary file record
     "after a finished hunk, a binary marker opens the next file");
   const [patch] = parseUnifiedDiff("GIT binary patch\nliteral 12\nzcmZQzU|?ur\n\nliteral 0\nHcmV?d00001");
   assert.deepEqual([patch!.binary, patch!.hunks.length], [true, 0], "the base85 data is not context lines");
+});
+
+test("each headerless binary marker is its own file, whatever follows it", () => {
+  const two = parseUnifiedDiff("Binary files a/a.png and b/a.png differ\nBinary files a/b.png and b/b.png differ");
+  assert.deepEqual(two.map((file) => [file.path, file.binary]), [["a.png", true], ["b.png", true]]);
+  const mixed = parseUnifiedDiff("Binary files a/a.png and b/a.png differ\n--- a/x.ts\n+++ b/x.ts\n@@ -1 +1 @@\n-a\n+b");
+  assert.deepEqual(mixed.map((file) => [file.path, file.binary ?? false, file.hunks.length]), [["a.png", true, 0], ["x.ts", false, 1]]);
+});
+
+test("a binary marker's sides are read whole, and a null side names the operation", () => {
+  assert.deepEqual(binaryMarkerSides("Binary files a/rock and roll.png and b/rock and roll.png differ"),
+    { oldPath: "rock and roll.png", newPath: "rock and roll.png" });
+  const [added] = parseUnifiedDiff("Binary files /dev/null and b/logo.png differ");
+  assert.deepEqual([added!.path, added!.isNew, added!.isDeleted ?? false], ["logo.png", true, false]);
+  const [deleted] = parseUnifiedDiff("Binary files a/logo.png and /dev/null differ");
+  assert.deepEqual([deleted!.path, deleted!.isNew, deleted!.isDeleted], ["logo.png", false, true]);
+  const [named] = parseUnifiedDiff("Binary files a/rock and roll.png and b/rock and roll.png differ");
+  assert.equal(named!.path, "rock and roll.png");
+  const [gitDeleted] = parseUnifiedDiff("diff --git a/x b/x\ndeleted file mode 100644\nBinary files a/x and /dev/null differ");
+  assert.deepEqual([gitDeleted!.path, gitDeleted!.isDeleted], ["x", true]);
+});
+
+test("a diff --git header whose path contains \" b/\" keeps the whole path", () => {
+  const [file] = parseUnifiedDiff("diff --git a/docs/a b/c.md b/docs/a b/c.md\nindex 1..2 100644\nBinary files a/docs/a b/c.md and b/docs/a b/c.md differ");
+  assert.equal(file!.path, "docs/a b/c.md");
+  const [moved] = parseUnifiedDiff("diff --git a/old.ts b/new.ts\nsimilarity index 90%\nrename from old.ts\nrename to new.ts");
+  assert.equal(moved!.path, "new.ts");
 });
 
 test("CRLF line endings are not part of a line's text", () => {

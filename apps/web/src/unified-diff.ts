@@ -49,6 +49,42 @@ const headerPath = (value: string): string | undefined => {
   return path.replace(/^[ab]\//, "");
 };
 
+/**
+ * The two sides of "Binary files X and Y differ". Either side is `/dev/null` or a prefixed path, and
+ * a path may itself contain " and ", so the separator is found from what each side must look like:
+ * equal paths split evenly, a null side anchors its end, and only then the last " and b/".
+ */
+export function binaryMarkerSides(line: string): { oldPath?: string; newPath?: string } | null {
+  const match = /^Binary files (.+) differ$/.exec(line);
+  if (!match) return null;
+  const body = match[1]!;
+  const strip = (side: string) => (side === "/dev/null" ? undefined : side.replace(/^[ab]\//, ""));
+  if (body.startsWith("/dev/null and ")) return { newPath: strip(body.slice("/dev/null and ".length)) };
+  if (body.endsWith(" and /dev/null")) return { oldPath: strip(body.slice(0, -" and /dev/null".length)) };
+  const half = (body.length - " and ".length) / 2;
+  if (Number.isInteger(half) && body.slice(half, half + " and ".length) === " and ") {
+    const [left, right] = [body.slice(0, half), body.slice(half + " and ".length)];
+    if (strip(left) === strip(right)) return { oldPath: strip(left), newPath: strip(right) };
+  }
+  const separator = body.lastIndexOf(" and b/");
+  if (separator < 0) return {};
+  return { oldPath: strip(body.slice(0, separator)), newPath: strip(body.slice(separator + " and ".length)) };
+}
+
+/** The new-side path of "diff --git a/X b/Y". A path may contain " b/", so equal sides split evenly
+ * first; a rename (its "rename to" line overrides this anyway) falls back to the last " b/". */
+function gitHeaderPath(line: string): string | undefined {
+  const match = /^diff --git (a\/.+)$/.exec(line);
+  if (!match) return / b\/(.+)$/.exec(line)?.[1];
+  const body = match[1]!;
+  const half = (body.length - 1) / 2;
+  if (Number.isInteger(half) && body[half] === " " && body.slice(2, half) === body.slice(half + 3) && body.startsWith("b/", half + 1)) {
+    return body.slice(half + 3);
+  }
+  const separator = body.lastIndexOf(" b/");
+  return separator < 0 ? undefined : body.slice(separator + 3);
+}
+
 export function parseUnifiedDiff(diff: string): DiffFile[] {
   const files: DiffFile[] = [];
   let file: DiffFile | null = null;
@@ -59,6 +95,9 @@ export function parseUnifiedDiff(diff: string): DiffFile[] {
   let newAt = 1;
   // A `GIT binary patch` is base85 data up to the next file, never lines to show.
   let binaryPatch = false;
+  // The current file has only its header so far: the next header line or binary marker completes
+  // it rather than opening another file.
+  let headerOnly = false;
   const startFile = (): DiffFile => {
     file = { isNew: false, hunks: [] };
     files.push(file);
@@ -66,9 +105,11 @@ export function parseUnifiedDiff(diff: string): DiffFile[] {
     oldLeft = 0;
     newLeft = 0;
     binaryPatch = false;
+    headerOnly = true;
     return file;
   };
   const bodyLine = (line: string) => {
+    headerOnly = false;
     if (!hunk) {
       // A bare body: the whole text, numbered from line 1.
       const current: DiffFile = file ?? startFile();
@@ -104,13 +145,14 @@ export function parseUnifiedDiff(diff: string): DiffFile[] {
     if (binaryPatch && !line.startsWith("diff ")) continue;
     if (line.startsWith("diff ")) {
       const current = startFile();
-      const target = / b\/(.+)$/.exec(line)?.[1];
+      const target = gitHeaderPath(line);
       if (target) current.path = target;
       continue;
     }
     const header = HUNK_HEADER.exec(line);
     if (header) {
       const current: DiffFile = file ?? startFile();
+      headerOnly = false;
       const [, oldStart, oldCount, newStart, newCount, section] = header;
       hunk = {
         header: true,
@@ -130,10 +172,10 @@ export function parseUnifiedDiff(diff: string): DiffFile[] {
     }
     // A "---"/"+++" pair outside a hunk names a file; one with no "diff" line opens the next file.
     if (line.startsWith("--- ") && lines[index + 1]?.startsWith("+++ ") && !(hunk && !hunk.header)) {
-      const current: DiffFile = file && !(file as DiffFile).hunks.length ? file : startFile();
+      const current: DiffFile = file && headerOnly ? file : startFile();
       if (line.slice(4).trim() === "/dev/null") current.isNew = true;
       if (lines[index + 1]!.slice(4).trim() === "/dev/null") current.isDeleted = true;
-      const target = headerPath(lines[index + 1]!.slice(4));
+      const target = headerPath(lines[index + 1]!.slice(4)) ?? headerPath(line.slice(4));
       if (target) current.path = target;
       index += 1;
       continue;
@@ -141,11 +183,16 @@ export function parseUnifiedDiff(diff: string): DiffFile[] {
     // A binary change is a file of its own even with no `diff --git` line before it; a bare body's
     // text is never read as one.
     if ((line.startsWith("Binary files ") || line.startsWith("GIT binary patch")) && !(hunk && !hunk.header)) {
-      const current: DiffFile = file && !(file as DiffFile).hunks.length ? file : startFile();
+      const current: DiffFile = file && headerOnly ? file : startFile();
       current.binary = true;
+      headerOnly = false;
       binaryPatch = line.startsWith("GIT binary patch");
-      const target = / and (?:b\/)?(.+) differ$/.exec(line)?.[1];
-      if (!current.path && target && target !== "/dev/null") current.path = target;
+      const sides = binaryMarkerSides(line);
+      if (sides) {
+        if (!sides.oldPath && sides.newPath) current.isNew = true;
+        if (sides.oldPath && !sides.newPath) current.isDeleted = true;
+        current.path ??= sides.newPath ?? sides.oldPath;
+      }
       continue;
     }
     if (!hunk && METADATA.test(line)) {
