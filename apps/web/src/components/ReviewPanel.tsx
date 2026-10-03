@@ -753,7 +753,13 @@ export function ReviewPanel({
       {error && <Notice tone="danger" compact>{error}</Notice>}
       {/* A failed status refresh keeps the last-known numbers on screen — say so, or the
           stale branch/file count reads as current. */}
-      {git.error && <Notice tone="danger" compact>Git status refresh failed: {git.error}</Notice>}
+      {git.error && (
+        <Notice tone="danger" details={<div className="code-well"><pre>{git.error}</pre></div>}>
+          {status
+            ? "Git status could not be read. The status shown below is the last known result and may be out of date."
+            : "Git status could not be read. The current status is unknown."}
+        </Notice>
+      )}
 
       <div className="git-status-row">
         <button className="btn ghost sm" onClick={loadStatus} disabled={disabled}>

@@ -4,6 +4,10 @@ The Review panel can import the current branch's GitHub pull-request or GitLab m
 discussions with **Sync GitHub** or **Sync GitLab**. Both operations are read-only
 toward the forge: Wollipog never posts, edits, resolves, or dismisses a remote comment.
 
+If Git status cannot be read, Review explains whether the status is unknown or a last-known result
+that may be out of date. Use **Show Details** to see the underlying diagnostic, and **Refresh Git
+Status** to retry. A successful retry clears the failure notice.
+
 GitLab.com repositories are detected from exact SSH or HTTP(S) remote hosts. A self-managed GitLab
 host becomes active only when global `glab` configuration contains that exact host; Wollipog checks
 that non-secret host-scoped configuration before running `glab auth status --hostname <host>`, so it does not
