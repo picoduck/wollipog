@@ -13,6 +13,7 @@ function harness(options: { role?: boolean; resume?: boolean; provider?: string;
   const servers: JsonRpcPeer[] = [];
   const children: AgentProcess[] = [];
   const calls: string[] = [];
+  let authenticationFailures = 0;
   const opts: DriverOptions = {
     command: "codex", args: ["-c", "model=selected-model", "-c", "approval_policy=on-request"], cwd: "/project",
     env: { CODEX_HOME: "/selected-account", ACCOUNT_MARKER: "private-account" }, context: { kind: "native" },
@@ -20,7 +21,9 @@ function harness(options: { role?: boolean; resume?: boolean; provider?: string;
     ...(options.role ? { orchestrator: { strictProjectIsolation: false, integrationIsolation: false } } : {}),
     ...(options.resume ? { resumeId: "thread" } : {}),
   };
-  const driver = new CodexAppServerDriver(opts, { onEvent: () => {}, onExit: () => {}, onStderr: line => diagnostics.push(line) }, undefined, {
+  const driver = new CodexAppServerDriver(opts, { onEvent: () => {}, onExit: () => {}, onStderr: line => diagnostics.push(line),
+    onAuthenticationFailure: () => { authenticationFailures++; },
+  }, undefined, {
     spawn: launch => {
       launches.push(launch);
       const stdin = new PassThrough();
@@ -50,7 +53,7 @@ function harness(options: { role?: boolean; resume?: boolean; provider?: string;
     },
     kill: () => {},
   });
-  return { driver, opts, diagnostics, launches, calls, servers, children };
+  return { driver, opts, diagnostics, launches, calls, servers, children, authenticationFailures: () => authenticationFailures };
 }
 
 test("standard and additive Orchestrator fresh/resumed/relaunched drivers retain native defaults and launch selection", async () => {
@@ -140,6 +143,7 @@ test("fallback stderr split at arbitrary byte boundaries never exposes the suffi
     }
     assert.equal(h.diagnostics.length, 2);
     assert.equal(JSON.parse(h.diagnostics[1]!).observedTransport, "http");
+    assert.equal(JSON.parse(h.diagnostics[1]!).scope, "unattributed");
     assert.doesNotMatch(h.diagnostics.join("\n"), /secret|private-prompt/);
   } finally { h.driver.dispose(); for (const server of h.servers) server.dispose("done"); }
 });
@@ -159,11 +163,27 @@ test("known subagent fallback is scoped without marking the root thread as HTTP"
     assert.equal(h.diagnostics.length, 2);
     assert.equal(JSON.parse(h.diagnostics[1]!).scope, "subagent");
     assert.equal(JSON.parse(h.diagnostics[1]!).provider, "unknown");
+    (h.children[0]!.stderr as PassThrough).write("WARN codex_core::client: falling back to HTTP secret\n");
+    assert.equal(JSON.parse(h.diagnostics[2]!).scope, "unattributed");
     await h.driver.newSession("/project");
-    assert.equal(JSON.parse(h.diagnostics[2]!).observedTransport, "unverified");
+    assert.equal(JSON.parse(h.diagnostics[3]!).observedTransport, "unverified");
     h.servers[0]!.notify("warning", { threadId: "thread", message });
     await new Promise(resolve => setImmediate(resolve));
-    assert.equal(h.diagnostics.length, 4, "child fallback does not suppress the root warning");
+    assert.equal(h.diagnostics.length, 5, "child or unattributed fallback does not suppress the root warning");
     assert.doesNotMatch(h.diagnostics.join("\n"), /private-child|secret/);
+  } finally { h.driver.dispose(); for (const server of h.servers) server.dispose("done"); }
+});
+
+test("multiline authentication chunks trigger recovery and suppress every raw line", async () => {
+  const h = harness();
+  try {
+    await h.driver.initialize();
+    await h.driver.newSession("/project");
+    (h.children[0]!.stderr as PassThrough).write("provider rejected request: 401 Unauthorized\n  bearer token secret-value rejected\n");
+    assert.equal(h.authenticationFailures(), 1);
+    assert.doesNotMatch(h.diagnostics.join("\n"), /401|Unauthorized|secret-value|bearer token/);
+    (h.children[0]!.stderr as PassThrough).write("Falling back from WebSockets to HTTPS transport. 401 Unauthorized bearer token secret-value\n");
+    assert.ok(h.diagnostics.some(line => { try { return JSON.parse(line).scope === "unattributed"; } catch { return false; } }));
+    assert.doesNotMatch(h.diagnostics.join("\n"), /secret-value/);
   } finally { h.driver.dispose(); for (const server of h.servers) server.dispose("done"); }
 });

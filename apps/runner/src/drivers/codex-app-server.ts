@@ -491,6 +491,7 @@ export class CodexAppServerDriver implements Driver {
   private serverIdentity = "unknown";
   private inferenceLaunch = 0;
   private inferenceHttpFallback = false;
+  private inferenceUnattributedFallback = false;
   private readonly inferenceSubagentFallbacks = new Set<string>();
   private inferenceConfiguration: CodexInferenceConfiguration | null = null;
   private completedTurnId: string | null = null;
@@ -725,6 +726,7 @@ export class CodexAppServerDriver implements Driver {
   private async startAppServer(enableDefaultModeQuestions: boolean): Promise<void> {
     this.inferenceLaunch += 1;
     this.inferenceHttpFallback = false;
+    this.inferenceUnattributedFallback = false;
     this.inferenceSubagentFallbacks.clear();
     this.inferenceConfiguration = null;
     // Same rule as the exec driver: the coupled preset always isolates configured MCP servers, and
@@ -788,7 +790,7 @@ export class CodexAppServerDriver implements Driver {
       const s = line.trim();
       if (s && !/DeprecationWarning|trace-deprecation/.test(s)) {
         const fallback = codexHttpFallbackWarning(s);
-        if (fallback) this.reportInferenceHttpFallback();
+        if (fallback) this.reportInferenceHttpFallback("unattributed");
         if (isProviderAuthenticationFailure(s)) this.signalAuthenticationFailure();
         else if (!fallback) this.emitProviderStderr(s);
       }
@@ -800,7 +802,18 @@ export class CodexAppServerDriver implements Driver {
         event: "codex_diagnostic_discarded", reason: "oversized_line",
       }));
     }, 64 * 1024);
-    child.stderr.on("data", (text: string) => stderrLines.push(text));
+    child.stderr.on("data", (text: string) => {
+      if (this.disposed || this.child !== child) return;
+      // Retain the previous whole-chunk authentication recognition: credential context may
+      // occupy a different line from 401/Unauthorized. Never emit any part of a matched chunk.
+      if (isProviderAuthenticationFailure(text)) {
+        stderrLines.reset();
+        this.signalAuthenticationFailure();
+        if (codexHttpFallbackWarning(text.trim())) this.reportInferenceHttpFallback("unattributed");
+        return;
+      }
+      stderrLines.push(text);
+    });
     const finishChild = (code: number | null, reason: string, spawnError?: Error) => {
       onStderrLine(stderrLines.takeTrailing());
       peer.dispose(reason);
@@ -973,8 +986,11 @@ export class CodexAppServerDriver implements Driver {
     }));
   }
 
-  private reportInferenceHttpFallback(subagentThread?: string): void {
-    if (subagentThread) {
+  private reportInferenceHttpFallback(scope: "root" | "subagent" | "unattributed" = "root", subagentThread?: string): void {
+    if (scope === "unattributed") {
+      if (this.inferenceUnattributedFallback) return;
+      this.inferenceUnattributedFallback = true;
+    } else if (scope === "subagent" && subagentThread) {
       if (this.inferenceSubagentFallbacks.has(subagentThread)) return;
       this.inferenceSubagentFallbacks.add(subagentThread);
     } else {
@@ -983,9 +999,9 @@ export class CodexAppServerDriver implements Driver {
     }
     this.cb.onStderr(JSON.stringify({
       event: "codex_inference_transport", entryPoint: "provider_warning", launch: this.inferenceLaunch,
-      phase: "fallback", ...(subagentThread ? { scope: "subagent" } : {}),
-      provider: subagentThread ? "unknown" : this.inferenceConfiguration?.provider ?? "unknown",
-      configuredTransport: subagentThread ? "unknown" : this.inferenceConfiguration?.configuredTransport ?? "unknown",
+      phase: "fallback", ...(scope !== "root" ? { scope } : {}),
+      provider: scope !== "root" ? "unknown" : this.inferenceConfiguration?.provider ?? "unknown",
+      configuredTransport: scope !== "root" ? "unknown" : this.inferenceConfiguration?.configuredTransport ?? "unknown",
       observedTransport: "http", reason: "provider_http_fallback",
     }));
   }
@@ -1724,7 +1740,7 @@ export class CodexAppServerDriver implements Driver {
       if (this.disposed || this.peer !== peer) return;
       if (!codexHttpFallbackWarning(params?.message)) return;
       if (params?.threadId && params.threadId !== this.threadId) {
-        if (this.subagentToolByThread.has(params.threadId)) this.reportInferenceHttpFallback(params.threadId);
+        if (this.subagentToolByThread.has(params.threadId)) this.reportInferenceHttpFallback("subagent", params.threadId);
         return;
       }
       this.reportInferenceHttpFallback();

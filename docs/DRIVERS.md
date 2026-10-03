@@ -1075,6 +1075,8 @@ Structured `codex_inference_transport` diagnostics distinguish `configuredTransp
 HTTP-fallback warning reports `http`, with a fixed reason and no raw error suffix. Diagnostics contain
 only bounded classifications and a per-driver launch counter; provider names, URLs, credentials,
 prompts, and response content are excluded. Split stderr warnings are framed before classification.
+Structured child-thread warnings have a separate `subagent` scope. Stderr traces have no thread
+identity and use `unattributed` scope; they never mark the root thread as HTTP.
 Some Codex upgrade failures (for example HTTP 426) switch directly to HTTP without a warning;
 configuration remains `unverified` in that case, and the live observer's HTTP request counts reveal
 the fallback. Absence of a warning is never reported as successful WebSocket use.
