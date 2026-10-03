@@ -515,6 +515,24 @@ test("Open in Review re-reads the diff and waits for a file the diff on screen p
   }
 });
 
+test("a second Open in Review after a met one still waits for its own fresh read (#2187)", async () => {
+  const harness = await mountPanel();
+  try {
+    await harness.render({ focus: { path: "src/a.ts", request: 1 } });
+    assert.equal(harness.focusHandled(), 1, "the first request finds its file");
+    await harness.render({ focus: null });
+    const release = harness.holdDiff();
+    await harness.render({ focus: { path: "src/c.ts", request: 2 } });
+    assert.equal(harness.focusHandled(), 1, "the earlier read cannot settle the new request");
+    harness.serveDiff(diffOf("3", [fileA(), fileB(), { ...fileA(), path: "src/c.ts" }]));
+    await release();
+    assert.equal(harness.focusHandled(), 2);
+    assert.equal(card(harness.container, "src/c.ts").querySelector(".diff-file-head"), domWindow.document.activeElement as unknown);
+  } finally {
+    await harness.unmount();
+  }
+});
+
 test("Open in Review gives up on a file a fresh read does not hold (#2187)", async () => {
   const harness = await mountPanel();
   try {

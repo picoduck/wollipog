@@ -126,6 +126,17 @@ test("a binary change or a pure rename keeps what Git says about it, and a binar
   assert.equal(gone!.isDeleted, true);
 });
 
+test("binary metadata with no diff --git header still makes a binary file record", () => {
+  const [marker, ...none] = parseUnifiedDiff("Binary files a/logo.png and b/logo.png differ");
+  assert.equal(none.length, 0);
+  assert.deepEqual([marker!.binary, marker!.path, marker!.hunks.length], [true, "logo.png", 0]);
+  const [text, image] = parseUnifiedDiff("--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\nBinary files a/y.png and b/y.png differ");
+  assert.deepEqual([text!.hunks[0]!.lines.length, image!.path, image!.binary], [2, "y.png", true],
+    "after a finished hunk, a binary marker opens the next file");
+  const [patch] = parseUnifiedDiff("GIT binary patch\nliteral 12\nzcmZQzU|?ur\n\nliteral 0\nHcmV?d00001");
+  assert.deepEqual([patch!.binary, patch!.hunks.length], [true, 0], "the base85 data is not context lines");
+});
+
 test("CRLF line endings are not part of a line's text", () => {
   const [file] = parseUnifiedDiff("--- a/x\r\n+++ b/x\r\n@@ -1 +1 @@\r\n-a\r\n+b\r\n");
   assert.deepEqual(file!.hunks[0]!.lines.map((line) => line.text), ["a", "b"]);

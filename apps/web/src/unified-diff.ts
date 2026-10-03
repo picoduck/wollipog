@@ -138,6 +138,16 @@ export function parseUnifiedDiff(diff: string): DiffFile[] {
       index += 1;
       continue;
     }
+    // A binary change is a file of its own even with no `diff --git` line before it; a bare body's
+    // text is never read as one.
+    if ((line.startsWith("Binary files ") || line.startsWith("GIT binary patch")) && !(hunk && !hunk.header)) {
+      const current: DiffFile = file && !(file as DiffFile).hunks.length ? file : startFile();
+      current.binary = true;
+      binaryPatch = line.startsWith("GIT binary patch");
+      const target = / and (?:b\/)?(.+) differ$/.exec(line)?.[1];
+      if (!current.path && target && target !== "/dev/null") current.path = target;
+      continue;
+    }
     if (!hunk && METADATA.test(line)) {
       const current = file as DiffFile | null;
       if (current) {
@@ -145,10 +155,6 @@ export function parseUnifiedDiff(diff: string): DiffFile[] {
         else if (line.startsWith("deleted file mode")) current.isDeleted = true;
         else if (line.startsWith("rename from ") || line.startsWith("copy from ")) current.oldPath = line.replace(/^(?:rename|copy) from /, "");
         else if (line.startsWith("rename to ") || line.startsWith("copy to ")) current.path = line.replace(/^(?:rename|copy) to /, "");
-        else if (line.startsWith("Binary files ") || line.startsWith("GIT binary patch")) {
-          current.binary = true;
-          binaryPatch = line.startsWith("GIT binary patch");
-        }
       }
       continue;
     }

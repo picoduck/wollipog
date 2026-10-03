@@ -92,7 +92,7 @@ import { TURN_RETRY_IN_FLIGHT_REASON, turnRetryPlan } from "../turn-retry.js";
 import { ConversationHandoffDialog } from "./ConversationHandoffDialog.js";
 import { isTimelineSessionActive } from "../timeline-clock.js";
 import { RightPanel, type RightPanelState } from "./RightPanel.js";
-import type { DiffFileFocus } from "./GitDiffViewer.js";
+import { useDiffFileFocus } from "../review-focus.js";
 import { useCampaignStatusAvailability } from "./useCampaignStatus.js";
 import { useGitStatus, useGitSummary } from "./useGitStatus.js";
 import { describeAttachmentProblem, ImageStrip, modelRefusesImagesSentence, usePastedImages, type AttachmentProblem } from "./images.js";
@@ -918,12 +918,11 @@ function SessionDetailLoaded({
     navigate({ name: "session", id: sessionId });
   }, [navigate, sessionId]);
   // A transcript edit's Open in Review (#2187): the Review tab, scrolled to that file once.
-  const [reviewFocus, setReviewFocus] = useState<DiffFileFocus | null>(null);
+  const { focus: reviewFocus, request: requestReviewFocus, clear: clearReviewFocus } = useDiffFileFocus();
   const openInReview = useCallback((path: string) => {
-    setReviewFocus((prior) => ({ path, request: (prior?.request ?? 0) + 1 }));
+    requestReviewFocus(path);
     rightPanel.show("review");
-  }, [rightPanel]);
-  const clearReviewFocus = useCallback(() => setReviewFocus(null), []);
+  }, [requestReviewFocus, rightPanel]);
   const openSession = useCallback((id: string) => navigate({ name: "session", id }), [navigate]);
   const recoveryEventEpoch = useStoreSelector((s) => s.sessions.get(sessionId)?.eventEpoch ?? 0);
   const recoveryGeneration = useStoreSelector((s) => s.snapshotRevision);
