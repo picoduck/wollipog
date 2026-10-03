@@ -427,6 +427,17 @@ test("an opted-in title is redacted like message text and bounded to 200 charact
   if (!control.ok) return;
   assert.equal(resolvePublicTranscriptShare(db, `Wollipog-Share ${control.value.token}`, 10_001)?.title, "Fix the bug");
 
+  // ...without gluing a secret to its neighbour, which would hide it from the redactors.
+  db.setSessionTitle("session-share", `prefix\u0007${FAKE_TITLE_TOKEN}`, 5, "user");
+  const glued = createAuthorizedTranscriptShare(
+    db, principal, "session-share", { expiresInSeconds: 3600, includeTitle: true }, 10_000,
+  );
+  assert.equal(glued.ok, true);
+  if (!glued.ok) return;
+  const gluedShared = resolvePublicTranscriptShare(db, `Wollipog-Share ${glued.value.token}`, 10_001);
+  assert.equal(gluedShared?.title, "prefix <redacted-secret>");
+  assert.equal(JSON.stringify(gluedShared).includes(FAKE_TITLE_TOKEN.slice(4)), false);
+
   // A title that trimming leaves empty is not stored, so the page keeps its own heading.
   db.setSessionTitle("session-share", "  \n ", 5, "user");
   const blank = createAuthorizedTranscriptShare(
