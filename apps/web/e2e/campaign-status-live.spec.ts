@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -41,6 +41,27 @@ async function reservePort(): Promise<number> {
   if (!address || typeof address !== "object") throw new Error("failed to reserve a loopback port");
   await new Promise<void>((resolvePromise, reject) => server.close((error) => (error ? reject(error) : resolvePromise())));
   return address.port;
+}
+
+/** A build-time control-plane endpoint the test puts in the build's parent environment on purpose:
+ * it must never reach the bundle, or the browser would talk to that control plane instead. */
+const HOSTILE_ENDPOINT = { http: "http://127.0.0.1:9/hosting-control-plane", ws: "ws://127.0.0.1:9/hosting-control-plane" };
+
+/** The parent environment without anything that could point the build or the control plane at
+ * another Wollipog installation: its database, port, credentials, or a VITE_ build endpoint. */
+function isolatedEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env = { ...source };
+  for (const key of Object.keys(env)) if (/^(RUNNER_|CONTROL_PLANE_|WOLLIPOG_|VITE_)/u.test(key)) delete env[key];
+  return env;
+}
+
+/** Every built file that mentions `needle`, relative to `dir`. */
+function filesMentioning(dir: string, needle: string): string[] {
+  return readdirSync(dir, { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => join(entry.parentPath, entry.name))
+    .filter((file) => readFileSync(file, "utf8").includes(needle))
+    .map((file) => file.slice(dir.length + 1));
 }
 
 async function stopChild(child: ChildProcess): Promise<void> {
@@ -87,8 +108,9 @@ class LiveStack {
   }
 
   async start(): Promise<void> {
+    const parent = { ...process.env, VITE_CONTROL_PLANE_HTTP: HOSTILE_ENDPOINT.http, VITE_CONTROL_PLANE_WS: HOSTILE_ENDPOINT.ws };
     const built = spawnSync("pnpm", ["--dir", "apps/web", "exec", "vite", "build", "--outDir", this.webDist], {
-      cwd: REPO_ROOT, encoding: "utf8", timeout: 120_000, shell: process.platform === "win32",
+      cwd: REPO_ROOT, encoding: "utf8", timeout: 120_000, shell: process.platform === "win32", env: isolatedEnv(parent),
     });
     if (built.status !== 0 || !existsSync(join(this.webDist, "index.html"))) {
       throw new Error(`web build failed: ${(built.stderr ?? "").slice(-2000)} ${(built.stdout ?? "").slice(-2000)}`);
@@ -100,8 +122,7 @@ class LiveStack {
 
   /** Start the control plane, wait for health, and put back what startup settlement stopped. */
   async launch(): Promise<void> {
-    const env = { ...process.env };
-    for (const key of Object.keys(env)) if (/^(RUNNER_|CONTROL_PLANE_|WOLLIPOG_)/u.test(key)) delete env[key];
+    const env = isolatedEnv();
     const child = spawn(process.execPath, ["--import", "tsx", "apps/control-plane/src/index.ts"], {
       cwd: REPO_ROOT,
       env: { ...env, CONTROL_PLANE_HOST: "127.0.0.1", CONTROL_PLANE_PORT: String(this.port),
@@ -534,4 +555,12 @@ test("a reconnecting browser catches up on ledger changes made while the control
   await expect(summaryBox(page)).toContainText(`${delivered} of ${committed + 1} Delivered`);
   await expect(workRows(page).filter({ hasText: "Recorded While Offline" })).toHaveCount(1);
   await expect(page.locator('.campaign-status [role="alert"]')).toHaveCount(0);
+});
+
+test("the web build and control plane never inherit another installation's endpoints or credentials", async () => {
+  // The build ran with a hostile VITE_CONTROL_PLANE_* in its parent environment.
+  expect(filesMentioning(stack.webDist, "hosting-control-plane")).toEqual([]);
+  expect(isolatedEnv({ PATH: "/bin", VITE_CONTROL_PLANE_HTTP: HOSTILE_ENDPOINT.http, VITE_CONTROL_PLANE_WS: HOSTILE_ENDPOINT.ws,
+    CONTROL_PLANE_DB: "/hosting/control-plane.db", CONTROL_PLANE_PORT: "4317", WOLLIPOG_SESSION_ID: "s_hosting",
+    RUNNER_TOKEN: "secret" })).toEqual({ PATH: "/bin" });
 });
