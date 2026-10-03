@@ -88,7 +88,7 @@ test("light theme and the coverage notice for unpriced records and a cached rate
   await page.setViewportSize({ width: 1280, height: 1000 });
   await page.goto("/usage-view-e2e.html?theme=light&unpriced=1");
   const notice = page.locator(".usage-notice");
-  await expect(notice).toContainText("no price");
+  await expect(notice).toContainText("could not be fully priced");
   await expect(notice).toContainText("could not be refreshed");
   await page.screenshot({ path: `${SHOT}/desktop-light-unpriced.png`, fullPage: true });
 
