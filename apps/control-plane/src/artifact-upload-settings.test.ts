@@ -83,3 +83,54 @@ test("creation, restart and durable turns use the owner's current preference wit
   assert.ok(!("artifactUploads" in JSON.parse(sent.at(-2)!).spec));
   assert.ok(!("artifactUploads" in JSON.parse(sent.at(-1)!)));
 });
+
+test("reconnect shares one retained-session scan and preserves both metadata streams and owner preferences", () => {
+  const sessions = [
+    { id: "automatic", runnerId: "current", projectId: "p", status: "completed", archived: true },
+    { id: "external", runnerId: "current", projectId: null, status: "idle", archived: false },
+    { id: "unowned", runnerId: "current", projectId: null, status: "completed", archived: true },
+    { id: "older", runnerId: "older", projectId: null, status: "idle", archived: false },
+  ];
+  let scans = 0;
+  let automatic = "wollipog_automatic";
+  const db = {
+    listSessions: (options: { includeArchived?: boolean }) => { assert.equal(options.includeArchived, true); scans++; return sessions; },
+    getRunner: (id: string) => ({ protocolVersion: id === "older" ? 197 : 198 }),
+    sessionOwnerUser: (id: string) => id === "unowned" ? null : { userId: id === "external" ? "second" : "first" },
+    artifactUploadPreference: (id?: string) => id === "first" ? automatic : id === "second" ? "external_hosting" : "manual",
+    projectMemorySharing: () => "shared",
+  } as unknown as ControlPlaneDb;
+  const sent: string[] = [];
+  const hub = new Hub(db);
+  hub.attachRunner("current", { send: (data) => sent.push(data) });
+  hub.attachRunner("older", { send: (data) => sent.push(data) });
+  scans = 0;
+  hub.syncProjectMemory(undefined, "current");
+  assert.equal(scans, 1, "reconnect must hydrate retained sessions only once");
+  const frames = sent.map((data) => JSON.parse(data));
+  assert.deepEqual(frames.filter((m) => m.type === "set_session_artifact_uploads").map((m) => [m.sessionId, m.preference]),
+    [["automatic", "wollipog_automatic"], ["external", "external_hosting"], ["unowned", "manual"]]);
+  assert.deepEqual(frames.filter((m) => m.type === "set_session_project_memory").map((m) => [m.sessionId, m.projectMemory]),
+    [["automatic", { projectId: "p", sharing: "shared" }], ["external", { projectId: null, sharing: "separate" }],
+      ["unowned", { projectId: null, sharing: "separate" }]]);
+
+  sent.length = 0;
+  hub.syncProjectMemory("p", "current");
+  const filtered = sent.map((data) => JSON.parse(data));
+  assert.equal(filtered.filter((m) => m.type === "set_session_artifact_uploads").length, 3,
+    "runner preferences remain complete when project memory is filtered");
+  assert.deepEqual(filtered.filter((m) => m.type === "set_session_project_memory").map((m) => m.sessionId), ["automatic"]);
+
+  automatic = "manual";
+  sent.length = 0;
+  hub.syncProjectMemory(undefined, "current");
+  assert.equal(JSON.parse(sent[0]!).preference, "manual", "reconnect explicitly clears a previously automatic preference");
+  sent.length = 0;
+  hub.syncArtifactUploads("first");
+  assert.deepEqual(sent.map((data) => JSON.parse(data)),
+    [{ type: "set_session_artifact_uploads", sessionId: "automatic", preference: "manual" }], "save sync is owner-scoped and gates older peers");
+  sent.length = 0;
+  hub.syncProjectMemory(undefined, "older");
+  assert.deepEqual(sent.map((data) => JSON.parse(data)),
+    [{ type: "set_session_project_memory", sessionId: "older", projectMemory: { projectId: null, sharing: "separate" } }]);
+});

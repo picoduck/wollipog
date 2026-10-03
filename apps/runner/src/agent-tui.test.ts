@@ -403,8 +403,12 @@ test("native TUI retains provider policy because mutable artifact guidance has n
       permissionProfile: async () => ({ active: false, reason: "test", args: original.args }),
     });
     assert.ok(launch);
-    assert.deepEqual(launch.args, original.args);
-    assert.doesNotThrow(() => agentTuiLaunch(original, { platform: "win32", comspec: "cmd.exe" }));
+    assert.deepEqual(launch.args, agentTuiLaunch(original)?.args);
+    for (const platform of ["linux", "win32"] as const) {
+      const expectedArgs = platform === "win32"
+        ? ["/d", "/v:off", "/s", "/c", '"claude --profile "team profile""'] : original.args;
+      assert.deepEqual(agentTuiLaunch(original, { platform, comspec: "cmd.exe" })?.args, expectedArgs);
+    }
     assert.deepEqual(original.args, ["--profile", "team profile"], "durable launch metadata is unchanged");
   }
 });
