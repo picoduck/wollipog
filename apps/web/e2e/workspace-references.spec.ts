@@ -121,6 +121,23 @@ test.describe("the File Reference dialog (#2177)", () => {
     await expect(page.locator(".composer-input")).toBeFocused();
   });
 
+  test("with the composer disabled, Remove from Message moves focus to Session Activity, as the chip's remove does", async ({ page }) => {
+    await openSessionWithTray(page);
+    await chip(page).click();
+    await expect(fileReference(page)).toBeVisible();
+    // An offline machine disables the composer while the dialog is open.
+    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerStatus("offline"));
+    await expect(page.locator(".composer-input")).toBeDisabled();
+    const remove = fileReference(page).getByRole("button", { name: "Remove from Message" });
+    await remove.focus();
+    await page.keyboard.press("Enter");
+    await expect(fileReference(page)).toHaveCount(0);
+    await expect(page.locator(".composer-attachments .ref-chip")).toHaveCount(0);
+    // Past the dialog's own deferred focus restore.
+    await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 50)));
+    await expect(page.getByRole("region", { name: "Session Activity" })).toBeFocused();
+  });
+
   test("Open in Files opens the file in the right panel", async ({ page }) => {
     await openSessionWithTray(page);
     await chip(page).click();

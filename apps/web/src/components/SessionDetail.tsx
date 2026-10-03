@@ -6682,15 +6682,18 @@ function SessionDetailLoaded({
             // phone, removing the last attachment would collapse the idle composer and hide that
             // textarea, so the close commits with the composer revealed and the message takes focus
             // inside this click: the composer's pointer-transfer check, which runs after it, then
-            // finds focus in the composer and keeps it open.
+            // finds focus in the composer and keeps it open. A disabled composer can't take focus, so
+            // it goes to Session Activity, as it does after the chip's own remove.
             const index = images.indexOf(inspectedWorkspaceReference);
-            workspaceReferenceReturnFocusRef.current = inputRef.current;
+            const input = inputRef.current;
+            const target = input && !input.disabled ? input : scrollRef.current;
+            workspaceReferenceReturnFocusRef.current = target;
             flushSync(() => {
               setComposerExpanded(true);
               if (index !== -1) remove(index);
               setInspectedWorkspaceReference(null);
             });
-            inputRef.current?.focus({ preventScroll: true });
+            target?.focus({ preventScroll: true });
           }}
           onOpenInFiles={inspectedWorkspaceReference.kind === "file" || inspectedWorkspaceReference.kind === "lines"
             ? () => {

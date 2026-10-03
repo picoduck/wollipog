@@ -6495,18 +6495,15 @@ textarea,
   color: var(--text);
   font: var(--type-small);
 }
+/* The icon stands apart; the path and its line range read as one string, "src/session.ts:18-21". */
 .ref-chip > svg,
-.ref-chip-open > svg { flex: none; }
-.ref-chip.is-readonly {
-  gap: var(--space-1);
-  padding: 0 var(--space-2);
-}
+.ref-chip-open > svg { flex: none; margin-right: var(--space-1); }
+.ref-chip.is-readonly { padding: 0 var(--space-2); }
 .ref-chip-open {
   display: inline-flex;
   min-width: 0;
   height: 100%;
   align-items: center;
-  gap: var(--space-1);
   padding: 0 var(--space-1) 0 var(--space-2);
   border: 0;
   border-radius: var(--radius-sm);
