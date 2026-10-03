@@ -386,8 +386,8 @@ test("while More Actions' Restart Session runs, Retry Turn waits and says why", 
 
 test("a configuration change still being saved travels with the retried prompt, as Send's does", async () => {
   await withFailedTurn({ status: "idle", overrides: { driver: "claude-code", permissionMode: "plan" } }, async ({ id, container, calls, retry }) => {
-    const plan = container.querySelector<HTMLButtonElement>(".mode-pill");
-    assert.ok(plan, "the Plan pill is shown in plan mode");
+    const plan = container.querySelector<HTMLButtonElement>(".plan-toggle");
+    assert.ok(plan, "the Plan toggle is shown in plan mode");
     await act(async () => plan.click());
     assert.deepEqual(calls, [`setConfig:${id}`], "the change is being saved");
     await click(retry()!);
