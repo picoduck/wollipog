@@ -922,10 +922,12 @@ const MUTATING_METHODS = new Set(["push", "unshift", "splice", "fill", "copyWith
  */
 const MAX_ALTERNATIVES = 1024;
 /**
- * Past this depth, a type is taken to hold a function rather than read further. A recursive generic
- * alias (`type Tree<T> = { next?: Tree<{ value: T }> }`) is a new type at every depth (#2458).
+ * Past this many steps, a type is taken to hold a function rather than read further. A recursive
+ * generic alias (`type Tree<T> = { next?: Tree<{ value: T }> }`) is a new type at every depth, and
+ * aliases that each name the last twice (`type L2 = L1[] | readonly L1[]`) double the work at every
+ * level (#2458).
  */
-const MAX_TYPE_DEPTH = 32;
+const MAX_TYPE_WORK = 1000;
 
 type SourceFunction = ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFunction;
 const isSourceFunction = (node: ts.Node | undefined): node is SourceFunction =>
@@ -2178,10 +2180,16 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
     if (symbol && symbol.flags & ts.SymbolFlags.Alias) symbol = checker.getAliasedSymbol(symbol);
     return elementTypeNodes(symbol?.declarations?.find(ts.isTypeAliasDeclaration)?.type, seen);
   };
+  /** Whether a type is `{}`, or a union with it: what an array reads as without the library, and what can hold anything. */
+  const hasEmptyObject = (type: ts.Type): boolean => (type.isUnion() ? type.types : [type]).some((member) =>
+    (member.flags & ts.TypeFlags.Object) !== 0 && member.getCallSignatures().length === 0 && member.getConstructSignatures().length === 0
+    && checker.getPropertiesOfType(member).length === 0 && checker.getIndexInfosOfType(member).length === 0);
   /**
    * The elements of the arrays a declaration or a value is written as, which the checker cannot see
    * without the library: those its written type names — on the declaration, or in an assertion on
-   * its value — or, with no type written, those of its array literal. Null when it names no array.
+   * its value — or, with no type written, those of its array literal. Null when it names no array, or
+   * when a union alternative besides its arrays can itself be `{}` (`string[] | {}`), so a `{}` it
+   * reads as need not be an array.
    */
   const arraysOf = (declared: ts.Node | undefined): ts.Node[] | null => {
     if (!declared) return null;
@@ -2194,47 +2202,55 @@ export function iconClasses(sources: readonly { file: string; source: string }[]
       value = value.expression;
     }
     if (written) {
+      let alternatives: ts.TypeNode = written;
+      while (ts.isParenthesizedTypeNode(alternatives)) alternatives = alternatives.type;
+      const others = ts.isUnionTypeNode(alternatives) ? alternatives.types.filter((member) => elementTypeNodes(member).length === 0) : [];
       const elements = elementTypeNodes(written);
-      return elements.length > 0 ? elements : null;
+      return elements.length > 0 && !others.some((member) => hasEmptyObject(checker.getTypeFromTypeNode(member))) ? elements : null;
     }
     return value && ts.isArrayLiteralExpression(value) && value.elements.length > 0 ? [...value.elements] : null;
   };
+  /** What one `holdsFunction` reading has visited: object types, array elements being expanded, and calls made. */
+  type TypeWalk = { seen: Set<ts.Type>; expanding: Set<ts.Node>; work: number };
   /**
    * Whether a value of a type can be a function, or hold one at any depth: `any` or `unknown`, an
    * `object`, a type parameter or a type still to be resolved from one (`T["draw"]`), something
    * callable, a tuple with such an element, an object with such a member or index signature, or any
    * part of an intersection that can (#2458). `{}` can hold a function too; but without the library,
    * the checker reads every array as `{}`, and drops it from an intersection, so an array is judged
-   * by the elements it is written with (`declared`). Past MAX_TYPE_DEPTH, a type is taken to hold one.
+   * by the elements it is written with (`declared`). Past MAX_TYPE_WORK calls in one reading, a type
+   * is taken to hold one.
    */
-  const holdsFunction = (type: ts.Type, declared: ts.Node | undefined, seen = new Set<ts.Type>(), expanding = new Set<ts.Node>(), depth = 0): boolean => {
-    if (depth > MAX_TYPE_DEPTH) return true;
+  const holdsFunction = (type: ts.Type, declared: ts.Node | undefined,
+    walk: TypeWalk = { seen: new Set(), expanding: new Set(), work: 0 }): boolean => {
+    walk.work += 1;
+    if (walk.work > MAX_TYPE_WORK) return true;
     const arrays = arraysOf(declared);
     // An element already being read, through a recursive alias (`type Nodes = (Nodes | typeof Icon)[]`), adds nothing.
     const elementHolds = (element: ts.Node) => {
       if (ts.isSpreadElement(element)) return true;
-      if (expanding.has(element)) return false;
-      expanding.add(element);
+      if (walk.expanding.has(element)) return false;
+      walk.expanding.add(element);
       const type = ts.isTypeNode(element) ? checker.getTypeFromTypeNode(element) : checker.getTypeAtLocation(element);
-      try { return holdsFunction(type, element, seen, expanding, depth + 1); } finally { expanding.delete(element); }
+      try { return holdsFunction(type, element, walk); } finally { walk.expanding.delete(element); }
     };
-    return (arrays !== null && arrays.some(elementHolds)) || typeHoldsFunction(type, arrays !== null, seen, expanding, depth);
+    return (arrays !== null && arrays.some(elementHolds)) || typeHoldsFunction(type, arrays !== null, walk);
   };
   /** `holdsFunction` for the type itself, where `{}` is the array `declared` names when `array` is set. */
-  const typeHoldsFunction = (type: ts.Type, array: boolean, seen: Set<ts.Type>, expanding: Set<ts.Node>, depth: number): boolean => {
-    if (type.isUnionOrIntersection()) return type.types.some((member) => typeHoldsFunction(member, array, seen, expanding, depth));
+  const typeHoldsFunction = (type: ts.Type, array: boolean, walk: TypeWalk): boolean => {
+    if (type.isUnionOrIntersection()) return type.types.some((member) => typeHoldsFunction(member, array, walk));
     if (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.NonPrimitive | ts.TypeFlags.InstantiableNonPrimitive)) return true;
     if (!(type.flags & ts.TypeFlags.Object)) return false;
     if (type.getCallSignatures().length > 0 || type.getConstructSignatures().length > 0) return true;
     const properties = checker.getPropertiesOfType(type);
     const indexes = checker.getIndexInfosOfType(type);
     if (properties.length === 0 && indexes.length === 0) return !array;
-    if (seen.has(type)) return false;
-    seen.add(type);
+    if (walk.seen.has(type)) return false;
+    walk.seen.add(type);
     // A tuple's rest element is in its type arguments, not its properties.
-    if (checker.isTupleType(type)) return checker.getTypeArguments(type).some((element) => holdsFunction(element, undefined, seen, expanding, depth + 1));
-    return properties.some((property) => holdsFunction(checker.getTypeOfSymbol(property), property.valueDeclaration, seen, expanding, depth + 1))
-      || indexes.some((index) => holdsFunction(index.type, index.declaration?.type, seen, expanding, depth + 1));
+    if (checker.isTupleType(type)) return checker.getTypeArguments(type).some((element) => holdsFunction(element, undefined, walk));
+    return properties.some((property) => holdsFunction(checker.getTypeOfSymbol(property), property.valueDeclaration, walk))
+      || indexes.some((index) => holdsFunction(index.type, index.declaration?.type, walk));
   };
   /**
    * Whether a value can only be a primitive, which holds nothing, so no function. Not `void`: a
@@ -3999,7 +4015,8 @@ test("every route #2394 found that could hide an icon class is followed, reporte
   // A written constant handed to another package is reported only when a function, the one thing in
   // it that could be a component, may be put in: when its type can hold one — a callable member, at
   // any depth, `any`, a generic type, an array of components however its type is written (a tuple's
-  // rest, an intersection, an assertion, a recursive alias) or too deep to read — or a write puts in
+  // rest, an intersection, an assertion, a recursive alias, a union with `{}`) or too deep or wide to
+  // read — or a write puts in
   // anything but a primitive, which may carry more than its type names (a replacement, an
   // `Object.assign` source, a `void` result). One that holds only data and is written only with
   // primitives is not, however its type is written (#2458).
@@ -4071,6 +4088,18 @@ test("every route #2394 found that could hide an icon class is followed, reporte
     "const deep: Tree<string> = { label: \"x\" };",
     "deep.label = \"y\";",
     "export const Deeper = () => <><Slot slot={slot} /><Slot deep={deep} /></>;",
+    "const loose: string[] | {} = [];",
+    "if (Array.isArray(loose)) loose.length = 0;",
+    "const strict: string[] | number = [];",
+    "if (Array.isArray(strict)) strict.length = 0;",
+    "type L0 = string;",
+    ...Array.from({ length: 12 }, (_, level) => `type L${level + 1} = L${level}[] | readonly L${level}[];`),
+    "const wide: { items: L12; label: string } = { items: [], label: \"x\" };",
+    "wide.label = \"y\";",
+    "export const Widest = () => <><Slot loose={loose} /><Slot strict={strict} /><Slot wide={wide} /></>;",
+    "const notes: string[] = [];",
+    "(notes as unknown[]).push(pick());",
+    "export const Noted = () => <Slot notes={notes} />;",
   ].join("\n") }), {
     classes: ["seen-icon"],
     unread: [
@@ -4089,6 +4118,9 @@ test("every route #2394 found that could hide an icon class is followed, reporte
       "Written.tsx:59 <Slot tree> hands another package an object written after it is bound, so what it holds cannot be listed",
       "Written.tsx:67 <Slot deep> hands another package an object written after it is bound, so what it holds cannot be listed",
       "Written.tsx:67 <Slot slot> hands another package an object written after it is bound, so what it holds cannot be listed",
+      "Written.tsx:87 <Slot loose> hands another package an object written after it is bound, so what it holds cannot be listed",
+      "Written.tsx:87 <Slot wide> hands another package an object written after it is bound, so what it holds cannot be listed",
+      "Written.tsx:90 <Slot notes> hands another package an object written after it is bound, so what it holds cannot be listed",
     ],
   });
   // An object handed to a function in the sources is followed into it, which never calls the icon.
