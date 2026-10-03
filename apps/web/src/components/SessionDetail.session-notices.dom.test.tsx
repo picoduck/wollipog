@@ -996,6 +996,30 @@ test("a send that fails after the draft was edited offers no Retry, so it never 
   }
 });
 
+test("loading a queued message into the composer clears the notices about the draft it replaced", async () => {
+  const fixture = await mount(sessionView({
+    queued: [{ id: "queue-1", text: "Queued projection", liveQueueObserved: true, editable: true, editRevision: "qer_exact" }],
+  }), {
+    client: {
+      readQueuedPrompt: async (_sessionId: string, promptId: string) => ({ prompt: {
+        promptId, text: "Queued exact content", images: [], editRevision: "qer_exact",
+      } }),
+    } as Partial<ApiClient>,
+  });
+  try {
+    await dropFiles(fixture.container, [bmp()]);
+    assert.equal(fixture.notices()[0]?.getAttribute("aria-label"), "Image Not Supported");
+    const edit = fixture.container.querySelector('button[aria-label="Edit Queued Message"]') as HTMLButtonElement;
+    assert.ok(edit, "the queued message can be edited");
+    await act(async () => { edit.click(); });
+    await flush(1);
+    assert.equal(composerInput(fixture.container).value, "Queued exact content");
+    assertNoDomNode(fixture.slot(), "the attachment notice was about the replaced draft");
+  } finally {
+    await fixture.unmount();
+  }
+});
+
 test("a server refusal keeps its words behind Show Details, not in the sentence", async () => {
   const fixture = await mount(sessionView({}), {
     client: { prompt: () => Promise.reject(new ApiError("session is not accepting prompts", 409)) } as Partial<ApiClient>,

@@ -1667,7 +1667,11 @@ function SessionDetailLoaded({
     setText(next);
     updateComposerSelection(caret);
     setSlashDismissedFor(`${next}\u0000${caret}`);
-  }, [updateComposerSelection]);
+    // Every replaced draft (a queued edit, Edit as a New Turn, a slash command, history recall) is
+    // a new message, so the composer's notices about the old one go with it. A caller that has a
+    // notice for the new draft sets it afterwards.
+    clearComposerErrors();
+  }, [clearComposerErrors, updateComposerSelection]);
   const persistQueuedPromptEditRecovery = useCallback((recovery: QueuedPromptEditRecovery): boolean =>
     queuedEditRecoveryScope !== null &&
       saveDurableQueuedEditRecovery(queuedEditRecoveryScope, recovery),
