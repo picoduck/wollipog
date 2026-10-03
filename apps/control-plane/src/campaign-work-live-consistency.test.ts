@@ -12,6 +12,7 @@ import Fastify from "fastify";
 import {
   CAMPAIGN_WORK_REVISION_CHANGED,
   PROTOCOL_VERSION,
+  type CampaignWorkItemDetailResponse,
   type CampaignWorkItemsPage,
   type CampaignWorkSummary,
   type CampaignWorkSummaryResponse,
@@ -294,6 +295,16 @@ test("member usage refreshes the live summary within the coalescing window, with
     const next = await get<CampaignWorkItemsPage>(
       `/api/sessions/${root}/campaign/work-items?state=all&limit=1&cursor=${encodeURIComponent(queueFirst.body.nextCursor!)}`);
     assert.equal(next.status, 200, "usage does not invalidate a queue-sorted cursor");
+    // What the panel re-reads when the re-sent summary's cost moved: the open item's details and
+    // its row carry the same cost as the summary, at the same revision.
+    const itemId = plan.data.items[0]!.workItemId;
+    const detail = await get<CampaignWorkItemDetailResponse>(`/api/sessions/${root}/campaign/work-items/${itemId}`);
+    assert.equal(detail.status, 200);
+    assert.equal(detail.body.revision, revision);
+    assert.equal(knownUsd(detail.body.item.cost), knownUsd(after.cost?.workItems), "the open detail matches the summary");
+    const rows = await get<CampaignWorkItemsPage>(`/api/sessions/${root}/campaign/work-items?state=all`);
+    assert.equal(knownUsd(rows.body.items.find((row) => row.id === itemId)?.cost), knownUsd(after.cost?.workItems),
+      "and so does its row");
 
     // A steady stream is bounded by the window: at most one refresh per window, plus the trailing one.
     const streamStart = owner.upserts(root).length;

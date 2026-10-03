@@ -291,8 +291,13 @@ mechanism (`apps/control-plane/src/campaign-work-observation.ts`):
   attribution observer runs inside the usage transaction and only schedules, so a rolled-back delta
   costs at most one needless refresh and a failing observer never fails the usage write. A token
   stream therefore costs at most one root refresh per campaign per window. The re-sent root carries
-  the new summary cost under the root audience's masking. Work-item rows and details read their
-  cost when they next load (a new revision, a reconnect, a reload, or opening an item).
+  the new summary cost under the root audience's masking. When a re-sent root carries a changed
+  summary cost at the same revision, the panel (`useCampaignStatus`) re-reads the open item's details
+  and, quietly, the shown rows through the same routes, so each reader still sees only the cost its
+  own access allows. The quiet row re-read neither shows a reload nor blocks Show More, and it is
+  dropped if a reload or a page changed the list meanwhile. The first change re-reads at once, and
+  later changes within the window are gathered into one re-read when it closes, so a token stream
+  costs each panel at most one re-read per second. A new revision reloads everything anyway.
 
 The revision therefore counts ledger writes and observed changes; reads still never move it. The
 alternative of leaving observations out of the revision was rejected because a list stitched across
@@ -632,4 +637,5 @@ starting contract. This document refines it as follows:
     no protocol version changes.
 29. **Usage refreshes the root without a revision.** Member usage re-sends the root, coalesced per
     campaign with the observed changes, so the embedded summary and the panel follow cost within one
-    window. No ledger write and no protocol change are involved.
+    window. The panel then re-reads the open details and the shown rows at the same revision (slice
+    10b), so they match the summary. No ledger write and no protocol change are involved.
