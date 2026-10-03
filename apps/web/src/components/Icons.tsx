@@ -77,6 +77,7 @@ import {
   PanelLeftClose as LucidePanelLeftClose,
   PanelLeftOpen as LucidePanelLeftOpen,
   PanelRight as LucidePanelRight,
+  Paperclip as LucidePaperclip,
   Pencil as LucidePencil,
   Pin as LucidePin,
   Plus as LucidePlus,
@@ -443,6 +444,11 @@ export function ImageIcon(props: IconProps) {
 
 export function ImageOffIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideImageOff} {...props} />;
+}
+
+/** A message that carries images: a row of the composer's queue tray (#2178). */
+export function PaperclipIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucidePaperclip} {...props} />;
 }
 
 export function ChainIcon(props: IconProps) {

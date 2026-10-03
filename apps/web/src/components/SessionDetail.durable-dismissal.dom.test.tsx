@@ -282,6 +282,13 @@ function button(fixture: Fixture, label: string): HTMLButtonElement | null {
   return fixture.container.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
 }
 
+/** A control on a queue tray row, as opposed to the same action in the notice slot (#2178). */
+function rowButton(fixture: Fixture, promptId: string, label: string): HTMLButtonElement | null {
+  return fixture.container.querySelector<HTMLButtonElement>(
+    `[data-testid="queued-prompt-${promptId}"] button[aria-label="${label}"]`,
+  );
+}
+
 const COMMAND_ID = "prompt-terminal-durable";
 const TEXT = "message the composer would otherwise keep forever";
 
@@ -339,10 +346,9 @@ for (const { state, label } of [
       const row = fixture.container.querySelector(`[data-testid="queued-prompt-${COMMAND_ID}"]`);
       assert.ok(row, "the terminal delivery entry is still visible above the composer");
 
-      const dismiss = button(fixture, label);
+      const dismiss = rowButton(fixture, COMMAND_ID, label);
       assert.ok(dismiss, "the visible terminal entry carries its own Dismiss action");
       assert.equal(dismiss.disabled, false);
-      assert.equal(dismiss.textContent, "Dismiss");
 
       // A disabled cancellation control must never stand in as the only removal action, and the
       // two accessible names stay distinct so a terminal entry is never mistaken for a live one.
@@ -375,7 +381,7 @@ for (const { state, label } of [
         fixture.container.querySelector(`[data-testid="pending-prompt-${COMMAND_ID}"]`),
         "without a transcript event the recovery card is still rendered",
       );
-      const dismiss = button(fixture, label);
+      const dismiss = rowButton(fixture, COMMAND_ID, label);
       assert.ok(dismiss, "the composer row's Dismiss does not depend on the recovery card being hidden");
       assert.equal(dismiss.disabled, false);
 
@@ -426,6 +432,47 @@ test("dismissing a terminal delivery entry removes only the receipt and survives
   }
 });
 
+test("a failed delivery's reason is a notice of the slot, not the row, and either Dismiss removes it once", async () => {
+  const fixture = await mountFixture({
+    sessionPatch: {
+      queued: terminalQueueEntry("failed"),
+      pendingPrompts: terminalPendingPrompt("failed", 1),
+    },
+    eventPayloads: [{ kind: "user_message", text: TEXT, images: [] }],
+    holdResolutions: true,
+  });
+  try {
+    const row = fixture.container.querySelector<HTMLElement>(`[data-testid="queued-prompt-${COMMAND_ID}"]`);
+    assert.ok(row);
+    assert.doesNotMatch(row.textContent ?? "", /provider canceled/, "the row keeps only its badge");
+    assert.equal(row.querySelector(".status")?.textContent, "Delivery Failed");
+    const notice = fixture.container.querySelector<HTMLElement>('.notice[aria-label="Message Not Delivered"]');
+    assert.ok(notice, "the failure is an entry of the session notice slot");
+    assert.ok(notice.classList.contains("t-danger"));
+    assert.match(notice.textContent ?? "", /wasn't delivered\. provider canceled/);
+    assert.ok(notice.textContent?.includes(`\u201c${TEXT.split(/\s+/).slice(0, 6).join(" ")}`),
+      "the notice quotes the message's first words");
+
+    const fromNotice = notice.querySelector<HTMLButtonElement>('button[aria-label="Dismiss Failed Message"]');
+    assert.ok(fromNotice);
+    assert.equal(fromNotice.textContent, "Dismiss");
+    await act(async () => fireDomEvent.click(fromNotice));
+    // While that request runs, neither Dismiss sends a second one.
+    const fromRow = rowButton(fixture, COMMAND_ID, "Dismiss Failed Message");
+    assert.equal(fromRow?.disabled, true);
+    assert.equal(notice.querySelector<HTMLButtonElement>('button[aria-label="Dismiss Failed Message"]')?.disabled, true);
+    await act(async () => fireDomEvent.click(fromRow!));
+    assert.deepEqual(fixture.calls.resolvePendingPrompt, [
+      { sessionId: fixture.sessionId, commandId: COMMAND_ID, action: "dismiss" },
+    ]);
+    await fixture.pushSession({ queued: undefined, pendingPrompts: undefined });
+    assertNoDomNode(fixture.container.querySelector('.notice[aria-label="Message Not Delivered"]'));
+    assertNoDomNode(fixture.container.querySelector(`[data-testid="queued-prompt-${COMMAND_ID}"]`));
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("an in-flight Retry does not make the composer row's Dismiss claim to be dismissing", async () => {
   const fixture = await mountFixture({
     sessionPatch: {
@@ -450,10 +497,8 @@ test("an in-flight Retry does not make the composer row's Dismiss claim to be di
       { sessionId: fixture.sessionId, commandId: COMMAND_ID, action: "retry" },
     ]);
 
-    const dismiss = fixture.container.querySelector<HTMLButtonElement>(".queued-dismiss");
+    const dismiss = rowButton(fixture, COMMAND_ID, "Dismiss Failed Message");
     assert.ok(dismiss, "the composer row's Dismiss is still rendered while the retry is in flight");
-    assert.equal(dismiss.textContent, "Dismiss",
-      "a retry must not label an unrelated dismissal control as dismissing");
     assert.equal(dismiss.hasAttribute("aria-busy"), false,
       "busy state belongs to the control whose action is actually running");
     assert.equal(dismiss.disabled, true, "but it stays disabled while another action is in flight");
@@ -463,7 +508,7 @@ test("an in-flight Retry does not make the composer row's Dismiss claim to be di
 });
 
 test("a terminal receipt listed beside a held live queue stays dismissible and is not marked held", async () => {
-  const HELD_TITLE = "Waiting for the active turn or control-plane decision to settle; resolve any visible prompt to continue";
+  const HELD_NOTE = "Held until the current turn or a pending decision settles. Resolve any visible prompt to continue.";
   const fixture = await mountFixture({
     sessionPatch: {
       status: "running",
@@ -490,45 +535,38 @@ test("a terminal receipt listed beside a held live queue stays dismissible and i
     const receiptBadge = receiptRow.querySelector<HTMLElement>(".status");
     assert.equal(receiptBadge?.textContent, "Delivery Failed");
     assert.equal(receiptBadge?.classList.contains("t-danger"), true, "a settled receipt is not paused by the held FIFO");
-    // Session-wide gates run before per-row state, so every surface that explains the row — badge,
-    // Steer, its info popover, and Edit — must carry the receipt's own reason, never a wait.
+    // Session-wide gates run before per-row state, so every surface that explains the row — its badge
+    // and Edit — must carry the receipt's own reason, never a wait. A receipt offers no Steer.
     const RECEIPT_REASON = "Delivery attempts for this message have ended, so it cannot be steered or edited.";
     const receiptExplanations = {
       badge: receiptBadge?.getAttribute("title"),
-      steer: receiptRow.querySelector('button[aria-label="Steer Queued Message"]')?.getAttribute("title"),
-      steerInfo: receiptRow.querySelector('.queued-steer-info [role="status"]')?.textContent,
       edit: receiptRow.querySelector('button[aria-label="Edit Queued Message"]')?.getAttribute("title"),
     };
-    assert.deepEqual(receiptExplanations, {
-      badge: RECEIPT_REASON,
-      steer: RECEIPT_REASON,
-      steerInfo: RECEIPT_REASON,
-      edit: RECEIPT_REASON,
-    });
+    assert.deepEqual(receiptExplanations, { badge: RECEIPT_REASON, edit: RECEIPT_REASON });
     for (const [surface, text] of Object.entries(receiptExplanations)) {
       assert.doesNotMatch(text ?? "", /active turn|settle|admission|wait/i,
         `the receipt's ${surface} explanation must not present it as waiting on the queue`);
     }
+    assertNoDomNode(receiptRow.querySelector('button[aria-label="Steer Queued Message"]'));
     const dismiss = receiptRow.querySelector<HTMLButtonElement>('button[aria-label="Dismiss Failed Message"]');
     assert.ok(dismiss);
     assert.equal(dismiss.disabled, false);
     assertNoDomNode(receiptRow.querySelector('button[aria-label="Cancel Queued Message"]'));
 
+    // The held queue is said once, in the tray's header, never on a row (#2178).
+    const head = fixture.container.querySelector<HTMLElement>(".queue-head");
+    assert.equal(head?.querySelector(".status")?.textContent, "Held");
+    assert.equal(head?.querySelector(".status")?.classList.contains("t-warning"), true);
+    assert.ok([...head!.querySelectorAll(".queue-note")].some((note) => note.textContent === HELD_NOTE));
     const liveRow = fixture.container.querySelector<HTMLElement>('[data-testid="queued-prompt-queue-live"]');
     assert.ok(liveRow);
-    const liveBadge = liveRow.querySelector<HTMLElement>(".status");
-    assert.equal(liveBadge?.textContent, "Held", "the live entry keeps its held presentation");
-    assert.equal(liveBadge?.classList.contains("t-warning"), true);
-    assert.equal(liveBadge?.getAttribute("title"), HELD_TITLE);
-    assert.notEqual(
-      liveRow.querySelector('button[aria-label="Steer Queued Message"]')?.getAttribute("title"),
-      RECEIPT_REASON,
-      "live entries keep the session-wide steering explanation",
-    );
+    assertNoDomNode(liveRow.querySelector(".status"), "a held row carries no badge of its own");
+    assertNoDomNode(liveRow.querySelector('button[aria-label="Steer Queued Message"]'),
+      "a held queue cannot steer, which the header says once");
     const cancel = liveRow.querySelector<HTMLButtonElement>('button[aria-label="Cancel Queued Message"]');
     assert.ok(cancel, "the live entry keeps its cancellation control");
     assert.equal(cancel.disabled, false);
-    assertNoDomNode(liveRow.querySelector(".queued-dismiss"));
+    assertNoDomNode(liveRow.querySelector('button[aria-label^="Dismiss"]'));
 
     await act(async () => fireDomEvent.click(dismiss));
     assert.deepEqual(fixture.calls.resolvePendingPrompt, [
@@ -603,13 +641,15 @@ test("a nonterminal durable entry keeps the existing pre-admission cancellation 
   try {
     assertNoDomNode(button(fixture, "Dismiss Failed Message"));
     assertNoDomNode(button(fixture, "Dismiss Uncertain Message"));
-    const cancel = button(fixture, "Queued Message Cancellation Unavailable");
+    const cancel = button(fixture, "Cancel Queued Message");
     assert.ok(cancel, "delivery that may still run keeps its disabled cancellation control");
     assert.equal(cancel.disabled, true);
-    assert.equal(
-      cancel.getAttribute("title"),
-      "Durable delivery entries cannot be canceled before runner admission.",
-    );
+    const reason = "This message can't be canceled until its machine accepts it.";
+    assert.equal(cancel.getAttribute("title"), reason);
+    const describedBy = cancel.getAttribute("aria-describedby");
+    assert.ok(describedBy);
+    assert.equal(fixture.container.querySelector(`#${describedBy}`)?.textContent, reason,
+      "the reason is visible text the control references, not only a tooltip");
   } finally {
     await unmountFixture(fixture);
   }

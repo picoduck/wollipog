@@ -77,8 +77,6 @@ const RECORDED: readonly (readonly [string, string, string, string])[] = [
   ["components/RightPanel.tsx", "×", "×", SIDE_PANEL],
   ["components/RunsView.tsx", "×", "×", RUNS],
   ["components/SessionApproval.tsx", "○", "○", APPROVALS],
-  ["components/SessionDetail.tsx", "ⓘ", "ⓘ", COMPOSER],
-  ["components/SessionDetail.tsx", "✕", "✕", COMPOSER],
   ["components/ShellDock.tsx", "×", "×", TERMINAL],
   ["components/ShellDock.tsx", "×", "×", TERMINAL],
   ["components/images.tsx", "✕", "✕", COMPOSER],

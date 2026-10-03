@@ -43,35 +43,107 @@ test.beforeEach(async ({ page }) => {
   await openSteeringSession(page);
 });
 
-for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }]) {
-  test(`disabled steering explains the live reason accessibly at ${viewport.width}px`, async ({ page }) => {
-    await page.setViewportSize(viewport);
-    const reason = "Wollipog has not confirmed an active provider turn.";
-    await page.evaluate((reason) => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
-      queued: [{ id: "coordinate-queue", text: "Keep this message and attachment", hasImages: true,
-        steerable: false, steerDisabledReason: reason }],
-    }), reason);
-    const row = page.getByTestId("queued-prompt-coordinate-queue");
-    await expect(row.getByRole("button", { name: "Steer Queued Message" })).toBeDisabled();
-    const info = row.getByLabel("Why Steering Is Unavailable");
-    await info.focus();
-    await page.keyboard.press("Enter");
-    await expect(row.getByRole("status")).toHaveText(reason);
-    await info.click();
-    await expect(row.getByRole("status")).toBeHidden();
-    await info.click();
-    await expect(row.getByRole("status")).toBeVisible();
-    await page.screenshot({ path: test.info().outputPath("steering-explanation.png") });
-    await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringRequests().length)).toBe(0);
-    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
-      queued: [{ id: "coordinate-queue", text: "Keep this message and attachment", hasImages: true,
-        steerable: true }],
-    }));
-    await expect(info).toHaveCount(0);
-    await expect(row.getByRole("button", { name: "Steer Queued Message" })).toBeEnabled();
-    await expect(row).toContainText("Keep this message and attachment");
-  });
+/** The composer's queue tray (#2178). */
+function tray(page: Page) {
+  return page.getByRole("region", { name: "Queued Messages" });
 }
+
+test("a steering reason every row shares is said once in the tray header, with no Steer or ⓘ on a row", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const reason = "Wollipog has not confirmed an active provider turn.";
+  await page.evaluate((reason) => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
+    queued: [
+      { id: "coordinate-queue", text: "Keep this message and attachment", hasImages: true,
+        steerable: false, steerDisabledReason: reason },
+      { id: "coordinate-queue-2", text: "And this one", steerable: false, steerDisabledReason: reason },
+    ],
+  }), reason);
+  await expect(tray(page).locator(".queue-count")).toHaveText("2 Queued");
+  await expect(tray(page).locator(".queue-note")).toHaveText([reason]);
+  await expect(tray(page).getByRole("button", { name: "Steer Queued Message" })).toHaveCount(0);
+  await expect(tray(page)).not.toContainText("ⓘ");
+  await expect(tray(page).locator(".queue-rows .status")).toHaveCount(0);
+  await page.screenshot({ path: test.info().outputPath("steering-explanation.png") });
+  await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringRequests().length)).toBe(0);
+
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
+    queued: [{ id: "coordinate-queue", text: "Keep this message and attachment", hasImages: true,
+      steerable: true }],
+  }));
+  await expect(tray(page).locator(".queue-note")).toHaveCount(0);
+  const row = page.getByTestId("queued-prompt-coordinate-queue");
+  await expect(row.getByRole("button", { name: "Steer Queued Message" })).toBeEnabled();
+  await expect(row).toContainText("Keep this message and attachment");
+});
+
+test("on a phone each queued row keeps 250px for its text and one 44px actions button that opens every action", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
+    queued: [
+      { id: "queue-eligible", text: "Run the integration suite after the migration lands", steerable: true,
+        liveQueueObserved: true, editable: true, editRevision: "r1" },
+      { id: "queue-ineligible", text: "Workflow-owned follow-up", steerable: false,
+        steerDisabledReason: "Workflow-owned prompts cannot be steered.", liveQueueObserved: true },
+      { id: "queue-steering", text: "Already on its way", steeringState: "promoting" },
+    ],
+  }));
+  await expect(tray(page).locator(".queue-count")).toHaveText("3 Queued");
+  for (const id of ["queue-eligible", "queue-ineligible", "queue-steering"]) {
+    const row = page.getByTestId(`queued-prompt-${id}`);
+    const buttons = row.getByRole("button");
+    await expect(buttons).toHaveCount(1);
+    await expect(buttons).toHaveAccessibleName("Queued Message Actions");
+    const button = await buttons.boundingBox();
+    expect(button?.width).toBe(44);
+    expect(button?.height).toBe(44);
+    const text = await row.locator(".queue-text").boundingBox();
+    expect(text?.width ?? 0).toBeGreaterThanOrEqual(250);
+  }
+  await expect(page.getByTestId("queued-prompt-queue-steering").locator(".status")).toHaveText("Steering…");
+
+  await page.getByTestId("queued-prompt-queue-ineligible").getByRole("button", { name: "Queued Message Actions" }).click();
+  const sheet = page.getByRole("menu", { name: "Queued Message Actions" });
+  await expect(sheet).toBeVisible();
+  const items = sheet.getByRole("menuitem");
+  await expect(items.locator(".menu-text")).toHaveText(["Steer into This Turn", "Edit Message", "Cancel Message"]);
+  const steer = items.filter({ hasText: "Steer into This Turn" });
+  await expect(steer).toHaveAttribute("aria-disabled", "true");
+  await expect(steer.locator(".menu-desc")).toHaveText("Workflow-owned prompts cannot be steered.");
+  await expect(items.filter({ hasText: "Edit Message" }).locator(".menu-desc")).not.toHaveText("");
+  await page.screenshot({ path: test.info().outputPath("phone-queue-actions.png") });
+  // An unavailable item stays reachable so its reason is heard, and choosing it does nothing.
+  await steer.dispatchEvent("click");
+  await expect(sheet).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringRequests().length)).toBe(0);
+  await page.keyboard.press("Escape");
+  await expect(sheet).toHaveCount(0);
+
+  await page.getByTestId("queued-prompt-queue-eligible").getByRole("button", { name: "Queued Message Actions" }).click();
+  await expect(sheet.getByRole("menuitem", { name: "Steer into This Turn" })).not.toHaveAttribute("aria-disabled", "true");
+  await sheet.getByRole("menuitem", { name: "Steer into This Turn" }).click();
+  await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringRequests()[0]?.promotePromptId))
+    .toBe("queue-eligible");
+});
+
+test("a failed delivery shows its reason in the notice slot and keeps its badge and Dismiss on the row", async ({ page }) => {
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
+    queued: [
+      { id: "queue-failed", text: "Ship the release notes today", steerable: false,
+        durableDeliveryState: "failed", durableDeliveryError: "The machine restarted before it took the message." },
+      { id: "queue-next", text: "Then tag the build", steerable: true, liveQueueObserved: true },
+    ],
+  }));
+  const notice = page.getByRole("alert", { name: "Message Not Delivered" });
+  await expect(notice).toContainText(
+    "\u201cShip the release notes today\u201d wasn't delivered. The machine restarted before it took the message.",
+  );
+  await expect(notice.getByRole("button", { name: "Dismiss Failed Message" })).toBeEnabled();
+  const row = page.getByTestId("queued-prompt-queue-failed");
+  await expect(row.locator(".status")).toHaveText("Delivery Failed");
+  await expect(row).not.toContainText("The machine restarted");
+  await expect(row.getByRole("button", { name: "Dismiss Failed Message" })).toBeEnabled();
+  await expect(page.getByTestId("queued-prompt-queue-next").locator(".status")).toHaveCount(0);
+});
 
 test("Ctrl+Enter steers without an optimistic echo while Enter, Shift+Enter, IME, and slash selection keep their contracts", async ({ page }) => {
   const composer = page.locator(".composer-input");
@@ -403,15 +475,18 @@ test("steering gates fail closed across protocol, provider, active-turn, held-qu
     "Wait for the active turn to settle or resolve the visible control-plane decision before steering.",
   );
   await expect.poll(requests).toBe(0);
-  await expect(page.getByTestId("queued-prompt-queue-ineligible").getByRole("button", { name: "Steer Queued Message" })).toBeDisabled();
-  await expect(page.getByTestId("queued-prompt-queue-legacy").getByRole("button", { name: "Steer Queued Message" })).toBeDisabled();
-  await expect(page.getByTestId("queued-prompt-queue-eligible").getByRole("button", { name: "Steer Queued Message" })).toBeDisabled();
+  // A held queue is said once, in the tray's header, and no row offers Steer (#2178).
+  await expect(tray(page).locator(".queue-head .status")).toHaveText("Held");
+  await expect(tray(page).locator(".queue-rows .status")).toHaveCount(0);
+  await expect(tray(page).getByRole("button", { name: "Steer Queued Message" })).toHaveCount(0);
 
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", { queueHeld: false }));
+  await expect(tray(page).locator(".queue-head .status")).toHaveCount(0);
+  // Rows that differ: only the eligible one offers Steer.
   await expect(page.getByTestId("queued-prompt-queue-ineligible").getByRole("button", { name: "Steer Queued Message" }))
-    .toHaveAttribute("title", "Workflow-owned prompts cannot be steered.");
+    .toHaveCount(0);
   await expect(page.getByTestId("queued-prompt-queue-legacy").getByRole("button", { name: "Steer Queued Message" }))
-    .toHaveAttribute("title", "This queued message is not eligible for steering.");
+    .toHaveCount(0);
   await expect(page.getByTestId("queued-prompt-queue-eligible").getByRole("button", { name: "Steer Queued Message" })).toBeEnabled();
 });
 
@@ -432,7 +507,8 @@ test("a pending Stop Turn blocks direct steering and queued promotion", async ({
   await page.keyboard.press("Control+Enter");
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringRequests().length)).toBe(0);
   await expect(page.getByTestId("queued-prompt-queue-during-stop").getByRole("button", { name: "Steer Queued Message" }))
-    .toBeDisabled();
+    .toHaveCount(0);
+  await expect(tray(page).locator(".queue-note")).toHaveText(["Wait for the current stop request to settle before steering."]);
 
   await page.evaluate(() => {
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleDeferredCancelTurn();
@@ -450,8 +526,8 @@ test("queued promotion uses stable queue identity and reconciles one canonical a
 
   const queued = page.getByTestId("queued-prompt-queue-promote-stable");
   await queued.getByRole("button", { name: "Steer Queued Message" }).click();
-  await expect(queued).toContainText("Steering…");
-  await expect(queued.getByRole("button", { name: "Steer Queued Message" })).toBeDisabled();
+  await expect(queued.locator(".status")).toHaveText("Steering…");
+  await expect(queued.getByRole("button", { name: "Steer Queued Message" })).toHaveCount(0);
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringRequests()[0]?.promotePromptId))
     .toBe("queue-promote-stable");
 

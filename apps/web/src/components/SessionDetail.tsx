@@ -79,6 +79,7 @@ import {
 } from "./common.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { Notice } from "./Notice.js";
+import { QueuedMessages, queuedMessageExcerpt } from "./QueuedMessages.js";
 import { sessionArchivedAtRest, statusMeta } from "../status-meta.js";
 import { shownWatchdogDelivery } from "../background-delivery-status.js";
 import {
@@ -228,7 +229,7 @@ import {
 import { deriveSteeringReceipts, SteeringReceipts } from "./SteeringReceipts.js";
 import { SessionCommandReceipts, visibleSessionCommandReceipts } from "./SessionCommandReceipts.js";
 import { ReceiptLine, RECEIPT_ROW_ATTRIBUTE, receiptRowId, receiptRowIds } from "./TranscriptReceipt.js";
-import { ArrowUpIcon, ChevronDownIcon, EditIcon, FolderIcon, ImageIcon, ImageOffIcon, MicIcon, PlanIcon, PlusIcon, ProjectsIcon, RefreshIcon, StopTurnIcon } from "./Icons.js";
+import { ArrowUpIcon, ChevronDownIcon, FolderIcon, ImageIcon, ImageOffIcon, MicIcon, PlanIcon, PlusIcon, ProjectsIcon, RefreshIcon, StopTurnIcon } from "./Icons.js";
 import {
   durableCommandAttachmentNote,
   buildComposerCommandRegistry,
@@ -292,9 +293,6 @@ import { holdRecoveryActionFor, sessionArchiveActionRefusal, sessionCommandRefus
 
 const NO_IMAGE_MIME_TYPES: readonly string[] = [];
 const STOP_TURN_RETRY_MS = 8_000;
-/** Why a `failed` or `uncertain` durable receipt offers only Dismiss. Worded for both states:
- * uncertain delivery may have landed, but either way no further attempt will be made. */
-const TERMINAL_RECEIPT_REASON = "Delivery attempts for this message have ended, so it cannot be steered or edited.";
 /** WebKit may synthesize a touch click in a later task. Keep the pointer transfer alive long
  * enough for that click; if no click arrives, finish the collapse instead of leaving a blurred
  * composer expanded. Pointer cancellation (the usual scroll path) finishes immediately. */
@@ -2879,7 +2877,6 @@ function SessionDetailLoaded({
   // A person the server refuses queue management (a Viewer) sees queued messages, delivery
   // receipts and steering attempts with their actions disabled and the reason (#1857).
   const queueRefusal = sessionCommandRefusal(session, "manageQueue");
-  const queueRefusalId = `queued-refusal-${session.id}`;
   const resolvePendingPrompt = useCallback(async (
     commandId: string,
     action: "cancel" | "dismiss" | "retry",
@@ -4548,10 +4545,68 @@ function SessionDetailLoaded({
       ),
     });
   }
+  // A queued message whose delivery failed is a notice of this slot, not a fragment of its queue
+  // row (#2178): the row keeps its Delivery Failed badge and its own Dismiss, and either Dismiss
+  // removes the receipt once.
+  for (const prompt of queuedPromptControls) {
+    const reason = prompt.durableDeliveryError;
+    if (!reason) continue;
+    const terminal = isTerminalDeliveryReceipt(prompt);
+    const failed = prompt.durableDeliveryState === "failed";
+    const excerpt = queuedMessageExcerpt(prompt);
+    const subject = prompt.text.trim() ? `“${excerpt}”` : "A message with images";
+    const title = failed ? "Message Not Delivered" : terminal ? "Delivery Uncertain" : "Message Not Delivered Yet";
+    const sentence = failed
+      ? `${subject} wasn't delivered.`
+      : terminal
+        ? `Wollipog couldn't confirm ${prompt.text.trim() ? subject : "a message with images"} was delivered.`
+        : `${subject} hasn't been delivered yet.`;
+    const dismissLabel = failed ? "Dismiss Failed Message" : "Dismiss Uncertain Message";
+    const dismissBusy = pendingPromptAction?.commandId === prompt.id && pendingPromptAction.action === "dismiss";
+    const refusalId = `queued-delivery-refusal-${prompt.id}`;
+    sessionNotices.push({
+      key: `queued-delivery:${prompt.id}`,
+      severity: failed ? "danger" : "warning",
+      rank: SESSION_NOTICE_RANK.queuedMessageError,
+      title,
+      render: ({ trailing }) => (
+        <Notice tone={failed ? "danger" : "warning"} role="alert" ariaLabel={title} title={title}
+          trailing={trailing}
+          actions={terminal && (
+            <button
+              type="button"
+              className="btn sm"
+              disabled={pendingPromptAction !== undefined || queueRefusal !== null}
+              aria-busy={dismissBusy || undefined}
+              aria-label={dismissLabel}
+              aria-describedby={queueRefusal !== null ? refusalId : undefined}
+              onClick={() => void resolvePendingPrompt(prompt.id, "dismiss")}
+            >
+              Dismiss
+            </button>
+          )}>
+          <p>{sentence} {reason}</p>
+          {terminal && queueRefusal !== null && <p className="notice-meta" id={refusalId}>{queueRefusal}</p>}
+        </Notice>
+      ),
+    });
+  }
   const composerIdleCollapsed = isMobile && !composerExpanded && !/[\r\n]/u.test(text) &&
     images.length === 0 && session.pendingApproval == null &&
     !historyQuarantine && !queuedEdit && composerErrorEntries.length === 0 && !retitleFeedback && !dictation.recording &&
     !dragActive && !paletteOpen && !workspacePickerOpen;
+  // Where focus goes when the notice slot or the queue tray removes the control that held it: the
+  // composer when it can take a message, or a collapsed phone composer's own Edit Message control, so
+  // the layout does not change under the person. A composer that still refuses a message (a plain
+  // Unarchive leaves the session stopped) cannot hold focus, so the page title takes it (#2202).
+  const focusComposerOrTitle = () => {
+    const input = inputRef.current;
+    const target = !input || input.disabled ? null
+      : composerIdleCollapsed ? input.closest(".composer-box")?.querySelector<HTMLElement>(".composer-idle-preview")
+      : input;
+    target?.focus({ preventScroll: true });
+    if (!target || target.ownerDocument.activeElement !== target) document.getElementById("page-title")?.focus();
+  };
   // The phone capsule's preview (#2154): the draft's first line to edit, or who a new message goes
   // to. A composer that cannot send says why instead.
   const composerIdleDraft = text.trim();
@@ -6049,19 +6104,7 @@ function SessionDetailLoaded({
             >
             {/* The one notice slot (§13.2): the most severe session condition, the rest behind
                 "+N More". Session notices are entries of it, never banners of their own. */}
-            <SessionNoticeSlot sessionId={session.id} entries={sessionNotices}
-              onFocusLost={() => {
-                // The composer when it can take a message: a collapsed phone composer's own Edit
-                // Message control, so the layout does not change under the person. A composer that
-                // still refuses a message (a plain Unarchive leaves the session stopped) cannot hold
-                // focus, so the page title takes it (#2202).
-                const input = inputRef.current;
-                const target = !input || input.disabled ? null
-                  : composerIdleCollapsed ? input.closest(".composer-box")?.querySelector<HTMLElement>(".composer-idle-preview")
-                  : input;
-                target?.focus({ preventScroll: true });
-                if (!target || target.ownerDocument.activeElement !== target) document.getElementById("page-title")?.focus();
-              }} />
+            <SessionNoticeSlot sessionId={session.id} entries={sessionNotices} onFocusLost={focusComposerOrTitle} />
             {switchAccountOpen && (
               <SwitchAccountDialog
                 session={session}
@@ -6082,161 +6125,6 @@ function SessionDetailLoaded({
                   ? "Rename failed. Couldn't rename this session."
                   : ""}
             </span>
-            {queuedPromptControls.length > 0 && (
-              <div className="queued-list" aria-label="Queued Messages">
-                {/* A disabled control's tooltip is announced by nothing, so the refusal is also a
-                    programmatic description of each action it disables. */}
-                {queueRefusal !== null && <p className="sr-only" id={queueRefusalId}>{queueRefusal}</p>}
-                {queuedPromptControls.map((q) => {
-                  const availability = queuedPromptSteeringAvailability(steeringAvailabilityInput, q);
-                  const editAvailability = queuedPromptEditingAvailability({
-                    runnerProtocolVersion: runner?.protocolVersion,
-                    runnerOnline,
-                    requestBusy: composerRequestBusy,
-                  }, q);
-                  const locallyPromoting = queueSteeringPending.has(q.id);
-                  const reserved = q.steeringState === "promoting" || q.steeringState === "uncertain";
-                  const durable = q.durableDeliveryState !== undefined;
-                  const queueStatus = statusMeta("queuedMessage", q.durableDeliveryState === "failed"
-                    ? "failed"
-                    : q.durableDeliveryState === "uncertain"
-                      ? "uncertain"
-                      : q.durableDeliveryState === "pending"
-                        ? "pending_delivery"
-                        : locallyPromoting || q.steeringState === "promoting"
-                          ? "steering"
-                          : q.steeringState === "uncertain"
-                            ? "uncertain"
-                            : session.queueHeld ? "held" : "queued");
-                  // A terminal durable receipt records delivery that has already stopped, so it can
-                  // never be cancelled. It carries dismissal instead, and the two are mutually
-                  // exclusive: cancellation removes work that may still run, dismissal only hides
-                  // settled evidence. The row's removal affordance must not be a disabled control —
-                  // the transcript recovery card that used to carry Dismiss is suppressed as soon
-                  // as `userEventSeq` lands, so this row is the only place the action can live.
-                  const terminalDurable = isTerminalDeliveryReceipt(q);
-                  // Session-wide gates (a held queue, a busy turn) are checked before per-row state,
-                  // so they would otherwise explain a receipt as waiting on the live FIFO. A settled
-                  // receipt is waiting on nothing: it explains itself, and borrows no held styling.
-                  const queueTitle = terminalDurable
-                    ? TERMINAL_RECEIPT_REASON
-                    : locallyPromoting
-                      ? "Steering is being submitted for this queued message."
-                      : !availability.available
-                        ? availability.reason
-                        : composerRequestBusy
-                          ? "Wait for the current message request to finish."
-                        : "Promote this queued message into the active turn.";
-                  const heldBadge = session.queueHeld === true && !terminalDurable;
-                  const canCancelThis = canCancelQueued && !durable && !reserved && !locallyPromoting &&
-                    queueRefusal === null;
-                  const steerTitle = queueRefusal ?? queueTitle;
-                  const steerDisabled = queueRefusal !== null || !availability.available || locallyPromoting ||
-                    composerRequestBusy;
-                  const dismissBusy = pendingPromptAction?.commandId === q.id &&
-                    pendingPromptAction.action === "dismiss";
-                  return (
-                    <div
-                      className={`queued-item${queuedEdit?.promptId === q.id ? " is-editing" : ""}`}
-                      key={q.id}
-                      data-testid={`queued-prompt-${q.id}`}
-                      aria-current={queuedEdit?.promptId === q.id ? "true" : undefined}
-                    >
-                      <StatusBadge
-                        meta={queueStatus}
-                        inline
-                        title={heldBadge
-                          ? "Waiting for the active turn or control-plane decision to settle; resolve any visible prompt to continue"
-                          : queueTitle}
-                      />
-                      <span className="queued-text">
-                        {q.hasImages && <span className="queued-img" aria-hidden="true">📎 </span>}
-                        {q.text || (q.hasImages ? "(attachment)" : "")}
-                      </span>
-                      {q.durableDeliveryError && (
-                        <Notice tone="danger" compact>{q.durableDeliveryError}</Notice>
-                      )}
-                      <div className="queued-actions">
-                        <button
-                          type="button"
-                          className="btn ghost sm queued-steer"
-                          disabled={steerDisabled}
-                          title={steerTitle}
-                          aria-describedby={queueRefusal !== null ? queueRefusalId : undefined}
-                          aria-label="Steer Queued Message"
-                          onClick={() => void promoteQueuedPrompt(q)}
-                        >
-                          {locallyPromoting || q.steeringState === "promoting" ? "Steering…" : "Steer"}
-                        </button>
-                        {steerDisabled && (
-                          <details className="queued-steer-info">
-                            <summary aria-label="Why Steering Is Unavailable">ⓘ</summary>
-                            <span role="status">{steerTitle}</span>
-                          </details>
-                        )}
-                        <button
-                          type="button"
-                          className="btn ghost sm queued-edit"
-                          disabled={queueRefusal !== null || !editAvailability.available || queuedEdit !== null}
-                          title={queueRefusal ?? (terminalDurable
-                            ? TERMINAL_RECEIPT_REASON
-                            : queuedEdit?.promptId === q.id
-                              ? "This queued message is already being edited."
-                              : editAvailability.available
-                                ? "Edit this queued message."
-                                : editAvailability.reason)}
-                          aria-label="Edit Queued Message"
-                          aria-describedby={queueRefusal !== null ? queueRefusalId : undefined}
-                          onClick={() => void beginQueuedPromptEdit(q)}
-                        >
-                          <EditIcon size={14} />
-                        </button>
-                        {terminalDurable ? (
-                          <button
-                            type="button"
-                            className="btn ghost sm queued-dismiss"
-                            disabled={pendingPromptAction !== undefined || queueRefusal !== null}
-                            aria-busy={dismissBusy || undefined}
-                            title={queueRefusal ?? "Remove this delivery receipt. The message already recorded in the transcript is kept, and no provider work is canceled, resent, or restarted."}
-                            aria-label={q.durableDeliveryState === "failed"
-                              ? "Dismiss Failed Message"
-                              : "Dismiss Uncertain Message"}
-                            aria-describedby={queueRefusal !== null ? queueRefusalId : undefined}
-                            onClick={() => void resolvePendingPrompt(q.id, "dismiss")}
-                          >
-                            {dismissBusy ? "Dismissing…" : "Dismiss"}
-                          </button>
-                        ) : (
-                          <button
-                            type="button"
-                            className="queued-cancel"
-                            disabled={!canCancelThis}
-                            title={queueRefusal ?? (
-                              !canCancelQueued
-                                ? runnerCapabilityRequirement(
-                                    runner?.protocolVersion,
-                                    "queuedPromptCancellation",
-                                    "queued prompt cancellation",
-                                  )
-                                : reserved || locallyPromoting
-                                  ? "Resolve steering before canceling this queued message."
-                                  : durable
-                                    ? "Durable delivery entries cannot be canceled before runner admission."
-                                  : "Cancel this queued message."
-                            )}
-                            aria-label={canCancelThis ? "Cancel Queued Message" : "Queued Message Cancellation Unavailable"}
-                            aria-describedby={queueRefusal !== null ? queueRefusalId : undefined}
-                            onClick={() => void api.cancelQueuedPrompt(session.id, q.id)}
-                          >
-                            ✕
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
             {queuedEdit && (
               <div className="queued-edit-banner" role="status">
                 <div className="queued-edit-copy">
@@ -6267,6 +6155,24 @@ function SessionDetailLoaded({
                 </div>
               </div>
             )}
+            <QueuedMessages
+              sessionId={session.id}
+              prompts={queuedPromptControls}
+              queueHeld={session.queueHeld === true}
+              agent={composerAgent}
+              steering={steeringAvailabilityInput}
+              requestBusy={composerRequestBusy}
+              refusal={queueRefusal}
+              steeringPending={queueSteeringPending}
+              editingPromptId={queuedEdit?.promptId ?? null}
+              editOpen={queuedEdit !== null}
+              pendingAction={pendingPromptAction}
+              onSteer={(prompt) => void promoteQueuedPrompt(prompt)}
+              onEdit={(prompt) => void beginQueuedPromptEdit(prompt)}
+              onCancel={(prompt) => void api.cancelQueuedPrompt(session.id, prompt.id)}
+              onDismiss={(prompt) => void resolvePendingPrompt(prompt.id, "dismiss")}
+              onFocusLost={focusComposerOrTitle}
+            />
             <div
               ref={composerBoxRef}
               className={`composer-box${dragActive ? imagesRefused ? " is-drop is-refused" : " is-drop" : ""}${composerAnswerActive ? " answer-mode" : ""}${composerIdleCollapsed ? " idle-collapsed" : ""}${canPrompt ? "" : " is-disabled"}`}

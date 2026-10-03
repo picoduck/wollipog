@@ -147,14 +147,18 @@ function LiveQuestionFixture() {
               </div>
               <div className="composer">
                 {showQueuedPrompts && queuedPrompts.length > 0 && (
-                  <div className="queued-list" aria-label="Queued Messages">
-                    {queuedPrompts.map((prompt) => (
-                      <div className="queued-item" key={prompt.id}>
-                        <span className="status sm t-neutral inline">Queued</span>
-                        <span className="queued-text">{prompt.text}</span>
-                      </div>
-                    ))}
-                  </div>
+                  <section className="queue" aria-label="Queued Messages">
+                    <div className="queue-head">
+                      <span className="queue-count">{queuedPrompts.length} Queued</span>
+                    </div>
+                    <ul className="queue-rows">
+                      {queuedPrompts.map((prompt) => (
+                        <li className="queue-row" key={prompt.id}>
+                          <span className="queue-text">{prompt.text}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
                 )}
                 <div className={`composer-box${answerActive ? " answer-mode" : ""}`}>
                   {pendingQuestion &&

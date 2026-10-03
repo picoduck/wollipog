@@ -666,8 +666,8 @@ for (const viewport of [
           await expect(page.getByRole("region", { name: "Agent Questions" })).toHaveCount(0);
           await expect(page.locator(".composer-input")).toBeVisible();
           if (delivery !== "accepted") {
-            await expect(page.locator(".queued-item")).toHaveCount(1);
-            await expect(page.locator(".queued-item")).toContainText("Answer: Patch");
+            await expect(page.locator(".queue-row")).toHaveCount(1);
+            await expect(page.locator(".queue-row")).toContainText("Answer: Patch");
             expect(existsSync(stack.receiptPath)).toBe(false);
           } else {
             expect(JSON.parse(await readFile(stack.receiptPath, "utf8"))).toMatchObject({ delivery: "steer", answer: "Patch" });
@@ -681,7 +681,7 @@ for (const viewport of [
             await stack.restart(false);
             await page.reload();
             await expect(answer).toHaveCount(0);
-            await expect(page.locator(".queued-item")).toHaveCount(1);
+            await expect(page.locator(".queue-row")).toHaveCount(1);
             writeFileSync(stack.receiptPath + ".release", "release");
             await expect.poll(async () => existsSync(stack.receiptPath)).toBe(true);
             expect(JSON.parse(await readFile(stack.receiptPath, "utf8"))).toMatchObject({ delivery: "queue", answer: "Patch" });
@@ -936,8 +936,8 @@ for (const viewport of [
         await expect(page.getByRole("region", { name: "Agent Questions" })
           .locator("xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' detail-scroll ')][1]"))
           .toHaveCount(1);
-        await expect(page.getByLabel("Queued Messages").locator(".queued-item")).toHaveCount(queuedMessages.length);
-        await expect(page.getByLabel("Queued Messages").locator(".queued-text")).toHaveText(queuedMessages);
+        await expect(page.getByLabel("Queued Messages").locator(".queue-row")).toHaveCount(queuedMessages.length);
+        await expect(page.getByLabel("Queued Messages").locator(".queue-text")).toHaveText(queuedMessages);
         await expectQuestionControlsInsideCard(page);
         await expect(page.getByRole("region", { name: "Agent Questions" })
           .getByText("Should I squash-merge pull request #342 now?", { exact: false })).toBeVisible();

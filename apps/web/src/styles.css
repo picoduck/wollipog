@@ -5260,99 +5260,90 @@ textarea {
   padding-left: max(var(--space-3), calc((100% - var(--chat-max)) / 2));
   padding-right: max(var(--space-3), calc((100% - var(--chat-max)) / 2));
 }
-/* Queued prompts waiting behind the running turn (item 10): visible + individually cancelable. */
-.queued-list {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  margin-bottom: 8px;
+/* The queue tray (#2178): messages waiting behind the turn, docked on the composer card so they read
+   as lined up behind the one being written. Inset from the card's edges, solid edge, open at the
+   bottom where the card takes over, and a hairline between rows. */
+.queue {
+  margin: 0 var(--space-3);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-top-left-radius: var(--radius-md);
+  border-top-right-radius: var(--radius-md);
 }
-.queued-item {
+.queue-head {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
-  padding: 5px 8px 5px 10px;
-  background: var(--bg-elev);
-  border: 1px dashed var(--border-strong);
-  border-radius: var(--radius-sm);
-  font-size: 12.5px;
+  column-gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+}
+.queue-count {
+  font: var(--type-label);
+  color: var(--text);
+}
+.queue-note {
+  flex-basis: 100%;
+  margin: 0;
+  font: var(--type-small);
   color: var(--text-dim);
 }
-.queued-item.is-editing {
-  border-color: color-mix(in srgb, var(--accent) 65%, var(--border));
-  background: color-mix(in srgb, var(--accent) 10%, var(--bg-elev));
-  box-shadow: inset 3px 0 0 var(--accent);
+.queue-rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
-.queued-text {
-  flex: 1;
+.queue-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: var(--space-2);
+  min-height: var(--control-h);
+  padding: var(--space-1) var(--space-2) var(--space-1) var(--space-3);
+  border-top: 1px solid var(--border);
+}
+.queue-row.is-editing {
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-elev));
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.queue-text {
+  flex: 1 1 0;
   min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
+  font: var(--type-body);
+  color: var(--text-dim);
   white-space: nowrap;
+  text-overflow: ellipsis;
 }
-.queued-actions {
+.queue-clip {
+  display: inline-block;
+  margin-right: var(--space-1);
+  vertical-align: text-bottom;
+}
+.queue-actions {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: var(--space-1);
   flex: none;
 }
-/* A delivery failure takes its own line under the queued message rather than a fragment of it. */
-.queued-item > .notice {
+/* A cancel that differs from the rest of the queue says why on its own line, which the button
+   references. */
+.queue-reason {
   flex-basis: 100%;
+  font: var(--type-small);
+  color: var(--text-dim);
+}
+/* Phones (#2178): each row is its text and one 44px actions button. A status that differs moves under
+   the text, so the words keep the line. */
+.queue.is-phone .queue-status {
   order: 1;
 }
-.queued-steer,
-.queued-dismiss,
-.queued-edit { flex: none; }
-.queued-steer-info { position: relative; }
-.queued-steer-info summary {
-  list-style: none;
-  cursor: pointer;
-  padding: 6px;
-  color: var(--text-dim);
-  border-radius: var(--radius-sm);
+.queue.is-phone .queue-status + .queue-text {
+  flex-basis: calc(100% - var(--space-2) - 44px);
 }
-.queued-steer-info summary::-webkit-details-marker { display: none; }
-.queued-steer-info summary:focus-visible { outline: 2px solid var(--text); }
-.queued-steer-info[open] > span {
-  position: absolute;
-  right: 0;
-  bottom: 100%;
-  z-index: var(--z-popover);
-  width: min(260px, 65vw);
-  padding: 10px;
-  white-space: normal;
-  color: var(--text);
-  background: var(--bg-elev-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  box-shadow: var(--shadow);
-}
-.queued-edit {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 4px 6px;
-}
-.queued-cancel {
-  flex: none;
-  background: transparent;
-  border: none;
-  color: var(--text-faint);
-  cursor: pointer;
-  font-size: 12px;
-  line-height: 1;
-  padding: 3px 5px;
-  border-radius: 5px;
-}
-.queued-cancel:hover:not(:disabled) {
-  background: var(--bg-elev-2);
-  color: var(--text);
-}
-.queued-cancel:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+.queue-more {
+  width: 44px;
+  height: 44px;
 }
 .queued-edit-banner {
   display: flex;

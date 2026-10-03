@@ -3440,7 +3440,7 @@ test("a phone queue tap cannot collapse while WebKit retains textarea focus", as
       queued: [{ id: "queued-1", text: "Queued message", hasImages: false, steerable: true }],
     });
     await focusRequestedComposer(fixture);
-    const queuedText = fixture.container.querySelector(".queued-text") as HTMLElement | null;
+    const queuedText = fixture.container.querySelector(".queue-text") as HTMLElement | null;
     assert.ok(queuedText);
 
     await act(async () => {
@@ -3715,11 +3715,12 @@ test("a Viewer's Stop Turn, queued-message actions and Plan control are disabled
     try {
       await resolveComposerDraft(draft, { text: "", images: [], updatedAt: 1 });
       const stopTurn = fixture.container.querySelector(".stop-turn-btn") as HTMLButtonElement;
-      const steer = fixture.container.querySelector('button[aria-label="Steer Queued Message"]') as HTMLButtonElement;
+      // Steer shows only where steering works for the row (#2178); this agent has not said it steers.
+      assertNoDomNode(fixture.container.querySelector('button[aria-label="Steer Queued Message"]'));
       const edit = fixture.container.querySelector('button[aria-label="Edit Queued Message"]') as HTMLButtonElement;
-      const cancel = fixture.container.querySelector(".queued-cancel") as HTMLButtonElement;
+      const cancel = fixture.container.querySelector('button[aria-label="Cancel Queued Message"]') as HTMLButtonElement;
       const plan = fixture.container.querySelector(".plan-toggle") as HTMLButtonElement;
-      for (const [name, control] of Object.entries({ stopTurn, steer, edit, cancel, plan })) {
+      for (const [name, control] of Object.entries({ stopTurn, edit, cancel, plan })) {
         assert.ok(control, `${label}: ${name} stays in place`);
       }
       if (commandPermissions?.cancelTurn !== refused) {
@@ -3730,7 +3731,10 @@ test("a Viewer's Stop Turn, queued-message actions and Plan control are disabled
         assert.notEqual(stopTurn.title, reason);
         continue;
       }
-      for (const [name, control] of Object.entries({ stopTurn, steer, edit, cancel, plan })) {
+      // The refusal is visible once, in the queue tray's header, and every queue action references it.
+      const header = fixture.container.querySelector(".queue-head");
+      assert.ok([...header!.querySelectorAll(".queue-note")].some((note) => note.textContent === reason));
+      for (const [name, control] of Object.entries({ stopTurn, edit, cancel, plan })) {
         assert.equal(control.disabled, true, `${name} is disabled for a Viewer`);
         const described = control.getAttribute("aria-describedby");
         assert.ok(described, `${name} carries its reason as a description`);
@@ -3740,7 +3744,7 @@ test("a Viewer's Stop Turn, queued-message actions and Plan control are disabled
       assert.equal(stopTurn.title, reason, "Stop Turn says why");
       assert.equal(cancel.title, reason);
       await act(async () => {
-        for (const control of [stopTurn, steer, edit, cancel, plan]) control.click();
+        for (const control of [stopTurn, edit, cancel, plan]) control.click();
         domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", shiftKey: true, bubbles: true }) as never);
         fixture.composer.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", shiftKey: true, bubbles: true }) as never);
       });

@@ -72,6 +72,9 @@ export const SESSION_NOTICE_RANK = {
   attachmentNote: 12,
   // A copy of an earlier message loaded by Edit as a New Turn, with Discard Edit (#2185).
   editingCopy: 13,
+  // A queued message whose delivery failed or could not be confirmed (#2178), after the composer's
+  // own entries: the draft in hand comes before a message already sent.
+  queuedMessageError: 14,
 } as const;
 
 const SEVERITY_ORDER: Record<SessionNoticeSeverity, number> = { danger: 0, warning: 1, info: 2 };

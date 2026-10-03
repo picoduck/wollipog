@@ -1490,6 +1490,21 @@ The queued-message labels were the composer's and the pending bubble's own table
 drawn in red and is now the warning tone, and every label now renders in Title Case instead of an
 uppercase transform.
 
+**Queue tray** (`QueuedMessages`, #2178). Messages not yet sent wait in `.queue`, docked on the
+composer card: inset `--space-3` from its edges with no gap, a solid `--border` edge, top corners
+`--radius-md`, and a hairline between rows. One header reads "<n> Queued", carries the one Held
+badge when the whole queue is held, and says once in sentence case what holds for every row: the
+held explanation, a steering reason every row shares ("Claude Code can't take steering mid-turn, so
+these send when the turn ends."), a cancel none of them can use, or a Viewer's refusal. A row carries
+a badge only where it differs from "Queued" (Steering…, Pending Delivery, Delivery Uncertain,
+Delivery Failed), reads its first line (an image-only message reads "Image attachment" after the
+paperclip icon), and ends in Steer (`.btn.sm.ghost`, only where steering works for that row), Edit
+and Cancel or Dismiss (`.icon-btn.sm`). A cancel that is not available stays, disabled, with its
+reason referenced by `aria-describedby`. Below 760px a row is its text and one 44px "Queued Message
+Actions" ⋯ button whose menu sheet lists Steer into This Turn, Edit Message and Cancel Message (or
+Dismiss Message), each disabled one with its reason as the second line. A delivery failure's reason
+is a notice of the slot (§13.2), not part of the row.
+
 **Message receipts** (#2171). What happened to a message after it was sent is one `.tl-receipt` line
 under that message, inside the scrolling transcript: after the last canonical item and before the
 Working row, right-aligned like the person's own messages. The line reads status first, then the
@@ -1871,7 +1886,8 @@ exactly one: the most severe, then the lowest rank.
 - Ranks live in one table, `SESSION_NOTICE_RANK`: worktree missing 1, conversation quarantined 2,
   worktree setup failed 3, invalid worktree setup configuration 4, account switch failed 5, session
   archived 7, skills unavailable 8, setup suggestion 9, composer error 10, attachment error 11,
-  attachment note 12, editing a copy 13. A new entry adds its rank there.
+  attachment note 12, editing a copy 13, queued-message delivery failure 14. A new entry adds its
+  rank there.
 - The others are a `.btn.sm.ghost` "+N More" in the shown notice's title row. It opens a menu (§9.1)
   of their tone icons and one-line titles; choosing one shows it until the set of conditions changes,
   and focus moves to the new notice's "+N More".
@@ -1901,6 +1917,11 @@ exactly one: the most severe, then the lowest rank.
   clears the composer). An accepted send of the copy ends it; a send that fails leaves it. It is kept
   with the draft, so leaving the session or reloading keeps Discard Edit; while a queued message is
   being edited it waits, since that edit owns the composer.
+- **Queued-message delivery failure** (#2178): a queued message whose delivery failed is a danger
+  entry, "Message Not Delivered": "“<first words>” wasn't delivered. <reason>", with Dismiss
+  (named "Dismiss Failed Message"), the same request as the row's own Dismiss. Delivery that could
+  not be confirmed is the warning "Delivery Uncertain". The row keeps its badge and its Dismiss; a
+  failed message still cannot be edited or resent.
 - **Drop target** (#2156): files dragged over the composer turn the card's own edge dashed
   `--text-dim` and change only the bar row, to "Drop to attach 2 images"; the draft and its
   attachments stay in view. A model without image input refuses the drop in the same row, with the
