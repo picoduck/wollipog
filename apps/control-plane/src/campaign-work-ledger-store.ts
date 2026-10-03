@@ -403,36 +403,63 @@ function cursorKey(parts: Record<string, unknown>): string {
   return JSON.stringify(Object.keys(parts).sort().map((key) => [key, parts[key] ?? null]));
 }
 
-/** `stamp` binds an ordering that can change without a ledger revision (the cost sort, which moves
- * as usage arrives); a cursor minted under another stamp is refused like a stale revision. */
-function encodeCursor(revision: number, key: string, offset: number, stamp?: string): string {
-  return Buffer.from(JSON.stringify({ v: 1, r: revision, k: key, o: offset, ...(stamp ? { s: stamp } : {}) }))
-    .toString("base64url");
+/**
+ * What a cursor binds besides its filter, sort, and revision, for orderings that move without a
+ * ledger revision. `stamp` binds the exact order its reader saw (the cost sort, which moves as usage
+ * arrives); a cursor minted under another stamp is refused like a stale revision. `at` is the time
+ * the order was evaluated at (the elapsed sort, where every open item keeps growing): each later
+ * page of the cursor is ordered at that same time, so within one revision its order cannot move.
+ */
+interface CursorBinding {
+  stamp?: string;
+  at?: number;
 }
 
-function decodeCursor(
-  cursor: string | undefined,
-  revision: number,
-  key: string,
-  stamp?: string,
-): LedgerResult<number> {
-  if (cursor === undefined) return done(0);
+/** A cursor whose shape and filter key were checked; `null` is the first page. */
+interface ParsedCursor {
+  revision: number;
+  offset: number;
+  stamp: unknown;
+  at: number | undefined;
+}
+
+function encodeCursor(revision: number, key: string, offset: number, binding: CursorBinding = {}): string {
+  return Buffer.from(JSON.stringify({
+    v: 1, r: revision, k: key, o: offset,
+    ...(binding.stamp ? { s: binding.stamp } : {}),
+    ...(binding.at !== undefined ? { t: binding.at } : {}),
+  })).toString("base64url");
+}
+
+function parseCursor(cursor: string | undefined, key: string): LedgerResult<ParsedCursor | null> {
+  if (cursor === undefined) return done(null);
   try {
     const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as
-      { v?: unknown; r?: unknown; k?: unknown; o?: unknown; s?: unknown };
+      { v?: unknown; r?: unknown; k?: unknown; o?: unknown; s?: unknown; t?: unknown };
     if (parsed.v !== 1 || !Number.isSafeInteger(parsed.r) || typeof parsed.k !== "string" ||
-        !Number.isSafeInteger(parsed.o) || (parsed.o as number) < 0) {
+        !Number.isSafeInteger(parsed.o) || (parsed.o as number) < 0 ||
+        (parsed.t !== undefined && (!Number.isSafeInteger(parsed.t) || (parsed.t as number) < 0))) {
       return fail("cursor is malformed");
     }
     if (parsed.k !== key) return fail("cursor belongs to a different filter or sort");
-    if (parsed.r !== revision || (parsed.s ?? undefined) !== stamp) {
-      return fail("the campaign ledger changed since this cursor was issued; restart from the first page", 409,
-        { code: CAMPAIGN_WORK_REVISION_CHANGED, revision });
-    }
-    return done(parsed.o as number);
+    return done({ revision: parsed.r as number, offset: parsed.o as number, stamp: parsed.s, at: parsed.t as number | undefined });
   } catch {
     return fail("cursor is malformed");
   }
+}
+
+function cursorOffset(cursor: ParsedCursor | null, revision: number, binding: CursorBinding = {}): LedgerResult<number> {
+  if (!cursor) return done(0);
+  if (cursor.revision !== revision || (cursor.stamp ?? undefined) !== binding.stamp || cursor.at !== binding.at) {
+    return fail("the campaign ledger changed since this cursor was issued; restart from the first page", 409,
+      { code: CAMPAIGN_WORK_REVISION_CHANGED, revision });
+  }
+  return done(cursor.offset);
+}
+
+function decodeCursor(cursor: string | undefined, revision: number, key: string): LedgerResult<number> {
+  const parsed = parseCursor(cursor, key);
+  return parsed.ok ? cursorOffset(parsed.data, revision) : parsed;
 }
 
 function pageLimit(limit: unknown): LedgerResult<number> {
@@ -1637,9 +1664,15 @@ export class CampaignWorkLedgerStore {
       (query.origin === undefined || summary.origin === query.origin) &&
       (state === "all" || (state === "unfinished" ? unfinished.has(summary.primaryState)
         : state === "finished" ? FINISHED_STATES.has(summary.primaryState) : summary.primaryState === state)));
+    const cursor = parseCursor(query.cursor, key);
+    if (!cursor.ok) return cursor;
+    // Elapsed grows for every open item, so an open item overtakes a finished one with no revision
+    // to show it. Every page of one cursor is therefore ordered at the time its first page was; a
+    // cursor minted without that time orders at now and is refused as stale below.
+    const at = sort === "elapsed" ? cursor.data?.at ?? now : undefined;
     // An item that never started shows its recorded age, so it sorts by that age too.
     const elapsed = (summary: CampaignWorkItemSummary) =>
-      (summary.elapsed.endedAt ?? now) - (summary.elapsed.startedAt ?? summary.createdAt);
+      (summary.elapsed.endedAt ?? at ?? now) - (summary.elapsed.startedAt ?? summary.createdAt);
     const byQueue = (a: CampaignWorkItemSummary, b: CampaignWorkItemSummary) =>
       (a.queuePosition ?? Number.MAX_SAFE_INTEGER) - (b.queuePosition ?? Number.MAX_SAFE_INTEGER) ||
       a.createdAt - b.createdAt || a.id.localeCompare(b.id);
@@ -1650,15 +1683,18 @@ export class CampaignWorkLedgerStore {
       : sort === "elapsed" ? (a, b) => elapsed(b) - elapsed(a) || byQueue(a, b)
       : sort === "cost" ? (a, b) => cost(b) - cost(a) || byQueue(a, b)
       : byQueue);
-    const stamp = sort === "cost" ? this.accounting.orderStamp(campaignId, rows.map((row) => row.id)) : undefined;
-    const offset = decodeCursor(query.cursor, snapshot.revision, key, stamp);
+    const binding: CursorBinding = {
+      ...(sort === "cost" ? { stamp: this.accounting.orderStamp(campaignId, rows.map((row) => row.id)) } : {}),
+      ...(at !== undefined ? { at } : {}),
+    };
+    const offset = cursorOffset(cursor.data, snapshot.revision, binding);
     if (!offset.ok) return offset;
     const items = rows.slice(offset.data, offset.data + limit.data);
     const end = offset.data + items.length;
     return done({
       revision: snapshot.revision,
       items,
-      nextCursor: end < rows.length ? encodeCursor(snapshot.revision, key, end, stamp) : null,
+      nextCursor: end < rows.length ? encodeCursor(snapshot.revision, key, end, binding) : null,
       total: rows.length,
     });
   }

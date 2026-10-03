@@ -195,7 +195,14 @@ revision. Observed changes increment it too, as Observed Invalidation describes.
 orders by measured item cost, highest first; items with nothing measured yet follow in queue order.
 That order moves without a ledger revision, both as usage arrives and as the reader's cost
 visibility changes. A `cost`-sorted cursor is therefore also bound, by a keyed digest, to the exact
-order its reader saw, and is refused with `409 revision_changed` once that order differs.
+order its reader saw, and is refused with `409 revision_changed` once that order differs. The
+`elapsed` sort also moves without a revision, because every open item keeps growing and overtakes
+finished ones. An `elapsed`-sorted cursor therefore carries the time its first page was ordered at,
+and every later page of it is ordered at that same time. Within one revision every item's elapsed
+bounds are fixed, so the walk keeps the first page's order exactly: it neither skips nor repeats an
+item, however long the reader takes. A fresh first page orders at the current time. An `elapsed`
+cursor without that time (minted before it was bound) is refused with `409 revision_changed`, so
+the client restarts.
 
 ## Read API
 
@@ -221,8 +228,9 @@ order its reader saw, and is refused with `409 revision_changed` once that order
   - `GET /api/sessions/:id/campaign/work-items?cursor&limit&origin&state&sort` returns a
     `CampaignWorkItemsPage`. The default filter is `unfinished`, the default sort is `queue`
     (queue position, then creation). The cursor is opaque and bound to the filter, sort, and
-    revision; a cursor from another revision returns `409 {code: "revision_changed", revision}` and
-    the client restarts from the first page.
+    revision, and, for the `cost` and `elapsed` sorts, to the order its first page saw (see the
+    Orchestrator routes above). A cursor from another revision returns
+    `409 {code: "revision_changed", revision}` and the client restarts from the first page.
   - `GET /api/sessions/:id/campaign/work-items/:itemId` returns a `CampaignWorkItemDetailResponse`.
   - `GET /api/sessions/:id/campaign/recommendations?cursor&limit&disposition` returns a
     `CampaignRecommendationsPage`: recommendations awaiting adjudication or publication, and
@@ -274,6 +282,15 @@ mechanism (`apps/control-plane/src/campaign-work-observation.ts`):
   invalidate.
 - A stored forge fact (slice 8) whose value or availability changes schedules the same coalesced
   revision and root refresh. A read that only renews the observation time moves nothing.
+- Usage attributed to a campaign (see Usage Attribution) schedules the same coalesced root refresh
+  **without** a revision increment. Cost is not part of the revision: the summary reads it fresh
+  outside the cached ledger part, and the `cost` sort binds its own cursors. Moving the revision
+  would restart every reader's paging each window for as long as any child streams tokens. The
+  attribution observer runs inside the usage transaction and only schedules, so a rolled-back delta
+  costs at most one needless refresh and a failing observer never fails the usage write. A token
+  stream therefore costs at most one root refresh per campaign per window. The re-sent root carries
+  the new summary cost under the root audience's masking. Work-item rows and details read their
+  cost when they next load (a new revision, a reconnect, a reload, or opening an item).
 
 The revision therefore counts ledger writes and observed changes; reads still never move it. The
 alternative of leaving observations out of the revision was rejected because a list stitched across
@@ -607,3 +624,10 @@ starting contract. This document refines it as follows:
     are retained with the ledger, not by the usage retention policy. Holds and pending decisions are
     not part of the recorded intervals. Campaign completion time is the projection's first
     observation of `verified_complete`.
+28. **Elapsed cursors carry their evaluation time.** The contract bound cursors to the revision
+    only. An `elapsed` order moves with the clock, so its cursor also binds the time its first page
+    was ordered at, instead of being refused whenever the clock moves. The cursor stays opaque, and
+    no protocol version changes.
+29. **Usage refreshes the root without a revision.** Member usage re-sends the root, coalesced per
+    campaign with the observed changes, so the embedded summary and the panel follow cost within one
+    window. No ledger write and no protocol change are involved.
