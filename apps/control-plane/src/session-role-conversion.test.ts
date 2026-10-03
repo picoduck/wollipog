@@ -90,11 +90,11 @@ test("conversion is human-only: neither agent role can call the role routes", ()
 });
 
 test("unsupported peers and incompatible permissions/isolation fail before dispatch or state change", async () => {
-  const h = harness("normal", 197);
+  const h = harness("normal", 198);
   try {
     const before = h.db.getSession("s");
-    assert.match(h.conversions.preview("s", "orchestrator", h.defaults, () => null).reason!, /protocol v198/);
-    await assert.rejects(h.conversions.change("s", "orchestrator", "normal", h.defaults, () => null), /protocol v198/);
+    assert.match(h.conversions.preview("s", "orchestrator", h.defaults, () => null).reason!, /protocol v199/);
+    await assert.rejects(h.conversions.change("s", "orchestrator", "normal", h.defaults, () => null), /protocol v199/);
     assert.deepEqual(h.db.getSession("s"), before);
     assert.equal(h.commands.length, 0);
   } finally { h.db.close(); }
@@ -330,9 +330,9 @@ test("an interrupted conversion cannot retry or reconcile through an older peer"
       throw new Error("disconnected");
     };
     await assert.rejects(h.conversions.change("s", "orchestrator", "normal", h.defaults, () => null), /disconnected/);
-    h.db.registerRunner(h.metadata, Date.now(), 197);
+    h.db.registerRunner(h.metadata, Date.now(), 198);
     h.conversions.reconcile("r", { id: "s", roleConversionReceipt: { conversionId: command!.conversionId, state: "prepared" } });
-    await assert.rejects(h.conversions.change("s", "orchestrator", "normal", h.defaults, () => null), /protocol v198/);
+    await assert.rejects(h.conversions.change("s", "orchestrator", "normal", h.defaults, () => null), /protocol v199/);
     assert.equal(h.db.getSession("s")!.role, "normal");
     assert.equal(h.db.sessionRoleConversionPending("s"), true);
   } finally { h.db.close(); }
