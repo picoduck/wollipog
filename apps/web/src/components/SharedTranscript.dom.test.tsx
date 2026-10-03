@@ -135,7 +135,7 @@ test("a person's message is a right-aligned bubble, and no internal word is visi
     assert.equal(bubble.querySelector("code")?.textContent, "login", "with the inline markdown profile");
     assert.equal(items[0]!.className, "", "the first turn starts at the top");
     assert.equal(items[2]!.className, "tl-turn-start", "a later message from the person starts a new turn");
-    assert.equal(items[3]!.querySelector(".tl-interrupted")?.textContent, "Stopped");
+    assert.equal(items[3]!.querySelector(".tl-turn-footer .tl-turn-stopped")?.textContent, "Stopped", "a stop is a footer fact (#2169)");
 
     const text = view.container.textContent ?? "";
     for (const word of ["USER", "ASSISTANT", "User", "Assistant", "Operational", "operationally", "capability", "Turn interrupted"]) {

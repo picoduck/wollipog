@@ -63,7 +63,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       await expect(reply.getByRole("table")).toBeVisible();
       await expect(reply.locator("pre code")).toContainText("await page.waitForURL");
       await expect(page.locator(".share-main").locator("img, video")).toHaveCount(0);
-      await expect(page.locator(".tl-interrupted")).toHaveText("Stopped");
+      await expect(page.locator(".tl-turn-footer .tl-turn-stopped")).toHaveText("Stopped");
       await expect(page.locator(".share-page")).not.toContainText(/USER|ASSISTANT|Operational|operationally|capability/);
 
       // A person's message hugs the column's right edge; a reply starts at its left edge.

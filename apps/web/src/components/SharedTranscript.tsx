@@ -3,7 +3,7 @@ import type { OperationalTranscriptMessage, PublicTranscriptShare } from "@wolli
 import { CONTROL_PLANE_HTTP } from "../config.js";
 import { transcriptShareRequest } from "../transcript-share-client.js";
 import { sharePageExpiryLabel } from "../transcript-share-time.js";
-import { LinkIcon } from "./Icons.js";
+import { LinkIcon, StopTurnIcon } from "./Icons.js";
 import { Markdown } from "./Markdown.js";
 import { Notice } from "./Notice.js";
 import { State } from "./State.js";
@@ -37,12 +37,17 @@ export function sharedTranscriptTitle(share: PublicTranscriptShare): string | nu
 /**
  * One projected message in the transcript's own recipes (#2151, #2152): a person's message is a
  * right-aligned bubble with the inline profile, a reply is unframed document markdown, and an
- * interruption is a quiet Stopped line. No media is embedded: an anonymous viewer gets plain links,
+ * interruption is a quiet Stopped footer line. No media is embedded: an anonymous viewer gets plain links,
  * and raw HTML stays disabled in both profiles.
  */
 function SharedMessage({ message }: { message: OperationalTranscriptMessage }) {
   if (isInterruption(message)) {
-    return <div className="tl-interrupted"><span>Stopped</span></div>;
+    // A stop is a footer fact (#2169); the projection records no time, so the footer names none.
+    return (
+      <div className="tl-turn-footer">
+        <span className="tl-turn-time tl-turn-stopped"><StopTurnIcon size={14} aria-hidden="true" />Stopped</span>
+      </div>
+    );
   }
   if (message.role === "user") {
     return (
