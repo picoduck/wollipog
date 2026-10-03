@@ -1,0 +1,39 @@
+{
+  "expectedGypPreimageSha256": "6be40699da2d2211561997eed87313780bd6cd58ffce021d4e83cfa96580450d",
+  "expectedMainPreimageSha256": "c946687691d86754f5d53560b54a70d17cfed62bf23158ac457497b8b912d740",
+  "proposedInputs": [
+    {
+      "bytes": 4496,
+      "name": "node_main.cc",
+      "sha256": "f2fbaad7819251f1f3f5a4c1b747675377152785e87717f957f19072846fff2e"
+    },
+    {
+      "bytes": 52527,
+      "name": "node.gyp",
+      "sha256": "a6ed8cc8705d1eca146f385e5866848650f35e1e1d53999efbeba509913f9168"
+    },
+    {
+      "bytes": 49,
+      "name": "minimal.cjs",
+      "sha256": "44f9550c31c43fb9d7b3b367c1ebb2b460382ebda4c54bb26ceb17b6705a29b9"
+    },
+    {
+      "bytes": 28472,
+      "name": "helper-input.c",
+      "sha256": "c4917ca16a7eb5d94b0862ce74d672c10c720c18c2bcc200fb880f17cacd4b69"
+    },
+    {
+      "bytes": 4840137,
+      "name": "postject-api.js",
+      "sha256": "88931f26b4d3e99e08dc8219a45f576986952fad4d0c78444d27048232b2881b"
+    },
+    {
+      "bytes": 13409,
+      "name": "postject-LICENSE",
+      "sha256": "6546657539feb5b454f400db317e71fa39ff5cd048fa5d78ae0ada2df72f1ea7"
+    }
+  ],
+  "sourceArchive": "https://nodejs.org/dist/v24.18.1/node-v24.18.1.tar.xz",
+  "sourceArchiveSha256": "86d40d594bbdfcf69009a62fdf43cb19ae72b6cb5822d2bdd8349c5a1b2fa628",
+  "unmodifiedSourceCommit": "9623d9ad85d37d2f0610ec4a82b48182cf2c6061"
+}
