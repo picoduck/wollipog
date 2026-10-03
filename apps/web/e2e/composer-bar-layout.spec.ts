@@ -369,8 +369,10 @@ for (const { name, query, reason } of [
       const box = page.locator(".composer-box");
       await expect(box).toHaveClass(/is-disabled/);
       await expect(page.locator(".composer-input")).toHaveAttribute("placeholder", reason);
+      // + stays openable on a paused composer (#2175), so Guardrails can still be read; the menu's
+      // rows that act refuse with the reason instead.
       const plus = page.getByRole("button", { name: "Add and Modes" });
-      await expect(plus).toBeDisabled();
+      await expect(plus).toBeEnabled();
       const controls = [
         page.getByRole("button", { name: /^Permission Mode:/ }),
         page.getByRole("button", { name: /^Model Settings:/ }),
@@ -390,7 +392,6 @@ for (const { name, query, reason } of [
         tokenColor(page, "--text-dim"), tokenColor(page, "--bg"), tokenColor(page, "--bg-elev"),
       ]);
       const inks = {
-        plus: await plus.evaluate((element) => getComputedStyle(element).color),
         shield: await controls[0]!.evaluate((element) => getComputedStyle(element.querySelector("svg")!).color),
         modelName: await controls[1]!.locator(".cbar-model").evaluate((element) => getComputedStyle(element).color),
         agentMark: await controls[1]!.locator(".agent-icon").evaluate((element) => getComputedStyle(element).color),
@@ -402,6 +403,7 @@ for (const { name, query, reason } of [
         expect(contrast(ink, elev), `${control} stays legible on --bg-elev`).toBeGreaterThanOrEqual(3);
       }
       expect(new Set(Object.values(inks)).size, "one disabled ink, agent mark included").toBe(1);
+      expect(await plus.evaluate((element) => getComputedStyle(element).color), "+ keeps its rest ink").not.toBe(inks.shield);
     });
   }
 }
@@ -579,9 +581,10 @@ test("controls disabled while open or unrestricted take the disabled ink (#2174)
   const plus = page.getByRole("button", { name: "Add and Modes" });
   await plus.click();
   await expect(plus).toHaveAttribute("aria-expanded", "true");
-  // The runner drops while the menu is open: the trigger is disabled with its menu still showing.
+  // The runner drops while the menu is open: + stays enabled with its menu still showing (#2175),
+  // while the bar's other controls take the disabled ink.
   await page.evaluate(() => window.setSessionUsageRunnerOnline(false));
-  await expect(plus).toBeDisabled();
+  await expect(plus).toBeEnabled();
   const ink = await disabledInk(page);
   const shield = page.getByRole("button", { name: /^Permission Mode:/ });
   await expect(shield).toBeDisabled();
@@ -591,12 +594,12 @@ test("controls disabled while open or unrestricted take the disabled ink (#2174)
     .filter((animation) => animation instanceof CSSTransition)
     .map((animation) => animation.finished.catch(() => undefined))));
   const painted = {
-    plus: await plus.evaluate((element) => getComputedStyle(element).color),
     shieldIcon: await shield.locator(".cbar-approvals").evaluate((element) => getComputedStyle(element).color),
     model: await chip.locator(".cbar-model").evaluate((element) => getComputedStyle(element).color),
     context: await chip.locator(".cbar-context").evaluate((element) => getComputedStyle(element).color),
   };
-  expect(painted).toEqual({ plus: ink, shieldIcon: ink, model: ink, context: ink });
+  expect(painted).toEqual({ shieldIcon: ink, model: ink, context: ink });
+  expect(await plus.evaluate((element) => getComputedStyle(element).color), "+ is not painted disabled").not.toBe(ink);
 });
 
 test.describe("390px phone with Plan on", () => {
