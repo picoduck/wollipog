@@ -48,13 +48,17 @@ branch first**, because that is what decides whether anything is required at all
   here and the message is permanent. CI still runs — `.github/workflows/ci.yml` has no branch filter
   on `pull_request` — so jobs will appear and pass while `--required` stays empty forever. The job
   list cannot tell you which case you are in; the base branch can.
-- **Draft pull request.** A run is created, but every job is guarded on `draft == false` — including
-  the aggregator, which carries that guard alongside its `always()` — so all of them skip and the
-  required context never appears. Skipped is not pending: waiting will not help. Mark it ready for
-  review, which re-triggers CI.
+- **Draft pull request.** PR jobs admit `draft == false` or `ready_for_review`; the latter also
+  admits a stale draft payload. Other draft events skip all jobs, including the aggregator.
+  Skipped is not pending: waiting will not help. Mark it ready for review, which re-triggers CI.
 - **No run at all.** Waiting cannot resolve this, whatever the cause — a fork pull request awaiting
   approval, a pull request GitHub cannot build a merge ref for, an explicit skip directive, and
   others. Do not enumerate; find out why this pull request has no run and fix that.
+
+On admitted PR runs, the aggregator uses `!cancelled()` so whole-workflow cancellation can cancel it.
+While the PR workflow remains active, failed, cancelled, or skipped dependencies still reach its
+failure-reporting shell. Non-PR aggregation remains unconditional, including after cancellation.
+See `docs/ci-aggregation.md` for the exact predicate and verification limits.
 
 `Browser End-to-End Tests` is the long pole at roughly 20–30 minutes, and the merge group re-runs it,
 so expect that wait twice: once on the branch and once after enqueueing.
