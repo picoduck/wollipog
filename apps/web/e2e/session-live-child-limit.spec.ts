@@ -114,3 +114,28 @@ test("at 390×844 Guardrails is a bottom sheet with full-width fields and a foot
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: `${SHOT}/mobile.png` });
 });
+
+test.describe("on a coarse pointer", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  test("opening Guardrails focuses no field until one is tapped", async ({ page }) => {
+    await openSession(page);
+    expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches),
+      "this emulation must report the coarse pointer the rule is keyed on").toBe(true);
+    await page.getByRole("button", { name: "Add and Modes" }).tap();
+    await page.getByRole("button", { name: "Guardrails…" }).tap();
+    const dialog = page.getByRole("dialog", { name: "Guardrails" });
+    await expect(dialog).toBeVisible();
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    const focused = await page.evaluate(() => {
+      const active = document.activeElement;
+      return { tag: active?.tagName.toLowerCase() ?? null, inDialog: Boolean(active?.closest('[role="dialog"]')) };
+    });
+    expect(["input", "textarea", "select"], "no field may raise the keyboard as the sheet opens").not.toContain(focused.tag);
+    expect(focused.inDialog, "focus still moves into the sheet").toBe(true);
+
+    const recurring = dialog.getByRole("textbox", { name: "Recurring Cost Threshold" });
+    await recurring.tap();
+    await expect(recurring).toBeFocused();
+  });
+});
