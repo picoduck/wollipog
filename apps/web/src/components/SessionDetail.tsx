@@ -3860,10 +3860,13 @@ function SessionDetailLoaded({
   }
   if (accountSwitchFailure && accountSwitchFailedOrder) {
     const failure = accountSwitchFailure;
-    // A personal identifier is never inlined, masked or not: the sentence names the account by role.
+    // With hiding enabled, generated account sentences name an email-shaped account by role.
     const account = privacy.hide && isPersonalIdentifier(failure.providerAccountLabel)
       ? "the selected account"
       : failure.providerAccountLabel;
+    const reason = privacy.hide ? redactPersonalIdentifiers(failure.reason, "the selected account") : failure.reason;
+    // An email's local part can be case-sensitive; sentence formatting must not change it.
+    const capitalizeReason = privacy.hide || !isPersonalIdentifier(reason.trim().split(/\s/u)[0]);
     const switchReason = !accountSwitchSupported
       ? runnerCapabilityRequirement(runner?.protocolVersion, "sessionProviderAccountSwitch", "session account switching")
       : runnerOfflineReason;
@@ -3890,7 +3893,7 @@ function SessionDetailLoaded({
           )}>
           <p>
             Wollipog couldn&rsquo;t continue with {account}.
-            {" "}{asSentence(privacy.hide ? redactPersonalIdentifiers(failure.reason, "the selected account") : failure.reason)}
+            {" "}{asSentence(reason, capitalizeReason)}
           </p>
           {accountSwitchApplicable && switchReason !== null && (
             <p className="notice-meta" id="account-switch-refusal">{switchReason}</p>
@@ -7326,10 +7329,10 @@ export function EarlierActivityControl({
 
 /** A runner-written fragment ("Install Dependencies exited with 1", "the provider conversation
  * cannot be resumed…") as a sentence of its own: capitalized, with closing punctuation. */
-function asSentence(text: string): string {
+function asSentence(text: string, capitalize = true): string {
   const trimmed = text.trim();
   if (!trimmed) return trimmed;
-  const capitalized = trimmed[0]!.toUpperCase() + trimmed.slice(1);
+  const capitalized = capitalize ? trimmed[0]!.toUpperCase() + trimmed.slice(1) : trimmed;
   return /[.!?…]$/u.test(capitalized) ? capitalized : `${capitalized}.`;
 }
 

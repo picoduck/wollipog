@@ -184,11 +184,11 @@ for (const [width, theme] of [[390, "light"], [1440, "dark"]] as const) {
     await creation.getByRole("dialog").screenshot({ path: join(evidenceDir, `new-session-${width}-${theme}-on.png`) });
     await creation.getByRole("button", { name: "Show Emails" }).click();
     await account.click();
-    await creation.getByRole("option", { name: /personal\.me@example/ }).click();
+    await creation.getByRole("option", { name: /work\.me@example\.org/ }).click();
     await expect(account).toHaveAccessibleName(/Hidden Account/);
     await expect(creation.getByRole("button", { name: "Show Emails" })).toBeVisible();
     await privacy.click();
-    await expect(account).toHaveAccessibleName(/personal\.me@example/);
+    await expect(account).toHaveAccessibleName(/work\.me@example\.org/);
     await creation.close();
   });
 }
@@ -217,4 +217,22 @@ test("default account settings follow privacy and changing their selection reset
   await expect(management.getByRole("option", { name: /Hidden Account/ })).toBeVisible();
   expect(await management.getByRole("listbox").innerHTML()).not.toContain("work@example.com");
   await management.close();
+});
+
+test("a Switch Account candidate selection preserves the keyboard reveal until the surface reopens", async ({ page, context }) => {
+  await page.goto("/settings-rows-e2e.html?section=behavior");
+  await page.getByRole("switch", { name: "Hide Account Emails" }).click();
+  const accounts = await context.newPage();
+  const picker = await openPicker(accounts);
+  await picker.getByRole("button", { name: "Show Emails" }).click();
+  const candidate = picker.getByRole("radio").nth(2);
+  await candidate.focus();
+  await accounts.keyboard.press("Space");
+  await expect(candidate).toBeChecked();
+  await expect(picker).toContainText("spare.me@example.org");
+  await expect(picker.getByRole("button", { name: "Hide Emails" })).toBeVisible();
+  await picker.getByRole("button", { name: "Cancel", exact: true }).click();
+  const reopened = await openPicker(accounts);
+  expect(await reopened.innerHTML()).not.toContain("@example.");
+  await accounts.close();
 });

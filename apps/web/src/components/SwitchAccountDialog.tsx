@@ -180,7 +180,7 @@ export function SwitchAccountDialog({
   // One deliberate reveal for every row (rows are radios inside labels and cannot nest a control),
   // bound to this exact list so a changed list starts hidden again.
   const shownLabels = [...(current && !current.removedFrom ? [current.label] : []), ...accounts.map((account) => account.label)];
-  const [revealed, toggleReveal] = useAccountIdentifierReveal(JSON.stringify([session.id, currentId, selectedId, current?.label, accounts.map((account) => [account.id, account.label])]));
+  const [revealed, toggleReveal] = useAccountIdentifierReveal(JSON.stringify([session.id, currentId, current?.label, accounts.map((account) => [account.id, account.label])]));
 
   // A message sent while the session waits for sign-in stays with that sign-in (#1668), so the body
   // promises the queue moves only when nothing is waiting for authentication.

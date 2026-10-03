@@ -407,7 +407,7 @@ test("an open account failure follows privacy without adding a local reveal cont
   try {
     const notice = fixture.notices()[0]!;
     assert.equal(notice.querySelector(".notice-body")?.textContent,
-      "Wollipog couldn’t continue with ada@example.com. Ada@example.com has no usage headroom.");
+      "Wollipog couldn’t continue with ada@example.com. ada@example.com has no usage headroom.");
     await act(async () => setHideAccountEmails(true));
     assert.equal(notice.querySelector(".notice-body")?.textContent,
       "Wollipog couldn’t continue with the selected account. The selected account has no usage headroom.");
