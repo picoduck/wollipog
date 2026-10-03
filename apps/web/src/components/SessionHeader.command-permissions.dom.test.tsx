@@ -361,3 +361,38 @@ test("a running turn keeps Fork Conversation… disabled with its reason; a sess
     await noWorktree.unmount();
   }
 });
+
+test("Restart Session restarts with or without the page's callbacks, telling them in order (#2169)", async () => {
+  const session = { id: "session-stopped", runnerId: "runner-1", title: "Stopped", status: "stopped", archived: false } as SessionView;
+  const bare: string[] = [];
+  const header = await renderHeader(session, bare);
+  try {
+    await act(async () => { menuItem(page(), "Restart Session").click(); await tick(); });
+    assert.deepEqual(bare, ["restart:session-stopped"], "a header mounted without the callbacks still restarts");
+  } finally {
+    await header.unmount();
+  }
+  const told: string[] = [];
+  const wired = await renderHeader(session, told, false, {
+    onRestartPendingChange: (pending) => told.push(`pending:${pending}`),
+    onRestarted: (restarted) => told.push(`restarted:${restarted.id}`),
+  });
+  try {
+    await act(async () => { menuItem(page(), "Restart Session").click(); await tick(); });
+    assert.deepEqual(told, ["pending:true", "restart:session-stopped", "restarted:session-stopped", "pending:false"],
+      "the restarted session is applied before the restart stops counting as in flight");
+  } finally {
+    await wired.unmount();
+  }
+  const blocked: string[] = [];
+  const waiting = await renderHeader(session, blocked, false, { restartBlockedReason: "Wait for Retry Turn to finish." });
+  try {
+    const restart = menuItem(page(), "Restart Session");
+    assert.equal(restart.disabled, true);
+    assert.equal(description(restart), "Wait for Retry Turn to finish.");
+    await act(async () => { restart.click(); await tick(); });
+    assert.deepEqual(blocked, []);
+  } finally {
+    await waiting.unmount();
+  }
+});

@@ -560,7 +560,8 @@ export function SessionHeader({
               void run(async () => {
                 onRestartPendingChange?.(true);
                 try {
-                  onRestarted?.(await api.restart(session.id));
+                  const restarted = await api.restart(session.id);
+                  onRestarted?.(restarted);
                 } finally {
                   onRestartPendingChange?.(false);
                 }
