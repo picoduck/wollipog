@@ -127,9 +127,27 @@ test("a missing combined context/tier rate cannot fall back to a cheaper short-c
 
 test("an incomplete published context premium stays unpriced instead of disappearing", () => {
   const table = parseRateTable({ example: { input_cost_per_token: 1, output_cost_per_token: 1,
-    input_cost_per_token_above_272k_tokens: 2, output_cost_per_token_above_272k_tokens: 3 } });
+    input_cost_per_token_above_272k_tokens: 2 } });
   const buckets = { uncachedInputTokens: 1, cachedInputTokens: 0, cacheCreationTokens: 0, outputTokens: 1 };
   assert.equal(priceUsage(table, "example", buckets, null, { serviceTier: "default", requestInputTokens: 300000 }).costSource, "unpriced");
   assert.equal(priceUsage(table, "example", buckets, null, { serviceTier: "default" }).costSource, "unpriced");
   assert.equal(priceUsage(table, "example", buckets, null, { serviceTier: "default", requestInputTokens: 100 }).costUsd, 2);
+});
+
+test("published OpenAI variants price zero cache writes without inventing a write rate", () => {
+  // LiteLLM gpt-5.5 publishes these priority fields with no cache-creation field.
+  const table = parseRateTable({ "gpt-5.5": { input_cost_per_token: 5e-6, output_cost_per_token: 30e-6,
+    cache_read_input_token_cost: 0.5e-6, input_cost_per_token_priority: 12.5e-6,
+    output_cost_per_token_priority: 75e-6, cache_read_input_token_cost_priority: 1.25e-6,
+    input_cost_per_token_above_272k_tokens: 10e-6, output_cost_per_token_above_272k_tokens: 45e-6,
+    cache_read_input_token_cost_above_272k_tokens: 1e-6 } });
+  const buckets = { uncachedInputTokens: 1000, cachedInputTokens: 1000, cacheCreationTokens: 0, outputTokens: 100 };
+  const fast = priceUsage(table, "gpt-5.5", buckets, null, { serviceTier: "fast", requestInputTokens: 2000 });
+  assert.equal(fast.costSource, "modelPriced");
+  assert.ok(Math.abs(fast.costUsd - 0.02125) < 1e-12);
+  assert.ok(Math.abs(fast.cacheSavingsUsd - 0.01125) < 1e-12);
+  const long = priceUsage(table, "gpt-5.5", buckets, null, { serviceTier: "default", requestInputTokens: 300000 });
+  assert.ok(Math.abs(long.costUsd - 0.0155) < 1e-12);
+  assert.equal(priceUsage(table, "gpt-5.5", { ...buckets, cacheCreationTokens: 1 }, null,
+    { serviceTier: "fast", requestInputTokens: 2000 }).costSource, "unpriced");
 });

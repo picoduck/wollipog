@@ -12022,7 +12022,7 @@ export class ControlPlaneDb {
       (target.costMicrousd === current.cost_microusd && snapshotRemainder > current.cost_remainder_picousd);
     let pricedRemainderPicousd: number | null = null;
     const residualPriced = providerCostGrew
-      ? { costSource: "providerReported" as const, costMicrousd: residual.costMicrousd }
+      ? { costSource: snapshot.costIsEstimate ? "modelPriced" as const : "providerReported" as const, costMicrousd: residual.costMicrousd }
       : residualTokens
         ? (() => {
             const priced = priceUsage(this.usageRateTable, dimensions?.model, {

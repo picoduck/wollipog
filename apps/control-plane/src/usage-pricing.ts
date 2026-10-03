@@ -8,12 +8,19 @@ import type { UsageCostSource } from "@wollipog/protocol";
  * lives in `usage-rate-table.ts`.
  */
 
+interface RequestModelRate {
+  inputCostPerToken: number;
+  outputCostPerToken: number;
+  cacheReadCostPerToken?: number;
+  cacheCreationCostPerToken?: number;
+}
+
 export interface ModelRate {
   inputCostPerToken: number;
   outputCostPerToken: number;
   cacheReadCostPerToken: number;
   cacheCreationCostPerToken: number;
-  requestRates?: { serviceTier: string; inputThreshold?: number; rate?: ModelRate }[];
+  requestRates?: { serviceTier: string; inputThreshold?: number; rate?: RequestModelRate }[];
 }
 
 export type RateTable = ReadonlyMap<string, ModelRate>;
@@ -113,8 +120,8 @@ export function parseRateTable(document: unknown): RateTable {
       const values = ["input_cost_per_token", "output_cost_per_token", "cache_read_input_token_cost", "cache_creation_input_token_cost"]
         .map((prefix) => finiteNonNegative(entry[`${prefix}_${suffix}`]));
       requestRates.push({ serviceTier: tier, ...(threshold ? { inputThreshold: Number(threshold[1]) * 1000 } : {}),
-        ...(values.some((value) => value === null) ? {} : {
-          rate: { inputCostPerToken: values[0]!, outputCostPerToken: values[1]!, cacheReadCostPerToken: values[2]!, cacheCreationCostPerToken: values[3]! },
+        ...(values[0] === null || values[1] === null ? {} : {
+          rate: { inputCostPerToken: values[0]!, outputCostPerToken: values[1]!, ...(values[2] === null ? {} : { cacheReadCostPerToken: values[2]! }), ...(values[3] === null ? {} : { cacheCreationCostPerToken: values[3]! }) },
         }) });
     }
     table.set(key, {
@@ -177,7 +184,14 @@ export function priceUsage(
           ? Math.max(maximum, variant.inputThreshold) : maximum, 0);
       const candidate = variants.find((variant) => variant.serviceTier === tier &&
         (variant.inputThreshold ?? 0) === threshold);
-      rate = candidate ? candidate.rate ?? null : (tier === "default" && threshold === 0 ? base : null);
+      // An unpublished cache bucket matters only if this response used it. Never invent a
+      // premium write/read price or reject an OpenAI response with zero cache writes.
+      const selected = candidate ? candidate.rate : (tier === "default" && threshold === 0 ? base : undefined);
+      rate = !selected || buckets.cachedInputTokens > 0 && selected.cacheReadCostPerToken === undefined ||
+        buckets.cacheCreationTokens > 0 && selected.cacheCreationCostPerToken === undefined ? null : {
+          ...selected, cacheReadCostPerToken: selected.cacheReadCostPerToken ?? 0,
+          cacheCreationCostPerToken: selected.cacheCreationCostPerToken ?? 0,
+        };
     }
   }
   const cacheSavingsUsd = rate

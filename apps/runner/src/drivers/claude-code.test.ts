@@ -1012,6 +1012,53 @@ test("Claude 2.1.277+ resumes charge only newly accrued conversation cost", asyn
   driver.dispose();
 });
 
+
+for (const probeSucceeds of [true, false]) test(`cancelled resume probe settles the replacement prompt (${probeSucceeds ? "success" : "failure"})`, async () => {
+  const children: any[] = [];
+  let probe: any;
+  let probeId: string;
+  let idleCallback: (() => void) | null = null;
+  const driver = new ClaudeCodeDriver(
+    { ...baseOpts, agentVersion: "2.1.287", env: { [CLAUDE_PERSISTENT_FLAG]: "1" }, config: { permissionMode: "acceptEdits" } },
+    noopCb,
+    { spawn: (options: any) => {
+        const child = fakeProcess();
+        if (options.args.includes("--tools")) { probe = child; probeId = options.args[options.args.indexOf("--resume") + 1]; }
+        else children.push(child);
+        return child;
+      }, kill: () => {}, setTimer: (cb: () => void) => { idleCallback = cb; return { unref() {} } as any; },
+      clearTimer: () => { idleCallback = null; } } as any,
+  );
+  const first = driver.prompt("one");
+  await nextTask();
+  children[0].stdout.write(JSON.stringify({ type: "result", subtype: "success", total_cost_usd: 0.01 }) + "\n");
+  await first;
+  (idleCallback as unknown as () => void)();
+  children[0].emit("close", 0);
+  await nextTask();
+  const cancelled = driver.prompt("cancel during probe");
+  await nextTask();
+  assert.ok(probe);
+  driver.cancel();
+  assert.equal(await cancelled, "cancelled");
+  const replacement = driver.prompt("replacement");
+  await nextTask();
+  if (probeSucceeds) {
+    probe.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: probeId! }) + "\n");
+    probe.stdout.write(JSON.stringify({ type: "result", subtype: "success", session_id: probeId!, total_cost_usd: 0.01, usage: {} }) + "\n");
+  }
+  probe.emit("close", probeSucceeds ? 0 : 1);
+  await nextTask();
+  await nextTask();
+  if (probeSucceeds) {
+    assert.equal(children.length, 2, "the current prompt must start after the cancelled prompt's probe");
+    children[1].stdout.write(JSON.stringify({ type: "result", subtype: "success", total_cost_usd: 0.02 }) + "\n");
+  }
+  const outcome = await Promise.race([replacement, new Promise((resolve) => setTimeout(() => resolve("hung"), 100))]);
+  assert.equal(outcome, probeSucceeds ? "end_turn" : "refusal");
+  driver.dispose();
+});
+
 test("persistent interactive approvals reuse stdin across two turns", async () => {
   const child = fakeProcess();
   const writes: string[] = [];
@@ -3856,7 +3903,7 @@ test("result event -> token_usage then end_turn", () => {
       cachedInputTokens: 80,
       costUsd: 0.0123,
       costIsEstimate: true,
-      claudeUsageCheckpoint: { sessionId: (h.driver as any).sessionId, totalCostUsd: 0.0123, models: Object.create(null) },
+      claudeUsageCheckpoint: { sessionId: (h.driver as any).sessionId, totalCostUsd: 0.0123, models: Object.create(null), accountingScope: "process" },
     },
   ]);
 });
@@ -5282,4 +5329,15 @@ test("Claude conversation reset persists the new resume coordinate and resets it
   assert.deepEqual(h.establishedSessions, ["after-clear"]);
   assert.equal(h.driver.agentSessionId(), "after-clear");
   assert.deepEqual(h.events.filter((e) => e.kind === "token_usage").map((e) => e.costUsd), [0.03, 0.01]);
+});
+
+test("one-shot resume accounting probe failure resolves refusal rather than rejecting prompt", async () => {
+  const events: SessionEventPayload[] = [];
+  const driver = new ClaudeCodeDriver({ ...baseOpts, agentVersion: "2.1.287", env: { [CLAUDE_PERSISTENT_FLAG]: "0" } },
+    { ...noopCb, onEvent: (event) => events.push(event) },
+    { spawn: () => { throw new Error("probe transport unavailable"); }, kill: () => {} } as any);
+  (driver as any).firstTurn = false;
+  assert.equal(await driver.prompt("resume"), "refusal");
+  assert.ok(events.some((event) => event.kind === "error" && event.message.includes("baseline")));
+  driver.dispose();
 });

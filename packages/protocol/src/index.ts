@@ -4862,6 +4862,8 @@ export type AuthoritativeSubagentLifecycle =
  * `session/update` notifications onto these; the control plane assigns id/seq/ts.
  */
 export interface ClaudeUsageCheckpoint {
+  /** Prevent process-scoped totals from being subtracted from restored conversation totals. */
+  accountingScope?: "process" | "conversation";
   sessionId: string;
   totalCostUsd: number;
   models: Record<string, {
@@ -6621,6 +6623,8 @@ export interface SessionSnapshot {
   contextTokensUsed?: number;
   contextWindow?: number;
   costUsd: number;
+  /** Protocol 196: SDK-computed cost retains estimate provenance during snapshot catch-up. */
+  costIsEstimate?: true;
   /** True for sessions adopted from an external CLI transcript (gates the reprocess action). */
   adopted?: boolean;
   /** Highest event seq the runner holds for this session (its own monotonic counter). */

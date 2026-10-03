@@ -8647,3 +8647,13 @@ test("zeroed provider accounting is unpriced and historical Claude estimates rem
   assert.equal(usage.legacyClaudeCostRecords, 1);
   assert.equal(usage.totals.costUsd, 1.1);
 });
+
+test("new Claude snapshot catch-up preserves estimate provenance without a legacy warning", () => {
+  const db = withRunner();
+  db.createSessionFromSnapshot(snapshot({ id: "sdk-snapshot", driver: "claude-code", historyEpoch: 1,
+    seq: 1, tokensIn: 10, costUsd: 0.01, costIsEstimate: true }), "runner-1", 2000);
+  const usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10000, granularity: "hour" });
+  assert.equal(usage.totals.costUsd, 0.01);
+  assert.equal(usage.totals.costSource, "modelPriced");
+  assert.equal(usage.legacyClaudeCostRecords, 0);
+});

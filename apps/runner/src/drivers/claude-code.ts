@@ -1125,7 +1125,14 @@ export class ClaudeCodeDriver implements Driver {
   }
 
   private async promptOneShot(text: string, images?: PromptImage[], slashCommand?: string): Promise<StopReason> {
-    if (!this.firstTurn && this.usageAccounting.restoresUsage && !this.usageBaselinePrepared) await this.prepareResumeUsageBaseline();
+    if (!this.firstTurn && this.usageAccounting.restoresUsage && !this.usageBaselinePrepared) {
+      try { await this.prepareResumeUsageBaseline(); }
+      catch {
+        if (this.disposed) return "cancelled";
+        this.cb.onEvent({ kind: "error", message: "Claude resume accounting baseline could not be recovered." });
+        return "refusal";
+      }
+    }
     if (this.disposed) return "cancelled";
     this.usageBaselinePrepared = false;
     this.usageAccounting.beginProcess();
@@ -1401,11 +1408,14 @@ export class ClaudeCodeDriver implements Driver {
       this.usageBaselinePreparing = true;
       void this.prepareResumeUsageBaseline().then(() => {
         this.usageBaselinePreparing = false;
-        this.startPersistentTurn(turn);
+        const current = this.activePersistentTurn;
+        if (current) this.startPersistentTurn(current);
       }).catch(() => {
         this.usageBaselinePreparing = false;
+        if (this.disposed) return;
         this.cb.onEvent({ kind: "error", message: "Claude resume accounting baseline could not be recovered." });
-        this.settlePersistentTurn(turn, "refusal");
+        const current = this.activePersistentTurn;
+        if (current) this.settlePersistentTurn(current, "refusal");
       });
       return;
     }

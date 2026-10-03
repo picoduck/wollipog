@@ -3048,6 +3048,7 @@ export function metaToSnapshot(
     contextTokensUsed: m.contextTokensUsed,
     contextWindow: m.contextWindow,
     costUsd: m.costUsd,
+    ...(m.driver === "claude-code" && m.claudeUsageCheckpoint?.accountingScope ? { costIsEstimate: true as const } : {}),
     adopted: isAdoptedSession(m),
     seq: m.seq,
     historyEpoch: m.logEpoch ?? 0,

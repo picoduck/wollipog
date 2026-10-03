@@ -41,3 +41,13 @@ test("fork baseline excludes inherited spending and new conversation identity re
   assert.ok(Math.abs(fork.result("fork", result(0.03, 0.01))[0]!.costUsd! - 0.01) < 1e-10);
   assert.equal(fork.result("new", result(0.01, 0))[0]!.costUsd, 0.01);
 });
+
+test("CLI upgrades cannot compare process-scoped or unidentified baselines to restored totals", () => {
+  const old = new ClaudeUsageAccounting(false);
+  old.result("s", result(0.02, 0.01));
+  assert.equal(old.checkpoint!.accountingScope, "process");
+  const modern = new ClaudeUsageAccounting(true, old.checkpoint!);
+  assert.equal(modern.checkpoint, null, "the resume probe must seed the actual restored prefix");
+  const unidentified = { ...old.checkpoint!, accountingScope: undefined };
+  assert.equal(new ClaudeUsageAccounting(true, unidentified).checkpoint, null);
+});

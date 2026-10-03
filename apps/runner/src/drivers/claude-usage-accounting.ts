@@ -15,7 +15,7 @@ export function claudeRestoresUsage(version: string | undefined): boolean {
   return major! > 2 || major === 2 && (minor! > 1 || minor === 1 && patch! >= 277);
 }
 
-export function claudeUsageCheckpoint(sessionId: string, result: any): ClaudeUsageCheckpoint | null {
+export function claudeUsageCheckpoint(sessionId: string, result: any, restoresUsage = true): ClaudeUsageCheckpoint | null {
   const totalCostUsd = cost(result.total_cost_usd);
   if (totalCostUsd === undefined) return null;
   const models: Record<string, ModelUsage> = Object.create(null);
@@ -30,18 +30,18 @@ export function claudeUsageCheckpoint(sessionId: string, result: any): ClaudeUsa
       ...(usage.costBasis !== "unknown" && cost(usage.costUSD) !== undefined ? { costUSD: cost(usage.costUSD) } : {}),
     };
   }
-  return { sessionId, totalCostUsd, models };
+  return { sessionId, totalCostUsd, models, accountingScope: restoresUsage ? "conversation" : "process" };
 }
 
 /** result.usage is main-loop/per-turn; modelUsage and USD are cumulative and include children. */
 export class ClaudeUsageAccounting {
   checkpoint: ClaudeUsageCheckpoint | null;
   constructor(readonly restoresUsage: boolean, checkpoint?: ClaudeUsageCheckpoint) {
-    this.checkpoint = checkpoint ?? null;
+    this.checkpoint = checkpoint?.accountingScope === (restoresUsage ? "conversation" : "process") ? checkpoint : null;
   }
   beginProcess(): void { if (!this.restoresUsage) this.checkpoint = null; }
   result(sessionId: string, result: any, model?: string | null): UsageEvent[] {
-    const next = claudeUsageCheckpoint(sessionId, result);
+    const next = claudeUsageCheckpoint(sessionId, result, this.restoresUsage);
     const previous = this.checkpoint?.sessionId === sessionId ? this.checkpoint : null;
     // A crash can zero every counter. It neither erases a baseline nor proves free work.
     if (result.subtype === "error_during_execution" && next?.totalCostUsd === 0 &&
