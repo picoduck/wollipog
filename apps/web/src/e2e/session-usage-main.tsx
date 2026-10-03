@@ -361,6 +361,13 @@ if (params.get("images") === "none") {
     if (agent.capabilities) agent.capabilities.supportsImages = false;
   }
 }
+// An agent with a plan mode, so the + menu shows its Plan Mode row beside every other row (#2203).
+if (params.get("plan-mode") === "1") {
+  for (const agent of runner.agents) {
+    const modes = agent.capabilities?.permissionModes;
+    if (modes && !modes.includes("plan")) modes.push("plan");
+  }
+}
 if (params.get("action") === "stop") {
   session.status = "running";
   session.activeTurnId = "turn-1";
