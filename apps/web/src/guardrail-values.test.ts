@@ -90,6 +90,28 @@ test("a save sends every changed field together and nothing unchanged", () => {
   });
 });
 
+test("every limit the server accepted reopens as plain digits and saves unchanged", () => {
+  for (const session of [
+    { costBudgetUsd: 0.0000001, costCheckpointsUsd: [1e-7, 2], maxToolCalls: 1e21, maxChildSessions: 6 },
+    { costBudgetUsd: 1e21, costCheckpointsUsd: [1e22], maxToolCalls: 200, maxChildSessions: 6 },
+  ] satisfies GuardrailSession[]) {
+    const draft = guardrailDraft(session);
+    for (const text of Object.values(draft)) assert.doesNotMatch(text, /e/i, `${text} reads as an amount`);
+    assert.deepEqual(guardrailPatch(session, draft), { ok: true, patch: {} });
+    // An unchanged limit never blocks saving another field.
+    assert.deepEqual(guardrailPatch(session, { ...draft, maxChildSessions: "9" }), { ok: true, patch: { maxChildSessions: 9 } });
+  }
+  assert.equal(guardrailDraft({ ...none, costBudgetUsd: 0.0000001 }).costBudgetUsd, "0.0000001");
+  assert.equal(guardrailDraft({ ...none, costBudgetUsd: 1e21 }).costBudgetUsd, "1000000000000000000000");
+});
+
+test("a stored limit at or below 0 reads as none, as the server means it", () => {
+  const session: GuardrailSession = { costBudgetUsd: 0, costCheckpointsUsd: null, maxToolCalls: -1, maxChildSessions: undefined };
+  assert.deepEqual(guardrailDraft(session), { costBudgetUsd: "", costCheckpointsUsd: "", maxToolCalls: "", maxChildSessions: "" });
+  assert.deepEqual(guardrailPatch(session, guardrailDraft(session)), { ok: true, patch: {} });
+  assert.equal(guardrailSummary(session), "No limits set.");
+});
+
 test("emptying clears cost and tool-call limits but keeps Live Child Limit; 0 pauses children", () => {
   const session: GuardrailSession = { costBudgetUsd: 10, costCheckpointsUsd: [2], maxToolCalls: 200, maxChildSessions: 6 };
   assert.deepEqual(guardrailPatch(session, { costBudgetUsd: "", costCheckpointsUsd: "", maxToolCalls: "", maxChildSessions: "" }), {

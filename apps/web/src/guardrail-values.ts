@@ -75,12 +75,36 @@ export const GUARDRAIL_FIELDS: readonly GuardrailField[] = ["costBudgetUsd", "co
 
 export type GuardrailSession = Pick<SessionView, "costBudgetUsd" | "costCheckpointsUsd" | "maxToolCalls" | "maxChildSessions">;
 
+/** A cost or tool-call limit as the server means it: a positive number, or none (it reads any value
+ * at or below 0 as "no limit"). */
+function armedLimit(value: number | null | undefined): number | null {
+  return value != null && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+/** An amount as plain digits, never in exponent form ("1e-7", "1e+21"), so it reads as the amount
+ * and parses back as typed. */
+export function plainDecimal(value: number): string {
+  const exponent = /^(\d)(?:\.(\d+))?e([+-]\d+)$/.exec(String(Math.abs(value)));
+  if (!exponent) return String(value);
+  // Move the point in JavaScript's shortest digits rather than printing the binary expansion.
+  const digits = exponent[1]! + (exponent[2] ?? "");
+  const point = 1 + Number(exponent[3]);
+  const plain = point <= 0
+    ? `0.${"0".repeat(-point)}${digits}`
+    : point >= digits.length
+      ? digits + "0".repeat(point - digits.length)
+      : `${digits.slice(0, point)}.${digits.slice(point)}`;
+  return value < 0 ? `-${plain}` : plain;
+}
+
 /** The fields as the dialog opens: the session's current limits, empty where none is set. */
 export function guardrailDraft(session: GuardrailSession): GuardrailDraft {
+  const budget = armedLimit(session.costBudgetUsd);
+  const toolCalls = armedLimit(session.maxToolCalls);
   return {
-    costBudgetUsd: session.costBudgetUsd != null ? String(session.costBudgetUsd) : "",
-    costCheckpointsUsd: (session.costCheckpointsUsd ?? []).join(", "),
-    maxToolCalls: session.maxToolCalls != null ? String(session.maxToolCalls) : "",
+    costBudgetUsd: budget !== null ? plainDecimal(budget) : "",
+    costCheckpointsUsd: (session.costCheckpointsUsd ?? []).map(plainDecimal).join(", "),
+    maxToolCalls: toolCalls !== null ? plainDecimal(toolCalls) : "",
     maxChildSessions: session.maxChildSessions != null ? String(session.maxChildSessions) : "",
   };
 }
@@ -115,27 +139,39 @@ export function checkpointAboveThreshold(draft: Pick<GuardrailDraft, "costBudget
  *
  * Only a field whose value differs from the session's sends: re-sending an unchanged cost or
  * tool-call threshold would re-arm its recurring allowance at the advanced amount (the control
- * plane stores a new step with every value it is given). An emptied cost or tool-call field sends
- * the server's clear value (0, or no checkpoints); an emptied Live Child Limit keeps the current
- * limit, since 0 there pauses new children.
+ * plane stores a new step with every value it is given). A field still showing the text it opened
+ * with is neither checked nor sent, so a limit the server accepted can never block saving another
+ * field. An emptied cost or tool-call field sends the server's clear value (0, or no checkpoints);
+ * an emptied Live Child Limit keeps the current limit, since 0 there pauses new children.
  */
 export function guardrailPatch(
   session: GuardrailSession,
   draft: GuardrailDraft,
 ): { ok: true; patch: Partial<SessionConfig> } | { ok: false; errors: Partial<Record<GuardrailField, string>> } {
+  const opened = guardrailDraft(session);
   const parsed = parseDraft(draft);
+  const edited = (field: GuardrailField) => draft[field] !== opened[field];
   const errors: Partial<Record<GuardrailField, string>> = {};
   for (const field of GUARDRAIL_FIELDS) {
     const result = parsed[field];
-    if (!result.ok) errors[field] = result.error;
+    if (edited(field) && !result.ok) errors[field] = result.error;
   }
+  if (Object.keys(errors).length) return { ok: false, errors };
   const { costBudgetUsd: budget, costCheckpointsUsd: checkpoints, maxToolCalls: toolCalls, maxChildSessions: children } = parsed;
-  if (!budget.ok || !checkpoints.ok || !toolCalls.ok || !children.ok) return { ok: false, errors };
   const patch: Partial<SessionConfig> = {};
-  if (budget.value !== (session.costBudgetUsd ?? null)) patch.costBudgetUsd = budget.value ?? 0;
-  if (checkpoints.value.join(",") !== (session.costCheckpointsUsd ?? []).join(",")) patch.costCheckpointsUsd = checkpoints.value;
-  if (toolCalls.value !== (session.maxToolCalls ?? null)) patch.maxToolCalls = toolCalls.value ?? 0;
-  if (children.value !== null && children.value !== session.maxChildSessions) patch.maxChildSessions = children.value;
+  if (edited("costBudgetUsd") && budget.ok && budget.value !== armedLimit(session.costBudgetUsd)) {
+    patch.costBudgetUsd = budget.value ?? 0;
+  }
+  if (edited("costCheckpointsUsd") && checkpoints.ok &&
+      checkpoints.value.join(",") !== (session.costCheckpointsUsd ?? []).join(",")) {
+    patch.costCheckpointsUsd = checkpoints.value;
+  }
+  if (edited("maxToolCalls") && toolCalls.ok && toolCalls.value !== armedLimit(session.maxToolCalls)) {
+    patch.maxToolCalls = toolCalls.value ?? 0;
+  }
+  if (edited("maxChildSessions") && children.ok && children.value !== null && children.value !== session.maxChildSessions) {
+    patch.maxChildSessions = children.value;
+  }
   return { ok: true, patch };
 }
 
@@ -148,11 +184,13 @@ export function formatUsd(amount: number): string {
 export function guardrailSummary(session: GuardrailSession): string {
   const amounts = [...new Set([
     ...(session.costCheckpointsUsd ?? []),
-    ...(session.costBudgetUsd != null ? [session.costBudgetUsd] : []),
+    ...(armedLimit(session.costBudgetUsd) !== null ? [session.costBudgetUsd!] : []),
   ])].sort((a, b) => a - b).map(formatUsd);
   const pauses = [
     amounts.length ? `${listWords(amounts)} spent` : null,
-    session.maxToolCalls != null ? `${session.maxToolCalls} tool ${session.maxToolCalls === 1 ? "call" : "calls"}` : null,
+    armedLimit(session.maxToolCalls) !== null
+      ? `${session.maxToolCalls} tool ${session.maxToolCalls === 1 ? "call" : "calls"}`
+      : null,
   ].filter((part): part is string => part !== null);
   const children = session.maxChildSessions == null
     ? null
