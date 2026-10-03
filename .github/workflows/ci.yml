@@ -361,11 +361,11 @@ jobs:
     uses: ./.github/workflows/settings-rows-win32.yml
 
   check:
-    # Report failed, cancelled or skipped dependencies while the workflow is active. Unlike
-    # always(), !cancelled() lets superseded runs cancel this job and release PR concurrency
-    # (#2452). It is a status function, so no implicit success() suppresses failure reporting.
+    # Report failed, cancelled or skipped dependencies while PR CI is active. !cancelled()
+    # lets superseded PR runs cancel this job (#2452), without changing non-PR aggregation.
+    # It is a status function, so no implicit success() suppresses failure reporting.
     # Keep the draft/ready-for-review guard; see docs/ci-aggregation.md for the verification limits.
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false) }}
+    if: ${{ (github.event_name != 'pull_request' || !cancelled()) && (github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false) }}
     name: Typecheck, Test & Sidecar Bundle
     runs-on: ubuntu-22.04
     timeout-minutes: 5

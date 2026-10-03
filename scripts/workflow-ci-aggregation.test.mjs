@@ -60,11 +60,11 @@ test("active aggregation reports every dependency outcome and preserves the draf
   }
 });
 
-test("workflow cancellation makes aggregation ineligible regardless of dependency outcomes", () => {
+test("PR workflow cancellation stops aggregation while non-PR cancellation retains reporting", () => {
   for (const event of events) {
     for (const outcomes of combinations) {
-      assert.equal(eligible(condition, event, outcomes, true), false,
-        `${event.name} with ${JSON.stringify(outcomes)} must not resist whole-workflow cancellation`);
+      assert.equal(eligible(condition, event, outcomes, true), event.event_name !== "pull_request" && event.expected,
+        `${event.name} with ${JSON.stringify(outcomes)} must preserve its cancellation admission policy`);
     }
   }
 });
