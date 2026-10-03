@@ -24,7 +24,7 @@ test("an Edit as a New Turn that is temporarily blocked stays listed and says wh
       await trigger.click({ force: true });
       const item = page.getByRole("menu", { name: menuName }).getByRole("menuitem", { name: "Edit as a New Turn" });
       await expect(item).toBeDisabled();
-      await expect(item).toHaveAccessibleDescription("Runner is offline.");
+      await expect(item).toHaveAccessibleDescription("runner-1 is offline. You can send again when it reconnects.");
       await item.click({ force: true });
       await expect(page.getByRole("dialog")).toHaveCount(0);
       await page.keyboard.press("Escape");
@@ -39,6 +39,6 @@ test("an Edit as a New Turn that is temporarily blocked stays listed and says wh
   await expect(dialog.getByRole("button", { name: "Load into Composer" })).toBeEnabled();
 
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerStatus("offline"));
-  await expect(dialog.getByText("Runner is offline.")).toBeVisible();
+  await expect(dialog.getByText("runner-1 is offline. You can send again when it reconnects.")).toBeVisible();
   await expect(dialog.getByRole("button", { name: "Load into Composer" })).toBeDisabled();
 });

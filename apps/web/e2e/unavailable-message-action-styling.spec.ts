@@ -24,7 +24,7 @@ for (const theme of ["dark", "light"] as const) {
     const editInFork = menu.getByRole("menuitem", { name: "Edit in a Fork…" });
     await expect(copy).toBeEnabled();
     await expect(copy).toBeFocused();
-    for (const [item, reason] of [[resend, "Runner is offline."], [editInFork, "Reconnect the runner before creating a fork."]] as const) {
+    for (const [item, reason] of [[resend, "runner-1 is offline. You can send again when it reconnects."], [editInFork, "Reconnect the runner before creating a fork."]] as const) {
       await expect(item).toBeDisabled();
       await expect(item).toHaveAccessibleDescription(reason);
       await expect(item.locator(".menu-desc")).toHaveText(reason);
