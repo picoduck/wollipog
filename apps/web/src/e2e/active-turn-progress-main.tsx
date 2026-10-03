@@ -7,9 +7,12 @@ import type { TimelineItem } from "../timeline.js";
 import { deriveActiveTurnProgress } from "../turn-progress.js";
 import "../styles.css";
 
-/** `?scenario=` picks the turn: running, failing (the default), silent or approval. */
+/** `?scenario=` picks the turn: running, failing (the default), silent or approval. `?theme=light`
+ * switches theme. */
 type Scenario = "running" | "failing" | "silent" | "approval";
-const requested = new URLSearchParams(window.location.search).get("scenario");
+const params = new URLSearchParams(window.location.search);
+document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dark");
+const requested = params.get("scenario");
 const scenario: Scenario = requested === "running" || requested === "silent" || requested === "approval"
   ? requested
   : "failing";
