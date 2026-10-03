@@ -3074,7 +3074,7 @@ function SessionDetailLoaded({
   const stopTurn = useCallback(async (): Promise<boolean> => {
     if (cancelTurnRefusal !== null) return false;
     if (!canStopTurn) {
-      setError("There is no active turn to stop.");
+      setError("There's no turn to stop right now.");
       return false;
     }
     if (stopTurnPendingRef.current) return false;
