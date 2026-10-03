@@ -48,9 +48,8 @@ export function parseComposerEditCopy(value: unknown): ComposerEditCopy | null {
   return { id: copy.id, ...(copy.turn !== undefined ? { turn: copy.turn } : {}), previous };
 }
 
-export function loadComposerEditCopy(sessionId: string, instanceScope = LOCAL_INSTANCE_SCOPE): ComposerEditCopy | null {
-  const held = copies.get(memoryKey(sessionId, instanceScope));
-  if (held) return held;
+/** The copy in browser storage, which every tab of this instance shares. */
+function storedComposerEditCopy(sessionId: string, instanceScope: string): ComposerEditCopy | null {
   const stored = loadInstanceStorageValue(storageKey(sessionId), instanceScope);
   if (stored === null) return null;
   try {
@@ -58,6 +57,10 @@ export function loadComposerEditCopy(sessionId: string, instanceScope = LOCAL_IN
   } catch {
     return null;
   }
+}
+
+export function loadComposerEditCopy(sessionId: string, instanceScope = LOCAL_INSTANCE_SCOPE): ComposerEditCopy | null {
+  return copies.get(memoryKey(sessionId, instanceScope)) ?? storedComposerEditCopy(sessionId, instanceScope);
 }
 
 export function saveComposerEditCopy(
@@ -118,7 +121,12 @@ export function finishComposerEditCopySend(
   accepted: boolean,
 ): void {
   sending.delete(sendingKey(sessionId, instanceScope, id));
-  if (accepted && loadComposerEditCopy(sessionId, instanceScope)?.id === id) {
-    clearComposerEditCopy(sessionId, instanceScope);
+  if (!accepted) return;
+  // This page's copy and the stored one are checked apart: another tab of the session may have
+  // stored a newer copy over this one, and that copy must stay.
+  const key = memoryKey(sessionId, instanceScope);
+  if (copies.get(key)?.id === id) copies.delete(key);
+  if (storedComposerEditCopy(sessionId, instanceScope)?.id === id) {
+    removeInstanceStorageValue(storageKey(sessionId), instanceScope);
   }
 }

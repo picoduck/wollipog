@@ -89,6 +89,22 @@ test("a send settles only the copy it sent: accepted ends it, a failure keeps it
   assert.equal(loadComposerEditCopy("s1", "instance-a"), null, "in storage too");
 });
 
+test("an accepted send in one tab leaves a newer copy another tab stored", () => {
+  // This tab loads copy A and sends it.
+  saveComposerEditCopy("s1", COPY, "instance-a");
+  markComposerEditCopySending("s1", "instance-a", COPY.id);
+  // Meanwhile another tab of the same session stores copy B over a draft of its own.
+  const otherTab: ComposerEditCopy = { id: "copy-b", previous: { text: "the other tab's draft", images: [] } };
+  const [key] = [...storage.values.keys()].filter((candidate) => storage.values.get(candidate)!.includes(COPY.id));
+  assert.ok(key);
+  storage.setItem(key, JSON.stringify(otherTab));
+
+  finishComposerEditCopySend("s1", "instance-a", COPY.id, true);
+  assert.deepEqual(loadComposerEditCopy("s1", "instance-a"), otherTab, "this tab now reads the other tab's copy");
+  forgetComposerEditCopiesForInstance("instance-a");
+  assert.deepEqual(loadComposerEditCopy("s1", "instance-a"), otherTab, "and it survives a reload");
+});
+
 test("a stored copy that is not well formed is ignored", () => {
   assert.deepEqual(parseComposerEditCopy({ id: "x", previous: null }), { id: "x", previous: null });
   assert.deepEqual(parseComposerEditCopy({ id: "x", turn: 2, previous: { text: "a", images: [] } }),
