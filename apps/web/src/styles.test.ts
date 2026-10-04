@@ -248,6 +248,25 @@ test("a field stacks 8px apart, its helper or error 4px under the control, and i
 });
 
 /**
+ * #2538: related fields share a `.field-row` of two equal columns, and every row is one column in a
+ * container under 480px (§8.1). The dialog body is the container, so one shared rule collapses the
+ * row in every dialog; Hand Off and Import from Git used to carry their own copies while Connect via
+ * SSH, New Run and Onboard Runner kept two 169px fields on a phone. e2e/field-row-collapse.spec.ts
+ * measures the rows.
+ */
+test("every field row is one column under a 480px container, by one shared rule", () => {
+  assert.match(soleRuleBody(".modal-body"), /container-type: inline-size;/, "the dialog body is the size container");
+  assert.match(soleRuleBody(".field-row"), /grid-template-columns: minmax\(0, 1fr\) minmax\(0, 1fr\);/);
+  const collapse = containerBlocks(css).filter((block) => block.containsSelector(".field-row"));
+  assert.deepEqual(collapse.map((block) => block.params), ["(max-width: 479px)"], "one unnamed container rule collapses the row");
+  assert.deepEqual(collapse[0]!.declarationsForSelector(".field-row").get("grid-template-columns"), ["minmax(0, 1fr)"]);
+  const columns = allDeclarations(css)
+    .filter((declaration) => declaration.prop === "grid-template-columns" && declaration.selectors.some((selector) => /\.field-row\b/.test(selector)))
+    .map((declaration) => declaration.selector);
+  assert.deepEqual(columns, [".field-row", ".field-row"], "no dialog sets a row's columns, or its collapse, on its own");
+});
+
+/**
  * #2366: Archived Sessions and the Automations editor stack their labels over the control outside a
  * `.field`. Those labels share the §8.1 rule above, their containers space them by --space-2, and no
  * other rule gives them a colour or type of their own (the old weight-600 overrides are gone). A grid

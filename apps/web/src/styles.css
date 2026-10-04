@@ -9648,7 +9648,9 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   order: -1;
   margin-left: calc(-1 * var(--space-2));
 }
+/* The size container a dialog's forms collapse in (§8.1, `.field-row`). */
 .modal-body {
+  container-type: inline-size;
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
@@ -10147,10 +10149,15 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   font-size: var(--text-sm);
 }
 .snooze-preview strong { color: var(--text); font-size: var(--text-xs); letter-spacing: 0.04em; text-transform: uppercase; }
+/* Related fields share a row of two equal columns, and one column in a container under 480px (§8.1).
+   The dialog body is that container (§8.3), so this is every phone sheet. */
 .field-row {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 12px;
+}
+@container (max-width: 479px) {
+  .field-row { grid-template-columns: minmax(0, 1fr); }
 }
 /* Selects must fill their field (not size to the longest option) and grid tracks must be allowed to
  * shrink, else a long runner/workspace/agent name forces the whole modal to scroll horizontally. */
@@ -10347,17 +10354,12 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 }
 /* Hand Off to Another Agent (#2186): What Carries Over, the Agent, then two aligned rows (Model and
    Effort, Service Tier and Permissions) whose columns share one grid, so their right edges line up.
-   The rows stack in a body under 480px wide (§8.1), which is every phone sheet. */
+   The rows stack under 480px like every `.field-row` (§8.1). */
 .handoff-dialog-body {
-  container-type: inline-size;
   display: grid;
   gap: var(--space-4);
 }
-.handoff-dialog-body > .field-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 .handoff-dialog-body > .field-row > .handoff-field-wide { grid-column: 1 / -1; }
-@container (max-width: 479px) {
-  .handoff-dialog-body > .field-row { grid-template-columns: minmax(0, 1fr); }
-}
 .handoff-carries > summary { justify-self: start; }
 .handoff-carries-note {
   margin: 0;
@@ -14621,11 +14623,6 @@ body.shell-dock-dragging * {
   min-width: 0;
 }
 .skill-git-body :is(h3, p, dl) { margin: 0; }
-/* Branch or Tag and Folder share a row, and one column under 480px of form (§8.1). */
-.skill-git-source { container-type: inline-size; }
-@container (max-width: 479px) {
-  .skill-git-source .field-row { grid-template-columns: minmax(0, 1fr); }
-}
 .skill-git-strip {
   display: flex;
   align-items: center;

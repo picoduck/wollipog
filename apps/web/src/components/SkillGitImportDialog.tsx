@@ -336,7 +336,7 @@ export function SkillGitImportDialog({ onClose, onImported, check, libraryVersio
     </div>;
   };
 
-  const sourceStep = <form className="form skill-git-source" noValidate onSubmit={(event) => {
+  const sourceStep = <form className="form" noValidate onSubmit={(event) => {
     event.preventDefault();
     // Enter again while Find Skills runs is the busy primary's click: refused, as the server
     // reads one source at a time.
