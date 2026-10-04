@@ -1217,9 +1217,10 @@ Helper text, one sentence.            ← or the error, which replaces it
   the helper, the error that replaces it and a `.field-foot` pull up by `--space-1` to sit 4px
   below it. A field warning pulls up by the same `--space-1`, 4px under the helper (§8.5).
 - Fields stack with 16px gap; related fields share a row on desktop with 12px gap
-  (`.field-row`, two equal columns that collapse to one in a container under 480px). The dialog
-  body is that container, so one shared rule stacks every row on a phone sheet; a dialog never
-  writes its own collapse.
+  (`.field-row`, two equal columns that collapse to one under 480px). The row sizes itself, so one
+  shared rule stacks every row on a phone sheet and a dialog never writes its own collapse. It is
+  not a size container query: a size container around a dialog's scrolling body would clip its
+  Select lists at the build floor (§2.10).
 - Fieldsets: `--type-section` legend, 24px above, no border.
 
 ### 8.2 Setting Rows (Instant-Apply Preferences)

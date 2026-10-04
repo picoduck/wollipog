@@ -2,10 +2,9 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 import { choosePageAction } from "./page-actions";
 
 /**
- * #2538: a `.field-row` keeps two equal columns on desktop and is one column in a container under
- * 480px (docs/design-system.md §8.1). The dialog body is the container, so on a phone sheet every
- * row's fields are full width and stacked. These three dialogs use the bare row; Hand Off and
- * Import from Git are measured in their own specs.
+ * #2538: a `.field-row` keeps two equal columns on desktop and is one column under 480px
+ * (docs/design-system.md §8.1), so on a phone sheet every row's fields are full width and stacked.
+ * These three dialogs use the bare row; Hand Off and Import from Git are measured in their own specs.
  */
 
 const dialogs: Array<{ name: string; open: (page: Page) => Promise<Locator> }> = [
@@ -52,7 +51,8 @@ for (const width of [1440, 390]) for (const { name, open } of dialogs) {
       const body = element.closest(".modal-body")!;
       const rect = element.getBoundingClientRect();
       return {
-        columns: getComputedStyle(element).gridTemplateColumns.split(" ").length,
+        // auto-fit reports the tracks it collapsed as 0px.
+        columns: getComputedStyle(element).gridTemplateColumns.split(" ").filter((track) => Number.parseFloat(track) > 0).length,
         bodyOverflow: body.scrollWidth - body.clientWidth,
         row: { left: rect.left, right: rect.right },
         fields: [...element.children].map((child) => {

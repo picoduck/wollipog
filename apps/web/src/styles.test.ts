@@ -248,22 +248,26 @@ test("a field stacks 8px apart, its helper or error 4px under the control, and i
 });
 
 /**
- * #2538: related fields share a `.field-row` of two equal columns, and every row is one column in a
- * container under 480px (§8.1). The dialog body is the container, so one shared rule collapses the
- * row in every dialog; Hand Off and Import from Git used to carry their own copies while Connect via
- * SSH, New Run and Onboard Runner kept two 169px fields on a phone. e2e/field-row-collapse.spec.ts
- * measures the rows.
+ * #2538: related fields share a `.field-row` of two equal columns, and every row is one column under
+ * 480px (§8.1). One shared rule does it: a track's floor is half of 480px less the 12px gap, so the
+ * second column fits only from 480px. Hand Off and Import from Git used to carry their own container
+ * copies while Connect via SSH, New Run and Onboard Runner kept two 169px fields on a phone. The row
+ * sizes itself rather than asking a size container: at the build floor (§2.10) a size container is
+ * the box `position: fixed` resolves against, and around a dialog's scrolling body it would clip the
+ * Select lists placed in it. e2e/field-row-collapse.spec.ts measures the rows.
  */
-test("every field row is one column under a 480px container, by one shared rule", () => {
-  assert.match(soleRuleBody(".modal-body"), /container-type: inline-size;/, "the dialog body is the size container");
-  assert.match(soleRuleBody(".field-row"), /grid-template-columns: minmax\(0, 1fr\) minmax\(0, 1fr\);/);
-  const collapse = containerBlocks(css).filter((block) => block.containsSelector(".field-row"));
-  assert.deepEqual(collapse.map((block) => block.params), ["(max-width: 479px)"], "one unnamed container rule collapses the row");
-  assert.deepEqual(collapse[0]!.declarationsForSelector(".field-row").get("grid-template-columns"), ["minmax(0, 1fr)"]);
+test("every field row is one column under 480px, by one shared rule and no size container", () => {
+  assert.equal(soleRuleBody(".field-row"),
+    "display: grid;\ngrid-template-columns: repeat(auto-fit, minmax(min(100%, calc((480px - 12px) / 2)), 1fr));\ngap: 12px;");
   const columns = allDeclarations(css)
     .filter((declaration) => declaration.prop === "grid-template-columns" && declaration.selectors.some((selector) => /\.field-row\b/.test(selector)))
     .map((declaration) => declaration.selector);
-  assert.deepEqual(columns, [".field-row", ".field-row"], "no dialog sets a row's columns, or its collapse, on its own");
+  assert.deepEqual(columns, [".field-row"], "no dialog sets a row's columns, or its collapse, on its own");
+  assert.deepEqual(containerBlocks(css).filter((block) => block.containsSelector(".field-row")).map((block) => block.params), [],
+    "the collapse is the row's own, not a container query");
+  const bodies = allDeclarations(css)
+    .filter((declaration) => /^container(-type)?$/.test(declaration.prop) && declaration.selectors.some((selector) => /\.modal-body\b/.test(selector)));
+  assert.deepEqual(bodies, [], "a dialog's scrolling body is never a size container");
 });
 
 /**

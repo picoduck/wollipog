@@ -9648,9 +9648,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   order: -1;
   margin-left: calc(-1 * var(--space-2));
 }
-/* The size container a dialog's forms collapse in (§8.1, `.field-row`). */
 .modal-body {
-  container-type: inline-size;
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
@@ -10149,15 +10147,14 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   font-size: var(--text-sm);
 }
 .snooze-preview strong { color: var(--text); font-size: var(--text-xs); letter-spacing: 0.04em; text-transform: uppercase; }
-/* Related fields share a row of two equal columns, and one column in a container under 480px (§8.1).
-   The dialog body is that container (§8.3), so this is every phone sheet. */
+/* Related fields share a row of two equal columns, and one column under 480px (§8.1): a track is at
+   least half of 480px less the gap, so a second fits only from 480px, and empty tracks collapse.
+   The row sizes itself rather than asking a size container, because at the build floor a size
+   container around a dialog's scrolling body would clip every Select list it holds (§2.10). */
 .field-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, calc((480px - 12px) / 2)), 1fr));
   gap: 12px;
-}
-@container (max-width: 479px) {
-  .field-row { grid-template-columns: minmax(0, 1fr); }
 }
 /* Selects must fill their field (not size to the longest option) and grid tracks must be allowed to
  * shrink, else a long runner/workspace/agent name forces the whole modal to scroll horizontally. */
