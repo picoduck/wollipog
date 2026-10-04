@@ -748,9 +748,14 @@ export function unverifiedDeliveryNote(labels: readonly string[]): string {
   return `Wollipog hasn't confirmed that approval prompts from ${modes} reach you here.`;
 }
 
+/**
+ * The Default row's name. Where Default resolves to a mode the menu also lists under its own name
+ * (Claude Code's Auto-Accept Edits, Codex App Server's Approve for Me), the label names it so the
+ * two rows don't read as different choices with the same meaning.
+ */
 export function defaultPermissionModeDisplayLabel(driver: AgentDriverKind): string {
   const resolved = defaultPermissionMode(driver);
-  return driver === "claude-code" && resolved
+  return (driver === "claude-code" || driver === "codex-app-server") && resolved
     ? `Default (${permissionModeLabel(resolved, driver)})`
     : "Default";
 }

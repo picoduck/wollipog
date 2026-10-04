@@ -72,7 +72,7 @@ async function expectPlainRows(page: Page, menu: Locator) {
   });
   expect(amber.glyph).toBe(amber.expected);
   // Every mode says what it means on a visible second line (this fixture is Codex App Server).
-  for (const name of ["Default", "Ask Every Time", "Auto-Accept Edits", "Full Access (No Checks)", LONG_LABEL]) {
+  for (const name of ["Default (Approve for Me)", "Ask Every Time", "Auto-Accept Edits", "Full Access (No Checks)", LONG_LABEL]) {
     await expect(menu.getByRole("menuitemradio", { name, exact: true }).locator(".menu-desc")).toBeVisible();
   }
   await expect(menu.getByRole("menuitemradio", { name: "Full Access (No Checks)" }))
@@ -81,7 +81,7 @@ async function expectPlainRows(page: Page, menu: Locator) {
   const note = menu.locator(".menu-note");
   await expect(note).toHaveCount(1);
   await expect(note).toHaveText(
-    `Wollipog hasn't confirmed that approval prompts from Default, Ask Every Time, Auto-Accept Edits, and ${LONG_LABEL} reach you here.`,
+    `Wollipog hasn't confirmed that approval prompts from Default (Approve for Me), Ask Every Time, Auto-Accept Edits, and ${LONG_LABEL} reach you here.`,
   );
   expect(await note.evaluate((element) => element === element.parentElement!.lastElementChild)).toBe(true);
 }

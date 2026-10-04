@@ -316,6 +316,12 @@ test("Pi presents its default ask mode once while preserving an explicit stored 
 
 test("the closed permission control identifies the resolved default instead of a transport warning", () => {
   assert.equal(defaultPermissionModeDisplayLabel("claude-code"), "Default (Auto-Accept Edits)");
+  // Codex App Server's default is Approve for Me, so its Default row says so (#2559). Exec Codex,
+  // Pi and an ACP provider keep the bare label.
+  assert.equal(defaultPermissionModeDisplayLabel("codex-app-server"), "Default (Approve for Me)");
+  assert.equal(defaultPermissionModeDisplayLabel("codex"), "Default");
+  assert.equal(defaultPermissionModeDisplayLabel("pi"), "Default");
+  assert.equal(defaultPermissionModeDisplayLabel("acp"), "Default");
   assert.equal(
     approvalControlLabel("claude-code", "", "unavailable"),
     "Default (Auto-Accept Edits)",

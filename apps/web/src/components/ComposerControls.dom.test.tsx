@@ -81,6 +81,12 @@ test("each permission row is one menu radio: arrows move between modes and choos
       assert.ok(radio.querySelector(".menu-desc")?.textContent, "every row shows its meaning as a second line");
     }
     const [defaultRow, approveRow, fullAccess] = radios as [HTMLButtonElement, HTMLButtonElement, HTMLButtonElement];
+    // Codex App Server's Default runs Approve for Me, and its name says so (#2559).
+    assert.equal(
+      domWindow.document.getElementById(defaultRow.getAttribute("aria-labelledby")!)?.textContent,
+      "Default (Approve for Me)",
+    );
+    assert.equal(defaultRow.dataset.menuLabel, "Default (Approve for Me)");
     // The second line describes the row; it does not rename it.
     assert.equal(
       domWindow.document.getElementById(fullAccess.getAttribute("aria-labelledby")!)?.textContent,
@@ -98,7 +104,7 @@ test("each permission row is one menu radio: arrows move between modes and choos
     assert.equal(notes.length, 1);
     assert.equal(menu.lastElementChild, notes[0], "the note sits at the bottom of the menu");
     assert.equal(notes[0]!.textContent,
-      "Wollipog hasn't confirmed that approval prompts from Default and Approve for Me reach you here.");
+      "Wollipog hasn't confirmed that approval prompts from Default (Approve for Me) and Approve for Me reach you here.");
     for (const row of [defaultRow, approveRow]) {
       assert.ok(row.getAttribute("aria-describedby")!.split(" ").includes(notes[0]!.id));
     }
