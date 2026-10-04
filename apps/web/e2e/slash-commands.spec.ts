@@ -954,6 +954,23 @@ test("Use /review replaces only the unknown token and keeps the rest of the mess
   expect(await promptTexts(page)).toEqual([]);
   await notice.getByRole("button", { name: "Use /review" }).click();
   await expect(composer).toHaveValue("/review please check the diff");
+
+  // The notice reads its suggestion from the current catalog: a collision added after the refusal
+  // offers the built-in by its new qualified alias, never the stale bare one.
+  await composer.fill("/reveiw the diff");
+  await page.keyboard.press("Enter");
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([
+    { name: "compact", source: "builtin", description: "Summarize the conversation so far" },
+    { name: "review", source: "builtin", description: "Review the current changes" },
+    { name: "review", source: "user", description: "My own review" },
+  ], ["plan"]));
+  await expect(notice.locator(".notice-body"))
+    .toHaveText("“/reveiw” isn't a recognized command, so nothing was sent. Did you mean /builtin:review?");
+  await notice.getByRole("button", { name: "Use /builtin:review" }).click();
+  await expect(composer).toHaveValue("/builtin:review the diff");
+  await setUnknownCommandCatalog(page);
+
+  await composer.fill("/review please check the diff");
   await page.keyboard.press("End");
   await page.keyboard.press("Enter");
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests())).toEqual([{
@@ -1000,6 +1017,9 @@ test("Send as Text, from the picker row or the notice, sends the literal text on
   await setUnknownCommandCatalog(page);
   const composer = page.locator(".composer-input");
   await composer.fill("/reveiw");
+  // A close match reached by the arrows belongs to this draft only.
+  await page.keyboard.press("ArrowDown");
+  await expect(composer).toHaveAttribute("aria-activedescendant", /.+/);
   await page.locator(".picker").getByRole("button", { name: "Send as Text" }).click();
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests())).toEqual([{
     sessionId: "session-alpha",
@@ -1007,6 +1027,12 @@ test("Send as Text, from the picker row or the notice, sends the literal text on
     images: [],
   }]);
   await expect(composer).toHaveValue("");
+  await composer.fill("/reveiw");
+  await expect(page.getByRole("group", { name: "Close Matches" })).toBeVisible();
+  await expect(composer, "the next draft starts with no match active").not.toHaveAttribute("aria-activedescendant");
+  await page.keyboard.press("Enter");
+  await expect(composer).toHaveValue("/reveiw");
+  await expect.poll(() => promptTexts(page)).toEqual(["/reveiw"]);
 
   // With no close match the sentence ends after "nothing was sent." and only Send as Text remains.
   await composer.fill("/zzzz");

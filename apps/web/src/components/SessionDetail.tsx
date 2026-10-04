@@ -628,7 +628,7 @@ interface ComposerSubmitOptions {
  * it was refused for is unchanged. `action` is what Send as Text repeats. */
 interface CommandNotSent {
   problem:
-    | { kind: "unknown"; token: string; suggestion?: ComposerCommand }
+    | { kind: "unknown"; token: string; suggestionId?: string }
     | { kind: "unavailable"; token: string; reason: string };
   action: "send" | "steer";
   text: string;
@@ -4645,7 +4645,8 @@ function SessionDetailLoaded({
     slashDismissedFor !== slashDismissKey;
   // A token that names no command, in a session that refuses one (#2176): the no-match row becomes
   // the unknown row, with Send as Text and the token's Close Matches, none of them active.
-  const slashUnknown = rejectUnknownCommands && slashNoMatch;
+  // A queued edit saves its text as it stands, so it keeps the plain no-match row.
+  const slashUnknown = rejectUnknownCommands && slashNoMatch && !queuedEdit;
   const slashCloseMatches = useMemo(
     () => slashUnknown && slashTrigger ? suggestComposerCommands(slashTrigger.query, composerCommands) : [],
     [composerCommands, slashTrigger, slashUnknown],
@@ -4719,10 +4720,14 @@ function SessionDetailLoaded({
   // A slash command that wasn't sent (#2176) is a warning while its draft is unchanged: editing the
   // draft clears it. An unknown token offers its closest match, which replaces only the token, and
   // both kinds offer Send as Text, which repeats the refused send or steer with the text as typed.
-  const visibleCommandNotSent = commandNotSent?.text === text ? commandNotSent : null;
+  const visibleCommandNotSent = commandNotSent?.text === text && !queuedEdit ? commandNotSent : null;
   if (visibleCommandNotSent) {
     const { problem, action } = visibleCommandNotSent;
-    const suggestion = problem.kind === "unknown" ? problem.suggestion : undefined;
+    // The suggestion is read from the current catalog, so a collision added since the refusal uses
+    // the command's current alias, and a command that's gone or unavailable is no longer offered.
+    const suggestion = problem.kind === "unknown" && problem.suggestionId
+      ? composerCommands.find((command) => command.id === problem.suggestionId && command.available)
+      : undefined;
     const title = problem.kind === "unknown" ? "Unknown Command" : "Command Unavailable";
     const sentence = problem.kind === "unavailable"
       ? `“${problem.token}” can't run here, so nothing was sent. ${problem.reason}`
@@ -4867,6 +4872,8 @@ function SessionDetailLoaded({
     setCommandNotSent((current) => current && current.text !== text ? null : current);
   }, [text]);
   useEffect(() => setCommandNotSent(null), [sessionId]);
+  // Each draft starts with no close match active, so Enter can't inherit an earlier draft's choice.
+  useEffect(() => setActiveCloseMatch(null), [sessionId, text]);
   const setComposerCaret = (caret: number) => {
     setComposerSelection({ start: caret, end: caret });
     window.requestAnimationFrame(() => {
@@ -5062,7 +5069,7 @@ function SessionDetailLoaded({
     // An unknown command is never sent (#2176): the draft, its attachments and the caret stay, and
     // the notice slot says why and offers the close match and Send as Text.
     if (invocation.kind === "unknown") {
-      showCommandNotSent({ kind: "unknown", token: invocation.token, suggestion: invocation.suggestions[0] }, "send");
+      showCommandNotSent({ kind: "unknown", token: invocation.token, suggestionId: invocation.suggestions[0]?.id }, "send");
       return;
     }
     if (invocation.kind === "command" && invocation.command.source === "app") {
@@ -5298,7 +5305,7 @@ function SessionDetailLoaded({
     const resolved = asText ? null
       : resolveComposerCommandInvocation(text.trim(), composerCommands, composerCommandResolutionOptions);
     if (resolved?.kind === "unknown") {
-      showCommandNotSent({ kind: "unknown", token: resolved.token, suggestion: resolved.suggestions[0] }, "steer");
+      showCommandNotSent({ kind: "unknown", token: resolved.token, suggestionId: resolved.suggestions[0]?.id }, "steer");
       return;
     }
     const outgoing = resolved?.kind === "plaintext" ? resolved.text : text.trim();

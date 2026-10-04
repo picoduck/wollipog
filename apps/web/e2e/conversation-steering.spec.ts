@@ -700,6 +700,20 @@ async function hitArea(page: Page, name: string) {
   });
 }
 
+test("a queued edit keeps a leading unknown slash token as text and never offers Send as Text (#2176)", async ({ page }) => {
+  await seedEditableQueue(page);
+  await page.getByTestId("queued-prompt-queue-edit").getByRole("button", { name: "Edit Queued Message" }).click();
+  const composer = page.locator(".composer-input");
+  await composer.fill("/zzzz");
+  // The plain no-match row: Send as Text would start a new message beside the one being edited.
+  await expect(page.locator(".picker-empty")).toHaveText("No commands match “/zzzz”.");
+  await expect(page.locator(".picker").getByRole("button", { name: "Send as Text" })).toHaveCount(0);
+  // Enter belongs to the edit's save, which keeps the text as it stands: no refusal, no new message.
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".session-notice-slot .notice.t-warning")).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests().length)).toBe(0);
+});
+
 test("editing a queued message is a 40px strip in the card, a check in the Send seat and the selected row (#2194)", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await seedEditableQueue(page);
