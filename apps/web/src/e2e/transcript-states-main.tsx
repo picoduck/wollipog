@@ -29,13 +29,16 @@ import "../styles.css";
  *   earlier-page request in flight, `?older=fail` rejects it, and the default resolves it.
  *
  * `?theme=light|dark` picks the theme and `?mode=preview` renders the Inbox preview. The right
- * panel records the mode it was asked to show in `body[data-right-panel-mode]`. */
+ * panel records the mode it was asked to show in `body[data-right-panel-mode]`. `?failed=1` adds a
+ * message sign-in recovery left unsent, with Retry and Dismiss (#2500); each action it sends is
+ * recorded in `body[data-pending-prompt-actions]`. */
 const params = new URLSearchParams(window.location.search);
 document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dark");
 const state = params.get("state") ?? "awaiting";
 const older = params.get("older") ?? "resolve";
 const mode = params.get("mode") === "preview" ? ("preview" as const) : ("expanded" as const);
 const count = Number(params.get("count") ?? "0");
+const failedPrompt = params.get("failed") === "1";
 
 const SESSION_ID = "transcript-states-session";
 const PROJECT_ID = "project-wollipog";
@@ -125,6 +128,20 @@ const session = {
   tokensOut: 0,
   costUsd: 0,
   adopted: false,
+  pendingPrompts: failedPrompt ? [{
+    commandId: "prompt-failed",
+    text: "Also update the changelog before you open the pull request.",
+    hasImages: false,
+    state: "failed",
+    errorCode: "PROVIDER_AUTHENTICATION_REQUIRED",
+    error: "authentication recovery was dismissed; this message was not sent",
+    canDismiss: true,
+    canRetry: true,
+    revision: 1,
+    attemptCount: 1,
+    createdAt: 1,
+    updatedAt: 1,
+  }] : undefined,
 } as SessionView;
 
 const snapshotMessage: ControlPlaneToUi = {
@@ -169,10 +186,16 @@ const navigation: ViewNavigation = {
 
 const never = () => new Promise<never>(() => {});
 let tailRequestCount = 0;
+const pendingPromptActions: string[] = [];
 const client = {
   ...api,
   getSessionEventPage: never,
   session: never,
+  resolvePendingPrompt: async (_id: string, commandId: string, action: string) => {
+    pendingPromptActions.push(`${action}:${commandId}`);
+    document.body.dataset.pendingPromptActions = pendingPromptActions.join(" ");
+    return session;
+  },
   getSessionEventTailPage: (_id: string, before: number | undefined, eventEpoch: number) => {
     tailRequestCount += 1;
     document.body.dataset.tailRequestCount = String(tailRequestCount);

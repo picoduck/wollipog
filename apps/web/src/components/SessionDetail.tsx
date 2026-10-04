@@ -6209,41 +6209,41 @@ function SessionDetailLoaded({
                       approvalContext={timelineApprovalContext}
                     />
                   )}
-                  <PendingPromptBubbles
-                    prompts={session.pendingPrompts ?? []}
-                    deliveredCommandIds={deliveredPromptCommandIds}
-                    liveQueueIds={liveQueueIds}
-                    canCancelLive={runnerOnline && canCancelQueued}
-                    pendingAction={pendingPromptAction?.commandId}
-                    worktreeRecoveryPending={worktreeRecovery !== undefined}
-                    actionRefusal={queueRefusal}
-                    onCancelPending={(commandId) => void resolvePendingPrompt(commandId, "cancel")}
-                    onCancelLive={(commandId) => void cancelLivePendingPrompt(commandId)}
-                    onDismiss={(commandId) => void resolvePendingPrompt(commandId, "dismiss")}
-                    onRetry={(commandId) => void resolvePendingPrompt(commandId, "retry")}
-                  />
-                  {showOptimistic && pending && (
-                    <div className="tl-row user">
-                      <div className="tl-bubble">
-                        {pending.images.length > 0 && (
-                          <div className="bubble-images">
-                            {pending.images.filter((attachment) => !isWorkspaceReference(attachment)).map((img, i) => (
-                              <PromptImageView key={"artifactId" in img ? img.artifactId : i} image={img} alt={`attachment ${i + 1}`} />
-                            ))}
-                            {pending.images.filter(isWorkspaceReference).map((reference) => (
-                              <ReadonlyReferenceChip key={reference.artifactId} reference={reference} />
-                            ))}
-                          </div>
-                        )}
-                        {pending.text && <div className="bubble-text"><Markdown profile="inline">{pending.text}</Markdown></div>}
-                      </div>
-                    </div>
-                  )}
                 </>
               )}
-              {/* One place for every transcript state, so a receipt never remounts (and drops the
-                  focus it holds) when history arrives; while history loads or fails, recovery
-                  receipts still keep their actions. */}
+              {/* One place for every transcript state, so a pending prompt or receipt never remounts
+                  (and drops the focus it holds) when history arrives; while history loads or fails, a
+                  failed message and the recovery receipts still keep their actions (#2171, #2500). */}
+              <PendingPromptBubbles
+                prompts={session.pendingPrompts ?? []}
+                deliveredCommandIds={deliveredPromptCommandIds}
+                liveQueueIds={liveQueueIds}
+                canCancelLive={runnerOnline && canCancelQueued}
+                pendingAction={pendingPromptAction?.commandId}
+                worktreeRecoveryPending={worktreeRecovery !== undefined}
+                actionRefusal={queueRefusal}
+                onCancelPending={(commandId) => void resolvePendingPrompt(commandId, "cancel")}
+                onCancelLive={(commandId) => void cancelLivePendingPrompt(commandId)}
+                onDismiss={(commandId) => void resolvePendingPrompt(commandId, "dismiss")}
+                onRetry={(commandId) => void resolvePendingPrompt(commandId, "retry")}
+              />
+              {showOptimistic && pending && (
+                <div className="tl-row user">
+                  <div className="tl-bubble">
+                    {pending.images.length > 0 && (
+                      <div className="bubble-images">
+                        {pending.images.filter((attachment) => !isWorkspaceReference(attachment)).map((img, i) => (
+                          <PromptImageView key={"artifactId" in img ? img.artifactId : i} image={img} alt={`attachment ${i + 1}`} />
+                        ))}
+                        {pending.images.filter(isWorkspaceReference).map((reference) => (
+                          <ReadonlyReferenceChip key={reference.artifactId} reference={reference} />
+                        ))}
+                      </div>
+                    )}
+                    {pending.text && <div className="bubble-text"><Markdown profile="inline">{pending.text}</Markdown></div>}
+                  </div>
+                </div>
+              )}
               {sentMessageReceipts}
               {transcriptRowsShown && activeTurnVisible && (
                 <WorkingIndicator

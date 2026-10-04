@@ -87,6 +87,28 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       await expect(notice.locator(".notice-details-body")).toHaveText("Could not load complete session activity.");
     });
 
+    test("a failed message keeps its row, Retry and Dismiss while history loads or failed to load (#2500)", async ({ page }) => {
+      for (const state of ["loading", "history-error"]) {
+        await open(page, `state=${state}&failed=1`);
+        if (state === "loading") await expect(page.locator(".transcript-skeleton")).toBeVisible();
+        else await expect(page.locator(".detail-reader .notice")).toContainText("Couldn't Load the Full Conversation");
+        const row = page.locator('.detail-scroll [data-pending-prompt-id="prompt-failed"]');
+        await expect(row).toBeInViewport();
+        await expect(row.locator(".tl-receipt")).toContainText("Delivery Failed");
+        await expect(row.locator(".tl-receipt")).toContainText("Sign-in was dismissed, so this message wasn't sent.");
+        const retry = row.getByRole("button", { name: "Retry Message" });
+        const dismiss = row.getByRole("button", { name: "Dismiss" });
+        await expect(retry).toBeEnabled();
+        await expect(retry).toBeInViewport();
+        await expect(dismiss).toBeEnabled();
+        await retry.click();
+        await expect(page.locator("body")).toHaveAttribute("data-pending-prompt-actions", "retry:prompt-failed");
+        await dismiss.click();
+        await expect(page.locator("body"))
+          .toHaveAttribute("data-pending-prompt-actions", "retry:prompt-failed dismiss:prompt-failed");
+      }
+    });
+
     test("the earlier-activity row centers its action between two hairlines", async ({ page }) => {
       await open(page, "state=earlier&older=hold");
       await page.locator("[data-virtual-row]").first().waitFor();

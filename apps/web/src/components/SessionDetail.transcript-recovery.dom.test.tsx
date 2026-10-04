@@ -186,6 +186,7 @@ function pageController() {
 }
 
 interface Fixture {
+  sessionId: string;
   container: HTMLDivElement;
   root: Root;
   scroller: HTMLElement;
@@ -206,6 +207,8 @@ async function mountFixture(
     mode = "expanded",
     pendingPrompts,
     steeringAttempts,
+    sessionOverrides,
+    client: clientOverrides,
   }: {
     pinnedOpen?: boolean;
     pendingQuestion?: boolean;
@@ -213,12 +216,15 @@ async function mountFixture(
     mode?: "preview" | "expanded";
     pendingPrompts?: SessionView["pendingPrompts"];
     steeringAttempts?: SessionView["steeringAttempts"];
+    sessionOverrides?: Partial<SessionView>;
+    client?: Partial<ApiClient>;
   } = {},
 ): Promise<Fixture> {
   fixtureSequence += 1;
   const currentSession = session(`transcript-recovery-${fixtureSequence}`);
   if (pendingPrompts) currentSession.pendingPrompts = pendingPrompts;
   if (steeringAttempts) currentSession.steeringAttempts = steeringAttempts;
+  Object.assign(currentSession, sessionOverrides);
   if (pendingQuestion) {
     currentSession.status = "input_required";
     currentSession.pendingApproval = {
@@ -264,6 +270,7 @@ async function mountFixture(
     session: () => new Promise<never>(() => {}),
     getSessionEventPage: pages.fetchPage,
     getSessionEventTailPage: pages.fetchTailPage,
+    ...clientOverrides,
   } as unknown as ApiClient;
   const rightPanel = {
     open: false,
@@ -338,7 +345,7 @@ async function mountFixture(
   await flushAsyncWork();
   const scroller = container.querySelector(".detail-scroll") as HTMLElement | null;
   assert.ok(scroller, "the transcript reader is mounted");
-  return { container, root, scroller, events, socket, renderMode };
+  return { sessionId: currentSession.id, container, root, scroller, events, socket, renderMode };
 }
 
 async function unmountFixture(fixture: Fixture) {
@@ -2052,5 +2059,191 @@ test("a focused receipt stays mounted and focused when the history it waited for
     assert.equal(domWindow.document.activeElement, queueAgain, "focus stays where the person left it");
   } finally {
     await unmountFixture(fixture);
+  }
+});
+
+/** A message sign-in recovery left undelivered: retryable and dismissible (#2500). */
+function failedAuthenticationPrompt(commandId: string): NonNullable<SessionView["pendingPrompts"]>[number] {
+  return {
+    commandId,
+    text: "Please also update the changelog.",
+    hasImages: false,
+    state: "failed",
+    errorCode: "PROVIDER_AUTHENTICATION_REQUIRED",
+    error: "authentication recovery was dismissed; this message was not sent",
+    canDismiss: true,
+    canRetry: true,
+    revision: 1,
+    attemptCount: 1,
+    createdAt: 2,
+    updatedAt: 2,
+  };
+}
+
+function pendingPromptButtons(fixture: Fixture, commandId: string) {
+  return [...fixture.scroller.querySelectorAll<HTMLButtonElement>(
+    `[data-testid="pending-prompt-${commandId}"] .tl-receipt-buttons button`)];
+}
+
+test("a failed message keeps its row, reason, Retry and Dismiss while the history is loading or failed to load (#2500)", async () => {
+  const pages = pageController();
+  const resolved: string[] = [];
+  const fixture = await mountFixture(pages, 0, {
+    pendingPrompts: [failedAuthenticationPrompt("prompt-failed")],
+    client: {
+      resolvePendingPrompt: async (_id: string, commandId: string, action: "cancel" | "dismiss" | "retry") => {
+        resolved.push(`${action}:${commandId}`);
+        return {} as SessionView;
+      },
+    },
+  });
+  const row = () => fixture.scroller.querySelector('[data-testid="pending-prompt-prompt-failed"]');
+  try {
+    assert.ok(fixture.container.querySelector(".transcript-skeleton"), "the transcript is loading");
+    assert.ok(row(), "the failed message is in the reader while history loads");
+    await act(async () => { pages.rejectTail(); });
+    await flushAsyncWork();
+    assert.ok(fixture.container.textContent!.includes("Couldn't Load the Full Conversation"), "history failed to load");
+    assert.match(row()?.querySelector(".tl-receipt")?.textContent ?? "",
+      /^Delivery Failed·Sign-in was dismissed, so this message wasn't sent\.·RetryDismissShow Details$/u,
+      "its status, reason and actions read as in a loaded transcript");
+    const buttons = pendingPromptButtons(fixture, "prompt-failed");
+    assert.deepEqual(buttons.map((button) => [button.textContent, button.disabled]), [["Retry", false], ["Dismiss", false]]);
+    await act(async () => { buttons[0]!.click(); });
+    await flushAsyncWork();
+    await act(async () => { pendingPromptButtons(fixture, "prompt-failed")[1]!.click(); });
+    await flushAsyncWork();
+    assert.deepEqual(resolved, ["retry:prompt-failed", "dismiss:prompt-failed"], "both actions reach the service");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a failed message under a history error keeps the Viewer refusal and worktree-recovery rules (#2500)", async () => {
+  const refusal = "Viewers can't manage this session's messages.";
+  const refused = { allowed: false as const, reason: refusal };
+  for (const variant of [
+    {
+      name: "refused",
+      overrides: { commandPermissions: {
+        stop: refused, restart: refused, stopBackgroundJob: refused, manageQueue: refused, prompt: refused,
+      } } satisfies Partial<SessionView>,
+      expected: [["Retry", true, refusal], ["Dismiss", true, refusal]],
+    },
+    {
+      name: "worktree recovery",
+      overrides: { worktreeRecovery: {
+        recoveryId: "recovery-1", detectedAt: 1, selectedPath: "/repos/demo/missing", expectedBranch: "agent/demo",
+        detail: "The selected worktree is missing.",
+      } } satisfies Partial<SessionView>,
+      expected: [["Retry", true, "Recover the selected worktree before retrying this message."], ["Dismiss", false, null]],
+    },
+  ]) {
+    const pages = pageController();
+    const fixture = await mountFixture(pages, 0, {
+      pendingPrompts: [failedAuthenticationPrompt("prompt-ruled")],
+      sessionOverrides: variant.overrides,
+    });
+    try {
+      await act(async () => { pages.rejectTail(); });
+      await flushAsyncWork();
+      assert.ok(fixture.container.textContent!.includes("Couldn't Load the Full Conversation"), "history failed to load");
+      assert.deepEqual(
+        pendingPromptButtons(fixture, "prompt-ruled")
+          .map((button) => [button.textContent, button.disabled, button.getAttribute("title")]),
+        variant.expected,
+        variant.name,
+      );
+    } finally {
+      await unmountFixture(fixture);
+    }
+  }
+});
+
+test("a focused failed message stays mounted and focused when the history it waited for arrives (#2500)", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages, 0, { pendingPrompts: [failedAuthenticationPrompt("prompt-focused")] });
+  try {
+    assert.ok(fixture.container.querySelector(".transcript-skeleton"), "the transcript is loading");
+    for (const label of ["Retry", "Dismiss"]) {
+      const action = pendingPromptButtons(fixture, "prompt-focused").find((button) => button.textContent === label);
+      assert.ok(action, label);
+      await act(async () => { action.focus(); });
+      assert.equal(domWindow.document.activeElement, action);
+      if (label === "Dismiss") {
+        await act(async () => {
+          pages.releaseTail({
+            events: cachedTranscriptEvents(fixture.sessionId, 2),
+            eventEpoch: 0,
+            nextBefore: 0,
+            hasMoreOlder: false,
+            cacheComplete: true,
+          });
+        });
+        await flushAsyncWork();
+        assertNoDomNode(fixture.container.querySelector(".transcript-skeleton"), "history has arrived");
+        const timeline = fixture.scroller.querySelector(".timeline");
+        assert.ok(timeline, "the transcript shows its rows");
+        assert.equal(Boolean(timeline.compareDocumentPosition(action as never) & domWindow.Node.DOCUMENT_POSITION_FOLLOWING),
+          true, "the failed message sits after the transcript's rows");
+        assert.equal(action.isConnected, true, "the row was not remounted");
+        assert.equal(domWindow.document.activeElement, action, "focus stays where the person left it");
+      }
+    }
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("once the history gives the transcript a tail, Message Not Sent counts and finds the failed message once (#2500)", async () => {
+  const observed: Array<{ element: Element; callback: IntersectionObserverCallback }> = [];
+  const original = Object.getOwnPropertyDescriptor(globalThis, "IntersectionObserver");
+  Object.defineProperty(globalThis, "IntersectionObserver", {
+    configurable: true,
+    writable: true,
+    value: class {
+      constructor(private readonly callback: IntersectionObserverCallback) {}
+      observe(element: Element) { observed.push({ element, callback: this.callback }); }
+      unobserve() {}
+      disconnect() {}
+    },
+  });
+  const pages = pageController();
+  const fixture = await mountFixture(pages, 0, { pendingPrompts: [failedAuthenticationPrompt("prompt-tail")] });
+  try {
+    const row = fixture.scroller.querySelector('[data-pending-prompt-id="prompt-tail"]');
+    assert.ok(row, "the failed message shows while history loads");
+    assert.equal(observed.length, 0, "a loading transcript has no tail to raise the control");
+    assertNoDomNode(tailControl(fixture));
+    await act(async () => {
+      pages.releaseTail({
+        events: cachedTranscriptEvents(fixture.sessionId, 2),
+        eventEpoch: 0,
+        nextBefore: 0,
+        hasMoreOlder: false,
+        cacheComplete: true,
+      });
+    });
+    await flushAsyncWork();
+    const watched = observed.filter(({ element }) => element.getAttribute("data-receipt-id") === "prompt:prompt-tail");
+    assert.ok(watched.length > 0, "the failed message is watched once the transcript has a tail");
+    assert.equal(new Set(watched.map(({ element }) => element)).size, 1, "one row stands for the message");
+    assert.equal(watched[0]!.element, row, "the row rendered while loading is the one watched");
+    const target = watched.at(-1)!;
+    await act(async () => {
+      target.callback([{ target: target.element, isIntersecting: false } as unknown as IntersectionObserverEntry],
+        {} as IntersectionObserver);
+    });
+    const control = tailControl(fixture) as HTMLButtonElement;
+    assert.equal(control.textContent, "1 Message Not Sent");
+    let scrolledTo: Element | null = null;
+    (target.element as HTMLElement).scrollIntoView = function (this: Element) { scrolledTo = this; };
+    await act(async () => { control.click(); });
+    assert.equal(scrolledTo, row, "the control scrolls to the message");
+    assert.equal(domWindow.document.activeElement?.textContent, "Retry", "focus lands on its first action");
+  } finally {
+    await unmountFixture(fixture);
+    if (original) Object.defineProperty(globalThis, "IntersectionObserver", original);
+    else delete (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver;
   }
 });
