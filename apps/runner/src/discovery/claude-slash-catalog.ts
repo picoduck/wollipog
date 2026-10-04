@@ -191,7 +191,20 @@ export function mergeClaudeSessionCatalog(inputs: ClaudeSessionCatalogInputs): C
     if (!files.has(key)) files.set(key, command);
   }
   const skills = skillsByName(inputs.skills);
-  const unsupported: UnsupportedSlashCommand[] = [];
+  // Every unsupported name gets its reason whether or not a list advertises it: Claude Code omits
+  // some (`/exit`) from `slash_commands`, and typing one must still say why rather than send it.
+  const unsupportedNames = new Map<string, string>();
+  for (const name of [...CLAUDE_UNSUPPORTED_COMMANDS, ...(inputs.init?.terminalCommands ?? [])]) {
+    const key = name.toLowerCase();
+    if (!unsupportedNames.has(key)) unsupportedNames.set(key, name);
+  }
+  for (const name of inputs.init?.commands ?? []) {
+    // Keep the casing Claude Code reports for a name it lists.
+    if (unsupportedNames.has(name.toLowerCase())) unsupportedNames.set(name.toLowerCase(), name);
+  }
+  const unsupported: UnsupportedSlashCommand[] = [...unsupportedNames.values()]
+    .map((name) => ({ name, reason: claudeUnsupportedReason(name) }))
+    .sort((a, b) => compareStable(a.name.toLowerCase(), b.name.toLowerCase()));
   const commands: AgentSlashCommand[] = [];
   const seen = new Set<string>();
   const add = (command: AgentSlashCommand) => {
@@ -222,12 +235,7 @@ export function mergeClaudeSessionCatalog(inputs: ClaudeSessionCatalogInputs): C
     // Double-underscore names are Claude Code's own plumbing, not commands for a person.
     if (name.startsWith("__")) continue;
     const key = name.toLowerCase();
-    if (CLAUDE_UNSUPPORTED_COMMANDS.has(key) || terminal.has(key)) {
-      if (!unsupported.some((entry) => entry.name.toLowerCase() === key)) {
-        unsupported.push({ name, reason: claudeUnsupportedReason(name) });
-      }
-      continue;
-    }
+    if (CLAUDE_UNSUPPORTED_COMMANDS.has(key) || terminal.has(key)) continue;
     const skill = skills.get(key);
     if (skill && !skill.userInvocable) continue;
     const file = files.get(key);
@@ -250,6 +258,5 @@ export function mergeClaudeSessionCatalog(inputs: ClaudeSessionCatalogInputs): C
     }
   }
   commands.sort((a, b) => compareStable(a.name.toLowerCase(), b.name.toLowerCase()));
-  unsupported.sort((a, b) => compareStable(a.name.toLowerCase(), b.name.toLowerCase()));
   return { commands: commands.slice(0, CLAUDE_INIT_CATALOG_LIMITS.maxCommands), unsupported };
 }

@@ -26,6 +26,7 @@ import {
 } from "./session-manager.js";
 import { setGitRunnerForTests } from "./git-ops.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
+import { applyClaudeSessionCatalog } from "./discovery/claude-commands.js";
 import { inheritCodexPlugins } from "./codex-plugins.js";
 import { inheritProviderPlugins } from "./provider-plugins.js";
 
@@ -461,16 +462,17 @@ test("Claude Code's init list merges into the authorized catalog, keeps unchange
       ["compact", "builtin"],
       ["deploy", "project"],
     ]);
-    assert.deepEqual(meta.sessionUnsupportedSlashCommands?.map((entry) => entry.name), ["doctor"]);
+    assert.ok(meta.sessionUnsupportedSlashCommands?.some((entry) => entry.name === "doctor"));
+    assert.ok(meta.sessionUnsupportedSlashCommands?.some((entry) => entry.name === "exit"));
     assert.deepEqual(rescans, [], "an init list without plugin roots needs no rescan");
 
     const snapshot = h.manager.sessionSnapshots()[0]!;
     const live = snapshot.agentCapabilities?.slashCommands ?? [];
     assert.ok(live.every((command) => command.invocation), "the merged catalog is authorized for the live provider");
-    assert.deepEqual(
-      (snapshot.agentCapabilities as { unsupportedSlashCommands?: unknown }).unsupportedSlashCommands,
-      [{ name: "doctor", reason: "Claude Code's /doctor needs its own terminal, so Wollipog doesn't send it." }],
-    );
+    const unsupported = (snapshot.agentCapabilities as { unsupportedSlashCommands?: { name: string; reason: string }[] })
+      .unsupportedSlashCommands ?? [];
+    assert.deepEqual(unsupported.find((entry) => entry.name === "doctor"),
+      { name: "doctor", reason: "Claude Code's /doctor needs its own terminal, so Wollipog doesn't send it." });
     const compactId = live.find((command) => command.name === "compact")!.invocation!.id;
     h.callbacks().onClaudeInitCatalog!({ ...init, commands: [...init.commands] });
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -501,6 +503,38 @@ test("Claude Code's init list merges into the authorized catalog, keeps unchange
     const userEvent = h.store.readEvents("command-session").find((event) => event.payload.kind === "user_message");
     assert.equal(userEvent?.payload.kind === "user_message" && userEvent.payload.text, "/brainstorm pricing",
       "Claude Code invokes a skill as /name");
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("launch persists the scanned skills, so a later init list keeps their metadata and hidden skills (#1224)", async () => {
+  const h = harness({
+    prepareClaudePlugins: (meta) => applyClaudeSessionCatalog(meta, {
+      commands: [{ name: "deploy", source: "project", description: "Deploy the application" }],
+      skills: [
+        { name: "notes", origin: "project", description: "Take notes.", argumentHint: "[topic]", userInvocable: true },
+        { name: "internal", origin: "project", userInvocable: false },
+      ],
+    }),
+  });
+  try {
+    assert.equal(await h.start(), true);
+    assert.equal(h.store.readMeta("command-session")?.claudeSlashCatalogInputs?.skills.length, 2,
+      "launch persists what preparation scanned");
+    h.callbacks().onClaudeInitCatalog!({
+      commands: ["deploy", "notes", "internal", "compact"],
+      skills: ["notes", "internal"],
+      terminalCommands: [],
+      plugins: [],
+    });
+    await waitFor(() => h.store.readMeta("command-session")?.sessionSlashCommands
+      ?.some((command) => command.name === "compact") === true, "the init list should merge");
+    const commands = h.store.readMeta("command-session")?.sessionSlashCommands ?? [];
+    assert.deepEqual(commands.find((command) => command.name === "notes"),
+      { name: "notes", source: "skill", description: "Take notes.", argumentHint: "[topic]" });
+    assert.equal(commands.find((command) => command.name === "internal"), undefined,
+      "a skill marked user-invocable: false stays hidden");
   } finally {
     h.cleanup();
   }

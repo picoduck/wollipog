@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
   CLAUDE_INIT_CATALOG_LIMITS,
+  CLAUDE_UNSUPPORTED_COMMANDS,
   claudeUnsupportedReason,
   mergeClaudeSessionCatalog,
   parseClaudeInitCatalog,
@@ -75,15 +76,29 @@ test("the init list decides membership, and each command gets its source label",
     { name: "usage", source: "builtin", description: "Show plan usage and limits." },
   ]);
   // Terminal-only commands, from the fixed list and from Claude Code's own list, are split out.
-  assert.deepEqual(merged.unsupported, [
-    { name: "color", reason: claudeUnsupportedReason("color") },
-    { name: "doctor", reason: claudeUnsupportedReason("doctor") },
-    { name: "exit", reason: claudeUnsupportedReason("exit") },
-  ]);
-  assert.equal(merged.unsupported[1]!.reason, "Claude Code's /doctor needs its own terminal, so Wollipog doesn't send it.");
+  const unsupported = new Map(merged.unsupported.map((entry) => [entry.name, entry.reason]));
+  assert.equal(unsupported.get("doctor"), "Claude Code's /doctor needs its own terminal, so Wollipog doesn't send it.");
+  assert.equal(unsupported.get("color"), claudeUnsupportedReason("color"));
+  assert.equal(unsupported.get("exit"), claudeUnsupportedReason("exit"));
+  assert.equal(merged.unsupported.length, CLAUDE_UNSUPPORTED_COMMANDS.size + 2,
+    "the fixed list plus Claude Code's two terminal commands that aren't on it");
+  assert.ok(!merged.commands.some((command) => unsupported.has(command.name)));
   assert.ok(!merged.commands.some((command) => command.name.startsWith("__")), "internal plumbing never appears");
   assert.ok(merged.commands.some((command) => command.source === "builtin"),
     "a catalog with the init list has built-ins, which tells the composer it is complete (#2176)");
+});
+
+test("unsupported names get their reason even when Claude Code doesn't advertise them", () => {
+  const merged = mergeClaudeSessionCatalog({
+    commands: [],
+    skills: [],
+    init: { commands: ["compact", "Doctor"], skills: [], terminalCommands: ["doctor", "reload-plugins"], plugins: [] },
+  });
+  const names = merged.unsupported.map((entry) => entry.name);
+  assert.ok(names.includes("exit"), "a denylisted name Claude Code omits from slash_commands");
+  assert.ok(names.includes("reload-plugins"), "a terminal command Claude Code doesn't list as a slash command");
+  assert.ok(names.includes("Doctor") && !names.includes("doctor"), "one entry per name, in the casing Claude Code lists");
+  assert.deepEqual(merged.commands.map((command) => command.name), ["compact"]);
 });
 
 test("a skill marked user-invocable: false is never advertised", () => {
@@ -123,7 +138,8 @@ test("without an init list the disk catalog stands, with personal and project sk
     { name: "deploy-check", source: "skill", description: "My personal deploy check." },
     { name: "release", source: "project", description: "Cut a release." },
   ]);
-  assert.deepEqual(merged.unsupported, []);
+  assert.deepEqual(merged.unsupported.map((entry) => entry.name), [...CLAUDE_UNSUPPORTED_COMMANDS].sort(),
+    "before an init list the fixed list still says why, so /exit is never sent as text");
   assert.ok(!merged.commands.some((command) => command.source === "builtin"),
     "an older runner's catalog keeps the composer's plain-text fallback (#2176)");
 });

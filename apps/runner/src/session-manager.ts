@@ -5693,6 +5693,8 @@ export class SessionManager {
       sessionSlashCommandProvenance: carrySlashCommandCatalog
         ? prior?.sessionSlashCommandProvenance
         : undefined,
+      sessionUnsupportedSlashCommands: carrySlashCommandCatalog ? prior?.sessionUnsupportedSlashCommands : undefined,
+      claudeSlashCatalogInputs: carrySlashCommandCatalog ? prior?.claudeSlashCatalogInputs : undefined,
       codexExecFallbackReason: spec.codexExecFallbackReason ?? prior?.codexExecFallbackReason,
       workspaceId: spec.workspaceId,
       repoPath,
@@ -7535,6 +7537,7 @@ export class SessionManager {
       }
       const priorCapabilities = meta.capabilities;
       const priorSessionSlashCommands = meta.sessionSlashCommands;
+      const priorUnsupportedSlashCommands = meta.sessionUnsupportedSlashCommands;
       launchPreparation = await this.prepareLaunch?.(meta, {
         isCurrent: () => this.launchIsCurrent(sessionId, launchGeneration),
       });
@@ -7565,9 +7568,13 @@ export class SessionManager {
         agentVersion: meta.agentVersion,
         sessionSlashCommands: meta.sessionSlashCommands,
         sessionSlashCommandProvenance: meta.sessionSlashCommandProvenance,
+        // The sources launch preparation merged (#1224): a later init list re-merges from them.
+        sessionUnsupportedSlashCommands: meta.sessionUnsupportedSlashCommands,
+        claudeSlashCatalogInputs: meta.claudeSlashCatalogInputs,
       });
       if (updated && (priorCapabilities !== meta.capabilities ||
-          priorSessionSlashCommands !== meta.sessionSlashCommands)) {
+          priorSessionSlashCommands !== meta.sessionSlashCommands ||
+          !sameUnsupportedSlashCommands(priorUnsupportedSlashCommands, meta.sessionUnsupportedSlashCommands))) {
         this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
       }
       if (!await this.preflightProviderAuthentication(meta, launchGeneration, approvedAuthentication)) return false;
@@ -11531,6 +11538,7 @@ export class SessionManager {
         // Provider catalogs may encode role-specific tools. Rediscover after the same conversation
         // resumes rather than advertising the old role's overlay through reconnect.
         sessionSlashCommands: undefined, sessionSlashCommandProvenance: undefined,
+        sessionUnsupportedSlashCommands: undefined, claudeSlashCatalogInputs: undefined,
         roleConversion: { ...conversion, state: "applied" },
       })!;
       this.store.flush(sessionId);
@@ -13567,6 +13575,8 @@ export class SessionManager {
           capabilities: source.capabilities,
           sessionSlashCommands: source.sessionSlashCommands,
           sessionSlashCommandProvenance: source.sessionSlashCommandProvenance,
+          sessionUnsupportedSlashCommands: source.sessionUnsupportedSlashCommands,
+          claudeSlashCatalogInputs: source.claudeSlashCatalogInputs,
         });
         if (updated && (priorCapabilities !== source.capabilities ||
             priorSessionSlashCommands !== source.sessionSlashCommands)) {
@@ -13660,6 +13670,8 @@ export class SessionManager {
           capabilities: source.capabilities,
           sessionSlashCommands: source.sessionSlashCommands,
           sessionSlashCommandProvenance: source.sessionSlashCommandProvenance,
+          sessionUnsupportedSlashCommands: source.sessionUnsupportedSlashCommands,
+          claudeSlashCatalogInputs: source.claudeSlashCatalogInputs,
         });
         if (updated && (priorCapabilities !== source.capabilities ||
             priorSessionSlashCommands !== source.sessionSlashCommands)) {
@@ -13808,6 +13820,8 @@ export class SessionManager {
         ...recoveryProvenance,
         sessionSlashCommands: undefined,
         sessionSlashCommandProvenance: undefined,
+        sessionUnsupportedSlashCommands: undefined,
+        claudeSlashCatalogInputs: undefined,
         env: {},
         adopted: false,
         providerStateVersion: source.context.kind === "wsl" ? 3 : 2,

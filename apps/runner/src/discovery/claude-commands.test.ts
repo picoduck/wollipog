@@ -990,7 +990,7 @@ test("launch preparation merges the last init list for the same provenance and d
     "builtin:compact",
     "project:release",
   ]);
-  assert.deepEqual(meta.sessionUnsupportedSlashCommands?.map((entry) => entry.name), ["doctor"]);
+  assert.ok(meta.sessionUnsupportedSlashCommands?.some((entry) => entry.name === "doctor"));
   assert.deepEqual(meta.claudeSlashCatalogInputs?.init, init);
 
   const moved = sessionMeta(repo, {
@@ -1002,7 +1002,8 @@ test("launch preparation merges the last init list for the same provenance and d
   await prepareClaudeSlashCommandCatalog(moved, { nativeHome: () => home });
   assert.equal(moved.claudeSlashCatalogInputs?.init, undefined, "a different launch root never inherits an init list");
   assert.ok(!moved.sessionSlashCommands?.some((entry) => entry.source === "builtin"));
-  assert.equal(moved.sessionUnsupportedSlashCommands, undefined);
+  assert.ok(!moved.sessionUnsupportedSlashCommands?.some((entry) => entry.name === "doctor"),
+    "the old init list's terminal commands go with it; the fixed list stays");
 });
 
 test("a cloud launch publishes only its own init list, never the host disk", async () => {
