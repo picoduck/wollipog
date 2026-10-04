@@ -802,7 +802,14 @@ test("an ambiguous Edit in a Fork failure stays in the confirmation as a danger 
     await settleDialog();
     const dialog = openDialog("Edit in a Fork");
     assert.ok(dialog, "the confirmation stays open");
-    assert.match(dialog.querySelector(".notice.t-danger")?.textContent ?? "", /The fork outcome is uncertain\. Do not retry\./u);
+    const failure = dialog.querySelector<HTMLElement>(".notice.t-danger");
+    assert.match(failure?.querySelector(".notice-body")?.textContent ?? "", /^The fork outcome is uncertain\. Do not retry\./u);
+    // The server's words wait behind Show Details (#2511).
+    assert.doesNotMatch(failure?.textContent ?? "", /timed out/u);
+    const details = failure?.querySelector<HTMLButtonElement>(".notice-details-toggle");
+    assert.ok(details);
+    await act(async () => { details.click(); });
+    assert.equal(failure?.querySelector(".notice-details-body code")?.textContent, "The control plane timed out.");
     assert.deepEqual(fixture.calls.navigate, [], "nothing opens");
 
     // Trying again does not create a second fork while the first one's outcome is unknown.

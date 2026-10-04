@@ -1925,6 +1925,15 @@ exactly one: the most severe, then the lowest rank.
   accepted. A command that keeps the attached images for the next message is an info entry ("/review
   doesn't send images. They stay here for your next message."), dismissible like other info entries.
   Nothing renders inside the composer card or between it and the slot.
+- **Composer action errors** (#2511): every other action that reports through the slot (Cancel,
+  Dismiss and Retry on a pending message, Stop Turn, Rewind, Fork, Recover Session, Restart, Retry
+  Setup, an @ reference, Steer and Queue Again) follows the same rule, under its own title
+  ("Rewind Failed", "Fork Not Created", "Session Not Restarted"), never "Action Failed". The sentence
+  opens with what failed ("Couldn't restart this session.") and ends with what to do. A cause the
+  person can act on has its own sentence (the machine is offline, the turn has no checkpoint) and no
+  details; anything else ends "Try again." with the server's words behind Show Details. The copy is in
+  `composer-action-errors.ts`. Edit in a Fork reports in its confirmation, whose danger notice keeps
+  the server's words behind Show Details the same way.
 - **Editing a Copy** (info, compact, #2185): Edit as a New Turn opens no dialog. It loads the
   message's text and attachments into the composer and focuses it; over a draft it first confirms
   "Replace Draft". While the copy is there the slot reads "Editing a copy of your Turn N message.

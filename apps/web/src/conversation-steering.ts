@@ -142,7 +142,7 @@ export function conversationSteeringAvailability(
   if (input.queueHeld) {
     return {
       available: false,
-      reason: "Wait for the active turn to settle or resolve the visible control-plane decision before steering.",
+      reason: "Steering waits until the current turn settles or the pending request is answered.",
     };
   }
   if (input.sessionStatus !== "running" || typeof input.activeTurnId !== "string" || !input.activeTurnId.trim()) {

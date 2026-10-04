@@ -61,7 +61,7 @@ test("direct steering availability requires every UI-known affirmative gate", ()
     [{ supportsSteering: undefined }, /has not verified/i],
     [{ policyPaused: true }, /guardrail decision/i],
     [{ inputPending: true }, /pending agent input/i],
-    [{ queueHeld: true }, /turn to settle or resolve the visible control-plane decision/i],
+    [{ queueHeld: true }, /^Steering waits until the current turn settles or the pending request is answered\.$/],
     [{ stopPending: true }, /stop request to settle/i],
     [{ sessionStatus: "idle" }, /active provider turn/i],
     [{ sessionStatus: "starting" }, /active provider turn/i],
@@ -71,7 +71,11 @@ test("direct steering availability requires every UI-known affirmative gate", ()
   for (const [patch, reason] of cases) {
     const result = conversationSteeringAvailability({ ...available, ...patch });
     assert.equal(result.available, false);
-    if (!result.available) assert.match(result.reason, reason);
+    if (!result.available) {
+      assert.match(result.reason, reason);
+      // Refusals name what the person can act on, never an internal component (#2511).
+      assert.doesNotMatch(result.reason, /control.plane/iu);
+    }
   }
 
   const inputRequired = conversationSteeringAvailability({ ...available, sessionStatus: "input_required" });
@@ -157,7 +161,11 @@ test("queued editing requires v99 and affirmative live per-entry eligibility", (
       ...patch,
     }, prompt);
     assert.equal(result.available, false);
-    if (!result.available) assert.match(result.reason, reason);
+    if (!result.available) {
+      assert.match(result.reason, reason);
+      // Refusals name what the person can act on, never an internal component (#2511).
+      assert.doesNotMatch(result.reason, /control.plane/iu);
+    }
   }
 
   const absentProjection = queuedPromptEditingAvailability({

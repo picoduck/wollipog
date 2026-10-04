@@ -146,6 +146,7 @@ import {
   shouldReadOpeningWindow,
 } from "../history-recovery.js";
 import { routedSessionPlaceholder, shouldHydrateRoutedSession } from "../detail-placeholder.js";
+import { composerActionError, type ComposerAction, type ComposerActionError } from "../composer-action-errors.js";
 import { transcriptPresentation, transcriptRendersRequestRow } from "../transcript-presentation.js";
 import { OrchestratorControlsDialog, orchestratorControlsSummary } from "./OrchestratorControlsDialog.js";
 import {
@@ -200,7 +201,7 @@ import { useInstanceScope } from "../instance-scope.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuLabel, MenuSeparator, MenuSurface } from "./Menu.js";
 import { Markdown } from "./Markdown.js";
-import { useFeedback, type ConfirmationOptions } from "./FeedbackProvider.js";
+import { ConfirmationFailure, useFeedback, type ConfirmationOptions } from "./FeedbackProvider.js";
 import { ContextWindowMeter } from "./ContextWindowMeter.js";
 import { resolveContextWindowCapacity } from "../context-window-capacity.js";
 import { SessionUsageControl } from "./SessionUsageControl.js";
@@ -570,6 +571,23 @@ function ambiguousForkError(cause: unknown): AmbiguousForkError | null {
   return new AmbiguousForkError(
     "The fork outcome is uncertain. Do not retry. Wait for the child to appear on the Board, and reload only after checking there.",
   );
+}
+
+/** What a pending prompt's Cancel, Dismiss and Retry are called when they fail. */
+const PENDING_PROMPT_ACTIONS = {
+  cancel: "cancelMessage", dismiss: "dismissMessage", retry: "retryMessage",
+} as const satisfies Record<"cancel" | "dismiss" | "retry", ComposerAction>;
+
+/** A failed fork or recovery as a notice: an uncertain outcome says not to retry, in its own words. */
+function forkFailure(
+  action: "fork" | "recoverConversation" | "editInFork",
+  cause: unknown,
+  ambiguous: AmbiguousForkError | null,
+  machineName: string | undefined,
+): ComposerActionError {
+  if (!ambiguous) return composerActionError(action, cause, machineName);
+  const { detail } = composerActionError(action, cause);
+  return { title: "Fork Outcome Unknown", message: ambiguous.message, ...(detail ? { detail } : {}) };
 }
 
 /** What the composer couldn't do, as a notice slot entry (#2156). */
@@ -1192,6 +1210,13 @@ function SessionDetailLoaded({
   /** A composer action's error, in one sentence that says what to do; null clears it. */
   const setError = useCallback((message: string | null, title = "Action Failed") => {
     showComposerError("action", message === null ? null : { title, message });
+  }, [showComposerError]);
+  // The session's machine, named when it is why an action failed; assigned once it is known below.
+  const actionMachineNameRef = useRef<string | undefined>(undefined);
+  /** A composer action the server refused (#2511): its own title and sentence, and the server's words
+   * behind Show Details. */
+  const showActionError = useCallback((action: ComposerAction, cause: unknown) => {
+    showComposerError("action", composerActionError(action, cause, actionMachineNameRef.current));
   }, [showComposerError]);
   // Edit as a New Turn's copy in the composer and the draft it replaced (#2185), kept per session
   // with the draft so leaving the session or reloading does not lose Discard Edit.
@@ -2900,7 +2925,7 @@ function SessionDetailLoaded({
     try {
       await api.resolvePendingPrompt(session.id, commandId, action);
     } catch (cause) {
-      setError((cause as Error).message);
+      showActionError(PENDING_PROMPT_ACTIONS[action], cause);
     } finally {
       setPendingPromptAction(undefined);
     }
@@ -2912,7 +2937,7 @@ function SessionDetailLoaded({
     try {
       await api.cancelQueuedPrompt(session.id, commandId);
     } catch (cause) {
-      setError((cause as Error).message);
+      showActionError("cancelQueuedMessage", cause);
     } finally {
       setPendingPromptAction(undefined);
     }
@@ -2976,6 +3001,7 @@ function SessionDetailLoaded({
   const promptRefusal = sessionCommandRefusal(session, "prompt");
   // Friendly machine label (hostname + local/SSH) instead of the raw random box runner id.
   const runnerDisp = runnerDisplay(runner, box, session.runnerId);
+  actionMachineNameRef.current = runnerDisp.name || undefined;
   // Why the composer cannot send a new message now (#2154). Edit & Resend states the same reason.
   // An archived session is also stopped; its notice is in the slot, so the slot's order decides.
   const promptUnavailableReason = composerUnavailableReason({
@@ -3250,10 +3276,7 @@ function SessionDetailLoaded({
     } catch (cause) {
       if (stopTurnAttemptRef.current !== attempt) return false;
       clearStopTurnAttempt();
-      // The turn ended before the stop reached it: the same plain sentence as stopping with no turn.
-      const noActiveTurn = cause instanceof ApiError && cause.status === 409 &&
-        /no active turn to stop/i.test(cause.message);
-      setError(noActiveTurn ? "There's no turn to stop right now." : (cause as Error).message, "Turn Not Stopped");
+      showActionError("stopTurn", cause);
       return false;
     }
   }, [api, canStopTurn, cancelTurnRefusal, clearStopTurnAttempt, mutationKey, sessionId]);
@@ -3500,7 +3523,7 @@ function SessionDetailLoaded({
         ...turnActionConfirmation(rewindFilesConfirmation(turn, prompt?.text)),
         tone: "danger",
       }) || rewindRefusalRef.current !== null) return;
-      await api.rewind(sessionId, turn).catch((e) => setError((e as Error).message));
+      await api.rewind(sessionId, turn).catch((cause: unknown) => showActionError("rewind", cause));
     },
     [api, confirm, rewindRefusal, sessionId],
   );
@@ -3529,9 +3552,9 @@ function SessionDetailLoaded({
           const ambiguous = ambiguousForkError(cause);
           if (ambiguous) releaseOnFinish = false;
           if (viewGenerationRef.current === generation) {
-            const message = (ambiguous ?? cause as Error).message;
-            setError(message);
-            if (mode === "preview") showToast(message, { tone: "error" });
+            const failure = forkFailure("fork", cause, ambiguous, actionMachineNameRef.current);
+            showComposerError("action", failure);
+            if (mode === "preview") showToast(failure.message, { tone: "error" });
           }
         } finally {
           if (releaseOnFinish) releaseFork();
@@ -3628,9 +3651,9 @@ function SessionDetailLoaded({
       const ambiguous = ambiguousForkError(cause);
       if (ambiguous) releaseOnFinish = false;
       if (viewGenerationRef.current === generation) {
-        const message = (ambiguous ?? cause as Error).message;
-        setError(message);
-        if (mode === "preview") showToast(message, { tone: "error" });
+        const failure = forkFailure("recoverConversation", cause, ambiguous, actionMachineNameRef.current);
+        showComposerError("action", failure);
+        if (mode === "preview") showToast(failure.message, { tone: "error" });
       }
     } finally {
       if (releaseOnFinish) releaseFork();
@@ -3678,7 +3701,7 @@ function SessionDetailLoaded({
     try {
       loadSession(await api.restart(session.id));
     } catch (cause) {
-      if (viewGenerationRef.current === generation) setError((cause as Error).message);
+      if (viewGenerationRef.current === generation) showActionError("restart", cause);
     } finally {
       if (viewGenerationRef.current === generation) {
         setRestartPending(false);
@@ -3774,14 +3797,19 @@ function SessionDetailLoaded({
     const generation = viewGenerationRef.current;
     setSetupRetryPending(true);
     setError(null);
+    // Which request failed: the retry itself, or the restart a setup that now succeeded needs.
+    let failedAction: ComposerAction = "retrySetup";
     try {
       const result = await api.retryWorktreeSetup(session.id, failedSetupWorktree.path);
       loadSession(result.session);
       // Initial launch failures need a fresh start after setup succeeds. Provider forks and
       // handoffs are restored to idle by the runner so Retry never discards their continuation.
-      if (result.session.status === "failed") loadSession(await api.restart(session.id));
+      if (result.session.status === "failed") {
+        failedAction = "restartAfterSetup";
+        loadSession(await api.restart(session.id));
+      }
     } catch (cause) {
-      if (viewGenerationRef.current === generation) setError((cause as Error).message);
+      if (viewGenerationRef.current === generation) showActionError(failedAction, cause);
     } finally {
       if (viewGenerationRef.current === generation) setSetupRetryPending(false);
     }
@@ -3969,11 +3997,13 @@ function SessionDetailLoaded({
       await saveComposerDraft(forked.id, draft.text, draft.images, instanceScope);
       if (viewGenerationRef.current === generation) navigate({ name: "session", id: forked.id });
     } catch (cause) {
-      // The confirmation shows the failure as its danger notice. An ambiguous fork keeps the lock,
-      // so trying again says a fork is already in progress rather than creating a second one.
+      // The confirmation shows the failure as its danger notice, with the server's words behind
+      // Show Details. An ambiguous fork keeps the lock, so trying again says a fork is already in
+      // progress rather than creating a second one.
       const ambiguous = ambiguousForkError(cause);
       if (ambiguous) releaseOnFinish = false;
-      throw ambiguous ?? cause;
+      const failure = forkFailure("editInFork", cause, ambiguous, actionMachineNameRef.current);
+      throw new ConfirmationFailure(failure.message, failure.detail);
     } finally {
       if (releaseOnFinish) releaseFork();
       forkInFlightRef.current = false;
@@ -4460,7 +4490,7 @@ function SessionDetailLoaded({
       if (addWorkspaceReference(reference) !== "limit") setError(null);
       window.requestAnimationFrame(() => inputRef.current?.focus());
     } catch (cause) {
-      setError((cause as Error).message);
+      showActionError("addReference", cause);
     }
   }, [addWorkspaceReference, api, runner?.protocolVersion, sessionId, workspaceReferencesSupported]);
 
@@ -5190,7 +5220,7 @@ function SessionDetailLoaded({
         promotePromptId: prompt.id,
       });
     } catch (cause) {
-      if (viewGenerationRef.current === generation) setError((cause as Error).message);
+      if (viewGenerationRef.current === generation) showActionError("steerQueuedMessage", cause);
     } finally {
       releaseComposerMutation(mutationKey, mutation.token);
       queueSteeringInFlightRef.current.delete(prompt.id);
@@ -5449,7 +5479,9 @@ function SessionDetailLoaded({
     try {
       await api.resolveSteeringAttempt(sessionId, submissionId, action);
     } catch (cause) {
-      if (viewGenerationRef.current === generation) setError((cause as Error).message);
+      if (viewGenerationRef.current === generation) {
+        showActionError(action === "queue_again" ? "queueAgain" : "dismissSteering", cause);
+      }
     } finally {
       steeringResolutionInFlightRef.current.delete(submissionId);
       if (viewGenerationRef.current === generation) {
@@ -6245,7 +6277,8 @@ function SessionDetailLoaded({
               pendingAction={pendingPromptAction}
               onSteer={(prompt) => void promoteQueuedPrompt(prompt)}
               onEdit={(prompt) => void beginQueuedPromptEdit(prompt)}
-              onCancel={(prompt) => void api.cancelQueuedPrompt(session.id, prompt.id)}
+              onCancel={(prompt) => void api.cancelQueuedPrompt(session.id, prompt.id)
+                .catch((cause: unknown) => showActionError("cancelQueuedMessage", cause))}
               onDismiss={(prompt) => void resolvePendingPrompt(prompt.id, "dismiss")}
               onFocusLost={focusComposerOrTitle}
             />

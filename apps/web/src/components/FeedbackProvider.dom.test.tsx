@@ -3,7 +3,7 @@ import test, { afterEach } from "node:test";
 import React, { act, StrictMode, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import { FeedbackProvider, useFeedback, type ConfirmationOptions } from "./FeedbackProvider.js";
+import { ConfirmationFailure, FeedbackProvider, useFeedback, type ConfirmationOptions } from "./FeedbackProvider.js";
 import { Modal } from "./common.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { statusMeta } from "../status-meta.js";
@@ -811,6 +811,24 @@ test("a failed pending confirmation stays open with the error, and can be tried 
   assert.equal(runs[1]!.signal.aborted, true, "cancelling while it runs aborts the action");
   await act(async () => { runs[1]!.resolve(); await tick(); });
   assert.equal(outcome.value, false, "an action that finishes after Cancel does not confirm");
+  await cleanup();
+});
+
+test("a ConfirmationFailure shows its sentence and keeps the server's words behind Show Details (#2511)", async () => {
+  const { runs, confirmButton, cleanup } = await renderPendingConfirmation();
+  await act(async () => { confirmButton()!.click(); await Promise.resolve(); });
+  await act(async () => {
+    runs[0]!.reject(new ConfirmationFailure("Couldn't stop the session. Try again.", "stop request rejected by runner"));
+    await tick();
+  });
+  const notice = document.querySelector<HTMLElement>('[role="dialog"] .notice[role="alert"]');
+  assert.ok(notice);
+  assert.equal(notice.querySelector(".notice-body")?.textContent, "Couldn't stop the session. Try again.");
+  assert.equal(notice.textContent?.includes("stop request rejected by runner"), false, "the details wait");
+  const toggle = notice.querySelector<HTMLButtonElement>(".notice-details-toggle");
+  assert.equal(toggle?.textContent, "Show Details");
+  await act(async () => { toggle!.click(); });
+  assert.equal(notice.querySelector(".notice-details-body code")?.textContent, "stop request rejected by runner");
   await cleanup();
 });
 

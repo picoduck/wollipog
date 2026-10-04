@@ -78,7 +78,8 @@ export interface ConfirmationOptions {
   returnFocus?: { current: HTMLElement | null };
   /** For a caller that waits on the action before closing: confirming runs this with the dialog
    * still open and the confirm button busy (§3.1), and `confirm()` resolves true once it succeeds.
-   * A failure stays in the dialog as a danger notice, so the person can try again or cancel.
+   * A failure stays in the dialog as a danger notice, so the person can try again or cancel; throw a
+   * `ConfirmationFailure` to keep the server's words behind Show Details rather than in that notice.
    * Cancelling while it runs aborts `signal` and resolves false. */
   onConfirm?: (signal: AbortSignal) => Promise<void>;
   /** Sentence case, announced while `onConfirm` runs: "Stopping the session…". */
@@ -97,6 +98,14 @@ interface ConfirmationRequest extends ConfirmationOptions {
 
 /** At most this many detail rows show; the rest are counted in "and N more". */
 export const MAX_CONFIRMATION_DETAIL_ROWS = 5;
+
+/** An `onConfirm` failure in one sentence that says what to do, with the server's own words for
+ * Show Details (§17.2). Any other error shows its message alone. */
+export class ConfirmationFailure extends Error {
+  constructor(message: string, readonly detail?: string) {
+    super(message);
+  }
+}
 
 function confirmationFingerprint(options: ConfirmationOptions): string {
   return [
@@ -588,7 +597,7 @@ function ConfirmationDialog({ request, onSettle }: {
     moreRows > 0 ? moreId : null,
   ].filter(Boolean).join(" ");
   const [running, setRunning] = useState(false);
-  const [failure, setFailure] = useState<string | null>(null);
+  const [failure, setFailure] = useState<{ message: string; detail?: string } | null>(null);
   const typeToConfirm = request.typeToConfirm;
   const [typed, setTyped] = useState("");
   const typedId = useId();
@@ -648,7 +657,9 @@ function ConfirmationDialog({ request, onSettle }: {
       if (controller.signal.aborted) return;
       inFlight.current = null;
       setRunning(false);
-      setFailure(cause instanceof Error ? cause.message : String(cause));
+      setFailure(cause instanceof ConfirmationFailure && cause.detail
+        ? { message: cause.message, detail: cause.detail }
+        : { message: cause instanceof Error ? cause.message : String(cause) });
     }
   };
 
@@ -715,7 +726,13 @@ function ConfirmationDialog({ request, onSettle }: {
             }} />
         </label>
       )}
-      {failure && <Notice tone="danger" compact role="alert">{failure}</Notice>}
+      {failure && (
+        // Show Details needs the action row under the sentence, which a one-line notice lacks.
+        <Notice tone="danger" compact={!failure.detail} role="alert"
+          details={failure.detail && <div className="code-well"><code>{failure.detail}</code></div>}>
+          {failure.message}
+        </Notice>
+      )}
     </Modal>
   );
 }

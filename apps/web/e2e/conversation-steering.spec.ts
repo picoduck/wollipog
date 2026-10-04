@@ -472,7 +472,7 @@ test("steering gates fail closed across protocol, provider, active-turn, held-qu
   await composer.fill("held queue");
   await page.keyboard.press("Control+Enter");
   await expect(page.getByRole("alert", { name: "Message Not Sent" }).locator(".notice-body")).toHaveText(
-    "Wait for the active turn to settle or resolve the visible control-plane decision before steering.",
+    "Steering waits until the current turn settles or the pending request is answered.",
   );
   await expect.poll(requests).toBe(0);
   // A held queue is said once, in the tray's header, and no row offers Steer (#2178).

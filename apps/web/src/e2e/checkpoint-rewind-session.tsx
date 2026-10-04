@@ -22,7 +22,8 @@ import { SessionDetail } from "../components/SessionDetail.js";
  *
  * `?driver=claude-code` makes it a Claude Code session, whose fork is only after the latest turn;
  * `?draft=<text>` puts a draft in the composer; `?fork=ambiguous` makes a fork's outcome uncertain
- * (a 504) and `?fork=hold` keeps it running; `?quarantine=fork|handoff` quarantines the
+ * (a 504) and `?fork=hold` keeps it running; `?rewind=refused` makes the server refuse a rewind (a
+ * 409); `?quarantine=fork|handoff` quarantines the
  * conversation with a recovery from Turn 2. Requests land in `document.body.dataset`
  * (`navigated`, `rewound`, `forked`, `prompted`).
  */
@@ -30,6 +31,7 @@ const params = new URLSearchParams(window.location.search);
 const driver = params.get("driver") === "claude-code" ? "claude-code" as const : "codex-app-server" as const;
 const quarantine = params.get("quarantine");
 const forkMode = params.get("fork");
+const rewindMode = params.get("rewind");
 const draftText = params.get("draft");
 
 const SESSION_ID = "checkpoint-rewind-session";
@@ -188,6 +190,7 @@ const client = {
   },
   rewind: async (_id: string, turn: number) => {
     document.body.dataset.rewound = String(turn);
+    if (rewindMode === "refused") throw new ApiError("rewind failed: git checkout exited with 128", 409);
   },
   fork: async (_id: string, turn: number) => {
     document.body.dataset.forked = String(turn);

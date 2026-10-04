@@ -248,6 +248,19 @@ test("session status details and the Projects page use no retired terms (#2334)"
   }
 });
 
+test("the composer's refusals, action errors and queued rows never say control plane (#2511)", () => {
+  for (const path of [
+    "./conversation-steering.ts",
+    "./composer-action-errors.ts",
+    "./components/QueuedMessages.tsx",
+    "./components/PendingPromptBubbles.tsx",
+    "./components/SteeringReceipts.tsx",
+  ]) {
+    const failures = sourceStrings(path, source(path)).filter((text) => /control.plane/iu.test(text));
+    assert.deepEqual(failures, [], path);
+  }
+});
+
 test("every surface that names a destination reads the registry's one name", () => {
   // The rail's accessible name and tooltip, its More sheet, the palette, the shortcut reference
   // and the Settings › Navigation rows each render `name`. A second field would let them drift

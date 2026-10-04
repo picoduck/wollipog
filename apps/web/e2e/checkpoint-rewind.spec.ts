@@ -312,6 +312,18 @@ test.describe("turn action flows on a whole session (#2185)", () => {
     await expect(page.locator("body")).toHaveAttribute("data-rewound", "2");
   });
 
+  test("a refused rewind is Rewind Failed in plain words, with the server's behind Show Details (#2511)", async ({ page }) => {
+    await openSession(page, "&rewind=refused");
+    await chooseMessageAction(page, "Rewind Files to Before This Turn…");
+    await page.getByRole("dialog", { name: "Rewind Files" }).getByRole("button", { name: "Rewind Files" }).click();
+    const notice = page.locator(".session-notice-slot").getByRole("alert", { name: "Rewind Failed" });
+    await expect(notice.locator(".notice-title")).toHaveText("Rewind Failed");
+    await expect(notice.locator(".notice-body")).toHaveText("Couldn't rewind the files to before this turn. Try again.");
+    await expect(page.getByText("git checkout exited with 128")).toHaveCount(0);
+    await notice.getByRole("button", { name: "Show Details" }).click();
+    await expect(notice.locator(".notice-details-body code")).toHaveText("rewind failed: git checkout exited with 128");
+  });
+
   test("Fork Conversation says what continues, and a Claude Code session notes its latest-turn limit in dim text", async ({ page }) => {
     await openSession(page, "&driver=claude-code");
     await page.getByRole("button", { name: "More Turn Actions" }).last().click();
