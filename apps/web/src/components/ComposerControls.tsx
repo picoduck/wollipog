@@ -248,7 +248,8 @@ function keepTabInside(event: ReactKeyboardEvent<HTMLDivElement>): void {
     .filter((element) => element.tabIndex >= 0 && !(element instanceof HTMLButtonElement && element.disabled));
   if (stops.length === 0) return;
   const active = event.currentTarget.ownerDocument.activeElement as HTMLElement | null;
-  const group = active?.closest('[role="radiogroup"]') ?? null;
+  // Each group's container: its radio rows, or the segmented Context Window.
+  const group = active?.closest(".model-settings-group") ?? null;
   const current = stops.findIndex((stop) => stop === active || (group !== null && group.contains(stop)));
   const next = current < 0
     ? (event.shiftKey ? stops.length - 1 : 0)
