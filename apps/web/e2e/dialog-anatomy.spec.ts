@@ -193,6 +193,7 @@ test.describe("phone", () => {
     const grabber = page.locator('.popover[aria-label="Model Settings"] .sheet-grabber');
     await expect(grabber).toBeVisible();
     await expect(grabber).toHaveAttribute("aria-hidden", "true");
+    await dialogMotionSettled(page);
     const box = await grabber.boundingBox();
     expect([box?.width, box?.height]).toEqual([36, 4]);
   });
