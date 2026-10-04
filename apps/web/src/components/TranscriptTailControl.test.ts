@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { newRowsLabel, notSentLabel, transcriptTailView } from "./TranscriptTailControl.js";
 
-const idle = { hasTail: true, offscreenNotSent: 0, recovering: false, following: true, newRows: 0 };
+const idle = { hasTail: true, offscreenNotSent: 0, recovering: false, following: true, newRows: 0, canScroll: true };
 
 test("the tail control says nothing at an idle tail or without a tail", () => {
   assert.equal(transcriptTailView(idle), null);
@@ -24,6 +24,12 @@ test("the tail control shows the highest-priority state only", () => {
     { kind: "jump", newRows: 3 });
   assert.deepEqual(transcriptTailView({ ...idle, recovering: true }), { kind: "recovering" },
     "recovery speaks at the tail too");
+});
+
+test("a transcript with nothing to scroll never offers a jump, whatever its follow state (#2526)", () => {
+  assert.equal(transcriptTailView({ ...idle, following: false, newRows: 3, canScroll: false }), null);
+  assert.deepEqual(transcriptTailView({ ...idle, recovering: true, following: false, canScroll: false }), { kind: "recovering" },
+    "recovery still speaks");
 });
 
 test("tail control labels", () => {

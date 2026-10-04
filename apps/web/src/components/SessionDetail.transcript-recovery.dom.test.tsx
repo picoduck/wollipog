@@ -603,7 +603,9 @@ test("a reader away from the tail keeps their place through recovery and its com
     });
     await flushAsyncWork();
     assert.equal(followState(fixture), "paused");
-    fixture.scroller.scrollTop = 123;
+    // A transcript with somewhere to scroll; one without has nothing to jump to (#2526).
+    setScrollerMetrics(fixture.scroller, { clientHeight: 500, scrollHeight: 900, scrollTop: 0 });
+    await scrollReader(fixture.scroller, 123, false);
 
     assert.equal(recoveryActive(fixture), true, "recovery outranks Jump to Latest");
     assert.equal(fixture.scroller.scrollTop, 123, "showing the control does not move the reader");
@@ -628,7 +630,8 @@ test("Jump to Latest appears only away from the tail, counts new rows, and retur
       fireDomEvent.wheel(fixture.scroller, { deltaY: -40 });
     });
     await flushAsyncWork();
-    fixture.scroller.scrollTop = 200;
+    setScrollerMetrics(fixture.scroller, { clientHeight: 500, scrollHeight: 900, scrollTop: 0 });
+    await scrollReader(fixture.scroller, 200, false);
     const jump = tailControl(fixture) as HTMLButtonElement | null;
     assert.ok(jump, "leaving the tail shows the control");
     assert.equal(jump.tagName, "BUTTON");

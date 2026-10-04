@@ -88,6 +88,7 @@ function Harness({ sessionId, revision, mode, scope = "test", rows, generation, 
       data-mode={mode}
       data-state={followTail.state}
       data-new={followTail.newRowCount}
+      data-can-scroll={String(followTail.canScroll)}
       data-anchor-key={initialAnchor?.key}
       data-anchor-offset={initialAnchor?.offset}
       onScroll={followTail.onScroll}
@@ -629,6 +630,63 @@ test("each held finger is released by its own end, wherever that end is delivere
     container.remove();
     outside.remove();
   }
+});
+
+test("a press that lifts at the tail resumes following, while one that carried the reader away stays paused (#2526)", async () => {
+  MockResizeObserver.instances.length = 0;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  const outside = domWindow.document.createElement("div") as unknown as HTMLElement;
+  domWindow.document.body.append(container as never, outside as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<Harness sessionId="tap-release" revision={0} mode="expanded" scope="tap-release" />);
+  });
+  const transcript = container.firstElementChild as HTMLElement;
+  transcript.scrollTo = (() => {}) as typeof transcript.scrollTo;
+  const viewportObserver = MockResizeObserver.instances.find((observer) => observer.observed.has(transcript));
+  assert.ok(viewportObserver);
+  const dispatch = async (target: EventTarget, event: Event) => {
+    await act(async () => { target.dispatchEvent(event as never); });
+  };
+  const scrollTo = async (scrollTop: number) => {
+    setScrollMetrics(transcript, { scrollTop, scrollHeight: 1_000, clientHeight: 200 });
+    await dispatch(transcript, new domWindow.Event("scroll", { bubbles: true }) as unknown as Event);
+  };
+  setScrollMetrics(transcript, { scrollTop: 800, scrollHeight: 1_000, clientHeight: 200 });
+  await act(async () => { viewportObserver.trigger(); });
+  assert.equal(transcript.dataset.canScroll, "true");
+
+  // A tap on a control in the transcript: the press pauses, and the lift at the tail resumes.
+  await dispatch(transcript, touchEvent("touchstart", [1], [1]));
+  assert.equal(transcript.dataset.state, "paused", "the press pauses, as it always has");
+  await dispatch(transcript, touchEvent("touchend", [1], []));
+  assert.equal(transcript.dataset.state, "following", "a tap at the tail is not reading");
+
+  // The same tap reported as both a touch pointer and a native touch resumes only once both lift.
+  await dispatch(transcript, pointerEvent("pointerdown", 3));
+  await dispatch(transcript, touchEvent("touchstart", [1], [1]));
+  await dispatch(outside, pointerEvent("pointerup", 3));
+  assert.equal(transcript.dataset.state, "paused", "a finger still down keeps the reader paused");
+  await dispatch(transcript, touchEvent("touchend", [1], []));
+  assert.equal(transcript.dataset.state, "following");
+
+  // A pan that carried the reader away stays paused when it lifts, and a later tap there too.
+  await dispatch(transcript, touchEvent("touchstart", [2], [2]));
+  await scrollTo(500);
+  await dispatch(transcript, touchEvent("touchend", [2], []));
+  assert.equal(transcript.dataset.state, "paused", "a pan away from the tail is reading");
+  await dispatch(transcript, touchEvent("touchstart", [3], [3]));
+  await dispatch(transcript, touchEvent("touchend", [3], []));
+  assert.equal(transcript.dataset.state, "paused", "a tap away from the tail leaves the reader where it is");
+
+  // A transcript with nothing to scroll reports it, so its owner offers no jump.
+  setScrollMetrics(transcript, { scrollTop: 0, scrollHeight: 200, clientHeight: 200 });
+  await act(async () => { viewportObserver.trigger(); });
+  assert.equal(transcript.dataset.canScroll, "false");
+
+  await act(async () => { root.unmount(); });
+  container.remove();
+  outside.remove();
 });
 
 test("previewing and paused sessions restore distinct logical anchors without following backfill", async () => {

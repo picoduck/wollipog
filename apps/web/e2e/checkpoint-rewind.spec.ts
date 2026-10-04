@@ -408,3 +408,96 @@ test.describe("turn action confirmations on a phone (#2185)", () => {
     });
   }
 });
+
+// #2526: a turn's phone menu is not reading. Opening and closing it, or choosing from it, leaves the
+// reader at the latest message, and Jump to Latest never offers a jump the transcript cannot make.
+test.describe("the phone turn menu keeps the reader at the latest message (#2526)", () => {
+  test.use({ hasTouch: true, isMobile: true });
+
+  const reader = (page: Page) => page.locator(".detail-scroll[data-follow-tail-state]");
+  const jumpToLatest = (page: Page) => page.locator('.transcript-tail-anchor[data-tail-control="jump"]');
+  /** How far the reader sits from its bottom, how far it could scroll, and its follow state. */
+  const readerPosition = (page: Page) => reader(page).evaluate((element) => ({
+    fromBottom: Math.round(element.scrollHeight - element.clientHeight - element.scrollTop),
+    canScroll: element.scrollHeight - element.clientHeight,
+    state: (element as HTMLElement).dataset.followTailState,
+  }));
+  async function expectAtLatest(page: Page) {
+    await expect.poll(async () => {
+      const { fromBottom, state } = await readerPosition(page);
+      return { atBottom: fromBottom <= 2, state };
+    }).toEqual({ atBottom: true, state: "following" });
+    await expect(jumpToLatest(page)).toHaveCount(0);
+  }
+  async function openTurnMenu(page: Page) {
+    await page.getByRole("button", { name: "More Turn Actions" }).last().tap();
+    await expect(page.getByRole("menu", { name: "More Turn Actions" })).toBeVisible();
+  }
+
+  // 844 tall has nothing to scroll, as in the report; 480 tall overflows, so the reader sits at a
+  // real bottom it could leave.
+  for (const height of [844, 480]) {
+    test.describe(`at 390×${height}`, () => {
+      test.use({ viewport: { width: 390, height } });
+
+      for (const dismissal of ["the backdrop", "Escape"] as const) {
+        test(`opening a turn's menu and dismissing it with ${dismissal} leaves the reader at the latest message`, async ({ page }) => {
+          await openSession(page);
+          await expectAtLatest(page);
+          expect((await readerPosition(page)).canScroll > 0).toBe(height < 844);
+          await openTurnMenu(page);
+          if (dismissal === "Escape") await page.keyboard.press("Escape");
+          // The sheet docks to the bottom, so the top of the page is backdrop.
+          else await page.touchscreen.tap(195, 40);
+          await expect(page.getByRole("menu")).toHaveCount(0);
+          await expectAtLatest(page);
+        });
+      }
+
+      test("choosing Edit as a New Turn from the turn's menu leaves the reader at the latest message", async ({ page }) => {
+        await openSession(page);
+        await openTurnMenu(page);
+        await page.getByRole("menuitem", { name: "Edit as a New Turn" }).tap();
+        await expect(page.locator(".composer-input")).toHaveValue(SECOND_PROMPT);
+        await expect(editingCopyNotice(page)).toBeVisible();
+        await expectAtLatest(page);
+      });
+    });
+  }
+
+  test("a finger held on the open menu sheet is not reading the transcript", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 480 });
+    await openSession(page);
+    await openTurnMenu(page);
+    // The sheet is portalled out of the transcript, but React still delivers its touches there.
+    await dialogMotionSettled(page);
+    const title = (await page.getByRole("menu").locator(".menu-label").first().boundingBox())!;
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [{ x: Math.round(title.x + title.width / 2), y: Math.round(title.y + title.height / 2) }],
+    });
+    await expect(reader(page)).toHaveAttribute("data-follow-tail-state", "following");
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchCancel", touchPoints: [] });
+    await page.keyboard.press("Escape");
+    await expectAtLatest(page);
+  });
+
+  test("Jump to Latest stays hidden while a press holds a transcript with nothing to scroll", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await openSession(page);
+    expect((await readerPosition(page)).canScroll).toBe(0);
+    // A finger held on the reader pauses following, but with nothing to scroll there is nowhere to
+    // jump to.
+    const label = (await page.locator(".tl-turn-footer .tl-turn-label").last().boundingBox())!;
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [{ x: Math.round(label.x + label.width / 2), y: Math.round(label.y + label.height / 2) }],
+    });
+    await expect(reader(page)).toHaveAttribute("data-follow-tail-state", "paused");
+    await expect(jumpToLatest(page)).toHaveCount(0);
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    await expectAtLatest(page);
+  });
+});

@@ -16,7 +16,8 @@ export type TranscriptTailView =
 /**
  * The control is silent unless it has something to say (#2153): a message that failed to send and
  * is off-screen, recovery in progress, or a reader away from the tail. A transcript that is
- * loading, empty or failed to load has no tail, so it shows nothing.
+ * loading, empty or failed to load has no tail, so it shows nothing; one that cannot scroll is
+ * already at its tail, so it never offers a jump (#2526).
  */
 export function transcriptTailView(input: {
   hasTail: boolean;
@@ -24,11 +25,12 @@ export function transcriptTailView(input: {
   recovering: boolean;
   following: boolean;
   newRows: number;
+  canScroll: boolean;
 }): TranscriptTailView {
   if (!input.hasTail) return null;
   if (input.offscreenNotSent > 0) return { kind: "not-sent", count: input.offscreenNotSent };
   if (input.recovering) return { kind: "recovering" };
-  if (!input.following) return { kind: "jump", newRows: input.newRows };
+  if (!input.following && input.canScroll) return { kind: "jump", newRows: input.newRows };
   return null;
 }
 

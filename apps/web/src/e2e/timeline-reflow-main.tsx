@@ -482,6 +482,7 @@ function Fixture() {
               recovering: false,
               following: followTail.isFollowing,
               newRows: followTail.newRowCount,
+              canScroll: followTail.canScroll,
             })}
             shortcut="End"
             readerRef={scrollRef}

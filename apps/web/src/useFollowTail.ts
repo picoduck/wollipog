@@ -68,6 +68,9 @@ export interface FollowTailApi {
   isFollowing: boolean;
   /** Rows appended since the reader left the tail; 0 while following. */
   newRowCount: number;
+  /** Whether the transcript overflows at all. One that cannot scroll is at its latest message, so
+   * there is nothing to jump to, whatever the follow state (#2526). */
+  canScroll: boolean;
   pause: () => void;
   preview: () => void;
   /** Claims viewport movement before Inbox paging starts its programmatic scroll. */
@@ -96,6 +99,11 @@ export function isAtFollowTailBottom(
   threshold = FOLLOW_TAIL_THRESHOLD_PX,
 ): boolean {
   return metrics.scrollHeight - metrics.scrollTop - metrics.clientHeight <= threshold;
+}
+
+/** Whether the transcript has anywhere to scroll, beyond the sub-pixel slack of the resume band. */
+export function canFollowTailScroll(metrics: Pick<FollowTailMetrics, "scrollHeight" | "clientHeight">): boolean {
+  return metrics.scrollHeight - metrics.clientHeight > FOLLOW_TAIL_RESUME_THRESHOLD_PX;
 }
 
 export function nextFollowTailState(
@@ -176,6 +184,7 @@ export function useFollowTail({
   const initialSnapshotRef = useRef<FollowTailSnapshot | undefined>(undefined);
   if (!initialSnapshotRef.current) initialSnapshotRef.current = loadSnapshot(initialKey);
   const [, setState] = useState<FollowTailState>(initialSnapshotRef.current.state);
+  const [canScroll, setCanScroll] = useState(false);
   const stateRef = useRef<FollowTailState>(initialSnapshotRef.current.state);
   const anchorRef = useRef<VirtualScrollAnchor | null>(initialSnapshotRef.current.anchor);
   const activeKeyRef = useRef(initialKey);
@@ -251,6 +260,7 @@ export function useFollowTail({
       scrollHeight: metrics.scrollHeight,
       clientHeight: metrics.clientHeight,
     };
+    setCanScroll(canFollowTailScroll(metrics));
   }, []);
 
   /**
@@ -384,6 +394,18 @@ export function useFollowTail({
     heldTouchesRef.current.delete(key);
     detach();
   }, []);
+  /** A held finger lifted. A press that lifts with the reader still at the tail was a tap, not
+   * reading: following resumes, so tapping a control in the transcript never leaves the reader
+   * paused at the latest message (#2526). A pan that carried the reader away stays paused. */
+  const endTouch = useCallback((key: string) => {
+    if (!heldTouchesRef.current.has(key)) return;
+    releaseTouch(key);
+    const element = scrollRef.current;
+    if (heldTouchesRef.current.size === 0 && element && stateRef.current === "paused" &&
+        programmaticScrollRef.current == null && isAtFollowTailBottom(element, FOLLOW_TAIL_RESUME_THRESHOLD_PX)) {
+      transition("resume");
+    }
+  }, [releaseTouch, scrollRef, transition]);
   /** Holds one finger until `target` hears the end that `ends` recognises as that finger's own. */
   const holdTouch = useCallback((
     key: string,
@@ -393,13 +415,13 @@ export function useFollowTail({
   ) => {
     releaseTouch(key);
     const onEnd = (event: Event) => {
-      if (ends(event)) releaseTouch(key);
+      if (ends(event)) endTouch(key);
     };
     for (const type of endTypes) target.addEventListener(type, onEnd);
     heldTouchesRef.current.set(key, () => {
       for (const type of endTypes) target.removeEventListener(type, onEnd);
     });
-  }, [releaseTouch]);
+  }, [endTouch, releaseTouch]);
   // A touch's later events all go to the element it started on, even once a re-render has removed
   // that element and they no longer bubble to the reader; and a reader `touchend` cannot say when
   // the reader's own fingers are gone, since `touches` counts fingers anywhere on the page. So each
@@ -595,6 +617,7 @@ export function useFollowTail({
     state: currentState,
     isFollowing: currentState === "following",
     newRowCount,
+    canScroll,
     pause,
     preview,
     beginProgrammaticScroll,
