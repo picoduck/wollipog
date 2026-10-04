@@ -1771,19 +1771,23 @@ function SessionDetailLoaded({
     storeRuntimeQueuedEditRecovery(key, queuedEditRecoveryScope.accountKey, recovery);
     return persistQueuedPromptEditRecovery(recovery);
   }, [persistQueuedPromptEditRecovery, queuedEditRecoveryScope]);
+  // The queued edit whose Save this composer watched in flight, kept until that recovery ends: its
+  // failure is this view's own action error, while an outcome restored from storage the strip says
+  // alone (#2560). It outlives the settlement, which may come before the recovery scope can load it.
+  const queuedEditSaveWatchedRef = useRef<{ key: string; promptId: string } | null>(null);
+  const queuedEditSaveInFlight = queuedPromptEditMutationRecovery(activeComposerMutation);
+  if (queuedEditSaveInFlight) {
+    queuedEditSaveWatchedRef.current = { key: mutationKey, promptId: queuedEditSaveInFlight.edit.promptId };
+  }
   const clearQueuedPromptEditRecovery = useCallback((key: string): void => {
+    queuedEditSaveWatchedRef.current = null;
     clearRuntimeQueuedEditRecovery(key);
     if (queuedEditRecoveryScope) clearDurableQueuedEditRecovery(queuedEditRecoveryScope);
   }, [queuedEditRecoveryScope]);
-  // The composer that watched a queued edit's Save in flight, so the Save's failure is that view's
-  // own action error when it settles; an outcome restored from storage the strip says alone (#2560).
-  const queuedEditSaveWatchedRef = useRef<string | null>(null);
-  if (queuedPromptEditMutationRecovery(activeComposerMutation)) queuedEditSaveWatchedRef.current = mutationKey;
   const restoreQueuedPromptEditRecovery = useCallback((
     recovery: QueuedPromptEditRecovery,
     pending: boolean,
     preserveDraft = false,
-    saveSettledHere = false,
   ) => {
     revealOrdinaryComposerRef.current("answer-owned");
     const restored = cloneQueuedPromptEditRecovery(recovery);
@@ -1799,13 +1803,15 @@ function SessionDetailLoaded({
     }
     // The Recovered Queued Message strip says what happened. Only a Save this view watched fail is
     // also a notice, with the reason it failed; a stored outcome would repeat the strip (#2560).
-    setError(saveSettledHere ? restored.error ?? null : null);
+    const watched = queuedEditSaveWatchedRef.current;
+    const saveFailedHere = !pending && watched?.key === mutationKey && watched.promptId === restored.edit.promptId;
+    setError(saveFailedHere ? restored.error ?? null : null);
     commandSubmissionRetryRef.current = null;
     suppressedDraftRef.current = pending ? { sessionId } : null;
     draftHydratedSessionRef.current = sessionId;
     pendingHydrationCaretRef.current = null;
     pendingComposerFocusRestoreRef.current = null;
-  }, [replace, sessionId, setProgrammaticComposerText]);
+  }, [mutationKey, replace, sessionId, setProgrammaticComposerText]);
   // Tap-or-hold dictation (browser SpeechRecognition; hidden when unsupported, #2193).
   const dictation = useVoiceDictation((phrase) => {
     revealOrdinaryComposerRef.current("always");
@@ -2125,7 +2131,6 @@ function SessionDetailLoaded({
 
   useEffect(() => {
     if (activeComposerMutation) return;
-    const saveSettledHere = queuedEditSaveWatchedRef.current === mutationKey;
     // An ordinary locally initiated queued edit already owns the composer. Leave a recovery that
     // another tab publishes recoverable until this edit is saved or cancelled.
     if (queuedEditRef.current && !queuedEditRecovered) return;
@@ -2202,16 +2207,15 @@ function SessionDetailLoaded({
             }
             storeRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey, restored);
           }
-          queuedEditSaveWatchedRef.current = null;
-          restoreQueuedPromptEditRecovery(restored, false, preserveDraftAfterLoad, saveSettledHere);
+          restoreQueuedPromptEditRecovery(restored, false, preserveDraftAfterLoad);
         })();
         return () => { cancelled = true; };
       }
-      queuedEditSaveWatchedRef.current = null;
-      restoreQueuedPromptEditRecovery(queuedEditRecovery, false, preserveQueuedEditDraft, saveSettledHere);
+      restoreQueuedPromptEditRecovery(queuedEditRecovery, false, preserveQueuedEditDraft);
       return;
     }
-    queuedEditSaveWatchedRef.current = null;
+    // With the recovery scope known, no recovery means the watched Save left none to explain.
+    if (queuedEditRecoveryScope) queuedEditSaveWatchedRef.current = null;
     if (suppressedDraftRef.current?.sessionId !== sessionId) return;
     const completedQueuedEdit = queuedEditRef.current !== null;
     if (completedQueuedEdit) {
