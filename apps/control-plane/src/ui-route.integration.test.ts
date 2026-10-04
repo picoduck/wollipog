@@ -2503,3 +2503,59 @@ test("legacy workspace rename cannot bypass durable Project management authority
     "Owner Rename",
   );
 });
+
+test("adding an organization member reconnects its UI clients so they reload the directory (#2527)", { timeout: 30_000 }, async (t) => {
+  const port = await reservePort();
+  const temp = mkdtempSync(join(tmpdir(), "wollipog-member-reconnect-"));
+  const databasePath = join(temp, "control-plane.db");
+  const ownerToken = loadOrCreateLocalDeviceToken(defaultLocalDeviceTokenPath(databasePath));
+  ControlPlaneDb.open(databasePath).close();
+
+  let output = "";
+  const child = spawn(
+    process.execPath,
+    ["--import", "tsx", "apps/control-plane/src/index.ts"],
+    {
+      cwd: REPO_ROOT,
+      env: {
+        ...process.env,
+        CONTROL_PLANE_HOST: "127.0.0.1",
+        CONTROL_PLANE_PORT: String(port),
+        CONTROL_PLANE_DB: databasePath,
+        CONTROL_PLANE_TOKEN,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    },
+  );
+  const capture = (chunk: unknown) => {
+    output = (output + String(chunk)).slice(-32_768);
+  };
+  child.stdout?.on("data", capture);
+  child.stderr?.on("data", capture);
+  t.after(async () => {
+    await stopChild(child);
+    rmSync(temp, { recursive: true, force: true });
+  });
+
+  const httpBase = `http://127.0.0.1:${port}`;
+  await waitForHealth(httpBase, child, () => output);
+  const ui = await openStrictSocket(authenticatedUiUrl(`ws://127.0.0.1:${port}`, ownerToken));
+  // A single-member organization reads every answer as the viewer's own; once a second member
+  // exists, a tab that kept its old directory would keep calling that member "you".
+  let created: Promise<Response> | undefined;
+  const closed = await closeAfter(ui, () => {
+    created = fetchWithBearer(`${httpBase}/api/identity/users`, ownerToken, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ displayName: "Grace Hopper", role: "operator" }),
+    });
+  });
+  assert.equal((await created!).status, 201);
+  assert.deepEqual(closed, { code: 1000, reason: "organization directory changed" },
+    "a new member is an ordinary reconnect, not an authorization failure");
+  const identity = await (await fetchWithBearer(`${httpBase}/api/identity`, ownerToken)).json() as {
+    memberships: Array<{ userName: string }>;
+  };
+  assert.ok(identity.memberships.some((membership) => membership.userName === "Grace Hopper"));
+});

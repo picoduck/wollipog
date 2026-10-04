@@ -24,7 +24,6 @@ export interface ViewerIdentity {
 /** A member's answer to a question, from its content-safe governance audit record. */
 export interface HumanQuestionAnswer {
   actorId?: string;
-  timestamp: number;
 }
 
 export interface ResolverDirectory {
@@ -61,29 +60,22 @@ export function humanQuestionAnswers(
         entry.outcome !== "answered" || entry.actor.kind !== "human") continue;
     answers ??= new Map();
     const list = answers.get(entry.requestId) ?? [];
-    list.push({ ...(entry.actor.id ? { actorId: entry.actor.id } : {}), timestamp: entry.timestamp });
+    list.push(entry.actor.id ? { actorId: entry.actor.id } : {});
     answers.set(entry.requestId, list);
   }
   return answers ?? NO_ANSWERS;
 }
 
 /**
- * The member who answered this occurrence of a request. A request id can be reused, so the answer
- * recorded nearest the row's resolution time is the one that settled it.
+ * The member who answered a request. A request id can be reused, and the audit carries no
+ * occurrence id; its control-plane timestamps cannot be matched against the runner's either, since
+ * the two clocks may disagree. So a reused id names its member only when every recorded answer
+ * came from the same one; otherwise the row stays neutral rather than risk naming the wrong one.
  */
-export function questionAnswerActorId(
-  directory: ResolverDirectory,
-  requestId: string,
-  resolvedAt: number | undefined,
-): string | undefined {
+export function questionAnswerActorId(directory: ResolverDirectory, requestId: string): string | undefined {
   const answers = directory.questionAnswers.get(requestId);
-  if (!answers?.length) return undefined;
-  if (answers.length === 1 || resolvedAt === undefined) return answers.at(-1)!.actorId;
-  let nearest = answers[0]!;
-  for (const answer of answers) {
-    if (Math.abs(answer.timestamp - resolvedAt) < Math.abs(nearest.timestamp - resolvedAt)) nearest = answer;
-  }
-  return nearest.actorId;
+  const actorId = answers?.[0]?.actorId;
+  return actorId && answers!.every((answer) => answer.actorId === actorId) ? actorId : undefined;
 }
 
 export type HumanResolver =

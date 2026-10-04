@@ -52,13 +52,13 @@ test("only members' answers from the audit name a question's resolver", () => {
     audit({ auditId: "f", requestId: "other", actor: { kind: "human" }, timestamp: 20 }),
   ]);
   assert.deepEqual([...answers], [
-    ["ask", [{ actorId: "user-ada", timestamp: 10 }]],
-    ["other", [{ timestamp: 20 }]],
+    ["ask", [{ actorId: "user-ada" }]],
+    ["other", [{}]],
   ]);
   assert.equal(humanQuestionAnswers([]).size, 0);
 
   const directory = { viewer: null, questionAnswers: answers };
-  assert.equal(questionAnswerActorId(directory, "ask", undefined), "user-ada");
-  assert.equal(questionAnswerActorId(directory, "other", 20), undefined);
-  assert.equal(questionAnswerActorId(directory, "missing", 20), undefined);
+  assert.equal(questionAnswerActorId(directory, "ask"), "user-ada");
+  assert.equal(questionAnswerActorId(directory, "other"), undefined);
+  assert.equal(questionAnswerActorId(directory, "missing"), undefined);
 });

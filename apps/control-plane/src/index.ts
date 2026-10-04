@@ -2561,6 +2561,10 @@ app.post("/api/identity/users", async (req, reply) => {
       role,
       now: Date.now(),
     });
+    // A new member makes the organization's sessions shared: reconnecting clients reload the
+    // directory, so a transcript stops attributing the new member's answers to "you" (#2527).
+    // Nobody's access changed, so this is an ordinary reconnect rather than a 1008.
+    hub.closeOrganizationUiClients(principal.organizationId, 1000, "organization directory changed");
     return reply.code(201).send({ membership });
   } catch {
     return reply.code(409).send({ error: "could not create organization member" });

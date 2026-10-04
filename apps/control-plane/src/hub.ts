@@ -924,12 +924,14 @@ export class Hub {
   }
 
   /** Role changes can turn a socket that connected as admin into a scoped member. Close every
-   * cached principal in the organization so no pre-change privilege survives until reconnect. */
-  closeOrganizationUiClients(organizationId: string): void {
+   * cached principal in the organization so no pre-change privilege survives until reconnect.
+   * A change that leaves every principal authorized passes an ordinary close code instead, so the
+   * UI reconnects promptly rather than treating it as an authorization failure. */
+  closeOrganizationUiClients(organizationId: string, code?: number, reason?: string): void {
     for (const [client, info] of this.uiClients) {
       if (info.principal?.organizationId !== organizationId) continue;
       try {
-        info.close();
+        info.close(code, reason);
       } catch {
         /* already closing */
       }

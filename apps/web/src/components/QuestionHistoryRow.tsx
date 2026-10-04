@@ -77,7 +77,7 @@ const shortId = (id: string) => (id.length > 12 ? `${id.slice(0, 12)}…` : id);
  * answer's audit record is not loaded.
  */
 function answeredBy(item: QuestionItem, directory: ResolverDirectory): string | null {
-  const actorId = questionAnswerActorId(directory, item.requestId, item.resolvedAt);
+  const actorId = questionAnswerActorId(directory, item.requestId);
   if (!actorId && !item.answers) return null;
   const resolver = humanResolver(directory.viewer, actorId);
   return resolver ? resolverName(resolver) : null;

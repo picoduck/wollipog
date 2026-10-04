@@ -61,8 +61,13 @@ function Viewer() {
 
 async function mount(getIdentity: ApiClient["getIdentity"], runtimeKey: string) {
   const sockets: UiSocket[] = [];
+  const credentialListeners: Array<() => void> = [];
   const connection: UiConnectionRuntime = {
     instanceId: runtimeKey, runtimeKey,
+    onCredentialChange: (listener) => {
+      credentialListeners.push(listener);
+      return () => {};
+    },
     createSocket: () => {
       const socket: UiSocket = { readyState: UI_SOCKET_OPEN, onopen: null, onmessage: null,
         onclose: null, onerror: null, send() {}, close() {} };
@@ -81,7 +86,8 @@ async function mount(getIdentity: ApiClient["getIdentity"], runtimeKey: string) 
   });
   return {
     text: () => container.textContent,
-    online: () => act(async () => { sockets[0]!.onmessage?.({ data: "{}" }); }),
+    online: () => act(async () => { sockets.at(-1)!.onmessage?.({ data: "{}" }); }),
+    switchCredentials: () => act(async () => { for (const listener of credentialListeners) listener(); }),
     unmount: () => act(async () => { root.unmount(); }),
   };
 }
@@ -105,6 +111,27 @@ test("a failed identity load leaves resolver wording neutral rather than guessin
   try {
     await view.online();
     assert.equal(view.text(), "unknown");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a reconnect with other credentials drops the previous viewer before the new one loads", async () => {
+  // Ada's tab re-pairs as Grace on the same client. If Grace's identity cannot load, Ada must not
+  // remain "you": every answer and decision reads neutrally instead.
+  let reject = false;
+  const view = await mount(async () => {
+    if (reject) throw new Error("identity unavailable");
+    return identity;
+  }, "viewer-identity-credential-switch");
+  try {
+    await view.online();
+    assert.equal(view.text(), "user-ada shared=true Grace Hopper");
+    reject = true;
+    await view.switchCredentials();
+    assert.equal(view.text(), "unknown", "the reconnecting connection shows no viewer");
+    await view.online();
+    assert.equal(view.text(), "unknown", "a failed reload keeps the previous viewer dropped");
   } finally {
     await view.unmount();
   }

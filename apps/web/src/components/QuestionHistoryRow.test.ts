@@ -192,7 +192,7 @@ test("an older runner's answer without a summary reads Answered with no answer l
 
 test("a shared session names who answered relative to the viewer, never by raw user id (#2527)", () => {
   const item = questionFrom([ask([destination]), answered([{ questionId: "destination", selected: ["Destination 1 (Production)"] }])]);
-  const byAda = { ask: [{ actorId: "user-ada", timestamp: ANSWERED }] };
+  const byAda = { ask: [{ actorId: "user-ada" }] };
   const ada = viewer("user-ada", MEMBERS);
   const grace = viewer("user-grace", MEMBERS);
 
@@ -202,7 +202,7 @@ test("a shared session names who answered relative to the viewer, never by raw u
   // A resolver missing from the directory, or without a display name, is "another member".
   const unnamed = viewer("user-grace", [...MEMBERS, ["user-anon", "  "]]);
   for (const actorId of ["user-gone", "user-anon"]) {
-    const html = render(item, true, directoryFor(unnamed, { ask: [{ actorId, timestamp: ANSWERED }] }));
+    const html = render(item, true, directoryFor(unnamed, { ask: [{ actorId }] }));
     assert.match(resolutionOf(html)!, /^Answered by another member at /);
     assert.doesNotMatch(html, /user-(gone|anon|ada|grace)/, "no raw user id is rendered");
   }
@@ -212,23 +212,26 @@ test("a shared session names who answered relative to the viewer, never by raw u
   assert.match(resolutionOf(render(item, true, directoryFor(null, byAda)))!, /^Answered at /);
 
   // A single-member installation keeps "you", whatever id an older record carries.
-  assert.match(resolutionOf(render(item, true, directoryFor(SOLO, { ask: [{ actorId: "device-1", timestamp: ANSWERED }] })))!,
+  assert.match(resolutionOf(render(item, true, directoryFor(SOLO, { ask: [{ actorId: "device-1" }] })))!,
     /^Answered by you at /);
 });
 
-test("a reused request id is attributed to the answer recorded nearest its resolution", () => {
+test("a reused request id names its member only when every recorded answer agrees", () => {
+  // The audit has no occurrence id, and its control-plane clock need not match the runner's, so
+  // two members' answers under one request id cannot be told apart: the row stays neutral.
   const item = questionFrom([ask([destination]), answered([{ questionId: "destination", selected: ["Destination 1 (Production)"] }])]);
-  const directory = directoryFor(viewer("user-grace", MEMBERS), { ask: [
-    { actorId: "user-grace", timestamp: ANSWERED - 60_000 },
-    { actorId: "user-ada", timestamp: ANSWERED + 5 },
-    { actorId: "user-grace", timestamp: ANSWERED + 60_000 },
-  ] });
-  assert.match(resolutionOf(render(item, true, directory))!, /^Answered by Ada Lovelace at /);
+  const grace = viewer("user-grace", MEMBERS);
+  const mixed = directoryFor(grace, { ask: [{ actorId: "user-grace" }, { actorId: "user-ada" }] });
+  assert.match(resolutionOf(render(item, true, mixed))!, /^Answered at /);
+  const same = directoryFor(grace, { ask: [{ actorId: "user-ada" }, { actorId: "user-ada" }] });
+  assert.match(resolutionOf(render(item, true, same))!, /^Answered by Ada Lovelace at /);
+  const solo = directoryFor(SOLO, { ask: [{ actorId: "user-local" }, { actorId: "device-1" }] });
+  assert.match(resolutionOf(render(item, true, solo))!, /^Answered by you at /);
 });
 
 test("the audit names who answered even when an older runner sent no summary", () => {
   const item = questionFrom([ask([destination]), event({ kind: "question_resolved", requestId: "ask", answered: true }, ANSWERED)]);
-  const directory = directoryFor(viewer("user-ada", MEMBERS), { ask: [{ actorId: "user-grace", timestamp: ANSWERED }] });
+  const directory = directoryFor(viewer("user-ada", MEMBERS), { ask: [{ actorId: "user-grace" }] });
   assert.match(resolutionOf(render(item, true, directory))!, /^Answered by Grace Hopper at /);
   assert.match(resolutionOf(render(item, true, directoryFor(SOLO)))!, /^Answered at /,
     "without a summary or an audit record the row cannot tell a member answered");
