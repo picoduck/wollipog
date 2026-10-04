@@ -33,8 +33,10 @@ export function DictationStrip({ startedAt, held, interim }: {
   }, [startedAt]);
   return (
     <div className="dictation-strip" role="status">
-      <span className="dictation-dot" aria-hidden="true" />
-      <span className="dictation-label">Listening…</span>
+      <span className="dictation-state">
+        <span className="dictation-dot" aria-hidden="true" />
+        <span className="dictation-label">Listening…</span>
+      </span>
       <span className="dictation-timer" role="timer" aria-live="off">{formatDictationElapsed(now - startedAt)}</span>
       {interim && <span className="dictation-interim" aria-live="off"><bdi>{interim}</bdi></span>}
       <span className="dictation-hint">{held ? "Release to stop" : "Tap the mic to stop"}</span>

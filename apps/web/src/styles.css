@@ -5886,8 +5886,9 @@ textarea {
    words truncate at the start, like a picker path: the ellipsis lands on the left so the newest
    stay in view, and the `<bdi>` inside keeps the words left to right. The stop hint outranks
    them: in a strip too narrow for both (a phone) the unsettled words stay out, and settled phrases
-   still reach the message. In one too narrow for the hint as well (below a 390px phone) it stays
-   out too, and the pressed mic, named Stop Dictating, says how to stop. */
+   still reach the message, and the label and timer take the hint's small type so the hint reads in
+   full at 390px in wide system fonts too. In one too narrow for the hint as well (below a 390px
+   phone) it stays out, and the pressed mic, named Stop Dictating, says how to stop. */
 .dictation-strip {
   container: dictation-strip / inline-size;
   display: flex;
@@ -5896,9 +5897,15 @@ textarea {
   height: var(--composer-ctl);
   align-items: center;
   gap: var(--space-2);
-  padding-left: var(--space-2);
   font: var(--type-body);
   white-space: nowrap;
+}
+/* The dot and "Listening…" read as one mark, like a status badge's dot and word. */
+.dictation-state {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
 }
 /* Drawn as a border, like the rail's attention dot, so forced colors keep it. */
 .dictation-dot {
@@ -5942,6 +5949,9 @@ textarea {
 }
 @container dictation-strip (max-width: 20rem) {
   .dictation-interim { display: none; }
+  .dictation-label,
+  .dictation-timer { font: var(--type-small); }
+  .dictation-label { font-weight: var(--weight-medium); }
 }
 @container dictation-strip (max-width: 15rem) {
   .dictation-hint { display: none; }
