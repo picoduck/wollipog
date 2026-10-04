@@ -3734,6 +3734,37 @@ test("updateSessionStatus clears pending approval when leaving input_required", 
   assert.equal(db.getSession("sess-1")!.pendingApproval, null);
 });
 
+test("durable queued rows report how many of their attachments are images, workspace references excluded", () => {
+  const db = withRunner();
+  db.createSession(newSession());
+  const image = { mimeType: "image/png", data: "AAAA" };
+  const referencedImage = { artifactId: "art_image", mimeType: "image/png", sizeBytes: 42, sha256: "a".repeat(64) };
+  const reference = {
+    artifactId: "workspace:lines", mimeType: "application/vnd.wollipog.workspace-reference+json", sizeBytes: 0,
+    sha256: "c".repeat(64), referenceVersion: 1, kind: "lines", path: "src/session.ts",
+    rootFingerprint: "b".repeat(64), targetFingerprint: "c".repeat(64), startLine: 18, endLine: 21,
+  };
+  const attachmentSets = [[image], [image, reference, referencedImage, image], [reference], undefined];
+  attachmentSets.forEach((images, index) => {
+    const payloadJson = JSON.stringify({
+      type: "prompt_session", sessionId: "sess-1", text: "", ...(images ? { images } : {}),
+    });
+    db.stageSessionPromptCommand({
+      commandId: `prompt-${index}`, sessionId: "sess-1", runnerId: "runner-1",
+      payloadJson, payloadSha256: createHash("sha256").update(payloadJson).digest("hex"),
+      expiresAt: 100_000, now: 2_000 + index,
+    });
+  });
+  const queued = db.getSession("sess-1")?.queued ?? [];
+  assert.deepEqual(queued.map(({ id, hasImages, imageCount }) => ({ id, hasImages, imageCount })), [
+    { id: "prompt-0", hasImages: true, imageCount: 1 },
+    { id: "prompt-1", hasImages: true, imageCount: 3 },
+    { id: "prompt-2", hasImages: true, imageCount: 0 },
+    { id: "prompt-3", hasImages: false, imageCount: undefined },
+  ]);
+  assert.equal(Object.hasOwn(queued[3]!, "imageCount"), false, "a message without attachments sends no count");
+});
+
 test("accepted async answers suppress stale snapshots and hydration by exact occurrence", () => {
   const db = withRunner();
   db.createSession(newSession());

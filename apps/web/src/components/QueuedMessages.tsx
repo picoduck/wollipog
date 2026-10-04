@@ -27,16 +27,25 @@ const TERMINAL_RECEIPT_REASON = "Delivery attempts for this message have ended, 
 const HELD_REASON = "Held until the current turn or a pending decision settles. Resolve any visible prompt to continue.";
 
 /** What a queued message reads as in one line: its first line, or what it carries when it has no
- * text. The queue only knows that a message has images, not how many. */
-export function queuedMessageLabel(prompt: Pick<QueuedPromptView, "text" | "hasImages">): string {
+ * text. An older runner or control plane reports that a message has attachments but not how many
+ * are images, so its message reads "Image attachment". A count of 0 means the attachments are all
+ * workspace references. */
+export function queuedMessageLabel(prompt: Pick<QueuedPromptView, "text" | "hasImages" | "imageCount">): string {
   const firstLine = prompt.text.split(/\r?\n/u).find((line) => line.trim() !== "")?.trim() ?? "";
   if (firstLine) return firstLine;
-  return prompt.hasImages ? "Image attachment" : "";
+  if (!prompt.hasImages) return "";
+  const count = prompt.imageCount;
+  if (count === undefined || !Number.isSafeInteger(count) || count < 0) return "Image attachment";
+  if (count === 0) return "Attachment";
+  return count === 1 ? "1 image" : `${count} images`;
 }
 
 /** The opening words of a queued message, for a sentence that quotes it (the delivery-failure
  * notice). */
-export function queuedMessageExcerpt(prompt: Pick<QueuedPromptView, "text" | "hasImages">, maxWords = 6): string {
+export function queuedMessageExcerpt(
+  prompt: Pick<QueuedPromptView, "text" | "hasImages" | "imageCount">,
+  maxWords = 6,
+): string {
   const words = queuedMessageLabel(prompt).split(/\s+/u).filter(Boolean);
   const excerpt = words.slice(0, maxWords).join(" ");
   return words.length > maxWords ? `${excerpt}…` : excerpt;

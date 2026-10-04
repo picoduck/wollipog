@@ -62,6 +62,7 @@ import {
   QUESTION_ANSWER_SUMMARY_TEXT_MAX_LENGTH,
   validateQuestionFreeText,
   validatePromptImageInputs,
+  promptImageCount,
   providerSupportsConversationFork,
   isOrchestratorOnlyCapabilities,
   mergeSessionCapabilities,
@@ -219,8 +220,8 @@ test("machine skill adoption is capability-gated per platform", () => {
   assert.equal(machineSkillAdoptionRecoveryRequirement(undefined), null);
 });
 
-test("PROTOCOL_VERSION is 205", () => {
-  assert.equal(PROTOCOL_VERSION, 205);
+test("PROTOCOL_VERSION is 206", () => {
+  assert.equal(PROTOCOL_VERSION, 206);
   assert.equal(UNIVERSAL_QUESTION_TEXT_MIN_PROTOCOL, 202, "the settled question contract stays at its own boundary");
   assert.equal(runnerSupportsProtocol(200, "artifactSessionGuidance"), false);
   assert.equal(runnerSupportsProtocol(201, "artifactSessionGuidance"), true);
@@ -1223,6 +1224,21 @@ test("prompt image references require bounded canonical integrity metadata", () 
   assert.match(validatePromptImageInputs([{ ...valid, mimeType: "text/plain" }]).error ?? "", /unsupported MIME/);
   assert.match(validatePromptImageInputs([{ ...valid, data: "hidden-base64" } as never]).error ?? "", /unsupported fields/);
   assert.match(validatePromptImageInputs([null as never]).error ?? "", /malformed/);
+});
+
+test("promptImageCount counts inline and referenced images but not workspace references", () => {
+  const referenced = { artifactId: "art_123", mimeType: "image/png", sizeBytes: 42, sha256: "a".repeat(64) };
+  const inline = { mimeType: "image/png", data: "AAAA" };
+  const workspace = {
+    artifactId: "workspace:lines", mimeType: "application/vnd.wollipog.workspace-reference+json", sizeBytes: 0,
+    sha256: "c".repeat(64), referenceVersion: 1, kind: "lines", path: "src/session.ts",
+    rootFingerprint: "b".repeat(64), targetFingerprint: "c".repeat(64), startLine: 18, endLine: 21,
+  } as const;
+  assert.equal(promptImageCount(undefined), 0);
+  assert.equal(promptImageCount([]), 0);
+  assert.equal(promptImageCount([inline]), 1);
+  assert.equal(promptImageCount([inline, workspace, referenced]), 2);
+  assert.equal(promptImageCount([workspace]), 0);
 });
 
 test("columnForStatus maps every SessionStatus to the expected column", () => {

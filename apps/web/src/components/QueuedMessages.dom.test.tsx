@@ -272,17 +272,54 @@ test("a Viewer sees every queue action disabled, with the refusal visible", asyn
   }
 });
 
-test("an image-only message reads Image attachment after a paperclip; text shows its first line", async () => {
-  assert.equal(queuedMessageLabel({ text: "", hasImages: true }), "Image attachment");
+test("an image-only message reads its image count after a paperclip; text shows its first line", async () => {
+  assert.equal(queuedMessageLabel({ text: "", hasImages: true, imageCount: 1 }), "1 image");
+  assert.equal(queuedMessageLabel({ text: "", hasImages: true, imageCount: 3 }), "3 images");
+  assert.equal(queuedMessageLabel({ text: "Look at these", hasImages: true, imageCount: 3 }), "Look at these");
   assert.equal(queuedMessageLabel({ text: "\nFirst line\nSecond line", hasImages: false }), "First line");
   assert.equal(queuedMessageExcerpt({ text: "one two three four five six seven", hasImages: false }),
     "one two three four five six…");
-  const tray = await render({ prompts: [queued("image", { text: "", hasImages: true })] });
+  assert.equal(queuedMessageExcerpt({ text: "", hasImages: true, imageCount: 3 }), "3 images");
+  const tray = await render({
+    prompts: [
+      queued("one", { text: "", hasImages: true, imageCount: 1 }),
+      queued("three", { text: "", hasImages: true, imageCount: 3 }),
+    ],
+  });
   try {
-    const text = tray.row("image").querySelector(".queue-text")!;
+    for (const [id, label] of [["one", "1 image"], ["three", "3 images"]] as const) {
+      const text = tray.row(id).querySelector(".queue-text")!;
+      assert.equal(text.textContent, label);
+      assert.ok(text.querySelector("svg"), "a paperclip icon, not 📎");
+    }
+    assert.ok(!tray.container.textContent?.includes("📎"));
+  } finally {
+    await tray.unmount();
+  }
+});
+
+test("an image-only message from an older runner or control plane, which sends no count, reads Image attachment", async () => {
+  assert.equal(queuedMessageLabel({ text: "", hasImages: true }), "Image attachment");
+  // A malformed count is treated as absent rather than shown.
+  assert.equal(queuedMessageLabel({ text: "", hasImages: true, imageCount: -1 }), "Image attachment");
+  assert.equal(queuedMessageLabel({ text: "", hasImages: true, imageCount: 1.5 }), "Image attachment");
+  const tray = await render({ prompts: [queued("legacy", { text: "", hasImages: true })] });
+  try {
+    const text = tray.row("legacy").querySelector(".queue-text")!;
     assert.equal(text.textContent, "Image attachment");
     assert.ok(text.querySelector("svg"), "a paperclip icon, not 📎");
-    assert.ok(!tray.container.textContent?.includes("📎"));
+  } finally {
+    await tray.unmount();
+  }
+});
+
+test("a message whose only attachments are workspace references reads Attachment, not an image count", async () => {
+  assert.equal(queuedMessageLabel({ text: "", hasImages: true, imageCount: 0 }), "Attachment");
+  const tray = await render({ prompts: [queued("reference", { text: "", hasImages: true, imageCount: 0 })] });
+  try {
+    const text = tray.row("reference").querySelector(".queue-text")!;
+    assert.equal(text.textContent, "Attachment");
+    assert.ok(text.querySelector("svg"), "a paperclip icon, not 📎");
   } finally {
     await tray.unmount();
   }

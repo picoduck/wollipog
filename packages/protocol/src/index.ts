@@ -643,7 +643,11 @@
 //      records it on the `question_resolved` it emits for exactly that request, so a shared session
 //      names its answering member per occurrence. Additive + optional: older runners ignore the
 //      field and older control planes send none; such answers read without a name, as before.
-export const PROTOCOL_VERSION = 205;
+// 206: a queued-prompt view carries `imageCount`, the number of image attachments with workspace
+//      references excluded, beside `hasImages` (#2533). The runner's live queue and the control
+//      plane's durable rows both fill it in. Additive + optional: an older peer omits it, and the
+//      queue tray labels an image-only message "Image attachment" instead of "N images", as before.
+export const PROTOCOL_VERSION = 206;
 export const UNIVERSAL_QUESTION_TEXT_MIN_PROTOCOL = 202;
 
 export type ArtifactUploadPreference = "manual" | "wollipog_automatic" | "external_hosting";
@@ -4970,6 +4974,12 @@ export function validateEventPayloadReferences(
   return { ok: true, value: value as EventPayloadReference[] };
 }
 
+/** How many prompt attachments are images. Workspace references share the attachment array but
+ * are not images, so they are not counted. */
+export function promptImageCount(images: readonly PromptImageInput[] | undefined): number {
+  return images?.filter((attachment) => !isWorkspaceReference(attachment)).length ?? 0;
+}
+
 /** Validate metadata-only references and legacy inline images without resolving artifact bytes. */
 export function validatePromptImageInputs(
   images: PromptImageInput[],
@@ -6067,8 +6077,13 @@ export interface QueuedPromptView {
   /** Runner-assigned id, stable for the life of the queue entry — the cancel target. */
   id: string;
   text: string;
-  /** The queued prompt also carries image attachments. */
+  /** The queued prompt also carries attachments: images, workspace references, or both. */
   hasImages?: boolean;
+  /** v206: how many of those attachments are images, workspace references excluded
+   * (`promptImageCount`). Present exactly when `hasImages` is true, so 0 means the message carries
+   * only workspace references. Older runners and control planes omit it; the queue tray then
+   * labels an image-only message without a count. */
+  imageCount?: number;
   /** A reserved promotion is not runnable; uncertain delivery remains held for user resolution. */
   steeringState?: "promoting" | "uncertain";
   /** Explicit false lets the runner explain why this particular entry cannot be promoted. */

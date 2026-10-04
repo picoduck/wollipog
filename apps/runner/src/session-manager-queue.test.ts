@@ -9,7 +9,7 @@ import { test } from "node:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentDriverKind, EditQueuedPromptMessage, RunnerToControlPlane, SessionQueueMessage } from "@wollipog/protocol";
+import { WORKSPACE_REFERENCE_MIME_TYPE, type AgentDriverKind, type EditQueuedPromptMessage, type RunnerToControlPlane, type SessionQueueMessage } from "@wollipog/protocol";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 import { createWorkspaceReference } from "./session-files.js";
@@ -972,6 +972,32 @@ test("hasImages flags queued prompts that carry attachments", () => {
   try {
     sm.prompt("s_q", "look", [{ mimeType: "image/png", data: "AAAA" }]);
     assert.equal(queues().at(-1)!.queue[0]!.hasImages, true);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a queued prompt reports how many of its attachments are images, workspace references excluded", () => {
+  const { sm, queues, cleanup } = harness();
+  try {
+    const image = { mimeType: "image/png", data: "AAAA" };
+    const reference = {
+      artifactId: "workspace:lines" as const, mimeType: WORKSPACE_REFERENCE_MIME_TYPE, sizeBytes: 0,
+      sha256: "c".repeat(64), referenceVersion: 1 as const, kind: "lines" as const, path: "src/session.ts",
+      rootFingerprint: "b".repeat(64), targetFingerprint: "c".repeat(64), startLine: 18, endLine: 21,
+    };
+    sm.prompt("s_q", "", [image]);
+    sm.prompt("s_q", "", [image, reference, image, image]);
+    sm.prompt("s_q", "", [reference]);
+    sm.prompt("s_q", "plain");
+    const queue = queues().at(-1)!.queue;
+    assert.deepEqual(queue.map(({ hasImages, imageCount }) => ({ hasImages, imageCount })), [
+      { hasImages: true, imageCount: 1 },
+      { hasImages: true, imageCount: 3 },
+      { hasImages: true, imageCount: 0 },
+      { hasImages: false, imageCount: undefined },
+    ]);
+    assert.equal(Object.hasOwn(queue[3]!, "imageCount"), false, "a message without attachments sends no count");
   } finally {
     cleanup();
   }

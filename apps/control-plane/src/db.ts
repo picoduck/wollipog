@@ -25,6 +25,7 @@ import {
 } from "./event-payloads.js";
 import {
   isTerminalDurableDeliveryState,
+  promptImageCount,
   EVENT_PAYLOAD_CHUNK_BYTES,
   EVENT_PAYLOAD_PREVIEW_BYTES,
   HUMAN_ONLY_PARENT_CONTROL_POLICY,
@@ -20949,18 +20950,24 @@ export class ControlPlaneDb {
   }
 
   private promptCommandDisplay(payloadJson: string): {
-    text: string; hasImages: boolean; retryable: boolean;
+    text: string; hasImages: boolean; imageCount: number; retryable: boolean;
   } | null {
     const command = JSON.parse(payloadJson) as PromptSessionMessage | AnswerRecoveredQuestionCommand;
     if (command?.type === "answer_recovered_question") {
       return {
         text: Object.values(command.answers).map((answer) => `Answer: ${String(answer)}`).join("\n"),
         hasImages: false,
+        imageCount: 0,
         retryable: false,
       };
     }
     if (command?.type !== "prompt_session" || command.campaignContinuation) return null;
-    return { text: command.text, hasImages: Boolean(command.images?.length), retryable: true };
+    return {
+      text: command.text,
+      hasImages: Boolean(command.images?.length),
+      imageCount: promptImageCount(command.images),
+      retryable: true,
+    };
   }
 
   /** Commands not yet started remain visible across CP or runner restarts. A live runner queue
@@ -20991,6 +20998,7 @@ export class ControlPlaneDb {
           id: row.command_id,
           text: command.text.length > 500 ? `${command.text.slice(0, 500)}…` : command.text,
           hasImages: command.hasImages,
+          ...(command.hasImages ? { imageCount: command.imageCount } : {}),
           steerable: false,
           steerDisabledReason: isTerminalDurableDeliveryState(durableDeliveryState)
             ? (row.error ?? "Durable delivery did not complete.")
@@ -21015,7 +21023,7 @@ export class ControlPlaneDb {
     ).all(sessionId) as unknown as SessionPromptCommandRow[];
     return rows.flatMap((row) => {
       if (row.state === "completed") return [];
-      let command: { text: string; hasImages: boolean; retryable: boolean } | null;
+      let command: { text: string; hasImages: boolean; imageCount: number; retryable: boolean } | null;
       try {
         command = this.promptCommandDisplay(row.payload_json);
       } catch {
