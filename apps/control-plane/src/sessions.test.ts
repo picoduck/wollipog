@@ -14433,7 +14433,7 @@ test("an explicit empty question submission remains distinct from dismissal", ()
 });
 
 test("mixed-version multi-select Other requests reject submission but remain safely dismissible", () => {
-  const { hub, svc } = makeHarness();
+  const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
   svc.onSessionEvent(id, {
     kind: "question_request",
@@ -14446,6 +14446,7 @@ test("mixed-version multi-select Other requests reject submission but remain saf
       options: [{ label: "Audit" }],
     }],
   });
+  db.registerRunner(runnerMeta(), Date.now(), 201);
   const deliveriesBeforeSubmit = hub.sentOfType("answer_question").length;
 
   const submission = svc.answerQuestion(
@@ -14456,8 +14457,8 @@ test("mixed-version multi-select Other requests reject submission but remain saf
     "submit",
   );
 
-  assert.equal(submission.status, 400);
-  assert.match(submission.error ?? "", /cannot combine multi-select and Other responses/);
+  assert.equal(submission.status, 409);
+  assert.match(submission.error ?? "", /updated runner/);
   assert.equal(hub.sentOfType("answer_question").length, deliveriesBeforeSubmit);
 
   const dismissal = svc.answerQuestion(
@@ -24986,5 +24987,32 @@ test("campaign cost follows session access: a hidden contributor hides its bucke
     assert.deepEqual(hiddenSummary.coordination, notAuthorized, "the root's own usage needs the root as well");
   } finally {
     db.close();
+  }
+});
+
+test("universal custom answers retain request correlation, summaries, and old-runner refusal (#1595)", () => {
+  for (const recovered of [false, true]) {
+    const { db, hub, svc } = makeHarness();
+    const id = seedSession(svc, hub);
+    const questions = [
+      { id: "single", question: "Where?", options: [{ label: "Staging" }], allowOther: false },
+      { id: "multi", question: "Checks?", options: [{ label: "Audit" }], multiSelect: true },
+    ];
+    svc.onSessionEvent(id, { kind: "question_request", requestId: "custom", occurrenceId: "custom_occurrence",
+      ...(recovered ? { async: true } : {}), questions });
+    db.registerRunner(runnerMeta(), Date.now(), 201);
+    const answers = { single: "Canary", multi: "Audit" };
+    const old = svc.answerQuestion(id, "custom", answers, undefined, "submit", undefined, "custom_occurrence");
+    assert.equal(old.status, 409);
+    assert.match(old.error!, /updated runner/);
+    assert.equal(db.getSession(id)!.pendingApproval!.requestId, "custom");
+    db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);
+    assert.ok(svc.answerQuestion(id, "custom", answers, undefined, "submit", undefined, "custom_occurrence").ok);
+    const delivered = recovered ? hub.sentOfType("durable_session_command").at(-1)!.command : hub.sentOfType("answer_question").at(-1)!;
+    assert.ok(delivered.type === "answer_question" || delivered.type === "answer_recovered_question");
+    if (delivered.type !== "answer_question" && delivered.type !== "answer_recovered_question") return;
+    assert.equal(delivered.requestId, "custom");
+    assert.deepEqual(delivered.answers, answers);
+    assert.deepEqual(delivered.answerSummary, [{ questionId: "single", text: "Canary" }, { questionId: "multi", text: "Audit" }]);
   }
 });

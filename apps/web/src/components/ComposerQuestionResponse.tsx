@@ -198,7 +198,7 @@ export function ComposerQuestionResponse({
   };
 
   const update = (raw: string): Record<string, QuestionResponseDraft> => {
-    const draft = { kind: "entry", value: raw } as const;
+    const draft: QuestionResponseDraft = { kind: currentDraft?.kind === "other" ? "other" : "entry", value: raw };
     const next = updateDraft(draft);
     if (!question.multiSelect) {
       const selected = questionDraftSelections(question, draft)[0];
@@ -359,6 +359,17 @@ export function ComposerQuestionResponse({
           })}
         </div>
       )}
+      {question.options.length > 0 && (
+        <button
+          className="btn ghost sm"
+          type="button"
+          disabled={controlsDisabled}
+          onClick={() => {
+            updateDraft({ kind: "other", value: currentDraft?.kind === "other" ? rawValue : "" });
+            focusSoon(inputRef);
+          }}
+        >Other Response</button>
+      )}
       <label className="sr-only" htmlFor={`${ids}-composer-input`}>Response to Question {currentIndex + 1}</label>
       <input
         id={`${ids}-composer-input`}
@@ -367,14 +378,14 @@ export function ComposerQuestionResponse({
         type={question.secret ? "password" : "text"}
         inputMode={question.inputFormat === "integer" ? "numeric" : question.inputFormat === "number" ? "decimal" : undefined}
         autoComplete="off"
-        maxLength={question.allowOther ? question.maxLength ?? DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH : undefined}
+        maxLength={question.maxLength ?? DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH}
         value={rawValue}
         aria-describedby={`${questionHelpId}${question.options.length > 0 ? ` ${choicesId}` : ""}${validationError ? ` ${questionErrorId}` : ""}`}
         aria-invalid={validationError ? true : undefined}
         aria-disabled={responseUnavailable || undefined}
         disabled={busy}
         readOnly={responseUnavailable}
-        placeholder={question.multiSelect
+        placeholder={currentDraft?.kind === "other" ? "Type your custom response" : question.multiSelect
           ? "Numbers or labels, separated by commas"
           : question.options.length > 0 ? "Number or label" : "Type your response"}
         onChange={(event) => update(event.currentTarget.value)}
@@ -396,11 +407,11 @@ export function ComposerQuestionResponse({
             ? "Responses are unavailable until the runner reconnects. Your draft is preserved."
             : question.required === false
               ? "This response is optional. Press Enter to continue without an answer."
-              : question.options.length === 0
+              : question.options.length === 0 || currentDraft?.kind === "other"
                 ? "Type your response, then press Enter."
                 : question.multiSelect
-                  ? "Type displayed numbers or labels separated by commas, then press Enter."
-                  : "Type a displayed number or unambiguous label, then press Enter."}
+                  ? "Type displayed numbers or labels separated by commas, or choose Other Response for custom text, then press Enter."
+                  : "Type a displayed number or label, or choose Other Response for custom text, then press Enter."}
       </div>
       {validationError && <div className="form-error" id={questionErrorId} role="alert">{validationError}</div>}
       {submissionError && <div className="form-error" role="alert">Could not answer the question: {submissionError}</div>}

@@ -663,3 +663,20 @@ test("an additive Pi Orchestrator waits for project trust and is not launched wi
   driver.resolvePermission(trust.requestId, "trust");
   await started;
 });
+
+test("Pi custom select text is delivered and boolean custom text never becomes false (#1595)", () => {
+  const events: SessionEventPayload[] = [];
+  const sent: Record<string, unknown>[] = [];
+  const driver = new PiRpcDriver(options(), callbacks(events));
+  (driver as any).peer = { send: (message: Record<string, unknown>) => { sent.push(message); return true; }, dispose: () => {} };
+  (driver as any).onRpcEvent({ type: "extension_ui_request", id: "custom-select", method: "select", title: "Pick", options: ["A"] });
+  const question = events.at(-1)!;
+  assert.equal(question.kind, "question_request");
+  if (question.kind !== "question_request") return;
+  assert.equal(driver.answerQuestion("custom-select", { [question.questions[0]!.id]: "My custom answer" }), true);
+  assert.deepEqual(sent.pop(), { type: "extension_ui_response", id: "custom-select", value: "My custom answer" });
+  (driver as any).onRpcEvent({ type: "extension_ui_request", id: "custom-confirm", method: "confirm", title: "Confirm" });
+  assert.equal(driver.answerQuestion("custom-confirm", { "custom-confirm:value": "Maybe" }), false);
+  assert.equal(driver.answerQuestion("custom-confirm", { "custom-confirm:value": "Yes" }), true);
+  driver.dispose();
+});

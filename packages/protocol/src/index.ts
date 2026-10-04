@@ -628,7 +628,11 @@
 // 201: artifact upload preferences reach session launch/resume instruction preparation. The
 //      control plane refreshes the non-secret preference outside durable command digests;
 //      older runners receive no field they cannot apply. Upload discovery grants no authority.
-export const PROTOCOL_VERSION = 201;
+// 202 is reserved by the concurrent session-role conversion change (#2479).
+// 203: every choice question accepts custom text. Multi-select labels remain arrays;
+//      a string is an exclusive custom response, even when it equals an offered label.
+export const PROTOCOL_VERSION = 203;
+export const UNIVERSAL_QUESTION_TEXT_MIN_PROTOCOL = 203;
 
 export type ArtifactUploadPreference = "manual" | "wollipog_automatic" | "external_hosting";
 export interface ArtifactUploadSettingsView { preference: ArtifactUploadPreference }
@@ -3749,15 +3753,18 @@ export interface AgentQuestion {
   /** Short chip label, e.g. "Language". */
   header?: string;
   question: string;
-  /** Multi-select answers contain offered labels only. This is mutually exclusive with
-   * `allowOther`; custom values have no unambiguous array representation on the normalized wire. */
+  /** Offered multi-select answers are label arrays; an exclusive custom answer is a string.
+   * Selection cardinality applies only to arrays, never to custom text. */
   multiSelect?: boolean;
   options: QuestionOption[];
-  /** Whether the provider accepts a free-form string instead of one of options[]. Mutually
-   * exclusive with `multiSelect`; producers must reject that unsupported combination. */
+  /** Legacy declaration for standalone free-text fields. Choice questions always offer text,
+   * including when this flag is absent or false. */
   allowOther?: boolean;
   /** Optional provider form fields may be omitted. Absence keeps the legacy required behavior. */
   required?: boolean;
+  /** A native typed form may be unable to deliver arbitrary text. Keep the request pending and
+   * show this explicit provider limitation rather than converting text to a boolean or enum. */
+  customAnswerError?: string;
   /** Render free-form input without echoing its value on screen. Answers remain transient. */
   secret?: boolean;
   /** Provider primitive expected for free-form input. Values cross the normalized boundary as
@@ -3774,7 +3781,7 @@ export interface AgentQuestion {
 }
 
 export function isSupportedAgentQuestion(question: AgentQuestion): boolean {
-  return !(question.multiSelect === true && question.allowOther === true);
+  return question.options.length > 0 || question.allowOther === true;
 }
 
 /** Upper bound applied to any provider free-text answer that declares no `maxLength`. Providers
@@ -3785,7 +3792,8 @@ export const DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH = 4000;
 /** Validate one provider-declared free-text value. Shared by the UI's submit gate and the
  * control plane's authoritative answer validation so both layers enforce the same constraints. */
 export function validateQuestionFreeText(question: AgentQuestion, value: string): string | null {
-  if (!value.length) return "expects a non-empty response";
+  if (!value.trim().length) return "expects a non-empty response";
+  if (question.customAnswerError) return question.customAnswerError;
   if (question.minLength != null && value.length < question.minLength) {
     return `expects at least ${question.minLength} character(s)`;
   }
@@ -3842,15 +3850,16 @@ export function validateQuestionAnswers(
   const keys = Object.keys(answers);
   if (action === "dismiss" && keys.length > 0) return "a dismissal cannot include answers";
   if (keys.length === 0 && action !== "submit") return null; // legacy or explicit dismiss
-  const unsupported = questions.find((question) => !isSupportedAgentQuestion(question));
-  if (unsupported) return `"${unsupported.id.slice(0, 80)}" cannot combine multi-select and Other responses`;
   const byId = new Map(questions.map((q) => [q.id, q]));
   for (const key of keys) {
     const q = byId.get(key);
     if (!q) return `unknown question: ${key.slice(0, 80)}`;
     const value = answers[key];
     const offered = new Set(q.options.map((o) => o.label));
-    if (q.multiSelect) {
+    if (q.multiSelect && typeof value === "string") {
+      const freeTextError = validateQuestionFreeText(q, value);
+      if (freeTextError) return `"${q.id.slice(0, 80)}" ${freeTextError}`;
+    } else if (q.multiSelect) {
       if (!Array.isArray(value)) {
         return `"${q.id.slice(0, 80)}" expects an array of labels`;
       }
@@ -3867,7 +3876,7 @@ export function validateQuestionAnswers(
       }
     } else {
       if (typeof value !== "string") return `"${q.id.slice(0, 80)}" expects one offered label`;
-      if (!offered.has(value) && !q.allowOther) {
+      if (!offered.has(value) && !isSupportedAgentQuestion(q)) {
         return `"${q.id.slice(0, 80)}" expects one offered label`;
       }
       if (!offered.has(value)) {
@@ -3932,7 +3941,7 @@ export function summarizeQuestionAnswers(
       continue;
     }
     if (typeof value !== "string") continue;
-    if (offered.has(value)) {
+    if (!question.multiSelect && offered.has(value)) {
       entries.push({ questionId, selected: [value] });
       continue;
     }

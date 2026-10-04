@@ -1111,14 +1111,16 @@ test("persistent AskUserQuestion is answered on the shared stdin channel", async
     request: {
       subtype: "can_use_tool",
       tool_name: "AskUserQuestion",
-      input: { questions: [{ question: "Choose?", header: "Choice", options: [{ label: "A", description: "first" }], multiSelect: false }] },
+      input: { questions: [{ question: "Choose?", header: "Choice", options: [{ label: "A", description: "first" }], multiSelect: true, allowOther: false }] },
     },
   }) + "\n");
   await nextTask();
   assert.ok(events.some((event) => event.kind === "question_request" && event.requestId === "question-1"));
-  assert.equal(driver.answerQuestion("question-1", { "Choose?": "A" }), true);
+  assert.equal(driver.answerQuestion("question-1", { "Choose?": "My custom choice, with punctuation" }), true);
   await nextTask();
   assert.ok(writes.some((write) => write.includes("question-1") && write.includes("control_response") && write.includes("answers")));
+  const response = writes.map((write) => JSON.parse(write)).find((message) => message.type === "control_response");
+  assert.deepEqual(response.response.response.updatedInput.answers, { "Choose?": "My custom choice, with punctuation" });
   child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
   assert.equal(await turn, "end_turn");
   driver.dispose();
@@ -4806,14 +4808,10 @@ test("normalizeQuestions tolerates malformed input", () => {
   assert.deepEqual(normalizeQuestions(null), []);
   assert.deepEqual(normalizeQuestions({}), []);
   assert.deepEqual(normalizeQuestions({ questions: "nope" }), []);
-  assert.deepEqual(normalizeQuestions({
-    questions: [{
-      question: "Choose features or add another",
-      multiSelect: true,
-      allowOther: true,
-      options: [{ label: "Audit" }],
-    }],
-  }), []);
+  const custom = normalizeQuestions({ questions: [{ question: "Choose features or add another",
+    multiSelect: true, allowOther: true, options: [{ label: "Audit" }] }] });
+  assert.equal(custom.length, 1);
+  assert.equal(custom[0]!.multiSelect, true);
 });
 
 test("renderApprovalInput shows the command for Bash and path+content for Write, bounded", () => {

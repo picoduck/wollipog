@@ -1363,6 +1363,14 @@ export class CodexAppServerDriver implements Driver {
   answerQuestion(requestId: string, answers: Record<string, string | string[]>, action?: "submit" | "dismiss"): boolean {
     const pending = this.pendingQuestions.get(requestId);
     if (!pending) return false;
+    if (action !== "dismiss" && pending.questions.some((question) => {
+      const answer = answers[question.id];
+      return question.customAnswerError && typeof answer === "string" &&
+        (question.multiSelect || !question.options.some((option) => option.label === answer));
+    })) {
+      this.cb.onStderr("The provider's typed form cannot deliver this custom text; the question remains pending.");
+      return false;
+    }
     this.pendingQuestions.delete(requestId);
     this.attentionOwners.delete(requestId);
     pending.resolve(pending.response(answers, action ?? (Object.keys(answers).length > 0 ? "submit" : "dismiss")));
@@ -1749,7 +1757,7 @@ export class CodexAppServerDriver implements Driver {
         if (this.disposed || this.cancelled) {
           return resolve(normalized.response({}, "dismiss"));
         }
-        this.pendingQuestions.set(id, { resolve, response: normalized.response });
+        this.pendingQuestions.set(id, { resolve, response: normalized.response, questions: normalized.questions });
         this.cb.onEvent({ kind: "question_request", requestId: id, questions: normalized.questions, ...ownership });
       }));
 
@@ -1793,7 +1801,7 @@ export class CodexAppServerDriver implements Driver {
         if (this.disposed || this.cancelled) {
           return resolve(normalized.response({}, "dismiss"));
         }
-        this.pendingQuestions.set(id, { resolve, response: normalized.response });
+        this.pendingQuestions.set(id, { resolve, response: normalized.response, questions: normalized.questions });
         this.cb.onEvent({ kind: "question_request", requestId: id, questions: normalized.questions, ...ownership });
       }));
 
@@ -2759,6 +2767,7 @@ function truncate(s: string, n: number): string {
 
 /** A parked structured question awaiting the normalized answer_question route. */
 interface PendingQuestion {
+  questions: AgentQuestion[];
   resolve: (response: Json) => void;
   response: (answers: Record<string, string | string[]>, action?: "submit" | "dismiss") => Json;
 }
@@ -2842,7 +2851,6 @@ export function normalizeCodexUserInput(params: Json): NormalizedQuestionRequest
   if (!Array.isArray(params?.questions) || params.questions.length === 0 || params.questions.length > 3) return null;
   const questions: AgentQuestion[] = [];
   for (const raw of params.questions) {
-    if (raw?.multiSelect === true && raw?.isOther === true) return null;
     const id = boundedString(raw?.id, MAX_QUESTION_ID);
     const question = boundedString(raw?.question, MAX_QUESTION_TEXT);
     const header = boundedString(raw?.header, MAX_QUESTION_HEADER);
@@ -2854,6 +2862,7 @@ export function normalizeCodexUserInput(params: Json): NormalizedQuestionRequest
       header,
       question,
       options,
+      ...(raw?.multiSelect === true ? { multiSelect: true } : {}),
       ...(raw?.isOther === true ? { allowOther: true, inputFormat: "text" as const, maxLength: MAX_FREE_TEXT } : {}),
       ...(raw?.isSecret === true ? { secret: true } : {}),
     });
@@ -2949,7 +2958,7 @@ export function normalizeMcpFormElicitation(params: Json): NormalizedQuestionReq
     if (property.type === "boolean") {
       const choices = [{ label: "True", value: true }, { label: "False", value: false }];
       nativeValues.set(id, new Map(choices.map((choice) => [choice.label, choice.value])));
-      questions.push({ ...base, options: choices.map(({ label }) => ({ label })) });
+      questions.push({ ...base, customAnswerError: "cannot be delivered because the provider requires one of its typed choices", options: choices.map(({ label }) => ({ label })) });
       continue;
     }
 
@@ -2967,6 +2976,7 @@ export function normalizeMcpFormElicitation(params: Json): NormalizedQuestionReq
       questions.push({
         ...base,
         multiSelect: true,
+        customAnswerError: "cannot be delivered because the provider requires an array of its typed choices",
         options: choices.map(({ label }) => ({ label })),
         minSelections,
         ...(maxSelections != null ? { maxSelections } : {}),
@@ -2978,7 +2988,7 @@ export function normalizeMcpFormElicitation(params: Json): NormalizedQuestionReq
       const choices = enumChoices(property);
       if (choices) {
         nativeValues.set(id, new Map(choices.map((choice) => [choice.label, choice.value])));
-        questions.push({ ...base, options: choices.map(({ label }) => ({ label })) });
+        questions.push({ ...base, customAnswerError: "cannot be delivered because the provider requires one of its typed choices", options: choices.map(({ label }) => ({ label })) });
         continue;
       }
       if (property.enum !== undefined || property.oneOf !== undefined || property.anyOf !== undefined) return null;

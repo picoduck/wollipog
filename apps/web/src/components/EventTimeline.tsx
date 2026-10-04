@@ -516,7 +516,7 @@ export const estimateTimelineRow = (row: TimelineRenderRow, pendingQuestionReque
     case "question":
       if (row.item.answered !== undefined || row.item.requestId !== pendingQuestionRequestId) return 44;
       return 112 + row.item.questions.reduce(
-        (height, question) => height + 64 + question.options.length * 44 + (question.allowOther ? 44 : 0),
+        (height, question) => height + 64 + question.options.length * 44 + (question.options.length > 0 || question.allowOther ? 44 : 0),
         0,
       );
     case "command_output": return 96;

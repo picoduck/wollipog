@@ -291,10 +291,10 @@ test("mobile Composer Response preserves invalid input, focus, and replacement b
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/agent-questions-e2e.html?style=composer");
   const response = page.locator(".composer-answer-input");
-  await response.fill("not offered");
+  await response.fill(" ");
   await response.press("Enter");
-  await expect(page.getByRole("alert")).toContainText("displayed number or unambiguous option label");
-  await expect(response).toHaveValue("not offered");
+  await expect(page.getByRole("alert")).toContainText("Enter a response");
+  await expect(response).toHaveValue(" ");
   await expect(response).toBeFocused();
 
   await page.evaluate(() => window.replaceAgentQuestion());
@@ -539,3 +539,39 @@ test("every question row reads its outcome and answer without arrows or emoji (#
   await expect(rows.nth(3).locator(".tl-question-withheld")).toHaveText("Answer not shown");
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
 });
+
+for (const width of [1280, 390]) {
+  for (const style of ["interactive", "composer"]) {
+    test(`universal custom responses on ${width}px ${style} preserve each question (#1595)`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 844 });
+      await page.goto(`/agent-questions-e2e.html?set=forms&style=${style}`);
+      if (style === "interactive") {
+        const inputs = page.locator('.question-input');
+        await expect(inputs).toHaveCount(5);
+        await inputs.nth(0).fill("Canary");
+        await inputs.nth(1).fill("Unit Tests");
+        await inputs.nth(3).fill("abc");
+        await inputs.nth(4).fill("3");
+        await page.getByRole("button", { name: "Submit", exact: true }).click();
+      } else {
+        const input = page.locator('.composer-answer-input');
+        await page.getByRole("button", { name: "Other Response", exact: true }).click();
+        await expect(input).toBeFocused();
+        await input.fill("Canary");
+        await input.press("Enter");
+        await page.getByRole("button", { name: "Other Response", exact: true }).click();
+        await input.fill("Unit Tests");
+        await input.press("Enter");
+        await input.press("Enter");
+        await input.fill("abc");
+        await input.press("Enter");
+        await input.fill("3");
+        await input.press("Enter");
+      }
+      await expect(page.getByRole("status")).toHaveText("Question Answered");
+      expect(await page.evaluate(() => window.agentQuestionCalls[0])).toMatchObject({
+        requestId: "ask-1", action: "submit", answers: { target: "Canary", checks: "Unit Tests", token: "abc", retries: "3" },
+      });
+    });
+  }
+}

@@ -2796,17 +2796,14 @@ test("Codex tool user input keeps the provider request id and returns native ans
   }, 702), { answers: {} });
   assert.equal(h.events.length, eventCount);
 
-  assert.deepEqual(await requests.get("item/tool/requestUserInput")!({
-    questions: [{
-      id: "unsupported",
-      header: "Features",
-      question: "Choose features or add another",
-      multiSelect: true,
-      isOther: true,
-      options: [{ label: "Audit", description: "Audit events" }],
-    }],
-  }, 703), { answers: {} });
-  assert.equal(h.events.length, eventCount);
+  for (const isOther of [false, true]) {
+    const custom = requests.get("item/tool/requestUserInput")!({ questions: [{
+      id: "features", header: "Features", question: "Choose features or add another",
+      multiSelect: true, isOther, options: [{ label: "Audit", description: "Audit events" }],
+    }] }, `custom-${isOther}`);
+    assert.equal(h.driver.answerQuestion(`custom-${isOther}`, { features: "Audit, but only weekly" }), true);
+    assert.deepEqual(await custom, { answers: { features: { answers: ["Audit, but only weekly"] } } });
+  }
 });
 
 test("MCP form elicitation maps primitive controls and returns provider-native content", async () => {
@@ -2855,6 +2852,8 @@ test("MCP form elicitation maps primitive controls and returns provider-native c
     { id: "note", options: [], required: false, multiSelect: undefined, inputFormat: "text" },
   ]);
 
+  assert.equal(h.driver.answerQuestion("mcp-form-9", { region: "Custom region" }), false);
+  assert.match(h.stderr.at(-1)!, /cannot deliver this custom text/);
   assert.equal(h.driver.answerQuestion("mcp-form-9", {
     region: "US East",
     confirm: "True",

@@ -489,7 +489,7 @@ for (const style of ["interactive", "composer"] as const) test(`Codex structured
       const submit = page.getByRole("button", { name: "Submit" });
       await expect(submit).toBeDisabled();
       await page.getByRole("radio", { name: /Staging/ }).click();
-      await page.getByRole("textbox").and(page.getByLabel("Response")).fill("Ship after checks pass");
+      await page.getByRole("textbox", { name: /Release Note/ }).fill("Ship after checks pass");
       await expect(submit).toBeEnabled();
       await submit.click();
     } else {
@@ -799,7 +799,7 @@ for (const provider of ["claude", "codex"] as const) {
               await page.getByRole("checkbox", { name: /Browser Tests/ }).click();
             } else {
               await page.getByRole("radio", { name: /Staging/ }).click();
-              await page.getByRole("textbox").and(page.getByLabel("Response")).fill("Ship after checks pass");
+              await page.getByRole("textbox", { name: /Release Note/ }).fill("Ship after checks pass");
             }
             await expect(submit).toBeEnabled();
             await submit.scrollIntoViewIfNeeded();
@@ -1006,4 +1006,45 @@ for (const viewport of [
       }
     });
   });
+}
+
+for (const provider of ["claude", "codex"] as const) {
+  for (const style of ["interactive", "composer"] as const) {
+    test(`${provider} ${style} custom text reaches the provider under its question request (#1595)`, async ({ page }) => {
+      test.setTimeout(120_000);
+      const stack = await startLiveStack(provider);
+      try {
+        const fragment = new URLSearchParams({ origin: stack.httpBase, token: stack.ownerToken, sessionId: stack.sessionId });
+        await page.addInitScript((value) => localStorage.setItem("wollipog.question-response-style", value), style);
+        await page.goto(`/agent-questions-live-e2e.html#${fragment}`);
+        const answers = provider === "claude" ? ["Regional canary", "Unit Tests"] : ["Canary", "Custom release note"];
+        if (style === "interactive") {
+          const inputs = page.locator('.question-input');
+          await expect(inputs).toHaveCount(2);
+          await inputs.nth(0).fill(answers[0]!);
+          await inputs.nth(1).fill(answers[1]!);
+          await page.getByRole("button", { name: "Submit", exact: true }).click();
+        } else {
+          const input = page.locator('.composer-answer-input');
+          await page.getByRole("button", { name: "Other Response", exact: true }).click();
+          await input.fill(answers[0]!);
+          await input.press("Enter");
+          if (provider === "claude") await page.getByRole("button", { name: "Other Response", exact: true }).click();
+          await input.fill(answers[1]!);
+          await input.press("Enter");
+        }
+        await expect(page.getByText("Question Answered", { exact: true })).toBeVisible();
+        await expect.poll(async () => {
+          try { return JSON.parse(await readFile(stack.receiptPath, "utf8")); } catch { return null; }
+        }, { timeout: 30_000 }).toMatchObject(provider === "claude" ? {
+          requestId: "live-question-1", behavior: "allow", answers: {
+            "Which rollout strategy should we use?": answers[0], "Which checks should run before promotion?": answers[1],
+          },
+        } : {
+          requestId: "live-codex-question-1", result: { answers: { environment: { answers: [answers[0]] }, note: { answers: [answers[1]] } } },
+        });
+        await expect.poll(async () => (await fetchSession(stack)).pendingApproval).toBeNull();
+      } finally { await stack.stop(); }
+    });
+  }
 }

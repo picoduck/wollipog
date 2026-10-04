@@ -261,12 +261,12 @@ test("Enter keeps invalid input focused and submits one deterministic choice thr
     assert.ok(input);
     input.focus();
     await act(async () => {
-      setInputValue(input, "not offered");
+      setInputValue(input, " ");
       input.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Enter", bubbles: true }) as never);
     });
-    assert.equal(input.value, "not offered");
+    assert.equal(input.value, " ");
     assert.equal(domWindow.document.activeElement, input);
-    assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /displayed number/);
+    assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /Enter a response/);
     assert.deepEqual(calls, []);
 
     await act(async () => {

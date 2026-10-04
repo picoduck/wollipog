@@ -286,7 +286,7 @@ function submitButton(container: HTMLDivElement): HTMLButtonElement {
   return button;
 }
 
-test("unsupported multi-select Other responses are deactivated while Dismiss remains usable", async () => {
+test("multi-select custom text replaces choice selection and is submitted verbatim (#1595)", async () => {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
@@ -308,25 +308,23 @@ test("unsupported multi-select Other responses are deactivated while Dismiss rem
 
   try {
     await renderBanner(root, questions, true, client);
-    assertNoDomNode(container.querySelector(".question-input"));
+    const input = container.querySelector<HTMLInputElement>(".question-input");
+    assert.ok(input);
+    assert.equal(input.disabled, false);
     const choice = container.querySelector<HTMLButtonElement>('[role="checkbox"]');
     assert.ok(choice);
-    assert.equal(choice.disabled, true);
-    assert.equal(choice.getAttribute("aria-disabled"), "true");
-    assert.equal(choice.tabIndex, -1);
+    assert.equal(choice.disabled, false);
+    assert.equal(choice.getAttribute("aria-disabled"), null);
+    assert.equal(choice.tabIndex, 0);
     assert.equal(submitButton(container).disabled, true);
 
-    const dismiss = [...container.querySelectorAll<HTMLButtonElement>(".approval-actions button")]
-      .find((candidate) => candidate.textContent?.trim().startsWith("Dismiss"));
-    assert.ok(dismiss);
-    assert.equal(dismiss.disabled, false);
-    await act(async () => {
-      dismiss.click();
-      await tick();
-    });
+    await act(async () => { setInputValue(input, "Audit"); });
+    assert.equal(choice.getAttribute("aria-checked"), "false");
+    assert.equal(submitButton(container).disabled, false);
+    await act(async () => { submitButton(container).click(); await tick(); });
     assert.deepEqual(calls, [{
       sessionId: "session-1",
-      action: { requestId: "question-1", answers: {}, action: "dismiss" },
+      action: { requestId: "question-1", answers: { features: "Audit" }, action: "submit" },
     }]);
   } finally {
     await act(async () => { root.unmount(); });

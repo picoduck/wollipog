@@ -1110,12 +1110,7 @@ export function SessionQuestionBanner({
                   })}
                 </div>
               )}
-              {responseStyle === "interactive" && question.options.length > 0 && !question.allowOther && showResponseError && (
-                <span className="form-error question-field-error" id={responseErrorId} role="alert">
-                  {responseError}
-                </span>
-              )}
-              {responseStyle === "interactive" && question.allowOther && !question.multiSelect && (
+              {responseStyle === "interactive" && isAnswerableAgentQuestion(question) && (
                 <label className="question-input-label">
                   <span id={responseLabelId}>{question.options.length > 0 ? "Other Response" : "Response"}</span>
                   {question.required === false && <span className="muted sm"> (optional)</span>}

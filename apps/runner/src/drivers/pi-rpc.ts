@@ -523,9 +523,10 @@ export class PiRpcDriver implements Driver {
   ): boolean {
     const pending = this.pendingQuestions.get(requestId);
     if (!pending || !this.peer) return false;
+    const answer = answers[pending.questionId];
+    if (action !== "dismiss" && pending.method === "confirm" && answer !== "Yes" && answer !== "No") return false;
     this.pendingQuestions.delete(requestId);
     if (pending.timer) clearTimeout(pending.timer);
-    const answer = answers[pending.questionId];
     const value = Array.isArray(answer) ? answer[0] : answer;
     const response: Json = action === "dismiss" || value == null
       ? { type: "extension_ui_response", id: requestId, cancelled: true }
@@ -818,6 +819,7 @@ export class PiRpcDriver implements Driver {
             question: title,
             context: boundedText(event.message, 4000),
             options: [{ label: "Yes" }, { label: "No" }],
+            customAnswerError: "cannot be delivered because the provider requires a boolean confirmation",
           }
         : {
             id: questionId,

@@ -36,6 +36,7 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   type AgentQuestion,
   type QuestionAnswerSummaryEntry,
   validateQuestionAnswers,
+  UNIVERSAL_QUESTION_TEXT_MIN_PROTOCOL,
   worktreeRecoveryAction,
   HUMAN_ONLY_PARENT_CONTROL_POLICY,
   DEFAULT_ORCHESTRATOR_DEFAULTS,
@@ -9395,6 +9396,15 @@ export class SessionsService {
     // pending state, so a bad client can't strand or spoof the ask.
     const invalid = validateQuestionAnswers(pending.questions ?? [], answers, action);
     if (invalid) return fail(`invalid answers: ${invalid}`, 400);
+    const customText = (pending.questions ?? []).some((question) => {
+      const answer = answers[question.id];
+      return typeof answer === "string" && (question.multiSelect === true ||
+        (question.allowOther !== true && question.options.length > 0 && !question.options.some((option) => option.label === answer)));
+    });
+    const needsUniversalContract = customText || (pending.questions ?? []).some((question) => question.multiSelect && question.allowOther);
+    if (action === "submit" && needsUniversalContract && (this.db.getRunner(session.runnerId)?.protocolVersion ?? 0) < UNIVERSAL_QUESTION_TEXT_MIN_PROTOCOL) {
+      return fail("custom choice answers require an updated runner; update the runner and retry", 409);
+    }
     const auditContent = questionAuditContent(pending, answers);
     const answerSummary = action === "submit" ? this.questionAnswerSummary(sessionId, pending.questions ?? [], answers) : undefined;
 

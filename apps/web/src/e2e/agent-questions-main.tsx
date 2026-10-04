@@ -55,6 +55,7 @@ const signedEvidenceUrl = "https://evidence.example/private/mobile-capture.png?X
 const richQuestions: AgentQuestion[] = [
   {
     id: "target",
+    allowOther: false,
     header: "Target",
     question: `Choose **one** deployment target.\n\n- \`staging\` for verification\n- production after approval`,
     context: `Review the [release guide](https://docs.example/release) and evidence at ${signedEvidenceUrl}`,
@@ -124,6 +125,7 @@ const replacementQuestions: AgentQuestion[] = [{
 const formQuestions: AgentQuestion[] = [
   {
     id: "target",
+    allowOther: false,
     header: "Target",
     question: "Choose a deployment target.",
     options: [{ label: "Staging" }, { label: "Production" }],

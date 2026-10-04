@@ -1141,7 +1141,7 @@ never injects an ordinary user message for a structured response.
 | `item/commandExecution/requestApproval` | command, cwd, reason, and network context; **Allow Once** (`accept`), **Allow for Session** (`acceptForSession`), **Reject** (`decline`), **Cancel** (`cancel`) | `{decision}` |
 | `item/fileChange/requestApproval` | file/reason context with the same four exact stable decisions | `{decision}` |
 | `item/permissions/requestApproval` | requested filesystem/network profile with **Allow** or **Reject** | allow: `{permissions:<requested>,scope:"session"}`; reject: `{permissions:{},scope:"turn"}` |
-| `item/tool/requestUserInput` | up to three choice questions, optional **Other Response**, bounded free text, and secret entry when declared | `{answers:{<questionId>:{answers:[...]}}}` |
+| `item/tool/requestUserInput` | up to three choice questions, automatic **Other Response**, bounded free text, and secret entry when declared | `{answers:{<questionId>:{answers:[...]}}}` |
 | `mcpServer/elicitation/request` mode `form` | bounded string/number/integer/boolean/single-enum/multi-enum controls with required, length, range, and selection constraints | submit: `{action:"accept",content:{...},_meta:null}`; dismiss: `{action:"cancel",content:null,_meta:null}` |
 | `mcpServer/elicitation/request` mode `url` | server/message/URL context with **Accept**, **Decline**, and **Cancel** | `{action:"accept"\|"decline"\|"cancel",content:null,_meta:null}` |
 
@@ -1401,3 +1401,29 @@ Runner logs include content-free `project_memory_policy_updated` and `project_me
 events keyed by session id and provider, with saved/effective policy. Launch failures name the
 unavailable capability. Policy audit events contain no saved memory contents, credential values, or memory paths.
 Operational filesystem failures may identify the failing path.
+
+### Custom Structured Question Answers
+
+Every normalized choice question offers **Other Response**, regardless of absent or false
+`allowOther`. The flag remains necessary to declare standalone free-text fields. Each question
+in a form retains its own answer and draft, keyed by its opaque question id and request occurrence.
+
+Single-select answers are strings. Multi-select answers are either an array of offered labels,
+or one exclusive custom string. A custom string replaces the selection; it never gets split into
+labels, even if it contains commas or equals an offered label. Selection-count constraints apply
+only to label arrays. Custom text keeps the shared text bounds and provider field validation.
+
+Claude receives these values in `updatedInput.answers`, keyed by question text. Codex's native
+request-user-input response wraps a custom string in its one-element `answers` array. Pi select
+responses carry it as `value`. Recovered and asynchronous requests keep the same representation
+in their correlated durable response. Answer summaries retain custom multi-select strings as text,
+with the existing transcript redaction, bounds, and secret/email withholding.
+
+Universal custom choice delivery requires protocol 203. Older runners receive ordinary selections
+and previously supported single-select `allowOther` responses; new custom responses fail explicitly
+without clearing the pending request. An older control plane may reject the new response explicitly.
+
+Native MCP enum/boolean forms and Pi boolean confirmations cannot represent arbitrary text in their
+provider schema. Their questions expose `customAnswerError`: entering custom text shows that limitation
+and retains the question, instead of converting it into an enum, a boolean, or a cancellation.
+These form responses grant no tool or governance authorization.

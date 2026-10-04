@@ -61,7 +61,7 @@ test("timeline row estimates match one quiet step row", () => {
   const question = { kind: "question" as const, id: 3, requestId: "ask", questions: [{
     id: "choice", question: "Pick one", options: [{ label: "A" }, { label: "B" }],
   }] };
-  assert.equal(estimateTimelineRow({ kind: "item", key: "question", item: question, inWork: false, depth: 0 }, "ask"), 264);
+  assert.equal(estimateTimelineRow({ kind: "item", key: "question", item: question, inWork: false, depth: 0 }, "ask"), 308);
   assert.equal(estimateTimelineRow({ kind: "item", key: "orphan", item: question, inWork: false, depth: 0 }), 44);
   assert.equal(estimateTimelineRow({
     kind: "item", key: "answered-question", item: { ...question, answered: true }, inWork: false, depth: 0,

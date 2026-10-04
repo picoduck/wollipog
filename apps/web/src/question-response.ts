@@ -110,12 +110,12 @@ export function resolveQuestionResponse(question: AgentQuestion, rawValue: strin
   if (question.multiSelect) {
     const wholeLabel = offeredLabel(question, value);
     const parsed = wholeLabel ? { tokens: [wholeLabel] } : splitChoiceTokens(value);
-    if (parsed.error) return { error: parsed.error };
+    if (parsed.error) return resolveQuestionOtherResponse(question, rawValue);
     const tokens = parsed.tokens!;
     const labels: string[] = [];
     for (const token of tokens) {
       const label = offeredLabel(question, token);
-      if (!label) return { error: `“${token}” is not a displayed number or unambiguous option label.` };
+      if (!label) return resolveQuestionOtherResponse(question, rawValue);
       if (labels.includes(label)) return { error: `“${label}” was selected more than once.` };
       labels.push(label);
     }
@@ -129,9 +129,6 @@ export function resolveQuestionResponse(question: AgentQuestion, rawValue: strin
 
   const label = offeredSingleLabel(question, value);
   if (label) return { answer: label };
-  if (!question.allowOther) {
-    return { error: "Enter a displayed number or unambiguous option label." };
-  }
   const freeTextError = validateQuestionFreeText(question, value);
   return freeTextError ? { error: `Response ${freeTextError}.` } : { answer: value };
 }
@@ -139,7 +136,7 @@ export function resolveQuestionResponse(question: AgentQuestion, rawValue: strin
 /** Validate an explicit Interactive Form Other response without applying Composer Response's displayed
  * number or offered-label syntax. */
 function resolveQuestionOtherResponse(question: AgentQuestion, rawValue: string): ResolvedQuestionResponse {
-  if (!isAnswerableAgentQuestion(question) || question.multiSelect || !question.allowOther) {
+  if (!isAnswerableAgentQuestion(question)) {
     return { error: "This question format is unsupported." };
   }
   const value = rawValue.trim();

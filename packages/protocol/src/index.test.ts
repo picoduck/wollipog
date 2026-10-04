@@ -218,8 +218,8 @@ test("machine skill adoption is capability-gated per platform", () => {
   assert.equal(machineSkillAdoptionRecoveryRequirement(undefined), null);
 });
 
-test("PROTOCOL_VERSION is 201", () => {
-  assert.equal(PROTOCOL_VERSION, 201);
+test("PROTOCOL_VERSION is 203", () => {
+  assert.equal(PROTOCOL_VERSION, 203);
   assert.equal(runnerSupportsProtocol(200, "artifactSessionGuidance"), false);
   assert.equal(runnerSupportsProtocol(201, "artifactSessionGuidance"), true);
   assert.equal(runnerSupportsProtocol(197, "campaignForgeStatus"), false);
@@ -1358,27 +1358,28 @@ test("validateQuestionAnswers accepts valid, empty (dismiss), rejects unknown/un
   assert.equal(validateQuestionAnswers(questions, {}), null); // dismiss
   assert.equal(validateQuestionAnswers(questions, { "Lang?": "TS", "Feats?": ["Auth", "API"] }), null);
   assert.match(validateQuestionAnswers(questions, { "Nope?": "TS" })!, /unknown question/);
-  assert.match(validateQuestionAnswers(questions, { "Lang?": "Rust", "Feats?": ["Auth"] })!, /offered/);
+  assert.equal(validateQuestionAnswers(questions, { "Lang?": "Rust", "Feats?": ["Auth"] }), null);
   assert.match(validateQuestionAnswers(questions, { "Lang?": ["TS"], "Feats?": ["Auth"] } as never)!, /offered label/);
-  assert.match(validateQuestionAnswers(questions, { "Lang?": "TS", "Feats?": "Auth" } as never)!, /array/);
+  assert.equal(validateQuestionAnswers(questions, { "Lang?": "TS", "Feats?": "Auth" }), null);
   assert.match(validateQuestionAnswers(questions, { "Lang?": "TS" })!, /missing answer/);
 });
 
-test("the normalized question contract rejects multi-select Other responses but remains dismissible", () => {
-  const unsupported = {
-    id: "features",
-    question: "Choose features or add another",
-    multiSelect: true,
-    allowOther: true,
-    options: [{ label: "Audit" }],
-  };
-
-  assert.equal(isSupportedAgentQuestion(unsupported), false);
-  assert.match(
-    validateQuestionAnswers([unsupported], { features: ["Audit"] }, "submit")!,
-    /cannot combine multi-select and Other responses/,
-  );
-  assert.equal(validateQuestionAnswers([unsupported], {}, "dismiss"), null);
+test("every choice question accepts exclusive custom text regardless of allowOther (#1595)", () => {
+  for (const allowOther of [undefined, false, true]) {
+    for (const multiSelect of [false, true]) {
+      const question = { id: "q", question: "Choose", options: [{ label: "Audit" }], multiSelect, allowOther,
+        minSelections: 2, maxLength: 20 };
+      assert.equal(isSupportedAgentQuestion(question), true);
+      assert.equal(validateQuestionAnswers([question], { q: "My own answer" }, "submit"), null);
+      assert.equal(validateQuestionAnswers([question], { q: "Audit" }, "submit"), null);
+      assert.match(validateQuestionAnswers([question], { q: " " }, "submit")!, /non-empty/);
+      assert.match(validateQuestionAnswers([question], { q: "x".repeat(21) }, "submit")!, /at most/);
+      if (multiSelect) {
+        assert.match(validateQuestionAnswers([question], { q: ["custom"] }, "submit")!, /not offered/);
+        assert.deepEqual(summarizeQuestionAnswers([question], { q: "Audit" }), [{ questionId: "q", text: "Audit" }]);
+      }
+    }
+  }
 });
 
 test("validateQuestionAnswers: duplicate multi-select labels + prototype-chain ids are rejected", () => {

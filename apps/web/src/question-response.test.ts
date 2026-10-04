@@ -51,8 +51,8 @@ const single: AgentQuestion = {
 test("text responses resolve displayed numbers and case-insensitive exact labels", () => {
   assert.deepEqual(resolveQuestionResponse(single, "2"), { answer: "Python" });
   assert.deepEqual(resolveQuestionResponse(single, "typescript"), { answer: "TypeScript" });
-  assert.match(resolveQuestionResponse(single, "py").error ?? "", /unambiguous option label/);
-  assert.match(resolveQuestionResponse(single, "rust").error ?? "", /displayed number/);
+  assert.deepEqual(resolveQuestionResponse(single, "py"), { answer: "py" });
+  assert.deepEqual(resolveQuestionResponse(single, "rust"), { answer: "rust" });
 });
 
 test("formatted single-choice labels with punctuation can return through typed-entry parsing", () => {
@@ -106,7 +106,7 @@ test("free text is accepted only when declared and retains provider validation",
   };
   assert.deepEqual(resolveQuestionResponse(form, "2"), { answer: "2" });
   assert.match(resolveQuestionResponse(form, "4").error ?? "", /above its maximum/);
-  assert.match(resolveQuestionResponse(single, "arbitrary prose").error ?? "", /displayed number/);
+  assert.deepEqual(resolveQuestionResponse(single, "arbitrary prose"), { answer: "arbitrary prose" });
 });
 
 test("answer maps omit blank optional fields and report every invalid response", () => {
@@ -114,7 +114,7 @@ test("answer maps omit blank optional fields and report every invalid response",
     single,
     { ...single, id: "optional", required: false },
     { ...single, id: "required" },
-  ], { language: "1", optional: "", required: "unknown" });
+  ], { language: "1", optional: "", required: "" });
   assert.deepEqual(result.answers, { language: "TypeScript" });
   assert.deepEqual(Object.keys(result.errors), ["required"]);
 });
@@ -187,4 +187,18 @@ test("opaque prototype-chain question ids remain own answer keys", () => {
   assert.equal(Object.hasOwn(result.answers, "__proto__"), true);
   assert.equal(result.answers.__proto__, "TypeScript");
   assert.deepEqual(result.errors, {});
+});
+
+test("Other intents are independent for every question and preserve numeric and label-like text (#1595)", () => {
+  for (const allowOther of [undefined, false, true]) {
+    const questions = [
+      { ...single, allowOther },
+      { ...single, id: "multi", multiSelect: true, minSelections: 2, allowOther },
+    ];
+    assert.deepEqual(questionDraftAnswers(questions, {
+      language: { kind: "other", value: "2" },
+      multi: { kind: "other", value: "TypeScript" },
+    }), { answers: { language: "2", multi: "TypeScript" }, errors: {} });
+    assert.deepEqual(resolveQuestionResponse(questions[1]!, "my answer, with commas"), { answer: "my answer, with commas" });
+  }
 });
