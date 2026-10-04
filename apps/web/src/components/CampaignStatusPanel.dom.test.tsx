@@ -14,7 +14,8 @@ import type {
   SessionView,
   UiSnapshotMessage,
 } from "@wollipog/protocol";
-import { api, ApiError, type ApiClient } from "../api.js";
+import { api, ApiError, createApiClient, type ApiClient } from "../api.js";
+import { API_REQUEST_DEADLINE_MS, createBrowserApiTransport } from "../api-transport.js";
 import { ApiProvider } from "../api-context.js";
 import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
@@ -350,6 +351,51 @@ test("navigating from a campaign to an unrelated session returns the open panel 
     assert.ok(panel.container.querySelector(".rp-launcher"));
   } finally {
     await panel.dispose();
+  }
+});
+
+test("a work list read that times out shows an error, though the panel ignores its own cancellations", async () => {
+  // The list is read through the real browser transport; its fetch never answers. Only the
+  // transport's deadline timer is captured, so the panel's own timers still run.
+  const deadlines: Array<() => void> = [];
+  const realSetTimeout = globalThis.setTimeout;
+  const realClearTimeout = globalThis.clearTimeout;
+  const transport = createBrowserApiTransport({
+    instanceId: "stalled-list",
+    origin: "http://127.0.0.1:4317",
+    fetch: ((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+    })) as typeof fetch,
+  });
+  const client = {
+    ...fakeClient(() => ({ revision: 1, items: [], nextCursor: null })).client,
+    campaignWorkItems: createApiClient(transport).campaignWorkItems,
+  } as ApiClient;
+  globalThis.setTimeout = ((callback: () => void, ms?: number, ...rest: unknown[]) => {
+    if (ms === API_REQUEST_DEADLINE_MS) {
+      deadlines.push(callback);
+      return deadlines.length as unknown as ReturnType<typeof setTimeout>;
+    }
+    return realSetTimeout(callback, ms, ...rest);
+  }) as typeof setTimeout;
+  globalThis.clearTimeout = ((id?: ReturnType<typeof setTimeout>) => {
+    if (typeof id !== "number") realClearTimeout(id);
+  }) as typeof clearTimeout;
+  const panel = await mount({ initial: rootSession, client });
+  try {
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    assert.equal(deadlines.length, 1, "the list read carries the transport's deadline");
+    assert.doesNotMatch(panel.container.textContent ?? "", /Couldn't Load Work Items/, "nothing fails before the deadline");
+    await act(async () => deadlines[0]!());
+    await settle();
+    const text = panel.container.textContent ?? "";
+    assert.match(text, /Couldn't Load Work Items/, "a timeout is a failure, not a silent cancellation");
+    assert.match(text, /didn't answer within 45 seconds/);
+  } finally {
+    await panel.dispose();
+    globalThis.setTimeout = realSetTimeout;
+    globalThis.clearTimeout = realClearTimeout;
   }
 });
 

@@ -13,6 +13,118 @@ export class TransportRequestError extends Error {
   }
 }
 
+/**
+ * A request passed its client deadline without a response (#2522). Deliberately not an
+ * `AbortError`: callers that treat an abort as a quiet cancellation must still show this as a
+ * failure. The server may still apply a timed-out mutation, so treat it as "not known to be saved"
+ * and reconcile by reloading, never as "not applied".
+ */
+export class RequestTimeoutError extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(`The Wollipog server didn't answer within ${Math.round(timeoutMs / 1000)} seconds.`);
+    this.name = "TimeoutError";
+  }
+}
+
+/**
+ * Client deadlines for browser API requests, all in one place (#2522). A request that reaches its
+ * deadline rejects with `RequestTimeoutError` instead of staying pending until the page reloads.
+ *
+ * The default follows the desktop transport's budgets (apps/desktop/src-tauri/src/remote_transport.rs:
+ * 5s connect, 20s read, 60s total): it stays within that 60s total, and it outlasts the server-side
+ * deadlines it wraps, such as the runner's 30s `GIT_TIMEOUT_MS` behind `/api/sessions/:id/git` and
+ * the control plane's 30s default runner wait, so the client never gives up first on an operation
+ * the server is still bounding.
+ */
+export const API_REQUEST_DEADLINE_MS = 45_000;
+
+/**
+ * Session retitle waits on the session-naming deadline chain (packages/protocol/src/index.ts), up to
+ * 33s with a custom endpoint, which the desktop gives a 35s read budget. It gets the desktop's whole
+ * 60s total so a slow title is never cut off by the default.
+ */
+export const SESSION_RETITLE_DEADLINE_MS = 60_000;
+
+/** For routes whose server-side bound is at most 60s: that bound plus a 30s margin. */
+const UP_TO_60S_SERVER_BOUND_DEADLINE_MS = 90_000;
+/** For routes whose server-side bound is at most 150s: that bound plus a 30s margin. */
+const UP_TO_150S_SERVER_BOUND_DEADLINE_MS = 180_000;
+
+/**
+ * The slowest upload the deadline allows for: a request body adds its size at this rate, because the
+ * body is sent before any response can arrive. 64 KiB/s keeps an 8 MB prompt image (+128s) uploading
+ * on a poor phone connection, while a JSON body under 64 KiB adds nothing.
+ */
+export const API_UPLOAD_FLOOR_BYTES_PER_SECOND = 64 * 1024;
+
+const route = (pattern: string) => new RegExp(`^${pattern.replaceAll(":id", "[^/]+")}$`);
+
+/**
+ * Requests that legitimately outlast the default. `null` opts out: the request keeps only its
+ * caller's signal and the instance connection's, because the server bounds it in minutes or not at
+ * all. Every other value is the server's own bound plus a margin, named beside it.
+ */
+const API_REQUEST_DEADLINE_OVERRIDES: ReadonlyArray<{ method: string; route: RegExp; deadlineMs: number | null }> = [
+  { method: "POST", route: route("/api/sessions/:id/retitle"), deadlineMs: SESSION_RETITLE_DEADLINE_MS },
+  // Whole-body downloads whose size the client cannot bound.
+  { method: "GET", route: route("/api/sessions/:id/export"), deadlineMs: null },
+  { method: "GET", route: route("/api/artifacts/:id/export"), deadlineMs: null },
+  // Fork, handoff and conversation recovery wait up to 65 minutes on the runner.
+  { method: "POST", route: route("/api/sessions/:id/fork"), deadlineMs: null },
+  // A worktree setup script may run for an hour (65-minute runner wait).
+  { method: "POST", route: route("/api/sessions/:id/worktrees/retry-setup"), deadlineMs: null },
+  // A runner update downloads its release with a per-stall limit but no total one.
+  { method: "POST", route: route("/api/boxes/:id/update-runner"), deadlineMs: null },
+  // Skill sync restarts its runner wait on every chunk, so it has no total bound.
+  { method: "POST", route: route("/api/runners/:id/skills/sync"), deadlineMs: null },
+  // 150s runner waits for worktree selection and setup generation.
+  { method: "POST", route: route("/api/sessions/:id/worktrees/select"), deadlineMs: UP_TO_150S_SERVER_BOUND_DEADLINE_MS },
+  { method: "POST", route: route("/api/sessions/:id/worktrees/generate-setup"), deadlineMs: UP_TO_150S_SERVER_BOUND_DEADLINE_MS },
+  { method: "GET", route: route("/api/projects/:id/locations/:id/worktree-setup"), deadlineMs: UP_TO_150S_SERVER_BOUND_DEADLINE_MS },
+  { method: "POST", route: route("/api/projects/:id/locations/:id/worktree-setup"), deadlineMs: UP_TO_150S_SERVER_BOUND_DEADLINE_MS },
+  // Pod reconciliation waits 120s; a Git skill preview clones for up to 90s.
+  { method: "POST", route: route("/api/pods/:id/reconcile"), deadlineMs: UP_TO_150S_SERVER_BOUND_DEADLINE_MS },
+  { method: "POST", route: route("/api/skill-git/preview"), deadlineMs: UP_TO_150S_SERVER_BOUND_DEADLINE_MS },
+  // Skill adoption and drift or orphan imports make two or three 30s runner calls and a sync.
+  { method: "POST", route: route("/api/skill-machine/:id/adopt"), deadlineMs: UP_TO_150S_SERVER_BOUND_DEADLINE_MS },
+  { method: "POST", route: route("/api/skill-drift/:id/import"), deadlineMs: UP_TO_150S_SERVER_BOUND_DEADLINE_MS },
+  { method: "POST", route: route("/api/runners/:id/skill-drift/restore"), deadlineMs: UP_TO_150S_SERVER_BOUND_DEADLINE_MS },
+  { method: "POST", route: route("/api/orphaned-skill-copies/:id/import"), deadlineMs: UP_TO_150S_SERVER_BOUND_DEADLINE_MS },
+  // Opening a pull request and forge review syncs wait 60s (other Git actions 30s, same route).
+  { method: "POST", route: route("/api/sessions/:id/git"), deadlineMs: UP_TO_60S_SERVER_BOUND_DEADLINE_MS },
+  // Choosing a provider account waits 60s; a subscription refresh is capped at 60s.
+  { method: "POST", route: route("/api/sessions/:id/authentication/account"), deadlineMs: UP_TO_60S_SERVER_BOUND_DEADLINE_MS },
+  { method: "POST", route: route("/api/usage/subscriptions/refresh"), deadlineMs: UP_TO_60S_SERVER_BOUND_DEADLINE_MS },
+  // External session adoption waits 45s, as long as the default itself.
+  { method: "POST", route: route("/api/sessions/adopt"), deadlineMs: UP_TO_60S_SERVER_BOUND_DEADLINE_MS },
+];
+
+/** The bytes a request body sends, or `null` when its size cannot be known in advance. */
+function requestBodyBytes(body: BodyInit | null | undefined): number | null {
+  if (body === undefined || body === null) return 0;
+  // Close enough for the ASCII JSON and base64 the client sends.
+  if (typeof body === "string") return body.length;
+  if (body instanceof Blob) return body.size;
+  if (body instanceof ArrayBuffer || ArrayBuffer.isView(body)) return body.byteLength;
+  if (body instanceof URLSearchParams) return body.toString().length;
+  return null;
+}
+
+/**
+ * The deadline for one request, or `null` for none: its route's deadline, extended for its body at
+ * `API_UPLOAD_FLOOR_BYTES_PER_SECOND`. A body of unknown size (a stream or form data) opts out.
+ */
+export function apiRequestDeadlineMs(method: string, path: string, body?: BodyInit | null): number | null {
+  const pathname = path.split("?", 1)[0]!;
+  const verb = method.toUpperCase();
+  const override = API_REQUEST_DEADLINE_OVERRIDES.find((entry) => entry.method === verb && entry.route.test(pathname));
+  const deadlineMs = override ? override.deadlineMs : API_REQUEST_DEADLINE_MS;
+  const bytes = requestBodyBytes(body);
+  if (deadlineMs === null || bytes === null) return null;
+  // Whole seconds, so a body under 64 KiB keeps the route's exact deadline.
+  return deadlineMs + Math.floor(bytes / API_UPLOAD_FLOOR_BYTES_PER_SECOND) * 1000;
+}
+
 export interface BrowserApiTransportOptions {
   instanceId: string;
   origin: string;
@@ -70,13 +182,27 @@ export function createBrowserApiTransport(options: BrowserApiTransportOptions): 
       const requestHeaders: Record<string, string> = {};
       headers.forEach((value, name) => { requestHeaders[name] = value; });
 
+      // The deadline rejects on its own as well as aborting, so a fetch that ignores its signal
+      // still fails on time. It runs until the response arrives, like the abort listeners above.
+      const deadlineMs = apiRequestDeadlineMs(init.method ?? "GET", path, init.body);
+      let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+      const deadline = deadlineMs === null ? null : new Promise<never>((_resolve, reject) => {
+        deadlineTimer = setTimeout(() => {
+          const timeout = new RequestTimeoutError(deadlineMs);
+          requestAbort.abort(timeout);
+          reject(timeout);
+        }, deadlineMs);
+      });
+
       try {
-        return await (fetchImpl ?? globalThis.fetch)(apiUrl(origin, path), {
+        const response = (fetchImpl ?? globalThis.fetch)(apiUrl(origin, path), {
           ...init,
           headers: requestHeaders,
           signal: requestAbort.signal,
         });
+        return await (deadline ? Promise.race([response, deadline]) : response);
       } finally {
+        clearTimeout(deadlineTimer);
         lifetime.signal.removeEventListener("abort", abort);
         init.signal?.removeEventListener("abort", callerAbort);
       }

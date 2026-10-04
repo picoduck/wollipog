@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
+import test, { afterEach, mock } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
@@ -11,7 +11,8 @@ import type {
   SessionView,
   WorkflowDecisionAuthority,
 } from "@wollipog/protocol";
-import { api, ApiError, type ApiClient } from "../api.js";
+import { api, ApiError, createApiClient, type ApiClient } from "../api.js";
+import { API_REQUEST_DEADLINE_MS, createBrowserApiTransport } from "../api-transport.js";
 import { ApiProvider } from "../api-context.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
@@ -581,6 +582,71 @@ test("a reload that never answers holds the next change only until its timeout",
     await flush();
     assert.equal(sent.length, 2, "then it is sent");
   });
+});
+
+test("a write that never answers fails at the transport deadline, reloads, and lets the next change through", async () => {
+  // A real client over the browser transport, with a fetch whose first policy write never answers.
+  const writes: Array<{ decisions: ParentControlDecisionPolicy; expectedRevision: number }> = [];
+  let reloads = 0;
+  const transport = createBrowserApiTransport({
+    instanceId: "stalled-write",
+    origin: "http://127.0.0.1:4317",
+    fetch: ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/api/sessions/orch/parent-control-policy") {
+        const body = JSON.parse(String(init?.body)) as { decisions: ParentControlDecisionPolicy; expectedRevision: number };
+        writes.push(body);
+        if (writes.length === 1) {
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+          });
+        }
+        return Promise.resolve(Response.json(orchestrator({
+          parentControlPolicy: { revision: body.expectedRevision + 1, decisions: body.decisions },
+        })));
+      }
+      if (url.pathname === "/api/sessions/lookup/by-id") {
+        reloads += 1;
+        return Promise.resolve(Response.json({ session: orchestrator() }));
+      }
+      return Promise.reject(new Error(`unexpected request ${url.pathname}`));
+    }) as typeof fetch,
+  });
+  const client = createApiClient(transport);
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const harness = await open(orchestrator(), {
+      setParentControlPolicy: client.setParentControlPolicy,
+      session: client.session,
+    });
+    const dialog = harness.dialog();
+    await act(async () => fireDomEvent.click(option(gate(dialog, "PR Merge Approval"), "Orchestrator")));
+    await act(async () => fireDomEvent.click(option(gate(dialog, "Merged Branch Deletion"), "Orchestrator")));
+    await flush();
+    assert.equal(writes.length, 1, "the second change waits behind the stalled write");
+
+    await act(async () => { mock.timers.tick(API_REQUEST_DEADLINE_MS - 1); });
+    await flush();
+    assertNoDomNode(dialog.querySelector(".notice.t-danger"), "no failure before the deadline");
+    assert.equal(writes.length, 1);
+
+    await act(async () => { mock.timers.tick(1); });
+    await flush();
+    const notice = dialog.querySelector<HTMLElement>(".notice.t-danger");
+    assert.match(notice?.textContent ?? "", /^Your change wasn't saved\./, "the deadline surfaces as the usual failure");
+    assert.equal(reloads, 1, "and the session is reloaded to reconcile what the server stored");
+    const details = [...notice!.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Show Details");
+    await act(async () => fireDomEvent.click(details!));
+    assert.match(notice?.textContent ?? "", /didn't answer within 45 seconds/);
+
+    await flush();
+    assert.equal(writes.length, 2, "then the queued change is sent");
+    assert.equal(writes[1]!.decisions.merged_branch_deletion, "orchestrator");
+    assert.equal(writes[1]!.decisions.pr_merge, "human", "on the reloaded policy, not the unconfirmed write");
+    await flush();
+  } finally {
+    mock.timers.reset();
+  }
 });
 
 test("a reload that answers after a newer save is not published", async () => {
