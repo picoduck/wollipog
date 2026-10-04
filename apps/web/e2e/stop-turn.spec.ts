@@ -82,7 +82,12 @@ test("composer Stop Turn is stable, idempotent, recall-safe, and distinct from S
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.failNextCancelTurn();
   });
   await page.getByRole("button", { name: "Stop Turn" }).click();
-  await expect(page.getByText("Simulated stop failure", { exact: true })).toBeVisible();
+  // A failure says what to do; the error's own words wait behind Show Details (#2511).
+  const notStopped = page.locator(".session-notice-slot").getByRole("alert", { name: "Turn Not Stopped" });
+  await expect(notStopped.locator(".notice-body")).toHaveText("Couldn't stop the turn. Try again or use Stop Session.");
+  await expect(page.getByText("Simulated stop failure", { exact: true })).toHaveCount(0);
+  await notStopped.getByRole("button", { name: "Show Details" }).click();
+  await expect(notStopped.locator(".notice-details-body code")).toHaveText("Simulated stop failure");
   await expect(page.getByRole("button", { name: "Stop Turn" })).toBeEnabled();
   await page.getByRole("button", { name: "Stop Turn" }).click();
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.cancelTurnCount())).toBe(4);
