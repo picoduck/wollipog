@@ -26,7 +26,9 @@ import "../styles.css";
  * - `history-error`: the opening read fails with nothing cached; `history-partial` fails after
  *   cached rows were delivered.
  * - `earlier`: a bounded opening window with older activity above it. `?older=hold` keeps the
- *   earlier-page request in flight, `?older=fail` rejects it, and the default resolves it.
+ *   earlier-page request in flight, `?older=fail` rejects it, `?older=unsupported` answers it as a
+ *   server without backward reads does, and the default resolves it.
+ * - `unpaired`: the server refuses this device before anything is cached (#2579).
  *
  * `?theme=light|dark` picks the theme and `?mode=preview` renders the Inbox preview. The right
  * panel records the mode it was asked to show in `body[data-right-panel-mode]`. `?failed=1` adds a
@@ -199,7 +201,7 @@ const client = {
   getSessionEventTailPage: (_id: string, before: number | undefined, eventEpoch: number) => {
     tailRequestCount += 1;
     document.body.dataset.tailRequestCount = String(tailRequestCount);
-    if (state === "loading") return never();
+    if (state === "loading" || state === "unpaired") return never();
     if (state === "history-error" || state === "history-partial") {
       return Promise.reject(new Error("GET /api/sessions/transcript-states-session/events/tail failed: 502 Bad Gateway"));
     }
@@ -210,6 +212,10 @@ const client = {
       }
       if (older === "hold") return never();
       if (older === "fail") return new Promise((_, reject) => window.setTimeout(() => reject(new Error("fixture rejected")), 80));
+      // No `hasMoreOlder`: an older server answers a backward read with a forward page.
+      if (older === "unsupported") {
+        return new Promise((resolve) => window.setTimeout(() => resolve({ events: [], eventEpoch, nextBefore: 0, cacheComplete: true }), 80));
+      }
       const end = events.findIndex((event) => event.seq === before);
       const page = events.slice(Math.max(0, end - 12), end);
       return new Promise((resolve) => window.setTimeout(() => resolve({
@@ -220,12 +226,15 @@ const client = {
   },
 } as unknown as ApiClient;
 
-/** A partial failure needs rows already cached: deliver them live before the read fails. */
+/** A partial failure needs rows already cached: deliver them live before the read fails. An
+ * unpaired device loses its connection once the session is known. */
 function EventSeeder() {
   const ready = useStoreSelector((current) => current.sessions.has(SESSION_ID));
   const { dispatch } = useStoreActions();
   React.useEffect(() => {
-    if (!ready || state !== "history-partial") return;
+    if (!ready) return;
+    if (state === "unpaired") dispatch({ type: "conn", conn: "unauthorized" });
+    if (state !== "history-partial") return;
     for (const event of events.slice(-9)) dispatch({ type: "msg", msg: { type: "session_event", event } });
   }, [dispatch, ready]);
   return null;

@@ -2456,7 +2456,14 @@ function SessionDetailLoaded({
             page.turnAligned,
           );
         }
-        else failOlderEventsLoad(sessionId, "Earlier activity is unavailable from this control plane.", base, epoch);
+        else {
+          failOlderEventsLoad(
+            sessionId,
+            "Earlier activity isn't available from this version of Wollipog. Update Wollipog to load it.",
+            base,
+            epoch,
+          );
+        }
       })
       .catch(() => failOlderEventsLoad(sessionId, "Could not load earlier activity.", base, epoch))
       .finally(() => {
@@ -6175,7 +6182,7 @@ function SessionDetailLoaded({
                 // unpaired device with nothing cached still needs a state here.
                 !transcript.error && (
                   <State variant="offline" title={conn === "unauthorized" ? "Pair to Load Activity" : "Activity Unavailable"}>
-                    {conn === "offline" ? "Reconnect to load this transcript." : "This device needs access to the control plane."}
+                    {conn === "offline" ? "Reconnect to load this transcript." : "Pair this device with Wollipog to load this transcript."}
                   </State>
                 )
               ) : transcript.body === "empty" && !hasTranscriptReceipts ? (

@@ -1708,6 +1708,41 @@ test("an automatic load failure keeps an understandable manual retry path", asyn
   }
 });
 
+test("an older page from a server without backward reads names Wollipog, not the control plane", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages);
+  try {
+    const openingWindow = fixture.events.slice(-8);
+    await act(async () => {
+      pages.releaseTail({
+        events: openingWindow,
+        eventEpoch: 0,
+        nextBefore: openingWindow[0]!.seq,
+        hasMoreOlder: true,
+        cacheComplete: true,
+      });
+    });
+    await flushAsyncWork();
+    setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 1_600, scrollTop: 120 });
+    await scrollReader(fixture.scroller, 120);
+    // No `hasMoreOlder`: the server answered a backward read with a forward page (#2579).
+    await act(async () => pages.releaseTail({ events: [], eventEpoch: 0, nextBefore: 0, cacheComplete: true }));
+    await flushAsyncWork();
+
+    const sentence = "Earlier activity isn't available from this version of Wollipog. Update Wollipog to load it.";
+    const control = fixture.container.querySelector(".tl-earlier") as HTMLElement;
+    assert.equal(control.dataset.state, "error");
+    assert.ok(control.textContent!.includes(sentence));
+    assert.doesNotMatch(control.textContent!, /control plane/i);
+    assert.equal(
+      fixture.container.querySelector("[data-earlier-activity-announcement]")?.textContent,
+      `${sentence} Retry is available.`,
+    );
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 async function openBoundedWindow(pages: ReturnType<typeof pageController>, fixture: Fixture) {
   const openingWindow = fixture.events.slice(-8);
   await act(async () => {

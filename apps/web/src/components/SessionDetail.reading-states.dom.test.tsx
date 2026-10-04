@@ -202,10 +202,10 @@ async function mountSession({
     scroller,
     shown,
     tailRequests: () => tail.length,
-    /** The connection to the control plane drops. */
-    async disconnect() {
+    /** The connection to the control plane drops, or the server refuses this unpaired device. */
+    async disconnect(conn: "offline" | "unauthorized" = "offline") {
       assert.ok(actions, "store actions are available");
-      await act(async () => actions!.dispatch({ type: "conn", conn: "offline" }));
+      await act(async () => actions!.dispatch({ type: "conn", conn }));
       await flushAsyncWork();
     },
     /** A later recovery of this session's history fails, as a reconnect's would. */
@@ -326,6 +326,26 @@ test("a history load that fails with nothing loaded is one notice, not a second 
     await view.unmount();
   }
 });
+
+for (const [conn, title, sentence] of [
+  ["unauthorized", "Pair to Load Activity", "Pair this device with Wollipog to load this transcript."],
+  ["offline", "Activity Unavailable", "Reconnect to load this transcript."],
+] as const) {
+  test(`an ${conn} device with nothing cached says what to do in user nouns`, async () => {
+    const view = await mountSession({ messageCount: 12 });
+    try {
+      await view.disconnect(conn);
+      const state = view.scroller.querySelector(".state.offline") as HTMLElement;
+      assert.ok(state, "the unavailable state stands in for the transcript");
+      assert.equal(state.querySelector(".state-title")?.textContent, title);
+      assert.equal(state.querySelector(".state-body")?.textContent, sentence);
+      // docs/design-system.md §17.2 retires "control plane" from user copy (#2579).
+      assert.doesNotMatch(state.textContent ?? "", /control[ -]plane/i);
+    } finally {
+      await view.unmount();
+    }
+  });
+}
 
 test("a partial history failure says how much loaded and keeps the raw error behind Show Details", async () => {
   const view = await mountSession({ messageCount: 240, cachedEvents: 9 });

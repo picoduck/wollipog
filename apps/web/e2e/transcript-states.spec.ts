@@ -109,6 +109,23 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       }
     });
 
+    test("the earlier-activity failure and unpaired-device state name Wollipog (#2579)", async ({ page }) => {
+      await open(page, "state=earlier&older=unsupported");
+      await page.locator("[data-virtual-row]").first().waitFor();
+      await page.locator(".detail-scroll").evaluate((element) => { element.scrollTop = 0; });
+      const row = page.locator(".tl-earlier");
+      await row.getByRole("button", { name: /^Load Earlier Activity/u }).click();
+      await expect(row).toHaveAttribute("data-state", "error");
+      await expect(row.locator(".notice-body"))
+        .toHaveText("Earlier activity isn't available from this version of Wollipog. Update Wollipog to load it.");
+
+      await open(page, "state=unpaired");
+      const state = page.locator(".detail-scroll .state.offline");
+      await expect(state.locator(".state-title")).toHaveText("Pair to Load Activity");
+      await expect(state.locator(".state-body")).toHaveText("Pair this device with Wollipog to load this transcript.");
+      await expect(page.getByText(/control plane/iu)).toHaveCount(0);
+    });
+
     test("the earlier-activity row centers its action between two hairlines", async ({ page }) => {
       await open(page, "state=earlier&older=hold");
       await page.locator("[data-virtual-row]").first().waitFor();

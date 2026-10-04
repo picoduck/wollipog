@@ -164,8 +164,9 @@ test("machine selectors render disambiguated Machine labels", () => {
 /**
  * docs/design-system.md §17.2 retires "control plane" from user copy in favour of "Wollipog". These
  * are the update-required and unsupported-server sentences a person reads when the server is older
- * than the dashboard (#2410). Each is pinned exactly, so the retired noun cannot return at any of
- * them. Source whitespace is collapsed because JSX text wraps across lines.
+ * than the dashboard (#2410), plus the transcript column's earlier-activity failure and
+ * unpaired-device sentences (#2579). Each is pinned exactly, so the retired noun cannot return at
+ * any of them. Source whitespace is collapsed because JSX text wraps across lines.
  *
  * Deliberately a list, not a file-wide ban: comments and identifiers keep the term, UsageView's
  * granularity mismatch is a thrown developer error, and the connection section of Settings uses it
@@ -192,6 +193,10 @@ const UPDATE_REQUIRED_COPY: ReadonlyArray<[string, string]> = [
     "This version of Wollipog does not support updating this Machine setting. Update or restart Wollipog so it matches this dashboard, then try again."],
   ["./components/UsageView.tsx", "Checking whether this version of Wollipog supports weekly aggregation."],
   ["./components/UsageView.tsx", "Weekly aggregation requires a newer version of Wollipog. Update Wollipog to use Week."],
+  // The transcript column's earlier-activity failure and unpaired-device state (#2579).
+  ["./components/SessionDetail.tsx",
+    "Earlier activity isn't available from this version of Wollipog. Update Wollipog to load it."],
+  ["./components/SessionDetail.tsx", "Pair this device with Wollipog to load this transcript."],
 ];
 
 const RETIRED_UPDATE_REQUIRED_COPY: ReadonlyArray<[string, RegExp]> = [
@@ -202,6 +207,7 @@ const RETIRED_UPDATE_REQUIRED_COPY: ReadonlyArray<[string, RegExp]> = [
   ["./components/SettingsView.tsx", /This control plane does not support Agent Harness defaults|Control plane update required|Control Plane Update Required/],
   ["./runners.ts", /This control plane does not support/],
   ["./components/UsageView.tsx", /this control plane supports|newer control plane|Upgrade the control plane/],
+  ["./components/SessionDetail.tsx", /unavailable from this control plane|needs access to the control plane/],
 ];
 
 test("update-required copy names Wollipog, not the control plane", () => {
