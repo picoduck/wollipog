@@ -7,6 +7,7 @@ import { type TurnUsage,
   groupTimeline,
   isCollapsibleWorkItem,
   isTurnActivity,
+  mergeTurnUsage,
   SubagentTreeProjector,
   timelineBoundaryKey,
   timelineItemIsStreaming,
@@ -318,6 +319,8 @@ function latestActivityAt(item: TimelineItem): number | undefined {
       candidates = [item.lastUsageAt];
       break;
     case "turn_interrupted":
+      candidates = [item.createdAt, item.lastUsageAt];
+      break;
     case "artifact_attached":
     case "review_decision":
       candidates = [item.createdAt];
@@ -385,17 +388,19 @@ export function summarizeTimelineTurns(
     const target = segments[targetIndex]!;
     if (item.kind === "tool_call" && !toolSegments.has(item.toolCallId)) toolSegments.set(item.toolCallId, targetIndex);
     segmentOf.set(item.id, targetIndex);
-    if (item.kind === "conversation_checkpoint") {
-      segment.conversationTurn = item.turn;
+    if (item.kind === "conversation_checkpoint" || item.kind === "checkpoint") {
+      if (item.kind === "conversation_checkpoint") segment.conversationTurn = item.turn;
+      else segment.fileTurn ??= item.turn;
+      // An automatic continuation's usage rides on the row that anchors it.
       if (item.lastUsageAt != null) segment.usageReported = true;
-    } else if (item.kind === "checkpoint") {
-      segment.fileTurn ??= item.turn;
-      if (item.lastUsageAt != null) segment.usageReported = true;
+      if (item.turnUsage) segment.usage = mergeTurnUsage(segment.usage, item.turnUsage);
     } else if (item.kind !== "user_message" && !HISTORY_DIVIDER_KINDS.has(item.kind)) {
       target.hasAgentContent = true;
     }
     if (item.kind === "turn_interrupted") {
       target.stopped = Number.isFinite(item.createdAt) ? { at: item.createdAt } : {};
+      if (item.lastUsageAt != null) target.usageReported = true;
+      if (item.turnUsage) target.usage = mergeTurnUsage(target.usage, item.turnUsage);
     }
     if (item.kind === "agent_message" && !item.parentToolUseId) {
       if (item.text) segment.responseParts.push(item.text);

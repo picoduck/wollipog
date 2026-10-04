@@ -1439,6 +1439,83 @@ test("a continuation's usage report times the continuation, not the turn before 
   assert.deepEqual(paged.map((segment) => [segment.turn, segment.finishedAt]), [[1, undefined], [2, 14_000]]);
 });
 
+test("a continuation's tokens and cost land on its own footer, not the turn before it", () => {
+  const event = (seq: number, ts: number, payload: SessionEventPayload) => ({ id: seq, sessionId: "s", seq, ts, payload });
+  const prompt = (usage: { inputTokens: number; outputTokens: number; costUsd: number }) => [
+    event(1, 0, { kind: "user_message", text: "Start the migration" }),
+    event(2, 1, { kind: "checkpoint", turn: 1, tree: "a" } as SessionEventPayload),
+    event(3, 2_000, { kind: "agent_message", text: "Started; it continues in the background.", final: true }),
+    event(4, 3_000, { kind: "token_usage", ...usage }),
+    event(5, 3_001, { kind: "conversation_checkpoint", turn: 1 }),
+  ];
+  const resumed = event(6, 10_000, { kind: "stderr", text: "Runner resumed orphaned background work automatically." });
+  const fileCheckpoint = event(7, 10_001, { kind: "checkpoint", turn: 2, tree: "b" } as SessionEventPayload);
+  const finished = event(8, 12_000, { kind: "agent_message", text: "The migration finished.", final: true });
+  const continuationUsage = event(9, 14_000, { kind: "token_usage", inputTokens: 4_000, outputTokens: 800, costUsd: 0.05 });
+  const completed = event(10, 14_001, { kind: "conversation_checkpoint", turn: 2 });
+  const footerUsage = (items: TimelineItem[]) =>
+    [...renderToStaticMarkup(React.createElement(EventTimeline, { items }))
+      .matchAll(/class="tl-turn-usage"[^>]*>([^<]*)</g)].map((match) => match[1]);
+  const usageOf = (items: TimelineItem[]) => summarizeTimelineTurns(items, new Map()).segments
+    .filter((segment) => segment.turn !== undefined)
+    .map((segment) => [segment.turn, segment.usage?.inputTokens, segment.usage?.outputTokens, segment.usage?.costUsd]);
+
+  const items = deriveTimeline([
+    ...prompt({ inputTokens: 1_000, outputTokens: 200, costUsd: 0.01 }),
+    resumed, fileCheckpoint, finished, continuationUsage, completed,
+  ]);
+  assert.deepEqual(footerUsage(items), ["1.2k tok · $0.01", "4.8k tok · $0.05"]);
+  assert.deepEqual(usageOf(items), [[1, 1_000, 200, 0.01], [2, 4_000, 800, 0.05]],
+    "the footers together hold every parentless report exactly once");
+
+  // A continuation without a file checkpoint, and a report landing after its conversation checkpoint.
+  const unanchored = deriveTimeline([
+    ...prompt({ inputTokens: 1_000, outputTokens: 200, costUsd: 0.01 }),
+    resumed, finished, continuationUsage, completed,
+  ]);
+  assert.deepEqual(usageOf(unanchored), [[1, 1_000, 200, 0.01], [2, 4_000, 800, 0.05]], "no file checkpoint");
+  for (const withFileCheckpoint of [true, false]) {
+    const late = deriveTimeline([
+      ...prompt({ inputTokens: 1_000, outputTokens: 200, costUsd: 0.01 }),
+      resumed, ...(withFileCheckpoint ? [fileCheckpoint] : []), finished, completed, continuationUsage,
+    ]);
+    assert.deepEqual(usageOf(late), [[1, 1_000, 200, 0.01], [2, 4_000, 800, 0.05]],
+      `late continuation report, file checkpoint ${withFileCheckpoint}`);
+  }
+
+  // A tail-first page that starts after the prompt: the continuation still owns its counters.
+  const page = deriveTimeline([prompt({ inputTokens: 1_000, outputTokens: 200, costUsd: 0.01 })[4]!,
+    resumed, finished, continuationUsage, completed]);
+  assert.deepEqual(usageOf(page), [[1, undefined, undefined, undefined], [2, 4_000, 800, 0.05]], "paged");
+
+  // A continuation settling in more than one report sums them, as a prompted turn does.
+  const split = deriveTimeline([
+    ...prompt({ inputTokens: 600, outputTokens: 100, costUsd: 0.004 }),
+    event(4.5, 3_000, { kind: "token_usage", inputTokens: 400, outputTokens: 100, costUsd: 0.006 }),
+    resumed, fileCheckpoint, finished,
+    event(9, 13_000, { kind: "token_usage", inputTokens: 1_000, outputTokens: 300, costUsd: 0.02 }),
+    event(9.5, 14_000, { kind: "token_usage", inputTokens: 3_000, outputTokens: 500, costUsd: 0.03 }),
+    completed,
+  ].sort((a, b) => a.seq - b.seq));
+  assert.deepEqual(footerUsage(split), ["1.2k tok · $0.01", "4.8k tok · $0.05"], "several reports per turn");
+
+  // A cancelled turn records no conversation checkpoint: a stopped continuation without a file
+  // checkpoint keeps its counters on its stop, whether they land before or after it.
+  const stop = event(11, 13_000, { kind: "turn_interrupted" });
+  for (const order of ["before", "after"] as const) {
+    const report = event(order === "before" ? 10 : 12, order === "before" ? 12_500 : 13_500,
+      { kind: "token_usage", inputTokens: 4_000, outputTokens: 800, costUsd: 0.05 });
+    const stopped = deriveTimeline([
+      ...prompt({ inputTokens: 1_000, outputTokens: 200, costUsd: 0.01 }),
+      resumed, finished, ...(order === "before" ? [report, stop] : [stop, report]),
+    ]);
+    const segments = summarizeTimelineTurns(stopped, new Map()).segments.slice(1);
+    assert.deepEqual(segments.map((segment) => [segment.stopped !== undefined, segment.usage?.inputTokens, segment.finishedAt]),
+      [[false, 1_000, 3_000], [true, 4_000, order === "before" ? 13_000 : 13_500]], `stopped continuation, report ${order}`);
+    assert.deepEqual(footerUsage(stopped), ["1.2k tok · $0.01", "4.8k tok · $0.05"], `stopped continuation footer, report ${order}`);
+  }
+});
+
 test("late subagent output stays with its parent tool's turn and never opens another", () => {
   const event = (seq: number, ts: number, payload: SessionEventPayload) => ({ id: seq, sessionId: "s", seq, ts, payload });
   const task = { kind: "tool_call", toolCallId: "task", title: "Agent", toolKind: "agent", status: "in_progress" } as SessionEventPayload;
