@@ -492,9 +492,14 @@ export function suggestComposerCommands(
   return commands
     .flatMap((command) => {
       if (!command.available) return [];
+      const name = command.name.toLowerCase();
+      // A namespaced command (`superpowers:brainstorming`) is also close to its own last part, which
+      // is what a person usually types.
+      const unqualified = name.slice(name.lastIndexOf(":") + 1);
       const distance = Math.min(
         commandEditDistance(typed, command.invocationAlias.toLowerCase(), allowance),
-        commandEditDistance(typed, command.name.toLowerCase(), allowance),
+        commandEditDistance(typed, name, allowance),
+        unqualified !== name ? commandEditDistance(typed, unqualified, allowance) : allowance + 1,
       );
       return distance <= allowance ? [{ command, distance }] : [];
     })

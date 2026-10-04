@@ -4646,7 +4646,11 @@ function SessionDetailLoaded({
   // A token that names no command, in a session that refuses one (#2176): the no-match row becomes
   // the unknown row, with Send as Text and the token's Close Matches, none of them active.
   // A queued edit saves its text as it stands, so it keeps the plain no-match row.
-  const slashUnknown = rejectUnknownCommands && slashNoMatch && !queuedEdit;
+  // A command the session reports it can't run (#1224) is known, not unknown: no menu offers it, and
+  // typed in full it resolves to its reason when sent.
+  const slashNamesUnsupported = slashTrigger !== null && composerCommands.some((command) =>
+    command.hidden && command.invocationAlias === slashTrigger.query.toLowerCase());
+  const slashUnknown = rejectUnknownCommands && slashNoMatch && !queuedEdit && !slashNamesUnsupported;
   const slashCloseMatches = useMemo(
     () => slashUnknown && slashTrigger ? suggestComposerCommands(slashTrigger.query, composerCommands) : [],
     [composerCommands, slashTrigger, slashUnknown],
@@ -4661,8 +4665,9 @@ function SessionDetailLoaded({
   const composerCommandResolution = useMemo(
     () => resolveComposerCommandInvocation(text, composerCommands, {
       unknownCommands: rejectUnknownCommands ? "reject" : "plaintext",
+      skillSigil: composerSkillSigil,
     }),
-    [composerCommands, rejectUnknownCommands, text],
+    [composerCommands, composerSkillSigil, rejectUnknownCommands, text],
   );
   const commandPreservesAttachedImages = composerCommandResolution.kind === "command" &&
     durableCommandPreservesAttachments(composerCommandResolution.command, images.length > 0);

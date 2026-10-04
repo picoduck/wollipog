@@ -860,6 +860,17 @@ test("close matches are available commands within one edit per three letters, cl
   assert.equal(commandEditDistance("", "abc"), 3);
 });
 
+test("a namespaced command is a close match for its own last part (#1224's plugin skills)", () => {
+  const commands = registry([
+    { name: "superpowers:brainstorming", providerSource: "skill" },
+    { name: "code-review:code-review", providerSource: "plugin" },
+  ]);
+  assert.deepEqual(suggestComposerCommands("brainstroming", commands).map((command) => command.label),
+    ["/superpowers:brainstorming"]);
+  assert.deepEqual(suggestComposerCommands("code-reveiw", commands).map((command) => command.label),
+    ["/code-review:code-review"]);
+});
+
 test("a bounded edit distance agrees with the full one up to its limit and stops early past it", () => {
   const words = ["", "a", "ab", "ba", "review", "reveiw", "rveiew", "preview", "compact", "compat", "cmopact",
     "context", "kontext", "deploy", "ploy", "abcdef", "badcfe", "release-notes", "relaese-ntoes"];

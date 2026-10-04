@@ -1086,6 +1086,42 @@ test("a Claude Code runner without the init-time catalog still sends an unknown 
   expect(await promptTexts(page)).toEqual(["/compact"]);
 });
 
+test("with Claude Code's init-time catalog, a terminal-only command explains itself instead of reading as unknown (#1224)", async ({ page }) => {
+  // The session overlay a #1224 runner publishes: init built-ins plus the commands Wollipog won't send.
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
+    driver: "claude-code",
+    agentName: "Claude Code",
+    agentCapabilities: {
+      slashCommands: [
+        { name: "compact", source: "builtin", description: "Summarize the conversation to free up context." },
+        { name: "release", source: "project", description: "Cut a release." },
+        { name: "brainstorming", source: "skill", description: "Explore an idea." },
+      ],
+      unsupportedSlashCommands: [
+        { name: "doctor", reason: "Claude Code's /doctor needs its own terminal, so Wollipog doesn't send it." },
+      ],
+    },
+  }));
+  const composer = page.locator(".composer-input");
+  await composer.fill("/doctor");
+  // Not offered, and not "unknown" either: the picker shows the plain no-match row.
+  await expect(page.getByRole("option", { name: /\/doctor/ })).toHaveCount(0);
+  await expect(page.locator(".picker-empty")).toHaveText("No commands match “/doctor”.");
+  await page.keyboard.press("Enter");
+  const notice = page.locator(".session-notice-slot .notice.t-warning[role='alert']");
+  await expect(notice.locator(".notice-title")).toHaveText("Command Unavailable");
+  await expect(notice.locator(".notice-body")).toHaveText(
+    "“/doctor” can't run here, so nothing was sent. Claude Code's /doctor needs its own terminal, so Wollipog doesn't send it.");
+  expect(await promptTexts(page)).toEqual([]);
+
+  // The init list's built-ins turn the rule on, so a typo is refused with its close match.
+  await composer.fill("/compat please");
+  await page.keyboard.press("Enter");
+  await expect(notice.locator(".notice-body"))
+    .toHaveText("“/compat” isn't a recognized command, so nothing was sent. Did you mean /compact?");
+  expect(await promptTexts(page)).toEqual([]);
+});
+
 test.describe("on a phone", () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
