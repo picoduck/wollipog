@@ -1372,11 +1372,12 @@ workflow step list is a different component and keeps a local name.
   around listbox options. `useAnchoredMenuStyle` anchors it to its field and sets its width (at
   least the trigger and at least 280px, §8.3) and its one height cap, `SELECT_MENU_MAX_HEIGHT_PX` in
   `ChoiceControls.tsx`; the stylesheet sets no height. It stays anchored to its field on phones too,
-  never a bottom sheet (§9.2): it opens below the field, or above it when only that side has room,
-  and its width and height are clamped to the viewport. It appears in place, without the menu's
-  entrance motion. It is not portalled: it stays beside its field and takes the field's font. Its
-  placement is measured against its real containing block (§2.10), so an ancestor container cannot
-  move it.
+  never a bottom sheet (§9.2). Its width and height are clamped to the viewport. It opens below the
+  field, or above it when only that side has room; in a view too short for either (a short or
+  scaled pane), it moves as little as it can to fit inside the viewport and may cover the field. It
+  appears in place, without the menu's entrance motion. It is not portalled: it stays beside its
+  field and takes the field's font. Its placement is measured against its real containing block
+  (§2.10), so an ancestor container cannot move it.
   It replaced `.ui-select-list`.
 
 ### 9.2 Popover
