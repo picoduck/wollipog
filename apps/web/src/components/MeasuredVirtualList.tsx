@@ -888,6 +888,9 @@ function VirtualList<T>({
       if (lostAnchorRef.current != null &&
           (lostIntent == null || lostIntent === viewportIntentVersionRef.current)) return;
       const viewport = scroll.getBoundingClientRect();
+      // A scroll at a width the observer has not adopted yet is that layout clamping scrollTop,
+      // not the reader moving (#2541). The width correction restores the last observed row.
+      if (viewportWidthRef.current !== 0 && viewportWidthRef.current !== Math.round(viewport.width)) return;
       const row = [...root.querySelectorAll<HTMLElement>("[data-virtual-row]")]
         .find((candidate) => {
           const rect = candidate.getBoundingClientRect();
@@ -1007,9 +1010,10 @@ function VirtualList<T>({
     let pending = pendingAnchorRef.current;
     const currentScrollMargin = root.getBoundingClientRect().top - viewport.top + scroll.scrollTop;
     const currentViewportWidth = Math.round(viewport.width);
+    const widthChangedBeforeObserver =
+      viewportWidthRef.current !== 0 && viewportWidthRef.current !== currentViewportWidth;
     const geometryChangedBeforeObserver =
-      Math.abs(scrollMarginRef.current - currentScrollMargin) >= 0.5 ||
-      (viewportWidthRef.current !== 0 && viewportWidthRef.current !== currentViewportWidth);
+      Math.abs(scrollMarginRef.current - currentScrollMargin) >= 0.5 || widthChangedBeforeObserver;
     const widthAnchor = preserveAnchorRef.current ? widthAnchorRef.current : null;
     const widthAnchorRow = widthAnchor ? findRow(widthAnchor.key) : null;
     const mountedWidthAnchor = widthAnchor && widthAnchorRow ? widthAnchor : null;
@@ -1075,7 +1079,10 @@ function VirtualList<T>({
         const rect = row.getBoundingClientRect();
         return rect.bottom > correctedViewport.top && rect.top < correctedViewport.bottom;
       });
-    if (firstVisible?.dataset.virtualKey) {
+    // Until the observer adopts a new width, the rows are laid out for a width this list has not
+    // measured, and scrollTop may be clamped to that layout's end (#2541). Keep the last observed
+    // reading row as the baseline the width correction restores.
+    if (firstVisible?.dataset.virtualKey && !widthChangedBeforeObserver) {
       const anchor = {
         key: firstVisible.dataset.virtualKey,
         offset: firstVisible.getBoundingClientRect().top - correctedViewport.top,

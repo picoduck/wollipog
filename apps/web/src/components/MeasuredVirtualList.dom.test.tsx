@@ -20,10 +20,27 @@ for (const [name, value] of Object.entries({
   ResizeObserver: class { observe() {} unobserve() {} disconnect() {} },
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
 
+/** The Inbox's measured geometry either side of the phone breakpoint (#2541): eleven rows, 7px of
+ * list padding, and a viewport whose height and width both change when the layout does. */
+const breakpointGeometry = { width: 390, rowHeight: 98, viewportHeight: 637 };
+const breakpointMaxScrollTop = () =>
+  14 + 11 * breakpointGeometry.rowHeight - breakpointGeometry.viewportHeight;
+
 Object.defineProperty(domWindow.Element.prototype, "getBoundingClientRect", {
   configurable: true,
   value() {
     const element = this as HTMLElement;
+    const breakpointReader = element.dataset.testid === "breakpoint-reader"
+      ? element
+      : element.closest<HTMLElement>("[data-testid='breakpoint-reader']");
+    if (breakpointReader) {
+      const { width, rowHeight, viewportHeight } = breakpointGeometry;
+      const row = element.hasAttribute("data-virtual-row");
+      const top = element === breakpointReader ? 0
+        : 7 + (row ? Number(element.dataset.index ?? 0) * rowHeight : 0) - breakpointReader.scrollTop;
+      const height = element === breakpointReader ? viewportHeight : row ? rowHeight : 11 * rowHeight;
+      return { x: 0, y: top, top, left: 0, right: width, bottom: top + height, width, height, toJSON: () => ({}) };
+    }
     const reader = element.dataset.testid === "initial-offset-reader";
     const list = element.classList.contains("initial-offset-list");
     const anchorRecoveryList = element.classList.contains("anchor-recovery-list");
@@ -116,6 +133,26 @@ function AnchorRecoveryFixture({
         anchorRecoveryPending={recoveryPending}
         onAnchorLost={onAnchorLost}
         onVisibleAnchorChange={onVisibleAnchorChange}
+      />
+    </div>
+  );
+}
+
+const BREAKPOINT_ROWS = Array.from({ length: 11 }, (_, index) => `row-${index}`);
+
+function BreakpointFixture({ shape }: { shape: "phone" | "desktop" }) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  return (
+    <div ref={scrollRef} data-testid="breakpoint-reader" style={{ overflow: "auto" }}>
+      <MeasuredVirtualList
+        items={BREAKPOINT_ROWS}
+        getKey={(item) => item}
+        renderItem={(item) => item}
+        scrollRef={scrollRef}
+        estimateSize={() => shape === "phone" ? 97 : 76}
+        overscan={6}
+        preserveAnchor
+        className="breakpoint-list"
       />
     </div>
   );
@@ -269,6 +306,55 @@ test("authoritative history falls back to the clamped nearest surviving ordinal"
   } finally {
     await act(async () => root.unmount());
     container.remove();
+  }
+});
+
+// #2541: widening a phone across the breakpoint first lays the phone list out under the desktop
+// stylesheet. Its taller viewport clamps scrollTop to that layout's end, which puts a different row
+// first. That geometry belongs to no width the list has observed, and nothing the reader did produced
+// it, so it must never become the row a later width correction restores.
+test("geometry at an unobserved width never replaces the reader's row", async () => {
+  Object.assign(breakpointGeometry, { width: 390, rowHeight: 98, viewportHeight: 637 });
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const rowOffset = (reader: HTMLElement, index: number) =>
+    reader.querySelector<HTMLElement>(`[data-virtual-row][data-index="${index}"]`)!.getBoundingClientRect().top;
+  try {
+    await act(async () => root.render(<BreakpointFixture shape="phone" />));
+    const reader = container.querySelector<HTMLElement>("[data-testid='breakpoint-reader']");
+    assert.ok(reader);
+    // A browser clamps scrollTop to the current layout's end.
+    let scrollTop = 0;
+    Object.defineProperty(reader, "scrollTop", {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => { scrollTop = Math.max(0, Math.min(value, breakpointMaxScrollTop())); },
+    });
+    const scroll = async () => await act(async () => {
+      reader.dispatchEvent(new domWindow.Event("scroll") as never);
+    });
+
+    // The reader is at the end of the phone list, reading row 4 with 56px of it above the fold.
+    reader.scrollTop = 455;
+    await scroll();
+    assert.equal(rowOffset(reader, 4), -56);
+
+    // The desktop stylesheet lands first: a 725px viewport over the phone-shaped rows clamps the
+    // end of the list to 367, where row 3 is first with 66px above the fold.
+    Object.assign(breakpointGeometry, { width: 1400, viewportHeight: 725 });
+    reader.scrollTop = reader.scrollTop;
+    await scroll();
+    assert.equal(rowOffset(reader, 3), -66);
+
+    // The desktop cards then render: 73px rows in a 245px viewport.
+    Object.assign(breakpointGeometry, { rowHeight: 73, viewportHeight: 245 });
+    await act(async () => root.render(<BreakpointFixture shape="desktop" />));
+    assert.equal(rowOffset(reader, 4), -56, "the reader's row keeps the offset it was read at");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    Object.assign(breakpointGeometry, { width: 390, rowHeight: 98, viewportHeight: 637 });
   }
 });
 
