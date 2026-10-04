@@ -6257,21 +6257,24 @@ test("multi-page hydration keeps lastEventAt at the latest held event, and a cle
   }
 });
 
-test("a fork's one-response history replaces the snapshot seed and caches runner events in order (#2528)", () => {
+test("the first unsequenced event replaces a snapshot seed, as a legacy fork or old runner sends (#2528)", () => {
   const db = withRunner();
   try {
-    const id = "legacy-fork";
-    db.createSessionFromSnapshot(snapshot({ id, seq: 2, updatedAt: 5_000 }), "runner-1", 1_000);
-    db.appendForkHistory(id, [
-      { seq: 2, ts: 400, payload: { kind: "agent_message", text: "two" } },
-      { seq: 1, ts: 300, payload: { kind: "user_message", text: "one" } },
-      { seq: 1, ts: 300, payload: { kind: "user_message", text: "one" } },
-    ]);
-    assert.deepEqual(db.listEvents(id).map((event) => event.ts), [300, 400]);
-    assert.equal(db.getHydratedSeq(id), 2);
-    assert.equal(db.getSession(id)?.lastEventAt, 400, "the seed is not an event time");
-    db.appendEvent(id, { kind: "agent_message", text: "three" }, 350, { runnerSeq: 3 });
-    assert.equal(db.getSession(id)?.lastEventAt, 400);
+    // A legacy fork copies its one-response history without runner seqs, then advances the cursor.
+    db.createSessionFromSnapshot(snapshot({ id: "legacy-fork", seq: 2, updatedAt: 5_000 }), "runner-1", 1_000);
+    db.appendEvent("legacy-fork", { kind: "user_message", text: "one" }, 300);
+    db.appendEvent("legacy-fork", { kind: "agent_message", text: "two" }, 400);
+    db.setHydratedSeq("legacy-fork", 2);
+    assert.equal(db.getSession("legacy-fork")?.lastEventAt, 400, "the seed is not an event time");
+    db.appendEvent("legacy-fork", { kind: "agent_message", text: "three" }, 350, { runnerSeq: 3 });
+    assert.equal(db.getSession("legacy-fork")?.lastEventAt, 400);
+
+    // A runner that sends no seq at all, for a session adopted with a later snapshot time.
+    db.createSessionFromSnapshot(snapshot({ id: "unsequenced", updatedAt: 5_000 }), "runner-1", 1_000);
+    db.appendEvent("unsequenced", { kind: "tool_call", toolCallId: "t", title: "Read", status: "completed" }, 300);
+    assert.equal(db.getSession("unsequenced")?.lastEventAt, 300);
+    db.appendEvent("unsequenced", { kind: "agent_message", text: "older" }, 200);
+    assert.equal(db.getSession("unsequenced")?.lastEventAt, 300);
   } finally {
     db.close();
   }

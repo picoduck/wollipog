@@ -4683,12 +4683,12 @@ function preserveCampaignFollowUpOrigins(db: DatabaseSync): void {
 }
 
 /** Session-row assignment that folds a cached event's time into its last activity, binding
- * (isRunnerEvent, ts, ts). Last activity keeps the later time, so replayed history, a restored
- * control-plane event, or a runner clock that trails the control plane's never moves it backward.
- * The first runner event cached into an empty runner cache (an adopted session, a cleared or
- * replaced history) instead recomputes it from every event the session holds: an adopted
+ * (ts, ts). Last activity keeps the later time, so replayed history, a restored control-plane
+ * event, or a runner clock that trails the control plane's never moves it backward. The first
+ * event cached into a session holding none (a new, adopted, or forked session, or a cleared
+ * history) instead takes the latest time among the just-inserted rows: an adopted or forked
  * session's value until then is its snapshot's updatedAt, which is not an event time. */
-const FOLD_LAST_EVENT_AT = `last_event_at=CASE WHEN ? AND hydrated_seq=0
+const FOLD_LAST_EVENT_AT = `last_event_at=CASE WHEN COALESCE(message_count,0)=0
   THEN (SELECT MAX(ts) FROM session_events WHERE session_id=sessions.id)
   ELSE MAX(COALESCE(last_event_at, ?), ?) END`;
 
@@ -14414,17 +14414,6 @@ export class ControlPlaneDb {
   setHydratedSeq(id: string, seq: number): void {
     this.stmt("UPDATE sessions SET hydrated_seq=? WHERE id=? AND hydrated_seq < ?").run(seq, id, seq);
   }
-
-  /** Cache a new fork's runner history returned in one response (a runner without indexed
-   * history), as the legacy history path does: runner events in seq order past the cursor, so
-   * the fork snapshot's updatedAt seed yields to their latest time. */
-  appendForkHistory(id: string, events: readonly { seq: number; ts: number; payload: SessionEventPayload }[]): void {
-    for (const event of [...events].sort((a, b) => a.seq - b.seq)) {
-      if (event.seq <= this.getHydratedSeq(id)) continue;
-      this.appendEvent(id, event.payload, event.ts, { runnerSeq: event.seq, historyEpoch: null });
-    }
-  }
-
   /** Persist the runner's durable history generation/tail. The first known epoch on a migrated row
    * adopts the existing cache; only a change between two known epochs proves replacement. */
   reconcileRunnerHistory(
@@ -21189,12 +21178,11 @@ export class ControlPlaneDb {
 
       // Maintain card preview + last activity + the message_count counter (sessionView reads the
       // counter instead of COUNT(*)-ing the event table on every broadcast).
-      const runnerEvent = options?.runnerSeq !== undefined ? 1 : 0;
       if (payload.kind === "user_message") {
         this.stmt(
             `UPDATE sessions SET ${FOLD_LAST_EVENT_AT}, message_count=COALESCE(message_count,0)+1, preview='' WHERE id=?`,
           )
-          .run(runnerEvent, ts, ts, sessionId);
+          .run(ts, ts, sessionId);
       } else if (payload.kind === "agent_message" && payload.text) {
         const prev =
           (this.stmt("SELECT preview FROM sessions WHERE id=?").get(sessionId) as
@@ -21204,12 +21192,12 @@ export class ControlPlaneDb {
         this.stmt(
             `UPDATE sessions SET ${FOLD_LAST_EVENT_AT}, message_count=COALESCE(message_count,0)+1, preview=? WHERE id=?`,
           )
-          .run(runnerEvent, ts, ts, next, sessionId);
+          .run(ts, ts, next, sessionId);
       } else {
         this.stmt(
             `UPDATE sessions SET ${FOLD_LAST_EVENT_AT}, message_count=COALESCE(message_count,0)+1 WHERE id=?`,
           )
-          .run(runnerEvent, ts, ts, sessionId);
+          .run(ts, ts, sessionId);
       }
 
       if (options?.runnerSeq !== undefined) {
@@ -21381,7 +21369,7 @@ export class ControlPlaneDb {
                 runner_history_tail_seq=CASE WHEN runner_history_tail_seq < ? THEN ? ELSE runner_history_tail_seq END,
                 ${FOLD_LAST_EVENT_AT}, message_count=COALESCE(message_count,0)+?, preview=?
           WHERE id=?`,
-      ).run(finalRunnerSeq, finalRunnerSeq, finalRunnerSeq, 1, latestTs, latestTs, events.length, preview, sessionId);
+      ).run(finalRunnerSeq, finalRunnerSeq, finalRunnerSeq, latestTs, latestTs, events.length, preview, sessionId);
       if (events.some((event) => event.payload.kind === "tool_call")) this.raiseSettledChildToolCallCharge(sessionId);
       this.db.exec("COMMIT");
       appliedResult = { applied: true, events: inserted };
