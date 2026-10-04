@@ -83,9 +83,9 @@ type RowOffsetSample = { key: string; offset: number | null };
  * Samples are read only inside the browser's rendering step, never in a task between frames: a
  * read there forces a style recalculation that would start a short transition early and hide the
  * very frame under test. Each frame is read once in a rAF callback, and again in a ResizeObserver
- * callback whenever the list, its rows or the reader resize — created after the list's own
- * observers, so it reads the geometry their corrections leave for the paint. A row that moves for a
- * single painted frame and moves back still shows.
+ * callback — every frame, and whenever the list, its rows or the reader resize — created after the
+ * list's own observers, so it reads the geometry their corrections leave for the paint. A row that
+ * moves for a single painted frame and moves back still shows.
  */
 async function recordRowOffsets(
   page: Page,
@@ -109,8 +109,13 @@ async function recordRowOffsets(
       let done = false;
       const observed = new Set<Element>();
       const resized = new ResizeObserver(() => sample());
+      // A box of the recorder's own, resized every frame, so its observer reports in every frame's
+      // first delivery — after the callbacks of every observer created before it.
+      const tick = document.createElement("div");
+      tick.style.cssText = "position: fixed; top: 0; left: 0; height: 0; width: 1px; visibility: hidden;";
+      document.body.append(tick);
       const observe = () => {
-        for (const target of [element, element.querySelector("[data-virtual-total]"), ...rows()]) {
+        for (const target of [tick, element, element.querySelector("[data-virtual-total]"), ...rows()]) {
           if (target && !observed.has(target)) {
             observed.add(target);
             resized.observe(target);
@@ -120,6 +125,7 @@ async function recordRowOffsets(
       const finish = (completed: boolean) => {
         done = true;
         resized.disconnect();
+        tick.remove();
         resolve({ samples, completed });
       };
       const sample = () => {
@@ -142,6 +148,7 @@ async function recordRowOffsets(
       };
       const frame = () => {
         sample();
+        tick.style.width = tick.style.width === "1px" ? "2px" : "1px";
         const now = performance.now();
         if (windowStart != null && now - windowStart >= options.durationMs) finish(true);
         else if (now - startedAt >= 5_000) finish(false);
@@ -754,8 +761,8 @@ for (const fault of ["row transition", "observer jump"] as const) {
   test(`the painted-frame row recorder sees a row that moves for one frame (${fault})`, async ({ page }) => {
     // Negative controls for the paging tests above. "row transition" puts back the transition #2426
     // removed, which paints a scroll correction a frame before the rows it compensates for.
-    // "observer jump" moves the reader in a ResizeObserver callback, before paint, as the first
-    // paged-in row measures, and moves it back on the next frame.
+    // "observer jump" moves the reader in a ResizeObserver callback, before paint, in the first frame
+    // after the page lands, and moves it back straight after that paint.
     await page.emulateMedia({ reducedMotion: "reduce" });
     await page.goto("/command-inbox-projects-e2e.html?scenario=preview-follow");
     if (fault === "row transition") {
@@ -769,23 +776,31 @@ for (const fault of ["row transition", "observer jump"] as const) {
     if (fault === "observer jump") {
       await reader.evaluate((element) => {
         const landedFrom = element.scrollTop;
-        const known = new Set(element.querySelectorAll("[data-virtual-row]"));
-        let jumped = false;
+        // In the first frame after the page lands, resize a box this fault owns. Its observer,
+        // created before the recorder's, moves the reader in that frame's first delivery, after the
+        // frame's rAF reads; the move back runs after the paint and before the next rAF, so only
+        // the recorder's observer-phase read can see the frame.
+        const trigger = document.createElement("div");
+        trigger.style.cssText = "position: fixed; top: 0; left: 0; height: 0; width: 1px; visibility: hidden;";
+        document.body.append(trigger);
+        let armed = false;
         const jump = new ResizeObserver(() => {
-          if (jumped || Math.abs(element.scrollTop - landedFrom) < 1) return;
-          jumped = true;
+          if (!armed) return;
           jump.disconnect();
+          trigger.remove();
           element.scrollTop -= 20;
-          requestAnimationFrame(() => { element.scrollTop += 20; });
+          setTimeout(() => { element.scrollTop += 20; }, 0);
         });
-        new MutationObserver((records, mutations) => {
-          for (const node of records.flatMap((record) => [...record.addedNodes])) {
-            if (node instanceof HTMLElement && node.matches("[data-virtual-row]") && !known.has(node)) {
-              jump.observe(node);
-              mutations.disconnect();
-            }
+        jump.observe(trigger);
+        const watch = () => {
+          if (Math.abs(element.scrollTop - landedFrom) < 1) {
+            requestAnimationFrame(watch);
+            return;
           }
-        }).observe(element, { childList: true, subtree: true });
+          armed = true;
+          trigger.style.width = "2px";
+        };
+        requestAnimationFrame(watch);
       });
     }
     const samples = await recordRowOffsets(page, reader, () => page.keyboard.press("Shift+Space"));
