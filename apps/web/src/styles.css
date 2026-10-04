@@ -16209,7 +16209,6 @@ body.shell-dock-dragging * {
 }
 .ui-select-option-reason { color: var(--amber-on-tint); font-size: var(--text-xs); }
 .ui-select-empty { margin: 0; padding: var(--space-3); color: var(--text-dim); font-size: var(--text-sm); }
-.ui-select-trigger[aria-disabled="true"] { cursor: not-allowed; color: var(--text-dim); }
 
 /* Choice rows (docs/design-system.md §8.4): one row for radio cards, member checklists and
    instance pickers. A leading 16px marker aligned to the title's FIRST line, so markers form one
@@ -16424,11 +16423,23 @@ body.shell-dock-dragging * {
 }
 /* Hover steps the edge up from --control-outline; --border-strong would have faded it. */
 @media (hover: hover) {
-  .ui-select-trigger:hover,
+  .ui-select-trigger:where(:not([aria-disabled="true"])):hover,
   .ui-searchable-combobox-input:hover { border-color: var(--text-dim); }
 }
 .ui-searchable-combobox-input { cursor: text; }
 .ui-searchable-combobox-input[aria-disabled="true"] { cursor: not-allowed; color: var(--text-faint); }
+/* A disabled Select trigger (#2619) is a filled control and draws a disabled native field's look
+   (§3.1, §8.1, #2617): the value in --text-faint on the unchanged fill and edge, `not-allowed`, and
+   no hover edge above. A placeholder takes the same ink. In forced colors its value and edge are
+   GrayText, as a disabled native select's are (#2611), and the caret inherits them. */
+.ui-select-trigger[aria-disabled="true"] { cursor: not-allowed; color: var(--text-faint); }
+.ui-select-trigger[aria-disabled="true"] .ui-select-value { color: inherit; }
+@media (forced-colors: active) {
+  .ui-select-trigger[aria-disabled="true"] {
+    color: GrayText;
+    border-color: GrayText;
+  }
+}
 .ui-select-value { flex: 1; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ui-select-value.is-placeholder { color: var(--text-dim); }
 .ui-select-caret { flex: none; color: var(--text-dim); }

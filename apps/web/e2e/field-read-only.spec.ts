@@ -6,7 +6,7 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
  * its value in --text-dim; it is not the editable look and not §3.1's disabled look. A field that is
  * read-only only while a request runs, and SearchableCombobox's readOnly-as-disabled, keep their own
  * looks. #2617: a disabled field draws its value in --text-faint with `cursor: not-allowed` on the
- * unchanged fill, undimmed (§3.1, §8.1).
+ * unchanged fill, undimmed (§3.1, §8.1). #2619: so does a disabled Select trigger.
  */
 
 /** The editable field as measured on main before #2520 (the issue's table). */
@@ -72,6 +72,18 @@ function luminance(rgb: string): number {
 function contrast(a: string, b: string): number {
   const [light, dark] = [luminance(a), luminance(b)].sort((x, y) => y - x);
   return (light! + 0.05) / (dark! + 0.05);
+}
+
+/** A Select's trigger, and the computed colour of its value and caret. */
+function trigger(page: Page, name: string): Locator {
+  return page.locator(`[data-field="${name}"] .ui-select-trigger`);
+}
+
+function triggerInk(control: Locator): Promise<{ value: string; caret: string }> {
+  return control.evaluate((element) => ({
+    value: getComputedStyle(element.querySelector(".ui-select-value")!).color,
+    caret: getComputedStyle(element.querySelector(".ui-select-caret")!).color,
+  }));
 }
 
 /** Moves focus off the field a dialog focused on opening, and lets its edge finish transitioning. */
@@ -163,6 +175,48 @@ for (const theme of ["dark", "light"] as const) {
       expect(await look(control(name)), `${name}: unchanged`).toMatchObject({ ...editableLook(theme), opacity: "1" });
     }
     expect((await look(control("editable-select"))).cursor, "editable-select: not the disabled cursor").not.toBe("not-allowed");
+  });
+
+  // #2619: a disabled Select trigger kept --text-dim, unlike the disabled native select beside it. It
+  // is a filled control on the field recipe, so it takes the same §3.1 look, placeholder included,
+  // and its edge does not step up under the pointer.
+  test(`${theme}: a disabled Select trigger draws the disabled field's look`, async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(`/read-only-fields-e2e.html?theme=${theme}`);
+    await expect(trigger(page, "select-trigger")).toBeVisible();
+    expect(await page.evaluate(() => matchMedia("(hover: hover)").matches)).toBe(true);
+    const [faint, dim] = await Promise.all([token(page, "--text-faint"), token(page, "--text-dim")]);
+    const disabledLook = {
+      color: faint, background: EDITABLE[theme].background, border: EDITABLE[theme].border,
+      borderStyle: "solid", borderWidth: "1px", cursor: "not-allowed", opacity: "1",
+    };
+    const nativeSelect = await look(page.locator('[data-field="disabled-select"] select'));
+    const hovered = async (control: Locator) => {
+      await control.hover();
+      await settle(page);
+      return (await look(control)).border;
+    };
+
+    for (const name of ["disabled-select-trigger", "disabled-select-trigger-placeholder"]) {
+      const control = trigger(page, name);
+      await expect(control).toHaveAttribute("aria-disabled", "true");
+      const disabled = await look(control);
+      expect(disabled, `${name}: --text-faint on --field-bg, not-allowed, undimmed`).toMatchObject(disabledLook);
+      expect(disabled, `${name}: the disabled native select's look`).toMatchObject({
+        color: nativeSelect.color, background: nativeSelect.background, border: nativeSelect.border,
+      });
+      expect((await triggerInk(control)).value, `${name}: its value or placeholder in the same ink`).toBe(faint);
+      expect(contrast(faint, disabled.background), `${name}: the value stays readable`).toBeGreaterThanOrEqual(4.5);
+      expect(await hovered(control), `${name}: no hover edge`).toBe(EDITABLE[theme].border);
+    }
+    await expect(trigger(page, "disabled-select-trigger-placeholder").locator(".ui-select-value")).toHaveClass(/is-placeholder/);
+
+    // The enabled trigger keeps its look and its hover edge, so the hover check above is not vacuous.
+    const enabled = trigger(page, "select-trigger");
+    expect(await look(enabled), "enabled trigger: unchanged").toMatchObject({ ...editableLook(theme), cursor: "pointer", opacity: "1" });
+    expect(await triggerInk(enabled), "enabled trigger: its value in --text, caret in --text-dim")
+      .toEqual({ value: EDITABLE[theme].color, caret: dim });
+    expect(await hovered(enabled), "enabled trigger: its edge steps up under the pointer").toBe(dim);
   });
 
   test(`${theme}: a read-only field stays in the tab order and its value can be selected`, async ({ page }) => {
@@ -272,6 +326,24 @@ for (const palette of ["dark", "light"] as const) {
       .toMatchObject({ readOnly: true, color: system.grayText, border: system.grayText });
     expect(await page.locator('[data-field="combobox"] .ui-picker-chevron svg').evaluate((icon) => getComputedStyle(icon).color),
       "combobox: its chevron too").toBe(system.grayText);
+
+    // #2619: a disabled Select trigger, a button, draws it too, caret included, at rest and hovered.
+    for (const name of ["disabled-select-trigger", "disabled-select-trigger-placeholder"]) {
+      const disabled = trigger(page, name);
+      expect(await look(disabled), `${name}: GrayText value and edge`).toMatchObject({
+        color: system.grayText, border: system.grayText, borderStyle: "solid",
+      });
+      expect(await triggerInk(disabled), `${name}: its value and caret too`)
+        .toEqual({ value: system.grayText, caret: system.grayText });
+      await disabled.hover();
+      expect((await look(disabled)).border, `${name}: hovered, the edge stays GrayText`).toBe(system.grayText);
+    }
+    const enabled = trigger(page, "select-trigger");
+    expect(await look(enabled), "enabled trigger: CanvasText value and edge").toMatchObject({
+      color: system.canvasText, border: system.canvasText,
+    });
+    expect(await triggerInk(enabled), "enabled trigger: its value and caret too")
+      .toEqual({ value: system.canvasText, caret: system.canvasText });
 
     for (const name of ["editable", "editable-textarea", "editable-select", "read-only", "read-only-textarea"]) {
       const field = await look(control(name));

@@ -4,7 +4,7 @@ import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { GuardrailsDialog, type GuardrailsDialogSession } from "../components/GuardrailsDialog.js";
 import { RenameSessionDialog } from "../components/RenameSessionDialog.js";
-import { SearchableCombobox } from "../components/ui/ChoiceControls.js";
+import { SearchableCombobox, Select } from "../components/ui/ChoiceControls.js";
 import "../styles.css";
 
 /**
@@ -12,8 +12,9 @@ import "../styles.css";
  *
  * `?scenario=fields` (the default): an editable input and textarea, the same two read-only for good
  * (`.is-read-only`), a read-only field without the marker, an invalid field, a disabled input and
- * textarea, an editable and a disabled native select, and a disabled SearchableCombobox, on a dialog
- * body's surface.
+ * textarea, an editable and a disabled native select, a disabled SearchableCombobox, and an enabled
+ * Select, a disabled one and a disabled one showing its placeholder (#2619), on a dialog body's
+ * surface.
  * `?scenario=guardrails-viewer` and `?scenario=guardrails-editable`: the real Guardrails dialog for a
  * Viewer and for someone who may save. Its save never settles, so a spec can hold it mid-save.
  * `?scenario=rename`: the real Rename Session dialog, whose rename never settles.
@@ -34,6 +35,7 @@ const SESSION: GuardrailsDialogSession = {
   liveChildCapacity: { occupied: 1, limit: 4, remaining: 3 },
 };
 const VIEWER_REFUSAL = "Your Viewer role can't change this session's configuration.";
+const REGIONS = [{ value: "us-east-1", label: "US East" }, { value: "eu-west-1", label: "EU West" }];
 const never = () => new Promise<never>(() => {});
 
 function Fields() {
@@ -94,6 +96,18 @@ function Fields() {
             options={[{ value: "billing", label: "Billing Service" }]}
             disabled
           />
+        </div>
+        <div className="field" data-field="select-trigger">
+          <span>Region</span>
+          <Select<string> label="Region" value="us-east-1" onChange={() => {}} options={REGIONS} />
+        </div>
+        <div className="field" data-field="disabled-select-trigger">
+          <span>Disabled Region</span>
+          <Select<string> label="Disabled Region" value="us-east-1" onChange={() => {}} options={REGIONS} disabled />
+        </div>
+        <div className="field" data-field="disabled-select-trigger-placeholder">
+          <span>Fallback Region</span>
+          <Select<string> label="Fallback Region" value={null} onChange={() => {}} options={REGIONS} disabled />
         </div>
       </form>
     </div>

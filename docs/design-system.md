@@ -1232,12 +1232,14 @@ Helper text, one sentence.            ← or the error, which replaces it
 - Disabled: a disabled text input, textarea or native select in a `.field` draws its value in
   `--text-faint` on the unchanged `--field-bg` fill and edge, with `cursor: not-allowed` and no
   opacity (Chromium's own 0.7 on a disabled select is reset); SearchableCombobox's `aria-disabled`
-  input takes the same ink. A field has a fill of its own and rests in `--text`, so it is a filled
-  control under §3.1 and takes `--text-faint` (6.42:1 dark, 5.58:1 light on `--field-bg`), not the
-  fill-less `--text-disabled` (3.93:1, 3.38:1), which is never for text a person has to read. The
-  value then shares the placeholder's tier, which is accepted because the other tier would fail
-  4.5:1; where the person would expect the field to work, its reason is visible text (§3.1). In
-  forced colors its value and edge are `GrayText` (§3.1); an editable field keeps `CanvasText`.
+  input and the Select trigger's `aria-disabled` button take the same ink (the trigger's placeholder
+  too), and the disabled trigger's edge does not step up on hover. A field has a fill of its own and
+  rests in `--text`, so it is a filled control under §3.1 and takes `--text-faint` (6.42:1 dark,
+  5.58:1 light on `--field-bg`), not the fill-less `--text-disabled` (3.93:1, 3.38:1), which is never
+  for text a person has to read. The value then shares the placeholder's tier, which is accepted
+  because the other tier would fail 4.5:1; where the person would expect the field to work, its
+  reason is visible text (§3.1). In forced colors its value and edge are `GrayText` (§3.1), as are
+  the Select trigger's caret and SearchableCombobox's chevron; an editable field keeps `CanvasText`.
 - Helper: `--type-small`, `--text-dim`, 4px below. One sentence.
 - Spacing: a `.field`'s parts stack `--space-2` apart, which puts the label 8px above the control;
   the helper, the error that replaces it and a `.field-foot` pull up by `--space-1` to sit 4px
