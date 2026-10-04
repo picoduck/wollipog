@@ -28,6 +28,10 @@ const priorElementGlobals = {
   // The setter announces its change with `new Event(...)`; a Node-global Event never reaches
   // happy-dom's listeners, and the row silently stops tracking the store it just wrote.
   Event: (globalThis as Record<string, unknown>)["Event"],
+  // The Question Response Style listbox positions and focuses itself on the next frame.
+  requestAnimationFrame: (globalThis as Record<string, unknown>)["requestAnimationFrame"],
+  cancelAnimationFrame: (globalThis as Record<string, unknown>)["cancelAnimationFrame"],
+  getComputedStyle: (globalThis as Record<string, unknown>)["getComputedStyle"],
 };
 
 before(() => {
@@ -38,6 +42,9 @@ before(() => {
   Object.defineProperty(globalThis, "HTMLElement", { configurable: true, writable: true, value: domWindow.HTMLElement });
   Object.defineProperty(globalThis, "HTMLButtonElement", { configurable: true, writable: true, value: domWindow.HTMLButtonElement });
   Object.defineProperty(globalThis, "Event", { configurable: true, writable: true, value: domWindow.Event });
+  Object.defineProperty(globalThis, "requestAnimationFrame", { configurable: true, writable: true, value: domWindow.requestAnimationFrame.bind(domWindow) });
+  Object.defineProperty(globalThis, "cancelAnimationFrame", { configurable: true, writable: true, value: domWindow.cancelAnimationFrame.bind(domWindow) });
+  Object.defineProperty(globalThis, "getComputedStyle", { configurable: true, writable: true, value: domWindow.getComputedStyle.bind(domWindow) });
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, writable: true, value: true });
 });
 
@@ -49,6 +56,9 @@ after(() => {
   Object.defineProperty(globalThis, "HTMLElement", { configurable: true, writable: true, value: priorElementGlobals.HTMLElement });
   Object.defineProperty(globalThis, "HTMLButtonElement", { configurable: true, writable: true, value: priorElementGlobals.HTMLButtonElement });
   Object.defineProperty(globalThis, "Event", { configurable: true, writable: true, value: priorElementGlobals.Event });
+  Object.defineProperty(globalThis, "requestAnimationFrame", { configurable: true, writable: true, value: priorElementGlobals.requestAnimationFrame });
+  Object.defineProperty(globalThis, "cancelAnimationFrame", { configurable: true, writable: true, value: priorElementGlobals.cancelAnimationFrame });
+  Object.defineProperty(globalThis, "getComputedStyle", { configurable: true, writable: true, value: priorElementGlobals.getComputedStyle });
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, writable: true, value: priorActEnvironment });
 });
 
@@ -94,21 +104,32 @@ test("the Question Response Style row defaults to Interactive Form and announces
   const root = createRoot(container);
   try {
     await act(async () => root.render(<BehaviorPanel />));
-    const optionByName = (name: string) => {
-      const match = [...container.querySelectorAll<HTMLElement>("[role=radio]")].find((option) =>
-        (option.getAttribute("aria-label") ?? option.textContent ?? "").includes(name));
-      assert.ok(match, `the Question Response Style row must offer "${name}"`);
+    // A listbox since #2506: the closed trigger states the value, and each option is picked from the list.
+    const trigger = () => {
+      const match = [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) =>
+        button.getAttribute("aria-label")?.startsWith("Question Response Style:"));
+      assert.ok(match, "the Question Response Style row must render its picker");
       return match;
     };
+    const choose = async (name: string) => {
+      await act(async () => trigger().click());
+      const option = [...container.ownerDocument.querySelectorAll<HTMLElement>("[role=option]")].find((element) =>
+        element.textContent?.startsWith(name));
+      assert.ok(option, `the Question Response Style row must offer "${name}"`);
+      await act(async () => option.click());
+    };
+    const rowText = () => trigger().closest(".ui-row")?.textContent ?? "";
 
     assert.equal(domWindow.localStorage.getItem(QUESTION_RESPONSE_STYLE_STORAGE_KEY), null);
-    assert.equal(optionByName("Interactive Form").getAttribute("aria-checked"), "true");
-    await act(async () => { optionByName("Composer Response").click(); });
+    assert.equal(trigger().getAttribute("aria-label"), "Question Response Style: Interactive Form");
+    assert.match(rowText(), /Choose options directly with keyboard-accessible form controls/);
+    await choose("Composer Response");
     assert.equal(domWindow.localStorage.getItem(QUESTION_RESPONSE_STYLE_STORAGE_KEY), "composer");
-    assert.equal(optionByName("Composer Response").getAttribute("aria-checked"), "true");
-    await act(async () => { optionByName("Interactive Form").click(); });
+    assert.equal(trigger().getAttribute("aria-label"), "Question Response Style: Composer Response");
+    assert.match(rowText(), /Answer pending questions through a distinct mode in the Session composer/);
+    await choose("Interactive Form");
     assert.equal(domWindow.localStorage.getItem(QUESTION_RESPONSE_STYLE_STORAGE_KEY), "interactive");
-    assert.equal(optionByName("Interactive Form").getAttribute("aria-checked"), "true");
+    assert.equal(trigger().getAttribute("aria-label"), "Question Response Style: Interactive Form");
   } finally {
     domWindow.localStorage.removeItem(QUESTION_RESPONSE_STYLE_STORAGE_KEY);
     await act(async () => root.unmount());

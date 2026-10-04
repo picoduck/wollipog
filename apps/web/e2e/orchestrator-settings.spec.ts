@@ -1,4 +1,5 @@
-import { expect, test, type Locator } from "@playwright/test";
+import { expect, test } from "@playwright/test";
+import { expectTextFits } from "./text-fit";
 
 test.use({ reducedMotion: "reduce" });
 
@@ -60,35 +61,6 @@ test("Orchestrator settings retain drifted values with actionable compatibility 
   await expect(page.getByRole("alert")).toContainText("Choose Automatic or another advertised combination");
   await page.screenshot({ path: testInfo.outputPath("orchestrator-settings-drift.png"), fullPage: true });
 });
-
-/** Every rendered line of text in `box` lies inside its border box, and no ancestor in it clips. */
-async function expectTextFits(box: Locator, what: string) {
-  const misfits = await box.evaluate((element) => {
-    const outer = element.getBoundingClientRect();
-    const found: string[] = [];
-    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
-    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-      const text = node.textContent?.trim();
-      if (!text) continue;
-      const range = document.createRange();
-      range.selectNodeContents(node);
-      for (const rect of range.getClientRects()) {
-        if (rect.width === 0) continue;
-        if (rect.left < outer.left - 0.5 || rect.right > outer.right + 0.5) {
-          found.push(`"${text}" spans ${rect.left.toFixed(1)}-${rect.right.toFixed(1)} in ${outer.left.toFixed(1)}-${outer.right.toFixed(1)}`);
-        }
-      }
-      // An ellipsis keeps the glyphs it shows inside the box while hiding the rest of the words.
-      for (let parent = node.parentElement; parent && element.contains(parent); parent = parent.parentElement) {
-        if (getComputedStyle(parent).overflowX !== "visible" && parent.scrollWidth > parent.clientWidth) {
-          found.push(`"${text}" is clipped by ${parent.className || parent.tagName}`);
-        }
-      }
-    }
-    return found;
-  });
-  expect(misfits, what).toEqual([]);
-}
 
 // #2413: as three equal pills in the panel's 260px value column, "Questions and Approvals" drew over
 // its neighbour at every width. Each option is measured in the listbox and, once chosen, in the trigger.

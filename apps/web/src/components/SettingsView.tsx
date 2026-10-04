@@ -37,7 +37,7 @@ import { EXPERIMENT_COPY, experimentForViewName } from "../experiments.js";
 import { useExperiments } from "../use-experiments.js";
 import { destination } from "../navigation.js";
 import { NavRow, SegmentedRow, SelectRow, StaticRow, SwitchRow } from "./ui/SettingsRows.js";
-import { Select } from "./ui/ChoiceControls.js";
+import { Select, type SelectOption } from "./ui/ChoiceControls.js";
 import { SCHEME_SWATCHES, type ColorScheme, type ResolvedTheme } from "../theme.js";
 import { setEnterKeyBehavior, useEnterKeyBehavior, type EnterKeyBehavior } from "../enter-key.js";
 import { setShowAgentLogs, useShowAgentLogs } from "../agent-logs.js";
@@ -389,6 +389,19 @@ export function PendingSetting({ title, description, reason }: { title: string; 
   );
 }
 
+const QUESTION_RESPONSE_STYLE_OPTIONS: SelectOption<QuestionResponseStyle>[] = [
+  {
+    value: "interactive",
+    label: "Interactive Form",
+    description: "Choose options directly with keyboard-accessible form controls. Stored on this device.",
+  },
+  {
+    value: "composer",
+    label: "Composer Response",
+    description: "Answer pending questions through a distinct mode in the Session composer. Stored on this device.",
+  },
+];
+
 export function BehaviorPanel({
   agentHarnessDefaults,
   sessionNaming,
@@ -420,20 +433,13 @@ export function BehaviorPanel({
         value={enterKey}
         onChange={(value) => setEnterKeyBehavior(value as EnterKeyBehavior)}
       />
-      <SegmentedRow
+      {/* A listbox rather than pills (#2506): "Composer Response" needs about 152px and the shared
+          220px value column gives each of two equal pills 106px, so the label ran past the border. */}
+      <SelectRow
         title="Question Response Style"
-        options={[
-          {
-            value: "interactive",
-            label: "Interactive Form",
-            description: "Choose options directly with keyboard-accessible form controls. Stored on this device.",
-          },
-          {
-            value: "composer",
-            label: "Composer Response",
-            description: "Answer pending questions through a distinct mode in the Session composer. Stored on this device.",
-          },
-        ]}
+        // The selected option's sentence, as the pills showed it: the row says what the choice does.
+        description={QUESTION_RESPONSE_STYLE_OPTIONS.find((option) => option.value === questionResponseStyle)?.description}
+        options={QUESTION_RESPONSE_STYLE_OPTIONS}
         value={questionResponseStyle}
         onChange={(value) => setQuestionResponseStyle(value as QuestionResponseStyle)}
       />
