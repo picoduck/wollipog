@@ -204,6 +204,8 @@ interface Fixture {
   pushSessionSync: (patch: Partial<SessionView>) => void;
   pushEvent: (payload: SessionEvent["payload"]) => Promise<void>;
   closeSocket: (code: number) => Promise<void>;
+  /** Rerenders the same SessionDetail (same key) as the Inbox's preview or its expanded view. */
+  setMode: (mode: "expanded" | "preview") => Promise<void>;
 }
 
 type ComposerDraftLoader = (sessionId: string, instanceScope: string) => Promise<ComposerDraft | null>;
@@ -320,11 +322,14 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
   const container = domWindow.document.body as unknown as HTMLDivElement;
   const root = createRoot(mountPoint);
   let detailMount = 0;
+  let detailMode: "expanded" | "preview" = "expanded";
+  let currentLoader: ComposerDraftLoader = () => draft.promise;
   const renderWithDraftLoader = (
     loader: ComposerDraftLoader,
     sessionId = currentSession.id,
     showDetail = true,
   ) => {
+    currentLoader = loader;
     const content = (
       <ApiProvider client={client}>
         <StoreProvider connection={connection} navigation={navigation}>
@@ -336,6 +341,7 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
               <SessionDetail
                 key={detailMount}
                 sessionId={sessionId}
+                mode={detailMode}
                 rightPanel={rightPanel}
                 onOpenTerminal={() => {}}
                 composerFocusIntent={options.composerFocusIntent ?? "message"}
@@ -432,6 +438,10 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
     },
     closeSocket: async (code) => {
       await act(async () => { socket.onclose?.({ code }); });
+    },
+    setMode: async (mode) => {
+      detailMode = mode;
+      await act(async () => renderWithDraftLoader(currentLoader));
     },
   };
 }
@@ -6202,4 +6212,35 @@ test("entering Answer Mode cancels dictation, and nothing it settles later leave
   } finally {
     setQuestionResponseStyle("interactive", domWindow as never);
   }
+});
+
+test("collapsing to the Inbox preview cancels dictation, so nothing listens with the composer gone (#2193)", async () => {
+  await withTrackedRecognition(async () => {
+    const draft = deferred<ComposerDraft | null>();
+    const fixture = await mountFixture(draft, { sessionCapabilities: PAUSED_LOOK_CAPABILITIES });
+    try {
+      await resolveComposerDraft(draft, { text: "hidden draft", images: [], updatedAt: 1 });
+      const mic = micButton(fixture);
+      await pointer(mic, "pointerdown");
+      await pointer(mic, "pointerup");
+      assert.equal(mic.getAttribute("aria-pressed"), "true");
+      const recognizer = TrackedRecognition.instances[0]!;
+
+      // The same keyed SessionDetail, now the Inbox's preview: no composer, no mic, no strip.
+      await fixture.setMode("preview");
+      assertNoDomNode(fixture.container.querySelector(".composer-bar"), "the preview has no composer bar");
+      assert.deepEqual(TrackedRecognition.log, ["start", "abort"], "dictation is cancelled with its mic");
+      assert.equal(recognizer.onresult, null, "nothing it settles later can rewrite the hidden draft");
+      assert.equal(recognizer.onend, null, "an engine ending cannot restart it");
+
+      await fixture.setMode("expanded");
+      const back = micButton(fixture);
+      assert.equal(back.getAttribute("aria-pressed"), "false", "expanding again does not resume listening");
+      assert.equal(back.getAttribute("aria-label"), "Dictate");
+      assert.equal(fixture.container.querySelector<HTMLTextAreaElement>(".composer-input")?.value, "hidden draft");
+      assert.equal(TrackedRecognition.instances.length, 1);
+    } finally {
+      await unmountFixture(fixture);
+    }
+  });
 });
