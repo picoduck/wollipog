@@ -377,6 +377,11 @@ focus.
 The borrowed hit area (`inset: -4px`) only works when neighbors are at least 8px away; inside a
 `.seg`, a tab strip or a tight icon cluster, the visual size itself must be 44px.
 
+A control that borrows more than 4px keeps the borrowed area inside its own row, so a neighbor never
+needs extra clearance from it. The attachment tray's 20px Remove (#2561) takes the top-right 44px of
+its 56px thumbnail rather than reaching past the tile, and a 36px reference chip keeps 4px above and
+below itself for its Remove's centered 44px.
+
 **One hit-area block.** Segmented options, switches and inline text links get their 44px
 coarse-pointer hit area from this block, once, in the shared stylesheet. A segmented option borrows
 the track's 2px inset and 1px edge; the switch uses `::before` because its thumb is `::after`; a link

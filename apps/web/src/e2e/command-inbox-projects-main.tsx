@@ -658,6 +658,8 @@ const steeringResolutionRequests: Array<{
 let deferredSteeringResolutionCount = 0;
 const pendingSteeringResolutionSettlements = new Map<string, () => void>();
 const sessionEvents = new Map<string, SessionEvent[]>();
+/** A queued message's exact attachments, keyed by `sessionId/promptId`, for opening it to edit. */
+const queuedPromptImages = new Map<string, PromptImageInput[]>();
 if (SCENARIO === "history-quarantine" || SCENARIO === "history-quarantine-handoff" || SCENARIO === "session-notices") {
   sessionEvents.set("session-alpha", [
     { id: 1, sessionId: "session-alpha", seq: 1, ts: 1, payload: { kind: "user_message", text: "Summarize the release notes.", final: true } },
@@ -2001,17 +2003,18 @@ const client = {
     return structuredClone(invocation);
   },
   // Opening a queued message for editing reads its exact content; the projection is its text, and a
-  // projection with images carries five small PNGs, enough to fill a phone's tray row.
+  // projection with images carries five small PNGs, enough to fill a phone's tray row, unless a test
+  // set its exact attachments.
   readQueuedPrompt: async (id: string, promptId: string) => {
     const prompt = model.sessions.find((candidate) => candidate.id === id)?.queued
       ?.find((candidate) => candidate.id === promptId);
     if (!prompt?.editRevision) throw new Error("queued prompt not editable");
-    const images = prompt.hasImages
+    const images = queuedPromptImages.get(`${id}/${promptId}`) ?? (prompt.hasImages
       ? Array.from({ length: 5 }, () => ({
         mimeType: "image/png",
         data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
       }))
-      : [];
+      : []);
     return { prompt: { promptId, text: prompt.text, images, editRevision: prompt.editRevision } };
   },
   steer: async (id: string, request: SteerRequest) => {
@@ -2549,6 +2552,8 @@ declare global {
       failNextPrompt(): void;
       failNextCancelTurn(): void;
       seedQueuedEditRecovery(sessionId: string, recovery: QueuedPromptEditRecovery): void;
+      /** What opening a queued message to edit reads as its attachments, in place of five PNGs. */
+      setQueuedPromptImages(sessionId: string, promptId: string, images: PromptImageInput[]): void;
       setDescendantRequests(state: "one" | "empty"): void;
       deferNextDescendantRequests(): void;
       settleDeferredDescendantRequests(): void;
@@ -2939,6 +2944,11 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
       sessionId,
     }, recovery);
     if (!saved) throw new Error("queued edit recovery was not saved");
+  },
+  setQueuedPromptImages(sessionId, promptId, images) {
+    // Each its own object, as a read from the server would give: the composer keys attachments by
+    // identity, so a repeated image must not arrive as the same object twice.
+    queuedPromptImages.set(`${sessionId}/${promptId}`, images.map((image) => structuredClone(image)));
   },
 };
 

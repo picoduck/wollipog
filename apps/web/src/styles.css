@@ -5389,12 +5389,9 @@ textarea {
 }
 .composer-mode.is-recovered .composer-mode-icon { color: var(--tone); }
 /* The queue tray docks on the card, so the row above sits close to the strip. On a coarse pointer the
-   strip's actions take the strip's bottom edge, 8px from the row's actions above, and the strip keeps
-   4px more below it: the attachment tray's Remove borrows 8px above its own row, so the card's 8px
-   gap alone would let it reach Cancel Edit. Every 44px touch area stays its own (§2.8); the strip
-   stays 40px. */
+   strip's actions take the strip's bottom edge, 8px from the row's actions above. Every 44px touch
+   area stays its own (§2.8); the strip stays 40px. */
 @media (pointer: coarse) {
-  .composer-mode { margin-bottom: var(--space-1); }
   .composer-mode-actions { align-self: end; }
 }
 /* A phone can't fit the recovered title and both actions on one line: the actions follow the
@@ -6568,8 +6565,17 @@ textarea,
   inset: calc(var(--space-1) * -1);
 }
 .attach-remove:hover { color: var(--red); }
+/* On a coarse pointer every Remove answers to 44px inside the tray's own row, so nothing placed
+   above or below the tray needs clearance from it (#2561). */
 @media (pointer: coarse) {
   .attach-remove::after { inset: calc(var(--space-3) * -1); }
+  /* A thumbnail's takes the tile's top-right 44px: from its 4px corner inset, 20px more down and
+     to the left. */
+  .attach-thumb > .attach-remove::after {
+    inset: calc(var(--space-1) * -1) calc(var(--space-1) * -1) calc(var(--space-5) * -1) calc(var(--space-5) * -1);
+  }
+  /* A chip's is centred on its 36px, so the chip keeps 4px above and below for it. */
+  .composer-attachments > .ref-chip { margin-block: calc((44px - var(--control-h-sm)) / 2); }
 }
 /* A file, line, diff or folder reference: a control, so control radius, not a pill (§2.5). */
 .ref-chip {

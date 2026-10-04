@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { TRAY_IMAGE, TRAY_REFERENCE } from "./fixtures/composer-tray.js";
 
 const fixtureUrl = "/command-inbox-projects-e2e.html?scenario=conversation-steering";
 
@@ -780,12 +781,19 @@ test.describe("on a coarse pointer", () => {
         return {
           name: button.getAttribute("aria-label") ?? button.textContent?.trim() ?? "",
           inStrip: button.closest(".composer-mode") !== null,
+          inTray: button.closest(".composer-attachments") !== null,
           top: box.top - grow(after.top, style.borderTopWidth),
           bottom: box.bottom + grow(after.bottom, style.borderBottomWidth),
           left: box.left - grow(after.left, style.borderLeftWidth),
           right: box.right + grow(after.right, style.borderRightWidth),
         };
       }));
+  }
+
+  type TouchArea = Awaited<ReturnType<typeof composerTouchAreas>>[number];
+  function overlaps(a: TouchArea, b: TouchArea) {
+    return Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 0.01 &&
+      Math.min(a.right, b.right) - Math.max(a.left, b.left) > 0.01;
   }
 
   /** The strip's actions each answer to at least 44px, and to no area another control answers to. */
@@ -797,9 +805,36 @@ test.describe("on a coarse pointer", () => {
       expect(action.bottom - action.top, `${action.name} keeps a 44px touch area`).toBeGreaterThanOrEqual(44);
       for (const other of areas) {
         if (other === action) continue;
-        const overlap = Math.min(action.bottom, other.bottom) - Math.max(action.top, other.top) > 0.01 &&
-          Math.min(action.right, other.right) - Math.max(action.left, other.left) > 0.01;
-        expect(overlap, `${action.name}'s touch area overlaps ${other.name}'s`).toBe(false);
+        expect(overlaps(action, other), `${action.name}'s touch area overlaps ${other.name}'s`).toBe(false);
+      }
+    }
+  }
+
+  /**
+   * Each of the tray's Remove buttons answers to at least 44 by 44px inside the tray's own row, and
+   * no control in the tray shares a touch area with one outside it (#2561).
+   */
+  async function expectTrayTouchAreasStayInTheirRow(page: Page, removeCount: number) {
+    const row = await page.locator(".composer-attachments").boundingBox();
+    if (!row) throw new Error("the attachment tray is not visible");
+    const areas = await composerTouchAreas(page);
+    const tray = areas.filter((area) => area.inTray);
+    const removes = tray.filter((area) => area.name.startsWith("Remove "));
+    expect(removes).toHaveLength(removeCount);
+    for (const remove of removes) {
+      expect(remove.bottom - remove.top, `${remove.name} keeps a 44px touch area`).toBeGreaterThanOrEqual(44);
+      expect(remove.right - remove.left, `${remove.name} keeps a 44px touch area`).toBeGreaterThanOrEqual(44);
+      expect(remove.top, `${remove.name} stays below the tray's top`).toBeGreaterThanOrEqual(row.y - 0.01);
+      expect(remove.bottom, `${remove.name} stays above the tray's bottom`)
+        .toBeLessThanOrEqual(row.y + row.height + 0.01);
+      for (const other of removes) {
+        if (other === remove) continue;
+        expect(overlaps(remove, other), `${remove.name}'s touch area overlaps ${other.name}'s`).toBe(false);
+      }
+    }
+    for (const control of tray) {
+      for (const other of areas.filter((area) => !area.inTray)) {
+        expect(overlaps(control, other), `${control.name}'s touch area overlaps ${other.name}'s`).toBe(false);
       }
     }
   }
@@ -858,6 +893,41 @@ test.describe("on a coarse pointer", () => {
       await expect(page.locator(".composer-attachments .attach-thumb .attach-remove")).toHaveCount(5);
       await expectStripTouchAreasOwnTheirTaps(page);
     });
+
+    // Remove's touch area stays in the tray's own row, so Cancel Edit directly above it needs no
+    // clearance: an image tile's takes the tile's corner, a reference's the chip's own 44px (#2561).
+    for (const referenceOnly of [false, true]) {
+      const seeded = referenceOnly ? "a reference alone" : "an image tile and a file reference";
+      test(`at ${width}px the tray's touch areas stay in its row under the strip with ${seeded} (#2561)`, async ({ page }) => {
+        await page.setViewportSize({ width, height: 900 });
+        await seedEditableQueue(page);
+        await page.evaluate(({ attachments }) => window.__WOLLIPOG_PROJECT_INBOX_E2E__
+          .setQueuedPromptImages("session-alpha", "queue-edit", attachments as never),
+        { attachments: referenceOnly ? [TRAY_REFERENCE] : [TRAY_IMAGE, TRAY_REFERENCE, TRAY_IMAGE] });
+        if (width <= 760) {
+          await page.getByTestId("queued-prompt-queue-edit").getByRole("button", { name: "Queued Message Actions" }).click();
+          await page.getByRole("menu", { name: "Queued Message Actions" }).getByRole("menuitem", { name: "Edit Message" })
+            .click();
+        } else {
+          await page.getByTestId("queued-prompt-queue-edit").getByRole("button", { name: "Edit Queued Message" }).click();
+        }
+        await expect(page.locator(".composer-box > .composer-mode")).toBeVisible();
+        const tray = page.locator(".composer-attachments");
+        await expect(tray.locator(".ref-chip")).toHaveCount(1);
+        await expect(tray.locator(".attach-thumb img")).toHaveCount(referenceOnly ? 0 : 2);
+        await expectTrayTouchAreasStayInTheirRow(page, referenceOnly ? 1 : 3);
+        await expectStripTouchAreasOwnTheirTaps(page);
+
+        // The browser agrees: a tap 1px above the tray, over any Remove, lands on no Remove.
+        const row = (await tray.boundingBox())!;
+        for (const remove of await tray.locator(".attach-remove").all()) {
+          const box = (await remove.boundingBox())!;
+          const hit = await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.closest(".attach-remove") !== null,
+            { x: box.x + box.width / 2, y: row.y - 1 });
+          expect(hit, "a tap above the tray removes nothing").toBe(false);
+        }
+      });
+    }
   }
 
   test("a recovered edit's Use as New Message and Dismiss Recovery each have a 44px hit area at 390px (#2194)", async ({ page }) => {
