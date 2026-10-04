@@ -888,9 +888,6 @@ function VirtualList<T>({
       if (lostAnchorRef.current != null &&
           (lostIntent == null || lostIntent === viewportIntentVersionRef.current)) return;
       const viewport = scroll.getBoundingClientRect();
-      // A scroll at a width the observer has not adopted yet is that layout clamping scrollTop,
-      // not the reader moving (#2541). The width correction restores the last observed row.
-      if (viewportWidthRef.current !== 0 && viewportWidthRef.current !== Math.round(viewport.width)) return;
       const row = [...root.querySelectorAll<HTMLElement>("[data-virtual-row]")]
         .find((candidate) => {
           const rect = candidate.getBoundingClientRect();
