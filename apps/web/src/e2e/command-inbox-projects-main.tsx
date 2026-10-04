@@ -2000,12 +2000,19 @@ const client = {
     }
     return structuredClone(invocation);
   },
-  // Opening a queued message for editing reads its exact content; the projection is its text.
+  // Opening a queued message for editing reads its exact content; the projection is its text, and a
+  // projection with images carries five small PNGs, enough to fill a phone's tray row.
   readQueuedPrompt: async (id: string, promptId: string) => {
     const prompt = model.sessions.find((candidate) => candidate.id === id)?.queued
       ?.find((candidate) => candidate.id === promptId);
     if (!prompt?.editRevision) throw new Error("queued prompt not editable");
-    return { prompt: { promptId, text: prompt.text, images: [], editRevision: prompt.editRevision } };
+    const images = prompt.hasImages
+      ? Array.from({ length: 5 }, () => ({
+        mimeType: "image/png",
+        data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+      }))
+      : [];
+    return { prompt: { promptId, text: prompt.text, images, editRevision: prompt.editRevision } };
   },
   steer: async (id: string, request: SteerRequest) => {
     const value = model.sessions.find((candidate) => candidate.id === id);

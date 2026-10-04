@@ -634,18 +634,19 @@ test("an oversized recovered attachment set stays recoverable and reports the li
 });
 
 /** One editable queued message on a runner that can edit queued messages. */
-async function seedEditableQueue(page: Page) {
-  await page.evaluate(() => {
+async function seedEditableQueue(page: Page, { withImage = false } = {}) {
+  await page.evaluate((withImage) => {
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(99);
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([], [], { supportsImages: true });
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
       queued: [
         { id: "queue-edit", text: "Run the integration suite after the migration lands", steerable: true,
-          liveQueueObserved: true, editable: true, editRevision: "r1" },
+          liveQueueObserved: true, editable: true, editRevision: "r1", hasImages: withImage },
         { id: "queue-other", text: "Then summarize the failures", steerable: true,
           liveQueueObserved: true, editable: true, editRevision: "r2" },
       ],
     });
-  });
+  }, withImage);
 }
 
 /** A recovered edit whose queued message changed elsewhere, so it can't be retried. */
@@ -838,6 +839,23 @@ test.describe("on a coarse pointer", () => {
       });
       await expect(page.getByRole("button", { name: "Respond", exact: true })).toBeVisible();
       await expect(page.locator(".composer-box > .composer-mode")).toBeVisible();
+      await expectStripTouchAreasOwnTheirTaps(page);
+    });
+
+    // An edited message with images opens the attachment tray (#2177) under the strip; its Remove
+    // buttons borrow a wide touch area upward, which must not reach the strip's actions.
+    test(`at ${width}px the strip's touch areas stay clear of the attachment tray's Remove (#2194)`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 900 });
+      await seedEditableQueue(page, { withImage: true });
+      if (width <= 760) {
+        await page.getByTestId("queued-prompt-queue-edit").getByRole("button", { name: "Queued Message Actions" }).click();
+        await page.getByRole("menu", { name: "Queued Message Actions" }).getByRole("menuitem", { name: "Edit Message" })
+          .click();
+      } else {
+        await page.getByTestId("queued-prompt-queue-edit").getByRole("button", { name: "Edit Queued Message" }).click();
+      }
+      await expect(page.locator(".composer-box > .composer-mode")).toBeVisible();
+      await expect(page.locator(".composer-attachments .attach-thumb .attach-remove")).toHaveCount(5);
       await expectStripTouchAreasOwnTheirTaps(page);
     });
   }

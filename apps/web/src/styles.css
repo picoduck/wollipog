@@ -5407,10 +5407,12 @@ textarea {
 }
 .composer-mode.is-recovered .composer-mode-icon { color: var(--tone); }
 /* The queue tray docks on the card, so the row above sits close to the strip. On a coarse pointer the
-   strip's actions take the strip's bottom edge: 8px from the row's actions above and 9px from
-   whatever the card shows below (a question's Respond), so every 44px touch area stays its own
-   (§2.8). */
+   strip's actions take the strip's bottom edge, 8px from the row's actions above, and the strip keeps
+   4px more below it: the attachment tray's Remove borrows 8px above its own row, so the card's 8px
+   gap alone would let it reach Cancel Edit. Every 44px touch area stays its own (§2.8); the strip
+   stays 40px. */
 @media (pointer: coarse) {
+  .composer-mode { margin-bottom: var(--space-1); }
   .composer-mode-actions { align-self: end; }
 }
 /* A phone can't fit the recovered title and both actions on one line: the actions follow the
