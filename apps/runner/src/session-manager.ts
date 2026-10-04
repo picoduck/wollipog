@@ -6422,7 +6422,7 @@ export class SessionManager {
   private applyClaudeInitCatalog(
     sessionId: string,
     client: Driver,
-    catalog: ClaudeInitCatalog,
+    catalog: ClaudeInitCatalog | null,
     launchGeneration: number,
   ): Promise<void> {
     const prior = this.claudeInitCatalogQueue.get(sessionId) ?? Promise.resolve();
@@ -6438,7 +6438,7 @@ export class SessionManager {
   private async mergeClaudeInitCatalog(
     sessionId: string,
     client: Driver,
-    catalog: ClaudeInitCatalog,
+    catalog: ClaudeInitCatalog | null,
     launchGeneration: number,
   ): Promise<void> {
     // Init lists arrive after launch has finished, so liveness is the exact client of a launch that
@@ -6454,12 +6454,16 @@ export class SessionManager {
         command.source === "user" || command.source === "project"),
       skills: [],
     };
-    if (current.claudeSlashCatalogInputs && sameClaudeInitCatalog(priorInputs.init, catalog)) {
+    if (catalog === null ? !priorInputs.init : current.claudeSlashCatalogInputs && sameClaudeInitCatalog(priorInputs.init, catalog)) {
       this.publishClaudeSessionCommands(sessionId, client, current, false);
       return;
     }
-    let inputs: ClaudeSessionCatalogInputs = { ...priorInputs, init: catalog };
-    if (!samePluginRoots(priorInputs.init, catalog) && provenance.includeUserCommands &&
+    // An init without the list (an older Claude Code) returns the session to its disk-only catalog
+    // rather than keeping a remembered list authoritative.
+    let inputs: ClaudeSessionCatalogInputs = catalog === null
+      ? { commands: priorInputs.commands, skills: priorInputs.skills }
+      : { ...priorInputs, init: catalog };
+    if (catalog !== null && !samePluginRoots(priorInputs.init, catalog) && provenance.includeUserCommands &&
         provenance.targetAdapter === "host") {
       const discovered = await this.discoverClaudeCommands({
         context: current.context,

@@ -127,6 +127,7 @@ test("without an init list the disk catalog stands, with personal and project sk
     commands: [
       { name: "release", source: "project", description: "Cut a release." },
       { name: "exit", source: "user" },
+      { name: "superpowers:audit", source: "plugin", description: "Only an init list says this plugin is on." },
     ],
     skills: [
       DEPLOY_CHECK,

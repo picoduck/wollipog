@@ -216,7 +216,8 @@ export function mergeClaudeSessionCatalog(inputs: ClaudeSessionCatalogInputs): C
 
   if (!inputs.init) {
     for (const command of inputs.commands) {
-      if (CLAUDE_UNSUPPORTED_COMMANDS.has(command.name.toLowerCase())) continue;
+      // Only an init list says which plugins are enabled, so their commands wait for one.
+      if (command.source === "plugin" || CLAUDE_UNSUPPORTED_COMMANDS.has(command.name.toLowerCase())) continue;
       add(command);
     }
     for (const skill of skills.values()) {

@@ -62,7 +62,7 @@ interface Harness {
   authenticationFailures: number;
   subscriptionUsage: unknown[];
   contextUsage: { contextTokensUsed?: number; contextWindow: number }[];
-  initCatalogs: ClaudeInitCatalog[];
+  initCatalogs: (ClaudeInitCatalog | null)[];
   /** Invoke the private mapper and return its StopReason | null. */
   feed: (msg: unknown) => unknown;
 }
@@ -75,7 +75,7 @@ function makeHarness(overrides: Partial<DriverOptions> = {}): Harness {
   let authenticationFailures = 0;
   const subscriptionUsage: unknown[] = [];
   const contextUsage: { contextTokensUsed?: number; contextWindow: number }[] = [];
-  const initCatalogs: ClaudeInitCatalog[] = [];
+  const initCatalogs: (ClaudeInitCatalog | null)[] = [];
   const cb: DriverCallbacks = {
     onClaudeInitCatalog: (catalog) => initCatalogs.push(catalog),
     onEvent: (payload) => events.push(payload),
@@ -3464,8 +3464,10 @@ test("system/init reports Claude Code's command catalog on every init, and only 
   assert.equal(h.events.length, 0);
 
   h.feed({ ...init, parent_tool_use_id: "toolu_subagent" });
+  assert.equal(h.initCatalogs.length, 2, "a subagent's init changes nothing");
   h.feed({ type: "system", subtype: "init", session_id: "abc" });
-  assert.equal(h.initCatalogs.length, 2, "a subagent's init and an init without the list change nothing");
+  assert.deepEqual(h.initCatalogs.slice(2), [null],
+    "an init without the list (an older Claude Code) says so, so a remembered list is dropped");
 });
 
 test("system/compact_boundary records the compaction in the transcript (#1224)", () => {

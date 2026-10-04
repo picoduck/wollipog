@@ -535,6 +535,17 @@ test("launch persists the scanned skills, so a later init list keeps their metad
       { name: "notes", source: "skill", description: "Take notes.", argumentHint: "[topic]" });
     assert.equal(commands.find((command) => command.name === "internal"), undefined,
       "a skill marked user-invocable: false stays hidden");
+
+    // A relaunch on a Claude Code release without the list returns to the disk-only catalog.
+    h.callbacks().onClaudeInitCatalog!(null);
+    await waitFor(() => !h.store.readMeta("command-session")?.sessionSlashCommands
+      ?.some((command) => command.source === "builtin"), "the remembered list should be dropped");
+    const diskOnly = h.store.readMeta("command-session")!;
+    assert.equal(diskOnly.claudeSlashCatalogInputs?.init, undefined);
+    assert.deepEqual(diskOnly.sessionSlashCommands?.map(({ name, source }) => [name, source]), [
+      ["deploy", "project"],
+      ["notes", "skill"],
+    ]);
   } finally {
     h.cleanup();
   }

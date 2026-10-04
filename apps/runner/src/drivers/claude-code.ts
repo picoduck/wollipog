@@ -2750,8 +2750,8 @@ export class ClaudeCodeDriver implements Driver {
           this.cb.onModelResolved?.(msg.model);
         }
         if (msg.subtype === "init" && !parentId) {
-          const catalog = parseClaudeInitCatalog(msg as Record<string, unknown>);
-          if (catalog) this.cb.onClaudeInitCatalog?.(catalog);
+          // Null when this Claude Code release sends no list, so a remembered one is dropped.
+          this.cb.onClaudeInitCatalog?.(parseClaudeInitCatalog(msg as Record<string, unknown>));
         }
         if (msg.subtype === "compact_boundary" && !parentId) {
           // `/compact` or Claude Code's own compaction replaced the history with a summary (#1224).
