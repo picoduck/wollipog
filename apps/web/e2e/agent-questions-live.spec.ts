@@ -165,7 +165,7 @@ async function expectQuestionControlsInsideCard(page: Page): Promise<void> {
 
 async function startLiveStack(
   provider: "claude" | "codex" = "claude",
-  codexScenario: "question" | "dogfood-question" | "async-question" = "question",
+  codexScenario: "question" | "custom-question" | "dogfood-question" | "async-question" = "question",
   restartRecovery = false,
   asyncDelivery?: "accepted" | "rejected",
   journalFault = false,
@@ -1012,7 +1012,7 @@ for (const provider of ["claude", "codex"] as const) {
   for (const style of ["interactive", "composer"] as const) {
     test(`${provider} ${style} custom text reaches the provider under its question request (#1595)`, async ({ page }) => {
       test.setTimeout(120_000);
-      const stack = await startLiveStack(provider);
+      const stack = await startLiveStack(provider, provider === "codex" ? "custom-question" : "question");
       try {
         const fragment = new URLSearchParams({ origin: stack.httpBase, token: stack.ownerToken, sessionId: stack.sessionId });
         await page.addInitScript((value) => localStorage.setItem("wollipog.question-response-style", value), style);

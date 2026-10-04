@@ -25016,3 +25016,23 @@ test("universal custom answers retain request correlation, summaries, and old-ru
     assert.deepEqual(delivered.answerSummary, [{ questionId: "single", text: "Canary" }, { questionId: "multi", text: "Audit" }]);
   }
 });
+
+test("typed provider custom-text refusal retains the exact card and never dispatches (#1595)", () => {
+  for (const multiSelect of [false, true]) {
+    const { db, hub, svc } = makeHarness();
+    const id = seedSession(svc, hub);
+    const question = { id: "typed", question: "Choose", options: [{ label: "True" }], multiSelect,
+      customAnswerError: "cannot be delivered because this is a typed provider field" };
+    svc.onSessionEvent(id, { kind: "question_request", requestId: "typed-request", questions: [question] });
+    const pending = db.getSession(id)!.pendingApproval;
+    const before = hub.sentOfType("answer_question").length;
+    for (const text of multiSelect ? ["Custom", "True"] : ["Custom"]) {
+      const refused = svc.answerQuestion(id, "typed-request", { typed: text }, undefined, "submit");
+      assert.equal(refused.status, 400);
+      assert.match(refused.error!, /typed provider field/);
+      assert.deepEqual(db.getSession(id)!.pendingApproval, pending);
+      assert.equal(hub.sentOfType("answer_question").length, before);
+    }
+    assert.ok(svc.answerQuestion(id, "typed-request", { typed: multiSelect ? ["True"] : "True" }, undefined, "submit").ok);
+  }
+});

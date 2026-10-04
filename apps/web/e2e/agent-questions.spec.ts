@@ -557,6 +557,7 @@ for (const width of [1280, 390]) {
         const input = page.locator('.composer-answer-input');
         await page.getByRole("button", { name: "Other Response", exact: true }).click();
         await expect(input).toBeFocused();
+        await expect(page.getByRole("textbox", { name: "Other Response to Question 1", exact: true })).toBeFocused();
         await input.fill("Canary");
         await input.press("Enter");
         await page.getByRole("button", { name: "Other Response", exact: true }).click();

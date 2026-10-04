@@ -370,7 +370,7 @@ export function ComposerQuestionResponse({
           }}
         >Other Response</button>
       )}
-      <label className="sr-only" htmlFor={`${ids}-composer-input`}>Response to Question {currentIndex + 1}</label>
+      <label className="sr-only" htmlFor={`${ids}-composer-input`}>{currentDraft?.kind === "other" ? "Other Response" : "Response"} to Question {currentIndex + 1}</label>
       <input
         id={`${ids}-composer-input`}
         ref={inputRef}

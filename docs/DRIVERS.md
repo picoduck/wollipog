@@ -1419,7 +1419,7 @@ responses carry it as `value`. Recovered and asynchronous requests keep the same
 in their correlated durable response. Answer summaries retain custom multi-select strings as text,
 with the existing transcript redaction, bounds, and secret/email withholding.
 
-Universal custom choice delivery requires protocol 203. Older runners receive ordinary selections
+Universal custom choice delivery requires protocol 202. Older runners receive ordinary selections
 and previously supported single-select `allowOther` responses; new custom responses fail explicitly
 without clearing the pending request. An older control plane may reject the new response explicitly.
 

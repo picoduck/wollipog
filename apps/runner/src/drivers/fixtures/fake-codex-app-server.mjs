@@ -15,9 +15,10 @@ if (argv.length === 2 && argv[0] === "app-server" && argv[1] === "--help") {
 
 const configuredScenario = process.env.WOLLIPOG_FAKE_CODEX_SCENARIO;
 const scenario = configuredScenario ?? argv[0] ?? "resume";
+const choiceQuestionScenario = scenario === "question" || scenario === "custom-question";
 const threadId = scenario === "fresh"
   ? "fixture-fresh"
-  : scenario === "question" || scenario === "dogfood-question" || scenario === "async-question"
+  : choiceQuestionScenario || scenario === "dogfood-question" || scenario === "async-question"
     ? "fixture-question"
     : scenario === "subagents"
       ? "fixture-subagents"
@@ -49,7 +50,7 @@ function send(message) {
 
 createInterface({ input: process.stdin }).on("line", (line) => {
   const message = JSON.parse(line);
-  if (!recovering && (scenario === "question" || scenario === "dogfood-question") && message.method == null && message.id === questionRequestId) {
+  if (!recovering && (choiceQuestionScenario || scenario === "dogfood-question") && message.method == null && message.id === questionRequestId) {
     const expected = scenario === "dogfood-question"
       ? {
           answers: {
@@ -57,12 +58,19 @@ createInterface({ input: process.stdin }).on("line", (line) => {
             delete_remote_branch: { answers: ["Delete Branch (Recommended)"] },
           },
         }
-      : {
-          answers: {
-            environment: { answers: ["Staging"] },
-            note: { answers: ["Ship after checks pass"] },
-          },
-        };
+      : scenario === "custom-question"
+        ? {
+            answers: {
+              environment: { answers: ["Canary"] },
+              note: { answers: ["Custom release note"] },
+            },
+          }
+        : {
+            answers: {
+              environment: { answers: ["Staging"] },
+              note: { answers: ["Ship after checks pass"] },
+            },
+          };
     if (JSON.stringify(message.result) !== JSON.stringify(expected)) {
       process.stderr.write("unexpected structured answer: " + JSON.stringify(message.result) + "\n");
       process.exitCode = 2;
@@ -92,7 +100,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     return;
   }
   if (message.method === "thread/start" && (
-    scenario === "fresh" || scenario === "question" || scenario === "dogfood-question" ||
+    scenario === "fresh" || choiceQuestionScenario || scenario === "dogfood-question" ||
     scenario === "async-question" || scenario === "subagents"
   )) {
     send({ id: message.id, result: { thread: { id: threadId } } });
@@ -158,7 +166,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       }
       return;
     }
-    if (scenario === "question") {
+    if (choiceQuestionScenario) {
       if (recovering) {
         const text = message.params?.input?.find((input) => input?.type === "text")?.text;
         const line = typeof text === "string" ? text.trim().split("\n").at(-1) : null;

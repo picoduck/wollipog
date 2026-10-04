@@ -51,8 +51,8 @@ const single: AgentQuestion = {
 test("text responses resolve displayed numbers and case-insensitive exact labels", () => {
   assert.deepEqual(resolveQuestionResponse(single, "2"), { answer: "Python" });
   assert.deepEqual(resolveQuestionResponse(single, "typescript"), { answer: "TypeScript" });
-  assert.deepEqual(resolveQuestionResponse(single, "py"), { answer: "py" });
-  assert.deepEqual(resolveQuestionResponse(single, "rust"), { answer: "rust" });
+  assert.match(resolveQuestionResponse(single, "py").error ?? "", /unambiguous option label/);
+  assert.match(resolveQuestionResponse(single, "rust").error ?? "", /displayed number/);
 });
 
 test("formatted single-choice labels with punctuation can return through typed-entry parsing", () => {
@@ -106,7 +106,7 @@ test("free text is accepted only when declared and retains provider validation",
   };
   assert.deepEqual(resolveQuestionResponse(form, "2"), { answer: "2" });
   assert.match(resolveQuestionResponse(form, "4").error ?? "", /above its maximum/);
-  assert.deepEqual(resolveQuestionResponse(single, "arbitrary prose"), { answer: "arbitrary prose" });
+  assert.match(resolveQuestionResponse(single, "arbitrary prose").error ?? "", /Other Response/);
 });
 
 test("answer maps omit blank optional fields and report every invalid response", () => {
@@ -199,6 +199,15 @@ test("Other intents are independent for every question and preserve numeric and 
       language: { kind: "other", value: "2" },
       multi: { kind: "other", value: "TypeScript" },
     }), { answers: { language: "2", multi: "TypeScript" }, errors: {} });
-    assert.deepEqual(resolveQuestionResponse(questions[1]!, "my answer, with commas"), { answer: "my answer, with commas" });
+    assert.match(resolveQuestionResponse(questions[1]!, "1, 4").error!, /not a displayed number/);
   }
+});
+
+test("typed choice mistakes retain validation while explicit Other preserves arbitrary punctuation", () => {
+  const multi = { ...single, multiSelect: true };
+  assert.match(resolveQuestionResponse(single, "4").error!, /Other Response/);
+  assert.match(resolveQuestionResponse(multi, "1, 4").error!, /not a displayed number/);
+  assert.match(resolveQuestionResponse(multi, "TypeScript, Pythno").error!, /not a displayed number/);
+  assert.deepEqual(questionDraftAnswers([multi], { language: { kind: "other", value: "1, 4" } }),
+    { answers: { language: "1, 4" }, errors: {} });
 });

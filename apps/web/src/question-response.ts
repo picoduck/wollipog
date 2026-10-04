@@ -110,12 +110,12 @@ export function resolveQuestionResponse(question: AgentQuestion, rawValue: strin
   if (question.multiSelect) {
     const wholeLabel = offeredLabel(question, value);
     const parsed = wholeLabel ? { tokens: [wholeLabel] } : splitChoiceTokens(value);
-    if (parsed.error) return resolveQuestionOtherResponse(question, rawValue);
+    if (parsed.error) return { error: parsed.error };
     const tokens = parsed.tokens!;
     const labels: string[] = [];
     for (const token of tokens) {
       const label = offeredLabel(question, token);
-      if (!label) return resolveQuestionOtherResponse(question, rawValue);
+      if (!label) return { error: `“${token}” is not a displayed number or unambiguous option label. Choose Other Response to enter custom text.` };
       if (labels.includes(label)) return { error: `“${label}” was selected more than once.` };
       labels.push(label);
     }
@@ -129,6 +129,7 @@ export function resolveQuestionResponse(question: AgentQuestion, rawValue: strin
 
   const label = offeredSingleLabel(question, value);
   if (label) return { answer: label };
+  if (!question.allowOther) return { error: "Enter a displayed number or unambiguous option label, or choose Other Response for custom text." };
   const freeTextError = validateQuestionFreeText(question, value);
   return freeTextError ? { error: `Response ${freeTextError}.` } : { answer: value };
 }

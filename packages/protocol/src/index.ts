@@ -628,11 +628,10 @@
 // 201: artifact upload preferences reach session launch/resume instruction preparation. The
 //      control plane refreshes the non-secret preference outside durable command digests;
 //      older runners receive no field they cannot apply. Upload discovery grants no authority.
-// 202 is reserved by the concurrent session-role conversion change (#2479).
-// 203: every choice question accepts custom text. Multi-select labels remain arrays;
+// 202: every choice question accepts custom text. Multi-select labels remain arrays;
 //      a string is an exclusive custom response, even when it equals an offered label.
-export const PROTOCOL_VERSION = 203;
-export const UNIVERSAL_QUESTION_TEXT_MIN_PROTOCOL = 203;
+export const PROTOCOL_VERSION = 202;
+export const UNIVERSAL_QUESTION_TEXT_MIN_PROTOCOL = 202;
 
 export type ArtifactUploadPreference = "manual" | "wollipog_automatic" | "external_hosting";
 export interface ArtifactUploadSettingsView { preference: ArtifactUploadPreference }
