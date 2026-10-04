@@ -6,8 +6,6 @@ import { Window } from "happy-dom";
 import type { SessionView } from "@wollipog/protocol";
 import type { ContextWindowCapacity } from "../context-window-capacity.js";
 import { ContextWindowMeter } from "./ContextWindowMeter.js";
-import { SessionUsageMenuGroup } from "./SessionUsageMenuGroup.js";
-import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window();
 for (const [name, value] of Object.entries({
@@ -100,44 +98,5 @@ test("before any usage the bar shows no ring, while the preview header keeps its
     assert.equal(header.container.querySelector("button")!.getAttribute("aria-label"), "Context Window 0.0% Used");
   } finally {
     await header.cleanup();
-  }
-});
-
-test("the Session Usage group states the context figures, then the cost, read-only", async () => {
-  const view = await render(<SessionUsageMenuGroup session={session({ contextTokensUsed: 186_000 })} resolution={CAPACITY} />);
-  try {
-    const group = view.container.querySelector<HTMLElement>('[role="group"][aria-label="Session Usage"]')!;
-    const terms = [...group.querySelectorAll("dt")].map((term) => term.textContent);
-    assert.deepEqual(terms, ["Context Window", "Session Cost"]);
-    const [context, cost] = [...group.querySelectorAll("dd")];
-    assert.equal(context!.textContent, "93%186K of 200K");
-    assert.ok(context!.classList.contains("t-danger"), "the group's ring takes the same tone");
-    assert.equal(cost!.textContent, "$1,234.56");
-    assertNoDomNode(group.querySelector("button, [role^='menuitem']"));
-    assert.ok(group.nextElementSibling?.getAttribute("role") === "separator", "a hairline separates it from the model choices");
-  } finally {
-    await view.cleanup();
-  }
-});
-
-test("the Session Usage group names an unpriced cost and drops an unknown window", async () => {
-  const view = await render(<SessionUsageMenuGroup session={session({ costUsd: 0, costSource: "unpriced" })} resolution={UNKNOWN} />);
-  try {
-    const terms = [...view.container.querySelectorAll("dt")].map((term) => term.textContent);
-    assert.deepEqual(terms, ["Session Cost"]);
-    const cost = view.container.querySelector("dd")!;
-    assert.ok(cost.classList.contains("is-unpriced"));
-    assert.equal(cost.querySelector(".sr-only")!.textContent, "Cost Unavailable");
-  } finally {
-    await view.cleanup();
-  }
-});
-
-test("a session without usage yet renders neither the group nor its separator", async () => {
-  const view = await render(<SessionUsageMenuGroup session={session({ tokensIn: 0, tokensOut: 0, costUsd: 0, contextTokensUsed: undefined })} resolution={UNKNOWN} />);
-  try {
-    assert.equal(view.container.innerHTML, "");
-  } finally {
-    await view.cleanup();
   }
 });

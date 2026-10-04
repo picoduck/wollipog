@@ -9,7 +9,8 @@ export const COMPOSER_USAGE_MIN_COLUMN_REM = 40;
 
 /**
  * - `bar`: the composer bar's trailing cluster, before the mic.
- * - `model-settings`: the read-only Session Usage group at the top of Model Settings.
+ * - `model-settings`: the Session Usage group at the top of Model Settings, whose rows open the
+ *   triggers' breakdowns in its place (#2447).
  * - `row`: their own right-aligned row above the bar, for a narrow column whose Model Settings
  *   cannot open (an agent with nothing to configure, or a person who may not change it).
  */

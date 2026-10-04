@@ -466,10 +466,11 @@ function initialModel(): FixtureModel {
       activeTurnId: null,
     });
   }
-  if (SCENARIO === "session-usage-escape") {
+  if (SCENARIO === "session-usage-escape" || SCENARIO === "session-usage-model-settings") {
     // Recorded usage and a served window, so the status strip shows the cost chip and context ring.
     Object.assign(initial.sessions.find((candidate) => candidate.id === "session-alpha")!, {
       tokensIn: 40_000, tokensOut: 900, costUsd: 0.42, contextTokensUsed: 40_000, contextWindow: 258_000,
+      ...(SCENARIO === "session-usage-model-settings" ? { model: "gpt-5.6-sol", effort: "high" } : {}),
     });
   }
   if (SCENARIO === "git-visibility") {
@@ -841,8 +842,12 @@ const runner: RunnerView = {
       acp: { logout: true, loadSession: true, sessionList: false, sessionDelete: false, sessionResume: false, sessionClose: false },
     } : {}),
     capabilities: {
-      models: [],
-      effortLevels: [],
+      // With a model to choose, the composer has Model Settings, which a phone opens with the
+      // Session Usage group at its top (#2447).
+      models: SCENARIO === "session-usage-model-settings"
+        ? [{ id: "gpt-5.6-sol", displayName: "GPT-5.6 Sol", default: true, efforts: ["low", "high"] }]
+        : [],
+      effortLevels: SCENARIO === "session-usage-model-settings" ? ["low", "high"] : [],
       slashCommands: [{ name: "review", source: "builtin", description: "Review the current changes" }],
       supportsImages: false,
       supportsApprovals: true,

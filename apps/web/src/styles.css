@@ -6350,7 +6350,7 @@ textarea,
 }
 .context-popover-head { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
 .context-popover-head span { color: var(--text-dim); font-variant-numeric: tabular-nums; }
-.context-popover > .meter { margin: var(--space-2) 0; }
+:is(.context-popover, .context-window-breakdown) > .meter { margin: var(--space-2) 0; }
 .context-popover-facts { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; margin: 0; }
 .context-popover-facts div { display: contents; }
 .context-popover-facts dt { color: var(--text-dim); }
@@ -6409,30 +6409,26 @@ textarea,
   background: var(--bg-elev-2);
   color: var(--text);
 }
-/* The same two figures, read-only, at the top of Model Settings when the bar has no room (#2166). */
-.session-usage-group-facts {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: var(--space-1) var(--space-3);
-  margin: 0;
-  padding: 0 var(--space-2) var(--space-2);
+/* The same two figures at the top of Model Settings when the bar has no room (#2166): menu rows
+   that each open their breakdown in Model Settings' place (#2447), the value and a chevron
+   trailing the label. */
+.session-usage-group-value {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
   font: var(--type-small);
-}
-.session-usage-group-facts > div { display: contents; }
-.session-usage-group-facts dt { color: var(--text-dim); }
-.session-usage-group-facts dd {
-  margin: 0;
-  text-align: right;
   font-variant-numeric: tabular-nums;
 }
-.session-usage-group-facts dd.is-unpriced { color: var(--text-faint); }
-.session-usage-group-context {
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: var(--space-1);
-}
+.session-usage-group-value.is-unpriced { color: var(--text-faint); }
 .session-usage-group-capacity { color: var(--text-dim); }
+/* A breakdown in Model Settings' place keeps its popover's type and spacing; on a phone it slides in
+   from the right, as a dialog pushed onto a sheet does (§7.5). */
+.model-settings-detail {
+  padding: var(--space-2) var(--space-2) var(--space-1);
+  font-size: var(--text-sm);
+}
+.menu-head.persistent.has-back { padding-left: var(--space-1); }
 .session-usage-popover {
   position: absolute;
   top: calc(100% + 6px);
@@ -9777,10 +9773,12 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
     padding: 0 max(var(--space-4), env(safe-area-inset-right)) max(var(--space-4), env(safe-area-inset-bottom))
       max(var(--space-4), env(safe-area-inset-left));
   }
-  /* Model Settings' rows are a menu's, so its sheet keeps the menu sheet's inset. */
+  /* Model Settings' rows are a menu's, so its sheet keeps the menu sheet's inset. A breakdown slides
+     in from the right without a horizontal scrollbar (#2447). */
   .popover.model-settings {
     padding: 0 max(var(--space-2), env(safe-area-inset-right)) max(var(--space-2), env(safe-area-inset-bottom))
       max(var(--space-2), env(safe-area-inset-left));
+    overflow-x: hidden;
   }
   .menu-backdrop {
     background: var(--modal-backdrop);
@@ -9814,7 +9812,8 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   }
   .modal.sheet-full .modal-head { padding-top: max(2px, env(safe-area-inset-top)); }
   /* A dialog opened from a sheet takes over its content, sliding in from the right (§7.1). */
-  .modal-panel.pushed { animation: sheet-push var(--dur-slow) var(--ease-out); }
+  .modal-panel.pushed,
+  .model-settings-detail { animation: sheet-push var(--dur-slow) var(--ease-out); }
   /* 48px above its hairline, which a 44px touch close button fills with 2px to spare each side. */
   .modal-head {
     min-height: calc(48px + 1px);
@@ -9872,6 +9871,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   /* Fade only (§2.9, §16.3): no scale, no slide, no drop, for dialogs, menus and their sheets. */
   .modal,
   .modal-panel.pushed,
+  .model-settings-detail,
   .menu,
   .popover { animation: modal-fade-in var(--dur-base) var(--ease-out); }
 }

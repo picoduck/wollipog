@@ -10,7 +10,7 @@ import { ComposerButton } from "./ComposerControls.js";
 const RING_RADIUS = 6;
 const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
 
-/** The fill ring itself, shared by the trigger and the read-only Session Usage group. */
+/** The fill ring itself, shared by the trigger and the Session Usage group. */
 export function ContextRing({ fillPct, size = 16 }: { fillPct: number; size?: number }) {
   const dash = (fillPct / 100) * RING_CIRCUMFERENCE;
   return (
@@ -59,7 +59,6 @@ export function ContextWindowMeter({ session, resolution, placement }: {
   placement?: "bar";
 }) {
   const contextWindow = resolution.capacity;
-  const discrepancy = contextWindowDiscrepancy(resolution.advertised, resolution.served);
   const fill = computeContextFill({
     tokensIn: session.tokensIn,
     tokensOut: session.tokensOut,
@@ -74,7 +73,6 @@ export function ContextWindowMeter({ session, resolution, placement }: {
   // and leaves no gap (#2166).
   if (!fill.known || (placement === "bar" && used <= 0)) return null;
 
-  const remaining = Math.max(0, contextWindow! - used);
   const summary = `${used.toLocaleString()} / ${contextWindow!.toLocaleString()} context tokens (${fill.formatPct})`;
   const trigger = {
     ref: popover.anchorRef,
@@ -113,30 +111,68 @@ export function ContextWindowMeter({ session, resolution, placement }: {
           aria-label="Context Window"
           style={popover.style}
         >
-          <div className="context-popover-head">
-            <strong>Context Window</strong>
-            <span>{fill.formatPct}</span>
-          </div>
-          <div className={`meter${contextToneClass(fill.tone)}`} role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(fill.fillPct)} aria-label="Context Window Usage">
-            <span style={{ width: `${fill.fillPct}%` }} />
-          </div>
-          <dl className="context-popover-facts">
-            <div><dt>Used</dt><dd>{formatTokens(used)}</dd></div>
-            {/* #806's capacity provenance stays: which window the meter is measuring against is an
-                occupancy fact, unlike the session billing #781 moved out of this panel. */}
-            <div><dt>Capacity</dt><dd>{formatContextWindow(contextWindow!)} · {resolution.source === "served" ? "Provider Reported" : "Model Catalog"}</dd></div>
-            <div><dt>Remaining</dt><dd>{formatTokens(remaining)}</dd></div>
-          </dl>
-          {discrepancy && (
-            <p className="context-popover-note context-popover-discrepancy" role="status">
-              {discrepancy.kind === "smaller"
-                ? `The provider is serving a ${formatContextWindow(discrepancy.served)} context window, not the ${formatContextWindow(discrepancy.advertised)} the selected model advertises. The meter uses the served size.`
-                : `The provider is serving a ${formatContextWindow(discrepancy.served)} context window; the selected model advertises ${formatContextWindow(discrepancy.advertised)}. The meter uses the served size.`}
-            </p>
-          )}
-          <p className="context-popover-note">{compactionNote(session.driver)}</p>
+          <ContextWindowFigures session={session} resolution={resolution} fill={fill} used={used} />
         </div>
       )}
     </span>
+  );
+}
+
+/** The Context Window panel's contents, the same in the popover and in Model Settings. */
+function ContextWindowFigures({ session, resolution, fill, used }: {
+  session: SessionView;
+  resolution: ContextWindowCapacity;
+  fill: ReturnType<typeof computeContextFill>;
+  used: number;
+}) {
+  const contextWindow = resolution.capacity!;
+  const discrepancy = contextWindowDiscrepancy(resolution.advertised, resolution.served);
+  const remaining = Math.max(0, contextWindow - used);
+  return (
+    <>
+      <div className="context-popover-head">
+        <strong>Context Window</strong>
+        <span>{fill.formatPct}</span>
+      </div>
+      <div className={`meter${contextToneClass(fill.tone)}`} role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(fill.fillPct)} aria-label="Context Window Usage">
+        <span style={{ width: `${fill.fillPct}%` }} />
+      </div>
+      <dl className="context-popover-facts">
+        <div><dt>Used</dt><dd>{formatTokens(used)}</dd></div>
+        {/* #806's capacity provenance stays: which window the meter is measuring against is an
+            occupancy fact, unlike the session billing #781 moved out of this panel. */}
+        <div><dt>Capacity</dt><dd>{formatContextWindow(contextWindow)} · {resolution.source === "served" ? "Provider Reported" : "Model Catalog"}</dd></div>
+        <div><dt>Remaining</dt><dd>{formatTokens(remaining)}</dd></div>
+      </dl>
+      {discrepancy && (
+        <p className="context-popover-note context-popover-discrepancy" role="status">
+          {discrepancy.kind === "smaller"
+            ? `The provider is serving a ${formatContextWindow(discrepancy.served)} context window, not the ${formatContextWindow(discrepancy.advertised)} the selected model advertises. The meter uses the served size.`
+            : `The provider is serving a ${formatContextWindow(discrepancy.served)} context window; the selected model advertises ${formatContextWindow(discrepancy.advertised)}. The meter uses the served size.`}
+        </p>
+      )}
+      <p className="context-popover-note">{compactionNote(session.driver)}</p>
+    </>
+  );
+}
+
+/**
+ * The Context Window panel shown in Model Settings' place when its Context Window row is opened
+ * (#2447), so the phone reaches the capacity's source, what is left and how the driver compacts,
+ * as the bar's ring does. Renders nothing while the window is unknown or nothing is used yet.
+ */
+export function ContextWindowBreakdown({ session, resolution }: { session: SessionView; resolution: ContextWindowCapacity }) {
+  const fill = computeContextFill({
+    tokensIn: session.tokensIn,
+    tokensOut: session.tokensOut,
+    usedTokens: session.contextTokensUsed,
+    contextWindow: resolution.capacity,
+  });
+  const used = session.contextTokensUsed ?? (session.tokensIn + session.tokensOut);
+  if (!fill.known || used <= 0) return null;
+  return (
+    <div className="context-window-breakdown" role="group" aria-label="Context Window">
+      <ContextWindowFigures session={session} resolution={resolution} fill={fill} used={used} />
+    </div>
   );
 }

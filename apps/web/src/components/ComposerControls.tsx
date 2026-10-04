@@ -1,6 +1,8 @@
 import React, {
   useEffect,
   useId,
+  useMemo,
+  useRef,
   useState,
   type ButtonHTMLAttributes,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -42,7 +44,15 @@ import { AgentIcon } from "./AgentIcon.js";
 import { handleRovingChoiceKeyDown, useAccessibleMenu, useDismissiblePopover } from "./interactions.js";
 import { MenuItem, MenuLabel, MenuNote, MenuSurface } from "./Menu.js";
 import {
+  MODEL_SETTINGS_DETAIL_TITLES,
+  ModelSettingsDetailContext,
+  useModelSettingsDetail,
+  type ModelSettingsDetail,
+  type ModelSettingsDetailController,
+} from "./model-settings-detail.js";
+import {
   ChevronDownIcon,
+  ChevronLeftIcon,
   CloseIcon,
   ServiceTierIcon,
   ShieldAlertIcon,
@@ -241,10 +251,10 @@ const MODEL_SETTINGS_TWO_COLUMN_WIDTH = 536;
 /** Tab and Shift+Tab move between the popover's stops and wrap at either end: it is portalled to
  * the end of <body>, so the browser would otherwise carry focus out of it with nowhere to go but
  * the address bar. A row the arrow keys moved to is not its group's Tab stop (arrows do not
- * choose), so it stands in for that stop. */
+ * choose), so it stands in for that stop. A breakdown's links are stops too (#2447). */
 function keepTabInside(event: ReactKeyboardEvent<HTMLDivElement>): void {
   if (event.key !== "Tab") return;
-  const stops = [...event.currentTarget.querySelectorAll<HTMLElement>("button, [tabindex]")]
+  const stops = [...event.currentTarget.querySelectorAll<HTMLElement>("button, a[href], [tabindex]")]
     .filter((element) => element.tabIndex >= 0 && !(element instanceof HTMLButtonElement && element.disabled));
   if (stops.length === 0) return;
   const active = event.currentTarget.ownerDocument.activeElement as HTMLElement | null;
@@ -264,6 +274,11 @@ function keepTabInside(event: ReactKeyboardEvent<HTMLDivElement>): void {
  * cannot sit inside a menu. Two columns when there is something for each, opening up from the chip
  * at its left edge; on a phone, the shared bottom sheet in one column. It keeps its title row and
  * Close button at every width.
+ *
+ * A Session Usage row opens its breakdown in the choices' place (#2447), as a dialog opened from a
+ * sheet pushes onto it (§7.5) rather than stacking a second layer: the title row gains Back and
+ * names the breakdown. Escape, like Back, returns to the choices with focus on the row, so each
+ * press closes one layer; a reopened popover starts on its choices.
  */
 export function ModelSettingsPopover({
   label,
@@ -283,12 +298,45 @@ export function ModelSettingsPopover({
   const popover = useDismissiblePopover(open, setOpen, "model-settings");
   const disabledReasonId = `${popover.panelId}-disabled-reason`;
   const disabled = disabledReason !== null;
+  const [detail, setDetail] = useState<ModelSettingsDetail | null>(null);
+  // The row a closed breakdown returns focus to.
+  const returnTo = useRef<ModelSettingsDetail | null>(null);
+  const backRef = useRef<HTMLButtonElement>(null);
+  const detailController = useMemo<ModelSettingsDetailController>(() => ({
+    detail,
+    open: setDetail,
+    back: () => {
+      returnTo.current = detail;
+      setDetail(null);
+    },
+  }), [detail]);
   // Opening lands on the current model, as the menu this replaced did, rather than on Close.
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      setDetail(null);
+      returnTo.current = null;
+      return;
+    }
     // The first roving stop: the Model group's checked row (or the first group's, without models).
     popover.panelRef.current?.querySelector<HTMLElement>('[tabindex="0"]')?.focus();
   }, [open, popover.panelRef]);
+  // A breakdown opens at its top with focus on Back; closing it puts focus back on its row, or on
+  // the first choice if that row has gone.
+  useEffect(() => {
+    const panel = popover.panelRef.current;
+    if (!panel) return;
+    if (detail) {
+      panel.scrollTop = 0;
+      backRef.current?.focus();
+      return;
+    }
+    const row = returnTo.current;
+    if (!row) return;
+    returnTo.current = null;
+    (panel.querySelector<HTMLElement>(`[data-model-settings-detail="${row}"]`)
+      ?? panel.querySelector<HTMLElement>('[tabindex="0"]')
+      ?? panel).focus();
+  }, [detail, popover.panelRef]);
   return (
     <div className="cbar-menu model-settings-menu">
       <ComposerButton
@@ -324,8 +372,20 @@ export function ModelSettingsPopover({
           boundary=".composer-box"
           tabIndex={-1}
           head={(
-            <div className="menu-head persistent">
-              <span className="menu-head-title">Model Settings</span>
+            <div className={`menu-head persistent${detail ? " has-back" : ""}`}>
+              {detail && (
+                <button
+                  ref={backRef}
+                  type="button"
+                  className="icon-btn"
+                  aria-label="Back to Model Settings"
+                  title="Back to Model Settings"
+                  onClick={detailController.back}
+                >
+                  <ChevronLeftIcon size={16} />
+                </button>
+              )}
+              <span className="menu-head-title">{detail ? MODEL_SETTINGS_DETAIL_TITLES[detail] : "Model Settings"}</span>
               <button
                 type="button"
                 className="icon-btn"
@@ -339,11 +399,19 @@ export function ModelSettingsPopover({
           )}
           onDismiss={() => popover.close(true)}
           onKeyDown={(event) => {
+            if (detail && event.key === "Escape") {
+              event.preventDefault();
+              event.stopPropagation();
+              detailController.back();
+              return;
+            }
             popover.onPanelKeyDown(event);
             keepTabInside(event);
           }}
         >
-          {children(() => popover.close(true))}
+          <ModelSettingsDetailContext.Provider value={detailController}>
+            {children(() => popover.close(true))}
+          </ModelSettingsDetailContext.Provider>
         </MenuSurface>
       )}
     </div>
@@ -464,7 +532,8 @@ export function ModelEffortMenuChoices({
    * yet; undefined means nothing is staged. */
   pendingEffort?: () => string | undefined;
   serviceTierState?: NonNullable<ReturnType<typeof serviceTierChoices>> | null;
-  /** The read-only Session Usage group (#2166), first and above the choices at every width. */
+  /** The Session Usage group (#2166), first and above the choices at every width. While one of its
+   * rows has its breakdown open (#2447), that breakdown is all Model Settings shows. */
   sessionUsage?: ReactNode;
   /** One column in reading order (the phone sheet): Model, Context Window, Reasoning Effort, then
    * Service Tier. Otherwise the effort has a column of its own beside the rest. */
@@ -472,6 +541,15 @@ export function ModelEffortMenuChoices({
   close?: () => void;
   apply: Apply;
 }) {
+  const detail = useModelSettingsDetail();
+  // A breakdown takes the choices' place (#2447). The group renders it, so a breakdown left open
+  // when the group goes (the bar has room for the triggers again) returns to the choices.
+  const detailOpen = detail?.detail != null;
+  const orphaned = detailOpen && sessionUsage == null;
+  useEffect(() => {
+    if (orphaned) detail?.back();
+  }, [orphaned, detail]);
+  if (detailOpen && !orphaned) return <div className="model-settings-detail">{sessionUsage}</div>;
   const modelListed = models.some((model) => model.id === modelVal);
   const modelGroup = models.length > 0 && (
     <SettingsRadioGroup label={`Model${modelSource === "cached" ? " (Cached)" : ""}`}>
@@ -612,7 +690,7 @@ export function ModelEffortControl(
     pendingModel?: () => string | undefined;
     pendingEffort?: () => string | undefined;
     pendingServiceTier?: () => string | undefined;
-    /** The read-only Session Usage group, while the composer bar has no room for its triggers (#2166). */
+    /** The Session Usage group, while the composer bar has no room for its triggers (#2166). */
     sessionUsage?: ReactNode;
   },
 ) {

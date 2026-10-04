@@ -504,6 +504,13 @@ test.describe("a composer column under 640px moves the figures into Model Settin
     await expect(group).toContainText("72K of 200K");
     await expect(group).toContainText("Session Cost");
     await expect(group).toContainText("$1.37");
+    // The popover opens the breakdown in its own place too, never as a second floating layer (#2447).
+    await group.getByRole("button", { name: "Session Cost" }).click();
+    await expect(menu.locator(".menu-head-title")).toHaveText("Session Cost");
+    await expect(menu.getByRole("group", { name: "Session Usage" }).locator(".session-usage-model")).toHaveCount(2);
+    await expect(page.locator(".session-usage-popover")).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await expect(menu.getByRole("button", { name: "Session Cost" })).toBeFocused();
     await page.keyboard.press("Escape");
     await expect(menu).toHaveCount(0);
   });
@@ -603,12 +610,137 @@ test("mobile: Model Settings opens with the Session Usage group, and the bar sta
   expect(groupBox!.y).toBeGreaterThanOrEqual(sheetBox!.y);
   expect(groupBox!.y + groupBox!.height).toBeLessThanOrEqual(sheetBox!.y + sheetBox!.height);
   await expect(menu.locator(".model-settings-columns"), "one column on a phone").toHaveCount(0);
-  await expect(group.locator("dt")).toHaveText(["Context Window", "Session Cost"]);
-  await expect(group.locator("dd").first()).toHaveText("36%72K of 200K");
-  await expect(group.locator("dd").last()).toHaveText("$1.37");
+  // Each figure is a row named by its label alone, in this order (#2447).
+  const rows = group.getByRole("button");
+  await expect(rows).toHaveCount(2);
+  await expect(rows.first()).toHaveAccessibleName("Context Window");
+  await expect(rows.first()).toHaveAccessibleDescription(/^36%\s*72K of 200K$/);
+  await expect(rows.last()).toHaveAccessibleName("Session Cost");
+  await expect(rows.last()).toHaveAccessibleDescription("$1.37");
   await page.screenshot({ path: `${SHOT}/mobile-model-settings-usage.png` });
   await page.keyboard.press("Escape");
   await expect(menu).toHaveCount(0);
+});
+
+/**
+ * #2447: on a phone the group's rows are the way to what the bar's popovers hold. Session Cost opens
+ * the Session Usage breakdown in Model Settings' place (Context Window its own), with Back in the
+ * title row, and each Escape closes one layer.
+ */
+test.describe("mobile: the Session Usage group opens its breakdowns inside Model Settings", () => {
+  test.describe("with a touch pointer", () => {
+    test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+    test("by touch: the per-model rows, the pricing link and the Codex App Server note", async ({ page }) => {
+      await page.goto("/session-usage-e2e.html?width=390&height=800&tiers=1");
+      await page.locator(".composer-idle-preview").tap();
+      await page.getByRole("button", { name: /^Model Settings/ }).tap();
+      const menu = page.getByRole("dialog", { name: "Model Settings" });
+      await menu.getByRole("button", { name: "Session Cost" }).tap();
+
+      await expect(menu.locator(".menu-head-title")).toHaveText("Session Cost");
+      await expect(menu.getByRole("radiogroup")).toHaveCount(0);
+      const usage = menu.getByRole("group", { name: "Session Usage" });
+      await expect(usage.locator(".session-usage-model-name")).toHaveText(["gpt-5.5-codex", "gpt-5.5-codex-mini"]);
+      await expect(usage).toContainText("Total Processed");
+      const link = usage.getByRole("link", { name: "Estimated API Costs" });
+      await link.scrollIntoViewIfNeeded();
+      await expect(link).toBeVisible();
+      const note = usage.locator(".session-usage-info-detail");
+      await expect(note).toBeHidden();
+      await usage.getByRole("button", { name: "About Codex App Server Usage" }).tap();
+      await expect(note).toBeVisible();
+      await expect(note).toContainText("Usage recorded since then counts every response.");
+      // The breakdown stays inside the sheet: no sideways scroll, nothing past the screen edge.
+      const sheet = await menu.evaluate((element) => ({
+        overflow: element.scrollWidth - element.clientWidth,
+        right: element.getBoundingClientRect().right,
+      }));
+      expect(sheet.overflow).toBeLessThanOrEqual(0);
+      expect(sheet.right).toBeLessThanOrEqual(390);
+
+      await menu.getByRole("button", { name: "Back to Model Settings" }).tap();
+      await expect(menu.locator(".menu-head-title")).toHaveText("Model Settings");
+      await expect(menu.getByRole("radiogroup", { name: "Model" })).toBeVisible();
+
+      await menu.getByRole("button", { name: "Context Window" }).tap();
+      await expect(menu.locator(".menu-head-title")).toHaveText("Context Window");
+      const occupancy = menu.getByRole("group", { name: "Context Window" });
+      await expect(occupancy).toContainText("Capacity");
+      await expect(occupancy).toContainText("Remaining");
+    });
+  });
+
+  test("by keyboard, and Escape closes the breakdown, then Model Settings", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto("/session-usage-e2e.html?width=390&height=800&tiers=1");
+    await page.locator(".composer-idle-preview").click();
+    const chip = page.getByRole("button", { name: /^Model Settings/ });
+    await chip.focus();
+    await page.keyboard.press("Enter");
+    const menu = page.getByRole("dialog", { name: "Model Settings" });
+    await expect(menu.getByRole("radio", { name: "GPT Tiered" })).toBeFocused();
+    // The group comes before the model choices, so Shift+Tab from the current model reaches it.
+    await page.keyboard.press("Shift+Tab");
+    const cost = menu.getByRole("button", { name: "Session Cost" });
+    await expect(cost).toBeFocused();
+    await page.keyboard.press("Enter");
+
+    const back = menu.getByRole("button", { name: "Back to Model Settings" });
+    await expect(back).toBeFocused();
+    const usage = menu.getByRole("group", { name: "Session Usage" });
+    await expect(usage.locator(".session-usage-model")).toHaveCount(2);
+    await page.keyboard.press("Tab");
+    await expect(menu.getByRole("button", { name: "Close Model Settings" })).toBeFocused();
+    await page.keyboard.press("Tab");
+    const about = usage.getByRole("button", { name: "About Codex App Server Usage" });
+    await expect(about).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(usage.locator(".session-usage-info-detail")).toBeVisible();
+    await page.keyboard.press("Tab");
+    await expect(usage.getByRole("link", { name: "Estimated API Costs" })).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(back, "Tab stays inside the sheet").toBeFocused();
+
+    // One layer per press: the breakdown, then Model Settings.
+    await page.keyboard.press("Escape");
+    await expect(menu).toBeVisible();
+    await expect(menu.locator(".menu-head-title")).toHaveText("Model Settings");
+    await expect(cost).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(menu).toHaveCount(0);
+    await expect(chip).toBeFocused();
+  });
+
+  test("in the full shell, the next Escape leaves the composer and the one after leaves the session", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto("/command-inbox-projects-e2e.html?scenario=session-usage-model-settings&fullShell=1");
+    await page.getByRole("button", { name: /Alpha Session/ }).click();
+    const sessionHeading = page.getByRole("heading", { level: 1, name: "Alpha Session" });
+    await expect(sessionHeading).toBeVisible();
+    await page.locator(".composer-idle-preview").click();
+    const chip = page.getByRole("button", { name: /^Model Settings/ });
+    await chip.click();
+    const menu = page.getByRole("dialog", { name: "Model Settings" });
+    const cost = menu.getByRole("button", { name: "Session Cost" });
+    await cost.click();
+    await expect(menu.locator(".menu-head-title")).toHaveText("Session Cost");
+    await expect(menu.getByRole("group", { name: "Session Usage" })).toContainText("Total Processed");
+
+    await page.keyboard.press("Escape");
+    await expect(menu.locator(".menu-head-title")).toHaveText("Model Settings");
+    await expect(cost).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(menu).toHaveCount(0);
+    await expect(chip).toBeFocused();
+    await expect(sessionHeading).toBeVisible();
+    // Then as from any composer control (#1796): out to the reader, and only then out of the session.
+    await page.keyboard.press("Escape");
+    await expect(page.locator(".main-body .detail-scroll")).toBeFocused();
+    await expect(sessionHeading).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(sessionHeading).toHaveCount(0);
+  });
 });
 
 test("mobile: without Model Settings the figures take their own row, and cost opens Session Usage", async ({ page }) => {
