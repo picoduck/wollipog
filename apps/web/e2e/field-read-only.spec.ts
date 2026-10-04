@@ -193,28 +193,62 @@ for (const theme of ["dark", "light"] as const) {
   });
 }
 
+/** Opens the fields harness under emulated forced colors and reads the system colours it paints with. */
+async function forcedColors(page: Page, palette: "dark" | "light") {
+  await page.emulateMedia({ forcedColors: "active", colorScheme: palette });
+  await page.goto(`/read-only-fields-e2e.html?theme=${palette}`);
+  expect(await page.evaluate(() => matchMedia("(forced-colors: active)").matches)).toBe(true);
+  const system = await page.evaluate(() => {
+    const read = (value: string) => {
+      const probe = document.createElement("span");
+      probe.style.color = value;
+      document.body.append(probe);
+      const color = getComputedStyle(probe).color;
+      probe.remove();
+      return color;
+    };
+    return { canvasText: read("CanvasText"), grayText: read("GrayText") };
+  });
+  expect(system.canvasText).not.toBe(system.grayText);
+  return system;
+}
+
 for (const palette of ["dark", "light"] as const) {
   test(`forced colors (${palette} palette): a read-only value draws in CanvasText with a visible edge`, async ({ page }) => {
-    await page.emulateMedia({ forcedColors: "active", colorScheme: palette });
-    await page.goto(`/read-only-fields-e2e.html?theme=${palette}`);
-    expect(await page.evaluate(() => matchMedia("(forced-colors: active)").matches)).toBe(true);
-    const system = await page.evaluate(() => {
-      const read = (value: string) => {
-        const probe = document.createElement("span");
-        probe.style.color = value;
-        document.body.append(probe);
-        const color = getComputedStyle(probe).color;
-        probe.remove();
-        return color;
-      };
-      return { canvasText: read("CanvasText"), grayText: read("GrayText") };
-    });
-    expect(system.canvasText).not.toBe(system.grayText);
+    const system = await forcedColors(page, palette);
     for (const name of ["read-only", "read-only-textarea"]) {
       const readOnly = await look(page.locator(`[data-field="${name}"] :is(input, textarea)`));
       expect(readOnly.color, `${name}: CanvasText, not the disabled GrayText`).toBe(system.canvasText);
       expect(readOnly, `${name}: keeps its dashed edge`).toMatchObject({ borderStyle: "dashed", borderWidth: "1px" });
       expect(contrast(readOnly.border, readOnly.background), `${name}: the edge shows against the fill`).toBeGreaterThanOrEqual(3);
+    }
+  });
+
+  // #2611: forced colors repaints the field's --text as CanvasText, so only an author GrayText tells
+  // a forced-colors user that a disabled field is unavailable (§3.1), as it does for a disabled `.btn`.
+  test(`forced colors (${palette} palette): a disabled field draws its value and edge in GrayText`, async ({ page }) => {
+    const system = await forcedColors(page, palette);
+    const control = (name: string) => page.locator(`[data-field="${name}"] :is(input, textarea, select)`);
+
+    for (const name of ["disabled", "disabled-textarea", "disabled-select"]) {
+      await expect(control(name)).toBeDisabled();
+      expect(await look(control(name)), `${name}: GrayText value and edge`).toMatchObject({
+        color: system.grayText, border: system.grayText, borderStyle: "solid",
+      });
+    }
+    // SearchableCombobox's readOnly-as-disabled input is `aria-disabled`, and reads as disabled too.
+    expect(await look(page.locator('[data-field="combobox"] input')), "combobox: GrayText value and edge")
+      .toMatchObject({ readOnly: true, color: system.grayText, border: system.grayText });
+    expect(await page.locator('[data-field="combobox"] .ui-picker-chevron svg').evaluate((icon) => getComputedStyle(icon).color),
+      "combobox: its chevron too").toBe(system.grayText);
+
+    for (const name of ["editable", "editable-textarea", "editable-select", "read-only", "read-only-textarea"]) {
+      const field = await look(control(name));
+      expect(field.color, `${name}: CanvasText, not the disabled GrayText`).toBe(system.canvasText);
+      expect(field.border, `${name}: not the disabled edge`).not.toBe(system.grayText);
+    }
+    for (const name of ["read-only", "read-only-textarea"]) {
+      expect((await look(control(name))).borderStyle, `${name}: keeps its dashed edge`).toBe("dashed");
     }
   });
 }

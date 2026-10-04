@@ -3233,6 +3233,17 @@ textarea {
   border-style: dashed;
   color: var(--text-dim);
 }
+/* Forced colors (#2611) replaces the field's --text with CanvasText, so a disabled field would read
+   as editable. As for a disabled `.btn` (#2130), an author system colour survives forcing, so a
+   disabled field names GrayText for its value and edge (§3.1). SearchableCombobox's
+   readOnly-as-disabled input is `aria-disabled` and takes it too; a read-only field is neither and
+   keeps CanvasText. The checkbox and radio markers keep their own rule (§8.4). */
+@media (forced-colors: active) {
+  :is(input:not([type="checkbox"], [type="radio"], [type="range"], [type="file"], [type="color"]), textarea, select):is(:disabled, [aria-disabled="true"]) {
+    color: GrayText;
+    border-color: GrayText;
+  }
+}
 
 .board {
   flex: 1;
@@ -16470,6 +16481,11 @@ body.shell-dock-dragging * {
   cursor: pointer;
 }
 .ui-searchable-combobox-input[aria-disabled="true"] ~ .ui-picker-chevron { cursor: not-allowed; }
+/* In forced colors the disabled input's value and edge are GrayText (#2611); its chevron, a sibling
+   it can't inherit from, names it too, as a disabled native select's caret does. */
+@media (forced-colors: active) {
+  .ui-searchable-combobox-input[aria-disabled="true"] ~ .ui-picker-chevron { color: GrayText; }
+}
 
 /* The no-match row (§12.2): a sentence naming the search, never a Title Case label. */
 .ui-select-no-match { display: flex; align-items: center; gap: var(--space-2); }

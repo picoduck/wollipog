@@ -11,8 +11,9 @@ import "../styles.css";
  * The read-only field state (#2520, docs/design-system.md §8.1) in a real browser.
  *
  * `?scenario=fields` (the default): an editable input and textarea, the same two read-only for good
- * (`.is-read-only`), a read-only field without the marker, an invalid field, a disabled field and a
- * disabled SearchableCombobox, on a dialog body's surface.
+ * (`.is-read-only`), a read-only field without the marker, an invalid field, a disabled input and
+ * textarea, an editable and a disabled native select, and a disabled SearchableCombobox, on a dialog
+ * body's surface.
  * `?scenario=guardrails-viewer` and `?scenario=guardrails-editable`: the real Guardrails dialog for a
  * Viewer and for someone who may save. Its save never settles, so a spec can hold it mid-save.
  * `?scenario=rename`: the real Rename Session dialog, whose rename never settles.
@@ -67,6 +68,22 @@ function Fields() {
         <label className="field" data-field="disabled">
           <span>Disabled</span>
           <input className="input" disabled defaultValue="staging-vpc" />
+        </label>
+        <label className="field" data-field="disabled-textarea">
+          <span>Disabled Textarea</span>
+          <textarea disabled rows={2} defaultValue="Review the diff before merging." />
+        </label>
+        <label className="field" data-field="editable-select">
+          <span>Editable Select</span>
+          <select defaultValue="us-east-1">
+            <option value="us-east-1">us-east-1</option>
+          </select>
+        </label>
+        <label className="field" data-field="disabled-select">
+          <span>Disabled Select</span>
+          <select disabled defaultValue="us-east-1">
+            <option value="us-east-1">us-east-1</option>
+          </select>
         </label>
         <div className="field" data-field="combobox">
           <span>Project</span>

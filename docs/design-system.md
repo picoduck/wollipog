@@ -1229,6 +1229,9 @@ Helper text, one sentence.            ← or the error, which replaces it
   selectable. Unlike disabled (§3.1: `--text-faint`, `not-allowed`, `GrayText`), it keeps
   `CanvasText` and its dashed edge in forced colors. A field read-only only while a request runs
   takes no marker and keeps the editable look.
+- Disabled: in forced colors a disabled text input, textarea or select draws its value and edge in
+  `GrayText` (§3.1), as does SearchableCombobox's `aria-disabled` input; an editable field keeps
+  `CanvasText`.
 - Helper: `--type-small`, `--text-dim`, 4px below. One sentence.
 - Spacing: a `.field`'s parts stack `--space-2` apart, which puts the label 8px above the control;
   the helper, the error that replaces it and a `.field-foot` pull up by `--space-1` to sit 4px
