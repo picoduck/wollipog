@@ -337,6 +337,24 @@ export function ModelSettingsPopover({
       ?? panel.querySelector<HTMLElement>('[tabindex="0"]')
       ?? panel).focus();
   }, [detail, popover.panelRef]);
+  // A breakdown's focused control can disappear under live usage (the pricing link goes with a
+  // ledger the runner's counters have overtaken), dropping focus to the document. The panel's own
+  // Escape handler never sees the next press then, and the shell's would close Model Settings with
+  // the breakdown, so the breakdown takes that press first.
+  const { back } = detailController;
+  useEffect(() => {
+    if (!detail) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.isComposing || event.defaultPrevented) return;
+      const doc = popover.panelRef.current?.ownerDocument;
+      if (!doc || (event.target !== doc.body && event.target !== doc.documentElement)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      back();
+    };
+    document.addEventListener("keydown", onKey, true);
+    return () => document.removeEventListener("keydown", onKey, true);
+  }, [detail, back, popover.panelRef]);
   return (
     <div className="cbar-menu model-settings-menu">
       <ComposerButton

@@ -239,6 +239,34 @@ test("Session Cost opens the breakdown in Model Settings' place, and Escape clos
   }
 });
 
+test("Escape still closes only the breakdown when live usage removes its focused link", async () => {
+  const view = await render(modelSettings(session()));
+  // The shell's own Escape (App.tsx) closes the open menu by its backdrop when the key reaches the window.
+  let shellEscapes = 0;
+  const shell = (event: KeyboardEvent) => { if (event.key === "Escape") shellEscapes += 1; };
+  domWindow.addEventListener("keydown", shell as never);
+  try {
+    await act(async () => { view.container.querySelector<HTMLButtonElement>(".model-chip")!.click(); });
+    await act(async () => { row("Session Cost")!.click(); });
+    const link = dialog()!.querySelector<HTMLAnchorElement>("a.link")!;
+    await act(async () => { link.focus(); });
+    assert.ok(active() === link);
+    // The runner's counters overtake the fetched ledger, which is rejected with its pricing link.
+    await view.rerender(modelSettings(session({ tokensIn: 400_000 })));
+    assertNoDomNode(dialog()!.querySelector("a.link"));
+    assert.ok(active() === domWindow.document.body as unknown as HTMLElement, "focus fell to the document");
+
+    await press("Escape");
+    assert.ok(dialog(), "Model Settings stays open");
+    assert.equal(title(), "Model Settings");
+    assert.ok(active() === row("Session Cost"), "focus returns to the Session Cost row");
+    assert.equal(shellEscapes, 0, "the press never reached the shell");
+  } finally {
+    domWindow.removeEventListener("keydown", shell as never);
+    await view.cleanup();
+  }
+});
+
 test("Context Window opens its breakdown too, and Back returns to its row", async () => {
   const view = await render(modelSettings(session()));
   try {
