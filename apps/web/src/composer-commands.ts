@@ -446,23 +446,35 @@ export function composerRejectsUnknownCommands(
 }
 
 /** Optimal string alignment distance: an insertion, deletion, substitution or swap of two adjacent
- * characters each costs one, so `reveiw` is one step from `review`. */
-export function commandEditDistance(left: string, right: string): number {
+ * characters each costs one, so `reveiw` is one step from `review`. With a `limit`, any distance
+ * past it is reported as `limit + 1` without finishing the table: a pasted path at the start of a
+ * message must not cost a full table per command on every render. */
+export function commandEditDistance(left: string, right: string, limit = Number.POSITIVE_INFINITY): number {
   const a = [...left];
   const b = [...right];
-  const rows = Array.from({ length: a.length + 1 }, (_, i) =>
-    Array.from({ length: b.length + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0)));
+  if (Math.abs(a.length - b.length) > limit) return limit + 1;
+  // Three rows: the one being filled and the two a transposition looks back to.
+  let before = new Array<number>(b.length + 1).fill(0);
+  let previous = Array.from({ length: b.length + 1 }, (_, j) => j);
+  let current = new Array<number>(b.length + 1).fill(0);
   for (let i = 1; i <= a.length; i += 1) {
+    current[0] = i;
+    let rowMinimum = current[0];
     for (let j = 1; j <= b.length; j += 1) {
       const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      let best = Math.min(rows[i - 1]![j]! + 1, rows[i]![j - 1]! + 1, rows[i - 1]![j - 1]! + cost);
+      let best = Math.min(previous[j]! + 1, current[j - 1]! + 1, previous[j - 1]! + cost);
       if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
-        best = Math.min(best, rows[i - 2]![j - 2]! + 1);
+        best = Math.min(best, before[j - 2]! + 1);
       }
-      rows[i]![j] = best;
+      current[j] = best;
+      rowMinimum = Math.min(rowMinimum, best);
     }
+    // A cell looks back at most two rows, so once two rows in a row are past the limit, no later
+    // cell can come back under it.
+    if (rowMinimum > limit && Math.min(...previous) > limit) return limit + 1;
+    [before, previous, current] = [previous, current, before];
   }
-  return rows[a.length]![b.length]!;
+  return Math.min(previous[b.length]!, limit + 1);
 }
 
 const MAX_COMMAND_SUGGESTIONS = 3;
@@ -481,8 +493,8 @@ export function suggestComposerCommands(
     .flatMap((command) => {
       if (!command.available) return [];
       const distance = Math.min(
-        commandEditDistance(typed, command.invocationAlias.toLowerCase()),
-        commandEditDistance(typed, command.name.toLowerCase()),
+        commandEditDistance(typed, command.invocationAlias.toLowerCase(), allowance),
+        commandEditDistance(typed, command.name.toLowerCase(), allowance),
       );
       return distance <= allowance ? [{ command, distance }] : [];
     })

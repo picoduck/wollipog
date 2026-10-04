@@ -860,6 +860,21 @@ test("close matches are available commands within one edit per three letters, cl
   assert.equal(commandEditDistance("", "abc"), 3);
 });
 
+test("a bounded edit distance agrees with the full one up to its limit and stops early past it", () => {
+  const words = ["", "a", "ab", "ba", "review", "reveiw", "rveiew", "preview", "compact", "compat", "cmopact",
+    "context", "kontext", "deploy", "ploy", "abcdef", "badcfe", "release-notes", "relaese-ntoes"];
+  for (const left of words) {
+    for (const right of words) {
+      const full = commandEditDistance(left, right);
+      for (const limit of [0, 1, 2, 3]) {
+        assert.equal(commandEditDistance(left, right, limit), Math.min(full, limit + 1), `${left} → ${right} ≤ ${limit}`);
+      }
+    }
+  }
+  // A pasted path at the start of a message is rejected by length before any table is built.
+  assert.equal(commandEditDistance("some-path/".repeat(100), "review", 3), 4);
+});
+
 test("Use /review replaces only the leading token and keeps the rest of the message", () => {
   const review = command(unknownCommandRegistry(), "provider:builtin:review");
   assert.deepEqual(replaceLeadingCommandToken("/reveiw please check the diff", review), {

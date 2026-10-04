@@ -4658,7 +4658,12 @@ function SessionDetailLoaded({
     ? selectedCloseMatch?.id ?? null
     : retainActiveComposerCommandId(activeSlashCommandId, slashMatches);
   const selectedSlashCommand = slashMatches.find((command) => command.id === selectedSlashCommandId);
-  const composerCommandResolution = resolveComposerCommandInvocation(text, composerCommands, composerCommandResolutionOptions);
+  const composerCommandResolution = useMemo(
+    () => resolveComposerCommandInvocation(text, composerCommands, {
+      unknownCommands: rejectUnknownCommands ? "reject" : "plaintext",
+    }),
+    [composerCommands, rejectUnknownCommands, text],
+  );
   const commandPreservesAttachedImages = composerCommandResolution.kind === "command" &&
     durableCommandPreservesAttachments(composerCommandResolution.command, images.length > 0);
   // The composer's own slot entries (#2156), behind the session's conditions of the same severity.
