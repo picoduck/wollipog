@@ -961,7 +961,7 @@ export function AutomationsView() {
               <h4>New Signed Trigger</h4>
               <div className="automation-form-grid">
                 <label>Name<input value={triggerDraft.name} maxLength={80} onChange={(event) => setTriggerDraft((current) => current ? { ...current, name: event.target.value } : current)} /></label>
-                <label>Kind<input value={titleCaseLabel(triggerDraft.kind)} readOnly /></label>
+                <label>Kind<input className="is-read-only" value={titleCaseLabel(triggerDraft.kind)} readOnly /></label>
                 {item.action.kind !== "workflow_run" && <div className="automation-span"><Checkbox checked={triggerDraft.configurable} label="Accept Delivery Fields" onChange={(checked) => setTriggerDraft((current) => current ? { ...current, configurable: checked } : current)} /></div>}
                 {item.action.kind !== "workflow_run" && triggerDraft.configurable && <>
                   <div><Checkbox checked={triggerDraft.allowPrompt} label="Delivered Prompt" onChange={(checked) => setTriggerDraft((current) => current ? { ...current, allowPrompt: checked } : current)} /></div>

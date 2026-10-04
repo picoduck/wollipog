@@ -382,6 +382,7 @@ export function OnboardRunnerDialog({
                 <label className="field">
                   <span>Runner ID</span>
                   <input
+                    className={repairingExisting ? "is-read-only" : undefined}
                     value={runnerId}
                     readOnly={repairingExisting}
                     aria-describedby={repairingExisting ? "repair-runner-id-help" : undefined}

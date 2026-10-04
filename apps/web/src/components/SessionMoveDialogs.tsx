@@ -372,7 +372,7 @@ export function NewWorkspaceDialog({ session, onClose, onMoved, returnFocusRef }
             <div className="folder-field-row">
               <input
                 id={`${ids}-folder`}
-                className="input folder-field-path"
+                className="input folder-field-path is-read-only"
                 value={folder ?? ""}
                 title={folder ?? undefined}
                 readOnly

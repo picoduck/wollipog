@@ -320,7 +320,7 @@ export function TranscriptShareDialog({ sessionId, sessionTitle, onClose, return
             <input
               ref={linkInputRef}
               id={linkInputId}
-              className="input share-link-input"
+              className="input share-link-input is-read-only"
               readOnly
               value={link.url}
               aria-describedby={linkHelperId}

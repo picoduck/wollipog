@@ -120,6 +120,7 @@ export function GuardrailsDialog({
           <input
             ref={(element) => { inputs.current[name] = element; }}
             id={inputId}
+            className={readOnly ? "is-read-only" : undefined}
             type="text"
             inputMode={inputMode}
             autoComplete="off"
@@ -127,7 +128,8 @@ export function GuardrailsDialog({
             placeholder={extra?.placeholder}
             value={draft[name]}
             // Read-only rather than disabled, so a Viewer can still select and read the value, and
-            // a field submitted with Enter keeps focus while saving.
+            // a field submitted with Enter keeps focus while saving. Only the Viewer's fields take
+            // the read-only look (§8.1); while saving they keep the editable one.
             readOnly={readOnly || saving}
             aria-invalid={error ? true : undefined}
             aria-describedby={[error ? errorId : helperId, warning ? warningId : null].filter(Boolean).join(" ")}

@@ -3200,6 +3200,19 @@ textarea {
   resize: vertical;
   line-height: 1.5;
 }
+/* A read-only field (§8.1, #2520): a value the person can read, select and copy but not change, such
+   as a Viewer's Guardrails or a share link. The edge turns dashed, the fill steps up to --bg-elev-2
+   and the value dims to --text-dim (6.55:1 dark, 6.01:1 light on that fill). The dashed edge carries
+   the state where a fill cannot: in light theme --field-bg and a dialog's --bg-elev are both white,
+   and forced colors repaints every fill. It stays focusable with the text cursor, unlike disabled
+   (§3.1). Only a field marked `.is-read-only` takes it: a field that is read-only while a request
+   runs keeps its editable look, and SearchableCombobox's readOnly-as-disabled keeps its disabled
+   look. `[readonly]` keeps a stale marker from restyling an editable field. */
+:is(input, textarea).is-read-only[readonly] {
+  background: var(--bg-elev-2);
+  border-style: dashed;
+  color: var(--text-dim);
+}
 
 .board {
   flex: 1;

@@ -1464,7 +1464,7 @@ export function NewSessionDialog({
               {browsedPath ? (
                 <input
                   id={folderInputId}
-                  className="input folder-field-path"
+                  className="input folder-field-path is-read-only"
                   value={browsedPath}
                   title={browsedPath}
                   readOnly

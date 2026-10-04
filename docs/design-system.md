@@ -1222,6 +1222,11 @@ Helper text, one sentence.            ← or the error, which replaces it
 - Control: `--control-h`, `--field-bg`, 1px `--control-outline`, `--radius-sm`, padding 0 12px,
   `--type-body` weight 400. Placeholder `--text-faint`, example-style ("e.g. staging-vpc"), never a
   label substitute.
+- Read-only (`readOnly` plus `.is-read-only`, for a value the person can never change here): a
+  dashed edge on a `--bg-elev-2` fill, value in `--text-dim`, text cursor, still in the tab order and
+  selectable. Unlike disabled (§3.1: `--text-faint`, `not-allowed`, `GrayText`), it keeps
+  `CanvasText` and its dashed edge in forced colors. A field read-only only while a request runs
+  takes no marker and keeps the editable look.
 - Helper: `--type-small`, `--text-dim`, 4px below. One sentence.
 - Spacing: a `.field`'s parts stack `--space-2` apart, which puts the label 8px above the control;
   the helper, the error that replaces it and a `.field-foot` pull up by `--space-1` to sit 4px
