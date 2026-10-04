@@ -5,6 +5,7 @@ import {
   type SubagentRollup,
   type TimelineItem,
 } from "./timeline.js";
+import { subagentName } from "./work-steps.js";
 
 export type SubagentLifecycle = AuthoritativeSubagentLifecycle | "unknown";
 
@@ -339,7 +340,8 @@ function deriveIndexedSubagentDescriptors(
       id,
       ...(effectiveParent.get(id) ? { parentId: effectiveParent.get(id) } : {}),
       childIds,
-      title: node.tool.title && !/^(Task|Agent)$/i.test(node.tool.title) ? node.tool.title : "Agent",
+      // The transcript names its agent row by the same rule, so Open lands on the same name (#2510).
+      title: subagentName(node.tool),
       depth,
       sourceIndex: node.sourceIndex,
       lifecycle,

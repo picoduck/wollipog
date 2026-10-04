@@ -8,6 +8,7 @@ import {
   selectedSubagentId,
   subagentTokenTotal,
 } from "./subagents.js";
+import { subagentName } from "./work-steps.js";
 import {
   publishTimelineSnapshotDelta,
   TimelineBuilder,
@@ -183,6 +184,27 @@ test("referenced legacy task tools remain visible while duplicate and cyclic own
     { id: "B", depth: 0 },
   ]);
   assert.equal(descriptors[0]!.title, "Agent", "generic provider tool names use a stable product label");
+});
+
+test("descriptor titles use the transcript's subagent name for every provider's spawn title", () => {
+  const items: TimelineItem[] = [
+    {
+      kind: "tool_call", id: 1, toolCallId: "claude-task", title: "Task",
+      text: '{"description":"Audit release gates","prompt":"Check every gate"}', toolKind: "agent", status: "completed",
+    },
+    { kind: "tool_call", id: 2, toolCallId: "codex-agent", title: "Agent: Investigate the flaky parser test", text: "", toolKind: "agent", status: "completed" },
+    { kind: "tool_call", id: 3, toolCallId: "plain", title: "Coordinate Release Audit", text: "", toolKind: "agent", status: "completed" },
+    { kind: "tool_call", id: 4, toolCallId: "unnamed", title: "Agent", text: "", toolKind: "agent", status: "completed" },
+  ];
+  const descriptors = deriveSubagentDescriptors(items, context);
+  assert.deepEqual(descriptors.map(({ title }) => title), [
+    "Audit release gates",
+    "Investigate the flaky parser test",
+    "Coordinate Release Audit",
+    "Agent",
+  ]);
+  assert.deepEqual(descriptors.map(({ title }) => title), items.map((item) => item.kind === "tool_call" ? subagentName(item) : ""),
+    "the panel and the transcript name an agent by one rule");
 });
 
 test("selected output contains the selected subtree and excludes parent and sibling work", () => {

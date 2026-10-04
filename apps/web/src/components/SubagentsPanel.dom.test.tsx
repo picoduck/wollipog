@@ -158,7 +158,7 @@ test("an external Open request focuses and names the selected subagent transcrip
     assert.equal(detail.tabIndex, -1);
     const label = domWindow.document.getElementById(detail.getAttribute("aria-labelledby")!);
     const description = domWindow.document.getElementById(detail.getAttribute("aria-describedby")!);
-    assert.equal(label?.textContent, "Agent: Inspect Parser");
+    assert.equal(label?.textContent, "Inspect Parser", "the panel names the agent as its transcript row does");
     assert.match(description?.textContent ?? "", /Failed · Subagent Activity/);
     assert.deepEqual(handled, [4]);
   } finally {
@@ -193,7 +193,7 @@ test("opening a nested agent from the selected output transfers focus to the new
     open.focus();
     await act(async () => open.click());
     const detail = container.querySelector<HTMLElement>(".subagent-detail")!;
-    assert.equal(container.querySelector(".subagent-detail-title")?.textContent, "Agent: Inspect Parser");
+    assert.equal(container.querySelector(".subagent-detail-title")?.textContent, "Inspect Parser");
     assert.equal(domWindow.document.activeElement, detail);
     assert.notEqual(domWindow.document.activeElement, domWindow.document.body);
     assert.deepEqual(reportedErrors, [], "focus capture and transfer report no uncaught handler errors");
@@ -359,6 +359,65 @@ test("transcript disclosure and Subagents panel action are separate accessible c
     await act(async () => open.click());
     assert.deepEqual(opened, ["outer"]);
     assert.equal(toggle.getAttribute("aria-expanded"), "true", "opening the panel does not toggle transcript disclosure");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("the panel's list row and detail title name each agent exactly as its transcript row does", async () => {
+  // A Claude Code spawn titled just "Task" is named by the description its input leads with, a
+  // Codex spawn drops its "Agent: " label, and a plainly titled spawn keeps its title (#2510).
+  const spawns: TimelineItem[] = [
+    {
+      kind: "tool_call", id: 1, toolCallId: "claude-task", title: "Task",
+      text: '{"description":"Audit release gates","prompt":"Check every gate","subagent_type":"Explore"}',
+      toolKind: "agent", status: "completed", startedAt: 100, completedAt: 110,
+    },
+    {
+      kind: "tool_call", id: 2, toolCallId: "codex-agent", title: "Agent: Investigate the flaky parser test",
+      text: "", toolKind: "agent", status: "completed", startedAt: 120, completedAt: 130,
+    },
+    {
+      kind: "tool_call", id: 3, toolCallId: "plain", title: "Coordinate Release Audit",
+      text: "", toolKind: "agent", status: "completed", startedAt: 140, completedAt: 150,
+    },
+  ];
+  const expected = ["Audit release gates", "Investigate the flaky parser test", "Coordinate Release Audit"];
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<EventTimeline items={spawns} onOpenSubagent={() => {}} />));
+    for (const worked of container.querySelectorAll<HTMLButtonElement>(".tl-work > .disclosure-trigger")) {
+      if (worked.getAttribute("aria-expanded") === "false") await act(async () => worked.click());
+    }
+    const transcriptNames = [...container.querySelectorAll(".tl-agent-name")].map((name) => name.textContent);
+    assert.deepEqual(transcriptNames, expected);
+    assert.deepEqual(
+      [...container.querySelectorAll(".tl-agent > .btn")].map((open) => open.getAttribute("aria-label")),
+      expected.map((name) => `Open ${name}`),
+    );
+
+    for (const [index, spawn] of spawns.entries()) {
+      await act(async () => root.render(
+        <SubagentsPanel
+          session={session}
+          items={spawns}
+          runnerOnline
+          requestedId={(spawn as { toolCallId: string }).toolCallId}
+          onSelect={() => {}}
+        />,
+      ));
+      const rowTitles = [...container.querySelectorAll(".subagent-list-title")]
+        .map((title) => title.textContent)
+        .sort();
+      assert.deepEqual(rowTitles, [...transcriptNames].sort(), "every list row carries its transcript row's name");
+      assert.equal(container.querySelector(".subagent-list-row[aria-current='true'] .subagent-list-title")?.textContent,
+        transcriptNames[index], "the row Open selects is named as the transcript row it came from");
+      assert.equal(container.querySelector(".subagent-detail-title")?.textContent, transcriptNames[index]);
+    }
   } finally {
     await act(async () => root.unmount());
     container.remove();
