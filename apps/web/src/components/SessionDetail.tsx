@@ -6592,6 +6592,16 @@ function SessionDetailLoaded({
                       // a right-click's context menu swallows the pointerup on some platforms.
                       onPress={(e) => {
                         if (!e.isPrimary || e.button !== 0) return;
+                        // The press keeps focus where it was, and the strip is about to replace the
+                        // left group: a control there that holds focus (the model chip after its menu
+                        // closed) would take it to the page body, where Escape no longer reaches
+                        // dictation. Focus moves to the mic, which stays: its Escape stops dictation,
+                        // and unlike the textarea it opens no phone keyboard (§16.2).
+                        const mic = e.currentTarget;
+                        const focused = mic.ownerDocument.activeElement;
+                        if (!dictation.recording && focused instanceof HTMLElement && focused.closest(".cbar-left")) {
+                          mic.focus({ preventScroll: true });
+                        }
                         dictation.pressStart();
                       }}
                       onPointerUp={dictation.pressEnd}

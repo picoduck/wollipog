@@ -6338,3 +6338,33 @@ test("Edit as a New Turn ends the dictation that was writing the draft it replac
     }
   });
 });
+
+test("a tap that starts dictation from a focused left-group control moves focus to the mic, where Escape still stops it (#2193)", async () => {
+  await withTrackedRecognition(async () => {
+    const draft = deferred<ComposerDraft | null>();
+    const fixture = await mountFixture(draft, {
+      sessionCapabilities: PAUSED_LOOK_CAPABILITIES,
+      sessionPatch: { model: "gpt-5.5", effort: "high", permissionMode: "default" },
+    });
+    try {
+      await resolveComposerDraft(draft, { text: "", images: [], updatedAt: 1 });
+      // Closing Model Settings returns focus to its chip, which the strip is about to replace.
+      const chip = fixture.container.querySelector<HTMLButtonElement>(".model-settings-menu > .cbar-trigger");
+      assert.ok(chip);
+      await act(async () => chip.focus());
+      assert.ok(chip.ownerDocument.activeElement === chip);
+      const mic = micButton(fixture);
+      await pointer(mic, "pointerdown");
+      await pointer(mic, "pointerup");
+      assert.equal(mic.getAttribute("aria-pressed"), "true");
+      assertNoDomNode(fixture.container.querySelector(".cbar-left"), "the strip replaced the left group");
+      assert.ok(mic.ownerDocument.activeElement === mic, "focus moved to the mic, which stays");
+
+      await act(async () => { fireDomEvent.keyDown(mic, { key: "Escape" }); });
+      assert.equal(mic.getAttribute("aria-pressed"), "false", "Escape still reaches dictation");
+      assert.deepEqual(TrackedRecognition.log, ["start", "stop"]);
+    } finally {
+      await unmountFixture(fixture);
+    }
+  });
+});
