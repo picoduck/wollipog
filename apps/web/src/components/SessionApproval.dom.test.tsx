@@ -7,7 +7,7 @@ import { Window } from "happy-dom";
 import type { AgentQuestion, SessionView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
-import { claimQuestionResponseOperation, clearQuestionDrafts, storedQuestionDrafts } from "../question-response.js";
+import { claimQuestionResponseOperation, clearQuestionDrafts, storeQuestionDrafts, storedQuestionDrafts } from "../question-response.js";
 import { setQuestionResponseStyle } from "../question-response-style.js";
 import { SessionApprovalBanner, SessionQuestionBanner } from "./SessionApproval.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
@@ -845,5 +845,41 @@ test("a Viewer sees a permission request's options disabled with the reason, and
       await act(async () => { root.unmount(); });
       container.remove();
     }
+  }
+});
+
+
+test("switching to Interactive Form does not present an invalid typed choice as an Other draft", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const questions: AgentQuestion[] = [{
+    id: "target", question: "Choose a target", allowOther: false,
+    options: [{ label: "Production" }, { label: "Staging" }],
+  }];
+  try {
+    storeQuestionDrafts("session-1", "question-1", { target: { kind: "entry", value: "Canary" } });
+    setQuestionResponseStyle("interactive", domWindow as never);
+    await renderBanner(root, questions, true);
+    const input = container.querySelector<HTMLInputElement>(".question-input")!;
+    assert.equal(input.value, "", "unadopted typed entry is not displayed as Other");
+    assert.equal(submitButton(container).disabled, true);
+    assert.deepEqual(storedQuestionDrafts("session-1", "question-1"), {
+      target: { kind: "entry", value: "Canary" },
+    }, "switching styles preserves the original draft intent");
+    await act(async () => { setInputValue(input, "Canary"); });
+    assert.equal(input.value, "Canary");
+    assert.equal(submitButton(container).disabled, false, "typing in Other explicitly adopts custom intent");
+    storeQuestionDrafts("session-1", "question-1", { target: { kind: "entry", value: "Canary" } });
+    await act(async () => setQuestionResponseStyle("composer", domWindow as never));
+    await renderBanner(root, [{ ...questions[0]!, allowOther: true }], true);
+    await act(async () => setQuestionResponseStyle("interactive", domWindow as never));
+    assert.equal(container.querySelector<HTMLInputElement>(".question-input")!.value, "Canary",
+      "a legacy single-choice typed custom answer is still displayed");
+    assert.equal(submitButton(container).disabled, false);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    clearQuestionDrafts("session-1", "question-1");
   }
 });

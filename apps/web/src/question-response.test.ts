@@ -211,3 +211,19 @@ test("typed choice mistakes retain validation while explicit Other preserves arb
   assert.deepEqual(questionDraftAnswers([multi], { language: { kind: "other", value: "1, 4" } }),
     { answers: { language: "1, 4" }, errors: {} });
 });
+
+
+test("explicit Other accepts only exact single-choice labels on native typed forms", () => {
+  const question: AgentQuestion = {
+    id: "confirm", question: "Continue?", options: [{ label: "Yes" }, { label: "No" }],
+    customAnswerError: "cannot be delivered because the provider requires one of its typed choices",
+  };
+  assert.deepEqual(questionDraftAnswers([question], { confirm: { kind: "other", value: "Yes" } }),
+    { answers: { confirm: "Yes" }, errors: {} });
+  for (const value of ["yes", "1", "Maybe"]) {
+    assert.match(questionDraftAnswers([question], { confirm: { kind: "other", value } }).errors.confirm!, /cannot be delivered/);
+  }
+  assert.match(questionDraftAnswers([{ ...question, multiSelect: true }], {
+    confirm: { kind: "other", value: "Yes" },
+  }).errors.confirm!, /cannot be delivered/, "a multi-select custom string is not a typed array");
+});

@@ -142,6 +142,11 @@ function resolveQuestionOtherResponse(question: AgentQuestion, rawValue: string)
   }
   const value = rawValue.trim();
   if (!value) return question.required === false ? {} : { error: "Enter a response." };
+  // A native typed form can carry an exact single-choice label even when it
+  // cannot carry arbitrary text. Match the server without ordinal parsing.
+  if (!question.multiSelect && question.customAnswerError && question.options.some((option) => option.label === value)) {
+    return { answer: value };
+  }
   const freeTextError = validateQuestionFreeText(question, value);
   return freeTextError ? { error: `Response ${freeTextError}.` } : { answer: value };
 }

@@ -1136,7 +1136,9 @@ export function SessionQuestionBanner({
                     max={question.maximum}
                     minLength={question.minLength}
                     maxLength={question.maxLength ?? DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH}
-                    value={draft?.kind === "other" || (draft?.kind === "entry" && selected.length === 0) ? rawValue : ""}
+                    value={draft?.kind === "other" || (draft?.kind === "entry"
+                      && (question.options.length === 0 || (!question.multiSelect && question.allowOther && selected.length === 0)))
+                      ? rawValue : ""}
                     autoComplete="off"
                     onChange={(event) => updateDraft(question, { kind: "other", value: event.target.value })}
                   />
