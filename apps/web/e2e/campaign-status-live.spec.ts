@@ -12,6 +12,7 @@ import { ControlPlaneDb } from "../../control-plane/src/db.js";
 import {
   defaultLocalDeviceTokenPath, loadOrCreateLocalDeviceToken,
 } from "../../control-plane/src/local-device-credential.js";
+import { CAMPAIGN_CONTINUATION_MAX_ATTEMPTS } from "../../control-plane/src/sessions.js";
 import { titleCaseLabel } from "../src/format.js";
 import { viewPath } from "../src/navigation.js";
 import { recordPlanOffline, restoreCampaignStatuses, seedCampaignStatus } from "./fixtures/campaign-status-seed.js";
@@ -482,9 +483,15 @@ test("a stalled campaign continuation reads Blocked at the root (#1352)", async 
     db.recordCampaignContinuationEvent({ eventId: `child-ready:${seeded.rootId}:live`, campaignSessionId: seeded.rootId,
       kind: "child_ready", now });
     const [event] = db.campaignContinuationEvents(seeded.rootId, now + 1_000);
+    // The server re-derives a continuation's state from its prompt command every few seconds, so
+    // the command fails too, by the runner's receipt, or that sweep would put a pending command's
+    // continuation back to pending. Its retries are spent, so the scheduler does not stage another.
     db.stageCampaignContinuation({ continuationId: "live-continuation", commandId: "live-continuation-cmd",
       campaignSessionId: seeded.rootId, runnerId: "campaign-status-e2e", eventFromSeq: event!.seq, eventThroughSeq: event!.seq,
-      payloadJson: "{}", payloadSha256: "a".repeat(64), expiresAt: now + 60_000, attemptCount: 1, now });
+      payloadJson: "{}", payloadSha256: "a".repeat(64), expiresAt: now + 60_000,
+      attemptCount: CAMPAIGN_CONTINUATION_MAX_ATTEMPTS, now });
+    db.recordSessionPromptCommandReceipt({ commandId: "live-continuation-cmd", runnerId: "campaign-status-e2e",
+      sessionId: seeded.rootId, state: "failed", revision: 1, error: "provider refused the turn", now });
     db.updateCampaignContinuationForCommand("live-continuation-cmd", "failed", now, "provider refused the turn");
   });
   await stack.updateItem(seeded.panelItemId, { stage: { stage: "implementing", note: "Still binding the panel." } });
