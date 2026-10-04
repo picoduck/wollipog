@@ -1,7 +1,9 @@
 import React, {
+  useEffect,
   useId,
   useState,
   type ButtonHTMLAttributes,
+  type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
   type Ref,
@@ -37,7 +39,7 @@ import {
 } from "../context-window-options.js";
 import { useStoreSelector } from "../store.js";
 import { AgentIcon } from "./AgentIcon.js";
-import { useAccessibleMenu } from "./interactions.js";
+import { handleRovingChoiceKeyDown, useAccessibleMenu, useDismissiblePopover } from "./interactions.js";
 import { MenuItem, MenuLabel, MenuNote, MenuSurface } from "./Menu.js";
 import {
   ChevronDownIcon,
@@ -47,6 +49,8 @@ import {
   ShieldCheckIcon,
   ShieldIcon,
 } from "./Icons.js";
+import { SegmentedControl } from "./ui/ChoiceControls.js";
+import { useIsMobile } from "./useIsMobile.js";
 
 type Apply = (patch: Partial<SessionConfig>) => void;
 
@@ -163,16 +167,14 @@ export function sessionPermissionModeControls(
   };
 }
 
-/** Shared popover shell for the composer-bar dropdowns (bottom-anchored, click-away backdrop). */
+/** Shared menu shell for the composer-bar dropdowns (bottom-anchored, click-away backdrop). */
 export function BarMenu({
   align = "left",
   label,
   title,
   ariaLabel,
   permissionMode = false,
-  modelSettings = false,
   showCaret = true,
-  menuTitle,
   menuLabel,
   disabledReason = null,
   children,
@@ -182,10 +184,8 @@ export function BarMenu({
   title?: string;
   ariaLabel?: string;
   permissionMode?: boolean;
-  modelSettings?: boolean;
   showCaret?: boolean;
-  menuTitle?: string;
-  /** The menu's accessible name and phone sheet title when it has no visible title. */
+  /** The menu's accessible name and phone sheet title. */
   menuLabel?: string;
   /** Why the signed-in person may not change this setting (#1857). The trigger is then disabled,
    * says why, and never opens its menu. */
@@ -197,11 +197,11 @@ export function BarMenu({
   const disabledReasonId = `${menu.menuId}-disabled-reason`;
   const disabled = disabledReason !== null;
   return (
-    <div className={`cbar-menu ${align}${permissionMode ? " permission-mode-menu" : ""}${modelSettings ? " model-settings-menu" : ""}`}>
+    <div className={`cbar-menu ${align}${permissionMode ? " permission-mode-menu" : ""}`}>
       <ComposerButton
         ref={menu.triggerRef}
         square={permissionMode}
-        className={`cbar-trigger${modelSettings ? " model-chip" : ""}`}
+        className="cbar-trigger"
         title={disabledReason ?? title}
         aria-label={ariaLabel}
         aria-haspopup="menu"
@@ -221,32 +221,125 @@ export function BarMenu({
           surfaceRef={menu.menuRef}
           anchor={{ trigger: menu.triggerRef }}
           id={menu.menuId}
-          label={menuTitle ?? menuLabel ?? ariaLabel ?? "Options"}
+          label={menuLabel ?? ariaLabel ?? "Options"}
           align={align === "right" ? "end" : "start"}
           // Composer menus stay inside the composer's column, which can be a narrow side panel.
           boundary=".composer-box"
-          head={menuTitle ? (
-            <div className="menu-head persistent" role="presentation">
-              <span className="menu-head-title">{menuTitle}</span>
-              {modelSettings && (
-                <button
-                  type="button"
-                  role="menuitem"
-                  className="icon-btn"
-                  aria-label={`Close ${menuTitle}`}
-                  data-menu-label={`Close ${menuTitle}`}
-                  title={`Close ${menuTitle}`}
-                  onClick={() => menu.close(true)}
-                >
-                  <CloseIcon size={16} />
-                </button>
-              )}
-            </div>
-          ) : undefined}
           onDismiss={() => menu.close(true)}
           onKeyDown={menu.onMenuKeyDown}
         >
           {children(() => menu.close(true))}
+        </MenuSurface>
+      )}
+    </div>
+  );
+}
+
+/** Model Settings in two columns: wide enough for a model's description beside the effort list. */
+const MODEL_SETTINGS_TWO_COLUMN_WIDTH = 536;
+
+/** Tab and Shift+Tab stay inside the popover: it is portalled to the end of <body>, so the browser
+ * would otherwise carry focus out of it with nowhere to go but the address bar. */
+function keepTabInside(event: ReactKeyboardEvent<HTMLDivElement>): void {
+  if (event.key !== "Tab") return;
+  const stops = [...event.currentTarget.querySelectorAll<HTMLElement>("button, [tabindex]")]
+    .filter((element) => element.tabIndex >= 0 && !(element instanceof HTMLButtonElement && element.disabled));
+  if (stops.length === 0) return;
+  const first = stops[0]!;
+  const last = stops.at(-1)!;
+  const active = event.currentTarget.ownerDocument.activeElement;
+  if (event.shiftKey ? active === first || !stops.includes(active as HTMLElement) : active === last) {
+    event.preventDefault();
+    (event.shiftKey ? last : first).focus();
+  }
+}
+
+/**
+ * Model Settings (docs/design-system.md §9.2, #2191): the model chip and the popover it opens, a
+ * `dialog` of radio groups rather than a menu, because a segmented control (the context window)
+ * cannot sit inside a menu. Two columns when there is something for each, opening up from the chip
+ * at its left edge; on a phone, the shared bottom sheet in one column. It keeps its title row and
+ * Close button at every width.
+ */
+export function ModelSettingsPopover({
+  label,
+  title,
+  ariaLabel,
+  disabledReason = null,
+  children,
+}: {
+  label: ReactNode;
+  title?: string;
+  ariaLabel: string;
+  /** Why the signed-in person may not change the model or effort (#1857). */
+  disabledReason?: string | null;
+  children: (close: () => void) => ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const popover = useDismissiblePopover(open, setOpen, "model-settings");
+  const disabledReasonId = `${popover.panelId}-disabled-reason`;
+  const disabled = disabledReason !== null;
+  // Opening lands on the current model, as the menu this replaced did, rather than on Close.
+  useEffect(() => {
+    if (!open) return;
+    // The first roving stop: the Model group's checked row (or the first group's, without models).
+    popover.panelRef.current?.querySelector<HTMLElement>('[tabindex="0"]')?.focus();
+  }, [open, popover.panelRef]);
+  return (
+    <div className="cbar-menu model-settings-menu">
+      <ComposerButton
+        ref={popover.triggerRef}
+        className="cbar-trigger model-chip"
+        title={disabledReason ?? title}
+        aria-label={ariaLabel}
+        aria-haspopup="dialog"
+        aria-expanded={open && !disabled}
+        aria-controls={open && !disabled ? popover.panelId : undefined}
+        aria-describedby={disabled ? disabledReasonId : undefined}
+        disabled={disabled}
+        onClick={popover.toggle}
+        onKeyDown={popover.onTriggerKeyDown}
+      >
+        {label}
+        <ChevronDownIcon size={14} className="cbar-caret" />
+      </ComposerButton>
+      {disabled && <span className="sr-only" id={disabledReasonId}>{disabledReason}</span>}
+      {open && !disabled && (
+        <MenuSurface
+          surfaceRef={popover.panelRef}
+          anchor={{ trigger: popover.triggerRef }}
+          id={popover.panelId}
+          kind="popover"
+          role="dialog"
+          label="Model Settings"
+          className="model-settings"
+          // Two columns are as wide as this; one column keeps the popover's own width (styles.css).
+          maxWidth={MODEL_SETTINGS_TWO_COLUMN_WIDTH}
+          align="start"
+          // Composer popovers stay inside the composer's column, which can be a narrow side panel.
+          boundary=".composer-box"
+          tabIndex={-1}
+          head={(
+            <div className="menu-head persistent">
+              <span className="menu-head-title">Model Settings</span>
+              <button
+                type="button"
+                className="icon-btn"
+                aria-label="Close Model Settings"
+                title="Close Model Settings"
+                onClick={() => popover.close(true)}
+              >
+                <CloseIcon size={16} />
+              </button>
+            </div>
+          )}
+          onDismiss={() => popover.close(true)}
+          onKeyDown={(event) => {
+            popover.onPanelKeyDown(event);
+            keepTabInside(event);
+          }}
+        >
+          {children(() => popover.close(true))}
         </MenuSurface>
       )}
     </div>
@@ -260,9 +353,37 @@ interface MenuModelChoice {
   defaultEffort?: string;
 }
 
-/** One menu-radio option shared by the Model, Context Window, Effort and Service Tier groups. */
-function MenuRadioOption({ checked, title, ariaLabel, description, icon, onSelect, children }: {
+/**
+ * A model description without the model's own name, as sentences: Claude Code's catalog writes
+ * "Opus 5 with 1M context · Best for everyday, complex tasks" under a row already named Opus 5, so
+ * the row reads "1M context. Best for everyday, complex tasks." A description that is only the
+ * name says nothing more and is dropped.
+ */
+export function plainModelDescription(model: MenuModelChoice): string | undefined {
+  const description = model.description?.trim();
+  if (!description) return undefined;
+  const displayName = model.displayName?.trim() ?? "";
+  // "Default (Opus 5)" names the model it resolves to, and that is what its description repeats.
+  const resolved = /^Default \((.+)\)$/.exec(displayName)?.[1];
+  const names = [displayName, resolved, model.id].filter((name): name is string => Boolean(name))
+    .sort((left, right) => right.length - left.length);
+  let text = description;
+  const name = names.find((candidate) => text.toLocaleLowerCase().startsWith(candidate.toLocaleLowerCase()));
+  // A whole-word match only: "GPT-6" must not be cut out of "GPT-6-Astra".
+  if (name && (text.length === name.length || /[\s·:,—]/.test(text[name.length]!))) {
+    text = text.slice(name.length).replace(/^\s*[·:,—]?\s*(?:with\s+)?/i, "");
+  }
+  const sentences = text.split(/\s+·\s+/).map((part) => part.trim()).filter(Boolean)
+    .map((part) => part[0]!.toLocaleUpperCase() + part.slice(1))
+    .map((part) => /[.!?]$/.test(part) ? part : `${part}.`);
+  return sentences.length > 0 ? sentences.join(" ") : undefined;
+}
+
+/** One Model Settings choice: §9.1's row with its trailing check, as a radio in its group. */
+function SettingsRadioOption({ checked, tabStop, title, ariaLabel, description, icon, onSelect, children }: {
   checked: boolean;
+  /** The group's one Tab stop (roving): the checked option, or the first when none is. */
+  tabStop: boolean;
   title?: string;
   ariaLabel?: string;
   description?: ReactNode;
@@ -272,10 +393,10 @@ function MenuRadioOption({ checked, title, ariaLabel, description, icon, onSelec
 }) {
   return (
     <MenuItem
-      role="menuitemradio"
+      role="radio"
       checked={checked}
+      tabIndex={tabStop ? 0 : -1}
       aria-label={ariaLabel}
-      data-menu-label={ariaLabel}
       description={description}
       icon={icon}
       title={title}
@@ -286,7 +407,28 @@ function MenuRadioOption({ checked, title, ariaLabel, description, icon, onSelec
   );
 }
 
-/** Pure leaf so the independent menu-radio groups retain an executable semantic contract. */
+/**
+ * A labelled radio group of Model Settings rows. The arrow keys move between options without
+ * choosing one, and Enter or Space chooses, as in the menu this replaced: every choice is a live
+ * configuration request, and a model change resets the effort, so arrowing past a model must not
+ * choose it on the way.
+ */
+function SettingsRadioGroup({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="model-settings-group">
+      <MenuLabel>{label}</MenuLabel>
+      <div
+        role="radiogroup"
+        aria-label={label}
+        onKeyDown={(event) => handleRovingChoiceKeyDown(event, "radio", { activate: false })}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/** Pure leaf so the independent radio groups retain an executable semantic contract. */
 export function ModelEffortMenuChoices({
   models,
   modelSource,
@@ -298,6 +440,8 @@ export function ModelEffortMenuChoices({
   effortVal,
   pendingEffort,
   serviceTierState,
+  sessionUsage = null,
+  stacked = false,
   close,
   apply,
 }: {
@@ -316,76 +460,99 @@ export function ModelEffortMenuChoices({
    * yet; undefined means nothing is staged. */
   pendingEffort?: () => string | undefined;
   serviceTierState?: NonNullable<ReturnType<typeof serviceTierChoices>> | null;
+  /** The read-only Session Usage group (#2166), first and above the choices at every width. */
+  sessionUsage?: ReactNode;
+  /** One column in reading order (the phone sheet): Model, Context Window, Reasoning Effort, then
+   * Service Tier. Otherwise the effort has a column of its own beside the rest. */
+  stacked?: boolean;
   close?: () => void;
   apply: Apply;
 }) {
+  const modelListed = models.some((model) => model.id === modelVal);
+  const modelGroup = models.length > 0 && (
+    <SettingsRadioGroup label={`Model${modelSource === "cached" ? " (Cached)" : ""}`}>
+      {models.map((model, index) => {
+        const description = plainModelDescription(model);
+        return (
+          <SettingsRadioOption
+            key={model.id}
+            checked={model.id === modelVal}
+            tabStop={modelListed ? model.id === modelVal : index === 0}
+            title={description}
+            ariaLabel={model.displayName ?? model.id}
+            description={description}
+            onSelect={() => apply({ model: model.id, effort: "", serviceTier: "" })}
+          >
+            {model.displayName ?? model.id}
+          </SettingsRadioOption>
+        );
+      })}
+    </SettingsRadioGroup>
+  );
+  const contextGroup = contextChoice && (
+    <div className="model-settings-group">
+      <MenuLabel>Context Window</MenuLabel>
+      <SegmentedControl
+        label="Context Window"
+        className="block"
+        value={contextChoice.selectedId}
+        options={contextChoice.options.map((option) => ({
+          value: option.id,
+          label: option.label,
+          title: `${option.contextWindow.toLocaleString()} tokens`,
+        }))}
+        // A window switch keeps the effort: variants of one base share their effort levels.
+        // Always send the key. The control plane reads an omitted effort on a model patch as
+        // "no effort chosen" and resolves back to the model's default, and an omitted key
+        // also cannot clear an effort already staged in the composer's pending config, which
+        // would then ride along with the next prompt. `""` is the established reset (the
+        // Model group above uses it), so an effort the target variant would reject as
+        // unsupported becomes that variant's own default instead of a 409.
+        // Read the staged effort at click time: an effort chosen moments ago is not in
+        // `effortVal` until `setConfig` round-trips, and it must not be reset by this switch.
+        onChange={(id) => {
+          const option = contextChoice.options.find((candidate) => candidate.id === id);
+          if (!option) return;
+          const staged = pendingEffort?.();
+          const effort = staged ?? effortVal;
+          apply({
+            model: option.id,
+            effort: contextWindowOptionAcceptsEffort(option, effort, agentEffortLevels) ? effort : "",
+            serviceTier: "",
+          });
+        }}
+      />
+    </div>
+  );
+  const effortListed = modelEfforts.includes(effortVal);
+  const effortGroup = modelEfforts.length > 0 && (
+    <SettingsRadioGroup label="Reasoning Effort">
+      <SettingsRadioOption checked={!effortVal} tabStop={!effortListed} onSelect={() => apply({ effort: "" })}>
+        {selectedModel?.defaultEffort ? `Default (${selectedModel.defaultEffort})` : "Default"}
+      </SettingsRadioOption>
+      {modelEfforts.map((effort) => (
+        <SettingsRadioOption key={effort} checked={effort === effortVal} tabStop={effort === effortVal} onSelect={() => apply({ effort })}>
+          {effortLabel(effort)}
+        </SettingsRadioOption>
+      ))}
+    </SettingsRadioGroup>
+  );
+  const tierGroup = serviceTierState && (
+    <ServiceTierMenuChoices state={serviceTierState} apply={apply} close={close ?? (() => undefined)} />
+  );
+  const leading = Boolean(modelGroup || contextGroup || tierGroup);
   return (
     <>
-      {models.length > 0 && (
-        <div role="group" aria-label="Model">
-          <MenuLabel>Model{modelSource === "cached" ? " (Cached)" : ""}</MenuLabel>
-          {models.map((model) => (
-            <MenuRadioOption
-              key={model.id}
-              checked={model.id === modelVal}
-              title={model.description}
-              ariaLabel={model.displayName ?? model.id}
-              description={model.description}
-              onSelect={() => apply({ model: model.id, effort: "", serviceTier: "" })}
-            >
-              {model.displayName ?? model.id}
-            </MenuRadioOption>
-          ))}
+      {sessionUsage}
+      {stacked || !leading || !effortGroup ? (
+        <div className="model-settings-column">{modelGroup}{contextGroup}{effortGroup}{tierGroup}</div>
+      ) : (
+        <div className="model-settings-columns">
+          <div className="model-settings-column">{modelGroup}{contextGroup}{tierGroup}</div>
+          <div className="model-settings-column">{effortGroup}</div>
         </div>
       )}
-      {contextChoice && (
-        <div role="group" aria-label="Context Window">
-          <MenuLabel>Context Window</MenuLabel>
-          {contextChoice.options.map((option) => (
-            <MenuRadioOption
-              key={option.id}
-              checked={option.id === contextChoice.selectedId}
-              title={`${option.contextWindow.toLocaleString()} tokens; applies to the next turn`}
-              // A window switch keeps the effort: variants of one base share their effort levels.
-              // Always send the key. The control plane reads an omitted effort on a model patch as
-              // "no effort chosen" and resolves back to the model's default, and an omitted key
-              // also cannot clear an effort already staged in the composer's pending config, which
-              // would then ride along with the next prompt. `""` is the established reset (the
-              // Model group above uses it), so an effort the target variant would reject as
-              // unsupported becomes that variant's own default instead of a 409.
-              // Read the staged effort at click time: an effort chosen moments ago is not in
-              // `effortVal` until `setConfig` round-trips, and it must not be reset by this switch.
-              onSelect={() => {
-                const staged = pendingEffort?.();
-                const effort = staged ?? effortVal;
-                apply({
-                  model: option.id,
-                  effort: contextWindowOptionAcceptsEffort(option, effort, agentEffortLevels) ? effort : "",
-                  serviceTier: "",
-                });
-              }}
-            >
-              {option.label}
-            </MenuRadioOption>
-          ))}
-        </div>
-      )}
-      {modelEfforts.length > 0 && (
-        <div role="group" aria-label="Reasoning Effort">
-          <MenuLabel>Reasoning Effort</MenuLabel>
-          <MenuRadioOption checked={!effortVal} onSelect={() => apply({ effort: "" })}>
-            {selectedModel?.defaultEffort ? `Default (${selectedModel.defaultEffort})` : "Default"}
-          </MenuRadioOption>
-          {modelEfforts.map((effort) => (
-            <MenuRadioOption key={effort} checked={effort === effortVal} onSelect={() => apply({ effort })}>
-              {effortLabel(effort)}
-            </MenuRadioOption>
-          ))}
-        </div>
-      )}
-      {serviceTierState && (
-        <ServiceTierMenuChoices state={serviceTierState} apply={apply} close={close ?? (() => undefined)} />
-      )}
+      <MenuNote>Changes apply from the next turn.</MenuNote>
     </>
   );
 }
@@ -448,6 +615,8 @@ export function ModelEffortControl(
   const {
     caps, models, contextChoice, modelSource, modelVal, selectedModel, modelEfforts, effortVal, serviceTierState, available,
   } = useModelSettings(session, pendingModel, pendingServiceTier);
+  // The phone sheet is one column in reading order (§9.2).
+  const sheet = useIsMobile();
   if (!available) return null;
   const pickerModel = models.find((model) => model.id === modelVal) ?? selectedModel;
   const selectedWindow = contextChoice?.options.find((option) => option.id === contextChoice.selectedId);
@@ -466,30 +635,31 @@ export function ModelEffortControl(
   );
   const accessibleFacts = [modelLabel, selectedWindow?.label, effortSuffix].filter(Boolean).join(", ");
   return (
-    <BarMenu
-      align="left"
-      modelSettings
-      menuTitle="Model Settings"
+    <ModelSettingsPopover
       label={label}
       title={modelSource === "cached" ? `${tooltip} Model metadata is cached; Rediscover to refresh.` : tooltip}
       ariaLabel={`Model Settings: ${accessibleFacts}`}
       disabledReason={disabledReason}
     >
-      {(close) => <>{sessionUsage}<ModelEffortMenuChoices
-        models={models}
-        modelSource={modelSource}
-        modelVal={modelVal}
-        selectedModel={selectedModel}
-        contextChoice={contextChoice}
-        modelEfforts={modelEfforts}
-        agentEffortLevels={caps?.effortLevels}
-        effortVal={effortVal}
-        pendingEffort={pendingEffort}
-        serviceTierState={serviceTierState}
-        close={close}
-        apply={apply}
-      /></>}
-    </BarMenu>
+      {(close) => (
+        <ModelEffortMenuChoices
+          models={models}
+          modelSource={modelSource}
+          modelVal={modelVal}
+          selectedModel={selectedModel}
+          contextChoice={contextChoice}
+          modelEfforts={modelEfforts}
+          agentEffortLevels={caps?.effortLevels}
+          effortVal={effortVal}
+          pendingEffort={pendingEffort}
+          serviceTierState={serviceTierState}
+          sessionUsage={sessionUsage}
+          stacked={sheet}
+          close={close}
+          apply={apply}
+        />
+      )}
+    </ModelSettingsPopover>
   );
 }
 
@@ -513,14 +683,11 @@ export function serviceTierChoices(
       ?? capabilities?.models.find((candidate) => !candidate.hidden);
   if (!model?.serviceTiers?.length) return null;
   const choices: ServiceTierChoice[] = [
-    { id: "default", name: "Standard", description: "Standard response speed. Applies to the next turn." },
+    // When a change applies is said once, in Model Settings' footer.
+    { id: "default", name: "Standard", description: "Standard response speed." },
     ...model.serviceTiers
       .filter((tier) => tier.id !== "default")
-      .map((tier) => ({
-        id: tier.id,
-        name: tier.name,
-        description: `${tier.description ? `${tier.description} ` : ""}Applies to the next turn.`,
-      })),
+      .map((tier) => ({ id: tier.id, name: tier.name, description: tier.description?.trim() ?? "" })),
   ];
   const preferred = selectedTier || model.defaultServiceTier || "default";
   return { choices, selected: choices.find((choice) => choice.id === preferred) ?? choices[0]! };
@@ -532,24 +699,24 @@ export function ServiceTierMenuChoices({ state, apply, close }: {
   close: () => void;
 }) {
   return (
-    <div role="group" aria-label="Service Tier">
-      <MenuLabel>Service Tier</MenuLabel>
+    <SettingsRadioGroup label="Service Tier">
       {state.choices.map((choice) => (
-        <MenuRadioOption
+        <SettingsRadioOption
           key={choice.id}
           checked={choice.id === state.selected.id}
-          title={choice.description}
+          tabStop={choice.id === state.selected.id}
+          title={choice.description || undefined}
           icon={choice.id.toLowerCase() === "fast" ? <ServiceTierIcon size={16} /> : null}
-          description={choice.description}
+          description={choice.description || undefined}
           onSelect={() => {
             apply({ serviceTier: choice.id });
             close();
           }}
         >
           {choice.name}
-        </MenuRadioOption>
+        </SettingsRadioOption>
       ))}
-    </div>
+    </SettingsRadioGroup>
   );
 }
 

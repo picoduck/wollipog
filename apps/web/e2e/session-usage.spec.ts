@@ -416,7 +416,7 @@ test.describe("desktop: context and cost sit in the composer bar before the mic"
 
       // While the bar shows them, Model Settings opens on its model choices with no usage group.
       await page.getByRole("button", { name: /^Model Settings/ }).click();
-      const menu = page.getByRole("menu", { name: "Model Settings" });
+      const menu = page.getByRole("dialog", { name: "Model Settings" });
       await expect(menu).toBeVisible();
       await expect(menu.getByRole("group", { name: "Session Usage" })).toHaveCount(0);
     });
@@ -493,7 +493,7 @@ test.describe("a composer column under 640px moves the figures into Model Settin
     expect(bar.overflow).toBeLessThanOrEqual(0);
 
     await page.getByRole("button", { name: /^Model Settings/ }).click();
-    const menu = page.getByRole("menu", { name: "Model Settings" });
+    const menu = page.getByRole("dialog", { name: "Model Settings" });
     const group = menu.getByRole("group", { name: "Session Usage" });
     await expect(group).toBeVisible();
     await expect(group).toContainText("Context Window");
@@ -528,7 +528,7 @@ test.describe("a composer column under 640px moves the figures into Model Settin
     await page.addStyleTag({ content: "html { font-size: 32px; }" });
     await expect(page.locator(".composer-bar :is(.context-control, .session-usage)")).toHaveCount(0);
     await page.getByRole("button", { name: /^Model Settings/ }).click();
-    await expect(page.getByRole("menu", { name: "Model Settings" }).getByRole("group", { name: "Session Usage" })).toContainText("$12,345.67");
+    await expect(page.getByRole("dialog", { name: "Model Settings" }).getByRole("group", { name: "Session Usage" })).toContainText("$12,345.67");
   });
 });
 
@@ -587,12 +587,18 @@ test("mobile: Model Settings opens with the Session Usage group, and the bar sta
   expect(bar.overflow).toBeLessThanOrEqual(0);
 
   await page.getByRole("button", { name: /^Model Settings/ }).click();
-  const menu = page.getByRole("menu", { name: "Model Settings" });
+  const menu = page.getByRole("dialog", { name: "Model Settings" });
   const group = menu.getByRole("group", { name: "Session Usage" });
   await expect(group).toBeVisible();
-  // First in the sheet, ahead of the model choices.
-  const order = await menu.evaluate((sheet) => [...sheet.querySelectorAll('[role="group"]')].map((element) => element.getAttribute("aria-label")));
-  expect(order[0]).toBe("Session Usage");
+  // First in the sheet, ahead of the model choices, and in view without scrolling (#2191).
+  const order = await menu.evaluate((sheet) => [...sheet.querySelectorAll('[role="group"], [role="radiogroup"]')]
+    .map((element) => element.getAttribute("aria-label")));
+  expect(order).toEqual(["Session Usage", "Model", "Reasoning Effort"]);
+  expect(await menu.evaluate((sheet) => sheet.scrollTop)).toBe(0);
+  const [sheetBox, groupBox] = await Promise.all([menu.boundingBox(), group.boundingBox()]);
+  expect(groupBox!.y).toBeGreaterThanOrEqual(sheetBox!.y);
+  expect(groupBox!.y + groupBox!.height).toBeLessThanOrEqual(sheetBox!.y + sheetBox!.height);
+  await expect(menu.locator(".model-settings-columns"), "one column on a phone").toHaveCount(0);
   await expect(group.locator("dt")).toHaveText(["Context Window", "Session Cost"]);
   await expect(group.locator("dd").first()).toHaveText("36%72K of 200K");
   await expect(group.locator("dd").last()).toHaveText("$1.37");

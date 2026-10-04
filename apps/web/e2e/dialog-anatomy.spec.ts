@@ -190,7 +190,7 @@ test.describe("phone", () => {
     await expect(page.locator(".composer-box")).toBeVisible();
     await page.locator(".composer-idle-preview").click();
     await page.getByRole("button", { name: /^Model Settings:/ }).click();
-    const grabber = page.locator('.menu[aria-label="Model Settings"] .sheet-grabber');
+    const grabber = page.locator('.popover[aria-label="Model Settings"] .sheet-grabber');
     await expect(grabber).toBeVisible();
     await expect(grabber).toHaveAttribute("aria-hidden", "true");
     const box = await grabber.boundingBox();

@@ -13,7 +13,7 @@ for (const viewport of [
     if (viewport.name === "mobile") await page.locator(".composer-idle-preview").click();
     const legacyTrigger = page.getByRole("button", { name: /^Model Settings:/ });
     await legacyTrigger.click();
-    await expect(page.getByRole("group", { name: "Service Tier" })).toHaveCount(0);
+    await expect(page.getByRole("radiogroup", { name: "Service Tier" })).toHaveCount(0);
     await page.keyboard.press("Escape");
     await page.screenshot({ path: `${SHOT}/${viewport.name}-before.png` });
 
@@ -25,11 +25,14 @@ for (const viewport of [
     await expect(page.locator('.cbar-trigger[title^="Service Tier:"]')).toHaveCount(0);
     await trigger.click();
 
-    const group = page.getByRole("group", { name: "Service Tier" });
-    await expect(group.getByRole("menuitemradio", { name: /Standard/ })).toHaveAttribute("aria-checked", "false");
-    await expect(group.getByRole("menuitemradio", { name: /Fast/ })).toHaveAttribute("aria-checked", "true");
-    await expect(group).toContainText("Standard response speed. Applies to the next turn.");
-    await expect(group).toContainText("Faster responses that use more ChatGPT credits. Applies to the next turn.");
+    const group = page.getByRole("radiogroup", { name: "Service Tier" });
+    await expect(group.getByRole("radio", { name: /Standard/ })).toHaveAttribute("aria-checked", "false");
+    await expect(group.getByRole("radio", { name: /Fast/ })).toHaveAttribute("aria-checked", "true");
+    // When a change applies is said once, in the footer, not under every tier (#2191).
+    await expect(group).toContainText("Standard response speed.");
+    await expect(group).toContainText("Faster responses that use more ChatGPT credits.");
+    await expect(group).not.toContainText("Applies to the next turn.");
+    await expect(page.getByRole("dialog", { name: "Model Settings" })).toContainText("Changes apply from the next turn.");
     await page.screenshot({ path: `${SHOT}/${viewport.name}-after-menu.png` });
   });
 }

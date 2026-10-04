@@ -6,8 +6,8 @@ import { Window } from "happy-dom";
 import type { SessionConfig } from "@wollipog/protocol";
 import {
   ApprovalsMenuChoices,
-  BarMenu,
   ModelEffortMenuChoices,
+  ModelSettingsPopover,
 } from "./ComposerControls.js";
 import { handleMenuKeyDown } from "./interactions.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
@@ -128,18 +128,15 @@ test("Model Settings close control dismisses without selecting and restores trig
   const root = createRoot(container);
   await act(async () => {
     root.render(
-      <BarMenu
-        modelSettings
-        menuTitle="Model Settings"
-        label="Current Model"
-        ariaLabel="Model Settings: Current Model"
-      >
+      <ModelSettingsPopover label="Current Model" ariaLabel="Model Settings: Current Model">
         {() => (
-          <button type="button" role="menuitemradio" aria-checked="true" onClick={() => { selectionCount += 1; }}>
-            Current Model
-          </button>
+          <div role="radiogroup" aria-label="Model">
+            <button type="button" role="radio" aria-checked="true" tabIndex={0} onClick={() => { selectionCount += 1; }}>
+              Current Model
+            </button>
+          </div>
         )}
-      </BarMenu>,
+      </ModelSettingsPopover>,
     );
   });
 
@@ -148,25 +145,51 @@ test("Model Settings close control dismisses without selecting and restores trig
     assert.ok(trigger);
     await act(async () => { trigger.click(); });
 
-    // The menu is portalled to <body> (the shared MenuSurface).
+    assert.equal(trigger.getAttribute("aria-haspopup"), "dialog");
+    // The popover is portalled to <body> (the shared MenuSurface).
+    const dialog = domWindow.document.querySelector('[role="dialog"][aria-label="Model Settings"]');
+    assert.ok(dialog, "Model Settings is a dialog of radio groups, not a menu");
+    assertNoDomNode(domWindow.document.querySelector('[role="menu"]'));
+    const current = dialog.querySelector('[role="radio"]');
+    assert.ok(domWindow.document.activeElement === current, "opening lands on the current choice, not on Close");
     const close = domWindow.document.querySelector('[aria-label="Close Model Settings"]') as unknown as HTMLButtonElement | null;
     assert.ok(close, "the open surface exposes an explicitly labelled close control");
-    assert.equal(close.getAttribute("role"), "menuitem");
+    assert.equal(close.getAttribute("role"), null, "a plain button inside the dialog");
     await act(async () => {
       close.click();
       await new Promise((resolve) => domWindow.setTimeout(resolve, 0));
     });
 
     assert.equal(selectionCount, 0, "closing does not activate the selected setting");
-    assertNoDomNode(domWindow.document.querySelector('[role="menu"]'));
+    assertNoDomNode(domWindow.document.querySelector('[role="dialog"]'));
     assert.equal(domWindow.document.activeElement, trigger, "focus returns to the Model Settings trigger");
+
+    // Escape closes it too, and Tab stays inside while it is open.
+    await act(async () => { trigger.click(); });
+    const reopened = domWindow.document.querySelector('[role="dialog"][aria-label="Model Settings"]')!;
+    const radio = reopened.querySelector('[role="radio"]')!;
+    await act(async () => {
+      radio.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }) as never);
+    });
+    assert.ok(domWindow.document.activeElement === reopened.querySelector('[aria-label="Close Model Settings"]'),
+      "Tab from the last stop wraps to the first, the Close button");
+    await act(async () => {
+      (domWindow.document.activeElement as unknown as HTMLElement).dispatchEvent(
+        new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }) as never,
+      );
+      // Focus returns to the trigger on the next task.
+      await new Promise((resolve) => domWindow.setTimeout(resolve, 0));
+    });
+    assertNoDomNode(domWindow.document.querySelector('[role="dialog"]'));
+    // Compare booleans: a failed equality between two happy-dom nodes inspects the whole document.
+    assert.ok(domWindow.document.activeElement === trigger, "Escape returns focus to the trigger");
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();
   }
 });
 
-test("Model Settings keeps provider descriptions and Service Tier selection in one menu", async () => {
+test("Model Settings keeps descriptions and Service Tier selection in one popover, and arrows only move", async () => {
   const applied: Partial<SessionConfig>[] = [];
   let closeCount = 0;
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
@@ -174,9 +197,12 @@ test("Model Settings keeps provider descriptions and Service Tier selection in o
   const root = createRoot(container);
   await act(async () => {
     root.render(
-      <div role="menu" onKeyDown={(event) => handleMenuKeyDown(event, () => undefined)}>
+      <div>
         <ModelEffortMenuChoices
-          models={[{ id: "gpt", displayName: "GPT Astra", description: "Best for complex work" }]}
+          models={[
+            { id: "gpt", displayName: "GPT Astra", description: "GPT Astra · Best for complex work" },
+            { id: "mini", displayName: "GPT Mini" },
+          ]}
           modelVal="gpt"
           selectedModel={{ id: "gpt", displayName: "GPT Astra" }}
           modelEfforts={["high"]}
@@ -196,10 +222,19 @@ test("Model Settings keeps provider descriptions and Service Tier selection in o
   });
 
   try {
-    assert.match(container.textContent ?? "", /GPT AstraBest for complex work/);
-    const tierGroup = container.querySelector('[role="group"][aria-label="Service Tier"]');
+    assert.match(container.textContent ?? "", /GPT AstraBest for complex work\./);
+    assert.match(container.textContent ?? "", /Changes apply from the next turn\./);
+    // Arrowing past a model must not choose it: each choice is a live request and resets the effort.
+    const models = [...container.querySelectorAll<HTMLButtonElement>('[role="radiogroup"][aria-label="Model"] [role="radio"]')];
+    models[0]!.focus();
+    await act(async () => {
+      models[0]!.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }) as never);
+    });
+    assert.ok((domWindow.document.activeElement as unknown) === models[1], "the arrow key moves to the next model");
+    assert.deepEqual(applied, [], "and does not choose it");
+    const tierGroup = container.querySelector('[role="radiogroup"][aria-label="Service Tier"]');
     assert.ok(tierGroup);
-    const fast = [...tierGroup.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')]
+    const fast = [...tierGroup.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
       .find((button) => button.textContent?.includes("Fast"));
     assert.ok(fast);
     await act(async () => { fast.click(); });
@@ -223,7 +258,7 @@ test("the Context Window group offers provider-stated variants and switches only
     agentEffortLevels: readonly string[] = ["low", "high"],
   ) => act(async () => {
     root.render(
-      <div role="menu" onKeyDown={(event) => handleMenuKeyDown(event, () => undefined)}>
+      <div>
         <ModelEffortMenuChoices
           models={[{ id: "opus[1m]", displayName: "Opus 5" }, { id: "sonnet", displayName: "Sonnet 5" }]}
           modelVal="opus[1m]"
@@ -248,12 +283,13 @@ test("the Context Window group offers provider-stated variants and switches only
   };
   try {
     await render(choice);
-    const group = container.querySelector('[role="group"][aria-label="Context Window"]');
-    assert.ok(group, "a real choice renders a Context Window group");
-    const radios = [...group!.querySelectorAll('[role="menuitemradio"]')] as HTMLButtonElement[];
+    const group = container.querySelector('[role="radiogroup"][aria-label="Context Window"]');
+    assert.ok(group, "a real choice renders a Context Window radio group");
+    assert.ok(group!.classList.contains("seg"), "drawn as the segmented control (§10.2)");
+    const radios = [...group!.querySelectorAll('[role="radio"]')] as HTMLButtonElement[];
     assert.deepEqual(radios.map((radio) => radio.textContent), ["200K", "1M"]);
     assert.deepEqual(radios.map((radio) => radio.getAttribute("aria-checked")), ["false", "true"]);
-    assert.equal(radios[0]!.title, "200,000 tokens; applies to the next turn");
+    assert.equal(radios[0]!.title, "200,000 tokens", "the tooltip keeps the exact token count");
     await act(async () => { radios[0]!.click(); });
     // The effort has to be sent explicitly: the control plane reads a model-only patch as "no
     // effort chosen" and resolves an explicit `low` back to the model's default effort.
@@ -271,7 +307,7 @@ test("the Context Window group offers provider-stated variants and switches only
       selectedId: "opus",
     }, "low");
     const asymmetric = [...container
-      .querySelectorAll('[role="group"][aria-label="Context Window"] [role="menuitemradio"]')] as HTMLButtonElement[];
+      .querySelectorAll('[role="radiogroup"][aria-label="Context Window"] [role="radio"]')] as HTMLButtonElement[];
     await act(async () => { asymmetric[1]!.click(); });
     // An explicit reset, not an omitted key: omitting it would leave `low` staged in the composer's
     // pending config, which then rides along with the next prompt and is rejected as unsupported.
@@ -285,7 +321,7 @@ test("the Context Window group offers provider-stated variants and switches only
     staged = "high";
     await render(choice, "low");
     const racing = [...container
-      .querySelectorAll('[role="group"][aria-label="Context Window"] [role="menuitemradio"]')] as HTMLButtonElement[];
+      .querySelectorAll('[role="radiogroup"][aria-label="Context Window"] [role="radio"]')] as HTMLButtonElement[];
     await act(async () => { racing[0]!.click(); });
     assert.deepEqual(applied, [{ model: "opus", effort: "high", serviceTier: "" }],
       "a just-staged effort survives a window switch made before the session view catches up");
@@ -296,7 +332,7 @@ test("the Context Window group offers provider-stated variants and switches only
     // still shows a persisted `low` that discovery has since dropped; it must not be carried over.
     await render(choice, "low", ["high"]);
     const stale = [...container
-      .querySelectorAll('[role="group"][aria-label="Context Window"] [role="menuitemradio"]')] as HTMLButtonElement[];
+      .querySelectorAll('[role="radiogroup"][aria-label="Context Window"] [role="radio"]')] as HTMLButtonElement[];
     await act(async () => { stale[0]!.click(); });
     assert.deepEqual(applied, [{ model: "opus", effort: "", serviceTier: "" }],
       "an effort the agent no longer advertises is cleared rather than sent");
@@ -304,15 +340,15 @@ test("the Context Window group offers provider-stated variants and switches only
     applied.length = 0;
     await render(choice, "");
     const defaultEffortRadios = [...container
-      .querySelectorAll('[role="group"][aria-label="Context Window"] [role="menuitemradio"]')] as HTMLButtonElement[];
+      .querySelectorAll('[role="radiogroup"][aria-label="Context Window"] [role="radio"]')] as HTMLButtonElement[];
     await act(async () => { defaultEffortRadios[0]!.click(); });
     assert.deepEqual(applied, [{ model: "opus", effort: "", serviceTier: "" }],
       "an unset effort stays unset so the new model's own default applies");
 
     await render(null);
-    assertNoDomNode(container.querySelector('[role="group"][aria-label="Context Window"]'),
+    assertNoDomNode(container.querySelector('[role="radiogroup"][aria-label="Context Window"]'),
       "no group without a real provider-listed choice");
-    assert.ok(container.querySelector('[role="group"][aria-label="Model"]'));
+    assert.ok(container.querySelector('[role="radiogroup"][aria-label="Model"]'));
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();
@@ -327,13 +363,13 @@ test("a refused person's composer setting is disabled with the reason and never 
   let selectionCount = 0;
   await act(async () => {
     root.render(
-      <BarMenu label="Current Model" ariaLabel="Model Settings: Current Model" title="Choose a model" disabledReason={reason}>
+      <ModelSettingsPopover label="Current Model" ariaLabel="Model Settings: Current Model" title="Choose a model" disabledReason={reason}>
         {() => (
-          <button type="button" role="menuitemradio" aria-checked="true" onClick={() => { selectionCount += 1; }}>
+          <button type="button" role="radio" aria-checked="true" onClick={() => { selectionCount += 1; }}>
             Current Model
           </button>
         )}
-      </BarMenu>,
+      </ModelSettingsPopover>,
     );
   });
   try {
@@ -346,7 +382,7 @@ test("a refused person's composer setting is disabled with the reason and never 
       trigger.click();
       trigger.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }) as never);
     });
-    assertNoDomNode(container.querySelector('[role="menu"]'), "the menu never opens");
+    assertNoDomNode(domWindow.document.querySelector('[role="dialog"]'), "the popover never opens");
     assert.equal(selectionCount, 0);
   } finally {
     await act(async () => { root.unmount(); });

@@ -238,6 +238,8 @@ export interface MenuSurfaceProps extends Omit<HTMLAttributes<HTMLDivElement>, "
   align?: "start" | "end";
   /** "trigger" matches the trigger's width (the instance selector). */
   width?: number | "trigger";
+  /** A cap wider than §9.1's or §9.2's, for a popover laid out in columns (Model Settings). */
+  maxWidth?: number;
   /** A selector for the trigger's ancestor whose width the menu stays inside on desktop. */
   boundary?: string;
   /** A selector for the trigger's ancestor the menu opens beside as a flyout on desktop (the rail). */
@@ -272,6 +274,7 @@ export function MenuSurface({
   kind = "menu",
   align = "start",
   width,
+  maxWidth,
   boundary,
   beside,
   onDismiss,
@@ -287,7 +290,7 @@ export function MenuSurface({
     anchor,
     align,
     kind === "popover" ? POPOVER_GAP : MENU_GAP,
-    kind === "popover" ? POPOVER_MAX_WIDTH : MENU_MAX_WIDTH,
+    maxWidth ?? (kind === "popover" ? POPOVER_MAX_WIDTH : MENU_MAX_WIDTH),
     sheet,
     boundary,
     beside,
@@ -326,7 +329,8 @@ export function MenuSurface({
 }
 
 export interface MenuItemProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, "role"> {
-  role?: "menuitem" | "menuitemradio" | "menuitemcheckbox";
+  /** `radio` draws the same row inside a popover's radio group, where menu roles do not belong. */
+  role?: "menuitem" | "menuitemradio" | "menuitemcheckbox" | "radio";
   /** The leading 16px icon slot. */
   icon?: ReactNode;
   /** A second line: an option's description, or why a disabled item is unavailable (§9.1). */

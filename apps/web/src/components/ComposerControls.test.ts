@@ -10,13 +10,14 @@ import {
   modelEffortControlLabel,
   ModelEffortMenuChoices,
   permissionModeOptionDescription,
+  plainModelDescription,
   serviceTierChoices,
   ServiceTierMenuChoices,
   sessionPermissionModeControls,
   unverifiedDeliveryNote,
 } from "./ComposerControls.js";
 
-test("model and reasoning effort are separately labelled menu-radio groups", () => {
+test("model and reasoning effort are separately labelled radio groups, side by side", () => {
   const html = renderToStaticMarkup(React.createElement(ModelEffortMenuChoices, {
     models: [{ id: "gpt", displayName: "GPT", defaultEffort: "medium" }],
     modelSource: "live",
@@ -26,10 +27,78 @@ test("model and reasoning effort are separately labelled menu-radio groups", () 
     effortVal: "high",
     apply: () => {},
   }));
-  assert.match(html, /role="group" aria-label="Model"/);
-  assert.match(html, /role="group" aria-label="Reasoning Effort"/);
-  assert.equal((html.match(/role="menuitemradio"/g) ?? []).length, 4);
+  assert.match(html, /role="radiogroup" aria-label="Model"/);
+  assert.match(html, /role="radiogroup" aria-label="Reasoning Effort"/);
+  assert.doesNotMatch(html, /role="menuitemradio"/, "a popover's choices are radios, not menu items");
+  assert.equal((html.match(/role="radio"/g) ?? []).length, 4);
   assert.equal((html.match(/aria-checked="true"/g) ?? []).length, 2);
+  // One Tab stop per group: the checked option.
+  assert.equal((html.match(/tabindex="0"/g) ?? []).length, 2);
+  // Two columns: the model on the left, the effort on its own on the right.
+  const columns = html.split('class="model-settings-column"').slice(1);
+  assert.match(html, /class="model-settings-columns"/);
+  assert.equal(columns.length, 2);
+  assert.match(columns[0]!, /aria-label="Model"/);
+  assert.doesNotMatch(columns[0]!, /Reasoning Effort/);
+  assert.match(columns[1]!, /aria-label="Reasoning Effort"/);
+  assert.match(html, /Changes apply from the next turn\./);
+});
+
+test("an effort-only harness, and the phone sheet, render one column in reading order", () => {
+  const effortsOnly = renderToStaticMarkup(React.createElement(ModelEffortMenuChoices, {
+    models: [],
+    modelVal: "",
+    modelEfforts: ["low", "high"],
+    effortVal: "",
+    apply: () => {},
+  }));
+  assert.doesNotMatch(effortsOnly, /model-settings-columns/, "no empty column");
+  assert.equal(effortsOnly.split('class="model-settings-column"').length - 1, 1);
+  assert.doesNotMatch(effortsOnly, /aria-label="Model"/);
+
+  const tiers = serviceTierChoices({
+    models: [{ id: "gpt", serviceTiers: [{ id: "fast", name: "Fast" }] }],
+    effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
+  }, "gpt", undefined);
+  const stacked = renderToStaticMarkup(React.createElement(ModelEffortMenuChoices, {
+    models: [{ id: "gpt", displayName: "GPT" }],
+    modelVal: "gpt",
+    modelEfforts: ["low", "high"],
+    effortVal: "",
+    serviceTierState: tiers,
+    sessionUsage: React.createElement("div", { role: "group", "aria-label": "Session Usage" }),
+    stacked: true,
+    apply: () => {},
+  }));
+  assert.doesNotMatch(stacked, /model-settings-columns/);
+  const order = [...stacked.matchAll(/aria-label="(Session Usage|Model|Reasoning Effort|Service Tier)"/g)].map((match) => match[1]);
+  assert.deepEqual(order, ["Session Usage", "Model", "Reasoning Effort", "Service Tier"]);
+});
+
+test("a model's description drops the model's own name and reads as sentences", () => {
+  assert.equal(
+    plainModelDescription({ id: "opus[1m]", displayName: "Opus 5", description: "Opus 5 with 1M context" }),
+    "1M context.",
+  );
+  assert.equal(
+    plainModelDescription({ id: "default", displayName: "Default (Opus 5)", description: "Opus 5 with 1M context · Best for everyday, complex tasks" }),
+    "1M context. Best for everyday, complex tasks.",
+  );
+  assert.equal(
+    plainModelDescription({ id: "sonnet", displayName: "Sonnet 5", description: "Sonnet 5 · Efficient for routine tasks" }),
+    "Efficient for routine tasks.",
+  );
+  assert.equal(
+    plainModelDescription({ id: "gpt-6", displayName: "GPT-6", description: "GPT-6-Astra is a preview." }),
+    "GPT-6-Astra is a preview.",
+    "only a whole name is removed",
+  );
+  assert.equal(plainModelDescription({ id: "opus", displayName: "Opus 5", description: "Opus 5" }), undefined);
+  assert.equal(plainModelDescription({ id: "opus", displayName: "Opus 5" }), undefined);
+  assert.equal(
+    plainModelDescription({ id: "pi", displayName: "Pi", description: "Uses the latest available Opus model" }),
+    "Uses the latest available Opus model.",
+  );
 });
 
 test("an effort-only control keeps a non-empty Model label when no live catalog is available", () => {
@@ -52,22 +121,24 @@ test("service tier choices expose Standard and provider copy for only the select
     effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
   };
   const state = serviceTierChoices(capabilities, "gpt-fast", undefined);
+  // When a change applies is said once, in Model Settings' footer, not under every tier.
   assert.deepEqual(state, {
     choices: [
-      { id: "default", name: "Standard", description: "Standard response speed. Applies to the next turn." },
-      { id: "fast", name: "Fast", description: "Uses more credits. Applies to the next turn." },
+      { id: "default", name: "Standard", description: "Standard response speed." },
+      { id: "fast", name: "Fast", description: "Uses more credits." },
     ],
-    selected: { id: "fast", name: "Fast", description: "Uses more credits. Applies to the next turn." },
+    selected: { id: "fast", name: "Fast", description: "Uses more credits." },
   });
   assert.equal(serviceTierChoices(capabilities, "gpt-standard", "fast"), null);
   const html = renderToStaticMarkup(React.createElement(ServiceTierMenuChoices, {
     state: state!, apply: () => {}, close: () => {},
   }));
-  assert.match(html, /role="group" aria-label="Service Tier"/);
+  assert.match(html, /role="radiogroup" aria-label="Service Tier"/);
   assert.match(html, />Standard</);
   assert.match(html, />Fast</);
-  assert.match(html, /Uses more credits\. Applies to the next turn\./);
-  assert.equal((html.match(/role="menuitemradio"/g) ?? []).length, 2);
+  assert.match(html, /Uses more credits\./);
+  assert.doesNotMatch(html, /Applies to the next turn/);
+  assert.equal((html.match(/role="radio"/g) ?? []).length, 2);
   assert.equal((html.match(/aria-checked="true"/g) ?? []).length, 1);
 });
 

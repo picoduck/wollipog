@@ -100,7 +100,7 @@ test.describe("with the composer focused, one tap", () => {
     await openSession(page);
     await focusComposer(page);
     await tapOnce(page, page.locator(".model-settings-menu .cbar-trigger"));
-    await expectFocusSettlesIn(page, page.locator('.menu[aria-label="Model Settings"]'));
+    await expectFocusSettlesIn(page, page.getByRole("dialog", { name: "Model Settings" }));
   });
 
   test("opens a workspace reference chip's inspector", async ({ page }) => {

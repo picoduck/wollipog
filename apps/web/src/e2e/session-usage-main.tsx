@@ -1,6 +1,6 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
-import type { ControlPlaneToUi, PromptImageInput, RunnerView, SessionEvent, SessionView } from "@wollipog/protocol";
+import type { ControlPlaneToUi, PromptImageInput, RunnerView, SessionConfig, SessionEvent, SessionView } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ViewNavigation } from "../navigation.js";
@@ -541,6 +541,13 @@ const client = {
       throw new ApiError("Parent Control policy revision is stale", 409);
     }
     session.parentControlPolicy = { revision: expectedRevision + 1, decisions };
+    return { ...session };
+  },
+  // Model Settings' choices (#2191): each patch is recorded, in order, so a spec can read what a
+  // context-window switch sent alongside the effort staged before it.
+  setConfig: async (_id: string, patch: Partial<SessionConfig>) => {
+    const recorded = (window as unknown as { __configPatches?: Partial<SessionConfig>[] }).__configPatches ??= [];
+    recorded.push(patch);
     return { ...session };
   },
   prompt: async () => {

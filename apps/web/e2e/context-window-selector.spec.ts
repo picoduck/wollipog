@@ -17,12 +17,15 @@ test("desktop: one Opus entry, a Context Window group, and catalog-sourced capac
   await expect(trigger).toContainText("1M");
   await expect(trigger).toHaveAttribute("title", /context window/);
   await trigger.click();
-  const modelGroup = page.getByRole("group", { name: "Model" });
-  await expect(modelGroup.getByRole("menuitemradio", { name: "Opus 5", exact: true })).toHaveAttribute("aria-checked", "true");
-  await expect(modelGroup.getByRole("menuitemradio", { name: /1M Context/ })).toHaveCount(0);
-  const windowGroup = page.getByRole("group", { name: "Context Window" });
-  await expect(windowGroup.getByRole("menuitemradio", { name: "200K" })).toHaveAttribute("aria-checked", "false");
-  await expect(windowGroup.getByRole("menuitemradio", { name: "1M" })).toHaveAttribute("aria-checked", "true");
+  const modelGroup = page.getByRole("radiogroup", { name: "Model" });
+  await expect(modelGroup.getByRole("radio", { name: "Opus 5", exact: true })).toHaveAttribute("aria-checked", "true");
+  await expect(modelGroup.getByRole("radio", { name: /1M Context/ })).toHaveCount(0);
+  // A segmented control (§10.2), one option per provider window.
+  const windowGroup = page.getByRole("radiogroup", { name: "Context Window" });
+  await expect(windowGroup.getByRole("radio")).toHaveText(["200K", "1M"]);
+  await expect(windowGroup.getByRole("radio", { name: "200K" })).toHaveAttribute("aria-checked", "false");
+  await expect(windowGroup.getByRole("radio", { name: "1M" })).toHaveAttribute("aria-checked", "true");
+  await expect(windowGroup.getByRole("radio", { name: "1M" })).toHaveAttribute("title", "1,000,000 tokens");
   await page.screenshot({ path: `${SHOT}/desktop-menu.png` });
   await page.keyboard.press("Escape");
 
@@ -33,6 +36,49 @@ test("desktop: one Opus entry, a Context Window group, and catalog-sourced capac
   await expect(popover).toContainText("1M · Model Catalog");
   await expect(popover.locator(".context-popover-discrepancy")).toHaveCount(0);
   await page.screenshot({ path: `${SHOT}/desktop-popover-catalog.png` });
+});
+
+test("1440px: two columns with Reasoning Effort in view, and a window switch keeps the staged effort", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/session-usage-e2e.html?width=1440&height=860&context=choice&used=150000");
+  const trigger = page.getByRole("button", { name: /^Model Settings:/ });
+  await trigger.click();
+  const popover = page.getByRole("dialog", { name: "Model Settings" });
+  const effort = popover.getByRole("radiogroup", { name: "Reasoning Effort" });
+  const columns = popover.locator(".model-settings-columns > .model-settings-column");
+  await expect(columns).toHaveCount(2);
+  await expect(columns.nth(0).getByRole("radiogroup", { name: "Model" })).toBeVisible();
+  await expect(columns.nth(0).getByRole("radiogroup", { name: "Context Window" })).toBeVisible();
+  await expect(columns.nth(1).getByRole("radiogroup", { name: "Reasoning Effort" })).toBeVisible();
+  // Side by side, and every effort is in view without scrolling the popover.
+  const [modelBox, effortBox, popoverBox] = await Promise.all([
+    popover.getByRole("radiogroup", { name: "Model" }).boundingBox(),
+    effort.boundingBox(),
+    popover.boundingBox(),
+  ]);
+  expect(effortBox!.x).toBeGreaterThan(modelBox!.x + modelBox!.width - 1);
+  expect(await popover.evaluate((element) => element.scrollHeight <= element.clientHeight)).toBe(true);
+  for (const option of await effort.getByRole("radio").all()) {
+    const box = (await option.boundingBox())!;
+    expect(box.y).toBeGreaterThanOrEqual(popoverBox!.y);
+    expect(box.y + box.height).toBeLessThanOrEqual(popoverBox!.y + popoverBox!.height);
+  }
+  // Opens up from the chip, at its left edge.
+  const triggerBox = (await trigger.boundingBox())!;
+  expect(popoverBox!.y + popoverBox!.height).toBeLessThanOrEqual(triggerBox.y + 0.5);
+  expect(Math.abs(popoverBox!.x - triggerBox.x)).toBeLessThanOrEqual(1);
+  // Plain descriptions, a check on every selected choice, and one footer.
+  await expect(popover.getByRole("radiogroup", { name: "Model" })).not.toContainText("Opus 5 with");
+  await expect(popover).toContainText("Changes apply from the next turn.");
+  for (const group of ["Model", "Reasoning Effort"]) {
+    await expect(popover.getByRole("radiogroup", { name: group }).locator('[aria-checked="true"] .menu-check')).toHaveCount(1);
+  }
+
+  // Stage High, then switch the window: the switch carries High rather than resetting it.
+  await effort.getByRole("radio", { name: "High", exact: true }).click();
+  await popover.getByRole("radiogroup", { name: "Context Window" }).getByRole("radio", { name: "200K" }).click();
+  const patches = await page.evaluate(() => (window as unknown as { __configPatches?: unknown[] }).__configPatches ?? []);
+  expect(patches).toEqual([{ effort: "high" }, { model: "opus", effort: "high", serviceTier: "" }]);
 });
 
 test("desktop: a served 200K window against an advertised 1M is named in the popover", async ({ page }) => {
@@ -55,8 +101,8 @@ test("no Context Window group when the catalog offers a single window for the ba
   const trigger = page.locator(".cbar-trigger", { hasText: "Sonnet 5" }).first();
   await expect(trigger).not.toContainText("1M");
   await trigger.click();
-  await expect(page.getByRole("group", { name: "Model" })).toBeVisible();
-  await expect(page.getByRole("group", { name: "Context Window" })).toHaveCount(0);
+  await expect(page.getByRole("radiogroup", { name: "Model" })).toBeVisible();
+  await expect(page.getByRole("radiogroup", { name: "Context Window" })).toHaveCount(0);
   // Sonnet's catalog entry states no window and nothing was served yet: no meter, no guess.
   await expect(page.locator(".context-control > button")).toHaveCount(0);
   await page.screenshot({ path: `${SHOT}/desktop-menu-no-choice.png` });
@@ -68,7 +114,7 @@ test("mobile: the Context Window group in the composer menu", async ({ page }) =
   await page.locator(".composer-idle-preview").click();
   const trigger = page.locator(".cbar-trigger", { hasText: "Opus 5" }).first();
   await trigger.click();
-  await expect(page.getByRole("group", { name: "Context Window" }).getByRole("menuitemradio", { name: "1M" })).toHaveAttribute("aria-checked", "true");
+  await expect(page.getByRole("radiogroup", { name: "Context Window" }).getByRole("radio", { name: "1M" })).toHaveAttribute("aria-checked", "true");
   await page.screenshot({ path: `${SHOT}/mobile-menu.png` });
   // On a phone the bar has no room for the ring (#2166): the same sheet opens with the window's
   // figures in its Session Usage group, ahead of the model choices.

@@ -5809,6 +5809,30 @@ textarea {
   max-width: 360px;
   flex: 0 1 auto;
 }
+/* Model Settings (#2191, docs/design-system.md §9.2): §9.1's radio rows in a popover. Its rows keep
+   the menu's inset, so it takes the menu's padding rather than the popover's. With a choice for
+   each column (ModelEffortMenuChoices renders the columns only then), the model and what belongs
+   to it sit beside the reasoning effort, and a composer pane too narrow for both lays them out in
+   one. */
+.popover.model-settings { padding: var(--space-1); }
+.popover.model-settings:has(.model-settings-columns) {
+  width: 536px;
+  max-width: min(536px, calc(100vw - var(--space-4)));
+}
+.model-settings-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  align-items: start;
+  gap: 0 var(--space-2);
+}
+.model-settings-column,
+.model-settings-group {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.model-settings-group + .model-settings-group { margin-top: var(--space-1); }
+.model-settings-group > .seg { margin: 0 0 var(--space-1); }
 .composer-btn {
   height: var(--composer-ctl);
   padding: 0 var(--space-2);
@@ -9633,6 +9657,11 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   .popover {
     padding: 0 max(var(--space-4), env(safe-area-inset-right)) max(var(--space-4), env(safe-area-inset-bottom))
       max(var(--space-4), env(safe-area-inset-left));
+  }
+  /* Model Settings' rows are a menu's, so its sheet keeps the menu sheet's inset. */
+  .popover.model-settings {
+    padding: 0 max(var(--space-2), env(safe-area-inset-right)) max(var(--space-2), env(safe-area-inset-bottom))
+      max(var(--space-2), env(safe-area-inset-left));
   }
   .menu-backdrop {
     background: var(--modal-backdrop);

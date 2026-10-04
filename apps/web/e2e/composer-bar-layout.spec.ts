@@ -127,11 +127,11 @@ test.describe("with a touch pointer", () => {
     await page.screenshot({ path: `${EVIDENCE}/after-mobile-orchestrator.png` });
     const trigger = page.getByRole("button", { name: /^Model Settings:/ });
     await trigger.click();
-    const sheet = page.locator('.menu[aria-label="Model Settings"]');
+    const sheet = page.getByRole("dialog", { name: "Model Settings" });
     await expect(sheet).toBeVisible();
     await dialogMotionSettled(page);
     await expect(sheet).toContainText("Model Settings");
-    const close = sheet.getByRole("menuitem", { name: "Close Model Settings" });
+    const close = sheet.getByRole("button", { name: "Close Model Settings" });
     await expect(close).toBeVisible();
     const [closeBox, titleBox] = await Promise.all([
       close.boundingBox(),
@@ -143,15 +143,17 @@ test.describe("with a touch pointer", () => {
     expect(closeBox!.height).toBeGreaterThanOrEqual(44);
     expect(closeBox!.x).toBeGreaterThanOrEqual(titleBox!.x + titleBox!.width);
     for (const group of ["Model", "Context Window", "Reasoning Effort", "Service Tier"]) {
-      await expect(sheet.getByRole("group", { name: group })).toBeVisible();
+      await expect(sheet.getByRole("radiogroup", { name: group })).toBeVisible();
     }
     const sheetBox = await sheet.boundingBox();
     expect(sheetBox).not.toBeNull();
     expect(sheetBox!.y + sheetBox!.height).toBeCloseTo(844, 0);
-    for (const row of await sheet.getByRole("menuitemradio").all()) {
+    for (const row of await sheet.locator('.menu-item[role="radio"]').all()) {
       expect((await row.boundingBox())!.height).toBeGreaterThanOrEqual(44);
     }
-    await expect(sheet.getByRole("group", { name: "Model" })).toContainText("with a 1M context window");
+    // The segmented Context Window keeps a full touch-height track (§10.2).
+    expect((await sheet.getByRole("radiogroup", { name: "Context Window" }).boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    await expect(sheet.getByRole("radiogroup", { name: "Model" })).toContainText("A 1M context window.");
     await page.screenshot({ path: `${EVIDENCE}/after-mobile-model-settings.png` });
     await sheet.evaluate((element) => { element.scrollTop = element.scrollHeight; });
     await expect(close).toBeVisible();
@@ -184,10 +186,10 @@ for (const { frameWidth, plan } of [
     if (plan) await expect(page.getByRole("button", { name: "Plan", exact: true })).toBeVisible();
     const trigger = page.getByRole("button", { name: /^Model Settings:/ });
     await trigger.click();
-    const popover = page.locator('.menu[aria-label="Model Settings"]');
+    const popover = page.getByRole("dialog", { name: "Model Settings" });
     await expect(popover).toBeVisible();
     await dialogMotionSettled(page);
-    const close = popover.getByRole("menuitem", { name: "Close Model Settings" });
+    const close = popover.getByRole("button", { name: "Close Model Settings" });
     const [frameBox, triggerBox, popoverBox, closeBox] = await Promise.all([
       page.locator("#frame").boundingBox(),
       trigger.boundingBox(),

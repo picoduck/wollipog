@@ -123,7 +123,10 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   // navigation rather than a persisted setting or one-of-N form choice. Listbox/option is the
   // correct combobox popup contract for its textarea; both pickers render through this one file.
   ["components/ComposerListbox.tsx", "raw-radiogroup", 2],
-  ["components/ComposerControls.tsx", "raw-radiogroup", 2],
+  // The permission menu's §9.1 menu radios, and Model Settings (#2191): a popover of §9.1 rows
+  // with the trailing check, as radios in labelled radio groups. It is a dialog rather than a menu
+  // because its Context Window is a SegmentedControl, which a menu cannot hold.
+  ["components/ComposerControls.tsx", "raw-radiogroup", 3],
   // View Options (#1961) is §9.1's radio-like menu: MenuItem rows with the trailing check, one per
   // Show and Group By choice, which reset with the page. A view switch in a menu, not a form choice.
   ["components/SkillList.tsx", "raw-radiogroup", 2],
