@@ -13,22 +13,26 @@
  * histories have only the audit record, so those are materialized as compact chronological rows
  * anchored to the last loaded event at or before the decision's timestamp.
  */
-import type { GovernanceAuditEntry } from "@wollipog/protocol";
+import type { GovernanceActor, GovernanceAuditEntry } from "@wollipog/protocol";
+import { humanResolver, resolverName, type ViewerIdentity } from "./resolver-identity.js";
 import { isCollapsibleWorkItem, type TimelineItem } from "./timeline.js";
 
 export type GovernanceOutcomeTone = "allowed" | "denied" | "timed-out" | "policy";
 
 export interface GovernanceOutcome {
+  /** Viewer-neutral label; a member's decision is named relative to the viewer when rendered. */
   label: string;
   detail: string;
   tone: GovernanceOutcomeTone;
+  /** A member approved or denied the request (#2527). `actorId` is their user id, never shown. */
+  human?: { verb: "Approved" | "Denied"; actorId?: string };
 }
 
 /** A single user-visible governance outcome, reduced to content-safe display fields. */
 export interface GovernanceDecision extends GovernanceOutcome {
   auditId: string;
   requestId: string;
-  /** Content-safe actor description, e.g. "You · device-1". */
+  /** Content-safe actor description, e.g. "Policy · rule-1"; a member is named when rendered. */
   decidedBy: string;
   policyId?: string;
   timestamp: number;
@@ -64,24 +68,51 @@ export function governanceAuditPresentation(entry: GovernanceAuditEntry): Govern
     return { label: "Allowed by Policy", detail: "The matched policy allowed this tool.", tone: "allowed" };
   }
   if (entry.actor.kind === "human" && entry.outcome === "allowed") {
-    return { label: "Approved by You", detail: "The suspended tool invocation resumed.", tone: "allowed" };
+    return {
+      label: "Approved",
+      detail: "The suspended tool invocation resumed.",
+      tone: "allowed",
+      human: humanDecision("Approved", entry.actor),
+    };
   }
   if (entry.actor.kind === "human" && entry.outcome === "denied") {
-    return { label: "Denied by You", detail: "The suspended tool invocation was blocked.", tone: "denied" };
+    return {
+      label: "Denied",
+      detail: "The suspended tool invocation was blocked.",
+      tone: "denied",
+      human: humanDecision("Denied", entry.actor),
+    };
   }
   return null;
 }
 
+function humanDecision(verb: "Approved" | "Denied", actor: GovernanceActor): NonNullable<GovernanceOutcome["human"]> {
+  return { verb, ...(actor.id ? { actorId: actor.id } : {}) };
+}
+
 const ACTOR_LABELS: Record<string, string> = {
-  human: "You",
+  human: "Member",
   policy: "Policy",
   agent: "Agent",
   system: "System",
 };
 
-function decidedByLabel(actor: GovernanceAuditEntry["actor"]): string {
+/** "Policy · rule-1". A member's user id is never shown: they are named when rendered. */
+function decidedByLabel(actor: GovernanceActor): string {
   const kind = ACTOR_LABELS[actor.kind] ?? actor.kind;
-  return actor.id ? `${kind} · ${actor.id}` : kind;
+  return actor.id && actor.kind !== "human" ? `${kind} · ${actor.id}` : kind;
+}
+
+/** "Approved by You", "Denied by Ada Lovelace", or "Approved by Another Member" (#2527). */
+export function governanceDecisionLabel(decision: GovernanceOutcome, viewer: ViewerIdentity | null): string {
+  const resolver = decision.human ? humanResolver(viewer, decision.human.actorId) : null;
+  return resolver ? `${decision.human!.verb} by ${resolverName(resolver, { titleCase: true })}` : decision.label;
+}
+
+/** The Decided By fact: "You", the member's display name, or "Another Member". */
+export function governanceDecidedBy(decision: GovernanceDecision, viewer: ViewerIdentity | null): string {
+  const resolver = decision.human ? humanResolver(viewer, decision.human.actorId) : null;
+  return resolver ? resolverName(resolver, { titleCase: true }) : decision.decidedBy;
 }
 
 /**

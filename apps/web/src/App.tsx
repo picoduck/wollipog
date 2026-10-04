@@ -21,6 +21,7 @@ import { ActiveInstanceConnectionProvider, activeInstanceConnection, useInstance
 import { disablePush, enablePush, pushAvailable, reconcilePushSubscription, type PushSetting } from "./push.js";
 import { pickTopmost } from "./layers.js";
 import { useIsMobile } from "./components/useIsMobile.js";
+import { ViewerIdentityProvider } from "./components/ViewerIdentityProvider.js";
 import { SessionPanelToggles } from "./components/SessionPanelToggles.js";
 import { parseStoredDockVisible } from "./dock.js";
 import { isInboxBlocked } from "./inbox.js";
@@ -777,6 +778,7 @@ export function Shell() {
           data-focus-zone="main"
           tabIndex={-1}
         >
+          <ViewerIdentityProvider>
           <SearchPaletteContext.Provider value={openPalette}>
           <AppBarSearchProvider onSearch={isMobile ? openPalette : undefined}>
           <ErrorBoundary
@@ -895,6 +897,7 @@ export function Shell() {
           </ErrorBoundary>
           </AppBarSearchProvider>
           </SearchPaletteContext.Provider>
+          </ViewerIdentityProvider>
         </div>
         {/* Bottom shell dock: session-scoped terminals in the compact desktop layout. Mounted only
             while toggled on; keyed by session so tab selection never bleeds across navigations. */}

@@ -4,6 +4,14 @@ import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { AgentQuestion, QuestionAnswerSummaryEntry, SessionEvent, SessionEventPayload } from "@wollipog/protocol";
 import { deriveTimeline, type TimelineItem } from "../timeline.js";
+import {
+  NO_RESOLVER_DIRECTORY,
+  ResolverDirectoryContext,
+  viewerIdentity,
+  type HumanQuestionAnswer,
+  type ResolverDirectory,
+  type ViewerIdentity,
+} from "../resolver-identity.js";
 import { QuestionHistoryRow, questionAnswerLine, questionOutcome } from "./QuestionHistoryRow.js";
 
 (globalThis as typeof globalThis & { React: typeof React }).React = React;
@@ -45,9 +53,38 @@ function ask(questions: AgentQuestion[], requestId = "ask"): SessionEvent {
   return event({ kind: "question_request", requestId, questions }, ASKED);
 }
 
-function render(item: QuestionItem, open = false): string {
-  return renderToStaticMarkup(React.createElement(QuestionHistoryRow, { item, open }));
+function render(item: QuestionItem, open = false, directory: ResolverDirectory = NO_RESOLVER_DIRECTORY): string {
+  return renderToStaticMarkup(React.createElement(
+    ResolverDirectoryContext.Provider,
+    { value: directory },
+    React.createElement(QuestionHistoryRow, { item, open }),
+  ));
 }
+
+function viewer(userId: string, members: Array<[string, string]>): ViewerIdentity {
+  return viewerIdentity({
+    context: {
+      userId, userName: "", organizationId: "org-1", organizationName: "Org", role: "operator",
+      deviceId: null, localBootstrap: false,
+    },
+    organizations: [],
+    memberships: members.map(([memberId, userName]) => ({
+      organizationId: "org-1", organizationName: "Org", userId: memberId, userName,
+      userStatus: "active", role: "operator", createdAt: 1,
+    })),
+    teams: [],
+  });
+}
+
+const SOLO = viewer("user-local", [["user-local", "Local owner"]]);
+const MEMBERS: Array<[string, string]> = [["user-ada", "Ada Lovelace"], ["user-grace", "Grace Hopper"]];
+
+/** The directory a viewer sees, with the answers the session's governance audit recorded. */
+function directoryFor(viewing: ViewerIdentity | null, answers: Record<string, HumanQuestionAnswer[]> = {}): ResolverDirectory {
+  return { viewer: viewing, questionAnswers: new Map(Object.entries(answers)) };
+}
+
+const resolutionOf = (html: string) => /<p class="tl-question-resolution">([^<]*)<\/p>/.exec(html)?.[1];
 
 const visibleText = (html: string) => html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
 
@@ -69,7 +106,7 @@ test("a single-choice answer reads on line 2 from the stored event (#2188)", () 
   assert.match(html, /aria-label="Destination · Answer: Destination 1 \(Production\) · Answered"/);
   assert.match(html, /<time dateTime="2026-10-03T00:31:00.000Z">/);
   assert.match(html, /Asked [^,]+, answered /);
-  assert.match(visibleText(render(item, true)), /Answered by you at /);
+  assert.match(visibleText(render(item, true, directoryFor(SOLO))), /Answered by you at /);
   assert.doesNotMatch(html, /❓|→|tl-perm/);
 });
 
@@ -151,6 +188,50 @@ test("an older runner's answer without a summary reads Answered with no answer l
   assert.doesNotMatch(html, /tl-step-detail|lucide-check /);
   assert.match(visibleText(html), /Answered at /);
   assert.doesNotMatch(visibleText(html), /Answered by you/, "who answered is unknown without the summary");
+});
+
+test("a shared session names who answered relative to the viewer, never by raw user id (#2527)", () => {
+  const item = questionFrom([ask([destination]), answered([{ questionId: "destination", selected: ["Destination 1 (Production)"] }])]);
+  const byAda = { ask: [{ actorId: "user-ada", timestamp: ANSWERED }] };
+  const ada = viewer("user-ada", MEMBERS);
+  const grace = viewer("user-grace", MEMBERS);
+
+  assert.match(resolutionOf(render(item, true, directoryFor(ada, byAda)))!, /^Answered by you at /);
+  assert.match(resolutionOf(render(item, true, directoryFor(grace, byAda)))!, /^Answered by Ada Lovelace at /);
+
+  // A resolver missing from the directory, or without a display name, is "another member".
+  const unnamed = viewer("user-grace", [...MEMBERS, ["user-anon", "  "]]);
+  for (const actorId of ["user-gone", "user-anon"]) {
+    const html = render(item, true, directoryFor(unnamed, { ask: [{ actorId, timestamp: ANSWERED }] }));
+    assert.match(resolutionOf(html)!, /^Answered by another member at /);
+    assert.doesNotMatch(html, /user-(gone|anon|ada|grace)/, "no raw user id is rendered");
+  }
+
+  // The answer is recorded but its audit is not loaded yet, or the viewer is unknown: neutral.
+  assert.match(resolutionOf(render(item, true, directoryFor(grace)))!, /^Answered at /);
+  assert.match(resolutionOf(render(item, true, directoryFor(null, byAda)))!, /^Answered at /);
+
+  // A single-member installation keeps "you", whatever id an older record carries.
+  assert.match(resolutionOf(render(item, true, directoryFor(SOLO, { ask: [{ actorId: "device-1", timestamp: ANSWERED }] })))!,
+    /^Answered by you at /);
+});
+
+test("a reused request id is attributed to the answer recorded nearest its resolution", () => {
+  const item = questionFrom([ask([destination]), answered([{ questionId: "destination", selected: ["Destination 1 (Production)"] }])]);
+  const directory = directoryFor(viewer("user-grace", MEMBERS), { ask: [
+    { actorId: "user-grace", timestamp: ANSWERED - 60_000 },
+    { actorId: "user-ada", timestamp: ANSWERED + 5 },
+    { actorId: "user-grace", timestamp: ANSWERED + 60_000 },
+  ] });
+  assert.match(resolutionOf(render(item, true, directory))!, /^Answered by Ada Lovelace at /);
+});
+
+test("the audit names who answered even when an older runner sent no summary", () => {
+  const item = questionFrom([ask([destination]), event({ kind: "question_resolved", requestId: "ask", answered: true }, ANSWERED)]);
+  const directory = directoryFor(viewer("user-ada", MEMBERS), { ask: [{ actorId: "user-grace", timestamp: ANSWERED }] });
+  assert.match(resolutionOf(render(item, true, directory))!, /^Answered by Grace Hopper at /);
+  assert.match(resolutionOf(render(item, true, directoryFor(SOLO)))!, /^Answered at /,
+    "without a summary or an audit record the row cannot tell a member answered");
 });
 
 test("an unanswered question keeps the Awaiting Answer warning status", () => {

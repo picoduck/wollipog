@@ -7,12 +7,15 @@ import {
   landedGovernanceAnchors,
   governanceAnchorSeq,
   governanceAuditPresentation,
+  governanceDecidedBy,
+  governanceDecisionLabel,
   governanceDecisions,
   mergeGovernanceDecisions,
   sameGovernanceSnapshot,
   transcriptGovernanceDecisions,
 } from "./governance.js";
 import { GovernanceHistoryPanel } from "./components/GovernanceHistoryPanel.js";
+import { ResolverDirectoryContext, viewerIdentity, type ViewerIdentity } from "./resolver-identity.js";
 import { isCollapsibleWorkItem, type TimelineItem } from "./timeline.js";
 
 function entry(overrides: Partial<GovernanceAuditEntry>): GovernanceAuditEntry {
@@ -22,7 +25,7 @@ function entry(overrides: Partial<GovernanceAuditEntry>): GovernanceAuditEntry {
     approvalKind: "policy_hook",
     stage: "resolution",
     outcome: "allowed",
-    actor: { kind: "human", id: "device-1" },
+    actor: { kind: "human", id: "user-ada" },
     scope: { sessionId: "session-1", runnerId: "runner-1" },
     timestamp: 1,
     ...overrides,
@@ -50,7 +53,12 @@ test("hook governance audit has distinct policy, human, timeout, and abandonment
     outcome: "denied",
     actor: { kind: "policy", id: "deny-shell" },
   }))?.label, "Blocked by Policy");
-  assert.equal(governanceAuditPresentation(entry({ outcome: "denied" }))?.label, "Denied by You");
+  assert.deepEqual(governanceAuditPresentation(entry({ outcome: "denied" })), {
+    label: "Denied",
+    detail: "The suspended tool invocation was blocked.",
+    tone: "denied",
+    human: { verb: "Denied", actorId: "user-ada" },
+  });
   assert.deepEqual(governanceAuditPresentation(entry({
     outcome: "denied",
     actor: { kind: "system", id: "decision-history-unavailable" },
@@ -63,7 +71,7 @@ test("hook governance audit has distinct policy, human, timeout, and abandonment
     outcome: "timed_out",
     actor: { kind: "system", id: "policy-ask-timeout" },
   }))?.label, "Approval Timed Out");
-  assert.equal(governanceAuditPresentation(entry({ outcome: "allowed" }))?.label, "Approved by You");
+  assert.deepEqual(governanceAuditPresentation(entry({ outcome: "allowed" }))?.human, { verb: "Approved", actorId: "user-ada" });
   assert.equal(governanceAuditPresentation(entry({
     outcome: "allowed",
     actor: { kind: "policy", id: "allow-read" },
@@ -80,6 +88,71 @@ test("hook governance audit has distinct policy, human, timeout, and abandonment
   }))?.label, "Answered by Policy");
 });
 
+function viewer(userId: string, members: Array<[string, string]>): ViewerIdentity {
+  return viewerIdentity({
+    context: {
+      userId, userName: "", organizationId: "org-1", organizationName: "Org", role: "operator",
+      deviceId: null, localBootstrap: false,
+    },
+    organizations: [],
+    memberships: members.map(([memberId, userName]) => ({
+      organizationId: "org-1", organizationName: "Org", userId: memberId, userName,
+      userStatus: "active", role: "operator", createdAt: 1,
+    })),
+    teams: [],
+  });
+}
+
+function historyAs(viewing: ViewerIdentity | null, decisions: ReturnType<typeof governanceDecisions>): string {
+  return renderToStaticMarkup(React.createElement(
+    ResolverDirectoryContext.Provider,
+    { value: { viewer: viewing, questionAnswers: new Map() } },
+    React.createElement(GovernanceHistoryPanel, { decisions }),
+  ));
+}
+
+test("a member's decision is named relative to the viewer, never by raw user id (#2527)", () => {
+  const ada = viewer("user-ada", [["user-ada", "Ada Lovelace"], ["user-grace", "Grace Hopper"], ["user-anon", " "]]);
+  const grace = viewer("user-grace", [["user-ada", "Ada Lovelace"], ["user-grace", "Grace Hopper"]]);
+  const [approved] = governanceDecisions([entry({ outcome: "allowed" })]);
+  const [denied] = governanceDecisions([entry({ outcome: "denied", actor: { kind: "human", id: "user-grace" } })]);
+  const [unnamed] = governanceDecisions([entry({ outcome: "denied", actor: { kind: "human", id: "user-anon" } })]);
+  const [departed] = governanceDecisions([entry({ outcome: "allowed", actor: { kind: "human", id: "user-gone" } })]);
+
+  assert.equal(governanceDecisionLabel(approved!, ada), "Approved by You");
+  assert.equal(governanceDecidedBy(approved!, ada), "You");
+  assert.equal(governanceDecisionLabel(approved!, grace), "Approved by Ada Lovelace");
+  assert.equal(governanceDecidedBy(approved!, grace), "Ada Lovelace");
+  assert.equal(governanceDecisionLabel(denied!, ada), "Denied by Grace Hopper");
+  assert.equal(governanceDecisionLabel(unnamed!, ada), "Denied by Another Member");
+  assert.equal(governanceDecisionLabel(departed!, ada), "Approved by Another Member");
+  assert.equal(governanceDecidedBy(departed!, ada), "Another Member");
+
+  // A single-member installation keeps "You", whatever id an older record carries.
+  const solo = viewer("user-local", [["user-local", "Local owner"]]);
+  assert.equal(governanceDecisionLabel(departed!, solo), "Approved by You");
+  assert.equal(governanceDecidedBy(departed!, solo), "You");
+
+  // An unknown viewer, or a shared decision with no recorded member, stays neutral.
+  assert.equal(governanceDecisionLabel(approved!, null), "Approved");
+  assert.equal(governanceDecidedBy(approved!, null), "Member");
+  const [anonymous] = governanceDecisions([entry({ outcome: "allowed", actor: { kind: "human" } })]);
+  assert.equal(governanceDecisionLabel(anonymous!, ada), "Approved");
+
+  // Policy decisions are unchanged.
+  const [policy] = governanceDecisions([entry({ outcome: "allowed", actor: { kind: "policy", id: "allow-read" } })]);
+  assert.equal(governanceDecisionLabel(policy!, ada), "Allowed by Policy");
+  assert.equal(governanceDecidedBy(policy!, ada), "Policy · allow-read");
+
+  const history = historyAs(grace, [approved!, denied!, departed!]);
+  assert.match(history, /Approved by Ada Lovelace/);
+  assert.match(history, /Denied by You/);
+  assert.match(history, /Approved by Another Member/);
+  assert.match(history, /<dd>Ada Lovelace<\/dd>/);
+  assert.doesNotMatch(history, /user-(ada|grace|gone)/, "no raw user id is rendered");
+  assert.doesNotMatch(historyAs(null, [approved!, denied!]), /user-|by You/);
+});
+
 test("non-hook audit entries produce no governance outcome", () => {
   assert.equal(governanceAuditPresentation(entry({ approvalKind: "permission" })), null);
 });
@@ -92,7 +165,7 @@ test("decisions are deduplicated, oldest-first, and preserve server order for ti
     entry({ auditId: "c", requestId: "hook-c", timestamp: 300 }),
   ]);
   assert.deepEqual(decisions.map((d) => d.auditId), ["b", "a", "c"]);
-  assert.equal(decisions[0]!.decidedBy, "You · device-1");
+  assert.equal(decisions[0]!.decidedBy, "Member", "a member's user id is never part of the stored label");
 });
 
 test("decisions never carry request content, answers, or credentials", () => {
@@ -101,7 +174,7 @@ test("decisions never carry request content, answers, or credentials", () => {
     governancePolicyId: "deny-shell",
   })]);
   assert.deepEqual(Object.keys(decision!).sort(), [
-    "auditId", "decidedBy", "detail", "label", "policyId", "requestId", "timestamp", "tone",
+    "auditId", "decidedBy", "detail", "human", "label", "policyId", "requestId", "timestamp", "tone",
   ]);
   assert.doesNotMatch(JSON.stringify(decision), /deadbeef/);
 });

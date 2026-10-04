@@ -1090,10 +1090,11 @@ test("native policy-hook decisions retain the runner sequence between exact tool
   assert.deepEqual(native.decision, {
     auditId: "audit-native",
     requestId: "hook-native",
-    label: "Approved by You",
+    label: "Approved",
     detail: "The suspended tool invocation resumed.",
     tone: "allowed",
-    decidedBy: "You · device-1",
+    human: { verb: "Approved", actorId: "device-1" },
+    decidedBy: "Member",
     policyId: "policy-native",
     timestamp: decision.ts,
   });

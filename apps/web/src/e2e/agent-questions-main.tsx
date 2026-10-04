@@ -7,6 +7,7 @@ import { SessionQuestionBanner } from "../components/SessionApproval.js";
 import { ComposerQuestionResponse } from "../components/ComposerQuestionResponse.js";
 import { EventTimeline } from "../components/EventTimeline.js";
 import { QuestionRowGallery } from "./question-row-gallery.js";
+import { ResolverGallery } from "./resolver-gallery.js";
 import { setQuestionResponseStyle, useQuestionResponseStyle } from "../question-response-style.js";
 import { inTypingContext } from "../shortcuts.js";
 import { isFollowTailResumeKey } from "../useFollowTail.js";
@@ -302,4 +303,6 @@ function Fixture() {
 
 createRoot(document.getElementById("root")!).render(params.get("set") === "gallery"
   ? <main id="question-frame" className="timeline"><QuestionRowGallery /></main>
-  : <Fixture />);
+  : params.get("set") === "resolvers"
+    ? <main id="question-frame" className="timeline"><ResolverGallery solo={params.get("viewer") === "solo"} /></main>
+    : <Fixture />);

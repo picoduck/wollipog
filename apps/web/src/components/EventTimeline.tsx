@@ -30,7 +30,7 @@ import {
 } from "./MeasuredVirtualList.js";
 import { CopyButton } from "./common.js";
 import { accountLabelText } from "../personal-identifiers.js";
-import { GovernanceDecisionFacts } from "./GovernanceDecision.js";
+import { GovernanceDecisionFacts, GovernanceDecisionLabel } from "./GovernanceDecision.js";
 import { AccountIcon, AgentLogIcon, BotIcon, ChevronRightIcon, CompactedIcon, CopyIcon, EditIcon, EditInForkIcon, FileEditIcon, HandOffIcon, NewFileIcon, PlanIcon, PlanInProgressIcon, PlanPendingIcon, RewindFilesIcon, StopTurnIcon, SuccessIcon, ThoughtIcon, ThreadForkIcon } from "./Icons.js";
 import { diffFileIsPlain, diffMaxLineNumber, hunkLabel, parseUnifiedDiff, type DiffFile } from "../unified-diff.js";
 import { markdownPlainText } from "./markdown-plain-text.js";
@@ -2421,7 +2421,7 @@ const TimelineRow = memo(function TimelineRow({
             <summary className="tl-governance-head">
               <span className="governance-icon" aria-hidden="true">⚖️</span>
               <span className="sr-only">Governance Decision: </span>
-              <span className="governance-label">{decision.label}</span>
+              <GovernanceDecisionLabel decision={decision} />
               <ActivityTimestampMeta startedAt={decision.timestamp} pointWhenEqual />
             </summary>
             <GovernanceDecisionFacts decision={decision} />

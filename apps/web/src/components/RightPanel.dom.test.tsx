@@ -108,7 +108,7 @@ const git: GitStatus = {
 const governanceDecision: GovernanceDecision = {
   auditId: "audit-1",
   requestId: "req-1",
-  decidedBy: "You · device-1",
+  decidedBy: "Policy · allow-read",
   label: "Allowed by Policy",
   detail: "The matched policy allowed this tool.",
   tone: "allowed",

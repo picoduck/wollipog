@@ -540,6 +540,48 @@ test("every question row reads its outcome and answer without arrows or emoji (#
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
 });
 
+for (const width of [1440, 390]) {
+  test(`question and governance rows name who answered relative to the viewer at ${width}px (#2527)`, async ({ page }) => {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+    await page.goto("/agent-questions-e2e.html?set=resolvers");
+    const timeline = page.getByRole("list", { name: "Resolver Rows" });
+    const questions = timeline.locator(".tl-question");
+    await expect(questions).toHaveCount(3);
+    for (const row of await questions.all()) await row.locator("summary").click();
+    await expect(questions.locator(".tl-question-resolution")).toHaveText([
+      /^Answered by you at /,
+      /^Answered by Grace Hopper at /,
+      /^Answered by another member at /,
+    ]);
+
+    // Approvals are routine work and fold into the turn's work group; expand any such group.
+    for (const group of await timeline.getByRole("button", { name: /^Worked/ }).all()) await group.click();
+    const decisions = timeline.locator(".tl-governance");
+    await expect(decisions.locator(".governance-label")).toHaveText([
+      "Approved by You", "Denied by Grace Hopper", "Approved by Another Member",
+    ]);
+    for (const decision of await decisions.all()) await decision.locator("summary").click();
+    await expect(decisions.locator(".governance-decision-facts dd:nth-of-type(1)")).toHaveText([
+      "You", "Grace Hopper", "Another Member",
+    ]);
+
+    expect(await page.locator("#question-frame").innerText()).not.toMatch(/user-|device-/);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+  });
+}
+
+test("a single-member installation keeps reading every answer and decision as its own (#2527)", async ({ page }) => {
+  await page.goto("/agent-questions-e2e.html?set=resolvers&viewer=solo");
+  const timeline = page.getByRole("list", { name: "Resolver Rows" });
+  const questions = timeline.locator(".tl-question");
+  for (const row of await questions.all()) await row.locator("summary").click();
+  await expect(questions.locator(".tl-question-resolution")).toHaveText([
+    /^Answered by you at /, /^Answered by you at /, /^Answered by you at /,
+  ]);
+  for (const group of await timeline.getByRole("button", { name: /^Worked/ }).all()) await group.click();
+  await expect(timeline.locator(".governance-label")).toHaveText(["Approved by You", "Denied by You", "Approved by You"]);
+});
+
 for (const width of [1280, 390]) {
   for (const style of ["interactive", "composer"]) {
     test(`universal custom responses on ${width}px ${style} preserve each question (#1595)`, async ({ page }) => {

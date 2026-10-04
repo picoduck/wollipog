@@ -1,5 +1,12 @@
-import React from "react";
-import type { GovernanceDecision } from "../governance.js";
+import React, { useContext } from "react";
+import { governanceDecidedBy, governanceDecisionLabel, type GovernanceDecision } from "../governance.js";
+import { ResolverDirectoryContext } from "../resolver-identity.js";
+
+/** The decision's label, naming a member's decision relative to the viewer (#2527). */
+export function GovernanceDecisionLabel({ decision }: { decision: GovernanceDecision }) {
+  const { viewer } = useContext(ResolverDirectoryContext);
+  return <span className="governance-label">{governanceDecisionLabel(decision, viewer)}</span>;
+}
 
 /**
  * The disclosure body shared by the transcript annotation and the consolidated history.
@@ -9,12 +16,13 @@ import type { GovernanceDecision } from "../governance.js";
  * input, question answers, and credentials are never part of the audit record and are never read.
  */
 export function GovernanceDecisionFacts({ decision }: { decision: GovernanceDecision }) {
+  const { viewer } = useContext(ResolverDirectoryContext);
   return (
     <div className="governance-decision-body">
       <p className="governance-decision-detail">{decision.detail}</p>
       <dl className="governance-decision-facts">
         <dt>Decided By</dt>
-        <dd>{decision.decidedBy}</dd>
+        <dd>{governanceDecidedBy(decision, viewer)}</dd>
         {decision.policyId && (
           <>
             <dt>Policy</dt>
