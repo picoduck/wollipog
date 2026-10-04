@@ -1,4 +1,7 @@
 import { defineConfig } from "@playwright/test";
+import { playwrightPort } from "./playwright.ports.ts";
+
+const port = playwrightPort("development");
 
 export default defineConfig({
   testDir: "./apps/web/e2e",
@@ -9,17 +12,18 @@ export default defineConfig({
   workers: 1,
   reporter: process.env.CI ? "github" : "list",
   use: {
-    baseURL: "http://127.0.0.1:4174",
+    baseURL: `http://127.0.0.1:${port}`,
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
   },
   webServer: {
-    command: "pnpm --dir apps/web exec vite --host 127.0.0.1 --port 4174 --strictPort",
-    url: "http://127.0.0.1:4174/remote-instances-e2e.html",
+    command: `pnpm --dir apps/web exec vite --host 127.0.0.1 --port ${port} --strictPort`,
+    url: `http://127.0.0.1:${port}/remote-instances-e2e.html`,
     // Never reused, including locally. This repo is worked in several git worktrees at once, and a
-    // Vite server left running by any of them answers on this port — so a local run, or a
-    // screenshot-baseline regeneration, could certify a different checkout's source and report
-    // every assertion green. --strictPort turns that collision into an error instead.
+    // Vite server left running by any of them can answer on this port — a plain checkout always
+    // uses 4174 — so a local run, or a screenshot-baseline regeneration, could certify a different
+    // checkout's source and report every assertion green. --strictPort turns that collision into an
+    // error instead.
     reuseExistingServer: false,
     timeout: 120_000,
   },

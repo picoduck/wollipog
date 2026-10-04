@@ -182,8 +182,14 @@ the Actions page for that ref to produce the same artifact.
 
 ## Other Conventions
 
-- **Port 4174 is fixed and `--strictPort`.** Two checkouts cannot run the suite at once; wait rather
-  than killing another run's server.
+- **Each worktree serves the suite on its own port.** `playwright.ports.ts` chooses it. In a
+  Wollipog-managed worktree, `playwright.config.ts` uses `WOLLIPOG_PORT_BLOCK_START` and
+  `playwright.production.config.ts` the next port, so worktrees with their own port blocks run the
+  suites at the same time. A malformed block, or one smaller than two ports, fails rather than
+  falling back. Without a block, as in CI and plain checkouts, the ports are `127.0.0.1:4174` and
+  `127.0.0.1:4175`, so two plain checkouts still cannot run the same suite at once. The server is
+  started with `--strictPort` and never reused, so a port already in use fails the run. Wait for
+  the other run rather than killing its server.
 - **The list is virtualized.** A card only has a box while it is mounted, so a spec that measures
   every row needs a viewport tall enough to mount them all, and should assert the expected count
   first so a failure names the real cause.

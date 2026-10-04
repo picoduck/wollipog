@@ -1,4 +1,7 @@
 import { defineConfig } from "@playwright/test";
+import { playwrightPort } from "./playwright.ports.ts";
+
+const port = playwrightPort("production");
 
 export default defineConfig({
   testDir: "./apps/web/e2e",
@@ -10,13 +13,13 @@ export default defineConfig({
   workers: 1,
   reporter: process.env.CI ? "github" : "list",
   use: {
-    baseURL: "http://127.0.0.1:4175",
+    baseURL: `http://127.0.0.1:${port}`,
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
   },
   webServer: {
-    command: "pnpm --filter @wollipog/web build:e2e && pnpm --filter @wollipog/web exec vite preview --mode production-e2e --host 127.0.0.1 --port 4175 --strictPort",
-    url: "http://127.0.0.1:4175/timeline-reflow-e2e.html",
+    command: `pnpm --filter @wollipog/web build:e2e && pnpm --filter @wollipog/web exec vite preview --mode production-e2e --host 127.0.0.1 --port ${port} --strictPort`,
+    url: `http://127.0.0.1:${port}/timeline-reflow-e2e.html`,
     reuseExistingServer: false,
     timeout: 180_000,
   },
