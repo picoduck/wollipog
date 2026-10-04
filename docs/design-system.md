@@ -409,6 +409,10 @@ No entrance animations on page load, no hover lift on cards, no `--ease-spring` 
 `prefers-reduced-motion: reduce` removes every transform and the pulse (state stays visible through
 the label).
 
+`--delay-tooltip` (500) is the one wait in the scale: how long a pointer rests before a tooltip shows
+(§9.3). Only the reveal waits; leaving hides at once. It is not motion, so reduced motion keeps it.
+The rail's JS tooltip waits the same 500ms, and a test holds the two equal.
+
 ### 2.10 Breakpoints
 
 | Name | Range | What changes |
@@ -1400,9 +1404,9 @@ context window). Rules for both menus and popovers:
 
 ### 9.3 Tooltip
 
-`--bg-elev-3`, `--text`, `--type-small`, `--radius-xs`, padding 4px 8px, max-width 280px, 500ms delay,
-sentence case. Tooltips never hold information the user needs to act (disabled reasons, option
-descriptions): that information must also be visible.
+`--bg-elev-3`, `--text`, `--type-small`, `--radius-xs`, padding 4px 8px, max-width 280px, 500ms delay
+(`--delay-tooltip`), sentence case. Tooltips never hold information the user needs to act (disabled
+reasons, option descriptions): that information must also be visible.
 
 ---
 

@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { expectDelayedTooltip } from "./tooltip-delay";
 
 async function rowGeometry(page: Page) {
   return page.locator(".tl-agent-msg, .tl-step, .tl-step-head > *").evaluateAll((rows) => rows.map((row) => {
@@ -144,9 +145,7 @@ for (const theme of ["dark", "light"]) {
 
     const time = page.locator(".tl-turn-footer time").first();
     const tooltip = page.locator(".tl-turn-footer [role='tooltip']").first();
-    await expect(tooltip).toBeHidden();
-    await time.hover();
-    await expect(tooltip).toBeVisible();
+    await expectDelayedTooltip(page, time, tooltip);
     await expect(tooltip).toHaveText(/^Started \d{1,2}:\d{2}:\d{2}\s?[AP]M, finished \d{1,2}:\d{2}:\d{2}\s?[AP]M \(26s\)$/);
     await expect(time).toHaveAccessibleDescription(/^Started .* \(26s\)$/);
   });

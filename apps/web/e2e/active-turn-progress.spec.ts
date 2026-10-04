@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import { expectDelayedTooltip } from "./tooltip-delay";
 
 type Scenario = "running" | "failing" | "silent" | "approval" | "agents";
 
@@ -114,6 +115,16 @@ test("a long unbroken plan step wraps inside the step tooltip at 390px", async (
   await expect.poll(() => tooltip.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await expectNoHorizontalOverflow(page);
 });
+
+for (const reducedMotion of ["no-preference", "reduce"] as const) {
+  test(`the step link's tooltip waits the shared tooltip delay on hover (${reducedMotion} motion)`, async ({ page }) => {
+    // Reduced motion collapses the fade, not the wait: the delay is intent, not animation.
+    await page.emulateMedia({ reducedMotion });
+    const progress = await openScenario(page, "running", { width: 1280, height: 800 });
+    const step = progress.getByRole("button", { name: "Coordinate Release Audit" });
+    await expectDelayedTooltip(page, step, progress.locator("[role='tooltip']"));
+  });
+}
 
 test("a silent turn says how long it has been quiet", async ({ page }) => {
   const progress = await openScenario(page, "silent", { width: 390, height: 844 });

@@ -508,6 +508,9 @@
   --dur-slow: 260ms;
   --ease-out: cubic-bezier(0.2, 0, 0, 1);
   --ease-spring: cubic-bezier(0.34, 1.3, 0.5, 1);
+  /* How long a pointer rests before a tooltip shows (§9.3). A wait, not motion: reduced motion keeps
+     it, and only the reveal uses it, so leaving hides at once. */
+  --delay-tooltip: 500ms;
 
   /* --- Elevation: a real ramp. One --shadow was being used for a 300px popover and a 720px
      modal alike, so they read at identical depth. --- */
@@ -6729,6 +6732,14 @@ textarea,
 .tl-turn-time:hover > .tl-tooltip {
   visibility: visible;
   opacity: 1;
+}
+/* A hover reveal waits --delay-tooltip, so a pointer crossing the transcript flashes nothing.
+   Visibility waits with it: until then the tooltip is hidden, not merely transparent. */
+.tl-turn-time:hover > .tl-tooltip,
+.tl-working-step-text:hover + .tl-tooltip {
+  transition:
+    opacity var(--dur-fast) var(--ease-out) var(--delay-tooltip),
+    visibility var(--dur-fast) var(--ease-out) var(--delay-tooltip);
 }
 
 .timeline {

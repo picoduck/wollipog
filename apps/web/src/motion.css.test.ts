@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { parse, type AtRule } from "postcss";
 import { customProperties, declarationsOf, topLevelRule } from "./css-rules.js";
+import { RAIL_TOOLTIP_DELAY_MS } from "./components/RailTooltip.js";
 
 const css = readFileSync(fileURLToPath(new URL("./styles.css", import.meta.url)), "utf8");
 
@@ -59,6 +60,29 @@ test("every transition draws its duration and easing from the scale", () => {
     }
   }
   assert.deepEqual(offenders, [], `these bypass the motion scale:\n${offenders.join("\n")}`);
+});
+
+/**
+ * #2433: §9.3 gives every tooltip a 500ms delay. The transcript's tooltips showed the instant the
+ * pointer touched them, and the rail's waited 500ms in JS, so the one number lived in two places.
+ */
+test("the tooltip delay is one token, matched by the rail's JS delay", () => {
+  const defined = tokens.get("--delay-tooltip");
+  assert.deepEqual(defined, ["500ms"], "--delay-tooltip must be defined once on :root as §9.3's 500ms");
+  assert.equal(RAIL_TOOLTIP_DELAY_MS, Number.parseInt(defined![0]!, 10),
+    "the rail's tooltip must wait as long as the stylesheet's");
+});
+
+test("every transition delay names a defined delay token", () => {
+  // An undefined var() makes the whole `transition` shorthand invalid at computed-value time, so a
+  // misspelt delay token would silently remove the tooltip's fade along with its delay.
+  const offenders: string[] = [];
+  for (const { selector, value } of declarationsOf(css, "transition")) {
+    for (const [, name] of value.matchAll(/var\((--delay-[a-z-]+)\)/g)) {
+      if (!tokens.get(name!)?.length) offenders.push(`${selector} uses undefined ${name}`);
+    }
+  }
+  assert.deepEqual(offenders, []);
 });
 
 /**
