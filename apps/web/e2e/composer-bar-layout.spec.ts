@@ -402,7 +402,7 @@ for (const { name, query, reason } of [
         .filter((animation) => animation instanceof CSSTransition)
         .map((animation) => animation.finished.catch(() => undefined))));
       // A disabled control must look disabled: its ink well below a ghost control at rest
-      // (--text-dim), yet still at least the 3:1 glyph floor on either page fill (§21 item 10).
+      // (--text-dim), yet still at least the 3:1 glyph floor on either page fill (--text-disabled, §3.1).
       const [rest, bg, elev] = await Promise.all([
         tokenColor(page, "--text-dim"), tokenColor(page, "--bg"), tokenColor(page, "--bg-elev"),
       ]);

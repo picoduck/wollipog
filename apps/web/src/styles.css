@@ -61,6 +61,12 @@
      reads as de-emphasised. The gap to --text-dim narrows; phase 8's hierarchy pass is where to
      re-space the three tiers, not here. */
   --text-faint: #8a98a4;
+  /* A disabled control with no fill of its own (ghost, icon and composer bar ghost buttons, §3.1).
+     Those rest in --text-dim, which --text-faint is barely 1.2:1 from, so they read as enabled.
+     This tier is 2.01:1 below --text-dim and still 3.93:1 on --bg and 3.63:1 on --bg-elev, over the
+     3:1 glyph floor (#1879). The scheme generator derives it by the same rule
+     (scheme-gen/disabled-tier.mjs). Never text a person has to read. */
+  --text-disabled: #687380;
   --accent: #45d6cc;
   --accent-2: #ef8f3f;
   /* Text that sits ON an accent fill. The accent is light in dark mode and dark in light mode, so
@@ -211,6 +217,8 @@
   --text-dim: #4f5d6a;
   /* 3.72:1 worst before; see the note in the dark block. */
   --text-faint: #606973;
+  /* 2.00:1 below --text-dim, 3.17:1 on --bg and 3.38:1 on --bg-elev; see the note in the dark block. */
+  --text-disabled: #838d97;
   --accent: #055d56;
   --accent-2: #bc4c00;
   --on-accent: #ffffff;
@@ -724,7 +732,8 @@ kbd {
    logo) paints its shapes in fixed brand fills, so unlike a currentColor icon it would not dim with
    its control. Inside any disabled control (a disabled menu item, an `aria-disabled` Open segment)
    it is drawn in one ink, the control's: every painted shape takes currentColor, the drop shadows go
-   and the shading layers hide. That ink is --text-faint, or GrayText in forced colors. Busy is
+   and the shading layers hide. That ink is --text-faint, --text-disabled in a control with no fill
+   (§3.1), or GrayText in forced colors. Busy is
    running, not unavailable, so a busy control keeps the brand colours. A mask's fill stays: only its
    alpha counts. */
 :is(:disabled, [aria-disabled="true"]):not([aria-busy="true"]) .multicolor-mark :not(mask, mask *)[fill]:not([fill="none"]) {
@@ -1734,7 +1743,7 @@ kbd {
   background: var(--bg-elev-2);
   color: var(--text);
 }
-/* Enabled only: a disabled inline destructive action reads --text-faint like every other button. */
+/* Enabled only: a disabled inline destructive action reads --text-disabled like every other ghost. */
 .btn.ghost.danger:not(:disabled, [aria-disabled="true"]) {
   color: var(--danger-text);
 }
@@ -1745,6 +1754,12 @@ kbd {
 .btn[aria-disabled="true"] {
   color: var(--text-faint);
   cursor: not-allowed;
+}
+/* A ghost has no fill to carry its label, and rests in --text-dim, which --text-faint is barely
+   1.2:1 from. So it drops to --text-disabled: at least 1.8:1 below rest and 3:1 on --bg and
+   --bg-elev in every scheme (#2518). A ghost toggle that is on keeps its on fill and this ink. */
+.btn.ghost:is(:disabled, [aria-disabled="true"]) {
+  color: var(--text-disabled);
 }
 .btn.primary:disabled,
 .btn.danger:not(.ghost):disabled,
@@ -1801,11 +1816,13 @@ kbd {
    so an `aria-disabled` button would read as enabled. Author system colours survive forcing, so
    disabled names the system's own "unavailable" ink for text and edge, as the timeline's unavailable
    actions do. Busy is running, not unavailable, so it keeps the button ink. The solid danger's
-   disabled edge is set at a heavier selector, so it is named again at that weight. */
+   disabled edge and the ghost's --text-disabled are set at heavier selectors, so they are named
+   again at those weights. */
 @media (forced-colors: active) {
   .btn:disabled,
   .btn[aria-disabled="true"]:not([aria-busy="true"]),
-  .btn.danger:not(.ghost):is(:disabled, [aria-disabled="true"]):not([aria-busy="true"]) {
+  .btn.danger:not(.ghost):is(:disabled, [aria-disabled="true"]):not([aria-busy="true"]),
+  .btn.ghost:is(:disabled, [aria-disabled="true"]):not([aria-busy="true"]) {
     color: GrayText;
     border-color: GrayText;
   }
@@ -1884,15 +1901,18 @@ kbd {
   background: var(--primary-bg-active);
   color: var(--primary-fg);
 }
+/* An icon button has no fill and rests in --text-dim, so disabled is --text-disabled, as on a
+   ghost button (#2518). */
 .icon-btn:disabled,
 .icon-btn[aria-disabled="true"] {
-  color: var(--text-faint);
+  color: var(--text-disabled);
   cursor: not-allowed;
 }
-/* The dimmed primary keeps its icon readable: --text-faint clears 4.5:1 on --bg-elev-3. */
+/* The dimmed primary is filled, so it keeps §3.1's ink: --text-faint clears 4.5:1 on --bg-elev-3. */
 .icon-btn.primary:disabled,
 .icon-btn.primary[aria-disabled="true"] {
   background: var(--bg-elev-3);
+  color: var(--text-faint);
 }
 
 /* ----------------------------- Status badges ----------------------------
@@ -3433,14 +3453,6 @@ textarea {
   .session-bar > .session-bar-project { display: none; }
 }
 .session-header-action { padding: 0; }
-.session-header-action:disabled {
-  color: var(--text-faint);
-  cursor: not-allowed;
-}
-.session-header-action:disabled:hover {
-  color: var(--text-faint);
-  background: transparent;
-}
 .detail-actions {
   display: flex;
   align-items: center;
@@ -5980,19 +5992,9 @@ textarea {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* A disabled ghost control in the bar (a stopped or failed session, a Viewer) draws in an ink below
-   --text-faint: a ghost control already rests in --text-dim, which --text-faint is barely 1.2:1
-   from, so §3.1's disabled ink alone read as enabled. 75% --text-faint toward the page fill stays
-   at least 3:1 on --bg and --bg-elev in every scheme, the glyph floor (#1880), and about 2:1 below
-   rest. Composer bar only, and no opacity (§21 item 10). Filled controls keep §3.1. */
-.btn.ghost.composer-btn:disabled {
-  color: color-mix(in srgb, var(--text-faint) 75%, var(--bg));
-}
-/* A disabled chip reads in that ink throughout, its agent mark included (the §9.1 brand-mark rule). */
+/* A disabled chip (a stopped or failed session, a Viewer) reads in the ghost's --text-disabled
+   throughout, its agent mark included (the §9.1 brand-mark rule). */
 .model-chip:disabled :is(.cbar-model, .cbar-context, .cbar-effort, .agent-icon) { color: inherit; }
-@media (forced-colors: active) {
-  .btn.ghost.composer-btn:disabled { color: GrayText; }
-}
 .cbar-model-label {
   display: inline-flex;
   min-width: 0;
@@ -16931,6 +16933,7 @@ body.shell-dock-dragging * {
   --text: #e6edf3;
   --text-dim: #9da5ac;
   --text-faint: #8d96a0;
+  --text-disabled: #6a7077;
   --accent: #4896f8;
   --accent-2: #dc7b3e;
   --on-accent: #0b0b0b;
@@ -17004,6 +17007,7 @@ body.shell-dock-dragging * {
   --text: #1f2328;
   --text-dim: #535c67;
   --text-faint: #59636e;
+  --text-disabled: #868c94;
   --accent: #0b62cb;
   --accent-2: #ac4804;
   --on-accent: #ffffff;
@@ -17079,6 +17083,7 @@ body.shell-dock-dragging * {
   --text: #abb2bf;
   --text-dim: #99a0aa;
   --text-faint: #888f9c;
+  --text-disabled: #6b7079;
   --accent: #61afef;
   --accent-2: #d19a66;
   --on-accent: #0b0b0b;
@@ -17152,6 +17157,7 @@ body.shell-dock-dragging * {
   --text: #383a42;
   --text-dim: #53555f;
   --text-faint: #5c5e69;
+  --text-disabled: #83858c;
   --accent: #3d5ca6;
   --accent-2: #7c5a14;
   --on-accent: #ffffff;
@@ -17227,6 +17233,7 @@ body.shell-dock-dragging * {
   --text: #f8f8f2;
   --text-dim: #c5cbdf;
   --text-faint: #afb8d2;
+  --text-disabled: #8a8e9f;
   --accent: #caaaf8;
   --accent-2: #ffb86c;
   --on-accent: #0b0b0b;
@@ -17300,6 +17307,7 @@ body.shell-dock-dragging * {
   --text: #1f1f1f;
   --text-dim: #5c564d;
   --text-faint: #635d52;
+  --text-disabled: #8b867b;
   --accent: #644ac9;
   --accent-2: #9c4a15;
   --on-accent: #ffffff;
@@ -17375,6 +17383,7 @@ body.shell-dock-dragging * {
   --text: #f8f8f2;
   --text-dim: #c6c4bc;
   --text-faint: #b3b1a4;
+  --text-disabled: #8a8982;
   --accent: #66d9ef;
   --accent-2: #fd971f;
   --on-accent: #0b0b0b;
@@ -17448,6 +17457,7 @@ body.shell-dock-dragging * {
   --text: #2c2c26;
   --text-dim: #59594e;
   --text-faint: #5f5f52;
+  --text-disabled: #89897f;
   --accent: #0d6c7e;
   --accent-2: #9d4d0c;
   --on-accent: #ffffff;

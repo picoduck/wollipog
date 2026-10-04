@@ -548,6 +548,72 @@ test("the text hierarchy is three distinct steps in every palette", () => {
   assert.deepEqual(failures, [], "three named tiers have to be three visible tiers");
 });
 
+test("the disabled tier is a legible glyph clearly below rest in every palette (#2518)", () => {
+  // A transparent control rests in `--text-dim` and draws disabled in `--text-disabled`. It has to
+  // stay a legible glyph on both page fills (the 3:1 floor #1879 set) and still read as not-rest:
+  // `--text-faint` is only 1.1-1.2:1 from `--text-dim`, which is why disabled ghosts read as enabled.
+  const failures: string[] = [];
+  let checks = 0;
+  for (const scheme of SCHEMES) {
+    for (const theme of THEMES) {
+      const tokens = tokensFor(scheme, theme);
+      const require = (name: string) => {
+        const value = literal(tokens, name);
+        assert.ok(value, `${scheme}/${theme}: ${name} must be a literal colour`);
+        return value;
+      };
+      const [disabled, rest] = [require("--text-disabled"), require("--text-dim")];
+      for (const [ground, floor] of [["--bg", 3], ["--bg-elev", 3]] as const) {
+        const measured = contrast(disabled, require(ground));
+        if (measured < floor) failures.push(`${scheme}/${theme}: --text-disabled on ${ground} is ${measured.toFixed(2)}:1`);
+        checks += 1;
+      }
+      const step = contrast(disabled, rest);
+      if (step < 1.8) failures.push(`${scheme}/${theme}: --text-disabled is only ${step.toFixed(2)}:1 below --text-dim`);
+      checks += 1;
+    }
+  }
+  // Five schemes x two themes x (two fills + one step), as a literal so a dropped scheme fails.
+  assert.equal(checks, 30, "every scheme and theme has to be measured");
+  assert.deepEqual(failures, [], "a disabled control has to be legible and look disabled in every scheme");
+});
+
+test("the generator raises a --text-dim too quiet to fit the disabled tier, rather than missing it", async () => {
+  // The tier fits only where `--text-dim` clears about 5.4:1 (3 x 1.8) on the worse fill. A future
+  // palette below that must get a louder rest ink, not a tier that misses a bound and not a
+  // per-component exception. Every shipped palette has the headroom, so this drives the rule
+  // directly with one that does not: #808080 is 3.95:1 on #121212.
+  const { disabledTier, DISABLED_GLYPH_FLOOR, DISABLED_REST_STEP } =
+    await import("./scheme-gen/disabled-tier.mjs" as string);
+  const [bg, bgElev] = ["#121212", "#1a1a1a"];
+  const tier = disabledTier({ dim: "#808080", bg, bgElev, extreme: "#ffffff" });
+  assert.notEqual(tier.dim, "#808080", "the rest ink has to move");
+  assert.ok(contrast(tier.dim, bgElev) > contrast("#808080", bgElev), "and move louder, toward the extreme");
+  for (const fill of [bg, bgElev]) assert.ok(contrast(tier.disabled, fill) >= DISABLED_GLYPH_FLOOR);
+  assert.ok(contrast(tier.disabled, tier.dim) >= DISABLED_REST_STEP);
+  // A rest ink with the headroom is left exactly where it is.
+  const roomy = disabledTier({ dim: "#b0b0b0", bg, bgElev, extreme: "#ffffff" });
+  assert.equal(roomy.dim, "#b0b0b0");
+  // And a fill no ink can clear is refused, not rounded into a pass.
+  assert.throws(() => disabledTier({ dim: "#808080", bg: "#ffffff", bgElev: "#ffffff", extreme: "#ffffff" }),
+    /leaves room for a disabled tier/);
+});
+
+test("controls with no fill draw disabled in the disabled tier; filled ones keep --text-faint", () => {
+  const color = (selector: string) => topLevelRule(css, selector)?.toString() ?? "";
+  assert.match(color('.btn.ghost:is(:disabled, [aria-disabled="true"])'),
+    /color:\s*var\(--text-disabled\)/, "a disabled ghost button");
+  assert.match(color('.icon-btn:disabled,\n.icon-btn[aria-disabled="true"]'),
+    /color:\s*var\(--text-disabled\)/, "a disabled icon button");
+  assert.match(color('.icon-btn.primary:disabled,\n.icon-btn.primary[aria-disabled="true"]'),
+    /color:\s*var\(--text-faint\)/, "a filled icon button keeps the faint tier on its fill");
+  assert.match(color('.btn:disabled,\n.btn[aria-disabled="true"]'),
+    /color:\s*var\(--text-faint\)/, "the filled button variants keep §3.1's faint tier");
+  // The composer's one-off ink (#2509) is retired for the shared tier.
+  assert.doesNotMatch(css, /composer-btn:disabled/, "no composer-only disabled ink");
+  assert.doesNotMatch(css, /var\(--text-faint\) 75%/, "no disabled ink mixed per component");
+});
+
 test("the retired alias is gone everywhere", () => {
   // A token that still exists is a token something will use again. The stylesheet keeps one
   // mention, in the comment explaining why it went.

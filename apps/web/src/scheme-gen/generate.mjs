@@ -11,23 +11,11 @@
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { contrast, hexToRgb, lin, mix } from "./colour.mjs";
+import { disabledTier } from "./disabled-tier.mjs";
 
 /** The stylesheet the demands are read from, which is also the one written to in write mode. */
 const STYLES = fileURLToPath(new URL("../styles.css", import.meta.url));
-
-const hexToRgb = (hex) => {
-  // Validated, because `parseInt` does not complain: a typo that left `#9d9mad` in an anchor parsed
-  // as a real colour and generated a whole scheme around it. A silent wrong answer is the worst
-  // kind, so this is a throw rather than a fallback.
-  if (!/^#[0-9a-fA-F]{6}$/.test(hex)) throw new Error(`not a 6-digit hex colour: ${JSON.stringify(hex)}`);
-  const h = hex.slice(1);
-  return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16));
-};
-const rgbToHex = (rgb) => `#${rgb.map((v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, "0")).join("")}`;
-const mix = (a, b, t) => rgbToHex(hexToRgb(a).map((v, i) => v + (hexToRgb(b)[i] - v) * t));
-const lin = (c) => { const s = c / 255; return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4; };
-const lum = (hex) => { const [r, g, b] = hexToRgb(hex); return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b); };
-const contrast = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
 
 /**
  * Nudge `colour` toward `toward` until it clears `ratio` against `on`.
@@ -867,8 +855,22 @@ for (const [name, themes] of Object.entries(SCHEMES)) {
     const label = `${name}/${theme}`;
     const map = tokens(themes[theme], theme);
     const { solve, constructed } = resolveRoleDemands(DEMANDS, map, ROLE_ALIASES, theme, label);
-    for (const [token, value] of Object.entries(satisfyDemands(map, solve, ANCHORS, label, constructed))) {
+    const solved = satisfyDemands(map, solve, ANCHORS, label, constructed);
+    // The disabled tier, measured against the FINAL rest ink and page fills: the demand loop can
+    // still move `--text-dim` and `--bg`. A `--text-dim` without the headroom for the tier is made
+    // louder here, never answered with a per-component exception, and the louder value has to keep
+    // every demand the loop just met.
+    const tier = disabledTier({
+      dim: solved["--text-dim"], bg: solved["--bg"], bgElev: solved["--bg-elev"],
+      extreme: theme === "dark" ? "#ffffff" : "#000000",
+    }, `${label} --text-disabled`);
+    if (tier.dim !== solved["--text-dim"]) {
+      solved["--text-dim"] = tier.dim;
+      assertDemandsMet(solved, solve, label);
+    }
+    for (const [token, value] of Object.entries(solved)) {
       css += `  ${token}: ${value};\n`;
+      if (token === "--text-faint") css += `  --text-disabled: ${tier.disabled};\n`;
     }
     css += "}\n";
   }

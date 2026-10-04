@@ -133,6 +133,7 @@ correct in every scheme and theme without regeneration.
 | `--text` | `#e6edf3` | `#17212b` | Primary text. |
 | `--text-dim` | `#9aa9b8` | `#4f5d6a` | Secondary text: descriptions, helper, labels in tables. |
 | `--text-faint` | `#8a98a4` | `#606973` | Tertiary: counts, timestamps, placeholders. Never for sentences. |
+| `--text-disabled` | `#687380` | `#838d97` | The disabled ink of a control with no fill of its own (§3.1). At least 3:1 on `--bg` and `--bg-elev` and 1.8:1 below `--text-dim` in every scheme. Never for text a person has to read. |
 | `--text-dim-on-tint` | `#aebac6` | `#495663` | Existing token: dim text on a 12–16% wash (neutral status badge text). |
 | `--accent` | `#45d6cc` | `#055d56` | Selection indicator, active nav, tab underline, checked controls, links. |
 | `--primary-from` | `#2fbcb2` | `#06736a` | Primary button fill (flat). |
@@ -475,6 +476,7 @@ state indicators need 3:1.
 | `--text` on `--bg` / `--bg-elev` / `--bg-elev-3` | 16.05 / 14.82 / 11.28 | 15.30 / 16.29 / 13.32 |
 | `--text-dim` on `--bg` / `--bg-elev-3` / `--surface-selected` | 7.89 / 5.55 / 5.69 | 6.35 / 5.53 / 5.60 |
 | `--text-faint` on `--bg` / `--bg-elev-3` (worst) / `--surface-selected` | 6.42 / **4.51** / 4.63 | 5.24 / **4.56** / 4.62 |
+| `--text-disabled` glyph on `--bg` / `--bg-elev` (3:1), and below `--text-dim` (1.8:1) | 3.93 / 3.63, 2.01 | 3.17 / 3.38, 2.00 |
 | `--accent` link on `--bg` / `--bg-elev` | 10.60 / 9.79 | 7.29 / 7.76 |
 | Primary label on rest / hover / pressed | 7.06 / 8.06 / 5.81 | 5.72 / 7.76 / 11.03 |
 | White on `--danger-bg` / hover | 5.02 / 6.45 | 5.36 / 7.87 |
@@ -526,7 +528,7 @@ States
 | Pressed | `--bg-elev-3` (primary: `--primary-bg-active`; danger: `--danger-bg-hover`). The secondary button's pressed fill equals its hover fill; press feedback there is the pointer, not a third gray. |
 | Selected / on (toggle buttons) | `--bg-elev-3` fill **plus a 1px `--control-outline` edge** (icon buttons: an inset edge), `aria-pressed="true"`, and an icon or label change. The edge is what separates "on" from "hovered": with one fill for both, a toggle that is on looks hovered. |
 | Focus | 2px `--focus` ring, 2px offset (§16.1). |
-| Disabled | Text `--text-faint`, fill unchanged, no hover, `cursor: not-allowed`. No opacity. In forced colors, text and edge are `GrayText`, for `disabled` and `aria-disabled="true"` alike. A disabled control that the user would reasonably expect to work shows its reason as visible text next to it (§8.6), never only in `title`. |
+| Disabled | Text `--text-faint`, fill unchanged, no hover, `cursor: not-allowed`. No opacity. A control with no fill of its own (ghost, icon button, a composer bar ghost control) rests in `--text-dim`, which `--text-faint` is only about 1.2:1 from, so its label and glyph take `--text-disabled` instead: at least 1.8:1 below rest and 3:1 on `--bg` and `--bg-elev` in every scheme. The scheme generator derives the tier, and raises a scheme's `--text-dim` rather than adding a per-component exception if it ever stops fitting. Filled controls (secondary, primary, danger) keep `--text-faint` on their fill; a ghost toggle that is on keeps its on fill and takes `--text-disabled`. In forced colors, text and edge are `GrayText`, for `disabled` and `aria-disabled="true"` alike. A disabled control that the user would reasonably expect to work shows its reason as visible text next to it (§8.6), never only in `title`. |
 | Busy | Label stays; a 14px spinner replaces the leading icon (or is prepended); the button keeps its width (`min-width` locked on press). In forced colors it keeps the enabled button ink, not `GrayText`. |
 
 Busy is one component, `BusyButton` (`apps/web/src/components/ui/BusyButton.tsx`). It locks the
@@ -1365,8 +1367,9 @@ workflow step list is a different component and keeps a local name.
   confirm.
 - Disabled items: `--text-faint` with the reason as the second line. The icon and the selection
   check go faint with the words. A multi-colour brand mark (`.multicolor-mark`, such as the Visual
-  Studio Code mark in Open In) is drawn in that one ink inside any disabled control, and keeps its
-  brand colours only while enabled. In forced colors a disabled item, its icon and its check are
+  Studio Code mark in Open In) or an agent mark is drawn in the control's one disabled ink
+  (`--text-faint`, or `--text-disabled` in a control with no fill, §3.1) inside any disabled
+  control, and keeps its brand colours only while enabled. In forced colors a disabled item, its icon and its check are
   `GrayText`.
 - Keyboard: arrow keys, Home/End, type-ahead, Enter/Space, Escape closes and returns focus.
 - **Note** (`.menu-note`, `MenuNote`): one sentence of context at the end of a menu, `--type-small`
@@ -2546,15 +2549,7 @@ These trade-offs are deliberate. Keep them in mind when a screen seems to argue 
    (§9.2). A sheet would cover the caret and compete with the software keyboard while the person is
    still typing the query the picker filters on. The Select and SearchableCombobox list is the
    other list that stays anchored on phones (§9.1).
-10. **Disabled composer bar controls.** A ghost control rests in `--text-dim`, and §3.1's disabled
-    `--text-faint` is only about 1.2:1 from it, so on a stopped or failed session the bar's +,
-    shield, model chip and mic read as enabled. In the composer bar only, a disabled ghost
-    `ComposerButton` (glyph, label and agent mark) draws in
-    `color-mix(in srgb, var(--text-faint) 75%, var(--bg))`. That is at least 3:1 on `--bg` and
-    `--bg-elev` in every scheme (the glyph floor, #1880) and about 2:1 below rest (1.9–2:1 in the
-    Wollipog themes), with no opacity (#2174). Forced colors stays `GrayText`, and filled controls
-    (Send, Stop Turn) keep §3.1. Every disabled control still says why.
-11. **Model Settings is a popover of menu rows.** Model Settings (#2191) holds a segmented Context
+10. **Model Settings is a popover of menu rows.** Model Settings (#2191) holds a segmented Context
     Window (§10.2), which a menu cannot contain, so it is a §9.2 popover (`role="dialog"`) of
     labelled radio groups. Its Model, Reasoning Effort and Service Tier choices keep §9.1's rows
     and trailing check, so the popover takes the menu's 4px inset instead of 16px, and it is 536px
