@@ -4,8 +4,10 @@
  * Feature-detected — callers hide the mic entirely when unsupported (e.g. Firefox).
  *
  * One press starts dictation. Released within `HOLD_THRESHOLD_MS` it was a tap, and dictation runs
- * until the next tap, `toggle()` (Enter or Space on the mic) or `stop()` (Escape, Send); held
- * longer it was push-to-talk, and the release stops it (#2193).
+ * until the next tap, `toggle()` (Enter or Space on the mic) or `stop()` (Escape); held longer it
+ * was push-to-talk, and the release stops it. A press the browser cancels, or a mouse that leaves
+ * the mic mid-press, stops it too: that gesture never completed (#2193). Sending calls `cancel()`,
+ * which drops what the engine has not settled, so what is sent is what the message showed.
  *
  * The engine ends itself in ways that contract must survive: `stop()` finalizes asynchronously
  * (~100ms–1s), and Chrome self-terminates on ~8s of silence ('no-speech') or transient 'network'
@@ -84,9 +86,11 @@ export function useVoiceDictation(onPhrase: (text: string) => void) {
     rec.interimResults = true;
     rec.lang = navigator.language || "en-US";
     rec.onresult = (ev) => {
+      // `resultIndex` marks only the changed suffix: final phrases are new from there, but a result
+      // before it can still be unsettled, so the interim words come from the whole list.
       const text = finalTranscripts(ev.results, ev.resultIndex);
       if (text) onPhraseRef.current(text);
-      setInterim(wantedRef.current ? interimTranscripts(ev.results, ev.resultIndex) : "");
+      setInterim(wantedRef.current ? interimTranscripts(ev.results, 0) : "");
     };
     rec.onerror = (ev) => {
       lastErrorRef.current = ev.error ?? "unknown";
@@ -133,6 +137,20 @@ export function useVoiceDictation(onPhrase: (text: string) => void) {
     recRef.current?.stop();
   }, [settle]);
 
+  /** End dictation and drop whatever the engine has not settled yet (sending, #2193). */
+  const cancel = useCallback(() => {
+    settle();
+    const rec = recRef.current;
+    if (!rec) return;
+    // Detached first: no late phrase reaches the draft being sent, and the 'aborted' ending cannot
+    // settle or restart a dictation started right after.
+    recRef.current = null;
+    rec.onresult = null;
+    rec.onerror = null;
+    rec.onend = null;
+    rec.abort();
+  }, [settle]);
+
   const toggle = useCallback(() => {
     if (wantedRef.current) stop();
     else start();
@@ -150,7 +168,7 @@ export function useVoiceDictation(onPhrase: (text: string) => void) {
     pressRef.current = { at, timer: setTimeout(() => setHeld(true), HOLD_THRESHOLD_MS) };
   }, [start, stop]);
 
-  /** The press that started dictation ended (release, cancel or leaving the mic). */
+  /** The press that started dictation was released on the mic. */
   const pressEnd = useCallback(() => {
     const press = pressRef.current;
     if (!press) return;
@@ -158,6 +176,12 @@ export function useVoiceDictation(onPhrase: (text: string) => void) {
     // The same instant the strip starts saying "Release to stop".
     if (Date.now() - press.at >= HOLD_THRESHOLD_MS) stop();
   }, [endPress, stop]);
+
+  /** The press that started dictation never completed (pointercancel, or leaving the mic). */
+  const pressCancel = useCallback(() => {
+    if (!pressRef.current) return;
+    stop();
+  }, [stop]);
 
   // Never leave the mic hot after unmount (navigation away mid-dictation). Clearing the intent
   // first keeps the 'aborted' onend from restarting.
@@ -170,5 +194,5 @@ export function useVoiceDictation(onPhrase: (text: string) => void) {
     [],
   );
 
-  return { supported, recording, startedAt, interim, held, start, stop, toggle, pressStart, pressEnd };
+  return { supported, recording, startedAt, interim, held, start, stop, cancel, toggle, pressStart, pressEnd, pressCancel };
 }

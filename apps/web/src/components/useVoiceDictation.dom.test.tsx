@@ -150,6 +150,63 @@ test("a hold past the threshold says so, and its release stops dictation", withF
   }
 }));
 
+test("a press that never completes stops dictation, short or long", withFakeSpeech(async () => {
+  const hook = await renderHook();
+  try {
+    // The browser took the touch for a scroll, or the mouse left the mic, before the threshold.
+    await hook.act((d) => d.pressStart());
+    await advance(50);
+    await hook.act((d) => d.pressCancel());
+    assert.equal(hook.dictation().recording, false);
+    assert.equal(FakeRecognition.instances[0]!.stopped, 1);
+    await act(async () => FakeRecognition.instances[0]!.end());
+
+    await hook.act((d) => d.pressStart());
+    await advance(HOLD_THRESHOLD_MS + 100);
+    await hook.act((d) => d.pressCancel());
+    assert.equal(hook.dictation().recording, false);
+    assert.equal(hook.dictation().held, false);
+
+    // After a completed tap, the pointerleave a touch fires on lifting changes nothing.
+    await act(async () => FakeRecognition.instances[1]!.end());
+    await hook.act((d) => d.pressStart());
+    await hook.act((d) => d.pressEnd());
+    await hook.act((d) => d.pressCancel());
+    assert.equal(hook.dictation().recording, true);
+  } finally {
+    await hook.unmount();
+  }
+}));
+
+test("cancel drops what the engine has not settled, and a new start begins at once", withFakeSpeech(async () => {
+  const hook = await renderHook();
+  try {
+    await hook.act((d) => d.toggle());
+    const first = FakeRecognition.instances[0]!;
+    await act(async () => first.emit([{ isFinal: false, 0: { transcript: "half a thought" } }]));
+    await hook.act((d) => d.cancel());
+    assert.equal(first.aborted, 1);
+    assert.equal(first.stopped, 0);
+    assert.equal(hook.dictation().recording, false);
+    assert.equal(hook.dictation().interim, "");
+    assert.equal(first.onresult, null, "a late phrase has nowhere to land");
+    assert.equal(first.onend, null);
+
+    await hook.act((d) => d.toggle());
+    assert.equal(FakeRecognition.instances.length, 2, "a fresh recognizer starts without waiting for the abort");
+    assert.equal(FakeRecognition.instances[1]!.started, 1);
+    assert.equal(hook.dictation().recording, true);
+    assert.deepEqual(hook.phrases, []);
+
+    // Cancelling with nothing running is harmless.
+    await hook.act((d) => d.cancel());
+    await hook.act((d) => d.cancel());
+    assert.equal(hook.dictation().recording, false);
+  } finally {
+    await hook.unmount();
+  }
+}));
+
 test("toggle starts and stops, as Enter or Space on the mic do", withFakeSpeech(async () => {
   const hook = await renderHook();
   try {
@@ -180,6 +237,14 @@ test("interim words surface separately, and only final phrases reach the message
     ]));
     assert.deepEqual(hook.phrases, ["fix the sidebar"]);
     assert.equal(hook.dictation().interim, "and the");
+    // An event that changes only a later result still keeps the unsettled words before it.
+    await act(async () => recognizer.emit([
+      { isFinal: true, 0: { transcript: "fix the sidebar" } },
+      { isFinal: false, 0: { transcript: "and the" } },
+      { isFinal: false, 0: { transcript: "header" } },
+    ], 2));
+    assert.equal(hook.dictation().interim, "and the header");
+    assert.deepEqual(hook.phrases, ["fix the sidebar"]);
 
     // Stopping clears the strip's words at once; the phrase the engine settles afterwards still lands.
     await hook.act((d) => d.stop());

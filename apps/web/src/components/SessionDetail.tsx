@@ -4828,9 +4828,9 @@ function SessionDetailLoaded({
   };
   const send = async () => {
     if (composerMutationRegistry.has(mutationKey) || stopTurnPendingRef.current || retitleInFlightRef.current) return;
-    // Sending ends dictation first (#2193). A phrase the engine is still settling lands in the
-    // emptied composer as the next draft rather than being lost.
-    dictation.stop();
+    // Sending ends dictation first (#2193) and drops what the engine has not settled: a phrase
+    // landing while the request is in flight would join the sent text or be lost to restoration.
+    dictation.cancel();
     const outgoing = text.trim();
     let invocation = resolveComposerCommandInvocation(outgoing, composerCommands);
     if (invocation.kind === "command" && invocation.command.source === "app") {
@@ -5045,7 +5045,7 @@ function SessionDetailLoaded({
   const steerDraft = async () => {
     // Direct steering posts to the same route as queued steering, so it follows that verdict (#1857).
     if (composerMutationRegistry.has(mutationKey) || stopTurnPendingRef.current || !canSend) return;
-    dictation.stop();
+    dictation.cancel();
     if (queueRefusal !== null) {
       setError(queueRefusal, "Message Not Sent");
       return;
@@ -5302,7 +5302,7 @@ function SessionDetailLoaded({
 
   const saveQueuedPromptEdit = async () => {
     if (!queuedEdit || queuedEditBusy || !queuedEditRetryable || composerMutationRegistry.has(mutationKey)) return;
-    dictation.stop();
+    dictation.cancel();
     // An edit opened before the person lost queue management is not sent (#1857).
     if (queueRefusal !== null) {
       setError(queueRefusal);
@@ -6568,15 +6568,16 @@ function SessionDetailLoaded({
                       disabled={!canPrompt}
                       aria-describedby={canPrompt ? undefined : composerUnavailableId}
                       // A tap toggles and a hold is push-to-talk (#2193): the press starts or stops,
-                      // and releasing a hold stops. Only a primary left-button press counts — a
-                      // right-click's context menu swallows the pointerup on some platforms.
+                      // releasing a hold stops, and a press that never completes (the browser took
+                      // the touch, the mouse left) stops. Only a primary left-button press counts —
+                      // a right-click's context menu swallows the pointerup on some platforms.
                       onPress={(e) => {
                         if (!e.isPrimary || e.button !== 0) return;
                         dictation.pressStart();
                       }}
                       onPointerUp={dictation.pressEnd}
-                      onPointerCancel={dictation.pressEnd}
-                      onPointerLeave={dictation.pressEnd}
+                      onPointerCancel={dictation.pressCancel}
+                      onPointerLeave={dictation.pressCancel}
                       // Enter, Space and assistive technology click without a pointer (detail 0);
                       // a pointer's own click has already been handled by its press.
                       onClick={(e) => {

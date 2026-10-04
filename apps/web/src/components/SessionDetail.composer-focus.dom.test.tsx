@@ -5938,7 +5938,7 @@ function micButton(fixture: Fixture): HTMLButtonElement {
   return mic;
 }
 
-async function pointer(button: HTMLButtonElement, type: "pointerdown" | "pointerup") {
+async function pointer(button: HTMLButtonElement, type: "pointerdown" | "pointerup" | "pointercancel") {
   await act(async () => {
     button.dispatchEvent(new domWindow.PointerEvent(type, {
       bubbles: true,
@@ -6004,6 +6004,14 @@ test("the mic toggles on a tap and stops a hold on release, showing a Listening 
       assert.deepEqual(TrackedRecognition.log, ["start", "stop", "start", "stop"]);
       assert.equal(mic.getAttribute("aria-pressed"), "false");
       assertNoDomNode(fixture.container.querySelector(".dictation-strip"));
+      await act(async () => TrackedRecognition.instances[1]!.onend?.());
+
+      // A press the browser cancels (it took the touch for a scroll) never completed: it stops.
+      await pointer(mic, "pointerdown");
+      assert.equal(mic.getAttribute("aria-pressed"), "true");
+      await pointer(mic, "pointercancel");
+      assert.equal(mic.getAttribute("aria-pressed"), "false");
+      assert.deepEqual(TrackedRecognition.log, ["start", "stop", "start", "stop", "start", "stop"]);
     } finally {
       await unmountFixture(fixture);
     }
@@ -6092,8 +6100,11 @@ test("Escape in the composer ends dictation, and Send ends it before sending (#2
       TrackedRecognition.log = [];
       await act(async () => { sendButton(fixture).click(); });
       await flushAsyncWork();
-      assert.deepEqual(TrackedRecognition.log, ["stop", "prompt"], "dictation stops before the message is sent");
+      // Aborted, not stopped: a phrase settling while the request is in flight would otherwise join
+      // the sent text. The recognizer is detached, so nothing it settles later reaches the draft.
+      assert.deepEqual(TrackedRecognition.log, ["abort", "prompt"], "dictation ends before the message is sent");
       assert.deepEqual(prompts, ["ship it"]);
+      assert.equal(recognizer.onresult, null);
       assert.equal(mic.getAttribute("aria-pressed"), "false");
       assertNoDomNode(fixture.container.querySelector(".dictation-strip"));
     } finally {
