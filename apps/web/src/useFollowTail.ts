@@ -45,12 +45,8 @@ export interface FollowTailKey {
   altKey: boolean;
 }
 
-/**
- * Where a held finger on the reader is reported from. A native pan reports through touch events
- * (its pointer is cancelled once the browser takes the pan); a drag the floating tail control hands
- * over (#2425) reports through touch pointer events only.
- */
-export type FollowTailTouchSource = "touch" | "pointer";
+/** The part of a native `touchstart` that says which fingers went down, and where. */
+export type FollowTailTouchStart = Pick<TouchEvent, "target" | "changedTouches">;
 
 export interface UseFollowTailOptions {
   /** The mounted transcript element. */
@@ -84,10 +80,13 @@ export interface FollowTailApi {
   onScroll: () => void;
   onWheel: (event: Pick<WheelEvent, "deltaY">) => void;
   onPointerMove: (event: Pick<PointerEvent, "buttons">) => void;
-  /** A finger went down on the reader: following pauses, and the finger counts as held. */
-  onTouchStart: (source: FollowTailTouchSource) => void;
-  /** That source's finger lifted or was cancelled. */
-  onTouchEnd: (source: FollowTailTouchSource) => void;
+  /** A native touch went down on the reader: following pauses, and each finger counts as held
+   * until that touch itself ends. */
+  onTouchStart: (event: FollowTailTouchStart) => void;
+  /** A touch pointer went down on the reader: following pauses, and the pointer counts as held until
+   * it lifts or is cancelled. A drag the floating tail control hands over (#2425) arrives only as
+   * these. */
+  onTouchPointerDown: (event: Pick<PointerEvent, "pointerId">) => void;
   /** Returns true when the caller should consume the key event. */
   onKeyDown: (event: FollowTailKey) => boolean;
 }
@@ -198,7 +197,8 @@ export function useFollowTail({
   const scrollIntentTimerRef = useRef<number | null>(null);
   const viewportGeometryRef = useRef<{ scrollTop: number; scrollHeight: number; clientHeight: number } | null>(null);
   const layoutScrollPredictionRef = useRef<number | null>(null);
-  const heldTouchSourcesRef = useRef(new Set<FollowTailTouchSource>());
+  /** Each held finger, keyed by its touch or pointer identity, with the listeners awaiting its end. */
+  const heldTouchesRef = useRef(new Map<string, () => void>());
   const programmaticScrollRef = useRef<{
     direction: "next" | "previous";
     settleTimer: number | null;
@@ -378,13 +378,50 @@ export function useFollowTail({
     if ((event.buttons & 1) !== 0) pause();
   }, [pause]);
 
-  const onTouchStart = useCallback((source: FollowTailTouchSource) => {
-    heldTouchSourcesRef.current.add(source);
-    pause();
-  }, [pause]);
-  const onTouchEnd = useCallback((source: FollowTailTouchSource) => {
-    heldTouchSourcesRef.current.delete(source);
+  const releaseTouch = useCallback((key: string) => {
+    const detach = heldTouchesRef.current.get(key);
+    if (!detach) return;
+    heldTouchesRef.current.delete(key);
+    detach();
   }, []);
+  /** Holds one finger until `target` hears the end that `ends` recognises as that finger's own. */
+  const holdTouch = useCallback((
+    key: string,
+    target: EventTarget,
+    endTypes: readonly string[],
+    ends: (event: Event) => boolean,
+  ) => {
+    releaseTouch(key);
+    const onEnd = (event: Event) => {
+      if (ends(event)) releaseTouch(key);
+    };
+    for (const type of endTypes) target.addEventListener(type, onEnd);
+    heldTouchesRef.current.set(key, () => {
+      for (const type of endTypes) target.removeEventListener(type, onEnd);
+    });
+  }, [releaseTouch]);
+  // A touch's later events all go to the element it started on, even once a re-render has removed
+  // that element and they no longer bubble to the reader; and a reader `touchend` cannot say when
+  // the reader's own fingers are gone, since `touches` counts fingers anywhere on the page. So each
+  // finger is released by its own end, heard where it started.
+  const onTouchStart = useCallback((event: FollowTailTouchStart) => {
+    pause();
+    const target = event.target;
+    if (!target) return;
+    for (const touch of Array.from(event.changedTouches)) {
+      const identifier = touch.identifier;
+      holdTouch(`touch:${identifier}`, target, ["touchend", "touchcancel"], (end) =>
+        Array.from((end as TouchEvent).changedTouches ?? []).some((ended) => ended.identifier === identifier));
+    }
+  }, [holdTouch, pause]);
+  // A pointer's end can land outside the reader (a relayed drag ends wherever the finger lifts), so
+  // it is heard on the window, which every pointer event that is still in the page reaches.
+  const onTouchPointerDown = useCallback((event: Pick<PointerEvent, "pointerId">) => {
+    pause();
+    const pointerId = event.pointerId;
+    holdTouch(`pointer:${pointerId}`, window, ["pointerup", "pointercancel"], (end) =>
+      (end as PointerEvent).pointerId === pointerId);
+  }, [holdTouch, pause]);
 
   const onScroll = useCallback(() => {
     const element = scrollRef.current;
@@ -424,7 +461,7 @@ export function useFollowTail({
     // wheel is (#2549). Pause at once: the bare-scroll fallback below waits for layout to claim the
     // scroll, and streamed growth claims it and pulls the reader back to the tail. A native pan has
     // no later pointer move that could pause, and the 48px tail band would swallow small steps.
-    if (heldTouchSourcesRef.current.size > 0 && !layoutOwned && previousScrollTop != null &&
+    if (heldTouchesRef.current.size > 0 && !layoutOwned && previousScrollTop != null &&
         element.scrollTop < previousScrollTop - FOLLOW_TAIL_LAYOUT_SCROLL_EPSILON_PX &&
         !isAtFollowTailBottom(element, FOLLOW_TAIL_RESUME_THRESHOLD_PX)) {
       pause();
@@ -527,7 +564,8 @@ export function useFollowTail({
     cancelProgrammaticScroll();
     cancelScheduledFollow();
     cancelScheduledScrollIntent();
-  }, [cancelProgrammaticScroll, cancelScheduledFollow, cancelScheduledScrollIntent, persist]);
+    for (const key of [...heldTouchesRef.current.keys()]) releaseTouch(key);
+  }, [cancelProgrammaticScroll, cancelScheduledFollow, cancelScheduledScrollIntent, persist, releaseTouch]);
 
   const onVisibleAnchorChange = useCallback((anchor: VirtualScrollAnchor) => {
     anchorRef.current = anchor;
@@ -568,7 +606,7 @@ export function useFollowTail({
     onWheel,
     onPointerMove,
     onTouchStart,
-    onTouchEnd,
+    onTouchPointerDown,
     onKeyDown,
   };
 }
