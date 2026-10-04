@@ -3,6 +3,7 @@ import { State } from "./State.js";
 import {
   type KeyboardEvent,
   type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
   type RefObject,
   useCallback,
@@ -1242,7 +1243,8 @@ function SessionDetailLoaded({
     readerIntent: null as EarlierActivityIntent | null,
     readerIntentTop: null as number | null,
     inputHeld: false,
-    nativeTouchActive: false,
+    /** Each reader finger, keyed by its touch or pointer identity, with the listeners awaiting its end. */
+    heldTouches: new Map<string, () => void>(),
     touchInputY: null as number | null,
     touchStartY: null as number | null,
     touchTraversalStarted: false,
@@ -2433,7 +2435,8 @@ function SessionDetailLoaded({
     state.readerIntentTop = null;
     state.readerIntentMovedUp = false;
     state.inputHeld = false;
-    state.nativeTouchActive = false;
+    for (const detach of state.heldTouches.values()) detach();
+    state.heldTouches.clear();
     state.touchInputY = null;
     state.touchStartY = null;
     state.touchTraversalStarted = false;
@@ -2493,16 +2496,66 @@ function SessionDetailLoaded({
     view.addEventListener("pointercancel", release);
   }, [deferEarlierActivityIdleEnd, markEarlierActivityIntent]);
 
-  const markTouchEarlierActivityIntent = useCallback((clientY: number | null = null) => {
-    markEarlierActivityIntent("touch-traversal", clientY);
-  }, [markEarlierActivityIntent]);
-
-  const markNativeTouchEarlierActivityIntent = useCallback((clientY: number | null) => {
+  const finishTouchEarlierActivityIntent = useCallback(() => {
     const state = automaticEarlierLoadRef.current;
-    if (state.nativeTouchActive) return;
-    markTouchEarlierActivityIntent(clientY);
-    state.nativeTouchActive = true;
-  }, [markTouchEarlierActivityIntent]);
+    if (state.readerIntent !== "touch-traversal") return;
+    state.inputHeld = false;
+    deferEarlierActivityIdleEnd();
+  }, [deferEarlierActivityIdleEnd]);
+
+  /** Holds one reader finger until `target` hears the end that `ends` recognises as that finger's
+   * own; the traversal finishes once no reader finger is held. */
+  const holdEarlierActivityTouch = useCallback((
+    key: string,
+    target: EventTarget,
+    endTypes: readonly string[],
+    ends: (event: Event) => boolean,
+  ) => {
+    const heldTouches = automaticEarlierLoadRef.current.heldTouches;
+    heldTouches.get(key)?.();
+    const onEnd = (event: Event) => {
+      if (!ends(event) || heldTouches.get(key) !== detach) return;
+      heldTouches.delete(key);
+      detach();
+      if (heldTouches.size === 0) finishTouchEarlierActivityIntent();
+    };
+    const detach = () => {
+      for (const type of endTypes) target.removeEventListener(type, onEnd);
+    };
+    for (const type of endTypes) target.addEventListener(type, onEnd);
+    heldTouches.set(key, detach);
+  }, [finishTouchEarlierActivityIntent]);
+
+  // A touch pointer's end can land outside the reader (a drag relayed from the floating tail control
+  // ends wherever the finger lifts), so it is heard on the window. A native pan cancels its pointer
+  // while the finger is still down; its touch, held below, keeps the traversal armed.
+  const markTouchPointerEarlierActivityIntent = useCallback((event: ReactPointerEvent<HTMLElement>) => {
+    markEarlierActivityIntent("touch-traversal", event.clientY);
+    const pointerId = event.pointerId;
+    holdEarlierActivityTouch(
+      `pointer:${pointerId}`,
+      event.currentTarget.ownerDocument.defaultView ?? window,
+      ["pointerup", "pointercancel"],
+      (end) => (end as PointerEvent).pointerId === pointerId,
+    );
+  }, [holdEarlierActivityTouch, markEarlierActivityIntent]);
+
+  // A touch's later events all go to the element it started on, even once a re-render has removed
+  // that element and they no longer bubble to the reader; and a reader `touchend` cannot say when
+  // the reader's own fingers are gone, since `touches` counts fingers anywhere on the page. So each
+  // finger is released by its own end, heard where it started (#2563).
+  const markNativeTouchEarlierActivityIntent = useCallback((event: TouchEvent) => {
+    const state = automaticEarlierLoadRef.current;
+    const target = event.target;
+    if (!target) return;
+    const nativeTouchHeld = [...state.heldTouches.keys()].some((key) => key.startsWith("touch:"));
+    if (!nativeTouchHeld) markEarlierActivityIntent("touch-traversal", event.touches[0]?.clientY ?? null);
+    for (const touch of Array.from(event.changedTouches)) {
+      const identifier = touch.identifier;
+      holdEarlierActivityTouch(`touch:${identifier}`, target, ["touchend", "touchcancel"], (end) =>
+        Array.from((end as TouchEvent).changedTouches ?? []).some((ended) => ended.identifier === identifier));
+    }
+  }, [holdEarlierActivityTouch, markEarlierActivityIntent]);
 
   const markTouchEarlierActivityMovement = useCallback((clientY: number | null) => {
     const state = automaticEarlierLoadRef.current;
@@ -2512,24 +2565,6 @@ function SessionDetailLoaded({
     }
     state.touchInputY = clientY;
   }, []);
-
-  const finishTouchEarlierActivityIntent = useCallback(() => {
-    const state = automaticEarlierLoadRef.current;
-    if (state.readerIntent !== "touch-traversal") return;
-    state.inputHeld = false;
-    deferEarlierActivityIdleEnd();
-  }, [deferEarlierActivityIdleEnd]);
-
-  const finishPointerTouchEarlierActivityIntent = useCallback(() => {
-    if (automaticEarlierLoadRef.current.nativeTouchActive) return;
-    finishTouchEarlierActivityIntent();
-  }, [finishTouchEarlierActivityIntent]);
-
-  const finishNativeTouchEarlierActivityIntent = useCallback((remainingTouches: number) => {
-    if (remainingTouches > 0) return;
-    automaticEarlierLoadRef.current.nativeTouchActive = false;
-    finishTouchEarlierActivityIntent();
-  }, [finishTouchEarlierActivityIntent]);
 
   const rearmEarlierActivityAfterMeasurements = useCallback(() => {
     cancelEarlierActivitySettle();
@@ -6006,7 +6041,7 @@ function SessionDetailLoaded({
               }}
               onPointerDown={(event) => {
                 if (event.pointerType === "touch") {
-                  markTouchEarlierActivityIntent(event.clientY);
+                  markTouchPointerEarlierActivityIntent(event);
                   // A touch pauses following on the press, as its touchstart does. A drag the
                   // floating tail control hands over (#2425) arrives as pointer events only.
                   followTail.onTouchPointerDown(event);
@@ -6021,14 +6056,8 @@ function SessionDetailLoaded({
                 }
                 followTail.onPointerMove(event);
               }}
-              onPointerUp={(event) => {
-                if (event.pointerType === "touch") finishPointerTouchEarlierActivityIntent();
-              }}
-              onPointerCancel={(event) => {
-                if (event.pointerType === "touch") finishPointerTouchEarlierActivityIntent();
-              }}
               onTouchStart={(event) => {
-                markNativeTouchEarlierActivityIntent(event.touches[0]?.clientY ?? null);
+                markNativeTouchEarlierActivityIntent(event.nativeEvent);
                 followTail.onTouchStart(event.nativeEvent);
               }}
               onTouchMove={(event) => {
@@ -6036,8 +6065,6 @@ function SessionDetailLoaded({
                 markTouchEarlierActivityMovement(clientY);
                 requestEarlierFromTouchAtHead(clientY, event.target);
               }}
-              onTouchEnd={(event) => finishNativeTouchEarlierActivityIntent(event.touches.length)}
-              onTouchCancel={(event) => finishNativeTouchEarlierActivityIntent(event.touches.length)}
               onKeyDown={(event) => {
                 if (event.defaultPrevented) return;
                 if (inTypingContext(event.currentTarget.ownerDocument)) return;

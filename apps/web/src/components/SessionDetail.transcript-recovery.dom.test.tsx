@@ -370,10 +370,23 @@ async function scrollReader(scroller: HTMLElement, scrollTop: number, readerInte
   await flushAsyncWork();
 }
 
+/** Fingers `0..n-1` are down at `clientYs`. A start or move changes all of them; an end lifts finger
+ * `n`, the last one down before it. */
 function touchInputEvent(type: "touchstart" | "touchmove" | "touchend", ...clientYs: number[]) {
+  const touches = clientYs.map((clientY, identifier) => ({ identifier, clientY }));
+  return fingerEvent(type, type === "touchend" ? [{ identifier: touches.length, clientY: 0 }] : touches, touches);
+}
+
+/** A touch event for the fingers `changed`, with `touches` every finger still on the page after it. */
+function fingerEvent(
+  type: "touchstart" | "touchmove" | "touchend",
+  changed: ReadonlyArray<{ identifier: number; clientY: number }>,
+  touches: ReadonlyArray<{ identifier: number; clientY: number }>,
+) {
   const event = new domWindow.Event(type, { bubbles: true });
-  Object.defineProperty(event, "touches", {
-    value: clientYs.map((clientY) => ({ clientY })),
+  Object.defineProperties(event, {
+    changedTouches: { value: changed },
+    touches: { value: touches },
   });
   return event;
 }
@@ -381,10 +394,12 @@ function touchInputEvent(type: "touchstart" | "touchmove" | "touchend", ...clien
 function pointerInputEvent(
   type: "pointerdown" | "pointermove" | "pointerup" | "pointercancel",
   clientY: number,
+  pointerId = 1,
 ) {
   const event = new domWindow.Event(type, { bubbles: true });
   Object.defineProperties(event, {
     clientY: { value: clientY },
+    pointerId: { value: pointerId },
     pointerType: { value: "touch" },
   });
   return event;
@@ -1344,6 +1359,138 @@ test("a two-finger touch start remains active after one pointer lifts", async ()
     assert.equal(pages.tailCalls.length, 2, "native ownership survives a partial two-finger lift");
   } finally {
     await unmountFixture(fixture);
+  }
+});
+
+test("each reader finger releases the touch traversal by its own end, wherever that end is delivered (#2563)", async () => {
+  interface Fingers { scroller: HTMLElement; row: HTMLElement; outside: HTMLElement }
+  const dispatch = (target: EventTarget, event: unknown) => act(async () => {
+    target.dispatchEvent(event as never);
+  });
+  const finger = (identifier: number) => ({ identifier, clientY: 100 + identifier * 100 });
+  // A reader finger lifts first; the outside finger's end never passes through the reader.
+  const liftReaderFingerBeforeOutsideFinger = async ({ row, outside }: Fingers) => {
+    await dispatch(row, fingerEvent("touchstart", [finger(1)], [finger(1)]));
+    await dispatch(outside, fingerEvent("touchstart", [finger(2)], [finger(1), finger(2)]));
+    await dispatch(row, fingerEvent("touchend", [finger(1)], [finger(2)]));
+    await dispatch(outside, fingerEvent("touchend", [finger(2)], []));
+  };
+  const cases: Array<{ name: string; held: boolean; gesture: (fingers: Fingers) => Promise<void> }> = [
+    {
+      name: "a reader finger that is still down",
+      held: true,
+      gesture: async ({ row }) => { await dispatch(row, fingerEvent("touchstart", [finger(1)], [finger(1)])); },
+    },
+    {
+      name: "a reader finger that lifts before a finger outside the reader",
+      held: false,
+      gesture: liftReaderFingerBeforeOutsideFinger,
+    },
+    {
+      name: "a reader finger whose row a re-render removed before it lifted",
+      held: false,
+      gesture: async ({ row }) => {
+        await dispatch(row, fingerEvent("touchstart", [finger(1)], [finger(1)]));
+        row.remove();
+        await dispatch(row, fingerEvent("touchend", [finger(1)], []));
+      },
+    },
+    {
+      name: "one of two reader fingers, while the other stays down",
+      held: true,
+      gesture: async ({ row, scroller }) => {
+        await dispatch(row, fingerEvent("touchstart", [finger(1)], [finger(1)]));
+        await dispatch(scroller, fingerEvent("touchstart", [finger(2)], [finger(1), finger(2)]));
+        await dispatch(row, fingerEvent("touchend", [finger(1)], [finger(2)]));
+      },
+    },
+    {
+      name: "both of two reader fingers, one after the other",
+      held: false,
+      gesture: async ({ row, scroller }) => {
+        await dispatch(row, fingerEvent("touchstart", [finger(1)], [finger(1)]));
+        await dispatch(scroller, fingerEvent("touchstart", [finger(2)], [finger(1), finger(2)]));
+        await dispatch(row, fingerEvent("touchend", [finger(1)], [finger(2)]));
+        await dispatch(scroller, fingerEvent("touchend", [finger(2)], []));
+      },
+    },
+    {
+      name: "a native pan whose pointer the browser cancelled",
+      held: true,
+      gesture: async ({ scroller }) => {
+        await dispatch(scroller, pointerInputEvent("pointerdown", 100, 1));
+        await dispatch(scroller, fingerEvent("touchstart", [finger(1)], [finger(1)]));
+        await dispatch(scroller, pointerInputEvent("pointercancel", 100, 1));
+      },
+    },
+    {
+      name: "a drag relayed from Jump to Latest that lifts",
+      held: false,
+      gesture: async ({ scroller }) => {
+        await dispatch(scroller, pointerInputEvent("pointerdown", 100, 7));
+        await dispatch(scroller, pointerInputEvent("pointerup", 100, 7));
+      },
+    },
+    {
+      name: "a relayed drag that lifts after a reader finger lifted before an outside finger",
+      held: false,
+      gesture: async (fingers) => {
+        await liftReaderFingerBeforeOutsideFinger(fingers);
+        await dispatch(fingers.scroller, pointerInputEvent("pointerdown", 100, 7));
+        await dispatch(fingers.scroller, pointerInputEvent("pointerup", 100, 7));
+      },
+    },
+    {
+      name: "a touch pointer that lifts outside the reader",
+      held: false,
+      gesture: async ({ scroller, outside }) => {
+        await dispatch(scroller, pointerInputEvent("pointerdown", 100, 7));
+        await dispatch(outside, pointerInputEvent("pointerup", 100, 7));
+      },
+    },
+    {
+      name: "a touch pointer while another pointer lifts",
+      held: true,
+      gesture: async ({ scroller, outside }) => {
+        await dispatch(scroller, pointerInputEvent("pointerdown", 100, 7));
+        await dispatch(outside, pointerInputEvent("pointerup", 100, 8));
+      },
+    },
+  ];
+  for (const { name, held, gesture } of cases) {
+    const pages = pageController();
+    const fixture = await mountFixture(pages);
+    const outside = domWindow.document.createElement("div") as unknown as HTMLElement;
+    const row = domWindow.document.createElement("div") as unknown as HTMLElement;
+    try {
+      const openingWindow = fixture.events.slice(-8);
+      await act(async () => {
+        pages.releaseTail({
+          events: openingWindow,
+          eventEpoch: 0,
+          nextBefore: openingWindow[0]!.seq,
+          hasMoreOlder: true,
+          cacheComplete: true,
+        });
+      });
+      await flushAsyncWork();
+      setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 1_600, scrollTop: 1_200 });
+      domWindow.document.body.append(outside as never);
+      fixture.scroller.append(row as never);
+
+      await gesture({ scroller: fixture.scroller, row, outside });
+      // Past the traversal's idle window, an upward scroll the reader did not start reaches the head.
+      await flushAsyncWork(250);
+      await scrollReader(fixture.scroller, 120, false);
+
+      assert.equal(pages.tailCalls.length, held ? 2 : 1, held
+        ? `${name} keeps the traversal held, so it loads at the head`
+        : `${name} ends the traversal, so a later scroll it did not start cannot load`);
+    } finally {
+      row.remove();
+      outside.remove();
+      await unmountFixture(fixture);
+    }
   }
 });
 
