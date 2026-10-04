@@ -468,7 +468,9 @@ test.describe("desktop: context and cost sit in the composer bar before the mic"
 
   test("reading away from the tail never moves the triggers", async ({ page }) => {
     await page.setViewportSize({ width: 1200, height: 820 });
-    await page.goto("/session-usage-e2e.html?width=1180&height=780");
+    // A pane short enough for the transcript to scroll: one that cannot scroll is already at its
+    // tail and shows no Jump to Latest (#2526).
+    await page.goto("/session-usage-e2e.html?width=1180&height=480");
     const followState = page.locator(".detail-scroll[data-follow-tail-state]");
     await expect(followState).toHaveAttribute("data-follow-tail-state", "following");
     const following = await readBar(page);
