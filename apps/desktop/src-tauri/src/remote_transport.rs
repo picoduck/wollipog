@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use tauri::ipc::{Channel, InvokeBody, Request, Response};
 use tauri::State;
 use tokio::net::{TcpSocket, TcpStream};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::{Message, WebSocketConfig};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
@@ -105,21 +105,28 @@ impl RuntimeLease {
         if !upload_stall_bounded {
             return Ok((request.body(body).send().await?, None));
         }
-        let (handed_off, body_handed_off) = oneshot::channel();
+        let last_taken = Arc::new(Mutex::new(started));
         let response = request
             .body(reqwest::Body::wrap(UploadBody {
                 remaining: body.into(),
-                handed_off: Some(handed_off),
+                last_taken: last_taken.clone(),
             }))
             .send();
         // A link at the upload floor has delivered the body by `started + budget.upload`, even
-        // though the client hands its last bytes to the socket buffers earlier. The response's
-        // usual stall bound counts from then, or from the handoff when a slower link makes that
-        // later, so it never cuts off an upload the floor allows for.
+        // though the client hands its last bytes to the socket buffers earlier. The usual stall
+        // bound counts from then, or from the client last taking a chunk when a slower link makes
+        // that later: an upload still moving is never cut off by it, and one the server stopped
+        // reading, or a response that never comes, still fails.
         let stalled = async {
-            let _ = body_handed_off.await;
-            let arrived = (started + budget.upload).max(tokio::time::Instant::now());
-            tokio::time::sleep_until(arrived + DEFAULT_REMOTE_HTTP_READ_TIMEOUT).await;
+            loop {
+                let last_taken = *last_taken.lock().unwrap_or_else(|error| error.into_inner());
+                let deadline =
+                    (started + budget.upload).max(last_taken) + DEFAULT_REMOTE_HTTP_READ_TIMEOUT;
+                if tokio::time::Instant::now() >= deadline {
+                    return;
+                }
+                tokio::time::sleep_until(deadline).await;
+            }
         };
         tokio::select! {
             response = response => Ok((response?, Some(DEFAULT_REMOTE_HTTP_READ_TIMEOUT))),
@@ -144,14 +151,14 @@ impl From<reqwest::Error> for NativeRequestError {
     }
 }
 
-/// A request body the client takes in chunks of this size, so its last chunk is taken only when
-/// little of the body remains to send.
+/// A request body the client takes in chunks of this size, so it takes one only as the socket
+/// makes room for it.
 const UPLOAD_CHUNK_BYTES: usize = 16 * 1024;
 
-/// A request body that reports when the client has taken the last of it (#2615).
+/// A request body that records when the client last took a chunk of it (#2615).
 struct UploadBody {
     remaining: Bytes,
-    handed_off: Option<oneshot::Sender<()>>,
+    last_taken: Arc<Mutex<tokio::time::Instant>>,
 }
 
 impl http_body::Body for UploadBody {
@@ -167,11 +174,10 @@ impl http_body::Body for UploadBody {
         }
         let length = self.remaining.len().min(UPLOAD_CHUNK_BYTES);
         let chunk = self.remaining.split_to(length);
-        if self.remaining.is_empty() {
-            if let Some(handed_off) = self.handed_off.take() {
-                let _ = handed_off.send(());
-            }
-        }
+        *self
+            .last_taken
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = tokio::time::Instant::now();
         Poll::Ready(Some(Ok(Frame::data(chunk))))
     }
 
@@ -1959,6 +1965,9 @@ mod tests {
                 every: Duration::from_secs(21),
                 bytes: 2,
             }),
+            // Reads the request head, then neither reads the body nor answers for an hour.
+            SlowReply::After(Duration::from_secs(60 * 60)),
+            SlowReply::After(Duration::from_secs(60 * 60)),
         ])
         .await;
         let lease = test_lease(&Uuid::new_v4().to_string(), &origin);
@@ -1991,6 +2000,19 @@ mod tests {
         );
         assert_timed_out_at(
             timed_request(&lease, &origin, Method::POST, images, image()).await,
+            upload_time + DEFAULT_REMOTE_HTTP_READ_TIMEOUT,
+        );
+
+        // A server that stops reading the body fails the upload on the same bound, even on a route
+        // with no total.
+        assert_timed_out_at(
+            timed_request(&lease, &origin, Method::POST, images, image()).await,
+            upload_time + DEFAULT_REMOTE_HTTP_READ_TIMEOUT,
+        );
+        let export = "/api/sessions/s_1/export?format=json";
+        assert_eq!(budget(Method::GET, export).total, None);
+        assert_timed_out_at(
+            timed_request(&lease, &origin, Method::GET, export, image()).await,
             upload_time + DEFAULT_REMOTE_HTTP_READ_TIMEOUT,
         );
         ticker.abort();
