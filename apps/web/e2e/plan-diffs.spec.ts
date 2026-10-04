@@ -43,4 +43,28 @@ for (const width of [1440, 390]) {
     await expect(page.getByTestId("opened-location")).toHaveText("Review: apps/web/src/release-notes.ts");
     await expectNoHorizontalOverflow(page);
   });
+
+  test(`read, delete and move steps keep their file name whole, and a command keeps its trailing ellipsis at ${width}px (#2523)`, async ({ page }) => {
+    await openFixture(page, width);
+    const clipped = (element: import("@playwright/test").Locator) => element.evaluate((node) => node.scrollWidth > node.clientWidth);
+    for (const [verb, path, name] of [
+      ["Read", "apps/web/src/components/Header.tsx", "Header.tsx"],
+      ["Delete", "apps/web/src/components/legacy/ReleaseBanner.tsx", "ReleaseBanner.tsx"],
+      ["Move", "apps/web/src/version.ts → apps/web/src/release/version.ts", "version.ts"],
+    ] as const) {
+      const row = page.locator(".tl-step-head").filter({ has: page.locator(".tl-step-verb", { hasText: new RegExp(`^${verb}$`) }) });
+      const label = row.locator(".tl-step-object > .tl-path");
+      await expect(label).toHaveAttribute("title", path);
+      await expect(row.locator(".tl-step-title")).toHaveText(`${verb} ${path}`);
+      await expect(label.locator(".tl-path-name")).toHaveText(name);
+      await expect.poll(() => clipped(label.locator(".tl-path-name")), `${verb}'s file name is not clipped`).toBe(false);
+      // A phone row shortens the directory first; a desktop row has room for the whole path.
+      await expect.poll(() => clipped(label.locator(".tl-path-dir"))).toBe(width === 390);
+    }
+    const command = page.locator(".tl-step-head").filter({ has: page.locator(".tl-step-verb", { hasText: /^Run$/ }) }).locator(".tl-step-object");
+    await expect(command.locator(".tl-path")).toHaveCount(0);
+    await expect(command).toHaveCSS("text-overflow", "ellipsis");
+    await expect.poll(() => clipped(command)).toBe(width === 390);
+    await expectNoHorizontalOverflow(page);
+  });
 }

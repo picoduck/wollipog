@@ -203,6 +203,17 @@ export function splitStepTitle(title: string, workspaceRoot?: string): { verb: s
   return { verb: title };
 }
 
+/** The kinds of work done on a file (ACP's read, edit, delete and move), whose object is its path. */
+const PATH_KINDS = new Set(["read", "edit", "delete", "move"]);
+
+/**
+ * Whether a step's object is a file path, so its directory gives way before its file name (§11.3).
+ * Claude files Glob and Grep under read, but their object is a pattern or a query.
+ */
+export function stepObjectIsPath(title: string, toolKind?: string): boolean {
+  return toolKind !== undefined && PATH_KINDS.has(toolKind) && !/^(?:Glob|Grep):/.test(title);
+}
+
 /** Provider tool names that are not verbs, as the verb a person would use. */
 const TOOL_VERBS: Record<string, string> = {
   Bash: "Run",

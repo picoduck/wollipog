@@ -6,7 +6,8 @@ import { deriveTimeline } from "../timeline.js";
 import "../styles.css";
 
 /** Two turns of real events through the timeline builder (#2187): turn 1 revises its plan three
- * times and writes a new file and edits another; turn 2 revises the plan once more.
+ * times, reads, deletes and moves files, runs a command, and writes a new file and edits another;
+ * turn 2 revises the plan once more.
  * `?theme=light` switches theme. */
 const params = new URLSearchParams(window.location.search);
 document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dark");
@@ -73,6 +74,9 @@ const events: SessionEvent[] = [
   event({ kind: "user_message", text: "Show the latest release note's version in the page header." }, at(600)),
   event(plan(["pending", "pending", "pending"]), at(590)),
   event({ kind: "tool_call", toolCallId: "read-header", title: "Read: apps/web/src/components/Header.tsx", toolKind: "read", status: "completed" }, at(580)),
+  event({ kind: "tool_call", toolCallId: "delete-banner", title: `Delete: ${workspaceRoot}/apps/web/src/components/legacy/ReleaseBanner.tsx`, toolKind: "delete", status: "completed" }, at(578)),
+  event({ kind: "tool_call", toolCallId: "move-version", title: "Move: apps/web/src/version.ts → apps/web/src/release/version.ts", toolKind: "move", status: "completed" }, at(576)),
+  event({ kind: "tool_call", toolCallId: "run-header-test", title: "$ pnpm --filter @wollipog/web exec node --test src/components/Header.dom.test.tsx", toolKind: "execute", status: "completed" }, at(574)),
   event(plan(["completed", "in_progress", "pending"]), at(570)),
   event({ kind: "file_edit", path: `${workspaceRoot}/apps/web/src/release-notes.ts`, diff: newFileDiff }, at(560)),
   event(plan(["completed", "completed", "in_progress"]), at(550)),

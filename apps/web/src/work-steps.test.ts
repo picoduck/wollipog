@@ -8,6 +8,7 @@ import {
   mergeWork,
   retryNeighbours,
   splitStepTitle,
+  stepObjectIsPath,
   subagentName,
   summarizeWork,
   workspaceRelativePath,
@@ -83,6 +84,19 @@ test("a provider title becomes a verb and a workspace-relative object", () => {
     "a path outside the session root stays as given");
   assert.equal(workspaceRelativePath("C:\\work\\repo\\src\\a.ts", "C:\\work\\repo\\"), "src/a.ts");
   assert.equal(workspaceRelativePath("/home/dev/repo-other/a.ts", "/home/dev/repo"), "/home/dev/repo-other/a.ts");
+});
+
+test("a step's object is a path when its kind works on a file, and not for a pattern or query", () => {
+  assert.equal(stepObjectIsPath("Read: /repo/src/a.ts", "read"), true);
+  assert.equal(stepObjectIsPath("Delete: src/a.ts", "delete"), true);
+  assert.equal(stepObjectIsPath("Move: src/a.ts → src/b/a.ts", "move"), true);
+  assert.equal(stepObjectIsPath("Write: src/a.ts", "edit"), true);
+  assert.equal(stepObjectIsPath("Glob: src/**/*.tsx", "read"), false, "Claude's Glob is filed under read with a pattern");
+  assert.equal(stepObjectIsPath("Grep: TODO", "read"), false, "and Grep with a query");
+  assert.equal(stepObjectIsPath("Bash: cat src/a.ts", "execute"), false, "a command is not a path");
+  assert.equal(stepObjectIsPath("grep: TODO", "search"), false);
+  assert.equal(stepObjectIsPath("WebFetch: https://example.com/a/b", "fetch"), false, "nor is a URL");
+  assert.equal(stepObjectIsPath("Read: src/a.ts"), false, "an unknown kind keeps the plain object");
 });
 
 test("a diff's line counts ignore its file headers", () => {

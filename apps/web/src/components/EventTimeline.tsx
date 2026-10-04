@@ -48,6 +48,7 @@ import {
   retryNeighbours,
   sameWork,
   splitStepTitle,
+  stepObjectIsPath,
   subagentName,
   summarizeWork,
   workspaceRelativePath,
@@ -2518,7 +2519,7 @@ function ToolCallStep({ item, attempts, open, onToggle }: {
     <ToolStep
       icon={toolIcon(item.toolKind)}
       verb={verb}
-      object={object}
+      object={object && stepObjectIsPath(item.title, item.toolKind) ? <PathLabel path={object} /> : object}
       trail={fact}
       timing={span.description || undefined}
       status={<StepStatus status={item.status} />}

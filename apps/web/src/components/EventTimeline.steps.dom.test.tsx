@@ -149,6 +149,49 @@ test("an edit names its workspace-relative path once", async () => {
   assert.deepEqual(opened, ["src/components/Header.tsx"], "a relative path can now open in the Files panel");
 });
 
+test("a tool call's path object keeps its file name whole, and any other object stays plain text", async () => {
+  const { container, root } = await mount();
+  const step = (id: number, title: string, toolKind: string, text = ""): TimelineItem => ({
+    kind: "tool_call", id, toolCallId: `call-${id}`, title, toolKind, status: "completed", text,
+  });
+  await act(async () => root.render(<EventTimeline workspaceRoot="/repo" items={[
+    { kind: "user_message", id: 1, text: "Tidy the header", createdAt: t0 },
+    step(2, "Read: /repo/src/components/Header.tsx", "read", "export function Header() {}"),
+    step(3, "Delete: /repo/src/legacy/Banner.tsx", "delete", "Deleted"),
+    step(4, "Move: src/version.ts → src/release/version.ts", "move", "Moved"),
+    step(5, "Read: README.md", "read"),
+    step(6, "Bash: cat src/components/Header.tsx", "execute"),
+    step(7, "Grep: src/components/", "read"),
+    step(8, "WebFetch: https://example.com/docs/a.html", "fetch"),
+  ]} />));
+  await openWork(container);
+  const steps = [...container.querySelectorAll<HTMLElement>(".tl-step")];
+  const parts = (index: number) => {
+    const path = steps[index]!.querySelector(".tl-step-object > .tl-path");
+    return path && {
+      title: path.getAttribute("title"),
+      dir: path.querySelector(".tl-path-dir")?.textContent ?? null,
+      name: path.querySelector(".tl-path-name")?.textContent,
+    };
+  };
+  assert.deepEqual(parts(0), { title: "src/components/Header.tsx", dir: "src/components/", name: "Header.tsx" });
+  assert.deepEqual(parts(1), { title: "src/legacy/Banner.tsx", dir: "src/legacy/", name: "Banner.tsx" });
+  assert.deepEqual(parts(2), {
+    title: "src/version.ts → src/release/version.ts", dir: "src/version.ts → src/release/", name: "version.ts",
+  }, "a move keeps its destination's file name whole");
+  assert.deepEqual(parts(3), { title: "README.md", dir: null, name: "README.md" });
+  for (const [index, object] of [[4, "cat src/components/Header.tsx"], [5, "src/components/"], [6, "https://example.com/docs/a.html"]] as const) {
+    assert.equal(parts(index), null, `${object} is not a path label`);
+    assert.equal(steps[index]!.querySelector(".tl-step-object")?.textContent, object, "it keeps its plain trailing-ellipsis object");
+  }
+  assert.deepEqual(steps.slice(0, 3).map((row) => row.querySelector(".tl-step-head")?.getAttribute("aria-label")), [
+    "Read src/components/Header.tsx · Completed",
+    "Delete src/legacy/Banner.tsx · Completed",
+    "Move src/version.ts → src/release/version.ts · Completed",
+  ], "the accessible name still reads the full verb and path");
+  assert.equal(steps[3]!.querySelector(".tl-step-title")?.textContent, "Read README.md", "as does a row without a body");
+});
+
 test("a failed step's body shows its exit code and error lines in the danger colour", async () => {
   const { container, root } = await mount();
   await act(async () => root.render(<EventTimeline items={settledTurn} />));
