@@ -35,11 +35,7 @@ test("a running step's duration ticks without layout shift and freezes when the 
   const completedToolSummary = page.locator("details.tl-step", { hasText: "Completed Details Tool" }).locator("summary");
   await expect(completedToolSummary).toHaveAccessibleName("Completed Details Tool · Completed");
   await expect(completedToolSummary).toHaveAccessibleDescription(/^Started .+, finished .+ \(40s\)$/);
-  const tooltip = page.locator(".tl-step", { hasText: "Completed Details Tool" }).getByRole("tooltip");
-  await expect(tooltip).toBeHidden();
-  await page.locator(".tl-step", { hasText: "Completed Details Tool" }).locator(".tl-step-trail").hover();
-  await expect(tooltip).toBeVisible();
-  await page.mouse.move(0, 0);
+  await expect(page.locator(".tl-step", { hasText: "Completed Details Tool" }).locator("[role='tooltip']")).toBeHidden();
 
   const before = await rowGeometry(page);
   // The fixture's clock origin is read when the page loads, so a slow runner adds a second or two.
@@ -73,6 +69,47 @@ test("a running step's duration ticks without layout shift and freezes when the 
   await page.clock.fastForward(60_000);
   expect(await page.locator(".tl-step-trail").allTextContents()).toEqual(frozen);
   expect(await page.evaluate(() => window.timelineTimestampE2E.metrics().updateCommits)).toBe(0);
+});
+
+/** Opens the timestamp harness with its settled work group expanded, and returns the completed step. */
+async function openCompletedStep(page: Page) {
+  await page.goto("/timeline-timestamps-e2e.html");
+  await expect(page.locator(".tl-work-title")).toHaveText("Worked for 1m 20s");
+  await page.locator(".tl-work > .disclosure-trigger").click();
+  return page.locator(".tl-step", { hasText: "Completed Details Tool" });
+}
+
+for (const reducedMotion of ["no-preference", "reduce"] as const) {
+  test(`a step's duration tooltip waits the shared tooltip delay on hover (${reducedMotion} motion)`, async ({ page }) => {
+    // Reduced motion collapses the fade, not the wait: the delay is intent, not animation.
+    await page.emulateMedia({ reducedMotion });
+    const step = await openCompletedStep(page);
+    const tooltip = step.locator("[role='tooltip']");
+    await expectDelayedTooltip(page, step.locator(".tl-step-trail"), tooltip);
+    await expect(tooltip).toHaveText(/^Started .+, finished .+ \(40s\)$/);
+    await expect(step.locator("summary")).toHaveAccessibleDescription(/^Started .+, finished .+ \(40s\)$/);
+  });
+}
+
+test("keyboard focus on a step reveals its duration tooltip at once, even mid-way through a hover's delay", async ({ page }) => {
+  const step = await openCompletedStep(page);
+  const summary = step.locator("summary");
+  const tooltip = step.locator("[role='tooltip']");
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Animation.enable");
+  await cdp.send("Animation.setPlaybackRate", { playbackRate: 0 });
+  await step.locator(".tl-step-trail").hover();
+  await tooltip.evaluate((element) => { for (const animation of element.getAnimations()) animation.currentTime = 100; });
+  await expect(tooltip).toBeHidden();
+  // A keypress first, so the focus that follows is keyboard focus (:focus-visible), as a Tab's is.
+  await page.keyboard.press("Shift");
+  await summary.focus();
+  await expect(summary).toBeFocused();
+  // The animation timeline is still frozen, so only a reveal that does not wait can pass.
+  await expect(tooltip).toBeVisible();
+  await expect(tooltip).toHaveCSS("opacity", "1");
+  await cdp.send("Animation.setPlaybackRate", { playbackRate: 1 });
+  await cdp.detach();
 });
 
 async function readerGeometry(page: Page) {

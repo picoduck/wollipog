@@ -6736,14 +6736,16 @@ textarea,
 /* A hover reveal waits --delay-tooltip, so a pointer crossing the transcript flashes nothing.
    Visibility waits with it: until then the tooltip is hidden, not merely transparent. */
 .tl-turn-time:hover > .tl-tooltip,
-.tl-working-step-text:hover + .tl-tooltip {
+.tl-working-step-text:hover + .tl-tooltip,
+.tl-step-trail:hover > .tl-tooltip {
   transition:
     opacity var(--dur-fast) var(--ease-out) var(--delay-tooltip),
     visibility var(--dur-fast) var(--ease-out) var(--delay-tooltip);
 }
 /* Keyboard focus reveals at once, as the rail's does. Dropping the transitions also cancels a hover's
    pending reveal when focus arrives under a resting pointer, which a changed delay alone would not. */
-.tl-working-step-text:focus-visible + .tl-tooltip { transition: none; }
+.tl-working-step-text:focus-visible + .tl-tooltip,
+.tl-step-head:focus-visible .tl-tooltip { transition: none; }
 
 .timeline {
   display: flex;
