@@ -5952,6 +5952,8 @@ textarea {
   .dictation-label,
   .dictation-timer { font: var(--type-small); }
   .dictation-label { font-weight: var(--weight-medium); }
+  /* The shorthand resets the numerals: keep the ticking timer at a steady width. */
+  .dictation-timer { font-variant-numeric: tabular-nums; }
 }
 @container dictation-strip (max-width: 15rem) {
   .dictation-hint { display: none; }

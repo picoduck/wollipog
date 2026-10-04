@@ -180,6 +180,7 @@ test.describe("on a phone", () => {
         hintRight: hint.getBoundingClientRect().right,
         hintTruncated: hint.scrollWidth > hint.clientWidth,
         labelWidth: label.width,
+        timerNumerals: getComputedStyle(bar.querySelector(".dictation-timer")!).fontVariantNumeric,
         rows: new Set([...bar.querySelectorAll(".dictation-strip > :not(.dictation-interim), button")]
           .map((element) => Math.round(element.getBoundingClientRect().top + element.getBoundingClientRect().height / 2))).size,
         overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
@@ -189,6 +190,7 @@ test.describe("on a phone", () => {
     expect(layout.stripRight).toBeLessThanOrEqual(layout.micLeft);
     expect(layout.hintRight).toBeLessThanOrEqual(layout.stripRight + 0.5);
     expect(layout.hintTruncated, "the hint reads in full").toBe(false);
+    expect(layout.timerNumerals, "the small-type timer keeps a steady width as it ticks").toBe("tabular-nums");
     expect(layout.labelWidth).toBeGreaterThan(0);
     expect(layout.overflow).toBe(false);
 
