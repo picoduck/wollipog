@@ -285,3 +285,37 @@ test("exhausting earlier history removes the fallback and ignores further head i
   await page.waitForTimeout(300);
   await expect(page.locator("body")).toHaveAttribute("data-tail-request-count", "2");
 });
+
+// #2570: a turn's menu is portalled out of the transcript, but React still delivers its wheels to
+// the reader. Scrolling over the open menu is not reading the transcript underneath it.
+test("an upward wheel over an open turn menu at the head loads no earlier activity", async ({ page }) => {
+  await page.goto("/recovery-notice-e2e.html?pagination=resolve&pagination-delay=300&height=800&width=1000");
+  const reader = page.locator(".detail-scroll");
+  await positionPausedReader(page, reader, 0);
+  await expect(page.locator(".tl-earlier")).toBeInViewport();
+
+  await reader.getByRole("button", { name: "More Turn Actions" }).first().click();
+  const menu = page.getByRole("menu", { name: "More Turn Actions" });
+  await expect(menu).toBeVisible();
+  expect(await menu.evaluate((element) => element.closest(".detail-scroll") === null)).toBe(true);
+
+  await menu.hover();
+  await page.mouse.wheel(0, -120);
+  await page.waitForTimeout(600);
+  await expect(page.locator("body")).toHaveAttribute("data-tail-request-count", "1");
+  expect(await reader.evaluate((element) => element.scrollTop)).toBe(0);
+  await expect(menu).toBeVisible();
+
+  // Nor is a reading key pressed inside the open menu.
+  for (const key of ["PageUp", "Home", "k", "Shift+Space"]) await page.keyboard.press(key);
+  await page.waitForTimeout(600);
+  await expect(page.locator("body")).toHaveAttribute("data-tail-request-count", "1");
+  expect(await reader.evaluate((element) => element.scrollTop)).toBe(0);
+
+  // The transcript itself still reads upward once the menu is gone.
+  await page.keyboard.press("Escape");
+  await expect(menu).toHaveCount(0);
+  await reader.hover();
+  await page.mouse.wheel(0, -120);
+  await expect.poll(() => page.locator("body").getAttribute("data-tail-request-count")).toBe("2");
+});

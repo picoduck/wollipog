@@ -22,11 +22,13 @@ test("the session surface key follows session identity, never display mode", () 
 
 test("the transcript key bridge yields to handled and modified global shortcuts", () => {
   const handler = detail.match(
-    /onKeyDown=\{\(event\) => \{\s*if \(event\.defaultPrevented\) return;\s*if \(inTypingContext\(event\.currentTarget\.ownerDocument\)\) return;\s*if \(mode !== "expanded" && !isFollowTailResumeKey\(event\)\) return;\s*if \(isFollowTailUpwardReadingKey\(event\)\) \{\s*markSingleEarlierActivityIntent\(\);\s*requestEarlierFromInputAtHead\(\);\s*\}\s*if \(!followTail\.onKeyDown\(event\)\) return;\s*event\.preventDefault\(\);\s*\}\}/,
+    /onKeyDown=\{\(event\) => \{\s*if \(event\.defaultPrevented \|\| !isReaderInput\(event\)\) return;\s*if \(inTypingContext\(event\.currentTarget\.ownerDocument\)\) return;\s*if \(mode !== "expanded" && !isFollowTailResumeKey\(event\)\) return;\s*if \(isFollowTailUpwardReadingKey\(event\)\) \{\s*markSingleEarlierActivityIntent\(\);\s*requestEarlierFromInputAtHead\(\);\s*\}\s*if \(!followTail\.onKeyDown\(event\)\) return;\s*event\.preventDefault\(\);\s*\}\}/,
   );
   assert.ok(handler, "preview and expanded readers must skip capture-handled keys and consume only their own bare reading keys");
   assert.match(handler[0], /mode !== "expanded" && !isFollowTailResumeKey\(event\)/,
     "preview readers expose resume keys without inheriting expanded-only upward-key pause semantics");
+  assert.match(handler[0], /!isReaderInput\(event\)/,
+    "keys pressed in a menu or dialog portalled from a transcript row must not read the transcript (#2570)");
   assert.match(handler[0], /inTypingContext\(event\.currentTarget\.ownerDocument\)/,
     "inline transcript inputs must retain bare letters and navigation keys");
   assert.match(handler[0], /isFollowTailUpwardReadingKey\(event\)\) \{\s*markSingleEarlierActivityIntent\(\);\s*requestEarlierFromInputAtHead\(\);/,

@@ -1,4 +1,5 @@
 import { devices, expect, test } from "@playwright/test";
+import { dialogMotionSettled } from "./dialog-motion.js";
 
 const phone = devices["Pixel 7"];
 test.use({
@@ -272,4 +273,50 @@ test("a downward finger drag at the head loads the next page without a scroll ev
   await expect(control).toContainText("Loading earlier activity…");
   await expect.poll(() => reader.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
   await expect(page.locator(".detail-scroll[data-follow-tail-state]")).toHaveAttribute("data-follow-tail-state", "paused");
+});
+
+// #2570: the phone menu sheet is portalled out of the transcript, but React still delivers its
+// touches to the reader. A pan inside the sheet is not reading the transcript underneath it.
+test("a downward pan inside an open turn menu sheet at the head loads no earlier activity", async ({ page, context }) => {
+  await page.goto("/recovery-notice-e2e.html?pagination=resolve&pagination-delay=300&height=720&width=412");
+
+  const reader = page.locator(".detail-scroll");
+  await expect.poll(() => page.locator("body").getAttribute("data-tail-request-count")).toBe("1");
+  await reader.dispatchEvent("wheel", { deltaY: -40 });
+  await expect(page.locator(".detail-scroll[data-follow-tail-state]")).toHaveAttribute("data-follow-tail-state", "paused");
+  await page.waitForTimeout(250);
+  await reader.evaluate((element) => {
+    element.scrollTop = 0;
+    element.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+  await page.waitForTimeout(250);
+  await expect(page.locator("body")).toHaveAttribute("data-tail-request-count", "1");
+  await expect(page.locator(".tl-earlier")).toBeInViewport();
+
+  await reader.getByRole("button", { name: "More Turn Actions" }).first().tap();
+  const menu = page.getByRole("menu", { name: "More Turn Actions" });
+  await expect(menu).toBeVisible();
+  await dialogMotionSettled(page);
+  expect(await menu.evaluate((element) => element.closest(".detail-scroll") === null)).toBe(true);
+
+  const box = (await menu.boundingBox())!;
+  const client = await context.newCDPSession(page);
+  const x = Math.round(box.x + box.width / 2);
+  const startY = Math.round(box.y + 20);
+  await client.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y: startY, id: 1 }] });
+  for (let step = 1; step <= 8; step += 1) {
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [{ x, y: startY + 20 * step, id: 1 }],
+    });
+    await page.waitForTimeout(16);
+  }
+  // With the finger still on the sheet, a scroll at the head finds no armed earlier-activity intent.
+  await reader.evaluate((element) => element.dispatchEvent(new Event("scroll", { bubbles: true })));
+  await page.waitForTimeout(600);
+  await expect(page.locator("body")).toHaveAttribute("data-tail-request-count", "1");
+  await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await page.waitForTimeout(300);
+  await expect(page.locator("body")).toHaveAttribute("data-tail-request-count", "1");
+  expect(await reader.evaluate((element) => element.scrollTop)).toBe(0);
 });

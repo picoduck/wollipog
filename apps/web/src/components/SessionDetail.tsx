@@ -338,8 +338,8 @@ function nestedScrollerConsumesUpwardInput(target: EventTarget | null, reader: H
 }
 
 /** React delivers a portal's events through the component tree, so a menu sheet or dialog opened
- * from a transcript row reports its presses and wheels to the reader too. Only input on the
- * reader's own page content moves the follow state (#2526). */
+ * from a transcript row reports its presses, wheels and keys to the reader too. Only input on the
+ * reader's own page content moves the follow state (#2526) or reaches for earlier history (#2570). */
 function isReaderInput(event: { target: EventTarget; currentTarget: HTMLElement }): boolean {
   return event.currentTarget.contains(event.target as Node);
 }
@@ -6039,42 +6039,47 @@ function SessionDetailLoaded({
                 maybeLoadEarlier(event.currentTarget);
               }}
               onWheel={(event) => {
+                if (!isReaderInput(event)) return;
                 if (event.deltaY < 0) {
                   markSingleEarlierActivityIntent();
                   if (!nestedScrollerConsumesUpwardInput(event.target, event.currentTarget)) {
                     requestEarlierFromInputAtHead();
                   }
                 }
-                if (isReaderInput(event)) followTail.onWheel(event);
+                followTail.onWheel(event);
               }}
               onPointerDown={(event) => {
+                if (!isReaderInput(event)) return;
                 if (event.pointerType === "touch") {
                   markTouchPointerEarlierActivityIntent(event);
                   // A touch pauses following on the press, as its touchstart does. A drag the
                   // floating tail control hands over (#2425) arrives as pointer events only.
-                  if (isReaderInput(event)) followTail.onTouchPointerDown(event);
+                  followTail.onTouchPointerDown(event);
                 } else markPointerEarlierActivityIntent(event.currentTarget);
               }}
               onPointerMove={(event) => {
+                if (!isReaderInput(event)) return;
                 if (event.pointerType === "touch") {
                   markTouchEarlierActivityMovement(event.clientY);
                   requestEarlierFromTouchAtHead(event.clientY, event.target);
                   // The press already paused; a drag that reaches the tail must be able to resume.
                   return;
                 }
-                if (isReaderInput(event)) followTail.onPointerMove(event);
+                followTail.onPointerMove(event);
               }}
               onTouchStart={(event) => {
+                if (!isReaderInput(event)) return;
                 markNativeTouchEarlierActivityIntent(event.nativeEvent);
-                if (isReaderInput(event)) followTail.onTouchStart(event.nativeEvent);
+                followTail.onTouchStart(event.nativeEvent);
               }}
               onTouchMove={(event) => {
+                if (!isReaderInput(event)) return;
                 const clientY = event.touches[0]?.clientY ?? null;
                 markTouchEarlierActivityMovement(clientY);
                 requestEarlierFromTouchAtHead(clientY, event.target);
               }}
               onKeyDown={(event) => {
-                if (event.defaultPrevented) return;
+                if (event.defaultPrevented || !isReaderInput(event)) return;
                 if (inTypingContext(event.currentTarget.ownerDocument)) return;
                 if (mode !== "expanded" && !isFollowTailResumeKey(event)) return;
                 if (isFollowTailUpwardReadingKey(event)) {
