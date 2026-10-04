@@ -5177,12 +5177,7 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
       inheritedProject,
       { sourceSessionId: sourceId, sourceTurn: turn },
     );
-    let highWater = 0;
-    for (const event of deferHistory ? [] : (res.events ?? [])) {
-      db.appendEvent(targetSessionId, event.payload, event.ts);
-      highWater = event.seq;
-    }
-    db.setHydratedSeq(targetSessionId, highWater);
+    if (!deferHistory) db.appendForkHistory(targetSessionId, res.events ?? []);
     hub.sessionChangedById(session.id);
     if (deferHistory) void svc.hydrateHistory(targetSessionId);
     return reply.code(201).send({

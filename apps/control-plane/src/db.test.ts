@@ -6257,6 +6257,26 @@ test("multi-page hydration keeps lastEventAt at the latest held event, and a cle
   }
 });
 
+test("a fork's one-response history replaces the snapshot seed and caches runner events in order (#2528)", () => {
+  const db = withRunner();
+  try {
+    const id = "legacy-fork";
+    db.createSessionFromSnapshot(snapshot({ id, seq: 2, updatedAt: 5_000 }), "runner-1", 1_000);
+    db.appendForkHistory(id, [
+      { seq: 2, ts: 400, payload: { kind: "agent_message", text: "two" } },
+      { seq: 1, ts: 300, payload: { kind: "user_message", text: "one" } },
+      { seq: 1, ts: 300, payload: { kind: "user_message", text: "one" } },
+    ]);
+    assert.deepEqual(db.listEvents(id).map((event) => event.ts), [300, 400]);
+    assert.equal(db.getHydratedSeq(id), 2);
+    assert.equal(db.getSession(id)?.lastEventAt, 400, "the seed is not an event time");
+    db.appendEvent(id, { kind: "agent_message", text: "three" }, 350, { runnerSeq: 3 });
+    assert.equal(db.getSession(id)?.lastEventAt, 400);
+  } finally {
+    db.close();
+  }
+});
+
 test("replacement history replay keeps a retained attachment's later time as the last activity (#2528)", () => {
   const db = withRunner();
   try {

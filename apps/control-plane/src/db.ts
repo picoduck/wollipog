@@ -14415,6 +14415,16 @@ export class ControlPlaneDb {
     this.stmt("UPDATE sessions SET hydrated_seq=? WHERE id=? AND hydrated_seq < ?").run(seq, id, seq);
   }
 
+  /** Cache a new fork's runner history returned in one response (a runner without indexed
+   * history), as the legacy history path does: runner events in seq order past the cursor, so
+   * the fork snapshot's updatedAt seed yields to their latest time. */
+  appendForkHistory(id: string, events: readonly { seq: number; ts: number; payload: SessionEventPayload }[]): void {
+    for (const event of [...events].sort((a, b) => a.seq - b.seq)) {
+      if (event.seq <= this.getHydratedSeq(id)) continue;
+      this.appendEvent(id, event.payload, event.ts, { runnerSeq: event.seq, historyEpoch: null });
+    }
+  }
+
   /** Persist the runner's durable history generation/tail. The first known epoch on a migrated row
    * adopts the existing cache; only a change between two known epochs proves replacement. */
   reconcileRunnerHistory(
