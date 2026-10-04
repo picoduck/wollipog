@@ -64,7 +64,13 @@ const route = (pattern: string) => new RegExp(`^${pattern.replaceAll(":id", "[^/
  * caller's signal and the instance connection's, because the server bounds it in minutes or not at
  * all. Every other value is the server's own bound plus a margin, named beside it.
  */
-const API_REQUEST_DEADLINE_OVERRIDES: ReadonlyArray<{ method: string; route: RegExp; deadlineMs: number | null }> = [
+const API_REQUEST_DEADLINE_OVERRIDES: ReadonlyArray<{
+  method: string;
+  route: RegExp;
+  /** Narrows the entry to requests whose query matches. */
+  query?: (query: URLSearchParams) => boolean;
+  deadlineMs: number | null;
+}> = [
   { method: "POST", route: route("/api/sessions/:id/retitle"), deadlineMs: SESSION_RETITLE_DEADLINE_MS },
   // Whole-body downloads whose size the client cannot bound.
   { method: "GET", route: route("/api/sessions/:id/export"), deadlineMs: null },
@@ -85,9 +91,13 @@ const API_REQUEST_DEADLINE_OVERRIDES: ReadonlyArray<{ method: string; route: Reg
   { method: "POST", route: route("/api/runners/:id/skill-drift/restore"), deadlineMs: null },
   { method: "POST", route: route("/api/orphaned-skill-copies/:id/import"), deadlineMs: null },
   { method: "POST", route: route("/api/runners/:id/orphaned-skill-copies/discard"), deadlineMs: null },
-  // The child-session inventory first loads the session's whole history, page by page, with a
-  // deadline per page but none in total.
+  // The child-session inventory and an event read without a page limit first load the session's
+  // whole history, page by page, with a deadline per page but none in total.
   { method: "GET", route: route("/api/sessions/:id/child-sessions"), deadlineMs: null },
+  { method: "GET", route: route("/api/sessions/:id/events"), query: (query) => !query.has("limit"), deadlineMs: null },
+  // Creating an outbound event subscription resolves its callback host with no bound of its own,
+  // and its one-time signing secret exists only in the reply.
+  { method: "POST", route: route("/api/outbound-event-subscriptions"), deadlineMs: null },
   // 150s runner waits for worktree selection and setup generation.
   { method: "POST", route: route("/api/sessions/:id/worktrees/select"), deadlineMs: UP_TO_150S_SERVER_BOUND_DEADLINE_MS },
   { method: "POST", route: route("/api/sessions/:id/worktrees/generate-setup"), deadlineMs: UP_TO_150S_SERVER_BOUND_DEADLINE_MS },
@@ -105,14 +115,30 @@ const API_REQUEST_DEADLINE_OVERRIDES: ReadonlyArray<{ method: string; route: Reg
   { method: "POST", route: route("/api/sessions/adopt"), deadlineMs: UP_TO_60S_SERVER_BOUND_DEADLINE_MS },
 ];
 
+/** The UTF-8 bytes fetch sends for `text`, counted without encoding it. */
+function utf8ByteLength(text: string): number {
+  let bytes = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const unit = text.charCodeAt(index);
+    if (unit < 0x80) bytes += 1;
+    else if (unit < 0x800) bytes += 2;
+    else if (unit >= 0xd800 && unit < 0xdc00 && index + 1 < text.length &&
+      (text.charCodeAt(index + 1) & 0xfc00) === 0xdc00) {
+      // A surrogate pair is one four-byte code point.
+      bytes += 4;
+      index += 1;
+    } else bytes += 3;
+  }
+  return bytes;
+}
+
 /** The bytes a request body sends, or `null` when its size cannot be known in advance. */
 function requestBodyBytes(body: BodyInit | null | undefined): number | null {
   if (body === undefined || body === null) return 0;
-  // Close enough for the ASCII JSON and base64 the client sends.
-  if (typeof body === "string") return body.length;
+  if (typeof body === "string") return utf8ByteLength(body);
   if (body instanceof Blob) return body.size;
   if (body instanceof ArrayBuffer || ArrayBuffer.isView(body)) return body.byteLength;
-  if (body instanceof URLSearchParams) return body.toString().length;
+  if (body instanceof URLSearchParams) return utf8ByteLength(body.toString());
   return null;
 }
 
@@ -121,9 +147,11 @@ function requestBodyBytes(body: BodyInit | null | undefined): number | null {
  * `API_UPLOAD_FLOOR_BYTES_PER_SECOND`. A body of unknown size (a stream or form data) opts out.
  */
 export function apiRequestDeadlineMs(method: string, path: string, body?: BodyInit | null): number | null {
-  const pathname = path.split("?", 1)[0]!;
+  const [pathname, search = ""] = path.split("?", 2) as [string, string?];
+  const query = new URLSearchParams(search);
   const verb = method.toUpperCase();
-  const override = API_REQUEST_DEADLINE_OVERRIDES.find((entry) => entry.method === verb && entry.route.test(pathname));
+  const override = API_REQUEST_DEADLINE_OVERRIDES.find((entry) =>
+    entry.method === verb && entry.route.test(pathname) && (entry.query?.(query) ?? true));
   const deadlineMs = override ? override.deadlineMs : API_REQUEST_DEADLINE_MS;
   const bytes = requestBodyBytes(body);
   if (deadlineMs === null || bytes === null) return null;

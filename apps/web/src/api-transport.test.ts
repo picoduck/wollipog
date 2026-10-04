@@ -239,6 +239,8 @@ test("routes the server bounds past the default get that bound plus a margin, or
     ["POST", "/api/orphaned-skill-copies/o_1/import"],
     ["POST", "/api/runners/r_1/orphaned-skill-copies/discard"],
     ["GET", "/api/sessions/s_1/child-sessions?limit=50"],
+    ["GET", "/api/sessions/s_1/events?after=0"],
+    ["POST", "/api/outbound-event-subscriptions"],
   ] as const) {
     assert.equal(apiRequestDeadlineMs(method, path), null, `${method} ${path} is bounded in minutes or not at all`);
   }
@@ -252,6 +254,10 @@ test("a request body extends its deadline by its size at the upload floor", () =
     "an 8 MB image gets 128s more at 64 KiB/s");
   assert.equal(apiRequestDeadlineMs("POST", "/api/sessions/s_1/prompt-images", new Blob([image])), API_REQUEST_DEADLINE_MS + 128_000);
   assert.equal(apiRequestDeadlineMs("POST", "/api/sessions/s_1/git", "x".repeat(API_UPLOAD_FLOOR_BYTES_PER_SECOND * 2)), 90_000 + 2_000);
+  assert.equal(apiRequestDeadlineMs("POST", "/api/sessions/s_1/prompt", "漢".repeat(64 * 1024)), API_REQUEST_DEADLINE_MS + 3_000,
+    "text is measured in the UTF-8 bytes fetch sends: three per CJK character");
+  assert.equal(apiRequestDeadlineMs("POST", "/api/sessions/s_1/prompt", "😀".repeat(16 * 1024)), API_REQUEST_DEADLINE_MS + 1_000,
+    "and four per surrogate pair");
   assert.equal(apiRequestDeadlineMs("POST", "/api/sessions/s_1/fork", image), null, "an opt-out stays opted out");
   assert.equal(apiRequestDeadlineMs("POST", "/api/skills", new FormData()), null, "a body of unknown size opts out");
 });
