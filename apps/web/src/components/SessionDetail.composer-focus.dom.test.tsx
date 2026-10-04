@@ -6157,3 +6157,49 @@ test("a composer that becomes blocked while listening stops dictation and disabl
     }
   });
 });
+
+test("entering Answer Mode cancels dictation, and nothing it settles later leaves the answer (#2193)", { timeout: 10_000 }, async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  try {
+    await withTrackedRecognition(async () => {
+      const draft = deferred<ComposerDraft | null>();
+      const fixture = await mountFixture(draft, { sessionCapabilities: PAUSED_LOOK_CAPABILITIES });
+      try {
+        await resolveComposerDraft(draft, { text: "ordinary message draft", images: [], updatedAt: 1 });
+        const mic = micButton(fixture);
+        await pointer(mic, "pointerdown");
+        await pointer(mic, "pointerup");
+        assert.equal(mic.getAttribute("aria-pressed"), "true");
+        const recognizer = TrackedRecognition.instances[0]!;
+
+        await fixture.pushSession({
+          pendingApproval: {
+            requestId: "ask-dictation",
+            title: "Choose a target",
+            options: [],
+            kind: "question",
+            questions: [{ id: "target", question: "Choose a target", options: [{ label: "Staging" }, { label: "Production" }] }],
+          },
+        } as Partial<SessionView>);
+        await act(async () => { flushFrames(); });
+        const reader = fixture.container.querySelector<HTMLElement>(".detail-scroll");
+        assert.ok(reader);
+        reader.focus();
+        await act(async () => {
+          reader.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "r", bubbles: true }) as never);
+          flushFrames();
+        });
+        assert.ok(fixture.container.querySelector(".composer-answer-input"), "Answer Mode replaced the bar");
+        assert.deepEqual(TrackedRecognition.log, ["start", "abort"], "dictation is cancelled, not left listening unseen");
+        assert.equal(recognizer.onresult, null);
+        assert.equal(recognizer.onend, null, "an engine ending cannot restart it");
+        assert.equal(TrackedRecognition.instances.length, 1);
+        assertNoDomNode(fixture.container.querySelector(".composer-input"), "Answer Mode stays open");
+      } finally {
+        await unmountFixture(fixture);
+      }
+    });
+  } finally {
+    setQuestionResponseStyle("interactive", domWindow as never);
+  }
+});

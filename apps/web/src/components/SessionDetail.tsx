@@ -4727,6 +4727,14 @@ function SessionDetailLoaded({
   useEffect(() => {
     if (!canPrompt && dictation.recording) stopDictation();
   }, [canPrompt, dictation.recording, stopDictation]);
+  // Dictation lives in the composer bar: Answer Mode replaces the bar, so it cancels dictation rather
+  // than leave it listening with no mic or strip, where a late phrase would reopen the ordinary
+  // composer mid-answer. A new session's composer starts without it too (#2193).
+  const cancelDictation = dictation.cancel;
+  useEffect(() => {
+    if (composerAnswerActive) cancelDictation();
+  }, [composerAnswerActive, cancelDictation]);
+  useEffect(() => cancelDictation, [session.id, cancelDictation]);
   // Live context and cost sit in the composer bar's trailing cluster, or in Model Settings when the
   // bar has no room for them (#2166).
   const [composerBoxRef, composerColumnNarrow] = useNarrowerThanRem<HTMLDivElement>(COMPOSER_USAGE_MIN_COLUMN_REM);
