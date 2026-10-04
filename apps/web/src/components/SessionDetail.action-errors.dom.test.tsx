@@ -535,6 +535,20 @@ test("a queued message that can't steer the turn says it is still queued", async
   } finally {
     await fixture.unmount();
   }
+
+  // A lost answer may follow a steer the machine took, which takes the message off the queue.
+  const lost = await mount(sessionView({
+    ...steerable,
+    queued: [{ id: "queue-1", text: "Use the staging database", steerable: true, liveQueueObserved: true }],
+  }), { client: { steer: refuse("Gateway Timeout", 504) } as Partial<ApiClient> });
+  try {
+    await lost.click("Steer Queued Message");
+    await assertPlainFailure(lost, "Steer Not Confirmed",
+      "Couldn't confirm whether the turn took this queued message. Check the transcript and the queue before steering it again.",
+      "Gateway Timeout");
+  } finally {
+    await lost.unmount();
+  }
 });
 
 test("an uncertain steer's Queue Again and Dismiss each name what failed", async () => {

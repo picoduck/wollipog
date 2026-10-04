@@ -80,3 +80,22 @@ test("known rewind, fork and stop causes have their own sentence", () => {
   assert.equal(composerActionError("stopTurn", new ApiError("the runner reports no active turn to stop", 502)).message,
     "Couldn't stop the turn. Try again or use Stop Session.");
 });
+
+test("a steer whose answer was lost doesn't claim the message is still queued", () => {
+  const causes = [
+    new ApiError("Gateway Timeout", 504),
+    new ApiError("runner did not respond in time", 504),
+    new ApiError("conversation steering failed: transport closed", 502),
+    new TypeError("Failed to fetch"),
+  ];
+  for (const cause of causes) {
+    const error = composerActionError("steerQueuedMessage", cause, "Build Box");
+    assert.equal(error.title, "Steer Not Confirmed", cause.message);
+    assert.equal(error.message,
+      "Couldn't confirm whether the turn took this queued message. Check the transcript and the queue before steering it again.");
+    assert.equal(error.detail, cause.message);
+  }
+  // A definite refusal is checked before the machine takes the message, so it is still queued.
+  assert.equal(composerActionError("steerQueuedMessage", new ApiError("the active turn changed before it could be steered", 409)).message,
+    "Couldn't steer the turn with this queued message. It's still queued.");
+});

@@ -40,6 +40,9 @@ interface ActionCopy {
   failed: string;
   /** What to do when the cause is unknown. */
   next?: string;
+  /** For an action whose effect a lost answer leaves unknown: what to say when the server may have
+   * acted (no answer, or a 5xx), since `failed` and `next` would claim it didn't. */
+  uncertain?: { title: string; message: string };
 }
 
 /** Each action's title, what failed, and what to do; an unrecognized failure reads as both together. */
@@ -67,7 +70,12 @@ const ACTION_COPY: Record<ComposerAction, ActionCopy> = {
   steerQueuedMessage: {
     title: "Message Not Steered",
     failed: "Couldn't steer the turn with this queued message.",
+    // Only a definite refusal leaves it queued: the machine takes it off the queue before it answers.
     next: "It's still queued.",
+    uncertain: {
+      title: "Steer Not Confirmed",
+      message: "Couldn't confirm whether the turn took this queued message. Check the transcript and the queue before steering it again.",
+    },
   },
   queueAgain: { title: "Message Not Queued", failed: "Couldn't queue this message again." },
   dismissSteering: { title: "Message Not Dismissed", failed: "Couldn't dismiss this message." },
@@ -91,10 +99,19 @@ export function composerActionError(
   machineName?: string,
 ): ComposerActionError {
   const copy = ACTION_COPY[action];
+  const detail = serverWords(cause);
+  if (copy.uncertain && outcomeUnknown(cause)) {
+    return { title: copy.uncertain.title, message: copy.uncertain.message, ...(detail ? { detail } : {}) };
+  }
   const known = knownCause(action, copy, cause, machineName?.trim() || undefined);
   if (known !== null) return { title: copy.title, message: known };
-  const detail = serverWords(cause);
   return { title: copy.title, message: `${copy.failed} ${copy.next ?? "Try again."}`, ...(detail ? { detail } : {}) };
+}
+
+/** No definite refusal arrived: the request may have reached the machine and done its work. */
+function outcomeUnknown(cause: unknown): boolean {
+  if (!(cause instanceof ApiError)) return true;
+  return cause.status >= 500 || /^runner did not respond in time$/i.test(cause.message.trim());
 }
 
 /**
