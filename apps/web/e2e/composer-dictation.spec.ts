@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import { pinWidestFace } from "./font-geometry";
 
 /**
  * The mic toggles on a tap, works while held, and shows a Listening strip in place of the bar's left
@@ -61,6 +62,24 @@ async function openComposer(page: Page, width: number, height: number, extra = "
     await idlePreview.click();
     await expect(page.locator(".composer-input")).toBeFocused();
   }
+}
+
+/**
+ * The strip's fit checks run in the machine's own face and again with the widest installed face
+ * pinned on the bar (#2557), so a strip that only fits a narrow face fails wherever a wide face is
+ * installed, not only on a runner whose default happens to be wide. Returns the face to name in
+ * assertion messages.
+ */
+async function measuredFace(page: Page, pinned: boolean) {
+  if (!pinned) return "the machine's own face";
+  return pinWidestFace(page, page.locator(".composer-bar"));
+}
+
+/** The pin is on the bar, so it must still reach the strip that replaces the bar's left group. */
+async function expectPinReaches(element: Locator, face: string, pinned: boolean) {
+  if (!pinned) return;
+  expect(await element.evaluate((node) => getComputedStyle(node).fontFamily), `the strip is set in ${face}`)
+    .toContain(face);
 }
 
 /** A touch held on the control for `ms` before it lifts. */
@@ -146,69 +165,75 @@ test("the Listening dot pulses, and holds still with reduced motion", async ({ p
 test.describe("on a phone", () => {
   test.use({ hasTouch: true });
 
-  test("a hold says to release, and releasing stops; the strip keeps the bar to one row with words in it", async ({ page }) => {
-    await openComposer(page, 390, 844);
-    const mic = page.getByRole("button", { name: "Dictate" });
-    const release = await touch(page, mic, 700);
-    const strip = page.getByRole("status").filter({ hasText: "Listening…" });
-    await expect(strip).toContainText("Release to stop");
-    await expect(page.getByRole("button", { name: "Stop Dictating" })).toHaveAttribute("aria-pressed", "true");
-    await release();
-    await expect(page.getByRole("button", { name: "Dictate" })).toHaveAttribute("aria-pressed", "false");
-    expect(await recognizerLog(page)).toEqual(["start", "stop"]);
+  for (const pinned of [false, true]) {
+    test(`a hold says to release, and releasing stops; the strip keeps the bar to one row with words in it${pinned ? ", in the widest installed face" : ""}`, async ({ page }) => {
+      await openComposer(page, 390, 844);
+      const face = await measuredFace(page, pinned);
+      const mic = page.getByRole("button", { name: "Dictate" });
+      const release = await touch(page, mic, 700);
+      const strip = page.getByRole("status").filter({ hasText: "Listening…" });
+      await expect(strip).toContainText("Release to stop");
+      await expect(page.getByRole("button", { name: "Stop Dictating" })).toHaveAttribute("aria-pressed", "true");
+      await release();
+      await expect(page.getByRole("button", { name: "Dictate" })).toHaveAttribute("aria-pressed", "false");
+      expect(await recognizerLog(page)).toEqual(["start", "stop"]);
 
-    const tap = await touch(page, mic, 100);
-    await tap();
-    await expect(strip).toContainText("Tap the mic to stop");
-    await hear(page, "move the settings link under the account menu and rename it");
-    const interim = strip.locator(".dictation-interim");
-    await expect(interim).toHaveText("move the settings link under the account menu and rename it");
-    await expect(page.locator(".composer-input")).toHaveValue("");
-    // A phone strip has no room for the hint and the words together: the stop hint stays, and the
-    // unsettled words wait for the message.
-    await expect(interim).toBeHidden();
-    await expect(strip.locator(".dictation-hint")).toBeVisible();
-    await expect(strip.locator(".dictation-hint")).toHaveText("Tap the mic to stop");
-    const layout = await page.locator(".composer-bar").evaluate((bar) => {
-      const stripBox = bar.querySelector(".dictation-strip")!.getBoundingClientRect();
-      const micBox = bar.querySelector('button[aria-label="Stop Dictating"]')!.getBoundingClientRect();
-      const hint = bar.querySelector(".dictation-hint")!;
-      const label = bar.querySelector(".dictation-label")!.getBoundingClientRect();
-      return {
-        stripRight: stripBox.right,
-        micLeft: micBox.left,
-        hintRight: hint.getBoundingClientRect().right,
-        hintTruncated: hint.scrollWidth > hint.clientWidth,
-        labelWidth: label.width,
-        timerNumerals: getComputedStyle(bar.querySelector(".dictation-timer")!).fontVariantNumeric,
-        rows: new Set([...bar.querySelectorAll(".dictation-strip > :not(.dictation-interim), button")]
-          .map((element) => Math.round(element.getBoundingClientRect().top + element.getBoundingClientRect().height / 2))).size,
-        overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
-      };
+      const tap = await touch(page, mic, 100);
+      await tap();
+      await expect(strip).toContainText("Tap the mic to stop");
+      await hear(page, "move the settings link under the account menu and rename it");
+      const interim = strip.locator(".dictation-interim");
+      await expect(interim).toHaveText("move the settings link under the account menu and rename it");
+      await expect(page.locator(".composer-input")).toHaveValue("");
+      // A phone strip has no room for the hint and the words together: the stop hint stays, and the
+      // unsettled words wait for the message.
+      await expect(interim).toBeHidden();
+      await expect(strip.locator(".dictation-hint")).toBeVisible();
+      await expect(strip.locator(".dictation-hint")).toHaveText("Tap the mic to stop");
+      await expectPinReaches(strip.locator(".dictation-hint"), face, pinned);
+      const layout = await page.locator(".composer-bar").evaluate((bar) => {
+        const stripBox = bar.querySelector(".dictation-strip")!.getBoundingClientRect();
+        const micBox = bar.querySelector('button[aria-label="Stop Dictating"]')!.getBoundingClientRect();
+        const hint = bar.querySelector(".dictation-hint")!;
+        const label = bar.querySelector(".dictation-label")!.getBoundingClientRect();
+        return {
+          stripRight: stripBox.right,
+          micLeft: micBox.left,
+          hintRight: hint.getBoundingClientRect().right,
+          hintTruncated: hint.scrollWidth > hint.clientWidth,
+          labelWidth: label.width,
+          timerNumerals: getComputedStyle(bar.querySelector(".dictation-timer")!).fontVariantNumeric,
+          rows: new Set([...bar.querySelectorAll(".dictation-strip > :not(.dictation-interim), button")]
+            .map((element) => Math.round(element.getBoundingClientRect().top + element.getBoundingClientRect().height / 2))).size,
+          overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+        };
+      });
+      expect(layout.rows, `the strip and the controls share one row in ${face}`).toBe(1);
+      expect(layout.stripRight, `the strip ends before the mic in ${face}`).toBeLessThanOrEqual(layout.micLeft);
+      expect(layout.hintRight, `the hint stays inside the strip in ${face}`).toBeLessThanOrEqual(layout.stripRight + 0.5);
+      expect(layout.hintTruncated, `the hint reads in full in ${face}`).toBe(false);
+      expect(layout.timerNumerals, "the small-type timer keeps a steady width as it ticks").toBe("tabular-nums");
+      expect(layout.labelWidth, `"Listening…" keeps its width in ${face}`).toBeGreaterThan(0);
+      expect(layout.overflow, `the page does not scroll sideways in ${face}`).toBe(false);
+
+      await hear(page, "move the settings link", true);
+      await expect(page.locator(".composer-input")).toHaveValue("move the settings link");
+      await expect(interim).toHaveCount(0);
     });
-    expect(layout.rows, "the strip and the controls share one row").toBe(1);
-    expect(layout.stripRight).toBeLessThanOrEqual(layout.micLeft);
-    expect(layout.hintRight).toBeLessThanOrEqual(layout.stripRight + 0.5);
-    expect(layout.hintTruncated, "the hint reads in full").toBe(false);
-    expect(layout.timerNumerals, "the small-type timer keeps a steady width as it ticks").toBe("tabular-nums");
-    expect(layout.labelWidth).toBeGreaterThan(0);
-    expect(layout.overflow).toBe(false);
-
-    await hear(page, "move the settings link", true);
-    await expect(page.locator(".composer-input")).toHaveValue("move the settings link");
-    await expect(interim).toHaveCount(0);
-  });
+  }
 });
 
 test.describe("on a narrow phone", () => {
   test.use({ hasTouch: true });
 
-  for (const width of [320, 360, 390, 430]) {
-    test(`${width}px: the strip's contents stay inside it, beside the mic`, async ({ page }) => {
+  for (const pinned of [false, true]) for (const width of [320, 360, 390, 430]) {
+    test(`${width}px: the strip's contents stay inside it, beside the mic${pinned ? ", in the widest installed face" : ""}`, async ({ page }) => {
       await openComposer(page, width, 844);
+      const face = await measuredFace(page, pinned);
       await page.getByRole("button", { name: "Dictate" }).click();
       const strip = page.locator(".dictation-strip");
       await expect(strip).toBeVisible();
+      await expectPinReaches(strip, face, pinned);
       const fit = await strip.evaluate((element) => {
         const box = element.getBoundingClientRect();
         const shown = [...element.children].filter((child) => getComputedStyle(child).display !== "none");
@@ -217,9 +242,9 @@ test.describe("on a narrow phone", () => {
           hint: shown.some((child) => child.classList.contains("dictation-hint")),
         };
       });
-      expect(fit.inside).toBe(true);
+      expect(fit.inside, `the strip's contents stay inside it in ${face}`).toBe(true);
       // From a 390px phone up there is room for the hint.
-      expect(fit.hint).toBe(width >= 390);
+      expect(fit.hint, `the hint shows from 390px up in ${face}`).toBe(width >= 390);
       await expect(strip).toContainText("Listening…");
     });
   }
