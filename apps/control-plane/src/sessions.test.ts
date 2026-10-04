@@ -12758,6 +12758,64 @@ test("restoring a policy attribution never moves the session's last activity bac
   assert.equal(db.getSession(id)?.lastEventAt, laterMessage);
 });
 
+/** A policy-answered question whose control-plane attribution is later than the runner events
+ * replayed after it (the runner's clock stepped back); the cache is cleared and ready to rehydrate. */
+function seedPolicyAnsweredHistory(protocolVersion?: number) {
+  const harness = makeHarness();
+  const { db, svc } = harness;
+  if (protocolVersion !== undefined) db.registerRunner(runnerMeta(), Date.now(), protocolVersion);
+  const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID }, undefined,
+    { organizationId: db.localIdentityContext().organizationId, owner: { kind: "user", userId: db.localIdentityContext().userId } });
+  assert.ok(created.ok && created.data);
+  const id = created.data.id;
+  db.updateSessionStatus(id, "running", Date.now());
+  assert.ok(svc.upsertGovernancePolicy({ policyId: "routine", name: "Routine Review", enabled: true, effect: "allow", priority: 1,
+    ownerUserId: db.localIdentityContext().userId, scope: {}, questionRule: { headerPattern: "Review", answer: { option: "Proceed" } } }).ok);
+  const request = { kind: "question_request" as const, requestId: "ask", questions: [{ id: "q", header: "Review", question: "Continue?", options: [{ label: "Proceed" }] }] };
+  if (protocolVersion === undefined) db.reconcileRunnerHistory(id, 1, 1);
+  svc.onSessionEvent(id, request, 1, 100);
+  const attributedAt = db.listEvents(id).find((event) => event.payload.kind === "question_policy_answered")!.ts;
+  assert.equal(attributedAt, 100);
+  db.clearSessionEvents(id);
+  const events = [
+    { seq: 1, ts: 100, payload: request },
+    { seq: 2, ts: 90, payload: { kind: "question_resolved" as const, requestId: "ask", answered: true } },
+    { seq: 3, ts: 80, payload: { kind: "agent_message" as const, text: "Done.", final: true } },
+  ];
+  return { ...harness, id, attributedAt, events };
+}
+
+test("multi-page hydration keeps a restored attribution's later time as the last activity (#2528)", async () => {
+  const { db, hub, svc, id, attributedAt, events } = seedPolicyAnsweredHistory();
+  db.reconcileRunnerHistory(id, 1, 3);
+  hub.requestHandler = (msg) => {
+    assert.equal(msg.type, "session_history_page");
+    if (msg.type !== "session_history_page") throw new Error("unexpected request");
+    const page = msg.afterSeq === 0 ? events.slice(0, 1) : events.slice(1);
+    const nextAfterSeq = page.at(-1)!.seq;
+    return { type: "session_history_page_result", requestId: msg.requestId, sessionId: id, ok: true, events: page,
+      page: { logEpoch: 1, throughSeq: 3, nextAfterSeq, hasMore: nextAfterSeq < 3 } };
+  };
+  await svc.hydrateHistory(id);
+  assert.deepEqual(db.listEvents(id).map((event) => event.payload.kind),
+    ["question_request", "question_policy_answered", "question_resolved", "agent_message"],
+    "the attribution is restored on the first page and the second page replays after it");
+  assert.equal(db.getSession(id)?.lastEventAt, attributedAt);
+});
+
+test("legacy history hydration keeps a restored attribution's later time as the last activity (#2528)", async () => {
+  const { db, hub, svc, id, attributedAt, events } = seedPolicyAnsweredHistory(53);
+  hub.requestHandler = (msg) => {
+    assert.equal(msg.type, "session_history");
+    if (msg.type !== "session_history") throw new Error("unexpected request");
+    return { type: "session_history_result", requestId: msg.requestId, sessionId: id, ok: true, events };
+  };
+  await svc.hydrateHistory(id);
+  assert.deepEqual(db.listEvents(id).map((event) => event.payload.kind),
+    ["question_request", "question_policy_answered", "question_resolved", "agent_message"]);
+  assert.equal(db.getSession(id)?.lastEventAt, attributedAt);
+});
+
 test("governance audit records explicit cancellation as dismissed", () => {
   const { hub, svc } = makeHarness();
   const id = seedSession(svc, hub);

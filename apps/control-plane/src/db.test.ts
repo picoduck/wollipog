@@ -6185,6 +6185,102 @@ test("appendEvent maintains lastEventAt and preview", () => {
   assert.equal(v.lastEventAt, 300);
 });
 
+test("appendEvent never moves lastEventAt backward for any event kind (#2528)", () => {
+  const db = withRunner();
+  try {
+    db.createSession(newSession());
+    db.appendEvent("sess-1", { kind: "error", message: "control-plane note" }, 500);
+    // A runner whose clock trails the control plane, live and through the legacy history path.
+    db.appendEvent("sess-1", { kind: "user_message", text: "older" }, 100);
+    db.appendEvent("sess-1", { kind: "agent_message", text: "older" }, 200, { runnerSeq: 1, historyEpoch: null });
+    db.appendEvent("sess-1", { kind: "tool_call", toolCallId: "t", title: "Read", status: "completed" }, 300,
+      { runnerSeq: 2 });
+    let v = db.getSession("sess-1")!;
+    assert.equal(v.lastEventAt, 500);
+    assert.equal(v.messageCount, 4);
+    assert.equal(v.preview, "older", "an older event still maintains the card preview");
+
+    db.appendEvent("sess-1", { kind: "agent_message", text: " newer" }, 600);
+    v = db.getSession("sess-1")!;
+    assert.equal(v.lastEventAt, 600);
+
+    // Legacy history for an adopted session replaces the snapshot's updatedAt seed, then folds.
+    db.createSessionFromSnapshot(snapshot({ id: "legacy-adopted", seq: 2, updatedAt: 5_000 }), "runner-1", 1_000);
+    db.appendEvent("legacy-adopted", { kind: "agent_message", text: "a" }, 300, { runnerSeq: 1, historyEpoch: null });
+    assert.equal(db.getSession("legacy-adopted")?.lastEventAt, 300);
+    db.appendEvent("legacy-adopted", { kind: "agent_message", text: "b" }, 200, { runnerSeq: 2, historyEpoch: null });
+    assert.equal(db.getSession("legacy-adopted")?.lastEventAt, 300);
+  } finally {
+    db.close();
+  }
+});
+
+test("multi-page hydration keeps lastEventAt at the latest held event, and a cleared cache recomputes it (#2528)", () => {
+  const db = withRunner();
+  try {
+    const id = "monotonic-history";
+    db.createSessionFromSnapshot(snapshot({ id, historyEpoch: 4, seq: 4, updatedAt: 5_000 }), "runner-1", 1_000);
+    assert.equal(db.getSession(id)?.lastEventAt, 5_000, "adoption seeds the snapshot's updatedAt");
+    // The first page replaces that seed, which is not an event time. It carries the latest
+    // timestamp out of order, and a later page is older.
+    db.appendHydratedPage(id, { afterSeq: 0, historyEpoch: 4, eventEpoch: 0 }, [
+      { seq: 1, ts: 100, payload: { kind: "agent_message", text: "one" } },
+      { seq: 2, ts: 400, payload: { kind: "agent_message", text: "two" } },
+      { seq: 3, ts: 150, payload: { kind: "agent_message", text: "three" } },
+    ]);
+    assert.equal(db.getSession(id)?.lastEventAt, 400, "a page uses its latest event, not its final one");
+    // A control-plane-authored event later than every runner event, restored between pages.
+    db.appendEvent(id, { kind: "error", message: "control-plane note" }, 900);
+    db.appendHydratedPage(id, { afterSeq: 3, historyEpoch: 4, eventEpoch: 0 }, [
+      { seq: 4, ts: 200, payload: { kind: "agent_message", text: "four" } },
+    ]);
+    let v = db.getSession(id)!;
+    assert.equal(v.lastEventAt, 900);
+    assert.equal(v.messageCount, 5);
+    assert.equal(v.preview, "onetwothreefour");
+
+    db.clearSessionEvents(id);
+    assert.equal(db.getSession(id)?.lastEventAt, null);
+    const eventEpoch = db.reconcileRunnerHistory(id, 4, 4)!.eventEpoch;
+    db.appendHydratedPage(id, { afterSeq: 0, historyEpoch: 4, eventEpoch }, [
+      { seq: 1, ts: 100, payload: { kind: "agent_message", text: "one" } },
+      { seq: 2, ts: 400, payload: { kind: "agent_message", text: "two" } },
+    ]);
+    db.appendHydratedPage(id, { afterSeq: 2, historyEpoch: 4, eventEpoch }, [
+      { seq: 3, ts: 150, payload: { kind: "agent_message", text: "three" } },
+      { seq: 4, ts: 200, payload: { kind: "agent_message", text: "four" } },
+    ]);
+    v = db.getSession(id)!;
+    assert.equal(v.lastEventAt, 400, "a full rehydration recomputes from the replayed events alone");
+  } finally {
+    db.close();
+  }
+});
+
+test("replacement history replay keeps a retained attachment's later time as the last activity (#2528)", () => {
+  const db = withRunner();
+  try {
+    const id = "monotonic-replacement";
+    db.createSessionFromSnapshot(snapshot({ id, historyEpoch: 4, seq: 1 }), "runner-1", 1_000);
+    const image = createScreenshotArtifact(db, { sessionId: id }, "retained-image",
+      { purpose: "session_attachment" });
+    db.appendEvent(id, { kind: "artifact_attached", artifact: image }, 900);
+    const reset = db.reconcileRunnerHistory(id, 5, 2)!;
+    assert.equal(reset.reset, true);
+    assert.equal(db.getSession(id)?.lastEventAt, 900);
+    // The replacement history comes from a runner whose clock trails the control plane's.
+    db.appendHydratedPage(id, { afterSeq: 0, historyEpoch: 5, eventEpoch: reset.eventEpoch }, [
+      { seq: 1, ts: 300, payload: { kind: "agent_message", text: "one" } },
+    ]);
+    db.appendHydratedPage(id, { afterSeq: 1, historyEpoch: 5, eventEpoch: reset.eventEpoch }, [
+      { seq: 2, ts: 400, payload: { kind: "agent_message", text: "two" } },
+    ]);
+    assert.equal(db.getSession(id)?.lastEventAt, 900);
+  } finally {
+    db.close();
+  }
+});
+
 test("appendEvent seq is per-session", () => {
   const db = withRunner();
   db.createSession(newSession({ id: "sess-1" }));

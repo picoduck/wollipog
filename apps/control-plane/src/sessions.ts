@@ -13547,8 +13547,7 @@ export class SessionsService {
     if (event.payload.kind !== "question_request") return null;
     const stored = this.db.questionPolicyAnswer(event);
     if (!stored) return null;
-    return this.db.appendEvent(event.sessionId, { ...stored.payload, questionEventSeq: event.seq }, stored.timestamp,
-      { restored: true });
+    return this.db.appendEvent(event.sessionId, { ...stored.payload, questionEventSeq: event.seq }, stored.timestamp);
   }
 
   private settleHydratedAsk(sessionId: string, trailingAsk: PendingApproval | null): void {
