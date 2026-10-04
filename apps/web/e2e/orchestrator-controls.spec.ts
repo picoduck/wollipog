@@ -91,6 +91,45 @@ for (const viewport of [
   }
 }
 
+for (const viewport of [
+  { name: "desktop", width: 1440, height: 900, touch: false },
+  { name: "phone", width: 390, height: 844, touch: true },
+] as const) {
+  test.describe(`${viewport.name}: a gate write that never answers`, () => {
+    test.use({ viewport: { width: viewport.width, height: viewport.height }, hasTouch: viewport.touch, isMobile: viewport.touch });
+
+    for (const theme of ["dark", "light"] as const) {
+      test(`${theme}: fails at the client deadline, reloads, and sends the next change (#2522)`, async ({ page }) => {
+        const writes: string[] = [];
+        // Held: the request is never fulfilled, as with a stalled control plane.
+        await page.route("**/api/sessions/*/parent-control-policy", (route) => { writes.push(route.request().postData() ?? ""); });
+        await openFixture(page, viewport.width, viewport.height, "&policy-write=transport");
+        await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
+        const dialog = await openControls(page);
+        await page.clock.install();
+        const merge = dialog.getByRole("radiogroup", { name: "PR Merge Approval" });
+        await merge.scrollIntoViewIfNeeded();
+        await merge.getByRole("radio", { name: "Orchestrator" }).click();
+        await dialog.getByRole("radiogroup", { name: "Merged Branch Deletion" }).getByRole("radio", { name: "Orchestrator" }).click();
+        await expect.poll(() => writes.length).toBe(1);
+
+        await page.clock.runFor(44_000);
+        await expect(dialog.locator(".notice.t-danger")).toHaveCount(0);
+        expect(writes, "the second change waits behind the stalled write").toHaveLength(1);
+        await page.clock.runFor(1_000);
+        const notice = dialog.locator(".notice.t-danger");
+        await expect(notice).toContainText("Your change wasn't saved.");
+        await notice.scrollIntoViewIfNeeded();
+        await page.screenshot({ path: `${SHOT}/${viewport.name}-${theme}-stalled-write-failed.png` });
+        await expect.poll(() => page.evaluate(() => document.body.dataset.sessionReloads)).toBe("1");
+        await expect.poll(() => writes.length, { message: "the queued change is then sent" }).toBe(2);
+        await notice.getByRole("button", { name: "Show Details" }).click();
+        await expect(notice).toContainText("The Wollipog server didn't answer within 45 seconds.");
+      });
+    }
+  });
+}
+
 test("without a campaign the dialog has no Campaign Behavior facts beyond the stored policy", async ({ page }) => {
   await openFixture(page, 1440, 900, "&campaign-state=off");
   const dialog = await openControls(page);

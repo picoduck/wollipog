@@ -34,6 +34,9 @@ const frameWidth = Number(params.get("width") ?? "900");
 const pinnedOpen = params.get("pinned") === "1";
 /** `?policy-conflict=1`: every workflow gate change meets a policy another person just changed (#2192). */
 const policyConflict = params.get("policy-conflict") === "1";
+/** `?policy-write=transport`: workflow gate changes go through the real browser API transport, so a
+ * spec can hold the request and let its client deadline expire (#2522). */
+const policyWriteThroughTransport = params.get("policy-write") === "transport";
 const pagination = params.get("pagination") === "1";
 const resolvedPagination = params.get("pagination") === "resolve";
 const eventHeavyOpening = params.get("event-heavy") === "1";
@@ -531,10 +534,11 @@ const client = {
     return { ...session };
   },
   setParentControlPolicy: async (
-    _id: string,
+    id: string,
     decisions: NonNullable<SessionView["parentControlPolicy"]>["decisions"],
     expectedRevision: number,
   ) => {
+    if (policyWriteThroughTransport) return api.setParentControlPolicy(id, decisions, expectedRevision);
     await new Promise((resolve) => window.setTimeout(resolve, 150));
     if (policyConflict) {
       session.parentControlPolicy = { ...session.parentControlPolicy!, revision: expectedRevision + 1 };
@@ -615,8 +619,8 @@ const client = {
       },
     };
   },
-  // Only the conflict fixture reloads the session; elsewhere the lookup never answers.
-  session: policyConflict
+  // Only the conflict and transport fixtures reload the session; elsewhere the lookup never answers.
+  session: policyConflict || policyWriteThroughTransport
     ? async () => {
       document.body.dataset.sessionReloads = String(Number(document.body.dataset.sessionReloads ?? 0) + 1);
       return { session: { ...session } };
