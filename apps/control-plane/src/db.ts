@@ -1487,19 +1487,19 @@ CREATE TABLE IF NOT EXISTS governance_policies (
 );
 CREATE INDEX IF NOT EXISTS idx_governance_policies_precedence
   ON governance_policies(enabled, priority DESC, policy_id);
--- Keyed by the runner's durable occurrence id, which identifies the question in every history
--- epoch; rows without one (older runners) fall back to runner seq + the epoch known at record time.
--- Its unique indexes are created after the startup migration that adds occurrence_id.
+-- Keyed by the runner's durable occurrence id and the runner seq of the logged question, which
+-- identify it whatever history epoch the control plane knew; rows without an occurrence id (older
+-- runners) fall back to runner seq + the epoch known at record time. Its unique indexes are created
+-- after the startup migration that adds occurrence_id.
 CREATE TABLE IF NOT EXISTS question_policy_answers (
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   request_id TEXT NOT NULL,
   occurrence_id TEXT,
   question_digest TEXT NOT NULL,
-  runner_seq INTEGER,
-  history_epoch INTEGER,
+  runner_seq INTEGER NOT NULL,
+  history_epoch INTEGER NOT NULL,
   payload TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
-  CHECK (occurrence_id IS NOT NULL OR (runner_seq IS NOT NULL AND history_epoch IS NOT NULL))
+  created_at INTEGER NOT NULL
 );
 -- Reconcile/hydrate/delete paths filter sessions by owner constantly; without this every
 -- runner reconnect pays O(sessions) scans per lookup.
@@ -4978,11 +4978,10 @@ export class ControlPlaneDb {
             request_id TEXT NOT NULL,
             occurrence_id TEXT,
             question_digest TEXT NOT NULL,
-            runner_seq INTEGER,
-            history_epoch INTEGER,
+            runner_seq INTEGER NOT NULL,
+            history_epoch INTEGER NOT NULL,
             payload TEXT NOT NULL,
-            created_at INTEGER NOT NULL,
-            CHECK (occurrence_id IS NOT NULL OR (runner_seq IS NOT NULL AND history_epoch IS NOT NULL))
+            created_at INTEGER NOT NULL
           );
           INSERT INTO question_policy_answers_v2
             (session_id, request_id, question_digest, runner_seq, history_epoch, payload, created_at)
@@ -5001,7 +5000,7 @@ export class ControlPlaneDb {
         );
         const bindOccurrence = db.prepare(
           `UPDATE question_policy_answers SET occurrence_id=? WHERE rowid=? AND NOT EXISTS
-             (SELECT 1 FROM question_policy_answers WHERE session_id=? AND occurrence_id=?)`,
+             (SELECT 1 FROM question_policy_answers WHERE session_id=? AND occurrence_id=? AND runner_seq=?)`,
         );
         for (const row of legacyRows) {
           const occurrences = new Set<string>();
@@ -5017,7 +5016,7 @@ export class ControlPlaneDb {
           }
           if (occurrences.size !== 1) continue;
           const [occurrenceId] = occurrences;
-          bindOccurrence.run(occurrenceId!, row.rowid, row.session_id, occurrenceId!);
+          bindOccurrence.run(occurrenceId!, row.rowid, row.session_id, occurrenceId!, row.runner_seq);
         }
         db.exec("COMMIT;");
       } catch (error) {
@@ -5029,7 +5028,7 @@ export class ControlPlaneDb {
     }
     db.exec(`
       CREATE UNIQUE INDEX IF NOT EXISTS idx_question_policy_answers_occurrence
-        ON question_policy_answers(session_id, occurrence_id) WHERE occurrence_id IS NOT NULL;
+        ON question_policy_answers(session_id, occurrence_id, runner_seq) WHERE occurrence_id IS NOT NULL;
       CREATE UNIQUE INDEX IF NOT EXISTS idx_question_policy_answers_runner_seq
         ON question_policy_answers(session_id, runner_seq, history_epoch) WHERE occurrence_id IS NULL;
     `);
@@ -18157,14 +18156,13 @@ export class ControlPlaneDb {
     timestamp: number,
     runnerSeq: number | undefined,
   ): void {
-    // The runner's occurrence id is stable across history epochs, so it needs no runner position.
-    if (!request.occurrenceId && runnerSeq === undefined) return;
+    if (runnerSeq === undefined) return;
     this.stmt(`INSERT OR REPLACE INTO question_policy_answers
       (session_id, request_id, occurrence_id, question_digest, runner_seq, history_epoch, payload, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(sessionId, payload.requestId, request.occurrenceId ?? null,
         createHash("sha256").update(JSON.stringify(request.questions)).digest("hex"),
-        runnerSeq ?? null, this.getRunnerHistoryState(sessionId)?.historyEpoch ?? -1, JSON.stringify(payload), timestamp);
+        runnerSeq, this.getRunnerHistoryState(sessionId)?.historyEpoch ?? -1, JSON.stringify(payload), timestamp);
   }
 
   questionPolicyAnswer(
@@ -18175,12 +18173,13 @@ export class ControlPlaneDb {
       .get(event.id, event.sessionId) as { runner_seq: number | null } | undefined;
     if (cached?.runner_seq == null) return null;
     const digest = createHash("sha256").update(JSON.stringify(event.payload.questions)).digest("hex");
-    // A row keyed by occurrence matches only that occurrence, whatever epoch either side saw.
+    // A row keyed by occurrence matches only that logged question, whatever epoch either side saw;
+    // the runner seq tells apart an async question the runner re-logs under its occurrence id.
     // Rows without one (older runners, or recorded before #2529) keep the exact-position match.
     const row = ((event.payload.occurrenceId
       ? this.stmt(`SELECT payload, created_at FROM question_policy_answers
-          WHERE session_id=? AND occurrence_id=? AND request_id=? AND question_digest=?`).get(
-          event.sessionId, event.payload.occurrenceId, event.payload.requestId, digest)
+          WHERE session_id=? AND occurrence_id=? AND runner_seq=? AND request_id=? AND question_digest=?`).get(
+          event.sessionId, event.payload.occurrenceId, cached.runner_seq, event.payload.requestId, digest)
       : undefined) ??
       this.stmt(`SELECT payload, created_at FROM question_policy_answers
         WHERE session_id=? AND occurrence_id IS NULL AND request_id=? AND question_digest=? AND runner_seq=?

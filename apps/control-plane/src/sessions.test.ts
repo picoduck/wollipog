@@ -6627,6 +6627,44 @@ for (const ordering of ["before", "after"] as const) {
   });
 }
 
+test("a policy attribution restores onto the logged question it answered, not an earlier copy of its occurrence (#2529)", async () => {
+  const { db, svc, hub } = makeHarness();
+  const local = db.localIdentityContext();
+  const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID }, undefined,
+    { organizationId: local.organizationId, owner: { kind: "user", userId: local.userId } });
+  assert.ok(created.ok && created.data);
+  const id = created.data.id;
+  db.updateSessionStatus(id, "running", Date.now());
+  // The runner re-logs an undelivered async question under its original occurrence id.
+  const question = { kind: "question_request" as const, requestId: "ask", occurrenceId: "request_async", async: true,
+    questions: [{ id: "q", header: "Review", question: "Continue?", options: [{ label: "Proceed" }] }] };
+  const provisional = { kind: "question_resolved" as const, requestId: "ask", occurrenceId: "request_async", answered: true };
+  svc.onSessionEvent(id, question, 1, 100);
+  svc.onSessionEvent(id, provisional, 2, 101);
+  assert.ok(svc.upsertGovernancePolicy({ policyId: "routine", name: "Routine Review", enabled: true, effect: "allow", priority: 1,
+    ownerUserId: local.userId, scope: {}, questionRule: { headerPattern: "Review", answer: { option: "Proceed" } } }).ok);
+  svc.onSessionEvent(id, question, 3, 102);
+  assert.equal(hub.sentOfType("answer_question").length, 1, "the policy answers the restored question");
+
+  db.clearSessionEvents(id);
+  db.reconcileRunnerHistory(id, 1, 3);
+  hub.requestHandler = (msg) => ({ type: "session_history_page_result", requestId: "requestId" in msg ? msg.requestId! : "history",
+    sessionId: id, ok: true, events: [
+      { seq: 1, ts: 100, payload: question },
+      { seq: 2, ts: 101, payload: provisional },
+      { seq: 3, ts: 102, payload: question },
+    ],
+    page: { logEpoch: 1, throughSeq: 3, nextAfterSeq: 3, hasMore: false } });
+  await svc.hydrateHistory(id);
+
+  const events = db.listEvents(id);
+  const attributions = events.filter((event) => event.payload.kind === "question_policy_answered");
+  assert.equal(attributions.length, 1);
+  const restored = events.filter((event) => event.payload.kind === "question_request").at(-1)!;
+  assert.equal(attributions[0]!.payload.kind === "question_policy_answered" && attributions[0]!.payload.questionEventSeq,
+    restored.seq);
+});
+
 test("unmatched, foreign-owned, and undeliverable question policies retain the ordinary input path", () => {
   for (const mode of ["no-match", "foreign-owner", "delivery-failure"] as const) {
     const { db, svc, hub } = makeHarness();

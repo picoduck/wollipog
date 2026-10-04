@@ -13541,8 +13541,8 @@ export class SessionsService {
   }
 
   /** Reconstruct CP-owned attribution after a runner-history cache reset, without delivering
-   * another answer. The runner's occurrence id (or, without one, runner sequence/epoch) and the
-   * question digest identify the exact occurrence. */
+   * another answer. The runner's occurrence id and sequence (or, without an occurrence id, runner
+   * sequence/epoch) and the question digest identify the exact logged question. */
   private restoreQuestionPolicyAttribution(event: SessionEvent): SessionEvent | null {
     if (event.payload.kind !== "question_request") return null;
     const stored = this.db.questionPolicyAnswer(event);
