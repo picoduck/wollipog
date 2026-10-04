@@ -426,6 +426,70 @@ test("legacy global event-artifact identity migrates to reusable event-scoped re
   }
 });
 
+test("legacy question policy attributions gain the occurrence key of the question they answered (#2529)", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-question-policy-occurrence-migration-"));
+  const path = join(root, "control-plane.db");
+  let db: ControlPlaneDb | undefined;
+  try {
+    db = ControlPlaneDb.open(path);
+    db.registerRunner(meta(), 1);
+    db.createSession(newSession());
+    const questions = [{ id: "q", header: "Review", question: "Continue?", options: [{ label: "Proceed" }] }];
+    const digest = createHash("sha256").update(JSON.stringify(questions)).digest("hex");
+    db.appendEvent("sess-1", { kind: "question_request", requestId: "ask", occurrenceId: "request_answered", questions },
+      100, { runnerSeq: 1 });
+    db.appendEvent("sess-1", { kind: "question_request", requestId: "ask", occurrenceId: "request_changed",
+      questions: [{ ...questions[0]!, question: "Deploy?" }] }, 200, { runnerSeq: 2 });
+    db.close();
+    db = undefined;
+
+    const attribution = (seq: number) => JSON.stringify({ kind: "question_policy_answered", requestId: "ask",
+      questionEventSeq: seq, policies: [{ policyId: "routine", name: "Routine Review" }] });
+    const legacy = new DatabaseSync(path);
+    legacy.exec(
+      `DROP INDEX idx_question_policy_answers_occurrence;
+       DROP INDEX idx_question_policy_answers_runner_seq;
+       DROP TABLE question_policy_answers;
+       CREATE TABLE question_policy_answers (
+         session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+         request_id TEXT NOT NULL,
+         question_digest TEXT NOT NULL,
+         runner_seq INTEGER NOT NULL,
+         history_epoch INTEGER NOT NULL,
+         payload TEXT NOT NULL,
+         created_at INTEGER NOT NULL,
+         PRIMARY KEY(session_id, runner_seq, history_epoch)
+       );`,
+    );
+    const insert = legacy.prepare(`INSERT INTO question_policy_answers
+      (session_id, request_id, question_digest, runner_seq, history_epoch, payload, created_at) VALUES ('sess-1', 'ask', ?, ?, -1, ?, ?)`);
+    insert.run(digest, 1, attribution(1), 100); // recorded before the epoch was known
+    insert.run(digest, 2, attribution(2), 200); // the cached question at that position differs
+    insert.run(digest, 3, attribution(3), 300); // the cache no longer holds the question
+    legacy.close();
+
+    db = ControlPlaneDb.open(path);
+    const keyed = db.raw().prepare(
+      "SELECT runner_seq, occurrence_id FROM question_policy_answers ORDER BY runner_seq",
+    ).all() as unknown as Array<{ runner_seq: number; occurrence_id: string | null }>;
+    assert.deepEqual(keyed.map((row) => ({ ...row })), [
+      { runner_seq: 1, occurrence_id: "request_answered" },
+      { runner_seq: 2, occurrence_id: null },
+      { runner_seq: 3, occurrence_id: null },
+    ]);
+    db.close();
+    db = ControlPlaneDb.open(path); // the rebuilt table is not migrated again
+    db.reconcileRunnerHistory("sess-1", 4, 2);
+    const [answered, changed] = db.listEvents("sess-1");
+    assert.equal(db.questionPolicyAnswer(answered!)?.payload.policies[0]?.name, "Routine Review",
+      "the migrated row restores after the epoch is adopted");
+    assert.equal(db.questionPolicyAnswer(changed!), null);
+  } finally {
+    db?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("steering projection prioritizes every bounded recovery obligation over newer receipts", () => {
   const db = withRunner();
   db.createSession(newSession());

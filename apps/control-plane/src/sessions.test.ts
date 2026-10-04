@@ -6579,6 +6579,54 @@ test("question policy answers avoid input state, record provenance, and survive 
   assert.equal(db.questionPolicyAnswer(requests[1]!), null, "identical later request IDs/text do not inherit the prior answer");
 });
 
+for (const ordering of ["before", "after"] as const) {
+  test(`a policy attribution recorded ${ordering} the runner's history epoch is adopted survives a cache reset (#2529)`, async () => {
+    const { db, svc, hub } = makeHarness();
+    const local = db.localIdentityContext();
+    const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID }, undefined,
+      { organizationId: local.organizationId, owner: { kind: "user", userId: local.userId } });
+    assert.ok(created.ok && created.data);
+    const id = created.data.id;
+    db.updateSessionStatus(id, "running", Date.now());
+    assert.ok(svc.upsertGovernancePolicy({ policyId: "routine", name: "Routine Review", enabled: true, effect: "allow", priority: 1,
+      ownerUserId: local.userId, scope: {}, questionRule: { headerPattern: "Review", answer: { option: "Proceed" } } }).ok);
+    const questions = [{ id: "q", header: "Review", question: "Continue?", options: [{ label: "Proceed" }] }];
+    const answered = { kind: "question_request" as const, requestId: "ask", occurrenceId: "request_answered", questions };
+    if (ordering === "after") db.reconcileRunnerHistory(id, 1, 1);
+    else assert.equal(db.getRunnerHistoryState(id)?.historyEpoch ?? null, null, "no runner history epoch is known yet");
+    svc.onSessionEvent(id, answered, 1, 100);
+    assert.equal(hub.sentOfType("answer_question").length, 1);
+    svc.onSessionEvent(id, { kind: "question_resolved", requestId: "ask", occurrenceId: "request_answered", answered: true }, 2, 101);
+
+    db.clearSessionEvents(id);
+    db.reconcileRunnerHistory(id, 1, 3);
+    // The provider reused the request id for an identical question, a new occurrence.
+    const reused = { ...answered, occurrenceId: "request_reused" };
+    hub.requestHandler = (msg) => ({ type: "session_history_page_result", requestId: "requestId" in msg ? msg.requestId! : "history",
+      sessionId: id, ok: true, events: [
+        { seq: 1, ts: 100, payload: answered },
+        { seq: 2, ts: 101, payload: { kind: "question_resolved", requestId: "ask", occurrenceId: "request_answered", answered: true } },
+        { seq: 3, ts: 102, payload: reused },
+      ],
+      page: { logEpoch: 1, throughSeq: 3, nextAfterSeq: 3, hasMore: false } });
+    await svc.hydrateHistory(id);
+
+    const events = db.listEvents(id);
+    const attributions = events.filter((event) => event.payload.kind === "question_policy_answered");
+    assert.equal(attributions.length, 1, "the attribution is restored exactly once");
+    const attribution = attributions[0]!.payload;
+    assert.ok(attribution.kind === "question_policy_answered");
+    assert.deepEqual(attribution.policies, [{ policyId: "routine", name: "Routine Review" }]);
+    const answeredRow = events.find((event) => event.payload.kind === "question_request" &&
+      event.payload.occurrenceId === "request_answered")!;
+    assert.equal(attribution.questionEventSeq, answeredRow.seq, "it attaches to the question the policy answered");
+    const reusedRow = events.find((event) => event.payload.kind === "question_request" &&
+      event.payload.occurrenceId === "request_reused")!;
+    assert.equal(db.questionPolicyAnswer(reusedRow), null, "a reused request id does not inherit the attribution");
+    assert.equal(hub.sentOfType("answer_question").length, 1, "hydration never sends another answer");
+  });
+}
+
 test("unmatched, foreign-owned, and undeliverable question policies retain the ordinary input path", () => {
   for (const mode of ["no-match", "foreign-owner", "delivery-failure"] as const) {
     const { db, svc, hub } = makeHarness();

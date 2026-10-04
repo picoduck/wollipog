@@ -1487,15 +1487,19 @@ CREATE TABLE IF NOT EXISTS governance_policies (
 );
 CREATE INDEX IF NOT EXISTS idx_governance_policies_precedence
   ON governance_policies(enabled, priority DESC, policy_id);
+-- Keyed by the runner's durable occurrence id, which identifies the question in every history
+-- epoch; rows without one (older runners) fall back to runner seq + the epoch known at record time.
+-- Its unique indexes are created after the startup migration that adds occurrence_id.
 CREATE TABLE IF NOT EXISTS question_policy_answers (
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   request_id TEXT NOT NULL,
+  occurrence_id TEXT,
   question_digest TEXT NOT NULL,
-  runner_seq INTEGER NOT NULL,
-  history_epoch INTEGER NOT NULL,
+  runner_seq INTEGER,
+  history_epoch INTEGER,
   payload TEXT NOT NULL,
   created_at INTEGER NOT NULL,
-  PRIMARY KEY(session_id, runner_seq, history_epoch)
+  CHECK (occurrence_id IS NOT NULL OR (runner_seq IS NOT NULL AND history_epoch IS NOT NULL))
 );
 -- Reconcile/hydrate/delete paths filter sessions by owner constantly; without this every
 -- runner reconnect pays O(sessions) scans per lookup.
@@ -4959,6 +4963,76 @@ export class ControlPlaneDb {
         db.exec("PRAGMA foreign_keys = ON;");
       }
     }
+    const questionPolicyAnswerColumns = db.prepare("PRAGMA table_info(question_policy_answers)")
+      .all() as unknown as Array<{ name: string }>;
+    if (!questionPolicyAnswerColumns.some((column) => column.name === "occurrence_id")) {
+      // #2529: a row recorded before the runner's history epoch was adopted carries epoch -1 and
+      // never matches again. Key rows by occurrence, recovering each legacy row's occurrence id from
+      // the cached question it answered while the cache still holds exactly that question.
+      db.exec("PRAGMA foreign_keys = OFF;");
+      try {
+        db.exec(`
+          BEGIN;
+          CREATE TABLE question_policy_answers_v2 (
+            session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            request_id TEXT NOT NULL,
+            occurrence_id TEXT,
+            question_digest TEXT NOT NULL,
+            runner_seq INTEGER,
+            history_epoch INTEGER,
+            payload TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            CHECK (occurrence_id IS NOT NULL OR (runner_seq IS NOT NULL AND history_epoch IS NOT NULL))
+          );
+          INSERT INTO question_policy_answers_v2
+            (session_id, request_id, question_digest, runner_seq, history_epoch, payload, created_at)
+            SELECT session_id, request_id, question_digest, runner_seq, history_epoch, payload, created_at
+            FROM question_policy_answers;
+          DROP TABLE question_policy_answers;
+          ALTER TABLE question_policy_answers_v2 RENAME TO question_policy_answers;
+        `);
+        const legacyRows = db.prepare(
+          `SELECT rowid, session_id, request_id, question_digest, runner_seq, created_at FROM question_policy_answers`,
+        ).all() as unknown as Array<{
+          rowid: number; session_id: string; request_id: string; question_digest: string; runner_seq: number; created_at: number;
+        }>;
+        const cachedQuestions = db.prepare(
+          `SELECT payload FROM session_events WHERE session_id=? AND runner_seq=? AND ts=? AND kind='question_request'`,
+        );
+        const bindOccurrence = db.prepare(
+          `UPDATE question_policy_answers SET occurrence_id=? WHERE rowid=? AND NOT EXISTS
+             (SELECT 1 FROM question_policy_answers WHERE session_id=? AND occurrence_id=?)`,
+        );
+        for (const row of legacyRows) {
+          const occurrences = new Set<string>();
+          for (const cached of cachedQuestions.all(row.session_id, row.runner_seq, row.created_at) as Array<{ payload: string }>) {
+            let question: unknown;
+            try { question = JSON.parse(cached.payload); } catch { continue; }
+            if (!question || typeof question !== "object") continue;
+            const { kind, requestId, occurrenceId, questions } = question as Record<string, unknown>;
+            if (kind === "question_request" && requestId === row.request_id && typeof occurrenceId === "string" &&
+                createHash("sha256").update(JSON.stringify(questions)).digest("hex") === row.question_digest) {
+              occurrences.add(occurrenceId);
+            }
+          }
+          if (occurrences.size !== 1) continue;
+          const [occurrenceId] = occurrences;
+          bindOccurrence.run(occurrenceId!, row.rowid, row.session_id, occurrenceId!);
+        }
+        db.exec("COMMIT;");
+      } catch (error) {
+        try { db.exec("ROLLBACK;"); } catch { /* no active transaction */ }
+        throw error;
+      } finally {
+        db.exec("PRAGMA foreign_keys = ON;");
+      }
+    }
+    db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_question_policy_answers_occurrence
+        ON question_policy_answers(session_id, occurrence_id) WHERE occurrence_id IS NOT NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_question_policy_answers_runner_seq
+        ON question_policy_answers(session_id, runner_seq, history_epoch) WHERE occurrence_id IS NULL;
+    `);
     for (const column of [
       "context_kind TEXT CHECK (context_kind IN ('native','wsl'))",
       "context_distro TEXT",
@@ -18078,16 +18152,19 @@ export class ControlPlaneDb {
 
   recordQuestionPolicyAnswer(
     sessionId: string,
-    questions: Extract<SessionEventPayload, { kind: "question_request" }>["questions"],
+    request: Extract<SessionEventPayload, { kind: "question_request" }>,
     payload: Extract<SessionEventPayload, { kind: "question_policy_answered" }>,
     timestamp: number,
     runnerSeq: number | undefined,
   ): void {
-    if (runnerSeq === undefined) return;
+    // The runner's occurrence id is stable across history epochs, so it needs no runner position.
+    if (!request.occurrenceId && runnerSeq === undefined) return;
     this.stmt(`INSERT OR REPLACE INTO question_policy_answers
-      (session_id, request_id, question_digest, runner_seq, history_epoch, payload, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-      .run(sessionId, payload.requestId, createHash("sha256").update(JSON.stringify(questions)).digest("hex"),
-        runnerSeq, this.getRunnerHistoryState(sessionId)?.historyEpoch ?? -1, JSON.stringify(payload), timestamp);
+      (session_id, request_id, occurrence_id, question_digest, runner_seq, history_epoch, payload, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(sessionId, payload.requestId, request.occurrenceId ?? null,
+        createHash("sha256").update(JSON.stringify(request.questions)).digest("hex"),
+        runnerSeq ?? null, this.getRunnerHistoryState(sessionId)?.historyEpoch ?? -1, JSON.stringify(payload), timestamp);
   }
 
   questionPolicyAnswer(
@@ -18097,11 +18174,20 @@ export class ControlPlaneDb {
     const cached = this.stmt("SELECT runner_seq FROM session_events WHERE id=? AND session_id=?")
       .get(event.id, event.sessionId) as { runner_seq: number | null } | undefined;
     if (cached?.runner_seq == null) return null;
-    const row = this.stmt(`SELECT payload, created_at FROM question_policy_answers
-      WHERE session_id=? AND request_id=? AND question_digest=? AND runner_seq=? AND history_epoch=? AND created_at=?`).get(
-        event.sessionId, event.payload.requestId, createHash("sha256").update(JSON.stringify(event.payload.questions)).digest("hex"),
+    const digest = createHash("sha256").update(JSON.stringify(event.payload.questions)).digest("hex");
+    // A row keyed by occurrence matches only that occurrence, whatever epoch either side saw.
+    // Rows without one (older runners, or recorded before #2529) keep the exact-position match.
+    const row = ((event.payload.occurrenceId
+      ? this.stmt(`SELECT payload, created_at FROM question_policy_answers
+          WHERE session_id=? AND occurrence_id=? AND request_id=? AND question_digest=?`).get(
+          event.sessionId, event.payload.occurrenceId, event.payload.requestId, digest)
+      : undefined) ??
+      this.stmt(`SELECT payload, created_at FROM question_policy_answers
+        WHERE session_id=? AND occurrence_id IS NULL AND request_id=? AND question_digest=? AND runner_seq=?
+          AND history_epoch=? AND created_at=?`).get(
+        event.sessionId, event.payload.requestId, digest,
         cached.runner_seq, this.getRunnerHistoryState(event.sessionId)?.historyEpoch ?? -1, event.ts,
-      ) as { payload: string; created_at: number } | undefined;
+      )) as { payload: string; created_at: number } | undefined;
     return row ? { payload: JSON.parse(row.payload), timestamp: row.created_at } : null;
   }
 

@@ -12875,7 +12875,7 @@ export class SessionsService {
             kind: "question_policy_answered", requestId: approval.requestId, questionEventSeq: ev.seq,
             policies: automatic.policies.map(({ policyId, name }) => ({ policyId, name })),
           };
-          this.db.recordQuestionPolicyAnswer(sessionId, payload.questions, attribution, now, runnerSeq);
+          this.db.recordQuestionPolicyAnswer(sessionId, payload, attribution, now, runnerSeq);
           this.hub.sessionEvent(this.db.appendEvent(sessionId, attribution, now));
           this.gateOnPolicy(sessionId, now);
           this.hub.sessionChangedById(sessionId);
@@ -13541,7 +13541,8 @@ export class SessionsService {
   }
 
   /** Reconstruct CP-owned attribution after a runner-history cache reset, without delivering
-   * another answer. Runner sequence/epoch and question digest identify the exact occurrence. */
+   * another answer. The runner's occurrence id (or, without one, runner sequence/epoch) and the
+   * question digest identify the exact occurrence. */
   private restoreQuestionPolicyAttribution(event: SessionEvent): SessionEvent | null {
     if (event.payload.kind !== "question_request") return null;
     const stored = this.db.questionPolicyAnswer(event);
