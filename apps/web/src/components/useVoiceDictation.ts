@@ -1,17 +1,21 @@
 /**
- * Hold-to-talk dictation on the browser's built-in SpeechRecognition (Chrome/Edge webkit-prefixed;
+ * Tap-or-hold dictation on the browser's built-in SpeechRecognition (Chrome/Edge webkit-prefixed;
  * no transcription backend, no audio leaves the page except to the browser's own service).
  * Feature-detected — callers hide the mic entirely when unsupported (e.g. Firefox).
  *
- * The engine ends itself in ways a hold-to-talk contract must survive: `stop()` finalizes
- * asynchronously (~100ms–1s), and Chrome self-terminates on ~8s of silence ('no-speech') or
- * transient 'network' errors even with continuous=true. So the hook tracks HOLD INTENT in a ref
- * and restarts a recognizer from `onend` whenever the user is still holding and the termination
- * wasn't fatal — the mic stays honest for the whole press.
+ * One press starts dictation. Released within `HOLD_THRESHOLD_MS` it was a tap, and dictation runs
+ * until the next tap, `toggle()` (Enter or Space on the mic) or `stop()` (Escape, Send); held
+ * longer it was push-to-talk, and the release stops it (#2193).
+ *
+ * The engine ends itself in ways that contract must survive: `stop()` finalizes asynchronously
+ * (~100ms–1s), and Chrome self-terminates on ~8s of silence ('no-speech') or transient 'network'
+ * errors even with continuous=true. So the hook tracks the person's INTENT in a ref and restarts a
+ * recognizer from `onend` whenever they still want to dictate and the termination wasn't fatal —
+ * the mic stays honest for the whole tap or press.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { finalTranscripts } from "../dictation.js";
+import { finalTranscripts, interimTranscripts } from "../dictation.js";
 
 /* Minimal local typings — SpeechRecognition isn't in TS's standard dom lib. */
 interface SpeechRecognitionLike {
@@ -34,19 +38,43 @@ function recognitionCtor(): (new () => SpeechRecognitionLike) | null {
   return w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null;
 }
 
-/** Terminations that must NOT auto-restart while held (a denied mic would loop forever). */
+/** Terminations that must NOT auto-restart (a denied mic would loop forever). */
 const FATAL_ERRORS = new Set(["not-allowed", "service-not-allowed", "audio-capture", "aborted"]);
 
+/** A press on the mic this long is push-to-talk: its release stops dictation. */
+export const HOLD_THRESHOLD_MS = 400;
+
 export function useVoiceDictation(onPhrase: (text: string) => void) {
+  // `recording` is the person's intent, so the mic and the strip answer the press at once; the
+  // engine's own asynchronous stop only decides whether a late final phrase still lands.
   const [recording, setRecording] = useState(false);
+  const [startedAt, setStartedAt] = useState<number | null>(null);
+  const [interim, setInterim] = useState("");
+  // The press that started dictation has lasted past the hold threshold, so releasing it stops.
+  const [held, setHeld] = useState(false);
   const recRef = useRef<SpeechRecognitionLike | null>(null);
-  const heldRef = useRef(false);
+  const wantedRef = useRef(false);
   const lastErrorRef = useRef<string | null>(null);
+  const pressRef = useRef<{ at: number; timer: ReturnType<typeof setTimeout> } | null>(null);
   // Keep the callback fresh without re-subscribing the recognizer.
   const onPhraseRef = useRef(onPhrase);
   onPhraseRef.current = onPhrase;
 
   const supported = typeof window !== "undefined" && recognitionCtor() !== null;
+
+  const endPress = useCallback(() => {
+    if (pressRef.current) clearTimeout(pressRef.current.timer);
+    pressRef.current = null;
+    setHeld(false);
+  }, []);
+
+  const settle = useCallback(() => {
+    wantedRef.current = false;
+    endPress();
+    setRecording(false);
+    setStartedAt(null);
+    setInterim("");
+  }, [endPress]);
 
   const startFresh = useCallback(function startFresh() {
     const Ctor = recognitionCtor();
@@ -58,6 +86,7 @@ export function useVoiceDictation(onPhrase: (text: string) => void) {
     rec.onresult = (ev) => {
       const text = finalTranscripts(ev.results, ev.resultIndex);
       if (text) onPhraseRef.current(text);
+      setInterim(wantedRef.current ? interimTranscripts(ev.results, ev.resultIndex) : "");
     };
     rec.onerror = (ev) => {
       lastErrorRef.current = ev.error ?? "unknown";
@@ -66,48 +95,80 @@ export function useVoiceDictation(onPhrase: (text: string) => void) {
       recRef.current = null;
       const fatal = FATAL_ERRORS.has(lastErrorRef.current ?? "");
       lastErrorRef.current = null;
-      if (heldRef.current && !fatal) {
-        // Still held: the engine ended on its own (silence timeout, network blip) or the user
-        // re-pressed during the async stop window — pick up seamlessly with a fresh recognizer.
+      setInterim("");
+      if (wantedRef.current && !fatal) {
+        // Still wanted: the engine ended on its own (silence timeout, network blip) or the person
+        // started again during the async stop window — pick up seamlessly with a fresh recognizer.
         startFresh();
         return;
       }
-      setRecording(false);
+      if (wantedRef.current) settle();
     };
     recRef.current = rec;
-    setRecording(true);
     try {
       rec.start();
     } catch {
       recRef.current = null;
-      setRecording(false);
+      settle();
     }
-  }, []);
+  }, [settle]);
 
   const start = useCallback(() => {
-    heldRef.current = true;
+    if (!recognitionCtor() || wantedRef.current) return;
+    wantedRef.current = true;
     lastErrorRef.current = null;
-    // If a recognizer is still finalizing a previous stop(), its onend sees heldRef and
+    setRecording(true);
+    setStartedAt(Date.now());
+    setInterim("");
+    // If a recognizer is still finalizing a previous stop(), its onend sees the intent and
     // restarts — starting a second instance here would double-capture.
     if (recRef.current) return;
     startFresh();
   }, [startFresh]);
 
   const stop = useCallback(() => {
-    heldRef.current = false;
-    // `recording` clears in onend — stop() is async in the engine (pending audio finalizes).
+    if (!wantedRef.current) return;
+    settle();
+    // The engine finalizes pending audio after stop(); a final phrase may still arrive.
     recRef.current?.stop();
-  }, []);
+  }, [settle]);
 
-  // Never leave the mic hot after unmount (navigation away mid-hold). Clearing the hold flag
+  const toggle = useCallback(() => {
+    if (wantedRef.current) stop();
+    else start();
+  }, [start, stop]);
+
+  /** A primary pointer pressed the mic: start if idle, otherwise this tap is the one that stops. */
+  const pressStart = useCallback(() => {
+    if (wantedRef.current) {
+      stop();
+      return;
+    }
+    start();
+    if (!wantedRef.current) return;
+    const at = Date.now();
+    pressRef.current = { at, timer: setTimeout(() => setHeld(true), HOLD_THRESHOLD_MS) };
+  }, [start, stop]);
+
+  /** The press that started dictation ended (release, cancel or leaving the mic). */
+  const pressEnd = useCallback(() => {
+    const press = pressRef.current;
+    if (!press) return;
+    endPress();
+    // The same instant the strip starts saying "Release to stop".
+    if (Date.now() - press.at >= HOLD_THRESHOLD_MS) stop();
+  }, [endPress, stop]);
+
+  // Never leave the mic hot after unmount (navigation away mid-dictation). Clearing the intent
   // first keeps the 'aborted' onend from restarting.
   useEffect(
     () => () => {
-      heldRef.current = false;
+      wantedRef.current = false;
+      if (pressRef.current) clearTimeout(pressRef.current.timer);
       recRef.current?.abort();
     },
     [],
   );
 
-  return { supported, recording, start, stop };
+  return { supported, recording, startedAt, interim, held, start, stop, toggle, pressStart, pressEnd };
 }

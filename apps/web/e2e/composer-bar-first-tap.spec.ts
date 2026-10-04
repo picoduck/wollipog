@@ -191,10 +191,11 @@ test.describe("with the composer focused, one tap", () => {
     await expect(composer).toBeFocused();
   });
 
-  test("starts dictation, and keeps the composer focused", async ({ page }) => {
+  test("starts dictation from a 44px hit area, keeps it on, and keeps the composer focused (#2193)", async ({ page }) => {
     await page.addInitScript(() => {
-      const w = window as unknown as { dictationStarts: number };
+      const w = window as unknown as { dictationStarts: number; dictationStops: number };
       w.dictationStarts = 0;
+      w.dictationStops = 0;
       class FakeRecognition {
         continuous = false;
         interimResults = false;
@@ -203,7 +204,7 @@ test.describe("with the composer focused, one tap", () => {
         onend: (() => void) | null = null;
         onerror = null;
         start() { w.dictationStarts += 1; }
-        stop() { queueMicrotask(() => this.onend?.()); }
+        stop() { w.dictationStops += 1; queueMicrotask(() => this.onend?.()); }
         abort() { queueMicrotask(() => this.onend?.()); }
       }
       // Chromium ships the unprefixed constructor too, and the hook prefers it.
@@ -213,9 +214,39 @@ test.describe("with the composer focused, one tap", () => {
     });
     await openSession(page);
     const composer = await focusComposer(page);
-    await tapOnce(page, page.getByRole("button", { name: "Hold to Dictate" }));
+    const mic = page.getByRole("button", { name: "Dictate" });
+    // 36px to look, with a hit area 4px past each edge: a tap 3px outside still lands on the mic.
+    const hitArea = await mic.evaluate((control) => {
+      const box = control.getBoundingClientRect();
+      const centerX = box.left + box.width / 2;
+      const centerY = box.top + box.height / 2;
+      const hits = (x: number, y: number) => {
+        const target = document.elementFromPoint(x, y);
+        return target !== null && (target === control || control.contains(target));
+      };
+      return {
+        width: box.width,
+        height: box.height,
+        edges: [hits(centerX, box.top - 3), hits(centerX, box.bottom + 3), hits(box.left - 3, centerY), hits(box.right + 3, centerY)],
+      };
+    });
+    expect(hitArea.width).toBeCloseTo(36, 0);
+    expect(hitArea.height).toBeCloseTo(36, 0);
+    expect(hitArea.edges, "the mic has a 44px hit area").toEqual([true, true, true, true]);
+
+    await tapOnce(page, mic);
     await expect.poll(() => page.evaluate(() =>
       (window as unknown as { dictationStarts: number }).dictationStarts)).toBe(1);
+    await expect(composer).toBeFocused();
+    // A tap is not a hold: dictation stays on after the finger lifts, until the next tap.
+    const stopDictating = page.getByRole("button", { name: "Stop Dictating" });
+    await expect(stopDictating).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByRole("status").filter({ hasText: "Listening…" })).toContainText("Tap the mic to stop");
+    expect(await page.evaluate(() => (window as unknown as { dictationStops: number }).dictationStops)).toBe(0);
+
+    await tapOnce(page, stopDictating);
+    await expect(page.getByRole("button", { name: "Dictate" })).toHaveAttribute("aria-pressed", "false");
+    expect(await page.evaluate(() => (window as unknown as { dictationStops: number }).dictationStops)).toBe(1);
     await expect(composer).toBeFocused();
   });
 });

@@ -5767,7 +5767,7 @@ for (const [status, reason] of [
       };
       described(box?.querySelector<HTMLButtonElement>(".permission-mode-menu > .cbar-trigger"), "the permission control");
       described(box?.querySelector<HTMLButtonElement>(".model-settings-menu > .cbar-trigger"), "the model control");
-      described(box?.querySelector<HTMLButtonElement>(".voice-btn"), "the mic");
+      described(box?.querySelector<HTMLButtonElement>('button[aria-label="Dictate"]'), "the mic");
       // + stays openable while paused (#2175), so Guardrails can be read and changed; the rows
       // that would act on the composer refuse with the same reason.
       const plus = box?.querySelector<HTMLButtonElement>(".plus-btn");
@@ -5822,7 +5822,7 @@ test("every composer bar control is a ComposerButton that keeps the composer foc
       }
     };
 
-    expectComposerButtons("idle with Plan on", ["Attach and Settings", "Plan", "Hold to Dictate", "Send"]);
+    expectComposerButtons("idle with Plan on", ["Attach and Settings", "Plan", "Dictate", "Send"]);
     const plan = fixture.container.querySelector<HTMLButtonElement>(".plan-toggle");
     assert.equal(plan?.getAttribute("aria-pressed"), "true", "Plan is a pressed toggle");
     assert.equal(plan?.textContent, "Plan", "Plan has an icon and a word, not a text glyph");
@@ -5900,4 +5900,249 @@ test("an attached image that can't be shown is an image-off tile and a notice un
   } finally {
     await unmountFixture(fixture);
   }
+});
+
+/** A recognizer the dictation tests can drive, logging what the composer asked of it (#2193). */
+class TrackedRecognition {
+  static instances: TrackedRecognition[] = [];
+  static log: string[] = [];
+  continuous = false;
+  interimResults = false;
+  lang = "";
+  onresult: ((ev: { resultIndex: number; results: Array<{ isFinal: boolean; 0: { transcript: string } }> }) => void) | null = null;
+  onerror: ((ev: { error?: string }) => void) | null = null;
+  onend: (() => void) | null = null;
+  constructor() { TrackedRecognition.instances.push(this); }
+  start() { TrackedRecognition.log.push("start"); }
+  stop() { TrackedRecognition.log.push("stop"); }
+  abort() { TrackedRecognition.log.push("abort"); }
+}
+
+async function withTrackedRecognition(body: () => Promise<void>) {
+  TrackedRecognition.instances = [];
+  TrackedRecognition.log = [];
+  const speech = domWindow as unknown as { SpeechRecognition?: unknown };
+  speech.SpeechRecognition = TrackedRecognition;
+  try {
+    await body();
+  } finally {
+    delete speech.SpeechRecognition;
+  }
+}
+
+function micButton(fixture: Fixture): HTMLButtonElement {
+  const mic = fixture.container.querySelector<HTMLButtonElement>(
+    '.composer-bar button[aria-label="Dictate"], .composer-bar button[aria-label="Stop Dictating"]',
+  );
+  assert.ok(mic, "the mic is in the composer bar");
+  return mic;
+}
+
+async function pointer(button: HTMLButtonElement, type: "pointerdown" | "pointerup") {
+  await act(async () => {
+    button.dispatchEvent(new domWindow.PointerEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      isPrimary: true,
+      button: 0,
+      pointerId: 1,
+      pointerType: "touch",
+    }) as never);
+  });
+}
+
+test("the mic toggles on a tap and stops a hold on release, showing a Listening strip in place of the left group (#2193)", async () => {
+  await withTrackedRecognition(async () => {
+    const draft = deferred<ComposerDraft | null>();
+    const fixture = await mountFixture(draft, { sessionCapabilities: PAUSED_LOOK_CAPABILITIES });
+    try {
+      await resolveComposerDraft(draft, { text: "", images: [], updatedAt: 1 });
+      const mic = micButton(fixture);
+      assert.equal(mic.getAttribute("aria-label"), "Dictate");
+      assert.equal(mic.getAttribute("aria-pressed"), "false");
+      assert.equal(mic.title, "Tap to dictate, or hold and release");
+      assert.equal(mic.disabled, false);
+      assert.ok(fixture.container.querySelector(".cbar-left"), "the left group shows while idle");
+      assertNoDomNode(fixture.container.querySelector(".dictation-strip"));
+
+      // A tap: down and straight up, from a focused composer.
+      await act(async () => fixture.composer.focus());
+      await pointer(mic, "pointerdown");
+      await pointer(mic, "pointerup");
+      assert.deepEqual(TrackedRecognition.log, ["start"]);
+      assert.equal(mic.getAttribute("aria-pressed"), "true", "a short tap leaves it listening");
+      assert.equal(mic.getAttribute("aria-label"), "Stop Dictating");
+      const strip = fixture.container.querySelector(".composer-bar .dictation-strip");
+      assert.ok(strip, "the strip shows while listening");
+      assert.equal(strip.getAttribute("role"), "status");
+      assert.equal(strip.querySelector(".dictation-label")?.textContent, "Listening…");
+      assert.equal(strip.querySelector(".dictation-timer")?.textContent, "00:00");
+      assert.equal(strip.querySelector(".dictation-hint")?.textContent, "Tap the mic to stop");
+      assertNoDomNode(fixture.container.querySelector(".cbar-left"), "the strip replaces the left group");
+      assert.ok(fixture.composer.ownerDocument.activeElement === fixture.composer, "the composer keeps focus");
+
+      await flushAsyncWork(1_050);
+      assert.equal(fixture.container.querySelector(".dictation-timer")?.textContent, "00:01", "the timer advances each second");
+
+      // The next tap stops.
+      await pointer(mic, "pointerdown");
+      await pointer(mic, "pointerup");
+      assert.deepEqual(TrackedRecognition.log, ["start", "stop"]);
+      assert.equal(mic.getAttribute("aria-pressed"), "false");
+      assert.equal(mic.getAttribute("aria-label"), "Dictate");
+      assertNoDomNode(fixture.container.querySelector(".dictation-strip"));
+      assert.ok(fixture.container.querySelector(".cbar-left"), "the left group returns");
+      await act(async () => TrackedRecognition.instances[0]!.onend?.());
+
+      // A hold: past the threshold the strip says to release, and the release stops.
+      await pointer(mic, "pointerdown");
+      assert.equal(fixture.container.querySelector(".dictation-hint")?.textContent, "Tap the mic to stop");
+      await flushAsyncWork(450);
+      assert.equal(fixture.container.querySelector(".dictation-hint")?.textContent, "Release to stop");
+      assert.equal(mic.getAttribute("aria-pressed"), "true");
+      await pointer(mic, "pointerup");
+      assert.deepEqual(TrackedRecognition.log, ["start", "stop", "start", "stop"]);
+      assert.equal(mic.getAttribute("aria-pressed"), "false");
+      assertNoDomNode(fixture.container.querySelector(".dictation-strip"));
+    } finally {
+      await unmountFixture(fixture);
+    }
+  });
+});
+
+test("Enter or Space on the focused mic toggles dictation and leaves focus on the mic (#2193)", async () => {
+  await withTrackedRecognition(async () => {
+    const draft = deferred<ComposerDraft | null>();
+    const fixture = await mountFixture(draft, { sessionCapabilities: PAUSED_LOOK_CAPABILITIES });
+    try {
+      await resolveComposerDraft(draft, { text: "", images: [], updatedAt: 1 });
+      const mic = micButton(fixture);
+      // A button's keyboard (and assistive technology) activation is a click with no pointer
+      // behind it: detail 0. A pointer's click has already been handled by its press.
+      const keyboardClick = async () => {
+        await act(async () => {
+          mic.dispatchEvent(new domWindow.MouseEvent("click", { bubbles: true, cancelable: true, detail: 0 }) as never);
+        });
+      };
+      await act(async () => mic.focus());
+      await keyboardClick();
+      assert.equal(mic.getAttribute("aria-pressed"), "true");
+      assert.equal(mic.getAttribute("aria-label"), "Stop Dictating");
+      assert.ok(mic.ownerDocument.activeElement === mic, "focus stays on the mic");
+      await keyboardClick();
+      assert.equal(mic.getAttribute("aria-pressed"), "false");
+      assert.ok(mic.ownerDocument.activeElement === mic, "focus stays on the mic");
+      assert.deepEqual(TrackedRecognition.log, ["start", "stop"]);
+
+      // A pointer's own click never toggles a second time.
+      await pointer(mic, "pointerdown");
+      await pointer(mic, "pointerup");
+      await act(async () => {
+        mic.dispatchEvent(new domWindow.MouseEvent("click", { bubbles: true, cancelable: true, detail: 1 }) as never);
+      });
+      assert.equal(mic.getAttribute("aria-pressed"), "true");
+
+      // Escape on the focused mic stops too.
+      await act(async () => {
+        mic.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }) as never);
+      });
+      assert.equal(mic.getAttribute("aria-pressed"), "false");
+    } finally {
+      await unmountFixture(fixture);
+    }
+  });
+});
+
+test("Escape in the composer ends dictation, and Send ends it before sending (#2193)", async () => {
+  await withTrackedRecognition(async () => {
+    const draft = deferred<ComposerDraft | null>();
+    const prompts: string[] = [];
+    const fixture = await mountFixture(draft, {
+      sessionCapabilities: PAUSED_LOOK_CAPABILITIES,
+      client: {
+        prompt: async (_sessionId, text) => {
+          TrackedRecognition.log.push("prompt");
+          prompts.push(text);
+          return undefined as never;
+        },
+      },
+    });
+    try {
+      await resolveComposerDraft(draft, { text: "", images: [], updatedAt: 1 });
+      const mic = micButton(fixture);
+      await pointer(mic, "pointerdown");
+      await pointer(mic, "pointerup");
+      assert.equal(mic.getAttribute("aria-pressed"), "true");
+      const escape = new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+      await act(async () => { fixture.composer.dispatchEvent(escape as never); });
+      assert.equal(escape.defaultPrevented, true, "Escape is consumed by the dictation layer");
+      assert.equal(mic.getAttribute("aria-pressed"), "false");
+      assert.deepEqual(TrackedRecognition.log, ["start", "stop"]);
+      // With nothing listening, Escape is left to the layers below.
+      const idleEscape = new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+      await act(async () => { fixture.composer.dispatchEvent(idleEscape as never); });
+      assert.equal(idleEscape.defaultPrevented, false);
+      await act(async () => TrackedRecognition.instances[0]!.onend?.());
+
+      await pointer(mic, "pointerdown");
+      await pointer(mic, "pointerup");
+      const recognizer = TrackedRecognition.instances[1]!;
+      await act(async () => recognizer.onresult?.({ resultIndex: 0, results: [{ isFinal: true, 0: { transcript: "ship it" } }] }));
+      assert.equal(fixture.composer.value, "ship it");
+      TrackedRecognition.log = [];
+      await act(async () => { sendButton(fixture).click(); });
+      await flushAsyncWork();
+      assert.deepEqual(TrackedRecognition.log, ["stop", "prompt"], "dictation stops before the message is sent");
+      assert.deepEqual(prompts, ["ship it"]);
+      assert.equal(mic.getAttribute("aria-pressed"), "false");
+      assertNoDomNode(fixture.container.querySelector(".dictation-strip"));
+    } finally {
+      await unmountFixture(fixture);
+    }
+  });
+});
+
+test("unsettled words show faint in the strip and reach the message only once final (#2193)", async () => {
+  await withTrackedRecognition(async () => {
+    const draft = deferred<ComposerDraft | null>();
+    const fixture = await mountFixture(draft, { sessionCapabilities: PAUSED_LOOK_CAPABILITIES });
+    try {
+      await resolveComposerDraft(draft, { text: "Draft:", images: [], updatedAt: 1 });
+      const mic = micButton(fixture);
+      await pointer(mic, "pointerdown");
+      await pointer(mic, "pointerup");
+      const recognizer = TrackedRecognition.instances[0]!;
+      await act(async () => recognizer.onresult?.({ resultIndex: 0, results: [{ isFinal: false, 0: { transcript: "fix the side" } }] }));
+      assert.equal(fixture.container.querySelector(".dictation-strip .dictation-interim")?.textContent, "fix the side");
+      assert.equal(fixture.composer.value, "Draft:", "unsettled words are not in the message");
+      await act(async () => recognizer.onresult?.({ resultIndex: 0, results: [{ isFinal: true, 0: { transcript: "fix the sidebar" } }] }));
+      assert.equal(fixture.composer.value, "Draft: fix the sidebar");
+      assertNoDomNode(fixture.container.querySelector(".dictation-interim"), "settled words leave the strip");
+    } finally {
+      await unmountFixture(fixture);
+    }
+  });
+});
+
+test("a composer that becomes blocked while listening stops dictation and disables the mic (#2193)", async () => {
+  await withTrackedRecognition(async () => {
+    const draft = deferred<ComposerDraft | null>();
+    const fixture = await mountFixture(draft, { sessionCapabilities: PAUSED_LOOK_CAPABILITIES });
+    try {
+      await resolveComposerDraft(draft, { text: "", images: [], updatedAt: 1 });
+      const mic = micButton(fixture);
+      await pointer(mic, "pointerdown");
+      await pointer(mic, "pointerup");
+      assert.equal(mic.getAttribute("aria-pressed"), "true");
+      await fixture.pushSession({ status: "stopped" });
+      const stopped = micButton(fixture);
+      assert.deepEqual(TrackedRecognition.log, ["start", "stop"]);
+      assert.equal(stopped.disabled, true);
+      assert.equal(stopped.getAttribute("aria-pressed"), "false");
+      assert.equal(stopped.getAttribute("aria-label"), "Dictate");
+      assertNoDomNode(fixture.container.querySelector(".dictation-strip"));
+    } finally {
+      await unmountFixture(fixture);
+    }
+  });
 });

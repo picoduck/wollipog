@@ -270,9 +270,6 @@ const AA_NON_TEXT = 3;
  * blocks something.
  */
 const ICON_ONLY = new Set([
-  // The microphone GLYPH, not the button: scoping the exemption to the svg makes it structurally
-  // true, so giving the control a visible label later cannot silently inherit the looser bar.
-  ".voice-btn.voice-recording > svg",
   // Onboarding status marks: each renders one aria-hidden glyph (✓, ! or △) beside a heading or
   // label that states the status in text, which OnboardRunnerDialog.test.tsx pins. They are measured
   // over their own `--bg-elev-3` disc as colour-only rules on a base fill.
@@ -458,7 +455,7 @@ test("a faded glyph on a transparent fill fails in every palette, even at the gl
   // #1880's first pass, verbatim: an unavailable message action faded to 45% of --text-faint.
   // It rendered at 1.9–2.7:1, so it fails even the 3:1 bar an icon-only selector is held to.
   const faded = "color-mix(in srgb, var(--text-faint) 45%, transparent)";
-  const unavailable = [...ICON_ONLY].find((selector) => selector.startsWith(".voice-btn"))!;
+  const unavailable = [...ICON_ONLY].find((selector) => selector.startsWith(".onboard-local-ready"))!;
   for (const fill of ["transparent", "none"]) {
     for (const rule of [
       { selector: unavailable, declarations: { color: faded, background: fill } },

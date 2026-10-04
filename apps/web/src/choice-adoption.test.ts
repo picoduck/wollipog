@@ -83,7 +83,7 @@ type Pattern = keyof typeof PATTERNS;
  *
  * Two entries are DELIBERATE and stay: both `aria-pressed` groups are genuine toggles — the
  * Pinned Summary, Terminal and Side Panel buttons in `SessionPanelToggles` (#2164), and the
- * composer bar's hold-to-dictate mic and Plan toggle (#2174) in `SessionDetail`. A toggle is what
+ * composer bar's tap-or-hold dictation mic and Plan toggle (#2174) in `SessionDetail`. A toggle is what
  * `aria-pressed` is for; it is only wrong when it describes one of N alternatives. They are
  * counted rather than exempted so that a FOURTH
  * one in `SessionPanelToggles.tsx` fails here instead of hiding behind a whole-file exemption.

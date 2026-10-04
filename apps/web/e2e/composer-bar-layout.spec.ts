@@ -101,7 +101,7 @@ for (const width of [320, 360, 393, 430]) {
       expect(geometry.model.right - geometry.model.left).toBeGreaterThanOrEqual(12);
       expect(geometry.modelText).toContain(kind === "claude" ? "Claude Opus" : "GPT-6-Astra");
       expect(geometry.horizontalOverflow).toBe(false);
-      await expect(page.getByRole("button", { name: "Hold to Dictate" })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Dictate" })).toBeVisible();
       await expect(page.locator('.cbar-trigger[title^="Service Tier:"]')).toHaveCount(0);
       await expect(page.locator(".cbar-model")).toHaveCount(1);
 
@@ -391,7 +391,7 @@ for (const { name, query, reason } of [
       const controls = [
         page.getByRole("button", { name: /^Permission Mode:/ }),
         page.getByRole("button", { name: /^Model Settings:/ }),
-        page.getByRole("button", { name: "Hold to Dictate" }),
+        page.getByRole("button", { name: "Dictate" }),
       ];
       for (const control of controls) {
         await expect(control).toBeVisible();
@@ -486,7 +486,7 @@ for (const { name, width, height, touch } of [
 
       const controls = await readBarControls(page);
       const names = controls.map((control) => control.name);
-      for (const expected of ["Attach and Settings", /^Permission Mode:/, /^Model Settings:/, "Plan", "Hold to Dictate", "Send"]) {
+      for (const expected of ["Attach and Settings", /^Permission Mode:/, /^Model Settings:/, "Plan", "Dictate", "Send"]) {
         expect(names.some((controlName) => typeof expected === "string" ? controlName === expected : expected.test(controlName)),
           `${String(expected)} is in the bar: ${names.join(", ")}`).toBe(true);
       }

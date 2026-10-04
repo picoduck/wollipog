@@ -28,3 +28,19 @@ export function finalTranscripts(results: ArrayLike<RecognitionResultLike>, from
   }
   return out;
 }
+
+/** The words the recognizer has heard but not yet settled, from resultIndex onward (#2193). */
+export function interimTranscripts(results: ArrayLike<RecognitionResultLike>, fromIndex: number): string {
+  let out = "";
+  for (let i = fromIndex; i < results.length; i++) {
+    const r = results[i]!;
+    if (!r.isFinal) out = appendTranscript(out, r[0].transcript);
+  }
+  return out;
+}
+
+/** Time spent dictating as mm:ss, the minutes unbounded ("00:07", "12:30", "75:00"). */
+export function formatDictationElapsed(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+}

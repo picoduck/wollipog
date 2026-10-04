@@ -159,9 +159,8 @@ const EXEMPTIONS: Exemption[] = [
       /^#(fff|ffffff)$/i.test(colour)
       && declaration.selectors.length > 0
       // Each entry names the PROPERTY that needs white, not just the selector: a white background
-      // on the voice button is a different claim from white text on it.
+      // on a remove button is a different claim from white text on it.
       && declaration.selectors.every((selector) => (new Map([
-        [".voice-btn.voice-recording > svg", "color"],
         [".attach-thumb > .attach-remove", "color"],
         // These frame an iframe carrying its own theme; tinting them shows through it.
         [".artifact-preview-frame", "background"],

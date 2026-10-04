@@ -46,7 +46,7 @@ for (const width of [320, 360, 393, 430]) {
         bar: bounds(".composer-bar"),
         plus: bounds(".plus-btn"),
         preview: bounds(".composer-idle-preview"),
-        dictation: bounds(".voice-btn"),
+        dictation: bounds('button[aria-label="Dictate"]'),
         action: bounds(".composer-btn.primary"),
         horizontalOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
       };
@@ -148,7 +148,7 @@ test("a focused phone request keeps its review trigger reachable when the compos
 test("active dictation expands the capsule on the initial press", async ({ page }) => {
   await openComposer(page, 393);
   const composer = page.locator(".composer-box");
-  const dictation = page.getByRole("button", { name: "Hold to Dictate" });
+  const dictation = page.getByRole("button", { name: "Dictate" });
   await expect(composer).toHaveClass(/idle-collapsed/);
   await dictation.dispatchEvent("pointerdown", {
     button: 0,
@@ -156,7 +156,8 @@ test("active dictation expands the capsule on the initial press", async ({ page 
     pointerId: 1,
     pointerType: "touch",
   });
-  await expect(dictation).toHaveAttribute("aria-pressed", "true");
+  // Listening renames the mic (#2193).
+  await expect(page.getByRole("button", { name: "Stop Dictating" })).toHaveAttribute("aria-pressed", "true");
   await expect(composer).not.toHaveClass(/idle-collapsed/);
 });
 
@@ -171,7 +172,7 @@ test.describe("a touch capsule (#2174)", () => {
       await expect(composer).toHaveClass(/idle-collapsed/);
       const capsule = await composer.evaluate((card) => {
         const cardBox = card.getBoundingClientRect();
-        const controls = ["Attach and Settings", "Hold to Dictate", "Send"].map((name) => {
+        const controls = ["Attach and Settings", "Dictate", "Send"].map((name) => {
           const control = card.querySelector<HTMLElement>(`button[aria-label="${name}"]`)!;
           const box = control.getBoundingClientRect();
           const centerX = box.left + box.width / 2;

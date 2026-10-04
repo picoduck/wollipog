@@ -1025,29 +1025,6 @@ kbd {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* Hold-to-talk mic in the composer bar (hidden when SpeechRecognition is unsupported): its listening
-   fill is with the composer bar's controls, below. */
-/* The GLYPH carries the colour, not the button. The 3:1 non-text threshold applies to an icon and
-   not to a label, and hanging that exemption on `.voice-btn.voice-recording` made it a promise
-   about a selector: give the button a visible label later and the looser threshold silently covers
-   text too. Scoped to the svg, the exemption is structurally true — a text node cannot inherit it.
-   White on a saturated semantic fill is correct in both themes, so it stays a literal. */
-.voice-btn.voice-recording > svg { color: #fff; }
-/* In forced colors the glyph takes the button's ButtonText: an svg keeps an author colour it sets
-   itself, and white would vanish on a light ButtonFace. */
-@media (forced-colors: active) {
-  .voice-btn.voice-recording > svg { color: inherit; }
-}
-@keyframes voice-pulse {
-  0%,
-  100% {
-    box-shadow: 0 0 0 0 color-mix(in srgb, var(--red) 45%, transparent);
-  }
-  50% {
-    box-shadow: 0 0 0 6px transparent;
-  }
-}
-
 .app.panel-dragging {
   cursor: col-resize;
   user-select: none;
@@ -1966,7 +1943,8 @@ kbd {
   background: transparent;
   box-shadow: inset 0 0 0 1px var(--tone);
 }
-/* The only ambient animation in the app (§2.9), and only for work that is actively progressing. */
+/* One of the two ambient animations in the app (§2.9, with the composer's Listening dot), and only
+   for work that is actively progressing. */
 .status.pulse::before { animation: pulse 1.4s ease-in-out infinite; }
 /* A flag beside a status ("Required", "Built-In") is a fact, not a state, so it carries no dot. */
 .status.no-dot::before { content: none; }
@@ -5901,11 +5879,75 @@ textarea {
   background: var(--bg-elev-2);
   color: var(--text);
 }
-/* Listening: the mic fills, outranking the recipe's pressed and hover fills. */
-.btn.voice-btn.voice-recording:is(*, :hover, :active) {
-  background: var(--red);
-  border-color: var(--red);
-  animation: voice-pulse 1.2s ease-in-out infinite;
+/* Listening (#2193): the mic wears the pressed toggle above, and the bar's left group becomes this
+   status strip: an 8px red dot, "Listening…", the time so far, the words not yet final in
+   --text-faint, and the stop hint beside the mic it refers to. The dot pulses like the running dot
+   (§2.9) and holds still under reduced motion, where "Listening…" carries the state. The unsettled
+   words truncate at the start, like a picker path: the ellipsis lands on the left so the newest
+   stay in view, and the `<bdi>` inside keeps the words left to right. In a strip
+   too narrow for both (a phone), the hint gives way to the words while they arrive and returns
+   when they settle; in one too narrow for the hint at all (below a 390px phone) it stays out. The
+   pressed mic, named Stop Dictating, still says how to stop. */
+.dictation-strip {
+  container: dictation-strip / inline-size;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: var(--composer-ctl);
+  align-items: center;
+  gap: var(--space-2);
+  padding-left: var(--space-2);
+  font: var(--type-body);
+  white-space: nowrap;
+}
+/* Drawn as a border, like the rail's attention dot, so forced colors keep it. */
+.dictation-dot {
+  flex: none;
+  box-sizing: border-box;
+  width: 8px;
+  height: 8px;
+  border: 4px solid var(--red);
+  border-radius: var(--radius-pill);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+.dictation-label {
+  flex: none;
+  color: var(--text);
+  font-weight: var(--weight-medium);
+}
+.dictation-timer {
+  flex: none;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.dictation-interim {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  direction: rtl;
+  color: var(--text-faint);
+  text-align: left;
+  text-overflow: ellipsis;
+}
+/* The system font's width varies by platform: past the thresholds below, the hint truncates rather
+   than run under the mic. */
+.dictation-hint {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  margin-left: auto;
+  text-overflow: ellipsis;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+@container dictation-strip (max-width: 26rem) {
+  .dictation-interim ~ .dictation-hint { display: none; }
+}
+@container dictation-strip (max-width: 15rem) {
+  .dictation-hint { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dictation-dot { animation: none; }
 }
 /* Stopping is busy, not refused (§3.1): the spinner keeps the enabled ink. */
 .stop-turn-btn.is-stopping:disabled {
