@@ -251,7 +251,9 @@ export type TimelineItem =
       turnUsage?: TurnUsage;
     }
   | { kind: "conversation_forked"; id: number; sourceSessionId: string; turn: number; handoff?: { sourceAgent: string; destinationAgent: string; disclosure: string } }
-  | { kind: "provider_account_switched"; id: number; providerAccountId: string; providerAccountLabel: string; automatic?: boolean };
+  | { kind: "provider_account_switched"; id: number; providerAccountId: string; providerAccountLabel: string; automatic?: boolean }
+  /** The provider summarized the conversation to free context (#1224). */
+  | { kind: "context_compacted"; id: number; trigger?: "manual" | "auto"; preTokens?: number };
 
 export interface AutomaticAccountSwitchNoticeState {
   sessionId: string;
@@ -412,6 +414,7 @@ const TURN_NEUTRAL_KINDS = new Set<TimelineItem["kind"]>([
   "checkpoint_restored",
   "conversation_forked",
   "provider_account_switched",
+  "context_compacted",
 ]);
 
 /** Top-level activity that, after a completed turn, means the runner began another without a
@@ -1425,6 +1428,15 @@ export class TimelineBuilder {
       case "conversation_forked":
         this.breakText();
         this.markDirty(this.items.push({ kind: "conversation_forked", id: ev.seq, sourceSessionId: p.sourceSessionId, turn: p.turn, ...(p.handoff ? { handoff: p.handoff } : {}) }) - 1);
+        break;
+      case "context_compacted":
+        this.breakText();
+        this.markDirty(this.items.push({
+          kind: "context_compacted",
+          id: ev.seq,
+          ...(p.trigger ? { trigger: p.trigger } : {}),
+          ...(p.preTokens !== undefined ? { preTokens: p.preTokens } : {}),
+        }) - 1);
         break;
       case "provider_account_switched":
         this.breakText();

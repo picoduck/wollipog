@@ -31,7 +31,7 @@ import {
 import { CopyButton } from "./common.js";
 import { accountLabelText } from "../personal-identifiers.js";
 import { GovernanceDecisionFacts } from "./GovernanceDecision.js";
-import { AccountIcon, AgentLogIcon, BotIcon, ChevronRightIcon, CopyIcon, EditIcon, EditInForkIcon, FileEditIcon, HandOffIcon, NewFileIcon, PlanIcon, PlanInProgressIcon, PlanPendingIcon, RewindFilesIcon, StopTurnIcon, SuccessIcon, ThoughtIcon, ThreadForkIcon } from "./Icons.js";
+import { AccountIcon, AgentLogIcon, BotIcon, ChevronRightIcon, CompactedIcon, CopyIcon, EditIcon, EditInForkIcon, FileEditIcon, HandOffIcon, NewFileIcon, PlanIcon, PlanInProgressIcon, PlanPendingIcon, RewindFilesIcon, StopTurnIcon, SuccessIcon, ThoughtIcon, ThreadForkIcon } from "./Icons.js";
 import { diffFileIsPlain, diffMaxLineNumber, hunkLabel, parseUnifiedDiff, type DiffFile } from "../unified-diff.js";
 import { markdownPlainText } from "./markdown-plain-text.js";
 import { TranscriptActionMenu, transcriptActionAvailable, type TranscriptAction } from "./TranscriptActions.js";
@@ -260,6 +260,7 @@ const HISTORY_DIVIDER_KINDS = new Set<TimelineItem["kind"]>([
   "checkpoint_restored",
   "conversation_forked",
   "provider_account_switched",
+  "context_compacted",
 ]);
 
 /** §2.4 rhythm: `--space-3` between rows of one turn, `--space-8` before the first row of the next. */
@@ -532,6 +533,7 @@ export const estimateTimelineRow = (row: TimelineRenderRow, pendingQuestionReque
     case "tool_call": return 28;
     case "conversation_forked": return row.item.handoff ? 76 : 52;
     case "provider_account_switched": return 52;
+    case "context_compacted": return 52;
     case "turn_interrupted": return 24;
     default: return 52;
   }
@@ -2232,6 +2234,16 @@ const TimelineRow = memo(function TimelineRow({
       return <ForkDivider item={item} />;
     case "provider_account_switched":
       return <AccountSwitchDivider item={item} />;
+    case "context_compacted":
+      return (
+        <HistoryDivider
+          icon={<CompactedIcon size={14} />}
+          label={item.trigger === "auto" ? "Conversation Compacted Automatically" : "Conversation Compacted"}
+          title={item.preTokens !== undefined
+            ? `Earlier messages were summarized to free context (${item.preTokens.toLocaleString()} tokens before).`
+            : "Earlier messages were summarized to free context."}
+        />
+      );
     case "user_message":
       return (
         <div className="tl-row user">

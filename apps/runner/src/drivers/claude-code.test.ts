@@ -44,6 +44,7 @@ import {
   warnLegacyClaudeLifetimeEnvironment,
 } from "./claude-code.js";
 import type { DriverCallbacks, DriverOptions } from "./driver.js";
+import type { ClaudeInitCatalog } from "../discovery/claude-slash-catalog.js";
 
 /**
  * Unit tests for the claude stream-json -> SessionEventPayload mapping.
@@ -61,6 +62,7 @@ interface Harness {
   authenticationFailures: number;
   subscriptionUsage: unknown[];
   contextUsage: { contextTokensUsed?: number; contextWindow: number }[];
+  initCatalogs: ClaudeInitCatalog[];
   /** Invoke the private mapper and return its StopReason | null. */
   feed: (msg: unknown) => unknown;
 }
@@ -73,7 +75,9 @@ function makeHarness(overrides: Partial<DriverOptions> = {}): Harness {
   let authenticationFailures = 0;
   const subscriptionUsage: unknown[] = [];
   const contextUsage: { contextTokensUsed?: number; contextWindow: number }[] = [];
+  const initCatalogs: ClaudeInitCatalog[] = [];
   const cb: DriverCallbacks = {
+    onClaudeInitCatalog: (catalog) => initCatalogs.push(catalog),
     onEvent: (payload) => events.push(payload),
     onStderr: (text) => stderr.push(text),
     onModelResolved: (model) => resolvedModels.push(model),
@@ -105,6 +109,7 @@ function makeHarness(overrides: Partial<DriverOptions> = {}): Harness {
     get authenticationFailures() { return authenticationFailures; },
     subscriptionUsage,
     contextUsage,
+    initCatalogs,
     feed,
   };
 }
@@ -3445,6 +3450,38 @@ test("system/init reports the provider-resolved model without emitting an event"
   assert.equal(h.events.length, 0);
   assert.equal(h.stderr.length, 0);
   assert.deepEqual(h.resolvedModels, ["claude-opus-5[1m]"]);
+});
+
+test("system/init reports Claude Code's command catalog on every init, and only for the top level (#1224)", () => {
+  const h = makeHarness();
+  const init = JSON.parse(readFileSync(new URL("./fixtures/claude-init-catalog.json", import.meta.url), "utf8")) as
+    Record<string, unknown>;
+  assert.equal(h.feed(init), null);
+  h.feed(init);
+  assert.equal(h.initCatalogs.length, 2, "each init reports, so a resume or one-shot turn refreshes the catalog");
+  assert.equal(h.initCatalogs[0]!.commands.includes("compact"), true);
+  assert.deepEqual(h.initCatalogs[0]!.terminalCommands, ["doctor", "color"]);
+  assert.equal(h.events.length, 0);
+
+  h.feed({ ...init, parent_tool_use_id: "toolu_subagent" });
+  h.feed({ type: "system", subtype: "init", session_id: "abc" });
+  assert.equal(h.initCatalogs.length, 2, "a subagent's init and an init without the list change nothing");
+});
+
+test("system/compact_boundary records the compaction in the transcript (#1224)", () => {
+  const h = makeHarness();
+  assert.equal(h.feed({
+    type: "system",
+    subtype: "compact_boundary",
+    session_id: "abc",
+    compact_metadata: { trigger: "manual", pre_tokens: 48_213 },
+  }), null);
+  h.feed({ type: "system", subtype: "compact_boundary", compact_metadata: { trigger: "sideways", pre_tokens: -1 } });
+  h.feed({ type: "system", subtype: "compact_boundary", parent_tool_use_id: "toolu_subagent" });
+  assert.deepEqual(h.events, [
+    { kind: "context_compacted", trigger: "manual", preTokens: 48_213 },
+    { kind: "context_compacted" },
+  ]);
 });
 
 test("system/init exposes and reports a fresh resumable conversation id exactly once", () => {

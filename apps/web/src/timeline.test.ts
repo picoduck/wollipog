@@ -1242,6 +1242,16 @@ test("conversation fork points and provenance render as standalone timeline item
   assert.ok(groupTimeline(items).every((group) => group.kind === "item"));
 });
 
+test("a provider compaction renders as a standalone history boundary (#1224)", () => {
+  const items = deriveTimeline([
+    ev({ kind: "agent_message", text: "before", final: true }),
+    ev({ kind: "context_compacted", trigger: "manual", preTokens: 48213 }),
+    ev({ kind: "agent_message", text: "after", final: true }),
+  ]);
+  assert.deepEqual(items.map((item) => item.kind), ["agent_message", "context_compacted", "agent_message"]);
+  assert.deepEqual(items[1], { kind: "context_compacted", id: items[1]!.id, trigger: "manual", preTokens: 48213 });
+});
+
 test("provider account switches render as standalone timeline boundaries", () => {
   const items = deriveTimeline([
     ev({ kind: "agent_message", text: "before", final: true }),

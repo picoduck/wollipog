@@ -1,4 +1,4 @@
-import type { AgentSlashCommand } from "@wollipog/protocol";
+import type { AgentSlashCommand, UnsupportedSlashCommand } from "@wollipog/protocol";
 
 export type ComposerCommandSource = "app" | "provider";
 
@@ -11,8 +11,9 @@ export type ComposerCommandExecutionMode = "app" | "structured" | "passthrough";
  */
 export type ComposerCommandAttachmentPolicy = "preserve" | "send" | "forbid";
 
-/** The picker's groups name a command's source: Wollipog itself, the agent, or the agent's skills. */
-export type ComposerCommandGroupId = "app" | "provider" | "skill";
+/** The picker's groups name a command's source: Wollipog itself, the agent, the agent's skills, or
+ * the prompts its MCP servers expose (#1224). */
+export type ComposerCommandGroupId = "app" | "provider" | "skill" | "mcp";
 
 export interface ComposerCommandContext {
   planSupported: boolean;
@@ -60,6 +61,9 @@ export interface ComposerCommand {
   attachmentPolicy: ComposerCommandAttachmentPolicy;
   groupId: ComposerCommandGroupId;
   groupLabel: string;
+  /** A command the agent knows but Wollipog won't send (#1224): never offered by a menu, but a
+   * message that names it in full resolves to it, so its reason is shown instead of sending it. */
+  hidden?: boolean;
 }
 
 /** The note for a command that keeps the attached images for the next message, naming the command by
@@ -120,6 +124,7 @@ export const COMPOSER_COMMAND_GROUPS: readonly ComposerCommandGroupMetadata[] = 
   { id: "app", label: "Wollipog", order: 0 },
   { id: "provider", label: AGENT_COMMAND_GROUP_FALLBACK_LABEL, order: 1 },
   { id: "skill", label: "Skills", order: 1 },
+  { id: "mcp", label: "MCP Prompts", order: 1 },
 ] as const;
 
 const GROUP_BY_ID = new Map(COMPOSER_COMMAND_GROUPS.map((group) => [group.id, group]));
@@ -129,6 +134,7 @@ const PROVIDER_SOURCE_LABELS: Record<NonNullable<ProviderComposerCommand["provid
   project: "Project",
   plugin: "Plugin",
   skill: "Skill",
+  mcp: "MCP",
 };
 
 const PROVIDER_INVOCATION_PRECEDENCE: Record<NonNullable<ProviderComposerCommand["providerSource"]>, number> = {
@@ -136,6 +142,7 @@ const PROVIDER_INVOCATION_PRECEDENCE: Record<NonNullable<ProviderComposerCommand
   project: 1,
   skill: 2,
   plugin: 3,
+  mcp: 4,
   builtin: 4,
 };
 
@@ -308,6 +315,8 @@ export function mapProviderComposerCommands(
 export function buildComposerCommandRegistry(input: {
   context: ComposerCommandContext;
   providerCommands?: readonly ProviderComposerCommand[];
+  /** Commands the session reports it can't run here, each with its reason (#1224). */
+  unsupportedCommands?: readonly UnsupportedSlashCommand[];
 }): ComposerCommand[] {
   const apps = appCommands(input.context);
   const appNames = new Set(apps.map((command) => command.name));
@@ -329,6 +338,7 @@ export function buildComposerCommandRegistry(input: {
   }
   const providerGroup = GROUP_BY_ID.get("provider")!;
   const skillGroup = GROUP_BY_ID.get("skill")!;
+  const mcpGroup = GROUP_BY_ID.get("mcp")!;
   const agentGroupLabel = optionalText(input.context.agentLabel) ?? providerGroup.label;
   const providerCommands = providers.map(({ input: provider, id, name, comparisonName }): ComposerCommand => {
     const duplicateProviderName = (providersByName.get(comparisonName) ?? 0) > 1;
@@ -368,19 +378,52 @@ export function buildComposerCommandRegistry(input: {
       attachmentPolicy: provider.attachmentPolicy ?? "send",
       ...(provider.providerSource === "skill"
         ? { groupId: skillGroup.id, groupLabel: skillGroup.label }
-        : { groupId: providerGroup.id, groupLabel: agentGroupLabel }),
+        : provider.providerSource === "mcp"
+          ? { groupId: mcpGroup.id, groupLabel: mcpGroup.label }
+          : { groupId: providerGroup.id, groupLabel: agentGroupLabel }),
     };
   });
 
-  return [...apps, ...providerCommands];
+  // An unsupported command resolves only by its exact bare name, and never shadows a command the
+  // session can run.
+  const taken = new Set([...apps, ...providerCommands].flatMap((command) =>
+    [command.invocationAlias.toLowerCase(), command.name.toLowerCase()]));
+  const unsupportedCommands = (input.unsupportedCommands ?? []).flatMap((unsupported): ComposerCommand[] => {
+    const parsed = advertisedName(unsupported.name);
+    const reason = optionalText(unsupported.reason);
+    if (!parsed || !reason || taken.has(parsed.comparisonName)) return [];
+    taken.add(parsed.comparisonName);
+    return [{
+      id: `unsupported:${parsed.comparisonName}`,
+      name: parsed.name,
+      label: `/${parsed.comparisonName}`,
+      invocationAlias: parsed.comparisonName,
+      source: "provider",
+      sourceLabel: "Harness",
+      executionMode: "passthrough",
+      available: false,
+      disabledReason: reason,
+      attachmentPolicy: "preserve",
+      groupId: providerGroup.id,
+      groupLabel: agentGroupLabel,
+      hidden: true,
+    }];
+  });
+
+  return [...apps, ...providerCommands, ...unsupportedCommands];
 }
 
 export function resolveComposerCommandInvocation(
   text: string,
   commands: readonly ComposerCommand[],
+  options: {
+    /** Whether `$name` names a skill: Codex's spelling. Claude Code invokes its skills as `/name`,
+     * so a `$` there stays text (#1224). */
+    skillSigil?: boolean;
+  } = {},
 ): ComposerCommandResolution {
   const trimmed = text.trim();
-  const skillReference = /^\$([^\s]+)(?:\s+([\s\S]*))?$/.exec(trimmed);
+  const skillReference = options.skillSigil === false ? null : /^\$([^\s]+)(?:\s+([\s\S]*))?$/.exec(trimmed);
   if (skillReference) {
     // `$name` is Codex's skill spelling: it names only a skill, and ordinary `$` text stays text.
     const skill = commands.find((candidate) => candidate.providerSource === "skill" &&
@@ -393,7 +436,7 @@ export function resolveComposerCommandInvocation(
   if (!match) return { kind: "plaintext", text };
   const alias = match[1]!.toLowerCase();
   const exact = commands.find((candidate) => candidate.invocationAlias.toLowerCase() === alias);
-  const qualified = /^(builtin|user|project|plugin|skill|provider):(.+)$/.exec(alias);
+  const qualified = /^(builtin|user|project|plugin|skill|mcp|provider):(.+)$/.exec(alias);
   const qualifiedProvider = !exact && qualified
     ? commands
         .filter((candidate) => candidate.source === "provider" &&
@@ -468,8 +511,9 @@ export function composerCommandsForTrigger(
   commands: readonly ComposerCommand[],
   trigger: ComposerCommandTrigger,
 ): ComposerCommand[] {
-  if (trigger.sigil !== "$") return [...commands];
-  return commands
+  const offered = commands.filter((command) => !command.hidden);
+  if (trigger.sigil !== "$") return offered;
+  return offered
     .filter((command) => command.providerSource === "skill")
     .map((command) => ({ ...command, label: `$${command.name}` }));
 }

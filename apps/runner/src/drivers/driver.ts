@@ -190,6 +190,10 @@ export interface DriverCallbacks {
   onAcpSessionState?: (state: { capabilities: AgentCapabilities; config: SessionConfig }) => void;
   /** The driver's complete invocable session command catalog changed. */
   onSessionCommands?: (commands: AgentSlashCommand[]) => void;
+  /** Claude Code reported its session command catalog in a `system/init` message (#1224). The
+   * session manager merges it with the disk scan; it arrives on every launch, resume and fork, and
+   * again on each one-shot turn. */
+  onClaudeInitCatalog?: (catalog: import("../discovery/claude-slash-catalog.js").ClaudeInitCatalog) => void;
   /** Authoritative context gauge: the effective context window the provider is serving plus its
    * current occupancy when known (stable ACP usage; Claude's terminal `result.modelUsage` and last
    * request size), with optional cumulative USD cost. Omitted occupancy leaves the prior gauge. */

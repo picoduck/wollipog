@@ -13,6 +13,7 @@ import {
   includeClaudeUserCommandsForTarget,
   mergeClaudeSlashCommands,
   parseClaudeCommandMetadata,
+  parseClaudeSkillMetadata,
   prepareClaudeSlashCommandCatalog,
   refreshClaudeSlashCommandCatalog,
   wslAbsolutePathToUnc,
@@ -165,6 +166,7 @@ test("native discovery uses repoPath only when worktreePath is nullish", async (
   );
   assert.deepEqual(result, {
     ok: true,
+    skills: [],
     commands: [{ name: "project", source: "project", description: "Project command" }],
   });
 });
@@ -180,6 +182,7 @@ test("remote execution scope discovers project commands without reading the host
   );
   assert.deepEqual(result, {
     ok: true,
+    skills: [],
     commands: [{ name: "project", source: "project", description: "Mounted project command" }],
   });
 });
@@ -320,7 +323,7 @@ test("native traversal is bounded by directory count", async () => {
     { context: { kind: "native" }, repoPath: repo },
     { nativeHome: () => home },
   );
-  assert.deepEqual(result, { ok: true, commands: [] });
+  assert.deepEqual(result, { ok: true, commands: [], skills: [] });
 });
 
 test("native per-directory truncation deterministically keeps ordinal-lowest entries", async () => {
@@ -368,12 +371,15 @@ test("WSL discovery uses only HOME argv plus the UNC provider and preserves spec
   );
   assert.deepEqual(result, {
     ok: true,
+    skills: [],
     commands: [{ name: "review", source: "user", description: "Personal description" }],
   });
   assert.deepEqual(calls, [{ file: "wsl.exe", args: ["-d", distro, "--exec", "printenv", "HOME"] }]);
   assert.deepEqual(mappings, [
     [distro, "/home/me/.claude/commands"],
+    [distro, "/home/me/.claude/skills"],
     [distro, `${project}/.claude/commands`],
+    [distro, `${project}/.claude/skills`],
   ]);
 });
 
@@ -407,6 +413,7 @@ test("WSL nested basename collisions are deterministic and personal commands ove
   );
   assert.deepEqual(result, {
     ok: true,
+    skills: [],
     commands: [{ name: "deploy", source: "user", description: "A personal" }],
   });
 });
@@ -470,6 +477,7 @@ test("native discovery follows stable linked personal and project roots through 
   );
   assert.deepEqual(result, {
     ok: true,
+    skills: [],
     commands: [
       { name: "personal", source: "user", description: "Personal only" },
       { name: "project", source: "project", description: "Project only" },
@@ -807,6 +815,7 @@ test("permission-denied descendant directories are skipped while a denied root s
   );
   assert.deepEqual(skipped, {
     ok: true,
+    skills: [],
     commands: [{ name: "kept", source: "project", description: "Readable command" }],
   });
   const failed = await discoverClaudeSlashCommands(
@@ -833,6 +842,7 @@ test("transient native file disappearance is skipped without discarding readable
   );
   assert.deepEqual(result, {
     ok: true,
+    skills: [],
     commands: [{ name: "kept", source: "project", description: "Readable command" }],
   });
 });
@@ -843,7 +853,7 @@ test("missing command directories are an explicit successful empty discovery", a
   assert.deepEqual(await discoverClaudeSlashCommands(
     { context: { kind: "native" }, repoPath: repo },
     { nativeHome: () => home },
-  ), { ok: true, commands: [] });
+  ), { ok: true, commands: [], skills: [] });
 });
 
 test("refresh clears on explicit empty and retains the exact prior catalog on discovery failure", async () => {
@@ -856,7 +866,7 @@ test("refresh clears on explicit empty and retains the exact prior catalog on di
     { context: { kind: "native" }, repoPath: repo },
     { nativeHome: () => home },
   );
-  assert.deepEqual(cleared, { outcome: "cleared", commands: [] });
+  assert.deepEqual(cleared, { outcome: "cleared", commands: [], skills: [] });
 
   const retained = await refreshClaudeSlashCommandCatalog(
     previous,
@@ -889,4 +899,123 @@ test("a non-transient UNC-backed WSL file read failure is atomic", async () => {
   );
   assert.equal(result.ok, false);
   if (!result.ok) assert.match(result.error, /I\/O error/);
+});
+
+function skill(root: string, name: string, contents: string): void {
+  const path = join(root, name, "SKILL.md");
+  mkdirSync(join(path, ".."), { recursive: true });
+  writeFileSync(path, contents, "utf8");
+}
+
+test("skill metadata reads description, argument-hint and user-invocable, never the body", () => {
+  assert.deepEqual(parseClaudeSkillMetadata([
+    "---",
+    "name: deploy-check",
+    "description: Check a deploy before it ships.",
+    "argument-hint: \"[environment]\"",
+    "---",
+    "Secret instructions for the model.",
+  ].join("\n")), { description: "Check a deploy before it ships.", argumentHint: "[environment]", userInvocable: true });
+  assert.deepEqual(parseClaudeSkillMetadata("---\nuser-invocable: false\n---\nBody"), { userInvocable: false });
+  assert.deepEqual(parseClaudeSkillMetadata("---\nuser-invocable: FALSE\n---\n"), { userInvocable: false });
+  assert.deepEqual(parseClaudeSkillMetadata("No frontmatter, so no description."), { userInvocable: true });
+});
+
+test("native discovery reads personal and project skills, one SKILL.md per directory", async () => {
+  const home = tempRoot("skills-home");
+  const repo = tempRoot("skills-repo");
+  skill(join(home, ".claude", "skills"), "notes", "---\ndescription: Personal notes skill.\n---\n");
+  skill(join(repo, ".claude", "skills"), "deploy-check", "---\ndescription: Project deploy check.\nargument-hint: <env>\n---\n");
+  skill(join(repo, ".claude", "skills"), "internal", "---\nuser-invocable: false\n---\n");
+  // Not skills: a root-level file, a nested SKILL.md, and a directory with an unusable name.
+  writeFileSync(join(repo, ".claude", "skills", "README.md"), "Not a skill", "utf8");
+  skill(join(repo, ".claude", "skills", "deploy-check", "nested"), "deeper", "---\ndescription: Too deep.\n---\n");
+  skill(join(repo, ".claude", "skills"), "bad name", "---\ndescription: Bad.\n---\n");
+  const result = await discoverClaudeSlashCommands(
+    { context: { kind: "native" }, repoPath: repo },
+    { nativeHome: () => home },
+  );
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.deepEqual(result.commands, []);
+  const byName = new Map(result.skills.map((entry) => [entry.name, entry]));
+  assert.equal(result.skills.length, 3);
+  assert.deepEqual(byName.get("notes"), { name: "notes", origin: "user", description: "Personal notes skill.", userInvocable: true });
+  assert.deepEqual(byName.get("deploy-check"), {
+    name: "deploy-check", origin: "project", description: "Project deploy check.", argumentHint: "<env>", userInvocable: true,
+  });
+  assert.deepEqual(byName.get("internal"), { name: "internal", origin: "project", userInvocable: false });
+});
+
+test("plugin roots from the init list add namespaced commands and skills, only where the user home may be read", async () => {
+  const home = tempRoot("plugin-home");
+  const repo = tempRoot("plugin-repo");
+  const plugin = tempRoot("plugin-root");
+  mkdirSync(join(plugin, "commands"), { recursive: true });
+  writeFileSync(join(plugin, "commands", "code-review.md"), "---\ndescription: Review with agents.\n---\n", "utf8");
+  skill(join(plugin, "skills"), "writing-plans", "---\ndescription: Write a plan.\n---\n");
+  const pluginRoots = [{ name: "superpowers", path: plugin }, { name: "missing", path: join(plugin, "absent") }];
+
+  const host = await discoverClaudeSlashCommands(
+    { context: { kind: "native" }, repoPath: repo, pluginRoots },
+    { nativeHome: () => home },
+  );
+  assert.equal(host.ok, true);
+  if (!host.ok) return;
+  assert.deepEqual(host.commands, [{ name: "superpowers:code-review", source: "plugin", description: "Review with agents." }]);
+  assert.deepEqual(host.skills, [
+    { name: "superpowers:writing-plans", origin: "plugin", description: "Write a plan.", userInvocable: true },
+  ]);
+
+  const container = await discoverClaudeSlashCommands(
+    { context: { kind: "native" }, repoPath: repo, includeUserCommands: false, pluginRoots },
+    { nativeHome: () => home },
+  );
+  assert.deepEqual(container, { ok: true, commands: [], skills: [] },
+    "a container or cloud target never reads plugin roots, which live in the host user's home");
+});
+
+test("launch preparation merges the last init list for the same provenance and drops it when provenance changes", async () => {
+  const home = tempRoot("prepare-home");
+  const repo = tempRoot("prepare-repo");
+  command(repo, "release.md", "Cut a release.");
+  const init = { commands: ["release", "compact", "doctor"], skills: [], terminalCommands: ["doctor"], plugins: [] };
+  const meta = sessionMeta(repo);
+  meta.sessionSlashCommandProvenance = claudeSlashCommandProvenance(meta);
+  meta.claudeSlashCatalogInputs = { commands: [], skills: [], init };
+
+  const prepared = await prepareClaudeSlashCommandCatalog(meta, { nativeHome: () => home });
+  assert.equal(prepared.outcome, "updated");
+  assert.deepEqual(meta.sessionSlashCommands?.map((entry) => `${entry.source}:${entry.name}`), [
+    "builtin:compact",
+    "project:release",
+  ]);
+  assert.deepEqual(meta.sessionUnsupportedSlashCommands?.map((entry) => entry.name), ["doctor"]);
+  assert.deepEqual(meta.claudeSlashCatalogInputs?.init, init);
+
+  const moved = sessionMeta(repo, {
+    worktreePath: tempRoot("prepare-worktree"),
+    sessionSlashCommandProvenance: meta.sessionSlashCommandProvenance,
+    claudeSlashCatalogInputs: meta.claudeSlashCatalogInputs,
+    sessionSlashCommands: meta.sessionSlashCommands,
+  });
+  await prepareClaudeSlashCommandCatalog(moved, { nativeHome: () => home });
+  assert.equal(moved.claudeSlashCatalogInputs?.init, undefined, "a different launch root never inherits an init list");
+  assert.ok(!moved.sessionSlashCommands?.some((entry) => entry.source === "builtin"));
+  assert.equal(moved.sessionUnsupportedSlashCommands, undefined);
+});
+
+test("a cloud launch publishes only its own init list, never the host disk", async () => {
+  const repo = tempRoot("cloud-repo");
+  command(repo, "release.md", "Cut a release.");
+  const meta = sessionMeta(repo, { executionTarget: { adapter: "cloud", id: "cloud-1" } as SessionMeta["executionTarget"] });
+  await prepareClaudeSlashCommandCatalog(meta);
+  assert.deepEqual(meta.sessionSlashCommands, []);
+  meta.claudeSlashCatalogInputs = {
+    commands: [],
+    skills: [],
+    init: { commands: ["compact"], skills: [], terminalCommands: [], plugins: [] },
+  };
+  await prepareClaudeSlashCommandCatalog(meta);
+  assert.deepEqual(meta.sessionSlashCommands?.map((entry) => entry.name), ["compact"]);
 });

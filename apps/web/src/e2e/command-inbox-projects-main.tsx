@@ -2463,6 +2463,8 @@ declare global {
       ): void;
       emitUserMessage(id: string, text: string, turnId: string): void;
       emitAgentMessage(id: string, text: string): void;
+      /** Append one event as the runner would, such as a provider compaction (#1224). */
+      emitSessionEvent(id: string, payload: SessionEvent["payload"]): void;
       emitActiveSubagent(id: string, toolCallId: string): void;
       sessionEventPageRequests(): Array<{ sessionId: string; after: number; direction?: "backward" }>;
       emitCanonicalSteeredMessage(id: string, text: string, turnId: string, submissionId: string): void;
@@ -2640,6 +2642,18 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
         messageId: `streamed-preview-message-${seq}`,
       },
     };
+    sessionEvents.set(id, [...(sessionEvents.get(id) ?? []), event]);
+    socket?.push({ type: "session_event", event: structuredClone(event) });
+    pushSession(value);
+  },
+  emitSessionEvent(id, payload) {
+    const value = model.sessions.find((candidate) => candidate.id === id);
+    if (!value) throw new Error(`unknown session: ${id}`);
+    const seq = value.messageCount + 1;
+    value.messageCount = seq;
+    value.updatedAt += 1;
+    value.lastEventAt = value.updatedAt;
+    const event: SessionEvent = { id: seq, sessionId: id, seq, ts: value.updatedAt, payload: structuredClone(payload) };
     sessionEvents.set(id, [...(sessionEvents.get(id) ?? []), event]);
     socket?.push({ type: "session_event", event: structuredClone(event) });
     pushSession(value);

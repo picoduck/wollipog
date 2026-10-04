@@ -1,0 +1,37 @@
+{
+  "type": "system",
+  "subtype": "init",
+  "session_id": "00000000-0000-4000-8000-000000000001",
+  "cwd": "/work/project",
+  "model": "claude-opus-4-7",
+  "permissionMode": "default",
+  "tools": ["Bash", "Edit", "Read", "Skill"],
+  "mcp_servers": [{ "name": "docs", "status": "connected" }],
+  "slash_commands": [
+    "deploy-check",
+    "brainstorming",
+    "superpowers:writing-plans",
+    "code-review:code-review",
+    "mcp__docs__summarize",
+    "compact",
+    "context",
+    "usage",
+    "init",
+    "model",
+    "review",
+    "security-review",
+    "doctor",
+    "color",
+    "exit",
+    "__remote-workflow",
+    "release"
+  ],
+  "skills": ["deploy-check", "brainstorming", "superpowers:writing-plans"],
+  "terminal_slash_commands": ["doctor", "color"],
+  "plugins": [
+    { "name": "superpowers", "path": "/home/me/.claude/plugins/cache/official/superpowers/6.4.1", "source": "superpowers@official" },
+    { "name": "code-review", "path": "/home/me/.claude/plugins/cache/official/code-review/1.0.0", "source": "code-review@official" }
+  ],
+  "output_style": "default",
+  "claude_code_version": "2.1.287"
+}

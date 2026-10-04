@@ -39,6 +39,7 @@ test("the registry exposes stable typed app commands and explicit gate reasons",
     { id: "app", label: "Wollipog", order: 0 },
     { id: "provider", label: "Agent", order: 1 },
     { id: "skill", label: "Skills", order: 1 },
+    { id: "mcp", label: "MCP Prompts", order: 1 },
   ]);
   assert.equal(command(enabled, "app:rename-session").description, "Rename this session from its conversation.");
   assert.equal(command(enabled, "app:rename-session").label, "/rename-session");
@@ -699,4 +700,67 @@ test("a $ trigger opens only when skills exist, offers only skills, and inserts 
   assert.equal(composerCommandsForTrigger(commands, slash!).length, commands.length);
   const review = offered.find((candidate) => candidate.name === "review")!;
   assert.deepEqual(replaceComposerCommandTrigger("$re  rest", trigger!, review), { text: "$review rest", caret: 8 });
+});
+
+/** A Claude Code session with the init-time catalog (#1224). */
+function claudeInitRegistry() {
+  return buildComposerCommandRegistry({
+    context: { planSupported: true, canStopTurn: false, agentLabel: "Claude Code" },
+    providerCommands: mapProviderComposerCommands([
+      { name: "compact", source: "builtin", description: "Summarize the conversation to free up context." },
+      { name: "brainstorming", source: "skill", description: "Explore an idea." },
+      { name: "mcp__docs__summarize", source: "mcp" },
+      { name: "release", source: "project" },
+    ]),
+    unsupportedCommands: [
+      { name: "doctor", reason: "Claude Code's /doctor needs its own terminal, so Wollipog doesn't send it." },
+      { name: "compact", reason: "A reason that must never shadow a runnable command." },
+      { name: "plan", reason: "Nor an app command." },
+      { name: "bad name", reason: "Invalid names are dropped." },
+    ],
+  });
+}
+
+test("an unsupported command never appears in a menu but resolves typed in full to its reason (#1224)", () => {
+  const commands = claudeInitRegistry();
+  const doctor = commands.find((command) => command.name === "doctor");
+  assert.ok(doctor);
+  assert.equal(doctor.hidden, true);
+  assert.equal(doctor.available, false);
+  assert.equal(doctor.disabledReason, "Claude Code's /doctor needs its own terminal, so Wollipog doesn't send it.");
+  assert.equal(commands.filter((command) => command.hidden).length, 1,
+    "an unsupported name never shadows a runnable provider or app command");
+
+  const slash = findComposerCommandTrigger("/do", 3)!;
+  assert.ok(!composerCommandsForTrigger(commands, slash).some((command) => command.hidden));
+  assert.ok(!rankComposerCommands(composerCommandsForTrigger(commands, slash), "doctor")
+    .some((match) => match.command.name === "doctor"));
+
+  const typed = resolveComposerCommandInvocation("/doctor", commands);
+  assert.equal(typed.kind, "command");
+  if (typed.kind === "command") {
+    assert.equal(typed.command.available, false, "the composer shows the reason instead of sending it");
+    assert.match(typed.command.disabledReason ?? "", /needs its own terminal/);
+  }
+});
+
+test("MCP prompts carry their own source label and qualified alias (#1224)", () => {
+  const commands = claudeInitRegistry();
+  const mcp = commands.find((command) => command.name === "mcp__docs__summarize");
+  assert.equal(mcp?.sourceLabel, "MCP");
+  assert.equal(mcp?.groupLabel, "MCP Prompts", "the picker names an MCP prompt's source by its group");
+  const qualified = resolveComposerCommandInvocation("/mcp:mcp__docs__summarize now", commands);
+  assert.equal(qualified.kind === "command" && qualified.command.id, mcp?.id);
+});
+
+test("without the skill sigil a $ reference stays text, and a skill still runs as /name (#1224)", () => {
+  const commands = claudeInitRegistry();
+  assert.deepEqual(resolveComposerCommandInvocation("$brainstorming pricing", commands, { skillSigil: false }), {
+    kind: "plaintext",
+    text: "$brainstorming pricing",
+  });
+  const slashed = resolveComposerCommandInvocation("/brainstorming pricing", commands, { skillSigil: false });
+  assert.equal(slashed.kind === "command" && slashed.command.providerSource, "skill");
+  const codex = resolveComposerCommandInvocation("$brainstorming pricing", commands);
+  assert.equal(codex.kind, "command", "Codex keeps its $name spelling by default");
 });

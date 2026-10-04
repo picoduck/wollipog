@@ -516,32 +516,38 @@ test("the projection-count encoding fences every prior one-policy wire generatio
     const intermediate = store.snapshots(129)[0]!;
     const recent = store.snapshots(147)[0]!;
     const previous = store.snapshots(170)[0]!;
+    const lastFiveVariant = store.snapshots(203)[0]!;
     const current = store.snapshots(CURRENT_PEER)[0]!;
 
     // Before v130 the one-policy encoding at local epoch zero was 1 for v86 and 0 for every
-    // v87+ peer. Before v148 the three-variant encoding used offset 2, and before v171 the
-    // four-variant encoding used offset 5. The advanced offset makes
-    // every current projection larger than either predecessor at the same local epoch, so every
-    // control plane resyncs when the runner upgrades even if its protocol changes at the same time.
+    // v87+ peer. Before v148 the three-variant encoding used offset 2, before v171 the
+    // four-variant encoding used offset 5, and before v204 the five-variant encoding used offset 9.
+    // The advanced offset makes every current projection larger than each predecessor at the same
+    // local epoch, so every control plane resyncs when the runner upgrades even if its protocol
+    // changes at the same time.
     assert.notEqual(legacy.historyEpoch, 1);
     assert.notEqual(intermediate.historyEpoch, 0);
-    assert.equal(legacy.historyEpoch, 13);
-    assert.equal(intermediate.historyEpoch, 12);
-    assert.equal(recent.historyEpoch, 11);
-    assert.equal(previous.historyEpoch, 10);
+    assert.equal(legacy.historyEpoch, 19);
+    assert.equal(intermediate.historyEpoch, 18);
+    assert.equal(recent.historyEpoch, 17);
+    assert.equal(previous.historyEpoch, 16);
+    assert.equal(lastFiveVariant.historyEpoch, 15);
 
-    assert.equal(current.historyEpoch, 9);
+    assert.equal(current.historyEpoch, 14);
     for (let localEpoch = 0; localEpoch < 8; localEpoch++) {
       const retiredFormatMaximum = localEpoch * 2 + 1;
       const precedingFormatMaximum = 2 + localEpoch * 3 + 2;
       const previousFormatMaximum = 5 + localEpoch * 4 + 3;
-      for (const peer of [86, 129, 147, 170, CURRENT_PEER]) {
+      const fiveVariantFormatMaximum = 9 + localEpoch * 5 + 4;
+      for (const peer of [86, 129, 147, 170, 203, CURRENT_PEER]) {
         assert.ok(store.projectedHistoryEpoch(localEpoch, peer) > retiredFormatMaximum,
           `v${peer} local epoch ${localEpoch} sorts above the retired encoding`);
         assert.ok(store.projectedHistoryEpoch(localEpoch, peer) > precedingFormatMaximum,
           `v${peer} local epoch ${localEpoch} sorts above the preceding three-variant encoding`);
         assert.ok(store.projectedHistoryEpoch(localEpoch, peer) > previousFormatMaximum,
           `v${peer} local epoch ${localEpoch} sorts above the preceding four-variant encoding`);
+        assert.ok(store.projectedHistoryEpoch(localEpoch, peer) > fiveVariantFormatMaximum,
+          `v${peer} local epoch ${localEpoch} sorts above the preceding five-variant encoding`);
       }
     }
 

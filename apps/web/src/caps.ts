@@ -18,6 +18,9 @@ function nativeSessionOverlay(capabilities: SessionCapabilities | undefined): Se
   const overlay = {
     ...(Object.hasOwn(capabilities, "elicitation") ? { elicitation: capabilities.elicitation } : {}),
     ...(Object.hasOwn(capabilities, "slashCommands") ? { slashCommands: capabilities.slashCommands } : {}),
+    ...(Object.hasOwn(capabilities, "unsupportedSlashCommands")
+      ? { unsupportedSlashCommands: capabilities.unsupportedSlashCommands }
+      : {}),
     ...(Object.hasOwn(capabilities, "supportsSteering")
       ? { supportsSteering: capabilities.supportsSteering }
       : {}),

@@ -460,6 +460,8 @@ const historyDividers: TimelineItem[] = [
     },
   },
   { kind: "provider_account_switched", id: 4, providerAccountId: "work", providerAccountLabel: "Work", automatic: true },
+  { kind: "context_compacted", id: 5, trigger: "manual", preTokens: 48213 },
+  { kind: "context_compacted", id: 6, trigger: "auto" },
 ];
 
 test("rewind, fork, handoff and account dividers expose concise accessible semantics", () => {
@@ -468,6 +470,8 @@ test("rewind, fork, handoff and account dividers expose concise accessible seman
   assert.match(html, /class="tl-divider" role="separator" aria-label="Files Rewound to Before Turn 7" title="Files restored to the checkpoint before turn 7"/);
   assert.match(html, /class="tl-divider" role="separator" aria-label="Forked from Turn 8" title="Conversation forked from turn 8"/);
   assert.match(html, /class="tl-divider" role="separator" aria-label="Automatically Switched Account to Work" title="Provider conversation resumed with Work"/);
+  assert.match(html, /class="tl-divider" role="separator" aria-label="Conversation Compacted" title="Earlier messages were summarized to free context \(48,213 tokens before\)\."/);
+  assert.match(html, /class="tl-divider" role="separator" aria-label="Conversation Compacted Automatically" title="Earlier messages were summarized to free context\."/);
   const descriptionId = html.match(/aria-label="Handoff from Claude Code to Codex After Turn 9" aria-describedby="([^"]+)"/)?.[1];
   assert.ok(descriptionId, "the concise handoff separator names its visible secondary description");
   assert.ok(html.includes(`<p id="${descriptionId}" class="tl-divider-desc">Fresh provider conversation. Tool output and reasoning were omitted.</p>`));
@@ -483,10 +487,12 @@ test("every history divider is one neutral label with a faint 14px icon and no g
     "Forked from Turn 8",
     "Handoff from Claude Code to Codex After Turn 9",
     "Automatically Switched Account to Work",
+    "Conversation Compacted",
+    "Conversation Compacted Automatically",
   ]);
   for (const [, svg] of labels) assert.match(svg!, /width="14"/);
   assert.deepEqual(labels.map(([, svg]) => svg!.match(/lucide-([a-z-]+)/)?.[1]),
-    ["file-clock", "git-fork", "arrow-right-left", "circle-user-round"]);
+    ["file-clock", "git-fork", "arrow-right-left", "circle-user-round", "fold-vertical", "fold-vertical"]);
   assert.doesNotMatch(html, /⤺|class="[^"]*(checkpoint|restored)/, "no retired glyph or teal checkpoint class remains");
 });
 

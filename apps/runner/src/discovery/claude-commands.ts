@@ -18,6 +18,12 @@ import { isAbsolute, join, relative, sep } from "node:path";
 import { posix } from "node:path";
 import type { AgentContext, AgentSlashCommand } from "@wollipog/protocol";
 import type { SessionMeta, SessionSlashCommandProvenance } from "../session-store.js";
+import {
+  mergeClaudeSessionCatalog,
+  type ClaudeInitCatalog,
+  type ClaudeSessionCatalogInputs,
+  type ClaudeSkillMetadata,
+} from "./claude-slash-catalog.js";
 import { run, type ExecResult } from "./resolve.js";
 
 export const CLAUDE_COMMAND_LIMITS = {
@@ -47,14 +53,17 @@ export interface ClaudeSlashCommandDiscoveryRequest {
   worktreePath?: string | null;
   /** Remote container/cloud launches may inspect the mounted project, never the host user's home. */
   includeUserCommands?: boolean;
+  /** Plugin roots Claude Code reported in its init message (#1224). Plugins live under the user's
+   * Claude home, so they are read only where personal commands are. */
+  pluginRoots?: ClaudeInitCatalog["plugins"];
 }
 
 export type ClaudeSlashCommandDiscoveryResult =
-  | { ok: true; commands: DiscoveredClaudeSlashCommand[] }
+  | { ok: true; commands: DiscoveredClaudeSlashCommand[]; skills: ClaudeSkillMetadata[] }
   | { ok: false; error: string };
 
 export type ClaudeSlashCommandRefreshResult =
-  | { outcome: "updated" | "cleared"; commands: DiscoveredClaudeSlashCommand[] }
+  | { outcome: "updated" | "cleared"; commands: DiscoveredClaudeSlashCommand[]; skills: ClaudeSkillMetadata[] }
   | { outcome: "retained"; commands: readonly DiscoveredClaudeSlashCommand[]; error: string };
 
 export type ClaudeSlashCommandPreparationResult =
@@ -85,7 +94,7 @@ export interface ClaudeSlashCommandDiscoveryDeps {
 export interface CommandFile {
   path: string;
   name: string;
-  source: "user" | "project";
+  source: "user" | "project" | "plugin";
   canonicalRoot?: string;
   caseSensitiveRoot?: boolean;
 }
@@ -158,7 +167,7 @@ function unquoteFrontmatterScalar(value: string): string {
 
 function frontmatterValue(
   lines: string[],
-  key: "description" | "argument-hint",
+  key: "description" | "argument-hint" | "user-invocable",
 ): string | undefined {
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index]!;
@@ -239,11 +248,55 @@ export function parseClaudeCommandMetadata(content: string, options: {
   };
 }
 
+/** Frontmatter lines of a bounded file, or none when the block is missing, unclosed or too large. */
+function frontmatterLines(content: string): { lines: string[]; frontmatter: string[]; bodyStart: number } {
+  const bounded = Buffer.from(content, "utf8")
+    .subarray(0, CLAUDE_COMMAND_LIMITS.maxFileBytes)
+    .toString("utf8")
+    .replace(/^\uFEFF/, "");
+  const lines = bounded.split(/\r?\n/);
+  if (lines[0]?.trim() !== "---") return { lines, frontmatter: [], bodyStart: 0 };
+  let bytes = 0;
+  const candidate: string[] = [];
+  for (let index = 1; index < lines.length && index <= CLAUDE_COMMAND_LIMITS.maxFrontmatterLines; index += 1) {
+    const line = lines[index]!;
+    bytes += Buffer.byteLength(line, "utf8") + 1;
+    if (bytes > CLAUDE_COMMAND_LIMITS.maxFrontmatterBytes) break;
+    if (line.trim() === "---" || line.trim() === "...") return { lines, frontmatter: candidate, bodyStart: index + 1 };
+    candidate.push(line);
+  }
+  return { lines, frontmatter: [], bodyStart: 0 };
+}
+
+/** Parse the metadata Claude Code documents for a skill's SKILL.md: `description`,
+ * `argument-hint` and `user-invocable`. A skill's body is instructions for the model, so it never
+ * becomes a description. */
+export function parseClaudeSkillMetadata(content: string): Omit<ClaudeSkillMetadata, "name" | "origin"> {
+  const { frontmatter } = frontmatterLines(content);
+  const description = boundedText(frontmatterValue(frontmatter, "description") ?? "",
+    CLAUDE_COMMAND_LIMITS.maxDescriptionCharacters);
+  const argumentHint = boundedText(frontmatterValue(frontmatter, "argument-hint") ?? "",
+    CLAUDE_COMMAND_LIMITS.maxArgumentHintCharacters);
+  const invocable = frontmatterValue(frontmatter, "user-invocable")?.trim().toLowerCase();
+  return {
+    ...(description ? { description } : {}),
+    ...(argumentHint ? { argumentHint } : {}),
+    userInvocable: invocable !== "false",
+  };
+}
+
 function commandName(relativePath: string, pathSeparator: string): string | null {
   const normalized = relativePath.split(pathSeparator).join("/");
   if (!/\.md$/i.test(normalized)) return null;
   const filename = normalized.slice(normalized.lastIndexOf("/") + 1, -3);
   return /^[A-Za-z0-9_][A-Za-z0-9._-]*$/.test(filename) ? filename : null;
+}
+
+/** A skill is a `<name>/SKILL.md` directly below its root; the directory names it. */
+function skillName(relativePath: string, pathSeparator: string): string | null {
+  const segments = relativePath.split(pathSeparator);
+  if (segments.length !== 2 || segments[1] !== "SKILL.md") return null;
+  return /^[A-Za-z0-9_][A-Za-z0-9._-]*$/.test(segments[0]!) ? segments[0]! : null;
 }
 
 function compareStable(a: string, b: string): number {
@@ -428,6 +481,9 @@ export async function nativeCommandFiles(
   options: {
     caseSensitiveRoot: boolean;
     maxDepth?: number;
+    /** Maps a root-relative file path to its command name, or null to skip it. Defaults to a
+     * `.md` file's basename. */
+    nameFile?: (relativePath: string, pathSeparator: string) => string | null;
     beforeDirectoryRead?: ClaudeSlashCommandDiscoveryDeps["beforeNativeDirectoryRead"];
     beforeRootRealpath?: ClaudeSlashCommandDiscoveryDeps["beforeNativeRootRealpath"];
     openDirectory: (path: string) => Promise<Dir>;
@@ -527,7 +583,7 @@ export async function nativeCommandFiles(
       if (entry.isDirectory() && current.depth < (options.maxDepth ?? CLAUDE_COMMAND_LIMITS.maxDepth)) {
         pending.push({ dir: path, depth: current.depth + 1 });
       } else if (entry.isFile()) {
-        const name = commandName(relative(canonicalRoot, path), sep);
+        const name = (options.nameFile ?? commandName)(relative(canonicalRoot, path), sep);
         if (name) files.push({ path, name, source, canonicalRoot, caseSensitiveRoot: options.caseSensitiveRoot });
       }
       // Symlinks are deliberately skipped: discovery must stay within the documented source root.
@@ -576,6 +632,11 @@ export function mergeClaudeSlashCommands(commands: DiscoveredClaudeSlashCommand[
     if (!personal.has(key)) personal.set(key, command);
   }
   for (const [key, command] of personal) byName.set(key, command);
+  // Plugin commands are namespaced by their plugin (`plugin:command`), so they never collide.
+  for (const command of stable.filter((entry) => entry.source === "plugin")) {
+    const key = command.name.toLowerCase();
+    if (!byName.has(key)) byName.set(key, command);
+  }
   return [...byName.values()].sort((a, b) => compareStable(a.name, b.name));
 }
 
@@ -586,10 +647,14 @@ export async function discoverClaudeSlashCommands(
   const sessionRoot = request.worktreePath ?? request.repoPath;
   try {
     const files: CommandFile[] = [];
+    const skillFiles: CommandFile[] = [];
     const contents = new Map<string, string>();
     const includeUserCommands = request.includeUserCommands !== false;
     let userRoot: string | undefined;
     let projectRoot: string;
+    let userSkillRoot: string | undefined;
+    let projectSkillRoot: string;
+    const pluginRoots: Array<{ name: string; root: string }> = [];
     let deadline = Date.now();
     if (request.context.kind === "native") {
       const budgetMs = Math.max(1, Math.min(
@@ -597,8 +662,16 @@ export async function discoverClaudeSlashCommands(
         CLAUDE_COMMAND_LIMITS.maxNativeDiscoveryMs,
       ));
       deadline = Date.now() + budgetMs;
-      if (includeUserCommands) userRoot = join((deps.nativeHome ?? homedir)(), ".claude", "commands");
+      if (includeUserCommands) {
+        const home = (deps.nativeHome ?? homedir)();
+        userRoot = join(home, ".claude", "commands");
+        userSkillRoot = join(home, ".claude", "skills");
+        for (const plugin of request.pluginRoots ?? []) {
+          if (isAbsolute(plugin.path)) pluginRoots.push({ name: plugin.name, root: plugin.path });
+        }
+      }
       projectRoot = join(sessionRoot, ".claude", "commands");
+      projectSkillRoot = join(sessionRoot, ".claude", "skills");
     } else {
       const rawExecute = deps.run ?? run;
       const budgetMs = Math.max(1, Math.min(
@@ -616,12 +689,17 @@ export async function discoverClaudeSlashCommands(
         if (home.errorCode || home.code !== 0 || !home.stdout.trim()) {
           throw new Error((home.errorCode ?? home.stderr.trim()) || "could not resolve WSL home");
         }
-        userRoot = mapWslPath(
-          distro,
-          posix.join(home.stdout.trim().split(/\r?\n/, 1)[0]!, ".claude", "commands"),
-        );
+        const wslHome = home.stdout.trim().split(/\r?\n/, 1)[0]!;
+        userRoot = mapWslPath(distro, posix.join(wslHome, ".claude", "commands"));
+        userSkillRoot = mapWslPath(distro, posix.join(wslHome, ".claude", "skills"));
+        for (const plugin of request.pluginRoots ?? []) {
+          if (posix.isAbsolute(plugin.path) && posix.normalize(plugin.path) === plugin.path) {
+            pluginRoots.push({ name: plugin.name, root: mapWslPath(distro, plugin.path) });
+          }
+        }
       }
       projectRoot = mapWslPath(distro, posix.join(sessionRoot, ".claude", "commands"));
+      projectSkillRoot = mapWslPath(distro, posix.join(sessionRoot, ".claude", "skills"));
     }
 
     const caseSensitiveRoot = request.context.kind === "wsl";
@@ -632,11 +710,38 @@ export async function discoverClaudeSlashCommands(
       openDirectory: deps.openNativeDirectory ?? ((path: string) => opendir(path)),
     };
     const discoveries: NativeCommandFileDiscovery[] = [];
-    if (userRoot) discoveries.push(await nativeCommandFiles(userRoot, "user", deadline, traversalOptions));
-    discoveries.push(await nativeCommandFiles(projectRoot, "project", deadline, traversalOptions));
-    files.push(...discoveries.flatMap((discovery) => discovery.files));
+    const commandRoot = async (root: string, source: CommandFile["source"], options: Partial<typeof traversalOptions> & {
+      maxDepth?: number;
+      nameFile?: (relativePath: string, pathSeparator: string) => string | null;
+    } = {}) => {
+      const discovery = await nativeCommandFiles(root, source, deadline, { ...traversalOptions, ...options });
+      discoveries.push(discovery);
+      return discovery.files;
+    };
+    if (userRoot) files.push(...await commandRoot(userRoot, "user"));
+    files.push(...await commandRoot(projectRoot, "project"));
+    if (userSkillRoot) skillFiles.push(...await commandRoot(userSkillRoot, "user", { maxDepth: 1, nameFile: skillName }));
+    skillFiles.push(...await commandRoot(projectSkillRoot, "project", { maxDepth: 1, nameFile: skillName }));
+    for (const plugin of pluginRoots) {
+      // Plugin commands and skills are namespaced by their plugin, as Claude Code lists them. A
+      // plugin root that can't be read loses only its own descriptions, never the whole catalog.
+      const prefixed = (name: string | null) => name ? `${plugin.name}:${name}` : null;
+      try {
+        files.push(...await commandRoot(join(plugin.root, "commands"), "plugin", {
+          maxDepth: 0,
+          nameFile: (path, separator) => prefixed(commandName(path, separator)),
+        }));
+        skillFiles.push(...await commandRoot(join(plugin.root, "skills"), "plugin", {
+          maxDepth: 1,
+          nameFile: (path, separator) => prefixed(skillName(path, separator)),
+        }));
+      } catch (error) {
+        if (!["EACCES", "EPERM", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+      }
+    }
     files.sort((left, right) => compareStable(left.path, right.path));
-    for (const file of files) {
+    skillFiles.sort((left, right) => compareStable(left.path, right.path));
+    for (const file of [...files, ...skillFiles]) {
       try {
         await withinDiscoveryDeadline(
           async () => deps.beforeNativeCommandRead?.(file.path),
@@ -665,7 +770,12 @@ export async function discoverClaudeSlashCommands(
       source: file.source,
       ...parseClaudeCommandMetadata(contents.get(file.path) ?? ""),
     }));
-    return { ok: true, commands: mergeClaudeSlashCommands(commands) };
+    const skills = skillFiles.filter((file) => contents.has(file.path)).map((file): ClaudeSkillMetadata => ({
+      name: file.name,
+      origin: file.source,
+      ...parseClaudeSkillMetadata(contents.get(file.path) ?? ""),
+    }));
+    return { ok: true, commands: mergeClaudeSlashCommands(commands), skills };
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     return { ok: false, error: `Claude command discovery failed: ${detail || "unknown error"}` };
@@ -682,9 +792,25 @@ export async function refreshClaudeSlashCommandCatalog(
   const discovered = await discoverClaudeSlashCommands(request, deps);
   if (!discovered.ok) return { outcome: "retained", commands: previous, error: discovered.error };
   return {
-    outcome: discovered.commands.length ? "updated" : "cleared",
+    outcome: discovered.commands.length || discovered.skills.length ? "updated" : "cleared",
     commands: discovered.commands,
+    skills: discovered.skills,
   };
+}
+
+/** Store a session's catalog sources and the menu merged from them (#1224). */
+export function applyClaudeSessionCatalog(meta: SessionMeta, inputs: ClaudeSessionCatalogInputs): void {
+  const merged = mergeClaudeSessionCatalog(inputs);
+  meta.claudeSlashCatalogInputs = inputs;
+  meta.sessionSlashCommands = merged.commands;
+  meta.sessionUnsupportedSlashCommands = merged.unsupported.length ? merged.unsupported : undefined;
+}
+
+function clearClaudeSessionCatalog(meta: SessionMeta): void {
+  meta.sessionSlashCommands = undefined;
+  meta.sessionSlashCommandProvenance = undefined;
+  meta.claudeSlashCatalogInputs = undefined;
+  meta.sessionUnsupportedSlashCommands = undefined;
 }
 
 /** Refresh one launch atomically and bind retained results to the exact runner-local boundary that
@@ -695,35 +821,42 @@ export async function prepareClaudeSlashCommandCatalog(
   deps: ClaudeSlashCommandDiscoveryDeps = {},
 ): Promise<ClaudeSlashCommandPreparationResult> {
   if (meta.driver !== "claude-code") {
-    meta.sessionSlashCommands = undefined;
-    meta.sessionSlashCommandProvenance = undefined;
+    clearClaudeSessionCatalog(meta);
     return { outcome: "cleared" };
   }
 
   const provenance = claudeSlashCommandProvenance(meta);
+  const priorMatches = sameClaudeSlashCommandProvenance(meta.sessionSlashCommandProvenance, provenance);
+  // The last init list Claude Code reported for this exact boundary stays authoritative until the
+  // relaunched process reports its own, so a relaunch doesn't drop the built-ins meanwhile.
+  const priorInit = priorMatches ? meta.claudeSlashCatalogInputs?.init : undefined;
   if (provenance.targetAdapter === "cloud") {
-    meta.sessionSlashCommands = [];
+    // Nothing on disk is the cloud target's; only the target's own init list names its commands.
+    applyClaudeSessionCatalog(meta, { commands: [], skills: [], ...(priorInit ? { init: priorInit } : {}) });
     meta.sessionSlashCommandProvenance = provenance;
     return { outcome: "cleared" };
   }
 
-  const priorMatches = sameClaudeSlashCommandProvenance(meta.sessionSlashCommandProvenance, provenance);
-  const previous = priorMatches ? (meta.sessionSlashCommands ?? []) : [];
-  if (!priorMatches) {
-    meta.sessionSlashCommands = undefined;
-    meta.sessionSlashCommandProvenance = undefined;
-  }
+  const previous = priorMatches
+    ? (meta.claudeSlashCatalogInputs?.commands ?? meta.sessionSlashCommands ?? [])
+    : [];
+  if (!priorMatches) clearClaudeSessionCatalog(meta);
   const refreshed = await refreshClaudeSlashCommandCatalog(previous, {
     context: meta.context,
     repoPath: meta.repoPath,
     worktreePath: meta.worktreePath,
     includeUserCommands: provenance.includeUserCommands,
+    ...(priorInit?.plugins.length ? { pluginRoots: priorInit.plugins } : {}),
   }, deps);
   if (refreshed.outcome === "retained") {
     if (priorMatches) return { outcome: "retained", error: refreshed.error };
     return { outcome: "discarded", error: refreshed.error };
   }
-  meta.sessionSlashCommands = [...refreshed.commands];
+  applyClaudeSessionCatalog(meta, {
+    commands: [...refreshed.commands],
+    skills: refreshed.skills,
+    ...(priorInit ? { init: priorInit } : {}),
+  });
   meta.sessionSlashCommandProvenance = provenance;
   return { outcome: refreshed.outcome };
 }

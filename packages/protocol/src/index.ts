@@ -633,7 +633,12 @@
 // 203: human-initiated, correlated existing-session role conversion. Prepare retires the quiet
 //      provider; commit revokes old credentials before resuming the same conversation. Older peers
 //      refuse conversion. Snapshot receipts reconcile interrupted replies without inventing roles.
-export const PROTOCOL_VERSION = 203;
+// 204: Claude Code's init-time slash command catalog (#1224). Runners record `context_compacted`
+//      when the provider compacts a conversation; older peers have the event omitted from their
+//      dense history. Session capability overlays may carry `unsupportedSlashCommands` and an `mcp`
+//      command source; both are additive, so an older client lists MCP prompts as harness commands
+//      and sends an unsupported command as text, as before.
+export const PROTOCOL_VERSION = 204;
 export const UNIVERSAL_QUESTION_TEXT_MIN_PROTOCOL = 202;
 
 export type ArtifactUploadPreference = "manual" | "wollipog_automatic" | "external_hosting";
@@ -1184,6 +1189,7 @@ const SESSION_EVENT_WIRE_POLICIES = {
   policy_hook_decision: { minProtocol: 130, legacy: "omit" },
   workflow_action_admission_armed: { minProtocol: 151, legacy: "omit" },
   provider_account_switched: { minProtocol: 171, legacy: "omit" },
+  context_compacted: { minProtocol: 204, legacy: "omit" },
 } as const satisfies Partial<Record<SessionEventKind, {
   minProtocol: number;
   legacy: "omit";
@@ -1213,8 +1219,9 @@ export function sessionEventWireProjectionVariant(
 export const SESSION_EVENT_WIRE_PROJECTION_VARIANTS =
   Object.keys(SESSION_EVENT_WIRE_POLICIES).length + 1;
 
-/** Numeric fence advanced at each projection-radix change; v171 follows v148's offset 5 + radix 4. */
-export const SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET = 9;
+/** Numeric fence advanced at each projection-radix change; v171 followed v148's offset 5 + radix 4,
+ * and v204 follows v171's offset 9 + radix 5. */
+export const SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET = 14;
 
 /** Whether this peer needs any explicit additive session-event compatibility projection.
  * Keeping policy inspection beside the policy table avoids callers probing it with a fabricated
@@ -1406,8 +1413,11 @@ export interface AgentModelServiceTier {
 
 export interface AgentSlashCommand {
   name: string;
-  /** `skill` is a provider skill invoked as a command, such as a Codex `$name` skill. */
-  source: "builtin" | "user" | "project" | "plugin" | "skill";
+  /** `skill` is a provider skill invoked as a command, such as a Codex `$name` skill or a Claude
+   * Code `/name` skill. `mcp` is a prompt an MCP server exposes as a command (Claude Code's
+   * `/mcp__server__prompt`, #1224); a client that predates it shows the command as a harness
+   * command. */
+  source: "builtin" | "user" | "project" | "plugin" | "skill" | "mcp";
   description?: string;
   /** Provider-authored argument usage, such as "<goal>" or "[on|off]". */
   argumentHint?: string;
@@ -1421,6 +1431,12 @@ export interface AgentSlashCommand {
 }
 
 export type SessionCommandExecutionMode = "passthrough" | "structured";
+
+/** A command name the agent knows but Wollipog won't send, with the sentence that says why. */
+export interface UnsupportedSlashCommand {
+  name: string;
+  reason: string;
+}
 
 /* --- Managed agent skills (control-plane-owned skill deployment, protocol v90) --- */
 
@@ -1852,6 +1868,8 @@ export interface AgentCapabilities {
   /** e.g. ["low","medium","high"]; empty when the agent has no effort knob. */
   effortLevels: string[];
   slashCommands: AgentSlashCommand[];
+  /** Session-scoped only (see `SessionCapabilityOverlay`); a catalog row never carries it. */
+  unsupportedSlashCommands?: UnsupportedSlashCommand[];
   /** Prompt-image transport: the user can attach an image to a prompt. Says nothing about images
    * returned by a tool; see `imageToolResults`. */
   supportsImages: boolean;
@@ -1903,6 +1921,11 @@ export interface AgentCapabilities {
 export interface SessionCapabilityOverlay {
   elicitation?: NonNullable<AgentCapabilities["elicitation"]>;
   slashCommands?: AgentSlashCommand[];
+  /** Commands the agent lists that can't run inside Wollipog (a terminal-only command such as
+   * Claude Code's `/doctor`, #1224). They never appear in a command menu, but a client that
+   * resolves one typed in full shows `reason` instead of sending it. Additive: a client that
+   * ignores the field sends such a token as text, as it did before. */
+  unsupportedSlashCommands?: UnsupportedSlashCommand[];
   /** Runtime transport truth can be narrower than the discovered native agent catalog. */
   supportsSteering?: boolean;
 }
@@ -1949,6 +1972,9 @@ export function mergeSessionCapabilities(
     ...catalog,
     ...(Object.hasOwn(session, "elicitation") ? { elicitation: session.elicitation } : {}),
     ...(Object.hasOwn(session, "slashCommands") ? { slashCommands: session.slashCommands } : {}),
+    ...(Object.hasOwn(session, "unsupportedSlashCommands")
+      ? { unsupportedSlashCommands: session.unsupportedSlashCommands }
+      : {}),
     ...(Object.hasOwn(session, "supportsSteering") ? { supportsSteering: session.supportsSteering } : {}),
   };
 }
@@ -5166,6 +5192,11 @@ export type SessionEventPayload =
   | { kind: "conversation_checkpoint"; turn: number }
   | { kind: "conversation_forked"; sourceSessionId: string; turn: number; handoff?: { sourceAgent: string; destinationAgent: string; disclosure: string } }
   | { kind: "provider_account_switched"; providerAccountId: string; providerAccountLabel: string; automatic?: boolean }
+  /** The provider summarized the conversation to free context (Claude Code's `compact_boundary`,
+   * #1224). `trigger` is `manual` for `/compact` and `auto` when the provider compacted on its own;
+   * `preTokens` is the context size before compaction when reported. A client that predates the
+   * kind skips it. */
+  | { kind: "context_compacted"; trigger?: "manual" | "auto"; preTokens?: number }
   | {
       kind: "token_usage";
       /** Provider-reported input count. Anthropic reports the uncached portion only; Codex reports

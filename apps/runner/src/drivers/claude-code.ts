@@ -18,6 +18,7 @@
  */
 
 import { ClaudeUsageAccounting, claudeRestoresUsage, claudeUsageCheckpoint } from "./claude-usage-accounting.js";
+import { parseClaudeInitCatalog } from "../discovery/claude-slash-catalog.js";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -2747,6 +2748,22 @@ export class ClaudeCodeDriver implements Driver {
         if (msg.subtype === "init" && typeof msg.model === "string" && msg.model) {
           this.resolvedModel = msg.model;
           this.cb.onModelResolved?.(msg.model);
+        }
+        if (msg.subtype === "init" && !parentId) {
+          const catalog = parseClaudeInitCatalog(msg as Record<string, unknown>);
+          if (catalog) this.cb.onClaudeInitCatalog?.(catalog);
+        }
+        if (msg.subtype === "compact_boundary" && !parentId) {
+          // `/compact` or Claude Code's own compaction replaced the history with a summary (#1224).
+          const metadata = (msg as { compact_metadata?: { trigger?: unknown; pre_tokens?: unknown } }).compact_metadata;
+          const trigger = metadata?.trigger === "manual" || metadata?.trigger === "auto" ? metadata.trigger : undefined;
+          const preTokens = typeof metadata?.pre_tokens === "number" && Number.isSafeInteger(metadata.pre_tokens) &&
+            metadata.pre_tokens >= 0 ? metadata.pre_tokens : undefined;
+          this.cb.onEvent({
+            kind: "context_compacted",
+            ...(trigger ? { trigger } : {}),
+            ...(preTokens !== undefined ? { preTokens } : {}),
+          });
         }
         if (msg.subtype === "api_retry") {
           const error = String(msg.error ?? "");

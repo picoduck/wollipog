@@ -46,6 +46,7 @@ import {
 import type {
   AgentCapabilities,
   AgentSlashCommand,
+  UnsupportedSlashCommand,
   AcpRuntimeCapabilities,
   AgentContext,
   BackgroundJobStopActor,
@@ -130,6 +131,11 @@ export interface SessionMeta {
   sessionSlashCommands?: AgentSlashCommand[];
   /** Runner-local proof of the exact launch boundary that produced sessionSlashCommands. */
   sessionSlashCommandProvenance?: SessionSlashCommandProvenance;
+  /** Claude Code commands the agent lists but Wollipog won't send (#1224), with their reasons. */
+  sessionUnsupportedSlashCommands?: UnsupportedSlashCommand[];
+  /** What a Claude Code session's catalog is merged from: its command files, skills and the last
+   * init list for the same provenance (#1224). */
+  claudeSlashCatalogInputs?: import("./discovery/claude-slash-catalog.js").ClaudeSessionCatalogInputs;
   codexExecFallbackReason?: "explicit_exec" | "compatibility_exec";
   workspaceId: string | null;
   /** The original repo path; worktrees live in the runner data directory, outside this repo. */
@@ -2963,11 +2969,18 @@ export function metaToSnapshot(
     controlPlaneProtocolVersion >= RUNNER_CAPABILITY_MIN_PROTOCOL.codexServiceTiers
     ? m.config
     : (({ serviceTier: _serviceTier, ...legacyConfig }) => legacyConfig)(m.config);
+  // Travels with the slash commands it qualifies; a client that ignores it sends the token as text.
+  const nativeUnsupportedSlashCommands = nativeSlashCommands !== undefined
+    ? m.sessionUnsupportedSlashCommands
+    : undefined;
   const nativeCapabilities: SessionCapabilityOverlay | undefined =
     nativeElicitation !== undefined || nativeSlashCommands !== undefined
       ? {
           ...(nativeElicitation !== undefined ? { elicitation: nativeElicitation } : {}),
           ...(nativeSlashCommands !== undefined ? { slashCommands: nativeSlashCommands } : {}),
+          ...(nativeUnsupportedSlashCommands?.length
+            ? { unsupportedSlashCommands: nativeUnsupportedSlashCommands }
+            : {}),
         }
       : undefined;
   return {

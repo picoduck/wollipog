@@ -433,6 +433,79 @@ test("command transcript text spells skills as $name and other commands as /name
   assert.equal(sessionCommandDisplayText("deploy", undefined, ""), "/deploy");
 });
 
+test("Claude Code's init list merges into the authorized catalog, keeps unchanged ids and records skills as /name (#1224)", async () => {
+  const h = harness();
+  const rescans: unknown[] = [];
+  (h.manager as unknown as { discoverClaudeCommands: (request: unknown) => Promise<unknown> }).discoverClaudeCommands =
+    async (request) => {
+      rescans.push(request);
+      return {
+        ok: true,
+        commands: [
+          { name: "deploy", source: "project", description: "Deploy the application", argumentHint: "<environment>" },
+          { name: "superpowers:audit", source: "plugin", description: "Audit with a plugin." },
+        ],
+        skills: [{ name: "brainstorm", origin: "user", description: "Explore an idea.", userInvocable: true }],
+      };
+    };
+  try {
+    assert.equal(await h.start(), true);
+    const init = { commands: ["deploy", "compact", "doctor", "brainstorm"], skills: ["brainstorm"],
+      terminalCommands: ["doctor"], plugins: [] };
+    h.callbacks().onClaudeInitCatalog!(init);
+    await waitFor(() => (h.store.readMeta("command-session")?.sessionSlashCommands?.length ?? 0) === 3,
+      "the init list should merge into the session catalog");
+    const meta = h.store.readMeta("command-session")!;
+    assert.deepEqual(meta.sessionSlashCommands?.map(({ name, source }) => [name, source]), [
+      ["brainstorm", "skill"],
+      ["compact", "builtin"],
+      ["deploy", "project"],
+    ]);
+    assert.deepEqual(meta.sessionUnsupportedSlashCommands?.map((entry) => entry.name), ["doctor"]);
+    assert.deepEqual(rescans, [], "an init list without plugin roots needs no rescan");
+
+    const snapshot = h.manager.sessionSnapshots()[0]!;
+    const live = snapshot.agentCapabilities?.slashCommands ?? [];
+    assert.ok(live.every((command) => command.invocation), "the merged catalog is authorized for the live provider");
+    assert.deepEqual(
+      (snapshot.agentCapabilities as { unsupportedSlashCommands?: unknown }).unsupportedSlashCommands,
+      [{ name: "doctor", reason: "Claude Code's /doctor needs its own terminal, so Wollipog doesn't send it." }],
+    );
+    const compactId = live.find((command) => command.name === "compact")!.invocation!.id;
+    h.callbacks().onClaudeInitCatalog!({ ...init, commands: [...init.commands] });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(h.manager.sessionSnapshots()[0]?.agentCapabilities?.slashCommands
+      ?.find((command) => command.name === "compact")?.invocation?.id, compactId,
+    "an unchanged init list keeps its command ids, so an open menu stays valid");
+
+    // New plugin roots rescan the disk for their commands and skills.
+    const plugins = [{ name: "superpowers", path: "/home/me/.claude/plugins/superpowers" }];
+    h.callbacks().onClaudeInitCatalog!({ ...init, commands: [...init.commands, "superpowers:audit"], plugins });
+    await waitFor(() => h.store.readMeta("command-session")?.sessionSlashCommands
+      ?.some((command) => command.name === "superpowers:audit") === true, "the plugin command should merge");
+    assert.equal(rescans.length, 1);
+    assert.deepEqual((rescans[0] as { pluginRoots?: unknown }).pluginRoots, plugins);
+    assert.deepEqual(h.store.readMeta("command-session")?.sessionSlashCommands
+      ?.find((command) => command.name === "superpowers:audit"),
+    { name: "superpowers:audit", source: "plugin", description: "Audit with a plugin." });
+
+    const skill = h.manager.sessionSnapshots()[0]?.agentCapabilities?.slashCommands
+      ?.find((command) => command.name === "brainstorm");
+    assert.ok(skill?.invocation);
+    const receipts: Receipt[] = [];
+    assert.equal(h.manager.invokeSessionCommand(
+      message(skill.invocation, { argumentText: "pricing" }),
+      receiptLifecycle("invocation-claude-skill", receipts),
+    ), true);
+    await waitFor(() => h.invoked.length === 1, "the skill command should start");
+    const userEvent = h.store.readEvents("command-session").find((event) => event.payload.kind === "user_message");
+    assert.equal(userEvent?.payload.kind === "user_message" && userEvent.payload.text, "/brainstorm pricing",
+      "Claude Code invokes a skill as /name");
+  } finally {
+    h.cleanup();
+  }
+});
+
 test("Codex authorizes prompts at thread start, adds skills when they arrive, and records skills as $name", async () => {
   const h = harness({
     driverKind: "codex-app-server",

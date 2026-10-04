@@ -33,6 +33,7 @@ import type {
   StopBackgroundJobRefusal,
   AgentDriverKind,
   AgentSlashCommand,
+  UnsupportedSlashCommand,
   AcpRuntimeCapabilities,
   DurableSessionCommandErrorCode,
   EditQueuedPromptMessage,
@@ -123,6 +124,17 @@ import type {
 } from "./drivers/driver.js";
 import { CodexAppServerResumeError } from "./drivers/codex-app-server.js";
 import type { CodexPromptTemplate } from "./discovery/codex-prompts.js";
+import {
+  applyClaudeSessionCatalog,
+  claudeSlashCommandProvenance,
+  discoverClaudeSlashCommands,
+} from "./discovery/claude-commands.js";
+import {
+  sameClaudeInitCatalog,
+  samePluginRoots,
+  type ClaudeInitCatalog,
+  type ClaudeSessionCatalogInputs,
+} from "./discovery/claude-slash-catalog.js";
 import { BoxAdmission, type AdmissionObservation, type AdmissionRequest } from "./box-admission.js";
 import { discoverIncompleteClaudeTasks, discoverIncompleteClaudeTasksInContext, inspectClaudeBackgroundWorkInContext } from "./claude-background-work.js";
 import { DEFAULT_MAX_CONCURRENT_SESSIONS, DEFAULT_WORKTREE_PORTS } from "./config.js";
@@ -319,8 +331,21 @@ export function sessionCommandDisplayText(
   commandName: string,
   source: AgentSlashCommand["source"] | undefined,
   argumentText: string,
+  driver?: AgentDriverKind,
 ): string {
-  return `${source === "skill" ? "$" : "/"}${commandName}${argumentText ? ` ${argumentText}` : ""}`;
+  // `$name` is Codex's spelling for a skill; Claude Code invokes its skills as `/name` (#1224).
+  const sigil = source === "skill" && driver !== "claude-code" ? "$" : "/";
+  return `${sigil}${commandName}${argumentText ? ` ${argumentText}` : ""}`;
+}
+
+function sameUnsupportedSlashCommands(
+  left: readonly UnsupportedSlashCommand[] | undefined,
+  right: readonly UnsupportedSlashCommand[] | undefined,
+): boolean {
+  const a = left ?? [];
+  const b = right ?? [];
+  return a.length === b.length && a.every((entry, index) =>
+    entry.name === b[index]!.name && entry.reason === b[index]!.reason);
 }
 
 function sameSlashCommandCatalog(
@@ -1395,6 +1420,14 @@ export class SessionManager {
   private discardSessionWorktreeIfSafe: typeof discardWorktreeIfSafe = discardWorktreeIfSafe;
   /** Test seam keeps provider-home discovery deterministic without writing into a real Claude home. */
   private discoverClaudeTasks: typeof discoverIncompleteClaudeTasks = discoverIncompleteClaudeTasks;
+  /** Disk scan for a Claude Code init list's new plugin roots (#1224); a test seam. */
+  private discoverClaudeCommands: (
+    request: Parameters<typeof discoverClaudeSlashCommands>[0],
+  ) => ReturnType<typeof discoverClaudeSlashCommands> = (request) => discoverClaudeSlashCommands(request);
+  /** Init lists merge in arrival order, one session at a time. */
+  private readonly claudeInitCatalogQueue = new Map<string, Promise<void>>();
+  /** Sessions whose init list merged before the provider was ready to authorize it. */
+  private readonly claudeInitAwaitingAuthority = new Set<string>();
   /** Async seam covers WSL markerless recovery without blocking runner startup. */
   private discoverClaudeTasksInContext: typeof discoverIncompleteClaudeTasksInContext = discoverIncompleteClaudeTasksInContext;
   private readonly sessionCommandAuthority = new SessionCommandAuthorityRegistry();
@@ -6381,6 +6414,104 @@ export class SessionManager {
     }
   }
 
+  /** Merge one Claude Code init list into the session's catalog (#1224). Init lists apply in
+   * arrival order; one that brings new plugin roots first rescans the disk for their skills and
+   * commands, on targets whose user home the runner may read. */
+  private applyClaudeInitCatalog(
+    sessionId: string,
+    client: Driver,
+    catalog: ClaudeInitCatalog,
+    launchGeneration: number,
+  ): Promise<void> {
+    const prior = this.claudeInitCatalogQueue.get(sessionId) ?? Promise.resolve();
+    const next = prior.catch(() => undefined).then(() =>
+      this.mergeClaudeInitCatalog(sessionId, client, catalog, launchGeneration));
+    this.claudeInitCatalogQueue.set(sessionId, next);
+    void next.finally(() => {
+      if (this.claudeInitCatalogQueue.get(sessionId) === next) this.claudeInitCatalogQueue.delete(sessionId);
+    }).catch(() => undefined);
+    return next;
+  }
+
+  private async mergeClaudeInitCatalog(
+    sessionId: string,
+    client: Driver,
+    catalog: ClaudeInitCatalog,
+    launchGeneration: number,
+  ): Promise<void> {
+    // Init lists arrive after launch has finished, so liveness is the exact client of a launch that
+    // nothing has replaced since.
+    const isLive = () => this.active.get(sessionId)?.client === client &&
+      !this.launchWasSuperseded(sessionId, launchGeneration) && !this.deleted.has(sessionId);
+    const current = this.store.readMeta(sessionId);
+    if (!current || current.driver !== "claude-code" || !isLive()) return;
+    const provenance = current.sessionSlashCommandProvenance ?? claudeSlashCommandProvenance(current);
+    const priorInputs: ClaudeSessionCatalogInputs = current.claudeSlashCatalogInputs ?? {
+      // A catalog stored before #1224 holds only command files.
+      commands: (current.sessionSlashCommands ?? []).filter((command) =>
+        command.source === "user" || command.source === "project"),
+      skills: [],
+    };
+    if (current.claudeSlashCatalogInputs && sameClaudeInitCatalog(priorInputs.init, catalog)) {
+      this.publishClaudeSessionCommands(sessionId, client, current, false);
+      return;
+    }
+    let inputs: ClaudeSessionCatalogInputs = { ...priorInputs, init: catalog };
+    if (!samePluginRoots(priorInputs.init, catalog) && provenance.includeUserCommands &&
+        provenance.targetAdapter === "host") {
+      const discovered = await this.discoverClaudeCommands({
+        context: current.context,
+        repoPath: current.repoPath,
+        worktreePath: current.worktreePath,
+        includeUserCommands: true,
+        pluginRoots: catalog.plugins,
+      });
+      if (!isLive()) return;
+      // A failed rescan keeps the prior files' metadata; the init list still decides membership.
+      if (discovered.ok) inputs = { commands: discovered.commands, skills: discovered.skills, init: catalog };
+    }
+    const latest = this.store.readMeta(sessionId);
+    if (!latest) return;
+    const merged = { ...latest } as SessionMeta;
+    applyClaudeSessionCatalog(merged, inputs);
+    const unchanged = sameSlashCommandCatalog(latest.sessionSlashCommands, merged.sessionSlashCommands) &&
+      sameUnsupportedSlashCommands(latest.sessionUnsupportedSlashCommands, merged.sessionUnsupportedSlashCommands);
+    const updated = this.store.patchMeta(sessionId, {
+      claudeSlashCatalogInputs: inputs,
+      sessionSlashCommands: unchanged ? latest.sessionSlashCommands : merged.sessionSlashCommands,
+      sessionUnsupportedSlashCommands: unchanged
+        ? latest.sessionUnsupportedSlashCommands
+        : merged.sessionUnsupportedSlashCommands,
+      sessionSlashCommandProvenance: provenance,
+    });
+    if (updated) this.publishClaudeSessionCommands(sessionId, client, updated, !unchanged);
+  }
+
+  /** Authorize a Claude Code session's current catalog once its provider is ready, and project it.
+   * An unchanged catalog keeps its command ids, so an open composer menu stays valid. */
+  private publishClaudeSessionCommands(
+    sessionId: string,
+    client: Driver,
+    meta: SessionMeta,
+    changed: boolean,
+  ): void {
+    const entry = this.active.get(sessionId);
+    const authorized = entry?.client === client && entry.providerReady === true &&
+      !!client.prepareCommand && !!client.invokeCommand;
+    if (authorized) {
+      this.sessionCommandAuthority.refresh(
+        sessionId,
+        meta.sessionSlashCommands ?? [],
+        JSON.stringify(meta.sessionSlashCommandProvenance ?? claudeSlashCommandProvenance(meta)),
+      );
+      this.claudeInitAwaitingAuthority.delete(sessionId);
+    } else if (entry?.client === client) {
+      // The init list arrived before the provider was ready; authorize it when it is.
+      this.claudeInitAwaitingAuthority.add(sessionId);
+    }
+    if (authorized || changed) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(meta) });
+  }
+
   private launchIsCurrent(sessionId: string, generation: number): boolean {
     return !this.shuttingDown &&
       !this.deleted.has(sessionId) &&
@@ -7726,6 +7857,11 @@ export class SessionManager {
           if (live?.client !== client) return;
           this.publishCodexSessionCommands(sessionId, client, commands, launchGeneration);
         },
+        onClaudeInitCatalog: (catalog) => {
+          void this.applyClaudeInitCatalog(sessionId, client, catalog, launchGeneration).catch((error) => {
+            console.warn(`[runner] Claude Code command catalog for ${sessionId} not applied: ${errText(error)}`);
+          });
+        },
         onAcpUsage: (usage) => {
           const current = this.store.readMeta(sessionId);
           if (!current) return;
@@ -7906,12 +8042,17 @@ export class SessionManager {
           launchGeneration,
         );
       }
-      if (launchPreparation?.sessionCommandCatalogFresh && meta.driver === "claude-code" &&
+      // A fresh disk scan, or an init list that arrived before the provider was ready (#1224), is
+      // authorized now; the stored catalog is read again because an init list may have merged in.
+      const claudeInitAwaiting = this.claudeInitAwaitingAuthority.delete(sessionId);
+      if ((launchPreparation?.sessionCommandCatalogFresh || claudeInitAwaiting) && meta.driver === "claude-code" &&
           client.prepareCommand && client.invokeCommand) {
+        const catalogMeta = this.store.readMeta(sessionId) ?? meta;
         this.sessionCommandAuthority.refresh(
           sessionId,
-          meta.sessionSlashCommands ?? [],
-          launchPreparation.sessionCommandCatalogProvenance ?? "claude-code:fresh",
+          catalogMeta.sessionSlashCommands ?? [],
+          launchPreparation?.sessionCommandCatalogProvenance ??
+            JSON.stringify(catalogMeta.sessionSlashCommandProvenance ?? claudeSlashCommandProvenance(catalogMeta)),
         );
         const authorized = this.store.readMeta(sessionId);
         if (authorized) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(authorized) });
@@ -13034,7 +13175,12 @@ export class SessionManager {
     }
 
     // No suspension is permitted from this boundary until invokeCommand has returned its promise.
-    const displayText = sessionCommandDisplayText(authorized.commandName, authorized.command.source, queued.text);
+    const displayText = sessionCommandDisplayText(
+      authorized.commandName,
+      authorized.command.source,
+      queued.text,
+      this.store.readMeta(sessionId)?.driver,
+    );
     const userEvent = this.emitEvent(sessionId, {
       kind: "user_message",
       text: displayText,

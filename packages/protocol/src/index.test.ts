@@ -219,8 +219,8 @@ test("machine skill adoption is capability-gated per platform", () => {
   assert.equal(machineSkillAdoptionRecoveryRequirement(undefined), null);
 });
 
-test("PROTOCOL_VERSION is 203", () => {
-  assert.equal(PROTOCOL_VERSION, 203);
+test("PROTOCOL_VERSION is 204", () => {
+  assert.equal(PROTOCOL_VERSION, 204);
   assert.equal(UNIVERSAL_QUESTION_TEXT_MIN_PROTOCOL, 202, "the settled question contract stays at its own boundary");
   assert.equal(runnerSupportsProtocol(200, "artifactSessionGuidance"), false);
   assert.equal(runnerSupportsProtocol(201, "artifactSessionGuidance"), true);
@@ -1107,8 +1107,8 @@ test("additive session-event kinds use explicit older-peer policies without muta
   assert.equal(sessionEventWireProjectionRequiredForProtocol(undefined), true);
   assert.equal(sessionEventWireProjectionRequiredForProtocol(86), true);
   assert.equal(sessionEventWireProjectionRequiredForProtocol(87), true);
-  assert.equal(sessionEventWireProjectionVariant(86), 4);
-  assert.equal(sessionEventWireProjectionVariant(87), 3);
+  assert.equal(sessionEventWireProjectionVariant(86), 5);
+  assert.equal(sessionEventWireProjectionVariant(87), 4);
 
   const hookDecision = {
     kind: "policy_hook_decision",
@@ -1123,8 +1123,8 @@ test("additive session-event kinds use explicit older-peer policies without muta
   assert.equal(projectSessionEventPayloadForProtocol(hookDecision, 130), hookDecision);
   assert.equal(sessionEventWireProjectionRequiredForProtocol(129), true);
   assert.equal(sessionEventWireProjectionRequiredForProtocol(130), true);
-  assert.equal(sessionEventWireProjectionVariant(129), 3);
-  assert.equal(sessionEventWireProjectionVariant(130), 2);
+  assert.equal(sessionEventWireProjectionVariant(129), 4);
+  assert.equal(sessionEventWireProjectionVariant(130), 3);
 
   const actionArm = {
     kind: "workflow_action_admission_armed",
@@ -1137,8 +1137,8 @@ test("additive session-event kinds use explicit older-peer policies without muta
   assert.equal(projectSessionEventPayloadForProtocol(actionArm, 151), actionArm);
   assert.equal(sessionEventWireProjectionRequiredForProtocol(150), true);
   assert.equal(sessionEventWireProjectionRequiredForProtocol(151), true);
-  assert.equal(sessionEventWireProjectionVariant(150), 2);
-  assert.equal(sessionEventWireProjectionVariant(151), 1);
+  assert.equal(sessionEventWireProjectionVariant(150), 3);
+  assert.equal(sessionEventWireProjectionVariant(151), 2);
 
   const accountSwitch = {
     kind: "provider_account_switched",
@@ -1152,20 +1152,28 @@ test("additive session-event kinds use explicit older-peer policies without muta
   assert.deepEqual(projectSessionEventPayloadForProtocol(automaticAccountSwitch, 172), accountSwitch);
   assert.equal(projectSessionEventPayloadForProtocol(automaticAccountSwitch, 173), automaticAccountSwitch);
   assert.equal(sessionEventWireProjectionRequiredForProtocol(170), true);
-  assert.equal(sessionEventWireProjectionRequiredForProtocol(171), false);
-  assert.equal(sessionEventWireProjectionVariant(170), 1);
-  assert.equal(sessionEventWireProjectionVariant(171), 0);
-  assert.equal(SESSION_EVENT_WIRE_PROJECTION_VARIANTS, 5);
+  assert.equal(sessionEventWireProjectionRequiredForProtocol(171), true);
+  assert.equal(sessionEventWireProjectionVariant(170), 2);
+  assert.equal(sessionEventWireProjectionVariant(171), 1);
+
+  // A provider compaction (#1224) is omitted for peers that predate it.
+  const compacted = { kind: "context_compacted", trigger: "manual", preTokens: 48_000 } as const;
+  assert.equal(projectSessionEventPayloadForProtocol(compacted, 203), null);
+  assert.equal(projectSessionEventPayloadForProtocol(compacted, 204), compacted);
+  assert.equal(sessionEventWireProjectionRequiredForProtocol(204), false);
+  assert.equal(sessionEventWireProjectionVariant(204), 0);
+  assert.equal(SESSION_EVENT_WIRE_PROJECTION_VARIANTS, 6);
 
   // The variant is the count of unmet policies, so it stays a dense index. The count is the
-  // projected-epoch radix, and the explicit offset fences the retired one-policy encoding.
-  assert.equal(sessionEventWireProjectionVariant(86), 4);
-  assert.equal(sessionEventWireProjectionVariant(undefined), 4);
-  assert.equal(sessionEventWireProjectionVariant(87), 3);
-  assert.equal(sessionEventWireProjectionVariant(130), 2);
-  assert.equal(sessionEventWireProjectionVariant(151), 1);
-  assert.equal(sessionEventWireProjectionVariant(171), 0);
-  assert.equal(SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET, 9);
+  // projected-epoch radix, and the explicit offset fences the retired encodings.
+  assert.equal(sessionEventWireProjectionVariant(86), 5);
+  assert.equal(sessionEventWireProjectionVariant(undefined), 5);
+  assert.equal(sessionEventWireProjectionVariant(87), 4);
+  assert.equal(sessionEventWireProjectionVariant(130), 3);
+  assert.equal(sessionEventWireProjectionVariant(151), 2);
+  assert.equal(sessionEventWireProjectionVariant(171), 1);
+  assert.equal(sessionEventWireProjectionVariant(204), 0);
+  assert.equal(SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET, 14);
 
   const required = { kind: "error", message: "still required" } as const;
   assert.equal(projectSessionEventPayloadForProtocol(required, 1), required,

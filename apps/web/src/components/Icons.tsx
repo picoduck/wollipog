@@ -52,6 +52,7 @@ import {
   GitBranchPlus as LucideGitBranchPlus,
   GitCommitVertical as LucideGitCommitVertical,
   GitFork as LucideGitFork,
+  FoldVertical as LucideFoldVertical,
   GitPullRequest as LucideGitPullRequest,
   Globe as LucideGlobe,
   Hash as LucideHash,
@@ -677,6 +678,10 @@ export function BranchIcon(props: IconProps) {
 
 export function ThreadForkIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideGitFork} {...props} />;
+}
+
+export function CompactedIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideFoldVertical} {...props} />;
 }
 
 export function EditInForkIcon(props: IconProps) {

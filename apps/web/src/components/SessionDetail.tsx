@@ -4455,9 +4455,16 @@ function SessionDetailLoaded({
       agentCaps?.slashCommands ?? [],
       providerCommandAttachmentPolicy,
     ),
-  }), [agentCaps?.slashCommands, canAnswerPendingQuestion, canStopTurn, composerAgentLabel, planSupported,
-    providerCommandAttachmentPolicy]);
-  const composerSkillSigil = useMemo(() => composerCommandsIncludeSkills(composerCommands), [composerCommands]);
+    unsupportedCommands: agentCaps?.unsupportedSlashCommands,
+  }), [agentCaps?.slashCommands, agentCaps?.unsupportedSlashCommands, canAnswerPendingQuestion, canStopTurn,
+    composerAgentLabel, planSupported, providerCommandAttachmentPolicy]);
+  // `$name` is Codex's spelling for a skill. Claude Code invokes its skills as `/name` (#1224), so
+  // there a `$` stays ordinary text and a skill's receipt shows its slash.
+  const dollarSkills = session.driver === "codex" || session.driver === "codex-app-server";
+  const composerSkillSigil = useMemo(
+    () => dollarSkills && composerCommandsIncludeSkills(composerCommands),
+    [composerCommands, dollarSkills],
+  );
   // A receipt outlives catalog rotation. The kind of every submission this view sent is known
   // exactly; otherwise a current skill command id, then a name only skills use, identifies a skill.
   const submissionIsSkillRef = useRef(new Map<string, boolean>());
@@ -4469,10 +4476,10 @@ function SessionDetailLoaded({
       .filter((command) => command.source === "skill")
       .map((command) => command.name.toLowerCase())
       .filter((name) => commands.every((command) => command.source === "skill" || command.name.toLowerCase() !== name)));
-    return (invocation: { submissionId: string; providerCommandId: string; commandName: string }) =>
-      submissionIsSkillRef.current.get(invocation.submissionId) ??
-      (skillIds.has(invocation.providerCommandId) || skillOnlyNames.has(invocation.commandName.toLowerCase()));
-  }, [agentCaps?.slashCommands]);
+    return (invocation: { submissionId: string; providerCommandId: string; commandName: string }) => dollarSkills &&
+      (submissionIsSkillRef.current.get(invocation.submissionId) ??
+        (skillIds.has(invocation.providerCommandId) || skillOnlyNames.has(invocation.commandName.toLowerCase())));
+  }, [agentCaps?.slashCommands, dollarSkills]);
   const slashTrigger = useMemo(
     () => composerSelection.start === composerSelection.end
       ? findComposerCommandTrigger(text, composerSelection.start, { skillSigil: composerSkillSigil })
@@ -4591,7 +4598,9 @@ function SessionDetailLoaded({
     slashDismissedFor !== slashDismissKey;
   const selectedSlashCommandId = retainActiveComposerCommandId(activeSlashCommandId, slashMatches);
   const selectedSlashCommand = slashMatches.find((command) => command.id === selectedSlashCommandId);
-  const composerCommandResolution = resolveComposerCommandInvocation(text, composerCommands);
+  const composerCommandResolution = resolveComposerCommandInvocation(text, composerCommands, {
+    skillSigil: composerSkillSigil,
+  });
   const commandPreservesAttachedImages = composerCommandResolution.kind === "command" &&
     durableCommandPreservesAttachments(composerCommandResolution.command, images.length > 0);
   // The composer's own slot entries (#2156), behind the session's conditions of the same severity.
@@ -4924,7 +4933,7 @@ function SessionDetailLoaded({
     // landing while the request is in flight would join the sent text or be lost to restoration.
     dictation.cancel();
     const outgoing = text.trim();
-    let invocation = resolveComposerCommandInvocation(outgoing, composerCommands);
+    let invocation = resolveComposerCommandInvocation(outgoing, composerCommands, { skillSigil: composerSkillSigil });
     if (invocation.kind === "command" && invocation.command.source === "app") {
       const args = invocation.arguments.trim().toLowerCase();
       const validArguments = invocation.command.name === "plan"
