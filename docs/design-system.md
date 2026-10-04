@@ -1371,10 +1371,12 @@ workflow step list is a different component and keeps a local name.
 - **Listbox** (`.menu.listbox`): the Select and SearchableCombobox list. It is the menu container
   around listbox options. `useAnchoredMenuStyle` anchors it to its field and sets its width (at
   least the trigger and at least 280px, §8.3) and its one height cap, `SELECT_MENU_MAX_HEIGHT_PX` in
-  `ChoiceControls.tsx`; the stylesheet sets no height. It stays anchored to its field on phones and
-  appears in place, without the menu's entrance motion. It is not portalled: it stays beside its
-  field and takes the field's font. Its placement is measured against its real containing block
-  (§2.10), so an ancestor container cannot move it.
+  `ChoiceControls.tsx`; the stylesheet sets no height. It stays anchored to its field on phones too,
+  never a bottom sheet (§9.2): it opens below the field, or above it when only that side has room,
+  and its width and height are clamped to the viewport. It appears in place, without the menu's
+  entrance motion. It is not portalled: it stays beside its field and takes the field's font. Its
+  placement is measured against its real containing block (§2.10), so an ancestor container cannot
+  move it.
   It replaced `.ui-select-list`.
 
 ### 9.2 Popover
@@ -1386,10 +1388,11 @@ context window). Rules for both menus and popovers:
 - `consumeEscape: true` by default (fixes Escape leaving the session).
 - Close on outside click and on ancestor scroll (or re-anchor); never float over a dialog header.
 - Only one floating layer open at a time; opening another closes the first.
-- On phones every menu and popover becomes a bottom sheet with a 48px title row and 44px items,
-  and the same 4px × 36px grabber as a dialog sheet (§7.5), so every bottom sheet reads alike.
-  The composer's / and @ pickers are the one exception (§21): they stay anchored above the
-  composer at every width (#2155).
+- On phones every other menu and popover becomes a bottom sheet with a 48px title row and 44px
+  items, and the same 4px × 36px grabber as a dialog sheet (§7.5), so every bottom sheet reads
+  alike. Two lists stay anchored at every width instead. The Select and SearchableCombobox list
+  (`.menu.listbox`, §9.1) opens beside its field, fitted to the viewport (#2547). The composer's /
+  and @ pickers (§21) open above the composer (#2155).
 
 ### 9.3 Tooltip
 
@@ -2040,7 +2043,8 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
 | App bar | 48px: ‹ Back (on detail routes) or nothing, title 16/600 (truncates), trailing icons (search, primary `+`, ⋯). Icons are 36px visual with 44px hit areas, as in the settled phone session header. No page description. |
 | Page header actions | Primary as `+` icon (accessible name "New Skill"), all others in ⋯ sheet. |
 | Master-detail | Two routes (§6.2). |
-| Dialogs, menus, popovers, selects | Bottom sheets (§7.5, §9.2), each with the 36px grabber. |
+| Dialogs, menus, popovers | Bottom sheets (§7.5, §9.2), each with the 36px grabber. |
+| Selects and comboboxes | An anchored list beside the field, fitted to the viewport, not a sheet (§9.1). |
 | Tables | Rows (§14). |
 | Toolbars and filters | One row: search field + a "Filters" button that opens a sheet with the filters and a result count. Native selects that size to their longest option are removed. |
 | Tabs | Scroll with fade and active-into-view; more than 4 become a view picker. |
@@ -2500,7 +2504,8 @@ These trade-offs are deliberate. Keep them in mind when a screen seems to argue 
 9. **Composer pickers on phones.** The / and @ pickers (`ComposerListbox`, #2155) open above the
    composer on phones too, with 44px rows and no footer keys, instead of becoming a bottom sheet
    (§9.2). A sheet would cover the caret and compete with the software keyboard while the person is
-   still typing the query the picker filters on.
+   still typing the query the picker filters on. The Select and SearchableCombobox list is the
+   other list that stays anchored on phones (§9.1).
 10. **Disabled composer bar controls.** A ghost control rests in `--text-dim`, and §3.1's disabled
     `--text-faint` is only about 1.2:1 from it, so on a stopped or failed session the bar's +,
     shield, model chip and mic read as enabled. In the composer bar only, a disabled ghost
