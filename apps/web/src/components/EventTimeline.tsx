@@ -369,13 +369,14 @@ export function summarizeTimelineTurns(
       (item.kind === "checkpoint" && segment.fileTurn !== undefined && item.turn !== segment.fileTurn)
     );
     if (startsTurn(item) && item.kind === "user_message") {
+      const usage = item.continuationUsage ? mergeTurnUsage(item.turnUsage, item.continuationUsage) : item.turnUsage;
       segment = {
         ...emptySegment(item.id, true),
         prompt: item,
         ...(item.turn != null ? { turn: item.turn } : {}),
         ...(Number.isFinite(item.createdAt) ? { startedAt: item.createdAt } : {}),
         ...(item.durationMs != null ? { durationMs: item.durationMs } : {}),
-        ...(item.turnUsage ? { usage: item.turnUsage } : {}),
+        ...(usage ? { usage } : {}),
         usageReported: item.lastUsageAt != null || item.durationMs != null,
       };
       segments.push(segment);

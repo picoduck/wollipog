@@ -1514,6 +1514,29 @@ test("a continuation's tokens and cost land on its own footer, not the turn befo
       [[false, 1_000, 3_000], [true, 4_000, order === "before" ? 13_000 : 13_500]], `stopped continuation, report ${order}`);
     assert.deepEqual(footerUsage(stopped), ["1.2k tok · $0.01", "4.8k tok · $0.05"], `stopped continuation footer, report ${order}`);
   }
+
+  // A refusal or provider error records neither a conversation checkpoint nor a stop, so such a
+  // continuation without a file checkpoint has no footer of its own: the turn before it keeps its
+  // counters rather than dropping them, before and after the next prompt.
+  const refused = [
+    ...prompt({ inputTokens: 1_000, outputTokens: 200, costUsd: 0.01 }),
+    resumed, finished, continuationUsage,
+  ];
+  const next = [
+    event(20, 20_000, { kind: "user_message", text: "Check the logs" }),
+    event(21, 22_000, { kind: "agent_message", text: "The logs are clean.", final: true }),
+    event(22, 23_000, { kind: "token_usage", inputTokens: 500, outputTokens: 100, costUsd: 0.02 }),
+    event(23, 23_001, { kind: "conversation_checkpoint", turn: 2 }),
+  ];
+  assert.deepEqual(footerUsage(deriveTimeline(refused)), ["6.0k tok · $0.06"], "an unanchored continuation's counters are held");
+  const afterRefusal = deriveTimeline([...refused, ...next]);
+  assert.deepEqual(footerUsage(afterRefusal), ["6.0k tok · $0.06", "600 tok · $0.02"], "the next prompt does not drop them");
+  const totals = summarizeTimelineTurns(afterRefusal, new Map()).segments.reduce(
+    (sum, segment) => [sum[0]! + (segment.usage?.inputTokens ?? 0) + (segment.usage?.outputTokens ?? 0), sum[1]! + (segment.usage?.costUsd ?? 0)],
+    [0, 0],
+  );
+  assert.equal(totals[0], 6_600);
+  assert.ok(Math.abs(totals[1]! - 0.08) < 1e-9, `summed cost ${totals[1]}`);
 });
 
 test("late subagent output stays with its parent tool's turn and never opens another", () => {
