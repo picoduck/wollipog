@@ -6575,7 +6575,10 @@ textarea,
     inset: calc(var(--space-1) * -1) calc(var(--space-1) * -1) calc(var(--space-5) * -1) calc(var(--space-5) * -1);
   }
   /* A chip's is centred on its 36px, so the chip keeps 4px above and below for it. */
-  .composer-attachments > .ref-chip { margin-block: calc((44px - var(--control-h-sm)) / 2); }
+  .composer-attachments > .ref-chip {
+    margin-top: calc((44px - var(--control-h-sm)) / 2);
+    margin-bottom: calc((44px - var(--control-h-sm)) / 2);
+  }
 }
 /* A file, line, diff or folder reference: a control, so control radius, not a pill (§2.5). */
 .ref-chip {
