@@ -32,7 +32,14 @@ for (const viewport of [
     await expect(group).toContainText("Standard response speed.");
     await expect(group).toContainText("Faster responses that use more ChatGPT credits.");
     await expect(group).not.toContainText("Applies to the next turn.");
-    await expect(page.getByRole("dialog", { name: "Model Settings" })).toContainText("Changes apply from the next turn.");
+    const dialog = page.getByRole("dialog", { name: "Model Settings" });
+    await expect(dialog).toContainText("Changes apply from the next turn.");
+    // A column with an icon keeps the slot on every row, so the model lines up with the tiers (§9.1).
+    const [modelText, tierText] = await Promise.all([
+      dialog.getByRole("radiogroup", { name: "Model" }).locator(".menu-text").first().boundingBox(),
+      group.locator(".menu-text").first().boundingBox(),
+    ]);
+    expect(Math.abs(modelText!.x - tierText!.x)).toBeLessThanOrEqual(1);
     await page.screenshot({ path: `${SHOT}/${viewport.name}-after-menu.png` });
   });
 }

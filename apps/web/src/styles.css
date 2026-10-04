@@ -2626,7 +2626,8 @@ button.status { cursor: pointer; }
   width: var(--icon);
   height: var(--icon);
 }
-.menu:has(.menu-icon) .menu-item:not(:has(> .menu-icon))::before {
+.menu:has(.menu-icon) .menu-item:not(:has(> .menu-icon))::before,
+.model-settings-column:has(.menu-icon) .menu-item:not(:has(> .menu-icon))::before {
   content: "";
   flex: none;
   width: var(--icon);
