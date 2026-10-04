@@ -251,6 +251,7 @@ import {
   replaceLeadingCommandToken,
   stepComposerCommandId,
   suggestComposerCommands,
+  unlistedCommandNames,
   type ComposerCommand,
   type ComposerCommandResolution,
   type ComposerCommandResolutionOptions,
@@ -4508,9 +4509,12 @@ function SessionDetailLoaded({
   // Whether an unknown slash token is refused rather than sent as text (#2176): always, except on a
   // Claude Code runner whose catalog can't yet name the built-ins its plain-text fallback runs.
   const rejectUnknownCommands = composerRejectsUnknownCommands(session.driver, agentCaps?.slashCommands ?? []);
+  // A command the agent advertises under a name the registry can't list still runs as text.
+  const unlistedNames = useMemo(() => unlistedCommandNames(agentCaps?.slashCommands ?? []), [agentCaps?.slashCommands]);
   const composerCommandResolutionOptions: ComposerCommandResolutionOptions = {
     unknownCommands: rejectUnknownCommands ? "reject" : "plaintext",
     skillSigil: composerSkillSigil,
+    unlistedNames,
   };
   // A receipt outlives catalog rotation. The kind of every submission this view sent is known
   // exactly; otherwise a current skill command id, then a name only skills use, identifies a skill.
@@ -4666,8 +4670,9 @@ function SessionDetailLoaded({
     () => resolveComposerCommandInvocation(text, composerCommands, {
       unknownCommands: rejectUnknownCommands ? "reject" : "plaintext",
       skillSigil: composerSkillSigil,
+      unlistedNames,
     }),
-    [composerCommands, composerSkillSigil, rejectUnknownCommands, text],
+    [composerCommands, composerSkillSigil, rejectUnknownCommands, text, unlistedNames],
   );
   const commandPreservesAttachedImages = composerCommandResolution.kind === "command" &&
     durableCommandPreservesAttachments(composerCommandResolution.command, images.length > 0);

@@ -120,6 +120,10 @@ export interface ComposerCommandResolutionOptions {
    * fallback that forwards it as ordinary text, for a session whose catalog can't name every
    * command its agent runs. */
   unknownCommands?: "reject" | "plaintext";
+  /** Lowercase names the agent advertises that the registry can't list (see
+   * `unlistedCommandNames`). A token naming one is sent as text, as before #2176, rather than
+   * refused as unknown. */
+  unlistedNames?: ReadonlySet<string>;
 }
 
 export type ComposerCommandMatchKind = "none" | "exact" | "prefix" | "boundary" | "substring" | "fuzzy";
@@ -166,6 +170,17 @@ function advertisedName(value: string): { name: string; comparisonName: string }
   return /^[\p{L}\p{N}_][\p{L}\p{N}_.:-]*$/u.test(name)
     ? { name, comparisonName: name.toLowerCase() }
     : null;
+}
+
+/** The names an agent advertises that the registry's name grammar can't list, lowercased. They are
+ * real commands, so the unknown-command rule must not refuse them. */
+export function unlistedCommandNames(commands: readonly Pick<AgentSlashCommand, "name">[]): Set<string> {
+  const names = new Set<string>();
+  for (const command of commands) {
+    const name = command.name.trim().replace(/^\//, "");
+    if (name && !/\s/u.test(name) && !advertisedName(name)) names.add(name.toLowerCase());
+  }
+  return names;
 }
 
 function optionalText(value: string | undefined): string | undefined {
@@ -574,7 +589,7 @@ export function resolveComposerCommandInvocation(
         (right.providerSource ? PROVIDER_INVOCATION_PRECEDENCE[right.providerSource] : 4) ||
       ordinalCompare(left.id, right.id))[0] : undefined);
   if (!command) {
-    return options.unknownCommands === "plaintext"
+    return options.unknownCommands === "plaintext" || options.unlistedNames?.has(alias)
       ? { kind: "plaintext", text }
       : { kind: "unknown", token: `/${match[1]!}`, suggestions: suggestComposerCommands(match[1]!, commands) };
   }

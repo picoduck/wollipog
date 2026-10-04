@@ -20,6 +20,7 @@ import {
   retainActiveComposerCommandId,
   stepComposerCommandId,
   suggestComposerCommands,
+  unlistedCommandNames,
   type ComposerCommand,
   type ComposerCommandContext,
   type ProviderComposerCommand,
@@ -858,6 +859,23 @@ test("close matches are available commands within one edit per three letters, cl
   assert.equal(commandEditDistance("reveiw", "review"), 1);
   assert.equal(commandEditDistance("compat", "compact"), 1);
   assert.equal(commandEditDistance("", "abc"), 3);
+});
+
+test("a command the agent advertises under a name the registry can't list is still sent as text", () => {
+  const advertised = [
+    { name: "compact", source: "builtin" as const },
+    { name: "mcp__docs__summarize@latest", source: "mcp" as const },
+  ];
+  const commands = registry(mapProviderComposerCommands(advertised));
+  assert.equal(commands.some((command) => command.name.includes("@")), false, "the registry can't list it");
+  const unlistedNames = unlistedCommandNames(advertised);
+  assert.deepEqual([...unlistedNames], ["mcp__docs__summarize@latest"]);
+  assert.deepEqual(resolveComposerCommandInvocation("/mcp__docs__summarize@latest now", commands, { unlistedNames }), {
+    kind: "plaintext",
+    text: "/mcp__docs__summarize@latest now",
+  });
+  assert.equal(resolveComposerCommandInvocation("/mcp__docs__summarize@latset", commands, { unlistedNames }).kind,
+    "unknown", "only the exact advertised name is spared");
 });
 
 test("a namespaced command is a close match for its own last part (#1224's plugin skills)", () => {
