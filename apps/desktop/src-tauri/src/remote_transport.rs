@@ -1,11 +1,17 @@
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::num::NonZeroU64;
+use std::pin::Pin;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, LazyLock, Mutex};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
+use http_body::{Frame, SizeHint};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION};
 use reqwest::{Client, Method, StatusCode};
 use secrecy::{ExposeSecret, SecretString};
@@ -14,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use tauri::ipc::{Channel, InvokeBody, Request, Response};
 use tauri::State;
 use tokio::net::{TcpSocket, TcpStream};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::{Message, WebSocketConfig};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
@@ -70,19 +76,111 @@ struct RuntimeLease {
 }
 
 impl RuntimeLease {
-    /// A request on this lease with its route's budget (#2577).
-    fn request(&self, method: Method, path: &str, url: Url) -> reqwest::RequestBuilder {
-        let budget = native_request_budget(&method, path);
-        let client = if budget.stall_bounded {
+    /// Sends a request on this lease with its route's budget (#2577), extended for its body
+    /// (#2615), and returns the response once its head arrives, with the stall bound its body must
+    /// still be read under, if the client does not enforce it.
+    async fn send(
+        &self,
+        method: Method,
+        path: &str,
+        url: Url,
+        headers: HeaderMap,
+        body: Vec<u8>,
+    ) -> Result<(reqwest::Response, Option<Duration>), NativeRequestError> {
+        let started = tokio::time::Instant::now();
+        let budget = native_request_budget(&method, path, body.len());
+        // The client's read timeout runs from the start of a request until its response head, so it
+        // would cut off an upload still within the total. A body that extends the budget is sent
+        // without it, and its stall bound is enforced here instead.
+        let upload_stall_bounded = budget.stall_bounded && !budget.upload.is_zero();
+        let client = if budget.stall_bounded && !upload_stall_bounded {
             &self.client
         } else {
             &self.long_wait_client
         };
-        let request = client.request(method, url);
-        match budget.total {
-            Some(total) => request.timeout(total),
-            None => request,
+        let mut request = client.request(method, url).headers(headers);
+        if let Some(total) = budget.total {
+            request = request.timeout(total);
         }
+        if !upload_stall_bounded {
+            return Ok((request.body(body).send().await?, None));
+        }
+        let (handed_off, body_handed_off) = oneshot::channel();
+        let response = request
+            .body(reqwest::Body::wrap(UploadBody {
+                remaining: body.into(),
+                handed_off: Some(handed_off),
+            }))
+            .send();
+        // A link at the upload floor has delivered the body by `started + budget.upload`, even
+        // though the client hands its last bytes to the socket buffers earlier. The response's
+        // usual stall bound counts from then, or from the handoff when a slower link makes that
+        // later, so it never cuts off an upload the floor allows for.
+        let stalled = async {
+            let _ = body_handed_off.await;
+            let arrived = (started + budget.upload).max(tokio::time::Instant::now());
+            tokio::time::sleep_until(arrived + DEFAULT_REMOTE_HTTP_READ_TIMEOUT).await;
+        };
+        tokio::select! {
+            response = response => Ok((response?, Some(DEFAULT_REMOTE_HTTP_READ_TIMEOUT))),
+            () = stalled => Err(NativeRequestError::Stalled),
+        }
+    }
+}
+
+/// Why a native request failed before its response head arrived. Callers report every failure
+/// alike, without the client's detail.
+#[derive(Debug)]
+enum NativeRequestError {
+    /// The response stalled past the bound this transport enforces itself.
+    Stalled,
+    /// The client failed the request, including on its own timeouts.
+    Client,
+}
+
+impl From<reqwest::Error> for NativeRequestError {
+    fn from(_: reqwest::Error) -> Self {
+        Self::Client
+    }
+}
+
+/// A request body the client takes in chunks of this size, so its last chunk is taken only when
+/// little of the body remains to send.
+const UPLOAD_CHUNK_BYTES: usize = 16 * 1024;
+
+/// A request body that reports when the client has taken the last of it (#2615).
+struct UploadBody {
+    remaining: Bytes,
+    handed_off: Option<oneshot::Sender<()>>,
+}
+
+impl http_body::Body for UploadBody {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
+        if self.remaining.is_empty() {
+            return Poll::Ready(None);
+        }
+        let length = self.remaining.len().min(UPLOAD_CHUNK_BYTES);
+        let chunk = self.remaining.split_to(length);
+        if self.remaining.is_empty() {
+            if let Some(handed_off) = self.handed_off.take() {
+                let _ = handed_off.send(());
+            }
+        }
+        Poll::Ready(Some(Ok(Frame::data(chunk))))
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.remaining.is_empty()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        SizeHint::with_exact(self.remaining.len() as u64)
     }
 }
 
@@ -91,10 +189,12 @@ impl RuntimeLease {
 const API_REQUEST_BUDGETS: &str = include_str!("../../../web/src/api-request-budgets.json");
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct ApiRequestBudgetTable {
     #[serde(rename = "$comment")]
     _comment: IgnoredAny,
+    /// The browser's `API_UPLOAD_FLOOR_BYTES_PER_SECOND`.
+    upload_floor_bytes_per_second: NonZeroU64,
     routes: Vec<ApiRequestBudgetRoute>,
 }
 
@@ -122,11 +222,16 @@ enum ApiRequestBudget {
     UnboundedDownload,
 }
 
-static API_REQUEST_BUDGET_ROUTES: LazyLock<Vec<ApiRequestBudgetRoute>> = LazyLock::new(|| {
+static API_REQUEST_BUDGET_TABLE: LazyLock<ApiRequestBudgetTable> = LazyLock::new(|| {
     serde_json::from_str::<ApiRequestBudgetTable>(API_REQUEST_BUDGETS)
         .expect("the shared API request budget table is valid")
-        .routes
 });
+
+/// How long a body of `bytes` may take to send: its size at the shared upload floor, in whole
+/// seconds like the browser's deadline, so a body under one second's worth adds nothing.
+fn upload_allowance(bytes: usize) -> Duration {
+    Duration::from_secs(bytes as u64 / API_REQUEST_BUDGET_TABLE.upload_floor_bytes_per_second)
+}
 
 /// Whether `path` matches `pattern`, where `:id` is one non-empty path segment.
 fn route_matches(pattern: &str, path: &str) -> bool {
@@ -145,7 +250,8 @@ fn route_matches(pattern: &str, path: &str) -> bool {
 /// The shared table's budget for a request, or `None` for the default.
 fn api_request_budget(method: &Method, path: &str) -> Option<ApiRequestBudget> {
     let (path, query) = path.split_once('?').unwrap_or((path, ""));
-    API_REQUEST_BUDGET_ROUTES
+    API_REQUEST_BUDGET_TABLE
+        .routes
         .iter()
         .find(|entry| {
             entry.method == method.as_str()
@@ -158,14 +264,19 @@ fn api_request_budget(method: &Method, path: &str) -> Option<ApiRequestBudget> {
 }
 
 /// What the desktop allows one request: whether a read may stall for at most
-/// `DEFAULT_REMOTE_HTTP_READ_TIMEOUT`, and its total deadline, if any.
+/// `DEFAULT_REMOTE_HTTP_READ_TIMEOUT`, its total deadline, if any, and how much of that total its
+/// body may take to send.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct NativeRequestBudget {
     stall_bounded: bool,
     total: Option<Duration>,
+    upload: Duration,
 }
 
-fn native_request_budget(method: &Method, path: &str) -> NativeRequestBudget {
+/// A request's budget: its route's, with the total extended by its body's upload allowance as the
+/// browser extends its deadline (#2615).
+fn native_request_budget(method: &Method, path: &str, body_bytes: usize) -> NativeRequestBudget {
+    let upload = upload_allowance(body_bytes);
     let (stall_bounded, total) = match api_request_budget(method, path) {
         None => (true, Some(DEFAULT_REMOTE_HTTP_TOTAL_TIMEOUT)),
         // The server sends nothing until these answer, so a read budget could only cut them short.
@@ -183,7 +294,8 @@ fn native_request_budget(method: &Method, path: &str) -> NativeRequestBudget {
     };
     NativeRequestBudget {
         stall_bounded,
-        total,
+        total: total.map(|total| total + upload),
+        upload,
     }
 }
 
@@ -861,7 +973,13 @@ async fn connect_websocket(
         .map_err(|_| NativeWebSocketError::Connection)?
 }
 
-async fn bounded_response(response: reqwest::Response, limit: usize) -> Result<Vec<u8>, String> {
+/// Reads a whole response body of at most `limit` bytes, failing when it stalls for `stall_bound`,
+/// for a response whose client does not bound its stalls itself.
+async fn bounded_response(
+    response: reqwest::Response,
+    limit: usize,
+    stall_bound: Option<Duration>,
+) -> Result<Vec<u8>, String> {
     if response
         .content_length()
         .is_some_and(|length| length > limit as u64)
@@ -870,7 +988,14 @@ async fn bounded_response(response: reqwest::Response, limit: usize) -> Result<V
     }
     let mut bytes = Vec::new();
     let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let chunk = match stall_bound {
+            Some(bound) => tokio::time::timeout(bound, stream.next())
+                .await
+                .map_err(|_| "The remote instance response was interrupted.".to_string())?,
+            None => stream.next().await,
+        };
+        let Some(chunk) = chunk else { break };
         let chunk =
             chunk.map_err(|_| "The remote instance response was interrupted.".to_string())?;
         let next = bytes
@@ -902,7 +1027,7 @@ async fn probe_request(
         .await
         .map_err(|_| "Could not connect to the remote Wollipog instance.".to_string())?;
     let status = response.status();
-    let body = bounded_response(response, MAX_PROBE_BODY_BYTES).await?;
+    let body = bounded_response(response, MAX_PROBE_BODY_BYTES, None).await?;
     Ok((status, body))
 }
 
@@ -1094,12 +1219,8 @@ pub(crate) async fn remote_http_request(
     let (request_key, request_nonce, mut request_cancel) =
         transport.reserve_request(&meta.runtime_key, &meta.request_id)?;
     let result = async {
-        let request = lease
-            .request(method, &meta.path, url)
-            .headers(headers)
-            .body(body);
-        let response = tokio::select! {
-            result = request.send() => result.map_err(|_| "The remote instance request failed.".to_string())?,
+        let (response, stall_bound) = tokio::select! {
+            result = lease.send(method, &meta.path, url, headers, body) => result.map_err(|_| "The remote instance request failed.".to_string())?,
             _ = wait_for_cancel(&mut cancel) => return Err("The remote instance request was canceled.".into()),
             _ = wait_for_cancel(&mut request_cancel) => return Err("The remote instance request was canceled.".into()),
         };
@@ -1118,7 +1239,7 @@ pub(crate) async fn remote_http_request(
             })
             .collect::<Vec<_>>();
         let body = tokio::select! {
-            result = bounded_response(response, MAX_RESPONSE_BODY_BYTES) => result?,
+            result = bounded_response(response, MAX_RESPONSE_BODY_BYTES, stall_bound) => result?,
             _ = wait_for_cancel(&mut cancel) => return Err("The remote instance request was canceled.".into()),
             _ = wait_for_cancel(&mut request_cancel) => return Err("The remote instance request was canceled.".into()),
         };
@@ -1401,18 +1522,19 @@ mod tests {
     }
 
     fn budget(method: Method, path: &str) -> NativeRequestBudget {
-        native_request_budget(&method, path)
+        native_request_budget(&method, path, 0)
     }
 
     const DEFAULT_BUDGET: NativeRequestBudget = NativeRequestBudget {
         stall_bounded: true,
         total: Some(DEFAULT_REMOTE_HTTP_TOTAL_TIMEOUT),
+        upload: Duration::ZERO,
     };
 
     #[test]
     fn every_shared_route_gets_a_desktop_budget_past_the_default() {
-        assert!(!API_REQUEST_BUDGET_ROUTES.is_empty());
-        for entry in API_REQUEST_BUDGET_ROUTES.iter() {
+        assert!(!API_REQUEST_BUDGET_TABLE.routes.is_empty());
+        for entry in API_REQUEST_BUDGET_TABLE.routes.iter() {
             let method = method(&entry.method).unwrap();
             let path = entry.route.replace(":id", "id-1");
             assert_eq!(
@@ -1421,7 +1543,7 @@ mod tests {
                 "{} {path}",
                 entry.method
             );
-            let native = native_request_budget(&method, &path);
+            let native = native_request_budget(&method, &path, 0);
             assert_ne!(native, DEFAULT_BUDGET, "{} {path}", entry.method);
             assert!(
                 native
@@ -1440,6 +1562,7 @@ mod tests {
             NativeRequestBudget {
                 stall_bounded: false,
                 total: Some(SESSION_RETITLE_REMOTE_HTTP_TIMEOUT),
+                upload: Duration::ZERO,
             }
         );
         assert!(SESSION_RETITLE_REMOTE_HTTP_TIMEOUT > MAX_SESSION_NAMING_REQUEST_DURATION);
@@ -1503,6 +1626,7 @@ mod tests {
                 NativeRequestBudget {
                     stall_bounded: false,
                     total: None,
+                    upload: Duration::ZERO,
                 },
                 "{method} {path} is bounded in minutes or not at all"
             );
@@ -1516,6 +1640,7 @@ mod tests {
                 NativeRequestBudget {
                     stall_bounded: true,
                     total: None,
+                    upload: Duration::ZERO,
                 },
                 "{method} {path} keeps its stall bound without a total"
             );
@@ -1551,12 +1676,62 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_request_body_extends_its_total_by_its_size_at_the_shared_upload_floor() {
+        assert_eq!(
+            API_REQUEST_BUDGET_TABLE.upload_floor_bytes_per_second.get(),
+            64 * 1024,
+            "the browser's API_UPLOAD_FLOOR_BYTES_PER_SECOND, read from the same table"
+        );
+        let prompt = "/api/sessions/s_1/prompt";
+        let images = "/api/sessions/s_1/prompt-images";
+        for bytes in [0, br#"{"text":"hi"}"#.len(), 64 * 1024 - 1] {
+            assert_eq!(
+                native_request_budget(&Method::POST, prompt, bytes),
+                DEFAULT_BUDGET,
+                "a {bytes}-byte body keeps the route's exact budget"
+            );
+        }
+        assert_eq!(
+            native_request_budget(&Method::POST, images, 8 * 1024 * 1024),
+            NativeRequestBudget {
+                stall_bounded: true,
+                total: Some(DEFAULT_REMOTE_HTTP_TOTAL_TIMEOUT + Duration::from_secs(128)),
+                upload: Duration::from_secs(128),
+            },
+            "an 8 MiB image gets 128s more at 64 KiB/s"
+        );
+        assert_eq!(
+            native_request_budget(&Method::POST, images, MAX_REQUEST_BODY_BYTES).total,
+            Some(DEFAULT_REMOTE_HTTP_TOTAL_TIMEOUT + Duration::from_secs(256))
+        );
+        assert_eq!(
+            native_request_budget(&Method::POST, "/api/sessions/s_1/git", 2 * 64 * 1024),
+            NativeRequestBudget {
+                stall_bounded: false,
+                total: Some(Duration::from_secs(90 + 2)),
+                upload: Duration::from_secs(2),
+            },
+            "a route past the default extends its own total"
+        );
+        assert_eq!(
+            native_request_budget(&Method::POST, "/api/sessions/s_1/fork", 8 * 1024 * 1024).total,
+            None,
+            "a route without a total stays without one"
+        );
+    }
+
     /// How the paused-clock test server answers one connection.
     enum SlowReply {
         /// Says nothing until the delay has passed, then answers in full.
         After(Duration),
         /// Answers at once, then sends its body one byte per interval.
         Trickle { every: Duration, bytes: usize },
+        /// Reads the request body at `per_second` bytes a second, then replies with `then`.
+        Upload {
+            per_second: usize,
+            then: Box<SlowReply>,
+        },
     }
 
     /// Serves one reply per connection, in the order the connections arrive, each on its own task
@@ -1579,7 +1754,39 @@ mod tests {
                             break;
                         }
                     }
+                    let mut reply = reply;
+                    if let SlowReply::Upload { per_second, then } = reply {
+                        let head_end = request
+                            .windows(4)
+                            .position(|window| window == b"\r\n\r\n")
+                            .unwrap()
+                            + 4;
+                        let length: usize = String::from_utf8_lossy(&request[..head_end])
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse().unwrap())
+                            })
+                            .unwrap();
+                        let mut received = request.len() - head_end;
+                        let mut buffer = vec![0_u8; per_second];
+                        while received < length {
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            let mut second = per_second.min(length - received);
+                            while second > 0 {
+                                let count = stream.read(&mut buffer[..second]).await.unwrap();
+                                assert!(count > 0, "the request body ended early");
+                                second -= count;
+                                received += count;
+                            }
+                        }
+                        reply = *then;
+                    }
                     match reply {
+                        SlowReply::Upload { .. } => {
+                            unreachable!("an upload replies once it is read")
+                        }
                         SlowReply::After(delay) => {
                             tokio::time::sleep(delay).await;
                             let _ = stream
@@ -1605,33 +1812,38 @@ mod tests {
         origin
     }
 
-    /// Sends one request on `lease` and reads its whole body, returning how long that took on the
-    /// paused clock and whether it timed out.
+    /// Sends one request on `lease` and reads its whole body as the command does, returning how
+    /// long that took on the paused clock and the body or the failure.
     async fn timed_request(
         lease: &RuntimeLease,
         origin: &str,
         method: Method,
         path: &str,
-    ) -> (Duration, Result<Vec<u8>, reqwest::Error>) {
+        body: Vec<u8>,
+    ) -> (Duration, Result<Vec<u8>, String>) {
         let started = tokio::time::Instant::now();
         let url = remote_url(origin, path).unwrap();
         let result = async {
-            let response = lease.request(method, path, url).send().await?;
-            Ok(response.bytes().await?.to_vec())
+            let (response, stall_bound) = lease
+                .send(method, path, url, HeaderMap::new(), body)
+                .await
+                .map_err(|error| format!("{error:?}"))?;
+            bounded_response(response, MAX_RESPONSE_BODY_BYTES, stall_bound).await
         }
         .await;
         (started.elapsed(), result)
     }
 
+    /// Asserts that a request failed at its `budget` on the paused clock. The test servers keep
+    /// every connection open, so only a timeout can end a request then.
     fn assert_timed_out_at(
-        (elapsed, result): (Duration, Result<Vec<u8>, reqwest::Error>),
+        (elapsed, result): (Duration, Result<Vec<u8>, String>),
         budget: Duration,
     ) {
         let error = result.expect_err("the request should have timed out");
-        assert!(error.is_timeout(), "{error:?}");
         assert!(
             elapsed >= budget && elapsed < budget + Duration::from_secs(1),
-            "timed out after {elapsed:?}, not at its {budget:?} budget: {error:?}"
+            "timed out after {elapsed:?}, not at its {budget:?} budget: {error}"
         );
     }
 
@@ -1665,17 +1877,23 @@ mod tests {
 
         // An ordinary route keeps its 20s read budget and, while bytes still arrive, its 60s total.
         assert_timed_out_at(
-            timed_request(&lease, &origin, Method::GET, "/api/sessions").await,
+            timed_request(&lease, &origin, Method::GET, "/api/sessions", Vec::new()).await,
             DEFAULT_REMOTE_HTTP_READ_TIMEOUT,
         );
         assert_timed_out_at(
-            timed_request(&lease, &origin, Method::GET, "/api/sessions").await,
+            timed_request(&lease, &origin, Method::GET, "/api/sessions", Vec::new()).await,
             DEFAULT_REMOTE_HTTP_TOTAL_TIMEOUT,
         );
 
         // A fork waits on the runner for up to 65 minutes without sending a byte.
-        let (elapsed, result) =
-            timed_request(&lease, &origin, Method::POST, "/api/sessions/s_1/fork").await;
+        let (elapsed, result) = timed_request(
+            &lease,
+            &origin,
+            Method::POST,
+            "/api/sessions/s_1/fork",
+            Vec::new(),
+        )
+        .await;
         assert_eq!(result.unwrap(), b"{}");
         assert!(elapsed >= Duration::from_secs(11 * 60));
 
@@ -1685,6 +1903,7 @@ mod tests {
             &origin,
             Method::POST,
             "/api/sessions/s_1/authentication/account",
+            Vec::new(),
         )
         .await;
         assert_eq!(result.unwrap(), b"{}");
@@ -1692,23 +1911,87 @@ mod tests {
 
         // Worktree selection waits out its 150s server bound and fails only past its own 180s.
         let select = "/api/sessions/s_1/worktrees/select";
-        let (elapsed, result) = timed_request(&lease, &origin, Method::POST, select).await;
+        let (elapsed, result) =
+            timed_request(&lease, &origin, Method::POST, select, Vec::new()).await;
         assert_eq!(result.unwrap(), b"{}");
         assert!(elapsed >= Duration::from_secs(170));
         assert_timed_out_at(
-            timed_request(&lease, &origin, Method::POST, select).await,
+            timed_request(&lease, &origin, Method::POST, select, Vec::new()).await,
             Duration::from_secs(180),
         );
 
         // An export downloads past the default total while bytes keep arriving, but still fails
         // when its server stalls.
         let export = "/api/sessions/s_1/export?format=json";
-        let (elapsed, result) = timed_request(&lease, &origin, Method::GET, export).await;
+        let (elapsed, result) =
+            timed_request(&lease, &origin, Method::GET, export, Vec::new()).await;
         assert_eq!(result.unwrap(), b"xxxxxxxxx");
         assert!(elapsed >= Duration::from_secs(90));
         assert_timed_out_at(
-            timed_request(&lease, &origin, Method::GET, export).await,
+            timed_request(&lease, &origin, Method::GET, export, Vec::new()).await,
             DEFAULT_REMOTE_HTTP_READ_TIMEOUT,
+        );
+        ticker.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_large_body_uploads_at_the_floor_past_the_budgets_a_small_body_keeps() {
+        // See long_routes_outlast_the_budgets_that_still_bound_ordinary_routes.
+        let ticker = tokio::spawn(async {
+            loop {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+        let floor = 64 * 1024;
+        let upload = |then| SlowReply::Upload {
+            per_second: floor,
+            then: Box::new(then),
+        };
+        let origin = serve_slowly(vec![
+            SlowReply::After(Duration::from_secs(61)),
+            SlowReply::Trickle {
+                every: Duration::from_secs(10),
+                bytes: 7,
+            },
+            upload(SlowReply::After(Duration::ZERO)),
+            upload(SlowReply::After(Duration::from_secs(11 * 60))),
+            upload(SlowReply::Trickle {
+                every: Duration::from_secs(21),
+                bytes: 2,
+            }),
+        ])
+        .await;
+        let lease = test_lease(&Uuid::new_v4().to_string(), &origin);
+        let prompt = "/api/sessions/s_1/prompt";
+        let images = "/api/sessions/s_1/prompt-images";
+        let image = || vec![0_u8; 8 * 1024 * 1024];
+        let upload_time = Duration::from_secs(128);
+
+        // A small JSON body keeps the exact 20s read budget and 60s total.
+        let json = || br#"{"text":"hi"}"#.to_vec();
+        assert_timed_out_at(
+            timed_request(&lease, &origin, Method::POST, prompt, json()).await,
+            DEFAULT_REMOTE_HTTP_READ_TIMEOUT,
+        );
+        assert_timed_out_at(
+            timed_request(&lease, &origin, Method::POST, prompt, json()).await,
+            DEFAULT_REMOTE_HTTP_TOTAL_TIMEOUT,
+        );
+
+        // An 8 MiB image sent at the upload floor takes 128s, past both of them, and succeeds.
+        let (elapsed, result) = timed_request(&lease, &origin, Method::POST, images, image()).await;
+        assert_eq!(result.unwrap(), b"{}");
+        assert!(elapsed >= upload_time, "uploaded in {elapsed:?}");
+
+        // Once the body has had its time to arrive, a response that stalls fails on the usual
+        // bound, well inside the 188s total, whether its head or its body stalls.
+        assert_timed_out_at(
+            timed_request(&lease, &origin, Method::POST, images, image()).await,
+            upload_time + DEFAULT_REMOTE_HTTP_READ_TIMEOUT,
+        );
+        assert_timed_out_at(
+            timed_request(&lease, &origin, Method::POST, images, image()).await,
+            upload_time + DEFAULT_REMOTE_HTTP_READ_TIMEOUT,
         );
         ticker.abort();
     }

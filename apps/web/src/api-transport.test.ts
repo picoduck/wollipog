@@ -276,6 +276,7 @@ test("a budget the browser cannot map fails as the shared table loads", () => {
 });
 
 test("a request body extends its deadline by its size at the upload floor", () => {
+  assert.equal(API_UPLOAD_FLOOR_BYTES_PER_SECOND, 64 * 1024, "the floor both transports read from the shared table");
   assert.equal(apiRequestDeadlineMs("POST", "/api/sessions/s_1/prompt", JSON.stringify({ text: "hi" })), API_REQUEST_DEADLINE_MS,
     "a small JSON body keeps the exact default");
   const image = new Uint8Array(8 * 1024 * 1024);

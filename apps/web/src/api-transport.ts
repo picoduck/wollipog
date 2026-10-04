@@ -67,9 +67,10 @@ const API_REQUEST_BUDGET_DEADLINES_MS: Readonly<Record<ApiRequestBudget, number 
 /**
  * The slowest upload the deadline allows for: a request body adds its size at this rate, because the
  * body is sent before any response can arrive. 64 KiB/s keeps an 8 MB prompt image (+128s) uploading
- * on a poor phone connection, while a JSON body under 64 KiB adds nothing.
+ * on a poor phone connection, while a JSON body under 64 KiB adds nothing. The desktop transport reads
+ * the same value from api-request-budgets.json (#2615).
  */
-export const API_UPLOAD_FLOOR_BYTES_PER_SECOND = 64 * 1024;
+export const API_UPLOAD_FLOOR_BYTES_PER_SECOND: number = apiRequestBudgets.uploadFloorBytesPerSecond;
 
 /** One request that legitimately outlasts the default, read from api-request-budgets.json. */
 interface ApiRequestBudgetRoute {
