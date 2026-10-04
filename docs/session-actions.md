@@ -226,7 +226,7 @@ The runner owns this metadata task independently of the agent turn and prompt qu
   generation, so ordinary preparation variance no longer shortens the provider's allowance.
   Preparation that overruns its own cap fails fast instead of handing the provider a fraction of a
   second. Each enclosing deadline is strictly larger than the one it supervises — runner budget 15s,
-  control-plane runner request 16s, control-plane abort 17s, desktop remote read budget 35s — so no
+  control-plane runner request 16s, control-plane abort 17s, desktop remote retitle budget 60s — so no
   outer transport can expire before the naming deadline it wraps.
 - Each runner admits at most two concurrent naming tasks and twelve starts per minute. Overload,
   timeouts, provider errors, missing accounts, unsupported providers, and older runners all fail

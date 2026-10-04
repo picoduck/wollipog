@@ -1,0 +1,31 @@
+{
+  "$comment": "Requests that legitimately outlast the default client deadline (#2522, #2577). Both transports read this table: the browser's (apps/web/src/api-transport.ts) and the desktop's (apps/desktop/src-tauri/src/remote_transport.rs), and each maps a budget to its own deadlines. Routes match on the path before any query; ':id' is one non-empty path segment. 'unlessQuery' narrows an entry to requests without that query parameter. Budgets: 'sessionRetitle' waits on the session-naming deadline chain (up to 33s); 'serverBoundUpTo60s' and 'serverBoundUpTo150s' are server bounds of at most 60s and 150s; 'unboundedServerWait' is a wait the server bounds in minutes or not at all, before it sends anything; 'unboundedDownload' answers promptly with a body whose size the client cannot bound.",
+  "routes": [
+    { "method": "POST", "route": "/api/sessions/:id/retitle", "budget": "sessionRetitle", "why": "The session-naming deadline chain in packages/protocol/src/index.ts, up to 33s with a custom endpoint." },
+    { "method": "GET", "route": "/api/sessions/:id/export", "budget": "unboundedDownload", "why": "A whole-body download whose size the client cannot bound." },
+    { "method": "GET", "route": "/api/artifacts/:id/export", "budget": "unboundedDownload", "why": "A whole-body download whose size the client cannot bound." },
+    { "method": "POST", "route": "/api/sessions/:id/fork", "budget": "unboundedServerWait", "why": "Fork, handoff and conversation recovery wait up to 65 minutes on the runner." },
+    { "method": "POST", "route": "/api/sessions/:id/worktrees/retry-setup", "budget": "unboundedServerWait", "why": "A worktree setup script may run for an hour (65-minute runner wait)." },
+    { "method": "POST", "route": "/api/sessions/:id/worktrees", "budget": "unboundedServerWait", "why": "Creation answers at once with progress, but a runner without progress support makes it wait the same 65 minutes as setup." },
+    { "method": "POST", "route": "/api/boxes/:id/update-runner", "budget": "unboundedServerWait", "why": "A runner update downloads its release with a per-stall limit but no total one." },
+    { "method": "POST", "route": "/api/runners/:id/skills/sync", "budget": "unboundedServerWait", "why": "Skill sync restarts its runner wait on every chunk, so it has no total bound." },
+    { "method": "POST", "route": "/api/skill-machine/:id/adopt", "budget": "unboundedServerWait", "why": "Waits for a skill sync, which has no total bound." },
+    { "method": "POST", "route": "/api/skill-drift/:id/import", "budget": "unboundedServerWait", "why": "Waits for a skill sync, which has no total bound." },
+    { "method": "POST", "route": "/api/runners/:id/skill-drift/restore", "budget": "unboundedServerWait", "why": "Waits for a skill sync, which has no total bound." },
+    { "method": "POST", "route": "/api/orphaned-skill-copies/:id/import", "budget": "unboundedServerWait", "why": "Waits for a skill sync, which has no total bound." },
+    { "method": "POST", "route": "/api/runners/:id/orphaned-skill-copies/discard", "budget": "unboundedServerWait", "why": "Waits for a skill sync, which has no total bound." },
+    { "method": "GET", "route": "/api/sessions/:id/child-sessions", "budget": "unboundedServerWait", "why": "Loads the session's whole history first, page by page, with a deadline per page but none in total." },
+    { "method": "GET", "route": "/api/sessions/:id/events", "unlessQuery": "limit", "budget": "unboundedServerWait", "why": "An event read without a page limit loads the session's whole history first, with a deadline per page but none in total." },
+    { "method": "POST", "route": "/api/sessions/:id/worktrees/select", "budget": "serverBoundUpTo150s", "why": "A 150s runner wait." },
+    { "method": "POST", "route": "/api/sessions/:id/worktrees/generate-setup", "budget": "serverBoundUpTo150s", "why": "A 150s runner wait." },
+    { "method": "GET", "route": "/api/projects/:id/locations/:id/worktree-setup", "budget": "serverBoundUpTo150s", "why": "A 150s runner wait." },
+    { "method": "POST", "route": "/api/projects/:id/locations/:id/worktree-setup", "budget": "serverBoundUpTo150s", "why": "A 150s runner wait." },
+    { "method": "POST", "route": "/api/pods/:id/reconcile", "budget": "serverBoundUpTo150s", "why": "Pod reconciliation waits 120s." },
+    { "method": "POST", "route": "/api/skill-git/preview", "budget": "serverBoundUpTo150s", "why": "A Git skill preview clones for up to 90s." },
+    { "method": "POST", "route": "/api/sessions/:id/git", "budget": "serverBoundUpTo60s", "why": "Opening a pull request and forge review syncs wait 60s (other Git actions 30s, same route)." },
+    { "method": "POST", "route": "/api/sessions/:id/role", "budget": "serverBoundUpTo60s", "why": "Role conversion prepares and commits sequentially, with a 30s runner wait for each phase." },
+    { "method": "POST", "route": "/api/sessions/:id/authentication/account", "budget": "serverBoundUpTo60s", "why": "Choosing a provider account waits 60s." },
+    { "method": "POST", "route": "/api/usage/subscriptions/refresh", "budget": "serverBoundUpTo60s", "why": "A subscription refresh is capped at 60s." },
+    { "method": "POST", "route": "/api/sessions/adopt", "budget": "serverBoundUpTo60s", "why": "External session adoption waits 45s, as long as the browser's default itself." }
+  ]
+}

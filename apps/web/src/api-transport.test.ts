@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { mock, test } from "node:test";
 import { createApiClient } from "./api.js";
+import apiRequestBudgets from "./api-request-budgets.json";
 import {
   API_REQUEST_DEADLINE_MS,
   API_UPLOAD_FLOOR_BYTES_PER_SECOND,
+  apiRequestBudgetRoutes,
   apiRequestDeadlineMs,
   createBrowserApiTransport,
   RequestTimeoutError,
@@ -192,7 +194,7 @@ test("the deadline table names retitle and the two exports, and bounds everythin
   assert.ok(API_REQUEST_DEADLINE_MS > 30_000, "outlasts the runner's 30s GIT_TIMEOUT_MS");
   assert.ok(API_REQUEST_DEADLINE_MS <= 60_000, "within the desktop transport's 60s total");
   assert.ok(SESSION_RETITLE_DEADLINE_MS > API_REQUEST_DEADLINE_MS);
-  assert.ok(SESSION_RETITLE_DEADLINE_MS > 35_000, "outlasts the desktop's 35s session-naming read budget");
+  assert.ok(SESSION_RETITLE_DEADLINE_MS > 33_000, "outlasts the 33s session-naming deadline chain");
   assert.equal(apiRequestDeadlineMs("POST", "/api/sessions/s_1/retitle"), SESSION_RETITLE_DEADLINE_MS);
   assert.equal(apiRequestDeadlineMs("post", "/api/sessions/s_1/retitle?source=command"), SESSION_RETITLE_DEADLINE_MS);
   assert.equal(apiRequestDeadlineMs("GET", "/api/sessions/s_1/export?format=json"), null);
@@ -248,6 +250,29 @@ test("routes the server bounds past the default get that bound plus a margin, or
   ] as const) {
     assert.equal(apiRequestDeadlineMs(method, path), null, `${method} ${path} is bounded in minutes or not at all`);
   }
+});
+
+test("every route in the table shared with the desktop transport outlasts the default or opts out", () => {
+  assert.ok(apiRequestBudgets.routes.length > 0);
+  for (const entry of apiRequestBudgets.routes) {
+    const path = entry.route.replaceAll(":id", "id-1");
+    const deadline = apiRequestDeadlineMs(entry.method, path);
+    assert.ok(deadline === null || deadline > API_REQUEST_DEADLINE_MS, `${entry.method} ${path} (${entry.budget})`);
+  }
+  // The desktop transport matches routes the same way (remote_transport.rs).
+  for (const [method, path] of [
+    ["POST", "/api/sessions//fork"],
+    ["GET", "/api/sessions/s_1/events?after=0&li%6Dit=200"],
+  ] as const) {
+    assert.equal(apiRequestDeadlineMs(method, path), API_REQUEST_DEADLINE_MS, `${method} ${path}`);
+  }
+});
+
+test("a budget the browser cannot map fails as the shared table loads", () => {
+  assert.throws(
+    () => apiRequestBudgetRoutes({ routes: [{ method: "GET", route: "/api/x", budget: "forever" }] }),
+    /Unknown API request budget "forever"/,
+  );
 });
 
 test("a request body extends its deadline by its size at the upload floor", () => {

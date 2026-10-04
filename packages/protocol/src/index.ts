@@ -690,10 +690,10 @@ export const SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS =
  *     -> runner teardown allowance (<= 1s), inside the margin below rather than competing with it
  *       -> control-plane runner request 17s
  *         -> control-plane supervision abort 18s
- *           -> desktop remote read budget 35s (apps/desktop/src-tauri/src/remote_transport.rs)
+ *           -> retitle budget 60s in the browser and desktop transports
  *
  * A custom endpoint may be configured up to 30s, so its supervision worst case is 33s — still
- * under the desktop read budget.
+ * under the client retitle budget.
  *
  * The total stays bounded: the runner clamps any requested budget to the runner budget below.
  */

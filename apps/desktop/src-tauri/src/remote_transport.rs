@@ -2,13 +2,14 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION};
 use reqwest::{Client, Method, StatusCode};
 use secrecy::{ExposeSecret, SecretString};
+use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 use tauri::ipc::{Channel, InvokeBody, Request, Response};
 use tauri::State;
@@ -41,10 +42,11 @@ const MAX_SOCKET_ATTEMPTS: usize = 16;
 const MAX_IN_FLIGHT_REQUESTS: usize = 64;
 const MAX_RUNTIME_KEY_BYTES: usize = 160;
 const DEFAULT_REMOTE_HTTP_READ_TIMEOUT: Duration = Duration::from_secs(20);
-const SESSION_NAMING_REMOTE_HTTP_READ_TIMEOUT: Duration = Duration::from_secs(35);
+const DEFAULT_REMOTE_HTTP_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
+const SESSION_RETITLE_REMOTE_HTTP_TIMEOUT: Duration = Duration::from_secs(60);
 /// Longest a control-plane rename can take before it answers: the largest configurable runner
 /// naming budget (30s for a custom endpoint) plus the control plane's supervision margin. The
-/// session-agent path is far shorter (15s runner budget + 3s). Keep the read budget above this so
+/// session-agent path is far shorter (15s runner budget + 3s). Keep the retitle budget above this so
 /// the transport never expires before the deadline it wraps. See the session naming deadline chain
 /// in packages/protocol/src/index.ts.
 #[cfg(test)]
@@ -59,19 +61,129 @@ struct RuntimeLease {
     profile_id: String,
     profile_origin: CanonicalRemoteOrigin,
     server_instance_id: String,
+    /// Fails a read that stalls for `DEFAULT_REMOTE_HTTP_READ_TIMEOUT`.
     client: Client,
-    session_naming_client: Client,
+    /// Waits for the server without a read budget, for routes it answers only when done.
+    long_wait_client: Client,
     secret: Arc<SecretString>,
     cancel: watch::Sender<bool>,
 }
 
 impl RuntimeLease {
-    fn client_for_path(&self, path: &str) -> &Client {
-        if is_session_retitle_path(path) {
-            &self.session_naming_client
-        } else {
+    /// A request on this lease with its route's budget (#2577).
+    fn request(&self, method: Method, path: &str, url: Url) -> reqwest::RequestBuilder {
+        let budget = native_request_budget(&method, path);
+        let client = if budget.stall_bounded {
             &self.client
+        } else {
+            &self.long_wait_client
+        };
+        let request = client.request(method, url);
+        match budget.total {
+            Some(total) => request.timeout(total),
+            None => request,
         }
+    }
+}
+
+/// Requests that legitimately outlast the default budgets. The browser transport reads the same
+/// table (apps/web/src/api-transport.ts), so the two cannot drift apart.
+const API_REQUEST_BUDGETS: &str = include_str!("../../../web/src/api-request-budgets.json");
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApiRequestBudgetTable {
+    #[serde(rename = "$comment")]
+    _comment: IgnoredAny,
+    routes: Vec<ApiRequestBudgetRoute>,
+}
+
+/// One table entry. Unknown fields are refused, so a matching rule the browser learns cannot be
+/// silently ignored here.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ApiRequestBudgetRoute {
+    method: String,
+    route: String,
+    #[serde(default)]
+    unless_query: Option<String>,
+    budget: ApiRequestBudget,
+    #[serde(rename = "why")]
+    _why: IgnoredAny,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum ApiRequestBudget {
+    SessionRetitle,
+    ServerBoundUpTo60s,
+    ServerBoundUpTo150s,
+    UnboundedServerWait,
+    UnboundedDownload,
+}
+
+static API_REQUEST_BUDGET_ROUTES: LazyLock<Vec<ApiRequestBudgetRoute>> = LazyLock::new(|| {
+    serde_json::from_str::<ApiRequestBudgetTable>(API_REQUEST_BUDGETS)
+        .expect("the shared API request budget table is valid")
+        .routes
+});
+
+/// Whether `path` matches `pattern`, where `:id` is one non-empty path segment.
+fn route_matches(pattern: &str, path: &str) -> bool {
+    let mut expected = pattern.split('/');
+    let mut actual = path.split('/');
+    loop {
+        match (expected.next(), actual.next()) {
+            (None, None) => return true,
+            (Some(":id"), Some(segment)) if !segment.is_empty() => {}
+            (Some(expected), Some(segment)) if expected == segment => {}
+            _ => return false,
+        }
+    }
+}
+
+/// The shared table's budget for a request, or `None` for the default.
+fn api_request_budget(method: &Method, path: &str) -> Option<ApiRequestBudget> {
+    let (path, query) = path.split_once('?').unwrap_or((path, ""));
+    API_REQUEST_BUDGET_ROUTES
+        .iter()
+        .find(|entry| {
+            entry.method == method.as_str()
+                && route_matches(&entry.route, path)
+                && entry.unless_query.as_deref().is_none_or(|name| {
+                    !url::form_urlencoded::parse(query.as_bytes()).any(|(key, _)| key == name)
+                })
+        })
+        .map(|entry| entry.budget)
+}
+
+/// What the desktop allows one request: whether a read may stall for at most
+/// `DEFAULT_REMOTE_HTTP_READ_TIMEOUT`, and its total deadline, if any.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NativeRequestBudget {
+    stall_bounded: bool,
+    total: Option<Duration>,
+}
+
+fn native_request_budget(method: &Method, path: &str) -> NativeRequestBudget {
+    let (stall_bounded, total) = match api_request_budget(method, path) {
+        None => (true, Some(DEFAULT_REMOTE_HTTP_TOTAL_TIMEOUT)),
+        // The server sends nothing until these answer, so a read budget could only cut them short.
+        // Each total is the server's bound plus a margin, the browser transport's deadline too.
+        Some(ApiRequestBudget::SessionRetitle) => {
+            (false, Some(SESSION_RETITLE_REMOTE_HTTP_TIMEOUT))
+        }
+        Some(ApiRequestBudget::ServerBoundUpTo60s) => (false, Some(Duration::from_secs(90))),
+        Some(ApiRequestBudget::ServerBoundUpTo150s) => (false, Some(Duration::from_secs(180))),
+        // Bounded in minutes or not at all. TCP keepalive still notices a vanished peer, and the
+        // caller and the instance connection can still cancel.
+        Some(ApiRequestBudget::UnboundedServerWait) => (false, None),
+        // These answer at once, so a stalled download still fails; only its length is unbounded.
+        Some(ApiRequestBudget::UnboundedDownload) => (true, None),
+    };
+    NativeRequestBudget {
+        stall_bounded,
+        total,
     }
 }
 
@@ -484,9 +596,10 @@ fn contains_secret(bytes: &[u8], secret: &SecretString) -> bool {
     !secret.is_empty() && memchr::memmem::find(bytes, secret).is_some()
 }
 
+/// A client with no total deadline of its own: each request sets one.
 fn hardened_client(
     local_address: Option<IpAddr>,
-    read_timeout: Duration,
+    read_timeout: Option<Duration>,
 ) -> Result<Client, String> {
     let mut builder = Client::builder()
         .tls_backend_native()
@@ -498,28 +611,17 @@ fn hardened_client(
         .no_deflate()
         .no_zstd()
         .connect_timeout(Duration::from_secs(5))
-        .read_timeout(read_timeout)
-        .timeout(Duration::from_secs(60))
         .pool_max_idle_per_host(2)
         .user_agent(concat!("Wollipog/", env!("CARGO_PKG_VERSION")));
+    if let Some(read_timeout) = read_timeout {
+        builder = builder.read_timeout(read_timeout);
+    }
     if let Some(address) = local_address {
         builder = builder.local_address(address);
     }
     builder
         .build()
         .map_err(|_| "The secure remote transport could not be initialized.".to_string())
-}
-
-fn is_session_retitle_path(path: &str) -> bool {
-    let path = path.split_once('?').map_or(path, |(path, _)| path);
-    let Some(session_path) = path.strip_prefix("/api/sessions/") else {
-        return false;
-    };
-    let mut segments = session_path.split('/');
-    matches!(
-        (segments.next(), segments.next(), segments.next()),
-        (Some(session_id), Some("retitle"), None) if !session_id.is_empty()
-    )
 }
 
 fn tailscale_command() -> Vec<String> {
@@ -663,7 +765,7 @@ async fn local_address_for_endpoint(
 async fn client_for_endpoint(endpoint: &CanonicalRemoteOrigin) -> Result<Client, String> {
     hardened_client(
         local_address_for_endpoint(endpoint).await?,
-        DEFAULT_REMOTE_HTTP_READ_TIMEOUT,
+        Some(DEFAULT_REMOTE_HTTP_READ_TIMEOUT),
     )
 }
 
@@ -672,8 +774,8 @@ async fn runtime_clients_for_endpoint(
 ) -> Result<(Client, Client), String> {
     let local_address = local_address_for_endpoint(endpoint).await?;
     Ok((
-        hardened_client(local_address, DEFAULT_REMOTE_HTTP_READ_TIMEOUT)?,
-        hardened_client(local_address, SESSION_NAMING_REMOTE_HTTP_READ_TIMEOUT)?,
+        hardened_client(local_address, Some(DEFAULT_REMOTE_HTTP_READ_TIMEOUT))?,
+        hardened_client(local_address, None)?,
     ))
 }
 
@@ -789,7 +891,9 @@ async fn probe_request(
     path: &str,
     secret: Option<&SecretString>,
 ) -> Result<(StatusCode, Vec<u8>), String> {
-    let mut request = client.get(format!("{}{path}", endpoint.origin));
+    let mut request = client
+        .get(format!("{}{path}", endpoint.origin))
+        .timeout(DEFAULT_REMOTE_HTTP_TOTAL_TIMEOUT);
     if let Some(secret) = secret {
         request = request.header(AUTHORIZATION, bearer(secret)?);
     }
@@ -875,7 +979,7 @@ pub(crate) async fn remote_transport_open(
             "The address now belongs to a different Wollipog instance.",
         ));
     }
-    let (client, session_naming_client) = runtime_clients_for_endpoint(&endpoint)
+    let (client, long_wait_client) = runtime_clients_for_endpoint(&endpoint)
         .await
         .map_err(|message| RemoteOpenError::new("offline", message))?;
     let _guard = registry.0.lock().await;
@@ -903,7 +1007,7 @@ pub(crate) async fn remote_transport_open(
                 profile_origin: endpoint.clone(),
                 server_instance_id: profile.server_instance_id,
                 client,
-                session_naming_client,
+                long_wait_client,
                 secret: Arc::new(secret),
                 cancel,
             },
@@ -991,8 +1095,7 @@ pub(crate) async fn remote_http_request(
         transport.reserve_request(&meta.runtime_key, &meta.request_id)?;
     let result = async {
         let request = lease
-            .client_for_path(&meta.path)
-            .request(method, url)
+            .request(method, &meta.path, url)
             .headers(headers)
             .body(body);
         let response = tokio::select! {
@@ -1290,74 +1393,324 @@ mod tests {
             profile_id: profile_id.to_string(),
             profile_origin: canonical_remote_origin(origin).unwrap(),
             server_instance_id: Uuid::new_v4().to_string(),
-            client: hardened_client(None, DEFAULT_REMOTE_HTTP_READ_TIMEOUT).unwrap(),
-            session_naming_client: hardened_client(None, SESSION_NAMING_REMOTE_HTTP_READ_TIMEOUT)
-                .unwrap(),
+            client: hardened_client(None, Some(DEFAULT_REMOTE_HTTP_READ_TIMEOUT)).unwrap(),
+            long_wait_client: hardened_client(None, None).unwrap(),
             secret: Arc::new(SecretString::from("abcdefghijklmnop".to_string())),
             cancel,
         }
     }
 
-    #[tokio::test]
-    async fn retitle_requests_receive_the_extended_native_read_budget() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    fn budget(method: Method, path: &str) -> NativeRequestBudget {
+        native_request_budget(&method, path)
+    }
 
-        assert!(SESSION_NAMING_REMOTE_HTTP_READ_TIMEOUT > MAX_SESSION_NAMING_REQUEST_DURATION);
-        assert!(DEFAULT_REMOTE_HTTP_READ_TIMEOUT < SESSION_NAMING_REMOTE_HTTP_READ_TIMEOUT);
-        assert!(is_session_retitle_path("/api/sessions/session-1/retitle"));
-        assert!(is_session_retitle_path(
-            "/api/sessions/session-1/retitle?source=command"
-        ));
-        assert!(!is_session_retitle_path("/api/sessions/session-1"));
-        assert!(!is_session_retitle_path(
-            "/api/sessions/session-1/retitle/extra"
-        ));
+    const DEFAULT_BUDGET: NativeRequestBudget = NativeRequestBudget {
+        stall_bounded: true,
+        total: Some(DEFAULT_REMOTE_HTTP_TOTAL_TIMEOUT),
+    };
+
+    #[test]
+    fn every_shared_route_gets_a_desktop_budget_past_the_default() {
+        assert!(!API_REQUEST_BUDGET_ROUTES.is_empty());
+        for entry in API_REQUEST_BUDGET_ROUTES.iter() {
+            let method = method(&entry.method).unwrap();
+            let path = entry.route.replace(":id", "id-1");
+            assert_eq!(
+                api_request_budget(&method, &path),
+                Some(entry.budget),
+                "{} {path}",
+                entry.method
+            );
+            let native = native_request_budget(&method, &path);
+            assert_ne!(native, DEFAULT_BUDGET, "{} {path}", entry.method);
+            assert!(
+                native
+                    .total
+                    .is_none_or(|total| total >= DEFAULT_REMOTE_HTTP_TOTAL_TIMEOUT),
+                "{} {path} never shortens the default",
+                entry.method
+            );
+        }
+    }
+
+    #[test]
+    fn routes_the_server_bounds_past_the_default_outlast_that_bound_or_have_none() {
+        assert_eq!(
+            budget(Method::POST, "/api/sessions/s_1/retitle?source=command"),
+            NativeRequestBudget {
+                stall_bounded: false,
+                total: Some(SESSION_RETITLE_REMOTE_HTTP_TIMEOUT),
+            }
+        );
+        assert!(SESSION_RETITLE_REMOTE_HTTP_TIMEOUT > MAX_SESSION_NAMING_REQUEST_DURATION);
+        // Each server bound is the one the control plane applies to that route today.
+        for (method, path, server_bound) in [
+            (Method::POST, "/api/sessions/s_1/git", 60),
+            (Method::POST, "/api/sessions/s_1/role", 60),
+            (Method::POST, "/api/sessions/s_1/authentication/account", 60),
+            (Method::POST, "/api/usage/subscriptions/refresh", 60),
+            (Method::POST, "/api/sessions/adopt", 45),
+            (Method::POST, "/api/sessions/s_1/worktrees/select", 150),
+            (
+                Method::POST,
+                "/api/sessions/s_1/worktrees/generate-setup",
+                150,
+            ),
+            (
+                Method::GET,
+                "/api/projects/p_1/locations/l_1/worktree-setup",
+                150,
+            ),
+            (
+                Method::POST,
+                "/api/projects/p_1/locations/l_1/worktree-setup",
+                150,
+            ),
+            (Method::POST, "/api/pods/pod_1/reconcile", 120),
+            (Method::POST, "/api/skill-git/preview", 90),
+        ] {
+            let budget = budget(method.clone(), path);
+            assert!(
+                !budget.stall_bounded,
+                "{method} {path} answers only when done"
+            );
+            assert!(
+                budget
+                    .total
+                    .is_some_and(|total| total > Duration::from_secs(server_bound)),
+                "{method} {path} outlasts its {server_bound}s server bound"
+            );
+        }
+        for (method, path) in [
+            (Method::POST, "/api/sessions/s_1/fork"),
+            (Method::POST, "/api/sessions/s_1/worktrees"),
+            (Method::POST, "/api/sessions/s_1/worktrees/retry-setup"),
+            (Method::POST, "/api/boxes/b_1/update-runner"),
+            (Method::POST, "/api/runners/r_1/skills/sync"),
+            (Method::POST, "/api/skill-machine/m_1/adopt"),
+            (Method::POST, "/api/skill-drift/d_1/import"),
+            (Method::POST, "/api/runners/r_1/skill-drift/restore"),
+            (Method::POST, "/api/orphaned-skill-copies/o_1/import"),
+            (
+                Method::POST,
+                "/api/runners/r_1/orphaned-skill-copies/discard",
+            ),
+            (Method::GET, "/api/sessions/s_1/child-sessions?limit=50"),
+            (Method::GET, "/api/sessions/s_1/events?after=0"),
+        ] {
+            assert_eq!(
+                budget(method.clone(), path),
+                NativeRequestBudget {
+                    stall_bounded: false,
+                    total: None,
+                },
+                "{method} {path} is bounded in minutes or not at all"
+            );
+        }
+        for (method, path) in [
+            (Method::GET, "/api/sessions/s_1/export?format=json"),
+            (Method::GET, "/api/artifacts/a_1/export"),
+        ] {
+            assert_eq!(
+                budget(method.clone(), path),
+                NativeRequestBudget {
+                    stall_bounded: true,
+                    total: None,
+                },
+                "{method} {path} keeps its stall bound without a total"
+            );
+        }
+    }
+
+    #[test]
+    fn routes_outside_the_shared_table_keep_the_default_budgets() {
+        for (method, path) in [
+            (Method::GET, "/api/sessions/s_1/retitle"),
+            (Method::POST, "/api/sessions/s_1/retitle/extra"),
+            (Method::GET, "/api/sessions/s_1/role?role=orchestrator"),
+            (Method::POST, "/api/sessions/s_1/role/extra"),
+            (Method::POST, "/api/sessions/s_1/export"),
+            (Method::GET, "/api/sessions/s_1"),
+            (Method::GET, "/api/sessions"),
+            (Method::POST, "/api/sessions//fork"),
+            (Method::POST, "/api/sessions/s_1/parent-control-policy"),
+            (Method::GET, "/api/sessions/s_1/events?after=0&limit=200"),
+            (Method::GET, "/api/sessions/s_1/events?after=0&li%6Dit=200"),
+            (
+                Method::POST,
+                "/api/runners/r_1/orphaned-skill-copies/preview",
+            ),
+            // The control plane bounds the callback-host lookup at 10s (OUTBOUND_EVENT_REQUEST_TIMEOUT_MS).
+            (Method::POST, "/api/outbound-event-subscriptions"),
+        ] {
+            assert_eq!(
+                budget(method.clone(), path),
+                DEFAULT_BUDGET,
+                "{method} {path}"
+            );
+        }
+    }
+
+    /// How the paused-clock test server answers one connection.
+    enum SlowReply {
+        /// Says nothing until the delay has passed, then answers in full.
+        After(Duration),
+        /// Answers at once, then sends its body one byte per interval.
+        Trickle { every: Duration, bytes: usize },
+    }
+
+    /// Serves one reply per connection, in the order the connections arrive, each on its own task
+    /// so a reply still sleeping never holds up the next connection.
+    async fn serve_slowly(replies: Vec<SlowReply>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move {
-            for _ in 0..2 {
+        tokio::spawn(async move {
+            for reply in replies {
                 let (mut stream, _) = listener.accept().await.unwrap();
-                let mut request = Vec::new();
-                let mut chunk = [0_u8; 1024];
-                loop {
-                    let count = stream.read(&mut chunk).await.unwrap();
-                    request.extend_from_slice(&chunk[..count]);
-                    if count == 0 || request.windows(4).any(|window| window == b"\r\n\r\n") {
-                        break;
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let mut chunk = [0_u8; 1024];
+                    loop {
+                        let count = stream.read(&mut chunk).await.unwrap_or(0);
+                        request.extend_from_slice(&chunk[..count]);
+                        if count == 0 || request.windows(4).any(|window| window == b"\r\n\r\n") {
+                            break;
+                        }
                     }
-                }
-                tokio::time::sleep(Duration::from_millis(60)).await;
-                let _ = stream
-                    .write_all(http_response("200 OK", "{}", "").as_bytes())
-                    .await;
+                    match reply {
+                        SlowReply::After(delay) => {
+                            tokio::time::sleep(delay).await;
+                            let _ = stream
+                                .write_all(http_response("200 OK", "{}", "").as_bytes())
+                                .await;
+                        }
+                        SlowReply::Trickle { every, bytes } => {
+                            let head = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Length: {bytes}\r\nConnection: close\r\n\r\n"
+                            );
+                            let _ = stream.write_all(head.as_bytes()).await;
+                            for _ in 0..bytes {
+                                tokio::time::sleep(every).await;
+                                if stream.write_all(b"x").await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                });
             }
         });
-        let (cancel, _) = watch::channel(false);
-        let lease = RuntimeLease {
-            profile_id: Uuid::new_v4().to_string(),
-            profile_origin: canonical_remote_origin(&origin).unwrap(),
-            server_instance_id: Uuid::new_v4().to_string(),
-            client: hardened_client(None, Duration::from_millis(20)).unwrap(),
-            session_naming_client: hardened_client(None, Duration::from_millis(500)).unwrap(),
-            secret: Arc::new(SecretString::from("abcdefghijklmnop".to_string())),
-            cancel,
-        };
+        origin
+    }
 
-        assert!(lease
-            .client_for_path("/api/sessions")
-            .get(&origin)
-            .send()
-            .await
-            .is_err());
-        let response = lease
-            .client_for_path("/api/sessions/session-1/retitle")
-            .get(&origin)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        server.await.unwrap();
+    /// Sends one request on `lease` and reads its whole body, returning how long that took on the
+    /// paused clock and whether it timed out.
+    async fn timed_request(
+        lease: &RuntimeLease,
+        origin: &str,
+        method: Method,
+        path: &str,
+    ) -> (Duration, Result<Vec<u8>, reqwest::Error>) {
+        let started = tokio::time::Instant::now();
+        let url = remote_url(origin, path).unwrap();
+        let result = async {
+            let response = lease.request(method, path, url).send().await?;
+            Ok(response.bytes().await?.to_vec())
+        }
+        .await;
+        (started.elapsed(), result)
+    }
+
+    fn assert_timed_out_at(
+        (elapsed, result): (Duration, Result<Vec<u8>, reqwest::Error>),
+        budget: Duration,
+    ) {
+        let error = result.expect_err("the request should have timed out");
+        assert!(error.is_timeout(), "{error:?}");
+        assert!(
+            elapsed >= budget && elapsed < budget + Duration::from_secs(1),
+            "timed out after {elapsed:?}, not at its {budget:?} budget: {error:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn long_routes_outlast_the_budgets_that_still_bound_ordinary_routes() {
+        // A paused clock leaps to the next timer whenever the runtime idles, even while loopback
+        // I/O is still in flight, so keep a timer due every few milliseconds to keep each leap small.
+        let ticker = tokio::spawn(async {
+            loop {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+        let origin = serve_slowly(vec![
+            SlowReply::After(Duration::from_secs(61)),
+            SlowReply::Trickle {
+                every: Duration::from_secs(10),
+                bytes: 7,
+            },
+            SlowReply::After(Duration::from_secs(11 * 60)),
+            SlowReply::After(Duration::from_secs(80)),
+            SlowReply::After(Duration::from_secs(170)),
+            SlowReply::After(Duration::from_secs(181)),
+            SlowReply::Trickle {
+                every: Duration::from_secs(10),
+                bytes: 9,
+            },
+            SlowReply::After(Duration::from_secs(21)),
+        ])
+        .await;
+        let lease = test_lease(&Uuid::new_v4().to_string(), &origin);
+
+        // An ordinary route keeps its 20s read budget and, while bytes still arrive, its 60s total.
+        assert_timed_out_at(
+            timed_request(&lease, &origin, Method::GET, "/api/sessions").await,
+            DEFAULT_REMOTE_HTTP_READ_TIMEOUT,
+        );
+        assert_timed_out_at(
+            timed_request(&lease, &origin, Method::GET, "/api/sessions").await,
+            DEFAULT_REMOTE_HTTP_TOTAL_TIMEOUT,
+        );
+
+        // A fork waits on the runner for up to 65 minutes without sending a byte.
+        let (elapsed, result) =
+            timed_request(&lease, &origin, Method::POST, "/api/sessions/s_1/fork").await;
+        assert_eq!(result.unwrap(), b"{}");
+        assert!(elapsed >= Duration::from_secs(11 * 60));
+
+        // An account selection answers after the default total, within its 90s budget.
+        let (elapsed, result) = timed_request(
+            &lease,
+            &origin,
+            Method::POST,
+            "/api/sessions/s_1/authentication/account",
+        )
+        .await;
+        assert_eq!(result.unwrap(), b"{}");
+        assert!(elapsed >= Duration::from_secs(80));
+
+        // Worktree selection waits out its 150s server bound and fails only past its own 180s.
+        let select = "/api/sessions/s_1/worktrees/select";
+        let (elapsed, result) = timed_request(&lease, &origin, Method::POST, select).await;
+        assert_eq!(result.unwrap(), b"{}");
+        assert!(elapsed >= Duration::from_secs(170));
+        assert_timed_out_at(
+            timed_request(&lease, &origin, Method::POST, select).await,
+            Duration::from_secs(180),
+        );
+
+        // An export downloads past the default total while bytes keep arriving, but still fails
+        // when its server stalls.
+        let export = "/api/sessions/s_1/export?format=json";
+        let (elapsed, result) = timed_request(&lease, &origin, Method::GET, export).await;
+        assert_eq!(result.unwrap(), b"xxxxxxxxx");
+        assert!(elapsed >= Duration::from_secs(90));
+        assert_timed_out_at(
+            timed_request(&lease, &origin, Method::GET, export).await,
+            DEFAULT_REMOTE_HTTP_READ_TIMEOUT,
+        );
+        ticker.abort();
     }
 
     fn http_response(status: &str, body: &str, extra_headers: &str) -> String {
@@ -1581,9 +1934,8 @@ mod tests {
             profile_id: profile_id.clone(),
             profile_origin: canonical_remote_origin(&format!("http://{address}")).unwrap(),
             server_instance_id: instance_id,
-            client: hardened_client(None, DEFAULT_REMOTE_HTTP_READ_TIMEOUT).unwrap(),
-            session_naming_client: hardened_client(None, SESSION_NAMING_REMOTE_HTTP_READ_TIMEOUT)
-                .unwrap(),
+            client: hardened_client(None, Some(DEFAULT_REMOTE_HTTP_READ_TIMEOUT)).unwrap(),
+            long_wait_client: hardened_client(None, None).unwrap(),
             secret: Arc::new(SecretString::from("abcdefghijklmnop".to_string())),
             cancel,
         };

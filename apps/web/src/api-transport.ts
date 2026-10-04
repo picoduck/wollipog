@@ -1,3 +1,5 @@
+import apiRequestBudgets from "./api-request-budgets.json";
+
 export interface ApiTransport {
   readonly instanceId: string;
   readonly publicOrigin: string;
@@ -40,15 +42,27 @@ export const API_REQUEST_DEADLINE_MS = 45_000;
 
 /**
  * Session retitle waits on the session-naming deadline chain (packages/protocol/src/index.ts), up to
- * 33s with a custom endpoint, which the desktop gives a 35s read budget. It gets the desktop's whole
- * 60s total so a slow title is never cut off by the default.
+ * 33s with a custom endpoint. It gets 60s, the desktop's retitle budget too, so a slow title is never
+ * cut off by the default.
  */
 export const SESSION_RETITLE_DEADLINE_MS = 60_000;
 
-/** For routes whose server-side bound is at most 60s: that bound plus a 30s margin. */
-const UP_TO_60S_SERVER_BOUND_DEADLINE_MS = 90_000;
-/** For routes whose server-side bound is at most 150s: that bound plus a 30s margin. */
-const UP_TO_150S_SERVER_BOUND_DEADLINE_MS = 180_000;
+export type ApiRequestBudget =
+  "sessionRetitle" | "serverBoundUpTo60s" | "serverBoundUpTo150s" | "unboundedServerWait" | "unboundedDownload";
+
+/**
+ * Deadlines for the budgets in api-request-budgets.json, the route table this transport shares with
+ * the desktop's (#2577). `null` opts out: the request keeps only its caller's signal and the instance
+ * connection's. Every other value is the server's bound plus a margin.
+ */
+const API_REQUEST_BUDGET_DEADLINES_MS: Readonly<Record<ApiRequestBudget, number | null>> = {
+  sessionRetitle: SESSION_RETITLE_DEADLINE_MS,
+  // Server bounds of at most 60s and 150s, each plus a 30s margin.
+  serverBoundUpTo60s: 90_000,
+  serverBoundUpTo150s: 180_000,
+  unboundedServerWait: null,
+  unboundedDownload: null,
+};
 
 /**
  * The slowest upload the deadline allows for: a request body adds its size at this rate, because the
@@ -57,62 +71,36 @@ const UP_TO_150S_SERVER_BOUND_DEADLINE_MS = 180_000;
  */
 export const API_UPLOAD_FLOOR_BYTES_PER_SECOND = 64 * 1024;
 
-const route = (pattern: string) => new RegExp(`^${pattern.replaceAll(":id", "[^/]+")}$`);
-
-/**
- * Requests that legitimately outlast the default. `null` opts out: the request keeps only its
- * caller's signal and the instance connection's, because the server bounds it in minutes or not at
- * all. Every other value is the server's own bound plus a margin, named beside it.
- */
-const API_REQUEST_DEADLINE_OVERRIDES: ReadonlyArray<{
+/** One request that legitimately outlasts the default, read from api-request-budgets.json. */
+interface ApiRequestBudgetRoute {
   method: string;
   route: RegExp;
-  /** Narrows the entry to requests whose query matches. */
-  query?: (query: URLSearchParams) => boolean;
+  /** Narrows the entry to requests without this query parameter. */
+  unlessQuery?: string;
   deadlineMs: number | null;
-}> = [
-  { method: "POST", route: route("/api/sessions/:id/retitle"), deadlineMs: SESSION_RETITLE_DEADLINE_MS },
-  // Whole-body downloads whose size the client cannot bound.
-  { method: "GET", route: route("/api/sessions/:id/export"), deadlineMs: null },
-  { method: "GET", route: route("/api/artifacts/:id/export"), deadlineMs: null },
-  // Fork, handoff and conversation recovery wait up to 65 minutes on the runner.
-  { method: "POST", route: route("/api/sessions/:id/fork"), deadlineMs: null },
-  // A worktree setup script may run for an hour (65-minute runner wait). Creation answers at once
-  // with progress, but a runner without progress support makes it wait the same 65 minutes.
-  { method: "POST", route: route("/api/sessions/:id/worktrees/retry-setup"), deadlineMs: null },
-  { method: "POST", route: route("/api/sessions/:id/worktrees"), deadlineMs: null },
-  // A runner update downloads its release with a per-stall limit but no total one.
-  { method: "POST", route: route("/api/boxes/:id/update-runner"), deadlineMs: null },
-  // Skill sync restarts its runner wait on every chunk, so it has no total bound, and neither do the
-  // adoptions, imports, restores and discards that wait for one.
-  { method: "POST", route: route("/api/runners/:id/skills/sync"), deadlineMs: null },
-  { method: "POST", route: route("/api/skill-machine/:id/adopt"), deadlineMs: null },
-  { method: "POST", route: route("/api/skill-drift/:id/import"), deadlineMs: null },
-  { method: "POST", route: route("/api/runners/:id/skill-drift/restore"), deadlineMs: null },
-  { method: "POST", route: route("/api/orphaned-skill-copies/:id/import"), deadlineMs: null },
-  { method: "POST", route: route("/api/runners/:id/orphaned-skill-copies/discard"), deadlineMs: null },
-  // The child-session inventory and an event read without a page limit first load the session's
-  // whole history, page by page, with a deadline per page but none in total.
-  { method: "GET", route: route("/api/sessions/:id/child-sessions"), deadlineMs: null },
-  { method: "GET", route: route("/api/sessions/:id/events"), query: (query) => !query.has("limit"), deadlineMs: null },
-  // 150s runner waits for worktree selection and setup generation.
-  { method: "POST", route: route("/api/sessions/:id/worktrees/select"), deadlineMs: UP_TO_150S_SERVER_BOUND_DEADLINE_MS },
-  { method: "POST", route: route("/api/sessions/:id/worktrees/generate-setup"), deadlineMs: UP_TO_150S_SERVER_BOUND_DEADLINE_MS },
-  { method: "GET", route: route("/api/projects/:id/locations/:id/worktree-setup"), deadlineMs: UP_TO_150S_SERVER_BOUND_DEADLINE_MS },
-  { method: "POST", route: route("/api/projects/:id/locations/:id/worktree-setup"), deadlineMs: UP_TO_150S_SERVER_BOUND_DEADLINE_MS },
-  // Pod reconciliation waits 120s; a Git skill preview clones for up to 90s.
-  { method: "POST", route: route("/api/pods/:id/reconcile"), deadlineMs: UP_TO_150S_SERVER_BOUND_DEADLINE_MS },
-  { method: "POST", route: route("/api/skill-git/preview"), deadlineMs: UP_TO_150S_SERVER_BOUND_DEADLINE_MS },
-  // Opening a pull request and forge review syncs wait 60s (other Git actions 30s, same route).
-  { method: "POST", route: route("/api/sessions/:id/git"), deadlineMs: UP_TO_60S_SERVER_BOUND_DEADLINE_MS },
-  // Role conversion prepares and commits sequentially, with a 30s runner wait for each phase.
-  { method: "POST", route: route("/api/sessions/:id/role"), deadlineMs: UP_TO_60S_SERVER_BOUND_DEADLINE_MS },
-  // Choosing a provider account waits 60s; a subscription refresh is capped at 60s.
-  { method: "POST", route: route("/api/sessions/:id/authentication/account"), deadlineMs: UP_TO_60S_SERVER_BOUND_DEADLINE_MS },
-  { method: "POST", route: route("/api/usage/subscriptions/refresh"), deadlineMs: UP_TO_60S_SERVER_BOUND_DEADLINE_MS },
-  // External session adoption waits 45s, as long as the default itself.
-  { method: "POST", route: route("/api/sessions/adopt"), deadlineMs: UP_TO_60S_SERVER_BOUND_DEADLINE_MS },
-];
+}
+
+/**
+ * The shared table, checked as it loads so a budget this transport cannot map fails at once rather
+ * than turning into a `NaN` deadline.
+ */
+export function apiRequestBudgetRoutes(
+  table: { routes: ReadonlyArray<{ method: string; route: string; unlessQuery?: string; budget: string }> },
+): ApiRequestBudgetRoute[] {
+  return table.routes.map((entry) => {
+    if (!Object.hasOwn(API_REQUEST_BUDGET_DEADLINES_MS, entry.budget)) {
+      throw new TypeError(`Unknown API request budget ${JSON.stringify(entry.budget)}.`);
+    }
+    return {
+      method: entry.method,
+      route: new RegExp(`^${entry.route.replaceAll(":id", "[^/]+")}$`),
+      ...(entry.unlessQuery === undefined ? {} : { unlessQuery: entry.unlessQuery }),
+      deadlineMs: API_REQUEST_BUDGET_DEADLINES_MS[entry.budget as ApiRequestBudget],
+    };
+  });
+}
+
+const API_REQUEST_DEADLINE_OVERRIDES = apiRequestBudgetRoutes(apiRequestBudgets);
 
 /** The UTF-8 bytes fetch sends for `text`, counted without encoding it. */
 function utf8ByteLength(text: string): number {
@@ -150,7 +138,8 @@ export function apiRequestDeadlineMs(method: string, path: string, body?: BodyIn
   const query = new URLSearchParams(search);
   const verb = method.toUpperCase();
   const override = API_REQUEST_DEADLINE_OVERRIDES.find((entry) =>
-    entry.method === verb && entry.route.test(pathname) && (entry.query?.(query) ?? true));
+    entry.method === verb && entry.route.test(pathname) &&
+    (entry.unlessQuery === undefined || !query.has(entry.unlessQuery)));
   const deadlineMs = override ? override.deadlineMs : API_REQUEST_DEADLINE_MS;
   const bytes = requestBodyBytes(body);
   if (deadlineMs === null || bytes === null) return null;

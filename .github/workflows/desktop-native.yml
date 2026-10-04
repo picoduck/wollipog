@@ -8,6 +8,8 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - "apps/desktop/src-tauri/**"
+      # The desktop transport compiles in the route budget table it shares with the browser.
+      - "apps/web/src/api-request-budgets.json"
       - ".github/workflows/desktop-native.yml"
   workflow_dispatch:
 
