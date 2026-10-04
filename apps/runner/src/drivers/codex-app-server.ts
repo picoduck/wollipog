@@ -2295,10 +2295,12 @@ export class CodexAppServerDriver implements Driver {
             ? item.exitCode === 0 ? "completed" : "failed"
             : item.status === "completed" ? "completed" : "failed"
           : "in_progress";
+        const exitCode = completed && Number.isSafeInteger(item.exitCode) ? item.exitCode : undefined;
         const skill = codexCommandSkillName(item.commandActions, item.cwd ?? this.cwd, this.skillPaths,
           this.providerSharesHostFilesystem());
         if (skill == null) {
-          this.emitTool(id, `$ ${truncate(String(item.command ?? ""), 80)}`, "execute", status, parentToolUseId);
+          this.emitTool(id, `$ ${truncate(String(item.command ?? ""), 80)}`, "execute", status, parentToolUseId,
+            undefined, exitCode);
         } else if (this.seenItems.has(id) && !this.seenItems.has(`skill:${id}`)) {
           // The catalog landed after this command started as a plain row. A repeated tool_call
           // replaces the row's title and kind; a status update alone would leave it a command.
@@ -2310,10 +2312,11 @@ export class CodexAppServerDriver implements Driver {
             toolKind: SKILL_TOOL_KIND,
             status,
             ...(parentToolUseId ? { parentToolUseId } : {}),
+            ...(exitCode !== undefined ? { exitCode } : {}),
           });
         } else {
           this.seenItems.add(`skill:${id}`);
-          this.emitTool(id, skillToolTitle(skill), SKILL_TOOL_KIND, status, parentToolUseId);
+          this.emitTool(id, skillToolTitle(skill), SKILL_TOOL_KIND, status, parentToolUseId, undefined, exitCode);
         }
         const out = item.aggregatedOutput ?? item.output;
         if (completed && out) {
@@ -2461,6 +2464,7 @@ export class CodexAppServerDriver implements Driver {
     status: string,
     parentToolUseId?: string,
     subagentLifecycle?: AuthoritativeSubagentLifecycle,
+    exitCode?: number,
   ): void {
     if (!this.seenItems.has(id)) {
       this.seenItems.add(id);
@@ -2472,6 +2476,7 @@ export class CodexAppServerDriver implements Driver {
         status,
         ...(parentToolUseId ? { parentToolUseId } : {}),
         ...(subagentLifecycle ? { subagentLifecycle } : {}),
+        ...(exitCode !== undefined ? { exitCode } : {}),
       });
     } else {
       this.cb.onEvent({
@@ -2480,6 +2485,7 @@ export class CodexAppServerDriver implements Driver {
         status,
         ...(parentToolUseId ? { parentToolUseId } : {}),
         ...(subagentLifecycle ? { subagentLifecycle } : {}),
+        ...(exitCode !== undefined ? { exitCode } : {}),
       });
     }
   }

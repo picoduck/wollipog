@@ -680,6 +680,7 @@ export function parsePiTranscript(content: string): SessionEventPayload[] {
         toolCallId: id,
         status: message.cancelled === true || (typeof message.exitCode === "number" && message.exitCode !== 0) ? "failed" : "completed",
         text: clip(asString(message.output), BODY_CLIP) || undefined,
+        ...(Number.isSafeInteger(message.exitCode) ? { exitCode: message.exitCode as number } : {}),
       });
     }
   }

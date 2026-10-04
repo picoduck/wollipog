@@ -142,11 +142,12 @@ export function ToolStep({
 
 /**
  * A step's output in a neutral well. A failed step's exit code and error lines read in the danger
- * text colour; everything else stays neutral, so the failure is what stands out.
+ * text colour; everything else stays neutral, so the failure is what stands out. `exitCode` is the
+ * code the provider reported, which the step states on its own line (StepExitCode).
  */
-export function StepOutput({ text, failed = false }: { text: string; failed?: boolean }) {
+export function StepOutput({ text, failed = false, exitCode }: { text: string; failed?: boolean; exitCode?: number }) {
   if (!failed) return <pre className="tl-step-output">{text}</pre>;
-  const { lines, failing } = failureLines(text);
+  const { lines, failing } = failureLines(text, exitCode);
   return (
     <pre className="tl-step-output">
       {lines.map((line, index) => (
@@ -156,6 +157,11 @@ export function StepOutput({ text, failed = false }: { text: string; failed?: bo
       ))}
     </pre>
   );
+}
+
+/** A failed step's reported exit code (#2456), in the danger text colour above its output. */
+export function StepExitCode({ code }: { code: number }) {
+  return <p className="tl-step-exit">Exit Code {code}</p>;
 }
 
 const plural = (count: number, one: string, many = `${one}s`) => `${count} ${count === 1 ? one : many}`;

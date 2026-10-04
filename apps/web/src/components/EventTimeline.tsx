@@ -44,6 +44,7 @@ import {
   foldRetries,
   mergeWork,
   ownsSubagent,
+  reportedExitCode,
   retryIdentity,
   retryNeighbours,
   sameWork,
@@ -54,7 +55,7 @@ import {
   workspaceRelativePath,
   type WorkLedger,
 } from "../work-steps.js";
-import { StepOutput, StepStatus, ToolStep, toolIcon, WorkLedgerLine } from "./ToolStep.js";
+import { StepExitCode, StepOutput, StepStatus, ToolStep, toolIcon, WorkLedgerLine } from "./ToolStep.js";
 import { statusMeta, toolStatusMeta } from "../status-meta.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { ReadonlyReferenceChip } from "./images.js";
@@ -2476,10 +2477,16 @@ function stepLabel(title: string, status: string, fact?: string): string {
   return [title, fact, toolStatusMeta(status).label].filter(Boolean).join(" · ");
 }
 
+/** The exit code a failed step states on its own line, when its provider reported one (#2456). */
+const stepExitCode = (item: ToolItem, failed: boolean): number | undefined =>
+  failed ? reportedExitCode(item.exitCode, item.text) : undefined;
+
 function ToolOutput({ item, failed }: { item: ToolItem; failed: boolean }) {
+  const exitCode = stepExitCode(item, failed);
   return (
     <>
-      {item.text && <StepOutput text={item.text} failed={failed} />}
+      {exitCode !== undefined && <StepExitCode code={exitCode} />}
+      {item.text && <StepOutput text={item.text} failed={failed} exitCode={item.exitCode} />}
       {item.referencedText?.map((fragment, index) => (
         <EventPayloadContent
           key={`${fragment.refs[0]?.artifactId ?? index}:${index}`}
@@ -2489,7 +2496,7 @@ function ToolOutput({ item, failed }: { item: ToolItem; failed: boolean }) {
           label="Tool Content"
           appendFull
         >
-          {(text, full) => full ? <StepOutput text={text} failed={failed} /> : null}
+          {(text, full) => full ? <StepOutput text={text} failed={failed} exitCode={item.exitCode} /> : null}
         </EventPayloadContent>
       ))}
     </>
@@ -2526,7 +2533,7 @@ function ToolCallStep({ item, attempts, open, onToggle }: {
         </li>
       ))}
     </ol>
-  ) : hasToolOutput(item) ? <ToolOutput item={item} failed={failed} /> : null;
+  ) : hasToolOutput(item) || stepExitCode(item, failed) !== undefined ? <ToolOutput item={item} failed={failed} /> : null;
   return (
     <ToolStep
       icon={toolIcon(item.toolKind)}

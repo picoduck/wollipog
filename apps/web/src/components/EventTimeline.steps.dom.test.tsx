@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { TimelineItem } from "../timeline.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { EventTimeline } from "./EventTimeline.js";
 
@@ -211,6 +213,66 @@ test("a failed step's body shows its exit code and error lines in the danger col
     "Error: expected 2 to be 3",
   ]);
   assert.match(well.textContent ?? "", /PASS src\/a\.test\.ts/, "the rest of the output stays, in the neutral colour");
+});
+
+test("a failed step prefers its reported exit code, stated once in the danger colour (#2456)", async () => {
+  const { container, root } = await mount();
+  const items: TimelineItem[] = [
+    // Codex: the output arrives as its own row, so the step's body is its exit code alone.
+    { ...run(1, "$ make", "failed", t0, 2), exitCode: 2 } as TimelineItem,
+    { kind: "command_output", id: 2, text: "make: *** No rule to make target 'all'.  Stop." },
+    // Output without an error line: the code is the failure, not the whole output.
+    { ...run(3, "$ ./check.sh", "failed", t0 + 3_000, 2, "checking 14 files\n3 files differ"), exitCode: 1 } as TimelineItem,
+    // Output that already states the same code shows it once, as its own highlighted line.
+    { ...run(4, "Bash: npm test", "failed", t0 + 6_000, 2, "Exit code 2\nError: expected 2 to be 3"), exitCode: 2 } as TimelineItem,
+    // A successful command never shows its code.
+    { ...run(5, "$ make all", "completed", t0 + 9_000, 2, "built"), exitCode: 0 } as TimelineItem,
+    { ...run(6, "$ true", "completed", t0 + 12_000, 2), exitCode: 0 } as TimelineItem,
+  ];
+  await act(async () => root.render(<EventTimeline items={items} />));
+  await openWork(container);
+  const step = (label: string) => [...container.querySelectorAll<HTMLElement>(".tl-step")].find((row) =>
+    (row.querySelector("summary")?.getAttribute("aria-label") ?? row.textContent)?.startsWith(label))!;
+  const open = async (row: HTMLElement) => {
+    await act(async () => row.querySelector<HTMLElement>("summary")!.click());
+    return row.querySelector<HTMLElement>(".tl-step-body")!;
+  };
+
+  const make = step("Run make · ");
+  assert.equal(make.tagName, "DETAILS", "a failed step with only a reported code still opens");
+  const makeBody = await open(make);
+  assert.deepEqual([...makeBody.querySelectorAll(".tl-step-exit")].map((line) => line.textContent), ["Exit Code 2"]);
+  assertNoDomNode(makeBody.querySelector("pre"), "its output stays in its own row");
+
+  const check = await open(step("Run ./check.sh"));
+  assert.equal(check.querySelector(".tl-step-exit")?.textContent, "Exit Code 1");
+  assert.deepEqual([...check.querySelectorAll(".tl-step-error")], [], "the output reads neutral; the code is the failure");
+
+  const npm = await open(step("Run npm test"));
+  assertNoDomNode(npm.querySelector(".tl-step-exit"), "no second statement of the same code");
+  assert.equal(npm.textContent?.match(/exit code 2/gi)?.length, 1);
+  assert.deepEqual([...npm.querySelectorAll(".tl-step-error")].map((line) => line.textContent?.trim()), [
+    "Exit code 2",
+    "Error: expected 2 to be 3",
+  ]);
+
+  const built = await open(step("Run make all"));
+  assertNoDomNode(built.querySelector(".tl-step-exit"), "a successful step never shows its code");
+  assert.equal(step("Run true").tagName, "DIV", "and gains no body for it");
+
+  const css = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
+  assert.match(css, /\.tl-step-exit \{[^}]*color: var\(--danger-text\);/, "the code reads in the danger text colour");
+});
+
+test("an older runner's failed step keeps its text-matched exit code and error lines (#2456)", async () => {
+  const { container, root } = await mount();
+  await act(async () => root.render(<EventTimeline items={settledTurn} />));
+  await openWork(container);
+  const failed = [...container.querySelectorAll<HTMLElement>("details.tl-step")].find((step) =>
+    step.querySelector("summary")?.getAttribute("aria-label") === "Run npm test · Failed")!;
+  await act(async () => failed.querySelector<HTMLElement>("summary")!.click());
+  assertNoDomNode(failed.querySelector(".tl-step-exit"), "no reported code, no separate line");
+  assert.equal(failed.querySelector(".tl-step-error")?.textContent?.trim(), "Exit code 1");
 });
 
 test("three failed attempts of one command fold into one row that lists each attempt", async () => {

@@ -7150,6 +7150,12 @@ textarea,
   overflow-wrap: anywhere;
 }
 .tl-step-error { color: var(--danger-text); }
+/* A failed step's reported exit code (#2456): a fact about the step, above its output well. */
+.tl-step-exit {
+  margin: 0;
+  color: var(--danger-text);
+  font: var(--type-small);
+}
 .tl-step-attempts {
   display: flex;
   flex-direction: column;

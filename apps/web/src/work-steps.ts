@@ -255,9 +255,10 @@ const ERROR_LINE = /\b(?:error|errors|errno|fail|failed|failure|fatal|exception|
 
 /**
  * Which output lines of a failed step read as the failure: the exit code line and the lines that
- * name an error. When neither appears, the whole output is the provider's error message.
+ * name an error. When neither appears, the whole output is the provider's error message, unless
+ * the provider reported the step's exit code (`reported`, #2456): that code is the failure then.
  */
-export function failureLines(text: string): { lines: string[]; failing: boolean[]; exitCode?: number } {
+export function failureLines(text: string, reported?: number): { lines: string[]; failing: boolean[]; exitCode?: number } {
   const lines = text.split("\n");
   let exitCode: number | undefined;
   const failing = lines.map((line) => {
@@ -268,6 +269,18 @@ export function failureLines(text: string): { lines: string[]; failing: boolean[
     }
     return ERROR_LINE.test(line);
   });
-  if (!failing.some(Boolean)) return { lines, failing: lines.map((line) => line.trim() !== "") };
+  if (!failing.some(Boolean) && reported === undefined) {
+    return { lines, failing: lines.map((line) => line.trim() !== "") };
+  }
   return exitCode === undefined ? { lines, failing } : { lines, failing, exitCode };
+}
+
+/**
+ * The exit code a failed step states on its own line (#2456): the one its provider reported,
+ * unless the output already shows that code, so a step never reads its exit code twice. Without a
+ * reported code, the output's own exit code line is all there is.
+ */
+export function reportedExitCode(exitCode: number | undefined, output: string): number | undefined {
+  if (exitCode === undefined) return undefined;
+  return failureLines(output, exitCode).exitCode === exitCode ? undefined : exitCode;
 }

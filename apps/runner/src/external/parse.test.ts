@@ -205,6 +205,24 @@ test("parsePiTranscript follows only the current tree branch and rejects malform
   assert.deepEqual(parsePiTranscript(branched.replace('"parentId":"branch01"', '"parentId":"missing0"')), []);
 });
 
+test("parsePiTranscript carries a user bash execution's exit code onto its tool update (#2456)", () => {
+  const bash = (id: string, parentId: string | null, exitCode: unknown) =>
+    JSON.stringify({ type: "message", id, parentId, message: { role: "bashExecution", command: "make", output: "make: *** No rule", exitCode } });
+  const transcript = [
+    JSON.stringify({ type: "session", version: 3, id: PI_ID, timestamp: "2026-09-16T12:00:00.000Z", cwd: "/repo/pi" }),
+    bash("bash0001", null, 2),
+    bash("bash0002", "bash0001", 0),
+    bash("bash0003", "bash0002", 1.5),
+  ].join("\n");
+  const updates = parsePiTranscript(transcript).filter((event) => event.kind === "tool_call_update");
+  assert.deepEqual(updates.map((event) => [event.status, event.exitCode]), [
+    ["failed", 2],
+    ["completed", 0],
+    ["failed", undefined],
+  ]);
+  assert.equal("exitCode" in updates[2]!, false);
+});
+
 test("parsePiTranscript does not synthesize an empty assistant message for a tool-only step", () => {
   const events = parsePiTranscript(PI);
   assert.equal(events.filter((event) => event.kind === "agent_message").length, 1);

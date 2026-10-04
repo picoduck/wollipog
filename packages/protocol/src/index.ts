@@ -647,7 +647,11 @@
 //      references excluded, beside `hasImages` (#2533). The runner's live queue and the control
 //      plane's durable rows both fill it in. Additive + optional: an older peer omits it, and the
 //      queue tray labels an image-only message "Image attachment" instead of "N images", as before.
-export const PROTOCOL_VERSION = 206;
+// 207: tool exit codes (#2456): `tool_call` and `tool_call_update` carry the integer `exitCode` a
+//      provider reported for the call (Codex command items today), and a failed step shows it
+//      exactly. Additive + optional: older runners send none, so clients keep matching exit code
+//      text in the output, and older clients ignore the field.
+export const PROTOCOL_VERSION = 207;
 export const UNIVERSAL_QUESTION_TEXT_MIN_PROTOCOL = 202;
 
 export type ArtifactUploadPreference = "manual" | "wollipog_automatic" | "external_hosting";
@@ -5136,6 +5140,8 @@ export type SessionEventPayload =
        * transcript prose or provider-private thread/process identifiers. */
       subagentName?: string;
       subagentRole?: string;
+      /** v207: the integer exit code the provider reported for this call, when it reports one. */
+      exitCode?: number;
     }
   | {
       kind: "tool_call_update";
@@ -5147,6 +5153,8 @@ export type SessionEventPayload =
       parentToolUseId?: string;
       /** Provider-observed lifecycle for an agent-spawning tool (v92+). */
       subagentLifecycle?: AuthoritativeSubagentLifecycle;
+      /** v207: the integer exit code the provider reported; replaces any earlier value. */
+      exitCode?: number;
     }
   | { kind: "plan"; entries: PlanEntry[]; parentToolUseId?: string }
   | { kind: "command_output"; text: string; textRefs?: EventPayloadReference[]; parentToolUseId?: string }

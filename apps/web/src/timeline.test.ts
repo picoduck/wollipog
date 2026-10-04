@@ -691,6 +691,36 @@ test("tool_call + tool_call_update still group by id (regression)", () => {
   assert.equal(tc.text, "out");
 });
 
+test("a tool's reported exit code rides its events onto the row, and an update replaces it (#2456)", () => {
+  const exitCode = (items: ReturnType<typeof deriveTimeline>) =>
+    (items[0] as Extract<ReturnType<typeof deriveTimeline>[number], { kind: "tool_call" }>).exitCode;
+  assert.equal(exitCode(deriveTimeline([
+    ev({ kind: "tool_call", toolCallId: "x1", title: "$ make", status: "in_progress" }),
+    ev({ kind: "tool_call_update", toolCallId: "x1", status: "failed", exitCode: 2 }),
+  ])), 2, "the completing update carries it onto the row");
+  assert.equal(exitCode(deriveTimeline([
+    ev({ kind: "tool_call", toolCallId: "x2", title: "$ make", status: "failed", exitCode: 1 }),
+    ev({ kind: "tool_call_update", toolCallId: "x2", status: "failed", exitCode: 2 }),
+  ])), 2, "a later update replaces an earlier value");
+  assert.equal(exitCode(deriveTimeline([
+    ev({ kind: "tool_call", toolCallId: "x3", title: "$ make", status: "in_progress", exitCode: 2 }),
+    ev({ kind: "tool_call_update", toolCallId: "x3", status: "failed", text: "late output" }),
+    ev({ kind: "tool_call", toolCallId: "x3", title: "Skill: review", toolKind: "skill", status: "failed" }),
+  ])), 2, "an event without one keeps the code already recorded");
+  assert.equal(exitCode(deriveTimeline([
+    ev({ kind: "tool_call_update", toolCallId: "x4", status: "failed", exitCode: 3 }),
+  ])), 3, "an update that creates the row carries it too");
+  const older = deriveTimeline([
+    ev({ kind: "tool_call", toolCallId: "x5", title: "$ make", status: "in_progress" }),
+    ev({ kind: "tool_call_update", toolCallId: "x5", status: "failed", text: "Exit code 2" }),
+  ]);
+  assert.equal("exitCode" in older[0]!, false, "an older runner's events leave the row without one");
+  assert.equal(exitCode(deriveTimeline([
+    ev({ kind: "tool_call", toolCallId: "x6", title: "$ make", status: "failed",
+      exitCode: "2" as unknown as number }),
+  ])), undefined, "anything but an integer is not an exit code");
+});
+
 test("live, imported, and backfilled tool events share envelope timing semantics", () => {
   const streams: SessionEvent[][] = [
     [

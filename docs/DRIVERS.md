@@ -1102,7 +1102,7 @@ forwarding HTTP inference, verifying that degraded transport is distinguishable 
 | `item/started`/`delta` `reasoning` / `item/reasoning/summaryTextDelta` | `{kind:"agent_thought", text:delta}` (or new `reasoning`) |
 | `item/started` `commandExecution {command,cwd,status}` | `{kind:"tool_call", toolCallId:id, title:command, toolKind:"execute", status}` |
 | `item/commandExecution/outputDelta` | `{kind:"tool_call_update", toolCallId:itemId, status:"in_progress", text:delta}` → also `{kind:"command_output", text}` |
-| `item/completed` `commandExecution {exitCode,status}` | `{kind:"tool_call_update", toolCallId, status}` |
+| `item/completed` `commandExecution {exitCode,status}` | `{kind:"tool_call_update", toolCallId, status, exitCode?}` (`exitCode` only when the provider reports an integer, v207) |
 | `item/started`/`completed` `fileChange {changes:[{path,kind,diff}],status}` | per change: `{kind:"file_edit", path, diff}` + `{kind:"tool_call_update", toolCallId, status}` |
 | `item/*` `mcpToolCall {server,tool,arguments,result?,error?,status}` | `{kind:"tool_call"/"tool_call_update", toolCallId:id, title:`${server}/${tool}`, status, text}` |
 | `item/*` `webSearch {query}` | `{kind:"tool_call", toolCallId:id, title:`web_search: ${query}`, status:"completed"}` |

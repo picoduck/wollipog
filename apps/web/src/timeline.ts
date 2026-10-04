@@ -147,6 +147,8 @@ export type TimelineItem =
       subagentLifecycle?: AuthoritativeSubagentLifecycle;
       /** The provider's explicit role for an agent it spawned ("Explore"); never parsed from prose. */
       subagentRole?: string;
+      /** The integer exit code the provider reported (v207); a later statement or update replaces it. */
+      exitCode?: number;
       /** Subagent items nested under this Task call — populated only by nestSubagents(). */
       children?: TimelineItem[];
       /**
@@ -1048,6 +1050,7 @@ export class TimelineBuilder {
           MAX_TRACKED_TOOL_CALL_STATEMENTS,
         );
         this.toolStatements.set(p.toolCallId, statementCount);
+        const exitCode = toolExitCode(p.exitCode);
         const existing = this.toolIndex.get(p.toolCallId);
         if (existing != null) {
           const item = this.items[existing] as ToolItem;
@@ -1068,6 +1071,7 @@ export class TimelineBuilder {
               ? { subagentLifecycle: p.subagentLifecycle ?? item.subagentLifecycle }
               : {}),
             ...((p.subagentRole ?? item.subagentRole) ? { subagentRole: p.subagentRole ?? item.subagentRole } : {}),
+            ...(exitCode !== undefined ? { exitCode } : {}),
             ...(activityAt != null ? { lastActivityAt: activityAt } : {}),
             ...(statementCount > 1 ? { statementCount } : {}),
           };
@@ -1090,6 +1094,7 @@ export class TimelineBuilder {
             parentToolUseId: p.parentToolUseId,
             ...(p.subagentLifecycle ? { subagentLifecycle: p.subagentLifecycle } : {}),
             ...(p.subagentRole ? { subagentRole: p.subagentRole } : {}),
+            ...(exitCode !== undefined ? { exitCode } : {}),
             ...(statementCount > 1 ? { statementCount } : {}),
             ...(Number.isFinite(ev.ts) ? { startedAt: ev.ts, lastActivityAt: ev.ts } : {}),
             ...(isTerminalToolStatus(p.status) && Number.isFinite(ev.ts) ? { completedAt: ev.ts } : {}),
@@ -1101,6 +1106,7 @@ export class TimelineBuilder {
         break;
       }
       case "tool_call_update": {
+        const exitCode = toolExitCode(p.exitCode);
         const idx = this.toolIndex.get(p.toolCallId);
         if (idx != null) {
           const it = this.items[idx] as Extract<TimelineItem, { kind: "tool_call" }>;
@@ -1119,6 +1125,7 @@ export class TimelineBuilder {
             ...((p.subagentLifecycle ?? it.subagentLifecycle)
               ? { subagentLifecycle: p.subagentLifecycle ?? it.subagentLifecycle }
               : {}),
+            ...(exitCode !== undefined ? { exitCode } : {}),
             ...(activityAt != null ? { lastActivityAt: activityAt } : {}),
             subagentRollup: isTerminalToolStatus(p.status) && it.startedAt != null
               ? { ...it.subagentRollup, durationMs: it.subagentRollup?.durationMs ?? Math.max(0, (activityAt ?? it.startedAt) - it.startedAt) }
@@ -1141,6 +1148,7 @@ export class TimelineBuilder {
               ...(p.textRefs?.length ? { referencedText: [{ preview: p.text ?? "", refs: p.textRefs }] } : {}),
               parentToolUseId: p.parentToolUseId,
               ...(p.subagentLifecycle ? { subagentLifecycle: p.subagentLifecycle } : {}),
+              ...(exitCode !== undefined ? { exitCode } : {}),
               ...(Number.isFinite(ev.ts) ? { startedAt: ev.ts, lastActivityAt: ev.ts } : {}),
               ...(isTerminalToolStatus(p.status) && Number.isFinite(ev.ts) ? { completedAt: ev.ts } : {}),
               subagentRollup: this.pendingSubagentRollups.get(p.toolCallId),
@@ -1497,6 +1505,11 @@ export class TimelineBuilder {
         break;
     }
   }
+}
+
+/** A tool event's exit code (v207), only when it is an integer: the payload crosses the wire. */
+function toolExitCode(value: unknown): number | undefined {
+  return Number.isSafeInteger(value) ? value as number : undefined;
 }
 
 function isTerminalToolStatus(status: string): boolean {

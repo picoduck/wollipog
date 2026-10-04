@@ -6,6 +6,7 @@ import {
   failureLines,
   foldRetries,
   mergeWork,
+  reportedExitCode,
   retryNeighbours,
   splitStepTitle,
   stepObjectIsPath,
@@ -116,6 +117,23 @@ test("a failure's exit code and error lines are found; output with neither is al
   const plain = failureLines("File does not exist.\n");
   assert.deepEqual(plain.failing, [true, false]);
   assert.equal(plain.exitCode, undefined);
+});
+
+test("a reported exit code is the failure, so output without an error line stays neutral (#2456)", () => {
+  assert.deepEqual(failureLines("make: *** No rule to make target 'all'.  Stop.\n", 2).failing, [false, false],
+    "the reported code carries the failure; the whole output is no longer coloured as the error");
+  const found = failureLines("Exit code 2\nerror: build failed\nnote: see log", 2);
+  assert.deepEqual(found.failing, [true, true, false], "error lines still read as the failure");
+  assert.equal(found.exitCode, 2);
+});
+
+test("a failed step states its reported exit code once, never beside the same code in its output (#2456)", () => {
+  assert.equal(reportedExitCode(2, "make: *** No rule to make target 'all'.  Stop."), 2);
+  assert.equal(reportedExitCode(2, ""), 2, "a step with no output still states its code");
+  assert.equal(reportedExitCode(2, "Exit code 2\nerror: build failed"), undefined,
+    "the output already shows that code");
+  assert.equal(reportedExitCode(2, "Exit code 1\nerror: build failed"), 2, "the reported code is preferred over the text");
+  assert.equal(reportedExitCode(undefined, "Exit code 1"), undefined, "an older runner reports none: the text is all there is");
 });
 
 test("an agent is named after its spawning call, never the provider's bare tool name (#2183)", () => {

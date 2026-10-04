@@ -2198,7 +2198,7 @@ test("commandExecution: a catalog arriving mid-command retitles the row as the s
   h.onItem({ ...item, exitCode: 0 }, true);
   assert.deepEqual(h.events, [
     { kind: "tool_call", toolCallId: "late", title: "$ cat SKILL.md", toolKind: "execute", status: "in_progress" },
-    { kind: "tool_call", toolCallId: "late", title: "Skill: review", toolKind: "skill", status: "completed" },
+    { kind: "tool_call", toolCallId: "late", title: "Skill: review", toolKind: "skill", status: "completed", exitCode: 0 },
   ]);
 });
 
@@ -2210,6 +2210,37 @@ test("commandExecution: a nonzero exit remains failed even with a completed life
   }, true);
   assert.equal((h.events[1] as { kind: string }).kind, "tool_call_update");
   assert.equal((h.events[1] as { status: string }).status, "failed");
+});
+
+test("commandExecution carries the provider's exit code on its completed tool event only (#2456)", () => {
+  const h = makeHarness();
+  h.onItem({ type: "commandExecution", id: "make", command: "make", exitCode: null }, false);
+  h.onItem({
+    type: "commandExecution", id: "make", command: "make", status: "failed", exitCode: 2,
+    aggregatedOutput: "make: *** No rule to make target 'all'.  Stop.\n",
+  }, true);
+  assert.deepEqual(h.events.slice(0, 2), [
+    { kind: "tool_call", toolCallId: "make", title: "$ make", toolKind: "execute", status: "in_progress" },
+    { kind: "tool_call_update", toolCallId: "make", status: "failed", exitCode: 2 },
+  ]);
+
+  // A first sighting that is already complete states the code on its tool_call; so does a skill row.
+  h.events.length = 0;
+  h.onItem({ type: "commandExecution", id: "once", command: "false", exitCode: 1 }, true);
+  (h.driver as any).skillPaths = new Map([["/home/u/.codex/skills/review/SKILL.md", "review"]]);
+  h.onItem({ type: "commandExecution", id: "skill", command: "cat SKILL.md", cwd: "/tmp/work", exitCode: 1,
+    commandActions: skillRead("/home/u/.codex/skills/review/SKILL.md") }, true);
+  assert.deepEqual(h.events.map((event) => event.kind === "tool_call" ? [event.toolCallId, event.exitCode] : null), [
+    ["once", 1],
+    ["skill", 1],
+  ]);
+
+  // Anything other than an integer is not an exit code.
+  for (const exitCode of [1.5, "1", Number.NaN]) {
+    h.events.length = 0;
+    h.onItem({ type: "commandExecution", id: `bad-${String(exitCode)}`, command: "x", exitCode, status: "failed" }, true);
+    assert.equal("exitCode" in h.events[0]!, false, String(exitCode));
+  }
 });
 
 test("fileChange -> a file_edit per change + a tool_call", () => {

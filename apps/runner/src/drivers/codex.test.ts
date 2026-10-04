@@ -358,9 +358,38 @@ test("command_execution: started -> tool_call, completed (same id) -> tool_call_
     aggregated_output: "file1\nfile2",
   });
   assert.deepEqual(events, [
-    { kind: "tool_call_update", toolCallId: "cmd-1", status: "completed" },
+    { kind: "tool_call_update", toolCallId: "cmd-1", status: "completed", exitCode: 0 },
     { kind: "command_output", text: "file1\nfile2" },
   ]);
+});
+
+test("command_execution carries the provider's exit code on its completed tool event only (#2456)", () => {
+  const { driver, events } = makeDriver();
+  handleItem(driver, "item.started", { id: "cmd-2", type: "command_execution", command: "make", exit_code: null });
+  handleItem(driver, "item.completed", {
+    id: "cmd-2",
+    type: "command_execution",
+    command: "make",
+    exit_code: 2,
+    status: "failed",
+    aggregated_output: "make: *** No rule to make target 'all'.  Stop.",
+  });
+  assert.deepEqual(events.slice(0, 2), [
+    { kind: "tool_call", toolCallId: "cmd-2", title: "$ make", toolKind: "execute", status: "in_progress" },
+    { kind: "tool_call_update", toolCallId: "cmd-2", status: "failed", exitCode: 2 },
+  ]);
+
+  // A first sighting that is already complete states the code on its tool_call.
+  events.length = 0;
+  handleItem(driver, "item.completed", { id: "cmd-3", type: "command_execution", command: "false", exit_code: 1 });
+  assert.equal((events[0] as any).exitCode, 1);
+
+  // Anything other than an integer is not an exit code.
+  for (const exitCode of [1.5, "1", Number.NaN, null]) {
+    events.length = 0;
+    handleItem(driver, "item.completed", { id: `cmd-${String(exitCode)}`, type: "command_execution", command: "x", exit_code: exitCode });
+    assert.equal("exitCode" in events[0]!, false, String(exitCode));
+  }
 });
 
 test("command_execution completed status: failed when exit_code !== 0 and status !== completed", () => {

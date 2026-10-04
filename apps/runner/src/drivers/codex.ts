@@ -412,11 +412,12 @@ export class CodexDriver implements Driver {
         break;
       case "command_execution": {
         const status = completed ? (item.exit_code === 0 || item.status === "completed" ? "completed" : "failed") : "in_progress";
+        const exit = completed && Number.isSafeInteger(item.exit_code) ? { exitCode: item.exit_code } : {};
         if (!this.seenItems.has(id)) {
           this.seenItems.add(id);
-          this.cb.onEvent({ kind: "tool_call", toolCallId: id, title: `$ ${truncate(String(item.command ?? ""), 80)}`, toolKind: "execute", status });
+          this.cb.onEvent({ kind: "tool_call", toolCallId: id, title: `$ ${truncate(String(item.command ?? ""), 80)}`, toolKind: "execute", status, ...exit });
         } else {
-          this.cb.onEvent({ kind: "tool_call_update", toolCallId: id, status });
+          this.cb.onEvent({ kind: "tool_call_update", toolCallId: id, status, ...exit });
         }
         const out = item.aggregated_output ?? item.output;
         if (out) this.cb.onEvent({ kind: "command_output", text: truncate(String(out), 2000) });
