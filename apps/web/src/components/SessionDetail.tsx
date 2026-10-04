@@ -3904,6 +3904,9 @@ function SessionDetailLoaded({
     if ((stored?.id ?? null) !== (editCopyRef.current?.id ?? null)) setEditCopyState(stored);
   }, [activeComposerMutation, instanceScope, sessionId]);
   const putComposerDraft = useCallback((draft: ComposerDraftContent) => {
+    // A draft put in place of another (Edit as a New Turn, Discard Edit) ends the dictation that was
+    // writing the old one (#2193).
+    dictation.cancel();
     draftDirty.current = true;
     composerDraftVersionRef.current += 1;
     draftState.current = draft;
@@ -3911,7 +3914,7 @@ function SessionDetailLoaded({
     if (draft.images.length) replace(draft.images);
     else clear();
     setHistIdx(-1);
-  }, [clear, replace, setProgrammaticComposerText]);
+  }, [clear, dictation.cancel, replace, setProgrammaticComposerText]);
   const openResendAction = useCallback(async (item: Extract<TimelineItem, { kind: "user_message" }>) => {
     if (!canPromptRef.current) return;
     const held = draftState.current;
@@ -4737,6 +4740,11 @@ function SessionDetailLoaded({
     return () => cancelDictation();
   }, [cancelDictation]);
   useEffect(() => cancelDictation, [session.id, cancelDictation]);
+  // Opening a queued edit, or leaving one (Save, Cancel Edit, Dismiss Recovery), swaps the draft the
+  // words go into: dictation ends with the draft it was writing, so no unsettled phrase lands in the
+  // other one.
+  const queuedEditPromptId = queuedEdit?.promptId ?? null;
+  useEffect(() => cancelDictation, [queuedEditPromptId, cancelDictation]);
   // Live context and cost sit in the composer bar's trailing cluster, or in Model Settings when the
   // bar has no room for them (#2166).
   const [composerBoxRef, composerColumnNarrow] = useNarrowerThanRem<HTMLDivElement>(COMPOSER_USAGE_MIN_COLUMN_REM);

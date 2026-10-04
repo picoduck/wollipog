@@ -6244,3 +6244,97 @@ test("collapsing to the Inbox preview cancels dictation, so nothing listens with
     }
   });
 });
+
+test("dictation ends with the draft it writes: opening, stopping in and cancelling a queued edit (#2193)", async () => {
+  await withTrackedRecognition(async () => {
+    const draft = deferred<ComposerDraft | null>();
+    const fixture = await mountFixture(draft, {
+      runnerProtocolVersion: 99,
+      sessionPatch: { queued: [{
+        id: "queue-1", text: "Queued projection", liveQueueObserved: true,
+        editable: true, editRevision: "qer_exact",
+      }] },
+      client: {
+        readQueuedPrompt: async (_sessionId, promptId) => ({ prompt: {
+          promptId, text: "Queued exact content", images: [], editRevision: "qer_exact",
+        } }),
+      },
+    });
+    const tapMic = async () => {
+      const mic = micButton(fixture);
+      await pointer(mic, "pointerdown");
+      await pointer(mic, "pointerup");
+      assert.equal(micButton(fixture).getAttribute("aria-pressed"), "true");
+      return TrackedRecognition.instances.at(-1)!;
+    };
+    const hear = (recognizer: TrackedRecognition, transcript: string, isFinal: boolean) =>
+      act(async () => recognizer.onresult?.({ resultIndex: 0, results: [{ isFinal, 0: { transcript } }] }));
+    try {
+      await resolveDraft(draft, "Unsent local draft");
+
+      // Opening an edit swaps the draft: dictation into the old one ends.
+      const before = await tapMic();
+      const edit = fixture.container.querySelector('button[aria-label="Edit Queued Message"]') as HTMLButtonElement;
+      await act(async () => { edit.click(); });
+      await flushAsyncWork(450);
+      assert.equal(fixture.composer.value, "Queued exact content");
+      assert.deepEqual(TrackedRecognition.log, ["start", "abort"]);
+      assert.equal(before.onresult, null);
+      assert.equal(micButton(fixture).getAttribute("aria-pressed"), "false");
+
+      // Escape stops dictation first and leaves the edit open; a second Escape would cancel it.
+      await tapMic();
+      await act(async () => { fireDomEvent.keyDown(fixture.composer, { key: "Escape" }); });
+      assert.equal(micButton(fixture).getAttribute("aria-pressed"), "false");
+      assert.ok(fixture.container.querySelector(".composer-mode"), "the first Escape leaves the edit open");
+      assert.deepEqual(TrackedRecognition.log, ["start", "abort", "start", "stop"]);
+      await act(async () => TrackedRecognition.instances.at(-1)!.onend?.());
+
+      // Cancel Edit restores the displaced draft; words still settling never reach it.
+      const during = await tapMic();
+      await hear(during, "half a sentence", false);
+      const cancel = [...fixture.container.querySelectorAll<HTMLButtonElement>("button")]
+        .find((button) => button.textContent === "Cancel Edit");
+      assert.ok(cancel);
+      await act(async () => { cancel.click(); });
+      await flushAsyncWork();
+      assertNoDomNode(fixture.container.querySelector(".composer-mode"));
+      assert.equal(fixture.composer.value, "Unsent local draft");
+      assert.equal(TrackedRecognition.log.at(-1), "abort");
+      assert.equal(during.onresult, null, "a late phrase has nowhere to land");
+      assert.equal(micButton(fixture).getAttribute("aria-pressed"), "false");
+    } finally {
+      await unmountFixture(fixture);
+    }
+  });
+});
+
+test("Edit as a New Turn ends the dictation that was writing the draft it replaces (#2193)", async () => {
+  await withTrackedRecognition(async () => {
+    const draft = deferred<ComposerDraft | null>();
+    const fixture = await mountFixture(draft, { mainEventPayloads: EDITABLE_TURN });
+    try {
+      await resolveDraft(draft, "");
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
+      const mic = micButton(fixture);
+      await pointer(mic, "pointerdown");
+      await pointer(mic, "pointerup");
+      const recognizer = TrackedRecognition.instances.at(-1)!;
+      await act(async () => recognizer.onresult?.({ resultIndex: 0, results: [{ isFinal: false, 0: { transcript: "unsettled" } }] }));
+      const edit = fixture.container.querySelector<HTMLButtonElement>('button[aria-label="Edit as a New Turn"]');
+      assert.ok(edit);
+      await act(async () => { edit.click(); });
+      await act(async () => {
+        flushFrames();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        flushFrames();
+      });
+      assert.equal(fixture.composer.value, "original prompt");
+      assert.deepEqual(TrackedRecognition.log, ["start", "abort"]);
+      assert.equal(recognizer.onresult, null, "nothing settles into the copied message");
+      assert.equal(micButton(fixture).getAttribute("aria-pressed"), "false");
+    } finally {
+      await unmountFixture(fixture);
+    }
+  });
+});
