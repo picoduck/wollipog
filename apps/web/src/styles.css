@@ -16421,10 +16421,12 @@ body.shell-dock-dragging * {
   font-weight: var(--weight-normal);
   line-height: 20px;
 }
-/* Hover steps the edge up from --control-outline; --border-strong would have faded it. */
+/* Hover steps the edge up from --control-outline; --border-strong would have faded it. A disabled
+   picker has no hover (§3.1, #2619, #2621); the exclusion sits in `:where()` so the invalid edge
+   still outranks this rule. */
 @media (hover: hover) {
   .ui-select-trigger:where(:not([aria-disabled="true"])):hover,
-  .ui-searchable-combobox-input:hover { border-color: var(--text-dim); }
+  .ui-searchable-combobox-input:where(:not([aria-disabled="true"])):hover { border-color: var(--text-dim); }
 }
 .ui-searchable-combobox-input { cursor: text; }
 .ui-searchable-combobox-input[aria-disabled="true"] { cursor: not-allowed; color: var(--text-faint); }

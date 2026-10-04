@@ -1233,7 +1233,7 @@ Helper text, one sentence.            ← or the error, which replaces it
   `--text-faint` on the unchanged `--field-bg` fill and edge, with `cursor: not-allowed` and no
   opacity (Chromium's own 0.7 on a disabled select is reset); SearchableCombobox's `aria-disabled`
   input and the Select trigger's `aria-disabled` button take the same ink (the trigger's placeholder
-  too), and the disabled trigger's edge does not step up on hover. A field has a fill of its own and
+  too), and neither disabled picker's edge steps up on hover. A field has a fill of its own and
   rests in `--text`, so it is a filled control under §3.1 and takes `--text-faint` (6.42:1 dark,
   5.58:1 light on `--field-bg`), not the fill-less `--text-disabled` (3.93:1, 3.38:1), which is never
   for text a person has to read. The value then shares the placeholder's tier, which is accepted

@@ -12,9 +12,9 @@ import "../styles.css";
  *
  * `?scenario=fields` (the default): an editable input and textarea, the same two read-only for good
  * (`.is-read-only`), a read-only field without the marker, an invalid field, a disabled input and
- * textarea, an editable and a disabled native select, a disabled SearchableCombobox, and an enabled
- * Select, a disabled one and a disabled one showing its placeholder (#2619), on a dialog body's
- * surface.
+ * textarea, an editable and a disabled native select, a disabled and an enabled SearchableCombobox
+ * (#2621), and an enabled Select, a disabled one and a disabled one showing its placeholder (#2619),
+ * on a dialog body's surface.
  * `?scenario=guardrails-viewer` and `?scenario=guardrails-editable`: the real Guardrails dialog for a
  * Viewer and for someone who may save. Its save never settles, so a spec can hold it mid-save.
  * `?scenario=rename`: the real Rename Session dialog, whose rename never settles.
@@ -95,6 +95,15 @@ function Fields() {
             onChange={() => {}}
             options={[{ value: "billing", label: "Billing Service" }]}
             disabled
+          />
+        </div>
+        <div className="field" data-field="editable-combobox">
+          <span>Editable Project</span>
+          <SearchableCombobox<string>
+            label="Editable Project"
+            value="billing"
+            onChange={() => {}}
+            options={[{ value: "billing", label: "Billing Service" }]}
           />
         </div>
         <div className="field" data-field="select-trigger">

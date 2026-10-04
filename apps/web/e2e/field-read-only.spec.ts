@@ -6,7 +6,8 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
  * its value in --text-dim; it is not the editable look and not §3.1's disabled look. A field that is
  * read-only only while a request runs, and SearchableCombobox's readOnly-as-disabled, keep their own
  * looks. #2617: a disabled field draws its value in --text-faint with `cursor: not-allowed` on the
- * unchanged fill, undimmed (§3.1, §8.1). #2619: so does a disabled Select trigger.
+ * unchanged fill, undimmed (§3.1, §8.1). #2619: so does a disabled Select trigger. #2621: a disabled
+ * SearchableCombobox's edge does not step up under the pointer.
  */
 
 /** The editable field as measured on main before #2520 (the issue's table). */
@@ -219,6 +220,34 @@ for (const theme of ["dark", "light"] as const) {
     expect(await hovered(enabled), "enabled trigger: its edge steps up under the pointer").toBe(dim);
   });
 
+  // #2621: a disabled SearchableCombobox's edge still stepped up to --text-dim under the pointer,
+  // unlike the disabled Select trigger beside it (§3.1: no hover).
+  test(`${theme}: a disabled SearchableCombobox keeps its edge under the pointer`, async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(`/read-only-fields-e2e.html?theme=${theme}`);
+    const combobox = (name: string) => page.locator(`[data-field="${name}"] input`);
+    await expect(combobox("editable-combobox")).toBeVisible();
+    expect(await page.evaluate(() => matchMedia("(hover: hover)").matches)).toBe(true);
+    const dim = await token(page, "--text-dim");
+    const hovered = async (control: Locator) => {
+      await control.hover();
+      await settle(page);
+      return look(control);
+    };
+
+    const disabled = combobox("combobox");
+    await expect(disabled).toHaveAttribute("aria-disabled", "true");
+    expect((await look(disabled)).border, "disabled combobox: --control-outline at rest").toBe(EDITABLE[theme].border);
+    expect(await hovered(disabled), "disabled combobox: no hover edge, not-allowed").toMatchObject({
+      border: EDITABLE[theme].border, cursor: "not-allowed",
+    });
+
+    // The enabled combobox keeps its hover edge, so the check above is not vacuous.
+    const enabled = combobox("editable-combobox");
+    expect(await look(enabled), "enabled combobox: unchanged").toMatchObject({ ...editableLook(theme), cursor: "text", readOnly: false });
+    expect((await hovered(enabled)).border, "enabled combobox: its edge steps up under the pointer").toBe(dim);
+  });
+
   test(`${theme}: a read-only field stays in the tab order and its value can be selected`, async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(`/read-only-fields-e2e.html?theme=${theme}`);
@@ -326,6 +355,10 @@ for (const palette of ["dark", "light"] as const) {
       .toMatchObject({ readOnly: true, color: system.grayText, border: system.grayText });
     expect(await page.locator('[data-field="combobox"] .ui-picker-chevron svg').evaluate((icon) => getComputedStyle(icon).color),
       "combobox: its chevron too").toBe(system.grayText);
+    // #2621: and its edge stays GrayText under the pointer.
+    await page.locator('[data-field="combobox"] input').hover();
+    expect((await look(page.locator('[data-field="combobox"] input'))).border, "combobox: hovered, the edge stays GrayText")
+      .toBe(system.grayText);
 
     // #2619: a disabled Select trigger, a button, draws it too, caret included, at rest and hovered.
     for (const name of ["disabled-select-trigger", "disabled-select-trigger-placeholder"]) {
@@ -345,7 +378,7 @@ for (const palette of ["dark", "light"] as const) {
     expect(await triggerInk(enabled), "enabled trigger: its value and caret too")
       .toEqual({ value: system.canvasText, caret: system.canvasText });
 
-    for (const name of ["editable", "editable-textarea", "editable-select", "read-only", "read-only-textarea"]) {
+    for (const name of ["editable", "editable-textarea", "editable-select", "editable-combobox", "read-only", "read-only-textarea"]) {
       const field = await look(control(name));
       expect(field.color, `${name}: CanvasText, not the disabled GrayText`).toBe(system.canvasText);
       expect(field.border, `${name}: not the disabled edge`).not.toBe(system.grayText);
