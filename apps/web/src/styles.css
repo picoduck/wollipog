@@ -3233,6 +3233,17 @@ textarea {
   border-style: dashed;
   color: var(--text-dim);
 }
+/* A disabled field (§3.1, §8.1, #2617): the value in --text-faint on the unchanged --field-bg fill
+   (6.42:1 dark, 5.58:1 light) with `cursor: not-allowed`. A field has a fill of its own and rests in
+   --text, so it takes the filled controls' --text-faint, not the fill-less --text-disabled. Opacity
+   is reset because Chromium dims a disabled select to 0.7, and §3.1 rules opacity out.
+   SearchableCombobox's readOnly-as-disabled input is `aria-disabled` and draws the same ink below.
+   `:where(.field)` keeps this at the forced-colors rule's specificity, which comes later and wins. */
+:where(.field) :is(input:not([type="checkbox"], [type="radio"], [type="range"], [type="file"], [type="color"]), textarea, select):disabled {
+  color: var(--text-faint);
+  cursor: not-allowed;
+  opacity: 1;
+}
 /* Forced colors (#2611) replaces the field's --text with CanvasText, so a disabled field would read
    as editable. As for a disabled `.btn` (#2130), an author system colour survives forcing, so a
    disabled field names GrayText for its value and edge (§3.1). SearchableCombobox's
@@ -16417,7 +16428,7 @@ body.shell-dock-dragging * {
   .ui-searchable-combobox-input:hover { border-color: var(--text-dim); }
 }
 .ui-searchable-combobox-input { cursor: text; }
-.ui-searchable-combobox-input[aria-disabled="true"] { cursor: not-allowed; color: var(--text-dim); }
+.ui-searchable-combobox-input[aria-disabled="true"] { cursor: not-allowed; color: var(--text-faint); }
 .ui-select-value { flex: 1; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ui-select-value.is-placeholder { color: var(--text-dim); }
 .ui-select-caret { flex: none; color: var(--text-dim); }

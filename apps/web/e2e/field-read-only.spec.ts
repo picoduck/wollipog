@@ -5,7 +5,8 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
  * read-only for good (`readOnly` plus `.is-read-only`) draws a dashed edge on a --bg-elev-2 fill with
  * its value in --text-dim; it is not the editable look and not §3.1's disabled look. A field that is
  * read-only only while a request runs, and SearchableCombobox's readOnly-as-disabled, keep their own
- * looks.
+ * looks. #2617: a disabled field draws its value in --text-faint with `cursor: not-allowed` on the
+ * unchanged fill, undimmed (§3.1, §8.1).
  */
 
 /** The editable field as measured on main before #2520 (the issue's table). */
@@ -28,6 +29,7 @@ async function token(page: Page, name: string): Promise<string> {
 
 type Look = {
   color: string;
+  opacity: string;
   background: string;
   border: string;
   borderStyle: string;
@@ -42,6 +44,7 @@ function look(control: Locator): Promise<Look> {
     const style = getComputedStyle(element);
     return {
       color: style.color,
+      opacity: style.opacity,
       background: style.backgroundColor,
       border: style.borderTopColor,
       borderStyle: style.borderTopStyle,
@@ -126,12 +129,40 @@ for (const theme of ["dark", "light"] as const) {
 
     // A field read-only only while a request runs has no marker and keeps the editable look.
     expect(await look(control("busy"))).toMatchObject({ ...editableLook(theme), readOnly: true });
+  });
 
-    // SearchableCombobox implements disabled with readOnly; it keeps its disabled look.
-    const combobox = page.locator('[data-field="combobox"] input');
-    expect(await look(combobox)).toMatchObject({
-      readOnly: true, cursor: "not-allowed", color: dim, background: EDITABLE[theme].background, borderStyle: "solid",
-    });
+  // #2617: outside forced colors a disabled field drew exactly like an editable one (a select only
+  // differed by Chromium's own opacity). §3.1 gives a filled control --text-faint, the fill unchanged,
+  // `cursor: not-allowed` and no opacity.
+  test(`${theme}: a disabled field draws its value in --text-faint with the not-allowed cursor`, async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(`/read-only-fields-e2e.html?theme=${theme}`);
+    const control = (name: string) => page.locator(`[data-field="${name}"] :is(input, textarea, select)`);
+    await expect(control("editable")).toBeVisible();
+    const faint = await token(page, "--text-faint");
+    const disabledLook = {
+      color: faint, background: EDITABLE[theme].background, border: EDITABLE[theme].border,
+      borderStyle: "solid", borderWidth: "1px", cursor: "not-allowed", opacity: "1",
+    };
+
+    for (const name of ["disabled", "disabled-textarea", "disabled-select"]) {
+      await expect(control(name)).toBeDisabled();
+      const disabled = await look(control(name));
+      expect(disabled, `${name}: --text-faint on --field-bg, not-allowed, undimmed`).toMatchObject(disabledLook);
+      expect(contrast(disabled.color, disabled.background), `${name}: the value stays readable`).toBeGreaterThanOrEqual(4.5);
+    }
+    expect((await look(control("disabled"))).height, "the disabled field keeps the control height")
+      .toBe((await look(control("editable"))).height);
+
+    // SearchableCombobox implements disabled with readOnly and `aria-disabled`; it takes the same look.
+    expect(await look(page.locator('[data-field="combobox"] input')), "combobox: the native field's disabled look")
+      .toMatchObject({ ...disabledLook, readOnly: true });
+
+    // Editable fields, and the native select, keep their look.
+    for (const name of ["editable", "editable-textarea", "editable-select"]) {
+      expect(await look(control(name)), `${name}: unchanged`).toMatchObject({ ...editableLook(theme), opacity: "1" });
+    }
+    expect((await look(control("editable-select"))).cursor, "editable-select: not the disabled cursor").not.toBe("not-allowed");
   });
 
   test(`${theme}: a read-only field stays in the tab order and its value can be selected`, async ({ page }) => {
