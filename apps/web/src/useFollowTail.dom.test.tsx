@@ -678,6 +678,36 @@ test("a press that lifts at the tail resumes following, while one that carried t
   await dispatch(transcript, touchEvent("touchstart", [3], [3]));
   await dispatch(transcript, touchEvent("touchend", [3], []));
   assert.equal(transcript.dataset.state, "paused", "a tap away from the tail leaves the reader where it is");
+  await scrollTo(800);
+  assert.equal(transcript.dataset.state, "following");
+
+  // A pan inside a nested scroller (a tool output) leaves the reader itself at the tail, but it is
+  // reading: the lift keeps the pause.
+  const well = domWindow.document.createElement("pre") as unknown as HTMLElement;
+  transcript.append(well as never);
+  await dispatch(well, touchEvent("touchstart", [4], [4]));
+  await dispatch(well, new domWindow.Event("scroll") as unknown as Event);
+  await dispatch(well, touchEvent("touchend", [4], []));
+  assert.equal(transcript.dataset.state, "paused", "a nested pan is reading, though the reader stayed at the tail");
+  await scrollTo(800);
+  assert.equal(transcript.dataset.state, "following");
+
+  // A pan up from the tail that layout then clamps back to the bottom keeps the pause the scroll
+  // rules gave it; the lift does not override them.
+  await dispatch(transcript, touchEvent("touchstart", [5], [5]));
+  await scrollTo(600);
+  assert.equal(transcript.dataset.state, "paused");
+  setScrollMetrics(transcript, { scrollTop: 600, scrollHeight: 1_000, clientHeight: 400 });
+  await act(async () => { viewportObserver.trigger(); });
+  await dispatch(transcript, new domWindow.Event("scroll", { bubbles: true }) as unknown as Event);
+  assert.equal(transcript.dataset.state, "paused", "a layout clamp to the bottom is not the reader's");
+  await dispatch(transcript, touchEvent("touchend", [5], []));
+  assert.equal(transcript.dataset.state, "paused", "a press that panned is not a tap, wherever it lifts");
+
+  // A tap that begins paused, even at the bottom, leaves the pause alone.
+  await dispatch(transcript, touchEvent("touchstart", [6], [6]));
+  await dispatch(transcript, touchEvent("touchend", [6], []));
+  assert.equal(transcript.dataset.state, "paused", "only a press that began while following is a tap to undo");
 
   // A transcript with nothing to scroll reports it, so its owner offers no jump.
   setScrollMetrics(transcript, { scrollTop: 0, scrollHeight: 200, clientHeight: 200 });
