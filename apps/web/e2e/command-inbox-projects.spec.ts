@@ -73,60 +73,102 @@ async function previewVisibleAnchor(page: Page) {
   });
 }
 
+type RowOffsetSample = { key: string; offset: number | null };
+
 /**
- * Presses `key` and follows the row at the top of the reader through every frame for `durationMs`
- * after the page lands (#2426). The page lands in the press's own task, so the first frame sampled
- * is the first frame after it; the rows it mounted measure in the frames that follow. Returns each
- * frame's offset of that same row, so a row that moves for a single frame and moves back still
- * shows.
+ * Runs `action` and follows one row of the reader through every painted frame (#2426). Without
+ * `key`, it waits for the reader to scroll (a page lands in the press's own task) and follows the
+ * row then at the top; with `key`, it follows that row from the first frame. Recording ends
+ * `durationMs` after it starts or, with `untilRowsGrow`, `durationMs` after the list gains a row.
+ * Samples are read only inside the browser's rendering step, never in a task between frames: a
+ * read there forces a style recalculation that would start a short transition early and hide the
+ * very frame under test. Each frame is read once in a rAF callback, and again in a ResizeObserver
+ * callback whenever the list, its rows or the reader resize — created after the list's own
+ * observers, so it reads the geometry their corrections leave for the paint. A row that moves for a
+ * single painted frame and moves back still shows.
  */
-async function landedRowOffsetsAfterPage(page: Page, reader: Locator, key: string, durationMs = 300) {
-  await reader.evaluate((element, duration) => {
+async function recordRowOffsets(
+  page: Page,
+  reader: Locator,
+  action: () => Promise<unknown>,
+  { key, untilRowsGrow = false, durationMs = 300 }: { key?: string; untilRowsGrow?: boolean; durationMs?: number } = {},
+) {
+  await reader.evaluate((element, options) => {
     const scrollTop = element.scrollTop;
-    const firstVisibleRow = () => {
-      const viewport = element.getBoundingClientRect();
-      return [...element.querySelectorAll<HTMLElement>("[data-virtual-row]")].find((candidate) => {
-        const rect = candidate.getBoundingClientRect();
-        return rect.bottom > viewport.top && rect.top < viewport.bottom;
-      });
-    };
+    const rowCount = () => Number(element.querySelector<HTMLElement>("[data-virtual-total]")?.dataset.virtualTotal ?? 0);
+    const initialRowCount = rowCount();
+    const rows = () => [...element.querySelectorAll<HTMLElement>("[data-virtual-row]")];
     const samples: Array<{ key: string; offset: number | null }> = [];
-    const probe = window as typeof window & { __landedRowOffsets?: Promise<typeof samples> };
-    probe.__landedRowOffsets = new Promise((resolve) => {
-      let landedKey: string | null = null;
-      let landedAt = 0;
-      const sample = (now: number) => {
-        if (landedKey == null && Math.abs(element.scrollTop - scrollTop) >= 1) {
-          landedKey = firstVisibleRow()?.dataset.virtualKey ?? null;
-          landedAt = now;
-        }
-        if (landedKey != null) {
-          const viewport = element.getBoundingClientRect();
-          const row = [...element.querySelectorAll<HTMLElement>("[data-virtual-row]")]
-            .find((candidate) => candidate.dataset.virtualKey === landedKey);
-          samples.push({ key: landedKey, offset: row ? row.getBoundingClientRect().top - viewport.top : null });
-          if (now - landedAt >= duration) {
-            resolve(samples);
-            return;
+    const probe = window as typeof window & {
+      __rowOffsets?: Promise<{ samples: typeof samples; completed: boolean }>;
+    };
+    probe.__rowOffsets = new Promise((resolve) => {
+      const startedAt = performance.now();
+      let trackedKey: string | null = options.key ?? null;
+      let windowStart: number | null = trackedKey != null && !options.untilRowsGrow ? startedAt : null;
+      let done = false;
+      const observed = new Set<Element>();
+      const resized = new ResizeObserver(() => sample());
+      const observe = () => {
+        for (const target of [element, element.querySelector("[data-virtual-total]"), ...rows()]) {
+          if (target && !observed.has(target)) {
+            observed.add(target);
+            resized.observe(target);
           }
         }
-        requestAnimationFrame(sample);
       };
-      requestAnimationFrame(sample);
+      const finish = (completed: boolean) => {
+        done = true;
+        resized.disconnect();
+        resolve({ samples, completed });
+      };
+      const sample = () => {
+        if (done) return;
+        const now = performance.now();
+        const viewport = element.getBoundingClientRect();
+        if (trackedKey == null && Math.abs(element.scrollTop - scrollTop) >= 1) {
+          trackedKey = rows().find((candidate) => {
+            const rect = candidate.getBoundingClientRect();
+            return rect.bottom > viewport.top && rect.top < viewport.bottom;
+          })?.dataset.virtualKey ?? null;
+          if (!options.untilRowsGrow) windowStart = now;
+        }
+        if (options.untilRowsGrow && windowStart == null && rowCount() > initialRowCount) windowStart = now;
+        if (trackedKey != null) {
+          const row = rows().find((candidate) => candidate.dataset.virtualKey === trackedKey);
+          samples.push({ key: trackedKey, offset: row ? row.getBoundingClientRect().top - viewport.top : null });
+        }
+        observe();
+      };
+      const frame = () => {
+        sample();
+        const now = performance.now();
+        if (windowStart != null && now - windowStart >= options.durationMs) finish(true);
+        else if (now - startedAt >= 5_000) finish(false);
+        else requestAnimationFrame(frame);
+      };
+      observe();
+      requestAnimationFrame(frame);
     });
-  }, durationMs);
-  await page.keyboard.press(key);
-  return page.evaluate(() =>
-    (window as typeof window & { __landedRowOffsets?: Promise<Array<{ key: string; offset: number | null }>> })
-      .__landedRowOffsets!);
+  }, { key, untilRowsGrow, durationMs });
+  await action();
+  const recorded = await page.evaluate(() =>
+    (window as typeof window & { __rowOffsets?: Promise<{ samples: RowOffsetSample[]; completed: boolean }> })
+      .__rowOffsets!);
+  expect(recorded.completed, "the recorder saw the reader move or the list grow").toBe(true);
+  return recorded.samples;
 }
 
-function expectLandedRowStill(samples: Array<{ key: string; offset: number | null }>) {
+/** The largest distance the followed row moved from where it was in the first recorded frame. */
+function rowDrift(samples: RowOffsetSample[]): number {
   expect(samples.length).toBeGreaterThan(2);
   const [first] = samples;
   expect(first!.offset).not.toBeNull();
-  const drift = samples.map((sample) => sample.offset == null ? Infinity : Math.abs(sample.offset - first!.offset!));
-  expect(Math.max(...drift), JSON.stringify(samples)).toBeLessThanOrEqual(2);
+  return Math.max(...samples.map((sample) => sample.offset == null ? Infinity : Math.abs(sample.offset - first!.offset!)));
+}
+
+function expectRowStill(samples: RowOffsetSample[]) {
+  expect(rowDrift(samples), JSON.stringify(samples)).toBeLessThanOrEqual(2);
 }
 
 async function settlePreviewLayout(page: Page, frames = 12) {
@@ -662,20 +704,22 @@ test("real Inbox preview paging preserves ownership with reduced motion", async 
 
   // The rows the page mounts measure in the frames after it lands, and the row at the top of the
   // reader must not move while they do — not even for one frame (#2426).
-  expectLandedRowStill(await landedRowOffsetsAfterPage(page, reader, "Shift+Space"));
+  expectRowStill(await recordRowOffsets(page, reader, () => page.keyboard.press("Shift+Space")));
   await expect(follow).toHaveAttribute("data-follow-tail-state", "previewing");
   expect((await previewScrollMetrics(page)).scrollTop).toBeLessThan(before.scrollTop - before.clientHeight * 0.35);
   const anchor = await previewVisibleAnchor(page);
   expect(anchor).not.toBeNull();
-  await page.evaluate(() => {
+  // The streamed row lands below the viewport; the anchor stays put in every frame until it has.
+  expectRowStill(await recordRowOffsets(page, reader, () => page.evaluate(() => {
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitAgentMessage(
       "session-alpha",
       "Reduced-motion streamed output must leave the preview viewport untouched. ".repeat(12),
     );
-  });
+  }), { key: anchor!.key, untilRowsGrow: true }));
   await expect(follow).toHaveAttribute("data-follow-tail-state", "previewing");
-  await expect.poll(async () => (await previewVisibleAnchor(page))?.key).toBe(anchor!.key);
-  await expect.poll(async () => Math.abs((await previewVisibleAnchor(page))!.offset - anchor!.offset)).toBeLessThanOrEqual(2);
+  const streamed = await previewVisibleAnchor(page);
+  expect(streamed?.key).toBe(anchor!.key);
+  expect(Math.abs(streamed!.offset - anchor!.offset)).toBeLessThanOrEqual(2);
 });
 
 for (const reducedMotion of ["reduce", "no-preference"] as const) {
@@ -688,7 +732,7 @@ for (const reducedMotion of ["reduce", "no-preference"] as const) {
     await expect.poll(async () => (await previewScrollMetrics(page)).distanceFromTail).toBeLessThanOrEqual(2);
     await page.locator(".inbox-list").focus();
     await settledPreviewScrollMetrics(page);
-    expectLandedRowStill(await landedRowOffsetsAfterPage(page, preview, "Shift+Space"));
+    expectRowStill(await recordRowOffsets(page, preview, () => page.keyboard.press("Shift+Space")));
     await expect(follow).toHaveAttribute("data-follow-tail-state", "previewing");
 
     // Page Up from the Session Reading keys, in the expanded session.
@@ -701,8 +745,51 @@ for (const reducedMotion of ["reduce", "no-preference"] as const) {
     await expect.poll(() => reader.evaluate((element) =>
       element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThanOrEqual(2);
     await settlePreviewLayout(page);
-    expectLandedRowStill(await landedRowOffsetsAfterPage(page, reader, "Shift+Space"));
+    expectRowStill(await recordRowOffsets(page, reader, () => page.keyboard.press("Shift+Space")));
     await expect(follow).toHaveAttribute("data-follow-tail-state", "paused");
+  });
+}
+
+for (const fault of ["row transition", "observer jump"] as const) {
+  test(`the painted-frame row recorder sees a row that moves for one frame (${fault})`, async ({ page }) => {
+    // Negative controls for the paging tests above. "row transition" puts back the transition #2426
+    // removed, which paints a scroll correction a frame before the rows it compensates for.
+    // "observer jump" moves the reader in a ResizeObserver callback, before paint, as the first
+    // paged-in row measures, and moves it back on the next frame.
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.goto("/command-inbox-projects-e2e.html?scenario=preview-follow");
+    if (fault === "row transition") {
+      await page.addStyleTag({ content: "[data-virtual-row] { transition-property: transform !important; }" });
+    }
+    const reader = page.getByRole("region", { name: "Session Preview Activity" });
+    await expect(reader.locator("[data-virtual-row]").first()).toBeVisible();
+    await expect.poll(async () => (await previewScrollMetrics(page)).distanceFromTail).toBeLessThanOrEqual(2);
+    await page.locator(".inbox-list").focus();
+    await settledPreviewScrollMetrics(page);
+    if (fault === "observer jump") {
+      await reader.evaluate((element) => {
+        const landedFrom = element.scrollTop;
+        const known = new Set(element.querySelectorAll("[data-virtual-row]"));
+        let jumped = false;
+        const jump = new ResizeObserver(() => {
+          if (jumped || Math.abs(element.scrollTop - landedFrom) < 1) return;
+          jumped = true;
+          jump.disconnect();
+          element.scrollTop -= 20;
+          requestAnimationFrame(() => { element.scrollTop += 20; });
+        });
+        new MutationObserver((records, mutations) => {
+          for (const node of records.flatMap((record) => [...record.addedNodes])) {
+            if (node instanceof HTMLElement && node.matches("[data-virtual-row]") && !known.has(node)) {
+              jump.observe(node);
+              mutations.disconnect();
+            }
+          }
+        }).observe(element, { childList: true, subtree: true });
+      });
+    }
+    const samples = await recordRowOffsets(page, reader, () => page.keyboard.press("Shift+Space"));
+    expect(rowDrift(samples), JSON.stringify(samples)).toBeGreaterThan(2);
   });
 }
 
