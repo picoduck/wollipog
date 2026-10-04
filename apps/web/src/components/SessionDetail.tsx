@@ -247,11 +247,16 @@ import {
   replaceComposerCommandTrigger,
   resolveComposerCommandInvocation,
   retainActiveComposerCommandId,
+  composerRejectsUnknownCommands,
+  replaceLeadingCommandToken,
   stepComposerCommandId,
+  suggestComposerCommands,
   type ComposerCommand,
+  type ComposerCommandResolution,
+  type ComposerCommandResolutionOptions,
   type ProviderComposerCommand,
 } from "../composer-commands.js";
-import { SlashCommandMenu, slashCommandOptionId } from "./SlashCommandMenu.js";
+import { SEND_AS_TEXT_TOOLTIP, SlashCommandMenu, slashCommandOptionId } from "./SlashCommandMenu.js";
 import { WorkspaceReferencePicker, workspaceReferenceOptionId } from "./WorkspaceReferencePicker.js";
 import {
   captureComposerFocus,
@@ -611,8 +616,22 @@ interface ComposerError {
   retry?: ComposerRetry;
 }
 interface ComposerRetry {
-  action: "send" | "steer";
+  /** The `AsText` actions repeat a failed Send as Text (#2176), with the text as it stands. */
+  action: "send" | "steer" | "sendAsText" | "steerAsText";
   draft: { text: string; images: PromptImageInput[] };
+}
+/** How `send` and `steerDraft` read the draft: Send as Text skips command resolution. */
+interface ComposerSubmitOptions {
+  asText?: boolean;
+}
+/** A slash command the composer refused to send (#2176), shown in the notice slot while the draft
+ * it was refused for is unchanged. `action` is what Send as Text repeats. */
+interface CommandNotSent {
+  problem:
+    | { kind: "unknown"; token: string; suggestion?: ComposerCommand }
+    | { kind: "unavailable"; token: string; reason: string };
+  action: "send" | "steer";
+  text: string;
 }
 /** A failed send or another composer action, or an attachment that did not land. */
 type ComposerErrorSource = "action" | "attachment";
@@ -1295,6 +1314,10 @@ function SessionDetailLoaded({
   });
   const [composerSelection, setComposerSelection] = useState({ start: 0, end: 0 });
   const [slashDismissedFor, setSlashDismissedFor] = useState<string | null>(null);
+  // The close match the arrow keys reached under an unknown command, for the token it was reached
+  // under; none is active until then, so Enter can't guess (#2176).
+  const [activeCloseMatch, setActiveCloseMatch] = useState<{ token: string; id: string } | null>(null);
+  const [commandNotSent, setCommandNotSent] = useState<CommandNotSent | null>(null);
   const slashListboxId = `session-slash-${useId().replace(/:/g, "")}`;
   const workspaceListboxId = `session-workspace-${useId().replace(/:/g, "")}`;
   const [workspaceResults, setWorkspaceResults] = useState<WorkspaceReferenceCandidate[]>([]);
@@ -4482,6 +4505,13 @@ function SessionDetailLoaded({
     () => dollarSkills && composerCommandsIncludeSkills(composerCommands),
     [composerCommands, dollarSkills],
   );
+  // Whether an unknown slash token is refused rather than sent as text (#2176): always, except on a
+  // Claude Code runner whose catalog can't yet name the built-ins its plain-text fallback runs.
+  const rejectUnknownCommands = composerRejectsUnknownCommands(session.driver, agentCaps?.slashCommands ?? []);
+  const composerCommandResolutionOptions: ComposerCommandResolutionOptions = {
+    unknownCommands: rejectUnknownCommands ? "reject" : "plaintext",
+    skillSigil: composerSkillSigil,
+  };
   // A receipt outlives catalog rotation. The kind of every submission this view sent is known
   // exactly; otherwise a current skill command id, then a name only skills use, identifies a skill.
   const submissionIsSkillRef = useRef(new Map<string, boolean>());
@@ -4613,11 +4643,21 @@ function SessionDetailLoaded({
     slashMatches.length === 0;
   const paletteOpen = !workspacePickerOpen && canPrompt && (slashMatches.length > 0 || slashNoMatch) &&
     slashDismissedFor !== slashDismissKey;
-  const selectedSlashCommandId = retainActiveComposerCommandId(activeSlashCommandId, slashMatches);
+  // A token that names no command, in a session that refuses one (#2176): the no-match row becomes
+  // the unknown row, with Send as Text and the token's Close Matches, none of them active.
+  const slashUnknown = rejectUnknownCommands && slashNoMatch;
+  const slashCloseMatches = useMemo(
+    () => slashUnknown && slashTrigger ? suggestComposerCommands(slashTrigger.query, composerCommands) : [],
+    [composerCommands, slashTrigger, slashUnknown],
+  );
+  const selectedCloseMatch = slashUnknown && activeCloseMatch?.token === slashTrigger?.raw
+    ? slashCloseMatches.find((command) => command.id === activeCloseMatch?.id)
+    : undefined;
+  const selectedSlashCommandId = slashUnknown
+    ? selectedCloseMatch?.id ?? null
+    : retainActiveComposerCommandId(activeSlashCommandId, slashMatches);
   const selectedSlashCommand = slashMatches.find((command) => command.id === selectedSlashCommandId);
-  const composerCommandResolution = resolveComposerCommandInvocation(text, composerCommands, {
-    skillSigil: composerSkillSigil,
-  });
+  const composerCommandResolution = resolveComposerCommandInvocation(text, composerCommands, composerCommandResolutionOptions);
   const commandPreservesAttachedImages = composerCommandResolution.kind === "command" &&
     durableCommandPreservesAttachments(composerCommandResolution.command, images.length > 0);
   // The composer's own slot entries (#2156), behind the session's conditions of the same severity.
@@ -4672,6 +4712,46 @@ function SessionDetailLoaded({
         <Notice tone="info" role="status" ariaLabel="Images Kept for Next Message" title="Images Kept for Next Message"
           trailing={trailing} onDismiss={onDismiss}>
           <p>{durableCommandAttachmentNote(commandLabel)}</p>
+        </Notice>
+      ),
+    });
+  }
+  // A slash command that wasn't sent (#2176) is a warning while its draft is unchanged: editing the
+  // draft clears it. An unknown token offers its closest match, which replaces only the token, and
+  // both kinds offer Send as Text, which repeats the refused send or steer with the text as typed.
+  const visibleCommandNotSent = commandNotSent?.text === text ? commandNotSent : null;
+  if (visibleCommandNotSent) {
+    const { problem, action } = visibleCommandNotSent;
+    const suggestion = problem.kind === "unknown" ? problem.suggestion : undefined;
+    const title = problem.kind === "unknown" ? "Unknown Command" : "Command Unavailable";
+    const sentence = problem.kind === "unavailable"
+      ? `“${problem.token}” can't run here, so nothing was sent. ${problem.reason}`
+      : `“${problem.token}” isn't a recognized command, so nothing was sent.${suggestion ? ` Did you mean ${suggestion.label}?` : ""}`;
+    sessionNotices.push({
+      key: "command-not-sent",
+      severity: "warning",
+      rank: SESSION_NOTICE_RANK.commandNotSent,
+      title,
+      render: ({ trailing }) => (
+        <Notice tone="warning" role="alert" ariaLabel={title} title={title} trailing={trailing}
+          onDismiss={() => setCommandNotSent(null)}
+          actions={<>
+            {suggestion && (
+              <button type="button" className="btn primary sm" onClick={() => applyCommandSuggestion(suggestion)}>
+                Use {suggestion.label}
+              </button>
+            )}
+            <button
+              type="button"
+              className="btn sm"
+              title={SEND_AS_TEXT_TOOLTIP}
+              disabled={composerRequestBusy}
+              onClick={() => void (action === "steer" ? steerDraft({ asText: true }) : send({ asText: true }))}
+            >
+              Send as Text
+            </button>
+          </>}>
+          <p>{sentence}</p>
         </Notice>
       ),
     });
@@ -4781,6 +4861,12 @@ function SessionDetailLoaded({
   useEffect(() => {
     setActiveSlashCommandId((current) => retainActiveComposerCommandId(current, slashMatches));
   }, [slashMatches]);
+  // Editing the draft clears a refused command's notice for good, so undoing the edit doesn't bring
+  // it back; so does leaving the session.
+  useEffect(() => {
+    setCommandNotSent((current) => current && current.text !== text ? null : current);
+  }, [text]);
+  useEffect(() => setCommandNotSent(null), [sessionId]);
   const setComposerCaret = (caret: number) => {
     setComposerSelection({ start: caret, end: caret });
     window.requestAnimationFrame(() => {
@@ -4789,6 +4875,26 @@ function SessionDetailLoaded({
       input.focus();
       input.setSelectionRange(caret, caret);
     });
+  };
+  // The picker sits where the notice does, so a refusal closes it for this draft, as Escape would;
+  // the notice offers what the picker did.
+  const showCommandNotSent = (problem: CommandNotSent["problem"], action: CommandNotSent["action"]) => {
+    setCommandNotSent({ problem, action, text });
+    if (slashDismissKey) setSlashDismissedFor(slashDismissKey);
+  };
+  // Use /review: the close match replaces the unknown token, the rest of the message stays, and the
+  // caret follows the command so its arguments can be typed.
+  const applyCommandSuggestion = (command: ComposerCommand) => {
+    const replacement = replaceLeadingCommandToken(text, command);
+    markDraftDirty();
+    flushSync(() => {
+      setHistIdx(-1);
+      setCommandNotSent(null);
+      setProgrammaticComposerText(replacement.text, replacement.caret);
+    });
+    const input = inputRef.current;
+    input?.focus({ preventScroll: true });
+    input?.setSelectionRange(replacement.caret, replacement.caret);
   };
   const insertSlashCommand = (command: ComposerCommand) => {
     if (!slashTrigger || !command.available) return;
@@ -4944,13 +5050,21 @@ function SessionDetailLoaded({
     editCopyRef.current = stored;
     setEditCopyState(stored);
   };
-  const send = async () => {
+  const send = async ({ asText = false }: ComposerSubmitOptions = {}) => {
     if (composerMutationRegistry.has(mutationKey) || stopTurnPendingRef.current || retitleInFlightRef.current) return;
     // Sending ends dictation first (#2193) and drops what the engine has not settled: a phrase
     // landing while the request is in flight would join the sent text or be lost to restoration.
     dictation.cancel();
     const outgoing = text.trim();
-    let invocation = resolveComposerCommandInvocation(outgoing, composerCommands, { skillSigil: composerSkillSigil });
+    let invocation: ComposerCommandResolution = asText
+      ? { kind: "plaintext", text: outgoing }
+      : resolveComposerCommandInvocation(outgoing, composerCommands, composerCommandResolutionOptions);
+    // An unknown command is never sent (#2176): the draft, its attachments and the caret stay, and
+    // the notice slot says why and offers the close match and Send as Text.
+    if (invocation.kind === "unknown") {
+      showCommandNotSent({ kind: "unknown", token: invocation.token, suggestion: invocation.suggestions[0] }, "send");
+      return;
+    }
     if (invocation.kind === "command" && invocation.command.source === "app") {
       const args = invocation.arguments.trim().toLowerCase();
       const validArguments = invocation.command.name === "plan"
@@ -4962,7 +5076,11 @@ function SessionDetailLoaded({
     }
     if (invocation.kind === "command") {
       if (!invocation.command.available) {
-        setError(invocation.command.disabledReason ?? "This command isn't available in this session.", "Command Not Run");
+        showCommandNotSent({
+          kind: "unavailable",
+          token: invocation.command.label,
+          reason: invocation.command.disabledReason ?? "This command isn't available in this session.",
+        }, "send");
         return;
       }
       if (images.length && invocation.command.attachmentPolicy === "forbid") {
@@ -5060,7 +5178,7 @@ function SessionDetailLoaded({
       (session.pendingPrompts ?? []).map((prompt) => prompt.commandId),
     );
     if (shouldShowOptimisticPrompt(session.status, durableProviderInvocation)) {
-      setPending({ text: outgoing, images: outgoingImages });
+      setPending({ text: invocation.kind === "plaintext" ? invocation.text : outgoing, images: outgoingImages });
     }
     let providerAccepted = false;
     let preservedDraftVersion: number | null = null;
@@ -5073,7 +5191,8 @@ function SessionDetailLoaded({
     );
     try {
       const cfg = Object.keys(pendingConfig.current).length ? pendingConfig.current : undefined;
-      const promptText = invocation.kind === "command" ? invocation.arguments : outgoing;
+      // Plain text is sent as resolved: an escaped `//x` or `\/x` goes as `/x`.
+      const promptText = invocation.kind === "command" ? invocation.arguments : invocation.text;
       const slashCommand = invocation.kind === "command" ? invocation.command.name : undefined;
       if (durableProviderInvocation && invocation.kind === "command") {
         await api.invokeSessionCommand(sessionId, {
@@ -5143,7 +5262,9 @@ function SessionDetailLoaded({
         }
         if (viewGenerationRef.current === generation) {
           showComposerError("action", messageNotSent(e, runnerDisp.name || undefined,
-            composerDraftVersionRef.current === submissionVersion ? { action: "send", draft: submittedDraft } : undefined));
+            composerDraftVersionRef.current === submissionVersion
+              ? { action: asText ? "sendAsText" : "send", draft: submittedDraft }
+              : undefined));
           setPending(null); // send failed — retract the optimistic bubble
         }
       }
@@ -5160,7 +5281,7 @@ function SessionDetailLoaded({
     }
   };
 
-  const steerDraft = async () => {
+  const steerDraft = async ({ asText = false }: ComposerSubmitOptions = {}) => {
     // Direct steering posts to the same route as queued steering, so it follows that verdict (#1857).
     if (composerMutationRegistry.has(mutationKey) || stopTurnPendingRef.current || !canSend) return;
     dictation.cancel();
@@ -5172,7 +5293,15 @@ function SessionDetailLoaded({
       setError(directSteeringAvailability.reason, "Message Not Sent");
       return;
     }
-    const outgoing = text.trim();
+    // A command that resolves is steering content as typed, but an unknown one is never sent
+    // (#2176), and an escaped `//x` steers as `/x`.
+    const resolved = asText ? null
+      : resolveComposerCommandInvocation(text.trim(), composerCommands, composerCommandResolutionOptions);
+    if (resolved?.kind === "unknown") {
+      showCommandNotSent({ kind: "unknown", token: resolved.token, suggestion: resolved.suggestions[0] }, "steer");
+      return;
+    }
+    const outgoing = resolved?.kind === "plaintext" ? resolved.text : text.trim();
     if (actualImages.length && !modelSupportsImages(sessionCaps, effectiveModel)) {
       reportAttachmentProblem({ kind: "model-refuses-images", modelName: selectedModelName });
       return;
@@ -5252,7 +5381,9 @@ function SessionDetailLoaded({
         }
         if (viewGenerationRef.current === generation) {
           showComposerError("action", messageNotSent(cause, runnerDisp.name || undefined,
-            composerDraftVersionRef.current === submissionVersion ? { action: "steer", draft: submittedDraft } : undefined));
+            composerDraftVersionRef.current === submissionVersion
+              ? { action: asText ? "steerAsText" : "steer", draft: submittedDraft }
+              : undefined));
         }
       }
     } finally {
@@ -5267,7 +5398,12 @@ function SessionDetailLoaded({
       if (viewGenerationRef.current === generation) setSteeringBusy(false);
     }
   };
-  composerRetryRef.current = { send, steer: steerDraft };
+  composerRetryRef.current = {
+    send: () => send(),
+    steer: () => steerDraft(),
+    sendAsText: () => send({ asText: true }),
+    steerAsText: () => steerDraft({ asText: true }),
+  };
 
   const promoteQueuedPrompt = async (prompt: QueuedPromptView) => {
     if (queueRefusal !== null || queueSteeringInFlightRef.current.has(prompt.id) ||
@@ -5565,10 +5701,7 @@ function SessionDetailLoaded({
   };
 
   const commitSlashCommand = (command: ComposerCommand) => {
-    if (!command.available) {
-      setError(command.disabledReason ?? "This command isn't available in this session.", "Command Not Run");
-      return;
-    }
+    if (!command.available) return;
     const exactTypedCommand = slashTrigger?.raw.toLowerCase() === command.label.toLowerCase();
     if (exactTypedCommand && command.source === "app" && command.name === "stop") {
       void send();
@@ -5607,7 +5740,8 @@ function SessionDetailLoaded({
       return;
     }
     // Steering owns exact Ctrl+Enter before slash-palette selection. The composed slash text is
-    // steering content; it is not dispatched as an app or provider slash command.
+    // steering content; it is not dispatched as an app or provider slash command, and an unknown
+    // one is not sent at all (#2176).
     if (!shortcutLayerActive(document) && matchesShortcut(e, "steer-turn")) {
       e.preventDefault();
       void steerDraft();
@@ -5640,18 +5774,39 @@ function SessionDetailLoaded({
         setSlashDismissedFor(slashDismissKey);
         return;
       }
-      // The no-match row has nothing to move to or choose: Enter sends the text as typed, as it
-      // did before the row existed, and Tab leaves the composer.
+      // Under an unknown command the arrows walk its Close Matches, and Enter or Tab inserts the one
+      // they reached. Until then Enter goes on to `send`, which refuses the token and says so in the
+      // notice slot, and Tab leaves the composer.
+      if (slashUnknown) {
+        if ((e.key === "ArrowDown" || e.key === "ArrowUp") && plainKey && slashCloseMatches.length && slashTrigger) {
+          e.preventDefault();
+          const next = stepComposerCommandId(selectedSlashCommandId, slashCloseMatches, e.key === "ArrowDown" ? 1 : -1);
+          setActiveCloseMatch(next ? { token: slashTrigger.raw, id: next } : null);
+          return;
+        }
+        if ((e.key === "Tab" || e.key === "Enter") && plainKey && selectedCloseMatch) {
+          e.preventDefault();
+          insertSlashCommand(selectedCloseMatch);
+          return;
+        }
+      }
+      // The no-match row of a session that still sends an unknown token as text has nothing to move
+      // to or choose: Enter sends the text as typed, and Tab leaves the composer.
       if ((e.key === "ArrowDown" || e.key === "ArrowUp") && plainKey && slashMatches.length) {
         e.preventDefault();
         setActiveSlashCommandId(stepComposerCommandId(selectedSlashCommandId, slashMatches,
           e.key === "ArrowDown" ? 1 : -1));
         return;
       }
-      if ((e.key === "Tab" || e.key === "Enter") && plainKey && slashMatches.length) {
+      if ((e.key === "Tab" || e.key === "Enter") && plainKey && selectedSlashCommand) {
         e.preventDefault();
-        // Every match is unavailable: the best one explains why instead of sending the token.
-        commitSlashCommand(selectedSlashCommand ?? slashMatches[0]!);
+        commitSlashCommand(selectedSlashCommand);
+        return;
+      }
+      // Every match is unavailable, and an unavailable row is never chosen: Enter goes on to `send`,
+      // which refuses a command typed in full with its reason (#2176), and Tab stays in the composer.
+      if (e.key === "Tab" && plainKey && slashMatches.length) {
+        e.preventDefault();
         return;
       }
     }
@@ -6473,8 +6628,15 @@ function SessionDetailLoaded({
                   query={slashTrigger?.raw ?? ""}
                   activeCommandId={selectedSlashCommandId}
                   hasAttachments={images.length > 0}
-                  onActiveCommandChange={setActiveSlashCommandId}
+                  onActiveCommandChange={(commandId) => slashUnknown
+                    ? setActiveCloseMatch(slashTrigger ? { token: slashTrigger.raw, id: commandId } : null)
+                    : setActiveSlashCommandId(commandId)}
                   onSelectCommand={commitSlashCommand}
+                  unknown={slashUnknown ? {
+                    suggestions: slashCloseMatches,
+                    onSendAsText: () => void send({ asText: true }),
+                    sendAsTextDisabled: composerRequestBusy,
+                  } : undefined}
                 />
               )}
               {workspacePickerOpen && (
@@ -6746,7 +6908,7 @@ function SessionDetailLoaded({
                       square
                       // Focus stays in the textarea, which also keeps a phone keyboard open after
                       // sending: the chat convention.
-                      onClick={queuedEdit ? saveQueuedPromptEdit : send}
+                      onClick={queuedEdit ? saveQueuedPromptEdit : () => void send()}
                       disabled={!canSend || composerRequestBusy || (queuedEdit !== null && !queuedEditRetryable)}
                       title={queuedEdit
                         ? !queuedEditRetryable && queuedEditRecoveryReason !== null

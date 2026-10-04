@@ -6,7 +6,7 @@ import {
   type ComposerCommand,
 } from "../composer-commands.js";
 import { ComposerListbox, ComposerListboxState } from "./ComposerListbox.js";
-import { BanIcon, SearchIcon } from "./Icons.js";
+import { BanIcon, SearchIcon, WarningIcon } from "./Icons.js";
 
 export interface SlashCommandMenuProps {
   listboxId: string;
@@ -18,7 +18,18 @@ export interface SlashCommandMenuProps {
   hasAttachments?: boolean;
   onActiveCommandChange: (commandId: string) => void;
   onSelectCommand: (command: ComposerCommand) => void;
+  /** The typed token names no command and Enter won't send it (#2176). The menu says so, offers
+   * Send as Text, and lists `suggestions` under Close Matches; none of them is active until the
+   * arrow keys reach it. Without this, an unmatched query shows the plain no-match row. */
+  unknown?: {
+    suggestions: readonly ComposerCommand[];
+    onSendAsText: () => void;
+    sendAsTextDisabled?: boolean;
+  };
 }
+
+/** Send as Text's tooltip, in the picker and in the notice. */
+export const SEND_AS_TEXT_TOOLTIP = "Send the message exactly as typed, the same as starting it with //.";
 
 function safeIdSuffix(value: string): string {
   const encoded = Array.from(value, (character) => character.codePointAt(0)!.toString(16)).join("-");
@@ -37,12 +48,16 @@ export function SlashCommandMenu({
   hasAttachments = false,
   onActiveCommandChange,
   onSelectCommand,
+  unknown,
 }: SlashCommandMenuProps) {
-  const sections = useMemo(() => groupRankedComposerCommands(commands).map((section) => ({
-    key: section.groupId,
-    label: section.label,
-    items: section.commands,
-  })), [commands]);
+  const unknownState = unknown && commands.length === 0 ? unknown : undefined;
+  const sections = useMemo(() => unknownState
+    ? [{ key: "close-matches", label: "Close Matches", items: unknownState.suggestions }]
+    : groupRankedComposerCommands(commands).map((section) => ({
+      key: section.groupId,
+      label: section.label,
+      items: section.commands,
+    })), [commands, unknownState]);
 
   // The second line: a disabled command's reason always, or the active row's attachment note.
   const secondLine = (command: ComposerCommand) => !command.available
@@ -94,12 +109,34 @@ export function SlashCommandMenu({
       }}
       onActiveChange={(command) => onActiveCommandChange(command.id)}
       onSelect={onSelectCommand}
-      states={commands.length === 0 && (
+      leadingState={unknownState && (
+        <ComposerListboxState
+          icon={<WarningIcon size={16} />}
+          role="status"
+          detail={unknownState.suggestions.length
+            ? "Enter won't send it. Choose a close match, or send it as text."
+            : "Enter won't send it. Keep typing, or send it as text."}
+          action={(
+            <button
+              type="button"
+              className="btn sm"
+              title={SEND_AS_TEXT_TOOLTIP}
+              disabled={unknownState.sendAsTextDisabled}
+              onClick={unknownState.onSendAsText}
+            >
+              Send as Text
+            </button>
+          )}
+        >
+          “{query}” isn't a recognized command.
+        </ComposerListboxState>
+      )}
+      states={commands.length === 0 && !unknownState && (
         <ComposerListboxState icon={<SearchIcon size={16} />} role="status">
           No commands match “{query}”.
         </ComposerListboxState>
       )}
-      enterLabel="Run or Insert"
+      enterLabel={unknownState ? "Insert" : "Run or Insert"}
     />
   );
 }

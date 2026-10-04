@@ -201,13 +201,30 @@ test("Ctrl+Enter steers without an optimistic echo while Enter, Shift+Enter, IME
   await expect(composer).toHaveValue("/review ");
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringRequests().length)).toBe(1);
 
-  await composer.fill("/rev");
-  await expect(page.getByRole("listbox")).toBeVisible();
+  await composer.fill("/review the diff");
   // The settled steer holds the composer through the same bookkeeping.
   await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
   await page.keyboard.press("Control+Enter");
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringRequests().length)).toBe(2);
-  await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringRequests()[1]?.text)).toBe("/rev");
+  await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringRequests()[1]?.text))
+    .toBe("/review the diff");
+  await expect(composer).toHaveValue("");
+
+  // An unknown command is not steered either (#2176). Send as Text in the notice steers it as typed.
+  // `/rev` is a prefix of `/review` rather than a typo of it, so no close match is offered.
+  await composer.fill("/rev");
+  await expect(page.getByRole("listbox")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
+  await page.keyboard.press("Control+Enter");
+  const notice = page.locator('.session-notice-slot .notice.t-warning[role="alert"]');
+  await expect(notice.locator(".notice-body"))
+    .toHaveText("“/rev” isn't a recognized command, so nothing was sent.");
+  await expect(composer).toHaveValue("/rev");
+  await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringRequests().length)).toBe(2);
+  await notice.getByRole("button", { name: "Send as Text" }).click();
+  await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringRequests().length)).toBe(3);
+  await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringRequests()[2]?.text)).toBe("/rev");
+  await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests().length)).toBe(1);
 });
 
 test("ordinary Send and steering are mutually exclusive in both directions", async ({ page }) => {

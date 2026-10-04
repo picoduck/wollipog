@@ -197,6 +197,62 @@ test("a query that matches nothing keeps the picker open on a no-match row", asy
   }
 });
 
+test("an unknown command's row says Enter won't send it, offers Send as Text, and lists inactive Close Matches", async () => {
+  let sentAsText = 0;
+  const selected: string[] = [];
+  const view = await render({
+    commands: [],
+    query: "/reveiw",
+    activeCommandId: null,
+    onSelectCommand: (choice) => selected.push(choice.id),
+    unknown: { suggestions: [command("provider:builtin:review")], onSendAsText: () => { sentAsText += 1; } },
+  });
+  try {
+    const picker = view.container.querySelector(".picker")!;
+    const row = picker.querySelector(".picker-empty")!;
+    assert.equal(row.getAttribute("role"), "status");
+    assert.equal(row.querySelector(".picker-empty-text > span")?.textContent, "“/reveiw” isn't a recognized command.");
+    assert.equal(row.querySelector(".picker-empty-detail")?.textContent,
+      "Enter won't send it. Choose a close match, or send it as text.");
+    assert.equal(picker.firstElementChild, row, "the unknown row leads, above its close matches");
+    const sendAsText = row.querySelector<HTMLButtonElement>("button.btn.sm")!;
+    assert.equal(sendAsText.textContent, "Send as Text");
+    assert.match(sendAsText.title, /exactly as typed/);
+    await act(async () => sendAsText.click());
+    assert.equal(sentAsText, 1);
+
+    const group = picker.querySelector('[role="group"]')!;
+    assert.equal(group.querySelector(".picker-group-label")?.textContent, "Close Matches");
+    const options = [...group.querySelectorAll('[role="option"]')];
+    assert.deepEqual(options.map((option) => option.querySelector(".picker-token")?.textContent), ["/review [focus]"]);
+    assert.equal(options[0]!.getAttribute("aria-selected"), "false", "no close match is active by default");
+    assertNoDomNode(picker.querySelector(".is-active"));
+    await act(async () => (options[0] as HTMLButtonElement).click());
+    assert.deepEqual(selected, ["provider:builtin:review"]);
+    assertNoDomNode(picker.querySelector(".picker-empty + .picker-empty"), "the plain no-match row is replaced");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("an unknown command with no close match offers only Send as Text", async () => {
+  const view = await render({
+    commands: [],
+    query: "/zzzz",
+    unknown: { suggestions: [], onSendAsText: () => undefined, sendAsTextDisabled: true },
+  });
+  try {
+    assert.equal(view.container.querySelector(".picker-empty-detail")?.textContent,
+      "Enter won't send it. Keep typing, or send it as text.");
+    assert.equal(view.container.querySelectorAll('[role="option"]').length, 0);
+    assert.equal(view.container.querySelector<HTMLButtonElement>(".picker-empty button")?.disabled, true);
+    assertNoDomNode(view.container.querySelector(".picker-keys .shortcut-hint:nth-child(2)"),
+      "with nothing to move to, only Escape is named");
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("group labels and footer keys are Title Case; descriptions and reasons are sentences", async () => {
   const view = await render({ commands: offered("re"), query: "/re" });
   try {

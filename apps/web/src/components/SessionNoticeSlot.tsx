@@ -68,15 +68,18 @@ export const SESSION_NOTICE_RANK = {
   // send or other composer action, an attachment that did not land, and the note that a command keeps
   // the attached images for the next message.
   composerError: 10,
-  attachmentError: 11,
-  attachmentNote: 12,
+  // A slash command that wasn't sent because it names no command or can't run here (#2176): a
+  // warning beside the failed send, since both are about the draft just submitted.
+  commandNotSent: 11,
+  attachmentError: 12,
+  attachmentNote: 13,
   // A copy of an earlier message loaded by Edit as a New Turn, with Discard Edit (#2185).
-  editingCopy: 13,
+  editingCopy: 14,
   // An attached image that couldn't be shown (#2177): a warning while the image stays attached.
-  attachmentBroken: 14,
+  attachmentBroken: 15,
   // A queued message whose delivery failed or could not be confirmed (#2178), after the composer's
   // own entries: the draft in hand comes before a message already sent.
-  queuedMessageError: 15,
+  queuedMessageError: 16,
 } as const;
 
 const SEVERITY_ORDER: Record<SessionNoticeSeverity, number> = { danger: 0, warning: 1, info: 2 };

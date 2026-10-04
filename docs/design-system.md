@@ -1913,9 +1913,9 @@ exactly one: the most severe, then the lowest rank.
 
 - Ranks live in one table, `SESSION_NOTICE_RANK`: worktree missing 1, conversation quarantined 2,
   worktree setup failed 3, invalid worktree setup configuration 4, account switch failed 5, session
-  archived 7, skills unavailable 8, setup suggestion 9, composer error 10, attachment error 11,
-  attachment note 12, editing a copy 13, attachment that couldn't be shown 14, queued-message delivery
-  failure 15. A new entry adds its rank there.
+  archived 7, skills unavailable 8, setup suggestion 9, composer error 10, command not sent 11,
+  attachment error 12, attachment note 13, editing a copy 14, attachment that couldn't be shown 15,
+  queued-message delivery failure 16. A new entry adds its rank there.
 - The others are a `.btn.sm.ghost` "+N More" in the shown notice's title row. It opens a menu (§9.1)
   of their tone icons and one-line titles; choosing one shows it until the set of conditions changes,
   and focus moves to the new notice's "+N More".
@@ -1947,6 +1947,17 @@ exactly one: the most severe, then the lowest rank.
   details; anything else ends "Try again." with the server's words behind Show Details. The copy is in
   `composer-action-errors.ts`. Edit in a Fork reports in its confirmation, whose danger notice keeps
   the server's words behind Show Details the same way.
+- **Unknown Command** and **Command Unavailable** (warning, #2176): a slash command the composer
+  refused to send. "“/reveiw” isn't a recognized command, so nothing was sent. Did you mean /review?"
+  with **Use /review** (replaces only the token), **Send as Text** (sends or steers the text as typed,
+  the same as a leading `//` or `\/`) and Dismiss; without a close match the sentence ends after
+  "nothing was sent." An unavailable command typed in full reads "“/stop” can't run here, so nothing
+  was sent." followed by its reason, with Send as Text. The draft, its attachments and the caret
+  stay; editing the draft clears the entry, and the / picker closes for that draft so the entry is in
+  view. The picker shows the same state first: "“/reveiw” isn't a recognized command." with Send as
+  Text and a Close Matches group in which no row is active, so Enter can't guess. A Claude Code
+  session whose runner doesn't report Claude Code's built-in commands (source `builtin`, #1224) keeps
+  sending an unknown token as text, because that is how those built-ins run there.
 - **Editing a Copy** (info, compact, #2185): Edit as a New Turn opens no dialog. It loads the
   message's text and attachments into the composer and focuses it; over a draft it first confirms
   "Replace Draft". While the copy is there the slot reads "Editing a copy of your Turn N message.

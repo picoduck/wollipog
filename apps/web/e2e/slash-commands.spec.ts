@@ -441,15 +441,18 @@ test("programmatic clear and history recall cannot open or hijack the slash menu
   });
 });
 
-test("description-only fuzzy text sends literally instead of rewriting the command", async ({ page }) => {
+test("description-only fuzzy text is an unknown command, never rewritten into one", async ({ page }) => {
   const composer = page.locator(".composer-input");
   await composer.fill("/no");
-  // The no-match row says so, but Enter still sends the text as typed (#2176 changes that).
-  await expect(page.locator(".picker-empty")).toHaveText("No commands match “/no”.");
+  // Nothing is offered for it, and Enter refuses it rather than guessing or sending it (#2176).
+  await expect(page.locator(".picker-empty .picker-empty-text > span").first())
+    .toHaveText("“/no” isn't a recognized command.");
   await expect(page.getByRole("option")).toHaveCount(0);
   await page.keyboard.press("Enter");
-  await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests()[0]?.text))
-    .toBe("/no");
+  await expect(page.locator(".session-notice-slot .notice.t-warning .notice-body"))
+    .toHaveText("“/no” isn't a recognized command, so nothing was sent.");
+  await expect(composer).toHaveValue("/no");
+  await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests().length)).toBe(0);
 });
 
 test("rename-session arguments remain literal prompt text", async ({ page }) => {
@@ -503,7 +506,7 @@ test("rename-session moves into a retryable status receipt without disturbing th
 
   await composer.fill("/stop");
   await page.keyboard.press("Enter");
-  const composerError = page.locator('.session-notice-slot .notice.t-danger[role="alert"]');
+  const composerError = page.locator('.session-notice-slot .notice.t-warning[role="alert"]');
   await expect(composerError).toContainText("There's no turn to stop right now.");
   // The receipt is in the transcript, so the composer's own error never shares its space.
   const [errorBox, receiptBox] = await Promise.all([composerError.boundingBox(), receipt.boundingBox()]);
@@ -750,24 +753,37 @@ test("a stale semantic rename reports its fence without replacing a newer title"
   await expect(composer).toHaveValue("");
 });
 
-test("unknown commands and absolute paths stay plaintext while command triggers require leading context", async ({ page }) => {
+test("unknown commands and leading paths are refused, escapes and later slashes are text, and triggers require leading context", async ({ page }) => {
   const composer = page.locator(".composer-input");
+  const notice = page.locator(".session-notice-slot .notice.t-warning .notice-body");
+  const prompts = () => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests().map((request) => request.text));
 
   await composer.fill("/unknown literal input");
   await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
   await expect(composer).toHaveAttribute("aria-expanded", "false");
   await page.keyboard.press("Enter");
-  await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests()[0]?.text))
-    .toBe("/unknown literal input");
-  await expect(composer).toHaveValue("");
+  await expect(notice).toHaveText("“/unknown” isn't a recognized command, so nothing was sent.");
+  await expect(composer).toHaveValue("/unknown literal input");
 
   await composer.fill("/etc/hosts");
-  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
+  await expect(notice, "editing the draft clears the notice").toHaveCount(0);
   await expect(page.getByRole("listbox", { name: "Slash Commands" })).toHaveCount(0);
   await page.keyboard.press("Enter");
-  await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests()[1]?.text))
-    .toBe("/etc/hosts");
-  await expect(composer).toHaveValue("");
+  await expect(notice).toHaveText("“/etc/hosts” isn't a recognized command, so nothing was sent.");
+  expect(await prompts()).toEqual([]);
+
+  // `//` and `\/` mark a leading slash as text and are removed; a slash later in a message is text.
+  for (const [typed, sent] of [
+    ["//unknown literal input", "/unknown literal input"],
+    ["\\/etc/hosts", "/etc/hosts"],
+    ["see /tmp/out.log", "see /tmp/out.log"],
+  ] as const) {
+    await composer.fill(typed);
+    await page.keyboard.press("Enter");
+    await expect.poll(prompts).toContain(sent);
+    await expect(composer).toHaveValue("");
+  }
+  expect(await prompts()).toEqual(["/unknown literal input", "/etc/hosts", "see /tmp/out.log"]);
 
   await composer.fill("First line\n/rev");
   await expect(page.getByRole("listbox", { name: "Slash Commands" })).toHaveCount(0);
@@ -815,9 +831,16 @@ test("IME owns menu keys and unavailable commands explain without dispatching", 
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests().length)).toBe(0);
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.cancelTurnCount())).toBe(0);
 
+  // Enter never chooses the unavailable row; the command typed in full is refused with its reason,
+  // and Send as Text is offered (#2176).
   await page.keyboard.press("Enter");
-  await expect(page.locator('.session-notice-slot .notice.t-danger[role="alert"] .notice-body')).toHaveText("There's no turn to stop right now.");
+  const notice = page.locator('.session-notice-slot .notice.t-warning[role="alert"]');
+  await expect(notice.locator(".notice-body"))
+    .toHaveText("“/stop” can't run here, so nothing was sent. There's no turn to stop right now.");
+  await expect(notice.getByRole("button", { name: "Send as Text" })).toBeVisible();
   await expect(composer).toHaveValue("/stop");
+  await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests().length)).toBe(0);
+  await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.cancelTurnCount())).toBe(0);
 });
 
 test("with seven commands the footer stays in view and the seventh row is reachable by scrolling", async ({ page }) => {
@@ -864,7 +887,8 @@ test("a slash query that matches nothing keeps the picker open until Escape or a
   await expect(page.locator(".picker")).toBeVisible();
   // The empty listbox stays in the DOM for aria-controls, but takes no room above the row.
   await expect(page.getByRole("listbox", { name: "Slash Commands", includeHidden: true })).toBeAttached();
-  await expect(page.locator(".picker-empty")).toHaveText("No commands match “/zzzz”.");
+  await expect(page.locator(".picker-empty .picker-empty-text > span").first())
+    .toHaveText("“/zzzz” isn't a recognized command.");
   await expect(composer).toHaveAttribute("aria-expanded", "true");
   await page.keyboard.press("Escape");
   await expect(page.locator(".picker")).toHaveCount(0);
@@ -878,8 +902,198 @@ test("a slash query that matches nothing keeps the picker open until Escape or a
   await expect(composer).toHaveValue("/zzz ");
 });
 
+/** A catalog with the close matches the unknown-command tests reach for (#2176). */
+async function setUnknownCommandCatalog(page: Page) {
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([
+    { name: "compact", source: "builtin", description: "Summarize the conversation so far" },
+    { name: "review", source: "builtin", description: "Review the current changes", argumentHint: "[focus]" },
+    { name: "deploy", source: "plugin", description: "Deploy this workspace" },
+  ], ["plan"]));
+}
+
+const promptTexts = (page: Page) => page.evaluate(() =>
+  window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests().map((request) => request.text));
+
+/** Submitting an unknown command alone, at either width: nothing starts, the draft stays, and the
+ * notice offers the close match, which replaces the token. */
+async function expectUnknownCommandRefused(page: Page) {
+  await setUnknownCommandCatalog(page);
+  const composer = page.locator(".composer-input");
+  const idlePreview = page.locator(".composer-idle-preview");
+  if (await idlePreview.isVisible()) await idlePreview.click();
+  await composer.fill("/compat");
+  await page.getByRole("button", { name: "Send" }).click();
+  const notice = page.locator('.session-notice-slot .notice.t-warning[role="alert"]');
+  await expect(notice.locator(".notice-title")).toHaveText("Unknown Command");
+  await expect(notice.locator(".notice-body"))
+    .toHaveText("“/compat” isn't a recognized command, so nothing was sent. Did you mean /compact?");
+  await expect(composer).toHaveValue("/compat");
+  // Nothing was sent or queued.
+  expect(await promptTexts(page)).toEqual([]);
+  await expect(notice.getByRole("button", { name: "Dismiss" })).toBeVisible();
+  await notice.getByRole("button", { name: "Use /compact" }).click();
+  await expect(composer).toHaveValue("/compact ");
+  await expect(composer).toBeFocused();
+  await expect(notice).toHaveCount(0);
+  expect(await promptTexts(page)).toEqual([]);
+}
+
+test("submitting an unknown command alone starts no turn, keeps the draft and offers Use /compact", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await expectUnknownCommandRefused(page);
+});
+
+test("Use /review replaces only the unknown token and keeps the rest of the message", async ({ page }) => {
+  await setUnknownCommandCatalog(page);
+  const composer = page.locator(".composer-input");
+  await composer.fill("/reveiw please check the diff");
+  await page.keyboard.press("Enter");
+  const notice = page.locator(".session-notice-slot .notice.t-warning");
+  await expect(notice.locator(".notice-body"))
+    .toHaveText("“/reveiw” isn't a recognized command, so nothing was sent. Did you mean /review?");
+  expect(await promptTexts(page)).toEqual([]);
+  await notice.getByRole("button", { name: "Use /review" }).click();
+  await expect(composer).toHaveValue("/review please check the diff");
+  await page.keyboard.press("End");
+  await page.keyboard.press("Enter");
+  await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests())).toEqual([{
+    sessionId: "session-alpha",
+    text: "please check the diff",
+    images: [],
+    slashCommand: "review",
+  }]);
+});
+
+test("the picker keeps an unknown command open with Send as Text and Close Matches, none active", async ({ page }) => {
+  await setUnknownCommandCatalog(page);
+  const composer = page.locator(".composer-input");
+  await composer.fill("/reveiw");
+  const picker = page.locator(".picker");
+  await expect(picker.locator(".picker-empty-text > span").first()).toHaveText("“/reveiw” isn't a recognized command.");
+  await expect(picker.locator(".picker-empty-detail")).toHaveText("Enter won't send it. Choose a close match, or send it as text.");
+  await expect(picker.getByRole("button", { name: "Send as Text" })).toHaveAttribute("title", /exactly as typed/);
+  const matches = page.getByRole("group", { name: "Close Matches" });
+  const review = matches.getByRole("option", { name: /\/review/ });
+  await expect(review).toHaveAttribute("aria-selected", "false");
+  await expect(composer).not.toHaveAttribute("aria-activedescendant");
+
+  // Enter with no match active raises the notice instead of sending, and the picker gives way to it.
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".session-notice-slot .notice.t-warning .notice-body"))
+    .toHaveText("“/reveiw” isn't a recognized command, so nothing was sent. Did you mean /review?");
+  await expect(picker).toHaveCount(0);
+  await expect(composer).toHaveValue("/reveiw");
+  expect(await promptTexts(page)).toEqual([]);
+
+  // The arrows reach the matches, and Enter then inserts the one reached.
+  await composer.fill("/reivew");
+  await expect(review).toHaveAttribute("aria-selected", "false");
+  await page.keyboard.press("ArrowDown");
+  await expect(review).toHaveAttribute("aria-selected", "true");
+  await expect(composer).toHaveAttribute("aria-activedescendant", (await review.getAttribute("id"))!);
+  await page.keyboard.press("Enter");
+  await expect(composer).toHaveValue("/review ");
+  expect(await promptTexts(page)).toEqual([]);
+});
+
+test("Send as Text, from the picker row or the notice, sends the literal text once and clears the draft", async ({ page }) => {
+  await setUnknownCommandCatalog(page);
+  const composer = page.locator(".composer-input");
+  await composer.fill("/reveiw");
+  await page.locator(".picker").getByRole("button", { name: "Send as Text" }).click();
+  await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests())).toEqual([{
+    sessionId: "session-alpha",
+    text: "/reveiw",
+    images: [],
+  }]);
+  await expect(composer).toHaveValue("");
+
+  // With no close match the sentence ends after "nothing was sent." and only Send as Text remains.
+  await composer.fill("/zzzz");
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Enter");
+  const notice = page.locator(".session-notice-slot .notice.t-warning");
+  await expect(notice.locator(".notice-body")).toHaveText("“/zzzz” isn't a recognized command, so nothing was sent.");
+  await expect(notice.locator(".notice-actions").getByRole("button")).toHaveText(["Send as Text"]);
+  await notice.getByRole("button", { name: "Send as Text" }).click();
+  await expect.poll(() => promptTexts(page)).toEqual(["/reveiw", "/zzzz"]);
+  await expect(composer).toHaveValue("");
+  await expect(notice).toHaveCount(0);
+
+  // Dismiss hides the notice and keeps the draft.
+  await composer.fill("/zzzz again");
+  await page.keyboard.press("Enter");
+  await notice.getByRole("button", { name: "Dismiss" }).click();
+  await expect(notice).toHaveCount(0);
+  await expect(composer).toHaveValue("/zzzz again");
+  expect(await promptTexts(page)).toEqual(["/reveiw", "/zzzz"]);
+});
+
+test("a Claude Code runner without the init-time catalog still sends an unknown token as text", async ({ page }) => {
+  await page.evaluate(() => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", { driver: "claude-code" });
+    // An older runner reports only Claude Code's disk commands.
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([{ name: "deploy", source: "project" }]);
+  });
+  const composer = page.locator(".composer-input");
+  await composer.fill("/compact");
+  await expect(page.locator(".picker-empty")).toHaveText("No commands match “/compact”.");
+  await page.keyboard.press("Enter");
+  await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests())).toEqual([{
+    sessionId: "session-alpha",
+    text: "/compact",
+    images: [],
+  }]);
+
+  // A runner that forwards the init-time catalog reports built-ins, and the rule turns on (#1224).
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([
+    { name: "deploy", source: "project" },
+    { name: "compact", source: "builtin" },
+  ]));
+  await composer.fill("/zzz");
+  await expect(page.locator(".picker-empty-text > span").first()).toHaveText("“/zzz” isn't a recognized command.");
+  await composer.fill("/compat");
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".session-notice-slot .notice.t-warning .notice-body"))
+    .toHaveText("“/compat” isn't a recognized command, so nothing was sent. Did you mean /compact?");
+  expect(await promptTexts(page)).toEqual(["/compact"]);
+});
+
 test.describe("on a phone", () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  test("submitting an unknown command alone starts no turn, keeps the draft and offers Use /compact", async ({ page }) => {
+    await expectUnknownCommandRefused(page);
+  });
+
+  test("the unknown-command notice's actions are 44px targets under its sentence", async ({ page }) => {
+    await setUnknownCommandCatalog(page);
+    const composer = page.locator(".composer-input");
+    const idlePreview = page.locator(".composer-idle-preview");
+    if (await idlePreview.isVisible()) await idlePreview.tap();
+    await composer.fill("/reveiw please check the diff");
+    await page.getByRole("button", { name: "Send" }).tap();
+    const notice = page.locator(".session-notice-slot .notice.t-warning");
+    const body = notice.locator(".notice-body");
+    await expect(body).toBeVisible();
+    const bodyBox = (await body.boundingBox())!;
+    for (const name of ["Use /review", "Send as Text"]) {
+      const button = notice.getByRole("button", { name });
+      const box = (await button.boundingBox())!;
+      expect(box.y, `${name} sits under the sentence`).toBeGreaterThanOrEqual(bodyBox.y + bodyBox.height - 1);
+      const hit = await button.evaluate((element) => {
+        const after = getComputedStyle(element, "::after");
+        const rect = element.getBoundingClientRect();
+        return after.position === "absolute"
+          ? rect.height - Number.parseFloat(after.top) - Number.parseFloat(after.bottom)
+          : rect.height;
+      });
+      expect(hit, `${name} is a 44px target`).toBeGreaterThanOrEqual(44);
+    }
+    await notice.getByRole("button", { name: "Use /review" }).tap();
+    await expect(composer).toHaveValue("/review please check the diff");
+  });
 
   test("both pickers open above the composer inside the viewport, with 44px rows and no footer keys", async ({ page }) => {
     await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([

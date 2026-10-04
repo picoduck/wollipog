@@ -6248,6 +6248,11 @@ textarea,
   color: var(--text-dim);
   font: var(--type-small);
 }
+/* A state row's one action (Send as Text, #2176) keeps its width at the row's end. */
+.picker-empty > .btn { flex: none; margin-inline-start: auto; }
+/* The unknown-command row leads the picker, above its Close Matches; the list's own rule keeps the
+   two apart. */
+.picker-empty + .picker-list:not(:empty) { border-top: 1px solid var(--border); }
 .picker-foot {
   display: flex;
   flex: none;

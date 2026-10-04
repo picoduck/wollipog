@@ -73,7 +73,11 @@ test("composer Stop Turn is stable, idempotent, recall-safe, and distinct from S
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleInterrupted("session-alpha"));
   await composer.fill("/stop");
   await page.keyboard.press("Enter");
-  await expect(page.locator('.session-notice-slot .notice.t-danger[role="alert"]').getByText("There's no turn to stop right now.", { exact: true })).toBeVisible();
+  // An unavailable command typed in full is refused with its reason as a warning, and nothing is
+  // sent (#2176).
+  await expect(page.locator('.session-notice-slot .notice.t-warning[role="alert"] .notice-body'))
+    .toHaveText("“/stop” can't run here, so nothing was sent. There's no turn to stop right now.");
+  await expect(composer).toHaveValue("/stop");
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.cancelTurnCount())).toBe(2);
 
   await composer.fill("");

@@ -40,6 +40,9 @@ export interface ComposerListboxProps<T> {
   onSelect: (item: T) => void;
   /** `.picker-empty` rows: no results, loading, errors, a prompt to type. */
   states?: ReactNode;
+  /** A `.picker-empty` row above the options, for a state the options follow from: an unknown
+   * command, then its close matches. */
+  leadingState?: ReactNode;
   /** One sentence pinned in the footer, such as "more matches exist". */
   note?: ReactNode;
   /** What Enter does, named in the footer. */
@@ -59,6 +62,7 @@ export function ComposerListbox<T>({
   onActiveChange,
   onSelect,
   states,
+  leadingState,
   note,
   enterLabel,
 }: ComposerListboxProps<T>) {
@@ -100,6 +104,7 @@ export function ComposerListbox<T>({
   return (
     // Pressing anywhere in the picker must not take focus from the textarea that owns it.
     <div className="picker" onMouseDown={(event) => event.preventDefault()}>
+      {leadingState}
       <div className="picker-list" id={listboxId} role="listbox" aria-label={label}>
         {sections.map((section) => {
           if (!section.items.length) return null;
@@ -136,6 +141,7 @@ export function ComposerListboxState({
   tone,
   role,
   detail,
+  action,
   children,
 }: {
   icon?: ReactNode;
@@ -143,6 +149,8 @@ export function ComposerListboxState({
   role?: "status" | "alert";
   /** A second line in the helper style. */
   detail?: ReactNode;
+  /** One `.btn.sm` at the row's end, such as Send as Text. */
+  action?: ReactNode;
   children: ReactNode;
 }) {
   return (
@@ -152,6 +160,7 @@ export function ComposerListboxState({
         <span>{children}</span>
         {detail && <span className="picker-empty-detail">{detail}</span>}
       </span>
+      {action}
     </div>
   );
 }

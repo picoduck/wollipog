@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import type { AgentSlashCommand } from "@wollipog/protocol";
 import {
   COMPOSER_COMMAND_GROUPS,
   buildComposerCommandRegistry,
+  commandEditDistance,
+  composerRejectsUnknownCommands,
   composerCommandsForTrigger,
   composerCommandsInPickerOrder,
   composerCommandsIncludeSkills,
@@ -12,9 +15,11 @@ import {
   mapProviderComposerCommands,
   rankComposerCommands,
   replaceComposerCommandTrigger,
+  replaceLeadingCommandToken,
   resolveComposerCommandInvocation,
   retainActiveComposerCommandId,
   stepComposerCommandId,
+  suggestComposerCommands,
   type ComposerCommand,
   type ComposerCommandContext,
   type ProviderComposerCommand,
@@ -278,7 +283,8 @@ test("a stored source-qualified alias follows only its exact surviving provider 
 
   const projectOnly = registry([{ name: "deploy", providerSource: "project" }]);
   const wrongSource = resolveComposerCommandInvocation("/user:deploy production", projectOnly);
-  assert.deepEqual(wrongSource, { kind: "plaintext", text: "/user:deploy production" });
+  // A stored alias whose scope is gone names no command, so it is refused rather than sent (#2176).
+  assert.deepEqual(wrongSource, { kind: "unknown", token: "/user:deploy", suggestions: [] });
   const retainedProject = resolveComposerCommandInvocation("/project:deploy production", projectOnly);
   assert.equal(retainedProject.kind, "command");
   if (retainedProject.kind === "command") assert.equal(retainedProject.command.id, "provider:project:deploy");
@@ -328,11 +334,11 @@ test("stored same-source identity aliases resolve only their surviving command",
     }
     assert.deepEqual(
       resolveComposerCommandInvocation(`/${oldAliases.get(removedId)} production`, collapsed),
-      { kind: "plaintext", text: `/${oldAliases.get(removedId)} production` },
+      { kind: "unknown", token: `/${oldAliases.get(removedId)}`, suggestions: [] },
     );
     assert.deepEqual(
       resolveComposerCommandInvocation(`/${oldAliases.get(survivingId)!.replace(/^plugin:/, "user:")} production`, collapsed),
-      { kind: "plaintext", text: `/${oldAliases.get(survivingId)!.replace(/^plugin:/, "user:")} production` },
+      { kind: "unknown", token: `/${oldAliases.get(survivingId)!.replace(/^plugin:/, "user:")}`, suggestions: [] },
     );
   }
 });
@@ -350,12 +356,14 @@ test("stored default-provider identity aliases survive collision collapse withou
   assert.equal(retained.kind, "command");
   if (retained.kind === "command") assert.equal(retained.command.id, "provider:catalog.alpha");
   assert.deepEqual(resolveComposerCommandInvocation(`/${betaAlias}`, collapsed), {
-    kind: "plaintext",
-    text: `/${betaAlias}`,
+    kind: "unknown",
+    token: `/${betaAlias}`,
+    suggestions: [],
   });
   assert.deepEqual(resolveComposerCommandInvocation(`/${alphaAlias.replace(/^provider:/, "plugin:")}`, collapsed), {
-    kind: "plaintext",
-    text: `/${alphaAlias.replace(/^provider:/, "plugin:")}`,
+    kind: "unknown",
+    token: `/${alphaAlias.replace(/^provider:/, "plugin:")}`,
+    suggestions: [],
   });
 });
 
@@ -431,7 +439,7 @@ test("sanitized explicit-id qualifier collisions remain unique and catalog-order
   }
 });
 
-test("invocation resolution is case-normalized and unknown text remains byte-for-byte plaintext", () => {
+test("invocation resolution is case-normalized and, where unknown tokens are sent, they stay byte-for-byte plaintext", () => {
   const commands = registry([
     { name: "review", providerSource: "builtin", executionMode: "structured" },
     { name: "plan", providerSource: "project" },
@@ -452,11 +460,12 @@ test("invocation resolution is case-normalized and unknown text remains byte-for
   assert.equal(appPlan.kind, "command");
   if (appPlan.kind === "command") assert.equal(appPlan.command.id, "app:plan");
 
-  assert.deepEqual(resolveComposerCommandInvocation(" /unknown keep literal ", commands), {
+  const sendUnknown = { unknownCommands: "plaintext" } as const;
+  assert.deepEqual(resolveComposerCommandInvocation(" /unknown keep literal ", commands, sendUnknown), {
     kind: "plaintext",
     text: " /unknown keep literal ",
   });
-  assert.deepEqual(resolveComposerCommandInvocation("/etc/hosts", commands), {
+  assert.deepEqual(resolveComposerCommandInvocation("/etc/hosts", commands, sendUnknown), {
     kind: "plaintext",
     text: "/etc/hosts",
   });
@@ -763,4 +772,116 @@ test("without the skill sigil a $ reference stays text, and a skill still runs a
   assert.equal(slashed.kind === "command" && slashed.command.providerSource, "skill");
   const codex = resolveComposerCommandInvocation("$brainstorming pricing", commands);
   assert.equal(codex.kind, "command", "Codex keeps its $name spelling by default");
+});
+function unknownCommandRegistry() {
+  return registry([
+    { name: "compact", providerSource: "builtin" },
+    { name: "review", providerSource: "builtin" },
+    { name: "context", providerSource: "builtin" },
+    { name: "deploy", providerSource: "project", available: false, disabledReason: "Deploys are off." },
+  ]);
+}
+
+test("a message that starts with an unknown slash token resolves as unknown, with close matches", () => {
+  const commands = unknownCommandRegistry();
+  const compat = resolveComposerCommandInvocation("/compat", commands);
+  assert.equal(compat.kind, "unknown");
+  if (compat.kind === "unknown") {
+    assert.equal(compat.token, "/compat");
+    assert.deepEqual(compat.suggestions.map((command) => command.label), ["/compact"]);
+  }
+  // Prose after the token doesn't make it text; a swapped pair of letters is one edit.
+  const reveiw = resolveComposerCommandInvocation("  /reveiw please check the diff ", commands);
+  assert.equal(reveiw.kind, "unknown");
+  if (reveiw.kind === "unknown") {
+    assert.equal(reveiw.token, "/reveiw");
+    assert.deepEqual(reveiw.suggestions.map((command) => command.label), ["/review"]);
+  }
+  // A path at the start of the message is a token too, and nothing is close to it.
+  assert.deepEqual(resolveComposerCommandInvocation("/tmp/out.log", commands), {
+    kind: "unknown",
+    token: "/tmp/out.log",
+    suggestions: [],
+  });
+});
+
+test("text that doesn't start with a slash, or escapes it, is sent as text", () => {
+  const commands = unknownCommandRegistry();
+  assert.deepEqual(resolveComposerCommandInvocation("see /tmp/out.log", commands), {
+    kind: "plaintext",
+    text: "see /tmp/out.log",
+  });
+  assert.deepEqual(resolveComposerCommandInvocation("\\/literal", commands), { kind: "plaintext", text: "/literal" });
+  assert.deepEqual(resolveComposerCommandInvocation("//literal", commands), { kind: "plaintext", text: "/literal" });
+  // Only the escape goes: the rest, an escaped known command included, is sent as written.
+  assert.deepEqual(resolveComposerCommandInvocation("  //compact now ", commands), {
+    kind: "plaintext",
+    text: "  /compact now ",
+  });
+  assert.deepEqual(resolveComposerCommandInvocation("/", commands), { kind: "plaintext", text: "/" });
+  // The escape applies in a session that still sends unknown tokens as text.
+  assert.deepEqual(resolveComposerCommandInvocation("//x", commands, { unknownCommands: "plaintext" }), {
+    kind: "plaintext",
+    text: "/x",
+  });
+  assert.deepEqual(resolveComposerCommandInvocation("/compat", commands, { unknownCommands: "plaintext" }), {
+    kind: "plaintext",
+    text: "/compat",
+  });
+});
+
+test("known commands, unavailable ones included, and $ references resolve as before", () => {
+  const commands = unknownCommandRegistry();
+  const plan = resolveComposerCommandInvocation("/plan please", commands);
+  assert.equal(plan.kind === "command" && plan.command.id, "app:plan",
+    "an app command with arguments it doesn't take is still a command here; send treats it as text");
+  const deploy = resolveComposerCommandInvocation("/deploy", commands);
+  assert.equal(deploy.kind === "command" && deploy.command.available, false);
+  assert.deepEqual(resolveComposerCommandInvocation("$HOME", commands), { kind: "plaintext", text: "$HOME" });
+});
+
+test("close matches are available commands within one edit per three letters, closest first, at most three", () => {
+  const commands = registry([
+    { name: "review", providerSource: "builtin" },
+    { name: "reviews", providerSource: "project" },
+    { name: "preview", providerSource: "project" },
+    { name: "revie", providerSource: "user" },
+    { name: "rewiew", providerSource: "plugin", available: false },
+  ]);
+  // /rewiew is one edit away but unavailable; the three at two edits tie and keep the label order,
+  // so the fourth, /reviews, is left out.
+  assert.deepEqual(suggestComposerCommands("reveiw", commands).map((command) => command.label),
+    ["/review", "/preview", "/revie"]);
+  assert.equal(suggestComposerCommands("Review", commands)[0]?.label, "/review", "matching ignores case");
+  assert.deepEqual(suggestComposerCommands("zz", commands), [], "a short token allows one edit");
+  assert.deepEqual(suggestComposerCommands("", commands), []);
+  assert.equal(commandEditDistance("reveiw", "review"), 1);
+  assert.equal(commandEditDistance("compat", "compact"), 1);
+  assert.equal(commandEditDistance("", "abc"), 3);
+});
+
+test("Use /review replaces only the leading token and keeps the rest of the message", () => {
+  const review = command(unknownCommandRegistry(), "provider:builtin:review");
+  assert.deepEqual(replaceLeadingCommandToken("/reveiw please check the diff", review), {
+    text: "/review please check the diff",
+    caret: 8,
+  });
+  assert.deepEqual(replaceLeadingCommandToken("  /reveiw", review), { text: "  /review ", caret: 10 });
+  assert.deepEqual(replaceLeadingCommandToken("/reveiw\nsecond line", review), {
+    text: "/review \nsecond line",
+    caret: 8,
+  });
+});
+
+test("unknown tokens are refused except on a Claude Code runner without the init-time catalog", () => {
+  const disk: Pick<AgentSlashCommand, "source">[] = [{ source: "user" }, { source: "project" }];
+  // An older runner reports only Claude Code's disk commands, so its built-ins still need the
+  // plain-text fallback.
+  assert.equal(composerRejectsUnknownCommands("claude-code", disk), false);
+  assert.equal(composerRejectsUnknownCommands("claude-code", []), false);
+  // A #1224 runner forwards the init-time catalog, whose built-ins carry source `builtin`.
+  assert.equal(composerRejectsUnknownCommands("claude-code", [...disk, { source: "builtin" }]), true);
+  for (const driver of ["codex", "codex-app-server", "pi", "acp", undefined] as const) {
+    assert.equal(composerRejectsUnknownCommands(driver, []), true, `${driver} never runs unadvertised slash text`);
+  }
 });
