@@ -73,6 +73,62 @@ async function previewVisibleAnchor(page: Page) {
   });
 }
 
+/**
+ * Presses `key` and follows the row at the top of the reader through every frame for `durationMs`
+ * after the page lands (#2426). The page lands in the press's own task, so the first frame sampled
+ * is the first frame after it; the rows it mounted measure in the frames that follow. Returns each
+ * frame's offset of that same row, so a row that moves for a single frame and moves back still
+ * shows.
+ */
+async function landedRowOffsetsAfterPage(page: Page, reader: Locator, key: string, durationMs = 300) {
+  await reader.evaluate((element, duration) => {
+    const scrollTop = element.scrollTop;
+    const firstVisibleRow = () => {
+      const viewport = element.getBoundingClientRect();
+      return [...element.querySelectorAll<HTMLElement>("[data-virtual-row]")].find((candidate) => {
+        const rect = candidate.getBoundingClientRect();
+        return rect.bottom > viewport.top && rect.top < viewport.bottom;
+      });
+    };
+    const samples: Array<{ key: string; offset: number | null }> = [];
+    const probe = window as typeof window & { __landedRowOffsets?: Promise<typeof samples> };
+    probe.__landedRowOffsets = new Promise((resolve) => {
+      let landedKey: string | null = null;
+      let landedAt = 0;
+      const sample = (now: number) => {
+        if (landedKey == null && Math.abs(element.scrollTop - scrollTop) >= 1) {
+          landedKey = firstVisibleRow()?.dataset.virtualKey ?? null;
+          landedAt = now;
+        }
+        if (landedKey != null) {
+          const viewport = element.getBoundingClientRect();
+          const row = [...element.querySelectorAll<HTMLElement>("[data-virtual-row]")]
+            .find((candidate) => candidate.dataset.virtualKey === landedKey);
+          samples.push({ key: landedKey, offset: row ? row.getBoundingClientRect().top - viewport.top : null });
+          if (now - landedAt >= duration) {
+            resolve(samples);
+            return;
+          }
+        }
+        requestAnimationFrame(sample);
+      };
+      requestAnimationFrame(sample);
+    });
+  }, durationMs);
+  await page.keyboard.press(key);
+  return page.evaluate(() =>
+    (window as typeof window & { __landedRowOffsets?: Promise<Array<{ key: string; offset: number | null }>> })
+      .__landedRowOffsets!);
+}
+
+function expectLandedRowStill(samples: Array<{ key: string; offset: number | null }>) {
+  expect(samples.length).toBeGreaterThan(2);
+  const [first] = samples;
+  expect(first!.offset).not.toBeNull();
+  const drift = samples.map((sample) => sample.offset == null ? Infinity : Math.abs(sample.offset - first!.offset!));
+  expect(Math.max(...drift), JSON.stringify(samples)).toBeLessThanOrEqual(2);
+}
+
 async function settlePreviewLayout(page: Page, frames = 12) {
   await page.evaluate((count) => new Promise<void>((resolve) => {
     let remaining = count;
@@ -596,21 +652,19 @@ test("an event-heavy Inbox preview fills its opening viewport before expansion",
 
 test("real Inbox preview paging preserves ownership with reduced motion", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
-  await page.goto("/command-inbox-projects-e2e.html?scenario=preview-follow");  const reader = page.getByRole("region", { name: "Session Preview Activity" });
+  await page.goto("/command-inbox-projects-e2e.html?scenario=preview-follow");
+  const reader = page.getByRole("region", { name: "Session Preview Activity" });
   const follow = page.locator(".detail-scroll[data-follow-tail-state]");
   await expect(reader.locator("[data-virtual-row]").first()).toBeVisible();
   await expect.poll(async () => (await previewScrollMetrics(page)).distanceFromTail).toBeLessThanOrEqual(2);
   await page.locator(".inbox-list").focus();
   const before = await settledPreviewScrollMetrics(page);
 
-  await page.keyboard.press("Shift+Space");
+  // The rows the page mounts measure in the frames after it lands, and the row at the top of the
+  // reader must not move while they do — not even for one frame (#2426).
+  expectLandedRowStill(await landedRowOffsetsAfterPage(page, reader, "Shift+Space"));
   await expect(follow).toHaveAttribute("data-follow-tail-state", "previewing");
-  await expect.poll(async () => (await previewScrollMetrics(page)).scrollTop)
-    .toBeLessThan(before.scrollTop - before.clientHeight * 0.35);
-  // Rows mounted by the page measure in the frames after it lands; the property under test is that
-  // the STREAM leaves the viewport alone, so read the anchor once paging has settled. (Without the
-  // reserved strip the preview is taller, and that first measurement moved the anchor past 12px.)
-  await settlePreviewLayout(page);
+  expect((await previewScrollMetrics(page)).scrollTop).toBeLessThan(before.scrollTop - before.clientHeight * 0.35);
   const anchor = await previewVisibleAnchor(page);
   expect(anchor).not.toBeNull();
   await page.evaluate(() => {
@@ -621,8 +675,36 @@ test("real Inbox preview paging preserves ownership with reduced motion", async 
   });
   await expect(follow).toHaveAttribute("data-follow-tail-state", "previewing");
   await expect.poll(async () => (await previewVisibleAnchor(page))?.key).toBe(anchor!.key);
-  await expect.poll(async () => Math.abs((await previewVisibleAnchor(page))!.offset - anchor!.offset)).toBeLessThan(12);
+  await expect.poll(async () => Math.abs((await previewVisibleAnchor(page))!.offset - anchor!.offset)).toBeLessThanOrEqual(2);
 });
+
+for (const reducedMotion of ["reduce", "no-preference"] as const) {
+  test(`paging keeps the landed row still while paged-in rows measure (${reducedMotion} motion)`, async ({ page }) => {
+    await page.emulateMedia({ reducedMotion });
+    await page.goto("/command-inbox-projects-e2e.html?scenario=preview-follow");
+    const preview = page.getByRole("region", { name: "Session Preview Activity" });
+    const follow = page.locator(".detail-scroll[data-follow-tail-state]");
+    await expect(preview.locator("[data-virtual-row]").first()).toBeVisible();
+    await expect.poll(async () => (await previewScrollMetrics(page)).distanceFromTail).toBeLessThanOrEqual(2);
+    await page.locator(".inbox-list").focus();
+    await settledPreviewScrollMetrics(page);
+    expectLandedRowStill(await landedRowOffsetsAfterPage(page, preview, "Shift+Space"));
+    await expect(follow).toHaveAttribute("data-follow-tail-state", "previewing");
+
+    // Page Up from the Session Reading keys, in the expanded session.
+    await page.getByRole("button", { name: "Expand Session" }).click();
+    const reader = page.getByRole("region", { name: "Session Activity" });
+    await expect(reader.locator("[data-virtual-row]").first()).toBeVisible();
+    await reader.focus();
+    await page.keyboard.press("End");
+    await expect(follow).toHaveAttribute("data-follow-tail-state", "following");
+    await expect.poll(() => reader.evaluate((element) =>
+      element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThanOrEqual(2);
+    await settlePreviewLayout(page);
+    expectLandedRowStill(await landedRowOffsetsAfterPage(page, reader, "Shift+Space"));
+    await expect(follow).toHaveAttribute("data-follow-tail-state", "paused");
+  });
+}
 
 test("real Inbox reading hints and resume keys match preview and expanded follow state", async ({ page }) => {
   await page.goto("/command-inbox-projects-e2e.html?scenario=preview-follow");

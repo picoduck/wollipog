@@ -207,6 +207,29 @@ test("a nonzero initial list offset does not call flushSync from the passive set
   }
 });
 
+test("the list's height and row positions never transition, whatever a stylesheet sets", async () => {
+  // The global reduced-motion guard gives every element a 1ms transition-duration; with the default
+  // `transition-property: all`, a transitioning transform paints a scroll correction a frame before
+  // the rows it compensates for (#2426).
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(<InitialOffsetFixture />);
+      await Promise.resolve();
+    });
+    const list = container.querySelector<HTMLElement>(".initial-offset-list");
+    const rows = [...container.querySelectorAll<HTMLElement>("[data-virtual-row]")];
+    assert.ok(list && rows.length > 0, "the measured list rendered rows");
+    assert.equal(list.style.transitionProperty, "none");
+    for (const row of rows) assert.equal(row.style.transitionProperty, "none", `row ${row.dataset.virtualKey}`);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 test("a mounted pin reports key replacement and unmount cleanup", async () => {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);

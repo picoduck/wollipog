@@ -1289,6 +1289,11 @@ function VirtualList<T>({
     setFocusedKey(next && rootRef.current?.contains(event.relatedTarget as Node) ? next : null);
   };
 
+  // The root's height and each row's transform are geometry the scroll corrections above write in
+  // step with scrollTop. They must never transition: the global reduced-motion guard gives every
+  // element a 1ms transition-duration, and with the default `transition-property: all` that would
+  // paint each correction's scrollTop a frame before the rows it compensates for, moving the
+  // reader's row for that frame (#2426).
   const totalHeight = virtualizer.getTotalSize();
   initialTotalHeightRef.current ??= totalHeight;
   const renderedTotalHeight = initialMeasurementsReady ? totalHeight : initialTotalHeightRef.current;
@@ -1313,6 +1318,7 @@ function VirtualList<T>({
         pointerEvents: initialMeasurementsReady ? undefined : "none",
         position: "relative",
         width: "100%",
+        transitionProperty: "none",
       }}
     >
       {mountedVirtualRows.map((virtualRow) => {
@@ -1326,6 +1332,7 @@ function VirtualList<T>({
           width: "100%",
           paddingBottom: gapAt(virtualRow.index) || undefined,
           transform: `translateY(${virtualRow.start - scrollMargin}px)`,
+          transitionProperty: "none",
         };
         return (
           <div
