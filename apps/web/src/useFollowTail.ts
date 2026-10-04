@@ -45,6 +45,13 @@ export interface FollowTailKey {
   altKey: boolean;
 }
 
+/**
+ * Where a held finger on the reader is reported from. A native pan reports through touch events
+ * (its pointer is cancelled once the browser takes the pan); a drag the floating tail control hands
+ * over (#2425) reports through touch pointer events only.
+ */
+export type FollowTailTouchSource = "touch" | "pointer";
+
 export interface UseFollowTailOptions {
   /** The mounted transcript element. */
   scrollRef: RefObject<HTMLElement | null>;
@@ -77,7 +84,10 @@ export interface FollowTailApi {
   onScroll: () => void;
   onWheel: (event: Pick<WheelEvent, "deltaY">) => void;
   onPointerMove: (event: Pick<PointerEvent, "buttons">) => void;
-  onTouchStart: () => void;
+  /** A finger went down on the reader: following pauses, and the finger counts as held. */
+  onTouchStart: (source: FollowTailTouchSource) => void;
+  /** That source's finger lifted or was cancelled. */
+  onTouchEnd: (source: FollowTailTouchSource) => void;
   /** Returns true when the caller should consume the key event. */
   onKeyDown: (event: FollowTailKey) => boolean;
 }
@@ -188,6 +198,7 @@ export function useFollowTail({
   const scrollIntentTimerRef = useRef<number | null>(null);
   const viewportGeometryRef = useRef<{ scrollTop: number; scrollHeight: number; clientHeight: number } | null>(null);
   const layoutScrollPredictionRef = useRef<number | null>(null);
+  const heldTouchSourcesRef = useRef(new Set<FollowTailTouchSource>());
   const programmaticScrollRef = useRef<{
     direction: "next" | "previous";
     settleTimer: number | null;
@@ -367,9 +378,18 @@ export function useFollowTail({
     if ((event.buttons & 1) !== 0) pause();
   }, [pause]);
 
+  const onTouchStart = useCallback((source: FollowTailTouchSource) => {
+    heldTouchSourcesRef.current.add(source);
+    pause();
+  }, [pause]);
+  const onTouchEnd = useCallback((source: FollowTailTouchSource) => {
+    heldTouchSourcesRef.current.delete(source);
+  }, []);
+
   const onScroll = useCallback(() => {
     const element = scrollRef.current;
     if (!element) return;
+    const previousScrollTop = viewportGeometryRef.current?.scrollTop;
     observeViewportGeometry(element);
     const layoutOwned = consumeLayoutScrollPrediction(element);
     const ownership = programmaticScrollRef.current;
@@ -398,6 +418,16 @@ export function useFollowTail({
       if (!layoutOwned && isAtFollowTailBottom(element, FOLLOW_TAIL_RESUME_THRESHOLD_PX)) {
         transition("resume");
       }
+      return;
+    }
+    // A held finger that carries the reader back up from the tail is reading back, as an upward
+    // wheel is (#2549). Pause at once: the bare-scroll fallback below waits for layout to claim the
+    // scroll, and streamed growth claims it and pulls the reader back to the tail. A native pan has
+    // no later pointer move that could pause, and the 48px tail band would swallow small steps.
+    if (heldTouchSourcesRef.current.size > 0 && !layoutOwned && previousScrollTop != null &&
+        element.scrollTop < previousScrollTop - FOLLOW_TAIL_LAYOUT_SCROLL_EPSILON_PX &&
+        !isAtFollowTailBottom(element, FOLLOW_TAIL_RESUME_THRESHOLD_PX)) {
+      pause();
       return;
     }
     if (isAtFollowTailBottom(element)) {
@@ -537,7 +567,8 @@ export function useFollowTail({
     onScroll,
     onWheel,
     onPointerMove,
-    onTouchStart: pause,
+    onTouchStart,
+    onTouchEnd,
     onKeyDown,
   };
 }

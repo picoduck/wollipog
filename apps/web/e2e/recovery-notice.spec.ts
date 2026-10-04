@@ -363,4 +363,65 @@ test.describe("touch", () => {
     expect(await settledScrollTop(page) - atTail, "turning back reads back again").toBeLessThan(-150);
     await expect(reader(page)).toHaveAttribute("data-follow-tail-state", "paused");
   });
+
+  // A pan that reaches the tail resumes following; turning back without lifting reads back again,
+  // even while output streams in and following would otherwise pull the reader to the tail (#2549).
+  for (const start of ["transcript", "control"] as const) {
+    test(`a touch pan from the ${start} that turns back from the tail while output streams stays put (#2549)`, async ({ page, context }) => {
+      await page.goto("/recovery-notice-e2e.html?mode=expanded&height=700&width=390&settled=1");
+      await expect(page.locator("[data-virtual-row]").first()).toBeVisible();
+      const client = await context.newCDPSession(page);
+      const append = () => page.evaluate(() =>
+        (window as typeof window & { appendFixtureEvents: (n: number) => void }).appendFixtureEvents(1));
+      const fromBottom = () => reader(page).evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight);
+      const touchAt = async (x: number, y: number) =>
+        client.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y, id: 1 }] });
+      const readBackNearTail = async () => {
+        await reader(page).dispatchEvent("wheel", { deltaY: -40 });
+        await reader(page).evaluate((el) => { el.scrollTop = el.scrollHeight - el.clientHeight - 150; });
+        await expect(control(page)).toBeVisible();
+        const near = await box(control(page));
+        return {
+          x: start === "control" ? near.left + near.width / 2 : near.left - 40,
+          y: near.top + near.height / 2,
+        };
+      };
+
+      const { x, y } = await readBackNearTail();
+      await client.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y, id: 1 }] });
+      for (let step = 1; step <= 10; step += 1) {
+        await touchAt(x, y - 30 * step);
+        await page.waitForTimeout(16);
+      }
+      await expect(reader(page), "the pan reached the tail").toHaveAttribute("data-follow-tail-state", "following");
+      for (let step = 1; step <= 10; step += 1) {
+        await touchAt(x, y - 300 + 25 * step);
+        if (step % 2 === 0) await append();
+        await page.waitForTimeout(16);
+      }
+      await page.waitForTimeout(150);
+      await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+      await page.waitForTimeout(600);
+      expect(await fromBottom(), "the reader stays where the turn left it").toBeGreaterThan(200);
+      await expect(reader(page)).toHaveAttribute("data-follow-tail-state", "paused");
+      await expect(control(page)).toBeVisible();
+
+      // A pan that ends at the tail while output streams still resumes following there. It travels
+      // twice as far, because the rows streaming in during it move the tail away from the finger.
+      const back = await readBackNearTail();
+      await client.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: back.x, y: back.y, id: 1 }] });
+      for (let step = 1; step <= 20; step += 1) {
+        await touchAt(back.x, back.y - 30 * step);
+        if (step % 2 === 0) await append();
+        await page.waitForTimeout(16);
+      }
+      await page.waitForTimeout(150);
+      await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+      await append();
+      await page.waitForTimeout(600);
+      await expect(reader(page)).toHaveAttribute("data-follow-tail-state", "following");
+      await expect.poll(fromBottom).toBeLessThanOrEqual(2);
+      await expect(control(page)).toHaveCount(0);
+    });
+  }
 });

@@ -421,7 +421,10 @@ function Fixture() {
           onScroll={followTailEnabled ? followTail.onScroll : undefined}
           onWheel={followTailEnabled ? followTail.onWheel : undefined}
           onPointerMove={followTailEnabled ? followTail.onPointerMove : undefined}
-          onTouchStart={followTailEnabled ? followTail.onTouchStart : undefined}
+          onTouchStart={followTailEnabled ? () => followTail.onTouchStart("touch") : undefined}
+          onTouchEnd={followTailEnabled ? (event) => {
+            if (event.touches.length === 0) followTail.onTouchEnd("touch");
+          } : undefined}
           onKeyDown={followTailEnabled ? (event) => {
             if (!followTail.onKeyDown(event)) return;
             event.preventDefault();

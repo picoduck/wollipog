@@ -5978,7 +5978,7 @@ function SessionDetailLoaded({
                   markTouchEarlierActivityIntent(event.clientY);
                   // A touch pauses following on the press, as its touchstart does. A drag the
                   // floating tail control hands over (#2425) arrives as pointer events only.
-                  followTail.onTouchStart();
+                  followTail.onTouchStart("pointer");
                 } else markPointerEarlierActivityIntent(event.currentTarget);
               }}
               onPointerMove={(event) => {
@@ -5991,22 +5991,33 @@ function SessionDetailLoaded({
                 followTail.onPointerMove(event);
               }}
               onPointerUp={(event) => {
-                if (event.pointerType === "touch") finishPointerTouchEarlierActivityIntent();
+                if (event.pointerType !== "touch") return;
+                finishPointerTouchEarlierActivityIntent();
+                followTail.onTouchEnd("pointer");
               }}
               onPointerCancel={(event) => {
-                if (event.pointerType === "touch") finishPointerTouchEarlierActivityIntent();
+                if (event.pointerType !== "touch") return;
+                finishPointerTouchEarlierActivityIntent();
+                // A native pan cancels its pointer as it starts; its touch events still hold it.
+                followTail.onTouchEnd("pointer");
               }}
               onTouchStart={(event) => {
                 markNativeTouchEarlierActivityIntent(event.touches[0]?.clientY ?? null);
-                followTail.onTouchStart();
+                followTail.onTouchStart("touch");
               }}
               onTouchMove={(event) => {
                 const clientY = event.touches[0]?.clientY ?? null;
                 markTouchEarlierActivityMovement(clientY);
                 requestEarlierFromTouchAtHead(clientY, event.target);
               }}
-              onTouchEnd={(event) => finishNativeTouchEarlierActivityIntent(event.touches.length)}
-              onTouchCancel={(event) => finishNativeTouchEarlierActivityIntent(event.touches.length)}
+              onTouchEnd={(event) => {
+                finishNativeTouchEarlierActivityIntent(event.touches.length);
+                if (event.touches.length === 0) followTail.onTouchEnd("touch");
+              }}
+              onTouchCancel={(event) => {
+                finishNativeTouchEarlierActivityIntent(event.touches.length);
+                if (event.touches.length === 0) followTail.onTouchEnd("touch");
+              }}
               onKeyDown={(event) => {
                 if (event.defaultPrevented) return;
                 if (inTypingContext(event.currentTarget.ownerDocument)) return;
