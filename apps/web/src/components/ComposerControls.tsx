@@ -238,20 +238,23 @@ export function BarMenu({
 /** Model Settings in two columns: wide enough for a model's description beside the effort list. */
 const MODEL_SETTINGS_TWO_COLUMN_WIDTH = 536;
 
-/** Tab and Shift+Tab stay inside the popover: it is portalled to the end of <body>, so the browser
- * would otherwise carry focus out of it with nowhere to go but the address bar. */
+/** Tab and Shift+Tab move between the popover's stops and wrap at either end: it is portalled to
+ * the end of <body>, so the browser would otherwise carry focus out of it with nowhere to go but
+ * the address bar. A row the arrow keys moved to is not its group's Tab stop (arrows do not
+ * choose), so it stands in for that stop. */
 function keepTabInside(event: ReactKeyboardEvent<HTMLDivElement>): void {
   if (event.key !== "Tab") return;
   const stops = [...event.currentTarget.querySelectorAll<HTMLElement>("button, [tabindex]")]
     .filter((element) => element.tabIndex >= 0 && !(element instanceof HTMLButtonElement && element.disabled));
   if (stops.length === 0) return;
-  const first = stops[0]!;
-  const last = stops.at(-1)!;
-  const active = event.currentTarget.ownerDocument.activeElement;
-  if (event.shiftKey ? active === first || !stops.includes(active as HTMLElement) : active === last) {
-    event.preventDefault();
-    (event.shiftKey ? last : first).focus();
-  }
+  const active = event.currentTarget.ownerDocument.activeElement as HTMLElement | null;
+  const group = active?.closest('[role="radiogroup"]') ?? null;
+  const current = stops.findIndex((stop) => stop === active || (group !== null && group.contains(stop)));
+  const next = current < 0
+    ? (event.shiftKey ? stops.length - 1 : 0)
+    : (current + (event.shiftKey ? -1 : 1) + stops.length) % stops.length;
+  event.preventDefault();
+  stops[next]!.focus();
 }
 
 /**

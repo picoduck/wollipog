@@ -189,6 +189,59 @@ test("Model Settings close control dismisses without selecting and restores trig
   }
 });
 
+test("Tab from a row the arrow keys reached stays inside Model Settings and moves by group", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      <ModelSettingsPopover label="Current Model" ariaLabel="Model Settings: Current Model">
+        {(close) => (
+          <ModelEffortMenuChoices
+            models={[{ id: "gpt", displayName: "GPT" }, { id: "mini", displayName: "GPT Mini" }]}
+            modelVal="gpt"
+            modelEfforts={["low", "high"]}
+            effortVal="low"
+            close={close}
+            apply={() => undefined}
+          />
+        )}
+      </ModelSettingsPopover>,
+    );
+  });
+  const press = (key: string, shiftKey = false) => act(async () => {
+    (domWindow.document.activeElement as unknown as HTMLElement).dispatchEvent(
+      new domWindow.KeyboardEvent("keydown", { key, shiftKey, bubbles: true, cancelable: true }) as never,
+    );
+  });
+  const named = (name: string) => domWindow.document.querySelector(`[aria-label="${name}"]`) ??
+    [...domWindow.document.querySelectorAll('[role="radio"]')].find((radio) => radio.textContent === name);
+  try {
+    await act(async () => { container.querySelector<HTMLButtonElement>(".model-chip")!.click(); });
+    assert.ok(domWindow.document.activeElement === named("GPT"), "opens on the current model");
+    // Into the effort group, then onto High, which is not the group's Tab stop.
+    await press("Tab");
+    assert.ok(domWindow.document.activeElement === named("Low"));
+    await press("ArrowDown");
+    assert.ok(domWindow.document.activeElement === named("High"));
+    await press("Tab");
+    assert.ok(domWindow.document.activeElement === named("Close Model Settings"),
+      "Tab from the last group wraps to Close instead of leaving the popover");
+    await press("Tab");
+    await press("ArrowDown");
+    assert.ok(domWindow.document.activeElement === named("GPT Mini"));
+    await press("Tab", true);
+    assert.ok(domWindow.document.activeElement === named("Close Model Settings"),
+      "Shift+Tab from an arrowed-to model goes back one stop, not to the end");
+    await press("Tab", true);
+    assert.ok(domWindow.document.activeElement === named("Low"), "Shift+Tab from the first stop wraps to the last group");
+    assert.ok(domWindow.document.querySelector('[role="dialog"]'), "still open");
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
 test("Model Settings keeps descriptions and Service Tier selection in one popover, and arrows only move", async () => {
   const applied: Partial<SessionConfig>[] = [];
   let closeCount = 0;
