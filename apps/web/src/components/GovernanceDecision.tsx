@@ -1,10 +1,10 @@
 import React, { useContext } from "react";
 import { governanceDecidedBy, governanceDecisionLabel, type GovernanceDecision } from "../governance.js";
-import { ResolverDirectoryContext } from "../resolver-identity.js";
+import { ViewerIdentityContext } from "../resolver-identity.js";
 
 /** The decision's label, naming a member's decision relative to the viewer (#2527). */
 export function GovernanceDecisionLabel({ decision }: { decision: GovernanceDecision }) {
-  const { viewer } = useContext(ResolverDirectoryContext);
+  const viewer = useContext(ViewerIdentityContext);
   return <span className="governance-label">{governanceDecisionLabel(decision, viewer)}</span>;
 }
 
@@ -16,7 +16,7 @@ export function GovernanceDecisionLabel({ decision }: { decision: GovernanceDeci
  * input, question answers, and credentials are never part of the audit record and are never read.
  */
 export function GovernanceDecisionFacts({ decision }: { decision: GovernanceDecision }) {
-  const { viewer } = useContext(ResolverDirectoryContext);
+  const viewer = useContext(ViewerIdentityContext);
   return (
     <div className="governance-decision-body">
       <p className="governance-decision-detail">{decision.detail}</p>

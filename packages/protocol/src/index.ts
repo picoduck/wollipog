@@ -638,7 +638,12 @@
 //      dense history. Session capability overlays may carry `unsupportedSlashCommands` and an `mcp`
 //      command source; both are additive, so an older client lists MCP prompts as harness commands
 //      and sends an unsupported command as text, as before.
-export const PROTOCOL_VERSION = 204;
+// 205: who answered (#2527): the control plane sends `answeredByUserId`, the organization user who
+//      submitted the answer, with `answer_question` and `answer_recovered_question`, and the runner
+//      records it on the `question_resolved` it emits for exactly that request, so a shared session
+//      names its answering member per occurrence. Additive + optional: older runners ignore the
+//      field and older control planes send none; such answers read without a name, as before.
+export const PROTOCOL_VERSION = 205;
 export const UNIVERSAL_QUESTION_TEXT_MIN_PROTOCOL = 202;
 
 export type ArtifactUploadPreference = "manual" | "wollipog_automatic" | "external_hosting";
@@ -5186,6 +5191,11 @@ export type SessionEventPayload =
        * answer and recorded by the runner for exactly this request. Absent for a dismissal and from
        * older runners and control planes. Shared transcripts exclude it like every question event. */
       answers?: QuestionAnswerSummaryEntry[];
+      /** v205: the organization user who submitted this answer (#2527), delivered with it and
+       * recorded for exactly this request. Absent for a dismissal, a policy or Parent Control
+       * answer, and from older runners and control planes. Never shown: the transcript names the
+       * member relative to the viewer. */
+      answeredByUserId?: string;
     }
   | { kind: "checkpoint"; turn: number; tree: string }
   | { kind: "checkpoint_restored"; turn: number }
@@ -8587,6 +8597,8 @@ export interface AnswerRecoveredQuestionCommand {
   resolvedByParentSessionId?: string;
   /** v200: the content-safe summary the runner records on this answer's `question_resolved`. */
   answerSummary?: QuestionAnswerSummaryEntry[];
+  /** v205: the organization user who submitted the answer, recorded on its `question_resolved`. */
+  answeredByUserId?: string;
 }
 
 /** Attempt to incorporate direct input or one existing queue item into the exact active turn.
@@ -8883,6 +8895,8 @@ export interface AnswerQuestionMessage {
   resolvedByParentSessionId?: string;
   /** v200: the content-safe summary the runner records on this answer's `question_resolved`. */
   answerSummary?: QuestionAnswerSummaryEntry[];
+  /** v205: the organization user who submitted the answer, recorded on its `question_resolved`. */
+  answeredByUserId?: string;
 }
 
 /** Restore a worktree session's FILES to the checkpoint taken before `turn` (T3-style rewind).

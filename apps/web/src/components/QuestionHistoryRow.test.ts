@@ -4,14 +4,7 @@ import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { AgentQuestion, QuestionAnswerSummaryEntry, SessionEvent, SessionEventPayload } from "@wollipog/protocol";
 import { deriveTimeline, type TimelineItem } from "../timeline.js";
-import {
-  NO_RESOLVER_DIRECTORY,
-  ResolverDirectoryContext,
-  viewerIdentity,
-  type HumanQuestionAnswer,
-  type ResolverDirectory,
-  type ViewerIdentity,
-} from "../resolver-identity.js";
+import { ViewerIdentityContext, viewerIdentity, type ViewerIdentity } from "../resolver-identity.js";
 import { QuestionHistoryRow, questionAnswerLine, questionOutcome } from "./QuestionHistoryRow.js";
 
 (globalThis as typeof globalThis & { React: typeof React }).React = React;
@@ -53,10 +46,10 @@ function ask(questions: AgentQuestion[], requestId = "ask"): SessionEvent {
   return event({ kind: "question_request", requestId, questions }, ASKED);
 }
 
-function render(item: QuestionItem, open = false, directory: ResolverDirectory = NO_RESOLVER_DIRECTORY): string {
+function render(item: QuestionItem, open = false, viewing: ViewerIdentity | null = null): string {
   return renderToStaticMarkup(React.createElement(
-    ResolverDirectoryContext.Provider,
-    { value: directory },
+    ViewerIdentityContext.Provider,
+    { value: viewing },
     React.createElement(QuestionHistoryRow, { item, open }),
   ));
 }
@@ -78,11 +71,6 @@ function viewer(userId: string, members: Array<[string, string]>): ViewerIdentit
 
 const SOLO = viewer("user-local", [["user-local", "Local owner"]]);
 const MEMBERS: Array<[string, string]> = [["user-ada", "Ada Lovelace"], ["user-grace", "Grace Hopper"]];
-
-/** The directory a viewer sees, with the answers the session's governance audit recorded. */
-function directoryFor(viewing: ViewerIdentity | null, answers: Record<string, HumanQuestionAnswer[]> = {}): ResolverDirectory {
-  return { viewer: viewing, questionAnswers: new Map(Object.entries(answers)) };
-}
 
 const resolutionOf = (html: string) => /<p class="tl-question-resolution">([^<]*)<\/p>/.exec(html)?.[1];
 
@@ -106,7 +94,7 @@ test("a single-choice answer reads on line 2 from the stored event (#2188)", () 
   assert.match(html, /aria-label="Destination · Answer: Destination 1 \(Production\) · Answered"/);
   assert.match(html, /<time dateTime="2026-10-03T00:31:00.000Z">/);
   assert.match(html, /Asked [^,]+, answered /);
-  assert.match(visibleText(render(item, true, directoryFor(SOLO))), /Answered by you at /);
+  assert.match(visibleText(render(item, true, SOLO)), /Answered by you at /);
   assert.doesNotMatch(html, /❓|→|tl-perm/);
 });
 
@@ -191,50 +179,68 @@ test("an older runner's answer without a summary reads Answered with no answer l
 });
 
 test("a shared session names who answered relative to the viewer, never by raw user id (#2527)", () => {
-  const item = questionFrom([ask([destination]), answered([{ questionId: "destination", selected: ["Destination 1 (Production)"] }])]);
-  const byAda = { ask: [{ actorId: "user-ada" }] };
+  const byAda = questionFrom([ask([destination]), answered([{ questionId: "destination", selected: ["Destination 1 (Production)"] }],
+    { answeredByUserId: "user-ada" })]);
+  assert.equal(byAda.answeredByUserId, "user-ada");
   const ada = viewer("user-ada", MEMBERS);
   const grace = viewer("user-grace", MEMBERS);
 
-  assert.match(resolutionOf(render(item, true, directoryFor(ada, byAda)))!, /^Answered by you at /);
-  assert.match(resolutionOf(render(item, true, directoryFor(grace, byAda)))!, /^Answered by Ada Lovelace at /);
+  assert.match(resolutionOf(render(byAda, true, ada))!, /^Answered by you at /);
+  assert.match(resolutionOf(render(byAda, true, grace))!, /^Answered by Ada Lovelace at /);
 
   // A resolver missing from the directory, or without a display name, is "another member".
   const unnamed = viewer("user-grace", [...MEMBERS, ["user-anon", "  "]]);
-  for (const actorId of ["user-gone", "user-anon"]) {
-    const html = render(item, true, directoryFor(unnamed, { ask: [{ actorId }] }));
+  for (const answeredByUserId of ["user-gone", "user-anon"]) {
+    const item = questionFrom([ask([destination]), answered([{ questionId: "destination", selected: ["Destination 1 (Production)"] }],
+      { answeredByUserId })]);
+    const html = render(item, true, unnamed);
     assert.match(resolutionOf(html)!, /^Answered by another member at /);
     assert.doesNotMatch(html, /user-(gone|anon|ada|grace)/, "no raw user id is rendered");
   }
 
-  // The answer is recorded but its audit is not loaded yet, or the viewer is unknown: neutral.
-  assert.match(resolutionOf(render(item, true, directoryFor(grace)))!, /^Answered at /);
-  assert.match(resolutionOf(render(item, true, directoryFor(null, byAda)))!, /^Answered at /);
-
-  // A single-member installation keeps "you", whatever id an older record carries.
-  assert.match(resolutionOf(render(item, true, directoryFor(SOLO, { ask: [{ actorId: "device-1" }] })))!,
-    /^Answered by you at /);
+  // Until the viewer is known, nobody is named.
+  assert.match(resolutionOf(render(byAda, true, null))!, /^Answered at /);
+  // A single-member installation keeps "you", whatever id the record carries.
+  assert.match(resolutionOf(render(byAda, true, SOLO))!, /^Answered by you at /);
 });
 
-test("a reused request id names its member only when every recorded answer agrees", () => {
-  // The audit has no occurrence id, and its control-plane clock need not match the runner's, so
-  // two members' answers under one request id cannot be told apart: the row stays neutral.
-  const item = questionFrom([ask([destination]), answered([{ questionId: "destination", selected: ["Destination 1 (Production)"] }])]);
+test("an answer an older runner or control plane recorded without its member stays neutral in a shared session", () => {
+  // Answers from before protocol 205, or through an older runner, carry no member.
+  const withSummary = questionFrom([ask([destination]),
+    answered([{ questionId: "destination", selected: ["Destination 1 (Production)"] }])]);
+  assert.equal(withSummary.answeredByUserId, undefined);
+  assert.match(resolutionOf(render(withSummary, true, viewer("user-grace", MEMBERS)))!, /^Answered at /);
+  assert.match(resolutionOf(render(withSummary, true, SOLO))!, /^Answered by you at /,
+    "a single-member installation still reads its summarized answers as its own");
+
+  const bare = questionFrom([ask([destination]), event({ kind: "question_resolved", requestId: "ask", answered: true }, ANSWERED)]);
+  assert.match(resolutionOf(render(bare, true, SOLO))!, /^Answered at /,
+    "with neither a summary nor a member, the row cannot tell a person answered");
+});
+
+test("each resolution says who settled it, so a reused request id never keeps another occurrence's member", () => {
+  // The member rides on the exact resolution the runner recorded, so each occurrence of a reused
+  // request id names its own member, and a later resolution never inherits an earlier one.
   const grace = viewer("user-grace", MEMBERS);
-  const mixed = directoryFor(grace, { ask: [{ actorId: "user-grace" }, { actorId: "user-ada" }] });
-  assert.match(resolutionOf(render(item, true, mixed))!, /^Answered at /);
-  const same = directoryFor(grace, { ask: [{ actorId: "user-ada" }, { actorId: "user-ada" }] });
-  assert.match(resolutionOf(render(item, true, same))!, /^Answered by Ada Lovelace at /);
-  const solo = directoryFor(SOLO, { ask: [{ actorId: "user-local" }, { actorId: "device-1" }] });
-  assert.match(resolutionOf(render(item, true, solo))!, /^Answered by you at /);
-});
+  const items = deriveTimeline([
+    event({ kind: "question_request", requestId: "reused", occurrenceId: "first", questions: [destination] }, ASKED),
+    answered([{ questionId: "destination", selected: ["Destination 1 (Production)"] }],
+      { occurrenceId: "first", answeredByUserId: "user-ada" }, "reused"),
+    event({ kind: "question_request", requestId: "reused", occurrenceId: "second", questions: [destination] }, ASKED),
+    answered([{ questionId: "destination", selected: ["Destination 2 (Staging)"] }],
+      { occurrenceId: "second", answeredByUserId: "user-grace" }, "reused"),
+  ]).filter((item): item is QuestionItem => item.kind === "question");
+  assert.deepEqual(items.map((item) => resolutionOf(render(item, true, grace))!.replace(/ at .*/, "")),
+    ["Answered by Ada Lovelace", "Answered by you"]);
 
-test("the audit names who answered even when an older runner sent no summary", () => {
-  const item = questionFrom([ask([destination]), event({ kind: "question_resolved", requestId: "ask", answered: true }, ANSWERED)]);
-  const directory = directoryFor(viewer("user-ada", MEMBERS), { ask: [{ actorId: "user-grace" }] });
-  assert.match(resolutionOf(render(item, true, directory))!, /^Answered by Grace Hopper at /);
-  assert.match(resolutionOf(render(item, true, directoryFor(SOLO)))!, /^Answered at /,
-    "without a summary or an audit record the row cannot tell a member answered");
+  const reanswered = questionFrom([ask([destination]),
+    answered([{ questionId: "destination", selected: ["Destination 1 (Production)"] }], { answeredByUserId: "user-ada" }),
+    event({ kind: "question_resolved", requestId: "ask", answered: true, resolutionReason: "submitted" }, ANSWERED + 1)]);
+  assert.equal(reanswered.answeredByUserId, undefined);
+  const dismissed = questionFrom([ask([destination]),
+    answered([{ questionId: "destination", selected: ["Destination 1 (Production)"] }], { answeredByUserId: "user-ada" }),
+    event({ kind: "question_resolved", requestId: "ask", answered: false, resolutionReason: "replaced" }, ANSWERED + 1)]);
+  assert.equal(dismissed.answeredByUserId, undefined);
 });
 
 test("an unanswered question keeps the Awaiting Answer warning status", () => {

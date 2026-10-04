@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { GovernanceAuditEntry, IdentityAdministrationView } from "@wollipog/protocol";
-import { humanQuestionAnswers, humanResolver, questionAnswerActorId, viewerIdentity } from "./resolver-identity.js";
+import type { IdentityAdministrationView } from "@wollipog/protocol";
+import { humanResolver, resolverName, viewerIdentity } from "./resolver-identity.js";
 
 function identity(userId: string, members: Array<[string, string, string?]>): IdentityAdministrationView {
   return {
@@ -15,14 +15,6 @@ function identity(userId: string, members: Array<[string, string, string?]>): Id
       userStatus: "active", role: "operator", createdAt: 1,
     })),
     teams: [],
-  };
-}
-
-function audit(overrides: Partial<GovernanceAuditEntry>): GovernanceAuditEntry {
-  return {
-    auditId: "audit", requestId: "ask", approvalKind: "question", stage: "resolution", outcome: "answered",
-    actor: { kind: "human", id: "user-ada" }, scope: { sessionId: "session", runnerId: "runner" }, timestamp: 10,
-    ...overrides,
   };
 }
 
@@ -42,23 +34,11 @@ test("the viewer's organization decides whether answers can belong to someone el
   assert.equal(humanResolver(null, "user-ada"), null);
 });
 
-test("only members' answers from the audit name a question's resolver", () => {
-  const answers = humanQuestionAnswers([
-    audit({ auditId: "a" }),
-    audit({ auditId: "b", outcome: "dismissed" }),
-    audit({ auditId: "c", actor: { kind: "policy", id: "routine" } }),
-    audit({ auditId: "d", stage: "policy_decision" }),
-    audit({ auditId: "e", approvalKind: "policy_hook", outcome: "allowed" }),
-    audit({ auditId: "f", requestId: "other", actor: { kind: "human" }, timestamp: 20 }),
-  ]);
-  assert.deepEqual([...answers], [
-    ["ask", [{ actorId: "user-ada" }]],
-    ["other", [{}]],
-  ]);
-  assert.equal(humanQuestionAnswers([]).size, 0);
-
-  const directory = { viewer: null, questionAnswers: answers };
-  assert.equal(questionAnswerActorId(directory, "ask"), "user-ada");
-  assert.equal(questionAnswerActorId(directory, "other"), undefined);
-  assert.equal(questionAnswerActorId(directory, "missing"), undefined);
+test("resolver names follow Title Case in labels and sentence case in prose", () => {
+  assert.equal(resolverName({ kind: "viewer" }), "you");
+  assert.equal(resolverName({ kind: "viewer" }, { titleCase: true }), "You");
+  assert.equal(resolverName({ kind: "other" }), "another member");
+  assert.equal(resolverName({ kind: "other" }, { titleCase: true }), "Another Member");
+  assert.equal(resolverName({ kind: "member", name: "grace hopper" }, { titleCase: true }), "grace hopper",
+    "a display name is user-authored and kept as written");
 });

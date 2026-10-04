@@ -475,6 +475,8 @@ interface QueuedPrompt {
     resolvedByParentSessionId?: string;
     /** The control plane's content-safe summary, recorded on this answer's resolution (#2188). */
     answerSummary?: QuestionAnswerSummaryEntry[];
+    /** The organization user who submitted the answer, recorded on its resolution (#2527). */
+    answeredByUserId?: string;
     /** Exact recovered card validated when the answer entered the queue. Authentication recovery
      * may project its own card until replay reaches the durable no-replay boundary. */
     pendingQuestion: PendingApproval;
@@ -12664,6 +12666,7 @@ export class SessionManager {
             : {}),
           ...(durable ? { commandId: durable.commandId } : {}),
           ...(recoveredQuestion.answerSummary ? { answers: recoveredQuestion.answerSummary } : {}),
+          ...(recoveredQuestion.answeredByUserId ? { answeredByUserId: recoveredQuestion.answeredByUserId } : {}),
         }, durable)
       : syntheticRecovery
       ? this.emitEvent(sessionId, {
@@ -15131,6 +15134,7 @@ export class SessionManager {
     resolvedByParentSessionId?: string,
     occurrenceId?: string,
     answerSummary?: QuestionAnswerSummaryEntry[],
+    answeredByUserId?: string,
   ): void {
     const entry = this.active.get(sessionId);
     const asyncQuestion = pendingRequests(this.store.readMeta(sessionId)?.pendingApproval)
@@ -15149,6 +15153,7 @@ export class SessionManager {
         resolutionReason: submitted ? "submitted" : "dismissed",
         ...(resolvedByParentSessionId ? { resolvedByParentSessionId } : {}),
         ...(submitted && answerSummary ? { answers: answerSummary } : {}),
+        ...(submitted && answeredByUserId ? { answeredByUserId } : {}),
       });
       return;
     }
@@ -15172,6 +15177,7 @@ export class SessionManager {
         resolutionReason: answered ? "submitted" : "dismissed",
         ...(resolvedByParentSessionId ? { resolvedByParentSessionId } : {}),
         ...(answered && answerSummary ? { answers: answerSummary } : {}),
+        ...(answered && answeredByUserId ? { answeredByUserId } : {}),
       });
       return;
     }
@@ -15217,6 +15223,7 @@ export class SessionManager {
     durable: DurableCommandLifecycle,
     resolvedByParentSessionId?: string,
     answerSummary?: QuestionAnswerSummaryEntry[],
+    answeredByUserId?: string,
   ): void {
     const meta = this.store.readMeta(sessionId);
     if (!meta) {
@@ -15275,6 +15282,7 @@ export class SessionManager {
         answers,
         ...(resolvedByParentSessionId ? { resolvedByParentSessionId } : {}),
         ...(answerSummary ? { answerSummary } : {}),
+        ...(answeredByUserId ? { answeredByUserId } : {}),
         pendingQuestion,
       };
     }
@@ -15317,6 +15325,7 @@ export class SessionManager {
       resolutionReason: "submitted",
       ...(resolvedByParentSessionId ? { resolvedByParentSessionId } : {}),
       ...(recoveredQuestion.answerSummary ? { answers: recoveredQuestion.answerSummary } : {}),
+      ...(recoveredQuestion.answeredByUserId ? { answeredByUserId: recoveredQuestion.answeredByUserId } : {}),
     })) return;
     this.store.flush(sessionId);
 

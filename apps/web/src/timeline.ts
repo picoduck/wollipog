@@ -224,6 +224,9 @@ export type TimelineItem =
       /** What was answered (#2188), recorded on the runner's resolution. Absent for a dismissal and
        * for an answer an older runner or control plane recorded. */
       answers?: QuestionAnswerSummaryEntry[];
+      /** The organization user who submitted the answer (#2527), recorded on the runner's
+       * resolution. Absent for a dismissal, a policy or parent answer, and from older peers. */
+      answeredByUserId?: string;
       /** When it was answered or otherwise resolved. */
       resolvedAt?: number;
     }
@@ -1376,6 +1379,8 @@ export class TimelineBuilder {
               : {}),
             ...(Number.isFinite(ev.ts) ? { resolvedAt: ev.ts } : {}),
             ...(p.answered && p.answers ? { answers: p.answers } : {}),
+            // Each resolution says who settled it; a later one never keeps an earlier member.
+            answeredByUserId: p.answered ? p.answeredByUserId : undefined,
             ...(!p.answered ? { answeredByPolicies: undefined, answers: undefined } : {}) };
           this.markDirty(idx);
         }

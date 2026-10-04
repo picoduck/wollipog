@@ -501,7 +501,7 @@ test("explicit question dismissal records cancelled telemetry and a dismissed li
   }
 });
 
-test("a submitted answer records the control plane's summary on its own resolution, and a dismissal none (#2188)", () => {
+test("a submitted answer records the control plane's summary and its member on its own resolution, and a dismissal neither (#2188, #2527)", () => {
   const summary = [{ questionId: "target", selected: ["Production"] }];
   for (const action of ["submit", "dismiss"] as const) {
     const { sm, sent, cleanup } = makeHarness(true);
@@ -511,9 +511,12 @@ test("a submitted answer records the control plane's summary on its own resoluti
         questions: [{ id: "target", question: "Which target?", options: [{ label: "Production" }], required: false }],
       });
       sm.answerQuestion("s_perm", "question-summary", action === "submit" ? { target: "Production" } : {}, action,
-        undefined, undefined, summary);
-      const resolved = (eventsOf(sent, "question_resolved")[0] as { payload: { answers?: unknown } }).payload;
+        undefined, undefined, summary, "usr_grace");
+      const resolved = (eventsOf(sent, "question_resolved")[0] as {
+        payload: { answers?: unknown; answeredByUserId?: string };
+      }).payload;
       assert.deepEqual(resolved.answers, action === "submit" ? summary : undefined, action);
+      assert.equal(resolved.answeredByUserId, action === "submit" ? "usr_grace" : undefined, action);
     } finally {
       cleanup();
     }
@@ -528,9 +531,12 @@ test("an async answer records the control plane's summary on its resolution (#21
       questions: [{ id: "0", question: "Which path?", options: [{ label: "Patch" }] }],
     });
     sm.answerQuestion("s_perm", "codex-async:summary", { "0": "Patch" }, "submit", undefined, undefined,
-      [{ questionId: "0", selected: ["Patch"] }]);
-    assert.deepEqual((eventsOf(sent, "question_resolved")[0] as { payload: { answers?: unknown } }).payload.answers,
-      [{ questionId: "0", selected: ["Patch"] }]);
+      [{ questionId: "0", selected: ["Patch"] }], "usr_grace");
+    const resolved = (eventsOf(sent, "question_resolved")[0] as {
+      payload: { answers?: unknown; answeredByUserId?: string };
+    }).payload;
+    assert.deepEqual(resolved.answers, [{ questionId: "0", selected: ["Patch"] }]);
+    assert.equal(resolved.answeredByUserId, "usr_grace", "an async answer names its member (#2527)");
   } finally {
     cleanup();
   }
@@ -736,17 +742,18 @@ test("a durably queued async answer stops presenting its question while the turn
       failed: (error) => { assert.fail(error); }, uncertain: (error) => { assert.fail(error); },
     };
     sm.answerRecoveredQuestion("s_perm", "codex-async:queued", recoveryId, { "0": "Patch" }, lifecycle, undefined,
-      [{ questionId: "0", selected: ["Patch"] }]);
+      [{ questionId: "0", selected: ["Patch"] }], "usr_ada");
     assert.equal((sm as any).active.get("s_perm").queue.length, 1);
     assert.equal(store.readMeta("s_perm")?.pendingApproval, null,
       "a queued answer must keep its exact question occurrence out of the response form");
     const resolution = eventsOf(sent, "question_resolved") as Array<{
-      payload: { commandId?: string; startsTurn?: boolean; occurrenceId: string; answers?: unknown };
+      payload: { commandId?: string; startsTurn?: boolean; occurrenceId: string; answers?: unknown; answeredByUserId?: string };
     }>;
     assert.equal(resolution.length, 1);
     assert.equal(resolution[0]!.payload.occurrenceId, recoveryId);
     assert.deepEqual(resolution[0]!.payload.answers, [{ questionId: "0", selected: ["Patch"] }],
       "the accepted async answer records its summary (#2188)");
+    assert.equal(resolution[0]!.payload.answeredByUserId, "usr_ada", "and who answered it (#2527)");
     assert.equal(resolution[0]!.payload.commandId, undefined);
     assert.equal(resolution[0]!.payload.startsTurn, undefined);
     sm.reconcileStore();
@@ -1479,6 +1486,7 @@ test("a durable recovered answer records one resolution before one provider cont
       lifecycle,
       undefined,
       [{ questionId: "target", selected: ["Production"] }],
+      "usr_ada",
     );
     for (let attempt = 0; attempt < 20 && !transitions.includes("completed"); attempt += 1) {
       await new Promise<void>((resolve) => setImmediate(resolve));
@@ -1496,6 +1504,7 @@ test("a durable recovered answer records one resolution before one provider cont
       resolutionReason: "submitted",
       commandId: "answer_command_1",
       answers: [{ questionId: "target", selected: ["Production"] }],
+      answeredByUserId: "usr_ada",
     });
     assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
     assert.equal(store.readMeta("s_perm")?.status, "idle");

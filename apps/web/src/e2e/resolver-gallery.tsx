@@ -1,12 +1,7 @@
 import type { AgentQuestion, GovernanceAuditEntry, SessionEvent, SessionEventPayload } from "@wollipog/protocol";
 import { EventTimeline } from "../components/EventTimeline.js";
 import { governanceDecisions } from "../governance.js";
-import {
-  humanQuestionAnswers,
-  ResolverDirectoryContext,
-  viewerIdentity,
-  type ResolverDirectory,
-} from "../resolver-identity.js";
+import { ViewerIdentityContext, viewerIdentity } from "../resolver-identity.js";
 import { deriveTimeline, type TimelineItem } from "../timeline.js";
 
 /**
@@ -51,12 +46,8 @@ function answered(requestId: string, question: AgentQuestion, selected: string, 
   add({ kind: "question_request", requestId, questions: [question] }, minute);
   add({
     kind: "question_resolved", requestId, answered: true, resolutionReason: "submitted",
-    answers: [{ questionId: question.id, selected: [selected] }],
+    answers: [{ questionId: question.id, selected: [selected] }], answeredByUserId: actorId,
   }, minute + 1);
-  audit.push({
-    auditId: `answer-${requestId}`, requestId, approvalKind: "question", stage: "resolution", outcome: "answered",
-    actor: { kind: "human", id: actorId }, scope, timestamp: at(minute + 1),
-  });
 }
 function decided(requestId: string, outcome: "allowed" | "denied", actorId: string, minute: number): void {
   audit.push({
@@ -104,13 +95,9 @@ const soloViewer = viewerIdentity({
 });
 
 export function ResolverGallery({ solo = false }: { solo?: boolean }) {
-  const directory: ResolverDirectory = {
-    viewer: solo ? soloViewer : sharedViewer,
-    questionAnswers: humanQuestionAnswers(audit),
-  };
   return (
-    <ResolverDirectoryContext.Provider value={directory}>
+    <ViewerIdentityContext.Provider value={solo ? soloViewer : sharedViewer}>
       <EventTimeline ariaLabel="Resolver Rows" items={items} />
-    </ResolverDirectoryContext.Provider>
+    </ViewerIdentityContext.Provider>
   );
 }

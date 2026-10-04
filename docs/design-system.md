@@ -1582,11 +1582,12 @@ success check on the chosen ones, free text in quotes, and one faint sentence sa
 "Answered by you at 12:31 AM", the policy, or the parent session. A member's answer names them
 relative to the viewer (#2527): "you" only when the viewer answered, otherwise their display name
 from the organization directory, or "another member" when it has none, never a raw user id. The
-answering member comes from the answer's governance audit record. The row reads "Answered at …"
-until the viewer's identity is loaded, and in a shared organization until that record is too; a
-single-member installation reads "you" without it. Governance decision rows follow the same rule: "Approved by You",
-"Denied by Grace Hopper", "Approved by Another Member", and their Decided By fact names the member
-the same way. The answer is the content-safe
+runner records the answering member's user id as `answeredByUserId` on that exact
+`question_resolved` (protocol 205). The row reads "Answered at …" until the viewer's identity is
+loaded, and in a shared organization for an answer an older runner or control plane recorded
+without a member; a single-member installation reads "you" either way. Governance decision rows
+follow the same rule ("Approved by You", "Denied by Grace Hopper", "Approved by Another Member"),
+and their Decided By fact names the member the same way. The answer is the content-safe
 summary the control plane sends with it, which the runner records as `answers` on that request's
 `question_resolved`; a dismissal records none, and an answer from an older runner or control plane
 reads "Answered" with no second line. Shared transcripts exclude every question event.

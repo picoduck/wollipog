@@ -11,7 +11,6 @@ import {
   type GovernanceAnchorEvent,
   type GovernanceDecision,
 } from "../governance.js";
-import { humanQuestionAnswers, type HumanQuestionAnswer } from "../resolver-identity.js";
 import { publishTimelineSnapshotDelta, type TimelineItem } from "../timeline.js";
 
 const NO_ENTRIES: GovernanceAuditEntry[] = [];
@@ -25,8 +24,6 @@ const NO_ENTRIES: GovernanceAuditEntry[] = [];
  */
 export interface GovernanceAuditState {
   decisions: GovernanceDecision[];
-  /** Members' question answers by request id, naming who answered each question row (#2527). */
-  questionAnswers: ReadonlyMap<string, readonly HumanQuestionAnswer[]>;
   available: boolean;
   hasMore: boolean;
   loadingOlder: boolean;
@@ -218,10 +215,8 @@ export function useGovernanceAudit(
 
   const visibleEntries = page.sessionId === sessionId ? page.entries : NO_ENTRIES;
   const decisions = useMemo(() => governanceDecisions(visibleEntries), [visibleEntries]);
-  const questionAnswers = useMemo(() => humanQuestionAnswers(visibleEntries), [visibleEntries]);
   return {
     decisions,
-    questionAnswers,
     available: decisions.length > 0 || (page.sessionId === sessionId && page.hasMore),
     hasMore: page.sessionId === sessionId && page.hasMore,
     loadingOlder: page.sessionId === sessionId && page.loadingOlder,

@@ -2,16 +2,17 @@
  * Who settled a question or a governance decision, named relative to the viewer (#2527).
  *
  * In a session several organization members can open, "by you" is only true for the member who
- * answered. The control plane records the resolving member's user id on the governance audit
- * entry; the viewer's own id and the organization directory come from `GET /api/identity`. A
- * resolver is "you" only when those ids match, otherwise their display name, never a raw id.
+ * answered. A question's resolution records the answering member's user id (protocol 205), and a
+ * governance decision carries its human actor's id; the viewer's own id and the organization
+ * directory come from `GET /api/identity`. A resolver is "you" only when those ids match,
+ * otherwise their display name, never a raw id.
  *
- * Single-member organizations (personal and local installations) keep the "you" wording without
- * needing the audit record. When the viewer, or the resolver in a shared organization, is not
+ * Single-member organizations (personal and local installations) keep the "you" wording, even for
+ * a record that carries no id. When the viewer, or in a shared organization the resolver, is not
  * known, the wording stays neutral rather than guessing either way.
  */
 import { createContext } from "react";
-import type { GovernanceAuditEntry, IdentityAdministrationView } from "@wollipog/protocol";
+import type { IdentityAdministrationView } from "@wollipog/protocol";
 
 export interface ViewerIdentity {
   userId: string;
@@ -21,22 +22,8 @@ export interface ViewerIdentity {
   names: ReadonlyMap<string, string>;
 }
 
-/** A member's answer to a question, from its content-safe governance audit record. */
-export interface HumanQuestionAnswer {
-  actorId?: string;
-}
-
-export interface ResolverDirectory {
-  viewer: ViewerIdentity | null;
-  /** Human answers by question request id, oldest first. */
-  questionAnswers: ReadonlyMap<string, readonly HumanQuestionAnswer[]>;
-}
-
-const NO_ANSWERS: ReadonlyMap<string, readonly HumanQuestionAnswer[]> = new Map();
-
-export const NO_RESOLVER_DIRECTORY: ResolverDirectory = { viewer: null, questionAnswers: NO_ANSWERS };
-
-export const ResolverDirectoryContext = createContext<ResolverDirectory>(NO_RESOLVER_DIRECTORY);
+/** The viewer, or null until their identity loads (and whenever it cannot). */
+export const ViewerIdentityContext = createContext<ViewerIdentity | null>(null);
 
 export function viewerIdentity(identity: IdentityAdministrationView): ViewerIdentity {
   const members = new Set([identity.context.userId]);
@@ -48,34 +35,6 @@ export function viewerIdentity(identity: IdentityAdministrationView): ViewerIden
     if (name) names.set(membership.userId, name);
   }
   return { userId: identity.context.userId, shared: members.size > 1, names };
-}
-
-/** Human question answers in an audit snapshot, grouped by request id. */
-export function humanQuestionAnswers(
-  entries: readonly GovernanceAuditEntry[],
-): ReadonlyMap<string, readonly HumanQuestionAnswer[]> {
-  let answers: Map<string, HumanQuestionAnswer[]> | null = null;
-  for (const entry of entries) {
-    if (entry.approvalKind !== "question" || entry.stage !== "resolution" ||
-        entry.outcome !== "answered" || entry.actor.kind !== "human") continue;
-    answers ??= new Map();
-    const list = answers.get(entry.requestId) ?? [];
-    list.push(entry.actor.id ? { actorId: entry.actor.id } : {});
-    answers.set(entry.requestId, list);
-  }
-  return answers ?? NO_ANSWERS;
-}
-
-/**
- * The member who answered a request. A request id can be reused, and the audit carries no
- * occurrence id; its control-plane timestamps cannot be matched against the runner's either, since
- * the two clocks may disagree. So a reused id names its member only when every recorded answer
- * came from the same one; otherwise the row stays neutral rather than risk naming the wrong one.
- */
-export function questionAnswerActorId(directory: ResolverDirectory, requestId: string): string | undefined {
-  const answers = directory.questionAnswers.get(requestId);
-  const actorId = answers?.[0]?.actorId;
-  return actorId && answers!.every((answer) => answer.actorId === actorId) ? actorId : undefined;
 }
 
 export type HumanResolver =

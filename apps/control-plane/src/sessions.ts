@@ -9415,6 +9415,11 @@ export class SessionsService {
     }
     const auditContent = questionAuditContent(pending, answers);
     const answerSummary = action === "submit" ? this.questionAnswerSummary(sessionId, pending.questions ?? [], answers) : undefined;
+    // Who answered (#2527): the runner records it on this exact resolution, so a shared session can
+    // name the member per occurrence. Parent Control answers name their parent session instead.
+    const answeredByUserId = action === "submit" && actor.kind === "human" && actor.id && !resolvedByParentSessionId
+      ? actor.id
+      : undefined;
 
     if ((pending.async || pending.recoveryReason === "provider_restart") && action === "submit") {
       if (!pending.async && pending.ownerToolUseId) {
@@ -9443,6 +9448,7 @@ export class SessionsService {
         answers,
         ...(resolvedByParentSessionId ? { resolvedByParentSessionId } : {}),
         ...(answerSummary ? { answerSummary } : {}),
+        ...(answeredByUserId ? { answeredByUserId } : {}),
       };
       const now = Date.now();
       try {
@@ -9495,6 +9501,7 @@ export class SessionsService {
       type: "answer_question", sessionId, requestId, answers, action,
       ...(pending.occurrenceId ? { occurrenceId: pending.occurrenceId } : {}),
       ...(answerSummary ? { answerSummary } : {}),
+      ...(answeredByUserId ? { answeredByUserId } : {}),
       ...(resolvedByParentSessionId ? { resolvedByParentSessionId } : {}),
     });
     if (!sent) {

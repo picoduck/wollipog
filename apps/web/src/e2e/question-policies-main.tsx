@@ -7,7 +7,7 @@ import { QuestionPoliciesPanel } from "../components/QuestionPoliciesPanel.js";
 import { GovernanceHistoryPanel } from "../components/GovernanceHistoryPanel.js";
 import { governanceDecisions } from "../governance.js";
 import { EventTimeline } from "../components/EventTimeline.js";
-import { ResolverDirectoryContext, viewerIdentity, type ResolverDirectory } from "../resolver-identity.js";
+import { ViewerIdentityContext, viewerIdentity } from "../resolver-identity.js";
 import "../styles.css";
 
 const params = new URLSearchParams(location.search);
@@ -37,18 +37,15 @@ const hookDecisions = governanceDecisions([{
 }]);
 
 /** Alice is the only member, so her own approval reads "Approved by You". */
-const soloDirectory: ResolverDirectory = {
-  viewer: viewerIdentity({
-    context: {
-      userId: "alice", userName: "Alice", organizationId: "org", organizationName: "Personal organization",
-      role: "owner", deviceId: null, localBootstrap: true,
-    },
-    organizations: [],
-    memberships: [],
-    teams: [],
-  }),
-  questionAnswers: new Map(),
-};
+const soloViewer = viewerIdentity({
+  context: {
+    userId: "alice", userName: "Alice", organizationId: "org", organizationName: "Personal organization",
+    role: "owner", deviceId: null, localBootstrap: true,
+  },
+  organizations: [],
+  memberships: [],
+  teams: [],
+});
 
 function GovernanceFixture() {
   const [olderLoaded, setOlderLoaded] = useState(false);
@@ -70,7 +67,7 @@ function GovernanceFixture() {
 }
 
 createRoot(document.getElementById("root")!).render(<ApiProvider client={client}>
-  <ResolverDirectoryContext.Provider value={soloDirectory}>
+  <ViewerIdentityContext.Provider value={soloViewer}>
   <main className="settings-panel" style={{ maxWidth: 760, margin: "24px auto", padding: 20 }}>
     <h2>Behavior</h2><QuestionPoliciesPanel />
     <EventTimeline ariaLabel="Policy Attribution Example" items={[{ kind: "question", id: 1, requestId: "review", answered: true,
@@ -81,5 +78,5 @@ createRoot(document.getElementById("root")!).render(<ApiProvider client={client}
     }]} />
     <GovernanceFixture />
   </main>
-  </ResolverDirectoryContext.Provider>
+  </ViewerIdentityContext.Provider>
 </ApiProvider>);

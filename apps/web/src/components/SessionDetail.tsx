@@ -7,7 +7,6 @@ import {
   type ReactNode,
   type RefObject,
   useCallback,
-  useContext,
   useEffect,
   useId,
   useLayoutEffect,
@@ -63,7 +62,6 @@ import { TranscriptSkeleton, transcriptLoadingSentence } from "./TranscriptSkele
 import { TranscriptEmptyState, TranscriptHistoryNotice, transcriptEmptyKind } from "./TranscriptReadingStates.js";
 import { clearRoutedSessionLookup, setRoutedSessionLookup, useRoutedSessionLookup } from "../routed-session-lookup.js";
 import { runnerDisplay } from "../runners.js";
-import { ResolverDirectoryContext, type ResolverDirectory } from "../resolver-identity.js";
 import { MoveToProjectDialog, MoveToWorkspaceDialog, NewWorkspaceDialog } from "./SessionMoveDialogs.js";
 import {
   advanceAutomaticAccountSwitchNotice,
@@ -2838,12 +2836,6 @@ function SessionDetailLoaded({
     evs?.[0]?.ts,
   );
   const governanceDecisions = governanceAudit.decisions;
-  // Name who answered each question row from its audit record, for the viewer the app loaded (#2527).
-  const { viewer } = useContext(ResolverDirectoryContext);
-  const resolverDirectory = useMemo<ResolverDirectory>(
-    () => ({ viewer, questionAnswers: governanceAudit.questionAnswers }),
-    [governanceAudit.questionAnswers, viewer],
-  );
   const timelineItems = useGovernanceTimeline(
     items,
     governanceDecisions,
@@ -6211,41 +6203,39 @@ function SessionDetailLoaded({
               ) : (
                 <>
                   {items.length > 0 && (
-                    <ResolverDirectoryContext.Provider value={resolverDirectory}>
-                      <EventTimeline
-                        driver={session.driver}
-                        items={timelineItems}
-                        sessionActive={isTimelineSessionActive(session.status)}
-                        onOpenSubagent={mode === "expanded" ? openSubagent : undefined}
-                        onOpenSourceLocation={openSourceLocation}
-                        onOpenInReview={mode === "expanded" ? openInReview : undefined}
-                        onOpenSession={openSession}
-                        workspaceRoot={session.worktreePath ?? runner?.workspaces.find((workspace) => workspace.id === session.workspaceId)?.path}
-                        scrollRef={scrollRef}
-                        historyKey={timelineHistoryKey}
-                        getInitialAnchor={followTail.getInitialAnchor}
-                        preserveAnchor={!followTail.isFollowing}
-                        anchorRecoveryPending={anchorRecoveryPending}
-                        onVisibleAnchorChange={followTail.onVisibleAnchorChange}
-                        onAnchorLost={followTail.onAnchorLost}
-                        // Keep checkpoint actions discoverable when the runner or worktree cannot
-                        // currently satisfy them; activation still uses the existing API contract.
-                        onRewind={mode === "expanded" ? onRewind : undefined}
-                        rewindUnavailableReason={rewindUnavailableReason}
-                        onFork={mode === "expanded" ? onFork : undefined}
-                        handoff={mode === "expanded" ? handoffControls : undefined}
-                        turnRetry={mode === "expanded" ? turnRetry : undefined}
-                        onEditAndResend={mode === "expanded" ? openResendAction : undefined}
-                        editAndResendUnavailableReason={promptUnavailableReason ?? undefined}
-                        onEditInFork={mode === "expanded" ? openForkEditAction : undefined}
-                        editInForkAvailabilityByItem={mode === "expanded" ? editInForkAvailabilityByItem : undefined}
-                        forkAvailabilityByTurn={mode === "expanded" ? forkAvailabilityByTurn : undefined}
-                        revealRequest={timelineRevealRequest}
-                        onRevealHandled={handleTimelineReveal}
-                        questionContext={timelineQuestionContext}
-                        approvalContext={timelineApprovalContext}
-                      />
-                    </ResolverDirectoryContext.Provider>
+                    <EventTimeline
+                      driver={session.driver}
+                      items={timelineItems}
+                      sessionActive={isTimelineSessionActive(session.status)}
+                      onOpenSubagent={mode === "expanded" ? openSubagent : undefined}
+                      onOpenSourceLocation={openSourceLocation}
+                      onOpenInReview={mode === "expanded" ? openInReview : undefined}
+                      onOpenSession={openSession}
+                      workspaceRoot={session.worktreePath ?? runner?.workspaces.find((workspace) => workspace.id === session.workspaceId)?.path}
+                      scrollRef={scrollRef}
+                      historyKey={timelineHistoryKey}
+                      getInitialAnchor={followTail.getInitialAnchor}
+                      preserveAnchor={!followTail.isFollowing}
+                      anchorRecoveryPending={anchorRecoveryPending}
+                      onVisibleAnchorChange={followTail.onVisibleAnchorChange}
+                      onAnchorLost={followTail.onAnchorLost}
+                      // Keep checkpoint actions discoverable when the runner or worktree cannot
+                      // currently satisfy them; activation still uses the existing API contract.
+                      onRewind={mode === "expanded" ? onRewind : undefined}
+                      rewindUnavailableReason={rewindUnavailableReason}
+                      onFork={mode === "expanded" ? onFork : undefined}
+                      handoff={mode === "expanded" ? handoffControls : undefined}
+                      turnRetry={mode === "expanded" ? turnRetry : undefined}
+                      onEditAndResend={mode === "expanded" ? openResendAction : undefined}
+                      editAndResendUnavailableReason={promptUnavailableReason ?? undefined}
+                      onEditInFork={mode === "expanded" ? openForkEditAction : undefined}
+                      editInForkAvailabilityByItem={mode === "expanded" ? editInForkAvailabilityByItem : undefined}
+                      forkAvailabilityByTurn={mode === "expanded" ? forkAvailabilityByTurn : undefined}
+                      revealRequest={timelineRevealRequest}
+                      onRevealHandled={handleTimelineReveal}
+                      questionContext={timelineQuestionContext}
+                      approvalContext={timelineApprovalContext}
+                    />
                   )}
                 </>
               )}

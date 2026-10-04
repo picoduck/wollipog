@@ -12730,6 +12730,36 @@ test("a dismissed question sends no answer summary (#2188)", () => {
     [["request", "pending"], ["resolution", "dismissed"]]);
 });
 
+test("a member's answer names them to the runner; dismissals and Parent Control answers do not (#2527)", () => {
+  const { hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  const ask = (requestId: string, extra: { occurrenceId?: string; async?: true } = {}) => svc.onSessionEvent(id, {
+    kind: "question_request", requestId, ...extra,
+    questions: [{ id: "q", question: "Continue?", options: [{ label: "Yes" }, { label: "No" }] }],
+  });
+
+  ask("member-ask");
+  assert.ok(svc.answerQuestion(id, "member-ask", { q: "Yes" }, { kind: "human", id: "usr_grace" }, "submit").ok);
+  assert.equal(hub.sentOfType("answer_question").at(-1)!.answeredByUserId, "usr_grace");
+
+  ask("member-dismiss");
+  assert.ok(svc.answerQuestion(id, "member-dismiss", {}, { kind: "human", id: "usr_grace" }, "dismiss").ok);
+  assert.equal(hub.sentOfType("answer_question").at(-1)!.answeredByUserId, undefined, "a dismissal names nobody");
+
+  ask("parent-ask");
+  assert.ok(svc.answerQuestion(id, "parent-ask", { q: "No" }, { kind: "agent", id: "parent-session" }, "submit",
+    "parent-session").ok);
+  assert.equal(hub.sentOfType("answer_question").at(-1)!.answeredByUserId, undefined,
+    "a Parent Control answer names its parent session instead");
+
+  ask("async-member", { occurrenceId: "request_async_member", async: true });
+  assert.ok(svc.answerQuestion(id, "async-member", { q: "Yes" }, { kind: "human", id: "usr_ada" }, "submit", undefined,
+    "request_async_member").ok);
+  const command = hub.sentOfType("durable_session_command").at(-1)!.command;
+  assert.equal(command.type === "answer_recovered_question" ? command.answeredByUserId : null, "usr_ada",
+    "a recovered answer carries its member in the durable command");
+});
+
 test("restoring a policy attribution never moves the session's last activity backward (#2188)", async () => {
   const { db, hub, svc } = makeHarness();
   const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID }, undefined,
@@ -14515,6 +14545,7 @@ test("an explicit empty question submission remains distinct from dismissal", ()
     answers: {},
     action: "submit",
     answerSummary: [],
+    answeredByUserId: "device-empty-submit",
   });
 });
 
@@ -14650,6 +14681,7 @@ test("resumable recovered answers persist one deterministic command before clear
     recoveryId: "question:1:12",
     answers: { target: "Production" },
     answerSummary: [{ questionId: "target", selected: ["Production"] }],
+    answeredByUserId: "device-recovery",
   });
 
   hub.sentToRunner.length = 0;

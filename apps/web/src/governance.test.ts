@@ -15,7 +15,7 @@ import {
   transcriptGovernanceDecisions,
 } from "./governance.js";
 import { GovernanceHistoryPanel } from "./components/GovernanceHistoryPanel.js";
-import { ResolverDirectoryContext, viewerIdentity, type ViewerIdentity } from "./resolver-identity.js";
+import { ViewerIdentityContext, viewerIdentity, type ViewerIdentity } from "./resolver-identity.js";
 import { isCollapsibleWorkItem, type TimelineItem } from "./timeline.js";
 
 function entry(overrides: Partial<GovernanceAuditEntry>): GovernanceAuditEntry {
@@ -105,8 +105,8 @@ function viewer(userId: string, members: Array<[string, string]>): ViewerIdentit
 
 function historyAs(viewing: ViewerIdentity | null, decisions: ReturnType<typeof governanceDecisions>): string {
   return renderToStaticMarkup(React.createElement(
-    ResolverDirectoryContext.Provider,
-    { value: { viewer: viewing, questionAnswers: new Map() } },
+    ViewerIdentityContext.Provider,
+    { value: viewing },
     React.createElement(GovernanceHistoryPanel, { decisions }),
   ));
 }

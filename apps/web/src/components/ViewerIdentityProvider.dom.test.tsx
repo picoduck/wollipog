@@ -7,7 +7,7 @@ import type { IdentityAdministrationView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
-import { ResolverDirectoryContext } from "../resolver-identity.js";
+import { ViewerIdentityContext } from "../resolver-identity.js";
 import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { ViewerIdentityProvider } from "./ViewerIdentityProvider.js";
@@ -55,7 +55,7 @@ const identity: IdentityAdministrationView = {
 };
 
 function Viewer() {
-  const { viewer } = useContext(ResolverDirectoryContext);
+  const viewer = useContext(ViewerIdentityContext);
   return <output>{viewer ? `${viewer.userId} shared=${viewer.shared} ${viewer.names.get("user-grace")}` : "unknown"}</output>;
 }
 

@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useApi } from "../api-context.js";
 import type { ApiClient } from "../api.js";
-import { NO_RESOLVER_DIRECTORY, ResolverDirectoryContext, viewerIdentity, type ViewerIdentity } from "../resolver-identity.js";
+import { ViewerIdentityContext, viewerIdentity, type ViewerIdentity } from "../resolver-identity.js";
 import { useStoreSelector } from "../store.js";
 
 /**
@@ -27,6 +27,5 @@ export function ViewerIdentityProvider({ children }: { children: ReactNode }) {
     return () => { cancelled = true; };
   }, [api, conn]);
   const viewer = conn === "online" && loaded?.api === api ? loaded.viewer : null;
-  const directory = useMemo(() => viewer ? { ...NO_RESOLVER_DIRECTORY, viewer } : NO_RESOLVER_DIRECTORY, [viewer]);
-  return <ResolverDirectoryContext.Provider value={directory}>{children}</ResolverDirectoryContext.Provider>;
+  return <ViewerIdentityContext.Provider value={viewer}>{children}</ViewerIdentityContext.Provider>;
 }
