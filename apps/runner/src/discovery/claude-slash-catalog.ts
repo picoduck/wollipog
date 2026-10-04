@@ -14,7 +14,7 @@
  * so a catalog containing one tells the web composer it is complete (#2176).
  */
 
-import type { AgentSlashCommand, UnsupportedSlashCommand } from "@wollipog/protocol";
+import { isSlashCommandName, type AgentSlashCommand, type UnsupportedSlashCommand } from "@wollipog/protocol";
 
 export const CLAUDE_INIT_CATALOG_LIMITS = {
   maxCommands: 512,
@@ -86,8 +86,6 @@ const CLAUDE_BUILTIN_METADATA: Readonly<Record<string, { description: string; ar
   "add-dir": { description: "Add a working directory.", argumentHint: "<path>" },
 };
 
-const NAME_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_.:@-]*$/;
-
 function commandNames(value: unknown, limit: number = CLAUDE_INIT_CATALOG_LIMITS.maxCommands): string[] {
   if (!Array.isArray(value)) return [];
   const seen = new Set<string>();
@@ -97,7 +95,7 @@ function commandNames(value: unknown, limit: number = CLAUDE_INIT_CATALOG_LIMITS
     if (typeof entry !== "string") continue;
     // Claude Code lists names bare; tolerate a leading slash from a future release.
     const name = entry.trim().replace(/^\//, "");
-    if (!name || name.length > CLAUDE_INIT_CATALOG_LIMITS.maxNameCharacters || !NAME_PATTERN.test(name)) continue;
+    if (!name || name.length > CLAUDE_INIT_CATALOG_LIMITS.maxNameCharacters || !isSlashCommandName(name)) continue;
     const key = name.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
@@ -116,7 +114,7 @@ export function parseClaudeInitCatalog(message: Record<string, unknown>): Claude
       if (plugins.length >= CLAUDE_INIT_CATALOG_LIMITS.maxPlugins) break;
       if (!entry || typeof entry !== "object") continue;
       const { name, path } = entry as { name?: unknown; path?: unknown };
-      if (typeof name !== "string" || !NAME_PATTERN.test(name) || name.includes(":") ||
+      if (typeof name !== "string" || !isSlashCommandName(name) || name.includes(":") ||
           name.length > CLAUDE_INIT_CATALOG_LIMITS.maxNameCharacters) continue;
       if (typeof path !== "string" || !path || path.length > CLAUDE_INIT_CATALOG_LIMITS.maxPathCharacters ||
           path.includes("\0")) continue;

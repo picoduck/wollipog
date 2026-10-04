@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test, type TestContext } from "node:test";
+import { SLASH_COMMAND_NAME_CASES } from "@wollipog/test-support/slash-command-names";
 import type { ExecResult } from "./resolve.js";
 import type { SessionMeta } from "../session-store.js";
 import {
@@ -169,6 +170,30 @@ test("native discovery uses repoPath only when worktreePath is nullish", async (
     skills: [],
     commands: [{ name: "project", source: "project", description: "Project command" }],
   });
+});
+
+test("command files and skill directories name commands by the shared grammar (#2602)", async () => {
+  const home = tempRoot("home");
+  const repo = tempRoot("repo");
+  // A path separator or colon can't be a file name on every platform the scan runs on.
+  const cases = SLASH_COMMAND_NAME_CASES.filter(({ name }) => !/[/:]/u.test(name));
+  for (const { name } of cases) {
+    command(repo, `${name}.md`, `Run ${name}`);
+    const skill = join(repo, ".claude", "skills", name, "SKILL.md");
+    mkdirSync(join(skill, ".."), { recursive: true });
+    writeFileSync(skill, `---\ndescription: Skill ${name}\n---\n`, "utf8");
+  }
+  if (process.platform !== "win32") command(repo, "ns:cmd.md", "A colon is the plugin namespace");
+
+  const result = await discoverClaudeSlashCommands(
+    { context: { kind: "native" }, repoPath: repo, worktreePath: null },
+    { nativeHome: () => home },
+  );
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  const accepted = cases.filter((entry) => entry.accepted).map((entry) => entry.name).sort();
+  assert.deepEqual(result.commands.map((entry) => entry.name).sort(), accepted);
+  assert.deepEqual(result.skills.map((entry) => entry.name).sort(), accepted);
 });
 
 test("remote execution scope discovers project commands without reading the host user catalog", async () => {

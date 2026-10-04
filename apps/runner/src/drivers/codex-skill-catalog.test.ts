@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { SLASH_COMMAND_NAME_CASES } from "@wollipog/test-support/slash-command-names";
 import {
   codexCommandSkillName,
   codexInvocableSkills,
@@ -30,6 +31,14 @@ test("skill commands carry the shortest provider description and one skill per n
     { name: "deploy", source: "skill", description: "Deploy the app" },
     { name: "bare", source: "skill" },
   ], "the first registration of a case-folded name wins and untokenizable names are omitted");
+});
+
+test("Codex skills keep the names the shared grammar accepts, except those with `@` (#2602)", () => {
+  const skills = SLASH_COMMAND_NAME_CASES.map(({ name }, index) => ({ name, path: `/u/.codex/skills/${index}/SKILL.md` }));
+  assert.deepEqual(
+    codexInvocableSkills(skills).map((skill) => skill.name),
+    SLASH_COMMAND_NAME_CASES.filter((entry) => entry.accepted && !entry.name.includes("@")).map((entry) => entry.name),
+  );
 });
 
 test("codexSkillsFromList keeps enabled skills with a name and path across cwd entries", () => {

@@ -16,7 +16,7 @@ import { lstat, open, opendir, realpath, stat, type FileHandle } from "node:fs/p
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { posix } from "node:path";
-import type { AgentContext, AgentSlashCommand } from "@wollipog/protocol";
+import { isSlashCommandName, type AgentContext, type AgentSlashCommand } from "@wollipog/protocol";
 import type { SessionMeta, SessionSlashCommandProvenance } from "../session-store.js";
 import {
   mergeClaudeSessionCatalog,
@@ -289,14 +289,20 @@ function commandName(relativePath: string, pathSeparator: string): string | null
   const normalized = relativePath.split(pathSeparator).join("/");
   if (!/\.md$/i.test(normalized)) return null;
   const filename = normalized.slice(normalized.lastIndexOf("/") + 1, -3);
-  return /^[A-Za-z0-9_][A-Za-z0-9._-]*$/.test(filename) ? filename : null;
+  return fileCommandName(filename);
 }
 
 /** A skill is a `<name>/SKILL.md` directly below its root; the directory names it. */
 function skillName(relativePath: string, pathSeparator: string): string | null {
   const segments = relativePath.split(pathSeparator);
   if (segments.length !== 2 || segments[1] !== "SKILL.md") return null;
-  return /^[A-Za-z0-9_][A-Za-z0-9._-]*$/.test(segments[0]!) ? segments[0]! : null;
+  return fileCommandName(segments[0]!);
+}
+
+/** A file or directory names a command when the shared grammar (#2602) accepts it. A colon is
+ * reserved for the `plugin:command` namespace, so a file can't claim one. */
+function fileCommandName(name: string): string | null {
+  return isSlashCommandName(name) && !name.includes(":") ? name : null;
 }
 
 function compareStable(a: string, b: string): number {

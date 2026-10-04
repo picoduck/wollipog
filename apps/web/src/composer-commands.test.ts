@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { AgentSlashCommand } from "@wollipog/protocol";
+import { isSlashCommandName, type AgentSlashCommand } from "@wollipog/protocol";
+import { SLASH_COMMAND_NAME_CASES } from "@wollipog/test-support/slash-command-names";
 import {
   COMPOSER_COMMAND_GROUPS,
   buildComposerCommandRegistry,
@@ -861,20 +862,43 @@ test("close matches are available commands within one edit per three letters, cl
   assert.equal(commandEditDistance("", "abc"), 3);
 });
 
-test("a command the agent advertises under a name the registry can't list is still sent as text", () => {
+test("the registry lists, triggers on and resolves exactly the names the shared grammar accepts (#2602)", () => {
+  const advertised = SLASH_COMMAND_NAME_CASES.map(({ name }) => ({ name, source: "mcp" as const }));
+  const commands = registry(mapProviderComposerCommands(advertised));
+  assert.deepEqual(unlistedCommandNames(advertised.filter((command) =>
+    SLASH_COMMAND_NAME_CASES.find((entry) => entry.name === command.name)!.accepted)), new Set(),
+  "a current runner's catalog leaves nothing for the older-runner safeguard");
+  for (const { name, accepted } of SLASH_COMMAND_NAME_CASES) {
+    const label = JSON.stringify(name);
+    const listed = composerCommandsForTrigger(commands, findComposerCommandTrigger("/", 1)!)
+      .find((command) => command.name === name);
+    assert.equal(isSlashCommandName(name), accepted, `the shared grammar on ${label}`);
+    assert.equal(Boolean(listed), accepted, `the picker on ${label}`);
+    if (!accepted) continue;
+    const typed = `/${name}`;
+    assert.equal(findComposerCommandTrigger(typed, 1)?.raw, typed, `the trigger spans all of ${label} from its first character`);
+    assert.equal(findComposerCommandTrigger(typed, typed.length)?.query, name, `the trigger reads all of ${label}`);
+    const chosen = replaceComposerCommandTrigger(typed, findComposerCommandTrigger(typed, 1)!, listed!);
+    assert.equal(chosen.text, `/${listed!.invocationAlias} `, `choosing ${label} completes the whole token`);
+    const resolved = resolveComposerCommandInvocation(`${chosen.text}now`, commands);
+    assert.equal(resolved.kind === "command" ? resolved.command.name : resolved.kind, name, `sending ${label}`);
+  }
+});
+
+test("a name an older runner advertises outside the shared grammar is still sent as text", () => {
   const advertised = [
     { name: "compact", source: "builtin" as const },
-    { name: "mcp__docs__summarize@latest", source: "mcp" as const },
+    { name: "deploy+prod", source: "user" as const },
   ];
   const commands = registry(mapProviderComposerCommands(advertised));
-  assert.equal(commands.some((command) => command.name.includes("@")), false, "the registry can't list it");
+  assert.equal(commands.some((command) => command.name === "deploy+prod"), false, "the registry can't list it");
   const unlistedNames = unlistedCommandNames(advertised);
-  assert.deepEqual([...unlistedNames], ["mcp__docs__summarize@latest"]);
-  assert.deepEqual(resolveComposerCommandInvocation("/mcp__docs__summarize@latest now", commands, { unlistedNames }), {
+  assert.deepEqual([...unlistedNames], ["deploy+prod"]);
+  assert.deepEqual(resolveComposerCommandInvocation("/deploy+prod now", commands, { unlistedNames }), {
     kind: "plaintext",
-    text: "/mcp__docs__summarize@latest now",
+    text: "/deploy+prod now",
   });
-  assert.equal(resolveComposerCommandInvocation("/mcp__docs__summarize@latset", commands, { unlistedNames }).kind,
+  assert.equal(resolveComposerCommandInvocation("/deploy+prdo", commands, { unlistedNames }).kind,
     "unknown", "only the exact advertised name is spared");
 });
 

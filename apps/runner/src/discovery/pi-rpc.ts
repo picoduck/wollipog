@@ -2,7 +2,13 @@ import { randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentCapabilities, AgentContext, AgentModel, AgentSlashCommand } from "@wollipog/protocol";
+import {
+  isSlashCommandName,
+  type AgentCapabilities,
+  type AgentContext,
+  type AgentModel,
+  type AgentSlashCommand,
+} from "@wollipog/protocol";
 import { PiRpcPeer } from "../pi-rpc-peer.js";
 import {
   PI_AGENT_CONTROL_PROBE_COMMAND,
@@ -164,7 +170,8 @@ export async function probePiRpc(
     const slashCommands = rawCommands.flatMap((raw): AgentSlashCommand[] => {
       const command = object(raw);
       const name = nonempty(command?.name);
-      if (!command || !name || name === PI_AGENT_CONTROL_PROBE_COMMAND) return [];
+      // A name the shared grammar (#2602) rejects could never be listed or chosen, so it isn't advertised.
+      if (!command || !name || name === PI_AGENT_CONTROL_PROBE_COMMAND || !isSlashCommandName(name)) return [];
       return [{ name, description: nonempty(command.description), source: commandSource(command) }];
     });
     const effortLevels = [...new Set(models.flatMap((model) => model.efforts ?? []))];

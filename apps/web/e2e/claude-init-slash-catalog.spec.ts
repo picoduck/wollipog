@@ -57,6 +57,38 @@ test("built-in commands, skills and MCP prompts appear under groups that name th
   await expect(listbox.getByRole("option", { name: /\/doctor/ })).toHaveCount(0);
 });
 
+test("a command named with `@` or in another script is listed and sent as a command turn (#2602)", async ({ page }) => {
+  await page.evaluate((catalog) => window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
+    agentCapabilities: {
+      ...catalog,
+      slashCommands: [
+        ...catalog.slashCommands,
+        { name: "mcp__docs__summarize@latest", source: "mcp" },
+        { name: "résumé", source: "project", description: "Summarize the branch." },
+      ],
+    },
+  }), CLAUDE_SESSION_CATALOG);
+  const composer = page.locator(".composer-input");
+  await composer.fill("/");
+  const listbox = page.getByRole("listbox", { name: "Slash Commands" });
+  await expect(listbox.getByRole("group", { name: "MCP Prompts" })
+    .getByRole("option", { name: "/mcp__docs__summarize@latest", exact: true })).toBeVisible();
+  await expect(listbox.getByRole("group", { name: "Claude Code" }).getByRole("option", { name: "/résumé", exact: true }))
+    .toBeVisible();
+
+  await composer.fill("/mcp__docs__summarize@");
+  await page.getByRole("option", { name: "/mcp__docs__summarize@latest", exact: true }).click();
+  await expect(composer).toHaveValue("/mcp__docs__summarize@latest ");
+  await composer.pressSequentially("this page");
+  await page.keyboard.press("Enter");
+  await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests())).toEqual([{
+    sessionId: "session-alpha",
+    text: "this page",
+    images: [],
+    slashCommand: "mcp__docs__summarize@latest",
+  }]);
+});
+
 test("typing a terminal-only command in full shows why it isn't sent", async ({ page }) => {
   const composer = page.locator(".composer-input");
   await composer.fill("/doc");

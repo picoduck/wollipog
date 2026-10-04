@@ -1,4 +1,11 @@
-import type { AgentDriverKind, AgentSlashCommand, UnsupportedSlashCommand } from "@wollipog/protocol";
+import {
+  SLASH_COMMAND_NAME_CHARACTERS,
+  isSlashCommandName,
+  isSlashCommandNameCharacter,
+  type AgentDriverKind,
+  type AgentSlashCommand,
+  type UnsupportedSlashCommand,
+} from "@wollipog/protocol";
 
 export type ComposerCommandSource = "app" | "provider";
 
@@ -164,16 +171,16 @@ const PROVIDER_INVOCATION_PRECEDENCE: Record<NonNullable<ProviderComposerCommand
   builtin: 4,
 };
 
+/** The runner advertises only names the shared grammar accepts (#2602), so this drops nothing a
+ * current runner sends. */
 function advertisedName(value: string): { name: string; comparisonName: string } | null {
   const name = value.trim();
-  if (name.startsWith("/")) return null;
-  return /^[\p{L}\p{N}_][\p{L}\p{N}_.:-]*$/u.test(name)
-    ? { name, comparisonName: name.toLowerCase() }
-    : null;
+  return isSlashCommandName(name) ? { name, comparisonName: name.toLowerCase() } : null;
 }
 
-/** The names an agent advertises that the registry's name grammar can't list, lowercased. They are
- * real commands, so the unknown-command rule must not refuse them. */
+/** The names an agent advertises that the shared grammar can't list, lowercased. They are real
+ * commands, so the unknown-command rule must not refuse them. A runner from before #2602 can still
+ * send one (Pi names went unchecked); a current runner drops them before advertising. */
 export function unlistedCommandNames(commands: readonly Pick<AgentSlashCommand, "name">[]): Set<string> {
   const names = new Set<string>();
   for (const command of commands) {
@@ -601,9 +608,8 @@ export function resolveComposerCommandInvocation(
   };
 }
 
-const TRIGGER_TOKEN = /^\/([\p{L}\p{N}_.:-]*)$/u;
-const SKILL_TRIGGER_TOKEN = /^\$([\p{L}\p{N}_.:-]*)$/u;
-const TRIGGER_CHARACTER = /[\p{L}\p{N}_.:-]/u;
+const TRIGGER_TOKEN = new RegExp(`^\\/([${SLASH_COMMAND_NAME_CHARACTERS}]*)$`, "u");
+const SKILL_TRIGGER_TOKEN = new RegExp(`^\\$([${SLASH_COMMAND_NAME_CHARACTERS}]*)$`, "u");
 
 /** Find the command token being typed. `$` opens the menu only when the session advertises skills,
  * so a `$` in any other composer stays ordinary text. */
@@ -622,7 +628,12 @@ export function findComposerCommandTrigger(
   if (!prefixMatch) return null;
 
   let tokenEnd = caret;
-  while (tokenEnd < text.length && TRIGGER_CHARACTER.test(text[tokenEnd]!)) tokenEnd += 1;
+  // Walk whole code points, so a letter outside the Basic Multilingual Plane extends the token.
+  while (tokenEnd < text.length) {
+    const character = String.fromCodePoint(text.codePointAt(tokenEnd)!);
+    if (!isSlashCommandNameCharacter(character)) break;
+    tokenEnd += character.length;
+  }
   if (text[tokenEnd] === "/" || text[tokenEnd] === "$") return null;
   const raw = text.slice(lineStart, tokenEnd);
   if (!token.test(raw)) return null;

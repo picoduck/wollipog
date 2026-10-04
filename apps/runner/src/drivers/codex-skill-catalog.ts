@@ -1,5 +1,5 @@
 import { realpathSync } from "node:fs";
-import type { AgentSlashCommand } from "@wollipog/protocol";
+import { isSlashCommandName, type AgentSlashCommand } from "@wollipog/protocol";
 import { posix, win32 } from "node:path";
 
 /**
@@ -56,16 +56,15 @@ export function codexSkillsFromList(response: unknown): CodexSkill[] {
   return skills;
 }
 
-const SKILL_COMMAND_NAME = /^[\p{L}\p{N}_][\p{L}\p{N}_.:-]*$/u;
-
 /**
  * One invocable skill per name, in `skills/list` order, so `$name` and `/name` are unambiguous.
- * Names Codex cannot receive as a command token are omitted.
+ * Names the shared grammar (#2602) rejects are omitted, and so are names with `@`: the grammar
+ * allows it for Claude Code's catalog, but whether Codex reads `$name@x` as one token is unverified.
  */
 export function codexInvocableSkills(skills: readonly CodexSkill[]): CodexSkill[] {
   const byName = new Map<string, CodexSkill>();
   for (const skill of skills) {
-    if (!SKILL_COMMAND_NAME.test(skill.name)) continue;
+    if (!isSlashCommandName(skill.name) || skill.name.includes("@")) continue;
     const key = skill.name.toLowerCase();
     if (!byName.has(key)) byName.set(key, skill);
   }

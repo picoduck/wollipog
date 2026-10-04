@@ -151,6 +151,8 @@ function handle(request) {
       return response("get_commands", request, { commands: [
         { name: "skill:review", description: "Review code", source: "skill", location: "user" },
         { name: "ship", description: "Ship it", source: "prompt", location: "user" },
+        // The shared grammar rejects `+`, so discovery never advertises this one (#2602).
+        { name: "deploy+prod", description: "Deploy to production", source: "prompt", location: "user" },
         ...(agentControlProbe && scenario !== "extension-unsupported"
           ? [{ name: "wollipog-agent-control-probe", description: "probe", source: "extension" }]
           : []),

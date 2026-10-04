@@ -46,7 +46,7 @@ test("Pi discovery derives models, thinking levels, images, commands, and skills
   assert.deepEqual(result.capabilities.slashCommands, [
     { name: "skill:review", description: "Review code", source: "user" },
     { name: "ship", description: "Ship it", source: "user" },
-  ]);
+  ], "a name the shared grammar rejects (deploy+prod) is never advertised");
   assert.equal(result.capabilities.supportsApprovals, true);
   assert.deepEqual(result.capabilities.permissionModes, ["default", "dontAsk", "bypassPermissions"]);
   assert.deepEqual(result.capabilities.elicitation, {

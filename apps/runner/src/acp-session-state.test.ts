@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { SLASH_COMMAND_NAME_CASES } from "@wollipog/test-support/slash-command-names";
 import {
   acpSessionPresentation,
   normalizeAcpCommands,
@@ -91,4 +92,11 @@ test("ACP session controls fail closed on invalid ids/current values and dedupli
     { name: "review", description: "two" },
     { name: "../escape", description: "bad" },
   ]), [{ name: "review", description: "one" }]);
+});
+
+test("ACP commands keep exactly the names the shared grammar accepts (#2602)", () => {
+  assert.deepEqual(
+    normalizeAcpCommands(SLASH_COMMAND_NAME_CASES.map(({ name }) => ({ name }))).map((command) => command.name),
+    SLASH_COMMAND_NAME_CASES.filter((entry) => entry.accepted).map((entry) => entry.name),
+  );
 });

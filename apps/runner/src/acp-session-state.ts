@@ -1,4 +1,10 @@
-import type { AgentCapabilities, AgentModel, AgentSlashCommand, SessionConfig } from "@wollipog/protocol";
+import {
+  isSlashCommandName,
+  type AgentCapabilities,
+  type AgentModel,
+  type AgentSlashCommand,
+  type SessionConfig,
+} from "@wollipog/protocol";
 
 export interface SafeAcpMode {
   id: string;
@@ -213,7 +219,7 @@ function flattenSelectValues(value: unknown): SafeAcpSelectValue[] {
 
 function boundedCommand(value: unknown): string | null {
   const command = boundedId(value);
-  return command && /^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$/.test(command) ? command : null;
+  return command && isSlashCommandName(command) ? command : null;
 }
 
 function boundedId(value: unknown): string | null {

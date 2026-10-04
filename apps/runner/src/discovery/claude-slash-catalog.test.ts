@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { isSlashCommandName } from "@wollipog/protocol";
+import { SLASH_COMMAND_NAME_CASES } from "@wollipog/test-support/slash-command-names";
 import {
   CLAUDE_INIT_CATALOG_LIMITS,
   CLAUDE_UNSUPPORTED_COMMANDS,
@@ -45,6 +47,20 @@ test("the init list parses into bounded, validated names, skills, terminal comma
 
   const many = parseClaudeInitCatalog({ slash_commands: Array.from({ length: 900 }, (_, index) => `c${index}`) });
   assert.equal(many?.commands.length, CLAUDE_INIT_CATALOG_LIMITS.maxCommands);
+});
+
+test("the init list advertises exactly the names the shared grammar accepts, `@` and any script included (#2602)", () => {
+  const init = parseClaudeInitCatalog({ slash_commands: SLASH_COMMAND_NAME_CASES.map((entry) => entry.name) });
+  assert.ok(init);
+  const { commands } = mergeClaudeSessionCatalog({ commands: [], skills: [], init });
+  const advertised = commands.map((entry) => entry.name);
+  for (const { name, accepted } of SLASH_COMMAND_NAME_CASES) {
+    assert.equal(isSlashCommandName(name), accepted, `the shared grammar on ${JSON.stringify(name)}`);
+    assert.equal(advertised.includes(name), accepted, `the runner on ${JSON.stringify(name)}`);
+  }
+  assert.equal(advertised.length, SLASH_COMMAND_NAME_CASES.filter((entry) => entry.accepted).length);
+  assert.deepEqual(commands.find((entry) => entry.name === "mcp__docs__summarize@latest"),
+    { name: "mcp__docs__summarize@latest", source: "mcp" });
 });
 
 test("the init list decides membership, and each command gets its source label", () => {

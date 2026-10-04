@@ -11,6 +11,10 @@
       "types": "./src/bounded-child-process.ts",
       "default": "./src/bounded-child-process.ts"
     },
+    "./slash-command-names": {
+      "types": "./src/slash-command-names.ts",
+      "default": "./src/slash-command-names.ts"
+    },
     "./tsconfig-test-debt": {
       "types": "./src/tsconfig-test-debt.ts",
       "default": "./src/tsconfig-test-debt.ts"
