@@ -95,9 +95,6 @@ const API_REQUEST_DEADLINE_OVERRIDES: ReadonlyArray<{
   // whole history, page by page, with a deadline per page but none in total.
   { method: "GET", route: route("/api/sessions/:id/child-sessions"), deadlineMs: null },
   { method: "GET", route: route("/api/sessions/:id/events"), query: (query) => !query.has("limit"), deadlineMs: null },
-  // Creating an outbound event subscription resolves its callback host with no bound of its own,
-  // and its one-time signing secret exists only in the reply.
-  { method: "POST", route: route("/api/outbound-event-subscriptions"), deadlineMs: null },
   // 150s runner waits for worktree selection and setup generation.
   { method: "POST", route: route("/api/sessions/:id/worktrees/select"), deadlineMs: UP_TO_150S_SERVER_BOUND_DEADLINE_MS },
   { method: "POST", route: route("/api/sessions/:id/worktrees/generate-setup"), deadlineMs: UP_TO_150S_SERVER_BOUND_DEADLINE_MS },

@@ -237,7 +237,21 @@ export class OutboundEventsService {
         (request.scope.kind !== "project" && request.scope.kind !== "automation")) {
       return fail("outbound event subscription is malformed");
     }
-    const target = await resolveOutboundTarget(request.callbackUrl, this.lookup);
+    // Bound the callback-host lookup as deliveries do, well inside the web client's request
+    // deadline: the one-time secret exists only in this reply, so creation must answer (with the
+    // subscription or with nothing persisted) before the client gives up on it. A lookup that
+    // answers after the bound is ignored.
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+    timeout.unref?.();
+    let target: ServiceResult<ResolvedTarget>;
+    try {
+      target = await abortable(resolveOutboundTarget(request.callbackUrl, this.lookup), controller.signal);
+    } catch {
+      return fail("callback hostname could not be resolved");
+    } finally {
+      clearTimeout(timeout);
+    }
     if (!target.ok || !target.data) return fail(target.error ?? "callback target is invalid", target.status);
     const secret = newAutomationTriggerSecret();
     const subscription = this.db.createOutboundEventSubscription({

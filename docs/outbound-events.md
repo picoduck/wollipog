@@ -144,7 +144,9 @@ embedded credentials or fragments are rejected. At creation and before every att
 resolves the hostname and rejects any DNS answer that is private, loopback (unless the URL itself is
 the explicit loopback exception), link-local, multicast, or reserved. The validated address is
 pinned for that request while TLS still verifies the original hostname, preventing a second DNS
-lookup from bypassing validation. Redirects are not followed, so they cannot cross the boundary.
+lookup from bypassing validation. Creation gives the lookup the same 10-second bound as a delivery
+attempt: a hostname that does not resolve in time fails creation with `callback hostname could not
+be resolved`, and nothing is persisted. Redirects are not followed, so they cannot cross the boundary.
 
 The worker emits structured, secret-free attempt logs keyed by delivery, subscription, event, kind,
 attempt, disposition, HTTP status, duration, and whether the durable receipt was recorded. Operators

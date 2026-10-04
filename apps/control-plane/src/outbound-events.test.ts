@@ -6,6 +6,7 @@ import type { AddressInfo } from "node:net";
 import { verifyAutomationTriggerSignature } from "./automation-trigger-ingress.js";
 import type { ClaimedOutboundEventDelivery, ControlPlaneDb } from "./db.js";
 import {
+  OUTBOUND_EVENT_REQUEST_TIMEOUT_MS,
   OUTBOUND_EVENT_RETRY_DELAYS_MS,
   OutboundEventsService,
   isBlockedOutboundAddress,
@@ -69,6 +70,53 @@ test("callback validation rejects credentials, redirects-to-private candidates, 
   const publicDns = await resolveOutboundTarget("https://events.example.test/hook",
     (async () => [{ address: "93.184.216.34", family: 4 }]) as never);
   assert.equal(publicDns.ok, true);
+});
+
+test("subscription creation bounds the callback-host lookup and persists nothing when it times out", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  // The bound must leave the web client's 45s default request deadline (API_REQUEST_DEADLINE_MS in
+  // apps/web/src/api-transport.ts) time to receive the reply carrying the one-time secret.
+  assert.ok(OUTBOUND_EVENT_REQUEST_TIMEOUT_MS < 45_000);
+  let answerLookup: (addresses: Array<{ address: string; family: number }>) => void = () => {};
+  const persisted: unknown[] = [];
+  const service = new OutboundEventsService({
+    createOutboundEventSubscription: (input: unknown) => (persisted.push(input), { subscriptionId: "oes_1" }),
+  } as unknown as ControlPlaneDb, quietLogger,
+  (() => new Promise((resolve) => { answerLookup = resolve; })) as never);
+  let settled = false;
+  const pending = service.create({
+    scope: { kind: "project", projectId: "p_1" },
+    eventKinds: ["session.created"],
+    callbackUrl: "https://slow-dns.example.test/hook",
+  }, { kind: "user" } as never).finally(() => { settled = true; });
+
+  t.mock.timers.tick(OUTBOUND_EVENT_REQUEST_TIMEOUT_MS - 1);
+  await new Promise(setImmediate);
+  assert.equal(settled, false, "creation waits for the lookup within its bound");
+  t.mock.timers.tick(1);
+  assert.deepEqual(await pending, { ok: false, status: 400, error: "callback hostname could not be resolved" });
+
+  answerLookup([{ address: "93.184.216.34", family: 4 }]);
+  await new Promise(setImmediate);
+  assert.deepEqual(persisted, [], "a lookup that answers after the bound never persists a subscription");
+});
+
+test("subscription creation within the lookup bound persists and returns the one-time secret", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const persisted: unknown[] = [];
+  const service = new OutboundEventsService({
+    createOutboundEventSubscription: (input: unknown) => (persisted.push(input), { subscriptionId: "oes_1" }),
+  } as unknown as ControlPlaneDb, quietLogger, (async () => [{ address: "93.184.216.34", family: 4 }]) as never);
+  const created = await service.create({
+    scope: { kind: "project", projectId: "p_1" },
+    eventKinds: ["session.created"],
+    callbackUrl: "https://events.example.test/hook",
+  }, { kind: "user" } as never);
+  assert.equal(created.status, 201);
+  assert.match(String(created.data?.secret), /\S/);
+  assert.equal(persisted.length, 1);
+  t.mock.timers.tick(OUTBOUND_EVENT_REQUEST_TIMEOUT_MS);
+  assert.equal(persisted.length, 1, "the elapsed bound changes nothing after the subscription exists");
 });
 
 test("generated address classes fail closed for private, link-local, multicast, and documentation networks", () => {

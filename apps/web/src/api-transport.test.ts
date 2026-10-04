@@ -207,6 +207,8 @@ test("the deadline table names retitle and the two exports, and bounds everythin
     ["POST", "/api/sessions/s_1/parent-control-policy"],
     ["GET", "/api/sessions/s_1/events?after=0&limit=200"],
     ["POST", "/api/runners/r_1/orphaned-skill-copies/preview"],
+    // The control plane bounds the callback-host lookup at 10s (OUTBOUND_EVENT_REQUEST_TIMEOUT_MS).
+    ["POST", "/api/outbound-event-subscriptions"],
   ] as const) {
     assert.equal(apiRequestDeadlineMs(method, path), API_REQUEST_DEADLINE_MS, `${method} ${path}`);
   }
@@ -243,7 +245,6 @@ test("routes the server bounds past the default get that bound plus a margin, or
     ["POST", "/api/runners/r_1/orphaned-skill-copies/discard"],
     ["GET", "/api/sessions/s_1/child-sessions?limit=50"],
     ["GET", "/api/sessions/s_1/events?after=0"],
-    ["POST", "/api/outbound-event-subscriptions"],
   ] as const) {
     assert.equal(apiRequestDeadlineMs(method, path), null, `${method} ${path} is bounded in minutes or not at all`);
   }
