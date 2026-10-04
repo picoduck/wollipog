@@ -5884,10 +5884,10 @@ textarea {
    --text-faint, and the stop hint beside the mic it refers to. The dot pulses like the running dot
    (§2.9) and holds still under reduced motion, where "Listening…" carries the state. The unsettled
    words truncate at the start, like a picker path: the ellipsis lands on the left so the newest
-   stay in view, and the `<bdi>` inside keeps the words left to right. In a strip
-   too narrow for both (a phone), the hint gives way to the words while they arrive and returns
-   when they settle; in one too narrow for the hint at all (below a 390px phone) it stays out. The
-   pressed mic, named Stop Dictating, still says how to stop. */
+   stay in view, and the `<bdi>` inside keeps the words left to right. The stop hint outranks
+   them: in a strip too narrow for both (a phone) the unsettled words stay out, and settled phrases
+   still reach the message. In one too narrow for the hint as well (below a 390px phone) it stays
+   out too, and the pressed mic, named Stop Dictating, says how to stop. */
 .dictation-strip {
   container: dictation-strip / inline-size;
   display: flex;
@@ -5940,8 +5940,8 @@ textarea {
   color: var(--text-dim);
   font: var(--type-small);
 }
-@container dictation-strip (max-width: 26rem) {
-  .dictation-interim ~ .dictation-hint { display: none; }
+@container dictation-strip (max-width: 20rem) {
+  .dictation-interim { display: none; }
 }
 @container dictation-strip (max-width: 15rem) {
   .dictation-hint { display: none; }

@@ -101,6 +101,12 @@ test("Enter and Space on the focused mic toggle dictation, and focus stays on th
   await expect(page.locator(".cbar-left")).toHaveCount(0);
   await expect(strip.locator(".dictation-timer")).toHaveText("00:00");
   await expect(strip.locator(".dictation-timer")).toHaveText("00:01", { timeout: 2_500 });
+  // A desktop strip has room for the unsettled words beside the stop hint.
+  await hear(page, "and keep the title on one line");
+  await expect(strip.locator(".dictation-interim")).toBeVisible();
+  await expect(strip.locator(".dictation-interim")).toHaveText("and keep the title on one line");
+  await expect(strip.locator(".dictation-hint")).toBeVisible();
+  await expect(page.locator(".composer-input")).toHaveValue("");
 
   await page.keyboard.press("Space");
   await expect(mic).toHaveAttribute("aria-pressed", "false");
@@ -158,35 +164,37 @@ test.describe("on a phone", () => {
     const interim = strip.locator(".dictation-interim");
     await expect(interim).toHaveText("move the settings link under the account menu and rename it");
     await expect(page.locator(".composer-input")).toHaveValue("");
-    // A phone strip has no room for the hint and the words together: the hint gives way to them.
-    await expect(strip.locator(".dictation-hint")).toBeHidden();
+    // A phone strip has no room for the hint and the words together: the stop hint stays, and the
+    // unsettled words wait for the message.
+    await expect(interim).toBeHidden();
+    await expect(strip.locator(".dictation-hint")).toBeVisible();
+    await expect(strip.locator(".dictation-hint")).toHaveText("Tap the mic to stop");
     const layout = await page.locator(".composer-bar").evaluate((bar) => {
       const stripBox = bar.querySelector(".dictation-strip")!.getBoundingClientRect();
       const micBox = bar.querySelector('button[aria-label="Stop Dictating"]')!.getBoundingClientRect();
-      const words = bar.querySelector(".dictation-interim")!.getBoundingClientRect();
+      const hint = bar.querySelector(".dictation-hint")!;
       const label = bar.querySelector(".dictation-label")!.getBoundingClientRect();
       return {
         stripRight: stripBox.right,
         micLeft: micBox.left,
-        wordsRight: words.right,
-        wordsWidth: words.width,
+        hintRight: hint.getBoundingClientRect().right,
+        hintTruncated: hint.scrollWidth > hint.clientWidth,
         labelWidth: label.width,
-        rows: new Set([...bar.querySelectorAll(".dictation-strip > :not(.dictation-hint), button")]
+        rows: new Set([...bar.querySelectorAll(".dictation-strip > :not(.dictation-interim), button")]
           .map((element) => Math.round(element.getBoundingClientRect().top + element.getBoundingClientRect().height / 2))).size,
         overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
       };
     });
     expect(layout.rows, "the strip and the controls share one row").toBe(1);
     expect(layout.stripRight).toBeLessThanOrEqual(layout.micLeft);
-    expect(layout.wordsRight).toBeLessThanOrEqual(layout.stripRight + 0.5);
-    expect(layout.wordsWidth, "the words have room").toBeGreaterThan(80);
+    expect(layout.hintRight).toBeLessThanOrEqual(layout.stripRight + 0.5);
+    expect(layout.hintTruncated, "the hint reads in full").toBe(false);
     expect(layout.labelWidth).toBeGreaterThan(0);
     expect(layout.overflow).toBe(false);
 
     await hear(page, "move the settings link", true);
     await expect(page.locator(".composer-input")).toHaveValue("move the settings link");
     await expect(interim).toHaveCount(0);
-    await expect(strip.locator(".dictation-hint")).toBeVisible();
   });
 });
 
@@ -242,7 +250,8 @@ test.describe("UI evidence (#2193)", () => {
           const mic = page.getByRole("button", { name: "Dictate" });
           await (await press(page, mic, 80))();
           await hear(page, "and keep the title on one line");
-          await expect(page.locator(".dictation-interim")).toBeVisible();
+          // Shown beside the hint on a desktop strip; a phone strip keeps the hint instead.
+          await expect(page.locator(".dictation-interim")).toHaveCount(1);
           await page.waitForTimeout(2_100);
           await shot("listening");
 
