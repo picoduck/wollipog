@@ -1,4 +1,5 @@
 import { devices, expect, test, type Page } from "@playwright/test";
+import { dialogMotionSettled } from "./dialog-motion.js";
 
 /**
  * The composer's + button as one plain Attach and Settings menu (#2203): where it opens on a desktop,
@@ -52,6 +53,7 @@ test.describe("on a phone", () => {
     const menu = page.getByRole("menu", { name: MENU });
     await expect(menu).toBeVisible();
     await expect(menu.locator(".menu-head")).toHaveText(MENU);
+    await dialogMotionSettled(page);
     const heights = await menu.locator(".menu-item").evaluateAll((rows) =>
       rows.map((row) => row.getBoundingClientRect().height));
     expect(heights.length).toBeGreaterThan(0);

@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { dialogMotionSettled } from "./dialog-motion";
 import { pinWidestFace } from "./font-geometry";
 
 /**
@@ -592,6 +593,7 @@ test("mobile: Model Settings opens with the Session Usage group, and the bar sta
   const menu = page.getByRole("dialog", { name: "Model Settings" });
   const group = menu.getByRole("group", { name: "Session Usage" });
   await expect(group).toBeVisible();
+  await dialogMotionSettled(page);
   // First in the sheet, ahead of the model choices, and in view without scrolling (#2191).
   const order = await menu.evaluate((sheet) => [...sheet.querySelectorAll('[role="group"], [role="radiogroup"]')]
     .map((element) => element.getAttribute("aria-label")));
