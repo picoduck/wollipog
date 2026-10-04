@@ -134,6 +134,8 @@ test("a failed step states its reported exit code once, never beside the same co
     "the output already shows that code");
   assert.equal(reportedExitCode(2, "Exit code 1\nerror: build failed"), 2, "the reported code is preferred over the text");
   assert.equal(reportedExitCode(undefined, "Exit code 1"), undefined, "an older runner reports none: the text is all there is");
+  assert.equal(reportedExitCode(2, "Exit code 1\nretrying\nExit code 2"), undefined,
+    "any of the output's exit code lines counts, not only the first");
 });
 
 test("an agent is named after its spawning call, never the provider's bare tool name (#2183)", () => {

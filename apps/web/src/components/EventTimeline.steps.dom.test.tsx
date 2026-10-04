@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Window } from "happy-dom";
+import type { EventPayloadReference } from "@wollipog/protocol";
+import { api } from "../api.js";
 import type { TimelineItem } from "../timeline.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
@@ -262,6 +265,47 @@ test("a failed step prefers its reported exit code, stated once in the danger co
 
   const css = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
   assert.match(css, /\.tl-step-exit \{[^}]*color: var\(--danger-text\);/, "the code reads in the danger text colour");
+});
+
+test("full tool content that states the reported exit code replaces the step's own line (#2456)", async () => {
+  const full = "Exit code 0\n".repeat(400) + "Exit code 2\nmake: *** [all] Error 2\n";
+  const reference: EventPayloadReference = {
+    artifactId: "full-output",
+    mimeType: "text/plain",
+    encoding: "utf8",
+    sizeBytes: Buffer.byteLength(full),
+    sha256: createHash("sha256").update(full).digest("hex"),
+  };
+  const priorExport = api.artifactExport;
+  api.artifactExport = async () => new Blob([full], { type: "text/plain" });
+  cleanup(() => { api.artifactExport = priorExport; });
+  const { container, root } = await mount();
+  const preview = "Exit code 0\n".repeat(3);
+  const items: TimelineItem[] = [{
+    ...run(1, "$ make", "failed", t0, 2, preview),
+    referencedText: [{ preview, refs: [reference] }],
+    exitCode: 2,
+  } as TimelineItem];
+  await act(async () => root.render(<EventTimeline items={items} />));
+  await openWork(container);
+  const step = container.querySelector<HTMLElement>("details.tl-step")!;
+  await act(async () => step.querySelector<HTMLElement>("summary")!.click());
+  const codes = () => step.querySelector(".tl-step-body")!.textContent!.match(/exit code 2/gi)?.length ?? 0;
+  assert.equal(step.querySelector(".tl-step-exit")?.textContent, "Exit Code 2", "the preview does not state it");
+  const load = [...step.querySelectorAll<HTMLButtonElement>("button")].find((button) =>
+    button.textContent?.startsWith("Load Full Tool Content"))!;
+  await act(async () => load.click());
+  for (let tries = 0; tries < 50 && !step.querySelector(".event-payload-full"); tries++) {
+    await act(async () => { await new Promise((resolve) => domWindow.setTimeout(resolve, 0)); });
+  }
+  assert.ok(step.querySelector(".event-payload-full"), "the full content loaded");
+  assertNoDomNode(step.querySelector(".tl-step-exit"), "the full content's own line states it instead");
+  assert.equal(codes(), 1, "the code reads once");
+  const hide = [...step.querySelectorAll<HTMLButtonElement>("button")].find((button) =>
+    button.textContent?.startsWith("Hide Full Tool Content"))!;
+  await act(async () => hide.click());
+  assert.equal(step.querySelector(".tl-step-exit")?.textContent, "Exit Code 2", "hiding it brings the line back");
+  assert.equal(codes(), 1);
 });
 
 test("an older runner's failed step keeps its text-matched exit code and error lines (#2456)", async () => {

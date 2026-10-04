@@ -275,6 +275,14 @@ export function failureLines(text: string, reported?: number): { lines: string[]
   return exitCode === undefined ? { lines, failing } : { lines, failing, exitCode };
 }
 
+/** Whether any of the output's exit code lines reads this code, not only its first. */
+export function statesExitCode(output: string, code: number): boolean {
+  return output.split("\n").some((line) => {
+    const exit = EXIT_CODE.exec(line);
+    return exit !== null && Number(exit[1]) === code;
+  });
+}
+
 /**
  * The exit code a failed step states on its own line (#2456): the one its provider reported,
  * unless the output already shows that code, so a step never reads its exit code twice. Without a
@@ -282,5 +290,5 @@ export function failureLines(text: string, reported?: number): { lines: string[]
  */
 export function reportedExitCode(exitCode: number | undefined, output: string): number | undefined {
   if (exitCode === undefined) return undefined;
-  return failureLines(output, exitCode).exitCode === exitCode ? undefined : exitCode;
+  return statesExitCode(output, exitCode) ? undefined : exitCode;
 }

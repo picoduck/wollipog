@@ -49,6 +49,7 @@ import {
   retryNeighbours,
   sameWork,
   splitStepTitle,
+  statesExitCode,
   stepObjectIsPath,
   subagentName,
   summarizeWork,
@@ -2481,8 +2482,34 @@ function stepLabel(title: string, status: string, fact?: string): string {
 const stepExitCode = (item: ToolItem, failed: boolean): number | undefined =>
   failed ? reportedExitCode(item.exitCode, item.text) : undefined;
 
+/** Full content loaded from a reference, which reports whether it already states the step's
+ * reported exit code, so the step's own line can give way to it (#2456). */
+function FullStepOutput({ text, failed, exitCode, index, report }: {
+  text: string;
+  failed: boolean;
+  exitCode?: number;
+  index: number;
+  report: (index: number, states: boolean) => void;
+}) {
+  const states = failed && exitCode !== undefined && statesExitCode(text, exitCode);
+  useBrowserLayoutEffect(() => {
+    if (!states) return;
+    report(index, true);
+    return () => report(index, false);
+  }, [states, index, report]);
+  return <StepOutput text={text} failed={failed} exitCode={exitCode} />;
+}
+
 function ToolOutput({ item, failed }: { item: ToolItem; failed: boolean }) {
-  const exitCode = stepExitCode(item, failed);
+  const [statedInFull, setStatedInFull] = useState<ReadonlySet<number>>(() => new Set());
+  const report = useCallback((index: number, states: boolean) => setStatedInFull((current) => {
+    if (current.has(index) === states) return current;
+    const next = new Set(current);
+    if (states) next.add(index);
+    else next.delete(index);
+    return next;
+  }), []);
+  const exitCode = statedInFull.size ? undefined : stepExitCode(item, failed);
   return (
     <>
       {exitCode !== undefined && <StepExitCode code={exitCode} />}
@@ -2496,7 +2523,9 @@ function ToolOutput({ item, failed }: { item: ToolItem; failed: boolean }) {
           label="Tool Content"
           appendFull
         >
-          {(text, full) => full ? <StepOutput text={text} failed={failed} exitCode={item.exitCode} /> : null}
+          {(text, full) => full
+            ? <FullStepOutput text={text} failed={failed} exitCode={item.exitCode} index={index} report={report} />
+            : null}
         </EventPayloadContent>
       ))}
     </>
