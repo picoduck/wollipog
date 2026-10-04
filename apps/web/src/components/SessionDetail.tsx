@@ -1775,10 +1775,15 @@ function SessionDetailLoaded({
     clearRuntimeQueuedEditRecovery(key);
     if (queuedEditRecoveryScope) clearDurableQueuedEditRecovery(queuedEditRecoveryScope);
   }, [queuedEditRecoveryScope]);
+  // The composer that watched a queued edit's Save in flight, so the Save's failure is that view's
+  // own action error when it settles; an outcome restored from storage the strip says alone (#2560).
+  const queuedEditSaveWatchedRef = useRef<string | null>(null);
+  if (queuedPromptEditMutationRecovery(activeComposerMutation)) queuedEditSaveWatchedRef.current = mutationKey;
   const restoreQueuedPromptEditRecovery = useCallback((
     recovery: QueuedPromptEditRecovery,
     pending: boolean,
     preserveDraft = false,
+    saveSettledHere = false,
   ) => {
     revealOrdinaryComposerRef.current("answer-owned");
     const restored = cloneQueuedPromptEditRecovery(recovery);
@@ -1792,7 +1797,9 @@ function SessionDetailLoaded({
       replace(restored.draft.images);
       setHistIdx(-1);
     }
-    setError(restored.error ?? null);
+    // The Recovered Queued Message strip says what happened. Only a Save this view watched fail is
+    // also a notice, with the reason it failed; a stored outcome would repeat the strip (#2560).
+    setError(saveSettledHere ? restored.error ?? null : null);
     commandSubmissionRetryRef.current = null;
     suppressedDraftRef.current = pending ? { sessionId } : null;
     draftHydratedSessionRef.current = sessionId;
@@ -2118,6 +2125,7 @@ function SessionDetailLoaded({
 
   useEffect(() => {
     if (activeComposerMutation) return;
+    const saveSettledHere = queuedEditSaveWatchedRef.current === mutationKey;
     // An ordinary locally initiated queued edit already owns the composer. Leave a recovery that
     // another tab publishes recoverable until this edit is saved or cancelled.
     if (queuedEditRef.current && !queuedEditRecovered) return;
@@ -2194,13 +2202,16 @@ function SessionDetailLoaded({
             }
             storeRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey, restored);
           }
-          restoreQueuedPromptEditRecovery(restored, false, preserveDraftAfterLoad);
+          queuedEditSaveWatchedRef.current = null;
+          restoreQueuedPromptEditRecovery(restored, false, preserveDraftAfterLoad, saveSettledHere);
         })();
         return () => { cancelled = true; };
       }
-      restoreQueuedPromptEditRecovery(queuedEditRecovery, false, preserveQueuedEditDraft);
+      queuedEditSaveWatchedRef.current = null;
+      restoreQueuedPromptEditRecovery(queuedEditRecovery, false, preserveQueuedEditDraft, saveSettledHere);
       return;
     }
+    queuedEditSaveWatchedRef.current = null;
     if (suppressedDraftRef.current?.sessionId !== sessionId) return;
     const completedQueuedEdit = queuedEditRef.current !== null;
     if (completedQueuedEdit) {

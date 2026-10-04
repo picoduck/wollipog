@@ -740,6 +740,8 @@ test("a recovered edit that can't be retried says why in the strip, and Save is 
     "This queued message changed elsewhere. The recovered edit cannot overwrite its newer revision.");
   await expect(strip.getByRole("button", { name: "Use as New Message" })).toBeEnabled();
   await expect(strip.getByRole("button", { name: "Dismiss Recovery" })).toBeEnabled();
+  // The strip is the recovery's one account of what happened; the slot does not repeat it (#2560).
+  await expect(page.locator(".session-notice-slot .notice.t-danger")).toHaveCount(0);
   await page.screenshot({ path: test.info().outputPath("queued-edit-recovered-desktop.png") });
 });
 
