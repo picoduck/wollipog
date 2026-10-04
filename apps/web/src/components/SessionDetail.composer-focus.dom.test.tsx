@@ -823,15 +823,23 @@ function sendButton(fixture: Fixture): HTMLButtonElement {
   return button;
 }
 
-async function waitForComposerSendToSettle(fixture: Fixture, timeoutMs = 5_000): Promise<void> {
+/** Flushes until `settled` holds, failing with `message` after `timeoutMs`. A send settles only
+ * after its draft cleanup, which awaits SubtleCrypto work off the main thread, so how many ticks
+ * that takes depends on the machine; a single flush loses the race on a loaded runner (#2558). */
+async function waitForSettled(settled: () => boolean, message: string, timeoutMs = 5_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  while (sendButton(fixture).querySelector(".spinner")) {
-    assert.ok(
-      Date.now() < deadline,
-      "the composer send request did not settle within the bounded test deadline",
-    );
+  while (!settled()) {
+    assert.ok(Date.now() < deadline, `${message} within the bounded test deadline`);
     await flushAsyncWork(10);
   }
+}
+
+async function waitForComposerSendToSettle(fixture: Fixture, timeoutMs = 5_000): Promise<void> {
+  await waitForSettled(
+    () => !sendButton(fixture).querySelector(".spinner"),
+    "the composer send request did not settle",
+    timeoutMs,
+  );
 }
 
 function detailedBackgroundSession(id: string): SessionView {
@@ -2364,7 +2372,10 @@ test("recovery appearing after mutation release preserves the dirty ordinary dra
     }), true);
 
     await act(async () => { prompt.resolve(undefined as never); });
-    await flushAsyncWork();
+    await waitForSettled(
+      () => fixture.composer.value === "Recovered queued edit",
+      "the recovery saved during the send did not replace the composer once the send settled",
+    );
     assert.equal(fixture.composer.value, "Recovered queued edit");
     assert.ok(fixture.container.querySelector(".composer-mode"));
 
@@ -4656,6 +4667,7 @@ test("Edit as a New Turn loads an empty composer without a dialog, names the tur
     await act(async () => { sendButton(fixture).click(); });
     await flushAsyncWork();
     assert.deepEqual(prompts, [{ text: "original prompt", images: [submittedImage] }]);
+    await waitForSettled(() => !editingCopyNotice(fixture), "sending the copy did not remove the notice");
     assertNoDomNode(editingCopyNotice(fixture), "sending the copy removes the notice");
   } finally {
     await unmountFixture(fixture);
@@ -4948,7 +4960,10 @@ for (const outcome of ["fails", "lands"] as const) {
         assert.equal(fixture.container.querySelector<HTMLTextAreaElement>(".composer-input")?.value, "my own draft");
       } else {
         await act(async () => { sends[0]!.resolve(); });
-        await flushAsyncWork();
+        await waitForSettled(
+          () => loadComposerEditCopy(fixture.sessionId, fixture.instanceScope) === null && !editingCopyNotice(fixture),
+          "the accepted send did not end the edit in the store and the remounted view",
+        );
         assert.equal(loadComposerEditCopy(fixture.sessionId, fixture.instanceScope), null, "the accepted send ends the edit");
         assertNoDomNode(editingCopyNotice(fixture), "and the remounted view follows");
       }
