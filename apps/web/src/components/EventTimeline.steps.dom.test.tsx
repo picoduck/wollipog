@@ -163,6 +163,7 @@ test("a tool call's path object keeps its file name whole, and any other object 
     step(6, "Bash: cat src/components/Header.tsx", "execute"),
     step(7, "Grep: src/components/", "read"),
     step(8, "WebFetch: https://example.com/docs/a.html", "fetch"),
+    step(9, "Read: /hosts", "read"),
   ]} />));
   await openWork(container);
   const steps = [...container.querySelectorAll<HTMLElement>(".tl-step")];
@@ -190,6 +191,8 @@ test("a tool call's path object keeps its file name whole, and any other object 
     "Move src/version.ts → src/release/version.ts · Completed",
   ], "the accessible name still reads the full verb and path");
   assert.equal(steps[3]!.querySelector(".tl-step-title")?.textContent, "Read README.md", "as does a row without a body");
+  assert.deepEqual(parts(7), { title: "/hosts", dir: "/", name: "hosts" }, "a root-level path keeps its leading slash");
+  assert.equal(steps[7]!.querySelector(".tl-step-title")?.textContent, "Read /hosts");
 });
 
 test("a failed step's body shows its exit code and error lines in the danger colour", async () => {
