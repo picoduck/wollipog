@@ -126,6 +126,27 @@ for (const reducedMotion of ["no-preference", "reduce"] as const) {
   });
 }
 
+test("keyboard focus reveals the step link's tooltip at once, even mid-way through a hover's delay", async ({ page }) => {
+  const progress = await openScenario(page, "running", { width: 1280, height: 800 });
+  const step = progress.getByRole("button", { name: "Coordinate Release Audit" });
+  const tooltip = progress.locator("[role='tooltip']");
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Animation.enable");
+  await cdp.send("Animation.setPlaybackRate", { playbackRate: 0 });
+  await step.hover();
+  await tooltip.evaluate((element) => { for (const animation of element.getAnimations()) animation.currentTime = 100; });
+  await expect(tooltip).toBeHidden();
+  // A keypress first, so the focus that follows is keyboard focus (:focus-visible), as a Tab's is.
+  await page.keyboard.press("Shift");
+  await step.focus();
+  await expect(step).toBeFocused();
+  // The animation timeline is still frozen, so only a reveal that does not wait can pass.
+  await expect(tooltip).toBeVisible();
+  await expect(tooltip).toHaveCSS("opacity", "1");
+  await cdp.send("Animation.setPlaybackRate", { playbackRate: 1 });
+  await cdp.detach();
+});
+
 test("a silent turn says how long it has been quiet", async ({ page }) => {
   const progress = await openScenario(page, "silent", { width: 390, height: 844 });
   await expect(progress.locator(".tl-working-note")).toHaveText("No new output for 3m");

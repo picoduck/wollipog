@@ -6741,6 +6741,9 @@ textarea,
     opacity var(--dur-fast) var(--ease-out) var(--delay-tooltip),
     visibility var(--dur-fast) var(--ease-out) var(--delay-tooltip);
 }
+/* Keyboard focus reveals at once, as the rail's does. Dropping the transitions also cancels a hover's
+   pending reveal when focus arrives under a resting pointer, which a changed delay alone would not. */
+.tl-working-step-text:focus-visible + .tl-tooltip { transition: none; }
 
 .timeline {
   display: flex;
