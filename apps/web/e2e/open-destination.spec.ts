@@ -57,7 +57,7 @@ function vsCodeMark(scope: Locator): Locator {
 }
 
 for (const theme of ["dark", "light"] as const) {
-  test(`the Visual Studio Code mark keeps its brand colours while enabled and goes faint while disabled (${theme}, #2274)`, async ({ page }) => {
+  test(`the Visual Studio Code mark keeps its brand colours while enabled and takes its control's disabled ink while disabled (${theme}, #2274)`, async ({ page }) => {
     const brand = { size: "16x16", fills: VS_CODE_FILLS, shadingDisplay: "inline", filters: [expect.stringMatching(/^url\(/), expect.stringMatching(/^url\(/)] };
     await openFixture(page, 1440, `theme=${theme}`);
     const main = page.getByRole("button", { name: "Open in VS Code" });
@@ -68,20 +68,22 @@ for (const theme of ["dark", "light"] as const) {
     expect(await vsCodeMarkPaint(vsCodeMark(vsCodeRow))).toEqual(brand);
     await expect(vsCodeRow.locator(".menu-check")).toHaveCSS("color", await tokenColour(page, "--accent"));
 
-    // Offline, every row and the Open segment are disabled: the mark is one faint ink, like its
-    // words and the other destinations' icons, at the full width and in the icon-only tier.
+    // Offline, every row and the Open segment are disabled: the mark is one ink, its control's, like
+    // its words and the other destinations' icons, at the full width and in the icon-only tier. The
+    // Open segment is a ghost, so that ink is --text-disabled (#2518); a menu row's is --text-faint.
     for (const width of [1440, 940]) {
       await openFixture(page, width, `theme=${theme}&offline=1`);
       const faint = await tokenColour(page, "--text-faint");
-      const disabledMark = { size: "16x16", fills: [faint, faint, faint], shadingDisplay: "none", filters: ["none", "none"] };
+      const disabled = await tokenColour(page, "--text-disabled");
+      const markIn = (ink: string) => ({ size: "16x16", fills: [ink, ink, ink], shadingDisplay: "none", filters: ["none", "none"] });
       const offlineMain = page.getByRole("button", { name: "Open in VS Code" });
-      await expect(offlineMain).toHaveCSS("color", faint);
-      expect(await vsCodeMarkPaint(vsCodeMark(offlineMain))).toEqual(disabledMark);
+      await expect(offlineMain).toHaveCSS("color", disabled);
+      expect(await vsCodeMarkPaint(vsCodeMark(offlineMain))).toEqual(markIn(disabled));
       await page.getByRole("button", { name: "Choose Where to Open" }).click();
       const offlineMenu = page.getByRole("menu", { name: "Open In" });
       const offlineRow = offlineMenu.getByRole("menuitemradio", { name: "VS Code" });
       await expect(offlineRow).toHaveCSS("color", faint);
-      expect(await vsCodeMarkPaint(vsCodeMark(offlineRow))).toEqual(disabledMark);
+      expect(await vsCodeMarkPaint(vsCodeMark(offlineRow))).toEqual(markIn(faint));
       for (const icon of await offlineMenu.locator(".menu-icon").all()) await expect(icon).toHaveCSS("color", faint);
       await expect(offlineRow.locator(".menu-check")).toHaveCSS("color", faint);
     }
