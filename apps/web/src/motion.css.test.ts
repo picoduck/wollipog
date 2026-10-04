@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { parse, type AtRule } from "postcss";
+import { parse, type AtRule, type Declaration, type Node, type Rule } from "postcss";
 import { customProperties, declarationsOf, topLevelRule } from "./css-rules.js";
 import { RAIL_TOOLTIP_DELAY_MS } from "./components/RailTooltip.js";
 
@@ -18,6 +18,25 @@ const css = readFileSync(fileURLToPath(new URL("./styles.css", import.meta.url))
  * animations, kept playing for a user who had asked their OS to stop animation.
  */
 const tokens = customProperties(topLevelRule(css, ":root"));
+
+function insideLayer(node: Node): boolean {
+  for (let ancestor = node.parent; ancestor; ancestor = ancestor.parent) {
+    if (ancestor.type === "atrule" && (ancestor as AtRule).name === "layer") return true;
+  }
+  return false;
+}
+
+/** The universal rules directly inside `prefers-reduced-motion: reduce` blocks, in or out of a layer. */
+function reducedMotionRules({ layered }: { layered: boolean }): Rule[] {
+  const reduced: AtRule[] = [];
+  parse(css).walkAtRules("media", (rule) => {
+    if (/prefers-reduced-motion:\s*reduce/.test(rule.params)) reduced.push(rule);
+  });
+  return reduced
+    .filter((at) => insideLayer(at) === layered)
+    .flatMap((at) => at.nodes ?? [])
+    .filter((node): node is Rule => node.type === "rule");
+}
 
 test("the motion scale is defined once and ordered", () => {
   const scale = ["--dur-instant", "--dur-fast", "--dur-base", "--dur-slow"];
@@ -103,9 +122,9 @@ test("reduced motion is honoured globally, not per component", () => {
   // Requires the bare `*`, not merely `*::before`. Narrowing the element selector to one component
   // while leaving the pseudo-element selectors universal passed an earlier version of this check,
   // and that is exactly the per-component arrangement the guard replaced.
-  const universal = reduced
-    .flatMap((at) => at.nodes ?? [])
-    .filter((node): node is import("postcss").Rule => node.type === "rule")
+  //
+  // Outside any cascade layer: the layered universal rule is the default the next test checks.
+  const universal = reducedMotionRules({ layered: false })
     .find((rule) => rule.selectors.some((selector) => selector.trim() === "*"));
   assert.ok(universal, "the guard must apply to every element, not just pseudo-elements");
   for (const pseudo of ["*::before", "*::after"]) {
@@ -135,4 +154,39 @@ test("reduced motion is honoured globally, not per component", () => {
   const iterations = declared.get("animation-iteration-count");
   assert.equal(iterations?.value, "1", "an infinite animation at 1ms still repeats forever");
   assert.ok(iterations?.important);
+});
+
+/**
+ * #2574: a 1ms duration on every element made every property change on an element that declares no
+ * transition a transition too, because `transition-property` defaults to `all`. The change painted a
+ * frame late, and geometry written in step with a scroll correction jumped for that frame (#2426).
+ *
+ * The default is taken away in a cascade layer. Every unlayered rule beats a layered one whatever
+ * its specificity, so an element that declares a transition keeps its properties, and the guard
+ * above still collapses their duration and keeps their end events.
+ */
+test("reduced motion starts no transition on an element that declares none", () => {
+  const resets = (rule: Rule) => rule.nodes.some((node) => node.type === "decl"
+    && (node.prop === "transition-property" || node.prop === "transition"));
+  const universal = (rule: Rule) => rule.selectors.some((selector) => selector.trim() === "*");
+
+  const layered = reducedMotionRules({ layered: true }).filter(universal);
+  assert.equal(layered.length, 1, "one layered universal rule must take the default away under reduced motion");
+  const [reset] = layered;
+  for (const pseudo of ["*::before", "*::after"]) {
+    assert.ok(reset!.selectors.some((selector) => selector.trim() === pseudo),
+      `${pseudo} must be covered too, as the guard covers it`);
+  }
+  const declarations = reset!.nodes.filter((node): node is Declaration => node.type === "decl");
+  assert.deepEqual(declarations.map((decl) => [decl.prop, decl.value]), [["transition-property", "none"]],
+    "the layered rule only takes away the default; durations stay with the guard");
+  // A layered !important outranks every unlayered declaration, !important or not, so it would remove
+  // every declared transition, and with them the transitionend events the guard keeps.
+  assert.ok(!declarations[0]!.important, "the layered default must not be !important");
+
+  // Unlayered, a universal reset ties on specificity with every `*` and `:where()` rule that
+  // declares a transition, and wins or loses by source order; with !important it removes them all.
+  const unlayered = reducedMotionRules({ layered: false }).filter((rule) => universal(rule) && resets(rule));
+  assert.deepEqual(unlayered.map((rule) => rule.selector), [],
+    "only the layered default may reset transitions for every element");
 });

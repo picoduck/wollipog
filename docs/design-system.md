@@ -407,7 +407,8 @@ Durations are the existing tokens (`--dur-instant` 80, `--dur-fast` 130, `--dur-
 
 No entrance animations on page load, no hover lift on cards, no `--ease-spring` in UI chrome.
 `prefers-reduced-motion: reduce` removes every transform and the pulse (state stays visible through
-the label).
+the label). Its global guard collapses every declared transition and animation to 1ms, so their end
+events still fire, and starts no transition on an element that declares none (#2574).
 
 `--delay-tooltip` (500) is the one wait in the scale: how long a pointer rests before a tooltip shows
 (§9.3). Only the reveal waits; leaving hides at once. It is not motion, so reduced motion keeps it.

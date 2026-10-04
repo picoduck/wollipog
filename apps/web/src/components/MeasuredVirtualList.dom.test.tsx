@@ -208,9 +208,9 @@ test("a nonzero initial list offset does not call flushSync from the passive set
 });
 
 test("the list's height and row positions never transition, whatever a stylesheet sets", async () => {
-  // The global reduced-motion guard gives every element a 1ms transition-duration; with the default
-  // `transition-property: all`, a transitioning transform paints a scroll correction a frame before
-  // the rows it compensates for (#2426).
+  // A transitioning transform, of any length, paints a scroll correction a frame before the rows it
+  // compensates for. The reduced-motion guard once gave every element a 1ms transition on every
+  // property (#2426, #2574); a stylesheet that declares one on rows must not bring that back.
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);

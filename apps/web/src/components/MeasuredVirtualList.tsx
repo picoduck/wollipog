@@ -1290,10 +1290,10 @@ function VirtualList<T>({
   };
 
   // The root's height and each row's transform are geometry the scroll corrections above write in
-  // step with scrollTop. They must never transition: the global reduced-motion guard gives every
-  // element a 1ms transition-duration, and with the default `transition-property: all` that would
-  // paint each correction's scrollTop a frame before the rows it compensates for, moving the
-  // reader's row for that frame (#2426).
+  // step with scrollTop. They must never transition, whatever a stylesheet declares: a transition
+  // of any length paints each correction's scrollTop a frame before the rows it compensates for,
+  // moving the reader's row for that frame. The global reduced-motion guard once gave every element
+  // a 1ms transition on every property, which is how that happened (#2426, #2574).
   const totalHeight = virtualizer.getTotalSize();
   initialTotalHeightRef.current ??= totalHeight;
   const renderedTotalHeight = initialMeasurementsReady ? totalHeight : initialTotalHeightRef.current;

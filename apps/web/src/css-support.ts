@@ -96,7 +96,8 @@ export type CssFeature = RequiresFloor | Downlevelled | Degrades;
  * time.)
  *
  * Deliberately absent, because they are older than every version below and so cannot raise the
- * floor: `:is()`, `:where()`, `content-visibility`, `accent-color`, `inert`, `dvh` units.
+ * floor: `:is()`, `:where()`, `content-visibility`, `accent-color`, `inert`, `dvh` units, and `@layer`
+ * (cascade layers: Chrome and Edge 99, Firefox 97, Safari 15.4; emitted unchanged by the build).
  */
 export const CSS_FEATURES: readonly CssFeature[] = [
   {
@@ -177,7 +178,7 @@ export const CSS_FEATURES: readonly CssFeature[] = [
  */
 export const CSS_SURFACE = {
   atRules: [
-  "container", "font-face", "keyframes", "media",
+  "container", "font-face", "keyframes", "layer", "media",
   ],
   properties: [
   "-webkit-box-orient", "-webkit-font-smoothing", "-webkit-line-clamp", "-webkit-mask-image",
@@ -208,7 +209,7 @@ export const CSS_SURFACE = {
   "scroll-behavior", "scroll-snap-align", "scroll-snap-type", "scrollbar-color",
   "scrollbar-width", "src", "stroke", "stroke-linecap", "stroke-width", "table-layout", "text-align",
   "text-decoration", "text-overflow", "text-transform", "top",
-  "touch-action", "transform", "transform-origin", "transition", "transition-duration",
+  "touch-action", "transform", "transform-origin", "transition", "transition-duration", "transition-property",
   "user-select", "vertical-align", "visibility", "white-space", "width", "word-break", "z-index",
   ],
   /** Pseudo-classes and pseudo-elements, without their leading colons. */

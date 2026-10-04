@@ -15817,7 +15817,14 @@ body.shell-dock-dragging * {
    animation. This is the global guard.
 
    Durations collapse to 1ms rather than 0 so that transitionend and animationend still fire —
-   several components advance state on those events, and `none` strands them. */
+   several components advance state on those events, and `none` strands them.
+
+   A 1ms duration on an element that declares no transition would make every property change on it
+   a transition, because `transition-property` defaults to `all`: the change paints a frame late,
+   and geometry that moves in step with a scroll correction jumps for that frame (#2426, #2574). So
+   the second rule takes the default away. It sits in a cascade layer, which every unlayered rule
+   beats whatever its specificity, so any element that declares a transition keeps its properties
+   and only its duration collapses. */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -15826,6 +15833,15 @@ body.shell-dock-dragging * {
     animation-iteration-count: 1 !important;
     transition-duration: 1ms !important;
     scroll-behavior: auto !important;
+  }
+}
+@layer reduced-motion-default {
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      transition-property: none;
+    }
   }
 }
 

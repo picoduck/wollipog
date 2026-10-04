@@ -1496,6 +1496,25 @@ for (const { control, growth } of tailGrowthControls) {
   });
 }
 
+// The composer is geometry outside the virtual list that moves in step with the follow-tail
+// re-pin. The reduced-motion guard once gave every element a 1ms transition on every property, so
+// for that user the composer's height change painted a frame late and could lag the re-pin (#2574).
+for (const reducedMotion of ["reduce", "no-preference"] as const) {
+  test(`a growing composer keeps every painted frame on the followed tail (${reducedMotion} motion)`, async ({ page }) => {
+    await page.emulateMedia({ reducedMotion });
+    const reader = await openFollowedTail(page);
+    // The first growth mounts the composer; the later ones change its height.
+    const sampled = await recordPaintedTailGrowth(page, "grow-composer", 4, 4);
+    expect(sampled.growths).toBe(4);
+    expect(await page.getByTestId("composer-spacer").evaluate((element) => element.getBoundingClientRect().height))
+      .toBeCloseTo(4 * 72, 0);
+    expect(sampled.frames.every((frame) => frame.following)).toBe(true);
+    const offTail = sampled.frames.flatMap((frame, index) => frame.distance > 2 ? [{ index, ...frame }] : []);
+    expect(offTail, "painted frames more than 2px off the followed tail").toEqual([]);
+    await expect(reader).toHaveAttribute("data-follow-tail-state", "following");
+  });
+}
+
 type DeepObserverFault = "grow-tail" | "chained-scroll";
 
 /**
