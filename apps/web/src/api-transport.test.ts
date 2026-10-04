@@ -134,6 +134,20 @@ test("a fetch that ignores its signal still fails at the deadline", withMockedTi
   assert.ok(pending.error instanceof RequestTimeoutError);
 }));
 
+test("a fetch that answers its abort with a fresh AbortError still reports the timeout", withMockedTimeouts(async () => {
+  const transport = createBrowserApiTransport({
+    instanceId: "a",
+    origin: "http://127.0.0.1:4317",
+    fetch: ((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new DOMException("The operation was aborted.", "AbortError")), { once: true });
+    })) as typeof fetch,
+  });
+  const pending = outcome(transport.request("/api/sessions"));
+  mock.timers.tick(API_REQUEST_DEADLINE_MS);
+  await settle();
+  assert.ok(pending.error instanceof RequestTimeoutError, "the timeout wins over the abort it causes");
+}));
+
 test("a caller's signal still aborts before the deadline, with the caller's reason", withMockedTimeouts(async () => {
   const transport = createBrowserApiTransport({ instanceId: "a", origin: "http://127.0.0.1:4317", fetch: stalledFetch() });
   const controller = new AbortController();
@@ -189,7 +203,8 @@ test("the deadline table names retitle and the two exports, and bounds everythin
     ["POST", "/api/sessions/s_1/export"],
     ["GET", "/api/sessions/s_1"],
     ["POST", "/api/sessions/s_1/parent-control-policy"],
-    ["POST", "/api/sessions/s_1/worktrees"],
+    ["GET", "/api/sessions/s_1/events?after=0&limit=200"],
+    ["POST", "/api/runners/r_1/orphaned-skill-copies/preview"],
   ] as const) {
     assert.equal(apiRequestDeadlineMs(method, path), API_REQUEST_DEADLINE_MS, `${method} ${path}`);
   }
@@ -208,21 +223,24 @@ test("routes the server bounds past the default get that bound plus a margin, or
     ["POST", "/api/projects/p_1/locations/l_1/worktree-setup", 150_000],
     ["POST", "/api/pods/pod_1/reconcile", 120_000],
     ["POST", "/api/skill-git/preview", 90_000],
-    ["POST", "/api/skill-machine/m_1/adopt", 90_000],
-    ["POST", "/api/skill-drift/d_1/import", 90_000],
-    ["POST", "/api/runners/r_1/skill-drift/restore", 90_000],
-    ["POST", "/api/orphaned-skill-copies/o_1/import", 90_000],
   ] as const) {
     const deadline = apiRequestDeadlineMs(method, path);
     assert.ok(deadline !== null && deadline > serverBoundMs, `${method} ${path} outlasts its ${serverBoundMs}ms server bound`);
   }
-  for (const path of [
-    "/api/sessions/s_1/fork",
-    "/api/sessions/s_1/worktrees/retry-setup",
-    "/api/boxes/b_1/update-runner",
-    "/api/runners/r_1/skills/sync",
-  ]) {
-    assert.equal(apiRequestDeadlineMs("POST", path), null, `${path} is bounded in minutes or not at all`);
+  for (const [method, path] of [
+    ["POST", "/api/sessions/s_1/fork"],
+    ["POST", "/api/sessions/s_1/worktrees"],
+    ["POST", "/api/sessions/s_1/worktrees/retry-setup"],
+    ["POST", "/api/boxes/b_1/update-runner"],
+    ["POST", "/api/runners/r_1/skills/sync"],
+    ["POST", "/api/skill-machine/m_1/adopt"],
+    ["POST", "/api/skill-drift/d_1/import"],
+    ["POST", "/api/runners/r_1/skill-drift/restore"],
+    ["POST", "/api/orphaned-skill-copies/o_1/import"],
+    ["POST", "/api/runners/r_1/orphaned-skill-copies/discard"],
+    ["GET", "/api/sessions/s_1/child-sessions?limit=50"],
+  ] as const) {
+    assert.equal(apiRequestDeadlineMs(method, path), null, `${method} ${path} is bounded in minutes or not at all`);
   }
 });
 

@@ -71,12 +71,23 @@ const API_REQUEST_DEADLINE_OVERRIDES: ReadonlyArray<{ method: string; route: Reg
   { method: "GET", route: route("/api/artifacts/:id/export"), deadlineMs: null },
   // Fork, handoff and conversation recovery wait up to 65 minutes on the runner.
   { method: "POST", route: route("/api/sessions/:id/fork"), deadlineMs: null },
-  // A worktree setup script may run for an hour (65-minute runner wait).
+  // A worktree setup script may run for an hour (65-minute runner wait). Creation answers at once
+  // with progress, but a runner without progress support makes it wait the same 65 minutes.
   { method: "POST", route: route("/api/sessions/:id/worktrees/retry-setup"), deadlineMs: null },
+  { method: "POST", route: route("/api/sessions/:id/worktrees"), deadlineMs: null },
   // A runner update downloads its release with a per-stall limit but no total one.
   { method: "POST", route: route("/api/boxes/:id/update-runner"), deadlineMs: null },
-  // Skill sync restarts its runner wait on every chunk, so it has no total bound.
+  // Skill sync restarts its runner wait on every chunk, so it has no total bound, and neither do the
+  // adoptions, imports, restores and discards that wait for one.
   { method: "POST", route: route("/api/runners/:id/skills/sync"), deadlineMs: null },
+  { method: "POST", route: route("/api/skill-machine/:id/adopt"), deadlineMs: null },
+  { method: "POST", route: route("/api/skill-drift/:id/import"), deadlineMs: null },
+  { method: "POST", route: route("/api/runners/:id/skill-drift/restore"), deadlineMs: null },
+  { method: "POST", route: route("/api/orphaned-skill-copies/:id/import"), deadlineMs: null },
+  { method: "POST", route: route("/api/runners/:id/orphaned-skill-copies/discard"), deadlineMs: null },
+  // The child-session inventory first loads the session's whole history, page by page, with a
+  // deadline per page but none in total.
+  { method: "GET", route: route("/api/sessions/:id/child-sessions"), deadlineMs: null },
   // 150s runner waits for worktree selection and setup generation.
   { method: "POST", route: route("/api/sessions/:id/worktrees/select"), deadlineMs: UP_TO_150S_SERVER_BOUND_DEADLINE_MS },
   { method: "POST", route: route("/api/sessions/:id/worktrees/generate-setup"), deadlineMs: UP_TO_150S_SERVER_BOUND_DEADLINE_MS },
@@ -85,11 +96,6 @@ const API_REQUEST_DEADLINE_OVERRIDES: ReadonlyArray<{ method: string; route: Reg
   // Pod reconciliation waits 120s; a Git skill preview clones for up to 90s.
   { method: "POST", route: route("/api/pods/:id/reconcile"), deadlineMs: UP_TO_150S_SERVER_BOUND_DEADLINE_MS },
   { method: "POST", route: route("/api/skill-git/preview"), deadlineMs: UP_TO_150S_SERVER_BOUND_DEADLINE_MS },
-  // Skill adoption and drift or orphan imports make two or three 30s runner calls and a sync.
-  { method: "POST", route: route("/api/skill-machine/:id/adopt"), deadlineMs: UP_TO_150S_SERVER_BOUND_DEADLINE_MS },
-  { method: "POST", route: route("/api/skill-drift/:id/import"), deadlineMs: UP_TO_150S_SERVER_BOUND_DEADLINE_MS },
-  { method: "POST", route: route("/api/runners/:id/skill-drift/restore"), deadlineMs: UP_TO_150S_SERVER_BOUND_DEADLINE_MS },
-  { method: "POST", route: route("/api/orphaned-skill-copies/:id/import"), deadlineMs: UP_TO_150S_SERVER_BOUND_DEADLINE_MS },
   // Opening a pull request and forge review syncs wait 60s (other Git actions 30s, same route).
   { method: "POST", route: route("/api/sessions/:id/git"), deadlineMs: UP_TO_60S_SERVER_BOUND_DEADLINE_MS },
   // Choosing a provider account waits 60s; a subscription refresh is capped at 60s.
@@ -183,14 +189,16 @@ export function createBrowserApiTransport(options: BrowserApiTransportOptions): 
       headers.forEach((value, name) => { requestHeaders[name] = value; });
 
       // The deadline rejects on its own as well as aborting, so a fetch that ignores its signal
-      // still fails on time. It runs until the response arrives, like the abort listeners above.
+      // still fails on time. It rejects before aborting: a fetch that answers its abort with a
+      // fresh AbortError must not win the race and pass the timeout off as a cancellation. It runs
+      // until the response arrives, like the abort listeners above.
       const deadlineMs = apiRequestDeadlineMs(init.method ?? "GET", path, init.body);
       let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
       const deadline = deadlineMs === null ? null : new Promise<never>((_resolve, reject) => {
         deadlineTimer = setTimeout(() => {
           const timeout = new RequestTimeoutError(deadlineMs);
-          requestAbort.abort(timeout);
           reject(timeout);
+          requestAbort.abort(timeout);
         }, deadlineMs);
       });
 
