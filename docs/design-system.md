@@ -151,7 +151,7 @@ correct in every scheme and theme without regeneration.
   --surface-selected: color-mix(in srgb, var(--accent) 12%, var(--bg-elev));  /* selected row, active rail item */
   --count-badge-ring: var(--bg-elev);  /* an on-icon count badge's ring; its surface overrides it (§11.4) */
 
-  /* Focus: neutral, never teal */
+  /* Focus: neutral, never teal. A generated scheme may emit its own (§21 item 8). */
   --focus: var(--text);
   --focus-width: 2px;
   --focus-offset: 2px;
@@ -2142,7 +2142,8 @@ input:focus-visible, textarea:focus-visible, .select-trigger:focus-visible {
 }
 ```
 
-- The ring is neutral (`--text`), not teal, so focus is never confused with selection.
+- The ring is neutral (`--text`, or a neutral pushed past it in One Dark and Dracula's dark theme,
+  §21 item 8), not teal, so focus is never confused with selection.
 - `:where()` keeps the global rule at zero specificity so components that draw their own focus do
   not get two rings (composer, search fields).
 - Programmatic focus targets (`#page-title`, `.modal`, `.detail-scroll`) never show a ring.
@@ -2522,9 +2523,13 @@ These trade-offs are deliberate. Keep them in mind when a screen seems to argue 
    so it shows focus as its own 1px edge in `--focus` instead of the §16.1 input recipe's edge plus
    ring. A 2px near-white ring around a card that is almost always focused reads as an alarm, and a
    teal edge would compete with Send. The card rests on `--control-outline`, so rest to focus
-   still measures at least 3:1 in both Wollipog themes. Other inputs keep §16.1. One Dark (both
-   themes) and Dracula's dark theme measure 2.3–2.8:1 until their `--control-outline` is
-   re-derived.
+   measures at least 3:1 in every scheme and theme. Other inputs keep §16.1. Because
+   `--control-outline` must itself clear 3:1 on the surfaces it bounds, `--focus` has to clear
+   about 9:1 on them, which `--text` does not in One Dark (both themes) or Dracula's dark theme.
+   The scheme generator therefore emits `--focus` per scheme: the palette's `--text`, moved toward
+   white (dark) or black (light) only as far as the 3:1 step needs. One Dark dark focuses in
+   `#c5c9d2` (3.00:1), One Dark light in `#313239` (3.02:1) and Dracula dark in `#ffffff`
+   (3.00:1, the most any colour reaches there). Every other generated theme keeps its `--text`.
 9. **Composer pickers on phones.** The / and @ pickers (`ComposerListbox`, #2155) open above the
    composer on phones too, with 44px rows and no footer keys, instead of becoming a bottom sheet
    (§9.2). A sheet would cover the caret and compete with the software keyboard while the person is

@@ -16922,6 +16922,7 @@ body.shell-dock-dragging * {
   --border: #383d44;
   --border-strong: #53585f;
   --control-outline: #71777e;
+  --focus: #e6edf3;
   --text: #e6edf3;
   --text-dim: #9da5ac;
   --text-faint: #8d96a0;
@@ -16994,6 +16995,7 @@ body.shell-dock-dragging * {
   --border: #d3d5d8;
   --border-strong: #b8babd;
   --control-outline: #808387;
+  --focus: #1f2328;
   --text: #1f2328;
   --text-dim: #535c67;
   --text-faint: #59636e;
@@ -17068,6 +17070,7 @@ body.shell-dock-dragging * {
   --border: #2f3239;
   --border-strong: #42464d;
   --control-outline: #6b7079;
+  --focus: #c5c9d2;
   --text: #abb2bf;
   --text-dim: #99a0aa;
   --text-faint: #888f9c;
@@ -17140,6 +17143,7 @@ body.shell-dock-dragging * {
   --border: #cdcdd0;
   --border-strong: #b6b7ba;
   --control-outline: #7a7b81;
+  --focus: #313239;
   --text: #383a42;
   --text-dim: #53555f;
   --text-faint: #5c5e69;
@@ -17214,6 +17218,7 @@ body.shell-dock-dragging * {
   --border: #545662;
   --border-strong: #6d6f78;
   --control-outline: #939599;
+  --focus: #ffffff;
   --text: #f8f8f2;
   --text-dim: #c5cbdf;
   --text-faint: #afb8d2;
@@ -17286,6 +17291,7 @@ body.shell-dock-dragging * {
   --border: #d2cebd;
   --border-strong: #b7b3a5;
   --control-outline: #807d74;
+  --focus: #1f1f1f;
   --text: #1f1f1f;
   --text-dim: #5c564d;
   --text-faint: #635d52;
@@ -17360,6 +17366,7 @@ body.shell-dock-dragging * {
   --border: #51524b;
   --border-strong: #6b6c65;
   --control-outline: #8e8f88;
+  --focus: #f8f8f2;
   --text: #f8f8f2;
   --text-dim: #c6c4bc;
   --text-faint: #b3b1a4;
@@ -17432,6 +17439,7 @@ body.shell-dock-dragging * {
   --border: #d2d2c9;
   --border-strong: #b8b8b0;
   --control-outline: #7f7f78;
+  --focus: #2c2c26;
   --text: #2c2c26;
   --text-dim: #59594e;
   --text-faint: #5f5f52;

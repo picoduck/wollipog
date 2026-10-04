@@ -741,9 +741,8 @@ test("the composer's placeholder reads at 4.5:1 in every palette, and its focus 
       const ratio = contrast(color("--text-faint"), color(surface));
       assert.ok(ratio >= AA_NORMAL, `placeholder on ${surface} in ${palette}: ${ratio.toFixed(2)}:1`);
     }
-    // The Wollipog scheme's two themes hold the 3:1 step; One Dark and Dracula do not yet, because
-    // their --control-outline sits close to --text (docs/design-system.md §21).
-    if (!palette.startsWith("wollipog:")) continue;
+    // Every palette, including One Dark and Dracula, whose --text sits too close to their
+    // --control-outline: the scheme generator moves their --focus past the text (#2504).
     const edge = contrast(color("--focus"), color("--control-outline"));
     assert.ok(edge >= AA_NON_TEXT, `rest to focus edge in ${palette}: ${edge.toFixed(2)}:1`);
   }

@@ -386,6 +386,13 @@ function tokens(a, theme) {
   // Control boundaries carry state — an empty radio ring, an off switch track — so WCAG's 3:1
   // non-text rule applies to them against the surface BEHIND them, which is the elevated one.
   const controlOutline = reach(mix(bgElev3, a.text, 0.35), bgElev3, 3, a.text, "--control-outline");
+  // The composer rests on --control-outline and shows focus by turning that edge --focus
+  // (docs/design-system.md §21), so the two must sit 3:1 apart. The outline is 3:1 off the surface,
+  // and ratios multiply along that chain, so focus has to clear about 9:1 on the surface — which
+  // One Dark's #abb2bf (7:1) and Dracula's #f8f8f2 (8.5:1 on the third elevation) do not. Focus
+  // therefore starts at the text and moves PAST it, to the theme's extreme, until the step clears.
+  // Where the text already does, it stays the text. Dracula dark needs pure white, at 3.0002:1.
+  const focus = reach(a.text, controlOutline, 3, dark ? "#ffffff" : "#000000", "--focus");
   // The faint tier carries counts, key hints and timestamps, all small. It has to clear 4.5:1 on
   // every surface in the app, so it is measured against the lightest one rather than the ground.
   const faint = reach(a.dim, bgElev3, 4.5, a.text, "--text-dim");
@@ -409,6 +416,7 @@ function tokens(a, theme) {
     "--border": border,
     "--border-strong": mix(bgElev3, a.text, 0.22),
     "--control-outline": controlOutline,
+    "--focus": focus,
     "--text": a.text,
     // Measured on the LIGHTEST surface it actually sits on, which is the status pills' 10% tint of
     // itself over the third elevation — not the elevation alone. `.st-queued` was 3.86:1.
