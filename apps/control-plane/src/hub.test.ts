@@ -1469,15 +1469,15 @@ test("a stale socket detach is a no-op: reconnect replacement survives and repor
   const newSock: Socket = { send: () => {} };
   const hub = new Hub(fakeDb);
   hub.attachRunner("r1", oldSock);
-  hub.noteRunnerReceiveActivity("r1", oldSock, 100);
-  assert.equal(hub.runnerLastReceiveActivity("r1"), 100);
+  hub.noteRunnerFrameActivity("r1", oldSock, 100);
+  assert.equal(hub.runnerLastFrameActivity("r1"), 100);
   hub.attachRunner("r1", newSock); // reconnect replaced the socket before the old close fired
   assert.deepEqual(replacementClose, [1008, "runner credential replaced"]);
-  assert.equal(hub.runnerLastReceiveActivity("r1"), null, "replacement does not inherit old activity");
-  hub.noteRunnerReceiveActivity("r1", oldSock, 300);
-  assert.equal(hub.runnerLastReceiveActivity("r1"), null, "stale frames cannot refresh the replacement");
-  hub.noteRunnerReceiveActivity("r1", newSock, 200);
-  assert.equal(hub.runnerLastReceiveActivity("r1"), 200);
+  assert.equal(hub.runnerLastFrameActivity("r1"), null, "replacement does not inherit old activity");
+  hub.noteRunnerFrameActivity("r1", oldSock, 300);
+  assert.equal(hub.runnerLastFrameActivity("r1"), null, "stale frames cannot refresh the replacement");
+  hub.noteRunnerFrameActivity("r1", newSock, 200);
+  assert.equal(hub.runnerLastFrameActivity("r1"), 200);
 
   assert.equal(hub.detachRunner("r1", oldSock), false, "stale detach must report non-current");
   assert.equal(hub.isRunnerOnline("r1"), true, "replacement connection stays attached");
@@ -1486,7 +1486,7 @@ test("a stale socket detach is a no-op: reconnect replacement survives and repor
 
   assert.equal(hub.detachRunner("r1", newSock), true, "current-socket detach reports true");
   assert.equal(hub.isRunnerOnline("r1"), false);
-  assert.equal(hub.runnerLastReceiveActivity("r1"), null, "detached activity is no longer visible");
+  assert.equal(hub.runnerLastFrameActivity("r1"), null, "detached activity is no longer visible");
 });
 
 test("closeRunner preserves current identity until the shared close teardown runs", async () => {

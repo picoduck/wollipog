@@ -134,7 +134,8 @@ test("1500 retained campaign children reconcile while real HTTP and heartbeat po
   let reconciliationCompleted = false;
   const child = spawn(process.execPath, ["--import", "tsx", "apps/control-plane/src/index.ts"], {
     cwd: REPO_ROOT, env: { ...process.env, CONTROL_PLANE_HOST: "127.0.0.1",
-      CONTROL_PLANE_PORT: String(port), CONTROL_PLANE_DB: databasePath },
+      CONTROL_PLANE_PORT: String(port), CONTROL_PLANE_DB: databasePath,
+      CONTROL_PLANE_HEARTBEAT_MS: "250" },
     stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
   });
   child.stdout?.on("data", (chunk) => {
@@ -155,13 +156,15 @@ test("1500 retained campaign children reconcile while real HTTP and heartbeat po
   read = new DatabaseSync(databasePath, { readOnly: true });
   let maxHealthMs = 0;
   let maxPongMs = 0;
+  let currentHeartbeat: ReturnType<typeof setInterval> | undefined;
   for (let pass = 0; pass < 3; pass++) {
     const socket = await openSocket(`ws://127.0.0.1:${port}/runner`);
     sockets.push(socket);
     // Behave like a real runner throughout the convergence wait, not just during probe samples.
     const heartbeat = setInterval(() => {
       if (socket.readyState === 1) socket.send(JSON.stringify({ type: "heartbeat" }));
-    }, 500);
+    }, 50);
+    currentHeartbeat = heartbeat;
     t.after(() => clearInterval(heartbeat));
     const registered = new Promise<void>((resolvePromise) => socket.on("message", (raw) => {
       if (JSON.parse(raw.toString()).type === "registered") resolvePromise();
@@ -264,6 +267,11 @@ test("1500 retained campaign children reconcile while real HTTP and heartbeat po
   assert.equal(reconciliationCompleted, true);
   t.diagnostic(`Reconciliation cancellation observed: ${/runner_reconciliation_cancelled/.test(output)}`);
   assert.doesNotMatch(output, /runner frame handler threw|runner_frame_queue_closed/);
+  // Backlog progress grants no permanent liveness exemption. After the bounded replay drains,
+  // stopping heartbeats must still force the ordinary half-open termination.
+  const silentClose = waitForClose(burstSocket);
+  clearInterval(currentHeartbeat);
+  assert.equal((await silentClose).code, 1006);
 });
 
 function registerFrame(index: number): string {
