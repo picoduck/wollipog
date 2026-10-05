@@ -370,8 +370,7 @@ for (const viewport of [
     await expect(held.locator(".notice-title")).toHaveText("Held Children 2");
     const list = held.locator("ul.held-children");
     const cap = viewport.width <= 760 ? 220 : 280;
-    expect(await list.evaluate((element) => getComputedStyle(element).maxHeight)).toBe(`${cap}px`);
-    expect((await list.boundingBox())!.height).toBeLessThanOrEqual(cap);
+    expect(Math.round((await list.boundingBox())!.height)).toBe(cap);
     // On phones each hold stacks its label over its value.
     const term = held.locator("dl.facts dt").first();
     const value = held.locator("dl.facts dd").first();
@@ -407,6 +406,23 @@ for (const viewport of [
     }
     await expect(continuation.getByRole("button", { name: "Retry Now" })).toBeVisible();
     await assertNoHorizontalOverflow(page, ".campaign-notices");
+  });
+
+  test(`in a short window the campaign notices leave the transcript and composer at least half, at ${viewport.name} (#2157)`, async ({ page }) => {
+    await page.setViewportSize({ width: viewport.width, height: 480 });
+    await page.goto("/request-surfaces-e2e.html?scenario=both");
+    const band = page.locator(".campaign-notices");
+    await expect(page.getByRole("region", { name: "Held Children" })).toBeVisible();
+    const chat = (await page.locator(".detail-chat").boundingBox())!;
+    const bandBox = (await band.boundingBox())!;
+    expect(bandBox.height).toBeLessThanOrEqual(chat.height / 2 + 1);
+    expect((await page.locator(".held-children").boundingBox())!.height).toBeLessThanOrEqual(480 * 0.4 + 1);
+    expect((await page.getByRole("region", { name: "Session Activity" }).boundingBox())!.height).toBeGreaterThan(100);
+    const composer = (await page.locator(".composer-box").boundingBox())!;
+    expect(composer.y + composer.height).toBeLessThanOrEqual(480);
+    // What the band cannot show scrolls into view from the keyboard.
+    await page.getByRole("link", { name: "Fix #1651: Queue Prompts Behind a Handoff Barrier" }).focus();
+    await expect(page.getByRole("link", { name: "Fix #1651: Queue Prompts Behind a Handoff Barrier" })).toBeInViewport();
   });
 
   test(`a Viewer's worktree-recovery advice names who can recover it, not the worktree tools, at ${viewport.name} (#1867)`, async ({ page }) => {

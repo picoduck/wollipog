@@ -9090,21 +9090,28 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   border-color: color-mix(in srgb, var(--red) 40%, transparent);
 }
 /* Campaign notices (§13.2, #2036, #2157): Campaign Continuation, then Held Children, at the top of the
-   chat column under the session bar, on the composer's width and gutters. */
+   chat column under the session bar, on the composer's width and gutters. As with the request dock,
+   the transcript and composer keep at least half the column: in a short pane the band scrolls. */
 .campaign-notices {
   display: grid;
-  flex: none;
+  flex: 0 1 auto;
+  align-content: start;
   gap: var(--space-2);
+  min-height: 0;
+  max-height: 50%;
   padding-top: var(--space-2);
   padding-right: max(var(--space-3), calc((100% - var(--chat-max)) / 2));
   padding-left: max(var(--space-3), calc((100% - var(--chat-max)) / 2));
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 /* Held Children: up to 32 children can be held, so the list scrolls and the transcript below keeps
-   its room. Each child is its link, then one `.facts` list per hold. */
+   its room: 280px at most (220px on phones), and less in a short window. Each child is its link,
+   then one `.facts` list per hold. */
 .held-children {
   display: grid;
   gap: var(--space-3);
-  max-height: 280px;
+  max-height: min(280px, 40dvh);
   margin: var(--space-2) 0 0;
   padding: 0;
   overflow-y: auto;
@@ -9123,7 +9130,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .notice-title > .count-badge { margin-left: var(--space-1); vertical-align: text-bottom; }
 
 @media (max-width: 760px) {
-  .held-children { max-height: 220px; }
+  .held-children { max-height: min(220px, 40dvh); }
   /* A phone stacks each hold's label over its value. */
   .held-children .facts {
     grid-template-columns: minmax(0, 1fr);
