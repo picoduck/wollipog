@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -134,8 +134,7 @@ test("1500 retained campaign children reconcile while real HTTP and heartbeat po
   let reconciliationCompleted = false;
   const child = spawn(process.execPath, ["--import", "tsx", "apps/control-plane/src/index.ts"], {
     cwd: REPO_ROOT, env: { ...process.env, CONTROL_PLANE_HOST: "127.0.0.1",
-      CONTROL_PLANE_PORT: String(port), CONTROL_PLANE_DB: databasePath,
-      CONTROL_PLANE_HEARTBEAT_MS: "250" },
+      CONTROL_PLANE_PORT: String(port), CONTROL_PLANE_DB: databasePath },
     stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
   });
   child.stdout?.on("data", (chunk) => {
@@ -156,15 +155,13 @@ test("1500 retained campaign children reconcile while real HTTP and heartbeat po
   read = new DatabaseSync(databasePath, { readOnly: true });
   let maxHealthMs = 0;
   let maxPongMs = 0;
-  let currentHeartbeat: ReturnType<typeof setInterval> | undefined;
   for (let pass = 0; pass < 3; pass++) {
     const socket = await openSocket(`ws://127.0.0.1:${port}/runner`);
     sockets.push(socket);
     // Behave like a real runner throughout the convergence wait, not just during probe samples.
     const heartbeat = setInterval(() => {
       if (socket.readyState === 1) socket.send(JSON.stringify({ type: "heartbeat" }));
-    }, 50);
-    currentHeartbeat = heartbeat;
+    }, 500);
     t.after(() => clearInterval(heartbeat));
     const registered = new Promise<void>((resolvePromise) => socket.on("message", (raw) => {
       if (JSON.parse(raw.toString()).type === "registered") resolvePromise();
@@ -192,7 +189,7 @@ test("1500 retained campaign children reconcile while real HTTP and heartbeat po
       socket.send(JSON.stringify({ type: "policy_hook_credential", sessionId: "new-credential-session", tokenHash: "c".repeat(64) }));
     }
     const credentialHandshake = new Promise<void>((resolvePromise, reject) => {
-      const timer = setTimeout(() => reject(new Error("Agent Control handshake stalled during inventory")), 2000);
+      const timer = setTimeout(() => reject(new Error(`Agent Control handshake stalled during inventory\n${output}`)), 2000);
       socket.on("message", (raw) => {
         const message = JSON.parse(raw.toString());
         if (message.type !== "agent_control_credential_registered" || message.sessionId !== "child-1499") return;
@@ -267,11 +264,102 @@ test("1500 retained campaign children reconcile while real HTTP and heartbeat po
   assert.equal(reconciliationCompleted, true);
   t.diagnostic(`Reconciliation cancellation observed: ${/runner_reconciliation_cancelled/.test(output)}`);
   assert.doesNotMatch(output, /runner frame handler threw|runner_frame_queue_closed/);
-  // Backlog progress grants no permanent liveness exemption. After the bounded replay drains,
-  // stopping heartbeats must still force the ordinary half-open termination.
-  const silentClose = waitForClose(burstSocket);
-  clearInterval(currentHeartbeat);
-  assert.equal((await silentClose).code, 1006);
+});
+
+test("a receive-paused runner stays online while authenticated replay advances, then expires when idle", { timeout: 60_000 }, async (t) => {
+  const port = await reservePort();
+  const temp = mkdtempSync(join(tmpdir(), "wollipog-replay-liveness-"));
+  const databasePath = join(temp, "control-plane.db");
+  const seed = ControlPlaneDb.open(databasePath);
+  const identity = seed.localIdentityContext();
+  const frame = JSON.parse(registerFrame(556));
+  const runnerId = frame.runner.runnerId as string;
+  seed.issueRunnerCredential({ credentialId: "rcred_replay_liveness_test", runnerId,
+    organizationId: identity.organizationId, ownerKind: "organization", ownerId: identity.organizationId,
+    label: "Synthetic", tokenHash: hashToken(runnerToken(556)), createdByUserId: identity.userId,
+    now: Date.now(), expiresAt: Date.now() + 600_000 });
+  seed.registerRunner(frame.runner, 1, PROTOCOL_VERSION);
+  seed.createSession({ id: "pressure-session", runnerId, workspaceId: "ws", agentId: "claude",
+    title: "Synthetic", driver: "claude-code", useWorktree: false, config: {}, now: 1 });
+  seed.updateSessionStatus("pressure-session", "completed", 2);
+  seed.createShell({ shellId: "pressure-shell", sessionId: "pressure-session", runnerId, name: "Synthetic", createdAt: 1 });
+  seed.close();
+  frame.sessionSnapshots = [{ id: "pressure-session", workspaceId: "ws", agentId: "claude",
+    title: "Synthetic", status: "completed", driver: "claude-code", useWorktree: false,
+    worktreePath: null, config: {}, preview: null, pendingApproval: null,
+    tokensIn: 0, tokensOut: 0, costUsd: 0, seq: 0, createdAt: 1, updatedAt: 2 }];
+
+  // Fault injection is confined to this disposable child: delay shell frame application without
+  // blocking its event loop. This guarantees a real read pause longer than the 1.5s deadline on
+  // fast and slow filesystems alike. It does not alter credentials, arrivals, or liveness logic.
+  const preloadPath = join(temp, "slow-replay.mjs");
+  writeFileSync(preloadPath, `
+import { setTimeout as delay } from 'node:timers/promises';
+import { RunnerFrameQueue } from ${JSON.stringify(new URL("./runner-frame-queue.ts", import.meta.url).href)};
+const enqueue = RunnerFrameQueue.prototype.enqueue;
+const wrapped = new WeakSet();
+RunnerFrameQueue.prototype.enqueue = function(message, bytes) {
+  if (!wrapped.has(this)) {
+    const handle = Reflect.get(this, 'handle');
+    const pressure = Reflect.get(this, 'onPressure');
+    if (typeof handle !== 'function' || typeof pressure !== 'function') throw new Error('queue fault injection seam changed');
+    Reflect.set(this, 'handle', async (frame) => {
+      if (frame.type === 'shell_output') await delay(20);
+      return Reflect.apply(handle, this, [frame]);
+    });
+    Reflect.set(this, 'onPressure', (paused) => {
+      console.error('TEST_REPLAY_PRESSURE=' + paused);
+      return Reflect.apply(pressure, this, [paused]);
+    });
+    wrapped.add(this);
+  }
+  return Reflect.apply(enqueue, this, [message, bytes]);
+};
+`);
+  let output = "";
+  const child = spawn(process.execPath, ["--import", "tsx", "--import", preloadPath, "apps/control-plane/src/index.ts"], {
+    cwd: REPO_ROOT, env: { ...process.env, CONTROL_PLANE_HOST: "127.0.0.1",
+      CONTROL_PLANE_PORT: String(port), CONTROL_PLANE_DB: databasePath, CONTROL_PLANE_HEARTBEAT_MS: "500" },
+    stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
+  });
+  child.stdout?.on("data", (chunk) => { output = (output + String(chunk)).slice(-128_000); });
+  child.stderr?.on("data", (chunk) => { output = (output + String(chunk)).slice(-128_000); });
+  let socket: StrictSocket | undefined;
+  let read: DatabaseSync | undefined;
+  t.after(async () => {
+    socket?.terminate();
+    await stopChild(child);
+    read?.close();
+    rmSync(temp, { recursive: true, force: true });
+  });
+  const url = `http://127.0.0.1:${port}`;
+  await waitForHealth(url, child, () => output);
+  read = new DatabaseSync(databasePath, { readOnly: true });
+  socket = await openSocket(`ws://127.0.0.1:${port}/runner`);
+  const registered = new Promise<void>((resolvePromise) => socket!.on("message", (raw) => {
+    if (JSON.parse(raw.toString()).type === "registered") resolvePromise();
+  }));
+  socket.send(JSON.stringify(frame));
+  await registered;
+  let disconnected = false;
+  socket.once("close", () => { disconnected = true; });
+  const count = 600;
+  const data = "x".repeat(64 * 1024);
+  // No heartbeat is sent: authenticated replay must keep the connection alive on its own.
+  for (let seq = 1; seq <= count; seq++) socket.send(JSON.stringify({ type: "shell_output",
+    sessionId: "pressure-session", shellId: "pressure-shell", stream: "stdout", data, seq }));
+  const deadline = Date.now() + 40_000;
+  while (Date.now() < deadline && !disconnected) {
+    if (read.prepare("SELECT output_end_seq FROM session_shells WHERE shell_id='pressure-shell'").get()?.output_end_seq === count) break;
+    await delay(50);
+  }
+  assert.equal(disconnected, false, `read-paused replay was mistaken for a dead runner\n${output}`);
+  assert.equal(read.prepare("SELECT output_end_seq FROM session_shells WHERE shell_id='pressure-shell'").get()?.output_end_seq,
+    count, `the authenticated replay did not finish\n${output}`);
+  assert.match(output, /TEST_REPLAY_PRESSURE=true/, "the test must exercise an actual socket read pause");
+  assert.match(output, /TEST_REPLAY_PRESSURE=false/, "draining must release socket read pressure");
+  assert.equal((await waitForClose(socket)).code, 1006,
+    "after the bounded backlog drains, a silent runner still reaches forced half-open termination");
 });
 
 function registerFrame(index: number): string {
