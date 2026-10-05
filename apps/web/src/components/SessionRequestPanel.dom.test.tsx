@@ -195,29 +195,34 @@ test("a child's eight-item evidence review persists acknowledgement drafts and s
   let root = createRoot(container);
   try {
     await act(async () => root.render(<ChildPanel child={child} client={client} />));
-    assert.equal(container.querySelectorAll(".evidence-review-item").length, 8);
-    assert.equal(container.querySelectorAll(".evidence-review-list").length, 1);
+    assert.equal(container.querySelectorAll(".ev-tile").length, 8);
+    assert.equal(container.querySelectorAll(".ev-grid").length, 1);
     assert.doesNotMatch(container.textContent ?? "", /signature=secret|https:\/\/evidence/);
     assert.equal(container.querySelector("details")?.hasAttribute("open"), false);
     const approve = footButtons(container).find((button) => button.textContent === "Approve")!;
     const deny = footButtons(container).find((button) => button.textContent === "Deny")!;
     assert.equal(approve.disabled, true);
     assert.equal(deny.disabled, false);
-    // Approve's reason is the visible sentence above the evidence.
+    // Approve's reason is the foot-note above the footer.
     assert.equal(domWindow.document.getElementById(approve.getAttribute("aria-describedby")!)?.textContent,
-      "Review every artifact before approving this request.");
-    const checks = [...container.querySelectorAll<HTMLInputElement>('.evidence-review-item input[type="checkbox"]')];
+      "Review 8 more to approve.");
+    // Each link-only item can be marked only once its link was opened (#2197).
+    const links = [...container.querySelectorAll<HTMLAnchorElement>(".ev-tile a.btn")];
+    assert.equal(links.length, 8);
+    await act(async () => { for (const link of links) link.click(); });
+    const checks = [...container.querySelectorAll<HTMLInputElement>('.ev-tile input[type="checkbox"]')];
     await act(async () => {
       checks[0]!.click();
       checks[1]!.click();
       checks[2]!.click();
     });
-    assert.match(container.querySelector(".evidence-review-summary [role=\"status\"]")?.textContent ?? "", /3 of 8 Reviewed/);
+    assert.equal(container.querySelector(".ev-progress")?.textContent, "3 of 8 reviewed");
 
     await act(async () => root.unmount());
     root = createRoot(container);
     await act(async () => root.render(<ChildPanel child={child} client={client} />));
-    const restored = [...container.querySelectorAll<HTMLInputElement>('.evidence-review-item input[type="checkbox"]')];
+    const restored = [...container.querySelectorAll<HTMLInputElement>('.ev-tile input[type="checkbox"]')];
+    assert.ok(restored.every((checkbox) => !checkbox.disabled), "the opened links are restored with the marks");
     assert.deepEqual(restored.map((checkbox) => checkbox.checked), [
       true, true, true, false, false, false, false, false,
     ]);
@@ -250,8 +255,8 @@ test("a human fallback explains why the assigned Orchestrator could not review t
   const root = createRoot(container);
   try {
     await act(async () => root.render(<ChildPanel child={asDescendant(session)} client={api as ApiClient} />));
-    assert.match(container.querySelector(".evidence-review")?.textContent ?? "",
-      /assigned to the Orchestrator, but this request needs a human\. Evidence "clip" is video/);
+    assert.match(container.querySelector(".ev-review details")?.textContent ?? "",
+      /assigned to the Orchestrator, but this request needs a person\. Evidence "clip" is video/);
   } finally {
     await act(async () => root.unmount());
     container.remove();

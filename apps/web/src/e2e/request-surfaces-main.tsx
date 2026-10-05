@@ -43,6 +43,8 @@ declare global {
       openedChild(): DescendantRequestView | null;
       submissions(): unknown[];
       artifactRequests(): string[];
+      /** The fixture links an Open Link activated; the page never navigates to them. */
+      openedLinks(): string[];
       openedHeldChild(): string | null;
       clearHold(sessionId: string): void;
       /** The next decision fails, as a runner that refuses it would. */
@@ -103,9 +105,20 @@ const descendantRequestStatus: DescendantRequestStatus = requestedPollStatus ===
 // `artifacts` makes the evidence artifact-backed: `ready` (every item), `mixed` (artifact, URI-only,
 // and video items together), `unrenderable` (a PNG artifact, a URI-only item, and two artifacts the card
 // cannot draw, one SVG and one with no media type, both carrying an external copy), `mismatch` (item 2's bytes do not match its digest), `unavailable`
-// (item 2 is gone), or `undecodable` (item 2 has a PNG signature, a correct digest, and a body no
+// (item 2 is gone), `unavailable-retry` (item 2's download fails and can be retried), or `undecodable` (item 2 has a PNG signature, a correct digest, and a body no
 // browser can draw, which is exactly what the artifact validator's signature check admits). The captures are drawn here so the fixture needs no binary files.
 const artifactMode = new URLSearchParams(window.location.search).get("artifacts");
+// `hold=1` keeps every artifact download pending, so each tile stays in its loading state.
+const holdArtifacts = new URLSearchParams(window.location.search).get("hold") === "1";
+const openedLinks: string[] = [];
+// The fixture's evidence links point at a host that does not exist. The click still reaches the
+// card, which records the link as opened, but the browser does not open a tab for it.
+document.addEventListener("click", (event) => {
+  const link = (event.target as Element | null)?.closest?.('a[href^="https://evidence.example/"]');
+  if (!(link instanceof HTMLAnchorElement)) return;
+  event.preventDefault();
+  openedLinks.push(link.href);
+}, true);
 const artifactBytes = new Map<string, ArrayBuffer>();
 const artifactDigests = new Map<string, string>();
 const artifactRequests: string[] = [];
@@ -811,10 +824,13 @@ function Fixture() {
     ...api,
     artifactExport: async (artifactId: string) => {
       artifactRequests.push(artifactId);
+      if (holdArtifacts) return new Promise<Blob>(() => {});
       const bytes = artifactBytes.get(artifactId);
       if (!bytes || (artifactMode === "unavailable" && artifactId === "art_2")) {
         throw new ApiError("artifact not found", 404);
       }
+      // A transport failure, which Retry can recover from.
+      if (artifactMode === "unavailable-retry" && artifactId === "art_2") throw new Error("network down");
       return new Blob([bytes], { type: artifactId === "art_clip" ? "video/webm" : "image/png" });
     },
     governancePolicies: async () => ({ policies: [{
@@ -1054,6 +1070,7 @@ window.__WOLLIPOG_REQUEST_SURFACES_E2E__ = {
   openedChild: () => openedChild,
   submissions: () => submissions,
   artifactRequests: () => [...artifactRequests],
+  openedLinks: () => [...openedLinks],
   openedHeldChild: () => openedHeldChild,
   clearHold: (sessionId) => clearHold(sessionId),
   failNextDecision: () => { failNextDecision = true; },

@@ -1,1 +1,0 @@
-|.evidence-review-summary|padding-bottom|12px

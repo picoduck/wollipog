@@ -121,43 +121,49 @@ async function mount(session: SessionView, artifactExport: ApiClient["artifactEx
   for (let turn = 0; turn < 6; turn += 1) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
   const button = (name: string) => [...container.querySelectorAll<HTMLButtonElement>(".request-card-foot button")]
     .find((candidate) => candidate.textContent === name)!;
-  const checkbox = (evidenceId: string) =>
-    container.querySelector<HTMLInputElement>(`input[aria-label="Mark ${evidenceId} as Reviewed"]`)!;
+  // Tiles are named by media type (#2197): "Screenshot", or "Screenshot 1" when there are several.
+  const checkbox = (name: string) =>
+    container.querySelector<HTMLInputElement>(`input[aria-label="Mark ${name} as Reviewed"]`);
+  const tile = (evidenceId: string) => [...container.querySelectorAll<HTMLElement>(".ev-tile")]
+    .find((candidate) => candidate.querySelector(".ev-id")?.textContent === evidenceId)!;
+  const footNote = () => container.querySelector(".request-card-reasons")?.textContent ?? "";
   // happy-dom never decodes an image, so the browser's verdict is delivered by hand: "load" for a
   // picture it could draw, "error" for bytes it could not.
   const decode = async (verdict: "load" | "error") => {
-    for (const image of container.querySelectorAll<HTMLImageElement>(".evidence-artifact img")) {
+    for (const image of container.querySelectorAll<HTMLImageElement>(".ev-media img")) {
       await act(async () => { image.dispatchEvent(new domWindow.Event(verdict) as unknown as Event); });
     }
   };
   return {
-    container, requests, button, checkbox, decode,
+    container, requests, button, checkbox, tile, footNote, decode,
     unmount: async () => { await act(async () => root.unmount()); container.remove(); },
   };
 }
 
-test("artifact-backed evidence is shown in place, verified against the decision digest, and replaces the external link", async () => {
+test("artifact-backed evidence is shown in its tile, verified against the decision digest, and replaces the external link", async () => {
   domWindow.localStorage.clear();
   const view = await mount(sessionWith([artifactItem()]), async () => new Blob([PNG], { type: "application/octet-stream" }));
   try {
     assert.deepEqual(view.requests, ["art_desktop"]);
     // A digest match says the file is the one the request names, not that it is a picture. Until
     // the browser has drawn it, nothing is visible and nothing can be marked reviewed.
-    assert.equal(view.container.querySelector<HTMLButtonElement>(".evidence-artifact-thumb")?.hidden, true);
-    assert.equal(view.checkbox("desktop-after").disabled, true, "a verified but undrawn image is not yet shown");
-    assert.match(view.container.querySelector('.evidence-artifact [role="status"]')?.textContent ?? "", /Loading evidence/u);
+    assert.equal(view.container.querySelector<HTMLButtonElement>(".ev-thumb")?.hidden, true);
+    assert.equal(view.checkbox("Screenshot")!.disabled, true, "a verified but undrawn image is not yet shown");
+    assert.equal(view.container.querySelector(".ev-loading")?.textContent, "Loading…");
+    assert.equal(view.footNote(), "Review 1 more to approve.");
     await view.decode("load");
-    assert.equal(view.container.querySelector<HTMLButtonElement>(".evidence-artifact-thumb")?.hidden, false);
-    const image = view.container.querySelector<HTMLImageElement>(".evidence-artifact img");
+    assert.equal(view.container.querySelector<HTMLButtonElement>(".ev-thumb")?.hidden, false);
+    const image = view.container.querySelector<HTMLImageElement>(".ev-media img");
     assert.ok(image, "the verified artifact is rendered inside the card");
-    assert.equal(image.getAttribute("alt"), "Evidence: desktop-after");
+    assert.equal(image.getAttribute("alt"), "Screenshot");
     assert.match(image.getAttribute("src") ?? "", /^blob:/u, "bytes stay in memory behind an object URL");
     assertNoDomNode(view.container.querySelector('a[href^="https://evidence.example"]'),
       "an artifact-backed item never sends the reviewer to the external copy");
     assert.doesNotMatch(view.container.innerHTML, /signature=secret/u);
-    assert.equal(view.container.querySelector(".evidence-artifact-thumb")?.getAttribute("aria-label"),
-      "Enlarge Evidence: desktop-after");
-    assert.equal(view.checkbox("desktop-after").disabled, false, "a shown image can be marked reviewed");
+    assert.equal(view.container.querySelector(".ev-thumb")?.getAttribute("aria-label"), "Open Screenshot");
+    assert.ok(view.container.querySelector(".ev-thumb[data-ev-viewer-target]"), "the shown tile is the viewer's target");
+    assert.equal(view.tile("desktop-after").querySelector(".ev-name")?.textContent, "Screenshot");
+    assert.equal(view.checkbox("Screenshot")!.disabled, false, "a shown image can be marked reviewed");
     assert.equal(view.button("Approve").disabled, true, "showing is not reviewing");
   } finally {
     await view.unmount();
@@ -171,11 +177,12 @@ test("artifact-only evidence can be reviewed without creating an external link",
   try {
     assert.deepEqual(view.requests, ["art_desktop"]);
     await view.decode("load");
-    assert.equal(view.container.querySelector(".evidence-artifact img")?.getAttribute("alt"), "Evidence: desktop-after");
-    assertNoDomNode(view.container.querySelector(".evidence-review-item a"));
-    assert.equal(view.checkbox("desktop-after").disabled, false);
-    await act(async () => view.checkbox("desktop-after").click());
+    assert.equal(view.container.querySelector(".ev-media img")?.getAttribute("alt"), "Screenshot");
+    assertNoDomNode(view.container.querySelector(".ev-tile a"));
+    assert.equal(view.checkbox("Screenshot")!.disabled, false);
+    await act(async () => view.checkbox("Screenshot")!.click());
     assert.equal(view.button("Approve").disabled, false);
+    assertNoDomNode(view.container.querySelector(".request-card-reasons"), "nothing is left to explain");
   } finally {
     await view.unmount();
   }
@@ -187,21 +194,29 @@ test("artifact-backed video is reviewable only after a picture frame loads", asy
   const view = await mount(sessionWith([item]), async () => new Blob([WEBM], { type: "video/webm" }));
   try {
     assert.deepEqual(view.requests, ["art_clip"]);
-    const video = view.container.querySelector<HTMLVideoElement>(".evidence-artifact-video");
+    const video = view.container.querySelector<HTMLVideoElement>(".ev-thumb video");
     assert.ok(video);
-    assert.equal(video.hidden, true);
-    assert.equal(view.checkbox("clip").disabled, true);
+    assert.equal(view.container.querySelector<HTMLButtonElement>(".ev-thumb")!.hidden, true);
+    assert.equal(view.checkbox("Recording")!.disabled, true);
     Object.defineProperties(video, { videoWidth: { value: 320 }, videoHeight: { value: 180 } });
     await act(async () => video.dispatchEvent(new domWindow.Event("loadedmetadata") as unknown as Event));
-    assert.equal(video.hidden, true, "metadata alone does not prove a frame was shown");
-    assert.equal(view.checkbox("clip").disabled, true);
+    assert.equal(view.container.querySelector<HTMLButtonElement>(".ev-thumb")!.hidden, true,
+      "metadata alone does not prove a frame was shown");
+    assert.equal(view.checkbox("Recording")!.disabled, true);
     await act(async () => video.dispatchEvent(new domWindow.Event("loadeddata") as unknown as Event));
-    assert.equal(video.hidden, false);
-    assert.equal(video.hasAttribute("controls"), true);
+    assert.equal(view.container.querySelector<HTMLButtonElement>(".ev-thumb")!.hidden, false);
+    // The tile holds the first frame, still and muted; the recording plays where the tile opens it.
+    assert.equal(video.muted, true);
     assert.equal(video.hasAttribute("playsinline"), true);
-    assert.equal(view.checkbox("clip").disabled, false);
-    assertNoDomNode(view.container.querySelector(".evidence-review-item a"));
-    await act(async () => view.checkbox("clip").click());
+    assert.equal(view.tile("clip").querySelector(".ev-facts")?.textContent, "320 × 180");
+    assert.equal(view.checkbox("Recording")!.disabled, false);
+    assertNoDomNode(view.container.querySelector(".ev-tile a"));
+    await act(async () => view.container.querySelector<HTMLButtonElement>(".ev-thumb")!.click());
+    // The dialog renders outside the card, in the document's modal layer.
+    const playing = domWindow.document.querySelector('video[aria-label="Play Recording"]') as unknown as HTMLVideoElement | null;
+    assert.ok(playing, "opening the tile plays the recording with its controls");
+    assert.equal(playing.hasAttribute("controls"), true);
+    await act(async () => view.checkbox("Recording")!.click());
     assert.equal(view.button("Approve").disabled, false);
   } finally { await view.unmount(); }
 });
@@ -211,14 +226,13 @@ test("a video without a picture track cannot be marked reviewed", async () => {
   const item = { evidenceId: "clip", artifactId: "art_clip", mediaType: "video/webm", sha256: WEBM_SHA };
   const view = await mount(sessionWith([item]), async () => new Blob([WEBM], { type: "video/webm" }));
   try {
-    const video = view.container.querySelector<HTMLVideoElement>(".evidence-artifact-video");
+    const video = view.container.querySelector<HTMLVideoElement>(".ev-thumb video");
     assert.ok(video);
     Object.defineProperties(video, { videoWidth: { value: 0 }, videoHeight: { value: 0 } });
     assert.equal(video.videoWidth, 0);
     await act(async () => video.dispatchEvent(new domWindow.Event("loadedmetadata") as unknown as Event));
-    assert.match(view.container.querySelector('.evidence-artifact [role="alert"]')?.textContent ?? "",
-      /could not be displayed\.$/u);
-    assert.equal(view.checkbox("clip").disabled, true);
+    assert.equal(view.tile("clip").querySelector(".ev-blocked")?.textContent, "Can't LoadIt matches its digest but can't be drawn.");
+    assertNoDomNode(view.checkbox("Recording"), "a blocked tile has no Reviewed mark");
     assert.equal(view.button("Approve").disabled, true);
   } finally { await view.unmount(); }
 });
@@ -229,11 +243,12 @@ test("a digest mismatch or an unavailable artifact shows no image and cannot cou
   saveEvidenceReviewDraft("local", "session-artifact-evidence", "occurrence-1", RESOURCE_DIGEST, ["desktop-after"]);
   const swapped = await mount(sessionWith([artifactItem()]), async () => new Blob([Buffer.from("substituted")]));
   try {
-    assertNoDomNode(swapped.container.querySelector(".evidence-artifact img"), "mismatched bytes are never displayed");
-    assert.match(swapped.container.querySelector('.evidence-artifact [role="alert"]')?.textContent ?? "",
-      /does not match the digest recorded in the request/u);
-    assert.equal(swapped.checkbox("desktop-after").disabled, true);
-    assert.equal(swapped.checkbox("desktop-after").checked, false, "the saved mark is not shown as a review");
+    assertNoDomNode(swapped.container.querySelector(".ev-media img"), "mismatched bytes are never displayed");
+    assert.equal(swapped.tile("desktop-after").querySelector(".ev-blocked-label")?.textContent, "Doesn't Match");
+    assertNoDomNode(swapped.checkbox("Screenshot"), "the saved mark is not shown as a review");
+    assert.match(swapped.container.querySelector('.notice[role="alert"]')?.textContent ?? "",
+      /Deny this request and ask for a new capture\./u);
+    assert.equal(swapped.footNote(), "Can't approve until every item can be reviewed.");
     assert.equal(swapped.button("Approve").disabled, true, "the saved mark cannot approve unseen evidence");
     assert.equal(swapped.button("Deny").disabled, false, "the reviewer can still reject");
   } finally {
@@ -242,11 +257,12 @@ test("a digest mismatch or an unavailable artifact shows no image and cannot cou
 
   const gone = await mount(sessionWith([artifactItem()]), async () => { throw new ApiError("artifact not found", 404); });
   try {
-    const alert = gone.container.querySelector('.evidence-artifact [role="alert"]');
-    assert.match(alert?.textContent ?? "", /no longer available, or you do not have access/u,
+    const blocked = gone.tile("desktop-after").querySelector(".ev-blocked");
+    assert.equal(blocked?.querySelector(".ev-blocked-label")?.textContent, "Can't Load");
+    assert.match(blocked?.textContent ?? "", /gone, or you don't have access/u,
       "a missing or forbidden artifact reads differently from a bad capture");
-    assertNoDomNode(alert?.querySelector("button"), "access and absence do not change on a retry");
-    assert.equal(gone.checkbox("desktop-after").disabled, true);
+    assertNoDomNode(blocked?.querySelector("button"), "access and absence do not change on a retry");
+    assertNoDomNode(gone.checkbox("Screenshot"));
     assertNoDomNode(gone.container.querySelector('a[href^="https://evidence.example"]'),
       "the card does not fall back to the external copy");
   } finally {
@@ -259,12 +275,11 @@ test("a digest mismatch or an unavailable artifact shows no image and cannot cou
   const undrawable = await mount(sessionWith([artifactItem()]), async () => new Blob([PNG]));
   try {
     await undrawable.decode("error");
-    assert.match(undrawable.container.querySelector('.evidence-artifact [role="alert"]')?.textContent ?? "",
-      /matches its recorded digest but could not be displayed\.$/u);
-    assertNoDomNode(undrawable.container.querySelector(".evidence-artifact img"), "no broken image is left on screen");
-    assertNoDomNode(undrawable.container.querySelector('.evidence-artifact [role="alert"] button'),
-      "the same bytes will not decode on a retry");
-    assert.equal(undrawable.checkbox("desktop-after").disabled, true);
+    assert.equal(undrawable.tile("desktop-after").querySelector(".ev-blocked")?.textContent,
+      "Can't LoadIt matches its digest but can't be drawn.");
+    assertNoDomNode(undrawable.container.querySelector(".ev-media img"), "no broken image is left on screen");
+    assertNoDomNode(undrawable.container.querySelector(".ev-blocked button"), "the same bytes will not decode on a retry");
+    assertNoDomNode(undrawable.checkbox("Screenshot"));
     assert.equal(undrawable.button("Approve").disabled, true);
   } finally {
     await undrawable.unmount();
@@ -276,12 +291,12 @@ test("a digest mismatch or an unavailable artifact shows no image and cannot cou
   const regressed = await mount(sessionWith([artifactItem()]), async () => new Blob([PNG]));
   try {
     await regressed.decode("load");
-    await act(async () => regressed.checkbox("desktop-after").click());
+    await act(async () => regressed.checkbox("Screenshot")!.click());
     assert.equal(regressed.button("Approve").disabled, false, "a shown and marked item enables approval");
     await regressed.decode("error");
-    assertNoDomNode(regressed.container.querySelector(".evidence-artifact img"));
-    assert.equal(regressed.checkbox("desktop-after").disabled, true);
-    assert.equal(regressed.checkbox("desktop-after").checked, false, "the earlier mark no longer reads as a review");
+    assertNoDomNode(regressed.container.querySelector(".ev-media img"));
+    assertNoDomNode(regressed.checkbox("Screenshot"), "the earlier mark no longer reads as a review");
+    assert.equal(regressed.container.querySelector(".ev-progress")?.textContent, "0 of 1 reviewed");
     assert.equal(regressed.button("Approve").disabled, true, "approval is withdrawn with the image");
   } finally {
     await regressed.unmount();
@@ -294,45 +309,117 @@ test("a digest mismatch or an unavailable artifact shows no image and cannot cou
     return new Blob([PNG]);
   });
   try {
-    const retry = flaky.container.querySelector<HTMLButtonElement>('.evidence-artifact [role="alert"] button');
+    const retry = flaky.container.querySelector<HTMLButtonElement>(".ev-blocked button");
     assert.equal(retry?.textContent, "Retry", "a transport failure can be retried");
+    assert.equal(retry?.getAttribute("aria-label"), "Retry Screenshot");
     await act(async () => retry!.click());
     for (let turn = 0; turn < 6; turn += 1) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
     await flaky.decode("load");
-    assert.ok(flaky.container.querySelector(".evidence-artifact img"), "the retry loads and verifies the artifact");
-    assert.equal(flaky.checkbox("desktop-after").disabled, false);
+    assert.ok(flaky.container.querySelector(".ev-media img"), "the retry loads and verifies the artifact");
+    assert.equal(flaky.checkbox("Screenshot")!.disabled, false);
   } finally {
     await flaky.unmount();
   }
 });
 
-test("URI-only evidence keeps a labelled external link, and mixed decisions show both", async () => {
+test("a link-only item can be marked reviewed only after its link was opened in this browser", async () => {
   domWindow.localStorage.clear();
-  const view = await mount(sessionWith([
+  // A mark saved before opened links were recorded does not count until the link is opened.
+  saveEvidenceReviewDraft("local", "session-artifact-evidence", "occurrence-1", RESOURCE_DIGEST, ["legacy"]);
+  const session = sessionWith([
     artifactItem(),
     { evidenceId: "legacy", uri: "https://evidence.example/legacy.png", sha256: "1".repeat(64) },
     { evidenceId: "clip", uri: "https://evidence.example/clip.webm", sha256: "2".repeat(64), mediaType: "video/webm" },
-  ]), async () => new Blob([PNG]));
+  ]);
+  const view = await mount(session, async () => new Blob([PNG]));
   try {
     assert.deepEqual(view.requests, ["art_desktop"], "only a renderable raster artifact is fetched");
     await view.decode("load");
-    assert.equal(view.container.querySelectorAll(".evidence-artifact").length, 1);
-    for (const evidenceId of ["legacy", "clip"]) {
-      const link = view.container.querySelector(`a[aria-label="View External Evidence: ${evidenceId}"]`);
-      assert.ok(link, `${evidenceId} keeps an external link, labelled as external`);
-      assert.equal(view.checkbox(evidenceId).disabled, false, `${evidenceId} is reviewable as before`);
+    assert.equal(view.container.querySelectorAll(".ev-thumb").length, 1);
+    assert.deepEqual([...view.container.querySelectorAll(".ev-name")].map((name) => name.textContent),
+      ["Screenshot", "Link 1", "Link 2"]);
+    assert.equal(view.container.querySelector(".request-card-title")?.textContent, "Review 3 items before approving");
+    for (const [evidenceId, name] of [["legacy", "Link 1"], ["clip", "Link 2"]] as const) {
+      const link = view.tile(evidenceId).querySelector<HTMLAnchorElement>("a.btn.sm");
+      assert.equal(link?.textContent, "Open Link");
+      assert.equal(link?.getAttribute("target"), "_blank");
+      assert.equal(link?.getAttribute("rel"), "noreferrer");
+      assert.equal(view.checkbox(name)!.disabled, true, `${name} waits until its link is opened`);
+      assert.equal(view.checkbox(name)!.checked, false);
     }
-    // Every item reviewed, and only then, enables approval.
-    for (const evidenceId of ["desktop-after", "legacy"]) await act(async () => view.checkbox(evidenceId).click());
-    assert.equal(view.button("Approve").disabled, true);
-    await act(async () => view.checkbox("clip").click());
+    assert.equal(view.footNote(), "Review 3 more to approve.");
+    // happy-dom does not navigate, so activating the link only records that it was opened.
+    await act(async () => view.tile("legacy").querySelector<HTMLAnchorElement>("a")!.click());
+    assert.equal(view.checkbox("Link 1")!.disabled, false, "an opened link can be marked reviewed");
+    assert.equal(view.checkbox("Link 1")!.checked, true, "the earlier mark counts once the link was opened");
+    assert.equal(view.checkbox("Link 2")!.disabled, true, "opening one link does not open the other");
+    await act(async () => view.checkbox("Screenshot")!.click());
+    assert.equal(view.footNote(), "Review 1 more to approve.");
+    assert.equal(view.button("Approve").getAttribute("aria-describedby"),
+      view.container.querySelector(".request-card-reasons > p")?.id, "Approve is described by the foot-note");
+    // A middle click opens the link too.
+    await act(async () => view.tile("clip").querySelector("a")!.dispatchEvent(
+      new domWindow.MouseEvent("auxclick", { bubbles: true, button: 1 }) as unknown as Event));
+    await act(async () => view.checkbox("Link 2")!.click());
     assert.equal(view.button("Approve").disabled, false);
+  } finally {
+    await view.unmount();
+  }
+
+  // The opened links are kept with the occurrence's draft, as the marks are.
+  const restored = await mount(session, async () => new Blob([PNG]));
+  try {
+    assert.equal(restored.checkbox("Link 1")!.disabled, false);
+    assert.equal(restored.checkbox("Link 2")!.disabled, false);
+  } finally {
+    await restored.unmount();
+    domWindow.localStorage.clear();
+  }
+});
+
+test("a four-screenshot request has one title, a progress line, named tiles and one digest caption", async () => {
+  domWindow.localStorage.clear();
+  const items = Array.from({ length: 4 }, (_, index) =>
+    artifactItem({ evidenceId: `viewport-${index + 1}`, artifactId: `art_${index + 1}` }));
+  const view = await mount(sessionWith(items), async () => new Blob([PNG]));
+  try {
+    assert.equal(view.container.querySelector(".request-card-title")?.textContent, "Review 4 screenshots before approving");
+    assert.equal(view.container.querySelector(".request-card-kind")?.textContent, "UI Evidence");
+    const progress = view.container.querySelector(".ev-progress");
+    assert.equal(progress?.textContent, "0 of 4 reviewed");
+    assert.equal(progress?.getAttribute("role"), "status");
+    assert.equal(progress?.getAttribute("aria-live"), "polite");
+    assert.equal(view.container.querySelectorAll(".ev-grid .ev-tile").length, 4);
+    assert.deepEqual([...view.container.querySelectorAll(".ev-name")].map((name) => name.textContent),
+      ["Screenshot 1", "Screenshot 2", "Screenshot 3", "Screenshot 4"]);
+    assert.deepEqual([...view.container.querySelectorAll(".ev-id")].map((id) => id.textContent),
+      ["viewport-1", "viewport-2", "viewport-3", "viewport-4"]);
+    assertNoDomNode(view.container.querySelector(".ev-checked"), "nothing is claimed before a draw");
+    await view.decode("load");
+    assert.equal(view.container.querySelectorAll(".ev-checked").length, 1, "one caption, not one per item");
+    assert.equal(view.container.querySelector(".ev-checked")?.textContent,
+      "Shown screenshots were checked by this browser against the request's digest.");
+    assert.equal(view.container.querySelector(".ev-checked")!.compareDocumentPosition(
+      view.container.querySelector(".ev-grid")!), domWindow.Node.DOCUMENT_POSITION_PRECEDING, "the caption is under the grid");
+    await act(async () => view.checkbox("Screenshot 1")!.click());
+    await act(async () => view.checkbox("Screenshot 2")!.click());
+    assert.equal(progress?.textContent, "2 of 4 reviewed");
+    const approve = view.button("Approve");
+    assert.equal(approve.disabled, true);
+    const describedBy = approve.getAttribute("aria-describedby") ?? "";
+    assert.equal(domWindow.document.getElementById(describedBy)?.textContent, "Review 2 more to approve.");
+    assert.equal(view.button("Deny").disabled, false);
+    // The resource key, digest and who decides wait behind one disclosure.
+    const details = view.container.querySelector("details.disclosure");
+    assert.equal(details?.querySelector("summary")?.textContent, "Show Details");
+    assert.match(details?.textContent ?? "", /Resource Keypr-1458-ui/u);
+    assert.match(details?.textContent ?? "", /Decided ByA person/u);
   } finally {
     await view.unmount();
   }
 });
 
-test("an artifact the card cannot show is blocked with its media type and never falls back to its URI", async () => {
+test("an artifact the card cannot show is blocked as Can't Show and never falls back to its URI", async () => {
   domWindow.localStorage.clear();
   // A mark saved before this rule existed must not carry over either.
   saveEvidenceReviewDraft("local", "session-artifact-evidence", "occurrence-1", RESOURCE_DIGEST, ["vector", "untyped"]);
@@ -347,17 +434,17 @@ test("an artifact the card cannot show is blocked with its media type and never 
     assert.deepEqual(view.requests, ["art_desktop"], "an artifact the card cannot show is not fetched");
     await view.decode("load");
     assert.equal(view.container.querySelectorAll("a[href]").length, 0, "no external link stands in for an artifact");
-    const blocked = (evidenceId: string) => [...view.container.querySelectorAll(".evidence-review-item")]
-      .find((item) => item.querySelector("strong")?.textContent === evidenceId)!
-      .querySelector('.evidence-artifact[data-status="unsupported"] [role="alert"]')?.textContent ?? "";
-    assert.match(blocked("vector"), /This artifact is image\/svg\+xml, which the review card cannot show/u);
-    assert.match(blocked("untyped"), /This artifact declares no media type/u);
-    for (const evidenceId of ["vector", "untyped"]) {
-      assert.equal(view.checkbox(evidenceId).disabled, true, `${evidenceId} cannot be marked reviewed`);
-      assert.equal(view.checkbox(evidenceId).checked, false, `${evidenceId} does not show the saved mark`);
-    }
-    await act(async () => view.checkbox("desktop-after").click());
-    assert.equal(view.container.querySelector('[role="status"]')?.textContent, "1 of 3 Reviewed");
+    const blocked = (evidenceId: string) =>
+      view.tile(evidenceId).querySelector('.ev-media[data-status="unsupported"] .ev-blocked')?.textContent ?? "";
+    assert.equal(blocked("vector"), "Can't Showimage/svg+xml can't be shown here.");
+    assert.equal(blocked("untyped"), "Can't ShowIt declares no media type.");
+    assertNoDomNode(view.tile("vector").querySelector("input"), "vector cannot be marked reviewed");
+    assertNoDomNode(view.tile("untyped").querySelector("input"), "untyped cannot be marked reviewed");
+    await act(async () => view.checkbox("Screenshot 1")!.click());
+    assert.equal(view.container.querySelector(".ev-progress")?.textContent, "1 of 3 reviewed");
+    assert.equal(view.footNote(), "Can't approve until every item can be reviewed.");
+    assert.match(view.container.querySelector('.notice[role="alert"]')?.textContent ?? "",
+      /Deny this request and ask for a new capture\./u);
     assert.equal(view.button("Approve").disabled, true, "approval stays blocked");
     assert.equal(view.button("Deny").disabled, false, "the reviewer can still deny");
   } finally {
@@ -386,21 +473,26 @@ for (const [label, withUri] of [["artifact-only", false], ["artifact-plus-URI", 
       const view = await mount(sessionWith([withUri ? artifactItem() : artifactOnly]), async () => new Blob([PNG]));
       try {
         assert.deepEqual(view.requests, [], "bytes nobody can check are not downloaded");
-        assertNoDomNode(view.container.querySelector(".evidence-artifact img"), "unchecked bytes are not displayed");
-        assert.match(view.container.querySelector(".evidence-artifact")?.textContent ?? "",
-          /^Not shown: this browser can check the artifact against the request's digest only over HTTPS or on localhost\.$/u);
-        assertNoDomNode(view.container.querySelector(".evidence-review-item a"),
-          "an artifact-backed item never falls back to its external copy");
+        assertNoDomNode(view.container.querySelector(".ev-media img"), "unchecked bytes are not displayed");
+        const blocked = view.tile("desktop-after").querySelector(".ev-blocked");
+        assert.equal(blocked?.textContent, "Not ShownNeeds HTTPS or localhost.");
+        assert.equal(blocked?.getAttribute("data-tone"), "neutral");
+        assertNoDomNode(view.container.querySelector(".ev-tile a"), "an artifact-backed item never falls back to its external copy");
+        assertNoDomNode(view.container.querySelector("[data-ev-viewer-target]"), "a tile that is not shown is no viewer target");
         assert.doesNotMatch(view.container.innerHTML, /signature=secret/u);
-        assert.doesNotMatch(view.container.textContent ?? "", /Checked by this browser/u);
-        const notice = view.container.querySelector('[role="note"][aria-label="HTTPS or Localhost Required"]');
-        assert.ok(notice, "the card says what is required, once");
+        assertNoDomNode(view.container.querySelector(".ev-checked"));
+        const notices = view.container.querySelectorAll('[role="note"][aria-label="HTTPS or Localhost Required"]');
+        assert.equal(notices.length, 1, "the card says what is required, once");
+        const notice = notices[0]!;
+        assert.equal(notice.compareDocumentPosition(view.container.querySelector(".ev-grid")!),
+          domWindow.Node.DOCUMENT_POSITION_FOLLOWING, "the notice sits above the grid");
         assert.match(notice.textContent ?? "", /This page is open at http:\/\/localhost\./u);
         assert.match(notice.textContent ?? "", /reopen Wollipog over HTTPS, for example through tailscale serve, or on localhost/u);
-        assert.equal(view.checkbox("desktop-after").disabled, true);
-        assert.equal(view.checkbox("desktop-after").checked, false);
-        assert.match(view.container.querySelector(".evidence-review-summary [role=\"status\"]")?.textContent ?? "",
-          /^0 of 1 Reviewed$/u, "a saved mark on an item this page cannot show is not counted");
+        assertNoDomNode(view.checkbox("Screenshot"));
+        assert.equal(view.container.querySelector(".ev-progress")?.textContent, "0 of 1 reviewed",
+          "a saved mark on an item this page cannot show is not counted");
+        assert.equal(view.footNote(), "Approve needs HTTPS or localhost. Deny works from here.");
+        assertNoDomNode(view.container.querySelector('.notice[role="alert"]'), "nothing failed: this page just can't check it");
         assert.equal(view.button("Approve").disabled, true);
         assert.equal(view.button("Deny").disabled, false, "rejecting stays possible");
       } finally {
@@ -410,7 +502,7 @@ for (const [label, withUri] of [["artifact-only", false], ["artifact-plus-URI", 
   });
 }
 
-test("without SubtleCrypto URI-only evidence keeps its link while artifact evidence stays blocked", async () => {
+test("without SubtleCrypto link-only evidence keeps its link while artifact evidence stays blocked", async () => {
   domWindow.localStorage.clear();
   await withoutSubtleCrypto(async () => {
     const view = await mount(sessionWith([
@@ -418,29 +510,19 @@ test("without SubtleCrypto URI-only evidence keeps its link while artifact evide
       { evidenceId: "legacy", uri: "https://evidence.example/legacy.png", sha256: "1".repeat(64) },
     ]), async () => new Blob([PNG]));
     try {
-      assert.ok(view.container.querySelector('a[aria-label="View External Evidence: legacy"]'));
-      assert.equal(view.checkbox("legacy").disabled, false);
-      assert.equal(view.checkbox("desktop-after").disabled, true);
-      await act(async () => view.checkbox("legacy").click());
+      const link = view.tile("legacy").querySelector<HTMLAnchorElement>("a.btn.sm");
+      assert.equal(link?.textContent, "Open Link");
+      await act(async () => link!.click());
+      assert.equal(view.checkbox("Link")!.disabled, false);
+      assertNoDomNode(view.checkbox("Screenshot"));
+      await act(async () => view.checkbox("Link")!.click());
       assert.equal(view.button("Approve").disabled, true);
+      assert.equal(view.footNote(), "Approve needs HTTPS or localhost. Deny works from here.");
     } finally {
       await view.unmount();
+      domWindow.localStorage.clear();
     }
   });
-});
-
-test("a secure page shows no HTTPS notice and says who checked each shown artifact", async () => {
-  domWindow.localStorage.clear();
-  const view = await mount(sessionWith([artifactItem()]), async () => new Blob([PNG]));
-  try {
-    assertNoDomNode(view.container.querySelector(".evidence-secure-context-notice"));
-    assertNoDomNode(view.container.querySelector(".evidence-artifact-check"), "nothing is claimed before the draw");
-    await view.decode("load");
-    assert.equal(view.container.querySelector(".evidence-artifact-check")?.textContent,
-      "Checked by this browser against the request's digest.");
-  } finally {
-    await view.unmount();
-  }
 });
 
 test("a failed image is reported to the card inside the error event, before any effect runs", async () => {
@@ -458,12 +540,13 @@ test("a failed image is reported to the card inside the error event, before any 
       <ApiProvider client={client}>
         <EvidenceArtifactView
           item={artifactItem() as never}
+          name="Screenshot"
           onStatusChange={(_evidenceId, status) => { reports.push(status); }}
         />
       </ApiProvider>,
     ));
     for (let turn = 0; turn < 6; turn += 1) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-    const image = container.querySelector<HTMLImageElement>(".evidence-artifact img")!;
+    const image = container.querySelector<HTMLImageElement>(".ev-media img")!;
     await act(async () => { image.dispatchEvent(new domWindow.Event("load") as unknown as Event); });
     assert.equal(reports.at(-1), "ready");
 
@@ -475,11 +558,11 @@ test("a failed image is reported to the card inside the error event, before any 
     });
     assert.equal(duringEvent, "unavailable", "the card is told in the event, not by a later effect");
     assert.equal(reports.at(-1), "unavailable");
-    assertNoDomNode(container.querySelector(".evidence-artifact img"));
+    assertNoDomNode(container.querySelector(".ev-media img"));
 
     // An error with nothing to fail is ignored by the component and must not be reported either.
     const before = reports.length;
-    await act(async () => { container.querySelector(".evidence-artifact")!.dispatchEvent(new domWindow.Event("error") as unknown as Event); });
+    await act(async () => { container.querySelector(".ev-media")!.dispatchEvent(new domWindow.Event("error") as unknown as Event); });
     assert.equal(reports.length, before);
   } finally {
     await act(async () => root.unmount());

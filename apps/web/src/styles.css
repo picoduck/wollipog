@@ -3874,141 +3874,225 @@ textarea {
 .request-panel-empty h3 {
   color: var(--text);
 }
-.evidence-review-summary {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  padding-bottom: 12px;
-}
-.evidence-review-summary h3,
-.evidence-review-summary p {
-  margin: 0;
-}
-.evidence-review-summary p {
-  margin-top: 4px;
-  color: var(--text-dim);
-  font-size: var(--text-sm);
-}
-.evidence-review-summary > strong {
-  flex: none;
-  color: var(--accent);
-  font-size: var(--text-sm);
-}
-/* The evidence body of a Request Card (#2197 rebuilds it as tiles). */
-.evidence-review {
+/* UI evidence as a grid of named tiles (#2197; docs/design-system.md §13.2): the Request Card's body
+   for this kind. The card's body is the one scroller; nothing here scrolls on its own. */
+.ev-review {
   display: grid;
   gap: var(--space-2);
   min-width: 0;
 }
-/* Inside the Request Card's body, which is the one scroller: the list never scrolls on its own. */
-.evidence-review-list {
-  padding-right: 3px;
+.ev-review > .notice { margin: 0; }
+.ev-progress {
+  margin: 0;
+  color: var(--text-dim-on-tint);
+  font: var(--type-label);
+  font-variant-numeric: tabular-nums;
 }
-.evidence-review-item {
+.ev-grid {
   display: grid;
-  gap: 10px;
-  padding: 11px 0;
-  border-top: 1px solid var(--border);
-}
-.evidence-review-item-main {
-  display: grid;
-  grid-template-columns: 26px minmax(0, 1fr);
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   align-items: start;
-  gap: 8px;
+  gap: var(--space-2);
 }
-.evidence-review-item-main > div {
+/* The dock is a strip of four small tiles, so the transcript keeps its half of the column and the
+   names stay in view above the footer. */
+.request-card[data-presentation="dock"] .ev-grid { grid-template-columns: repeat(4, minmax(0, 160px)); }
+.ev-cell { min-width: 0; }
+.ev-tile {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  container: ev-tile / inline-size;
+}
+/* The frame keeps a 16:10 place for the picture before it arrives, and grows for a failure's words. */
+.ev-frame {
+  position: relative;
   display: grid;
   min-width: 0;
-  gap: 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg);
 }
-.evidence-review-item-main strong {
-  overflow-wrap: anywhere;
+/* The 16:10 floor shares the frame's one cell with its content, so the taller of the two wins. */
+.ev-frame::before {
+  content: "";
+  grid-area: 1 / 1;
+  padding-top: 62.5%;
 }
-.evidence-review-item-main .btn {
-  justify-self: start;
+.ev-frame > .ev-media { grid-area: 1 / 1; }
+.ev-tile[data-reviewed] .ev-frame { border-color: var(--accent); }
+.ev-frame:has(.ev-blocked[data-tone="danger"]) {
+  border-color: color-mix(in srgb, var(--red) 32%, transparent);
+  background: color-mix(in srgb, var(--red) 7%, var(--bg-elev));
 }
-.evidence-review-index {
+.ev-media {
   display: grid;
-  width: 24px;
-  height: 24px;
   place-items: center;
-  border-radius: var(--radius-pill);
-  color: var(--text-dim);
-  background: var(--bg-elev-2);
-  font-size: var(--text-xs);
-  font-weight: 700;
-}
-/* An artifact-backed evidence image, shown in place. The frame reserves its height before the
-   image arrives so a long review does not jump as items load. */
-.evidence-artifact {
-  display: grid;
-  min-width: 0;
-  min-height: 96px;
   align-content: center;
+  gap: var(--space-1);
+  min-width: 0;
 }
-/* Only a frame that is waiting for an image needs to hold its place. */
-.evidence-artifact[data-status="mismatch"],
-.evidence-artifact[data-status="unavailable"],
-.evidence-artifact[data-status="unverifiable"],
-.evidence-artifact[data-status="unsupported"] {
-  min-height: 0;
+.ev-loading {
+  color: var(--text-dim);
+  font: var(--type-small);
 }
-.evidence-artifact-thumb {
+.ev-thumb {
+  position: absolute;
+  inset: 0;
   display: block;
-  width: 100%;
   padding: 0;
   overflow: hidden;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg-elev-2);
+  border: 0;
+  border-radius: inherit;
+  background: none;
   cursor: zoom-in;
 }
 /* `display: block` above would otherwise defeat the hidden attribute, and an image that is still
    decoding, or that failed to, must not be visible as if it were evidence. */
-.evidence-artifact-thumb[hidden] {
-  display: none;
-}
-.evidence-artifact-thumb:focus-visible {
+.ev-thumb[hidden] { display: none; }
+.ev-thumb:focus-visible {
   outline: var(--focus-width) solid var(--focus);
   outline-offset: 2px;
 }
-.evidence-artifact-thumb img {
+.ev-thumb > :is(img, video) {
   display: block;
   width: 100%;
-  max-height: 320px;
+  height: 100%;
   object-fit: contain;
 }
-.evidence-artifact-state {
+.ev-play {
+  position: absolute;
+  right: var(--space-1);
+  bottom: var(--space-1);
   display: grid;
-  justify-items: start;
-  gap: 8px;
-  margin: 0;
+  place-items: center;
+  width: var(--space-6);
+  height: var(--space-6);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--bg) 80%, transparent);
+  color: var(--text);
 }
-.evidence-artifact-state p {
-  margin: 0;
+/* The Reviewed mark sits on the picture's corner, on a chip of its own surface. Scoped by its frame to
+   outrank the Checkbox row's own height, which is for a row, not a chip. */
+.ev-frame > .ev-mark {
+  position: absolute;
+  top: var(--space-1);
+  left: var(--space-1);
+  min-height: 0;
+  padding: var(--space-0-5) var(--space-2) var(--space-0-5) var(--space-1);
+  column-gap: var(--space-1);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--bg-elev) 90%, transparent);
+  box-shadow: var(--elev-1);
+  font: var(--type-label);
 }
-.evidence-artifact-check {
-  margin: 0;
-  font-size: var(--text-xs);
+/* A link-only tile has no picture: its mark is a row in the frame, under Open Link. */
+.ev-media[data-status="link"] { padding-block: var(--space-2); }
+.ev-media[data-status="link"] > .ev-mark {
+  position: relative;
+  min-height: 0;
+  padding: 0;
+  background: none;
+  box-shadow: none;
 }
-/* Shown once per card when this page cannot check artifact evidence at all. */
-.evidence-review-list > .notice { margin: 0 0 var(--space-3); }
-.evidence-artifact-full {
+@media (pointer: coarse) {
+  /* A 44px target around the mark's 20px box; on a picture it takes that much of the corner. */
+  .ev-mark::after {
+    content: "";
+    position: absolute;
+    inset: calc(-1 * var(--space-3));
+  }
+  /* Open Link and Retry are wider than 44px already; borrowing sideways too would push the strip's
+     last tile past the card and scroll it. */
+  .ev-tile .btn.sm::after { right: 0; left: 0; }
+}
+.ev-meta {
+  display: grid;
+  min-width: 0;
+}
+/* The name is the tile's primary text: it wraps rather than give way to the id beside it. */
+.ev-name {
+  color: var(--text);
+  font: var(--type-label);
+  overflow-wrap: anywhere;
+}
+.ev-facts {
+  color: var(--text-dim-on-tint);
+  font: var(--type-small);
+  font-variant-numeric: tabular-nums;
+}
+.ev-id {
+  overflow: hidden;
+  color: var(--text-dim-on-tint);
+  font: var(--type-small);
+  font-family: var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ev-link-glyph {
+  display: inline-flex;
+  color: var(--text-dim);
+}
+/* A tile that cannot show its evidence says why where the picture would be (§12.4). */
+.ev-blocked {
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: var(--space-1);
+  padding: var(--space-2);
+  color: var(--text-dim);
+  font: var(--type-small);
+  text-align: center;
+}
+.ev-blocked-label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--text);
+  font: var(--type-label);
+}
+.ev-blocked[data-tone="danger"] .ev-blocked-label { color: var(--danger-text); }
+.ev-blocked-detail { overflow-wrap: anywhere; }
+@container ev-tile (max-width: 119px) {
+  /* A tile in the dock's strip on a phone: the request-level notice says what the detail would. */
+  .ev-blocked-detail,
+  .ev-link-glyph { display: none; }
+  .ev-mark .checkbox-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .ev-frame > .ev-mark { padding: var(--space-1); }
+}
+.ev-checked {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin: 0;
+  color: var(--text-dim-on-tint);
+  font: var(--type-small);
+}
+.ev-checked > .app-icon {
+  flex: none;
+  color: var(--green-on-tint);
+}
+@media (forced-colors: active) {
+  .ev-checked > .app-icon { color: inherit; }
+}
+.ev-digest {
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+.ev-full {
   display: block;
   max-width: 100%;
   max-height: 78vh;
   margin: 0 auto;
   object-fit: contain;
-}
-.evidence-review-details {
-  margin: 12px 0;
-  padding: 9px 0;
-  border-top: 1px solid var(--border);
-}
-.evidence-review-details summary {
-  color: var(--text-dim);
-  cursor: pointer;
+  background: var(--bg);
 }
 .agents-panel {
   display: flex;
@@ -4616,8 +4700,6 @@ textarea {
 .artifact-preview-meta { color: var(--text-dim); font-size: 11px; }
 .artifact-preview-image { display: block; max-width: 100%; max-height: 70vh; margin: 0 auto; object-fit: contain; }
 .artifact-preview-video { display: block; width: 100%; max-height: 70vh; margin: 0 auto; background: var(--bg); }
-.evidence-artifact-video { display: block; width: 100%; max-height: 65vh; background: var(--bg); }
-.evidence-artifact-video[hidden] { display: none; }
 .tl-artifact { min-width: 0; max-width: 680px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); }
 .tl-artifact-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin-bottom: 8px; }
 .tl-artifact-head strong { min-width: 0; overflow-wrap: anywhere; }
@@ -13978,9 +14060,6 @@ body.shell-dock-dragging * {
   .request-panel-detail-head {
     align-items: stretch;
     flex-direction: column;
-  }
-  .evidence-review-summary > strong {
-    white-space: nowrap;
   }
   /* Composer: six lines at most, above the software keyboard. */
   .composer-input { max-height: calc(6 * 22px); }

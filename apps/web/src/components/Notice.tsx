@@ -14,7 +14,8 @@ export function ToneIcon({ tone }: { tone: NoticeTone }) {
 export interface NoticeProps {
   tone?: NoticeTone;
   /** Replaces the tone icon where a subject icon says more, as the wrench does for a setup
-   * suggestion. Only for a neutral or info notice: a warning or danger keeps its tone icon. */
+   * suggestion. Only for a neutral or info notice: a warning or danger keeps its tone icon, except
+   * HTTPS or Localhost Required, whose lock is the subject the design names (#2197). */
   icon?: ReactNode;
   /** Optional Title Case title, above a sentence-case body. */
   title?: ReactNode;

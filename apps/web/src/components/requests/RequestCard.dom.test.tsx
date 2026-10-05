@@ -490,7 +490,10 @@ test("UI evidence keeps its signed links out of the card: no Request Details", a
   } as PendingApproval;
   const view = await render(<RequestCard session={sessionWith(request)} request={request} runnerOnline presentation="dock" />);
   try {
-    assertNoDomNode(view.container.querySelector("details.disclosure"));
+    // The evidence body's own Show Details holds the key and digest, never the request's input.
+    const disclosures = [...view.container.querySelectorAll("details.disclosure")];
+    assert.deepEqual(disclosures.map((details) => details.querySelector("summary")?.textContent), ["Show Details"]);
+    assert.doesNotMatch(disclosures[0]!.innerHTML, /signature=secret|evidence\.example/u);
     assert.doesNotMatch(view.container.textContent ?? "", /signature=secret/u);
   } finally {
     await view.unmount();

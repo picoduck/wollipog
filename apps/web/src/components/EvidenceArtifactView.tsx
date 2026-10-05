@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Notice } from "./Notice.js";
 import { MAX_PROMPT_IMAGE_BYTES, MAX_SESSION_VIDEO_BYTES, PROMPT_IMAGE_MIME_TYPES, type WorkflowDecisionResourceSnapshot } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { sha256Hex } from "../artifact-preview.js";
 import { Modal } from "./common.js";
+import { DecisionBlockedIcon, ErrorIcon, PlayIcon, SecureContextRequiredIcon } from "./Icons.js";
 
 export type EvidenceItem = Extract<
   WorkflowDecisionResourceSnapshot,
@@ -63,14 +64,43 @@ type LoadState =
   | { status: "mismatch" | "unverifiable" }
   | { status: "unavailable"; reason: string; retryable: boolean };
 
-/** One artifact-backed evidence image, fetched with the reviewer's own access and checked against
- * the digest bound to the decision before anything is shown. */
+/** The pixel size the browser drew a shown artifact at: the capture's viewport. */
+export interface EvidenceDimensions { width: number; height: number }
+
+/**
+ * A tile's state that is not a picture (§12.4; #2197): a 16px icon, a Title Case label and one short
+ * sentence, with Retry when trying again can help. Shown in the tile's frame, where the image would be.
+ */
+export function EvidenceBlocked({ icon, label, detail, tone, action }: {
+  icon: ReactNode;
+  label: string;
+  detail: ReactNode;
+  /** `danger` for evidence that failed; `neutral` for evidence this page may not show. */
+  tone: "danger" | "neutral";
+  action?: ReactNode;
+}) {
+  return (
+    <div className="ev-blocked" data-tone={tone}>
+      <span className="ev-blocked-label">{icon}{label}</span>
+      <span className="ev-blocked-detail">{detail}</span>
+      {action}
+    </div>
+  );
+}
+
+/** One artifact-backed evidence image or recording, fetched with the reviewer's own access and checked
+ * against the digest bound to the decision before anything is shown. It fills a tile's frame. */
 export function EvidenceArtifactView({
   item,
+  name,
   onStatusChange,
+  onDimensions,
 }: {
   item: EvidenceItem & { artifactId: string; mediaType: string };
+  /** The tile's readable name ("Screenshot 2"), which also names its controls. */
+  name: string;
   onStatusChange: (evidenceId: string, status: EvidenceArtifactStatus) => void;
+  onDimensions?: (dimensions: EvidenceDimensions) => void;
 }) {
   const api = useApi();
   const [state, setState] = useState<LoadState>({ status: "pending" });
@@ -82,6 +112,8 @@ export function EvidenceArtifactView({
   const enlargeRef = useRef<HTMLButtonElement>(null);
   const onStatusChangeRef = useRef(onStatusChange);
   onStatusChangeRef.current = onStatusChange;
+  const onDimensionsRef = useRef(onDimensions);
+  onDimensionsRef.current = onDimensions;
   const statusRef = useRef<LoadState["status"]>("pending");
   statusRef.current = state.status;
 
@@ -121,13 +153,13 @@ export function EvidenceArtifactView({
         return {
           status: "unavailable",
           reason: gone
-            ? "This artifact is no longer available, or you do not have access to it."
-            : `This artifact could not be loaded: ${error instanceof Error ? error.message : String(error)}`,
+            ? "It's gone, or you don't have access."
+            : `Couldn't download it: ${error instanceof Error ? error.message : String(error)}`,
           retryable: !gone,
         };
       }
       if (blob.size > (isVideo ? MAX_SESSION_VIDEO_BYTES : MAX_PROMPT_IMAGE_BYTES)) {
-        return { status: "unavailable", reason: "This artifact is too large to show here.", retryable: false };
+        return { status: "unavailable", reason: "It's too large to show here.", retryable: false };
       }
       try {
         const bytes = await blob.arrayBuffer();
@@ -140,7 +172,7 @@ export function EvidenceArtifactView({
         // Reading or hashing failed. Without this the item would sit on "Loading" forever.
         return {
           status: "unavailable",
-          reason: `This artifact could not be checked: ${error instanceof Error ? error.message : String(error)}`,
+          reason: `Couldn't check it: ${error instanceof Error ? error.message : String(error)}`,
           retryable: true,
         };
       }
@@ -162,7 +194,8 @@ export function EvidenceArtifactView({
   }, [item.evidenceId, reportedStatus]);
 
   const imageUrl = state.status === "decoding" || state.status === "ready" ? state.url : null;
-  const onImageLoad = useCallback(() => {
+  const onImageLoad = useCallback((dimensions: EvidenceDimensions) => {
+    if (dimensions.width > 0 && dimensions.height > 0) onDimensionsRef.current?.(dimensions);
     setState((current) => current.status === "decoding" ? { status: "ready", url: current.url } : current);
   }, []);
   const onImageError = useCallback(() => {
@@ -176,7 +209,7 @@ export function EvidenceArtifactView({
     setState((current) => current.status === "decoding" || current.status === "ready"
       ? {
           status: "unavailable",
-          reason: "This artifact matches its recorded digest but could not be displayed.",
+          reason: "It matches its digest but can't be drawn.",
           retryable: false,
         }
       : current);
@@ -185,86 +218,94 @@ export function EvidenceArtifactView({
   const retry = useCallback(() => setAttempt((current) => current + 1), []);
 
   return (
-    <div className="evidence-artifact" ref={containerRef} data-status={state.status}>
+    <div className="ev-media" ref={containerRef} data-status={state.status} aria-busy={
+      state.status === "pending" || state.status === "loading" || state.status === "decoding" || undefined}>
       {(state.status === "pending" || state.status === "loading" || state.status === "decoding") && (
-        <p className="evidence-artifact-state muted" role="status">Loading evidence…</p>
+        <span className="ev-loading">Loading…</span>
       )}
-      {imageUrl && (isVideo ? (
-        <video className="evidence-artifact-video" src={imageUrl} controls playsInline preload="auto"
-          aria-label={`Play Evidence: ${item.evidenceId}`} hidden={state.status !== "ready"}
-          onLoadedMetadata={(event) => {
-            if (!(event.currentTarget.videoWidth > 0 && event.currentTarget.videoHeight > 0)) onImageError();
-          }}
-          onLoadedData={(event) => {
-            if (event.currentTarget.videoWidth > 0 && event.currentTarget.videoHeight > 0) onImageLoad();
-            else onImageError();
-          }}
-          onError={onImageError} />
-      ) : (
+      {imageUrl && (
         <>
-          {/* Mounted while decoding so the browser attempts the draw, but hidden and inert until it
-              succeeds: a broken image must never look like evidence that was shown. */}
+          {/* The tile's one viewer target. Mounted while decoding so the browser attempts the draw,
+              but hidden and inert until it succeeds: a broken image must never look like evidence
+              that was shown. The Evidence Viewer (#2207) takes over this button's activation. */}
           <button
             type="button"
-            className="evidence-artifact-thumb"
+            className="ev-thumb"
             ref={enlargeRef}
             hidden={state.status !== "ready"}
             disabled={state.status !== "ready"}
             onClick={() => setEnlarged(true)}
-            aria-label={`Enlarge Evidence: ${item.evidenceId}`}
+            aria-label={`Open ${name}`}
+            data-ev-viewer-target=""
           >
-            <img src={imageUrl} alt={`Evidence: ${item.evidenceId}`} onLoad={onImageLoad} onError={onImageError} />
+            {isVideo ? (
+              <>
+                {/* The first frame, muted and still: the recording plays in the viewer. */}
+                <video src={imageUrl} muted playsInline preload="auto" aria-hidden="true" tabIndex={-1}
+                  onLoadedMetadata={(event) => {
+                    if (!(event.currentTarget.videoWidth > 0 && event.currentTarget.videoHeight > 0)) onImageError();
+                  }}
+                  onLoadedData={(event) => {
+                    const { videoWidth: width, videoHeight: height } = event.currentTarget;
+                    if (width > 0 && height > 0) onImageLoad({ width, height });
+                    else onImageError();
+                  }}
+                  onError={onImageError} />
+                <span className="ev-play" aria-hidden="true"><PlayIcon /></span>
+              </>
+            ) : (
+              <img src={imageUrl} alt={name}
+                onLoad={(event) => onImageLoad({
+                  width: event.currentTarget.naturalWidth,
+                  height: event.currentTarget.naturalHeight,
+                })}
+                onError={onImageError} />
+            )}
           </button>
           {enlarged && state.status === "ready" && (
             <Modal
-              title={item.evidenceId}
+              title={name}
+              description={item.evidenceId}
               onClose={() => setEnlarged(false)}
               size="lg"
               returnFocusRef={enlargeRef}
             >
-              <img className="evidence-artifact-full" src={imageUrl} alt={`Evidence: ${item.evidenceId}`} />
+              {isVideo
+                ? <video className="ev-full" src={imageUrl} controls playsInline preload="auto" aria-label={`Play ${name}`} />
+                : <img className="ev-full" src={imageUrl} alt={name} />}
             </Modal>
           )}
         </>
-      ))}
-      {state.status === "ready" && (
-        <p className="evidence-artifact-check muted">Checked by this browser against the request's digest.</p>
       )}
       {state.status === "mismatch" && (
-        <p className="evidence-artifact-state form-error" role="alert">
-          This browser found that this artifact does not match the digest recorded in the request, so it is not shown.
-        </p>
+        <EvidenceBlocked tone="danger" icon={<DecisionBlockedIcon size={14} />} label="Doesn't Match"
+          detail="It isn't the file the request names." />
       )}
       {state.status === "unavailable" && (
-        <div className="evidence-artifact-state form-error" role="alert">
-          <p>{state.reason}</p>
-          {state.retryable && <button type="button" className="btn ghost sm" onClick={retry}>Retry</button>}
-        </div>
+        <EvidenceBlocked tone="danger" icon={<ErrorIcon size={14} />} label="Can't Load" detail={state.reason}
+          action={state.retryable
+            ? <button type="button" className="btn sm" onClick={retry} aria-label={`Retry ${name}`}>Retry</button>
+            : undefined} />
       )}
       {/* No external link here, even when the item has a `uri`: an artifact-backed item is reviewed
           as the checked artifact or not at all, so the reviewer never approves bytes nobody checked. */}
       {state.status === "unverifiable" && (
-        <p className="evidence-artifact-state muted" role="status">
-          Not shown: this browser can check the artifact against the request's digest only over HTTPS or on localhost.
-        </p>
+        <EvidenceBlocked tone="neutral" icon={<SecureContextRequiredIcon size={14} />} label="Not Shown"
+          detail="Needs HTTPS or localhost." />
       )}
     </div>
   );
 }
 
 /** An artifact the card cannot draw. Its external copy, if any, is never offered in its place: nobody could check
- * that copy against the request's digest, so the item stays blocked and only Deny remains. */
+ * that copy against the request's digest, so the item stays blocked and only Deny remains (#1792). */
 export function UnrenderableEvidenceArtifact({ item }: { item: EvidenceItem }) {
   return (
-    <div className="evidence-artifact" data-status="unsupported">
-      <div className="evidence-artifact-state form-error" role="alert">
-        <p>
-          {item.mediaType
-            ? <>This artifact is <code>{item.mediaType}</code>, which the review card cannot show, so it cannot be reviewed here.</>
-            : <>This artifact declares no media type, so the review card cannot show it and it cannot be reviewed here.</>}
-          {" "}Ask for a PNG, JPEG, GIF, WebP, MP4, or WebM capture, or deny the request.
-        </p>
-      </div>
+    <div className="ev-media" data-status="unsupported">
+      <EvidenceBlocked tone="danger" icon={<ErrorIcon size={14} />} label="Can't Show"
+        detail={item.mediaType
+          ? <><code>{item.mediaType}</code> can't be shown here.</>
+          : "It declares no media type."} />
     </div>
   );
 }
@@ -273,7 +314,8 @@ export function UnrenderableEvidenceArtifact({ item }: { item: EvidenceItem }) {
 export function EvidenceSecureContextNotice({ evidence }: { evidence: readonly EvidenceItem[] }) {
   if (evidenceIntegrityCheckAvailable() || !evidence.some(isRenderableEvidence)) return null;
   return (
-    <Notice tone="warning" role="note" ariaLabel="HTTPS or Localhost Required" title="HTTPS or Localhost Required">
+    <Notice tone="warning" icon={<SecureContextRequiredIcon />} role="note" ariaLabel="HTTPS or Localhost Required"
+      title="HTTPS or Localhost Required">
       <p>
         This page is open at <code>{window.location.origin}</code>. Browsers can check evidence against the
         request's digest only on HTTPS or localhost pages, so artifact evidence is not shown here and cannot be

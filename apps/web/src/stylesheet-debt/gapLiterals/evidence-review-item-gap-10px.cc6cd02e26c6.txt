@@ -1,1 +1,0 @@
-|.evidence-review-item|gap|10px

@@ -339,7 +339,9 @@ test("child evidence actions stay reachable in a short desktop panel", async ({ 
   const panelCard = page.locator(".request-panel-detail .request-card");
   await expect(panelCard).toHaveAttribute("data-presentation", "panel");
   await assertInside(page, ".request-panel-detail", panelCard.locator(".request-card-foot"));
-  await panelCard.locator('.evidence-review-item input[type="checkbox"]').check();
+  // A link-only item is marked once its link was opened (#2197).
+  await panelCard.getByRole("link", { name: "Open Link" }).click();
+  await panelCard.locator('.ev-tile input[type="checkbox"]').check();
   await expect(panelCard.getByRole("button", { name: "Approve", exact: true })).toBeEnabled();
   for (const name of ["Approve", "Deny"]) {
     // One control height with this mouse (#1799); a touch screen makes it 44px.
@@ -393,23 +395,32 @@ for (const viewport of [
     const geometry = await dockGeometry(page);
     expect(geometry.transcript).toBeGreaterThanOrEqual(geometry.reading * 0.5 - 1);
     await expect(page.getByRole("complementary", { name: "Requests" })).toHaveCount(0);
-    await expect(card(page).locator(".evidence-review-summary").getByRole("status")).toContainText("0 of 8 Reviewed");
+    await expect(card(page).locator(".ev-progress")).toHaveText("0 of 8 reviewed");
     const approve = card(page).locator(".request-card-foot").getByRole("button", { name: /^Approve/u });
     await expect(approve).toBeDisabled();
-    await expect(approve).toHaveAccessibleDescription("Review every artifact before approving this request.");
+    await expect(approve).toHaveAccessibleDescription("Review 8 more to approve.");
     await expect(card(page).locator(".request-card-foot").getByRole("button", { name: /^Deny/u })).toBeVisible();
-    await expect(page.locator(".evidence-review-item")).toHaveCount(8);
+    await expect(page.locator(".ev-tile")).toHaveCount(8);
     await expect(page.locator("body")).not.toContainText("signature=hidden");
     await assertNoHorizontalOverflow(page, ".request-card-body");
 
-    const checks = page.locator('.evidence-review-item input[type="checkbox"]');
-    for (let index = 0; index < 3; index += 1) await checks.nth(index).check();
-    await expect(card(page).locator(".evidence-review-summary").getByRole("status")).toContainText("3 of 8 Reviewed");
+    // Each link-only item is marked once its link was opened (#2197).
+    const links = page.locator(".ev-tile").getByRole("link", { name: "Open Link" });
+    const checks = page.locator('.ev-tile input[type="checkbox"]');
+    for (let index = 0; index < 3; index += 1) {
+      await links.nth(index).click();
+      await checks.nth(index).check();
+    }
+    await expect(card(page).locator(".ev-progress")).toHaveText("3 of 8 reviewed");
+    await expect(approve).toHaveAccessibleDescription("Review 5 more to approve.");
     // The review survives a reload and a rotation.
     await page.setViewportSize(viewport.width <= 844 ? { width: viewport.height, height: viewport.width } : viewport);
     await page.reload();
-    await expect(card(page).locator(".evidence-review-summary").getByRole("status")).toContainText("3 of 8 Reviewed");
-    for (let index = 3; index < 8; index += 1) await checks.nth(index).check();
+    await expect(card(page).locator(".ev-progress")).toHaveText("3 of 8 reviewed");
+    for (let index = 3; index < 8; index += 1) {
+      await links.nth(index).click();
+      await checks.nth(index).check();
+    }
     await expect(approve).toBeEnabled();
     await approve.click();
     await expect(card(page)).toHaveCount(0);

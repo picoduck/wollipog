@@ -75,6 +75,7 @@ import {
   Network as LucideNetwork,
   Route as LucideRoute,
   Lock as LucideLock,
+  LockKeyhole as LucideLockKeyhole,
   Mail as LucideMail,
   MessageCircleQuestion as LucideMessageCircleQuestion,
   Mic as LucideMic,
@@ -88,6 +89,7 @@ import {
   Paperclip as LucidePaperclip,
   Pencil as LucidePencil,
   Pin as LucidePin,
+  Play as LucidePlay,
   Plus as LucidePlus,
   RefreshCw as LucideRefreshCw,
   ScrollText as LucideScrollText,
@@ -374,7 +376,8 @@ export function DecisionClosedIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideCircleX} {...props} />;
 }
 
-/** A Decision Record blocked by a policy or fail-closed (#2204). */
+/** A Decision Record blocked by a policy or fail-closed (#2204); an evidence item whose bytes failed
+ * the request's digest check (#2197), which fails closed the same way. */
 export function DecisionBlockedIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideShieldX} {...props} />;
 }
@@ -410,6 +413,16 @@ export function AccountIcon(props: IconProps) {
 
 export function LockIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideLock} {...props} />;
+}
+
+/** A page that needs HTTPS or localhost to check evidence against its digest (#1787, #2197). */
+export function SecureContextRequiredIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideLockKeyhole} {...props} />;
+}
+
+/** A recording: the play mark over a UI evidence tile's first frame (#2197). */
+export function PlayIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucidePlay} {...props} />;
 }
 
 export function MailIcon(props: IconProps) {

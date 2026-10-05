@@ -80,16 +80,18 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `WrapLinesIcon` | Lucide | `WrapText` | The Wrap Lines toggle in a markdown code block's header. |
 | `WarningIcon` | Lucide | `TriangleAlert` | Generic warning state. |
 | `InfoIcon` | Lucide | `Info` | Generic information state; the info and neutral tone icon on toasts and notices; the session bar's Pinned Summary toggle, which opens the session's details column. |
-| `SuccessIcon` | Lucide | `CircleCheck` | The success tone icon on toasts and notices; a completed plan step; an allowed or answered Decision Record. |
+| `SuccessIcon` | Lucide | `CircleCheck` | The success tone icon on toasts and notices; a completed plan step; an allowed or answered Decision Record; the UI evidence digest caption. |
 | `DecisionClosedIcon` | Lucide | `CircleX` | A Decision Record that ended without going ahead: Rejected, Dismissed, Ended Early, Replaced, Resolved by Provider. |
-| `DecisionBlockedIcon` | Lucide | `ShieldX` | A Decision Record blocked by a policy or fail-closed. |
+| `DecisionBlockedIcon` | Lucide | `ShieldX` | A Decision Record blocked by a policy or fail-closed; a UI evidence tile whose bytes don't match the request's digest. |
 | `DecisionTimedOutIcon` | Lucide | `TimerOff` | A Decision Record whose deadline passed. |
 | `PlanPendingIcon` | Lucide | `Circle` | A plan step not started yet. |
 | `PlanInProgressIcon` | Lucide | `CircleDot` | The plan step in progress. |
-| `ErrorIcon` | Lucide | `CircleAlert` | The danger tone icon on toasts and notices; the failed count on a work ledger line. |
+| `ErrorIcon` | Lucide | `CircleAlert` | The danger tone icon on toasts and notices; the failed count on a work ledger line; a UI evidence tile that Can't Load or Can't Show. |
 | `KeyboardIcon` | Lucide | `Keyboard` | Keyboard shortcuts. |
 | `AccountIcon` | Lucide | `CircleUserRound` | The provider account a session runs under; the Request Card's Sign-In kind. |
 | `LockIcon` | Lucide | `Lock` | Locked or restricted state; a masked identifier that is not an email. |
+| `SecureContextRequiredIcon` | Lucide | `LockKeyhole` | A page that must be HTTPS or localhost to check evidence: the HTTPS or Localhost Required notice and a UI evidence tile that is Not Shown. |
+| `PlayIcon` | Lucide | `Play` | A recording: the mark over a UI evidence tile's first frame. |
 | `MailIcon` | Lucide | `Mail` | A masked or revealed email address. |
 | `EyeIcon` | Lucide | `Eye` | Reveal a masked personal identifier. |
 | `EyeOffIcon` | Lucide | `EyeOff` | Hide a revealed personal identifier. |

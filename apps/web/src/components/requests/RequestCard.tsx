@@ -216,7 +216,7 @@ export function RequestCard({
     authenticationRecoveryPanelApplies(session, request)
       ? <AuthenticationRecoveryPanel key="recovery" session={session} approval={request} runner={runner}
         runnerOnline={runnerOnline} /> : null,
-    evidence ? <EvidenceReviewBody key="evidence" review={evidence} reasonId={evidenceReasonId} /> : null,
+    evidence ? <EvidenceReviewBody key="evidence" review={evidence} /> : null,
     workflowDecision && !evidence ? <WorkflowDecisionSummary key="decision" snapshot={workflowDecision.resourceSnapshot} /> : null,
     decisionDetails ? (
       <details key="details" className="disclosure">
@@ -257,7 +257,7 @@ export function RequestCard({
         trailing={headTrailing}
       />
       <h3 className="request-card-title" id={titleId} ref={headingRef} tabIndex={-1} data-session-request-focus="">
-        {request.title}
+        {evidence ? evidence.title : request.title}
       </h3>
       {policyLine && <p className="request-card-policy">{policyLine}</p>}
       {body.length > 0 && <div className="request-card-body">{body}</div>}
@@ -266,10 +266,12 @@ export function RequestCard({
           {REQUEST_CARD_COPY.notSent} {error}
         </Notice>
       )}
-      {(reason !== null || signInBlocked) && (
+      {(reason !== null || signInBlocked || evidence?.footNote) && (
         <div className="request-card-reasons">
           {reason !== null && <p id={reasonId}>{reason}</p>}
           {signInBlocked && <p id={signInReasonId}>{REQUEST_CARD_COPY.signInOwner}</p>}
+          {/* Why Approve is off while UI evidence is under review (#2197); Deny never waits on it. */}
+          {evidence?.footNote && <p id={evidenceReasonId}>{evidence.footNote}</p>}
         </div>
       )}
       <div className="request-card-foot">

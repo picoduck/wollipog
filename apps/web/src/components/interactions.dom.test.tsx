@@ -618,9 +618,11 @@ test("UI evidence approval requires an explicit review acknowledgement and sends
     const approve = [...container.querySelectorAll<HTMLButtonElement>(".request-card-foot button")]
       .find((button) => button.textContent?.includes("Approve"))!;
     assert.equal(approve.disabled, true);
-    assert.equal(container.querySelector<HTMLAnchorElement>('[href="https://evidence.example/after.png"]')?.getAttribute("aria-label"),
-      "View External Evidence: desktop-after");
-    const reviewed = container.querySelector<HTMLInputElement>('.evidence-review-item input[type="checkbox"]')!;
+    const link = container.querySelector<HTMLAnchorElement>('[href="https://evidence.example/after.png"]')!;
+    assert.equal(link.textContent, "Open Link");
+    const reviewed = container.querySelector<HTMLInputElement>('.ev-tile input[type="checkbox"]')!;
+    assert.equal(reviewed.disabled, true, "a link-only item is reviewable once its link was opened");
+    await act(async () => { link.click(); });
     await act(async () => { reviewed.click(); });
     assert.equal(approve.disabled, false);
     await act(async () => { approve.click(); await tick(); });
@@ -692,13 +694,15 @@ test("the inline evidence card blocks an artifact it cannot show instead of link
     const button = (name: string) => [...container.querySelectorAll<HTMLButtonElement>(".request-card-foot button")]
       .find((candidate) => candidate.textContent?.includes(name))!;
     assertNoDomNode(container.querySelector('[href="https://evidence.example/vector.svg"]'));
-    assert.ok(container.querySelector('[href="https://evidence.example/legacy.png"]'), "URI-only evidence keeps its link");
-    assert.match(container.querySelector('.evidence-artifact[data-status="unsupported"]')?.textContent ?? "",
-      /This artifact is image\/svg\+xml, which the review card cannot show/u);
-    const checkbox = (evidenceId: string) =>
-      container.querySelector<HTMLInputElement>(`input[aria-label="Mark ${evidenceId} as Reviewed"]`)!;
-    assert.equal(checkbox("vector").disabled, true);
-    await act(async () => { checkbox("legacy").click(); });
+    const legacy = container.querySelector<HTMLAnchorElement>('[href="https://evidence.example/legacy.png"]');
+    assert.ok(legacy, "URI-only evidence keeps its link");
+    assert.equal(container.querySelector('.ev-media[data-status="unsupported"]')?.textContent,
+      "Can't Showimage/svg+xml can't be shown here.");
+    const checkbox = (name: string) =>
+      container.querySelector<HTMLInputElement>(`input[aria-label="Mark ${name} as Reviewed"]`);
+    assertNoDomNode(checkbox("Screenshot"), "the SVG has no Reviewed mark");
+    await act(async () => { legacy.click(); });
+    await act(async () => { checkbox("Link")!.click(); });
     assert.equal(button("Approve").disabled, true);
     await act(async () => { button("Deny").click(); await tick(); });
     assert.deepEqual(requests, [{ requestId: "workflow-evidence-unrenderable", optionId: "deny" }]);

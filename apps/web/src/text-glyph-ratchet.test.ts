@@ -81,6 +81,7 @@ const EXEMPT: readonly (readonly [string, string, string, string])[] = [
   ["shortcuts.ts", "→", "Hidden in Settings → Appearance", "a settings path written in a sentence"],
   ["shortcuts.ts", "→", "Turned off in Settings → Experimental", "a settings path written in a sentence"],
   ["components/Markdown.tsx", "×", "×", "the multiplication sign in an image's pixel size, 1280 × 720"],
+  ["components/requests/EvidenceReview.tsx", "×", "×", "the multiplication sign in a UI evidence capture's pixel size, 960 × 600"],
 ];
 
 function sourceFiles(dir: string, out: string[] = []): string[] {
