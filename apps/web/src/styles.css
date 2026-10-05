@@ -4057,8 +4057,9 @@ textarea {
   /* A tile in the dock's strip on a phone: the request-level notice says what the detail would. */
   .ev-blocked-detail,
   .ev-link-glyph { display: none; }
-  /* Open Link and Retry keep their words in a strip tile about 77px wide, whatever the UI font. */
-  .ev-tile .btn.sm { padding-inline: var(--space-1); }
+  /* Open Link keeps its words in a strip tile about 77px wide, whatever the UI font, and stays wider
+     than 44px. Retry is short enough to keep its own padding, and with it its 44px width. */
+  .ev-media[data-status="link"] > .btn.sm { padding-inline: var(--space-1); }
   .ev-mark .checkbox-label {
     position: absolute;
     width: 1px;

@@ -368,11 +368,12 @@ test("tiles are named in full and keep their targets on a touch phone", async ({
       expect(await tile(page, id).locator(".ev-name").evaluate((name) => name.scrollWidth <= name.clientWidth + 1)).toBe(true);
     }
     const target = (locator: Locator) => locator.evaluate((element) => {
-      // A 44px target, by the element's own box or the hit area its ::after lends it.
+      // A 44px target in each direction, by the element's own box or the hit area its ::after
+      // lends it on that axis (a tile's small buttons borrow height only).
       const box = element.getBoundingClientRect();
       const after = getComputedStyle(element, "::after");
-      const inset = after.content === "none" ? 0 : -parseFloat(after.top);
-      return Math.min(box.width, box.height) + 2 * Math.max(0, inset);
+      const borrowed = (side: string) => after.content === "none" ? 0 : Math.max(0, -parseFloat(side));
+      return Math.min(box.width + 2 * borrowed(after.left), box.height + 2 * borrowed(after.top));
     });
     expect(await target(first.getByRole("button", { name: "Open Screenshot 1" }))).toBeGreaterThanOrEqual(44);
     expect(await target(first.locator("label.ev-mark"))).toBeGreaterThanOrEqual(44);
