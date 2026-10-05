@@ -114,6 +114,14 @@ const longQuestions: AgentQuestion[] = [
   },
 ];
 
+// A question whose text alone is taller than the card's cap above the transcript (#2196).
+const longTextQuestions: AgentQuestion[] = [{
+  id: "plan",
+  header: "Plan",
+  question: Array.from({ length: 30 }, (_, index) => `Paragraph ${index + 1} explains one more part of the plan.`).join("\n\n"),
+  options: [{ label: "Proceed" }, { label: "Hold" }],
+}];
+
 const replacementQuestions: AgentQuestion[] = [{
   id: "replacement",
   header: "Replacement",
@@ -182,6 +190,8 @@ function Fixture() {
   const [questions, setQuestions] = useState(
     params.get("set") === "long"
       ? longQuestions
+      : params.get("set") === "long-text"
+        ? longTextQuestions
       : params.get("set") === "forms"
         ? formQuestions
         : params.get("set") === "rich"

@@ -13246,10 +13246,24 @@ body.shell-dock-dragging * {
     order: -1;
   }
 }
+/* Capped above the transcript, a long question scrolls on its own, so the answers and the footer
+   keep their room; in the transcript and the Requests panel the card is not capped. */
+.question-bar > .question-text {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: min(240px, 30dvh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
 .timeline .question-bar {
   max-width: none;
   max-height: none;
   margin-top: 0;
+}
+.timeline .question-bar > .question-text,
+.request-panel-detail > .question-bar > .question-text {
+  max-height: none;
+  overflow: visible;
 }
 .timeline .question-list {
   flex: none;

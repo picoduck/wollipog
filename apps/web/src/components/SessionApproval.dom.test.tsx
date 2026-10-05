@@ -665,6 +665,30 @@ test("a failed submission shows a danger notice above the footer, keeps the choi
   }
 });
 
+test("Try Again keeps its label while the retry is pending", async () => {
+  const { container, root } = mount();
+  const retry = deferredAnswer();
+  let calls = 0;
+  const client = {
+    ...api,
+    answerQuestion: () => (++calls === 1 ? Promise.reject(new Error("Rejected once.")) : retry.promise),
+  } as ApiClient;
+  try {
+    await renderBanner(root, [{ id: "target", question: "Choose a target", options: [{ label: "Staging" }] }], true, client);
+    await act(async () => { row(container, "Staging").click(); });
+    await act(async () => { submitButton(container).click(); await tick(); });
+    assert.equal(label(submitButton(container)), "Try Again");
+    await act(async () => { submitButton(container).click(); });
+    assert.equal(submitButton(container).getAttribute("aria-busy"), "true");
+    assert.equal(label(submitButton(container)), "Try Again", "the pending retry still names what runs");
+    assertNoDomNode(container.querySelector('[role="alert"]'), "the old failure clears while the retry runs");
+  } finally {
+    retry.resolve({} as SessionView);
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
 test("submitting shows the busy primary without swapping its label", async () => {
   const { container, root } = mount();
   const answer = deferredAnswer();

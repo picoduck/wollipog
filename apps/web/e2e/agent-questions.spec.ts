@@ -417,6 +417,40 @@ test("a long history-loading fallback remains reachable inside the fixed session
   expect(await page.evaluate(() => window.scrollY)).toBe(0);
 });
 
+test("a question taller than the capped card scrolls on its own and keeps its answers and footer in reach", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/agent-questions-e2e.html?set=long-text&slot=1");
+  const bar = page.getByRole("region", { name: "Agent Questions" });
+  await expectInsideViewport(bar, page);
+  const title = bar.locator(".question-text");
+  const scroll = await title.evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+    overflowY: getComputedStyle(element).overflowY,
+  }));
+  expect(scroll.overflowY).toBe("auto");
+  expect(scroll.scrollHeight).toBeGreaterThan(scroll.clientHeight);
+  const proceed = page.getByRole("radio", { name: "Proceed" });
+  await proceed.scrollIntoViewIfNeeded();
+  await expectInsideViewport(proceed, page);
+  await proceed.click();
+  const submit = page.getByRole("button", { name: "Submit Answers" });
+  await expectInsideViewport(submit, page);
+  const [barBox, submitBox] = [await geometry(bar), await geometry(submit)];
+  expect(submitBox.bottom).toBeLessThanOrEqual(barBox.bottom);
+  await submit.click();
+  await expect(page.getByRole("status").filter({ hasText: "Question Answered" })).toHaveCount(1);
+  expect(await page.evaluate(() => window.agentQuestionCalls[0]?.answers)).toEqual({ plan: "Proceed" });
+});
+
+test("in the transcript a long question is not capped", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/agent-questions-e2e.html?set=long-text");
+  const title = page.getByRole("region", { name: "Agent Questions" }).locator(".question-text");
+  await expect(title).toHaveCSS("overflow-y", "visible");
+  expect(await title.evaluate((element) => element.scrollHeight <= element.clientHeight + 1)).toBe(true);
+});
+
 test("a replacement request cannot submit retained selections", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/agent-questions-e2e.html");

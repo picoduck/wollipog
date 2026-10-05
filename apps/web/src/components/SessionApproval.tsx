@@ -413,6 +413,9 @@ export function SessionQuestionBanner({
   // The questions whose errors show: each one the person tried to move past unanswered (§8.5).
   const [attempted, setAttempted] = useState<ReadonlySet<string>>(() => new Set());
   const [failure, setFailure] = useState<{ action: "submit" | "dismiss"; detail: string } | null>(null);
+  // Once a submission failed, the primary reads Try Again until the answers are sent, including
+  // while the retry is pending and the failure notice is gone (BusyButton keeps its label).
+  const [retrying, setRetrying] = useState(false);
   const [focusRequest, setFocusRequest] = useState<{ target: CardFocus; serial: number } | null>(null);
   const operationPendingRef = useRef<object | null>(null);
   const liveRequestRef = useRef<object | null>(null);
@@ -453,6 +456,7 @@ export function SessionQuestionBanner({
     setAttempted(new Set());
     setBusy(null);
     setFailure(null);
+    setRetrying(false);
   }, [answerKey, sessionId]);
 
   useEffect(() => {
@@ -591,7 +595,10 @@ export function SessionQuestionBanner({
       clearQuestionDrafts(sessionId, answerKey);
       onSessionUpdate?.(updated);
     } catch (cause) {
-      if (liveRequestRef.current === submittedRequest) setFailure({ action: "submit", detail: (cause as Error).message });
+      if (liveRequestRef.current === submittedRequest) {
+        setFailure({ action: "submit", detail: (cause as Error).message });
+        setRetrying(true);
+      }
     } finally {
       releaseOperation();
       if (operationPendingRef.current === operation) operationPendingRef.current = null;
@@ -701,7 +708,7 @@ export function SessionQuestionBanner({
   const kindLabel = recoveryRequired ? QUESTION_CARD_COPY.recoveryRequired
     : isAsync ? QUESTION_CARD_COPY.asyncQuestion : QUESTION_CARD_COPY.question;
   const failureText = failure?.action === "dismiss" ? QUESTION_CARD_COPY.notDismissed : QUESTION_CARD_COPY.notSent;
-  const submitLabel = failure?.action === "submit" ? QUESTION_CARD_COPY.tryAgain : QUESTION_CARD_COPY.submitAnswers;
+  const submitLabel = retrying ? QUESTION_CARD_COPY.tryAgain : QUESTION_CARD_COPY.submitAnswers;
   const navigateOnly = !answerable;
   const composerHint = !interactive && questions.length > 0 && !recoveryRequiresDismiss;
 
