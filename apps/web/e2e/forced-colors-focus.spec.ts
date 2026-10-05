@@ -9,13 +9,14 @@ import { RIGHT_PANEL_KEY_STEP } from "../src/right-panel.js";
  * checks the separator really paints.
  */
 
-const URL = "/request-surfaces-e2e.html?scenario=evidence";
+// The Requests panel of a campaign with child requests: the session's own requests are on its dock.
+const URL = "/request-surfaces-e2e.html?scenario=descendants";
 
 async function openSeparator(page: Page, theme: "dark" | "light") {
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto(URL);
   await page.evaluate((value) => document.documentElement.dataset.theme = value, theme);
-  await page.getByRole("button", { name: "Review Evidence" }).click();
+  await page.getByRole("button", { name: "Needs Your Input: 8 Requests" }).click();
   const separator = page.getByRole("separator", { name: "Resize Panel" });
   await expect(separator).toBeVisible();
   await page.mouse.move(0, 0);

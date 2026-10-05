@@ -17,11 +17,9 @@ async function capture(page: Page, name: string): Promise<void> {
 
 async function open(page: Page, query: string) {
   await page.goto(`/authentication-recovery-e2e.html?${query}`);
-  // A standalone request is reviewed from its transcript row in the request panel.
-  await page.getByRole("button", { name: "Review Request" }).click();
-  const card = page.getByRole("region", { name: "Approval Review" });
+  // The session's own request is answered on the Request Card docked above the composer (#2179).
+  const card = page.locator(".request-dock").getByRole("region", { name: "Authentication Required — Claude Code" });
   await expect(card).toBeVisible();
-  await expect(card).toContainText("Authentication Required — Claude Code");
   const recovery = card.getByRole("group", { name: "Account Recovery" });
   await expect(recovery).toBeVisible();
   return { card, recovery };
@@ -97,7 +95,9 @@ test("an older runner keeps the existing actions with update guidance and no ide
   await page.setViewportSize({ width: 1180, height: 820 });
   const { card, recovery } = await open(page, "theme=dark&scenario=older");
   await expect(recovery).toContainText("Update and restart the runner, or use this card's other actions.");
-  await expect(card.getByRole("button", { name: "Recheck Authentication" })).toBeVisible();
+  // A second one-time choice waits in the card's ⋯ menu, with its description (#2179).
+  await card.getByRole("button", { name: "More Choices" }).click();
+  await expect(page.getByRole("menuitem", { name: "Recheck Authentication" })).toBeVisible();
   expect(await page.evaluate(() => window.__WOLLIPOG_AUTH_RECOVERY_E2E__.identityRequests())).toBe(0);
   await capture(page, "auth-recovery-older-runner-desktop-dark");
 });

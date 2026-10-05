@@ -203,6 +203,8 @@ export type TimelineItem =
       requestId: string;
       title: string;
       options: PermissionOption[];
+      /** When the request was raised, which the Request Card's head line shows (#2179). */
+      createdAt?: number;
       resolvedOptionId?: string | null;
       resolutionReason?: StructuredRequestResolutionReason;
       resolvedByParentSessionId?: string;
@@ -1258,6 +1260,7 @@ export class TimelineBuilder {
             title: p.title,
             options: p.options,
             context: p.context,
+            ...(Number.isFinite(ev.ts) ? { createdAt: ev.ts } : {}),
             resolvedOptionId: undefined,
             resolutionReason: undefined,
           };
@@ -1274,6 +1277,7 @@ export class TimelineBuilder {
             title: p.title,
             options: p.options,
             context: p.context,
+            ...(Number.isFinite(ev.ts) ? { createdAt: ev.ts } : {}),
           }) - 1;
         this.permIndex.set(p.requestId, appended);
         if (p.purpose === "authentication") this.activeAuthenticationIndex = appended;

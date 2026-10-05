@@ -22,8 +22,9 @@ import { useRemovedFocus } from "./useRemovedFocus.js";
  * `onDismiss` to its `onDismiss` (except Session Archived, which is the way back). A condition that also stops a new message defines its `key`,
  * severity and rank once, beside the composer's reason for it in `SessionDetail`, and the entry
  * spreads them: the composer sorts those reasons with `compareSessionNotices`, so its placeholder
- * names the condition this slot shows first (#2037). The Approvals epic's request dock takes the
- * slot ahead of every entry while a request is pending; it is not an entry.
+ * names the condition this slot shows first (#2037). The request dock (#2179) takes the slot ahead of
+ * every entry while a request is pending: it is the slot's `lead`, not an entry, and the entries
+ * wait behind the "+N More" in its card's head line.
  *
  * NOT AN ENTRY. A campaign notice describes an Orchestrator campaign rather than whether this
  * session can take its next turn: Campaign Continuation and Held Children. They stay under the
@@ -52,6 +53,16 @@ export interface SessionNoticeEntry {
   /** One line, Title Case: the menu item that shows this condition. */
   title: string;
   render: (context: SessionNoticeContext) => ReactNode;
+}
+
+/** What takes the slot ahead of every entry: the request dock while a request is pending (#2179). */
+export interface SessionNoticeLead {
+  key: string;
+  /** One line, Title Case: its item in "+N More" while the person has chosen a notice instead. */
+  title: string;
+  /** Its 16px icon in that menu. */
+  icon: ReactNode;
+  render: (context: { trailing: ReactNode }) => ReactNode;
 }
 
 /** Every entry's rank, in one table so the order is reviewed in one place (#1966). */
@@ -112,9 +123,11 @@ function dismissInfo(sessionId: string, key: string): void {
   for (const listener of [...dismissalListeners]) listener();
 }
 
-export function SessionNoticeSlot({ sessionId, entries, onFocusLost }: {
+export function SessionNoticeSlot({ sessionId, entries, lead, onFocusLost }: {
   sessionId: string;
   entries: readonly SessionNoticeEntry[];
+  /** Shown ahead of every entry, which then wait behind its "+N More". */
+  lead?: SessionNoticeLead;
   /** Where focus goes when the slot is gone while a control in it, or its "+N More" menu, held
    * focus: the composer, or the page title when the composer cannot take it. */
   onFocusLost?: () => void;
@@ -127,17 +140,20 @@ export function SessionNoticeSlot({ sessionId, entries, onFocusLost }: {
   const visible = entries
     .filter((entry) => entry.severity !== "info" || !dismissed.has(entry.key))
     .sort(compareSessionNotices);
+  type Shown = { lead: SessionNoticeLead } | { entry: SessionNoticeEntry };
+  const candidates: Shown[] = [...(lead ? [{ lead }] : []), ...visible.map((entry) => ({ entry }))];
+  const keyOf = (candidate: Shown) => "lead" in candidate ? candidate.lead.key : candidate.entry.key;
   // The set of conditions, order-free. A choice from "+N More" holds only while it is unchanged.
-  const signature = visible.map((entry) => entry.key).sort().join("\n");
+  const signature = candidates.map(keyOf).sort().join("\n");
   const [choice, setChoice] = useState<{ key: string; signature: string } | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const menu = useAccessibleMenu(menuOpen, setMenuOpen, "session-notice-more");
   const focusTrigger = useRef(false);
   const slotRef = useRef<HTMLDivElement>(null);
 
-  const shown = (choice?.signature === signature ? visible.find((entry) => entry.key === choice.key) : undefined) ??
-    visible[0];
-  const rest = visible.filter((entry) => entry !== shown);
+  const shown = (choice?.signature === signature ? candidates.find((candidate) => keyOf(candidate) === choice.key) : undefined) ??
+    candidates[0];
+  const rest = candidates.filter((candidate) => candidate !== shown);
 
   // The trigger belongs to whichever notice is shown, so after a choice it is a new button. Focus
   // follows it, rather than falling to <body> with the menu.
@@ -205,17 +221,19 @@ export function SessionNoticeSlot({ sessionId, entries, onFocusLost }: {
           onDismiss={() => menu.close(true)}
           onKeyDown={menu.onMenuKeyDown}
         >
-          {rest.map((entry) => (
+          {rest.map((candidate) => (
             <MenuItem
-              key={entry.key}
-              icon={<span className={`session-notice-tone t-${entry.severity}`}><ToneIcon tone={entry.severity} /></span>}
+              key={keyOf(candidate)}
+              icon={"lead" in candidate
+                ? candidate.lead.icon
+                : <span className={`session-notice-tone t-${candidate.entry.severity}`}><ToneIcon tone={candidate.entry.severity} /></span>}
               onClick={() => {
                 menu.close(false);
                 focusTrigger.current = true;
-                setChoice({ key: entry.key, signature });
+                setChoice({ key: keyOf(candidate), signature });
               }}
             >
-              {entry.title}
+              {"lead" in candidate ? candidate.lead.title : candidate.entry.title}
             </MenuItem>
           ))}
         </MenuSurface>
@@ -224,10 +242,10 @@ export function SessionNoticeSlot({ sessionId, entries, onFocusLost }: {
   );
 
   return (
-    <div ref={slotRef} className="session-notice-slot" data-notice-key={shown.key} tabIndex={-1}>
-      {shown.render({
+    <div ref={slotRef} className="session-notice-slot" data-notice-key={keyOf(shown)} tabIndex={-1}>
+      {"lead" in shown ? shown.lead.render({ trailing }) : shown.entry.render({
         trailing,
-        ...(shown.severity === "info" ? { onDismiss: () => dismissInfo(sessionId, shown.key) } : {}),
+        ...(shown.entry.severity === "info" ? { onDismiss: () => dismissInfo(sessionId, shown.entry.key) } : {}),
       })}
     </div>
   );

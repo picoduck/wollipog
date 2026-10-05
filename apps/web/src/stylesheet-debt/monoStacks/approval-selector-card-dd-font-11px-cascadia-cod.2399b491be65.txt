@@ -1,1 +1,0 @@
-|.approval-selector-card dd|font|11px "Cascadia Code", Consolas, monospace

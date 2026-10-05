@@ -31,6 +31,13 @@ import {
 import { TERMINAL_UPDATE_NOTE } from "./components/SessionPanelToggles.js";
 import { messageActions, turnActions } from "./components/EventTimeline.js";
 import { shareCreatedLabel, shareExpiryLabel, shareMoment } from "./transcript-share-time.js";
+import {
+  moreRequestsLabel,
+  pendingRequestsTitle,
+  REQUEST_CARD_COPY,
+  requestKindMeta,
+  requestPolicyLine,
+} from "./components/requests/request-meta.js";
 
 const SOURCE_ROOT = path.resolve("apps/web/src");
 const MINOR_WORDS = new Set([
@@ -719,6 +726,37 @@ test("Share Transcript's titles, labels and buttons are Title Case, and its sent
   assert.ok(isTitleCase(`Revoke Link That Expires ${shareMoment(expiresAt, now)}`));
   assert.equal(shareExpiryLabel({ status: "active", expiresAt }, now), "Expires in 2 days");
   assert.ok(isSentenceCase(shareCreatedLabel(now, now).replace(/\d.*$/, "").trim()));
+});
+
+test("the Request Card's labels and names are Title Case, and its foot-notes are sentences (#2179)", () => {
+  const titles = ["moreChoices", "copyDetails", "policyMatch", "pendingRequests", "waitingRequests", "pendingRequestTitle"] as const;
+  const sentences = ["runnerOffline", "signInOwner", "notSent", "sending"] as const;
+  assert.deepEqual([...titles, ...sentences].sort(), Object.keys(REQUEST_CARD_COPY).sort(), "every string is classified");
+  for (const key of titles) {
+    assert.ok(isTitleCase(REQUEST_CARD_COPY[key]) && !/[.!?…]$/.test(REQUEST_CARD_COPY[key]), `${key}: ${REQUEST_CARD_COPY[key]}`);
+  }
+  for (const key of sentences) {
+    const value = REQUEST_CARD_COPY[key];
+    assert.ok(/[.…]$/.test(value) && isSentenceCase(value.replace(/^Only the machine owner or an organization admin/, "Only")),
+      `${key}: ${value}`);
+  }
+  const kinds = ["permission", "cost_budget", "max_tool_calls", "authentication", "question", "workflow_decision"] as const;
+  for (const kind of kinds) {
+    for (const category of kind === "workflow_decision" ? ["pr_merge", "ui_evidence_approval"] : [undefined]) {
+      const label = requestKindMeta({ kind, workflowDecision: category ? { category } as never : undefined }).label;
+      assert.ok(isTitleCase(label), `${kind} ${category ?? ""}: ${label}`);
+    }
+  }
+  for (const label of [moreRequestsLabel(1), moreRequestsLabel(3), pendingRequestsTitle(1), pendingRequestsTitle(3)]) {
+    assert.ok(isTitleCase(label), label);
+  }
+  // The policy line is a sentence fragment: "Asked by Deploy Guard · Rejects automatically in 9:42", with
+  // the policy's name as written by its author.
+  for (const part of requestPolicyLine("guard", 582_000).split(" · ")) assert.ok(isSentenceCase(part), part);
+  // Every label written into the card and dock's markup is Title Case too.
+  const failures = ["RequestCard.tsx", "RequestDock.tsx", "EvidenceReview.tsx", "WorkflowDecisionSummary.tsx"]
+    .flatMap((file) => titleCaseFailures(parseSource(path.join(SOURCE_ROOT, "components/requests", file))).failures);
+  assert.deepEqual(failures, []);
 });
 
 test("the session menus' labels are Title Case, with an ellipsis only where a dialog or confirmation follows (#2161)", () => {

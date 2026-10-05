@@ -4,14 +4,14 @@ import { after, before, test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { SessionView } from "@wollipog/protocol";
+import { pendingRequests, type SessionView } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { saveEvidenceReviewDraft } from "../evidence-review-drafts.js";
 import { EvidenceArtifactView, type EvidenceArtifactStatus } from "./EvidenceArtifactView.js";
-import { SessionRequestPanel, sessionRequestPanelKey } from "./SessionRequestPanel.js";
+import { RequestDock, dockRequests } from "./requests/RequestDock.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
@@ -113,21 +113,13 @@ async function mount(session: SessionView, artifactExport: ApiClient["artifactEx
   const root = createRoot(container);
   await act(async () => root.render(
     <ApiProvider client={client}>
-      <SessionRequestPanel
-        session={session}
-        runnerOnline
-        descendants={[]}
-        selectedKey={sessionRequestPanelKey(session.id, session.pendingApproval!.occurrenceId!)}
-        onSelectedKeyChange={() => {}}
-        onSessionUpdate={() => {}}
-        onDescendantsUpdate={() => {}}
-        onOpenChild={() => {}}
-      />
+      {/* The session's own evidence is reviewed on the request dock's card (#2179). */}
+      <RequestDock session={session} requests={dockRequests(pendingRequests(session.pendingApproval))} runnerOnline />
     </ApiProvider>,
   ));
   // Fetch, digest, and the state update each settle on their own turn.
   for (let turn = 0; turn < 6; turn += 1) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-  const button = (name: string) => [...container.querySelectorAll<HTMLButtonElement>(".evidence-review-actions button")]
+  const button = (name: string) => [...container.querySelectorAll<HTMLButtonElement>(".request-card-foot button")]
     .find((candidate) => candidate.textContent === name)!;
   const checkbox = (evidenceId: string) =>
     container.querySelector<HTMLInputElement>(`input[aria-label="Mark ${evidenceId} as Reviewed"]`)!;

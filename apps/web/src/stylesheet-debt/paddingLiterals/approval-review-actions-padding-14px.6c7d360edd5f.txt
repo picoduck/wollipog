@@ -1,1 +1,0 @@
-|.approval-review-actions|padding|14px

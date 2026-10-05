@@ -67,8 +67,10 @@ hydration and flush, view-generation fencing, fork leasing, timeline recovery, a
 git-status reader. Presentation leaves are split at stable boundaries:
 
 - `SessionHeader` owns header actions and the transcript-share dialog.
-- `SessionApprovalBanner` and `SessionQuestionBanner` own approval/question presentation and
-  request-scoped response state.
+- `RequestCard` (in `components/requests/`) owns the presentation and request-scoped decision state
+  of every request other than a question, on the request dock above the composer (`RequestDock`)
+  and in the Requests and Agents panels; `SessionQuestionBanner` owns questions until #2196.
+  `SessionApprovalRegion` keeps the one focus and live-announcement owner for both.
 - `EventTimeline` and `RightPanel` remain their existing independently testable seams.
 
 The detail coordinator subscribes only to its owning runner and box. The shared git-status result is

@@ -1,11 +1,30 @@
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState, type MutableRefObject } from "react";
 import { createRoot } from "react-dom/client";
-import { sessionHolds, type DescendantRequestView, type SessionView } from "@wollipog/protocol";
+import {
+  pendingRequests,
+  prioritizedPendingRequests,
+  removePendingRequest,
+  sessionHolds,
+  type DescendantRequestView,
+  type PendingApproval,
+  type SessionView,
+} from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { CampaignContinuationNotice } from "../components/SessionDetail.js";
 import { CampaignHeldChildren } from "../components/CampaignHeldChildren.js";
 import { RightPanel, type RightPanelState } from "../components/RightPanel.js";
+import { Notice } from "../components/Notice.js";
+import {
+  SESSION_NOTICE_RANK,
+  SessionNoticeSlot,
+  type SessionNoticeEntry,
+  type SessionNoticeLead,
+} from "../components/SessionNoticeSlot.js";
+import { RequestDock, dockRequests } from "../components/requests/RequestDock.js";
+import { RequestKindIcon, pendingRequestsTitle } from "../components/requests/request-meta.js";
+import type { RequestIntentHandler } from "../components/requests/RequestCard.js";
+import { useSessionReadingKeys } from "../useSessionReadingKeys.js";
 import { SessionApprovalRegion } from "../components/SessionApproval.js";
 import { EventTimeline } from "../components/EventTimeline.js";
 import {
@@ -22,15 +41,26 @@ declare global {
     __WOLLIPOG_REQUEST_SURFACES_E2E__: {
       openedChild(): DescendantRequestView | null;
       submissions(): unknown[];
-      workerReviewOpened(): boolean;
       artifactRequests(): string[];
       openedHeldChild(): string | null;
       clearHold(sessionId: string): void;
+      /** The next decision fails, as a runner that refuses it would. */
+      failNextDecision(): void;
     };
   }
 }
 
 const scenario = new URLSearchParams(window.location.search).get("scenario") ?? "evidence";
+// The request dock's states (#2179): `runner=offline`, `respond=viewer` (a Viewer's refusal),
+// `notices=1` (two session notices behind the card's "+N More"), `tall=1` (a body taller than the
+// dock's cap) and `keyboard=1` (the software keyboard is open).
+const query = new URLSearchParams(window.location.search);
+const runnerOnline = query.get("runner") !== "offline";
+const respondAs = query.get("respond");
+const withNotices = query.get("notices") === "1";
+const tallBody = query.get("tall") === "1";
+const keyboardOpen = query.get("keyboard") === "1";
+let failNextDecision = false;
 const evidenceCount = Number(new URLSearchParams(window.location.search).get("items")) || 8;
 // `bounded=1` replaces the held children with one whose handoff the runner bounds (#1778);
 // `bounded=legacy` shows the same hold as a runner without the bound reports it.
@@ -122,7 +152,6 @@ let openedChild: DescendantRequestView | null = null;
 let openedHeldChild: string | null = null;
 let clearHold: (sessionId: string) => void = () => {};
 const submissions: unknown[] = [];
-let workerReviewOpened = false;
 
 function evidenceSession(): SessionView {
   const evidence = Array.from({ length: evidenceCount }, (_, index) => {
@@ -469,6 +498,214 @@ function heldCampaignSession(): SessionView {
   } as SessionView;
 }
 
+/** A session's own requests for the dock (#2179), by scenario. Each is a real request shape: the
+ * options are in the provider's order, which the card's footer reorders. */
+function permissionRequest(): PendingApproval {
+  return {
+    requestId: "permission-deploy",
+    occurrenceId: "permission-deploy",
+    kind: "permission",
+    title: "Run pnpm deploy?",
+    context: {
+      toolName: "Bash",
+      path: "/workspace/project",
+      branch: "fix/request-dock",
+      input: tallBody
+        ? Array.from({ length: 60 }, (_, index) => `pnpm deploy --step ${index + 1} --target production`).join("\n")
+        : "pnpm deploy --target production",
+    },
+    options: [
+      { optionId: "allow", name: "Allow", kind: "allow_once" },
+      {
+        optionId: "allow-always",
+        name: "Always Allow in This Session",
+        description: "Allows pnpm deploy without asking until the session ends.",
+        kind: "allow_always",
+      },
+      { optionId: "deny", name: "Reject", kind: "reject_once" },
+    ],
+  };
+}
+
+function policyRequest(): PendingApproval {
+  return {
+    requestId: "policy-ask",
+    occurrenceId: "policy-ask",
+    kind: "policy_hook",
+    title: "Bash requires approval.",
+    governancePolicyId: "deploy-guard",
+    expiresAt: Date.now() + (9 * 60 + 42) * 1000,
+    context: { toolName: "Bash", path: "/workspace/project", input: "pnpm deploy --target production" },
+    options: [
+      { optionId: "allow", name: "Allow", kind: "allow_once" },
+      { optionId: "deny", name: "Deny", kind: "reject_once" },
+    ],
+  };
+}
+
+function budgetRequest(): PendingApproval {
+  return {
+    requestId: "cost-budget:session:1",
+    kind: "cost_budget",
+    title: "Cost budget reached — $5.02 of $5.00. Continue?",
+    options: [
+      { optionId: "continue", name: "Continue", kind: "allow_once" },
+      { optionId: "cancel", name: "Stop", kind: "reject_once" },
+    ],
+  };
+}
+
+function toolCallsRequest(): PendingApproval {
+  return {
+    requestId: "max-tool-calls:session:1",
+    kind: "max_tool_calls",
+    title: "Tool-call limit reached — 200 of 200 tool calls. Continue?",
+    options: [
+      { optionId: "continue", name: "Continue", kind: "allow_once" },
+      { optionId: "cancel", name: "Stop", kind: "reject_once" },
+    ],
+  };
+}
+
+function workflowRequest(): PendingApproval {
+  return {
+    requestId: "merge-occurrence",
+    occurrenceId: "merge-occurrence",
+    kind: "workflow_decision",
+    title: "PR Merge Approval Required",
+    options: [
+      { optionId: "approve", name: "Approve", kind: "allow_once" },
+      { optionId: "deny", name: "Deny", kind: "reject_once" },
+    ],
+    workflowDecision: {
+      requestId: "merge-request",
+      occurrenceId: "merge-occurrence",
+      sessionId: "dock-session",
+      controllingSessionId: "parent",
+      category: "pr_merge",
+      resourceKey: "pr-2179",
+      resourceSnapshot: {
+        category: "pr_merge",
+        repository: "picoduck/wollipog",
+        pullRequest: 2179,
+        headSha: "c0ffee".repeat(6) + "c0ff",
+        reviewResult: "merge",
+        requiredChecks: { headSha: "c0ffee".repeat(6) + "c0ff", status: "passed", checkedAt: 1, checks: [] },
+      },
+      resourceDigest: "d".repeat(64),
+      policyRevision: 1,
+      authority: "human",
+      status: "pending",
+      createdAt: Date.now() - 3 * 60_000,
+    },
+  };
+}
+
+function signInRequest(): PendingApproval {
+  return {
+    requestId: "auth:claude",
+    kind: "authentication",
+    title: "Sign In to Claude Code",
+    options: [
+      {
+        optionId: "auth:login",
+        name: "Start Sign-In",
+        description: "Run the provider's login flow in this exact runner context. Output stays on the runner.",
+        kind: "allow_once",
+      },
+      {
+        optionId: "auth:revalidate",
+        name: "Recheck Authentication",
+        description: "Ask the provider in this exact context whether authentication is now valid.",
+        kind: "allow_once",
+      },
+      {
+        optionId: "auth:dismiss",
+        name: "Dismiss Recovery",
+        description: "Discard any retained prompt and make the session promptable without retrying provider work.",
+        kind: "reject_once",
+      },
+    ],
+  };
+}
+
+const DOCK_SCENARIOS: Record<string, { title: string; requests: () => PendingApproval[] }> = {
+  permission: { title: "Deploy the Request Dock", requests: () => [permissionRequest()] },
+  policy: { title: "Deploy Behind a Policy", requests: () => [policyRequest()] },
+  budget: { title: "Budgeted Session", requests: () => [budgetRequest()] },
+  "tool-calls": { title: "Tool-Limited Session", requests: () => [toolCallsRequest()] },
+  workflow: { title: "Campaign Merge", requests: () => [workflowRequest()] },
+  // Arrival order: the permission came first, the sign-in last. The dock orders them by priority.
+  multiple: { title: "Three Requests at Once", requests: () => [permissionRequest(), budgetRequest(), signInRequest()] },
+};
+
+function dockSession(): SessionView {
+  const entry = DOCK_SCENARIOS[scenario]!;
+  const [first, ...rest] = entry.requests();
+  return {
+    ...evidenceSession(),
+    id: "dock-session",
+    title: entry.title,
+    agentName: "Claude Code",
+    driver: "claude-code",
+    pendingApproval: { ...first!, ...(rest.length ? { additionalRequests: rest } : {}) },
+  } as SessionView;
+}
+
+function noticeEntries(): SessionNoticeEntry[] {
+  if (!withNotices) return [];
+  return [
+    {
+      key: "composer-error",
+      severity: "danger",
+      rank: SESSION_NOTICE_RANK.composerError,
+      title: "Message Not Sent",
+      render: ({ trailing }) => (
+        <Notice tone="danger" title="Message Not Sent" trailing={trailing}>
+          Couldn't send your message. Try again.
+        </Notice>
+      ),
+    },
+    {
+      key: "skills",
+      severity: "info",
+      rank: SESSION_NOTICE_RANK.skillsUnavailable,
+      title: "Skills Unavailable",
+      render: ({ trailing, onDismiss }) => (
+        <Notice tone="info" title="Skills Unavailable" trailing={trailing} onDismiss={onDismiss}>
+          This container session can't use the skills on your machine.
+        </Notice>
+      ),
+    },
+  ];
+}
+
+/** A and D, routed as the session's reading keys route them: to the dock's expanded request. */
+function ReadingKeys({ intentRef, scrollRef }: {
+  intentRef: MutableRefObject<RequestIntentHandler | null>;
+  scrollRef: MutableRefObject<HTMLDivElement | null>;
+}) {
+  const noop = () => {};
+  useSessionReadingKeys({
+    enabled: true,
+    sessionId: "dock-session",
+    scrollRef,
+    actions: {
+      nextSession: noop,
+      previousSession: noop,
+      approve: () => { intentRef.current?.("approve"); },
+      deny: () => { intentRef.current?.("deny"); },
+      archive: noop,
+      snooze: noop,
+      fork: noop,
+      reply: noop,
+      pauseFollow: noop,
+      resumeFollow: noop,
+    },
+  });
+  return null;
+}
+
 function Fixture() {
   const [session, setSession] = useState(() => scenario === "issue-closure" ? issueClosureSession() : scenario === "continuation"
     ? continuationSession()
@@ -493,7 +730,19 @@ function Fixture() {
             ? { ...standaloneApprovalSession().pendingApproval!, ownerToolUseId: "worker-tool" }
             : standaloneApprovalSession().pendingApproval,
         } as SessionView
+      : DOCK_SCENARIOS[scenario] ? dockSession()
+      // The transcript's own artifacts, with no request pending.
+      : scenario === "artifact-timeline" ? { ...evidenceSession(), status: "running", pendingApproval: null } as SessionView
       : evidenceSession());
+  const viewedSession = respondAs === "viewer" ? {
+    ...session,
+    commandPermissions: {
+      stop: { allowed: true },
+      restart: { allowed: true },
+      stopBackgroundJob: { allowed: true },
+      respond: { allowed: false, reason: "Your Viewer role can read this session but not answer its requests." },
+    },
+  } as SessionView : session;
   const descendants = useMemo(() => includeDescendants ? descendantRequests() : [], []);
   const [open, setOpen] = useState(false);
   const [mode, setMode] = useState<RightPanelMode>("requests");
@@ -510,12 +759,10 @@ function Fixture() {
       },
     } as SessionView;
   });
-  const [selectedKey, setSelectedKey] = useState<string | null>(() => scenario === "descendants" || scenario === "held"
+  const [selectedKey, setSelectedKey] = useState<string | null>(() => includeDescendants
     ? sessionRequestPanelKey(descendants[0]!.sessionId, descendants[0]!.occurrenceId)
-    : session.pendingApproval?.occurrenceId
-      ? sessionRequestPanelKey(session.id, session.pendingApproval.occurrenceId)
-      : null);
-  const legacyFocusRef = useRef<HTMLTextAreaElement>(null);
+    : null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
   const state: RightPanelState = {
     open,
     mode,
@@ -546,11 +793,24 @@ function Fixture() {
       }
       return new Blob([bytes], { type: artifactId === "art_clip" ? "video/webm" : "image/png" });
     },
-    approve: async (_sessionId: string, body: unknown) => {
+    governancePolicies: async () => ({ policies: [{
+      policyId: "deploy-guard", name: "Deploy Guard", effect: "ask", priority: 1, enabled: true, scope: {},
+      askTimeout: 600, createdAt: 1, updatedAt: 1,
+    }] }),
+    approve: async (sessionId: string, body: { requestId: string; optionId: string | null }) => {
       submissions.push(structuredClone(body));
-      const updated = { ...session, status: "running", pendingApproval: null } as SessionView;
+      if (failNextDecision) {
+        failNextDecision = false;
+        throw new ApiError("The runner did not accept the decision.", 503);
+      }
+      if (sessionId !== session.id) {
+        setOpen(false);
+        return session;
+      }
+      // Only the decided request leaves; the others stay pending in their order.
+      const remaining = removePendingRequest(session.pendingApproval, body.requestId);
+      const updated = { ...session, status: remaining ? "input_required" : "running", pendingApproval: remaining } as SessionView;
       setSession(updated);
-      setOpen(false);
       return updated;
     },
     resolvePendingPrompt: async (_sessionId: string, commandId: string, action: "cancel" | "dismiss" | "retry") => {
@@ -565,9 +825,8 @@ function Fixture() {
       return updated;
     },
   } as ApiClient;
-  const ownDecision = session.pendingApproval?.workflowDecision;
   const standaloneTemplate = scenario === "issue-closure" ? issueClosureSession().pendingApproval! : scenario === "standalone" || scenario === "worker"
-    ? standaloneApprovalSession().pendingApproval! : null;
+    ? standaloneApprovalSession().pendingApproval! : DOCK_SCENARIOS[scenario]?.requests()[0] ?? null;
   const standaloneTimelineItems: TimelineItem[] = standaloneTemplate ? [{
     kind: "permission",
     id: 25,
@@ -575,8 +834,11 @@ function Fixture() {
     title: standaloneTemplate.title,
     options: standaloneTemplate.options,
     context: standaloneTemplate.context,
-    ...(session.pendingApproval ? {} : { resolvedOptionId: scenario === "issue-closure"
-      ? (submissions.at(-1) as { optionId?: string } | undefined)?.optionId : "trust", resolutionReason: "submitted" as const }),
+    createdAt: Date.now() - 2 * 60_000,
+    ...(pendingRequests(session.pendingApproval).some((request) => request.requestId === standaloneTemplate.requestId)
+      ? {}
+      : { resolvedOptionId: (submissions.at(-1) as { optionId?: string } | undefined)?.optionId ?? "trust",
+        resolutionReason: "submitted" as const }),
   }] : [];
   const artifactTimelineItems: TimelineItem[] = scenario === "artifact-timeline" ? [
     ...(artifactMode === "ready" ? Array.from({ length: 24 }, (_, index): TimelineItem =>
@@ -595,10 +857,34 @@ function Fixture() {
     ...(artifactMode === "ready" ? Array.from({ length: 40 }, (_, index): TimelineItem =>
       ({ kind: "user_message", id: 200 + index, text: `Later transcript message ${index + 1}` })) : []),
   ] : [];
-  const artifactTimelineScrollRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const intentRef = useRef<RequestIntentHandler | null>(null);
+  const docked = dockRequests(prioritizedPendingRequests(session.pendingApproval));
+  const permissionTimes = new Map(standaloneTimelineItems.flatMap((item) =>
+    item.kind === "permission" && item.createdAt ? [[item.requestId, item.createdAt] as const] : []));
+  const lead: SessionNoticeLead | undefined = docked.length > 0 ? {
+    key: "request-dock",
+    title: pendingRequestsTitle(docked.length),
+    icon: <RequestKindIcon request={docked[0]!} />,
+    render: ({ trailing }) => (
+      <RequestDock
+        session={viewedSession}
+        requests={docked}
+        runnerOnline={runnerOnline}
+        owner="Claude Code"
+        createdAt={(request) => request.workflowDecision?.createdAt ?? permissionTimes.get(request.requestId)}
+        headTrailing={trailing}
+        onSessionUpdate={setSession}
+        showKeyHints
+        intentRef={intentRef}
+        keyboardOpen={keyboardOpen}
+      />
+    ),
+  } : undefined;
 
   return (
     <ApiProvider client={client}>
+      <ReadingKeys intentRef={intentRef} scrollRef={scrollRef} />
       <main className="app" style={{ display: "block", height: "100dvh" }}>
         <section className="session-detail expanded" style={{ height: "100%" }}>
           <header className="detail-bar session-bar" style={{ justifyContent: "space-between" }}>
@@ -644,63 +930,40 @@ function Fixture() {
                   )}
                 </div>
               )}
-              {(scenario === "legacy" || scenario === "standalone" || scenario === "worker" || scenario === "issue-closure") && (
-                <SessionApprovalRegion
-                  session={session}
-                  runnerOnline
-                  fallbackFocusRef={legacyFocusRef}
-                  onSessionUpdate={setSession}
-                  showKeyHints={false}
-                  standaloneInReviewSurface={scenario === "standalone" || scenario === "issue-closure"}
-                />
-              )}
-              <div className="detail-main">
-                <div className="detail-reader">
-                  <div className="detail-scroll measured-virtual-scroll" role="region" aria-label="Session Activity"
-                    ref={artifactTimelineScrollRef}>
-                    {Array.from({ length: scenario === "artifact-timeline" ? 0 : 24 }, (_, index) => (
-                      <div className={`tl-row ${index % 2 ? "agent" : "user"}`} key={index}>
-                        <div className={index % 2 ? "tl-agent-msg" : "tl-bubble"}>
-                          Transcript message {index + 1}
+              <SessionApprovalRegion
+                session={viewedSession}
+                runnerOnline={runnerOnline}
+                fallbackFocusRef={composerRef}
+                onSessionUpdate={setSession}
+                showKeyHints={false}
+              />
+              <div className="chat-reading">
+                <div className="detail-main">
+                  <div className="detail-reader">
+                    <div className="detail-scroll measured-virtual-scroll" role="region" aria-label="Session Activity"
+                      ref={scrollRef} tabIndex={0}>
+                      {Array.from({ length: scenario === "artifact-timeline" ? 0 : 24 }, (_, index) => (
+                        <div className={`tl-row ${index % 2 ? "agent" : "user"}`} key={index}>
+                          <div className={index % 2 ? "tl-agent-msg" : "tl-bubble"}>
+                            Transcript message {index + 1}
+                          </div>
                         </div>
-                      </div>
-                    ))}
-                    {(scenario === "standalone" || scenario === "worker" || scenario === "artifact-timeline" || scenario === "issue-closure") && (
-                      <EventTimeline
-                        items={scenario === "artifact-timeline" ? artifactTimelineItems : standaloneTimelineItems}
-                        scrollRef={scenario === "artifact-timeline" ? artifactTimelineScrollRef : undefined}
-                        historyKey={scenario === "artifact-timeline" ? `${session.id}:0` : undefined}
-                        approvalContext={session.pendingApproval ? {
-                          sessionId: session.id,
-                          requestId: session.pendingApproval.requestId,
-                          onOpenRequest: () => {
-                            if (scenario === "worker") workerReviewOpened = true;
-                            else setOpen(true);
-                          },
-                        } : undefined}
-                      />
-                    )}
-                    {scenario === "evidence" && ownDecision?.resourceSnapshot.category === "ui_evidence_approval" && (
-                      <section className="tl-request-card" aria-label="Pending UI Evidence Request">
-                        <span className="tl-request-icon" aria-hidden="true">🖼️</span>
-                        <span className="tl-request-copy">
-                          <strong>UI Evidence Review Required</strong>
-                          <span>{ownDecision.resourceSnapshot.evidence.length} Evidence Items</span>
-                        </span>
-                        <button
-                          className="btn primary sm"
-                          type="button"
-                          aria-controls="right-panel"
-                          onClick={() => setOpen(true)}
-                        >
-                          Review Evidence
-                        </button>
-                      </section>
-                    )}
+                      ))}
+                      {(standaloneTimelineItems.length > 0 || scenario === "artifact-timeline") && (
+                        <EventTimeline
+                          items={scenario === "artifact-timeline" ? artifactTimelineItems : standaloneTimelineItems}
+                          scrollRef={scenario === "artifact-timeline" ? scrollRef : undefined}
+                          historyKey={scenario === "artifact-timeline" ? `${session.id}:0` : undefined}
+                        />
+                      )}
+                    </div>
                   </div>
                 </div>
-                <div className="composer"><div className="composer-box"><textarea ref={legacyFocusRef} className="composer-input" aria-label="Composer" /></div></div>
+                {lead && (
+                  <SessionNoticeSlot sessionId={session.id} entries={noticeEntries()} lead={lead} />
+                )}
               </div>
+              <div className="composer"><div className="composer-box"><textarea ref={composerRef} className="composer-input" aria-label="Composer" /></div></div>
             </div>
             <RightPanel
               state={state}
@@ -743,10 +1006,10 @@ function Fixture() {
 window.__WOLLIPOG_REQUEST_SURFACES_E2E__ = {
   openedChild: () => openedChild,
   submissions: () => submissions,
-  workerReviewOpened: () => workerReviewOpened,
   artifactRequests: () => [...artifactRequests],
   openedHeldChild: () => openedHeldChild,
   clearHold: (sessionId) => clearHold(sessionId),
+  failNextDecision: () => { failNextDecision = true; },
 };
 
 void prepareArtifacts().then(() => createRoot(document.getElementById("root")!).render(<Fixture />));

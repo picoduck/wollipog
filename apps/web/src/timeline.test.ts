@@ -955,13 +955,14 @@ test("repeated pending permission requests update one stable transcript row", ()
     context: { toolName: "Bash", input: "first guidance" },
   }));
   const first = builder.snapshot();
-  builder.push(ev({
+  const update = ev({
     kind: "permission_request",
     requestId: "p1",
     title: "Updated Title",
     options: [{ optionId: "updated", name: "Updated" }],
     context: { toolName: "Bash", input: "updated guidance" },
-  }));
+  });
+  builder.push(update);
   const updated = builder.snapshot();
 
   assert.equal(updated.length, 1);
@@ -973,6 +974,8 @@ test("repeated pending permission requests update one stable transcript row", ()
     title: "Updated Title",
     options: [{ optionId: "updated", name: "Updated" }],
     context: { toolName: "Bash", input: "updated guidance" },
+    // When the request now on the row was raised, for the Request Card's head line (#2179).
+    createdAt: update.ts,
     resolvedOptionId: undefined,
     resolutionReason: undefined,
   });
@@ -1032,6 +1035,7 @@ test("authentication request identity changes coalesce until the current request
     title: "Authentication Required — Claude Code",
     options: [{ optionId: "auth:revalidate", name: "Recheck Authentication" }],
     context: { toolName: "Claude Code", input: "Sign-in finished; recheck authentication." },
+    createdAt: events[4]!.ts,
     resolvedOptionId: "auth:revalidate",
     resolutionReason: "submitted",
     resolvedAt: events.at(-1)!.ts,

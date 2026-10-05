@@ -509,8 +509,9 @@ test("SessionDetail keeps a standalone request reachable through skeleton and em
   const pages = pageController();
   const fixture = await mountFixture(pages, 0, { pendingStandalone: true });
   try {
-    const request = () => fixture.container.querySelector('[data-session-request-control="review"]');
-    assert.ok(request(), "the standalone request is reachable while history is loading");
+    const allow = () => [...fixture.container.querySelectorAll<HTMLButtonElement>(".request-dock .request-card-foot button")]
+      .find((button) => button.textContent?.startsWith("Trust This Configuration"));
+    assert.ok(allow(), "the request's decision is on the dock while history is loading");
     assert.ok(fixture.container.querySelector(".transcript-skeleton"));
 
     await act(async () => {
@@ -518,23 +519,29 @@ test("SessionDetail keeps a standalone request reachable through skeleton and em
     });
     await flushAsyncWork();
 
-    assert.ok(request(), "the standalone request remains reachable beside an authoritative empty state");
+    assert.ok(allow(), "the request stays on the dock beside an authoritative empty state");
     assert.match(fixture.scroller.textContent ?? "", /Start the Conversation/u);
   } finally {
     await unmountFixture(fixture);
   }
 });
 
-test("SessionDetail places a standalone fallback after loaded timeline activity", async () => {
+test("SessionDetail docks a standalone request between loaded activity and the composer (#2179)", async () => {
   const pages = pageController();
   const fixture = await mountFixture(pages, 12, { pendingStandalone: true });
   try {
-    const timeline = fixture.container.querySelector(".timeline");
-    const request = fixture.container.querySelector(".tl-request-card");
-    assert.ok(timeline);
-    assert.ok(request);
-    assert.ok(timeline.compareDocumentPosition(request) & domWindow.Node.DOCUMENT_POSITION_FOLLOWING,
-      "a tail-following reader encounters the pending request after loaded activity");
+    const reading = fixture.container.querySelector(".chat-reading")!;
+    const dock = fixture.container.querySelector(".request-dock")!;
+    const composer = fixture.container.querySelector(".composer")!;
+    assert.ok(reading && dock && composer);
+    assert.equal(fixture.scroller.contains(dock), false, "the request is not a transcript row");
+    assert.equal(reading.lastElementChild?.contains(dock), true, "the dock ends the reading column");
+    assert.equal(reading.nextElementSibling, composer, "the composer is directly below it");
+    assert.equal(dock.closest(".session-notice-slot")?.getAttribute("data-notice-key"), "request-dock",
+      "the dock takes the notice slot");
+    assertNoDomNode(composer.querySelector(".session-notice-slot"), "the slot is not also above the composer");
+    assertNoDomNode(fixture.container.querySelector(".tl-request-card"));
+    assert.doesNotMatch(fixture.container.textContent ?? "", /Review Request|awaiting decision/u);
   } finally {
     await unmountFixture(fixture);
   }

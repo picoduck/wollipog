@@ -25,6 +25,7 @@ import { titleCaseLabel } from "../format.js";
 import type { GitStatus } from "./useGitStatus.js";
 import { RightPanel, useRightPanelState, type RightPanelState } from "./RightPanel.js";
 import { forgetCampaignStatusMemory } from "./CampaignStatusPanel.js";
+import { registerRequestRevealer } from "./requests/request-reveal.js";
 import { CAMPAIGN_COST_REFRESH_MS, useCampaignStatusAvailability } from "./useCampaignStatus.js";
 import { CAMPAIGN_STATUS_UNSUPPORTED_REASON } from "../campaign-status.js";
 import {
@@ -1046,7 +1047,7 @@ test("a member's summary that fails to refresh says so instead of passing off ol
   }
 });
 
-test("a blocker naming the Orchestrator's own request opens that request, not the child's", async () => {
+test("a blocker naming the Orchestrator's own request opens that request on its dock, not the child's", async () => {
   harnessRequests.descendants = [pendingRequest("s_child", "occ_child")];
   const blocked = item("cwi_5", {
     primaryState: "blocked",
@@ -1059,14 +1060,19 @@ test("a blocker naming the Orchestrator's own request opens that request, not th
     orchestratorCampaign: campaign(workSummary()),
     pendingApproval: { requestId: "occ_root", occurrenceId: "occ_root", title: "Run the merge command", options: [] },
   });
+  // The session's own requests are answered on its request dock (#2179), which brings one up when asked.
+  const revealed: string[] = [];
+  const unregister = registerRequestRevealer("s_root", (requestId) => { revealed.push(requestId); return true; });
   const panel = await mount({ initial: awaiting, client });
   try {
     await act(async () => panel.state.show("campaign"));
     await settle();
     await click(panel.container.querySelector(".campaign-work-row")!);
     await click([...panel.container.querySelectorAll("button")].find((button) => button.textContent === "Open Requests")!);
-    assert.equal(harnessRequests.selected[0], JSON.stringify(["s_root", "occ_root"]));
+    assert.deepEqual(revealed, ["occ_root"]);
+    assert.deepEqual(harnessRequests.selected, [], "the child's request is not selected in its place");
   } finally {
+    unregister();
     await panel.dispose();
   }
 });

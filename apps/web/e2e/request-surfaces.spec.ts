@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 async function assertNoHorizontalOverflow(page: Page, selector: string) {
   const geometry = await page.locator(selector).evaluate((element) => ({
@@ -8,68 +8,252 @@ async function assertNoHorizontalOverflow(page: Page, selector: string) {
   expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth + 1);
 }
 
-async function assertActionsInsideRequestPanel(page: Page) {
-  const geometry = await page.locator(".request-panel-detail, .evidence-review-actions").evaluateAll((elements) =>
-    elements.map((element) => element.getBoundingClientRect().toJSON()));
-  expect(geometry).toHaveLength(2);
-  expect(geometry[1]!.top).toBeGreaterThanOrEqual(geometry[0]!.top - 1);
-  expect(geometry[1]!.bottom).toBeLessThanOrEqual(geometry[0]!.bottom + 1);
+async function assertInside(page: Page, outer: string, inner: Locator) {
+  const container = await page.locator(outer).boundingBox();
+  const box = await inner.boundingBox();
+  expect(container && box).toBeTruthy();
+  expect(box!.y).toBeGreaterThanOrEqual(container!.y - 1);
+  expect(box!.y + box!.height).toBeLessThanOrEqual(container!.y + container!.height + 1);
 }
 
-async function assertActionsInsidePanel(page: Page, selector: string) {
-  const geometry = await page.locator(`.right-panel, ${selector}`).evaluateAll((elements) =>
-    elements.map((element) => element.getBoundingClientRect().toJSON()));
-  expect(geometry).toHaveLength(2);
-  expect(geometry[1]!.top).toBeGreaterThanOrEqual(geometry[0]!.top - 1);
-  expect(geometry[1]!.bottom).toBeLessThanOrEqual(geometry[0]!.bottom + 1);
+/** The reading column, the dock and the transcript as boxes (#2179): the dock's cap and the
+ * transcript's half are measured against the column that holds them both. */
+async function dockGeometry(page: Page) {
+  return page.evaluate(() => {
+    const box = (selector: string) => document.querySelector(selector)!.getBoundingClientRect();
+    const body = document.querySelector<HTMLElement>(".request-card-body");
+    return {
+      reading: box(".chat-reading").height,
+      slot: box(".chat-reading > .session-notice-slot").height,
+      dock: box(".request-dock").height,
+      transcript: document.querySelector<HTMLElement>(".detail-scroll")!.clientHeight,
+      dockBottom: box(".chat-reading > .session-notice-slot").bottom,
+      composerTop: box(".composer").top,
+      bodyScrolls: body ? body.scrollHeight > body.clientHeight + 1 : false,
+      bodyOverflow: body ? getComputedStyle(body).overflowY : null,
+      headVisible: box(".request-card-head").top >= box(".chat-reading").top,
+      footBottom: box(".request-card-foot").bottom,
+      slotBottom: box(".chat-reading > .session-notice-slot").bottom,
+    };
+  });
 }
 
-test("evidence actions remain reachable in a short desktop panel with child requests", async ({ page }) => {
-  await page.setViewportSize({ width: 900, height: 480 });
-  await page.goto("/request-surfaces-e2e.html?scenario=evidence&items=8&children=1");
-  await page.getByRole("button", { name: "Review Evidence" }).click();
+const card = (page: Page) => page.locator(".request-dock .request-card");
+const footButton = (page: Page, name: string) => card(page).locator(".request-card-foot").getByRole("button", { name, exact: true });
+const submissions = (page: Page) => page.evaluate(() => window.__WOLLIPOG_REQUEST_SURFACES_E2E__.submissions());
 
-  await expect(page.locator(".request-panel-row")).toHaveCount(13);
-  await assertActionsInsideRequestPanel(page);
-  const checks = page.locator('.evidence-review-item input[type="checkbox"]');
-  await expect(checks.first()).toBeVisible();
-  for (let index = 0; index < 8; index += 1) await checks.nth(index).check();
-  await expect(page.getByRole("button", { name: "Approve" })).toBeEnabled();
-  const detail = page.locator(".request-panel-detail");
-  await detail.evaluate((element) => { element.scrollTop = element.scrollHeight; });
-  await assertActionsInsideRequestPanel(page);
-  for (const button of ["Approve", "Deny"]) {
-    const height = await page.getByRole("button", { name: button }).evaluate((element) =>
-      element.getBoundingClientRect().height);
-    // One control height with this mouse (#1799); a touch screen makes it 44px.
-    expect(height).toBe(32);
+for (const viewport of [
+  { name: "desktop", width: 1440, height: 900 },
+  { name: "phone", width: 390, height: 844 },
+]) {
+  test(`a pending permission is allowed on the card above the composer without the side panel at ${viewport.name}`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/request-surfaces-e2e.html?scenario=permission");
+    await expect(card(page)).toBeVisible();
+    await expect(card(page).getByRole("heading", { name: "Run pnpm deploy?" })).toBeVisible();
+    const geometry = await dockGeometry(page);
+    // Directly above the composer: nothing but the composer's divider between them.
+    expect(Math.abs(geometry.composerTop - geometry.dockBottom)).toBeLessThanOrEqual(1);
+    await expect(page.getByRole("complementary", { name: "Requests" })).toHaveCount(0);
+    // The transcript keeps no Review Request and no "awaiting decision…" for the row.
+    await expect(page.locator(".tl-perm")).toContainText("Run pnpm deploy?");
+    await expect(page.getByRole("button", { name: "Review Request" })).toHaveCount(0);
+    await expect(page.locator("body")).not.toContainText("awaiting decision");
+    await expect(page.locator(".tl-request-card, .approval-bar, .approval-review-surface")).toHaveCount(0);
+    if (viewport.width <= 760) {
+      // One footer row on a phone.
+      const tops = await card(page).locator(".request-card-foot > button").evaluateAll((buttons) =>
+        buttons.map((button) => Math.round(button.getBoundingClientRect().top)));
+      expect(new Set(tops).size).toBe(1);
+    }
+
+    await footButton(page, "Allow").click();
+    await expect(card(page)).toHaveCount(0);
+    await expect(page.getByRole("complementary", { name: "Requests" })).toHaveCount(0);
+    await expect.poll(() => submissions(page)).toEqual([{ requestId: "permission-deploy", optionId: "allow" }]);
+    await expect(page.getByRole("textbox", { name: "Composer" })).toBeFocused();
+  });
+}
+
+test("the footer is Reject, the ⋯ menu, then Allow, and Always Allow is only in the menu with its description", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/request-surfaces-e2e.html?scenario=permission");
+  const names = await card(page).locator(".request-card-foot > button").evaluateAll((buttons) =>
+    buttons.map((button) => button.getAttribute("aria-label") ?? button.childNodes[0]?.textContent));
+  expect(names).toEqual(["Reject", "More Choices", "Allow"]);
+  await expect(card(page).locator(".request-card-foot .btn.primary")).toHaveText(/^Allow/u);
+  await expect(card(page).locator(".request-card-foot")).not.toContainText("Always Allow");
+  for (const button of await card(page).locator(".request-card-foot > button").all()) {
+    expect((await button.boundingBox())!.height).toBe(32);
+  }
+  await card(page).getByRole("button", { name: "More Choices" }).click();
+  const item = page.getByRole("menuitem", { name: "Always Allow in This Session" });
+  await expect(item).toBeVisible();
+  await expect(item).toContainText("Allows pnpm deploy without asking until the session ends.");
+  await item.click();
+  await expect.poll(() => submissions(page)).toEqual([{ requestId: "permission-deploy", optionId: "allow-always" }]);
+});
+
+test("A and D act on the expanded request, and the keycaps show with a mouse", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/request-surfaces-e2e.html?scenario=permission");
+  await expect(footButton(page, "Allow").locator("kbd")).toBeVisible();
+  await expect(footButton(page, "Reject").locator("kbd")).toBeVisible();
+  await page.getByRole("region", { name: "Session Activity" }).focus();
+  await page.keyboard.press("d");
+  await expect.poll(() => submissions(page)).toEqual([{ requestId: "permission-deploy", optionId: "deny" }]);
+
+  await page.goto("/request-surfaces-e2e.html?scenario=multiple");
+  await page.getByRole("button", { name: /\+2 More Requests/u }).click();
+  await page.getByRole("button", { name: /Run pnpm deploy\?/u }).click();
+  await expect(card(page).getByRole("heading")).toHaveText("Run pnpm deploy?");
+  await page.keyboard.press("a");
+  await expect.poll(() => submissions(page)).toEqual([{ requestId: "permission-deploy", optionId: "allow" }]);
+});
+
+test.describe("on a coarse pointer", () => {
+  test.use({ hasTouch: true, isMobile: true, viewport: { width: 390, height: 844 } });
+  test("the keycaps are absent and the buttons are 44px", async ({ page }) => {
+    await page.goto("/request-surfaces-e2e.html?scenario=permission");
+    await expect(card(page)).toBeVisible();
+    await expect(card(page).locator("kbd").first()).toBeHidden();
+    for (const button of await card(page).locator(".request-card-foot > button").all()) {
+      expect((await button.boundingBox())!.height).toBe(44);
+    }
+  });
+});
+
+for (const variant of [
+  { query: "runner=offline", reason: "Decisions are unavailable until the runner reconnects." },
+  { query: "respond=viewer", reason: "Your Viewer role can read this session but not answer its requests." },
+]) {
+  test(`Allow and Reject are disabled with the reason as visible text (${variant.query})`, async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(`/request-surfaces-e2e.html?scenario=permission&${variant.query}`);
+    await expect(card(page).locator(".request-card-reasons")).toHaveText(variant.reason);
+    for (const name of ["Allow", "Reject"]) {
+      await expect(footButton(page, name)).toBeDisabled();
+      await expect(footButton(page, name)).toHaveAccessibleDescription(variant.reason);
+      await expect(footButton(page, name)).not.toHaveAttribute("title", /.+/u);
+    }
+  });
+}
+
+test("a policy ask shows who asked and counts down to its automatic rejection", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/request-surfaces-e2e.html?scenario=policy");
+  const line = card(page).locator(".request-card-policy");
+  await expect(line).toHaveText(/^Asked by Deploy Guard · Rejects automatically in 9:4\d$/u);
+  const first = await line.textContent();
+  await expect.poll(() => line.textContent(), { timeout: 3_000 }).not.toBe(first);
+});
+
+test("request cards use the one warning surface, never the danger colour", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  for (const scenario of ["permission", "budget", "tool-calls", "workflow", "evidence", "policy"]) {
+    await page.goto(`/request-surfaces-e2e.html?scenario=${scenario}`);
+    const colours = await card(page).evaluate((element) => {
+      const probe = (tone: string) => {
+        const notice = document.createElement("div");
+        notice.className = `notice t-${tone}`;
+        element.parentElement!.append(notice);
+        const style = getComputedStyle(notice);
+        const result = { background: style.backgroundColor, border: style.borderTopColor };
+        notice.remove();
+        return result;
+      };
+      const style = getComputedStyle(element);
+      return { card: { background: style.backgroundColor, border: style.borderTopColor }, warning: probe("warning"), danger: probe("danger") };
+    });
+    expect(colours.card, scenario).toEqual(colours.warning);
+    expect(colours.card.background, scenario).not.toBe(colours.danger.background);
+    expect(colours.card.border, scenario).not.toBe(colours.danger.border);
   }
 });
 
-test("short desktop evidence review preserves child identity and navigation", async ({ page }) => {
-  await page.setViewportSize({ width: 900, height: 480 });
-  await page.goto("/request-surfaces-e2e.html?scenario=evidence&children=1");
-  await page.getByRole("button", { name: "Review Evidence" }).click();
-  await page.getByRole("button", { name: /^Child Session 1 UI Evidence/u }).click();
+for (const viewport of [
+  { name: "desktop", width: 1440, height: 900, cap: 0.4 },
+  { name: "phone", width: 390, height: 844, cap: 0.5 },
+  { name: "phone with the keyboard open", width: 390, height: 844, cap: 0.4, keyboard: true },
+]) {
+  test(`a body taller than the space keeps the dock at its cap and the transcript at least half at ${viewport.name}`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto(`/request-surfaces-e2e.html?scenario=permission&tall=1${viewport.keyboard ? "&keyboard=1" : ""}`);
+    await expect(card(page)).toBeVisible();
+    const geometry = await dockGeometry(page);
+    expect(geometry.slot).toBeLessThanOrEqual(geometry.reading * viewport.cap + 1);
+    expect(geometry.dock).toBeLessThanOrEqual(geometry.reading * viewport.cap + 1);
+    expect(geometry.transcript).toBeGreaterThanOrEqual(geometry.reading * 0.5 - 1);
+    // Only the body scrolls: the head, title and footer stay inside the dock.
+    expect(geometry.bodyOverflow).toBe("auto");
+    expect(geometry.bodyScrolls).toBe(true);
+    expect(geometry.headVisible).toBe(true);
+    expect(geometry.footBottom).toBeLessThanOrEqual(geometry.slotBottom + 1);
+    await expect(footButton(page, "Allow")).toBeInViewport();
+  });
+}
 
-  await expect(page.locator(".request-panel-detail-head h3")).toHaveText("Child Session 1");
-  const openChild = page.getByRole("button", { name: "Open Child Session" });
-  await expect(openChild).toBeVisible();
-  await openChild.click();
+test("several requests: the sign-in is expanded, +2 More Requests lists the others, a row expands, a decision brings the next", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/request-surfaces-e2e.html?scenario=multiple");
+  await expect(card(page).getByRole("heading")).toHaveText("Sign In to Claude Code");
+  const more = page.getByRole("button", { name: /\+2 More Requests/u });
+  await expect(more).toHaveAttribute("aria-expanded", "false");
+  await expect(more).toContainText("Budget, Permission");
+  await more.click();
+  const rows = page.getByRole("list", { name: "Waiting Requests" }).getByRole("button");
+  await expect(rows).toHaveText([/Cost budget reached/u, /Run pnpm deploy\?/u]);
+  await rows.nth(1).click();
+  await expect(card(page).getByRole("heading")).toHaveText("Run pnpm deploy?");
+  await expect(card(page).getByRole("heading")).toBeFocused();
+  await footButton(page, "Allow").click();
+  await expect.poll(() => submissions(page)).toEqual([{ requestId: "permission-deploy", optionId: "allow" }]);
+  await expect(card(page).getByRole("heading")).toHaveText("Sign In to Claude Code");
+  await expect(page.getByRole("button", { name: /\+1 More Request/u })).toContainText("Budget");
+});
+
+test("the session's notices wait behind the card's +N More and the request comes back from the notice's", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/request-surfaces-e2e.html?scenario=permission&notices=1");
+  const trailing = card(page).locator(".request-card-head").getByRole("button", { name: "+2 More" });
+  await trailing.click();
+  await expect(page.getByRole("menuitem")).toHaveText(["Message Not Sent", "Skills Unavailable"]);
+  await page.getByRole("menuitem", { name: "Message Not Sent" }).click();
+  await expect(card(page)).toHaveCount(0);
+  await expect(page.locator(".session-notice-slot .notice.t-danger")).toContainText("Message Not Sent");
+  await page.locator(".session-notice-slot").getByRole("button", { name: "+2 More" }).click();
+  await page.getByRole("menuitem", { name: "Pending Request" }).click();
+  await expect(card(page).getByRole("heading")).toHaveText("Run pnpm deploy?");
+});
+
+test("a decision that fails is a danger notice above the footer, and the choice can be retried", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/request-surfaces-e2e.html?scenario=budget");
+  await page.evaluate(() => window.__WOLLIPOG_REQUEST_SURFACES_E2E__.failNextDecision());
+  await footButton(page, "Continue").click();
+  await expect(card(page).getByRole("alert")).toHaveText("Your decision wasn't sent. The runner did not accept the decision.");
+  await footButton(page, "Continue").click();
+  await expect(card(page)).toHaveCount(0);
+  await expect.poll(() => submissions(page)).toHaveLength(2);
+});
+
+test("child evidence actions stay reachable in a short desktop panel", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 480 });
+  await page.goto("/request-surfaces-e2e.html?scenario=descendants");
+  await page.getByRole("button", { name: "Needs Your Input: 8 Requests" }).click();
+  await expect(page.locator(".request-panel-row")).toHaveCount(12);
+  const panelCard = page.locator(".request-panel-detail .request-card");
+  await expect(panelCard).toHaveAttribute("data-presentation", "panel");
+  await assertInside(page, ".request-panel-detail", panelCard.locator(".request-card-foot"));
+  await panelCard.locator('.evidence-review-item input[type="checkbox"]').check();
+  await expect(panelCard.getByRole("button", { name: "Approve", exact: true })).toBeEnabled();
+  for (const name of ["Approve", "Deny"]) {
+    // One control height with this mouse (#1799); a touch screen makes it 44px.
+    expect((await panelCard.getByRole("button", { name, exact: true }).boundingBox())!.height).toBe(32);
+  }
+  await page.getByRole("button", { name: "Open Child Session" }).click();
   await expect.poll(() => page.evaluate(() =>
     window.__WOLLIPOG_REQUEST_SURFACES_E2E__.openedChild()?.sessionId)).toBe("child-1");
-});
-test("legacy inline evidence fixture reproduces the mobile over-height review", async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/request-surfaces-e2e.html?scenario=legacy");
-  await page.getByRole("button", { name: "Details" }).click();
-  const approval = page.locator(".approval-bar");
-  await expect(approval).toBeVisible();
-  const bounds = await approval.boundingBox();
-  expect(bounds!.height).toBeGreaterThan(844 * 0.7);
-  const transcriptHeight = await page.getByRole("region", { name: "Session Activity" })
-    .evaluate((element) => element.clientHeight);
-  expect(transcriptHeight).toBeLessThan(120);
 });
 
 test("missing campaign continuation result is visible and explicitly acknowledged", async ({ page }) => {
@@ -93,13 +277,12 @@ test("missing campaign continuation result is visible and explicitly acknowledge
     }]);
 });
 
-test("worker-owned approval stays canonical while its transcript row opens worker review", async ({ page }) => {
+test("a worker-owned approval stays out of the dock, and its transcript row has no review button", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto("/request-surfaces-e2e.html?scenario=worker");
-  await expect(page.locator(".approval-bar")).toHaveCount(0);
-  await page.getByRole("button", { name: "Review Request" }).click();
-  await expect.poll(() => page.evaluate(() =>
-    window.__WOLLIPOG_REQUEST_SURFACES_E2E__.workerReviewOpened())).toBe(true);
+  await expect(page.locator(".tl-perm")).toContainText("Trust Worktree Setup Configuration?");
+  await expect(page.locator(".request-dock")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Review Request" })).toHaveCount(0);
 });
 
 for (const viewport of [
@@ -108,65 +291,39 @@ for (const viewport of [
   { name: "desktop", width: 1280, height: 800 },
   { name: "desktop split pane", width: 900, height: 700 },
 ]) {
-  test(`eight-item evidence review remains reachable at ${viewport.name}`, async ({ page }) => {
+  test(`eight-item evidence review stays reachable on the dock at ${viewport.name}`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await page.goto("/request-surfaces-e2e.html?scenario=evidence");
     const transcript = page.getByRole("region", { name: "Session Activity" });
     await expect(transcript).toBeVisible();
-    const initialHeight = await transcript.evaluate((element) => element.clientHeight);
-    expect(initialHeight).toBeGreaterThan(Math.min(220, viewport.height * 0.35));
-    await expect(page.locator(".approval-bar")).toHaveCount(0);
-
-    const trigger = page.getByRole("button", { name: "Review Evidence" });
-    await trigger.scrollIntoViewIfNeeded();
-    await trigger.click();
-    const panel = page.getByRole("complementary", { name: "Requests" });
-    await expect(panel).toBeVisible();
-    await expect(page.getByRole("button", { name: "Close Panel" })).toBeVisible();
-    await expect(page.getByRole("status", { name: "" })).toContainText("0 of 8 Reviewed");
-    await expect(page.getByRole("button", { name: "Approve" })).toBeDisabled();
-    await expect(page.getByRole("button", { name: "Deny" })).toBeVisible();
+    const geometry = await dockGeometry(page);
+    expect(geometry.transcript).toBeGreaterThanOrEqual(geometry.reading * 0.5 - 1);
+    await expect(page.getByRole("complementary", { name: "Requests" })).toHaveCount(0);
+    await expect(card(page).locator(".evidence-review-summary").getByRole("status")).toContainText("0 of 8 Reviewed");
+    const approve = card(page).locator(".request-card-foot").getByRole("button", { name: /^Approve/u });
+    await expect(approve).toBeDisabled();
+    await expect(approve).toHaveAccessibleDescription("Review every artifact before approving this request.");
+    await expect(card(page).locator(".request-card-foot").getByRole("button", { name: /^Deny/u })).toBeVisible();
     await expect(page.locator(".evidence-review-item")).toHaveCount(8);
-    await expect(page.locator(".approval-context")).toHaveCount(0);
     await expect(page.locator("body")).not.toContainText("signature=hidden");
-    await assertNoHorizontalOverflow(page, ".request-panel");
-
-    if (viewport.width <= 760) {
-      const overflow = await page.locator(".request-panel").evaluate((element) => ({
-        own: getComputedStyle(element).overflowY,
-        list: getComputedStyle(element.querySelector(".evidence-review-list")!).overflowY,
-      }));
-      expect(overflow.own).toBe("auto");
-      expect(overflow.list).toBe("visible");
-    } else {
-      const bounds = await page.locator(".detail-chat, .right-panel").evaluateAll((elements) =>
-        elements.map((element) => element.getBoundingClientRect().toJSON()));
-      expect(bounds[0]!.width).toBeGreaterThan(300);
-      expect(bounds[1]!.width).toBeLessThanOrEqual(Math.floor(viewport.width * 0.4) + 1);
-    }
+    await assertNoHorizontalOverflow(page, ".request-card-body");
 
     const checks = page.locator('.evidence-review-item input[type="checkbox"]');
     for (let index = 0; index < 3; index += 1) await checks.nth(index).check();
-    await expect(page.locator(".evidence-review-summary").getByRole("status")).toContainText("3 of 8 Reviewed");
-    await page.getByRole("button", { name: "Close Panel" }).click();
-    await expect(panel).toHaveCount(0);
-    await expect(trigger).toBeFocused();
-
-    await page.setViewportSize(viewport.width <= 760
-      ? { width: viewport.height, height: viewport.width }
-      : viewport);
-    await trigger.click();
-    await expect(page.locator(".evidence-review-summary").getByRole("status")).toContainText("3 of 8 Reviewed");
+    await expect(card(page).locator(".evidence-review-summary").getByRole("status")).toContainText("3 of 8 Reviewed");
+    // The review survives a reload and a rotation.
+    await page.setViewportSize(viewport.width <= 844 ? { width: viewport.height, height: viewport.width } : viewport);
+    await page.reload();
+    await expect(card(page).locator(".evidence-review-summary").getByRole("status")).toContainText("3 of 8 Reviewed");
     for (let index = 3; index < 8; index += 1) await checks.nth(index).check();
-    await expect(page.getByRole("button", { name: "Approve" })).toBeEnabled();
-    await page.getByRole("button", { name: "Approve" }).click();
-    await expect(panel).toHaveCount(0);
-    await expect.poll(() => page.evaluate(() =>
-      window.__WOLLIPOG_REQUEST_SURFACES_E2E__.submissions())).toEqual([{
-        requestId: "evidence-occurrence",
-        optionId: "approve",
-        evidenceReviewed: Array.from({ length: 8 }, (_, index) => `viewport-${index + 1}`),
-      }]);
+    await expect(approve).toBeEnabled();
+    await approve.click();
+    await expect(card(page)).toHaveCount(0);
+    await expect.poll(() => submissions(page)).toEqual([{
+      requestId: "evidence-occurrence",
+      optionId: "approve",
+      evidenceReviewed: Array.from({ length: 8 }, (_, index) => `viewport-${index + 1}`),
+    }]);
   });
 }
 
@@ -200,16 +357,13 @@ for (const viewport of [
     test(`evidence actions stay visible with ${itemCount} items at ${viewport.name}`, async ({ page }) => {
       await page.setViewportSize(viewport);
       await page.goto(`/request-surfaces-e2e.html?scenario=evidence&items=${itemCount}`);
-      await page.getByRole("button", { name: "Review Evidence" }).click();
-
-      const actions = page.locator(".evidence-review-actions");
-      await expect(actions.getByRole("button", { name: "Approve" })).toBeDisabled();
-      await expect(actions.getByRole("button", { name: "Deny" })).toBeVisible();
-      await assertActionsInsideRequestPanel(page);
-
-      const scrollOwner = page.locator(viewport.width <= 760 ? ".request-panel" : ".evidence-review-list");
-      await scrollOwner.evaluate((element) => { element.scrollTop = element.scrollHeight; });
-      await assertActionsInsideRequestPanel(page);
+      const foot = card(page).locator(".request-card-foot");
+      await expect(foot.getByRole("button", { name: /^Approve/u })).toBeDisabled();
+      await expect(foot.getByRole("button", { name: /^Deny/u })).toBeVisible();
+      await expect(foot).toBeInViewport({ ratio: 1 });
+      await card(page).locator(".request-card-body").evaluate((element) => { element.scrollTop = element.scrollHeight; });
+      await expect(foot).toBeInViewport({ ratio: 1 });
+      await expect(card(page).locator(".request-card-head")).toBeInViewport({ ratio: 1 });
     });
   }
 }
@@ -218,52 +372,25 @@ for (const viewport of [
   { name: "mobile", width: 390, height: 844 },
   { name: "desktop", width: 1280, height: 800 },
 ]) {
-  test(`standalone approval uses its transcript row and responsive review on ${viewport.name}`, async ({ page }) => {
+  test(`a worktree setup request is answered on the dock with its command, facts and menu choice on ${viewport.name}`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await page.goto("/request-surfaces-e2e.html?scenario=standalone");
 
-    const transcript = page.getByRole("region", { name: "Session Activity" });
-    await expect(transcript).toBeVisible();
-    expect(await transcript.evaluate((element) => element.clientHeight)).toBeGreaterThan(viewport.height * 0.35);
-    await expect(page.locator(".approval-bar")).toHaveCount(0);
+    const geometry = await dockGeometry(page);
+    expect(geometry.transcript).toBeGreaterThanOrEqual(geometry.reading * 0.5 - 1);
     const requestRow = page.locator(".tl-perm");
     await expect(requestRow).toHaveCount(1);
     await expect(requestRow).toContainText("Trust Worktree Setup Configuration?");
-    const transcriptDetails = requestRow.locator(".perm-context");
-    await expect(transcriptDetails).not.toHaveAttribute("open", "");
-    await expect(transcriptDetails.locator("pre")).not.toBeVisible();
+    await expect(requestRow.getByRole("button", { name: "Review Request" })).toHaveCount(0);
+    await expect(card(page).locator(".facts")).toContainText("wollipog.worktree_setup");
+    await expect(card(page).locator(".facts")).toContainText("fix/responsive-approval");
+    await expect(card(page).locator(".code-well")).toContainText("pnpm setup:step-12");
+    await expect(card(page).locator(".request-card-foot").getByRole("button", { name: "Create Without Setup", exact: true })).toBeVisible();
+    await expect(card(page).locator(".request-card-foot")).not.toContainText("Trust This Configuration");
 
-    const trigger = requestRow.getByRole("button", { name: "Review Request" });
-    await trigger.scrollIntoViewIfNeeded();
-    const transcriptPosition = await transcript.evaluate((element) => element.scrollTop);
-    await trigger.click();
-    const panel = page.getByRole("complementary", { name: "Requests" });
-    await expect(panel).toBeVisible();
-    await expect(page.locator(".approval-review-surface")).toBeVisible();
-    await expect(page.locator(".approval-selector-context")).toContainText("wollipog.worktree_setup");
-    await expect(page.locator(".approval-selector-context")).toContainText("fix/responsive-approval");
-    const panelDetails = page.locator(".approval-review-details");
-    await expect(panelDetails).not.toHaveAttribute("open", "");
-    await expect(panelDetails.locator("pre")).not.toBeVisible();
-    await expect(page.getByRole("button", { name: "Trust This Configuration" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Create Without Setup" })).toBeVisible();
-    await assertActionsInsidePanel(page, ".approval-review-actions");
-
-    await panelDetails.locator("summary").click();
-    await expect(panelDetails.locator("pre")).toContainText("pnpm setup:step-12");
-    const scrollOwner = page.locator(viewport.width <= 760 ? ".request-panel" : ".approval-review-body");
-    await scrollOwner.evaluate((element) => { element.scrollTop = element.scrollHeight; });
-    await assertActionsInsidePanel(page, ".approval-review-actions");
-
-    await page.getByRole("button", { name: "Close Panel" }).click();
-    await expect(panel).toHaveCount(0);
-    await expect(trigger).toBeFocused();
-    expect(await transcript.evaluate((element) => element.scrollTop)).toBe(transcriptPosition);
-
-    await trigger.click();
-    await page.getByRole("button", { name: "Trust This Configuration" }).click();
-    await expect(panel).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "Review Request" })).toHaveCount(0);
+    await card(page).getByRole("button", { name: "More Choices" }).click();
+    await page.getByRole("menuitem", { name: "Trust This Configuration" }).click();
+    await expect(card(page)).toHaveCount(0);
     // The resolved request becomes its Decision Record (#2204): the outcome word, never the option id.
     await expect(requestRow).toHaveCount(0);
     const record = page.locator("details.tl-decision");
@@ -271,11 +398,10 @@ for (const viewport of [
     await expect(record.locator(".tl-decision-outcome")).toHaveText("Allowed");
     await expect(record.locator(".tl-decision-title")).toHaveText("Trust Worktree Setup Configuration?");
     await expect(record).not.toContainText(/\btrust\b|→/);
-    await expect.poll(() => page.evaluate(() =>
-      window.__WOLLIPOG_REQUEST_SURFACES_E2E__.submissions())).toEqual([{
-        requestId: "worktree-setup:one:hash",
-        optionId: "trust",
-      }]);
+    await expect.poll(() => submissions(page)).toEqual([{
+      requestId: "worktree-setup:one:hash",
+      optionId: "trust",
+    }]);
   });
 }
 
@@ -303,7 +429,7 @@ for (const viewport of [
     await expect(page.locator(".request-readonly")).toContainText(
       "must respond through its session-management tools",
     );
-    await expect(page.locator(".request-readonly .approval-actions")).toHaveCount(0);
+    await expect(page.locator(".request-readonly .request-card, .request-readonly button")).toHaveCount(0);
     await page.getByRole("button", { name: "Open Child Session" }).click();
     await expect.poll(() => page.evaluate(() =>
       window.__WOLLIPOG_REQUEST_SURFACES_E2E__.openedChild()?.sessionId)).toBe("child-3");

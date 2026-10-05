@@ -3858,28 +3858,11 @@ textarea {
 .request-readonly > p {
   margin-top: 0;
 }
-.request-structured-summary dl,
-.evidence-review-details dl {
+.request-structured-summary {
   display: grid;
-  gap: 8px;
-  margin: 10px 0 0;
+  gap: var(--space-2);
 }
-.request-structured-summary dl > div,
-.evidence-review-details dl > div {
-  min-width: 0;
-}
-.request-structured-summary dt,
-.evidence-review-details dt {
-  color: var(--text-faint);
-  font-size: var(--text-xs);
-  font-weight: 700;
-}
-.request-structured-summary dd,
-.evidence-review-details dd {
-  margin: 2px 0 0;
-  overflow-wrap: anywhere;
-}
-.request-panel-detail > .approval-bar {
+.request-panel-detail > .question-bar {
   margin: 0;
 }
 .request-panel-empty {
@@ -3888,70 +3871,6 @@ textarea {
 }
 .request-panel-empty h3 {
   color: var(--text);
-}
-.tl-request-card {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: min(100%, var(--chat-max));
-  margin: 8px auto;
-  padding: 10px 12px;
-  border: 1px solid color-mix(in srgb, var(--amber) 35%, transparent);
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--amber) 10%, transparent);
-}
-.tl-request-icon {
-  flex: none;
-}
-.tl-request-copy {
-  display: grid;
-  flex: 1;
-  min-width: 0;
-  gap: 2px;
-}
-.tl-request-copy > span {
-  color: var(--text-dim-on-tint);
-  font-size: var(--text-xs);
-}
-.evidence-review-surface {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto auto;
-  min-height: 100%;
-}
-@media (min-width: 761px) {
-  .request-panel-detail:has(> .evidence-review-surface) {
-    display: grid;
-    grid-template-rows: auto auto minmax(0, 1fr);
-    overflow: auto;
-  }
-  .request-panel-detail > .evidence-review-surface {
-    min-height: 0;
-  }
-}
-@media (min-width: 761px) and (max-height: 500px) {
-  .request-panel-detail:has(> .evidence-review-surface) > .request-panel-detail-head {
-    align-items: center;
-    min-width: 0;
-    margin-bottom: 4px;
-  }
-  .request-panel-detail:has(> .evidence-review-surface) > .request-panel-detail-head > div {
-    min-width: 0;
-  }
-  .request-panel-detail:has(> .evidence-review-surface) > .request-panel-detail-head h3 {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .request-panel-detail:has(> .evidence-review-surface) > .request-panel-detail-head p {
-    display: none;
-  }
-  .request-panel:not(.request-panel-single) {
-    grid-template-rows: minmax(72px, 25%) minmax(0, 1fr);
-  }
-  .request-panel:not(.request-panel-single) .request-panel-detail:has(> .evidence-review-surface) > .request-owner,
-  .request-panel:not(.request-panel-single) .evidence-review-summary p {
-    display: none;
-  }
 }
 .evidence-review-summary {
   display: flex;
@@ -3974,9 +3893,14 @@ textarea {
   color: var(--accent);
   font-size: var(--text-sm);
 }
+/* The evidence body of a Request Card (#2197 rebuilds it as tiles). */
+.evidence-review {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+/* Inside the Request Card's body, which is the one scroller: the list never scrolls on its own. */
 .evidence-review-list {
-  min-height: 0;
-  overflow: auto;
   padding-right: 3px;
 }
 .evidence-review-item {
@@ -4067,19 +3991,13 @@ textarea {
   font-size: var(--text-xs);
 }
 /* Shown once per card when this page cannot check artifact evidence at all. */
-.evidence-review-list > .notice,
-.approval-evidence > .notice { margin: 0 0 var(--space-3); }
+.evidence-review-list > .notice { margin: 0 0 var(--space-3); }
 .evidence-artifact-full {
   display: block;
   max-width: 100%;
   max-height: 78vh;
   margin: 0 auto;
   object-fit: contain;
-}
-.approval-evidence-item:has(.evidence-artifact) {
-  display: grid;
-  align-items: start;
-  justify-content: stretch;
 }
 .evidence-review-details {
   margin: 12px 0;
@@ -4089,76 +4007,6 @@ textarea {
 .evidence-review-details summary {
   color: var(--text-dim);
   cursor: pointer;
-}
-.evidence-review-actions {
-  position: sticky;
-  z-index: var(--z-sticky);
-  bottom: 0;
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 8px;
-  padding: 12px 0 14px;
-  border-top: 1px solid var(--border);
-  background: var(--bg-elev);
-}
-.approval-review-surface {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto auto;
-  min-height: 100%;
-}
-.approval-review-summary {
-  padding-bottom: 12px;
-}
-.approval-review-summary h3,
-.approval-review-summary p {
-  margin: 0;
-}
-.approval-review-summary p {
-  margin-top: 4px;
-  color: var(--text-dim);
-  font-size: var(--text-sm);
-}
-.approval-review-body {
-  min-height: 0;
-  overflow: auto;
-}
-.approval-review-details {
-  margin-top: 12px;
-  border-top: 1px solid var(--border);
-  padding-top: 12px;
-}
-.approval-review-details summary {
-  color: var(--text-dim);
-  cursor: pointer;
-}
-.approval-review-details .approval-context {
-  max-height: none;
-  margin: 10px 0 0;
-}
-.approval-review-actions {
-  position: sticky;
-  z-index: var(--z-sticky);
-  bottom: 0;
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 8px;
-  padding: 12px 0 14px;
-  border-top: 1px solid var(--border);
-  background: var(--bg-elev);
-}
-@media (min-width: 761px) {
-  .request-panel-detail:has(> .approval-review-surface) {
-    display: grid;
-    grid-template-rows: auto auto minmax(0, 1fr);
-    overflow: hidden;
-  }
-  .request-panel-detail > .approval-review-surface {
-    min-height: 0;
-  }
 }
 .agents-panel {
   display: flex;
@@ -5170,34 +5018,6 @@ textarea {
   color: var(--accent);
   text-decoration: underline;
 }
-.approval-bar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  background: color-mix(in srgb, var(--amber) 10%, transparent);
-  border: 1px solid color-mix(in srgb, var(--amber) 35%, transparent);
-  border-radius: var(--radius-sm);
-  padding: 11px 14px;
-  margin-top: 12px;
-  /* Approval/question cards align with the centered chat column below them. */
-  width: 100%;
-  max-width: var(--chat-max);
-  margin-left: auto;
-  margin-right: auto;
-}
-.approval-text {
-  flex: 1;
-  font-size: 13px;
-  color: var(--amber);
-}
-/* Phase 7: cost-budget pause — visually distinct (red) from a gold permission request */
-.approval-bar.cost-budget {
-  background: color-mix(in srgb, var(--red) 10%, transparent);
-  border-color: color-mix(in srgb, var(--red) 40%, transparent);
-}
-.approval-bar.cost-budget .approval-text {
-  color: var(--red);
-}
 .governance-history {
   list-style: none;
   margin: 0;
@@ -5392,6 +5212,224 @@ textarea {
 /* The one session notice slot (§13.2, #1966): the composer column's first child, on its width and
    gutters. It holds one notice; the rest of the session's conditions are its "+N More" menu. */
 .session-notice-slot { margin-bottom: var(--space-2); }
+
+/* ------------------------- Reading column and request dock -------------------------
+   The reading column (#2179) holds the transcript and, while a request is pending, the request
+   dock below it: the notice slot's lead entry, directly above the composer (§13.2). It is a size
+   container, so the dock's cap is a share of the column, never of the page: at most 40% on desktop,
+   50% on a phone and 40% again while the software keyboard is open, which keeps at least half of the
+   column for the transcript. */
+.chat-reading {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  container: chat-reading / size;
+}
+.chat-reading > .session-notice-slot {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  min-height: 0;
+  max-height: 40cqh;
+  margin: 0;
+  padding: var(--space-2) max(var(--space-3), calc((100% - var(--chat-max)) / 2)) var(--space-3);
+}
+@media (max-width: 760px) {
+  .chat-reading > .session-notice-slot { max-height: 50cqh; }
+}
+.chat-reading > .session-notice-slot:has(> .request-dock[data-keyboard-open]) { max-height: 40cqh; }
+/* In a column too short for the card's head, title, footer and a few lines of body (a phone in
+   landscape), the dock scrolls as a whole rather than squeezing the body away; it never passes its cap. */
+.request-dock {
+  display: flex;
+  flex: 0 1 auto;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.request-dock-more {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-items: flex-start;
+}
+.request-dock-more-kinds {
+  color: var(--text-faint);
+  font: var(--type-small);
+}
+.request-dock-more-kinds::before {
+  content: "·";
+  margin-right: var(--space-1);
+}
+.request-dock-rows {
+  align-self: stretch;
+  max-height: calc(3 * var(--control-h));
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  list-style: none;
+}
+.request-dock-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  height: var(--control-h);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text);
+  font: var(--type-body);
+  text-align: left;
+  cursor: pointer;
+}
+@media (hover: hover) {
+  .request-dock-row:hover { background: var(--bg-elev-2); }
+}
+.request-dock-row > .app-icon { flex: none; }
+.request-dock-row-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.request-dock-row-owner,
+.request-dock-row-time {
+  flex: none;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+@media (max-width: 760px) {
+  .request-dock-row-owner { display: none; }
+}
+.request-dock-card {
+  display: flex;
+  flex: 0 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* The Request Card (#2179): the one warning surface a live request uses, never the danger red of a
+   failure. Its head, title and footer keep their height; only the body scrolls. */
+.request-card {
+  display: flex;
+  flex: 0 1 auto;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  min-height: 0;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid color-mix(in srgb, var(--amber) 32%, transparent);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--amber) 7%, var(--bg-elev));
+  color: var(--text);
+  font: var(--type-body);
+}
+.request-card > * {
+  flex: none;
+  margin: 0;
+}
+.request-card-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  min-height: var(--control-h-sm);
+  color: var(--text-dim-on-tint);
+  font: var(--type-small);
+}
+.request-card-kind {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--amber-on-tint);
+  font: var(--type-label);
+}
+.request-card-meta {
+  display: inline-flex;
+  gap: var(--space-2);
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.request-card-meta > * {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* The separators are flex items of the meta, so its gap spaces them; a later part's own sits inside it. */
+.request-card-kind + .request-card-meta::before { content: "·"; }
+.request-card-meta > * + *::before {
+  content: "·";
+  margin-right: var(--space-2);
+}
+.request-card-trailing {
+  display: inline-flex;
+  flex: none;
+  margin-left: auto;
+}
+.request-card-title {
+  font: var(--type-section);
+  overflow-wrap: anywhere;
+}
+.request-card-policy {
+  color: var(--text-dim-on-tint);
+  font: var(--type-small);
+  font-variant-numeric: tabular-nums;
+}
+.request-card-body {
+  display: flex;
+  flex: 0 1 auto;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.request-card-body > * { flex: none; }
+@media (max-height: 520px) {
+  /* Too short to keep the card's head and footer still around a scrolling body: the whole card
+     scrolls inside the capped dock instead. */
+  .request-dock .request-card-body { flex: none; overflow: visible; }
+}
+.request-card .request-card-body > * { margin: 0; }
+.request-card-body > .code-well > pre { max-height: none; }
+.request-card-reasons {
+  display: grid;
+  gap: var(--space-1);
+  color: var(--text-dim-on-tint);
+  font: var(--type-small);
+}
+.request-card-reasons > p { margin: 0; }
+.request-card-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+@media (max-width: 760px) {
+  /* One footer row on a phone, where the dock is in thumb reach. */
+  .request-card[data-presentation="dock"] .request-card-foot { flex-wrap: nowrap; }
+}
+/* In the Requests panel the detail scrolls as one page, so a short panel never squeezes the card's
+   body away; the footer sticks to the panel's lower edge on the card's own wash. */
+.request-panel-detail > .request-card { flex: none; }
+.request-panel-detail > .request-card .request-card-body { overflow: visible; }
+.request-panel-detail > .request-card .request-card-foot {
+  position: sticky;
+  bottom: 0;
+  padding-block: var(--space-2);
+  background: color-mix(in srgb, var(--amber) 7%, var(--bg-elev));
+}
+.agents-panel .request-card { flex: none; }
 .session-notice-tone { display: inline-flex; color: var(--tone); }
 .session-notice-more { font-variant-numeric: tabular-nums; }
 @media (max-width: 760px) {
@@ -7575,12 +7613,6 @@ textarea,
   max-width: 100%;
   overflow-wrap: anywhere;
 }
-.perm-pending {
-  color: var(--amber);
-}
-.tl-perm-review {
-  margin-left: auto;
-}
 /* Working line (#2170, §11.1, §11.3): while a turn runs, one line in a fixed order (the state, the
    elapsed time, the current step and at most one action), plus an exception line only when
    something went wrong. Neither line wraps: the step and the retry error clip at their end. */
@@ -8694,13 +8726,6 @@ textarea,
 }
 .provider-login-card form input {
   width: 100%;
-}
-.approval-bar:has(> .provider-login-card) {
-  flex-wrap: wrap;
-}
-.approval-bar > .provider-login-card {
-  flex: 0 0 100%;
-  margin-top: 0;
 }
 /* Authentication Required account context (#1649): provider-reported identity kept visibly
    separate from the configured label, then the other accounts on the same Machine. */
@@ -12106,7 +12131,7 @@ body.shell-dock-dragging * {
 .session-detail.preview .detail-chat,
 .session-detail.preview .detail-main { min-height: 0; }
 .session-detail.preview .detail-scroll { padding-block: var(--space-3); }
-.session-detail.preview .approval-bar { margin: 8px 14px 0; }
+.session-detail.preview .question-bar { margin: var(--space-2) var(--space-3) 0; }
 .session-preview-head {
   display: flex;
   flex: none;
@@ -13032,11 +13057,20 @@ body.shell-dock-dragging * {
 
 /* --------- Trust surface: approval context + structured question card ---------- */
 
-.approval-bar .approval-main {
+.question-main {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-2);
   width: 100%;
+}
+.question-title {
+  flex: 1;
+  color: var(--amber-on-tint);
+  font: var(--type-body);
+}
+.question-actions {
+  display: flex;
+  gap: var(--space-2);
 }
 /* Why a refused person cannot decide this request (#1857): a full-width line under the options. */
 .approval-refusal {
@@ -13062,68 +13096,26 @@ body.shell-dock-dragging * {
   word-break: break-word;
   width: 100%;
 }
-.approval-evidence {
-  display: grid;
-  gap: 8px;
-  width: 100%;
-  margin-top: 8px;
-  padding: 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg);
-  font-size: var(--text-sm);
-}
-.approval-evidence p { color: var(--text-dim); }
-/* An evidence item that cannot be reviewed must not read as ordinary helper text. */
-.approval-evidence p.form-error,
-.approval-evidence .form-error p { color: var(--red); }
-.approval-evidence-item {
+/* The question card (#2196 rebuilds it on the Request Card). Aligned with the centered chat column
+   below it, on the amber wash a live request uses. */
+.question-bar {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-.approval-selector-context {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 6px;
-  width: 100%;
-  margin: 8px 0 0;
-}
-.approval-selector-card {
-  min-width: 0;
-  padding: 7px 9px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg);
-}
-.approval-selector-card dt {
-  color: var(--text-faint);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: .04em;
-  text-transform: uppercase;
-}
-.approval-selector-card dd {
-  margin: 2px 0 0;
-  overflow-wrap: anywhere;
-  color: var(--text);
-  font: 11px "Cascadia Code", Consolas, monospace;
-}
-.approval-bar {
-  flex-wrap: wrap;
-}
-
-.approval-bar.question-bar {
   flex-direction: column;
-  flex-wrap: nowrap;
   align-items: stretch;
+  gap: var(--space-3);
+  width: 100%;
   min-width: 0;
+  max-width: var(--chat-max);
   min-height: 0;
   max-height: min(560px, 60dvh);
+  margin: var(--space-3) auto 0;
+  padding: var(--space-3) var(--space-4);
   overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--amber) 32%, transparent);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--amber) 7%, var(--bg-elev));
 }
-.question-bar .approval-main,
+.question-bar .question-main,
 .question-bar > .form-error {
   flex: none;
 }
@@ -13291,7 +13283,7 @@ body.shell-dock-dragging * {
 /* Glyph wrappers that had no rules, so the characters inherited the surrounding size and sat off
    the baseline. A fixed box keeps them aligned with the text beside them. */
 .perm-icon,
-.approval-icon,
+.question-icon,
 .question-mark {
   display: inline-flex;
   align-items: center;
@@ -13919,15 +13911,13 @@ body.shell-dock-dragging * {
   }
   .background-work-group-head { align-items: center; }
 
-  /* Approvals: keep the decision buttons on their own tappable row. */
-  .approval-bar {
+  /* Questions: keep the response buttons on their own tappable row. */
+  .question-main {
     flex-wrap: wrap;
+    row-gap: var(--space-2);
   }
-  .approval-bar .approval-main {
-    flex-wrap: wrap;
-    row-gap: 8px;
-  }
-  .approval-actions {
+  .approval-actions,
+  .question-actions {
     flex-wrap: wrap;
   }
   /* Request review is one full-height page on phones. The page itself owns scrolling so evidence
@@ -13941,9 +13931,7 @@ body.shell-dock-dragging * {
     overscroll-behavior: contain;
   }
   .request-panel-list,
-  .request-panel-detail,
-  .evidence-review-list,
-  .approval-review-body {
+  .request-panel-detail {
     overflow: visible;
     max-height: none;
   }
@@ -13953,25 +13941,6 @@ body.shell-dock-dragging * {
   .request-panel-detail-head {
     align-items: stretch;
     flex-direction: column;
-  }
-  .tl-request-card {
-    align-items: stretch;
-    flex-wrap: wrap;
-  }
-  .evidence-review-surface {
-    display: block;
-    min-height: 100%;
-  }
-  .approval-review-surface {
-    display: block;
-    min-height: 100%;
-  }
-  .evidence-review-summary {
-    position: sticky;
-    z-index: var(--z-sticky);
-    top: -14px;
-    padding: 14px 0 12px;
-    background: var(--bg-elev);
   }
   .evidence-review-summary > strong {
     white-space: nowrap;
@@ -15949,12 +15918,8 @@ body.shell-dock-dragging * {
    promotion has no job left — and it did active harm: it made `.slash-src` render identically to
    `.slash-desc`, which uses the dim tier, so the two lines of an active row became one weight. A
    promotion that outlives its reason is an inversion waiting to be reported. */
-.card-approval .approval-title,
-.approval-bar .approval-text {
+.card-approval .approval-title {
   color: var(--amber-on-tint);
-}
-.approval-bar.cost-budget .approval-text {
-  color: var(--red-on-tint);
 }
 
 .skeleton {

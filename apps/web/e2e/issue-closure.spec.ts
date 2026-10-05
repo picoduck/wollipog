@@ -3,7 +3,8 @@ for (const width of [1440, 390]) {
   test(`issue closure approval shows exact action and conflicts at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/request-surfaces-e2e.html?scenario=issue-closure");
-    await page.getByRole("button", { name: "Review Request" }).click();
+    // The decision is on the Request Card docked above the composer (#2179).
+    const foot = page.locator(".request-dock .request-card-foot");
     const details = page.getByRole("region", { name: "Issue Closure Details" });
     await expect(details).toBeVisible();
     await expect(details.getByRole("link", { name: "#123: Obsolete Task" })).toHaveAttribute("href", "https://github.com/team/repo/issues/123");
@@ -12,8 +13,8 @@ for (const width of [1440, 390]) {
       "#77: Earlier Implementation", "Implement Issue 123", "Work is still associated with this issue."]) {
       await expect(details).toContainText(text);
     }
-    await expect(page.getByRole("button", { name: "Approve", exact: true })).toBeEnabled();
-    await page.getByRole("button", { name: "Deny", exact: true }).click();
+    await expect(foot.getByRole("button", { name: /^Approve/u })).toBeEnabled();
+    await foot.getByRole("button", { name: /^Deny/u }).click();
     await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_REQUEST_SURFACES_E2E__.submissions())).toEqual([
       { requestId: "evidence-occurrence", optionId: "deny" },
     ]);

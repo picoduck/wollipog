@@ -1,1 +1,0 @@
-|.approval-selector-card dt|font-size|10

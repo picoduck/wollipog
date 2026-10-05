@@ -1,10 +1,8 @@
-import { IssueClosureSummary } from "./IssueClosureSummary.js";
 import React, { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import {
   DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH,
-  isPolicyApproval,
   type AgentQuestion,
-  type ApprovalContext,
+  type PendingApproval,
   type SessionView,
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
@@ -23,25 +21,10 @@ import {
 } from "../question-response.js";
 import { useQuestionResponseStyle } from "../question-response-style.js";
 import { useInstanceScope } from "../instance-scope.js";
-import {
-  clearEvidenceReviewDraft,
-  loadEvidenceReviewDraft,
-  saveEvidenceReviewDraft,
-} from "../evidence-review-drafts.js";
+import { clearEvidenceReviewDraft } from "../evidence-review-drafts.js";
 import { handleRovingChoiceKeyDown } from "./interactions.js";
 import { StructuredQuestionText } from "./StructuredQuestionText.js";
-import { Checkbox } from "./ui/ChoiceControls.js";
-import {
-  EvidenceArtifactView,
-  EvidenceSecureContextNotice,
-  evidenceStatusBlocksReview,
-  isArtifactBackedEvidence,
-  isRenderableEvidence,
-  UnrenderableEvidenceArtifact,
-  type EvidenceArtifactStatus,
-} from "./EvidenceArtifactView.js";
-import { ProviderLoginCard } from "./ProviderLoginCard.js";
-import { AuthenticationRecoveryPanel, authenticationRecoveryPanelApplies } from "./AuthenticationRecoveryPanel.js";
+import { revealDockedRequest } from "./requests/request-reveal.js";
 
 const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
@@ -63,38 +46,6 @@ export function approvalFocusDestination(
   return nextRequestId ? "request" : "fallback";
 }
 
-export function approvalKeyHintForOption(
-  options: readonly { optionId: string; kind?: string }[],
-  optionId: string,
-): "A" | "D" | null {
-  const option = options.find((candidate) => candidate.optionId === optionId);
-  if (option?.kind !== "allow_once" && option?.kind !== "reject_once") return null;
-  if (options.filter((candidate) => candidate.kind === option.kind).length !== 1) return null;
-  return option.kind === "allow_once" ? "A" : "D";
-}
-
-export function ApprovalSelectorContext({ context }: { context?: ApprovalContext }) {
-  const selectors = [
-    { key: "tool", label: "Tool", value: context?.toolName },
-    { key: "path", label: "Path", value: context?.path },
-    { key: "network", label: "Network", value: context?.network },
-    { key: "branch", label: "Branch", value: context?.branch },
-  ].filter((selector): selector is { key: string; label: string; value: string } =>
-    typeof selector.value === "string" && selector.value.length > 0);
-  if (!selectors.length) return null;
-
-  return (
-    <dl className="approval-selector-context" aria-label="Policy Match Context">
-      {selectors.map((selector) => (
-        <div className="approval-selector-card" data-selector={selector.key} key={selector.key}>
-          <dt>{selector.label}</dt>
-          <dd>{selector.value}</dd>
-        </div>
-      ))}
-    </dl>
-  );
-}
-
 /** Why the signed-in person may not answer or decide this session's requests (#1857), from the
  * session's view in the store. Without a store or a view it is `fallback`: a caller that knows the
  * requester's verdict from another view passes it, and otherwise the server still decides. */
@@ -106,7 +57,9 @@ export function useSessionResponseRefusal(sessionId: string, fallback: string | 
   return stored === undefined ? fallback : stored;
 }
 
-/** Stable focus/live boundary across coalesced approval replacement and final resolution. */
+/** Stable focus/live boundary across coalesced approval replacement and final resolution. The
+ * session's own non-question requests are answered on the request dock above the composer (#2179);
+ * this region keeps a pending question in its current place until #2205 docks questions too. */
 export function SessionApprovalRegion({
   session,
   runnerOnline,
@@ -116,7 +69,6 @@ export function SessionApprovalRegion({
   onSessionUpdate,
   showKeyHints = true,
   questionInTimeline = false,
-  standaloneInReviewSurface = false,
 }: {
   session: SessionView;
   runnerOnline: boolean;
@@ -127,41 +79,11 @@ export function SessionApprovalRegion({
   showKeyHints?: boolean;
   /** Whether the pending question already has an authoritative transcript row. */
   questionInTimeline?: boolean;
-  /** Whether the standalone approval is represented by its transcript trigger + request panel. */
-  standaloneInReviewSurface?: boolean;
 }) {
-  const instanceScope = useInstanceScope();
   const approval = session.pendingApproval;
   const questionFallback = approval?.kind === "question" && !questionInTimeline;
-  const standaloneApproval = standaloneApprovalForReview(approval);
-  const reviewApproval = standaloneInReviewSurface ? standaloneApproval : null;
-  const evidenceRequestId = reviewApproval?.requestId ?? null;
-  const evidenceResourceDigest = reviewApproval?.workflowDecision?.resourceDigest ?? null;
-  const evidenceIdentity = evidenceRequestId && evidenceResourceDigest ? {
-    sessionId: session.id,
-    requestId: evidenceRequestId,
-    resourceDigest: evidenceResourceDigest,
-  } : null;
-  const previousEvidenceIdentityRef = useRef(evidenceIdentity);
-  useEffect(() => {
-    const previous = previousEvidenceIdentityRef.current;
-    if (previous && (
-      !evidenceIdentity ||
-      previous.sessionId !== evidenceIdentity.sessionId ||
-      previous.requestId !== evidenceIdentity.requestId ||
-      previous.resourceDigest !== evidenceIdentity.resourceDigest
-    )) {
-      clearEvidenceReviewDraft(
-        instanceScope,
-        previous.sessionId,
-        previous.requestId,
-        previous.resourceDigest,
-      );
-    }
-    previousEvidenceIdentityRef.current = evidenceIdentity;
-  }, [evidenceRequestId, evidenceResourceDigest, instanceScope, session.id]);
   const requestPresentation = questionFallback ? "fallback" : approval?.kind === "question"
-    ? "timeline" : reviewApproval ? "timeline" : standaloneApproval ? "standalone" : "none";
+    ? "timeline" : approval ? "dock" : "none";
   return (
     <>
       <SessionRequestCoordinator
@@ -174,17 +96,6 @@ export function SessionApprovalRegion({
         alternateFallbackFocusRef={alternateFallbackFocusRef}
         onFallbackFocus={onFallbackFocus}
       />
-      {standaloneApproval && !reviewApproval && (
-        <div data-session-request-id={standaloneApproval.requestId} data-session-request-session={session.id}>
-          <SessionApprovalBanner
-            key={standaloneApproval.requestId}
-            session={session}
-            runnerOnline={runnerOnline}
-            onSessionUpdate={onSessionUpdate}
-            showKeyHints={showKeyHints}
-          />
-        </div>
-      )}
       {questionFallback && (
         <div data-session-request-id={approval.requestId} data-session-request-session={session.id}>
           <SessionQuestionBanner
@@ -206,11 +117,28 @@ export function SessionApprovalRegion({
   );
 }
 
-/** Questions and worker-owned requests already have authoritative interactive presentations. */
-export function standaloneApprovalForReview(
-  approval: SessionView["pendingApproval"],
-): NonNullable<SessionView["pendingApproval"]> | null {
-  return approval && approval.kind !== "question" && !approval.ownerToolUseId ? approval : null;
+/** Clears the saved review of a UI evidence decision once it is no longer pending, wherever it was
+ * resolved: on this card, on another device, or replaced by a new occurrence (#1107). */
+export function useEvidenceDraftRetirement(sessionId: string, requests: readonly PendingApproval[]): void {
+  const instanceScope = useInstanceScope();
+  const identities = requests.flatMap((request) => {
+    const decision = request.kind === "workflow_decision" ? request.workflowDecision : undefined;
+    return decision?.resourceSnapshot.category === "ui_evidence_approval"
+      ? [JSON.stringify([sessionId, request.requestId, decision.resourceDigest])]
+      : [];
+  });
+  const signature = identities.join("\n");
+  const previousRef = useRef<string[]>(identities);
+  useEffect(() => {
+    for (const previous of previousRef.current) {
+      if (identities.includes(previous)) continue;
+      const [previousSession, requestId, resourceDigest] = JSON.parse(previous) as [string, string, string];
+      clearEvidenceReviewDraft(instanceScope, previousSession, requestId, resourceDigest);
+    }
+    previousRef.current = identities;
+  // The signature is the set of identities.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [instanceScope, signature]);
 }
 
 /** Keep one question representation at its event's timeline position while the request is live. */
@@ -272,6 +200,7 @@ function requestRegionFor(element: Element | null): HTMLElement | null {
 /** Navigate to an existing request without making a response button the implicit Enter target.
  * False when no mounted surface renders the request, so the caller can route elsewhere. */
 export function focusSessionRequest(sessionId: string, requestId: string): boolean {
+  if (revealDockedRequest(sessionId, requestId)) return true;
   const region = [...document.querySelectorAll<HTMLElement>("[data-session-request-id]")]
     .find((candidate) => candidate.dataset.sessionRequestId === requestId &&
       candidate.dataset.sessionRequestSession === sessionId);
@@ -298,7 +227,10 @@ function enabledRequestControl(
   const eligible = region?.querySelector(".question-style-composer")
     ? controls.filter((control) => control.dataset.sessionRequestControl !== "dismiss")
     : controls;
-  return eligible.find((control) => control.dataset.sessionRequestControl === preferredControl) ?? eligible[0] ?? null;
+  // A Request Card names its heading as the landing place: a new request is read before it is
+  // answered, and its first button is not the one to press by default.
+  return eligible.find((control) => control.dataset.sessionRequestControl === preferredControl) ??
+    region?.querySelector<HTMLElement>("[data-session-request-focus]") ?? eligible[0] ?? null;
 }
 
 /** Persistent focus and live-announcement owner for approvals in either presentation. */
@@ -315,7 +247,7 @@ function SessionRequestCoordinator({
   sessionId: string;
   requestId: string | null;
   requestIsQuestion: boolean;
-  requestPresentation: "fallback" | "timeline" | "standalone" | "none";
+  requestPresentation: "fallback" | "timeline" | "dock" | "none";
   runnerOnline: boolean;
   fallbackFocusRef: RefObject<HTMLElement | null>;
   alternateFallbackFocusRef?: RefObject<HTMLElement | null>;
@@ -385,391 +317,6 @@ function SessionRequestCoordinator({
     ownedFocusBeforeRender, requestId, requestWasUnchangedBeforeRender, runnerOnline]);
 
   return <span className="sr-only" role="status" aria-live="polite">{announcement}</span>;
-}
-
-export function SessionApprovalBanner({
-  session,
-  runnerOnline,
-  onSessionUpdate,
-  showKeyHints = true,
-  presentation = "banner",
-}: {
-  session: SessionView;
-  runnerOnline: boolean;
-  onSessionUpdate?: (session: SessionView) => void;
-  showKeyHints?: boolean;
-  presentation?: "banner" | "review";
-}) {
-  const api = useApi();
-  const instanceScope = useInstanceScope();
-  const approval = session.pendingApproval!;
-  const runner = useOptionalStoreSelector((state) => state.runners.get(session.runnerId));
-  // A person the server refuses a decision (a Viewer) reads the request with every option disabled
-  // and the reason beside them (#1857).
-  const responseRefusal = sessionCommandRefusal(session, "respond");
-  const responseRefusalId = useId();
-  const providerLogin = runner?.providerLogins?.find(
-    (login) => login.sessionId === session.id && login.status !== "succeeded" && login.status !== "cancelled",
-  );
-  const workflowDecision = approval.kind === "workflow_decision" ? approval.workflowDecision : undefined;
-  const closureSnapshot = workflowDecision?.resourceSnapshot.category === "issue_closure" ? workflowDecision.resourceSnapshot : null;
-  const evidenceSnapshot = workflowDecision?.resourceSnapshot.category === "ui_evidence_approval"
-    ? workflowDecision.resourceSnapshot : null;
-  const evidenceDecision = evidenceSnapshot ? workflowDecision! : null;
-  const evidence = evidenceSnapshot?.evidence ?? [];
-  const evidenceIds = evidence.map((item) => item.evidenceId);
-  const [busy, setBusy] = useState(false);
-  const [showContext, setShowContext] = useState(evidence.length === 0);
-  const [error, setError] = useState<string | null>(null);
-  const [reviewedEvidence, setReviewedEvidence] = useState<string[]>(() => evidenceDecision
-    ? loadEvidenceReviewDraft(
-        instanceScope,
-        session.id,
-        approval.requestId,
-        evidenceDecision.resourceDigest,
-        evidenceIds,
-      )
-    : []);
-  const contextId = useId();
-  const isPolicy = isPolicyApproval(approval);
-  const decisionNeedsRunner = approval.kind !== "policy_hook" && approval.kind !== "workflow_decision";
-  // An artifact-backed item counts as reviewed only once its verified image was actually shown. A
-  // saved mark from an earlier visit does not survive the artifact turning out missing, mismatched,
-  // or uncheckable in this browser. An artifact's `uri`, if any, never stands in for the checked
-  // bytes, so an artifact of a media type the card cannot show stays blocked.
-  const [artifactStatus, setArtifactStatus] = useState<Record<string, EvidenceArtifactStatus>>({});
-  const evidenceBlocked = (item: (typeof evidence)[number]) => {
-    if (!isRenderableEvidence(item)) return isArtifactBackedEvidence(item) || !item.uri;
-    return evidenceStatusBlocksReview(artifactStatus[item.evidenceId] ?? "pending");
-  };
-  const evidenceComplete = evidence.every((item) =>
-    reviewedEvidence.includes(item.evidenceId) && !evidenceBlocked(item));
-  // The total counts what the checkboxes show, so a saved mark on an item this page cannot show
-  // is not reported as reviewed.
-  const reviewedCount = evidence.filter((item) =>
-    reviewedEvidence.includes(item.evidenceId) && !evidenceBlocked(item)).length;
-  const onArtifactStatus = (evidenceId: string, status: EvidenceArtifactStatus) =>
-    setArtifactStatus((current) => current[evidenceId] === status ? current : { ...current, [evidenceId]: status });
-
-  useEffect(() => {
-    setReviewedEvidence(evidenceDecision
-      ? loadEvidenceReviewDraft(
-          instanceScope,
-          session.id,
-          approval.requestId,
-          evidenceDecision.resourceDigest,
-          evidenceIds,
-        )
-      : []);
-    setShowContext(evidence.length === 0);
-    setError(null);
-    setBusy(false);
-  // The ids and digest are the immutable identity of this exact review occurrence.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [approval.requestId, evidenceDecision?.resourceDigest, instanceScope, session.id]);
-
-  const updateEvidence = (evidenceId: string, checked: boolean) => {
-    if (!evidenceDecision) return;
-    setReviewedEvidence((current) => {
-      const next = checked
-        ? [...new Set([...current, evidenceId])]
-        : current.filter((candidate) => candidate !== evidenceId);
-      saveEvidenceReviewDraft(
-        instanceScope,
-        session.id,
-        approval.requestId,
-        evidenceDecision.resourceDigest,
-        next,
-      );
-      return next;
-    });
-  };
-
-  const decide = async (optionId: string | null) => {
-    if (responseRefusal !== null) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const updated = await api.approve(session.id, {
-        requestId: approval.requestId,
-        optionId,
-        ...(evidence.length && optionId === "approve" ? { evidenceReviewed: reviewedEvidence } : {}),
-        ...(evidenceDecision && optionId === "approve" && evidence.some((item) => item.uri === undefined)
-          ? { evidenceReviewDigest: evidenceDecision.resourceDigest }
-          : {}),
-      });
-      if (evidenceDecision) {
-        clearEvidenceReviewDraft(
-          instanceScope,
-          session.id,
-          approval.requestId,
-          evidenceDecision.resourceDigest,
-        );
-      }
-      onSessionUpdate?.(updated);
-    } catch (cause) {
-      setError((cause as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  if (approval.kind === "question") {
-    return (
-      <SessionQuestionBanner
-        sessionId={session.id}
-        requestId={approval.requestId}
-        occurrenceId={approval.occurrenceId}
-        questions={approval.questions ?? []}
-        isAsync={approval.async}
-        recoveryReason={approval.recoveryReason}
-        recoveryAction={approval.recoveryAction}
-        runnerOnline={runnerOnline}
-        responseRefusal={responseRefusal}
-        onSessionUpdate={onSessionUpdate}
-        showKeyHints={showKeyHints}
-      />
-    );
-  }
-
-  const refusalNote = responseRefusal !== null && (
-    <p className="muted approval-refusal" id={responseRefusalId}>{responseRefusal}</p>
-  );
-  const refusalDescription = responseRefusal !== null ? responseRefusalId : undefined;
-
-  if (presentation === "review" && evidenceDecision) {
-    return (
-      <section className="evidence-review-surface" aria-label="UI Evidence Review" aria-busy={busy}>
-        <div className="evidence-review-summary">
-          <div>
-            <h3>{approval.title}</h3>
-            <p>Review every artifact before approving this request.</p>
-            {evidenceDecision.humanFallback && <p className="muted">
-              UI Evidence Approval is assigned to the Orchestrator, but this request needs a human. {evidenceDecision.humanFallback.reason}
-            </p>}
-          </div>
-          <strong role="status" aria-live="polite">
-            {reviewedCount} of {evidence.length} Reviewed
-          </strong>
-        </div>
-        <div className="evidence-review-list" aria-label="Evidence Items">
-          {/* In the list rather than the summary: it needs the full width, and in a short panel it
-              scrolls with the items instead of crowding them out. */}
-          <EvidenceSecureContextNotice evidence={evidence} />
-          {evidence.map((item, index) => (
-            <article className="evidence-review-item" key={item.evidenceId}>
-              <div className="evidence-review-item-main">
-                <span className="evidence-review-index" aria-hidden="true">{index + 1}</span>
-                <div>
-                  <strong>{item.evidenceId}</strong>
-                  {!isArtifactBackedEvidence(item) && item.uri && (
-                    <a
-                      className="btn ghost sm"
-                      href={item.uri}
-                      target="_blank"
-                      rel="noreferrer"
-                      aria-label={`View External Evidence: ${item.evidenceId}`}
-                    >
-                      View External Evidence
-                    </a>
-                  )}
-                  {!isArtifactBackedEvidence(item) && !item.uri && (
-                    <p className="form-error" role="alert">This evidence has no viewable artifact or external link.</p>
-                  )}
-                </div>
-              </div>
-              {isRenderableEvidence(item)
-                ? <EvidenceArtifactView item={item} onStatusChange={onArtifactStatus} />
-                : isArtifactBackedEvidence(item) && <UnrenderableEvidenceArtifact item={item} />}
-              <Checkbox
-                label="Reviewed"
-                ariaLabel={`Mark ${item.evidenceId} as Reviewed`}
-                checked={reviewedEvidence.includes(item.evidenceId) && !evidenceBlocked(item)}
-                disabled={evidenceBlocked(item)}
-                onChange={(checked) => updateEvidence(item.evidenceId, checked)}
-              />
-            </article>
-          ))}
-          <details className="evidence-review-details">
-            <summary>Advanced Details</summary>
-            <dl>
-              <div><dt>Resource Key</dt><dd>{evidenceDecision.resourceKey}</dd></div>
-              <div><dt>Resource Digest</dt><dd>{evidenceDecision.resourceDigest}</dd></div>
-            </dl>
-          </details>
-        </div>
-        {error && <div className="form-error" role="alert">Approval failed: {error}</div>}
-        {refusalNote}
-        <div className="evidence-review-actions">
-          {approval.options.map((option) => {
-            const blocksApproval = option.optionId === "approve" && !evidenceComplete;
-            const blocksProviderLogin = option.optionId === "auth:login" && runner?.canManage === false;
-            return (
-              <button
-                key={option.optionId}
-                type="button"
-                className={`btn ${option.kind?.startsWith("allow") ? "primary" : "ghost danger"}`}
-                disabled={busy || blocksApproval || blocksProviderLogin || responseRefusal !== null}
-                aria-describedby={refusalDescription}
-                onClick={() => void decide(option.optionId)}
-              >
-                {busy ? "Submitting…" : option.name}
-              </button>
-            );
-          })}
-        </div>
-      </section>
-    );
-  }
-
-  if (presentation === "review") {
-    return (
-      <section className="approval-review-surface" aria-label="Approval Review" aria-busy={busy}>
-        <div className="approval-review-summary">
-          <h3>{approval.title}</h3>
-          <p>
-            Review the request details before choosing an action.
-            {!runnerOnline && decisionNeedsRunner && " The runner is offline."}
-          </p>
-        </div>
-        <div className="approval-review-body">
-          {authenticationRecoveryPanelApplies(session, approval) && (
-            <AuthenticationRecoveryPanel session={session} approval={approval} runner={runner} runnerOnline={runnerOnline} />
-          )}
-          {closureSnapshot && <IssueClosureSummary snapshot={closureSnapshot} />}
-          <ApprovalSelectorContext context={approval.context} />
-          {approval.context?.input && !closureSnapshot && (
-            <details className="approval-review-details">
-              <summary>Request Details</summary>
-              <pre className="approval-context">{approval.context.input}</pre>
-            </details>
-          )}
-        </div>
-        {error && <div className="form-error" role="alert">Approval failed: {error}</div>}
-        {refusalNote}
-        <div className="approval-review-actions">
-          {approval.options.map((option) => (
-            <button
-              key={option.optionId}
-              type="button"
-              title={option.optionId === "auth:login" && runner?.canManage === false
-                ? "Machine owner or organization admin permission is required"
-                : option.description}
-              className={`btn ${option.kind?.startsWith("allow") ? "primary" : "ghost danger"}`}
-              disabled={busy || (decisionNeedsRunner && !runnerOnline) ||
-                (option.optionId === "auth:login" && runner?.canManage === false) || responseRefusal !== null}
-              aria-describedby={refusalDescription}
-              onClick={() => void decide(option.optionId)}
-            >
-              {busy ? "Submitting…" : option.name}
-            </button>
-          ))}
-        </div>
-      </section>
-    );
-  }
-
-  return (
-    <section
-      className={`approval-bar${isPolicy ? " cost-budget" : ""}`}
-      aria-label={approval.kind === "authentication" ? approval.title
-        : approval.kind === "workflow_decision" ? "Workflow Decision Required" : "Agent Approval Required"}
-    >
-      <div className="approval-main">
-        <span className="approval-icon" aria-hidden="true">
-          {approval.kind === "cost_budget" || approval.kind === "cost_checkpoint" ? "💰"
-            : approval.kind === "daily_budget" ? "📅"
-              : approval.kind === "cost_unpriced" ? "❓"
-                : approval.kind === "max_tool_calls" ? "🧰" : approval.kind === "authentication" ? "🔑"
-                  : approval.kind === "workflow_decision" ? "🛡️" : "🔐"}
-        </span>
-        <span className="approval-text">
-          {approval.title}
-          {!runnerOnline && decisionNeedsRunner && <span className="muted"> · Runner Offline</span>}
-        </span>
-        <div className="approval-actions">
-          {approval.context?.input && !closureSnapshot && (
-            <button
-              className="btn ghost sm"
-              type="button"
-              aria-expanded={showContext}
-              aria-controls={contextId}
-              onClick={() => setShowContext((value) => !value)}
-            >
-              {showContext ? "Hide Details" : "Details"}
-            </button>
-          )}
-          {approval.options.map((option) => {
-            const keyHint = showKeyHints ? approvalKeyHintForOption(approval.options, option.optionId) : null;
-            const evidenceBlocksApproval = evidence.length > 0 && option.optionId === "approve" && !evidenceComplete;
-            const providerLoginBlocked = option.optionId === "auth:login" && runner?.canManage === false;
-            return (
-              <button
-                key={option.optionId}
-                type="button"
-                title={providerLoginBlocked
-                  ? "Machine owner or organization admin permission is required"
-                  : option.description}
-                className={`btn sm ${option.kind?.startsWith("allow") ? "primary" : "ghost danger"}`}
-                disabled={busy || evidenceBlocksApproval || providerLoginBlocked ||
-                  (decisionNeedsRunner && !runnerOnline) || responseRefusal !== null}
-                aria-describedby={refusalDescription}
-                onClick={() => void decide(option.optionId)}
-              >
-                {option.name}
-                {keyHint && <kbd>{keyHint}</kbd>}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-      {refusalNote}
-      {approval.kind === "authentication" && providerLogin && (
-        <ProviderLoginCard runnerId={session.runnerId} login={providerLogin} />
-      )}
-      {authenticationRecoveryPanelApplies(session, approval) && (
-        <AuthenticationRecoveryPanel session={session} approval={approval} runner={runner} runnerOnline={runnerOnline} />
-      )}
-      {evidence.length > 0 && (
-        <div className="approval-evidence" aria-label="Evidence Review">
-          <p>Open and inspect each evidence item, then mark it as reviewed.</p>
-          <EvidenceSecureContextNotice evidence={evidence} />
-          {evidence.map((item) => (
-            <div className="approval-evidence-item" key={item.evidenceId}>
-              {isRenderableEvidence(item)
-                ? <>
-                    <strong>{item.evidenceId}</strong>
-                    <EvidenceArtifactView item={item} onStatusChange={onArtifactStatus} />
-                  </>
-                : isArtifactBackedEvidence(item)
-                  ? <>
-                      <strong>{item.evidenceId}</strong>
-                      <UnrenderableEvidenceArtifact item={item} />
-                    </>
-                : item.uri
-                  ? <a className="link" href={item.uri} target="_blank" rel="noreferrer">Open External Evidence: {item.evidenceId}</a>
-                  : <p className="form-error" role="alert">This evidence has no viewable artifact or external link.</p>}
-              <Checkbox
-                label="Reviewed"
-                ariaLabel={`Mark ${item.evidenceId} as Reviewed`}
-                checked={reviewedEvidence.includes(item.evidenceId) && !evidenceBlocked(item)}
-                disabled={evidenceBlocked(item)}
-                onChange={(checked) => updateEvidence(item.evidenceId, checked)}
-              />
-            </div>
-          ))}
-        </div>
-      )}
-      {approval.kind === "policy_hook" && (
-        <ApprovalSelectorContext context={approval.context} />
-      )}
-      {closureSnapshot && <IssueClosureSummary snapshot={closureSnapshot} />}
-      {showContext && !closureSnapshot && approval.context?.input && (
-        <pre className="approval-context" id={contextId}>{approval.context.input}</pre>
-      )}
-      {error && <div className="form-error" role="alert">Approval failed: {error}</div>}
-    </section>
-  );
 }
 
 /** Structured agent questions with two presentations over one request-keyed canonical draft. */
@@ -961,7 +508,7 @@ export function SessionQuestionBanner({
 
   return (
     <section
-      className={`approval-bar question-bar question-style-${responseStyle}`}
+      className={`question-bar question-style-${responseStyle}`}
       aria-label="Agent Questions"
       aria-busy={busy !== null}
       onKeyDown={(event) => {
@@ -970,15 +517,15 @@ export function SessionQuestionBanner({
         void submit();
       }}
     >
-      <div className="approval-main">
-        <span className="approval-icon" aria-hidden="true">❓</span>
-        <span className="approval-text">
+      <div className="question-main">
+        <span className="question-icon" aria-hidden="true">❓</span>
+        <span className="question-title">
           {isAsync ? "Async Agent Question" : recoveryRequired
             ? "Agent Question Recovery Required"
             : `The agent has ${questions.length === 1 ? "a question" : `${questions.length} questions`}`}
           {!runnerOnline && <span className="muted"> · Runner Offline</span>}
         </span>
-        <div className="approval-actions">
+        <div className="question-actions">
           <button
             className="btn ghost sm"
             type="button"

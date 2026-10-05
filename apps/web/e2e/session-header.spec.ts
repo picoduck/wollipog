@@ -199,7 +199,7 @@ test("the Requests panel stays open until descendant polling authoritatively set
   await expect(trigger).toBeFocused();
 });
 
-test("resolving a closed Requests surface leaves the cross-session generic toggle on the launcher", async ({ page }) => {
+test("a request answered on the dock never opens the Requests panel, and the generic toggle stays on the launcher", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto("/command-inbox-projects-e2e.html?scenario=preview-follow&fullShell=1");
   await page.evaluate(() => localStorage.clear());
@@ -223,13 +223,11 @@ test("resolving a closed Requests surface leaves the cross-session generic toggl
     });
   });
 
-  const review = page.getByRole("button", { name: "Review Request" });
-  await review.scrollIntoViewIfNeeded();
-  await review.click();
-  await expect(page.locator("#right-panel")).toHaveAccessibleName("Requests");
-  await page.getByRole("button", { name: "Close Panel" }).click();
+  // The session's own request is on the Request Card docked above the composer (#2179).
+  const heading = page.locator(".request-dock .request-card").getByRole("heading");
+  await expect(heading).toHaveText("Approve Right Panel Recovery?");
   await expect(page.locator("#right-panel")).toHaveCount(0);
-  await expect(review).toBeFocused();
+  await heading.focus();
 
   await page.evaluate(() => {
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
@@ -240,10 +238,7 @@ test("resolving a closed Requests surface leaves the cross-session generic toggl
 
   await expect(page.locator("#right-panel")).toHaveCount(0);
   await expect(page.locator(".composer-input")).toBeFocused();
-  await expect.poll(() => page.evaluate(() => ({
-    open: localStorage.getItem("wollipog.rightpanel.open"),
-    mode: localStorage.getItem("wollipog.rightpanel.mode"),
-  }))).toEqual({ open: "0", mode: "launcher" });
+  expect(await page.evaluate(() => localStorage.getItem("wollipog.rightpanel.mode"))).not.toBe("requests");
 
   await page.getByRole("button", { name: "Back to Sessions" }).click();
   await page.getByRole("button", { name: /No Project Session/ }).click();

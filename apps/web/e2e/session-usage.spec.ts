@@ -273,14 +273,14 @@ test("the warning state above the threshold", async ({ page }) => {
   await expect(page.locator(".session-usage-popover").first()).toContainText("claude-fable-5-1");
 });
 
-test("a cost checkpoint parks the session with a compact responsive-review request", async ({ page }) => {
+test("a cost checkpoint parks the session with its Budget card docked above the composer", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 820 });
   await page.goto("/session-usage-e2e.html?width=1180&height=780&approval=checkpoint");
   await expect(page.locator(".approval-bar")).toHaveCount(0);
-  const card = page.getByRole("region", { name: "Pending Approval Request" });
-  await expect(card).toContainText("Cost checkpoint — $2.61 of $2.50. Continue?");
-  const trigger = page.getByRole("button", { name: "Review Request" });
-  await expect(trigger).toBeVisible();
+  const card = page.locator(".request-dock").getByRole("region", { name: "Cost checkpoint — $2.61 of $2.50. Continue?" });
+  await expect(card).toHaveAttribute("data-request-kind", "budget");
+  const foot = card.locator(".request-card-foot");
+  await expect(foot.getByRole("button")).toHaveText([/^Stop/u, /^Continue/u]);
   await page.screenshot({ path: `${SHOT}/desktop-checkpoint-card.png` });
 });
 

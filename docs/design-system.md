@@ -2078,6 +2078,20 @@ follows these rules so it never crowds out the conversation it asks about:
   into one-line rows (kind icon, title, owner, time; owner hidden on phones). Choosing a row brings
   that request to the top for this view; the priority order is unchanged. A and D act on the
   expanded request; a decision brings up the next one.
+- **The Request Card** (`components/requests/RequestCard.tsx`, #2179) is the dock's card and the
+  Requests and Agents panels' card for a child's or a worker's request. Head line: the kind's 16px
+  icon and label (`requestKindMeta()`: Permission, Budget, Tool Calls, Workflow Decision, UI Evidence,
+  Sign-In, Question), the owner and the time. Then the title in `--type-section`, a policy ask's
+  "Asked by <policy>" and "Rejects automatically in 9:42", and the body: the command in a code well
+  (§11.7) and the match context as facts (§5.4). The footer is `requestCardActions()`: `reject_*`
+  options as secondaries, `allow_always` and every other option in a ⋯ menu with its description as
+  the item's second line, and the first `allow_once` as the one primary, last; a request with no
+  `allow_once` has no primary. A reason nobody can act (the runner is offline, a Viewer's refusal, a
+  machine-owner-only sign-in) is a visible foot-note the disabled buttons reference; a failed
+  decision is a compact danger notice above the footer. The dock is the notice slot's `lead`
+  (`SessionNoticeSlot`), at the end of the `.chat-reading` column, a size container its caps are
+  measured against. Questions stay where they are until #2205, and a worker's request stays in the
+  Agents panel.
 - **Reading back shrinks it to a strip.** While the reader scrolls up away from the live tail, the
   dock becomes one 44px strip: kind icon, title, count ("1 of 3") and Expand. Returning to the tail or
   activating the strip restores the dock and moves focus to the card's heading. A new request updates

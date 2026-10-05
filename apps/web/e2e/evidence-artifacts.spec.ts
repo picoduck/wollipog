@@ -2,10 +2,10 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 
 const SHOT = "test-results/evidence-artifacts";
 
+/** The session's own evidence is reviewed on the request dock's card above the composer (#2179). */
 async function openReview(page: Page, query: string): Promise<void> {
   await page.goto(`/request-surfaces-e2e.html?scenario=evidence&${query}`);
-  await page.getByRole("button", { name: "Review Evidence" }).click();
-  await expect(page.getByRole("complementary", { name: "Requests" })).toBeVisible();
+  await expect(page.locator(".request-dock .request-card")).toBeVisible();
 }
 
 const artifactRequests = (page: Page) =>
@@ -35,9 +35,9 @@ for (const viewport of [
     await expect(first.getByRole("img", { name: "Evidence: viewport-1" })).toBeVisible();
     await expect(page.locator('a[href^="https://evidence.example"]')).toHaveCount(0);
     await expect(page.locator("body")).not.toContainText("signature=hidden");
-    // The image is inside the panel, not overflowing it.
+    // The image is inside the card, not overflowing it.
     const fits = await first.locator(".evidence-artifact-thumb").evaluate((element) => {
-      const panel = element.closest(".right-panel, .request-panel-detail")!.getBoundingClientRect();
+      const panel = element.closest(".request-card")!.getBoundingClientRect();
       const box = element.getBoundingClientRect();
       return box.left >= panel.left - 1 && box.right <= panel.right + 1 && box.width > 120;
     });
@@ -98,36 +98,6 @@ for (const viewport of [
     await page.screenshot({ path: `${SHOT}/${viewport.name}-unavailable.png` });
   });
 }
-
-test("the inline approval card shows a blocked item's reviewed checkbox as disabled", async ({ page }) => {
-  await page.setViewportSize({ width: 1280, height: 800 });
-  await page.goto("/request-surfaces-e2e.html?scenario=legacy&items=3&artifacts=unavailable");
-  const card = page.locator(".approval-evidence");
-  const blocked = card.getByRole("checkbox", { name: "Mark viewport-2 as Reviewed" });
-  const open = card.getByRole("checkbox", { name: "Mark viewport-1 as Reviewed" });
-  await expect(card.getByRole("img", { name: "Evidence: viewport-1" })).toBeVisible();
-  await expect(blocked).toBeDisabled();
-  // The Checkbox row (§8.4): a disabled row keeps its size and reads in --text-faint rather than
-  // fading, and the box takes its row's cursor.
-  const styles = (checkbox: Locator) => checkbox.evaluate((input) => {
-    const label = input.closest("label")!;
-    const probe = document.createElement("span");
-    probe.style.color = "var(--text-faint)";
-    label.append(probe);
-    const faint = getComputedStyle(probe).color;
-    probe.remove();
-    return {
-      label: getComputedStyle(label).cursor,
-      faint: getComputedStyle(label).color === faint,
-      checkbox: getComputedStyle(input).cursor,
-    };
-  });
-  expect(await styles(blocked)).toEqual({ label: "not-allowed", faint: true, checkbox: "not-allowed" });
-  // An enabled item is untouched: the whole row is the target, and nothing faint leaks onto it.
-  expect(await styles(open)).toEqual({ label: "pointer", faint: false, checkbox: "pointer" });
-  await open.check();
-  await expect(open).toBeChecked();
-});
 
 test("the review surface shows a blocked item's reviewed checkbox with the disabled cursor", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
@@ -218,8 +188,7 @@ async function openReviewFromNetworkAddress(page: Page, query: string): Promise<
   });
   await page.goto(`${NETWORK_ORIGIN}/request-surfaces-e2e.html?scenario=evidence&${query}`);
   expect(await page.evaluate(() => [window.isSecureContext, Boolean(globalThis.crypto?.subtle)])).toEqual([false, false]);
-  await page.getByRole("button", { name: "Review Evidence" }).click();
-  await expect(page.getByRole("complementary", { name: "Requests" })).toBeVisible();
+  await expect(page.locator(".request-dock .request-card")).toBeVisible();
 }
 
 for (const viewport of [
@@ -261,20 +230,19 @@ for (const viewport of [
   }
 }
 
-test("over plain HTTP a short desktop panel with child requests keeps the whole HTTPS notice", async ({ page }, testInfo) => {
-  // The compact layout drops the summary's own lines at this height; the way forward must survive it
-  // without crowding out the items or spilling past the actions.
+test("over plain HTTP a short desktop dock keeps the whole HTTPS notice reachable", async ({ page }, testInfo) => {
+  // The dock is capped at this height, so the card scrolls inside it; the way forward and the
+  // actions must stay reachable there.
   await page.setViewportSize({ width: 900, height: 480 });
   await openReviewFromNetworkAddress(page, "items=2&artifacts=artifact-only&children=1");
   const notice = page.getByRole("note", { name: "HTTPS or Localhost Required" });
-  const layout = await page.locator(".evidence-review-surface").evaluate((surface) => ({
-    overflow: surface.scrollHeight - surface.clientHeight,
-    listHeight: surface.querySelector(".evidence-review-list")!.clientHeight,
-    noticeInList: Boolean(surface.querySelector('.evidence-review-list > .notice[aria-label="HTTPS or Localhost Required"]')),
-  }));
-  expect(layout.overflow).toBeLessThanOrEqual(1);
-  expect(layout.listHeight).toBeGreaterThan(40);
-  expect(layout.noticeInList).toBe(true);
+  const card = page.locator(".request-dock .request-card");
+  expect(await card.evaluate((element) =>
+    Boolean(element.querySelector('.request-card-body .evidence-review-list > .notice[aria-label="HTTPS or Localhost Required"]')))).toBe(true);
+  await notice.scrollIntoViewIfNeeded();
+  await expect(notice).toBeInViewport();
+  await card.locator(".request-card-foot").scrollIntoViewIfNeeded();
+  await expect(card.locator(".request-card-foot")).toBeInViewport({ ratio: 1 });
   await notice.scrollIntoViewIfNeeded();
   await expect(notice.getByText(`This page is open at ${NETWORK_ORIGIN}.`, { exact: false })).toBeVisible();
   await expect(notice.getByText("reopen Wollipog over HTTPS", { exact: false })).toBeVisible();
@@ -335,6 +303,8 @@ test("a large review loads images as they approach the viewport, not all at once
   await page.setViewportSize({ width: 1280, height: 640 });
   await openReview(page, "items=32&artifacts=ready");
   await expect(page.locator(".evidence-review-item")).toHaveCount(32);
+  // The dock's card body is the scroller (#2179): the first item comes into view within it.
+  await page.locator(".evidence-review-item").first().scrollIntoViewIfNeeded();
   await expect(page.locator(".evidence-review-item").first().getByRole("img")).toBeVisible();
   const initial = await artifactRequests(page);
   expect(initial.length).toBeGreaterThan(0);

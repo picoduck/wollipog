@@ -9,7 +9,7 @@ import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { claimQuestionResponseOperation, clearQuestionDrafts, storeQuestionDrafts, storedQuestionDrafts } from "../question-response.js";
 import { setQuestionResponseStyle } from "../question-response-style.js";
-import { SessionApprovalBanner, SessionQuestionBanner } from "./SessionApproval.js";
+import { SessionQuestionBanner } from "./SessionApproval.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -280,7 +280,7 @@ test("a resumable recovered question keeps its preserved form answerable", async
 });
 
 function submitButton(container: HTMLDivElement): HTMLButtonElement {
-  const button = [...container.querySelectorAll<HTMLButtonElement>(".approval-actions button")]
+  const button = [...container.querySelectorAll<HTMLButtonElement>(".question-actions button")]
     .find((candidate) => candidate.textContent?.trim() === "Submit");
   assert.ok(button);
   return button;
@@ -405,7 +405,7 @@ test("an online-to-offline transition keeps choices reachable and explains every
     assert.deepEqual(choices.map((choice) => choice.tabIndex), [0, -1]);
     const input = container.querySelector<HTMLInputElement>(".question-input");
     assert.ok(input?.disabled);
-    assert.ok([...container.querySelectorAll<HTMLButtonElement>(".approval-actions button")]
+    assert.ok([...container.querySelectorAll<HTMLButtonElement>(".question-actions button")]
       .every((control) => control.disabled));
     assert.equal(
       container.querySelector(".question-availability")?.textContent,
@@ -416,7 +416,7 @@ test("an online-to-offline transition keeps choices reachable and explains every
     const group = container.querySelector<HTMLElement>('[role="radiogroup"]');
     assert.ok(group?.getAttribute("aria-describedby")?.split(" ").includes(offlineAvailability!.id));
     assert.ok(input.getAttribute("aria-describedby")?.split(" ").includes(offlineAvailability!.id));
-    assert.ok([...container.querySelectorAll<HTMLButtonElement>(".approval-actions button")]
+    assert.ok([...container.querySelectorAll<HTMLButtonElement>(".question-actions button")]
       .every((control) => control.getAttribute("aria-describedby") === offlineAvailability!.id));
 
     await act(async () => { choices[0]!.click(); });
@@ -502,7 +502,7 @@ test("Composer Response keeps the transcript card as context without card-owned 
     setQuestionResponseStyle("composer", domWindow as never);
     await renderBanner(root, questions, true);
     assertNoDomNode(container.querySelector(".question-input"));
-    assert.equal(container.querySelector(".approval-actions button")?.textContent?.trim(), "Dismiss D");
+    assert.equal(container.querySelector(".question-actions button")?.textContent?.trim(), "Dismiss D");
     assert.match(container.textContent ?? "", /Respond through Answer Mode in the Session composer/);
     assert.deepEqual([...container.querySelectorAll(".question-text-options li")].map((item) => item.textContent?.trim()), [
       "TypeScript",
@@ -767,7 +767,7 @@ test("a Viewer can read a question but not answer or dismiss it, and the card sa
     assert.ok(container.querySelector<HTMLInputElement>(".question-input")?.disabled);
     const choices = [...container.querySelectorAll<HTMLButtonElement>(".question-option")];
     assert.ok(choices.every((choice) => choice.getAttribute("aria-disabled") === "true"));
-    const actions = [...container.querySelectorAll<HTMLButtonElement>(".approval-actions button")];
+    const actions = [...container.querySelectorAll<HTMLButtonElement>(".question-actions button")];
     assert.ok(actions.length > 0);
     assert.ok(actions.every((control) => control.disabled && control.getAttribute("aria-describedby") === availability.id));
     await act(async () => {
@@ -785,69 +785,6 @@ test("a Viewer can read a question but not answer or dismiss it, and the card sa
     container.remove();
   }
 });
-
-test("a Viewer sees a permission request's options disabled with the reason, and no decision is sent (#1857)", async () => {
-  const reason = "Your Viewer role is read-only.";
-  for (const respond of [{ allowed: false as const, reason }, { allowed: true as const }, undefined]) {
-    const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-    domWindow.document.body.append(container as never);
-    const root = createRoot(container);
-    const decisions: Array<string | null> = [];
-    const pending = {
-      id: "session-approval", runnerId: "runner-1", title: "Approval", status: "running", archived: false,
-      pendingApproval: {
-        kind: "permission",
-        requestId: "approval-1",
-        title: "Allow Command?",
-        options: [
-          { optionId: "approve", name: "Approve", kind: "allow_once" },
-          { optionId: "deny", name: "Deny", kind: "reject_once" },
-        ],
-      },
-      ...(respond ? { commandPermissions: {
-        stop: { allowed: true }, restart: { allowed: true }, stopBackgroundJob: { allowed: true }, respond,
-      } } : {}),
-    } as unknown as SessionView;
-    const client = {
-      ...api,
-      approve: async (_sessionId: string, body: { optionId: string | null }) => {
-        decisions.push(body.optionId);
-        return pending;
-      },
-    } as unknown as ApiClient;
-    try {
-      for (const presentation of ["banner", "review"] as const) {
-        decisions.length = 0;
-        await act(async () => {
-          root.render(
-            <ApiProvider client={client}>
-              <SessionApprovalBanner session={pending} runnerOnline presentation={presentation} />
-            </ApiProvider>,
-          );
-        });
-        const approve = [...container.querySelectorAll<HTMLButtonElement>("button")]
-          .find((button) => button.textContent?.startsWith("Approve"))!;
-        assert.ok(approve, `${presentation}: Approve is shown`);
-        if (respond?.allowed === false) {
-          assert.equal(approve.disabled, true, `${presentation}: Approve is disabled`);
-          const described = approve.getAttribute("aria-describedby");
-          assert.equal(described ? domWindow.document.getElementById(described)?.textContent : null, reason,
-            `${presentation}: the visible reason describes the option`);
-        } else {
-          assert.equal(approve.disabled, false, `${presentation}: Approve is offered as before`);
-          assertNoDomNode(container.querySelector(".approval-refusal"));
-        }
-        await act(async () => { approve.click(); await tick(); });
-        assert.deepEqual(decisions, respond?.allowed === false ? [] : ["approve"],
-          `${presentation}: a decision is sent only when allowed`);
-      }
-    } finally {
-      await act(async () => { root.unmount(); });
-      container.remove();
-    }
-  }
-});
-
 
 test("switching to Interactive Form does not present an invalid typed choice as an Other draft", async () => {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;

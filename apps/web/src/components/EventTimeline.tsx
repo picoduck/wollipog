@@ -133,12 +133,6 @@ export interface TimelineQuestionContext {
   showKeyHints?: boolean;
 }
 
-export interface TimelineApprovalContext {
-  sessionId: string;
-  requestId: string;
-  onOpenRequest: () => void;
-}
-
 /**
  * Announces only errors appended after the opening transcript window has settled. Keeping the
  * live region outside the virtualized rows prevents history paging, reconnect hydration, and row
@@ -576,7 +570,6 @@ export const EventTimeline = memo(function EventTimeline({
   revealRequest,
   onRevealHandled,
   questionContext,
-  approvalContext,
   workspaceRoot,
   onOpenSession,
 }: {
@@ -619,8 +612,6 @@ export const EventTimeline = memo(function EventTimeline({
   onRevealHandled?: (requestId: number, outcome: VirtualRevealOutcome) => void;
   /** Authoritative pending request used to replace its matching historical question row in place. */
   questionContext?: TimelineQuestionContext;
-  /** Pending standalone approval that adds one review action to its canonical permission row. */
-  approvalContext?: TimelineApprovalContext;
   /** The session's root, so a step names a file by its workspace-relative path. */
   workspaceRoot?: string;
   /** Open another session, such as a fork's source; must be identity-stable. */
@@ -659,7 +650,6 @@ export const EventTimeline = memo(function EventTimeline({
       revealRequest={scopedRevealRequest}
       onRevealHandled={onRevealHandled}
       questionContext={questionContext}
-      approvalContext={approvalContext}
       workspaceRoot={workspaceRoot}
     />
     </TranscriptImageCacheProvider>
@@ -694,7 +684,6 @@ function EventTimelineBody({
   revealRequest,
   onRevealHandled,
   questionContext,
-  approvalContext,
   workspaceRoot,
 }: {
   items: TimelineItem[];
@@ -723,7 +712,6 @@ function EventTimelineBody({
   revealRequest?: TimelineRevealRequest | null;
   onRevealHandled?: (requestId: number, outcome: VirtualRevealOutcome) => void;
   questionContext?: TimelineQuestionContext;
-  approvalContext?: TimelineApprovalContext;
   workspaceRoot?: string;
 }) {
   const projector = useRef<IncrementalTimelineRows | null>(null);
@@ -920,8 +908,6 @@ function EventTimelineBody({
           failedTurnPrompt={item.kind === "error" ? turns.segments[turns.segmentOf.get(item.id) ?? -1]?.prompt : undefined}
           questionContext={item.kind === "question" && row.key === pinnedQuestionRow?.key &&
             questionContext?.questionInTimeline === true ? questionContext : undefined}
-          approvalContext={item.kind === "permission" && item.resolvedOptionId === undefined &&
-            item.requestId === approvalContext?.requestId ? approvalContext : undefined}
         />
       </WorkRule>
     );
@@ -2183,7 +2169,6 @@ const TimelineRow = memo(function TimelineRow({
   disclosureOpen = false,
   onDisclosureToggle,
   questionContext,
-  approvalContext,
 }: {
   item: TimelineItem;
   /** A folded retry's attempts, oldest first, when `item` is its latest. */
@@ -2207,7 +2192,6 @@ const TimelineRow = memo(function TimelineRow({
   disclosureOpen?: boolean;
   onDisclosureToggle?: () => void;
   questionContext?: TimelineQuestionContext;
-  approvalContext?: TimelineApprovalContext;
 }) {
   const sessionActive = useContext(TimelineActivityContext);
   const mediaSettled = timelineMediaSettled(item, sessionActive);
@@ -2330,28 +2314,13 @@ const TimelineRow = memo(function TimelineRow({
       if (item.resolvedOptionId !== undefined) {
         return <TimelineDecisionRecord record={permissionDecisionRecord(item)} open={disclosureOpen} onToggle={onDisclosureToggle} />;
       }
-      // A pending permission keeps its interim row until the request dock owns it (#2179).
+      // A pending permission is answered on the request dock above the composer (#2179); its row
+      // names the request and what was asked, and becomes a decision record once it resolves.
       return (
-        <div
-          className="tl-perm"
-          data-session-request-id={approvalContext?.requestId}
-          data-session-request-session={approvalContext?.sessionId}
-        >
+        <div className="tl-perm">
           <div className="tl-perm-head">
             <span className="perm-icon" aria-hidden="true"><ShieldIcon size={16} /></span>
             <span>{item.title}</span>
-            <span className="perm-pending">awaiting decision…</span>
-            {approvalContext && (
-              <button
-                className="btn primary sm tl-perm-review"
-                type="button"
-                data-session-request-control="review"
-                aria-controls="right-panel"
-                onClick={approvalContext.onOpenRequest}
-              >
-                Review Request
-              </button>
-            )}
           </div>
           {item.context?.input && (
             <details

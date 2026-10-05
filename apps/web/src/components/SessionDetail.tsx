@@ -23,6 +23,7 @@ import {
   validatePromptImageInputs,
   isPolicyApproval,
   pendingRequests,
+  prioritizedPendingRequests,
   isPromptImageReference,
   isWorkspaceReference,
   isTerminal,
@@ -35,6 +36,7 @@ import {
   type SessionConfig,
   type DescendantBlockedChildView,
   type DescendantRequestView,
+  type PendingApproval,
   type SessionHoldView,
   type SessionReminderView,
   sessionRole,
@@ -52,7 +54,13 @@ import { COMPOSER_USAGE_MIN_COLUMN_REM, composerUsagePlacement, useNarrowerThanR
 import { accountLabelText, isPersonalIdentifier, redactPersonalIdentifiers } from "../personal-identifiers.js";
 import { AccountLabel } from "./AccountIdentifier.js";
 import { useAccountEmailPrivacy } from "../account-email-privacy.js";
-import { compareSessionNotices, SESSION_NOTICE_RANK, SessionNoticeSlot, type SessionNoticeEntry } from "./SessionNoticeSlot.js";
+import {
+  compareSessionNotices,
+  SESSION_NOTICE_RANK,
+  SessionNoticeSlot,
+  type SessionNoticeEntry,
+  type SessionNoticeLead,
+} from "./SessionNoticeSlot.js";
 import { sessionAccountSwitchApplicable, SwitchAccountDialog } from "./SwitchAccountDialog.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { SessionPlaceholder } from "./SessionPlaceholder.js";
@@ -148,7 +156,7 @@ import {
 } from "../history-recovery.js";
 import { routedSessionPlaceholder, shouldHydrateRoutedSession } from "../detail-placeholder.js";
 import { composerActionError, type ComposerAction, type ComposerActionError } from "../composer-action-errors.js";
-import { transcriptPresentation, transcriptRendersRequestRow } from "../transcript-presentation.js";
+import { transcriptPresentation } from "../transcript-presentation.js";
 import { OrchestratorControlsDialog, orchestratorControlsSummary } from "./OrchestratorControlsDialog.js";
 import {
   acquireSessionFork,
@@ -184,12 +192,12 @@ import {
   saveComposerEditCopy,
   type ComposerEditCopy,
 } from "../composer-edit-copy.js";
-import { SessionApprovalRegion, focusSessionRequest, standaloneApprovalForReview } from "./SessionApproval.js";
-import {
-  requestTypeLabel,
-  sessionRequestPanelKey,
-  type DescendantRequestStatus,
-} from "./SessionRequestPanel.js";
+import { SessionApprovalRegion, focusSessionRequest, useEvidenceDraftRetirement } from "./SessionApproval.js";
+import { type DescendantRequestStatus } from "./SessionRequestPanel.js";
+import { RequestDock, dockRequests } from "./requests/RequestDock.js";
+import { RequestKindIcon, pendingRequestsTitle } from "./requests/request-meta.js";
+import type { RequestIntentHandler } from "./requests/RequestCard.js";
+import { useSoftwareKeyboardOpen } from "./requests/software-keyboard.js";
 import { CampaignHeldChildren, type CampaignHeldChild } from "./CampaignHeldChildren.js";
 import { ComposerQuestionResponse } from "./ComposerQuestionResponse.js";
 import { useGovernanceAudit, useGovernanceTimeline } from "./useGovernanceAudit.js";
@@ -1077,31 +1085,23 @@ function SessionDetailLoaded({
     }
     return hold.recoveryAction;
   }, [heldChildStoreRecoveryActions, heldChildren]);
-  const ownStandaloneApproval = standaloneApprovalForReview(session.pendingApproval);
-  const ownWorkerApproval = session.pendingApproval?.ownerToolUseId
-    ? session.pendingApproval : null;
-  const ownApprovalRequestId = ownStandaloneApproval?.requestId;
-  const ownApprovalOccurrenceId = ownStandaloneApproval?.occurrenceId ?? ownStandaloneApproval?.requestId;
-  const timelineApprovalRequestId = ownApprovalRequestId ?? ownWorkerApproval?.requestId;
-  const ownWorkflowDecision = ownStandaloneApproval?.kind === "workflow_decision"
-    ? ownStandaloneApproval.workflowDecision : undefined;
-  const ownEvidenceSnapshot = ownWorkflowDecision?.resourceSnapshot.category === "ui_evidence_approval"
-    ? ownWorkflowDecision.resourceSnapshot : null;
-  const ownEvidenceDecision = ownEvidenceSnapshot ? ownWorkflowDecision! : null;
+  // The session's own requests, answered on the request dock above the composer (#2179), in
+  // attention priority order. Questions keep their place until #2205; a worker's stay in the
+  // Agents panel.
+  const prioritizedRequests = useMemo(() => prioritizedPendingRequests(session.pendingApproval),
+    [session.pendingApproval]);
+  const dockedRequests = useMemo(() => dockRequests(prioritizedRequests), [prioritizedRequests]);
+  useEvidenceDraftRetirement(session.id, dockedRequests);
+  const requestIntentRef = useRef<RequestIntentHandler | null>(null);
+  const softwareKeyboardOpen = useSoftwareKeyboardOpen();
   const [selectedRequestKey, setSelectedRequestKey] = useState<string | null>(null);
   const requestPanelModeActive = mode === "expanded" && rightPanel.mode === "requests";
-  const openRequestPanel = useCallback((key: string) => {
-    setSelectedRequestKey(key);
-    rightPanel.show("requests");
-    if (mode === "preview") onExpand?.();
-  }, [mode, onExpand, rightPanel]);
   useLayoutEffect(() => {
-    if (!requestPanelModeActive || ownStandaloneApproval || descendantRequests.length > 0 ||
+    if (!requestPanelModeActive || descendantRequests.length > 0 ||
         (descendantRequestStatus !== "idle" && descendantRequestStatus !== "ready")) return;
     rightPanel.setMode("launcher");
     if (rightPanel.open) rightPanel.close();
-  }, [descendantRequests.length, descendantRequestStatus, ownStandaloneApproval,
-    requestPanelModeActive, rightPanel]);
+  }, [descendantRequests.length, descendantRequestStatus, requestPanelModeActive, rightPanel]);
   const anchorRecoveryPending = eventHistory?.refreshing === true ||
     (conn === "online" && eventHistory?.everComplete !== true && eventHistory?.error == null);
   const recoveryRevision = useStoreSelector((s) =>
@@ -1354,7 +1354,9 @@ function SessionDetailLoaded({
     const scope = `${session.id}:${session.eventEpoch ?? 0}`;
     if (attentionEntryScope.current === scope) return;
     attentionEntryScope.current = scope;
-    if (session.pendingApproval?.ownerToolUseId || session.pendingApproval?.additionalRequests?.length) {
+    // The Agents panel answers a worker's request and lists an async question beside the others;
+    // the session's own requests are on the dock.
+    if (pendingRequests(session.pendingApproval).some((request) => request.ownerToolUseId || request.async)) {
       rightPanelRef.current.show("subagents");
     }
   }, [mode, session.id, session.eventEpoch, session.pendingApproval]);
@@ -2854,9 +2856,19 @@ function SessionDetailLoaded({
   // Incremental derivation: streamed chunks push only the NEW events into a per-session
   // builder instead of re-folding the whole array (O(n²) over a long session).
   const items = useTimeline(sessionId, evs, session.eventEpoch ?? 0);
-  const ownApprovalHasTimelineRow = timelineApprovalRequestId !== undefined && items.some((item) =>
-    item.kind === "permission" && item.requestId === timelineApprovalRequestId &&
-    item.resolvedOptionId === undefined);
+  // When each docked request was raised: a workflow decision carries its own time, and a provider's
+  // request has its transcript row.
+  const requestCreatedAt = useMemo(() => {
+    const times = new Map<string, number>();
+    const wanted = new Set(dockedRequests.map((request) => request.requestId));
+    for (let index = items.length - 1; wanted.size > 0 && index >= 0; index -= 1) {
+      const item = items[index]!;
+      if (item.kind !== "permission" || !wanted.has(item.requestId)) continue;
+      wanted.delete(item.requestId);
+      if (item.createdAt !== undefined) times.set(item.requestId, item.createdAt);
+    }
+    return (request: PendingApproval) => request.workflowDecision?.createdAt ?? times.get(request.requestId);
+  }, [dockedRequests, items]);
   // Governance outcomes are transcript context, not a persistent header: the decisions whose
   // request has no transcript row of its own are spliced in at their chronological position, and
   // the whole list stays reviewable in the side panel (a full-screen drawer on phones).
@@ -3561,11 +3573,15 @@ function SessionDetailLoaded({
   const readingActions = useMemo<SessionReadingKeyActions>(() => ({
     nextSession: () => onNextSession?.(),
     previousSession: () => onPreviousSession?.(),
+    // A and D act on the dock's expanded request (#2179); without one they keep acting on the
+    // session's top request, as in the Sessions list.
     approve: () => {
+      if (requestIntentRef.current?.("approve")) return;
       if (responseRefusal === null) onApprove?.();
       else setError(responseRefusal);
     },
     deny: () => {
+      if (requestIntentRef.current?.("deny")) return;
       if (responseRefusal === null) onDeny?.();
       else setError(responseRefusal);
     },
@@ -4376,17 +4392,13 @@ function SessionDetailLoaded({
   }), [handlePendingQuestionAvailabilityChange, isMobile, loadSession, questionInTimeline, runnerOnline,
     session.id, timelinePendingQuestion]);
   // The working line's Review moves focus to the request blocking the turn, wherever it can be
-  // answered: its transcript row when the transcript owns that request (revealed like a step, since
-  // the virtual list may not have it mounted), else a request card outside the transcript, else
-  // the Agents panel, which lists every pending request (a worker's beside an async question).
+  // answered: a question's transcript row while the transcript owns it (revealed like a step, since
+  // the virtual list may not have it mounted), else the request dock or the question card, else the
+  // Agents panel, which lists every pending request (a worker's beside an async question).
   const reviewPendingRequest = useCallback((requestId: string) => {
-    const transcriptOwnsRequest = requestId === pendingQuestion?.requestId
-      ? questionInTimeline
-      : requestId === timelineApprovalRequestId && ownApprovalHasTimelineRow;
-    for (let index = items.length - 1; transcriptOwnsRequest && index >= 0; index -= 1) {
+    for (let index = items.length - 1; requestId === pendingQuestion?.requestId && questionInTimeline && index >= 0; index -= 1) {
       const item = items[index]!;
-      if ((item.kind === "permission" && item.requestId === requestId && item.resolvedOptionId === undefined) ||
-          (item.kind === "question" && item.requestId === requestId && item.answered === undefined)) {
+      if (item.kind === "question" && item.requestId === requestId && item.answered === undefined) {
         revealCurrentOperation(item.id);
         return;
       }
@@ -4394,22 +4406,8 @@ function SessionDetailLoaded({
     if (focusSessionRequest(session.id, requestId)) return;
     rightPanel.show("subagents");
     navigate({ name: "session", id: session.id, attention: { eventEpoch: session.eventEpoch ?? 0, requestId } });
-  }, [items, navigate, ownApprovalHasTimelineRow, pendingQuestion?.requestId, questionInTimeline,
-    revealCurrentOperation, rightPanel, session.eventEpoch, session.id, timelineApprovalRequestId]);
-  const timelineApprovalContext = useMemo(() => timelineApprovalRequestId && ownApprovalHasTimelineRow ? {
-      sessionId: session.id,
-      requestId: timelineApprovalRequestId,
-      onOpenRequest: ownStandaloneApproval && ownApprovalOccurrenceId
-        ? () => openRequestPanel(sessionRequestPanelKey(session.id, ownApprovalOccurrenceId))
-        : () => {
-            rightPanel.show("subagents");
-            navigate({ name: "session", id: session.id, attention: {
-              eventEpoch: session.eventEpoch ?? 0,
-              requestId: timelineApprovalRequestId,
-            } });
-          },
-    } : undefined, [navigate, openRequestPanel, ownApprovalHasTimelineRow, ownApprovalOccurrenceId,
-      ownStandaloneApproval, rightPanel, session.eventEpoch, session.id, timelineApprovalRequestId]);
+  }, [items, navigate, pendingQuestion?.requestId, questionInTimeline, revealCurrentOperation, rightPanel,
+    session.eventEpoch, session.id]);
   const working =
     showOptimistic || (!terminal && (session.status === "running" || session.status === "starting"));
   // The merged Working row must also survive approval/question waits: the projector keeps
@@ -5898,36 +5896,26 @@ function SessionDetailLoaded({
   const currentProjectName = projectsSupported
     ? session.projectId ? projects.get(session.projectId)?.name ?? session.projectName : undefined
     : session.workspaceName;
-  const standaloneRequestCard = ownStandaloneApproval && ownApprovalOccurrenceId &&
-    !transcriptRendersRequestRow(transcript.body, ownApprovalHasTimelineRow) ? (
-      <section
-        className="tl-request-card"
-        aria-label={`Pending ${requestTypeLabel(ownStandaloneApproval)} Request`}
-        data-session-request-id={ownStandaloneApproval.requestId}
-        data-session-request-session={session.id}
-      >
-        <span className="tl-request-icon" aria-hidden="true">{ownEvidenceSnapshot ? "🖼️" : "🔐"}</span>
-        <span className="tl-request-copy">
-          <strong>{ownStandaloneApproval.title}</strong>
-          <span>
-            {ownEvidenceSnapshot
-              ? `${ownEvidenceSnapshot.evidence.length} evidence ${ownEvidenceSnapshot.evidence.length === 1 ? "item" : "items"}`
-              : `${requestTypeLabel(ownStandaloneApproval)} · Review Required`}
-          </span>
-        </span>
-        <button
-          className="btn primary sm"
-          type="button"
-          data-session-request-control="review"
-          aria-controls="right-panel"
-          onClick={() => openRequestPanel(
-            sessionRequestPanelKey(session.id, ownApprovalOccurrenceId),
-          )}
-        >
-          {ownEvidenceDecision ? "Review Evidence" : "Review Request"}
-        </button>
-      </section>
-    ) : null;
+  // The request dock (#2179), as the notice slot's lead while the session has a request of its own.
+  const requestDockLead: SessionNoticeLead | undefined = dockedRequests.length > 0 ? {
+    key: "request-dock",
+    title: pendingRequestsTitle(dockedRequests.length),
+    icon: <RequestKindIcon request={dockedRequests[0]!} />,
+    render: ({ trailing }) => (
+      <RequestDock
+        session={session}
+        requests={dockedRequests}
+        runnerOnline={runnerOnline}
+        owner={sessionAgentLabel(session.agentName, session.driver, session.agentId)}
+        createdAt={requestCreatedAt}
+        headTrailing={trailing}
+        onSessionUpdate={loadSession}
+        showKeyHints={sessionReadingKeys}
+        intentRef={requestIntentRef}
+        keyboardOpen={softwareKeyboardOpen}
+      />
+    ),
+  } : undefined;
 
   // On a phone a summary row that opens the right panel closes the sheet, since only one overlay is
   // open at a time (#2147). The row that had focus is gone with the sheet, so focus follows it into
@@ -6106,16 +6094,15 @@ function SessionDetailLoaded({
           } : undefined}
           onOpenBackgroundWork={() => rightPanel.show("background")}
           onOpenAttention={() => {
+            // The top request is answered on the dock when it is the session's own.
+            const top = prioritizedRequests[0];
+            if (top && dockedRequests.includes(top) && focusSessionRequest(session.id, top.requestId)) return;
             const requests = pendingRequests(session.pendingApproval);
             if (requests.length > 1) {
               rightPanel.show("subagents");
               navigate({ name: "session", id: session.id, attention: {
                 eventEpoch: session.eventEpoch ?? 0,
               } });
-              return;
-            }
-            if (ownStandaloneApproval && ownApprovalOccurrenceId) {
-              openRequestPanel(sessionRequestPanelKey(session.id, ownApprovalOccurrenceId));
               return;
             }
             if (requests.length === 0 && (session.orchestratorCampaign?.pendingRequests?.human ?? 0) > 0) {
@@ -6239,8 +6226,11 @@ function SessionDetailLoaded({
             // The fallback owns the request only until the matching pinned row is mounted and the
             // virtual list can keep it reachable at its canonical transcript position.
             questionInTimeline={questionInTimeline}
-            standaloneInReviewSurface={Boolean(ownStandaloneApproval)}
           />
+          {/* The reading column (#2179): the transcript, then the request dock directly above the
+              composer. The dock caps at a share of this column, so the transcript keeps at least
+              half of it (§13.2). */}
+          <div className="chat-reading">
           <div
             className="detail-main"
             data-active-pane={activePane}
@@ -6360,7 +6350,6 @@ function SessionDetailLoaded({
                   fallbackFocusRef={scrollRef}
                 />
               )}
-              {transcript.body !== "timeline" && standaloneRequestCard}
               <TranscriptErrorAlert
                 historyKey={timelineHistoryKey}
                 items={items}
@@ -6423,7 +6412,6 @@ function SessionDetailLoaded({
                       revealRequest={timelineRevealRequest}
                       onRevealHandled={handleTimelineReveal}
                       questionContext={timelineQuestionContext}
-                      approvalContext={timelineApprovalContext}
                     />
                   )}
                 </>
@@ -6471,7 +6459,6 @@ function SessionDetailLoaded({
                   onReviewPendingRequest={reviewPendingRequest}
                 />
               )}
-              {transcriptRowsShown && transcript.body === "timeline" && standaloneRequestCard}
             </div>
             </div>
             {/* The one floating control at the reader's lower edge (#2153), where the newest
@@ -6490,6 +6477,17 @@ function SessionDetailLoaded({
             {/* The one polite live region for recovery, whatever the control is showing. */}
             <span className="sr-only" role="status" data-transcript-recovery-status>{recoveryAnnouncement}</span>
           </div>
+          {/* While a request is pending it takes the notice slot ahead of every notice, which wait
+              behind the "+N More" in its card's head line (§13.2). */}
+          {requestDockLead && (
+            <SessionNoticeSlot
+              sessionId={session.id}
+              entries={mode === "expanded" ? sessionNotices : []}
+              lead={requestDockLead}
+              onFocusLost={focusComposerOrTitle}
+            />
+          )}
+          </div>
 
           {mode === "expanded" && (
             <div
@@ -6499,7 +6497,9 @@ function SessionDetailLoaded({
             >
             {/* The one notice slot (§13.2): the most severe session condition, the rest behind
                 "+N More". Session notices are entries of it, never banners of their own. */}
-            <SessionNoticeSlot sessionId={session.id} entries={sessionNotices} onFocusLost={focusComposerOrTitle} />
+            {!requestDockLead && (
+              <SessionNoticeSlot sessionId={session.id} entries={sessionNotices} onFocusLost={focusComposerOrTitle} />
+            )}
             {switchAccountOpen && (
               <SwitchAccountDialog
                 session={session}

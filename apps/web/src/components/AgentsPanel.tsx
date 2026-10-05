@@ -12,7 +12,8 @@ import { isCurrentWorker, workerRoster, type WorkerMemberMetadata } from "../wor
 import { statusMeta } from "../status-meta.js";
 import { SubagentsPanel } from "./SubagentsPanel.js";
 import { BackgroundWorkPanel } from "./BackgroundWorkPanel.js";
-import { SessionApprovalBanner } from "./SessionApproval.js";
+import { SessionQuestionBanner } from "./SessionApproval.js";
+import { RequestCard } from "./requests/RequestCard.js";
 import { SegmentedControl } from "./ui/ChoiceControls.js";
 
 const PAGE_SIZE = 50;
@@ -130,8 +131,11 @@ export function shouldOpenPrimaryRequestInSession(
   primaryRequestId: string | undefined,
   hasOpenHandler: boolean,
 ): boolean {
-  return Boolean(hasOpenHandler && request && (request.kind === "question" || !request.ownerToolUseId) &&
-    request.requestId === primaryRequestId);
+  // The session's own requests other than questions are all on its request dock (#2179); a question
+  // is in the session only while it is the primary request.
+  return Boolean(hasOpenHandler && request && (request.kind === "question"
+    ? request.requestId === primaryRequestId
+    : !request.ownerToolUseId));
 }
 
 export function childRegistryProgressKey(
@@ -657,6 +661,14 @@ export function AgentsPanel(props: Props) {
     }
     primaryRequestRef.current?.focus();
   }, [selectedRequest?.requestId, primaryInSession, requests.length]);
+  // The worker that asks, as the Request Card's head line names it ("Plan Reviewer, a subagent").
+  const selectedRequestOwner = (() => {
+    const ownerId = selectedRequest?.ownerToolUseId;
+    if (!ownerId) return undefined;
+    const name = (!projection.ambiguousIds.has(ownerId) ? agents.find((agent) => agent.id === ownerId)?.title : undefined) ??
+      compactAttentionOwners.find((value) => value.requestId === selectedRequest.requestId && value.toolCallId === ownerId)?.name;
+    return name ? `${name}, a subagent` : "A subagent";
+  })();
   const selectedKey = requestedId ? `subagent:${requestedId}` : chosen;
   const selected = rows.find((row) => row.id === selectedKey);
   const filtered = rows.filter((row) => filter === "all" || (filter === "active" ? isCurrentWorker(row) : !isCurrentWorker(row)));
@@ -695,9 +707,16 @@ export function AgentsPanel(props: Props) {
           onBlurCapture={(event) => {
             if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget as Node)) requestOwnsFocus.current = false;
           }}
-          data-session-request-id={selectedRequest.requestId} data-session-request-session={session.id}><SessionApprovalBanner key={selectedRequest.requestId}
-          session={{ ...session, pendingApproval: selectedRequest }} runnerOnline={runnerOnline}
-          onSessionUpdate={loadSession} showKeyHints={false} /></div>}
+          data-session-request-id={selectedRequest.requestId} data-session-request-session={session.id}>
+          {selectedRequest.kind === "question" ? <SessionQuestionBanner key={selectedRequest.requestId}
+            sessionId={session.id} requestId={selectedRequest.requestId} occurrenceId={selectedRequest.occurrenceId}
+            questions={selectedRequest.questions ?? []} isAsync={selectedRequest.async}
+            recoveryReason={selectedRequest.recoveryReason} recoveryAction={selectedRequest.recoveryAction}
+            runnerOnline={runnerOnline} onSessionUpdate={loadSession} showKeyHints={false} />
+            : <RequestCard key={selectedRequest.requestId} session={{ ...session, pendingApproval: selectedRequest }}
+              request={selectedRequest} runnerOnline={runnerOnline} presentation="panel"
+              owner={selectedRequestOwner} onSessionUpdate={loadSession} />}
+        </div>}
       </section>}
       <SegmentedControl label="Worker Filter" value={filter} onChange={selectFilter}
         options={(["active", "history", "all"] as const).map((value) => ({

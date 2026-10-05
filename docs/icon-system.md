@@ -49,7 +49,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `PodsIcon` | Lucide | `UsersRound` | Collaboration group. |
 | `AutomationsIcon` | Lucide | `Zap` | Automation action. |
 | `ServiceTierIcon` | Lucide | `Gauge` | Fast service-tier setting; distinct from the Automations bolt. |
-| `CostIcon` | Lucide | `DollarSign` | A dollar amount inside a field, such as the Guardrails cost thresholds. |
+| `CostIcon` | Lucide | `DollarSign` | A dollar amount inside a field, such as the Guardrails cost thresholds; the Request Card's Budget kind. |
 | `CountIcon` | Lucide | `Hash` | A whole count inside a field, such as the Guardrails tool-call and live-child limits. |
 | `SkillsIcon` | Lucide | `WandSparkles` | Reusable agent capability; a skill step in the transcript. |
 | `RecommendedIcon` | Lucide | `Sparkles` | Something Wollipog recommends, such as a built-in skill. |
@@ -87,7 +87,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `PlanInProgressIcon` | Lucide | `CircleDot` | The plan step in progress. |
 | `ErrorIcon` | Lucide | `CircleAlert` | The danger tone icon on toasts and notices; the failed count on a work ledger line. |
 | `KeyboardIcon` | Lucide | `Keyboard` | Keyboard shortcuts. |
-| `AccountIcon` | Lucide | `CircleUserRound` | The provider account a session runs under. |
+| `AccountIcon` | Lucide | `CircleUserRound` | The provider account a session runs under; the Request Card's Sign-In kind. |
 | `LockIcon` | Lucide | `Lock` | Locked or restricted state; a masked identifier that is not an email. |
 | `MailIcon` | Lucide | `Mail` | A masked or revealed email address. |
 | `EyeIcon` | Lucide | `Eye` | Reveal a masked personal identifier. |
@@ -103,9 +103,9 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `FolderOpenIcon` | Lucide | `FolderOpen` | Open in Files: shows a referenced file in the Files panel. |
 | `BanIcon` | Lucide | `Ban` | Why a choice can't be made: a disabled command's reason in the / picker. |
 | `FolderUpIcon` | Lucide | `CornerUpLeft` | Navigate to the parent directory. |
-| `QuestionIcon` | Lucide | `MessageCircleQuestion` | A question: an agent's question row in the transcript; Side Chat's launcher. |
+| `QuestionIcon` | Lucide | `MessageCircleQuestion` | A question: an agent's question row in the transcript; Side Chat's launcher; the Request Card's Question kind. |
 | `MicIcon` | Lucide | `Mic` | Dictation action. |
-| `ImageIcon` | Lucide | `Image` | Image attachment. |
+| `ImageIcon` | Lucide | `Image` | Image attachment; the Request Card's UI Evidence kind. |
 | `ImageOffIcon` | Lucide | `ImageOff` | Transcript media that could not load; an attached or sent image that could not be shown; the composer's refused drop target when the model can't read images. |
 | `PaperclipIcon` | Lucide | `Paperclip` | A message that carries images: a row of the composer's queue tray. |
 | `AtSignIcon` | Lucide | `AtSign` | Reference a workspace file: the + menu's Reference a File… row, which opens the @ picker. |
@@ -115,7 +115,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `CursorEditorIcon` | Custom Exception | `Simple Icons 16.29.0: Cursor` | Canonical monochrome product mark; Lucide excludes vendor logos. |
 | `DevinDesktopIcon` | Custom Exception | `Official Devin Mark` | Cognition's compact product mark; Lucide excludes vendor logos. |
 | `ZedEditorIcon` | Custom Exception | `Simple Icons 16.29.0: Zed Industries` | Canonical monochrome product mark; Lucide excludes vendor logos. |
-| `ShieldIcon` | Lucide | `Shield` | Generic approval status, intentionally filled. |
+| `ShieldIcon` | Lucide | `Shield` | Generic approval status, intentionally filled; the Request Card's Permission kind. |
 | `ShieldAlertIcon` | Lucide | `ShieldAlert` | A permission mode that skips approval checks: the composer bar's shield and that mode's permission menu row, amber on the icon only. |
 | `ShieldCheckIcon` | Lucide | `ShieldCheck` | An Orchestrator's fixed permission mode in the composer bar. |
 | `PlanIcon` | Lucide | `ListTodo` | A plan: the composer bar's Plan toggle and a transcript plan card's head; `ListChecks` already means the background job list. |
@@ -139,7 +139,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `JobsIcon` | Lucide | `ListChecks` | Background job list with per-job state. |
 | `CampaignIcon` | Lucide | `ChartGantt` | An issue campaign's work items: Campaign Status in the right panel. |
 | `ChildSessionRequestsIcon` | Lucide | `Network` | Who answers an Orchestrator's child session requests: the Pinned Summary's Child Session Requests row. |
-| `WorkflowDecisionsIcon` | Lucide | `Route` | Where an Orchestrator's workflow gates are decided: the Pinned Summary's Workflow Decisions row. |
+| `WorkflowDecisionsIcon` | Lucide | `Route` | Where an Orchestrator's workflow gates are decided: the Pinned Summary's Workflow Decisions row; the Request Card's Workflow Decision kind. |
 | `GuardrailsIcon` | Lucide | `Fence` | A session's limits: the + menu's Guardrails… row. `Gauge` already means the Fast service tier. |
 | `OrchestratorControlsIcon` | Lucide | `Waypoints` | An Orchestrator's parent control and workflow gates: the + menu's Orchestrator Controls… row. `Workflow` already means workflow runs. |
 | `ExternalLinkIcon` | Lucide | `ExternalLink` | A link that opens outside Wollipog. |
@@ -160,7 +160,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `ThoughtIcon` | Lucide | `Brain` | A thought step in the transcript. |
 | `AgentLogIcon` | Lucide | `ScrollText` | An Agent Log step (a harness's own output) in the transcript. |
 | `BotIcon` | Lucide | `Bot` | An agent step in the transcript. |
-| `ToolIcon` | Lucide | `Hammer` | A tool step of any other kind; distinct from the project setup wrench. |
+| `ToolIcon` | Lucide | `Hammer` | A tool step of any other kind; distinct from the project setup wrench; the Request Card's Tool Calls kind. |
 
 The Visual Studio Code mark comes from Microsoft's
 [official SVG asset bundle](https://code.visualstudio.com/assets/branding/visual-studio-code-icons.zip)

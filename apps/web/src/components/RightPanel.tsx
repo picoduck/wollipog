@@ -1,6 +1,7 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { CampaignIcon, ChevronLeftIcon, CommandLineIcon, DiffIcon, FolderIcon, GlobeIcon, QuestionIcon, InboxIcon, JobsIcon, LockIcon, TeamIcon } from "./Icons.js";
 import {
+  pendingRequests,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
   type GitForgeInfo,
@@ -31,7 +32,8 @@ import type { TimelineItem } from "../timeline.js";
 import type { GovernanceDecision } from "../governance.js";
 import { GovernanceHistoryPanel } from "./GovernanceHistoryPanel.js";
 import { AgentsPanel } from "./AgentsPanel.js";
-import { focusSessionRequest, standaloneApprovalForReview } from "./SessionApproval.js";
+import { focusSessionRequest } from "./SessionApproval.js";
+import { dockRequests } from "./requests/RequestDock.js";
 import { BackgroundWorkPanel } from "./BackgroundWorkPanel.js";
 import { loadBrowserStorageValue, saveBrowserStorageValue } from "../instance-storage.js";
 import { SessionRequestPanel, sessionRequestPanelKey, type DescendantRequestStatus } from "./SessionRequestPanel.js";
@@ -407,8 +409,11 @@ export function RightPanel({
     e.preventDefault();
   };
 
-  const requestsAvailable = descendantRequests.length > 0 ||
-    standaloneApprovalForReview(session.pendingApproval) !== null;
+  // The session's own requests are on its request dock (#2179); this panel lists its descendants'.
+  const requestsAvailable = descendantRequests.length > 0;
+  const ownRequests = dockRequests(pendingRequests(session.pendingApproval));
+  const ownRequestKey = (request: (typeof ownRequests)[number]) =>
+    sessionRequestPanelKey(session.id, request.occurrenceId ?? request.requestId);
 
   /**
    * Every non-launcher mode owns a body. The switch is exhaustive on purpose: adding a mode to
@@ -455,19 +460,24 @@ export function RightPanel({
               // The request the blocker names, else one pending on the item's own child session.
               // Never another child's: an item with no listed request offers its child instead.
               // The named occurrence wins wherever it is listed; only then the child-session fallback.
-              const own = standaloneApprovalForReview(session.pendingApproval);
-              const ownOccurrence = own ? own.occurrenceId ?? own.requestId : null;
               if (target.occurrenceId) {
-                if (target.occurrenceId === ownOccurrence) return sessionRequestPanelKey(session.id, ownOccurrence);
+                const ownNamed = ownRequests.find((request) => (request.occurrenceId ?? request.requestId) === target.occurrenceId);
+                if (ownNamed) return ownRequestKey(ownNamed);
                 const named = descendantRequests.find((request) => request.occurrenceId === target.occurrenceId);
                 if (named) return sessionRequestPanelKey(named.sessionId, named.occurrenceId);
               }
               if (!target.sessionId) return null;
-              if (target.sessionId === session.id) return ownOccurrence ? sessionRequestPanelKey(session.id, ownOccurrence) : null;
+              if (target.sessionId === session.id) return ownRequests[0] ? ownRequestKey(ownRequests[0]) : null;
               const child = descendantRequests.find((request) => request.sessionId === target.sessionId);
               return child ? sessionRequestPanelKey(child.sessionId, child.occurrenceId) : null;
             }}
             onOpenRequest={(requestKey) => {
+              // The session's own request opens on its dock card; a descendant's in this panel.
+              const own = ownRequests.find((request) => ownRequestKey(request) === requestKey);
+              if (own) {
+                focusSessionRequest(session.id, own.requestId);
+                return;
+              }
               onSelectedRequestKeyChange(requestKey);
               state.show("requests");
             }}

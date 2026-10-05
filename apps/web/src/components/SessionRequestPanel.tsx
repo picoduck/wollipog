@@ -1,4 +1,3 @@
-import { IssueClosureSummary } from "./IssueClosureSummary.js";
 import {
   Fragment,
   useEffect,
@@ -13,16 +12,12 @@ import {
   type DescendantRequestView,
   type PendingApproval,
   type SessionView,
-  type WorkflowDecisionResourceSnapshot,
 } from "@wollipog/protocol";
 import { relativeTime } from "../format.js";
 import { sessionCommandRefusal } from "../session-command-permissions.js";
-import {
-  SessionApprovalBanner,
-  SessionQuestionBanner,
-  standaloneApprovalForReview,
-  useSessionResponseRefusal,
-} from "./SessionApproval.js";
+import { SessionQuestionBanner, useSessionResponseRefusal } from "./SessionApproval.js";
+import { RequestCard } from "./requests/RequestCard.js";
+import { WorkflowDecisionSummary } from "./requests/WorkflowDecisionSummary.js";
 
 type RequestPanelItem = {
   key: string;
@@ -72,38 +67,6 @@ export function requestTypeLabel(request: PendingApproval): string {
   return "Approval";
 }
 
-function workflowSummary(snapshot: WorkflowDecisionResourceSnapshot) {
-  switch (snapshot.category) {
-    case "implementation_question":
-      return <>
-        <p>{snapshot.question}</p>
-        <ul>{snapshot.options.map((option) => <li key={option.optionId}>{option.label}</li>)}</ul>
-      </>;
-    case "issue_closure":
-      return <IssueClosureSummary snapshot={snapshot} />;
-    case "pr_merge":
-      return <dl>
-        <div><dt>Repository</dt><dd>{snapshot.repository}</dd></div>
-        <div><dt>Pull Request</dt><dd>#{snapshot.pullRequest}</dd></div>
-        <div><dt>Head Commit</dt><dd><code>{snapshot.headSha.slice(0, 12)}</code></dd></div>
-      </dl>;
-    case "merged_branch_deletion":
-      return <dl>
-        <div><dt>Repository</dt><dd>{snapshot.repository}</dd></div>
-        <div><dt>Branch</dt><dd><code>{snapshot.branch}</code></dd></div>
-        <div><dt>Merge Commit</dt><dd><code>{snapshot.mergeCommitSha.slice(0, 12)}</code></dd></div>
-      </dl>;
-    case "follow_up_issue_publication":
-      return <dl>
-        <div><dt>Repository</dt><dd>{snapshot.repository}</dd></div>
-        <div><dt>Issue Title</dt><dd>{snapshot.sanitizedTitle}</dd></div>
-        <div><dt>Labels</dt><dd>{snapshot.labels.join(", ") || "None"}</dd></div>
-      </dl>;
-    case "ui_evidence_approval":
-      return <p>{snapshot.evidence.length} evidence {snapshot.evidence.length === 1 ? "item" : "items"} awaiting human review.</p>;
-  }
-}
-
 export function SessionRequestPanel({
   session,
   runnerOnline,
@@ -125,23 +88,9 @@ export function SessionRequestPanel({
   onDescendantsUpdate: () => void;
   onOpenChild: (request: DescendantRequestView) => void;
 }) {
-  const ownRequest = standaloneApprovalForReview(session.pendingApproval);
-  const ownDecision = ownRequest?.kind === "workflow_decision" ? ownRequest.workflowDecision : null;
-  const ownOccurrenceId = ownRequest?.occurrenceId ?? ownRequest?.requestId;
+  // The session's own requests are answered on the request dock above its composer (#2179); this
+  // panel lists the requests of its descendants, each opened on the same Request Card.
   const items = useMemo<RequestPanelItem[]>(() => [
-    ...(ownRequest && ownOccurrenceId ? [{
-      key: itemKey(session.id, ownOccurrenceId),
-      sessionId: session.id,
-      sessionTitle: session.title,
-      runnerId: session.runnerId,
-      runnerOnline,
-      eventEpoch: session.eventEpoch ?? 0,
-      createdAt: ownDecision?.createdAt ?? session.updatedAt,
-      responseOwner: "human" as const,
-      occurrenceId: ownOccurrenceId,
-      request: ownRequest,
-      descendant: false,
-    }] : []),
     ...descendants.map((item) => ({
       key: itemKey(item.sessionId, item.occurrenceId),
       sessionId: item.sessionId,
@@ -157,8 +106,7 @@ export function SessionRequestPanel({
     })),
   ].sort((left, right) => left.responseOwner === right.responseOwner
     ? 0
-    : left.responseOwner === "human" ? -1 : 1), [descendants, ownDecision?.createdAt, ownOccurrenceId,
-      ownRequest, runnerOnline, session]);
+    : left.responseOwner === "human" ? -1 : 1), [descendants]);
   const activeKey = items.some((item) => item.key === selectedKey) ? selectedKey : items[0]?.key ?? null;
   const selected = items.find((item) => item.key === activeKey) ?? null;
   // A descendant's view may not have reached the store yet. For a person the answer route applies
@@ -284,7 +232,7 @@ export function SessionRequestPanel({
             <p>The Orchestrator owns this decision and must respond through its session-management tools.</p>
             {workflowDecision && (
               <div className="request-structured-summary">
-                {workflowSummary(workflowDecision.resourceSnapshot)}
+                <WorkflowDecisionSummary snapshot={workflowDecision.resourceSnapshot} />
               </div>
             )}
           </div>
@@ -304,7 +252,7 @@ export function SessionRequestPanel({
             showKeyHints={false}
           />
         ) : (
-          <SessionApprovalBanner
+          <RequestCard
             key={selected.key}
             session={{
               ...session,
@@ -313,10 +261,11 @@ export function SessionRequestPanel({
               runnerId: selected.runnerId,
               pendingApproval: selected.request,
             }}
+            request={selected.request}
             runnerOnline={selected.runnerOnline}
+            presentation="panel"
+            createdAt={selected.createdAt}
             onSessionUpdate={selected.descendant ? onDescendantsUpdate : onSessionUpdate}
-            showKeyHints={false}
-            presentation="review"
           />
         )}
       </section>

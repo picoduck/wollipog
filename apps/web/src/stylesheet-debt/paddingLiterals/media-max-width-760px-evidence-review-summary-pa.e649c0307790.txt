@@ -1,1 +1,0 @@
-@media (max-width: 760px)|.evidence-review-summary|padding|14px

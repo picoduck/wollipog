@@ -3,7 +3,7 @@ import type { GithubIssueClosureSnapshot } from "@wollipog/protocol";
 
 export function IssueClosureSummary({ snapshot }: { snapshot: GithubIssueClosureSnapshot }) {
   return <section aria-label="Issue Closure Details">
-    <dl>
+    <dl className="facts">
       <div><dt>Repository</dt><dd>{snapshot.repository}</dd></div>
       <div><dt>Issue</dt><dd><a className="link" href={snapshot.url} target="_blank" rel="noreferrer">#{snapshot.issue}: {snapshot.title}</a></dd></div>
       <div><dt>Closure Reason</dt><dd>{snapshot.reason === "completed" ? "Completed" : "Not Planned"}</dd></div>

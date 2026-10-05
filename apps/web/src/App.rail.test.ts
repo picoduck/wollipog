@@ -162,8 +162,10 @@ test("the transcript's lower edge has one floating tail control, and context and
   // #2153: no always-on chip and no reserved recovery band. A zero-height anchor below the reader
   // carries the floating control. #2166: the status strip under it is gone, so the reader extends
   // to the composer column, and context, cost and the Reply hint moved into the composer.
-  assert.match(detail, /<div className="detail-reader">[\s\S]*<TranscriptTailControl[\s\S]*role="status" data-transcript-recovery-status>\{recoveryAnnouncement\}<\/span>\s*<\/div>\s*\{mode === "expanded" && \(\s*<div\s+className="composer"/,
-    "the anchor and the one recovery live region are the last things before the composer");
+  // #2179: the reading column then ends with the request dock, the notice slot's lead, directly
+  // above the composer.
+  assert.match(detail, /<div className="detail-reader">[\s\S]*<TranscriptTailControl[\s\S]*role="status" data-transcript-recovery-status>\{recoveryAnnouncement\}<\/span>\s*<\/div>\s*\{\/\*[\s\S]*?\*\/\}\s*\{requestDockLead && \(\s*<SessionNoticeSlot[\s\S]*?lead=\{requestDockLead\}[\s\S]*?\/>\s*\)\}\s*<\/div>\s*\{mode === "expanded" && \(\s*<div\s+className="composer"/,
+    "the anchor and the one recovery live region end the reader, and the request dock alone sits between it and the composer");
   assert.doesNotMatch(detail, /transcript-status-|<ShortcutHint/,
     "no element of the retired status strip, nor its Reply hint button, remains");
   assert.doesNotMatch(detail, /follow-tail-chip|follow-tail-control|transcript-recovery-slot|TranscriptRecoveryStripEcho|label="Page Up"|label="Page Down"/,

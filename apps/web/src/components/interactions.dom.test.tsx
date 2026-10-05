@@ -3,10 +3,11 @@ import test from "node:test";
 import React, { StrictMode, act, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { SessionView } from "@wollipog/protocol";
+import { prioritizedPendingRequests, type SessionView } from "@wollipog/protocol";
 import { useCommandPaletteFocus } from "./CommandPalette.js";
 import { EventTimeline } from "./EventTimeline.js";
 import { SessionApprovalRegion } from "./SessionApproval.js";
+import { RequestDock, dockRequests } from "./requests/RequestDock.js";
 import { handleMenuKeyDown, useAccessibleMenu, useDismissiblePopover } from "./interactions.js";
 import { Select } from "./ui/ChoiceControls.js";
 import { clearQuestionDrafts } from "../question-response.js";
@@ -474,6 +475,28 @@ function offlinePolicySession(requestId: string, withContext: boolean): SessionV
   } as SessionView;
 }
 
+/** The session's own requests as SessionDetail shows them: the focus coordinator and question
+ * fallback of the approval region, and every other request on the dock (#2179). */
+function DockedRegion({ session, runnerOnline, fallbackFocusRef, alternateFallbackFocusRef }: {
+  session: SessionView;
+  runnerOnline: boolean;
+  fallbackFocusRef: React.RefObject<HTMLElement | null>;
+  alternateFallbackFocusRef?: React.RefObject<HTMLElement | null>;
+}) {
+  const requests = dockRequests(prioritizedPendingRequests(session.pendingApproval));
+  return (
+    <>
+      <SessionApprovalRegion
+        session={session}
+        runnerOnline={runnerOnline}
+        fallbackFocusRef={fallbackFocusRef}
+        alternateFallbackFocusRef={alternateFallbackFocusRef}
+      />
+      {requests.length > 0 && <RequestDock session={session} requests={requests} runnerOnline={runnerOnline} />}
+    </>
+  );
+}
+
 function authenticationSession(title = "Authentication Required — Claude Code"): SessionView {
   return {
     id: "session-1",
@@ -497,20 +520,22 @@ test("provider authentication card uses its visible title as the accessible name
   const root = createRoot(container);
   await act(async () => {
     root.render(
-      <SessionApprovalRegion
+      <DockedRegion
         session={authenticationSession()}
         runnerOnline
         fallbackFocusRef={{ current: null }}
       />,
     );
   });
-  const card = container.querySelector<HTMLElement>('[aria-label="Authentication Required — Claude Code"]');
+  const card = container.querySelector<HTMLElement>(".request-card")!;
   assert.ok(card);
-  assert.match(card.textContent ?? "", /Authentication Required — Claude Code/);
+  assert.equal(domWindow.document.getElementById(card.getAttribute("aria-labelledby")!)?.textContent,
+    "Authentication Required — Claude Code");
+  assert.match(card.querySelector(".code-well")?.textContent ?? "", /Run `claude` in this exact context\./);
   assert.deepEqual(
-    [...card.querySelectorAll<HTMLButtonElement>(".approval-actions button")].map((button) => button.textContent?.trim()),
-    ["Hide Details"],
-    "terminal login guidance offers context details but no fake provider approval action",
+    [...card.querySelectorAll<HTMLButtonElement>(".request-card-foot button")].map((button) => button.textContent?.trim()),
+    [],
+    "terminal login guidance shows its context but no fake provider approval action",
   );
   await act(async () => { root.unmount(); });
   container.remove();
@@ -524,16 +549,16 @@ test("restored authentication recovery card uses its visible title as the access
   const title = "Authentication Restored — Retained Messages Waiting";
   await act(async () => {
     root.render(
-      <SessionApprovalRegion
+      <DockedRegion
         session={authenticationSession(title)}
         runnerOnline
         fallbackFocusRef={{ current: null }}
       />,
     );
   });
-  const card = container.querySelector<HTMLElement>(`[aria-label="${title}"]`);
+  const card = container.querySelector<HTMLElement>(".request-card")!;
   assert.ok(card);
-  assert.match(card.textContent ?? "", new RegExp(title));
+  assert.equal(domWindow.document.getElementById(card.getAttribute("aria-labelledby")!)?.textContent, title);
   await act(async () => { root.unmount(); });
   container.remove();
 });
@@ -586,16 +611,16 @@ test("UI evidence approval requires an explicit review acknowledgement and sends
     await act(async () => {
       root.render(
         <ApiProvider client={client}>
-          <SessionApprovalRegion session={session} runnerOnline={false} fallbackFocusRef={{ current: null }} />
+          <DockedRegion session={session} runnerOnline={false} fallbackFocusRef={{ current: null }} />
         </ApiProvider>,
       );
     });
-    const approve = [...container.querySelectorAll<HTMLButtonElement>(".approval-actions button")]
+    const approve = [...container.querySelectorAll<HTMLButtonElement>(".request-card-foot button")]
       .find((button) => button.textContent?.includes("Approve"))!;
     assert.equal(approve.disabled, true);
-    assert.equal(container.querySelector<HTMLAnchorElement>('[href="https://evidence.example/after.png"]')?.textContent,
-      "Open External Evidence: desktop-after");
-    const reviewed = container.querySelector<HTMLInputElement>('.approval-evidence input[type="checkbox"]')!;
+    assert.equal(container.querySelector<HTMLAnchorElement>('[href="https://evidence.example/after.png"]')?.getAttribute("aria-label"),
+      "View External Evidence: desktop-after");
+    const reviewed = container.querySelector<HTMLInputElement>('.evidence-review-item input[type="checkbox"]')!;
     await act(async () => { reviewed.click(); });
     assert.equal(approve.disabled, false);
     await act(async () => { approve.click(); await tick(); });
@@ -660,11 +685,11 @@ test("the inline evidence card blocks an artifact it cannot show instead of link
     await act(async () => {
       root.render(
         <ApiProvider client={client}>
-          <SessionApprovalRegion session={session} runnerOnline={false} fallbackFocusRef={{ current: null }} />
+          <DockedRegion session={session} runnerOnline={false} fallbackFocusRef={{ current: null }} />
         </ApiProvider>,
       );
     });
-    const button = (name: string) => [...container.querySelectorAll<HTMLButtonElement>(".approval-actions button")]
+    const button = (name: string) => [...container.querySelectorAll<HTMLButtonElement>(".request-card-foot button")]
       .find((candidate) => candidate.textContent?.includes(name))!;
     assertNoDomNode(container.querySelector('[href="https://evidence.example/vector.svg"]'));
     assert.ok(container.querySelector('[href="https://evidence.example/legacy.png"]'), "URI-only evidence keeps its link");
@@ -695,7 +720,7 @@ function OfflineApprovalHarness({
   const fallbackRef = useRef<HTMLTextAreaElement>(null);
   return (
     <>
-      <SessionApprovalRegion
+      <DockedRegion
         session={offlinePolicySession(requestId, withContext)}
         runnerOnline={runnerOnline}
         fallbackFocusRef={fallbackRef}
@@ -887,7 +912,7 @@ function DisabledFallbackHarness({ requestId }: { requestId: string | null }) {
   const transcriptRef = useRef<HTMLDivElement>(null);
   return (
     <>
-      <SessionApprovalRegion
+      <DockedRegion
         session={requestId ? offlinePolicySession(requestId, true) : approvalSession(null)}
         runnerOnline={false}
         fallbackFocusRef={composerRef}
@@ -905,22 +930,25 @@ test("approval resolution uses the transcript when the composer fallback is disa
   const container = happyContainer as unknown as HTMLDivElement;
   const root = createRoot(container);
   await act(async () => { root.render(<DisabledFallbackHarness requestId="ask-a" />); });
-  container.querySelector<HTMLButtonElement>('button[aria-expanded]')!.focus();
+  container.querySelector<HTMLButtonElement>('button[aria-label="Copy Request Details"]')!.focus();
   await act(async () => { root.render(<DisabledFallbackHarness requestId={null} />); });
   assert.equal(domWindow.document.activeElement?.getAttribute("aria-label"), "Transcript");
   await act(async () => { root.unmount(); });
   container.remove();
 });
 
-test("offline approval replacement falls back when the new request has no enabled action", async () => {
+test("offline approval replacement lands on the new request's heading when it has no enabled action", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
   const container = happyContainer as unknown as HTMLDivElement;
   const root = createRoot(container);
   await act(async () => { root.render(<OfflineApprovalHarness requestId="ask-a" withContext />); });
-  container.querySelector<HTMLButtonElement>('button[aria-expanded]')!.focus();
+  container.querySelector<HTMLButtonElement>('button[aria-label="Copy Request Details"]')!.focus();
   await act(async () => { root.render(<OfflineApprovalHarness requestId="ask-b" withContext={false} />); });
-  assert.equal(domWindow.document.activeElement?.getAttribute("aria-label"), "Offline composer");
+  // The new card's disabled Allow is never focused; its heading is, and the reason is visible below.
+  assert.equal(domWindow.document.activeElement?.textContent, "Approval ask-b");
+  assert.equal(domWindow.document.activeElement?.tagName, "H3");
+  assert.match(container.querySelector(".request-card-reasons")?.textContent ?? "", /until the runner reconnects/);
   await act(async () => { root.unmount(); });
   container.remove();
 });
@@ -933,7 +961,7 @@ test("going offline preserves focus on an approval control that remains enabled"
   await act(async () => {
     root.render(<OfflineApprovalHarness requestId="ask-a" withContext runnerOnline />);
   });
-  const details = container.querySelector<HTMLButtonElement>("button[aria-expanded]");
+  const details = container.querySelector<HTMLButtonElement>('button[aria-label="Copy Request Details"]');
   assert.ok(details);
   details.focus();
 

@@ -4,14 +4,15 @@ import { after, before, test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { DescendantRequestView, SessionView } from "@wollipog/protocol";
+import { pendingRequests, type DescendantRequestView, type SessionView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { loadEvidenceReviewDraft, saveEvidenceReviewDraft } from "../evidence-review-drafts.js";
 import { clearQuestionDrafts, storedQuestionDrafts } from "../question-response.js";
-import { SessionApprovalRegion } from "./SessionApproval.js";
+import { useEvidenceDraftRetirement } from "./SessionApproval.js";
+import { dockRequests } from "./requests/RequestDock.js";
 import { SessionRequestPanel, sessionRequestPanelKey } from "./SessionRequestPanel.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -114,60 +115,108 @@ function standaloneApprovalSession(): SessionView {
   } as SessionView;
 }
 
-test("eight-item evidence review stays bounded, persists acknowledgement drafts, and submits exact ids", async () => {
-  domWindow.localStorage.clear();
-  const session = evidenceSession();
-  const approvals: unknown[] = [];
-  const client = {
-    ...api,
-    approve: async (_sessionId: string, body: unknown) => {
-      approvals.push(structuredClone(body));
-      return { ...session, status: "running", pendingApproval: null } as SessionView;
-    },
-  } as ApiClient;
-  const selected = sessionRequestPanelKey(session.id, session.pendingApproval!.occurrenceId!);
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  let root = createRoot(container);
-  const render = () => root.render(
+/** A child's request in this session's Requests panel: the panel lists descendants only (#2179). */
+function asDescendant(child: SessionView): DescendantRequestView {
+  const request = child.pendingApproval!;
+  return {
+    sessionId: child.id,
+    sessionTitle: child.title,
+    runnerId: child.runnerId,
+    runnerOnline: true,
+    eventEpoch: child.eventEpoch ?? 0,
+    createdAt: Date.now() - 30_000,
+    responseOwner: "human",
+    occurrenceId: request.occurrenceId ?? request.requestId,
+    request,
+  };
+}
+
+const parentSession = (): SessionView => ({ ...evidenceSession(), id: "session-parent", title: "Parent", pendingApproval: null }) as SessionView;
+
+function ChildPanel({ child, client }: { child: DescendantRequestView; client: ApiClient }) {
+  return (
     <ApiProvider client={client}>
       <SessionRequestPanel
-        session={session}
+        session={parentSession()}
         runnerOnline
-        descendants={[]}
-        selectedKey={selected}
+        descendants={[child]}
+        selectedKey={sessionRequestPanelKey(child.sessionId, child.occurrenceId)}
         onSelectedKeyChange={() => {}}
         onSessionUpdate={() => {}}
         onDescendantsUpdate={() => {}}
         onOpenChild={() => {}}
       />
-    </ApiProvider>,
+    </ApiProvider>
   );
+}
+
+const footButtons = (container: HTMLElement) => [...container.querySelectorAll<HTMLButtonElement>(".request-card-foot button")];
+
+test("the session's own request is not listed in the panel: the dock above the composer answers it", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
   try {
-    await act(async () => render());
+    await act(async () => root.render(
+      <ApiProvider client={api as ApiClient}>
+        <SessionRequestPanel
+          session={standaloneApprovalSession()}
+          runnerOnline
+          descendants={[]}
+          selectedKey={null}
+          onSelectedKeyChange={() => {}}
+          onSessionUpdate={() => {}}
+          onDescendantsUpdate={() => {}}
+          onOpenChild={() => {}}
+        />
+      </ApiProvider>,
+    ));
+    assert.match(container.textContent ?? "", /No Pending Requests/);
+    assertNoDomNode(container.querySelector(".request-card"));
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("a child's eight-item evidence review persists acknowledgement drafts and submits exact ids", async () => {
+  domWindow.localStorage.clear();
+  const child = asDescendant(evidenceSession());
+  const approvals: unknown[] = [];
+  const client = {
+    ...api,
+    approve: async (_sessionId: string, body: unknown) => {
+      approvals.push(structuredClone(body));
+      return parentSession();
+    },
+  } as ApiClient;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  let root = createRoot(container);
+  try {
+    await act(async () => root.render(<ChildPanel child={child} client={client} />));
     assert.equal(container.querySelectorAll(".evidence-review-item").length, 8);
     assert.equal(container.querySelectorAll(".evidence-review-list").length, 1);
-    assertNoDomNode(container.querySelector(".request-panel-list"),
-      "a direct evidence review has one natural scrolling surface");
     assert.doesNotMatch(container.textContent ?? "", /signature=secret|https:\/\/evidence/);
     assert.equal(container.querySelector("details")?.hasAttribute("open"), false);
-    const approve = [...container.querySelectorAll<HTMLButtonElement>(".evidence-review-actions button")]
-      .find((button) => button.textContent === "Approve")!;
-    const deny = [...container.querySelectorAll<HTMLButtonElement>(".evidence-review-actions button")]
-      .find((button) => button.textContent === "Deny")!;
+    const approve = footButtons(container).find((button) => button.textContent === "Approve")!;
+    const deny = footButtons(container).find((button) => button.textContent === "Deny")!;
     assert.equal(approve.disabled, true);
     assert.equal(deny.disabled, false);
+    // Approve's reason is the visible sentence above the evidence.
+    assert.equal(domWindow.document.getElementById(approve.getAttribute("aria-describedby")!)?.textContent,
+      "Review every artifact before approving this request.");
     const checks = [...container.querySelectorAll<HTMLInputElement>('.evidence-review-item input[type="checkbox"]')];
     await act(async () => {
       checks[0]!.click();
       checks[1]!.click();
       checks[2]!.click();
     });
-    assert.match(container.querySelector('[role="status"]')?.textContent ?? "", /3 of 8 Reviewed/);
+    assert.match(container.querySelector(".evidence-review-summary [role=\"status\"]")?.textContent ?? "", /3 of 8 Reviewed/);
 
     await act(async () => root.unmount());
     root = createRoot(container);
-    await act(async () => render());
+    await act(async () => root.render(<ChildPanel child={child} client={client} />));
     const restored = [...container.querySelectorAll<HTMLInputElement>('.evidence-review-item input[type="checkbox"]')];
     assert.deepEqual(restored.map((checkbox) => checkbox.checked), [
       true, true, true, false, false, false, false, false,
@@ -175,8 +224,7 @@ test("eight-item evidence review stays bounded, persists acknowledgement drafts,
     await act(async () => {
       for (const checkbox of restored.slice(3)) checkbox.click();
     });
-    const restoredApprove = [...container.querySelectorAll<HTMLButtonElement>(".evidence-review-actions button")]
-      .find((button) => button.textContent === "Approve")!;
+    const restoredApprove = footButtons(container).find((button) => button.textContent === "Approve")!;
     assert.equal(restoredApprove.disabled, false);
     await act(async () => { restoredApprove.click(); });
     assert.deepEqual(approvals, [{
@@ -201,21 +249,8 @@ test("a human fallback explains why the assigned Orchestrator could not review t
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
   try {
-    await act(async () => root.render(
-      <ApiProvider client={api as ApiClient}>
-        <SessionRequestPanel
-          session={session}
-          runnerOnline
-          descendants={[]}
-          selectedKey={sessionRequestPanelKey(session.id, session.pendingApproval!.occurrenceId!)}
-          onSelectedKeyChange={() => {}}
-          onSessionUpdate={() => {}}
-          onDescendantsUpdate={() => {}}
-          onOpenChild={() => {}}
-        />
-      </ApiProvider>,
-    ));
-    assert.match(container.querySelector(".evidence-review-summary")?.textContent ?? "",
+    await act(async () => root.render(<ChildPanel child={asDescendant(session)} client={api as ApiClient} />));
+    assert.match(container.querySelector(".evidence-review")?.textContent ?? "",
       /assigned to the Orchestrator, but this request needs a human\. Evidence "clip" is video/);
   } finally {
     await act(async () => root.unmount());
@@ -223,45 +258,36 @@ test("a human fallback explains why the assigned Orchestrator could not review t
   }
 });
 
-test("standalone approval review keeps request context collapsed and submits through the existing API", async () => {
-  const session = standaloneApprovalSession();
+test("a child's permission opens on the Request Card with its command, facts and menu choice", async () => {
+  const child = asDescendant(standaloneApprovalSession());
   const approvals: unknown[] = [];
   const client = {
     ...api,
     approve: async (_sessionId: string, body: unknown) => {
       approvals.push(structuredClone(body));
-      return { ...session, status: "running", pendingApproval: null } as SessionView;
+      return parentSession();
     },
   } as ApiClient;
-  const selected = sessionRequestPanelKey(session.id, session.pendingApproval!.occurrenceId!);
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
   try {
-    await act(async () => root.render(
-      <ApiProvider client={client}>
-        <SessionRequestPanel
-          session={session}
-          runnerOnline
-          descendants={[]}
-          selectedKey={selected}
-          onSelectedKeyChange={() => {}}
-          onSessionUpdate={() => {}}
-          onDescendantsUpdate={() => {}}
-          onOpenChild={() => {}}
-        />
-      </ApiProvider>,
-    ));
+    await act(async () => root.render(<ChildPanel child={child} client={client} />));
     assertNoDomNode(container.querySelector(".approval-bar"));
-    assert.ok(container.querySelector(".approval-review-surface"));
-    assert.match(container.querySelector(".approval-selector-context")?.textContent ?? "", /wollipog\.worktree_setup/);
-    assert.match(container.querySelector(".approval-selector-context")?.textContent ?? "", /fix\/example/);
-    const details = container.querySelector<HTMLDetailsElement>(".approval-review-details")!;
-    assert.equal(details.open, false);
-    assert.match(details.textContent ?? "", /pnpm install/);
-    const trust = [...container.querySelectorAll<HTMLButtonElement>(".approval-review-actions button")]
-      .find((button) => button.textContent === "Trust This Configuration")!;
-    await act(async () => trust.click());
+    assertNoDomNode(container.querySelector(".approval-review-surface"));
+    const card = container.querySelector<HTMLElement>(".request-card")!;
+    assert.equal(card.dataset.presentation, "panel");
+    assert.match(card.querySelector(".code-well")?.textContent ?? "", /pnpm install/);
+    const facts = card.querySelector(".facts")?.textContent ?? "";
+    assert.match(facts, /wollipog\.worktree_setup/);
+    assert.match(facts, /fix\/example/);
+    // An allow_always option waits in the ⋯ menu; the reject is the visible secondary.
+    assert.deepEqual(footButtons(container).map((button) => button.textContent || button.getAttribute("aria-label")),
+      ["Create Without Setup", "More Choices"]);
+    await act(async () => { footButtons(container)[1]!.click(); });
+    const trust = [...(domWindow.document.body as unknown as HTMLElement).querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+      .find((item) => item.textContent === "Trust This Configuration")!;
+    await act(async () => { trust.click(); });
     assert.deepEqual(approvals, [{ requestId: "worktree-setup:one:hash", optionId: "trust" }]);
   } finally {
     await act(async () => root.unmount());
@@ -269,7 +295,7 @@ test("standalone approval review keeps request context collapsed and submits thr
   }
 });
 
-test("cost checkpoints retain their Continue and Stop actions in the responsive review surface", async () => {
+test("a child's cost checkpoint keeps Stop before the one primary Continue", async () => {
   const session = standaloneApprovalSession();
   session.pendingApproval = {
     requestId: "cost-checkpoint:session:1",
@@ -285,51 +311,11 @@ test("cost checkpoints retain their Continue and Stop actions in the responsive 
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
   try {
-    await act(async () => root.render(
-      <ApiProvider client={api}>
-        <SessionRequestPanel
-          session={session}
-          runnerOnline
-          descendants={[]}
-          selectedKey={sessionRequestPanelKey(session.id, session.pendingApproval!.occurrenceId!)}
-          onSelectedKeyChange={() => {}}
-          onSessionUpdate={() => {}}
-          onDescendantsUpdate={() => {}}
-          onOpenChild={() => {}}
-        />
-      </ApiProvider>,
-    ));
-    assert.match(container.querySelector(".approval-review-surface")?.textContent ?? "", /Cost checkpoint/);
-    assert.deepEqual(
-      [...container.querySelectorAll<HTMLButtonElement>(".approval-review-actions button")]
-        .map((button) => button.textContent),
-      ["Continue", "Stop"],
-    );
-  } finally {
-    await act(async () => root.unmount());
-    container.remove();
-  }
-});
-
-test("worker-owned approval stays in its canonical worker request surface", async () => {
-  const session = standaloneApprovalSession();
-  session.pendingApproval = { ...session.pendingApproval!, ownerToolUseId: "worker-tool" };
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
-  try {
-    await act(async () => root.render(
-      <ApiProvider client={api}>
-        <SessionApprovalRegion
-          session={session}
-          runnerOnline
-          fallbackFocusRef={{ current: null }}
-          standaloneInReviewSurface
-        />
-      </ApiProvider>,
-    ));
-    assertNoDomNode(container.querySelector(".approval-bar"));
-    assertNoDomNode(container.querySelector(".approval-review-surface"));
+    await act(async () => root.render(<ChildPanel child={asDescendant(session)} client={api as ApiClient} />));
+    assert.match(container.querySelector(".request-card-title")?.textContent ?? "", /Cost checkpoint/);
+    assert.equal((container.querySelector(".request-card") as HTMLElement | null)?.dataset.requestKind, "budget");
+    assert.deepEqual(footButtons(container).map((button) => [button.textContent, button.className]),
+      [["Stop", "btn"], ["Continue", "btn primary"]]);
   } finally {
     await act(async () => root.unmount());
     container.remove();
@@ -468,7 +454,7 @@ test("descendant inbox exposes count, ownership, keyboard selection, and canonic
     });
     assert.equal(rows[1]!.getAttribute("aria-current"), "true");
     assert.match(container.querySelector(".request-owner")?.textContent ?? "", /Assigned to Orchestrator/);
-    assertNoDomNode(container.querySelector(".request-readonly .approval-actions"),
+    assertNoDomNode(container.querySelector(".request-readonly button, .request-card"),
       "the human dashboard does not expose controls for an Orchestrator-owned decision");
     assert.match(container.querySelector(".request-structured-summary")?.textContent ?? "", /Pull Request#44/);
     const open = [...container.querySelectorAll<HTMLButtonElement>("button")]
@@ -541,6 +527,11 @@ test("switching between descendant questions preserves each request's draft", as
   }
 });
 
+function DraftRetirement({ session }: { session: SessionView }) {
+  useEvidenceDraftRetirement(session.id, dockRequests(pendingRequests(session.pendingApproval)));
+  return null;
+}
+
 test("remote evidence resolution clears the stale review draft", async () => {
   const pending = evidenceSession();
   const decision = pending.pendingApproval!.workflowDecision!;
@@ -556,27 +547,12 @@ test("remote evidence resolution clears the stale review draft", async () => {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
-  const focusRef = React.createRef<HTMLElement>();
   try {
+    await act(async () => root.render(<DraftRetirement session={pending} />));
+    assert.deepEqual(loadEvidenceReviewDraft("local", pending.id, pending.pendingApproval!.requestId,
+      decision.resourceDigest, evidenceIds), evidenceIds.slice(0, 2), "a pending review keeps its draft");
     await act(async () => root.render(
-      <ApiProvider client={api}>
-        <SessionApprovalRegion
-          session={pending}
-          runnerOnline
-          fallbackFocusRef={focusRef}
-          standaloneInReviewSurface
-        />
-      </ApiProvider>,
-    ));
-    await act(async () => root.render(
-      <ApiProvider client={api}>
-        <SessionApprovalRegion
-          session={{ ...pending, status: "running", pendingApproval: null } as SessionView}
-          runnerOnline
-          fallbackFocusRef={focusRef}
-          standaloneInReviewSurface
-        />
-      </ApiProvider>,
+      <DraftRetirement session={{ ...pending, status: "running", pendingApproval: null } as SessionView} />,
     ));
     assert.deepEqual(loadEvidenceReviewDraft(
       "local",
@@ -642,7 +618,7 @@ test("a Viewer cannot answer a descendant question whose child view has not reac
     ));
     assert.equal(container.querySelector(".question-availability")?.textContent, reason,
       "the requester's own verdict stands in for the missing child view");
-    const actions = [...container.querySelectorAll<HTMLButtonElement>(".approval-actions button")];
+    const actions = [...container.querySelectorAll<HTMLButtonElement>(".question-actions button")];
     assert.ok(actions.length > 0);
     assert.ok(actions.every((button) => button.disabled));
     await act(async () => { for (const button of actions) button.click(); });

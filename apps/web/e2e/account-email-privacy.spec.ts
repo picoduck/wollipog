@@ -123,7 +123,7 @@ test(`${width}px ${theme}: Usage and authentication recovery show emails by defa
   const auth = await context.newPage();
   await auth.setViewportSize({ width, height: 1000 });
   await auth.goto("/authentication-recovery-e2e.html");
-  await auth.getByRole("button", { name: "Review Request" }).click();
+  // The request is on the Request Card docked above the composer (#2179); no panel to open.
   await auth.evaluate(theme => document.documentElement.dataset.theme = theme, theme);
   const recovery = auth.getByRole("group", { name: "Account Recovery" });
   await expect(recovery).toContainText("morgan.lee@example.com");
