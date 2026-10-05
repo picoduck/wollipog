@@ -336,6 +336,8 @@ export function RequestDock({
             headingRef={headingRef}
             headTrailing={headTrailing}
             keyboardOpen={keyboardOpen}
+            intentRef={intentRef}
+            topRequest={expanded === requests[0]}
             whereAsked={whereAsked && {
               // As reading back does: the dock shrinks to its strip once the reader is far enough
               // from the tail, even if the person expanded it since leaving.

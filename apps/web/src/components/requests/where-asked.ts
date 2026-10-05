@@ -1,16 +1,26 @@
 import { useCallback, useEffect, useMemo, useState, type RefObject } from "react";
 import type { TimelineItem } from "../../timeline.js";
+import { VIRTUAL_VIEWPORT_INTENT_EVENT } from "../../viewport-intent.js";
 import { QUESTION_CARD_COPY } from "./QuestionStep.js";
 import type { DockWhereAsked } from "./RequestDock.js";
 
 /** The keys the reader scrolls with; one ends the marker's selection. */
 const READER_SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " ", "j", "k"]);
 
-/** The latest transcript event of the question asked under `requestId`. */
-export function questionEventId(items: readonly TimelineItem[], requestId: string): number | null {
+/** A question the dock is waiting on: its request, and the occurrence a provider may reuse it for. */
+export interface PendingQuestionRef {
+  requestId: string;
+  occurrenceId?: string;
+}
+
+/** The transcript event of the pending question: still unanswered, and of its occurrence when both
+ * name one, so an earlier answered occurrence of a reused request id is never taken for it. */
+export function questionEventId(items: readonly TimelineItem[], question: PendingQuestionRef): number | null {
   for (let index = items.length - 1; index >= 0; index -= 1) {
     const item = items[index]!;
-    if (item.kind === "question" && item.requestId === requestId) return item.id;
+    if (item.kind !== "question" || item.requestId !== question.requestId || item.answered !== undefined) continue;
+    if (question.occurrenceId && item.occurrenceId && item.occurrenceId !== question.occurrenceId) continue;
+    return item.id;
   }
   return null;
 }
@@ -28,7 +38,7 @@ export function useQuestionWhereAsked({
   items,
   history,
   loadOlder,
-  pendingRequestIds,
+  pendingQuestions,
   reveal,
   readerRef,
   following,
@@ -41,7 +51,7 @@ export function useQuestionWhereAsked({
   /** Starts loading the next earlier page; false when none can be loaded. */
   loadOlder: () => boolean;
   /** The questions the dock holds; a search for one that resolves meanwhile stops. */
-  pendingRequestIds: readonly string[];
+  pendingQuestions: readonly PendingQuestionRef[];
   /** Scrolls the transcript to an event, as reading back does. */
   reveal: (eventId: number) => void;
   readerRef: RefObject<HTMLElement | null>;
@@ -63,16 +73,19 @@ export function useQuestionWhereAsked({
     reveal(eventId);
     setSelected(requestId);
   }, [reveal]);
+  const pendingQuestion = useCallback((requestId: string): PendingQuestionRef =>
+    pendingQuestions.find((question) => question.requestId === requestId) ?? { requestId }, [pendingQuestions]);
   const show = useCallback((requestId: string) => {
+    // The latest request wins: a page still loading for another question no longer navigates.
+    setSearch(null);
     setMissing(null);
-    const eventId = questionEventId(items, requestId);
+    const eventId = questionEventId(items, pendingQuestion(requestId));
     if (eventId !== null) showMarker(requestId, eventId);
     else if (history.hasOlder) setSearch(requestId);
     else setMissing(requestId);
-  }, [history.hasOlder, items, showMarker]);
+  }, [history.hasOlder, items, pendingQuestion, showMarker]);
 
   // One page at a time until the marker's event arrives or there is nothing older.
-  const pending = pendingRequestIds.join("\n");
   useEffect(() => {
     if (search === null) return;
     const finish = (eventId: number | null) => {
@@ -80,17 +93,19 @@ export function useQuestionWhereAsked({
       if (eventId === null) setMissing(search);
       else showMarker(search, eventId);
     };
-    if (!pending.split("\n").includes(search)) {
+    if (!pendingQuestions.some((question) => question.requestId === search)) {
       setSearch(null);
       return;
     }
-    const eventId = questionEventId(items, search);
+    const eventId = questionEventId(items, pendingQuestion(search));
     if (eventId !== null) finish(eventId);
     else if (!history.hasOlder) finish(null);
     else if (!history.loadingOlder && !loadOlder()) finish(null);
-  }, [history.hasOlder, history.loadingOlder, items, loadOlder, pending, search, showMarker]);
+  }, [history.hasOlder, history.loadingOlder, items, loadOlder, pendingQuestion, pendingQuestions, search, showMarker]);
 
-  // The selection lasts until the reader scrolls on their own, or returns to the live tail.
+  // The selection lasts until the reader scrolls on their own (a wheel, a finger, a scroll key, the
+  // scrollbar, or a reading shortcut's claim on the viewport), or returns to the live tail. The
+  // reveal's own scrolling is none of these.
   useEffect(() => {
     const reader = readerRef.current;
     if (selected === null || !reader) return;
@@ -98,22 +113,29 @@ export function useQuestionWhereAsked({
     const clearOnScrollKey = (event: KeyboardEvent) => {
       if (READER_SCROLL_KEYS.has(event.key)) clear();
     };
+    const clearOnScrollbar = (event: PointerEvent) => {
+      if (event.target === reader) clear();
+    };
     reader.addEventListener("wheel", clear, { passive: true });
     reader.addEventListener("touchmove", clear, { passive: true });
     reader.addEventListener("keydown", clearOnScrollKey);
+    reader.addEventListener("pointerdown", clearOnScrollbar);
+    reader.addEventListener(VIRTUAL_VIEWPORT_INTENT_EVENT, clear);
     return () => {
       reader.removeEventListener("wheel", clear);
       reader.removeEventListener("touchmove", clear);
       reader.removeEventListener("keydown", clearOnScrollKey);
+      reader.removeEventListener("pointerdown", clearOnScrollbar);
+      reader.removeEventListener(VIRTUAL_VIEWPORT_INTENT_EVENT, clear);
     };
   }, [readerRef, selected]);
   if (selected !== null && following) setSelected(null);
 
   const unavailableReason = useCallback((requestId: string): string | null =>
-    questionEventId(items, requestId) === null &&
+    questionEventId(items, pendingQuestion(requestId)) === null &&
       (missing === requestId || (history.complete && !history.hasOlder))
       ? QUESTION_CARD_COPY.whereAskedNotLoaded : null,
-  [history.complete, history.hasOlder, items, missing]);
+  [history.complete, history.hasOlder, items, missing, pendingQuestion]);
   const whereAsked = useMemo<DockWhereAsked>(() => ({
     show,
     unavailableReason,

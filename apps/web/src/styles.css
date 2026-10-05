@@ -13885,6 +13885,40 @@ body.shell-dock-dragging * {
     ) .chat-reading > .session-notice-slot {
       max-height: 40cqh;
     }
+    /* And compacts a docked question card as the visual-viewport signal does (#2205), for the same
+       browsers: the head line, Dismiss and the step count give way, and the title takes one line. */
+    .detail-chat:has(
+      textarea:focus:not([readonly]),
+      [contenteditable=""]:focus,
+      [contenteditable="true"]:focus,
+      input:focus:not([readonly], [type="button"], [type="checkbox"], [type="color"],
+        [type="file"], [type="image"], [type="radio"], [type="range"], [type="reset"],
+        [type="submit"])
+    ) .request-dock :is(.question-card > .request-card-head, .question-dismiss, .question-step-note) {
+      display: none;
+    }
+    .detail-chat:has(
+      textarea:focus:not([readonly]),
+      [contenteditable=""]:focus,
+      [contenteditable="true"]:focus,
+      input:focus:not([readonly], [type="button"], [type="checkbox"], [type="color"],
+        [type="file"], [type="image"], [type="radio"], [type="range"], [type="reset"],
+        [type="submit"])
+    ) .request-dock .question-card > .question-text {
+      display: -webkit-box;
+      max-height: none;
+      overflow: hidden;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 1;
+    }
+    .detail-chat:has(
+      textarea:focus:not([readonly]),
+      [contenteditable=""]:focus,
+      [contenteditable="true"]:focus,
+      input:focus:not([readonly], [type="button"], [type="checkbox"], [type="color"],
+        [type="file"], [type="image"], [type="radio"], [type="range"], [type="reset"],
+        [type="submit"])
+    ) .request-dock .question-card > .question-text > * { display: inline; }
   }
 
   /* From 600px the five tabs would sit about 150px apart, so they keep a 480px centered measure. */

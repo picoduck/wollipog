@@ -326,7 +326,7 @@ function Fixture() {
     items,
     history: { hasOlder: false, loadingOlder: false, complete: true },
     loadOlder: () => false,
-    pendingRequestIds,
+    pendingQuestions: pendingRequestIds.map((requestId) => ({ requestId })),
     reveal,
     readerRef: scrollRef,
     following: followTail.state === "following",

@@ -10,8 +10,9 @@ import { installDomTestCleanup } from "../../dom-test-cleanup.js";
 import type { TimelineItem } from "../../timeline.js";
 import { QUESTION_CARD_COPY } from "./QuestionStep.js";
 import { RequestDock, type DockWhereAsked } from "./RequestDock.js";
-import { revealDockedRequest } from "./request-reveal.js";
-import { useQuestionWhereAsked } from "./where-asked.js";
+import { decideDockedRequest, revealDockedRequest } from "./request-reveal.js";
+import { questionEventId, useQuestionWhereAsked } from "./where-asked.js";
+import { dispatchVirtualViewportIntent } from "../../viewport-intent.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
@@ -57,7 +58,7 @@ function HookFixture({ items, history, loadOlder, pending = ["ask-1"], following
 }) {
   const readerRef = useRef<HTMLDivElement>(null);
   expose(useQuestionWhereAsked({
-    items, history, loadOlder, pendingRequestIds: pending, reveal: onReveal, readerRef, following, resetKey: "session:0",
+    items, history, loadOlder, pendingQuestions: pending.map((requestId) => ({ requestId })), reveal: onReveal, readerRef, following, resetKey: "session:0",
   }));
   return <div ref={readerRef} data-testid="reader" tabIndex={0} />;
 }
@@ -197,6 +198,55 @@ test("a question answered while its place loads stops the search", async () => {
   }
 });
 
+test("Show Where Asked for another question supersedes a search still loading (#2205 review)", async () => {
+  const view = await mountHook();
+  const other: TimelineItem = { kind: "question", id: 50, requestId: "ask-2", questions };
+  try {
+    await view.render({ items: [other, ...earlier], history: partial, pending: ["ask-1", "ask-2"] });
+    await act(async () => view.hook.whereAsked.show("ask-1"));
+    assert.equal(view.hook.whereAsked.loadingRequestId, "ask-1");
+    await view.render({ items: [other, ...earlier], history: { ...partial, loadingOlder: true }, pending: ["ask-1", "ask-2"] });
+    await act(async () => view.hook.whereAsked.show("ask-2"));
+    assert.deepEqual(view.reveals, [50]);
+    assert.equal(view.hook.whereAsked.loadingRequestId, null);
+    // The page asked for ask-1 arrives: nothing navigates away from ask-2.
+    await view.render({ items: [questionItem, other, ...earlier], history: partial, pending: ["ask-1", "ask-2"] });
+    assert.deepEqual(view.reveals, [50]);
+    assert.equal(view.hook.selectedRequestId, "ask-2");
+    assert.equal(view.loads, 1);
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("a reused request id's earlier, answered occurrence is never taken for the pending one (#2205 review)", () => {
+  const answered: TimelineItem = { kind: "question", id: 10, requestId: "ask-1", occurrenceId: "first", questions, answered: true };
+  const pending: TimelineItem = { kind: "question", id: 20, requestId: "ask-1", occurrenceId: "second", questions };
+  assert.equal(questionEventId([answered], { requestId: "ask-1", occurrenceId: "second" }), null);
+  assert.equal(questionEventId([answered], { requestId: "ask-1" }), null);
+  assert.equal(questionEventId([answered, pending], { requestId: "ask-1", occurrenceId: "second" }), 20);
+  const stale: TimelineItem = { kind: "question", id: 5, requestId: "ask-1", occurrenceId: "zero", questions };
+  assert.equal(questionEventId([stale], { requestId: "ask-1", occurrenceId: "second" }), null);
+  assert.equal(questionEventId([{ ...pending, occurrenceId: undefined }], { requestId: "ask-1", occurrenceId: "second" }), 20,
+    "an event recorded without an occurrence still matches");
+});
+
+test("the marker's selection also ends at the scrollbar and at a reading shortcut's claim on the viewport (#2205 review)", async () => {
+  const view = await mountHook();
+  try {
+    await view.render({ items: [questionItem, ...earlier], history: loaded });
+    await act(async () => view.hook.whereAsked.show("ask-1"));
+    // A press on the reader's own box (its scrollbar), not on a row inside it.
+    await act(async () => view.reader().dispatchEvent(new domWindow.PointerEvent("pointerdown", { bubbles: true }) as unknown as Event));
+    assert.equal(view.hook.selectedRequestId, null);
+    await act(async () => view.hook.whereAsked.show("ask-1"));
+    await act(async () => dispatchVirtualViewportIntent(view.reader(), "up"));
+    assert.equal(view.hook.selectedRequestId, null);
+  } finally {
+    await view.cleanup();
+  }
+});
+
 const session = { id: "session-dock", runnerId: "runner-1", title: "Session", status: "input_required" } as SessionView;
 const questionRequest: PendingApproval = { requestId: "ask-1", kind: "question", title: "Which environment?", options: [], questions };
 
@@ -256,5 +306,52 @@ test("the dock brings a question up by focusing its heading, and marks the card 
     assert.equal(heading.textContent, "Which environment should I deploy to?");
   } finally {
     await view.cleanup();
+  }
+});
+
+test("A and D act on the docked question the dock shows, never on the request behind it (#2205 review)", async () => {
+  const calls: string[] = [];
+  const client = {
+    ...api,
+    approve: async (_sessionId: string, body: { requestId: string; optionId: string }) => {
+      calls.push(`approve:${body.requestId}:${body.optionId}`);
+      return session;
+    },
+    answerQuestion: async (_sessionId: string, body: { requestId: string; action?: string }) => {
+      calls.push(`${body.action}:${body.requestId}`);
+      return session;
+    },
+  } as unknown as typeof api;
+  const permission: PendingApproval = {
+    requestId: "deploy", kind: "permission", title: "Run pnpm deploy?",
+    options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }, { optionId: "deny", name: "Reject", kind: "reject_once" }],
+  };
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const render = (requests: PendingApproval[], revealRequestId?: string) => act(async () => root.render(
+    <ApiProvider client={client}>
+      <RequestDock session={session} requests={requests} runnerOnline revealRequestId={revealRequestId} />
+    </ApiProvider>,
+  ));
+  try {
+    // The permission tops the session; the person expanded the question.
+    await render([permission, questionRequest], "ask-1");
+    assert.ok(container.querySelector(".question-card"));
+    let taken = false;
+    await act(async () => { taken = decideDockedRequest(session.id, "approve"); });
+    assert.equal(taken, true, "A is the question card's, which brings its question up");
+    await act(async () => { taken = decideDockedRequest(session.id, "deny"); });
+    assert.equal(taken, true);
+    assert.deepEqual(calls, ["dismiss:ask-1"], "D dismissed the question it shows, and nothing decided the permission");
+
+    // On the top request, A keeps its meaning for the caller (the Sessions list opens the question).
+    await act(async () => root.render(<></>));
+    await render([questionRequest]);
+    await act(async () => { taken = decideDockedRequest(session.id, "approve"); });
+    assert.equal(taken, false);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
   }
 });

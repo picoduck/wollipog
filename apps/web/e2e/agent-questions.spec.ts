@@ -883,6 +883,24 @@ test.describe("on a phone with the software keyboard open", () => {
     expect(await scrollPositions()).toEqual(before);
   });
 
+  test("a focused field compacts the card where the keyboard resizes the layout viewport instead (#2205)", async ({ page }) => {
+    // No `keyboard=1`: browsers that resize the layout viewport publish no visual-viewport gap, so
+    // the focused field is the signal, as for the dock's 40% cap.
+    await page.goto("/agent-questions-e2e.html?set=notes");
+    const card = dockedCard(page);
+    await expect(card.locator(".request-card-head")).toBeVisible();
+    await card.locator(".question-input").focus();
+    await expect(card.locator(".request-card-head")).toBeHidden();
+    await expect(card.getByRole("button", { name: "Dismiss" })).toBeHidden();
+    const title = card.locator(".question-text");
+    const lineHeight = await title.evaluate((element) => parseFloat(getComputedStyle(element).lineHeight));
+    expect((await geometry(title)).height).toBeLessThanOrEqual(lineHeight + 1);
+    const [slot, reading] = [await geometry(page.locator(".chat-reading > .session-notice-slot")), await geometry(page.locator(".chat-reading"))];
+    expect(slot.height).toBeLessThanOrEqual(reading.height * 0.4 + 1);
+    await card.locator(".question-input").blur();
+    await expect(card.locator(".request-card-head")).toBeVisible();
+  });
+
   test("a row or Next tapped while typing in the docked card takes the tap, though the dock regrows on blur (#2205)", async ({ page }) => {
     await page.goto("/agent-questions-e2e.html");
     const card = dockedCard(page);

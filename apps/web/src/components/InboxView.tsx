@@ -1174,9 +1174,10 @@ export function InboxView({
       showToast(refusal, { tone: "error" });
       return;
     }
-    // The preview's request dock may have another of the session's own requests expanded; the key
-    // acts on the card the person is reading (#2179).
-    if (approval.kind !== "question" && !approval.ownerToolUseId && decideDockedRequest(targetSession.id, intent)) return;
+    // The preview's request dock may have another of the session's own requests expanded, a question
+    // included; the key acts on the card the person is reading, and does nothing behind its strip
+    // (#2179, #2205).
+    if (!approval.ownerToolUseId && decideDockedRequest(targetSession.id, intent)) return;
     if (!beginBusy(targetSession.id)) return;
     try {
       if (approval.kind === "question") {

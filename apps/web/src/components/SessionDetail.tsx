@@ -197,7 +197,7 @@ import {
 import { SessionApprovalRegion, focusSessionRequest, useEvidenceDraftRetirement } from "./SessionApproval.js";
 import { type DescendantRequestStatus } from "./SessionRequestPanel.js";
 import { RequestDock, dockRequests } from "./requests/RequestDock.js";
-import { useQuestionWhereAsked } from "./requests/where-asked.js";
+import { useQuestionWhereAsked, type PendingQuestionRef } from "./requests/where-asked.js";
 import { RequestKindIcon, pendingRequestsTitle } from "./requests/request-meta.js";
 import { useSoftwareKeyboardOpen } from "./requests/software-keyboard.js";
 import { decideDockedRequest } from "./requests/request-reveal.js";
@@ -3615,8 +3615,8 @@ function SessionDetailLoaded({
   const readingActions = useMemo<SessionReadingKeyActions>(() => ({
     nextSession: () => onNextSession?.(),
     previousSession: () => onPreviousSession?.(),
-    // A and D act on the dock's expanded request when the session's top request is docked (#2179);
-    // otherwise (a question, a worker's request) they keep acting on the top request.
+    // A and D act on the dock's expanded request when the session's top request is docked (#2179,
+    // #2205); otherwise (a worker's request), or for A on a top question, they act on the top request.
     approve: () => {
       if (topRequestDocked && decideDockedRequest(session.id, "approve")) return;
       if (responseRefusal === null) onApprove?.();
@@ -4416,9 +4416,10 @@ function SessionDetailLoaded({
   // The pending questions, whose transcript rows are markers (#2205): the dock's, and a worker's,
   // whose Jump to Question opens the Agents panel. Keyed by their ids, so heartbeats that replace the
   // session view keep the transcript's context.
-  const pendingQuestionKey = prioritizedRequests.flatMap((request) => request.kind === "question" ? [request.requestId] : [])
-    .join("\n");
-  const pendingQuestionIds = useMemo(() => pendingQuestionKey ? pendingQuestionKey.split("\n") : [], [pendingQuestionKey]);
+  const pendingQuestionKey = JSON.stringify(prioritizedRequests.flatMap((request) =>
+    request.kind === "question" ? [{ requestId: request.requestId, occurrenceId: request.occurrenceId }] : []));
+  const pendingQuestions = useMemo(() => JSON.parse(pendingQuestionKey) as PendingQuestionRef[], [pendingQuestionKey]);
+  const pendingQuestionIds = useMemo(() => pendingQuestions.map((question) => question.requestId), [pendingQuestions]);
   const revealQuestionMarker = useCallback((eventId: number) => revealTranscriptEvent(eventId, "question"),
     [revealTranscriptEvent]);
   const { whereAsked: dockWhereAsked, selectedRequestId: selectedMarker } = useQuestionWhereAsked({
@@ -4429,7 +4430,7 @@ function SessionDetailLoaded({
       complete: eventHistory?.everComplete === true && eventWindow !== undefined,
     },
     loadOlder,
-    pendingRequestIds: pendingQuestionIds,
+    pendingQuestions,
     reveal: revealQuestionMarker,
     readerRef: scrollRef,
     following: followTail.state === "following",

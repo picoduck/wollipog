@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import React, { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type MutableRefObject, type ReactNode, type RefObject } from "react";
 import type { AgentQuestion, PendingApproval, SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { useOptionalStoreSelector } from "../store.js";
@@ -23,7 +23,7 @@ import { LocateIcon, QuestionIcon } from "./Icons.js";
 import { Notice } from "./Notice.js";
 import { StructuredQuestionText } from "./StructuredQuestionText.js";
 import { BusyButton } from "./ui/BusyButton.js";
-import { RequestCardHead } from "./requests/RequestCard.js";
+import { RequestCardHead, type RequestIntentHandler } from "./requests/RequestCard.js";
 import {
   QUESTION_CARD_COPY,
   QuestionStep,
@@ -300,6 +300,8 @@ export function SessionQuestionBanner({
   headTrailing,
   keyboardOpen = false,
   whereAsked,
+  intentRef,
+  topRequest = true,
 }: {
   sessionId: string;
   requestId: string;
@@ -324,6 +326,10 @@ export function SessionQuestionBanner({
   /** The software keyboard is open (§13.2). */
   keyboardOpen?: boolean;
   whereAsked?: QuestionWhereAsked;
+  /** Receives the session's A and D while the dock shows this card (#2179): D dismisses it. */
+  intentRef?: MutableRefObject<RequestIntentHandler | null>;
+  /** The session's top request, whose A keeps its meaning on the session's other surfaces. */
+  topRequest?: boolean;
 }) {
   const api = useApi();
   const storedRefusal = useSessionResponseRefusal(sessionId);
@@ -573,6 +579,31 @@ export function SessionQuestionBanner({
       if (liveRequestRef.current === submittedRequest) setBusy(null);
     }
   };
+
+  // The session's A and D act on the card the dock shows, never on a request behind it: D dismisses
+  // the question, as the card's own D does. A answers nothing without the card, so on the top request
+  // it keeps its meaning elsewhere (the Sessions list opens the question in its session); on another
+  // it brings this card's question up.
+  const dismissRef = useRef(dismiss);
+  dismissRef.current = dismiss;
+  const topRequestRef = useRef(topRequest);
+  topRequestRef.current = topRequest;
+  useEffect(() => {
+    if (!intentRef) return;
+    const handler: RequestIntentHandler = (intent) => {
+      if (intent === "deny") {
+        void dismissRef.current();
+        return true;
+      }
+      if (topRequestRef.current) return false;
+      requestFocus({ kind: "title" });
+      return true;
+    };
+    intentRef.current = handler;
+    return () => {
+      if (intentRef.current === handler) intentRef.current = null;
+    };
+  }, [intentRef]);
 
   /** Next: an answerable step must be answered before the card moves on; reading moves freely. */
   const next = () => {
