@@ -68,6 +68,9 @@ const scope = (toolName: string, path?: string) => ({ sessionId: SESSION_ID, run
 const newestPage: GovernanceAuditEntry[] = [
   entry("yesterday-continue", NOW - DAY - 2 * HOUR, { approvalKind: "cost_checkpoint", outcome: "allowed" }),
   entry("yesterday-signin", NOW - DAY - HOUR, { approvalKind: "authentication", outcome: "dismissed" }),
+  entry("policy-permission", NOW - 110 * MINUTE, {
+    actor: { kind: "policy", id: "allow-reads" }, governancePolicyId: "allow-reads", scope: scope("Grep"),
+  }),
   entry("allow-read", NOW - 95 * MINUTE, {
     approvalKind: "policy_hook", actor: { kind: "policy", id: "allow-reads" }, governancePolicyId: "allow-reads",
     scope: scope("Read", "apps/web/src/governance.ts"),

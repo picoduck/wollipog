@@ -20,14 +20,13 @@ const FILTER_OPTIONS = [
 export const DECISION_HISTORY_SKELETON_DELAY_MS = 300;
 
 /**
- * A decision the viewer made. A member's decision is the viewer's unless the viewer is known to be
- * someone else (#2527): a single-member installation, and a viewer whose identity has not loaded,
- * read every person's decision as their own, as the row's "by You" does.
+ * A decision the viewer made: exactly the rows that read "by You" (#2527). In a single-member
+ * installation every person's decision is the viewer's; while the viewer is unknown, or in a shared
+ * organization for a decision that names no member, none is, as the row stays neutral too.
  */
 function decidedByViewer(decision: GovernanceDecision, viewer: ViewerIdentity | null): boolean {
   if (decision.actor?.kind !== "member") return false;
-  const resolver = humanResolver(viewer, decision.actor.userId);
-  return resolver === null ? !viewer?.shared : resolver.kind === "viewer";
+  return humanResolver(viewer, decision.actor.userId)?.kind === "viewer";
 }
 
 /** Decisions the viewer's approval policies made, or Wollipog made for them: everything not a person's. */

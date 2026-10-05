@@ -25,9 +25,9 @@ for (const theme of ["dark", "light"] as const) {
     test("lists every decision newest first under day headers, and filters to You and Policies", async ({ page }) => {
       await page.goto(`/decision-history-e2e.html?theme=${theme}`);
       await expect(page.locator(".rp-title")).toHaveText("Decision History");
-      await expect(rows(page)).toHaveCount(9);
+      await expect(rows(page)).toHaveCount(10);
       expect(await outcomes(page)).toEqual([
-        "Blocked", "Blocked", "Allowed", "Answered", "Rejected", "Allowed", "Allowed", "Dismissed", "Allowed",
+        "Blocked", "Blocked", "Allowed", "Answered", "Rejected", "Allowed", "Allowed", "Allowed", "Dismissed", "Allowed",
       ]);
       await expect(page.locator(".decision-history-day-label")).toHaveText(["Today", "Yesterday"]);
       for (const height of await rows(page).locator("summary").evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().height))) {
@@ -39,7 +39,7 @@ for (const theme of ["dark", "light"] as const) {
       expect(await outcomes(page)).toEqual(["Allowed", "Answered", "Rejected", "Allowed", "Dismissed", "Allowed"]);
       await capture(page, `you-1440-${theme}`);
       await filterTo(page, "Policies");
-      expect(await outcomes(page)).toEqual(["Blocked", "Blocked", "Allowed"]);
+      expect(await outcomes(page)).toEqual(["Blocked", "Blocked", "Allowed", "Allowed"]);
       await capture(page, `policies-1440-${theme}`);
     });
 
@@ -76,7 +76,7 @@ for (const theme of ["dark", "light"] as const) {
       await expect(more).toHaveAttribute("aria-busy", "true");
       await expect(more).toHaveText("Load Older Decisions");
       await capture(page, `load-older-busy-1440-${theme}`);
-      await expect(rows(page)).toHaveCount(11);
+      await expect(rows(page)).toHaveCount(12);
       await expect(more).toHaveCount(0);
     });
 
@@ -102,7 +102,7 @@ for (const theme of ["dark", "light"] as const) {
       await expect(notice).toContainText("Couldn't Load Decisions");
       await capture(page, `error-1440-${theme}`);
       await notice.getByRole("button", { name: "Retry" }).click();
-      await expect(rows(page)).toHaveCount(9);
+      await expect(rows(page)).toHaveCount(10);
     });
   });
 
@@ -111,7 +111,7 @@ for (const theme of ["dark", "light"] as const) {
 
     test("rows are 44px targets and the request title is never squeezed out by who decided", async ({ page }) => {
       await page.goto(`/decision-history-e2e.html?theme=${theme}`);
-      await expect(rows(page)).toHaveCount(9);
+      await expect(rows(page)).toHaveCount(10);
       for (const height of await rows(page).locator("summary").evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().height))) {
         expect(height).toBeGreaterThanOrEqual(44);
       }

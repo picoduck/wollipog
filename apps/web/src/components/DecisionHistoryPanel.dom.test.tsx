@@ -151,8 +151,11 @@ test("another member's decision is not the viewer's in a shared organization", (
   ]);
   assert.deepEqual(filterDecisions(decisions, "you", shared).map((decision) => decision.auditId), ["mine"]);
   assert.deepEqual(filterDecisions(decisions, "policies", shared), []);
-  assert.deepEqual(filterDecisions(decisions, "you", null).map((decision) => decision.auditId), ["mine", "theirs"],
-    "before the viewer is known, a person's decision reads as the viewer's, as its row's by You does");
+  assert.deepEqual(filterDecisions(decisions, "you", null), [],
+    "before the viewer is known no decision is theirs, as no row reads by You");
+  const single: ViewerIdentity = { userId: "user-ada", shared: false, names: new Map() };
+  assert.deepEqual(filterDecisions(decisions, "you", single).map((decision) => decision.auditId), ["mine", "theirs"],
+    "in a single-member installation every person is the viewer");
 });
 
 test("rows are grouped under Today, Yesterday and then the date", async () => {

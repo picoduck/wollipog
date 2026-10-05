@@ -159,12 +159,20 @@ const HUMAN_DECISION_KINDS: ReadonlySet<ApprovalKind> = new Set<ApprovalKind>([
  * or Dismissed (a sign-in action they chose is Resolved, since nothing was allowed). Only the
  * terminal `resolution` a person recorded counts; a failed delivery, a consumed or revoked
  * workflow approval, and a parent session's answer are not a person's decision. A policy-hook ask a
- * person settled is already one of `governanceAuditPresentation`'s outcomes.
+ * person settled is already one of `governanceAuditPresentation`'s outcomes. A tool policy's own
+ * resolution of a provider permission is presented here too, so Policies lists it.
  */
 export function humanDecisionPresentation(entry: GovernanceAuditEntry): GovernanceOutcome | null {
-  if (entry.stage !== "resolution" || entry.actor.kind !== "human" || !HUMAN_DECISION_KINDS.has(entry.approvalKind)) {
+  if (entry.stage !== "resolution" || !HUMAN_DECISION_KINDS.has(entry.approvalKind)) return null;
+  // A control-plane tool policy settles a provider permission itself: its terminal record is a
+  // `resolution` by the policy (its earlier `policy_decision` is the same decision, not a row).
+  if (entry.actor.kind === "policy" && entry.approvalKind === "permission") {
+    const policy = policyActor(entry.actor, entry.governancePolicyId);
+    if (entry.outcome === "allowed") return { outcome: "allowed", actor: policy, detail: "The matched policy allowed this request." };
+    if (entry.outcome === "denied") return { outcome: "blocked", actor: policy, detail: "The matched policy denied this request." };
     return null;
   }
+  if (entry.actor.kind !== "human") return null;
   const actor: DecisionActor = { kind: "member", ...(entry.actor.id ? { userId: entry.actor.id } : {}) };
   const question = entry.approvalKind === "question";
   switch (entry.outcome) {
@@ -239,6 +247,50 @@ export function decisionHistory(entries: readonly GovernanceAuditEntry[]): Gover
     settled.add(key);
     return human;
   });
+}
+
+/** The loaded transcript rows a decision can be shown at: governance rows by audit id, and every
+ * occurrence of each request id with when it was settled. */
+export interface TranscriptDecisionIndex {
+  byAuditId: Map<string, number>;
+  byRequestId: Map<string, Array<{ itemId: number; settledAt?: number }>>;
+}
+
+export function indexTranscriptDecisionRows(items: readonly TimelineItem[]): TranscriptDecisionIndex {
+  const index: TranscriptDecisionIndex = { byAuditId: new Map(), byRequestId: new Map() };
+  const add = (requestId: string, itemId: number, settledAt: number | undefined) => {
+    const rows = index.byRequestId.get(requestId) ?? [];
+    rows.push({ itemId, ...(settledAt !== undefined ? { settledAt } : {}) });
+    index.byRequestId.set(requestId, rows);
+  };
+  for (const item of items) {
+    if (item.kind === "permission" || item.kind === "question") add(item.requestId, item.id, item.resolvedAt);
+    else if (item.kind === "governance_decision") {
+      index.byAuditId.set(item.decision.auditId, item.id);
+      add(item.decision.requestId, item.id, item.decision.timestamp);
+    }
+  }
+  return index;
+}
+
+/** How far the runner's settled time and the audit's may disagree for one occurrence (two clocks). */
+const SETTLED_AT_TOLERANCE_MS = 5 * 60_000;
+
+/**
+ * The transcript row that shows this decision's request. A provider can reuse a request id, so the
+ * decision goes to the loaded occurrence settled nearest its audit time, and to none when that is
+ * further than the clocks can disagree (only another occurrence is loaded). A lone occurrence with no
+ * settled time (an older runner) is the row; several, any without one, are ambiguous.
+ */
+export function transcriptRowForDecision(index: TranscriptDecisionIndex, decision: GovernanceDecision): number | undefined {
+  const governanceRow = index.byAuditId.get(decision.auditId);
+  if (governanceRow !== undefined) return governanceRow;
+  const rows = index.byRequestId.get(decision.requestId);
+  if (!rows?.length) return undefined;
+  if (rows.some((row) => row.settledAt === undefined)) return rows.length === 1 ? rows[0]!.itemId : undefined;
+  const distance = (row: { settledAt?: number }) => Math.abs(row.settledAt! - decision.timestamp);
+  const nearest = rows.reduce((best, row) => distance(row) < distance(best) ? row : best);
+  return distance(nearest) <= SETTLED_AT_TOLERANCE_MS ? nearest.itemId : undefined;
 }
 
 /** Audit ids are append-only records, so the id list identifies the snapshot's content. */

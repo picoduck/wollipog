@@ -202,7 +202,12 @@ import { useRemovedFocus } from "./useRemovedFocus.js";
 import { CampaignHeldChildren, type CampaignHeldChild } from "./CampaignHeldChildren.js";
 import { ComposerQuestionResponse } from "./ComposerQuestionResponse.js";
 import { useGovernanceAudit, useGovernanceTimeline } from "./useGovernanceAudit.js";
-import type { GovernanceDecision } from "../governance.js";
+import {
+  indexTranscriptDecisionRows,
+  transcriptRowForDecision,
+  type GovernanceDecision,
+  type TranscriptDecisionIndex,
+} from "../governance.js";
 import { SessionHeader } from "./SessionHeader.js";
 import { useWorktreeSetupSuggestion, WorktreeSetupNotice } from "./WorktreeSetupNotice.js";
 import { WorktreeRecoveryCard } from "./WorktreeRecoveryCard.js";
@@ -2912,20 +2917,9 @@ function SessionDetailLoaded({
   // Decision History's Show in Transcript: the loaded row that shows each decision's request. The
   // index is built only when the panel asks, so a streamed chunk never walks the whole transcript.
   const transcriptItemForDecision = useMemo(() => {
-    let rows: { byAuditId: Map<string, number>; byRequestId: Map<string, number> } | null = null;
-    return (decision: GovernanceDecision): number | undefined => {
-      if (!rows) {
-        rows = { byAuditId: new Map(), byRequestId: new Map() };
-        for (const item of timelineItems) {
-          if (item.kind === "permission" || item.kind === "question") rows.byRequestId.set(item.requestId, item.id);
-          else if (item.kind === "governance_decision") {
-            rows.byAuditId.set(item.decision.auditId, item.id);
-            rows.byRequestId.set(item.decision.requestId, item.id);
-          }
-        }
-      }
-      return rows.byAuditId.get(decision.auditId) ?? rows.byRequestId.get(decision.requestId);
-    };
+    let index: TranscriptDecisionIndex | null = null;
+    return (decision: GovernanceDecision): number | undefined =>
+      transcriptRowForDecision(index ??= indexTranscriptDecisionRows(timelineItems), decision);
   }, [timelineItems]);
   const automaticAccountSwitchNotice = useRef<AutomaticAccountSwitchNoticeState>({
     sessionId: session.id,

@@ -6,6 +6,7 @@ import type { GovernanceAuditEntry } from "@wollipog/protocol";
 import {
   decisionHistory,
   humanDecisionPresentation,
+  indexTranscriptDecisionRows,
   landedGovernanceAnchors,
   governanceAnchorSeq,
   governanceAuditPresentation,
@@ -13,6 +14,7 @@ import {
   mergeGovernanceDecisions,
   sameGovernanceSnapshot,
   transcriptGovernanceDecisions,
+  transcriptRowForDecision,
 } from "./governance.js";
 import {
   decisionActorName,
@@ -373,6 +375,38 @@ test("Decision History titles a person's non-tool decisions by what they settled
     entry({ auditId: "c", approvalKind: "cost_checkpoint", outcome: "allowed", actor: person, timestamp: 3 }),
   ]).map((decision) => governanceDecisionRecord(decision).title);
   assert.deepEqual(titles, ["Workflow Decision", "Sign-In", "Cost Checkpoint"]);
+});
+
+test("a tool policy's own resolution of a provider permission is a Policies row, never a transcript row", () => {
+  const entries = [
+    entry({ auditId: "policy-ask", requestId: "perm-p", approvalKind: "permission", stage: "policy_decision", outcome: "allowed", actor: { kind: "policy", id: "allow-reads" }, governancePolicyId: "allow-reads", timestamp: 10 }),
+    entry({ auditId: "policy-allow", requestId: "perm-p", approvalKind: "permission", outcome: "allowed", actor: { kind: "policy", id: "allow-reads" }, governancePolicyId: "allow-reads", timestamp: 11 }),
+    entry({ auditId: "policy-deny", requestId: "perm-q", approvalKind: "permission", outcome: "denied", actor: { kind: "policy", id: "deny-shell" }, governancePolicyId: "deny-shell", timestamp: 12 }),
+    entry({ auditId: "policy-undelivered", requestId: "perm-r", approvalKind: "permission", outcome: "delivery_failed", actor: { kind: "policy", id: "deny-shell" }, timestamp: 13 }),
+  ];
+  assert.deepEqual(governanceDecisions(entries), []);
+  const history = decisionHistory(entries);
+  assert.deepEqual(history.map((decision) => [decision.auditId, decision.outcome]), [["policy-allow", "allowed"], ["policy-deny", "blocked"]]);
+  assert.deepEqual(history[0]!.actor, { kind: "policy", policyId: "allow-reads" });
+});
+
+test("Show in Transcript picks the occurrence of a reused request id settled nearest the decision", () => {
+  const question = (id: number, resolvedAt?: number) => ({
+    kind: "question", id, requestId: "q-reused", questions: [], answered: true,
+    ...(resolvedAt !== undefined ? { resolvedAt } : {}),
+  }) as unknown as TimelineItem;
+  const decision = (timestamp: number) => decisionHistory([
+    entry({ auditId: `a-${timestamp}`, requestId: "q-reused", approvalKind: "question", outcome: "answered", timestamp }),
+  ])[0]!;
+  const index = indexTranscriptDecisionRows([question(1, 1_000), message(2), question(3, 9_000)]);
+  assert.equal(transcriptRowForDecision(index, decision(1_050)), 1);
+  assert.equal(transcriptRowForDecision(index, decision(8_990)), 3);
+  assert.equal(transcriptRowForDecision(indexTranscriptDecisionRows([question(1), question(3, 9_000)]), decision(1_050)), undefined,
+    "an occurrence without a settled time makes the match ambiguous");
+  assert.equal(transcriptRowForDecision(indexTranscriptDecisionRows([question(3, 9_000_000)]), decision(1_050)), undefined,
+    "only another occurrence is loaded");
+  assert.equal(transcriptRowForDecision(indexTranscriptDecisionRows([question(3)]), decision(1_050)), 3,
+    "a lone occurrence an older runner recorded without a settled time is the row");
 });
 
 test("a guardrail decision recorded under both of its request ids is one Decision History row", () => {
