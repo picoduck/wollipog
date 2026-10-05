@@ -75,6 +75,73 @@ for (const viewport of [
   });
 }
 
+for (const viewport of [
+  { name: "desktop", width: 1440, height: 900 },
+  { name: "phone", width: 390, height: 844 },
+]) {
+  test(`reading back shrinks the dock to a 44px strip, and the live tail restores the card, at ${viewport.name} (#2195)`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/request-surfaces-e2e.html?scenario=permission&follow=1");
+    const reader = page.getByRole("region", { name: "Session Activity" });
+    const strip = page.locator(".request-dock .dock-strip");
+    const expand = strip.getByRole("button", { name: "Expand Request", exact: true });
+    const readBack = async () => {
+      await reader.hover();
+      await page.mouse.wheel(0, -600);
+      await expect(reader).toHaveAttribute("data-follow-tail-state", "paused");
+      await expect(strip).toBeVisible();
+    };
+    await expect(card(page)).toBeVisible();
+    await expect(reader).toHaveAttribute("data-follow-tail-state", "following");
+
+    await readBack();
+    await expect(card(page)).toHaveCount(0);
+    expect((await strip.boundingBox())!.height).toBe(44);
+    await expect(strip.locator(".dock-strip-title")).toHaveText("Run pnpm deploy?");
+    await expect(strip.locator(".dock-strip-position")).toHaveText("1 of 1");
+    if (viewport.width <= 760) {
+      // Icon-only, and the title keeps the row: it is never cut to a few characters for the rest.
+      await expect(expand.locator(".dock-strip-expand-label")).toBeHidden();
+      const title = (await strip.locator(".dock-strip-title").boundingBox())!;
+      expect(title.width).toBeGreaterThan((await strip.boundingBox())!.width / 2);
+    } else {
+      await expect(expand).toHaveText("Expand");
+    }
+    await assertNoHorizontalOverflow(page, ".request-dock");
+
+    // A and D do nothing while the request cannot be read.
+    await reader.focus();
+    await page.keyboard.press("a");
+    await page.keyboard.press("d");
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    expect(await submissions(page)).toEqual([]);
+
+    // Back at the live tail, the card returns and focus stays in the reader.
+    await page.keyboard.press("End");
+    await expect(reader).toHaveAttribute("data-follow-tail-state", "following");
+    await expect(card(page).getByRole("heading", { name: "Run pnpm deploy?" })).toBeVisible();
+    await expect(reader).toBeFocused();
+
+    // Activating the strip restores the card and moves focus to its heading.
+    await readBack();
+    await strip.locator(".dock-strip-title").click();
+    await expect(card(page).getByRole("heading", { name: "Run pnpm deploy?" })).toBeFocused();
+    await expect(reader).toHaveAttribute("data-follow-tail-state", "paused");
+
+    // A request arriving while collapsed takes the strip when it outranks the first, and is announced.
+    await reader.focus();
+    await page.keyboard.press("End");
+    await readBack();
+    await page.evaluate(() => window.__WOLLIPOG_REQUEST_SURFACES_E2E__.addRequest("budget"));
+    await expect(strip.locator(".dock-strip-title")).toHaveText("Cost budget reached — $5.02 of $5.00. Continue?");
+    await expect(strip.locator(".dock-strip-position")).toHaveText("1 of 2");
+    await expect(page.locator("[data-request-dock-announcement]"))
+      .toHaveText("Approval Required: Cost budget reached — $5.02 of $5.00. Continue?");
+    await expand.click();
+    await expect(card(page).getByRole("heading")).toBeFocused();
+  });
+}
+
 test("the footer is Reject, the ⋯ menu, then Allow, and Always Allow is only in the menu with its description", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/request-surfaces-e2e.html?scenario=permission");

@@ -5964,6 +5964,7 @@ function SessionDetailLoaded({
         showKeyHints={sessionReadingKeys}
         keyboardOpen={softwareKeyboardOpen}
         revealRequestId={revealRequestId}
+        followTailState={followTail.state}
       />
     ),
   } : undefined;

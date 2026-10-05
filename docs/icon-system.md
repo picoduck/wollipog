@@ -58,6 +58,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `ChevronDownIcon` | Lucide | `ChevronDown` | Directional disclosure. |
 | `ChevronRightIcon` | Lucide | `ChevronRight` | Directional disclosure. |
 | `ChevronLeftIcon` | Lucide | `ChevronLeft` | Directional disclosure. |
+| `ChevronUpIcon` | Lucide | `ChevronUp` | Expand on the request dock's reading-back strip. |
 | `PlusIcon` | Lucide | `Plus` | Generic add action. |
 | `PinIcon` | Lucide | `Pin` | Pinned session state. |
 | `MoreHorizontalIcon` | Lucide | `Ellipsis` | Horizontal overflow menu. |

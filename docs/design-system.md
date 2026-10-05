@@ -2106,10 +2106,14 @@ follows these rules so it never crowds out the conversation it asks about:
   (`SessionNoticeSlot`), at the end of the `.chat-reading` column, a size container its caps are
   measured against. Questions stay where they are until #2205, and a worker's request stays in the
   Agents panel.
-- **Reading back shrinks it to a strip.** While the reader scrolls up away from the live tail, the
-  dock becomes one 44px strip: kind icon, title, count ("1 of 3") and Expand. Returning to the tail or
-  activating the strip restores the dock and moves focus to the card's heading. A new request updates
-  the strip's title and count and is announced. The request never disappears.
+- **Reading back shrinks it to a strip.** While the reader scrolls up away from the live tail (the
+  follow-tail state is paused), the dock becomes one 44px `.dock-strip` on the card's warning
+  surface: kind icon, the expanded request's title, its position ("1 of 3") and Expand, icon-only
+  below 760px with the name "Expand Request". Returning to the tail restores the card without moving
+  focus; activating the strip or Expand restores it and moves focus to the card's heading, and it stays
+  expanded until the reader is back at the tail. A and D do nothing while the strip shows. A new
+  request updates the strip's title and count and is announced once. The request never disappears,
+  and the height the dock gives back goes to the transcript without moving its reading anchor.
 - **The question and its context link both ways.** The transcript keeps a compact neutral marker
   where a question was asked ("Question · title", with Jump to Question). The card head has Show Where
   Asked, which scrolls the transcript so the marker sits in the upper third, gives the marker the

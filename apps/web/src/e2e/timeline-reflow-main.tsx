@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { flushSync } from "react-dom";
-import type { AgentQuestion } from "@wollipog/protocol";
+import { prioritizedPendingRequests, type AgentQuestion, type SessionView } from "@wollipog/protocol";
 import type { TimelineItem } from "../timeline.js";
 import { EventTimeline, type TimelineRevealRequest } from "../components/EventTimeline.js";
 import {
@@ -10,6 +10,7 @@ import {
 } from "../components/MeasuredVirtualList.js";
 import { useFollowTail } from "../useFollowTail.js";
 import { TranscriptTailControl, transcriptTailView } from "../components/TranscriptTailControl.js";
+import { RequestDock, dockRequests } from "../components/requests/RequestDock.js";
 import "../styles.css";
 
 const sentence = "A long transcript message must wrap naturally when the side panel narrows the reader, without colliding with the next message or its timestamp. ";
@@ -257,6 +258,26 @@ const baseItems: TranscriptItem[] = Array.from({ length: 30 }, (_, index) => ind
   ? { kind: "agent_message" as const, id: index + 1, text: `${index + 1}. ${sentence.repeat(30)}`, createdAt: Date.now() - index * 1_000 }
   : { kind: "user_message" as const, id: index + 1, text: `${index + 1}. ${sentence.repeat(22)}`, createdAt: Date.now() - index * 1_000 });
 
+/** The request docked below the reader with `dock=1`. */
+const dockSession = {
+  id: "timeline-reflow-dock",
+  runnerId: "runner-1",
+  title: "Timeline Reflow",
+  status: "input_required",
+  agentName: "Claude Code",
+  driver: "claude-code",
+  pendingApproval: {
+    requestId: "reflow-permission",
+    kind: "permission",
+    title: "Run a potentially destructive command",
+    context: { toolName: "Bash", path: "/workspace/app", input: "rm -rf build && pnpm build" },
+    options: [
+      { optionId: "allow", name: "Allow", kind: "allow_once" },
+      { optionId: "deny", name: "Reject", kind: "reject_once" },
+    ],
+  },
+} as SessionView;
+
 function Fixture() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const disabledFollowScrollRef = useRef<HTMLDivElement>(null);
@@ -270,6 +291,8 @@ function Fixture() {
   const ledgerFixtureEnabled = useMemo(() => new URLSearchParams(window.location.search).get("ledger") === "1", []);
   const questionHistoryFixtureEnabled = useMemo(() => new URLSearchParams(window.location.search).get("question-history") === "1", []);
   const historyFixtureEnabled = useMemo(() => new URLSearchParams(window.location.search).get("history") === "1", []);
+  // `dock=1`: a pending request docked below the reader in a reading column, as in Session Detail (#2195).
+  const dockFixtureEnabled = useMemo(() => new URLSearchParams(window.location.search).get("dock") === "1", []);
   const [panelWidth, setPanelWidth] = useState(0);
   const [composerHeight, setComposerHeight] = useState(0);
   const [noticeMounted, setNoticeMounted] = useState(true);
@@ -408,7 +431,10 @@ function Fixture() {
   }, [followTail.follow]);
   return (
     <main style={{ display: "flex", width: "100vw", height: "100vh", background: "var(--bg)" }}>
-      <section style={{ display: "flex", minWidth: 0, flex: 1, flexDirection: "column" }}>
+      <section
+        className={dockFixtureEnabled ? "chat-reading" : undefined}
+        style={{ display: "flex", minWidth: 0, flex: 1, flexDirection: "column" }}
+      >
         <div
           className="detail-scroll measured-virtual-scroll"
           ref={scrollRef}
@@ -490,6 +516,16 @@ function Fixture() {
             onShowNotSent={() => {}}
             onFocusLost={() => scrollRef.current?.focus({ preventScroll: true })}
           />
+        )}
+        {dockFixtureEnabled && (
+          <div className="session-notice-slot">
+            <RequestDock
+              session={dockSession}
+              requests={dockRequests(prioritizedPendingRequests(dockSession.pendingApproval))}
+              runnerOnline
+              followTailState={followTailEnabled ? followTail.state : undefined}
+            />
+          </div>
         )}
         {/* Stands in for the auto-growing composer: a sibling below the reader in the same flex
             column, so its height changes resize the transcript viewport exactly like a draft

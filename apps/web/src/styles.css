@@ -5304,6 +5304,52 @@ textarea {
   flex-direction: column;
   min-height: 0;
 }
+/* Reading back (#2195): the dock as one 44px row on the card's warning surface, so the history the
+   reader went back for keeps the rest of the column. The title gives way to nothing but its ellipsis:
+   the position is a few characters and Expand turns into an icon on phones. */
+.dock-strip {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-2);
+  height: 44px;
+  padding: 0 var(--space-2) 0 var(--space-3);
+  border: 1px solid color-mix(in srgb, var(--amber) 32%, transparent);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--amber) 7%, var(--bg-elev));
+  color: var(--text);
+  font: var(--type-body);
+  cursor: pointer;
+}
+.dock-strip > .app-icon {
+  flex: none;
+  color: var(--amber-on-tint);
+}
+@media (forced-colors: active) {
+  .dock-strip > .app-icon { color: inherit; }
+}
+.dock-strip-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font: var(--type-body-strong);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dock-strip-position {
+  flex: none;
+  color: var(--text-dim);
+  font: var(--type-small);
+  font-variant-numeric: tabular-nums;
+}
+.dock-strip-expand { flex: none; }
+@media (max-width: 760px) {
+  .dock-strip-expand {
+    width: var(--control-h-sm);
+    padding: 0;
+  }
+  .dock-strip-expand-label { display: none; }
+}
 
 /* The Request Card (#2179): the one warning surface a live request uses, never the danger red of a
    failure. Its head, title and footer keep their height; only the body scrolls. */

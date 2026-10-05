@@ -129,6 +129,8 @@ export const REQUEST_CARD_COPY = {
   pendingRequests: "Pending Requests",
   waitingRequests: "Waiting Requests",
   pendingRequestTitle: "Pending Request",
+  expand: "Expand",
+  expandRequest: "Expand Request",
   runnerOffline: "Decisions are unavailable until the runner reconnects.",
   signInOwner: "Only the machine owner or an organization admin can start sign-in.",
   notSent: "Your decision wasn't sent.",
@@ -138,6 +140,11 @@ export const REQUEST_CARD_COPY = {
 /** The dock's disclosure: "+1 More Request", "+2 More Requests". */
 export function moreRequestsLabel(count: number): string {
   return `+${count} More ${count === 1 ? "Request" : "Requests"}`;
+}
+
+/** The reading-back strip's position of the expanded request among the docked ones: "1 of 3". */
+export function requestPositionLabel(position: number, count: number): string {
+  return `${position} of ${count}`;
 }
 
 /** The menu item that brings the dock back while a notice is shown in its place. */

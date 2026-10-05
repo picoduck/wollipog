@@ -25,6 +25,7 @@ import { RequestDock, dockRequests } from "../components/requests/RequestDock.js
 import { RequestKindIcon, pendingRequestsTitle } from "../components/requests/request-meta.js";
 import { decideDockedRequest } from "../components/requests/request-reveal.js";
 import { useSessionReadingKeys } from "../useSessionReadingKeys.js";
+import { useFollowTail } from "../useFollowTail.js";
 import { SessionApprovalRegion, focusSessionRequest } from "../components/SessionApproval.js";
 import { EventTimeline } from "../components/EventTimeline.js";
 import {
@@ -48,6 +49,8 @@ declare global {
       failNextDecision(): void;
       /** What the status control and the working line's Review do: bring a request into view. */
       reveal(requestId: string): boolean;
+      /** A request arrives while the dock is pending (#2195). */
+      addRequest(kind: "sign-in" | "budget"): void;
     };
   }
 }
@@ -62,6 +65,9 @@ const respondAs = query.get("respond");
 const withNotices = query.get("notices") === "1";
 const tallBody = query.get("tall") === "1";
 const keyboardOpen = query.get("keyboard") === "1";
+// `follow=1`: the transcript follows its tail as the session's does, so reading back shrinks the
+// dock to its strip (#2195).
+const followTailEnabled = query.get("follow") === "1";
 let failNextDecision = false;
 const evidenceCount = Number(new URLSearchParams(window.location.search).get("items")) || 8;
 // `bounded=1` replaces the held children with one whose handoff the runner bounds (#1778);
@@ -153,6 +159,7 @@ async function prepareArtifacts(): Promise<void> {
 let openedChild: DescendantRequestView | null = null;
 let openedHeldChild: string | null = null;
 let clearHold: (sessionId: string) => void = () => {};
+let addRequest: (kind: "sign-in" | "budget") => void = () => {};
 const submissions: unknown[] = [];
 
 function evidenceSession(): SessionView {
@@ -768,6 +775,14 @@ function Fixture() {
       },
     } as SessionView;
   });
+  addRequest = (kind) => setSession((current) => {
+    const [first, ...rest] = pendingRequests(current.pendingApproval);
+    const arriving = kind === "sign-in" ? signInRequest() : budgetRequest();
+    return {
+      ...current,
+      pendingApproval: { ...first!, additionalRequests: [...rest, arriving] },
+    } as SessionView;
+  });
   const [selectedKey, setSelectedKey] = useState<string | null>(() => includeDescendants
     ? sessionRequestPanelKey(descendants[0]!.sessionId, descendants[0]!.occurrenceId)
     : null);
@@ -869,6 +884,14 @@ function Fixture() {
       ({ kind: "user_message", id: 200 + index, text: `Later transcript message ${index + 1}` })) : []),
   ] : [];
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  // Without `follow=1` the hook watches no element, so the transcript keeps its resting position.
+  const unfollowedRef = useRef<HTMLDivElement | null>(null);
+  const followTail = useFollowTail({
+    scrollRef: followTailEnabled ? scrollRef : unfollowedRef,
+    contentRevision: session.pendingApproval,
+    sessionId: session.id,
+    persistenceScope: "request-surfaces-e2e",
+  });
   const docked = dockRequests(prioritizedPendingRequests(session.pendingApproval));
   const permissionTimes = new Map(standaloneTimelineItems.flatMap((item) =>
     item.kind === "permission" && item.createdAt ? [[item.requestId, item.createdAt] as const] : []));
@@ -889,6 +912,7 @@ function Fixture() {
         showKeyHints
         keyboardOpen={keyboardOpen}
         revealRequestId={revealRequestId}
+        followTailState={followTailEnabled ? followTail.state : undefined}
       />
     ),
   } : undefined;
@@ -952,7 +976,17 @@ function Fixture() {
                 <div className="detail-main">
                   <div className="detail-reader">
                     <div className="detail-scroll measured-virtual-scroll" role="region" aria-label="Session Activity"
-                      ref={scrollRef} tabIndex={0}>
+                      ref={scrollRef} tabIndex={0}
+                      data-follow-tail-state={followTailEnabled ? followTail.state : undefined}
+                      onScroll={followTailEnabled ? followTail.onScroll : undefined}
+                      onWheel={followTailEnabled ? followTail.onWheel : undefined}
+                      onPointerMove={followTailEnabled ? followTail.onPointerMove : undefined}
+                      onTouchStart={followTailEnabled ? (event) => followTail.onTouchStart(event.nativeEvent) : undefined}
+                      onKeyDown={followTailEnabled ? (event) => {
+                        if (!followTail.onKeyDown(event)) return;
+                        event.preventDefault();
+                        event.stopPropagation();
+                      } : undefined}>
                       {Array.from({ length: scenario === "artifact-timeline" ? 0 : 24 }, (_, index) => (
                         <div className={`tl-row ${index % 2 ? "agent" : "user"}`} key={index}>
                           <div className={index % 2 ? "tl-agent-msg" : "tl-bubble"}>
@@ -1022,6 +1056,7 @@ window.__WOLLIPOG_REQUEST_SURFACES_E2E__ = {
   clearHold: (sessionId) => clearHold(sessionId),
   failNextDecision: () => { failNextDecision = true; },
   reveal: (requestId) => focusSessionRequest("dock-session", requestId),
+  addRequest: (kind) => addRequest(kind),
 };
 
 void prepareArtifacts().then(() => createRoot(document.getElementById("root")!).render(<Fixture />));

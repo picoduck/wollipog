@@ -16,6 +16,7 @@ import {
   ChevronDown as LucideChevronDown,
   ChevronLeft as LucideChevronLeft,
   ChevronRight as LucideChevronRight,
+  ChevronUp as LucideChevronUp,
   Circle as LucideCircle,
   CircleUserRound as LucideCircleUserRound,
   CircleX as LucideCircleX,
@@ -271,6 +272,10 @@ export function ChevronRightIcon(props: IconProps) {
 
 export function ChevronLeftIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideChevronLeft} {...props} />;
+}
+
+export function ChevronUpIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideChevronUp} {...props} />;
 }
 
 export function PlusIcon(props: IconProps) {
