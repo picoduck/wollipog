@@ -421,13 +421,30 @@ for (const viewport of [
     expect((await page.getByRole("region", { name: "Session Activity" }).boundingBox())!.height).toBeGreaterThan(100);
     const composer = (await page.locator(".composer-box").boundingBox())!;
     expect(composer.y + composer.height).toBeLessThanOrEqual(480);
-    // Held Children scrolls inside its own edge rather than spilling past it, and what it cannot show
-    // scrolls into view from the keyboard.
+    // Held Children keeps a usable view (10rem, 12rem on phones) and the band scrolls past it; what
+    // either cannot show scrolls into view from the keyboard.
     const held = page.getByRole("region", { name: "Held Children" });
-    const heldBox = (await held.boundingBox())!;
-    expect(heldBox.y + heldBox.height).toBeLessThanOrEqual(bandBox.y + bandBox.height + 1);
+    expect((await held.boundingBox())!.height).toBeGreaterThanOrEqual(viewport.width <= 760 ? 191 : 159);
+    expect(await held.evaluate((element) => element.scrollHeight <= element.clientHeight + 1 ||
+      getComputedStyle(element).overflowY === "auto")).toBe(true);
     await page.getByRole("link", { name: "Fix #1651: Queue Prompts Behind a Handoff Barrier" }).focus();
     await expect(page.getByRole("link", { name: "Fix #1651: Queue Prompts Behind a Handoff Barrier" })).toBeInViewport();
+  });
+
+  test(`a long continuation error behind Show Details leaves Held Children a usable view, at ${viewport.name} (#2157)`, async ({ page }) => {
+    await page.setViewportSize({ width: viewport.width, height: 600 });
+    await page.goto("/request-surfaces-e2e.html?scenario=both");
+    await page.getByRole("status", { name: "Couldn't Resume the Orchestrator" })
+      .getByRole("button", { name: "Show Details" }).click();
+    const held = page.getByRole("region", { name: "Held Children" });
+    // Held Children keeps 10rem (12rem on phones) and the band scrolls instead of crushing it.
+    expect((await held.boundingBox())!.height).toBeGreaterThanOrEqual(viewport.width <= 760 ? 191 : 159);
+    expect(await page.locator(".campaign-notices").evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+    const link = held.getByRole("link", { name: "Fix #1650: Keep a Decision Resume Across Worktree Recovery" });
+    await link.focus();
+    await expect(link).toBeInViewport();
+    const composer = (await page.locator(".composer-box").boundingBox())!;
+    expect(composer.y + composer.height).toBeLessThanOrEqual(600);
   });
 
   test(`with both campaign notices in a common window, Held Children's list gives up height and nothing is cut, at ${viewport.name} (#2157)`, async ({ page }) => {

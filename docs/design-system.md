@@ -2026,7 +2026,11 @@ exactly one: the most severe, then the lowest rank.
   Children is a neutral notice with the `CirclePause` icon and a count badge in its title: the
   summary sentence, then a focusable list capped at 280px (220px on phones) that scrolls. Each child
   is its session link, followed by one `.facts` list per hold (Hold, Reason, Recovery Action with its
-  backtick spans as code, Held Decision Resumes); on phones each label stacks over its value.
+  backtick spans as code, Held Decision Resumes); on phones each label stacks over its value. As with
+  the request dock, the transcript keeps at least half the column: the band takes at most 50%, Held
+  Children's list gives up height first (to 96px, the list never more than 40% of the window), the
+  notice then scrolls inside its own edge down to 10rem (12rem on phones), and only past that does
+  the band scroll.
 - A condition nothing waits on is info, compact and dismissible: skills that a container or cloud
   session cannot use (the dismissal is kept per session on the device, and the Pinned Summary keeps
   a Skills: Not Available row) and the Project setup suggestion (dismissed for the Project on the

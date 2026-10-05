@@ -9107,10 +9107,12 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   overscroll-behavior: contain;
 }
 .campaign-notices > .notice { flex: none; }
+/* Held Children shrinks no further than a usable view of its list (10rem, 12rem on phones, both under
+   its natural height); past that the band scrolls instead, as when Show Details opens a long error. */
 .campaign-notices > .held-children-notice {
   flex: 0 1 auto;
   grid-template-rows: minmax(0, 1fr);
-  min-height: 0;
+  min-height: 10rem;
   overflow-y: auto;
   overscroll-behavior: contain;
 }
@@ -9149,6 +9151,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 
 @media (max-width: 760px) {
   .held-children { max-height: min(220px, 40dvh); }
+  .campaign-notices > .held-children-notice { min-height: 12rem; }
   /* A phone stacks each hold's label over its value. */
   .held-children .facts {
     grid-template-columns: minmax(0, 1fr);
