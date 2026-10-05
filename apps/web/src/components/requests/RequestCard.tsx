@@ -181,6 +181,9 @@ export function RequestCard({
     : { ...requestCardActions(request.options), recheck: null, methods: [] };
   const { tertiary, secondary, menu: menuOptions, primary, recheck, methods } = actions;
   const recovery = authenticationRecoveryPanelApplies(session, request);
+  // Check Again lives on the recovery body's Last Checked fact. Where that body is not shown (a child's
+  // sign-in read under a parent of another driver) the recheck stays reachable as a secondary.
+  const footerSecondary = recheck && !recovery ? [...secondary, recheck] : secondary;
   const canChooseAccount = authenticationAccountChoiceApplies(session, request, runner);
   const [choosingAccount, setChoosingAccount] = useState(false);
   // The sign-in method chosen among several; the first until the person picks another.
@@ -337,7 +340,7 @@ export function RequestCard({
       )}
       <div className="request-card-foot">
         {tertiary && optionButton(tertiary, "tertiary")}
-        {secondary.map((option) => optionButton(option, "secondary"))}
+        {footerSecondary.map((option) => optionButton(option, "secondary"))}
         {canChooseAccount && (
           // #2208 opens its Choose Another Account dialog from here; until then the card lists the
           // Machine's other accounts in its body.

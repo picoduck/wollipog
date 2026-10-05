@@ -495,6 +495,27 @@ test("each sign-in state has exactly one primary, or only Cancel Sign-In while a
   }
 });
 
+test("without the recovery body, Recheck Authentication stays a footer secondary", async () => {
+  // The Requests panel reads a Claude Code child's sign-in with its ACP parent's driver, so the
+  // recovery body (and its Check Again) does not render there.
+  const decisions: unknown[] = [];
+  const request = recovery([AUTH.login, AUTH.revalidate, AUTH.dismiss]);
+  const view = await renderWithRunner(
+    <RequestCard session={signInSession(request, { driver: "acp" })} request={request} runnerOnline presentation="panel" />, {},
+    { approve: async (_id, body) => { decisions.push(body); return signInSession(request); } },
+  );
+  try {
+    assert.deepEqual(footer(view.container), ["Dismiss Recovery", "Recheck Authentication", "Start Sign-In (primary)"]);
+    assert.equal(view.container.querySelectorAll(".request-card .primary").length, 1);
+    const recheck = [...view.container.querySelectorAll<HTMLButtonElement>(".request-card-foot > button")]
+      .find((button) => button.textContent === "Recheck Authentication")!;
+    await act(async () => { recheck.click(); await tick(); await tick(); });
+    assert.deepEqual(decisions, [{ requestId: "provider-auth:card", optionId: "auth:revalidate" }]);
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("Check Again on the Last Checked fact runs the runner's recheck; Dismiss Recovery sits at the far left", async () => {
   const decisions: unknown[] = [];
   const request = recovery([AUTH.acceptCurrent, AUTH.revalidate, AUTH.dismiss]);
