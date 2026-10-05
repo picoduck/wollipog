@@ -71,44 +71,6 @@ export interface GovernancePolicyNames {
   invalidate: () => void;
 }
 
-/** One terminal resolution the governance audit recorded for a permission: who settled it, and when.
- * `actor` is null for an actor a row cannot name (an agent). */
-export interface PermissionResolution {
-  actor: DecisionActor | null;
-  at: number;
-}
-
-/** The audit's terminal permission resolutions, by request id. */
-export type PermissionResolutions = ReadonlyMap<string, readonly PermissionResolution[]>;
-
-/**
- * Who settled each permission, from the session's content-safe governance audit: the runner's
- * `permission_resolved` names no one, and a policy can settle a permission as well as a person.
- * Empty where the audit is not loaded (a shared page, a collapsed preview).
- */
-export const PermissionResolutionActorsContext = createContext<PermissionResolutions>(new Map());
-
-/** How far apart the control plane's audit time and the runner's event time may be for one
- * resolution. Clocks differ between machines; a reused request id is resolved much further apart. */
-export const PERMISSION_RESOLUTION_WINDOW_MS = 5 * 60_000;
-
-/**
- * Who settled this occurrence of a permission: the one audited resolution of its request id within
- * the window of its own resolution time. A provider can reuse a request id (Codex's restart per
- * process), and the audit may not hold an old occurrence (paging, retention), so with no match, or
- * more than one, the row names no one rather than borrow another occurrence's actor.
- */
-export function permissionResolutionActor(
-  resolutions: PermissionResolutions,
-  requestId: string,
-  resolvedAt: number | undefined,
-): DecisionActor | undefined {
-  if (resolvedAt === undefined || !Number.isFinite(resolvedAt)) return undefined;
-  const near = (resolutions.get(requestId) ?? []).filter((resolution) =>
-    Math.abs(resolution.at - resolvedAt) <= PERMISSION_RESOLUTION_WINDOW_MS);
-  return near.length === 1 ? near[0]!.actor ?? undefined : undefined;
-}
-
 export const GovernancePolicyNamesContext = createContext<GovernancePolicyNames>({
   names: null,
   load: () => {},
@@ -203,21 +165,17 @@ export function permissionOutcome(item: PermissionItem): DecisionOutcome {
   }
 }
 
-/** Outcomes nobody chose: the request ended around the person rather than by them. */
-const UNATTRIBUTED: ReadonlySet<DecisionOutcome> = new Set([
-  "replaced", "provider_resolved", "expired", "rechecked_automatically", "another_account_selected",
-]);
-
 /**
- * A resolved permission as a Decision Record. A parent session's decision names the parent; any
- * other is named only by its audited actor (`resolvedBy`), since a policy can settle a permission
- * too. Without one the row names nobody rather than assume a person did.
+ * A resolved permission as a Decision Record. The runner's `permission_resolved` names who decided
+ * only when a parent session did; a person and a policy both resolve permissions without naming
+ * themselves there, so any other row names no one rather than guess (the audit cannot be tied to one
+ * occurrence of a reused provider request id).
  */
-export function permissionDecisionRecord(item: PermissionItem, resolvedBy?: DecisionActor): DecisionRecordModel {
+export function permissionDecisionRecord(item: PermissionItem): DecisionRecordModel {
   const outcome = permissionOutcome(item);
   const actor: DecisionActor | undefined = item.resolvedByParentSessionId
     ? { kind: "parent", sessionId: item.resolvedByParentSessionId }
-    : UNATTRIBUTED.has(outcome) ? undefined : resolvedBy;
+    : undefined;
   const context = item.context;
   const facts: DecisionFact[] = [];
   if (context?.toolName) facts.push({ label: "Tool", value: context.toolName });

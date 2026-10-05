@@ -6,13 +6,11 @@ import {
   governanceDecisions,
   landedGovernanceAnchors,
   mergeGovernanceDecisions,
-  permissionResolutionActors,
   sameGovernanceSnapshot,
   transcriptGovernanceDecisions,
   type GovernanceAnchorEvent,
   type GovernanceDecision,
 } from "../governance.js";
-import type { PermissionResolutions } from "../decision-record.js";
 import { publishTimelineSnapshotDelta, type TimelineItem } from "../timeline.js";
 
 const NO_ENTRIES: GovernanceAuditEntry[] = [];
@@ -26,8 +24,6 @@ const NO_ENTRIES: GovernanceAuditEntry[] = [];
  */
 export interface GovernanceAuditState {
   decisions: GovernanceDecision[];
-  /** Who settled each permission, by request id and time (#2204). */
-  permissionActors: PermissionResolutions;
   available: boolean;
   hasMore: boolean;
   loadingOlder: boolean;
@@ -219,10 +215,8 @@ export function useGovernanceAudit(
 
   const visibleEntries = page.sessionId === sessionId ? page.entries : NO_ENTRIES;
   const decisions = useMemo(() => governanceDecisions(visibleEntries), [visibleEntries]);
-  const permissionActors = useMemo(() => permissionResolutionActors(visibleEntries), [visibleEntries]);
   return {
     decisions,
-    permissionActors,
     available: decisions.length > 0 || (page.sessionId === sessionId && page.hasMore),
     hasMore: page.sessionId === sessionId && page.hasMore,
     loadingOlder: page.sessionId === sessionId && page.loadingOlder,

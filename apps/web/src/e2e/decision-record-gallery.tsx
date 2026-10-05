@@ -2,7 +2,7 @@ import React from "react";
 import type { GovernanceAuditEntry, PermissionOption, SessionEvent, SessionEventPayload, SessionView } from "@wollipog/protocol";
 import { EventTimeline } from "../components/EventTimeline.js";
 import { GovernancePolicyNamesContext } from "../decision-record.js";
-import { governanceDecisions, permissionResolutionActors } from "../governance.js";
+import { governanceDecisions } from "../governance.js";
 import { ViewerIdentityContext, viewerIdentity } from "../resolver-identity.js";
 import { StoreProvider } from "../store.js";
 import { deriveTimeline, type TimelineItem } from "../timeline.js";
@@ -61,14 +61,6 @@ const items: TimelineItem[] = [
   ...governanceDecisions(audit).map((decision, index): TimelineItem => ({ kind: "governance_decision", id: 100 + index, decision })),
 ];
 
-/** The session's audit names Alice as the person who settled her two permissions. */
-const permissionActors = permissionResolutionActors([
-  { auditId: "audit-allowed", requestId: "perm-allowed", approvalKind: "permission", stage: "resolution", outcome: "allowed",
-    actor: { kind: "human", id: "alice" }, scope, timestamp: at(1) },
-  { auditId: "audit-rejected", requestId: "perm-rejected", approvalKind: "permission", stage: "resolution", outcome: "denied",
-    actor: { kind: "human", id: "alice" }, scope, timestamp: at(3) },
-]);
-
 const policies = {
   names: new Map([["no-shell-in-production", "No Shell in Production"], ["ask-before-deploys", "Ask Before Deploys"]]),
   load: () => {},
@@ -114,7 +106,7 @@ export function DecisionRecordGallery() {
     <StoreProvider connection={connection}>
       <GovernancePolicyNamesContext.Provider value={policies}>
         <ViewerIdentityContext.Provider value={viewer}>
-          <EventTimeline ariaLabel="Decision Records" items={items} onOpenSession={() => {}} permissionActors={permissionActors} />
+          <EventTimeline ariaLabel="Decision Records" items={items} onOpenSession={() => {}} />
         </ViewerIdentityContext.Provider>
       </GovernancePolicyNamesContext.Provider>
     </StoreProvider>

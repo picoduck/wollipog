@@ -19,7 +19,7 @@ import type {
   GovernanceAuditOutcome,
   GovernanceAuditStage,
 } from "@wollipog/protocol";
-import type { DecisionActor, DecisionOutcome, PermissionResolution, PermissionResolutions } from "./decision-record.js";
+import type { DecisionActor, DecisionOutcome } from "./decision-record.js";
 import { isCollapsibleWorkItem, type TimelineItem } from "./timeline.js";
 
 export interface GovernanceOutcome {
@@ -126,33 +126,6 @@ export function governanceAuditPresentation(entry: GovernanceAuditEntry): Govern
   }
   if (entry.approvalKind !== "policy_hook") return null;
   return policyHookOutcome(entry.stage, entry.outcome, entry.actor, entry.governancePolicyId, "audit");
-}
-
-const PERMISSION_KINDS = new Set(["permission", "authentication"]);
-const TERMINAL_RESOLUTIONS = new Set(["allowed", "denied", "dismissed", "answered"]);
-
-/**
- * Every terminal resolution the audit recorded for a runner permission, by request id (#2204): a
- * member (named relative to the viewer when rendered), a policy, or Wollipog, and when. A row picks
- * its own occurrence's resolution by time (`permissionResolutionActor`).
- */
-export function permissionResolutionActors(entries: readonly GovernanceAuditEntry[]): PermissionResolutions {
-  const resolutions = new Map<string, PermissionResolution[]>();
-  const seen = new Set<string>();
-  for (const entry of entries) {
-    if (!PERMISSION_KINDS.has(entry.approvalKind) || entry.stage !== "resolution" ||
-        !TERMINAL_RESOLUTIONS.has(entry.outcome) || seen.has(entry.auditId)) continue;
-    seen.add(entry.auditId);
-    const actor: DecisionActor | null = entry.actor.kind === "human"
-      ? { kind: "member", ...(entry.actor.id ? { userId: entry.actor.id } : {}) }
-      : entry.actor.kind === "policy" ? policyActor(entry.actor, entry.governancePolicyId)
-        : entry.actor.kind === "system" ? { kind: "wollipog" }
-          : null;
-    const list = resolutions.get(entry.requestId) ?? [];
-    list.push({ actor, at: entry.timestamp });
-    resolutions.set(entry.requestId, list);
-  }
-  return resolutions;
 }
 
 /**

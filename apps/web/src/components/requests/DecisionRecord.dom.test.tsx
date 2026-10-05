@@ -15,8 +15,8 @@ import { api, type ApiClient } from "../../api.js";
 import { ApiProvider } from "../../api-context.js";
 import { assertNoDomNode } from "../../dom-test-assertions.js";
 import { installDomTestCleanup } from "../../dom-test-cleanup.js";
-import { GovernancePolicyNamesContext, type GovernancePolicyNames, type PermissionResolutions } from "../../decision-record.js";
-import { governanceDecisions, permissionResolutionActors } from "../../governance.js";
+import { GovernancePolicyNamesContext, type GovernancePolicyNames } from "../../decision-record.js";
+import { governanceDecisions } from "../../governance.js";
 import { ViewerIdentityContext, viewerIdentity } from "../../resolver-identity.js";
 import { StoreProvider } from "../../store.js";
 import { deriveTimeline, type TimelineItem } from "../../timeline.js";
@@ -169,7 +169,6 @@ async function mount(
   items: TimelineItem[],
   client: Partial<ApiClient> = {},
   onOpenSession?: (id: string) => void,
-  permissionActors?: PermissionResolutions,
 ) {
   const sockets: UiSocket[] = [];
   const connection: UiConnectionRuntime = {
@@ -192,7 +191,7 @@ async function mount(
       <GovernancePolicyNamesProvider>
         <PolicyNamesProbe />
         <ViewerIdentityContext.Provider value={soloViewer}>
-          <EventTimeline ariaLabel="Decisions" items={shown} onOpenSession={onOpenSession} permissionActors={permissionActors} />
+          <EventTimeline ariaLabel="Decisions" items={shown} onOpenSession={onOpenSession} />
         </ViewerIdentityContext.Provider>
       </GovernancePolicyNamesProvider>
     </StoreProvider></ApiProvider>);
@@ -240,7 +239,7 @@ test("every permission resolution reads as a past-tense outcome, never an arrow 
     const allowed = rows[cases.findIndex((entry) => entry.optionId === "opt-allow-once-x7")]!;
     assert.equal(allowed.querySelector(".tl-decision-outcome")?.className, "tl-decision-outcome t-success");
     assertNoDomNode(allowed.querySelector(".tl-decision-by"),
-      "without the session's audit, a permission names nobody rather than assume a person decided");
+      "a permission's event names no one, so the row names nobody rather than guess who decided");
     assert.ok(allowed.querySelector(".lucide-circle-check"), "a success outcome shows CircleCheck");
     const rejected = rows[cases.findIndex((entry) => entry.optionId === "opt-reject-once-x7")]!;
     assert.equal(rejected.querySelector(".tl-decision-outcome")?.className, "tl-decision-outcome t-neutral");
@@ -389,65 +388,6 @@ test("policy names reload once for a policy they lack, and again after a policy 
     assert.equal(loads, 5);
     await view.render([blockedBy("alpha-x7", 0), blockedBy("beta-x7", 1), blockedBy("gone-x7", 2)]);
     assert.equal(loads, 5);
-  } finally {
-    await view.unmount();
-  }
-});
-
-test("a permission names who settled it from the session's audit: you, a policy, or nobody when unsure", async () => {
-  const items = deriveTimeline([
-    event({ kind: "permission_request", requestId: "by-person", title: "Run Tests", options: OPTION_SETS.acp! }),
-    event({ kind: "permission_resolved", requestId: "by-person", optionId: "opt-allow-once-x7", resolutionReason: "submitted" }),
-    event({ kind: "permission_request", requestId: "by-policy", title: "Read Files", options: OPTION_SETS.acp! }),
-    event({ kind: "permission_resolved", requestId: "by-policy", optionId: "opt-allow-once-x7", resolutionReason: "submitted" }),
-    event({ kind: "permission_request", requestId: "reused", title: "Write File", options: OPTION_SETS.acp! }),
-    event({ kind: "permission_resolved", requestId: "reused", optionId: "opt-reject-once-x7", resolutionReason: "submitted" }),
-  ]);
-  // The control plane's audit of each resolution: a person, a scoped allow policy that auto-resolved
-  // the request, and a provider request id used twice, so neither of its actors can be trusted.
-  const actors = permissionResolutionActors([
-    audit({ auditId: "a1", requestId: "by-person", approvalKind: "permission", outcome: "allowed", actor: { kind: "human", id: "alice" } }),
-    audit({ auditId: "a2", requestId: "by-policy", approvalKind: "permission", outcome: "allowed",
-      actor: { kind: "policy", id: "allow-reads-x7" }, governancePolicyId: "allow-reads-x7" }),
-    audit({ auditId: "a3", requestId: "reused", approvalKind: "permission", outcome: "denied", actor: { kind: "human", id: "alice" } }),
-    audit({ auditId: "a4", requestId: "reused", approvalKind: "permission", outcome: "allowed", actor: { kind: "policy", id: "allow-reads-x7" } }),
-  ]);
-  const governancePolicies: ApiClient["governancePolicies"] = async () =>
-    ({ policies: [{ policyId: "allow-reads-x7", name: "Allow Reads" }] as never });
-  const view = await mount(items, { governancePolicies }, undefined, actors);
-  try {
-    await view.online();
-    assert.deepEqual(view.rows().map((row) => row.querySelector("summary")?.getAttribute("aria-label")), [
-      "Allowed Run Tests by You",
-      "Allowed Read Files by Allow Reads",
-      "Rejected Write File",
-    ]);
-    assert.doesNotMatch(view.container.textContent ?? "", /allow-reads-x7|alice/);
-  } finally {
-    await view.unmount();
-  }
-});
-
-test("a reused request id names each occurrence only by its own audited resolution", async () => {
-  const OLD = RESOLVED_AT - 100 * 86_400_000;
-  // The provider reused the id 100 days later. The old resolution's audit is past retention, so only
-  // the new one is in the audit; the old row must not borrow it.
-  const items = deriveTimeline([
-    event({ kind: "permission_request", requestId: "reused-id", title: "Old Request", options: OPTION_SETS.acp! }, OLD),
-    event({ kind: "permission_resolved", requestId: "reused-id", optionId: "opt-reject-once-x7", resolutionReason: "submitted" }, OLD),
-    event({ kind: "permission_request", requestId: "reused-id", title: "New Request", options: OPTION_SETS.acp! }),
-    event({ kind: "permission_resolved", requestId: "reused-id", optionId: "opt-allow-once-x7", resolutionReason: "submitted" }),
-  ]);
-  const actors = permissionResolutionActors([
-    audit({ auditId: "new", requestId: "reused-id", approvalKind: "permission", outcome: "allowed",
-      actor: { kind: "human", id: "alice" }, timestamp: RESOLVED_AT - 2_000 }),
-  ]);
-  const view = await mount(items, {}, undefined, actors);
-  try {
-    assert.deepEqual(view.rows().map((row) => row.querySelector("summary")?.getAttribute("aria-label")), [
-      "Rejected Old Request",
-      "Allowed New Request by You",
-    ]);
   } finally {
     await view.unmount();
   }

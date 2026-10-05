@@ -9,15 +9,12 @@ import {
   governanceAuditPresentation,
   governanceDecisions,
   mergeGovernanceDecisions,
-  permissionResolutionActors,
   sameGovernanceSnapshot,
   transcriptGovernanceDecisions,
 } from "./governance.js";
 import { GovernanceHistoryPanel } from "./components/GovernanceHistoryPanel.js";
 import {
   decisionActorName,
-  PERMISSION_RESOLUTION_WINDOW_MS,
-  permissionResolutionActor,
   decisionRecordText,
   governanceDecisionRecord,
   GovernancePolicyNamesContext,
@@ -209,36 +206,6 @@ test("a policy's decision names the policy, never its id, and Decided By appears
   assert.match(html, /Copy Audit ID/);
   const visible = html.replace(/<[^>]+>/g, " ");
   assert.doesNotMatch(visible, /deny-shell|ask-deploys|audit-block|hook-1|Policy ·/, "ids are only copied");
-});
-
-test("a permission's audited resolution names who settled it, and an ambiguous request id names no one (#2204)", () => {
-  const actors = permissionResolutionActors([
-    entry({ auditId: "p1", requestId: "perm-person", approvalKind: "permission", outcome: "allowed", actor: { kind: "human", id: "user-ada" } }),
-    entry({ auditId: "p2", requestId: "perm-policy", approvalKind: "permission", outcome: "allowed",
-      actor: { kind: "policy", id: "allow-read" }, governancePolicyId: "allow-read" }),
-    entry({ auditId: "p3", requestId: "perm-auth", approvalKind: "authentication", outcome: "dismissed", actor: { kind: "system", id: "auth" } }),
-    // A failed delivery is not how the request ended; the later resolution is.
-    entry({ auditId: "p4", requestId: "perm-retried", approvalKind: "permission", outcome: "delivery_failed", actor: { kind: "human", id: "user-ada" } }),
-    entry({ auditId: "p5", requestId: "perm-retried", approvalKind: "permission", outcome: "denied", actor: { kind: "human", id: "user-grace" } }),
-    // The same provider request id resolved twice (ids restart per provider process).
-    entry({ auditId: "p6", requestId: "perm-reused", approvalKind: "permission", outcome: "allowed", actor: { kind: "human", id: "user-ada" } }),
-    entry({ auditId: "p7", requestId: "perm-reused", approvalKind: "permission", outcome: "allowed", actor: { kind: "human", id: "user-ada" } }),
-    // Not a permission resolution.
-    entry({ auditId: "p8", requestId: "hook-1", approvalKind: "policy_hook", outcome: "allowed" }),
-    entry({ auditId: "p9", requestId: "perm-request", approvalKind: "permission", stage: "request", outcome: "pending" }),
-  ]);
-  const who = (requestId: string, at = 1) => permissionResolutionActor(actors, requestId, at);
-  assert.deepEqual(who("perm-person"), { kind: "member", userId: "user-ada" });
-  assert.deepEqual(who("perm-policy"), { kind: "policy", policyId: "allow-read" });
-  assert.deepEqual(who("perm-auth"), { kind: "wollipog" });
-  assert.deepEqual(who("perm-retried"), { kind: "member", userId: "user-grace" }, "a failed delivery is not the outcome");
-  assert.equal(who("perm-reused"), undefined, "two resolutions in the same window name no one");
-  assert.equal(who("hook-1"), undefined);
-  assert.equal(who("perm-request"), undefined);
-  assert.equal(who("perm-person", 1 + PERMISSION_RESOLUTION_WINDOW_MS + 1), undefined,
-    "an occurrence outside the window of every audited resolution names no one");
-  assert.deepEqual(who("perm-person", 1 + PERMISSION_RESOLUTION_WINDOW_MS), { kind: "member", userId: "user-ada" });
-  assert.equal(permissionResolutionActor(actors, "perm-person", undefined), undefined, "no resolution time, no match");
 });
 
 test("non-hook audit entries produce no governance outcome", () => {
