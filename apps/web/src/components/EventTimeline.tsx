@@ -2396,8 +2396,8 @@ const TimelineRow = memo(function TimelineRow({
   }
 });
 
-/** A Decision Record in the transcript: the timeline's clock for its relative time, and its parent
- * session link where the transcript can navigate. */
+/** A Decision Record in the transcript: the timeline's live clock for its relative time while the
+ * session runs, and its parent session link where the transcript can navigate. */
 function TimelineDecisionRecord({ record, auditId, open, onToggle }: {
   record: DecisionRecordModel;
   auditId?: string;
@@ -2405,8 +2405,10 @@ function TimelineDecisionRecord({ record, auditId, open, onToggle }: {
   onToggle?: () => void;
 }) {
   const now = useContext(TimelineClockContext);
+  // The clock only advances while the session runs; a settled transcript reads clock times.
+  const live = useContext(TimelineActivityContext);
   const openSession = useContext(TimelineSessionLinkContext);
-  return <DecisionRecord record={record} auditId={auditId} open={open} onToggle={onToggle} now={now} onOpenSession={openSession} />;
+  return <DecisionRecord record={record} auditId={auditId} open={open} onToggle={onToggle} now={live ? now : undefined} onOpenSession={openSession} />;
 }
 
 /** The question row, with its parent session link where the transcript can navigate. */

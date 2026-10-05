@@ -106,7 +106,7 @@ export function DecisionRecordGallery() {
     <StoreProvider connection={connection}>
       <GovernancePolicyNamesContext.Provider value={policies}>
         <ViewerIdentityContext.Provider value={viewer}>
-          <EventTimeline ariaLabel="Decision Records" items={items} onOpenSession={() => {}} />
+          <EventTimeline ariaLabel="Decision Records" items={items} onOpenSession={() => {}} sessionActive />
         </ViewerIdentityContext.Provider>
       </GovernancePolicyNamesContext.Provider>
     </StoreProvider>

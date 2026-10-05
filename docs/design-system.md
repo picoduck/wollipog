@@ -1618,8 +1618,9 @@ resolved permissions, governance decisions and automated reviews. Pending permis
 records; the request dock owns them (#2179). The row is a `<details class="disclosure">` whose
 summary is `--control-h` tall (44px on touch): the §5.5 chevron, a 16px outcome icon in its tone
 (`CircleCheck` success, `CircleX` neutral, `ShieldX` danger, `TimerOff` warning, §18), the
-`requestDecision` word in its tone, the request's title, "by" who decided, and a relative time whose
-tooltip is the absolute time. Who decided is "You" (relative to the viewer, #2527), a policy's
+`requestDecision` word in its tone, the request's title, "by" who decided, and when: how long ago
+while the session runs (the transcript's live clock), otherwise the clock time like every other
+transcript timestamp, with the absolute date and time as its tooltip. Who decided is "You" (relative to the viewer, #2527), a policy's
 display name from the organization's policies (never "Policy · <id>"; "Policy" until the names
 load; they reload once for a policy they lack and after a policy is saved), the parent session's title, the reviewer, or "Wollipog" for a fail-closed block. A permission
 event names who decided only when a parent session did; a person and a policy (which can

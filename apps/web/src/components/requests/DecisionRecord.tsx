@@ -7,7 +7,7 @@ import {
   type DecisionNames,
   type DecisionRecordModel,
 } from "../../decision-record.js";
-import { formatRecordedRelativeTime } from "../../format.js";
+import { formatRecordedRelativeTime, formatRecordedTimestamp } from "../../format.js";
 import { ViewerIdentityContext } from "../../resolver-identity.js";
 import { sessionDisplayTitle } from "../../session-title.js";
 import { statusMeta, type StatusTone } from "../../status-meta.js";
@@ -65,8 +65,8 @@ export function useSessionDisplayTitle(sessionId: string | undefined): string | 
 
 /**
  * A finished decision as one row (#2204, docs/design-system.md §5.5, §11.2): the §5.5 chevron, a
- * 16px outcome icon in its tone, the past-tense outcome, what was requested, who decided and how long
- * ago. The summary is `--control-h` tall (44px on touch). Opening it shows the facts once, Decided By
+ * 16px outcome icon in its tone, the past-tense outcome, what was requested, who decided and when
+ * (how long ago while the session runs). The summary is `--control-h` tall (44px on touch). Opening it shows the facts once, Decided By
  * first and Recorded last; ids are only ever copied, through Copy Audit ID.
  *
  * The parent session's title links to that session from the Decided By fact, not from the summary,
@@ -86,7 +86,9 @@ export function DecisionRecord({
   auditId?: string;
   open?: boolean;
   onToggle?: () => void;
-  /** The shared clock the relative time reads; the current time when absent. */
+  /** A live clock (the transcript's, while its session runs): the row reads how long ago. Without
+   * one (a settled session, the decision history) it reads the clock time, as every transcript
+   * timestamp does, rather than a "just now" that would never advance. */
   now?: number;
   /** Opens another session; absent where the surface cannot navigate (a shared page). */
   onOpenSession?: (sessionId: string) => void;
@@ -125,7 +127,7 @@ export function DecisionRecord({
         </span>
         {at !== undefined && (
           <time id={timeId} className="tl-decision-time" dateTime={new Date(at).toISOString()} title={absoluteTime(at)}>
-            {formatRecordedRelativeTime(at, now ?? Date.now())}
+            {now !== undefined ? formatRecordedRelativeTime(at, now) : formatRecordedTimestamp(at)?.label}
           </time>
         )}
       </summary>

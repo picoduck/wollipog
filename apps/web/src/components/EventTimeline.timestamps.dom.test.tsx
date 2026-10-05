@@ -199,6 +199,29 @@ test("quiet active sessions keep the shared clock advancing", async () => {
   }
 });
 
+test("a settled transcript's decision reads its clock time, never a relative time that cannot advance", async () => {
+  let now = startedAt;
+  const originalDateNow = Date.now;
+  Object.defineProperty(Date, "now", { configurable: true, writable: true, value: () => now });
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const decision: TimelineItem[] = [{ kind: "review_decision", id: 32, reviewId: "settled", reviewer: { kind: "policy" }, outcome: "denied", createdAt: startedAt }];
+  const clockTime = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit", second: "2-digit" }).format(new Date(startedAt));
+  try {
+    await act(async () => root.render(<EventTimeline items={decision} sessionActive={false} />));
+    assert.equal(container.querySelector(".tl-decision-time")?.textContent, clockTime);
+    now += 2 * 3_600_000;
+    await act(async () => root.render(<EventTimeline items={[...decision]} sessionActive={false} />));
+    assert.equal(container.querySelector(".tl-decision-time")?.textContent, clockTime, "still the clock time two hours later");
+    assert.doesNotMatch(container.textContent ?? "", /just now/);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    Object.defineProperty(Date, "now", { configurable: true, writable: true, value: originalDateNow });
+  }
+});
+
 test("clock ticks update timestamp consumers without rerendering general timeline rows", async () => {
   let now = startedAt;
   let tick: (() => void) | undefined;
