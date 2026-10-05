@@ -120,17 +120,19 @@ test("real shell preserves global shortcuts from the grid and F2 opens the selec
   await page.locator(".inbox-search input").fill("Session");
   await page.locator(".inbox-search input").press("Escape");
   await expect(page.locator(".inbox-search input")).toHaveValue("");
-  // F2 opens the selected session on its top-priority request; the session's own request card
-  // takes a primary request, and the Agents panel offers the way there.
+  // F2 opens the selected session on its top-priority request; the session's own request is on its
+  // request dock, which expands it and takes focus, with no Agents panel in the way (#2179).
   await page.locator(".inbox-row-shell", { hasText: "Running Session" }).locator(".inbox-row").click();
   await grid.focus();
   await grid.press("F2");
   const panel = page.getByRole("complementary", { name: "Agents", exact: true });
-  await expect(panel).toBeVisible();
-  await expect(panel.getByRole("button", { name: "Open Request in Session", exact: true })).toBeFocused();
+  const heading = page.locator(".request-dock .request-card").getByRole("heading");
+  await expect(heading).toHaveText("Primary Request");
+  await expect(heading).toBeFocused();
+  await expect(panel).toHaveCount(0);
   await page.reload();
-  await expect(panel).toBeVisible();
-  await expect(panel.getByRole("button", { name: "Open Request in Session", exact: true })).toBeFocused();
+  await expect(heading).toBeFocused();
+  await expect(panel).toHaveCount(0);
   await page.screenshot({ path: ".agents/tmp/attention-followup/keyboard-shell.png", fullPage: true });
 });
 
@@ -186,6 +188,16 @@ test("search Enter hands the preserved filter to the Sessions grid for keyboard 
   await expect(page.getByRole("grid", { name: "Sessions", exact: true })).toHaveCount(0);
 });
 
+for (const width of [390, 1280]) test(`an attention route to the session's own request opens it on the dock, not the Agents panel, at ${width}px`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 900 });
+  // s-approval's own request is primary-3; its worker's child-3 waits in the Agents panel (#2179).
+  await page.goto(fullShell(`/sessions/~${opaque("s-approval")}/attention/~${opaque("primary-3")}?epoch=7`));
+  const heading = page.locator(".request-dock .request-card").getByRole("heading");
+  await expect(heading).toHaveText("Primary Request");
+  await expect(heading).toBeFocused();
+  await expect(page.getByRole("complementary", { name: "Agents", exact: true })).toHaveCount(0);
+});
+
 for (const width of [390, 1280]) test(`real shell threads an exact attention route through the panel at ${width}px`, async ({ page }) => {
   await page.setViewportSize({ width, height: 900 });
   // The list no longer offers a per-request target (#896); the exact child route is a deep link.
@@ -201,19 +213,21 @@ for (const width of [390, 1280]) test(`real shell threads an exact attention rou
   await expect(request.getByText("Exact Child Request 3", { exact: true })).toBeVisible();
   if (width === 1280) {
     const closePanel = page.getByRole("button", { name: "Close Panel", exact: true });
-    // The bar's Session Status popover opens the requests through the same entry point (#2182).
+    // The bar's Session Status popover opens the top request through the same entry point (#2182);
+    // the top request is the session's own, so it is the dock's card that takes focus (#2179).
     const status = page.locator(".session-bar .session-status-button");
     const reviewRequest = async () => {
       await status.click();
       await page.getByRole("dialog", { name: "Session Status" })
         .getByRole("button", { name: "Review Request" }).first().click();
     };
+    const heading = page.locator(".request-dock .request-card").getByRole("heading");
     await closePanel.click();
     await reviewRequest();
-    await expect(panel).toBeVisible();
-    await closePanel.click();
+    await expect(heading).toBeFocused();
+    await expect(panel).toHaveCount(0);
     await reviewRequest();
-    await expect(panel).toBeVisible();
+    await expect(heading).toBeFocused();
   }
   await page.screenshot({ path: `.agents/tmp/attention-followup/shell-route-${width}.png`, fullPage: true });
 });

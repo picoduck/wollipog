@@ -7,7 +7,8 @@ import {
   useRef,
   useState,
 } from "react";
-import { runnerSupportsProtocol } from "@wollipog/protocol";
+import { pendingRequests, runnerSupportsProtocol } from "@wollipog/protocol";
+import { dockRequests } from "./components/requests/RequestDock.js";
 import { useStoreActions, useStoreSelector, type View } from "./store.js";
 import { useApi } from "./api-context.js";
 import { notifier } from "./notify.js";
@@ -407,7 +408,14 @@ export function Shell() {
   const attentionKey = view.name === "session" && view.attention
     ? `${viewPath(view)}\0${view.attention.activationId ?? 0}` : null;
   useEffect(() => {
-    if (attentionKey) rightPanel.show("subagents");
+    if (!attentionKey) return;
+    // The session's own request (not a worker's) is answered on its request dock (#2179), which
+    // brings the named one up itself; the Agents panel would only cover it on a phone.
+    const target = view.name === "session" ? view.attention : undefined;
+    const session = view.name === "session" ? sessions.get(view.id) : undefined;
+    if (target?.requestId && session && (session.eventEpoch ?? 0) === target.eventEpoch &&
+        dockRequests(pendingRequests(session.pendingApproval)).some((request) => request.requestId === target.requestId)) return;
+    rightPanel.show("subagents");
     // A route change, not unrelated panel state, requests focus/navigation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [attentionKey]);

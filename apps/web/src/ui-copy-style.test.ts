@@ -729,7 +729,8 @@ test("Share Transcript's titles, labels and buttons are Title Case, and its sent
 });
 
 test("the Request Card's labels and names are Title Case, and its foot-notes are sentences (#2179)", () => {
-  const titles = ["moreChoices", "copyDetails", "policyMatch", "pendingRequests", "waitingRequests", "pendingRequestTitle"] as const;
+  const titles = ["moreChoices", "copyDetails", "requestDetails", "policyMatch", "pendingRequests", "waitingRequests",
+    "pendingRequestTitle"] as const;
   const sentences = ["runnerOffline", "signInOwner", "notSent", "sending"] as const;
   assert.deepEqual([...titles, ...sentences].sort(), Object.keys(REQUEST_CARD_COPY).sort(), "every string is classified");
   for (const key of titles) {

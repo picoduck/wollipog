@@ -407,6 +407,63 @@ test("several requests: the top priority is expanded, the rest wait as rows, a r
   }
 });
 
+test("a workflow decision shows everything it approves: the exact issue body, and the full request behind Request Details", async () => {
+  const snapshot = {
+    category: "follow_up_issue_publication" as const,
+    repository: "picoduck/wollipog",
+    sanitizedTitle: "Shrink the Request Dock While Reading Back",
+    sanitizedBody: "## Problem\n\nThe dock stays full height while the reader scrolls back.",
+    labels: ["enhancement"],
+  };
+  const request: PendingApproval = {
+    requestId: "publication",
+    kind: "workflow_decision",
+    title: "Follow-Up Issue Publication Approval Required",
+    context: { input: JSON.stringify(snapshot) },
+    options: [
+      { optionId: "approve", name: "Approve", kind: "allow_once" },
+      { optionId: "deny", name: "Deny", kind: "reject_once" },
+    ],
+    workflowDecision: {
+      requestId: "publication", occurrenceId: "publication", sessionId: "session-dock", controllingSessionId: "parent",
+      category: "follow_up_issue_publication", resourceKey: "issue", resourceSnapshot: snapshot,
+      resourceDigest: "d".repeat(64), policyRevision: 1, authority: "human", status: "pending", createdAt: 1,
+    },
+  } as PendingApproval;
+  const view = await render(<RequestCard session={sessionWith(request)} request={request} runnerOnline presentation="dock" />);
+  try {
+    const facts = view.container.querySelector(".request-card-body .facts")!;
+    assert.match(facts.textContent ?? "", /Issue Body/u);
+    assert.equal(facts.querySelector(".code-well pre")?.textContent, snapshot.sanitizedBody);
+    const details = view.container.querySelector<HTMLDetailsElement>(".request-card-body details.disclosure")!;
+    assert.match(details.querySelector("summary")?.textContent ?? "", /^Request Details$/u);
+    assert.equal(details.querySelector("pre")?.textContent, JSON.stringify(snapshot));
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("UI evidence keeps its signed links out of the card: no Request Details", async () => {
+  const evidence = [{ evidenceId: "after", uri: "https://evidence.example/after.png?signature=secret", sha256: "a".repeat(64) }];
+  const request = {
+    requestId: "evidence", kind: "workflow_decision", title: "UI Evidence Approval Required",
+    context: { input: JSON.stringify({ evidence }) },
+    options: [{ optionId: "approve", name: "Approve", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "reject_once" }],
+    workflowDecision: {
+      requestId: "evidence", occurrenceId: "evidence", sessionId: "session-dock", controllingSessionId: "parent",
+      category: "ui_evidence_approval", resourceKey: "ui", resourceSnapshot: { category: "ui_evidence_approval", evidence },
+      resourceDigest: "e".repeat(64), policyRevision: 1, authority: "human", status: "pending", createdAt: 1,
+    },
+  } as PendingApproval;
+  const view = await render(<RequestCard session={sessionWith(request)} request={request} runnerOnline presentation="dock" />);
+  try {
+    assertNoDomNode(view.container.querySelector("details.disclosure"));
+    assert.doesNotMatch(view.container.textContent ?? "", /signature=secret/u);
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("a decision in flight survives expanding another request and coming back: no second decision is sent", async () => {
   const sent: unknown[] = [];
   let answer!: () => void;

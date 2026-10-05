@@ -547,6 +547,37 @@ test("SessionDetail docks a standalone request between loaded activity and the c
   }
 });
 
+test("SessionDetail returns focus to the composer when the last docked request resolves behind a worker's (#2179)", async () => {
+  const options = [
+    { optionId: "allow", name: "Allow", kind: "allow_once" as const },
+    { optionId: "deny", name: "Reject", kind: "reject_once" as const },
+  ];
+  // The worker's request is the session's primary one; the coordinator tracks it, not the dock's.
+  const worker = { requestId: "worker-ask", kind: "permission" as const, title: "Worker Ask", options, ownerToolUseId: "tool-1" };
+  const own = { requestId: "own-ask", kind: "permission" as const, title: "Run pnpm deploy?", options };
+  const pages = pageController();
+  const fixture = await mountFixture(pages, 12, {
+    sessionOverrides: { status: "input_required", pendingApproval: { ...worker, additionalRequests: [own] } },
+  });
+  try {
+    const allow = [...fixture.container.querySelectorAll<HTMLButtonElement>(".request-dock .request-card-foot button")]
+      .find((button) => button.textContent?.startsWith("Allow"))!;
+    assert.ok(allow, "the session's own request is on the dock");
+    await act(async () => { allow.focus(); });
+    await act(async () => fixture.socket.push({
+      type: "session_upsert",
+      session: { ...session(fixture.sessionId), status: "input_required", pendingApproval: worker },
+    }));
+    await flushAsyncWork();
+    assertNoDomNode(fixture.container.querySelector(".request-dock"));
+    const active = domWindow.document.activeElement as unknown as Element | null;
+    assert.ok(active === fixture.container.querySelector(".composer-input") || active === fixture.scroller,
+      `focus returns to the composer or the reader, not ${active?.tagName}`);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("recovery over a long cached transcript shows at the reader's lower edge while following", async () => {
   const pages = pageController();
   const fixture = await mountFixture(pages);

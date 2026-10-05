@@ -15,7 +15,7 @@ import { useOptionalStoreSelector } from "../../store.js";
 import { sessionCommandRefusal } from "../../session-command-permissions.js";
 import { useAccessibleMenu } from "../interactions.js";
 import { MenuItem, MenuSurface } from "../Menu.js";
-import { MoreHorizontalIcon } from "../Icons.js";
+import { ChevronRightIcon, MoreHorizontalIcon } from "../Icons.js";
 import { Notice } from "../Notice.js";
 import { BusyButton } from "../ui/BusyButton.js";
 import { CopyButton } from "../common.js";
@@ -189,6 +189,12 @@ export function RequestCard({
 
   const time = createdAt ?? workflowDecision?.createdAt;
   const input = !workflowDecision ? request.context?.input : undefined;
+  // A workflow decision's full request stays readable behind a disclosure, as it was before the card,
+  // except where its body already shows all of it: an issue closure, and UI evidence, whose input
+  // carries signed links the review must not expose.
+  const decisionCategory = workflowDecision?.resourceSnapshot.category;
+  const decisionDetails = workflowDecision && decisionCategory !== "issue_closure" &&
+    decisionCategory !== "ui_evidence_approval" ? request.context?.input : undefined;
   const facts = [
     { label: "Tool", value: request.context?.toolName },
     { label: "Path", value: request.context?.path },
@@ -207,6 +213,17 @@ export function RequestCard({
         runnerOnline={runnerOnline} /> : null,
     evidence ? <EvidenceReviewBody key="evidence" review={evidence} reasonId={evidenceReasonId} /> : null,
     workflowDecision && !evidence ? <WorkflowDecisionSummary key="decision" snapshot={workflowDecision.resourceSnapshot} /> : null,
+    decisionDetails ? (
+      <details key="details" className="disclosure">
+        <summary><ChevronRightIcon className="disclosure-chevron" />{REQUEST_CARD_COPY.requestDetails}</summary>
+        <div className="disclosure-body">
+          <div className="code-well">
+            <pre>{decisionDetails}</pre>
+            <CopyButton text={decisionDetails} iconOnly ariaLabel={REQUEST_CARD_COPY.copyDetails} className="icon-btn sm" />
+          </div>
+        </div>
+      </details>
+    ) : null,
     input ? (
       <div key="input" className="code-well">
         <pre>{input}</pre>

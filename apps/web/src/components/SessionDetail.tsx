@@ -198,6 +198,7 @@ import { RequestDock, dockRequests } from "./requests/RequestDock.js";
 import { RequestKindIcon, pendingRequestsTitle } from "./requests/request-meta.js";
 import type { RequestIntentHandler } from "./requests/RequestCard.js";
 import { useSoftwareKeyboardOpen } from "./requests/software-keyboard.js";
+import { useRemovedFocus } from "./useRemovedFocus.js";
 import { CampaignHeldChildren, type CampaignHeldChild } from "./CampaignHeldChildren.js";
 import { ComposerQuestionResponse } from "./ComposerQuestionResponse.js";
 import { useGovernanceAudit, useGovernanceTimeline } from "./useGovernanceAudit.js";
@@ -1093,6 +1094,7 @@ function SessionDetailLoaded({
   const dockedRequests = useMemo(() => dockRequests(prioritizedRequests), [prioritizedRequests]);
   useEvidenceDraftRetirement(session.id, dockedRequests);
   const requestIntentRef = useRef<RequestIntentHandler | null>(null);
+  const chatReadingRef = useRef<HTMLDivElement>(null);
   const softwareKeyboardOpen = useSoftwareKeyboardOpen();
   const [selectedRequestKey, setSelectedRequestKey] = useState<string | null>(null);
   const requestPanelModeActive = mode === "expanded" && rightPanel.mode === "requests";
@@ -1348,6 +1350,26 @@ function SessionDetailLoaded({
   const retitleReceiptRef = useRef<HTMLDivElement>(null);
   const rightPanelRef = useRef(rightPanel);
   rightPanelRef.current = rightPanel;
+  // An attention link naming one of the dock's requests (the Sessions list's top request, an Inbox
+  // card) expands that request and moves focus to it; App leaves the Agents panel closed for it.
+  const handledAttentionRef = useRef<string | null>(null);
+  const dockedRequestIds = dockedRequests.map((request) => request.requestId).join("\n");
+  useEffect(() => {
+    const requestId = attentionTarget?.requestId;
+    if (!requestId || attentionTarget.eventEpoch !== (session.eventEpoch ?? 0) ||
+        !dockedRequestIds.split("\n").includes(requestId)) return;
+    const key = JSON.stringify([session.id, attentionTarget.eventEpoch, requestId, attentionTarget.activationId ?? 0]);
+    if (handledAttentionRef.current === key) return;
+    // After the dock has mounted; a re-render before the frame reschedules it.
+    const frame = window.requestAnimationFrame(() => {
+      if (!focusSessionRequest(session.id, requestId)) return;
+      handledAttentionRef.current = key;
+      // A cold deep link opens the Agents panel before the session has loaded; it is not needed for
+      // a docked request, and on a phone it would cover the card.
+      if (rightPanelRef.current.open && rightPanelRef.current.mode === "subagents") rightPanelRef.current.close();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [attentionTarget, dockedRequestIds, session.eventEpoch, session.id]);
   const attentionEntryScope = useRef<string | null>(null);
   useEffect(() => {
     if (mode !== "expanded") return;
@@ -5896,6 +5918,20 @@ function SessionDetailLoaded({
   const currentProjectName = projectsSupported
     ? session.projectId ? projects.get(session.projectId)?.name ?? session.projectName : undefined
     : session.workspaceName;
+  // The last docked request can resolve while the coordinator tracks a different primary request (a
+  // worker's), so it never sees the dock's focused control go. The dock's own hand-off (to the next
+  // request's heading) needs a dock; with none left, focus returns to the composer or the reader.
+  const dockHadRequestsRef = useRef(false);
+  const dockFocusRemoved = useRemovedFocus(chatReadingRef, ".menu-pop");
+  useLayoutEffect(() => {
+    const had = dockHadRequestsRef.current;
+    dockHadRequestsRef.current = dockedRequests.length > 0;
+    if (!dockFocusRemoved() || !had || dockedRequests.length > 0) return;
+    if (mode === "expanded" && focusComposerAfterRequestResolution()) return;
+    const composer = inputRef.current;
+    (composer && !composer.disabled && mode === "expanded" ? composer : scrollRef.current)?.focus();
+  });
+
   // The request dock (#2179), as the notice slot's lead while the session has a request of its own.
   const requestDockLead: SessionNoticeLead | undefined = dockedRequests.length > 0 ? {
     key: "request-dock",
@@ -6232,7 +6268,7 @@ function SessionDetailLoaded({
           {/* The reading column (#2179): the transcript, then the request dock directly above the
               composer. The dock caps at a share of this column, so the transcript keeps at least
               half of it (§13.2). */}
-          <div className="chat-reading">
+          <div className="chat-reading" ref={chatReadingRef}>
           <div
             className="detail-main"
             data-active-pane={activePane}

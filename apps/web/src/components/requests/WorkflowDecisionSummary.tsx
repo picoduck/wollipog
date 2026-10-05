@@ -30,6 +30,8 @@ export function WorkflowDecisionSummary({ snapshot }: { snapshot: WorkflowDecisi
         <div><dt>Repository</dt><dd>{snapshot.repository}</dd></div>
         <div><dt>Issue Title</dt><dd>{snapshot.sanitizedTitle}</dd></div>
         <div><dt>Labels</dt><dd>{snapshot.labels.join(", ") || "None"}</dd></div>
+        {/* The exact body that is published: a person approving it reads it first. */}
+        <div><dt>Issue Body</dt><dd><div className="code-well"><pre>{snapshot.sanitizedBody}</pre></div></dd></div>
       </dl>;
     case "ui_evidence_approval":
       return <p>{snapshot.evidence.length} evidence {snapshot.evidence.length === 1 ? "item" : "items"} awaiting human review.</p>;

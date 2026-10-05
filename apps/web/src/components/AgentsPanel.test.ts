@@ -477,4 +477,12 @@ test("a worker-owned primary approval stays actionable in the Agents panel", () 
     primary.requestId,
     true,
   ), true);
+  // Every own request other than a question is on the request dock, primary or not (#2179); a
+  // secondary question (an async one) is still answered here.
+  assert.equal(shouldOpenPrimaryRequestInSession({ ...primary, ownerToolUseId: undefined }, "another-request", true), true);
+  assert.equal(shouldOpenPrimaryRequestInSession(
+    { ...primary, ownerToolUseId: undefined, kind: "question", questions: [] },
+    "another-request",
+    true,
+  ), false);
 });

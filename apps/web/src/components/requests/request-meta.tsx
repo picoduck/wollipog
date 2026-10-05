@@ -124,6 +124,7 @@ export function formatRequestCountdown(remainingMs: number): string {
 export const REQUEST_CARD_COPY = {
   moreChoices: "More Choices",
   copyDetails: "Copy Request Details",
+  requestDetails: "Request Details",
   policyMatch: "Policy Match Context",
   pendingRequests: "Pending Requests",
   waitingRequests: "Waiting Requests",
