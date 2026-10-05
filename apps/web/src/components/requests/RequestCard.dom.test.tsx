@@ -23,6 +23,7 @@ import { RequestCard, type RequestIntentHandler } from "./RequestCard.js";
 import { RequestDock, dockRequests } from "./RequestDock.js";
 import { decideDockedRequest, revealDockedRequest } from "./request-reveal.js";
 import type { FollowTailState } from "../../useFollowTail.js";
+import { SessionNoticeSlot } from "../SessionNoticeSlot.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
@@ -809,6 +810,45 @@ test("a card that shrinks under focus hands it to Expand, and a control elsewher
     const heading = view.container.querySelector(".request-card h3");
     assert.equal(heading?.textContent, "Run pnpm deploy?");
     assert.equal(domWindow.document.activeElement, heading);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("the notice slot's +N More menu in the card's head closes as the strip takes the card's place, with focus on Expand", async () => {
+  const pending = permission();
+  function SlotHarness({ state }: { state: FollowTailState }) {
+    const session = sessionWith(pending);
+    const requests = dockRequests(prioritizedPendingRequests(pending));
+    return (
+      <SessionNoticeSlot
+        sessionId={session.id}
+        entries={[{ key: "skills", severity: "info", rank: 8, title: "Skills Unavailable", render: ({ trailing }) => <div>{trailing}</div> }]}
+        lead={{
+          key: "request-dock",
+          title: "Pending Request",
+          icon: null,
+          requestIds: requests.map((request) => request.requestId),
+          render: ({ trailing, concealTrailing }) => (
+            <RequestDock session={session} requests={requests} runnerOnline headTrailing={trailing}
+              followTailState={state} onConceal={concealTrailing} />
+          ),
+        }}
+      />
+    );
+  }
+  const view = await render(<SlotHarness state="following" />);
+  try {
+    const more = view.container.querySelector<HTMLButtonElement>(".request-card .session-notice-more")!;
+    assert.equal(more.textContent, "+1 More");
+    await act(async () => { more.focus(); more.click(); });
+    const item = body().querySelector<HTMLElement>('[role="menuitem"]')!;
+    assert.equal(item.textContent, "Skills Unavailable");
+    await act(async () => { item.focus(); });
+    await view.rerender(<SlotHarness state="paused" />);
+    assert.ok(view.container.querySelector(".dock-strip"));
+    assertNoDomNode(body().querySelector('[role="menu"]'), "no notice menu is left open over the strip");
+    assert.equal(domWindow.document.activeElement, view.container.querySelector(".dock-strip-expand"));
   } finally {
     await view.unmount();
   }

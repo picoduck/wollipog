@@ -58,6 +58,7 @@ export function RequestDock({
   revealRequestId,
   followTailState,
   readerRef,
+  onConceal,
 }: {
   session: SessionView;
   /** In priority order (`prioritizedPendingRequests`), already limited by `dockRequests`. */
@@ -77,6 +78,9 @@ export function RequestDock({
   /** The transcript's scroller, whose room below the reading position the strip waits for. Without
    * one the strip shows as soon as the reader is paused. */
   readerRef?: RefObject<HTMLElement | null>;
+  /** Called as the strip takes the card's place: closes the menu behind `headTrailing` (the notice
+   * slot's `concealTrailing`). */
+  onConceal?: () => void;
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(() => revealRequestId ?? null);
   const [moreOpen, setMoreOpen] = useState(false);
@@ -169,15 +173,22 @@ export function RequestDock({
     if (collapsed) expandRef.current?.focus({ preventScroll: true });
     else headingRef.current?.focus();
   });
-  // A card hidden behind its strip while a control in it (or its menu) has focus hands focus to
-  // Expand, rather than leaving it on a control nobody can see.
+  // A card hidden behind its strip closes the menus opened from it, which are portalled and would
+  // stay open over the strip: its own ⋯ (RequestCard's `concealed`) and the notice slot's "+N More"
+  // in its head (`onConceal`). Focus in the card or one of those menus goes to Expand, rather than
+  // staying on a control nobody can see.
   const wasCollapsed = useRef(collapsed);
   useLayoutEffect(() => {
     const hid = collapsed && !wasCollapsed.current;
     wasCollapsed.current = collapsed;
     if (!hid) return;
-    const active = cardRef.current?.ownerDocument.activeElement;
-    if (active && (cardRef.current?.contains(active) || active.closest("[data-request-card-menu]"))) {
+    const card = cardRef.current;
+    const active = card?.ownerDocument.activeElement;
+    const menu = active?.closest<HTMLElement>('[role="menu"]');
+    const menuFromCard = menu?.id !== undefined && menu.id !== "" &&
+      [...(card?.querySelectorAll("[aria-controls]") ?? [])].some((trigger) => trigger.getAttribute("aria-controls") === menu.id);
+    onConceal?.();
+    if (active && (card?.contains(active) || active.closest("[data-request-card-menu]") || menuFromCard)) {
       expandRef.current?.focus({ preventScroll: true });
     }
   });

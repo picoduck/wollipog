@@ -900,7 +900,7 @@ function Fixture() {
     title: pendingRequestsTitle(docked.length),
     icon: <RequestKindIcon request={docked[0]!} />,
     requestIds: docked.map((request) => request.requestId),
-    render: ({ trailing, revealRequestId }) => (
+    render: ({ trailing, revealRequestId, concealTrailing }) => (
       <RequestDock
         session={viewedSession}
         requests={docked}
@@ -914,6 +914,7 @@ function Fixture() {
         revealRequestId={revealRequestId}
         followTailState={followTailEnabled ? followTail.state : undefined}
         readerRef={scrollRef}
+        onConceal={concealTrailing}
       />
     ),
   } : undefined;
