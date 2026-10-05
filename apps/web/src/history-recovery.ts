@@ -185,9 +185,9 @@ export async function recoverSessionHistory(
 /**
  * Whether an open should read the bounded tail window rather than the forward gap chain.
  *
- * A frozen cursor of zero has no retained gap to close, including after a provisional REST
- * window painted before the WebSocket subscription was acknowledged. Re-reading the bounded
- * window keeps that acknowledgement from restarting a full forward walk from zero.
+ * A read cursor of zero has no retained gap or proven provisional REST window to resume. The
+ * store derives a read-local cursor from a completed provisional window before calling this
+ * predicate, so a late acknowledgement cannot replay its omitted prefix from zero.
  * A paused reader still needs the history containing their saved anchor.
  */
 export function shouldReadOpeningWindow(input: {

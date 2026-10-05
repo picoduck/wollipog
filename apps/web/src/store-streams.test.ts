@@ -1242,3 +1242,90 @@ test("a replacement window clears older-load state its fence is about to orphan"
   store.loadOlderEvents("s1", [event("s1", 18), event("s1", 19)], true, 20, 0);
   assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [18, 19, 20, 21]);
 });
+
+
+for (const frozen of [0, 200]) {
+  test(`a complete provisional REST window supplies a local read cursor without advancing frozen ${frozen}`, () => {
+    const store = new Store();
+    message(store, {
+      type: "snapshot", capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+      runners: [], boxes: [], sessions: [session("s1", 3)], runs: [], pods: [],
+    });
+    store.navigate({ name: "session", id: "s1" });
+    const generation = store.getState().snapshotRevision;
+    if (frozen > 0) {
+      store.prepareSubscriptionRecovery(1, ["s1"]);
+      message(store, { type: "session_subscriptions_applied", revision: 1, sessionIds: ["s1"], podIds: [] });
+      store.beginEventHistoryLoad("s1", 3, 1, generation);
+      store.loadEvents("s1", [event("s1", 199), event("s1", 200)], 3, 1, true, generation, true);
+    }
+    store.prepareSubscriptionRecovery(2, ["s1"]);
+    store.beginEventHistoryLoad("s1", 3, -1, generation);
+    store.loadEvents("s1", [event("s1", 1_000), event("s1", 1_001), event("s1", 1_002)],
+      3, -1, true, generation, true);
+    message(store, { type: "session_event", event: event("s1", 1_010) });
+    message(store, { type: "session_subscriptions_applied", revision: 2, sessionIds: ["s1"], podIds: [] });
+    assert.equal(store.recoveryAfter("s1"), frozen);
+    assert.equal(store.recoveryReadAfter("s1", 3, generation), 1_002,
+      "REST tail is authoritative; the gapped live high-water mark is not");
+    assert.equal(store.recoveryAfter("s1"), frozen, "deriving a read cursor never publishes stream progress");
+    assert.equal(store.recoveryReadAfter("s1", 3, generation - 1), frozen);
+    assert.equal(store.recoveryReadAfter("s1", 4, generation), frozen);
+    store.loadOlderEvents("s1", [event("s1", 998), event("s1", 999)], true, 1_000, 3);
+    assert.equal(store.recoveryReadAfter("s1", 3, generation), 1_002,
+      "older paging preserves the proven REST tail without promoting live delivery");
+    store.beginEventHistoryLoad("s1", 3, -1, generation);
+    assert.equal(store.recoveryReadAfter("s1", 3, generation), 1_002,
+      "starting another read cannot erase the receipt for an unchanged visible window");
+    store.failEventHistoryLoad("s1", "REST failed", 3, -1, generation);
+    assert.equal(store.recoveryReadAfter("s1", 3, generation), 1_002,
+      "a failed refresh leaves the earlier completed REST receipt valid");
+    store.beginEventHistoryLoad("s1", 3, -1, generation);
+    store.loadEvents("s1", [event("s1", 2_000), event("s1", 2_001)], 3, -1, false, generation, true);
+    assert.equal(store.recoveryReadAfter("s1", 3, generation), frozen,
+      "a partial replacement has no receipt and cannot promote from historical completeness");
+    assert.equal(store.getState().eventWindows.get("s1")?.provisionalRestTail, undefined);
+    message(store, { type: "session_events_reset", sessionId: "s1", eventEpoch: 4, events: [] });
+    assert.equal(store.recoveryReadAfter("s1", 4, generation), 0,
+      "an old window cannot seed the replacement epoch");
+  });
+}
+
+test("a provisional REST window containing a seq gap cannot promote its read cursor", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot", capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1", 3)], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  store.prepareSubscriptionRecovery(1, ["s1"]);
+  store.beginEventHistoryLoad("s1", 3, -1, generation);
+  store.loadEvents("s1", [event("s1", 1_000), event("s1", 1_002)], 3, -1, true, generation, true);
+  message(store, { type: "session_event", event: event("s1", 1_001) });
+  message(store, { type: "session_subscriptions_applied", revision: 1, sessionIds: ["s1"], podIds: [] });
+  assert.equal(store.recoveryReadAfter("s1", 3, generation), 0,
+    "live delivery cannot substitute for the REST window's missing contiguity proof");
+  assert.equal(store.recoveryAfter("s1"), 0);
+});
+
+
+test("restoring an inactive reader clears its provisional receipt attribution", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot", capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1", 3)], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  store.prepareSubscriptionRecovery(1, ["s1"]);
+  store.beginEventHistoryLoad("s1", 3, -1, generation);
+  store.loadEvents("s1", [event("s1", 1_000), event("s1", 1_001)], 3, -1, true, generation, true);
+  assert.equal(store.recoveryReadAfter("s1", 3, generation), 1_001);
+  store.navigate({ name: "board" });
+  store.navigate({ name: "session", id: "s1" });
+  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [1_000, 1_001]);
+  assert.equal(store.getState().eventWindows.get("s1")?.provisionalRestTail, undefined);
+  assert.equal(store.recoveryReadAfter("s1", 3, generation), 0,
+    "retained data is not a newly completed provisional HTTP response for this view");
+});

@@ -993,8 +993,9 @@ function SessionDetailLoaded({
     failOlderEventsLoad,
     eventWindowBase,
     loadSession,
+    getSession,
     navigate,
-    recoveryAfter,
+    recoveryReadAfter,
     beginEventHistoryLoad,
     failEventHistoryLoad,
   } = useStoreActions();
@@ -1019,16 +1020,10 @@ function SessionDetailLoaded({
   const evsRef = useRef(evs);
   evsRef.current = evs;
   const olderInFlightRef = useRef(false);
-  // Whether a fetched history has ever completed for the CURRENT epoch. Read by the recovery effect
-  // before it registers its own load, so the effect sees the state that preceded it.
-  const everCompletedRef = useRef(false);
   const eventHistory = useStoreSelector((s) => {
     const history = s.eventHistory.get(sessionId);
     return history?.eventEpoch === (s.sessions.get(sessionId)?.eventEpoch ?? 0) ? history : undefined;
   });
-  everCompletedRef.current = eventHistory?.everComplete === true;
-  const latestSessionRef = useRef(session);
-  latestSessionRef.current = session;
   const eventWindow = useStoreSelector((s) => {
     const window = s.eventWindows.get(sessionId);
     return window?.eventEpoch === (s.sessions.get(sessionId)?.eventEpoch ?? 0) ? window : undefined;
@@ -2421,25 +2416,24 @@ function SessionDetailLoaded({
   // refresh the creation-time row independently; neither requires live stream admission.
   // Revision -1 keeps this provisional read from advancing the frozen reconnect cursor.
   useEffect(() => {
-    if (conn === "unauthorized" || (conn === "online" && recoveryRevision != null) ||
-        everCompletedRef.current || hasSavedFollowTailAnchor(instanceScope, sessionId)) return;
+    if (conn === "unauthorized" || (conn === "online" && recoveryRevision != null)) return;
     let cancelled = false;
     const epoch = recoveryEventEpoch;
     const generation = recoveryGeneration;
     const revision = -1;
-    beginEventHistoryLoad(sessionId, epoch, revision, generation);
     // Metadata cannot hold up the transcript. A creation-time Starting row can precede provider
     // readiness, so recheck only that state every two seconds, at most five more times. An
     // acknowledgement, navigation, epoch change or connection phase cancels the whole operation.
     let metadataRetryTimer: number | undefined;
     let metadataAttempts = 0;
     const refreshMetadata = () => {
-      if (cancelled || (metadataAttempts > 0 && latestSessionRef.current.status !== "starting")) return;
-      const requestedRow = latestSessionRef.current;
+      const requestedRow = getSession(sessionId);
+      if (cancelled || !requestedRow || (metadataAttempts > 0 && requestedRow.status !== "starting")) return;
       metadataAttempts++;
       void api.session(sessionId).then(({ session: refreshed }) => {
         if (cancelled || refreshed.id !== sessionId) return;
-        const latest = latestSessionRef.current;
+        const latest = getSession(sessionId);
+        if (!latest) return;
         // A same-millisecond live upsert still owns its newer row identity. Do not let an older
         // in-flight HTTP response replace it merely because the timestamps happen to match.
         if (refreshed.updatedAt >= latest.updatedAt &&
@@ -2453,29 +2447,39 @@ function SessionDetailLoaded({
       }).catch(() => { /* Preserve the latest row; the transcript reports its REST failure below. */ });
     };
     refreshMetadata();
-    void recoverSessionHistoryWindow(
-      { sessionId, eventEpoch: epoch, recoveryRevision: revision },
-      {
-        fetchTailPage: api.getSessionEventTailPage,
-        applyWindow: (id, events, pageEpoch, pageRevision, complete, hasOlder, turnAligned) =>
-          loadEvents(id, events, pageEpoch, pageRevision, complete, generation, hasOlder, turnAligned),
-        isCurrent: () => !cancelled,
-      },
-    ).then((result) => {
-      if (!cancelled && !result.complete) {
-        // Unsupported backward reads wait for ordinary acknowledged recovery. Do not start an
-        // unbounded forward walk here and recreate the slow opening path.
-        failEventHistoryLoad(sessionId, "Could not load session activity before the live connection was ready.", epoch, revision, generation);
-      }
-    }).catch(() => {
-      if (!cancelled) failEventHistoryLoad(sessionId, "Could not load session activity.", epoch, revision, generation);
-    });
+    if (!hasSavedFollowTailAnchor(instanceScope, sessionId)) {
+      beginEventHistoryLoad(sessionId, epoch, revision, generation);
+      void recoverSessionHistoryWindow(
+        { sessionId, eventEpoch: epoch, recoveryRevision: revision },
+        {
+          fetchTailPage: api.getSessionEventTailPage,
+          applyWindow: (id, events, pageEpoch, pageRevision, complete, hasOlder, turnAligned) => {
+            // A warm reader can pause while this GET is pending. Its saved row and offset own
+            // the window at the response boundary, just as they do during acknowledged recovery.
+            if (!cancelled && !hasSavedFollowTailAnchor(instanceScope, sessionId)) {
+              loadEvents(id, events, pageEpoch, pageRevision, complete, generation, hasOlder, turnAligned);
+            }
+          },
+          isCurrent: () => !cancelled && !hasSavedFollowTailAnchor(instanceScope, sessionId),
+        },
+      ).then((result) => {
+        if (!cancelled && !hasSavedFollowTailAnchor(instanceScope, sessionId) && !result.complete) {
+          // Unsupported backward reads wait for ordinary acknowledged recovery. Do not start an
+          // unbounded forward walk here and recreate the slow opening path.
+          failEventHistoryLoad(sessionId, "Could not load session activity before the live connection was ready.", epoch, revision, generation);
+        }
+      }).catch(() => {
+        if (!cancelled && !hasSavedFollowTailAnchor(instanceScope, sessionId)) {
+          failEventHistoryLoad(sessionId, "Could not load session activity.", epoch, revision, generation);
+        }
+      });
+    }
     return () => {
       cancelled = true;
       if (metadataRetryTimer !== undefined) window.clearTimeout(metadataRetryTimer);
     };
   }, [api, instanceScope, sessionId, conn, recoveryRevision, recoveryEventEpoch, recoveryGeneration,
-    historyRetry, beginEventHistoryLoad, failEventHistoryLoad, loadEvents, loadSession]);
+    historyRetry, beginEventHistoryLoad, failEventHistoryLoad, loadEvents, loadSession, getSession]);
 
   // Opening a session reads a bounded window at the TAIL: one request paints the newest activity
   // no matter how long the session is. Reopening after an outage instead backfills only the gap
@@ -2492,9 +2496,9 @@ function SessionDetailLoaded({
     // cursor silently skipped every gap event.
     // Frozen before the acknowledged subscription was sent; a post-ack live seq must not advance
     // recovery past older outage gaps.
-    const after = recoveryAfter(sessionId);
     const epoch = recoveryEventEpoch;
     const generation = recoveryGeneration;
+    const after = recoveryReadAfter(sessionId, epoch, generation);
     const isCurrent = () => !cancelled;
     const historyOptions: SessionHistoryRecoveryOptions = {
       fetchPage: api.getSessionEventPage,
@@ -2512,8 +2516,9 @@ function SessionDetailLoaded({
     const request = { sessionId, after, eventEpoch: epoch, recoveryRevision };
     const forwardRecovery = () => recoverSessionHistory(request, historyOptions);
     const canReplaceWithWindow = () => !hasSavedFollowTailAnchor(instanceScope, sessionId);
-    // A zero cursor reads the tail even if a provisional REST window already painted before the
-    // socket acknowledgement. Small reconnect gaps retain their rows; long gaps use a fixed
+    // A complete provisional REST window contributes its own contiguous tail to this read even
+    // before its subscription acknowledgement. Pausing after it painted must not replay an omitted
+    // prefix from the old frozen cursor. Small reconnect gaps retain their rows; long gaps use a fixed
     // forward-page budget before replacing the tail. Check paused state again at that boundary so
     // a reader who starts reading during recovery keeps the rows their saved position depends on.
     // Paused positions keep contiguous forward recovery so tail replacement cannot remove the
@@ -2544,7 +2549,7 @@ function SessionDetailLoaded({
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api, sessionId, loadEvents, conn, recoveryRevision, recoveryAfter, recoveryEventEpoch, recoveryGeneration, historyRetry, beginEventHistoryLoad, failEventHistoryLoad]);
+  }, [api, sessionId, loadEvents, conn, recoveryRevision, recoveryReadAfter, recoveryEventEpoch, recoveryGeneration, historyRetry, beginEventHistoryLoad, failEventHistoryLoad]);
 
   // Older pages have one serialized fetch path. Opening recovery may use it briefly to complete an
   // underfilled first viewport; afterward only explicit controls and reader navigation call it.

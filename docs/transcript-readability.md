@@ -85,8 +85,15 @@ up to five additional reads. A newer live status, acknowledgement, navigation, e
 request, or connection-phase change stops the retries. The transcript is not re-fetched, and
 exhaustion retains the latest server-reported state.
 
-A zero cursor reads the tail even when provisional REST history completed before the WebSocket
-subscription acknowledgement; that acknowledgement must not restart a full forward walk from zero.
+A completed contiguous provisional REST window supplies a cursor for the acknowledged read, even
+if the reader pauses after it paints. That cursor is capped at the recorded HTTP tail and belongs to
+the current event epoch and reconnect generation; newer live events cannot move it past a gap. The
+receipt stays valid while the same window remains visible, including a further provisional refresh
+that the reader pauses or that fails. Partial or normal tail replacements clear it, and restoring an
+inactive reader clears its current-view attribution. The frozen stream cursor is never advanced by
+deriving this read cursor. Without a proven window or a retained gap cursor, an opening read uses
+the bounded tail.
+
 A control plane without backward reads is detected before its response can replace the transcript
 and resumes the forward chain at its applied cursor. Obsolete epochs and cancelled recoveries do
 not start a tail replacement.

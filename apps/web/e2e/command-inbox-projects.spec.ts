@@ -891,17 +891,14 @@ test("real Inbox restores independent paused anchors after hidden streaming and 
   expect(noProject.key).not.toBe(alpha.key);
 
   await page.evaluate(() => {
-    for (let index = 0; index < 4; index += 1) {
+    // Stay in the same log and miss more than two forward pages while this reader is hidden.
+    // An epoch change means replacement history, not ordinary pruning of a reader's cache.
+    for (let index = 0; index < 36; index += 1) {
       window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitAgentMessage(
         "session-alpha",
         `Hidden Alpha output ${index + 1}. ${"The durable fixture must survive cache pruning. ".repeat(10)}`,
       );
     }
-    const alpha = window.__WOLLIPOG_PROJECT_INBOX_E2E__.model().sessions
-      .find((session) => session.id === "session-alpha");
-    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
-      eventEpoch: (alpha?.eventEpoch ?? 0) + 1,
-    });
   });
   await expect.poll(async () => (await previewVisibleAnchor(page))?.key).toBe(noProject.key);
   const alphaRequestsBeforeRestore = await page.evaluate(() =>
@@ -919,17 +916,12 @@ test("real Inbox restores independent paused anchors after hidden streaming and 
     .toBeGreaterThan(alphaRequestsBeforeRestore + 1);
 
   await page.evaluate(() => {
-    for (let index = 0; index < 3; index += 1) {
+    for (let index = 0; index < 36; index += 1) {
       window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitAgentMessage(
         "session-no-project",
         `Hidden No Project output ${index + 1}. ${"Each session retains its own logical reading position. ".repeat(10)}`,
       );
     }
-    const noProject = window.__WOLLIPOG_PROJECT_INBOX_E2E__.model().sessions
-      .find((session) => session.id === "session-no-project");
-    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-no-project", {
-      eventEpoch: (noProject?.eventEpoch ?? 0) + 1,
-    });
   });
   const noProjectRequestsBeforeRestore = await page.evaluate(() =>
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.sessionEventPageRequests()
@@ -959,17 +951,18 @@ test("Session Reading movement owns an incomplete Inbox restore across an immedi
   await expect(page.locator("[data-session-surface-id='session-no-project']")).toBeVisible();
 
   await page.evaluate(() => {
-    const alpha = window.__WOLLIPOG_PROJECT_INBOX_E2E__.model().sessions
-      .find((session) => session.id === "session-alpha");
-    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
-      eventEpoch: (alpha?.eventEpoch ?? 0) + 1,
-    });
+    for (let index = 0; index < 36; index += 1) {
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitAgentMessage(
+        "session-alpha", `Delayed hidden output ${index + 1}.`,
+      );
+    }
   });
   await page.getByRole("row", { name: /Alpha Session/ }).click();
   await expect(page.locator("[data-session-surface-id='session-alpha']")).toBeVisible();
   await page.getByRole("button", { name: "Expand Session" }).click();
   const expandedReader = page.getByRole("region", { name: "Session Activity" });
-  await expect(expandedReader.locator("[data-virtual-total='12']")).toBeVisible();
+  // The saved window is immediately readable while the same-epoch forward gap is still loading.
+  await expect(expandedReader.locator("[data-virtual-total='24']")).toBeVisible();
   await expandedReader.focus();
   const beforeMove = await expandedReader.evaluate((element) => element.scrollTop);
   await page.keyboard.press("j");
@@ -986,9 +979,9 @@ test("Session Reading movement owns an incomplete Inbox restore across an immedi
       : null;
   });
   expect(moved).not.toBeNull();
-  expect(moved!.key).not.toBe(original.key);
+  expect(moved!.key !== original.key || Math.abs(moved!.offset - original.offset) > 20).toBe(true);
 
-  await expect(expandedReader.locator("[data-virtual-total='12']")).toBeVisible();
+  await expect(expandedReader.locator("[data-virtual-total='24']")).toBeVisible();
   await page.getByRole("button", { name: "Back to Sessions" }).click();
   await page.getByRole("row", { name: /No Project Session/ }).click();
   await expect(page.locator("[data-session-surface-id='session-no-project']")).toBeVisible();
@@ -1006,6 +999,38 @@ test("Session Reading movement owns an incomplete Inbox restore across an immedi
   // re-encoding removed-notice geometry.
   await expect.poll(async () => Math.abs((await previewVisibleAnchor(page))!.offset - moved!.offset)).toBeLessThan(48);
   await expect(page.locator(".detail-scroll[data-follow-tail-state]")).toHaveAttribute("data-follow-tail-state", "paused");
+});
+
+test("Inbox replacement history expires the old paused anchor and opens its latest window", async ({ page }) => {
+  await page.goto("/command-inbox-projects-e2e.html?scenario=scroll-restore");
+  await page.getByRole("tab", { name: /All/ }).click();
+  await page.getByRole("row", { name: /Alpha Session/ }).click();
+  await expect.poll(async () => (await previewScrollMetrics(page)).scrollHeight).toBeGreaterThan(1_800);
+  const oldAnchor = await pausePreviewAt(page, 0.38);
+  await page.getByRole("row", { name: /No Project Session/ }).click();
+  await expect(page.locator("[data-session-surface-id='session-no-project']")).toBeVisible();
+
+  await page.evaluate(() => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionEventHistory("session-alpha",
+      Array.from({ length: 56 }, (_, index) => ({
+        kind: "agent_message" as const,
+        text: `Replacement response ${index + 1}. ${"This belongs to the replacement log. ".repeat(10)}`,
+        final: true, messageId: `replacement-message-${index + 1}`,
+      })));
+  });
+  const requestsBefore = await page.evaluate(() =>
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.sessionEventPageRequests().length);
+  await page.getByRole("row", { name: /Alpha Session/ }).click();
+  await expect(page.locator("[data-session-surface-id='session-alpha']")).toBeVisible();
+  await expect(page.locator(".detail-scroll[data-follow-tail-state]")).toHaveAttribute("data-follow-tail-state", "following");
+  await expect.poll(async () => (await previewScrollMetrics(page)).distanceFromTail).toBeLessThanOrEqual(2);
+  await expect.poll(async () => (await previewVisibleAnchor(page))?.key).not.toBe(oldAnchor.key);
+  await expect(page.getByRole("region", { name: "Session Preview Activity" }).getByText(/Replacement response 56\./)).toBeVisible();
+  const reads = await page.evaluate((start) =>
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.sessionEventPageRequests().slice(start)
+      .filter((request) => request.sessionId === "session-alpha"), requestsBefore);
+  expect(reads.some((request) => request.direction === "backward")).toBe(true);
+  expect(reads.filter((request) => request.direction !== "backward").every((request) => request.after > 0)).toBe(true);
 });
 
 test("Inbox titles keep one reading axis across row signals, widths, and densities", async ({ page }) => {

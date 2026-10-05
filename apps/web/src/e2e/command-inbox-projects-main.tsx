@@ -33,6 +33,7 @@ import {
   type SteerResultReason,
   type SteeringAttemptView,
   type UiSnapshotMessage,
+  type UiToControlPlane,
   type WorkspaceReference,
 } from "@wollipog/protocol";
 import type { ProviderComposerCommand } from "../composer-commands.js";
@@ -69,6 +70,8 @@ import { staticPinnedSummary } from "../components/pinned-summary-state.js";
 
 const FIXTURE_QUERY = new URLSearchParams(window.location.search);
 const SCENARIO = FIXTURE_QUERY.get("scenario");
+// Reader restoration exercises the current protocol; unrelated fixtures retain legacy delivery.
+const TARGETED_READER_STREAMS = SCENARIO === "scroll-restore";
 /** Scenarios that show the Pinned Summary open without the app shell's toggle. */
 const STATIC_SUMMARY_OPEN = SCENARIO === "git-visibility" || SCENARIO === "worktree-identity" ||
   SCENARIO === "unsafe-worktree-pr";
@@ -919,9 +922,9 @@ function snapshot(): UiSnapshotMessage {
   return {
     type: "snapshot",
     capabilities: {
-      sessionSubscriptions: false,
-      boundedDelivery: false,
-      paginatedSessionHistory: false,
+      sessionSubscriptions: TARGETED_READER_STREAMS,
+      boundedDelivery: TARGETED_READER_STREAMS,
+      paginatedSessionHistory: TARGETED_READER_STREAMS,
       projects: !LEGACY_WORKSPACES,
       createProjectLocations: !LEGACY_WORKSPACES,
       nativeTuiLaunch: true,
@@ -950,15 +953,25 @@ class FixtureSocket implements UiSocket {
   onmessage: ((event: { data: string }) => void) | null = null;
   onclose: ((event: { code: number }) => void) | null = null;
   onerror: (() => void) | null = null;
+  private sessionIds = new Set<string>();
   constructor() {
     window.setTimeout(() => {
       this.onopen?.();
       this.push(snapshot());
     }, 0);
   }
-  send() {}
+  send(data: string): void {
+    if (!TARGETED_READER_STREAMS) return;
+    const message = JSON.parse(data) as UiToControlPlane;
+    if (message.type !== "session_subscriptions") return;
+    this.sessionIds = new Set(message.sessionIds);
+    this.push({ type: "session_subscriptions_applied", revision: message.revision,
+      sessionIds: message.sessionIds, podIds: message.podIds });
+  }
   close() {}
   push(message: ControlPlaneToUi): void {
+    if (TARGETED_READER_STREAMS && message.type === "session_event" &&
+        !this.sessionIds.has(message.event.sessionId)) return;
     this.onmessage?.({ data: JSON.stringify(message) });
   }
 }
@@ -2545,6 +2558,7 @@ declare global {
       ): void;
       setSupportsSteering(id: string, supported: boolean | undefined): void;
       replaceSessionSnapshot(id: string, patch: Partial<SessionView>): void;
+      replaceSessionEventHistory(id: string, payloads: SessionEvent["payload"][]): void;
       /** Deleted from another client: gone from the snapshot, and a lookup answers 404 (#2202). */
       deleteSession(id: string): void;
       replaceSnapshot(): void;
@@ -2894,6 +2908,19 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
     const value = model.sessions.find((candidate) => candidate.id === id);
     if (!value) throw new Error(`unknown session: ${id}`);
     Object.assign(value, structuredClone(patch));
+    saveModel();
+    socket?.push(snapshot());
+  },
+  replaceSessionEventHistory(id, payloads) {
+    const value = model.sessions.find((candidate) => candidate.id === id);
+    if (!value) throw new Error(`unknown session: ${id}`);
+    value.eventEpoch = (value.eventEpoch ?? 0) + 1;
+    value.messageCount = payloads.length;
+    value.updatedAt += 1;
+    sessionEvents.set(id, payloads.map((payload, index) => ({
+      id: index + 1, sessionId: id, seq: index + 1, ts: value.updatedAt,
+      payload: structuredClone(payload),
+    })));
     saveModel();
     socket?.push(snapshot());
   },

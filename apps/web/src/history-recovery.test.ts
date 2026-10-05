@@ -692,8 +692,8 @@ test("opening-fill pages request and preserve semantic turn alignment", async ()
 test("the opening window survives a live event that lands before the load starts", () => {
   const cold = { recoveryAfter: 0, hasSavedReadingPosition: false };
   assert.equal(shouldReadOpeningWindow(cold), true);
-  // The decision does not depend on cached rows: live pre-ack delivery and a provisional REST
-  // window both leave a zero frozen cursor that must read the tail instead of walking from zero.
+  // Live pre-ack rows provide no cursor proof, so a zero read cursor uses the tail. A completed
+  // provisional REST window is resolved to its proven read cursor by the store before this call.
   // A reconnect gap belongs to the forward chain, whose frozen cursor cannot skip outage events.
   assert.equal(shouldReadOpeningWindow({ ...cold, recoveryAfter: 4_800 }), false);
   // A reader paused somewhere keeps the history their restore depends on.

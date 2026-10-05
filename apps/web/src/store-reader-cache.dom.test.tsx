@@ -61,6 +61,166 @@ async function pause(scope: string, id: string, restoreOnly = false) {
   return restored;
 }
 
+async function mountReader(store: Store, scope: string) {
+  const container = dom.document.createElement("div");
+  dom.document.body.append(container);
+  const root = createRoot(container as unknown as HTMLElement);
+  let api!: FollowTailApi;
+  function Reader({ id, epoch }: { id: string; epoch: number }) {
+    const scrollRef = React.useRef<HTMLDivElement>(null);
+    api = useFollowTail({ scrollRef, contentRevision: 1, sessionId: id, persistenceScope: scope, rowGeneration: epoch });
+    return <div ref={scrollRef} />;
+  }
+  function Screen() {
+    const state = React.useSyncExternalStore(store.subscribe, store.getState);
+    return state.view.name === "session"
+      ? <Reader key={state.view.id} id={state.view.id} epoch={state.sessions.get(state.view.id)?.eventEpoch ?? 0} />
+      : null;
+  }
+  await act(async () => root.render(<React.StrictMode><Screen /></React.StrictMode>));
+  return {
+    api: () => api,
+    unmount: async () => {
+      await act(async () => root.unmount());
+      container.remove();
+    },
+  };
+}
+
+test("mounted-reader cleanup cannot recreate a position navigation or an epoch change expired", async () => {
+  for (const scenario of ["oversized", "gapped", "epoch", "legacy"] as const) {
+    const scope = `mounted-reader-expiry-${scenario}`;
+    const store = new Store({ name: "session", id: "s1" }, undefined, scope);
+    snapshot(store, [session("s1")]);
+    load(store, "s1", events("s1", 100, scenario === "oversized" ? 2001 : 101));
+    const mounted = await mountReader(store, scope);
+    try {
+      await act(async () => {
+        mounted.api().onVisibleAnchorChange({ key: "150", offset: -12, index: 50 });
+        mounted.api().pause();
+      });
+      assert.equal(hasSavedFollowTailAnchor(scope, "s1"), true);
+      await act(async () => {
+        if (scenario === "gapped") {
+          store.dispatch({ type: "msg", msg: { type: "session_event", event: events("s1", 205, 1)[0]! } });
+        } else if (scenario === "epoch") {
+          store.dispatch({ type: "msg", msg: { type: "session_upsert", session: session("s1", 1) } });
+        } else if (scenario === "legacy") {
+          snapshot(store, [session("s1")], false);
+        }
+        store.navigate({ name: "board" });
+      });
+      assert.equal(hasSavedFollowTailAnchor(scope, "s1"), false,
+        `${scenario}: the real navigation-then-unmount order must leave the position expired`);
+      await act(async () => store.navigate({ name: "session", id: "s1" }));
+      assert.equal(mounted.api().state, "following", "a reader without retained rows opens at the tail");
+      assert.equal(mounted.api().getInitialAnchor(), null);
+      await act(async () => {
+        mounted.api().onVisibleAnchorChange({ key: "300", offset: 20, index: 3 });
+        mounted.api().pause();
+      });
+      assert.equal(hasSavedFollowTailAnchor(scope, "s1"), true, "the fresh mount can save a new valid position");
+    } finally { await mounted.unmount(); }
+  }
+});
+
+test("a cold Store invalidates a mounted predecessor's position when that session opens", async () => {
+  const scope = "mounted-reader-new-store";
+  const oldStore = new Store({ name: "session", id: "s1" }, undefined, scope);
+  snapshot(oldStore, [session("s1")]);
+  load(oldStore, "s1");
+  const mounted = await mountReader(oldStore, scope);
+  await act(async () => {
+    mounted.api().onVisibleAnchorChange({ key: "150", offset: -12, index: 50 });
+    mounted.api().pause();
+  });
+  const replacement = new Store({ name: "board" }, undefined, scope);
+  snapshot(replacement, [session("s1")]);
+  replacement.navigate({ name: "session", id: "s1" });
+  await mounted.unmount();
+  assert.equal(hasSavedFollowTailAnchor(scope, "s1"), false,
+    "cleanup of the previous Store's mounted session must not resurrect an unrestorable anchor");
+});
+
+test("an epoch change renews the still-mounted reader without accepting callbacks from its old log", async () => {
+  const scope = "mounted-reader-new-epoch";
+  const store = new Store({ name: "session", id: "s1" }, undefined, scope);
+  snapshot(store, [session("s1")]);
+  load(store, "s1");
+  const mounted = await mountReader(store, scope);
+  try {
+    await act(async () => {
+      mounted.api().onVisibleAnchorChange({ key: "150", offset: -12, index: 50 });
+      mounted.api().pause();
+    });
+    const previousLog = mounted.api();
+    await act(async () => {
+      store.dispatch({ type: "msg", msg: { type: "session_upsert", session: session("s1", 1) } });
+      store.beginEventHistoryLoad("s1", 1, 1);
+      store.loadEvents("s1", events("s1", 500), 1, 1, true, store.getState().snapshotRevision, true, true);
+    });
+    await act(async () => {
+      mounted.api().onVisibleAnchorChange({ key: "550", offset: -5, index: 50 });
+      mounted.api().pause();
+      previousLog.onVisibleAnchorChange({ key: "150", offset: -12, index: 50 });
+      previousLog.onAnchorLost({ key: "550", offset: -5, index: 50 });
+    });
+    assert.equal(hasSavedFollowTailAnchor(scope, "s1"), true,
+      "the same mounted reader can save a new position after its event epoch changes");
+    await act(async () => store.navigate({ name: "board" }));
+    await act(async () => store.navigate({ name: "session", id: "s1" }));
+    assert.deepEqual(mounted.api().getInitialAnchor(), { key: "550", offset: -5, index: 50 });
+    assert.equal(mounted.api().state, "paused");
+    assert.equal(store.getState().eventWindows.get("s1")?.eventEpoch, 1);
+  } finally { await mounted.unmount(); }
+});
+
+test("an explicit inactive-history reset discards only its reader cache even without a changed wire epoch", async () => {
+  for (const eventEpoch of [undefined, 0]) {
+    const scope = `reader-explicit-reset-${eventEpoch}`;
+    const store = new Store({ name: "board" }, undefined, scope);
+    snapshot(store, [session("s1"), session("s2")]);
+    load(store, "s1");
+    await pause(scope, "s1");
+    load(store, "s2", undefined, 2);
+    await pause(scope, "s2");
+    store.navigate({ name: "board" });
+    store.dispatch({ type: "msg", msg: {
+      type: "session_events_reset", sessionId: "s1", events: events("s1", 1, 1),
+      ...(eventEpoch === undefined ? {} : { eventEpoch }),
+    } });
+    store.navigate({ name: "session", id: "s1" });
+    assert.equal(store.getState().events.has("s1"), false,
+      "the accepted reset cannot restore the old retained log while awaiting fresh history");
+    assert.equal(hasSavedFollowTailAnchor(scope, "s1"), false);
+    store.navigate({ name: "session", id: "s2" });
+    assert.equal(store.getState().events.get("s2")?.length, 101);
+    assert.equal(hasSavedFollowTailAnchor(scope, "s2"), true);
+  }
+});
+
+test("snapshot eviction leaves a mounted reader's Pause and Resume controls working without reviving its saved position", async () => {
+  const scope = "mounted-reader-snapshot-eviction";
+  const store = new Store({ name: "session", id: "active" }, undefined, scope);
+  snapshot(store, [session("active")]);
+  load(store, "active");
+  const mounted = await mountReader(store, scope);
+  try {
+    await act(async () => {
+      mounted.api().onVisibleAnchorChange({ key: "150", offset: -12, index: 50 });
+      mounted.api().pause();
+    });
+    for (let index = 0; index < 200; index++) await pause(scope, `browsed-${index}`);
+    assert.equal(hasSavedFollowTailAnchor(scope, "active"), false, "the snapshot bound evicted the older mounted position");
+    await act(async () => mounted.api().follow());
+    assert.equal(mounted.api().state, "following", "Resume still changes the mounted reader after its snapshot was evicted");
+    await act(async () => mounted.api().pause());
+    assert.equal(mounted.api().state, "paused", "Pause also remains usable without a persisted snapshot");
+    assert.equal(hasSavedFollowTailAnchor(scope, "active"), false);
+  } finally { await mounted.unmount(); }
+  assert.equal(hasSavedFollowTailAnchor(scope, "active"), false, "unmount must not resurrect the evicted position");
+});
+
 test("a paused reader returns immediately to its loaded window and recovers only the unseen tail", async () => {
   const scope = "reader-return";
   const store = new Store({ name: "session", id: "s1" }, undefined, scope);

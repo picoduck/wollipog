@@ -119,6 +119,9 @@ export function nextFollowTailState(
 interface FollowTailSnapshot {
   state: FollowTailState;
   anchor: VirtualScrollAnchor | null;
+  /** Mounted readers keep this identity through cleanup. Expiration revokes it so an old
+   * layout-effect cleanup or queued anchor callback cannot recreate a discarded position. */
+  generation: { valid: boolean };
 }
 
 const MAX_FOLLOW_TAIL_SNAPSHOTS = 200;
@@ -129,19 +132,26 @@ function snapshotKey(scope: string, sessionId: string): string {
 }
 
 function loadSnapshot(key: string): FollowTailSnapshot {
-  const snapshot = followTailSnapshots.get(key);
-  return snapshot ? { state: snapshot.state, anchor: snapshot.anchor && { ...snapshot.anchor } } : {
-    state: "following",
-    anchor: null,
-  };
+  let snapshot = followTailSnapshots.get(key);
+  if (!snapshot) {
+    snapshot = { state: "following", anchor: null, generation: { valid: true } };
+    storeSnapshot(key, snapshot, snapshot.generation);
+  }
+  return { ...snapshot, anchor: snapshot.anchor && { ...snapshot.anchor } };
 }
 
-function storeSnapshot(key: string, snapshot: FollowTailSnapshot): void {
+function storeSnapshot(
+  key: string,
+  snapshot: Pick<FollowTailSnapshot, "state" | "anchor">,
+  generation: FollowTailSnapshot["generation"],
+): void {
+  if (!generation.valid) return;
   followTailSnapshots.delete(key);
-  followTailSnapshots.set(key, { state: snapshot.state, anchor: snapshot.anchor && { ...snapshot.anchor } });
+  followTailSnapshots.set(key, { ...snapshot, anchor: snapshot.anchor && { ...snapshot.anchor }, generation });
   while (followTailSnapshots.size > MAX_FOLLOW_TAIL_SNAPSHOTS) {
     const oldest = followTailSnapshots.keys().next().value as string | undefined;
     if (oldest == null) break;
+    followTailSnapshots.get(oldest)!.generation.valid = false;
     followTailSnapshots.delete(oldest);
   }
 }
@@ -162,7 +172,10 @@ export function hasSavedFollowTailAnchor(scope: string, sessionId: string): bool
 /** A position whose rows were evicted or replaced must not turn the next open into a full-log
  * fetch. Expire only this instance's reader; another instance may still hold its own window. */
 export function expireFollowTailAnchor(scope: string, sessionId: string): void {
-  followTailSnapshots.delete(snapshotKey(scope, sessionId));
+  const key = snapshotKey(scope, sessionId);
+  const snapshot = followTailSnapshots.get(key);
+  if (snapshot) snapshot.generation.valid = false;
+  followTailSnapshots.delete(key);
 }
 
 export function isFollowTailUpwardReadingKey(event: FollowTailKey): boolean {
@@ -192,18 +205,13 @@ export function useFollowTail({
   const [canScroll, setCanScroll] = useState(false);
   const stateRef = useRef<FollowTailState>(initialSnapshotRef.current.state);
   const anchorRef = useRef<VirtualScrollAnchor | null>(initialSnapshotRef.current.anchor);
+  const snapshotGenerationRef = useRef(initialSnapshotRef.current.generation);
   const activeKeyRef = useRef(initialKey);
   const rowsRef = useRef<readonly FollowTailRow[]>([]);
   rowsRef.current = rows ?? [];
   /** The newest row id when the reader left the tail; null while following or not yet known. */
   const detachBaselineRef = useRef<number | null>(null);
   const rowGenerationRef = useRef(rowGeneration);
-  if (!Object.is(rowGenerationRef.current, rowGeneration)) {
-    // A reset history numbers its rows afresh, so the old detach point means nothing in it. The
-    // reader keeps their state; the count restarts from the rows the reset delivered.
-    rowGenerationRef.current = rowGeneration;
-    detachBaselineRef.current = null;
-  }
   const previousSessionIdRef = useRef(sessionId);
   const followFrameRef = useRef<number | null>(null);
   const followFramesRemainingRef = useRef(0);
@@ -228,14 +236,29 @@ export function useFollowTail({
     activeKeyRef.current = currentKey;
     stateRef.current = restored.state;
     anchorRef.current = restored.anchor;
+    snapshotGenerationRef.current = restored.generation;
+    detachBaselineRef.current = null;
+  } else if (!Object.is(rowGenerationRef.current, rowGeneration)) {
+    // This mounted session now renders a replacement log. Renew its reader generation without
+    // reviving the old position; a newly reported row can persist in the new sequence space.
+    expireFollowTailAnchor(persistenceScope, sessionId);
+    snapshotGenerationRef.current = loadSnapshot(currentKey).generation;
+    anchorRef.current = null;
     detachBaselineRef.current = null;
   }
+  rowGenerationRef.current = rowGeneration;
+  const snapshotGeneration = snapshotGenerationRef.current;
 
   const persist = useCallback(() => {
-    storeSnapshot(activeKeyRef.current, { state: stateRef.current, anchor: anchorRef.current });
-  }, []);
+    if (activeKeyRef.current !== currentKey || snapshotGenerationRef.current !== snapshotGeneration) return;
+    storeSnapshot(currentKey, { state: stateRef.current, anchor: anchorRef.current }, snapshotGeneration);
+  }, [currentKey, snapshotGeneration]);
 
   const transition = useCallback((event: "pause" | "preview" | "resume") => {
+    // Eviction revokes persistence, not this mounted reader's controls. Identity still fences
+    // callbacks from another session or event log; storeSnapshot rejects an expired generation.
+    if (activeKeyRef.current !== currentKey ||
+        snapshotGenerationRef.current !== snapshotGeneration) return;
     const next = nextFollowTailState(stateRef.current, event);
     if (next === stateRef.current) return;
     if (next === "following") detachBaselineRef.current = null;
@@ -246,8 +269,8 @@ export function useFollowTail({
     }
     stateRef.current = next;
     setState(next);
-    storeSnapshot(activeKeyRef.current, { state: next, anchor: anchorRef.current });
-  }, []);
+    storeSnapshot(currentKey, { state: next, anchor: anchorRef.current }, snapshotGeneration);
+  }, [currentKey, snapshotGeneration]);
 
   /**
    * Position accounting for layout-driven scrolls. When viewport geometry changes, the browser's
@@ -618,15 +641,19 @@ export function useFollowTail({
   }, [cancelProgrammaticScroll, cancelScheduledFollow, cancelScheduledScrollIntent, persist, releaseTouch]);
 
   const onVisibleAnchorChange = useCallback((anchor: VirtualScrollAnchor) => {
+    if (activeKeyRef.current !== currentKey ||
+        snapshotGenerationRef.current !== snapshotGeneration) return;
     anchorRef.current = anchor;
-    storeSnapshot(activeKeyRef.current, { state: stateRef.current, anchor });
-  }, []);
+    storeSnapshot(currentKey, { state: stateRef.current, anchor }, snapshotGeneration);
+  }, [currentKey, snapshotGeneration]);
 
   const onAnchorLost = useCallback((anchor: VirtualScrollAnchor) => {
+    if (activeKeyRef.current !== currentKey ||
+        snapshotGenerationRef.current !== snapshotGeneration) return;
     if (anchorRef.current?.key !== anchor.key) return;
     anchorRef.current = null;
     follow();
-  }, [follow]);
+  }, [currentKey, follow, snapshotGeneration]);
 
   const getInitialAnchor = useCallback(() =>
     stateRef.current === "following" ? null : anchorRef.current, []);
