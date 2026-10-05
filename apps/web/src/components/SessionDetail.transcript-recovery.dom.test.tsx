@@ -186,7 +186,7 @@ function pageController() {
       id: string,
       before: number | undefined,
       eventEpoch: number,
-      _limit: number,
+      _limit?: number,
       alignToTurn?: boolean,
     ) => {
       tailCalls.push({ id, before, eventEpoch, alignToTurn });
@@ -216,6 +216,8 @@ interface Fixture {
   readLoadedEvents: () => SessionEvent[] | undefined;
   setConnection: (conn: ConnState) => void;
   reopen: () => Promise<void>;
+  readApiClient: () => ApiClient;
+  setApiClient: (client: ApiClient) => Promise<void>;
   renderMode: (mode: "preview" | "expanded") => Promise<void>;
 }
 
@@ -293,7 +295,7 @@ async function mountFixture(
     push() {},
     listen: () => () => {},
   };
-  const client = {
+  let client = {
     ...api,
     session: () => new Promise<never>(() => {}),
     getSessionEventPage: pages.fetchPage,
@@ -383,7 +385,7 @@ async function mountFixture(
   await flushAsyncWork();
   const scroller = container.querySelector(".detail-scroll") as HTMLElement | null;
   assert.ok(scroller, "the transcript reader is mounted");
-  return { sessionId: currentSession.id, container, root, scroller, events, socket, renderMode, readSession: () => observedSession, readLoadedEvents: () => observedEvents, setConnection: (conn) => connectionSetter(conn), reopen: async () => { detailMount++; await renderMode(mode); } };
+  return { sessionId: currentSession.id, container, root, scroller, events, socket, renderMode, readSession: () => observedSession, readLoadedEvents: () => observedEvents, setConnection: (conn) => connectionSetter(conn), reopen: async () => { detailMount++; await renderMode(mode); }, readApiClient: () => client, setApiClient: async (nextClient) => { client = nextClient; await renderMode(mode); } };
 }
 
 async function unmountFixture(fixture: Fixture) {
@@ -2784,5 +2786,127 @@ test("fleet acknowledgement churn cannot strand an unfinished opening but skips 
     assert.equal(metadataCalls, 2, "complete empty history also suppresses redundant provisional metadata");
     assert.equal(pages.tailCalls.length, 4, "a complete empty window does not need a fleet-triggered replacement");
     assertNoDomNode(fixture.container.querySelector(".transcript-skeleton"));
+  } finally { await unmountFixture(fixture); }
+});
+
+
+test("a cancelled acknowledged gap still uses REST while its replacement acknowledgement is missing", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages, 12, { acknowledgeSubscription: false });
+  try {
+    await act(async () => pages.releaseTail({
+      events: fixture.events, eventEpoch: 0, hasMoreOlder: false, cacheComplete: true,
+    }));
+    await flushAsyncWork();
+    const revision = fixture.socket.sent.filter((message) => message.type === "session_subscriptions").at(-1)?.revision;
+    assert.ok(revision != null);
+    await act(async () => fixture.socket.push({
+      type: "session_subscriptions_applied", revision, sessionIds: [fixture.sessionId], podIds: [],
+    }));
+    await flushAsyncWork();
+    assert.equal(pages.forwardCalls(), 1, "ordinary acknowledged recovery has an unfinished gap");
+    assert.equal(recoveryActive(fixture), true);
+    await act(async () => fixture.socket.push({
+      type: "session_upsert", session: { ...session(`${fixture.sessionId}-busy`), status: "running" },
+    }));
+    await flushAsyncWork();
+    assert.equal(pages.tailCalls.length, 2,
+      "previous completeness cannot suppress REST after a pending normal gap was cancelled");
+    await act(async () => pages.releaseForward({
+      events: [], eventEpoch: 0, nextAfter: 24, hasMoreCached: false, cacheComplete: true,
+    }));
+    await flushAsyncWork();
+    assert.equal(recoveryActive(fixture), true, "the cancelled forward read cannot settle the active fallback");
+    const latest: SessionEvent = { id: 25, sessionId: fixture.sessionId, seq: 25, ts: 25,
+      payload: { kind: "agent_message", text: "recovered without the replacement acknowledgement", final: true } };
+    await act(async () => pages.releaseTail({
+      events: [...fixture.events, latest], eventEpoch: 0, hasMoreOlder: false, cacheComplete: true,
+    }));
+    await flushAsyncWork();
+    assert.equal(recoveryActive(fixture), false, "REST settles the interrupted gap even when the new ack never arrives");
+    assert.equal(fixture.readLoadedEvents()?.at(-1)?.id, 25);
+  } finally { await unmountFixture(fixture); }
+});
+
+test("a failed acknowledged refresh can retry through REST while the next fleet acknowledgement is missing", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages, 12, { acknowledgeSubscription: false });
+  try {
+    await act(async () => pages.releaseTail({
+      events: fixture.events, eventEpoch: 0, hasMoreOlder: false, cacheComplete: true,
+    }));
+    await flushAsyncWork();
+    const revision = fixture.socket.sent.filter((message) => message.type === "session_subscriptions").at(-1)?.revision;
+    assert.ok(revision != null);
+    await act(async () => fixture.socket.push({
+      type: "session_subscriptions_applied", revision, sessionIds: [fixture.sessionId], podIds: [],
+    }));
+    await flushAsyncWork();
+    await act(async () => pages.releaseForward({
+      events: [], eventEpoch: 7, nextAfter: 24, hasMoreCached: false, cacheComplete: true,
+    }));
+    await flushAsyncWork();
+    assert.ok(fixture.container.querySelector(".transcript-history-notice[data-state='error']"));
+    await act(async () => fixture.socket.push({
+      type: "session_upsert", session: { ...session(`${fixture.sessionId}-busy`), status: "running" },
+    }));
+    await flushAsyncWork();
+    assert.equal(pages.tailCalls.length, 2, "a failed refresh is not proof that the current window is settled");
+    await act(async () => pages.rejectTail());
+    await flushAsyncWork();
+    const retry = fixture.container.querySelector<HTMLButtonElement>(
+      ".transcript-history-notice[data-state='error'] .notice-actions button");
+    assert.ok(retry, "REST failure keeps a manual retry available despite the missing ack");
+    await act(async () => retry.click());
+    await flushAsyncWork();
+    assert.equal(pages.tailCalls.length, 3, "manual retry cannot be suppressed by an older complete window");
+    await act(async () => pages.releaseTail({
+      events: fixture.events, eventEpoch: 0, hasMoreOlder: false, cacheComplete: true,
+    }));
+    await flushAsyncWork();
+    assertNoDomNode(fixture.container.querySelector(".transcript-history-notice[data-state='error']"));
+    assert.equal(recoveryActive(fixture), false);
+  } finally { await unmountFixture(fixture); }
+});
+
+
+test("a temporary API source change cannot reuse an older acknowledged opening when returning without an ack", async () => {
+  const pages = pageController();
+  const alternatePages = pageController();
+  const fixture = await mountFixture(pages, 12, { acknowledgeSubscription: false });
+  try {
+    const originalClient = fixture.readApiClient();
+    const response = { events: fixture.events, eventEpoch: 0, hasMoreOlder: false, cacheComplete: true };
+    await act(async () => pages.releaseTail(response));
+    await flushAsyncWork();
+    const revision = fixture.socket.sent.filter((message) => message.type === "session_subscriptions").at(-1)?.revision;
+    assert.ok(revision != null);
+    await act(async () => fixture.socket.push({
+      type: "session_subscriptions_applied", revision, sessionIds: [fixture.sessionId], podIds: [],
+    }));
+    await flushAsyncWork();
+    await act(async () => pages.releaseForward({
+      events: [], eventEpoch: 0, nextAfter: 24, hasMoreCached: false, cacheComplete: true,
+    }));
+    await flushAsyncWork();
+    await act(async () => fixture.socket.push({
+      type: "session_upsert", session: { ...session(`${fixture.sessionId}-busy`), status: "running" },
+    }));
+    await flushAsyncWork();
+    assert.equal(pages.tailCalls.length, 1, "the settled source has no redundant fleet read");
+    const alternateClient: ApiClient = { ...originalClient,
+      getSessionEventPage: alternatePages.fetchPage,
+      getSessionEventTailPage: alternatePages.fetchTailPage,
+    };
+    await fixture.setApiClient(alternateClient);
+    assert.equal(alternatePages.tailCalls.length, 1, "a new API identity owns a fresh unacknowledged opening");
+    await act(async () => alternatePages.releaseTail(response));
+    await flushAsyncWork();
+    await fixture.setApiClient(originalClient);
+    assert.equal(pages.tailCalls.length, 2,
+      "returning to the old API is a fresh opening, not an inherited acknowledgement from before the source switch");
+    await act(async () => pages.releaseTail(response));
+    await flushAsyncWork();
+    assert.equal(recoveryActive(fixture), false);
   } finally { await unmountFixture(fixture); }
 });

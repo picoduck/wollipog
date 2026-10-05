@@ -85,7 +85,8 @@ up to five additional reads. A newer live status, acknowledgement, navigation, e
 request, or connection-phase change stops the retries. The transcript is not re-fetched, and
 exhaustion retains the latest server-reported state.
 
-Once a mounted conversation has been acknowledged and its history has completed, unrelated fleet
+Once a mounted conversation has been acknowledged and its current history refresh has settled
+successfully, unrelated fleet
 subscription changes use ordinary forward recovery without repeating provisional REST reads.
 Connection loss resets that guard so a missing reconnect acknowledgement can use REST again.
 
