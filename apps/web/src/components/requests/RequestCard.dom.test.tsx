@@ -24,6 +24,7 @@ import { RequestDock, dockRequests } from "./RequestDock.js";
 import { decideDockedRequest, revealDockedRequest } from "./request-reveal.js";
 import type { FollowTailState } from "../../useFollowTail.js";
 import { SessionNoticeSlot } from "../SessionNoticeSlot.js";
+import { useIsMobile } from "../useIsMobile.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
@@ -616,11 +617,18 @@ test("crossing the phone breakpoint keeps focus in the card that held it, even w
   const second = { ...recovery([AUTH.login, AUTH.revalidate, AUTH.dismiss]), requestId: "provider-auth:second" };
   let settle: () => void = () => undefined;
   await setViewport(390);
-  const view = await renderWithRunner(
-    <>
-      <RequestCard session={signInSession(first)} request={first} runnerOnline presentation="dock" />
-      <RequestCard session={signInSession(second, { id: "session-second" })} request={second} runnerOnline presentation="panel" />
-    </>, {},
+  // The dock as SessionDetail renders it, beside a Requests panel card, under a parent that re-renders
+  // at the breakpoint (as SessionDetail does): each owns focus in its own menu.
+  function Page() {
+    const phone = useIsMobile();
+    return (
+      <div data-phone={phone}>
+        <RequestDock session={signInSession(first)} requests={[first]} runnerOnline />
+        <RequestCard session={signInSession(second, { id: "session-second" })} request={second} runnerOnline presentation="panel" />
+      </div>
+    );
+  }
+  const view = await renderWithRunner(<Page />, {},
     { approve: async () => { await new Promise<void>((done) => { settle = done; }); return signInSession(first); } },
   );
   const cards = () => [...view.container.querySelectorAll<HTMLElement>(".request-card")];

@@ -414,7 +414,9 @@ export function RequestCard({
                 align="end"
                 onDismiss={() => menu.close(true)}
                 onKeyDown={menu.onMenuKeyDown}
-                data-request-card-menu=""
+                // Its presentation, so the dock owns focus in its own cards' menus and not in a
+                // Requests panel card's beside it.
+                data-request-card-menu={presentation}
               >
                 {menuOptions.map((option) => (
                   <MenuItem

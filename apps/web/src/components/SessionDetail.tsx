@@ -6027,7 +6027,7 @@ function SessionDetailLoaded({
   // request's heading) needs a dock; with none left, focus returns to the composer or the reader.
   // A preview docks its requests above the reading column rather than in it (#2210).
   const dockHadRequestsRef = useRef(false);
-  const dockFocusRemoved = useRemovedFocus(mode === "expanded" ? chatReadingRef : detailChatRef, "[data-request-card-menu]");
+  const dockFocusRemoved = useRemovedFocus(mode === "expanded" ? chatReadingRef : detailChatRef, '[data-request-card-menu="dock"]');
   useLayoutEffect(() => {
     const had = dockHadRequestsRef.current;
     dockHadRequestsRef.current = dockedRequests.length > 0;

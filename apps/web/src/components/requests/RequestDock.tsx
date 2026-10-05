@@ -193,7 +193,7 @@ export function RequestDock({
   // A decision removes the button that had focus. The next request's heading takes it, so a keyboard
   // stays in the dock; with nothing left, the request coordinator returns focus to the composer. A
   // strip restored under focus hands it to the heading.
-  const removedFocus = useRemovedFocus(dockRef, "[data-request-card-menu]");
+  const removedFocus = useRemovedFocus(dockRef, '[data-request-card-menu="dock"]');
   useLayoutEffect(() => {
     if (!removedFocus() || !expanded) return;
     if (collapsed) expandRef.current?.focus({ preventScroll: true });
@@ -218,7 +218,7 @@ export function RequestDock({
     const closedOpenMenu = onConceal?.() === true;
     const focusLost = !active || active === card?.ownerDocument.body;
     if ((closedOpenMenu && focusLost) ||
-        (active && (card?.contains(active) || active.closest("[data-request-card-menu]") || menuFromCard))) {
+        (active && (card?.contains(active) || active.closest('[data-request-card-menu="dock"]') || menuFromCard))) {
       expandRef.current?.focus({ preventScroll: true });
     }
   });
