@@ -114,7 +114,8 @@ test.describe("at 1440×900 with a mouse", () => {
     await openShell(page, "/settings");
     const settings = rail(page).getByRole("button", { name: "Settings", exact: true });
     await expect(settings).toHaveAttribute("aria-current", "page");
-    const look = await settings.evaluate((element) => {
+    // The initial theme transition can still be interpolating these colors after aria-current is set.
+    const look = () => settings.evaluate((element) => {
       const style = getComputedStyle(element);
       const bar = getComputedStyle(element, "::before");
       const probe = document.createElement("span");
@@ -132,7 +133,7 @@ test.describe("at 1440×900 with a mouse", () => {
       probe.remove();
       return result;
     });
-    expect(look).toEqual({ color: true, fill: true, barWidth: "3px", barColor: true, barLeft: 0 });
+    await expect.poll(look).toEqual({ color: true, fill: true, barWidth: "3px", barColor: true, barLeft: 0 });
     await expect(page.locator('.app-rail [aria-current="page"]')).toHaveCount(1);
   });
 
