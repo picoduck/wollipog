@@ -363,7 +363,8 @@ for (const viewport of [
   });
 
   test(`Held Children is a neutral notice whose list scrolls within its cap by keyboard at ${viewport.name} (#2157)`, async ({ page }) => {
-    await page.setViewportSize(viewport);
+    // Tall enough that the cap, not the half-column budget, sets the list's height.
+    await page.setViewportSize({ width: viewport.width, height: 1100 });
     await page.goto("/request-surfaces-e2e.html?scenario=held");
     const held = page.getByRole("region", { name: "Held Children" });
     await expect(held).toHaveClass(/\bt-neutral\b/u);
@@ -420,9 +421,28 @@ for (const viewport of [
     expect((await page.getByRole("region", { name: "Session Activity" }).boundingBox())!.height).toBeGreaterThan(100);
     const composer = (await page.locator(".composer-box").boundingBox())!;
     expect(composer.y + composer.height).toBeLessThanOrEqual(480);
-    // What the band cannot show scrolls into view from the keyboard.
+    // Held Children scrolls inside its own edge rather than spilling past it, and what it cannot show
+    // scrolls into view from the keyboard.
+    const held = page.getByRole("region", { name: "Held Children" });
+    const heldBox = (await held.boundingBox())!;
+    expect(heldBox.y + heldBox.height).toBeLessThanOrEqual(bandBox.y + bandBox.height + 1);
     await page.getByRole("link", { name: "Fix #1651: Queue Prompts Behind a Handoff Barrier" }).focus();
     await expect(page.getByRole("link", { name: "Fix #1651: Queue Prompts Behind a Handoff Barrier" })).toBeInViewport();
+  });
+
+  test(`with both campaign notices in a common window, Held Children's list gives up height and nothing is cut, at ${viewport.name} (#2157)`, async ({ page }) => {
+    await page.setViewportSize(viewport.width <= 760 ? viewport : { width: 1440, height: 900 });
+    await page.goto("/request-surfaces-e2e.html?scenario=both");
+    const band = page.locator(".campaign-notices");
+    const held = page.getByRole("region", { name: "Held Children" });
+    await expect(held).toBeVisible();
+    expect(await band.evaluate((element) => element.scrollHeight <= element.clientHeight + 1)).toBe(true);
+    expect(await held.evaluate((element) => element.scrollHeight <= element.clientHeight + 1)).toBe(true);
+    const listHeight = (await held.locator("ul.held-children").boundingBox())!.height;
+    expect(listHeight).toBeGreaterThanOrEqual(96);
+    expect(listHeight).toBeLessThan(viewport.width <= 760 ? 220 : 280);
+    const chat = (await page.locator(".detail-chat").boundingBox())!;
+    expect((await band.boundingBox())!.height).toBeLessThanOrEqual(chat.height / 2 + 1);
   });
 
   test(`a Viewer's worktree-recovery advice names who can recover it, not the worktree tools, at ${viewport.name} (#1867)`, async ({ page }) => {

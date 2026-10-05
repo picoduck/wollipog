@@ -58,6 +58,7 @@ export function CampaignHeldChildren({
   return (
     <Notice
       as="section"
+      className="held-children-notice"
       tone="neutral"
       icon={<HeldIcon />}
       ariaLabel={name}

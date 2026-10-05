@@ -9091,11 +9091,12 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 }
 /* Campaign notices (§13.2, #2036, #2157): Campaign Continuation, then Held Children, at the top of the
    chat column under the session bar, on the composer's width and gutters. As with the request dock,
-   the transcript and composer keep at least half the column: in a short pane the band scrolls. */
+   the transcript and composer keep at least half the column: Held Children gives up its list's
+   height first, then scrolls inside its own edge, and the band scrolls only as a last resort. */
 .campaign-notices {
-  display: grid;
+  display: flex;
   flex: 0 1 auto;
-  align-content: start;
+  flex-direction: column;
   gap: var(--space-2);
   min-height: 0;
   max-height: 50%;
@@ -9105,12 +9106,29 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   overflow-y: auto;
   overscroll-behavior: contain;
 }
+.campaign-notices > .notice { flex: none; }
+.campaign-notices > .held-children-notice {
+  flex: 0 1 auto;
+  grid-template-rows: minmax(0, 1fr);
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.held-children-notice > .notice-content {
+  grid-template-rows: auto minmax(0, 1fr);
+  align-self: stretch;
+  min-height: 0;
+}
+.held-children-notice .notice-body { display: flex; flex-direction: column; min-height: 0; }
+.held-children-notice .notice-body > p { flex: none; }
 /* Held Children: up to 32 children can be held, so the list scrolls and the transcript below keeps
-   its room: 280px at most (220px on phones), and less in a short window. Each child is its link,
-   then one `.facts` list per hold. */
+   its room: 280px at most (220px on phones), less in a short window, and never under 96px while the
+   notice can hold it. Each child is its link, then one `.facts` list per hold. */
 .held-children {
   display: grid;
+  flex: 0 1 auto;
   gap: var(--space-3);
+  min-height: 96px;
   max-height: min(280px, 40dvh);
   margin: var(--space-2) 0 0;
   padding: 0;
