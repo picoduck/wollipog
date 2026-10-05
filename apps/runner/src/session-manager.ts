@@ -7691,6 +7691,13 @@ export class SessionManager {
         isolation,
       }, { isCurrent: () => this.launchIsCurrent(sessionId, launchGeneration) });
       if (!this.launchIsCurrent(sessionId, launchGeneration)) throw new Error("session launch changed during provider-home acquisition");
+      // Scope synchronization can finish during any preparation or provider-home wait.
+      // Refresh at the last synchronous boundary before the driver captures its live policy.
+      const authoritativeScope = this.store.readMeta(sessionId)?.orchestrator?.issueScope;
+      if (meta.orchestrator && authoritativeScope && authoritativeScope.revision > (meta.orchestrator.issueScope?.revision ?? 0)) {
+        meta.orchestrator.issueNumbers = [...authoritativeScope.issueNumbers];
+        meta.orchestrator.issueScope = authoritativeScope;
+      }
       client = this.createDriver(
         meta.driver,
         {

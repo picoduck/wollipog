@@ -91,7 +91,7 @@ function fixture(t: TestContext, mode: CloseMode = "closed") {
     return store;
   };
   return { root, repository, commands, inspect, execute, snapshot, restart, diskMeta, scope: (message: Omit<Extract<import("@wollipog/protocol").CampaignIssueScopeMessage, {operation:"synchronize"}>, "sessionId" | "requestId" | "type">) => manager.campaignIssueScope({ type: "campaign_issue_scope", requestId: "scope", sessionId, ...message } as import("@wollipog/protocol").CampaignIssueScopeMessage),
-    store: () => store, mutations: () => commands.filter((command) => command.file === "gh" && command.args[0] === "issue") };
+    manager: () => manager, store: () => store, mutations: () => commands.filter((command) => command.file === "gh" && command.args[0] === "issue") };
 }
 
 const digest = (snapshot: GithubIssueClosureSnapshot) => createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
@@ -210,4 +210,30 @@ test("runner scope synchronization persists across recreation and refuses stale 
   assert.equal((await f.scope({operation:"synchronize",scope:{...removed,issueNumbers:[123]}})).ok,false,"same revision cannot change authority");
   assert.equal((await f.execute({...original,scopeRevision:1})).ok,false);
   assert.equal(f.mutations().length,0);
+});
+
+test("a scope removal during provider preparation reaches the driver launch policy", async (t) => {
+  const f = fixture(t);
+  const initial = { repository: "example/project", issueNumbers: [issue], revision: 1, authorizedByUserId: "owner", authorizedAt: 1000 };
+  assert.equal((await f.scope({operation:"synchronize",scope:initial})).ok,true);
+  let enter!: () => void, release!: () => void;
+  const entered = new Promise<void>((resolve) => { enter=resolve; });
+  const gate = new Promise<void>((resolve) => { release=resolve; });
+  let launched: import("./drivers/driver.js").DriverOptions["orchestrator"];
+  const manager = f.manager() as unknown as {
+    providerHomeLeases: { acquire(): Promise<void>; stopAcquisitions(): void };
+    createDriver: (kind: string, options: import("./drivers/driver.js").DriverOptions) => never;
+    beginLaunchGeneration(id: string): number;
+    launch(meta: SessionMeta, resume: undefined, generation: number): Promise<boolean>;
+  };
+  manager.providerHomeLeases = { acquire: async () => { enter(); await gate; }, stopAcquisitions() {} };
+  manager.createDriver = (_kind, options) => { launched=options.orchestrator; throw new Error("capture-only driver"); };
+  const launching = manager.launch(f.store().readMeta(sessionId)!,undefined,manager.beginLaunchGeneration(sessionId));
+  try {
+    await entered;
+    assert.equal((await f.scope({operation:"synchronize",scope:{...initial,issueNumbers:[],revision:2}})).ok,true);
+  } finally { release(); }
+  await launching;
+  assert.deepEqual(launched?.issueNumbers,[],"the removed issue must not regain live permission authority");
+  assert.equal(launched?.issueScope?.revision,2);
 });
