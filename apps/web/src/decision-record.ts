@@ -65,10 +65,17 @@ export interface DecisionNames {
  */
 export interface GovernancePolicyNames {
   names: ReadonlyMap<string, string> | null;
-  load: () => void;
+  /** A row needs this policy's name: loads the names, or reloads them once for a policy they lack. */
+  load: (policyId: string) => void;
+  /** A policy was created, renamed or removed here: reload the names a row is showing. */
+  invalidate: () => void;
 }
 
-export const GovernancePolicyNamesContext = createContext<GovernancePolicyNames>({ names: null, load: () => {} });
+export const GovernancePolicyNamesContext = createContext<GovernancePolicyNames>({
+  names: null,
+  load: () => {},
+  invalidate: () => {},
+});
 
 /** The name of who decided, in Title Case: "You", a member's name, a policy's name, the parent
  * session's title, "Wollipog" or the reviewer. Null when it must stay unsaid: a person the viewer
@@ -151,7 +158,8 @@ export function permissionOutcome(item: PermissionItem): DecisionOutcome {
   switch (item.resolutionReason) {
     case "replaced": return "replaced";
     case "provider_resolved": return "provider_resolved";
-    case "dismissed": return "dismissed";
+    // The runner records a chosen Cancel as a dismissal; the option still says what happened.
+    case "dismissed": return permissionOptionOutcome(item.options, item.resolvedOptionId) === "ended_early" ? "ended_early" : "dismissed";
     case "expired": return "expired";
     default: return permissionOptionOutcome(item.options, item.resolvedOptionId);
   }

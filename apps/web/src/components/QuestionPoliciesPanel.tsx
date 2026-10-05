@@ -1,6 +1,7 @@
-import React, { useEffect, useState } from "react";
+import React, { useContext, useEffect, useState } from "react";
 import type { GovernancePolicy } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
+import { GovernancePolicyNamesContext } from "../decision-record.js";
 import { SettingsGroup } from "./SettingsView.js";
 import { SwitchRow } from "./ui/SettingsRows.js";
 
@@ -23,6 +24,7 @@ export function starterQuestionPolicy(category: typeof QUESTION_POLICY_STARTERS[
 
 export function QuestionPoliciesPanel() {
   const api = useApi();
+  const { invalidate: invalidatePolicyNames } = useContext(GovernancePolicyNamesContext);
   const [policies, setPolicies] = useState<GovernancePolicy[]>([]);
   const [owner, setOwner] = useState<{ userId: string; organizationId: string }>();
   const [busy, setBusy] = useState<string>();
@@ -44,6 +46,8 @@ export function QuestionPoliciesPanel() {
         ? { ...existing, enabled: !current.enabled }
         : starterQuestionPolicy(category, owner.userId, owner.organizationId, true));
       setPolicies((old) => [...old.filter((p) => p.policyId !== saved.policyId), saved]);
+      // Decision Records name policies by their display name; a new policy needs its name loaded.
+      invalidatePolicyNames();
     } catch (e) { setError((e as Error).message); }
     finally { setBusy(undefined); }
   }

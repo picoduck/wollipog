@@ -41,11 +41,12 @@ function useDecisionNames(record: DecisionRecordModel): DecisionNames {
   const viewer = useContext(ViewerIdentityContext);
   const policies = useContext(GovernancePolicyNamesContext);
   const actor = record.actor;
-  const wantsPolicy = actor?.kind === "policy" && Boolean(actor.policyId);
-  const { load } = policies;
+  const policyId = actor?.kind === "policy" ? actor.policyId : undefined;
+  const { load, names: policyNames } = policies;
+  const named = policyId !== undefined && policyNames?.has(policyId) === true;
   useEffect(() => {
-    if (wantsPolicy) load();
-  }, [load, wantsPolicy]);
+    if (policyId && !named) load(policyId);
+  }, [load, named, policyId, policyNames]);
   const parentId = actor?.kind === "parent" ? actor.sessionId : undefined;
   const parentTitle = useSessionDisplayTitle(parentId);
   return {

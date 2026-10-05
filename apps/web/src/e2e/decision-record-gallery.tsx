@@ -64,6 +64,7 @@ const items: TimelineItem[] = [
 const policies = {
   names: new Map([["no-shell-in-production", "No Shell in Production"], ["ask-before-deploys", "Ask Before Deploys"]]),
   load: () => {},
+  invalidate: () => {},
 };
 
 /** Alice is the only member, so her decisions read "by You". */

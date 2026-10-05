@@ -69,7 +69,7 @@ function GovernanceFixture() {
 }
 
 /** The policy behind the native decision, named as Settings › Approvals names it. */
-const policyNames = { names: new Map([["deny-shell", "Deny Shell Commands"]]), load: () => {} };
+const policyNames = { names: new Map([["deny-shell", "Deny Shell Commands"]]), load: () => {}, invalidate: () => {} };
 
 const root = createRoot(document.getElementById("root")!);
 if (params.get("set") === "decisions") {

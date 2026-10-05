@@ -126,7 +126,7 @@ function historyAs(
 ): string {
   return renderToStaticMarkup(React.createElement(
     GovernancePolicyNamesContext.Provider,
-    { value: { names: policies, load: () => {} } },
+    { value: { names: policies, load: () => {}, invalidate: () => {} } },
     React.createElement(
       ViewerIdentityContext.Provider,
       { value: viewing },

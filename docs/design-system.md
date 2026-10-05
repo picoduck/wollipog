@@ -1621,13 +1621,14 @@ summary is `--control-h` tall (44px on touch): the §5.5 chevron, a 16px outcome
 `requestDecision` word in its tone, the request's title, "by" who decided, and a relative time whose
 tooltip is the absolute time. Who decided is "You" (relative to the viewer, #2527), a policy's
 display name from the organization's policies (never "Policy · <id>"; "Policy" until the names
-load), the parent session's title, the reviewer, or "Wollipog" for a fail-closed block. A permission
+load; they reload once for a policy they lack and after a policy is saved), the parent session's title, the reviewer, or "Wollipog" for a fail-closed block. A permission
 event records no member, so in a shared organization its row names nobody rather than guessing. The
 body is a §5.4 `.facts` list, each fact once: Decided By (a parent session's title links to it),
 Tool, Path, Branch, the command in a §11.7 code well, Risk for a review, and Recorded as one absolute
 time with seconds. Ids (request, audit, policy, session, review) are never shown; Copy Audit ID copies
 them. The chosen option's kind decides the word (`allow_*` Allowed, `reject_*` Rejected, `cancel`
-Ended Early); the runner's own sign-in resolutions keep their words.
+Ended Early, even though the runner records a chosen Cancel as a dismissal); the runner's own
+sign-in resolutions keep their words.
 
 Facts are not statuses: "Detached Work: Untracked", "Changes Present", "Worktree", "Kept Aside" are
 meta (§11.3). This table lives in code as one `statusMeta(domain, value) → {label, tone, pulse}` map;

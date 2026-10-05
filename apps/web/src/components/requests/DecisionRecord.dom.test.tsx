@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
-import React, { act } from "react";
+import React, { act, useContext } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type {
@@ -14,6 +14,7 @@ import type {
 import { api, type ApiClient } from "../../api.js";
 import { ApiProvider } from "../../api-context.js";
 import { installDomTestCleanup } from "../../dom-test-cleanup.js";
+import { GovernancePolicyNamesContext, type GovernancePolicyNames } from "../../decision-record.js";
 import { governanceDecisions } from "../../governance.js";
 import { ViewerIdentityContext, viewerIdentity } from "../../resolver-identity.js";
 import { StoreProvider } from "../../store.js";
@@ -105,6 +106,8 @@ const EXPECTED_BY_REASON: Partial<Record<StructuredRequestResolutionReason, stri
 };
 
 function expectedWord(option: PermissionOption | undefined, optionId: string | null, reason?: StructuredRequestResolutionReason, parent = false): string {
+  // The runner records a chosen Cancel as a dismissal (session-manager's permission_resolved).
+  if (reason === "dismissed" && option?.kind === "cancel") return "Ended Early";
   if (!parent && reason && EXPECTED_BY_REASON[reason]) return EXPECTED_BY_REASON[reason]!;
   if (optionId === null) return "Dismissed";
   if (!option) return optionId === "auth:automatic-retry" ? "Rechecked Automatically" : "Another Account Selected";
@@ -155,6 +158,12 @@ function parentSession(): SessionView {
   } as SessionView;
 }
 
+let policyNames!: GovernancePolicyNames;
+function PolicyNamesProbe() {
+  policyNames = useContext(GovernancePolicyNamesContext);
+  return null;
+}
+
 async function mount(items: TimelineItem[], client: Partial<ApiClient> = {}, onOpenSession?: (id: string) => void) {
   const sockets: UiSocket[] = [];
   const connection: UiConnectionRuntime = {
@@ -171,19 +180,23 @@ async function mount(items: TimelineItem[], client: Partial<ApiClient> = {}, onO
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
-  await act(async () => {
-    root.render(<ApiProvider client={{ ...api, ...client }}><StoreProvider connection={connection}>
+  const client_ = { ...api, ...client };
+  const render = (shown: TimelineItem[]) => act(async () => {
+    root.render(<ApiProvider client={client_}><StoreProvider connection={connection}>
       <GovernancePolicyNamesProvider>
+        <PolicyNamesProbe />
         <ViewerIdentityContext.Provider value={soloViewer}>
-          <EventTimeline ariaLabel="Decisions" items={items} onOpenSession={onOpenSession} />
+          <EventTimeline ariaLabel="Decisions" items={shown} onOpenSession={onOpenSession} />
         </ViewerIdentityContext.Provider>
       </GovernancePolicyNamesProvider>
     </StoreProvider></ApiProvider>);
   });
+  await render(items);
   const rows = () => [...container.querySelectorAll<HTMLDetailsElement>("details.tl-decision")];
   return {
     container,
     rows,
+    render,
     online: () => act(async () => {
       sockets.at(-1)!.onmessage?.({ data: JSON.stringify({ type: "snapshot", runners: [], boxes: [], sessions: [parentSession()], runs: [], pods: [] }) });
       await Promise.resolve();
@@ -310,6 +323,65 @@ test("policy decisions load the policy names once, name the policy, and keep its
     const copy = [...blocked!.querySelectorAll("button")].find((button) => button.textContent?.includes("Copy Audit ID"))!;
     await act(async () => { copy.click(); });
     assert.equal(copied, "Audit ID: audit-block\nRequest ID: hook-block\nPolicy ID: deny-shell-x7");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a chosen Cancel, which the runner records as a dismissal, reads Ended Early", async () => {
+  const items = deriveTimeline([
+    event({ kind: "permission_request", requestId: "codex-cancel", title: "Run Migrations", options: OPTION_SETS.codex! }),
+    event({ kind: "permission_resolved", requestId: "codex-cancel", optionId: "cancel", resolutionReason: "dismissed" }),
+    event({ kind: "permission_request", requestId: "plain-dismiss", title: "Run Seeds", options: OPTION_SETS.codex! }),
+    event({ kind: "permission_resolved", requestId: "plain-dismiss", optionId: null, resolutionReason: "dismissed" }),
+  ]);
+  const view = await mount(items);
+  try {
+    assert.deepEqual(view.rows().map((row) => row.querySelector(".tl-decision-outcome")?.textContent), ["Ended Early", "Dismissed"]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("policy names reload once for a policy they lack, and again after a policy is saved here", async () => {
+  const policies = [{ policyId: "alpha-x7", name: "Alpha" }];
+  let loads = 0;
+  const governancePolicies: ApiClient["governancePolicies"] = async () => {
+    loads += 1;
+    return { policies: policies.map((policy) => ({ ...policy })) as never };
+  };
+  const blockedBy = (policyId: string, index: number): TimelineItem => ({
+    kind: "governance_decision", id: -100 - index,
+    decision: governanceDecisions([audit({ auditId: `audit-${policyId}`, requestId: `hook-${policyId}`, stage: "policy_decision",
+      outcome: "denied", actor: { kind: "policy", id: policyId }, governancePolicyId: policyId })])[0]!,
+  });
+  const view = await mount([blockedBy("alpha-x7", 0)], { governancePolicies });
+  const by = () => view.rows().map((row) => row.querySelector(".tl-decision-by")?.textContent);
+  try {
+    await view.online();
+    assert.equal(loads, 1);
+    assert.deepEqual(by(), ["by Alpha"]);
+
+    // A policy created after the names loaded, without a reconnect.
+    policies.push({ policyId: "beta-x7", name: "Beta" });
+    await view.render([blockedBy("alpha-x7", 0), blockedBy("beta-x7", 1)]);
+    assert.equal(loads, 2, "a row naming an unknown policy reloads the names");
+    assert.deepEqual(by(), ["by Alpha", "by Beta"]);
+
+    // A policy that no longer exists asks once, not on every render.
+    await view.render([blockedBy("alpha-x7", 0), blockedBy("beta-x7", 1), blockedBy("gone-x7", 2)]);
+    await view.render([blockedBy("alpha-x7", 0), blockedBy("beta-x7", 1), blockedBy("gone-x7", 2)]);
+    assert.equal(loads, 3);
+    assert.deepEqual(by(), ["by Alpha", "by Beta", "by Policy"]);
+
+    // Saving a policy here (Settings › Behavior) reloads them, so a rename shows.
+    policies[0]!.name = "Alpha Renamed";
+    await act(async () => { policyNames.invalidate(); });
+    assert.deepEqual(by(), ["by Alpha Renamed", "by Beta", "by Policy"]);
+    // The reload, then one more ask for the policy that is still gone; then it settles.
+    assert.equal(loads, 5);
+    await view.render([blockedBy("alpha-x7", 0), blockedBy("beta-x7", 1), blockedBy("gone-x7", 2)]);
+    assert.equal(loads, 5);
   } finally {
     await view.unmount();
   }
