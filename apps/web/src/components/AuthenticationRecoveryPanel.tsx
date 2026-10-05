@@ -76,9 +76,9 @@ export function signInSituation(approval: PendingApproval): SignInSituation | nu
   return ids.has("auth:revalidate") ? "read_only" : null;
 }
 
-/** What the facts can say about the account signed in now: shown, unknown to an older runner, or
- * unknown for now (offline, a failed or inconclusive check). */
-export type SignedInAccountView = "seen" | "older_runner" | "unseen";
+/** What the facts can say about the account signed in now: shown (an email), still being checked,
+ * unknown to an older runner, or unknown for now (offline, a failed or inconclusive check, no email). */
+export type SignedInAccountView = "seen" | "checking" | "older_runner" | "unseen";
 
 /**
  * The one sentence under the facts: the situation, and what the primary does about it. It never
@@ -111,6 +111,10 @@ export function signInSentence({ situation, provider, signingIn, loginStatus, ac
       if (account === "older_runner") {
         return `This machine's runner can't tell which account ${provider} uses. Use Current Account continues this ` +
           `session with whatever account ${provider} is signed in to.`;
+      }
+      if (account === "checking") {
+        return `Checking which account ${provider} uses. Use Current Account continues this session with ` +
+          `whatever account ${provider} is signed in to.`;
       }
       if (account === "unseen") {
         return `Wollipog couldn't check which account ${provider} uses. Use Current Account continues this session ` +
@@ -213,10 +217,7 @@ export function AuthenticationRecoveryPanel({
     provider,
     signingIn,
     loginStatus: providerLogin?.status,
-    account: !supported ? "older_runner"
-      : !runnerOnline || currentIdentity?.state === "failed" ||
-        (currentIdentity?.state === "loaded" && currentIdentity.value.status !== "authenticated") ? "unseen"
-      : "seen",
+    account: signedInAccountView(supported, runnerOnline, currentIdentity),
   });
 
   return (
@@ -274,6 +275,20 @@ export function AuthenticationRecoveryPanel({
       )}
     </div>
   );
+}
+
+/** "seen" only when Signed In Now shows an email, so the sentence never claims more than the facts. */
+function signedInAccountView(
+  supported: boolean,
+  runnerOnline: boolean,
+  identity: Loadable<ProviderAuthenticationCurrentIdentity> | null,
+): SignedInAccountView {
+  if (!supported) return "older_runner";
+  if (!runnerOnline) return "unseen";
+  if (!identity || identity.state === "loading") return "checking";
+  if (identity.state === "failed") return "unseen";
+  const value = identity.value;
+  return value.status === "authenticated" && value.emailSupported && value.email ? "seen" : "unseen";
 }
 
 function lastChecked(

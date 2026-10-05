@@ -249,9 +249,30 @@ test("the sentence never claims a mismatch Signed In Now cannot show", async () 
   } finally {
     await older.cleanup();
   }
+  // While the check runs, the sentence says so; then it states only what Signed In Now shows.
+  let resolve: (identity: ProviderAuthenticationCurrentIdentity) => void = () => undefined;
+  const deferred = {
+    ...client().value,
+    authenticationCurrentIdentity: () => new Promise<{ identity: ProviderAuthenticationCurrentIdentity }>((done) => {
+      resolve = (identity) => done({ identity });
+    }),
+  } as ApiClient;
+  const checking = await render(
+    <AuthenticationRecoveryPanel session={session()} approval={different} runner={runner()} runnerOnline />, deferred);
+  try {
+    assert.match(checking.container.querySelector(".sign-in-sentence")?.textContent ?? "",
+      /^Checking which account Claude Code uses\. Use Current Account continues/);
+    await act(async () => { resolve({ status: "authenticated", emailSupported: true, email: EMAIL, observedAt: 1 }); await tick(); });
+    assert.match(checking.container.querySelector(".sign-in-sentence")?.textContent ?? "",
+      /^Claude Code is signed in to a different account than this session uses\./, "an email shown: the mismatch is a fact");
+  } finally {
+    await checking.cleanup();
+  }
   for (const identity of [
     { status: "unknown" as const, emailSupported: true, email: null, observedAt: 1 },
     { status: "unauthenticated" as const, emailSupported: true, email: null, observedAt: 1 },
+    { status: "authenticated" as const, emailSupported: true, email: null, observedAt: 1 },
+    { status: "authenticated" as const, emailSupported: false, email: null, observedAt: 1 },
   ]) {
     const view = await render(
       <AuthenticationRecoveryPanel session={session()} approval={different} runner={runner()} runnerOnline />,
@@ -259,7 +280,7 @@ test("the sentence never claims a mismatch Signed In Now cannot show", async () 
     );
     try {
       assert.match(view.container.querySelector(".sign-in-sentence")?.textContent ?? "",
-        /^Wollipog couldn't check which account Claude Code uses\./, identity.status);
+        /^Wollipog couldn't check which account Claude Code uses\./, JSON.stringify(identity));
     } finally {
       await view.cleanup();
     }
