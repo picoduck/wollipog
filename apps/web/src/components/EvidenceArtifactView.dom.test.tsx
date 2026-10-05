@@ -119,7 +119,13 @@ async function mount(session: SessionView, artifactExport: ApiClient["artifactEx
   ));
   // Fetch, digest, and the state update each settle on their own turn.
   for (let turn = 0; turn < 6; turn += 1) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-  const button = (name: string) => [...container.querySelectorAll<HTMLButtonElement>(".request-card-foot button")]
+  // The digest runs on SubtleCrypto, which no number of turns waits for under load. Keep waiting while
+  // a tile is still downloading or hashing, but only so long: a test may hold a download on purpose.
+  const settledBy = Date.now() + 2_000;
+  while (container.querySelector('.ev-media[data-status="loading"]') && Date.now() < settledBy) {
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 5)); });
+  }
+  const button =(name: string) => [...container.querySelectorAll<HTMLButtonElement>(".request-card-foot button")]
     .find((candidate) => candidate.textContent === name)!;
   // Tiles are named by media type (#2197): "Screenshot", or "Screenshot 1" when there are several.
   const checkbox = (name: string) =>
@@ -594,6 +600,14 @@ const press = async (key: string) => {
 };
 // Focus comes back on a timer once the dialog has gone.
 const settleFocus = async () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+/** Waits for the card to reach a state: a download and its digest settle on no fixed number of turns. */
+const settle = async (reached: () => boolean, what: string) => {
+  const deadline = Date.now() + 5_000;
+  while (!reached()) {
+    assert.ok(Date.now() < deadline, `timed out waiting for ${what}`);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 5)); });
+  }
+};
 const screenshots = (count: number) => Array.from({ length: count }, (_, index) =>
   artifactItem({ evidenceId: `viewport-${index + 1}`, artifactId: `art_${index + 1}` }));
 const openTile = async (view: Awaited<ReturnType<typeof mount>>, evidenceId: string) => {
@@ -811,8 +825,8 @@ test("focus stays in the viewer when another item fails and takes the filmstrip 
     thumb.focus();
     assert.equal(domWindow.document.activeElement, thumb as unknown as Element);
     release();
-    for (let turn = 0; turn < 6; turn += 1) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-    assert.equal(view.tile("viewport-2").querySelector(".ev-blocked-label")?.textContent, "Doesn't Match");
+    await settle(() => view.tile("viewport-2").querySelector(".ev-blocked-label")?.textContent === "Doesn't Match",
+      "Screenshot 2 to read Doesn't Match");
     assert.equal(viewerTitle(), "Screenshot 1 of 2", "the item shown stays");
     assert.deepEqual(filmstrip(), [], "one item left has no filmstrip");
     assert.equal(domWindow.document.activeElement, viewerButton("Mark Reviewed and Next") as unknown as Element,
