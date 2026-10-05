@@ -432,10 +432,13 @@ export function observedReconciliationRevision(db: ControlPlaneDb, sessionId: st
   return Number(db.raw().prepare("SELECT acknowledged_revision FROM usage_cost_reconciliation_observations WHERE session_id=?").get(sessionId)?.acknowledged_revision ?? 0);
 }
 
-export function observeReconciliationRevision(db: ControlPlaneDb, sessionId: string, acknowledged: number): void {
-  if (!Number.isSafeInteger(acknowledged) || acknowledged <= 0) return;
+export function observeReconciliationRevision(db: ControlPlaneDb, sessionId: string, acknowledged: number): number {
+  const observed = observedReconciliationRevision(db, sessionId);
+  if (!Number.isSafeInteger(acknowledged) || acknowledged <= observed) return observed;
+  // Runtime publication is frequent; equal/stale acknowledgements must stay read-only.
   db.raw().prepare(`INSERT INTO usage_cost_reconciliation_observations VALUES (?, ?)
     ON CONFLICT(session_id) DO UPDATE SET acknowledged_revision=MAX(acknowledged_revision, excluded.acknowledged_revision)`).run(sessionId, acknowledged);
+  return observedReconciliationRevision(db, sessionId);
 }
 
 /** Old snapshots retain their raw baseline until the runner acknowledges a correction revision. */

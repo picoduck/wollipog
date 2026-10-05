@@ -2,7 +2,7 @@ import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, campai
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
 import { normalizeCampaignIssueScopeSnapshot, type CampaignIssueScopeRequest, type CampaignIssueScopeView } from "@wollipog/protocol";
 import { normalizeIssueClosureSnapshot, issueClosureActiveChildren } from "./github-issue-closure.js";
-import { observedReconciliationRevision, observeReconciliationRevision, normalizeReconciledSnapshot, reconciliationDeltaUsd, reconciliationRevision } from "./claude-cost-reconciliation.js";
+import { observeReconciliationRevision, normalizeReconciledSnapshot, reconciliationDeltaUsd, reconciliationRevision } from "./claude-cost-reconciliation.js";
 import type { GithubIssueClosureRequest, GithubIssueClosureResult } from "@wollipog/protocol";
 /**
  * Session orchestration: the control-plane brain that turns UI commands into
@@ -13599,9 +13599,9 @@ export class SessionsService {
     if (this.db.getSession(sessionId)?.runnerId !== runnerId) return false;
     const revision = reconciliationRevision(this.db, sessionId);
     const acknowledged = snapshot.costReconciliationRevision ?? 0;
-    observeReconciliationRevision(this.db, sessionId, acknowledged);
+    const observed = observeReconciliationRevision(this.db, sessionId, acknowledged);
     const revisionUnavailable = !Number.isSafeInteger(acknowledged) || acknowledged < 0 ||
-      Math.max(acknowledged, observedReconciliationRevision(this.db, sessionId)) > revision;
+      Math.max(acknowledged, observed) > revision;
     if (!revisionUnavailable && (revision === 0 || runnerSupportsProtocol(
       this.db.getRunner(runnerId)?.protocolVersion, "costReconciliation"))) return false;
     this.log.warn(JSON.stringify({ event: revisionUnavailable ? "cost_reconciliation_revision_unavailable" :

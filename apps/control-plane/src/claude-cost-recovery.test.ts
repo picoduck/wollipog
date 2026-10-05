@@ -154,11 +154,15 @@ test("verified restore recovery preserves later usage, is read-only in preview a
     const input = recovery(db);
     restored = ControlPlaneDb.open(path);
     observeReconciliationRevision(restored, "session", 1);
+    const changes = restored.raw().prepare("SELECT total_changes() AS n").get()?.n;
+    observeReconciliationRevision(restored, "session", 1);
+    observeReconciliationRevision(restored, "session", 0);
+    assert.equal(restored.raw().prepare("SELECT total_changes() AS n").get()?.n, changes, "unchanged/stale acknowledgement publication is read-only");
     assert.throws(() => normalizeReconciledSnapshot(restored!, snapshot(now, 0.0200012, 1)), /revision/);
     const ordinary = previewClaudeReconciliation(restored, principal, evidence);
     assert.equal(ordinary.deltaUsd, 0);
     assert.ok(ordinary.rows.every((row) => row.status === "unresolved"));
-    restored.appendEvent("session", { kind: "token_usage", model: "new-model", costUsd: 0.0030007 }, now + 2 * 3_600_000,
+    restored.appendEvent("session", { kind: "token_usage", model: "new-model", costUsd: 0.0030003 }, now + 2 * 3_600_000,
       { accrueUsage: true, runnerSeq: 3, historyEpoch: 1 });
     const before = restored.raw().prepare("SELECT * FROM usage_session_state").all();
     const preview = previewClaudeReconciliationRecovery(restored, principal, input);
@@ -169,13 +173,16 @@ test("verified restore recovery preserves later usage, is read-only in preview a
     assert.equal(restored.raw().prepare("SELECT COUNT(*) AS n FROM usage_cost_reconciliations").get()?.n, 0);
     const result = applyClaudeReconciliationRecovery(restored, principal, input, preview.digest);
     assert.equal(result.revision, 1);
-    assert.equal(ledgerPico(restored), 23_001_900_000);
-    const acknowledged = snapshot(now, 0.0230019, 1);
+    const audit = restored.raw().prepare("SELECT delta_microusd, result_json FROM usage_cost_reconciliations").get()!;
+    assert.equal(audit.delta_microusd, -10001, "the original correction identity/delta is retained");
+    assert.equal(JSON.parse(String(audit.result_json)).correction.deltaMicrousd, -10000, "new usage can change the integer allocation without changing the exact correction");
+    assert.equal(ledgerPico(restored), 23_001_500_000);
+    const acknowledged = snapshot(now, 0.0230015, 1);
     assert.equal(normalizeReconciledSnapshot(restored, acknowledged).costUsd, acknowledged.costUsd);
-    assert.equal(normalizeReconciledSnapshot(restored, { ...acknowledged, costUsd: 0.0330025, costReconciliationRevision: 0 }).costUsd, 0.0230019);
+    assert.equal(normalizeReconciledSnapshot(restored, { ...acknowledged, costUsd: 0.0330021, costReconciliationRevision: 0 }).costUsd, 0.0230015);
     restored.close(); restored = ControlPlaneDb.open(path);
     assert.equal(applyClaudeReconciliationRecovery(restored, principal, input, preview.digest).applied, false);
-    assert.equal(ledgerPico(restored), 23_001_900_000);
+    assert.equal(ledgerPico(restored), 23_001_500_000);
     assert.equal(restored.raw().prepare("SELECT COUNT(*) AS n FROM usage_cost_reconciliation_recoveries").get()?.n, 1);
   } finally { restored?.close(); db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
