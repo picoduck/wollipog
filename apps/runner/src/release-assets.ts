@@ -7,10 +7,11 @@
  */
 
 import { createHash } from "node:crypto";
-import { createWriteStream } from "node:fs";
+import { createReadStream, writeSync } from "node:fs";
 import { open } from "node:fs/promises";
-import { Readable } from "node:stream";
-import { pipeline } from "node:stream/promises";
+import { Readable, Writable } from "node:stream";
+import { finished, pipeline } from "node:stream/promises";
+import type { ReleaseStaging } from "./release-staging.js";
 
 export const RELEASE_REPOSITORY = "picoduck/wollipog";
 export const WEB_BUNDLE_ASSET_NAME = "wollipog-web.tar.gz";
@@ -146,13 +147,13 @@ export function parseChecksumManifest(text: string): Map<string, string> {
   return entries;
 }
 
-export type Downloader = (url: string, destination: string, headers: Record<string, string>) => Promise<void>;
+export type Downloader = (url: string, sink: Writable, headers: Record<string, string>) => Promise<void>;
 
-/** Stream a URL to a new file; the caller verifies the bytes before promoting them. */
-export const downloadToFile: Downloader = async (url, destination, headers) => {
+/** Stream into the caller-owned bounded sink; this callback has no pathname opening authority. */
+export const downloadToFile: Downloader = async (url, sink, headers) => {
   const response = await fetch(url, { headers, redirect: "follow" });
   if (!response.ok || !response.body) throw new Error(`download failed for ${url}: HTTP ${response.status}`);
-  await pipeline(Readable.fromWeb(response.body as import("stream/web").ReadableStream), createWriteStream(destination, { mode: 0o600 }));
+  await pipeline(Readable.fromWeb(response.body as import("stream/web").ReadableStream), sink);
 };
 
 export async function sha256File(path: string): Promise<string> {
@@ -168,23 +169,58 @@ export async function sha256File(path: string): Promise<string> {
 
 /**
  * Download one asset and prove its bytes: the publisher digest is mandatory (an asset without one
- * is refused), and when a manifest is supplied its entry must agree as well. Returns the hex digest.
+ * is refused), and when a manifest is supplied its entry must agree as well. The caller's current
+ * owned attempt supplies the private sink and no-replace publication authority. Returns the digest.
  */
 export async function downloadVerifiedAsset(
   download: Downloader,
   asset: ReleaseAsset,
   destination: string,
-  options: { manifest?: Map<string, string> | null; token?: string | null; hash?: (path: string) => Promise<string> } = {},
+  options: { staging: ReleaseStaging; manifest?: Map<string, string> | null; token?: string | null },
 ): Promise<string> {
-  const publisher = asset.digest ? asset.digest.slice("sha256:".length) : null;
+  const publisher = asset.digest && /^sha256:[a-f0-9]{64}$/u.test(asset.digest) ? asset.digest.slice("sha256:".length) : null;
   if (!publisher) throw new Error(`${asset.name} has no valid GitHub SHA-256 digest; refusing an unverified download`);
   const manifestDigest = options.manifest ? options.manifest.get(asset.name) ?? null : null;
   if (options.manifest && !manifestDigest) throw new Error(`${CHECKSUM_MANIFEST_NAME} has no entry for ${asset.name}`);
   if (manifestDigest && manifestDigest !== publisher) throw new Error(`${asset.name}: ${CHECKSUM_MANIFEST_NAME} and the GitHub digest disagree`);
   const headers: Record<string, string> = { accept: "application/octet-stream", "user-agent": "wollipog-cli" };
   if (options.token) headers.authorization = `Bearer ${options.token}`;
-  await download(asset.url, destination, headers);
-  const actual = await (options.hash ?? sha256File)(destination);
+  if (!Number.isSafeInteger(asset.size) || asset.size <= 0) throw new Error(`${asset.name} has no positive safe declared size`);
+  const partial = options.staging.createPartial(asset, destination);
+  let written = 0;
+  const sink = new Writable({ write(chunk: Buffer, _encoding, callback) {
+    try {
+      if (chunk.length > partial.size - written) throw new Error(`${asset.name} exceeds its declared download size`);
+      let offset = 0;
+      while (offset < chunk.length) {
+        const count = writeSync(partial.fd, chunk, offset, chunk.length - offset);
+        if (count <= 0) throw new Error(`${asset.name} download write made no progress`);
+        offset += count;
+      }
+      written += chunk.length;
+      callback();
+    } catch (error) { callback(error as Error); }
+  } });
+  // Observe errors before calling the injected callback; callback rejection must not leave an
+  // unhandled sink rejection or allow delayed writes through a closed/reused descriptor.
+  const completion = finished(sink, { cleanup: true });
+  void completion.catch(() => {});
+  try {
+    await download(asset.url, sink, headers);
+    if (!sink.writableEnded) sink.end();
+    await completion;
+  } catch (error) {
+    sink.destroy();
+    await completion.catch(() => {});
+    throw error;
+  }
+  if (written !== partial.size) throw new Error(`${asset.name} download length disagrees with its declared size`);
+  options.staging.verifyPartial(partial.path, partial.size);
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(partial.path, { fd: partial.fd, autoClose: false, start: 0 })) hash.update(chunk as Buffer);
+  const actual = hash.digest("hex");
+  options.staging.verifyPartial(partial.path, partial.size);
   if (actual !== publisher) throw new Error(`${asset.name} failed SHA-256 verification (expected ${publisher}, got ${actual})`);
+  options.staging.publish(partial.path, destination);
   return actual;
 }

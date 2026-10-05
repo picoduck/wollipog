@@ -29,6 +29,7 @@ import {
   type JsonFetch,
 } from "./release-assets.js";
 import { VERSION } from "./version.js";
+import { ReleaseStaging, type StagingFilesystem } from "./release-staging.js";
 import {
   CONTROL_PLANE_UNIT,
   DEFAULT_PORT,
@@ -75,6 +76,8 @@ export interface ServiceHost {
   fetchJson: JsonFetch;
   /** Stream a release asset to a file. */
   download: Downloader;
+  /** Complete filesystem identity adapter for deterministic staging tests. */
+  stagingFilesystem?: StagingFilesystem;
   arch: string;
   sleep(ms: number): Promise<void>;
   now(): number;
@@ -853,140 +856,156 @@ async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (
   }
 
   // Stage every byte under the data directory before touching anything live.
-  const staging = join(layout.dataDir, "upgrades", release.tag);
-  host.removeTree(staging);
-  host.ensureDir(join(layout.dataDir, "upgrades"), 0o700);
-  host.ensureDir(staging, 0o700);
   const manifestAsset = release.assets.find((asset) => asset.name === CHECKSUM_MANIFEST_NAME);
   if (!manifestAsset) throw new CliError(`${release.tag} has no ${CHECKSUM_MANIFEST_NAME}; refusing to upgrade from a release that cannot be verified`);
-  const manifestPath = join(staging, CHECKSUM_MANIFEST_NAME);
-  await downloadVerifiedAsset(host.download, manifestAsset, manifestPath, { token });
-  const manifest = parseChecksumManifest(host.readFile(manifestPath));
-  const staged = new Map<string, string>();
-  for (const target of targets) {
-    const destination = join(staging, target.assetName);
-    await downloadVerifiedAsset(host.download, findAsset(release, target.assetName), destination, { manifest, token });
-    host.chmod(destination, 0o755);
-    const probe = await host.exec(destination, ["--version"], { timeoutMs: 60_000 });
-    const reported = probe.code === 0 ? probe.stdout.trim().split(/\s+/u)[0] ?? "" : "";
-    if (reported !== release.version) {
-      throw new CliError(`downloaded ${target.assetName} reports version "${reported}" (exit ${probe.code}) instead of ${release.version}; nothing was installed`);
-    }
-    staged.set(target.component, destination);
-  }
-  let stagedWeb: string | null = null;
+  const selected = [manifestAsset, ...targets.map((target) => findAsset(release, target.assetName))];
   if (webDist) {
-    // A control plane that serves the dashboard is upgraded together with its bundle or not at all.
     const webAsset = release.assets.find((asset) => asset.name === WEB_BUNDLE_ASSET_NAME);
     if (!webAsset) throw new CliError(`${release.tag} has no ${WEB_BUNDLE_ASSET_NAME}, but this control plane serves the dashboard from ${webDist}; nothing was installed`);
-    const tarball = join(staging, WEB_BUNDLE_ASSET_NAME);
-    await downloadVerifiedAsset(host.download, webAsset, tarball, { manifest, token });
-    const extracted = await host.exec("tar", ["-xzf", tarball, "-C", staging], { timeoutMs: 120_000 });
-    if (extracted.code !== 0 || !host.exists(join(staging, "web", "index.html"))) {
-      throw new CliError(`could not extract ${WEB_BUNDLE_ASSET_NAME}: ${extracted.stderr.trim() || "no web/index.html in the archive"}; nothing was installed`);
-    }
-    stagedWeb = join(staging, "web");
+    selected.push(webAsset);
   }
-
-  const controlPlane = targets.find((target) => target.component === "control-plane");
-  const runner = targets.find((target) => target.component === "runner");
-
-  // Swap: keep exactly one previous generation of each executable and of the web bundle. Every path
-  // is recorded before its first mutation, so a swap that fails midway is undone as well.
-  const previous = (path: string) => `${path}.previous`;
-  const swapped: Array<{ path: string; hadPrevious: boolean; movedAside: boolean; tree: boolean }> = [];
-  const replace = (path: string, source: string, tree: boolean) => {
-    const entry = { path, hadPrevious: host.exists(path), movedAside: false, tree };
-    swapped.push(entry);
-    if (tree) host.removeTree(previous(path)); else host.removeFile(previous(path));
-    if (entry.hadPrevious) {
-      host.move(path, previous(path));
-      entry.movedAside = true;
+  if (selected.some((asset) => release.assets.filter((candidate) => candidate.name === asset.name).length !== 1)) throw new CliError("release metadata has duplicate selected asset names");
+  const attempt = ReleaseStaging.create(layout.dataDir, { mode, serviceUid }, release.tag, selected, host.stagingFilesystem);
+  const staging = attempt.path;
+  try {
+    const manifestPath = join(staging, CHECKSUM_MANIFEST_NAME);
+    await downloadVerifiedAsset(host.download, manifestAsset, manifestPath, { staging: attempt, token });
+    attempt.beforeMove(manifestPath);
+    const manifest = parseChecksumManifest(host.readFile(manifestPath));
+    const staged = new Map<string, string>();
+    for (const target of targets) {
+      const destination = join(staging, target.assetName);
+      await downloadVerifiedAsset(host.download, findAsset(release, target.assetName), destination, { staging: attempt, manifest, token });
+      attempt.executable(destination, () => host.chmod(destination, 0o755));
+      const probe = await host.exec(destination, ["--version"], { timeoutMs: 60_000 });
+      const reported = probe.code === 0 ? probe.stdout.trim().split(/\s+/u)[0] ?? "" : "";
+      if (reported !== release.version) {
+        throw new CliError(`downloaded ${target.assetName} reports version "${reported}" (exit ${probe.code}) instead of ${release.version}; nothing was installed`);
+      }
+      staged.set(target.component, destination);
     }
-    host.move(source, path);
-    if (!tree) host.chmod(path, 0o755);
-  };
-  const aliasPartial = (alias: string) => `${alias}.upgrade-${release.tag}`;
-  const rollBack = async (reason: string): Promise<CliError> => {
-    const problems: string[] = [];
-    for (const entry of [...swapped].reverse()) {
-      try {
-        // A live generation that was never moved aside is still in place: leave it alone.
-        if (entry.hadPrevious && !entry.movedAside) continue;
-        if (entry.tree) host.removeTree(entry.path); else host.removeFile(entry.path);
-        if (entry.movedAside && host.exists(previous(entry.path))) host.move(previous(entry.path), entry.path);
-      } catch (error) {
-        problems.push(`could not restore ${entry.path}: ${(error as Error).message}`);
+    let stagedWeb: string | null = null;
+    if (webDist) {
+      // A control plane that serves the dashboard is upgraded together with its bundle or not at all.
+      const webAsset = release.assets.find((asset) => asset.name === WEB_BUNDLE_ASSET_NAME);
+      if (!webAsset) throw new CliError(`${release.tag} has no ${WEB_BUNDLE_ASSET_NAME}, but this control plane serves the dashboard from ${webDist}; nothing was installed`);
+      const tarball = join(staging, WEB_BUNDLE_ASSET_NAME);
+      await downloadVerifiedAsset(host.download, webAsset, tarball, { staging: attempt, manifest, token });
+      const extracted = await host.exec("tar", ["-xzf", tarball, "-C", staging], { timeoutMs: 120_000 });
+      if (extracted.code !== 0 || !host.exists(join(staging, "web", "index.html"))) {
+        throw new CliError(`could not extract ${WEB_BUNDLE_ASSET_NAME}: ${extracted.stderr.trim() || "no web/index.html in the archive"}; nothing was installed`);
+      }
+      stagedWeb = join(staging, "web");
+      attempt.captureWeb();
+    }
+
+    const controlPlane = targets.find((target) => target.component === "control-plane");
+    const runner = targets.find((target) => target.component === "runner");
+
+    // Swap: keep exactly one previous generation of each executable and of the web bundle. Every path
+    // is recorded before its first mutation, so a swap that fails midway is undone as well.
+    const previous = (path: string) => `${path}.previous`;
+    const swapped: Array<{ path: string; hadPrevious: boolean; movedAside: boolean; tree: boolean }> = [];
+    const replace = (path: string, source: string, tree: boolean) => {
+      if (source.startsWith(`${staging}/`)) attempt.beforeMove(source);
+      const entry = { path, hadPrevious: host.exists(path), movedAside: false, tree };
+      swapped.push(entry);
+      if (tree) host.removeTree(previous(path)); else host.removeFile(previous(path));
+      if (entry.hadPrevious) {
+        host.move(path, previous(path));
+        entry.movedAside = true;
+      }
+      host.move(source, path);
+      if (source.startsWith(`${staging}/`)) attempt.moved(source);
+      if (!tree) host.chmod(path, 0o755);
+    };
+    const aliasPartial = (alias: string) => `${alias}.upgrade-${release.tag}`;
+    const rollBack = async (reason: string): Promise<CliError> => {
+      const problems: string[] = [];
+      for (const entry of [...swapped].reverse()) {
+        try {
+          // A live generation that was never moved aside is still in place: leave it alone.
+          if (entry.hadPrevious && !entry.movedAside) continue;
+          if (entry.tree) host.removeTree(entry.path); else host.removeFile(entry.path);
+          if (entry.movedAside && host.exists(previous(entry.path))) host.move(previous(entry.path), entry.path);
+        } catch (error) {
+          problems.push(`could not restore ${entry.path}: ${(error as Error).message}`);
+        }
+      }
+      for (const alias of aliases) host.removeFile(aliasPartial(alias));
+      for (const target of targets) {
+        const restarted = await systemctl(host, mode, ["restart", target.unit]);
+        if (restarted.code !== 0) problems.push(`could not restart ${target.unit}: ${restarted.stderr.trim()}`);
+      }
+      const healthy = controlPlane ? await waitFor(host, 60_000, async () => (await probeHealth(host, effective.port)).ok) : true;
+      if (!healthy) problems.push("the control plane is still not healthy: inspect with `wollipog service logs control-plane`");
+      return new CliError(`${reason}; rolled back to the previous executables${problems.length ? `, with problems: ${problems.join("; ")}` : controlPlane ? " (control plane healthy again)" : ""}`);
+    };
+
+    try {
+      for (const target of targets) replace(target.path, staged.get(target.component)!, false);
+      for (const alias of aliases) {
+        host.removeFile(aliasPartial(alias));
+        host.copyTree(runnerTarget!.path, aliasPartial(alias));
+        replace(alias, aliasPartial(alias), false);
+      }
+      if (stagedWeb && webDist) replace(webDist, stagedWeb, true);
+      if (mode === "system") {
+        const owned = await host.exec("chown", ["-R", `${layout.account}:${layout.account}`, ...targets.map((target) => target.path), ...aliases, ...(stagedWeb && webDist ? [webDist] : [])], { timeoutMs: 60_000 });
+        if (owned.code !== 0) throw new Error(`chown to ${layout.account} failed: ${owned.stderr.trim()}`);
+      }
+    } catch (error) {
+      throw await rollBack(`installing the new executables failed (${(error as Error).message})`);
+    }
+
+    if (controlPlane) {
+      const restart = await systemctl(host, mode, ["restart", controlPlane.unit]);
+      if (restart.code !== 0) throw await rollBack(`could not restart ${controlPlane.unit}: ${restart.stderr.trim()}`);
+      const healthy = await waitFor(host, 60_000, async () => (await probeHealth(host, effective.port)).ok);
+      if (!healthy) throw await rollBack(`${controlPlane.unit} did not become healthy within 60s after the upgrade`);
+      const status = await adminJson<{ appVersion?: string }>(host, effective, ["status"]);
+      if (status.data?.appVersion !== release.version) {
+        throw await rollBack(`the restarted control plane reports version ${status.data?.appVersion ?? "unknown"}, not ${release.version}`);
       }
     }
-    for (const alias of aliases) host.removeFile(aliasPartial(alias));
-    for (const target of targets) {
-      const restarted = await systemctl(host, mode, ["restart", target.unit]);
-      if (restarted.code !== 0) problems.push(`could not restart ${target.unit}: ${restarted.stderr.trim()}`);
+    if (runner) {
+      const restart = await systemctl(host, mode, ["restart", runner.unit]);
+      if (restart.code !== 0) throw await rollBack(`could not restart ${runner.unit}: ${restart.stderr.trim()}`);
+      const runnerId = (() => { try { return (JSON.parse(host.readFile(layout.runnerConfigFile)) as { runnerId?: string }).runnerId ?? null; } catch { return null; } })();
+      if (controlPlane && runnerId) {
+        const online = await waitFor(host, 90_000, async () => {
+          const status = await adminJson<{ runners?: { items?: Array<{ runnerId: string; status: string; version?: string }> } }>(host, effective, ["status"]);
+          return status.data?.runners?.items?.some((item) => item.runnerId === runnerId && item.status === "online") === true;
+        });
+        if (!online) throw await rollBack(`runner ${runnerId} did not register as online within 90s after the upgrade`);
+      } else {
+        // A runner-only host reports to a remote control plane this command cannot query; the unit
+        // staying active is the readiness signal here.
+        const active = await waitFor(host, 30_000, async () => (await unitState(host, mode, runner.unit)).activeState === "active");
+        if (!active) throw await rollBack(`${runner.unit} did not become active within 30s after the upgrade`);
+      }
     }
-    const healthy = controlPlane ? await waitFor(host, 60_000, async () => (await probeHealth(host, effective.port)).ok) : true;
-    if (!healthy) problems.push("the control plane is still not healthy: inspect with `wollipog service logs control-plane`");
-    return new CliError(`${reason}; rolled back to the previous executables${problems.length ? `, with problems: ${problems.join("; ")}` : controlPlane ? " (control plane healthy again)" : ""}`);
-  };
-
-  try {
-    for (const target of targets) replace(target.path, staged.get(target.component)!, false);
-    for (const alias of aliases) {
-      host.removeFile(aliasPartial(alias));
-      host.copyTree(runnerTarget!.path, aliasPartial(alias));
-      replace(alias, aliasPartial(alias), false);
-    }
-    if (stagedWeb && webDist) replace(webDist, stagedWeb, true);
-    if (mode === "system") {
-      const owned = await host.exec("chown", ["-R", `${layout.account}:${layout.account}`, ...targets.map((target) => target.path), ...aliases, ...(stagedWeb && webDist ? [webDist] : [])], { timeoutMs: 60_000 });
-      if (owned.code !== 0) throw new Error(`chown to ${layout.account} failed: ${owned.stderr.trim()}`);
-    }
+    const cleanup = attempt.finish();
+    if (cleanup) throw new CliError(`upgrade to ${release.tag} completed and is healthy, but ${cleanup}`);
+    const report = {
+      upgraded: true,
+      release: release.tag,
+      previous: Object.fromEntries(currentVersions),
+      components: targets.map((target) => ({ component: target.component, path: target.path, previousKept: host.exists(previous(target.path)) ? previous(target.path) : null })),
+      aliases,
+      webDist: stagedWeb ? webDist : null,
+    };
+    emit(report, [
+      `Upgraded to ${release.tag}: ${targets.map((target) => `${target.component} ${currentVersions.get(target.component) ?? "unknown"} → ${release.version}`).join(", ")}${aliases.length ? `, ${aliases.map((alias) => basename(alias)).join(" and ")} refreshed` : ""}${stagedWeb ? ", web bundle refreshed" : ""}.`,
+      `Previous executables kept as ${targets.map((target) => previous(target.path)).join(" and ")}; the next upgrade replaces them.`,
+      controlPlane ? `Control plane healthy${runner ? " and runner online." : "."}` : "Runner active.",
+    ].join("\n"));
+    return 0;
   } catch (error) {
-    throw await rollBack(`installing the new executables failed (${(error as Error).message})`);
+    const cleanup = attempt.finish();
+    if (cleanup) throw new CliError(`${(error as Error).message}; ${cleanup}`);
+    throw error;
   }
-
-  if (controlPlane) {
-    const restart = await systemctl(host, mode, ["restart", controlPlane.unit]);
-    if (restart.code !== 0) throw await rollBack(`could not restart ${controlPlane.unit}: ${restart.stderr.trim()}`);
-    const healthy = await waitFor(host, 60_000, async () => (await probeHealth(host, effective.port)).ok);
-    if (!healthy) throw await rollBack(`${controlPlane.unit} did not become healthy within 60s after the upgrade`);
-    const status = await adminJson<{ appVersion?: string }>(host, effective, ["status"]);
-    if (status.data?.appVersion !== release.version) {
-      throw await rollBack(`the restarted control plane reports version ${status.data?.appVersion ?? "unknown"}, not ${release.version}`);
-    }
-  }
-  if (runner) {
-    const restart = await systemctl(host, mode, ["restart", runner.unit]);
-    if (restart.code !== 0) throw await rollBack(`could not restart ${runner.unit}: ${restart.stderr.trim()}`);
-    const runnerId = (() => { try { return (JSON.parse(host.readFile(layout.runnerConfigFile)) as { runnerId?: string }).runnerId ?? null; } catch { return null; } })();
-    if (controlPlane && runnerId) {
-      const online = await waitFor(host, 90_000, async () => {
-        const status = await adminJson<{ runners?: { items?: Array<{ runnerId: string; status: string; version?: string }> } }>(host, effective, ["status"]);
-        return status.data?.runners?.items?.some((item) => item.runnerId === runnerId && item.status === "online") === true;
-      });
-      if (!online) throw await rollBack(`runner ${runnerId} did not register as online within 90s after the upgrade`);
-    } else {
-      // A runner-only host reports to a remote control plane this command cannot query; the unit
-      // staying active is the readiness signal here.
-      const active = await waitFor(host, 30_000, async () => (await unitState(host, mode, runner.unit)).activeState === "active");
-      if (!active) throw await rollBack(`${runner.unit} did not become active within 30s after the upgrade`);
-    }
-  }
-  host.removeTree(staging);
-  const report = {
-    upgraded: true,
-    release: release.tag,
-    previous: Object.fromEntries(currentVersions),
-    components: targets.map((target) => ({ component: target.component, path: target.path, previousKept: host.exists(previous(target.path)) ? previous(target.path) : null })),
-    aliases,
-    webDist: stagedWeb ? webDist : null,
-  };
-  emit(report, [
-    `Upgraded to ${release.tag}: ${targets.map((target) => `${target.component} ${currentVersions.get(target.component) ?? "unknown"} → ${release.version}`).join(", ")}${aliases.length ? `, ${aliases.map((alias) => basename(alias)).join(" and ")} refreshed` : ""}${stagedWeb ? ", web bundle refreshed" : ""}.`,
-    `Previous executables kept as ${targets.map((target) => previous(target.path)).join(" and ")}; the next upgrade replaces them.`,
-    controlPlane ? `Control plane healthy${runner ? " and runner online." : "."}` : "Runner active.",
-  ].join("\n"));
-  return 0;
 }
 
 export function defaultServiceIo(): ServiceIo {
