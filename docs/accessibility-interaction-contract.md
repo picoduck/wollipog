@@ -73,7 +73,7 @@ git-status reader. Presentation leaves are split at stable boundaries:
   head line (`RequestCardHead`) over one question per step (`QuestionStep`), in today's placement
   until #2205 docks it. While focus is in the card, 1–9 pick the current question's rows, Enter
   moves on, Ctrl/Cmd+Enter submits from any step and D dismisses; a field being typed in keeps its
-  keys. `SessionApprovalRegion` keeps the one focus and live-announcement owner for both.
+  keys, and Session Reading's shortcuts stand aside while focus is in the card, its heading included. `SessionApprovalRegion` keeps the one focus and live-announcement owner for both.
 - `EventTimeline` and `RightPanel` remain their existing independently testable seams.
 
 The detail coordinator subscribes only to its owning runner and box. The shared git-status result is

@@ -55,6 +55,9 @@ function Harness({
         <input role="combobox" aria-label="Filter Worktrees" aria-expanded />
         <div role="separator" aria-label="Resize Shell Panel" tabIndex={0} />
         <input className="shell-input" aria-label="Pipe Shell" />
+        <section className="request-card question-card" aria-label="Agent Questions">
+          <div role="heading" aria-level={3} tabIndex={-1}>Which target?</div>
+        </section>
       </div>
       <div className="xterm"><textarea aria-label="Terminal" /></div>
       <nav data-focus-zone="rail"><button type="button">Inbox</button></nav>
@@ -328,6 +331,21 @@ test("typing, native controls, layers, focus zones, and xterm keep their key own
   dispatchKey("f");
   menu.remove();
   assert.deepEqual(fixture.calls, ["nextSession"]);
+
+  await act(async () => { fixture.root.unmount(); });
+  fixture.container.remove();
+});
+
+test("a question card owns every key while focus is on its heading (#2196)", async () => {
+  const fixture = await renderHarness();
+  // The heading is a focusable div, not a native control, so only the card's ownership keeps D on
+  // its question rather than the session's top request.
+  fixture.container.querySelector<HTMLElement>(".question-card [role=heading]")!.focus();
+  for (const key of ["d", "a", "e", "s", "r", "j", "1"]) {
+    assert.equal(dispatchKey(key).defaultPrevented, false, key);
+  }
+  assert.deepEqual(fixture.calls, []);
+  assert.deepEqual(fixture.scrollCalls, []);
 
   await act(async () => { fixture.root.unmount(); });
   fixture.container.remove();
