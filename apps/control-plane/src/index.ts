@@ -1271,6 +1271,9 @@ app.register(async (instance) => {
           serverTime: Date.now(),
           heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
           protocolVersion: PROTOCOL_VERSION,
+          ...(runnerSupportsProtocol(msg.protocolVersion, "skillRequestResumption")
+            ? { pendingSkillRequests: hub.pendingSkillRequests(runnerId) }
+            : {}),
           ...(runnerSupportsProtocol(msg.protocolVersion, "machineRunnerCapacity")
             ? { runnerCapacity: db.machineRunnerCapacityConfiguration(runnerId) ?? undefined }
             : {}),

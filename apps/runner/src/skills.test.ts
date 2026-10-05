@@ -79,9 +79,12 @@ for (const outcome of ["granted", "refused"] as const) {
         metadata: { agents: AgentDefinition[] };
         config: { providerAccounts: [] };
         chunkedSkillsSync: ChunkedSkillsSyncAssembler;
+        generation: number;
+        skillStateReporter: { connectionGeneration: number };
       } = {
         lastDesiredSkills: [old], metadata: { agents: [codexAgent] },
         config: { providerAccounts: [] }, chunkedSkillsSync: assembler,
+        generation: 0, skillStateReporter: { connectionGeneration: 0 },
       };
       const capture = (): { allowRemovals: boolean; stillCurrent: () => boolean } => runInNewContext(
         transformSync(`(() => {${source.slice(start, end)}return { allowRemovals, stillCurrent };})()`, { loader: "ts" }).code,

@@ -1483,11 +1483,24 @@ function completeChunkedSkillsSync(msg: Extract<ControlPlaneToRunner, { type: "s
 /** Serializes reconcile passes so concurrent syncs and discovery rescans cannot interleave the
  * link-replacement and removal steps. */
 let skillsReconcileQueue: Promise<void> = Promise.resolve();
-const skillStateReporter = new SkillStateReporter(config.runnerId, sendUp, log);
+/** Inventory and removal events belong to the current connection, never the general outbox. */
+function sendSkillState(message: import("@wollipog/protocol").SkillsStateMessage): void {
+  const socket = ws;
+  if (!socket || socket.readyState !== WebSocket.OPEN || !registered) {
+    throw new Error("skill state transport is not registered");
+  }
+  const projected = projectMessageForCurrentProtocol(message);
+  if (!projected) throw new Error("skill state projection is unavailable");
+  socket.send(JSON.stringify(projected));
+}
+
+const skillStateReporter = new SkillStateReporter(config.runnerId, sendSkillState, log);
 
 function queueSkillsReconcile(requestId?: string): void {
+  const generation = skillStateReporter.connectionGeneration;
   const request = skillStateReporter.request(requestId);
   const run = async () => {
+    if (generation !== skillStateReporter.connectionGeneration || skillStateReporter.awaitingConnectionAuthority) return;
     // Read at run time, not queue time: a pass queued behind another always applies the freshest
     // authoritative list, and replaying it under an older requestId still reports converged truth.
     const desired = lastDesiredSkills;
@@ -1496,7 +1509,8 @@ function queueSkillsReconcile(requestId?: string): void {
     const reconciliationAccounts = config.providerAccounts.map(account => ({
       id: account.id, provider: account.provider, directory: account.directory,
     }));
-    const stillCurrent = () => desired === lastDesiredSkills && reconciliationAgents === metadata.agents &&
+    const stillCurrent = () => generation === skillStateReporter.connectionGeneration &&
+      desired === lastDesiredSkills && reconciliationAgents === metadata.agents &&
       allowRemovals === (desired !== null && !chunkedSkillsSync.inProgress) &&
       config.providerAccounts.length === reconciliationAccounts.length && reconciliationAccounts.every((account, i) => {
         const current = config.providerAccounts[i];
@@ -1599,18 +1613,21 @@ function queueSkillsReconcile(requestId?: string): void {
         });
         result = mergeWslSkillsResult(result, wsl, metadata.agents);
       }
-      skillStateReporter.report(result, request, stillCurrent());
     } catch (error) {
-      skillStateReporter.report({
+      result = {
         deployed: [],
         unmanaged: [],
         removedLinks: result?.removedLinks ?? [],
         ...(result?.superseded ? { superseded: true } : {}),
         error: `skill reconcile failed: ${errText(error)}`,
-      }, request, stillCurrent());
+      };
     }
+    // A failed handoff is transport failure, not a new empty reconciliation observation.
+    skillStateReporter.report(result, request, stillCurrent(), generation);
   };
-  skillsReconcileQueue = skillsReconcileQueue.then(run, run);
+  skillsReconcileQueue = skillsReconcileQueue.then(run, run).catch(() => {
+    log("skill state handoff failed; pending requests retain their original deadline");
+  });
 }
 
 /** WSL adoption and recovery run inside each distro on a Windows runner, only when the control plane
@@ -1973,6 +1990,8 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       backoff = INITIAL_BACKOFF_MS;
       registered = true;
       controlPlaneProtocolVersion = msg.protocolVersion ?? null;
+      skillStateReporter.resumeRequests(runnerSupportsProtocol(controlPlaneProtocolVersion, "skillRequestResumption")
+        ? msg.pendingSkillRequests : undefined);
       harnessInstallationChoices = synchronizedHarnessChoices(controlPlaneProtocolVersion, msg.harnessInstallationChoices);
       automaticAccountSwitchConfigurationSynchronized = false;
       harnessSelectionGeneration++;
@@ -3002,7 +3021,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
     case "skills_sync":
       chunkedSkillsSync.reset();
       if (msg.runnerId !== config.runnerId) {
-        sendUp({
+        sendSkillState({
           type: "skills_state",
           runnerId: config.runnerId,
           ...(msg.requestId !== undefined ? { requestId: msg.requestId } : {}),
@@ -3743,11 +3762,12 @@ function connect(): void {
   automaticAccountSwitchConfigurationSynchronized = false;
   sessions.setAutomaticAccountSwitchAuthorityReady(false);
   chunkedSkillsSync.reset();
-  skillStateReporter.resetRequests();
+  skillStateReporter.beginConnection();
   const socket = new WebSocket(validateControlPlaneUrl(config.controlPlaneUrl, allowInsecureTransport));
   ws = socket;
 
   socket.on("open", () => {
+    if (ws !== socket) return;
     log("connected — registering");
     const register: RegisterMessage = {
       type: "register",
@@ -3766,6 +3786,7 @@ function connect(): void {
   });
 
   socket.on("message", (raw: Buffer) => {
+    if (ws !== socket) return;
     const msg = parseMessage<ControlPlaneToRunner>(raw.toString());
     if (!msg) return;
     // A malformed frame (missing/mistyped fields survive the cast-only parseMessage) must not
@@ -3780,6 +3801,7 @@ function connect(): void {
   });
 
   socket.on("close", () => {
+    if (ws !== socket) return;
     stopHeartbeat();
     registered = false;
     forgetAgentControlRegistrationAnswers();
@@ -3794,6 +3816,7 @@ function connect(): void {
   });
 
   socket.on("error", (err: Error) => {
+    if (ws !== socket) return;
     log(`socket error: ${err.message}`);
   });
 
@@ -3801,6 +3824,7 @@ function connect(): void {
   // clear the missed-ping counter. Silence across MAX_MISSED_HEARTBEAT_PONGS pings terminates the
   // socket in startHeartbeat.
   socket.on("pong", () => {
+    if (ws !== socket) return;
     heartbeatPongObserved = true;
     missedHeartbeatPongs = 0;
   });

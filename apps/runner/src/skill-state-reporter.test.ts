@@ -136,7 +136,6 @@ test("no-cache removal bookkeeping keeps only the latest bounded real event and 
   const event = Array.from({ length: 300 }, (_, i) => ({ path: `skills/${i}`, reason: "Actual fixture removal" }));
   f.reporter.report({ ...superseded(), removedLinks: [{ path: "skills/older", reason: "Older actual removal" }] });
   f.reporter.report({ ...superseded(), removedLinks: event }, f.reporter.request("pending"));
-  f.reporter.resetRequests();
   f.reporter.report(superseded());
   f.reporter.report(empty());
   assert.deepEqual(f.messages[0]!.removals, event.slice(0, 256));
@@ -468,5 +467,66 @@ test("production publication stays fenced across a stubbed WSL await without sta
     assert.match(stale.error!, /stale.*superseded/);
     f.context.reconcileWslSkills = async () => empty(); await f.queue("wsl-current");
     assert.equal(f.db.getRunnerSkillState("fixture")!.error, undefined);
+  } finally { f.close(); }
+});
+
+for (const solicited of [false, true]) for (const refused of [false, true]) {
+  test(`production queue drops old ${solicited ? "solicited" : "unsolicited"} generation after ${refused ? "refused" : "granted"} ownership wait`, async () => {
+    const f = integratedFixture();
+    try {
+      await f.queue();
+      const before = f.db.getRunnerSkillState("fixture")!;
+      const messageCount = f.messages.length;
+      const gate = f.block(f.home, refused);
+      const pending = f.queue(solicited ? "R" : undefined);
+      await gate.entered;
+      f.reporter.beginConnection();
+      f.reporter.resumeRequests(solicited ? [{ requestId: "R", remainingMs: 30_000 }] : []);
+      gate.finish(); await pending;
+      assert.equal(f.messages.length, messageCount, "old success/error cannot publish or drain resumed correlation");
+      assert.deepEqual(f.db.getRunnerSkillState("fixture"), before);
+      assert.deepEqual(gate.visited, [f.home], "old pass cannot replay subsequent account/GC/link reconciliation");
+      f.release(); await f.queue();
+      assert.equal(f.messages.at(-1)!.requestId, solicited ? "R" : undefined);
+      assert.deepEqual(f.db.getRunnerSkillState("fixture")!.deployed, before.deployed);
+    } finally { f.close(); }
+  });
+}
+
+test("production queue skips queued work from an old connection before any ownership/link work", async () => {
+  const f = integratedFixture();
+  try {
+    const gate = f.block(f.home, false);
+    const running = f.queue(); await gate.entered;
+    const queued = f.queue("R");
+    f.reporter.beginConnection(); f.reporter.resumeRequests([{ requestId: "R", remainingMs: 30_000 }]);
+    gate.finish(); await running; await queued;
+    assert.deepEqual(gate.visited, [f.home]);
+    assert.equal(f.messages.length, 0);
+    f.release(); await f.queue();
+    assert.equal(f.messages.at(-1)!.requestId, "R");
+  } finally { f.close(); }
+});
+
+test("production queue does not turn a refused handoff into empty error inventory or consume its admission", async () => {
+  const f = integratedFixture();
+  try {
+    await f.queue();
+    const before = f.db.getRunnerSkillState("fixture")!, count = f.messages.length;
+    const push = f.messages.push.bind(f.messages);
+    let attempts = 0;
+    f.messages.push = (...messages: SkillsStateMessage[]) => {
+      attempts++;
+      if (attempts === 1) throw new Error("Fixture handoff refused");
+      return push(...messages);
+    };
+    await f.queue("R");
+    assert.equal(attempts, 1, "transport failure is not retried as a reconcile error");
+    assert.equal(f.messages.length, count);
+    assert.deepEqual(f.db.getRunnerSkillState("fixture"), before);
+    f.reporter.beginConnection(); f.reporter.resumeRequests([{ requestId: "R", remainingMs: 30_000 }]);
+    await f.queue();
+    assert.equal(f.messages.at(-1)!.requestId, "R");
+    assert.deepEqual(f.db.getRunnerSkillState("fixture")!.deployed, before.deployed);
   } finally { f.close(); }
 });

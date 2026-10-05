@@ -652,7 +652,11 @@
 //      exactly. Additive + optional: older runners send none, so clients keep matching exit code
 //      text in the output, and older clients ignore the field.
 // 208: human-approved, revisioned campaign issue scope and bounded epic member proposals.
-export const PROTOCOL_VERSION = 208;
+// 209: replacement connections resume bounded manual skill correlations from current-server
+//      pending authority and retained runner-local admission; old peers retain timeout fallback.
+export const PROTOCOL_VERSION = 209;
+export const SKILL_REPORT_REQUEST_LIFETIME_MS = 30_000;
+export const MAX_SKILL_REPORT_REQUESTS = 64;
 export { boundedIssueNumbers, epicChecklistMembers, normalizeCampaignIssueScopeSnapshot } from "./campaign-issue-scope.js";
 export const UNIVERSAL_QUESTION_TEXT_MIN_PROTOCOL = 202;
 
@@ -947,6 +951,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   stopFailureRecovery: 85,
   stopAttemptCorrelation: 89,
   agentSkills: 90,
+  skillRequestResumption: 209,
   machineSkillSnapshots: 111,
   nativeWindowsMachineSkillSnapshots: 119,
   nativeWindowsSkillDeployment: 119,
@@ -8589,6 +8594,13 @@ export type RunnerToControlPlane =
 
 /* --- Control Plane -> Runner --- */
 
+/** Current Hub pending authority only; no cross-process clock epoch or persistence receipt. */
+export interface PendingSkillReportRequest {
+  requestId: string;
+  /** Positive remaining monotonic admission lifetime, at most 30000ms at server projection. */
+  remainingMs: number;
+}
+
 export interface RegisteredMessage {
   type: "registered";
   ok: true;
@@ -8602,6 +8614,9 @@ export interface RegisteredMessage {
   automaticAccountSwitching?: RunnerAutomaticAccountSwitchConfiguration;
   /** Complete Machine choices, including unavailable installations. Protocol v177+. */
   harnessInstallationChoices?: HarnessInstallationChoice[];
+  /** Protocol v209+. At most 64 pending admissions, scoped to this authenticated runner.
+   * Resume requires a retained local ticket; omission/empty clears old connection candidates. */
+  pendingSkillRequests?: PendingSkillReportRequest[];
 }
 
 export interface ConfigureHarnessInstallationChoicesMessage {

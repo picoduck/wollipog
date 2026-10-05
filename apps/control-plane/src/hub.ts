@@ -8,7 +8,7 @@
  * The DB is the source of truth; the hub broadcasts deltas built from it.
  */
 
-import { runnerSupportsProtocol, PROJECT_MEMORY_MIN_PROTOCOL, isTerminal, isTerminalDurableDeliveryState } from "@wollipog/protocol";
+import { MAX_SKILL_REPORT_REQUESTS, SKILL_REPORT_REQUEST_LIFETIME_MS, runnerSupportsProtocol, PROJECT_MEMORY_MIN_PROTOCOL, isTerminal, isTerminalDurableDeliveryState } from "@wollipog/protocol";
 import type {
   ControlPlaneToRunner,
   ControlPlaneToUi,
@@ -42,6 +42,7 @@ import type {
   RewindResultMessage,
   ShellOpenResultMessage,
   SkillsStateMessage,
+  PendingSkillReportRequest,
   SkillSnapshotResultMessage,
   SkillAdoptionResultMessage,
   SkillAdoptionRecoveryResultMessage,
@@ -198,6 +199,8 @@ interface UiSubscriptionAdmission {
 }
 
 export interface HubOptions {
+  /** Monotonic skill admission clock; injectable without changing other Hub timing policies. */
+  skillRequestNow?: () => number;
   /** Production uses the exported hard ceiling; a smaller value makes LRU behavior testable. */
   uiSubscriptionAdmissionMaxKeys?: number;
   /** Connection ceilings are configurable only so deterministic unit tests can use tiny bounds. */
@@ -263,6 +266,8 @@ export type RunnerRequestResult =
 
 interface PendingRequest {
   runnerId: string;
+  /** Initial skill admission only; existing chunk-progress inactivity refresh is independent. */
+  skillAdmissionExpiresAt?: number;
   waiters: Array<{
     resolve: (result: RunnerRequestResult) => void;
     reject: (err: Error) => void;
@@ -295,6 +300,7 @@ function permissionsKey(session: SessionView): string {
 }
 
 export class Hub {
+  private readonly skillRequestNow: () => number;
   private readonly uiClients = new Map<Socket, UiClientInfo>();
   /** Process-lifetime admission state. Keeping it outside UiClientInfo prevents reconnects or
    * parallel sockets from replenishing one authenticated caller's authorization-query budget. */
@@ -322,6 +328,7 @@ export class Hub {
   private readonly sessionParentCapacityState = new Map<string, boolean>();
 
   constructor(private readonly db: ControlPlaneDb, options: HubOptions = {}) {
+    this.skillRequestNow = options.skillRequestNow ?? (() => performance.now());
     this.uiSubscriptionAdmissionMaxKeys = Math.max(
       1,
       Math.floor(options.uiSubscriptionAdmissionMaxKeys ?? MAX_UI_SUBSCRIPTION_ADMISSION_KEYS),
@@ -556,6 +563,10 @@ export class Hub {
         return;
       }
       const pending: PendingRequest = { runnerId, waiters: [{ resolve, reject }], timer: undefined };
+      if ((msg.type === "skills_sync" || msg.type === "skills_sync_manifest") &&
+          msg.runnerId === runnerId && msg.requestId === requestId) {
+        pending.skillAdmissionExpiresAt = this.skillRequestNow() + Math.min(timeoutMs, SKILL_REPORT_REQUEST_LIFETIME_MS);
+      }
       this.pendingRequests.set(requestId, pending);
       this.armRunnerRequestTimeout(requestId, pending, timeoutMs);
       if (!this.sendToRunner(runnerId, msg)) {
@@ -564,6 +575,21 @@ export class Hub {
         reject(new RunnerRequestNotSentError());
       }
     });
+  }
+
+  /** Replacement registration projects existing authority, never dispatches or extends it. */
+  pendingSkillRequests(runnerId: string): PendingSkillReportRequest[] {
+    if (!this.isRunnerOnline(runnerId)) return [];
+    const now = this.skillRequestNow();
+    const requests: PendingSkillReportRequest[] = [];
+    for (const [requestId, pending] of this.pendingRequests) {
+      if (pending.runnerId !== runnerId || pending.skillAdmissionExpiresAt === undefined) continue;
+      const remainingMs = pending.skillAdmissionExpiresAt - now;
+      if (remainingMs <= 0) continue;
+      requests.push({ requestId, remainingMs });
+      if (requests.length === MAX_SKILL_REPORT_REQUESTS) break;
+    }
+    return requests;
   }
 
   /** Extend one exact request's inactivity deadline after verified protocol progress. */

@@ -220,8 +220,10 @@ test("machine skill adoption is capability-gated per platform", () => {
   assert.equal(machineSkillAdoptionRecoveryRequirement(undefined), null);
 });
 
-test("PROTOCOL_VERSION is 208", () => {
-  assert.equal(PROTOCOL_VERSION, 208);
+test("PROTOCOL_VERSION is 209", () => {
+  assert.equal(PROTOCOL_VERSION, 209);
+  assert.equal(runnerSupportsProtocol(208, "skillRequestResumption"), false);
+  assert.equal(runnerSupportsProtocol(209, "skillRequestResumption"), true);
   assert.equal(runnerSupportsProtocol(207, "campaignIssueScopeChanges"), false);
   assert.equal(runnerSupportsProtocol(208, "campaignIssueScopeChanges"), true);
   assert.equal(UNIVERSAL_QUESTION_TEXT_MIN_PROTOCOL, 202, "the settled question contract stays at its own boundary");
