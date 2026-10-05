@@ -52,14 +52,19 @@ test("a pending question renders only on the dock at every scroll position and a
   await page.goto("/agent-questions-e2e.html?before=2&after=90");
   const reader = page.getByRole("region", { name: "Session Activity" });
   const dock = page.locator(".request-dock");
-  const forms = page.getByRole("region", { name: "Agent Questions" });
   const marker = page.locator(".ask-marker");
   const expectDocked = async () => {
     await expect(dock).toBeVisible();
     // Expanded at the live tail, or behind its strip while reading back: never at the transcript row.
     await expect(page.locator(".question-card")).toHaveCount(1);
     await expect(dock.locator(".question-card")).toHaveCount(1);
-    await expect(forms).toHaveCount(await dock.locator(".dock-strip").count() > 0 ? 0 : 1);
+    // Exactly one of the strip and the card shows, read in one pass: the strip may come or go while
+    // the reader settles, so the two are never compared across separate reads.
+    await expect.poll(() => page.evaluate(() => {
+      const strip = document.querySelector(".request-dock .dock-strip") !== null;
+      const card = document.querySelector<HTMLElement>(".request-dock .question-card");
+      return strip !== (card?.checkVisibility() === true);
+    })).toBe(true);
     await expect(reader.getByRole("region", { name: "Agent Questions" })).toHaveCount(0);
     await expect(reader.getByRole("radio")).toHaveCount(0);
     await expect(page.locator(".detail-chat > .question-bar")).toHaveCount(0);
