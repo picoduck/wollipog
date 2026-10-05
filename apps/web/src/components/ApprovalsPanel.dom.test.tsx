@@ -113,10 +113,13 @@ async function mount(element: React.ReactNode, client?: ApiClient) {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
-  await act(async () => root.render(client ? <ApiProvider client={client}>{element}</ApiProvider> : element));
-  // Let the policy and identity requests settle.
-  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-  return { container, unmount: () => act(async () => root.unmount()) };
+  const render = async (next: React.ReactNode) => {
+    await act(async () => root.render(client ? <ApiProvider client={client}>{next}</ApiProvider> : next));
+    // Let the policy and identity requests settle.
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  };
+  await render(element);
+  return { container, rerender: render, unmount: () => act(async () => root.unmount()) };
 }
 
 function group(container: HTMLElement, title: string): HTMLElement {
@@ -238,10 +241,10 @@ test("tool policies list in priority order with effect and meta, and no control 
   await act(async () => rows[0]!.click());
   const facts = domWindow.document.querySelector('[role="dialog"] dl.facts')!;
   const terms = [...facts.querySelectorAll("dt")].map((term) => term.textContent);
-  assert.deepEqual(terms, ["Name", "Effect", "Priority", "State", "Source", "Tool", "Machine", "Workspace", "Agent",
-    "Branch", "Conditions", "Policy ID", "Updated"]);
+  assert.deepEqual(terms, ["Name", "Effect", "Priority", "State", "Source", "Tool", "Organization", "Machine", "Workspace",
+    "Agent", "Branch", "Conditions", "Policy ID", "Updated"]);
   assert.deepEqual([...facts.querySelectorAll("dd")].slice(0, -1).map((value) => value.textContent), ["Deny Shell", "Deny", "50", "On",
-    "Saved on this control plane.", "Every tool", "prod", "Every workspace", "Every agent", "main",
+    "Saved on this control plane.", "Every tool", "Every organization", "prod", "Every workspace", "Every agent", "main",
     "Cost at least $5.00, not escalated", "deny-shell"]);
   assert.deepEqual(api.writes, [], "nothing in Tool Policies sends a PUT");
 });
@@ -288,4 +291,47 @@ test("a linked question policy focuses its switch", async () => {
   const { container } = await mount(<ApprovalsPanel policyId="questions:custom:notes:alice" />, stub([CUSTOM]).client);
   const frame = container.querySelector<HTMLElement>(`#${approvalsPolicyAnchorId(CUSTOM.policyId)}`)!;
   assert.equal(domWindow.document.activeElement, frame.querySelector("[role=switch]"));
+});
+
+test("a custom policy whose id is a starter's category keeps its own busy, failure and retry state", async () => {
+  const lookalike = policy({
+    policyId: "review", name: "Lookalike", ownerUserId: "alice", scope: { organizationId: "org" },
+    questionRule: { questionPattern: "*", answer: { text: "Yes" } },
+  });
+  const api = stub([lookalike]);
+  const { container } = await mount(<ApprovalsPanel />, api.client);
+  const routine = group(container, "Routine Questions");
+  api.failSaves = 1;
+  await act(async () => switchNamed(routine, "Lookalike").click());
+  assert.equal(routine.querySelectorAll(".ui-row-failure").length, 1, "only the custom row fails");
+  assert.ok(switchNamed(routine, "Lookalike").closest(".ui-row-failed"));
+  assert.ok(!switchNamed(routine, "Review Sharing and Retries").closest(".ui-row-failed"));
+  await act(async () => (routine.querySelector(".ui-row-retry") as HTMLButtonElement).click());
+  assert.deepEqual(api.writes.map((write) => [write.policyId, write.enabled]), [["review", false], ["review", false]],
+    "Try Again repeats the custom policy's change, not the starter's");
+});
+
+test("leaving a policy link and coming back to it scrolls to the row again", async () => {
+  const scrolled: string[] = [];
+  const original = domWindow.HTMLElement.prototype.scrollIntoView;
+  domWindow.HTMLElement.prototype.scrollIntoView = function (this: HTMLElement) { scrolled.push(this.id); };
+  try {
+    const { rerender } = await mount(<ApprovalsPanel policyId="ask-deploys" />, stub(TOOL_POLICIES).client);
+    await rerender(<ApprovalsPanel />);
+    await rerender(<ApprovalsPanel policyId="ask-deploys" />);
+    assert.deepEqual(scrolled, [approvalsPolicyAnchorId("ask-deploys"), approvalsPolicyAnchorId("ask-deploys")]);
+  } finally {
+    domWindow.HTMLElement.prototype.scrollIntoView = original;
+  }
+});
+
+test("an organization selector is shown, since the control plane enforces it", async () => {
+  const scoped = policy({ policyId: "org-deny", name: "Org Deny", effect: "deny", scope: { organizationId: "org-a" } });
+  const { container } = await mount(<ApprovalsPanel />, stub([scoped]).client);
+  const row = group(container, "Tool Policies").querySelector<HTMLButtonElement>(".ui-row-nav")!;
+  assert.deepEqual([...row.querySelectorAll(".policy-meta-item")].map((item) => item.textContent),
+    ["Scope: every machine, one organization"]);
+  await act(async () => row.click());
+  const facts = [...document.querySelectorAll('[role="dialog"] dl.facts > div')].map((pair) => pair.textContent);
+  assert.ok(facts.includes("Organizationorg-a"));
 });

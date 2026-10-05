@@ -58,7 +58,7 @@ export function ApprovalsPanel({ policyId }: { policyId?: string }) {
     });
   }, []);
 
-  useScrollToPolicy(load.status === "ready" ? policyId : undefined);
+  useScrollToPolicy(policyId, load.status === "ready");
 
   const ready = load.status === "ready" ? load : null;
   return (
@@ -107,13 +107,18 @@ function AnsweringQuestionsGroup() {
 }
 
 /**
- * Brings a linked policy's row into view and focus once, per policy id. The row is marked until
- * focus leaves it, so the eye lands on it as well as the keyboard.
+ * Brings a linked policy's row into view and focus once the policies are in, once per arrival at the
+ * link: leaving it (to plain Approvals, say) and coming back with Back scrolls to the row again. The
+ * row is marked until focus leaves it, so the eye lands on it as well as the keyboard.
  */
-function useScrollToPolicy(policyId: string | undefined) {
+function useScrollToPolicy(policyId: string | undefined, ready: boolean) {
   const done = useRef<string | null>(null);
   useEffect(() => {
-    if (policyId === undefined || done.current === policyId) return;
+    if (policyId === undefined) {
+      done.current = null;
+      return;
+    }
+    if (!ready || done.current === policyId) return;
     const row = document.getElementById(approvalsPolicyAnchorId(policyId));
     if (!row) return;
     done.current = policyId;
@@ -127,5 +132,5 @@ function useScrollToPolicy(policyId: string | undefined) {
       row.removeEventListener("focusout", clear);
     };
     row.addEventListener("focusout", clear);
-  }, [policyId]);
+  }, [policyId, ready]);
 }

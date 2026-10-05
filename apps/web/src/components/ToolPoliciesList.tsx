@@ -76,6 +76,7 @@ function PolicyDetails({ policy, onClose }: { policy: GovernancePolicy; onClose:
     ["State", policy.enabled ? "On" : "Off"],
     ["Source", policy.builtin ? "Built in to Wollipog. It cannot be changed." : "Saved on this control plane."],
     ["Tool", scope.toolName ? <code>{scope.toolName}</code> : "Every tool"],
+    ["Organization", scope.organizationId ? <code>{scope.organizationId}</code> : "Every organization"],
     ["Machine", scope.runnerId ? <code>{scope.runnerId}</code> : "Every machine"],
     ["Workspace", scope.workspaceId ? <code>{scope.workspaceId}</code> : "Every workspace"],
     ["Agent", scope.agentId ? <code>{scope.agentId}</code> : "Every agent"],

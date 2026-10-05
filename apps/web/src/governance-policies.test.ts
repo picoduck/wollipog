@@ -31,6 +31,7 @@ test("scope, conditions and timeouts read as label-prefixed meta in sentence cas
   assert.equal(policyScopePhrase({}), "every machine");
   assert.equal(policyScopePhrase({ runnerId: "r", workspaceId: "w", agentId: "codex", path: "src/*", branch: "main", network: "x.internal" }),
     "one machine, one workspace, agent codex, path src/*, branch main, network x.internal");
+  assert.equal(policyScopePhrase({ organizationId: "org-a" }), "every machine, one organization");
   assert.deepEqual(policyConditionPhrases({
     statuses: ["running", "input_required"], minCostUsd: 5, maxCostUsd: 0, minToolCalls: 1, maxToolCalls: 20, escalated: true,
   }), ["status running or input required", "cost at least $5.00", "cost at most $0.00", "at least 1 tool call", "at most 20 tool calls", "escalated"]);

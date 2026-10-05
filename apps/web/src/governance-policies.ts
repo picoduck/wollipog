@@ -29,9 +29,11 @@ export function toolPolicies(policies: readonly GovernancePolicy[]): GovernanceP
     .sort((a, b) => b.priority - a.priority || EFFECT_ORDER[b.effect] - EFFECT_ORDER[a.effect] || a.policyId.localeCompare(b.policyId));
 }
 
-/** Where a policy applies, as one phrase: "every machine", "one machine, branch main". */
+/** Where a policy applies, as one phrase: "every machine", "one machine, one organization, branch main". */
 export function policyScopePhrase(scope: GovernancePolicyScope): string {
   const parts = [scope.runnerId ? "one machine" : "every machine"];
+  // The control plane enforces it like every other selector, so it is never left unsaid.
+  if (scope.organizationId) parts.push("one organization");
   if (scope.workspaceId) parts.push("one workspace");
   if (scope.agentId) parts.push(`agent ${scope.agentId}`);
   if (scope.path) parts.push(`path ${scope.path}`);

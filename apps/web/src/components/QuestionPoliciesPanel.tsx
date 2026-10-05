@@ -50,8 +50,11 @@ export function customQuestionPolicies(policies: readonly GovernancePolicy[], ow
 
 /** One switch: a starter, which may not be stored yet, or a stored custom policy. */
 interface QuestionPolicyRow {
-  key: string;
+  /** The row's identity and the key of its busy, failure and saved state. Policy ids are unique,
+   * where a starter's category id ("review") could also be a custom policy's whole id. */
   policyId: string;
+  /** The starter this row stands for, which may not be stored yet. */
+  starter?: QuestionPolicyStarter;
   title: string;
   description: string;
   custom: boolean;
@@ -62,12 +65,12 @@ function questionPolicyRows(policies: readonly GovernancePolicy[], owner: Policy
   const starters = QUESTION_POLICY_STARTERS.map((category): QuestionPolicyRow => {
     const policyId = starterQuestionPolicyId(category, owner.userId);
     return {
-      key: category.id, policyId, title: category.title, description: category.description, custom: false,
+      policyId, starter: category, title: category.title, description: category.description, custom: false,
       current: policies.find((policy) => policy.policyId === policyId),
     };
   });
   const custom = customQuestionPolicies(policies, owner).map((policy): QuestionPolicyRow => ({
-    key: policy.policyId, policyId: policy.policyId, title: policy.name.trim() || "Untitled Policy",
+    policyId: policy.policyId, title: policy.name.trim() || "Untitled Policy",
     description: questionRuleDescription(policy.questionRule!), custom: true, current: policy,
   }));
   return [...starters, ...custom];
@@ -100,29 +103,29 @@ export function QuestionPoliciesPanel({ policies, owner, onSaved }: {
   useEffect(() => () => window.clearTimeout(savedTimer.current), []);
 
   async function save(row: QuestionPolicyRow, enabled: boolean) {
-    if (!owner || busy.has(row.key)) return;
-    setBusy((old) => new Set(old).add(row.key));
-    setFailures((old) => withoutKey(old, row.key));
-    if (savedKey === row.key) setSavedKey(null);
+    if (!owner || busy.has(row.policyId)) return;
+    setBusy((old) => new Set(old).add(row.policyId));
+    setFailures((old) => withoutKey(old, row.policyId));
+    if (savedKey === row.policyId) setSavedKey(null);
     try {
       let next: Omit<GovernancePolicy, "createdAt" | "updatedAt">;
       if (row.current) {
         const { createdAt: _created, updatedAt: _updated, builtin: _builtin, ...existing } = row.current;
         next = { ...existing, enabled };
       } else {
-        const category = QUESTION_POLICY_STARTERS.find((starter) => starter.id === row.key)!;
-        next = starterQuestionPolicy(category, owner.userId, owner.organizationId, enabled);
+        // Only a starter can be unstored: a custom row exists because its policy does.
+        next = starterQuestionPolicy(row.starter!, owner.userId, owner.organizationId, enabled);
       }
       onSaved(await api.putGovernancePolicy(next));
       // Decision Records name policies by their display name; a new policy needs its name loaded.
       invalidatePolicyNames();
-      setSavedKey(row.key);
+      setSavedKey(row.policyId);
       window.clearTimeout(savedTimer.current);
-      savedTimer.current = window.setTimeout(() => setSavedKey((key) => key === row.key ? null : key), SAVED_MS);
+      savedTimer.current = window.setTimeout(() => setSavedKey((key) => key === row.policyId ? null : key), SAVED_MS);
     } catch (error) {
-      setFailures((old) => new Map(old).set(row.key, { enabled, detail: (error as Error).message }));
+      setFailures((old) => new Map(old).set(row.policyId, { enabled, detail: (error as Error).message }));
     } finally {
-      setBusy((old) => withoutKey(old, row.key));
+      setBusy((old) => withoutKey(old, row.policyId));
     }
   }
 
@@ -132,17 +135,17 @@ export function QuestionPoliciesPanel({ policies, owner, onSaved }: {
       intro={<>Answer routine permission questions automatically in sessions you own. <HowRoutineAnswersWork /></>}
     >
       {policies === null || owner === null ? <SkeletonRows count={3} announce="Loading routine questions…" /> : questionPolicyRows(policies, owner).map((row) => {
-        const failure = failures.get(row.key);
+        const failure = failures.get(row.policyId);
         return (
           <SwitchRow
-            key={row.key}
+            key={row.policyId}
             anchorId={approvalsPolicyAnchorId(row.policyId)}
             title={row.title}
             badge={row.custom ? <StatusBadge tone="neutral" noDot label="Custom" /> : undefined}
             description={row.description}
             checked={row.current?.enabled ?? false}
-            busy={busy.has(row.key)}
-            saved={savedKey === row.key}
+            busy={busy.has(row.policyId)}
+            saved={savedKey === row.policyId}
             failure={failure
               ? { message: SAVE_FAILED, detail: failure.detail, onRetry: () => void save(row, failure.enabled) }
               : null}

@@ -137,8 +137,8 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       await deny.click();
       const dialog = page.getByRole("dialog", { name: "Policy Details" });
       await expect(dialog).toBeVisible();
-      await expect(dialog.locator("dt")).toHaveText(["Name", "Effect", "Priority", "State", "Source", "Tool", "Machine",
-        "Workspace", "Agent", "Branch", "Conditions", "Policy ID", "Updated"]);
+      await expect(dialog.locator("dt")).toHaveText(["Name", "Effect", "Priority", "State", "Source", "Tool", "Organization",
+        "Machine", "Workspace", "Agent", "Branch", "Conditions", "Policy ID", "Updated"]);
       await expect(dialog.locator(".modal-foot button")).toHaveText(["Done"]);
       await capture(page, `policy-details-${viewport.width}`);
       await dialog.getByRole("button", { name: "Done" }).click();
