@@ -84,6 +84,7 @@ export function RequestDock({
   const dockRef = useRef<HTMLElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const expandRef = useRef<HTMLButtonElement>(null);
+  const cardRef = useRef<HTMLDivElement>(null);
   const focusHeading = useRef(revealRequestId !== undefined);
   const expanded = requests.find((request) => request.requestId === selectedId) ?? requests[0];
   const waiting = requests.filter((request) => request !== expanded);
@@ -161,13 +162,24 @@ export function RequestDock({
   });
   // A decision removes the button that had focus. The next request's heading takes it, so a keyboard
   // stays in the dock; with nothing left, the request coordinator returns focus to the composer. A
-  // card that shrinks to its strip under focus hands it to Expand, and a strip restored under focus
-  // hands it to the heading.
+  // strip restored under focus hands it to the heading.
   const removedFocus = useRemovedFocus(dockRef, "[data-request-card-menu]");
   useLayoutEffect(() => {
     if (!removedFocus() || !expanded) return;
     if (collapsed) expandRef.current?.focus({ preventScroll: true });
     else headingRef.current?.focus();
+  });
+  // A card hidden behind its strip while a control in it (or its menu) has focus hands focus to
+  // Expand, rather than leaving it on a control nobody can see.
+  const wasCollapsed = useRef(collapsed);
+  useLayoutEffect(() => {
+    const hid = collapsed && !wasCollapsed.current;
+    wasCollapsed.current = collapsed;
+    if (!hid) return;
+    const active = cardRef.current?.ownerDocument.activeElement;
+    if (active && (cardRef.current?.contains(active) || active.closest("[data-request-card-menu]"))) {
+      expandRef.current?.focus({ preventScroll: true });
+    }
   });
   useEffect(() => {
     if (waiting.length === 0) setMoreOpen(false);
@@ -197,7 +209,7 @@ export function RequestDock({
       data-keyboard-open={keyboardOpen ? "" : undefined}
       data-collapsed={collapsed ? "" : undefined}
     >
-      {collapsed ? (
+      {collapsed && (
         // The whole strip is the pointer target; Expand is its keyboard and assistive-technology
         // control, and its click reaches this handler too.
         <div
@@ -221,70 +233,73 @@ export function RequestDock({
             <span className="dock-strip-expand-label">{REQUEST_CARD_COPY.expand}</span>
           </button>
         </div>
-      ) : (
-        <>
-          {waiting.length > 0 && (
-            <div className="request-dock-more disclosure">
-              <button
-                type="button"
-                className="disclosure-trigger"
-                aria-expanded={moreOpen}
-                aria-controls={moreOpen ? listId : undefined}
-                onClick={() => setMoreOpen((open) => !open)}
-              >
-                <ChevronRightIcon size={14} className="disclosure-chevron" />
-                <span>{moreRequestsLabel(waiting.length)}</span>
-                <span className="request-dock-more-kinds">{waitingRequestKinds(waiting)}</span>
-              </button>
-              {moreOpen && (
-                <ul className="request-dock-rows" id={listId} aria-label={REQUEST_CARD_COPY.waitingRequests}>
-                  {waiting.map((request) => {
-                    const time = createdAt?.(request) ?? request.workflowDecision?.createdAt;
-                    return (
-                      <li key={request.requestId}>
-                        <button
-                          type="button"
-                          className="request-dock-row"
-                          onClick={() => {
-                            focusHeading.current = true;
-                            setSelectedId(request.requestId);
-                            setMoreOpen(false);
-                          }}
-                        >
-                          <RequestKindIcon request={request} />
-                          <span className="request-dock-row-title">{request.title}</span>
-                          {owner && <span className="request-dock-row-owner">{owner}</span>}
-                          {time ? <span className="request-dock-row-time">{relativeTime(time)}</span> : null}
-                        </button>
-                      </li>
-                    );
-                  })}
-                </ul>
-              )}
-            </div>
-          )}
-          <div
-            className="request-dock-card"
-            data-session-request-id={expanded.requestId}
-            data-session-request-session={session.id}
-          >
-            <RequestCard
-              key={`${expanded.requestId}:${expanded.occurrenceId ?? ""}`}
-              session={session}
-              request={expanded}
-              runnerOnline={runnerOnline}
-              presentation="dock"
-              owner={owner}
-              createdAt={createdAt?.(expanded)}
-              headTrailing={headTrailing}
-              onSessionUpdate={onSessionUpdate}
-              showKeyHints={showKeyHints}
-              intentRef={intentRef}
-              headingRef={headingRef}
-            />
-          </div>
-        </>
       )}
+      {!collapsed && waiting.length > 0 && (
+        <div className="request-dock-more disclosure">
+          <button
+            type="button"
+            className="disclosure-trigger"
+            aria-expanded={moreOpen}
+            aria-controls={moreOpen ? listId : undefined}
+            onClick={() => setMoreOpen((open) => !open)}
+          >
+            <ChevronRightIcon size={14} className="disclosure-chevron" />
+            <span>{moreRequestsLabel(waiting.length)}</span>
+            <span className="request-dock-more-kinds">{waitingRequestKinds(waiting)}</span>
+          </button>
+          {moreOpen && (
+            <ul className="request-dock-rows" id={listId} aria-label={REQUEST_CARD_COPY.waitingRequests}>
+              {waiting.map((request) => {
+                const time = createdAt?.(request) ?? request.workflowDecision?.createdAt;
+                return (
+                  <li key={request.requestId}>
+                    <button
+                      type="button"
+                      className="request-dock-row"
+                      onClick={() => {
+                        focusHeading.current = true;
+                        setSelectedId(request.requestId);
+                        setMoreOpen(false);
+                      }}
+                    >
+                      <RequestKindIcon request={request} />
+                      <span className="request-dock-row-title">{request.title}</span>
+                      {owner && <span className="request-dock-row-owner">{owner}</span>}
+                      {time ? <span className="request-dock-row-time">{relativeTime(time)}</span> : null}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+      )}
+      {/* Hidden, not unmounted, behind the strip: work in progress on the card (a sign-in code, an
+          evidence review) and what happens to it meanwhile are still there when it is expanded. The
+          strip is then the request's region for the controls that look it up. */}
+      <div
+        ref={cardRef}
+        className="request-dock-card"
+        hidden={collapsed}
+        data-session-request-id={collapsed ? undefined : expanded.requestId}
+        data-session-request-session={collapsed ? undefined : session.id}
+      >
+        <RequestCard
+          key={`${expanded.requestId}:${expanded.occurrenceId ?? ""}`}
+          session={session}
+          request={expanded}
+          runnerOnline={runnerOnline}
+          presentation="dock"
+          owner={owner}
+          createdAt={createdAt?.(expanded)}
+          headTrailing={headTrailing}
+          onSessionUpdate={onSessionUpdate}
+          showKeyHints={showKeyHints}
+          intentRef={intentRef}
+          headingRef={headingRef}
+          concealed={collapsed}
+        />
+      </div>
       <span className="sr-only" role="status" aria-live="polite" data-request-dock-announcement="">
         {announcement && <span key={announcement.serial}>{announcement.text}</span>}
       </span>

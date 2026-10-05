@@ -1,6 +1,7 @@
 import React, {
   useEffect,
   useId,
+  useLayoutEffect,
   useRef,
   useState,
   type MutableRefObject,
@@ -56,6 +57,9 @@ export interface RequestCardProps {
   /** Receives the card's A and D while it is the expanded request. */
   intentRef?: MutableRefObject<RequestIntentHandler | null>;
   headingRef?: Ref<HTMLHeadingElement>;
+  /** The dock shows its reading-back strip in the card's place (#2195). The card stays mounted, so a
+   * sign-in code being typed or an evidence review keeps its state, but its menu closes. */
+  concealed?: boolean;
 }
 
 /**
@@ -79,6 +83,7 @@ export function RequestCard({
   showKeyHints = false,
   intentRef,
   headingRef,
+  concealed = false,
 }: RequestCardProps) {
   const api = useApi();
   const runner = useOptionalStoreSelector((state) => state.runners.get(session.runnerId));
@@ -98,6 +103,10 @@ export function RequestCard({
   const error = useDecisionFailure(flightKey);
   const [menuOpen, setMenuOpen] = useState(false);
   const menu = useAccessibleMenu(menuOpen, setMenuOpen, "request-options", "item", { reachUnavailable: true });
+  // The menu is portalled, so hiding the card would leave it open over the strip.
+  useLayoutEffect(() => {
+    if (concealed) setMenuOpen(false);
+  }, [concealed]);
   const idPrefix = useId().replace(/:/g, "");
   const titleId = `${idPrefix}-title`;
   const reasonId = `${idPrefix}-reason`;

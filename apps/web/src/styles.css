@@ -5304,6 +5304,7 @@ textarea {
   flex-direction: column;
   min-height: 0;
 }
+.request-dock-card[hidden] { display: none; }
 /* Reading back (#2195): the dock as one 44px row on the card's warning surface, so the history the
    reader went back for keeps the rest of the column. The title gives way to nothing but its ellipsis:
    the position is a few characters and Expand turns into an icon on phones. */

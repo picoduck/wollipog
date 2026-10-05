@@ -641,17 +641,25 @@ function ReadingBackHarness({ pending, state }: { pending: PendingApproval | nul
   );
 }
 
+/** Whether the dock shows its card: behind the strip it stays mounted, hidden. */
+const cardShown = (view: { container: HTMLElement }) => {
+  const card = view.container.querySelector<HTMLElement>(".request-dock-card");
+  return card !== null && !card.hidden && card.querySelector(".request-card") !== null;
+};
+
 test("reading back shrinks the dock to a strip with the title, its position and Expand; the tail restores it without moving focus", async () => {
   const pending = permission();
   const view = await render(<ReadingBackHarness pending={pending} state="following" />);
   const strip = () => view.container.querySelector<HTMLElement>(".dock-strip");
   try {
-    assert.ok(view.container.querySelector(".request-card"), "the card while following");
+    assert.ok(cardShown(view), "the card while following");
     assertNoDomNode(strip());
     const composer = view.container.querySelector("textarea")!;
     await act(async () => { composer.focus(); });
     await view.rerender(<ReadingBackHarness pending={pending} state="paused" />);
-    assertNoDomNode(view.container.querySelector(".request-card"), "the strip replaces the card");
+    assert.equal(cardShown(view), false, "the strip takes the card's place");
+    assert.equal(view.container.querySelectorAll("[data-session-request-id]").length, 1, "the strip is the request's one region");
+    assert.ok(strip()?.hasAttribute("data-session-request-id"));
     assert.equal(strip()?.querySelector(".dock-strip-title")?.textContent, "Run pnpm deploy?");
     assert.equal(strip()?.querySelector(".dock-strip-position")?.textContent, "1 of 1");
     const expand = strip()!.querySelector<HTMLButtonElement>("button")!;
@@ -660,7 +668,7 @@ test("reading back shrinks the dock to a strip with the title, its position and 
     assert.equal(view.container.querySelector(".request-dock")?.getAttribute("aria-label"), "Pending Requests");
     // Inbox paging's programmatic scroll is not reading back.
     await view.rerender(<ReadingBackHarness pending={pending} state="previewing" />);
-    assert.ok(view.container.querySelector(".request-card"));
+    assert.ok(cardShown(view));
     await view.rerender(<ReadingBackHarness pending={pending} state="paused" />);
     assert.ok(strip());
     await view.rerender(<ReadingBackHarness pending={pending} state="following" />);
@@ -681,7 +689,7 @@ test("activating the strip restores the card and focuses its heading; it stays e
     assert.equal(heading?.textContent, "Run pnpm deploy?");
     assert.equal(domWindow.document.activeElement, heading);
     await view.rerender(<ReadingBackHarness pending={pending} state="paused" />);
-    assert.ok(view.container.querySelector(".request-card"), "still reading back, the expanded card stays");
+    assert.ok(cardShown(view), "still reading back, the expanded card stays");
     await view.rerender(<ReadingBackHarness pending={pending} state="following" />);
     await view.rerender(<ReadingBackHarness pending={pending} state="paused" />);
     assert.ok(view.container.querySelector(".dock-strip"), "the next reading back shrinks it again");
@@ -801,6 +809,26 @@ test("a card that shrinks under focus hands it to Expand, and a control elsewher
     const heading = view.container.querySelector(".request-card h3");
     assert.equal(heading?.textContent, "Run pnpm deploy?");
     assert.equal(domWindow.document.activeElement, heading);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("the card behind the strip is the same card when it comes back, and its open menu closes with focus on Expand", async () => {
+  const pending = permission();
+  const view = await render(<ReadingBackHarness pending={pending} state="following" />);
+  try {
+    const card = view.container.querySelector(".request-card");
+    const more = view.container.querySelector<HTMLButtonElement>('[aria-label="More Choices"]')!;
+    await act(async () => { more.focus(); more.click(); });
+    const item = body().querySelector<HTMLElement>('[role="menuitem"]')!;
+    await act(async () => { item.focus(); });
+    await view.rerender(<ReadingBackHarness pending={pending} state="paused" />);
+    assertNoDomNode(body().querySelector('[role="menuitem"]'), "no menu is left open over the strip");
+    assert.equal(domWindow.document.activeElement, view.container.querySelector(".dock-strip-expand"));
+    await act(async () => { view.container.querySelector<HTMLButtonElement>(".dock-strip-expand")!.click(); });
+    assert.equal(view.container.querySelector(".request-card"), card,
+      "not remounted, so what was in progress on it (a sign-in code, an evidence review) is kept");
   } finally {
     await view.unmount();
   }

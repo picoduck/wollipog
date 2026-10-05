@@ -95,8 +95,9 @@ for (const viewport of [
     await expect(reader).toHaveAttribute("data-follow-tail-state", "following");
 
     await readBack();
-    await expect(card(page)).toHaveCount(0);
+    await expect(card(page)).toBeHidden();
     expect((await strip.boundingBox())!.height).toBe(44);
+    expect((await page.locator(".request-dock").boundingBox())!.height).toBe(44);
     await expect(strip.locator(".dock-strip-title")).toHaveText("Run pnpm deploy?");
     await expect(strip.locator(".dock-strip-position")).toHaveText("1 of 1");
     if (viewport.width <= 760) {
