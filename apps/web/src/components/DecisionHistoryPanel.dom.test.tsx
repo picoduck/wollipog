@@ -4,6 +4,11 @@ import React, { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { GovernanceAuditEntry } from "@wollipog/protocol";
+import { api } from "../api.js";
+import { ApiProvider } from "../api-context.js";
+import { viewPath, type View, type ViewNavigation } from "../navigation.js";
+import { StoreProvider } from "../store.js";
+import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { decisionHistory, type GovernanceDecision } from "../governance.js";
@@ -223,6 +228,61 @@ test("with no decisions the panel shows No Decisions Yet", async () => {
     assert.equal(view.container.querySelector(".state-title")?.textContent, "No Decisions Yet");
     assert.match(view.container.textContent ?? "", /Decisions you and your approval policies make in this session appear here\./);
     assertNoDomNode(view.container.querySelector('[role="radiogroup"]'), "nothing to filter");
+  } finally {
+    await view.dispose();
+  }
+});
+
+test("the empty state links to Settings › Approvals, in place for a plain click (#2158)", async () => {
+  const navigated: View[] = [];
+  const navigation: ViewNavigation = {
+    current: () => ({ name: "inbox" }),
+    push: (view) => { navigated.push(view); },
+    listen: () => () => {},
+  };
+  class IdleSocket implements UiSocket {
+    readonly readyState = UI_SOCKET_OPEN;
+    onopen: (() => void) | null = null;
+    onmessage: ((event: { data: string }) => void) | null = null;
+    onclose: ((event: { code: number }) => void) | null = null;
+    onerror: (() => void) | null = null;
+    send() {}
+    close() {}
+  }
+  const connection: UiConnectionRuntime = {
+    instanceId: "decision-history-link",
+    runtimeKey: "decision-history-link:1",
+    createSocket: () => new IdleSocket(),
+    close() {},
+  };
+  const view = await mount(
+    <ApiProvider client={api}>
+      <StoreProvider connection={connection} navigation={navigation}><DecisionHistoryPanel decisions={[]} /></StoreProvider>
+    </ApiProvider>,
+  );
+  try {
+    const link = [...view.container.querySelectorAll<HTMLAnchorElement>(".state a")]
+      .find((candidate) => candidate.textContent === "Approval Policies");
+    assert.ok(link, "the empty state offers Approval Policies");
+    assert.equal(link.getAttribute("href"), viewPath({ name: "settings", section: "approvals" }));
+    assert.equal(link.getAttribute("href"), "/settings/approvals");
+    await act(async () => {
+      link.dispatchEvent(new domWindow.MouseEvent("click", { bubbles: true, cancelable: true, button: 0, metaKey: true }) as unknown as Event);
+    });
+    assert.deepEqual(navigated, [], "a modified click is the browser's (a new tab)");
+    await act(async () => link.click());
+    assert.deepEqual(navigated.at(-1), { name: "settings", section: "approvals" });
+  } finally {
+    await view.dispose();
+  }
+});
+
+test("without the app's store the empty state's link is a plain link", async () => {
+  const view = await mount(<DecisionHistoryPanel decisions={[]} />);
+  try {
+    const link = view.container.querySelector<HTMLAnchorElement>(".state a.btn.sm");
+    assert.equal(link?.textContent, "Approval Policies");
+    assert.equal(link?.getAttribute("href"), "/settings/approvals");
   } finally {
     await view.dispose();
   }

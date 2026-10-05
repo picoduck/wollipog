@@ -1,6 +1,8 @@
 import React, { useContext, useEffect, useId, useState } from "react";
 import { governanceDecisionRecord } from "../decision-record.js";
 import type { GovernanceDecision } from "../governance.js";
+import { viewPath } from "../navigation.js";
+import { useHasStore, useStoreActions } from "../store.js";
 import { humanResolver, ViewerIdentityContext, type ViewerIdentity } from "../resolver-identity.js";
 import { ShieldCheckIcon } from "./Icons.js";
 import { DecisionRecord } from "./requests/DecisionRecord.js";
@@ -89,6 +91,34 @@ function useDelayedFlag(active: boolean, delayMs: number): boolean {
   return active && shown;
 }
 
+const APPROVALS_SETTINGS = { name: "settings", section: "approvals" } as const;
+
+/** The empty state's next step (§12.1): the policies that decide for you, in Settings › Approvals
+ * (#2158). A real link, so it opens in a new tab too; in the app a plain click navigates in place. */
+function ApprovalPoliciesLink() {
+  const hasStore = useHasStore();
+  return hasStore ? <StoreApprovalPoliciesLink /> : (
+    <a className="btn sm" href={viewPath(APPROVALS_SETTINGS)}>Approval Policies</a>
+  );
+}
+
+function StoreApprovalPoliciesLink() {
+  const { navigate } = useStoreActions();
+  return (
+    <a
+      className="btn sm"
+      href={viewPath(APPROVALS_SETTINGS)}
+      onClick={(event) => {
+        if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        event.preventDefault();
+        navigate(APPROVALS_SETTINGS);
+      }}
+    >
+      Approval Policies
+    </a>
+  );
+}
+
 function ShowInTranscript({ itemId, onShow }: { itemId: number | undefined; onShow?: (itemId: number) => void }) {
   const reasonId = useId();
   const available = itemId !== undefined && onShow !== undefined;
@@ -167,7 +197,7 @@ export function DecisionHistoryPanel({
   }
   if (!decisions.length && !hasMore) {
     return (
-      <State compact icon={<ShieldCheckIcon size={24} />} title="No Decisions Yet">
+      <State compact icon={<ShieldCheckIcon size={24} />} title="No Decisions Yet" actions={<ApprovalPoliciesLink />}>
         Decisions you and your approval policies make in this session appear here.
       </State>
     );

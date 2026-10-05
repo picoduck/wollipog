@@ -1645,7 +1645,8 @@ Audit ID; when the request's row is not in the loaded transcript it is `aria-dis
 the loaded transcript." beside it. **Load Older Decisions** is a `.btn.sm` `BusyButton` at the
 list's left edge after the last row. Loading is skeleton rows at `--control-h` after 300ms, a
 failed load a danger notice with **Retry**, and an empty session a compact "No Decisions Yet"
-state; the launcher row is always enabled.
+state whose action, **Approval Policies**, opens Settings › Approvals (#2158); the launcher row is
+always enabled.
 
 Facts are not statuses: "Detached Work: Untracked", "Changes Present", "Worktree", "Kept Aside" are
 meta (§11.3). This table lives in code as one `statusMeta(domain, value) → {label, tone, pulse}` map;
