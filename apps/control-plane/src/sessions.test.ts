@@ -115,6 +115,11 @@ for (const scenario of ["downgrade", "revision-ahead", "stopped", "archived"]) t
     }
     assert.doesNotThrow(() => svc.applySessionRuntimeUpdate(RUNNER_ID, snapshots[0]!));
     assert.equal(db.sessionCostUsd("corrected"), 0.02);
+    if (scenario === "revision-ahead") {
+      assert.equal(db.raw().prepare("SELECT acknowledged_revision AS revision FROM usage_cost_reconciliation_observations WHERE session_id='corrected'").get()?.revision, 2);
+      svc.applySessionRuntimeUpdate(RUNNER_ID, { ...snapshots[0]!, costUsd: 0.04, costReconciliationRevision: 0 });
+      assert.equal(db.sessionCostUsd("corrected"), 0.02, "stale lower acknowledgement cannot bypass the missing-revision fence");
+    }
     if (scenario === "stopped" || scenario === "archived") assert.ok(hub.sentOfType("stop_session").some((frame) => frame.sessionId === "corrected"));
   } finally { db.close(); }
 });

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { applyClaudeReconciliation, previewClaudeReconciliation, reconciliationDeltaUsd, reconciliationRevision } from "./claude-cost-reconciliation.js";
+import { applyClaudeReconciliation, previewClaudeReconciliation, reconciliationDeltaUsd, reconciliationRevision, exportClaudeReconciliations, previewClaudeReconciliationRecovery, applyClaudeReconciliationRecovery } from "./claude-cost-reconciliation.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { runnerSupportsProtocol } from "@wollipog/protocol";
 import { HourlyUsageUnavailableError, type ControlPlaneDb } from "./db.js";
@@ -41,10 +41,14 @@ export function registerUsageRoutes(
     if (typeof query.sessionId !== "string" || !db.canAccessSession(principal, query.sessionId)) {
       return reply.code(404).send({ error: "accounting audit is unavailable" });
     }
-    return { reconciliations: db.raw().prepare(`SELECT digest, revision, delta_microusd AS deltaMicrousd,
+    return { reconciliations: db.raw().prepare(`SELECT r.digest, revision, delta_microusd AS deltaMicrousd, COALESCE(p.delta_remainder_picousd,0) AS deltaRemainderPicousd,
       actor_id AS actorId, source_sha256 AS sourceSha256, evidence_json AS evidenceJson,
-      result_json AS resultJson, created_at AS createdAt FROM usage_cost_reconciliations
-      WHERE session_id=? AND organization_id=? ORDER BY revision DESC LIMIT 20`).all(query.sessionId, principal.organizationId) };
+      result_json AS resultJson, created_at AS createdAt FROM usage_cost_reconciliations r
+      LEFT JOIN usage_cost_reconciliation_precision p ON p.digest=r.digest
+      WHERE session_id=? AND organization_id=? ORDER BY revision DESC LIMIT 20`).all(query.sessionId, principal.organizationId),
+      recoveries: db.raw().prepare(`SELECT digest, actor_id AS actorId, source_sha256 AS sourceSha256,
+        result_json AS resultJson, created_at AS createdAt FROM usage_cost_reconciliation_recoveries
+        WHERE session_id=? AND organization_id=? ORDER BY created_at DESC LIMIT 20`).all(query.sessionId, principal.organizationId) };
   });
   app.post("/api/usage/claude-reconciliation/apply", async (request, reply) => {
     const principal = requestPrincipal(request);
@@ -60,20 +64,53 @@ export function registerUsageRoutes(
     let result: ReturnType<typeof applyClaudeReconciliation>;
     try { result = applyClaudeReconciliation(db, principal, body.evidence, body.approvedDigest); }
     catch { return reply.code(409).send({ error: "reconciliation is unavailable or changed; review a fresh preview" }); }
+    return synchronizeCorrection(request, result, "claude_cost_reconciliation_applied");
+  });
+
+  function synchronizeCorrection(request: FastifyRequest, result: ReturnType<typeof applyClaudeReconciliation>, event: string) {
     const session = db.getSession(result.sessionId)!;
-    // A durable revision makes resend safe after interruption or a disconnected runner.
-    // Replays of an older apply use the latest total and revision, never its old amount.
     let synchronized = false;
     try {
-      synchronized = hub.sendToRunner(session.runnerId, {
+      synchronized = hub?.sendToRunner?.(session.runnerId, {
         type: "priced_session_cost", sessionId: session.id, costUsd: db.sessionCostUsd(session.id),
-        costReconciliationRevision: reconciliationRevision(db, session.id),
-        costReconciliationDeltaUsd: reconciliationDeltaUsd(db, session.id),
-      });
-    } catch { /* The correction committed. Reconnect or exact retry resends its revision. */ }
-    hub.sessionChangedById?.(session.id);
-    return { ...result, synchronized, costUsd: db.sessionCostUsd(session.id),
-      revision: reconciliationRevision(db, session.id) };
+        costReconciliationRevision: reconciliationRevision(db, session.id), costReconciliationDeltaUsd: reconciliationDeltaUsd(db, session.id),
+      }) ?? false;
+    } catch { /* Already committed; reconnect or exact retry resends the latest correction. */ }
+    try { hub?.sessionChangedById?.(session.id); } catch { /* Publication cannot roll back accounting. */ }
+    request.log.info({ event, entryPoint: "http", requestId: request.id, sessionId: session.id,
+      revision: reconciliationRevision(db, session.id), applied: result.applied, synchronized });
+    return { ...result, synchronized, costUsd: db.sessionCostUsd(session.id), revision: reconciliationRevision(db, session.id) };
+  }
+
+  app.get("/api/usage/claude-reconciliation/export", async (request, reply) => {
+    const principal = requestPrincipal(request);
+    if (!principal || principal.kind !== "human" || !canAdministerIdentity(principal.role)) return reply.code(403).send({ error: "organization owner or admin permission is required" });
+    const { sessionId } = request.query as { sessionId?: unknown };
+    if (typeof sessionId !== "string" || !db.canAccessSession(principal, sessionId)) return reply.code(404).send({ error: "accounting export is unavailable" });
+    try { return exportClaudeReconciliations(db, principal, sessionId); }
+    catch { return reply.code(409).send({ error: "complete bounded accounting export is unavailable" }); }
+  });
+  app.post("/api/usage/claude-reconciliation/recovery/preview", async (request, reply) => {
+    const principal = requestPrincipal(request);
+    if (!principal || principal.kind !== "human" || !canAdministerIdentity(principal.role)) return reply.code(403).send({ error: "organization owner or admin permission is required" });
+    try { return previewClaudeReconciliationRecovery(db, principal, request.body); }
+    catch { return reply.code(400).send({ error: "invalid or unavailable accounting recovery evidence" }); }
+  });
+  app.post("/api/usage/claude-reconciliation/recovery/apply", async (request, reply) => {
+    const principal = requestPrincipal(request);
+    if (!principal || principal.kind !== "human" || !canAdministerIdentity(principal.role)) return reply.code(403).send({ error: "organization owner or admin permission is required" });
+    const body = request.body as { evidence?: unknown; approvedDigest?: unknown; approved?: unknown } | undefined;
+    if (!body || body.approved !== true || typeof body.approvedDigest !== "string" || Object.keys(body).some((key) => !["evidence", "approvedDigest", "approved"].includes(key))) {
+      return reply.code(400).send({ error: "explicit approval of an exact recovery preview is required" });
+    }
+    if (!hub?.sendToRunner) return reply.code(503).send({ error: "revision-aware cost synchronization is unavailable" });
+    let result: ReturnType<typeof applyClaudeReconciliationRecovery>;
+    try { result = applyClaudeReconciliationRecovery(db, principal, body.evidence, body.approvedDigest); }
+    catch {
+      request.log.warn({ event: "claude_cost_reconciliation_recovery_rejected", entryPoint: "http", requestId: request.id });
+      return reply.code(409).send({ error: "recovery is unavailable or changed; review a fresh preview" });
+    }
+    return synchronizeCorrection(request, result, "claude_cost_reconciliation_recovery_applied");
   });
 
   app.get("/api/usage", async (request, reply) => {

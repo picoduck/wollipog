@@ -54,9 +54,35 @@ ownership or settings:
 without a known locator are ambiguous. Pruned contributions, missing replay coverage, already
 corrected events, and ambiguous boundaries remain unchanged with reasons in the preview.
 
-This initial evidence schema accepts only amounts exactly representable in whole micro-USD.
-Historical fractional micro-USD records require original carry attribution that older ledgers
-discarded; they remain unresolved rather than altering another record's rounding carry.
+Whole micro-USD evidence remains supported. Fractional records additionally require a verified
+original `rounding` checkpoint from an accounting receipt/export:
+
+```json
+{
+  "rounding": {
+    "originalMicro": 10001,
+    "beforePicousd": 0,
+    "afterPicousd": -400000
+  }
+}
+```
+
+This synthetic checkpoint describes an original cost of USD 0.0100006: ingestion allocated
+10,001 micro-USD and retained a remainder of -400,000 pico-USD. `originalMicro` is the actual
+integer ledger contribution, not independent rounding of the displayed provider amount.
+Both remainders must be integers in [-500000, 500000). Adjacent original rounding checkpoints
+must agree; the proof must match the immutable event and any retained receipt. Older records
+may import this proof with their trusted original attribution. Missing proof stays unresolved.
+
+The supported precision matches ingestion: whole micro-USD plus a pico-USD remainder. Cumulative
+query-tree and per-model checkpoints are compared at that precision. Preview shows raw costs,
+original/proposed integer ledger allocations, session remainder changes, and the allocation policy.
+Apply preserves unrelated integer contributions. It settles net rounding units only within the
+corrected rows, in evidence/model order, from the last affected model with positive verified cost.
+A correction needing a negative or unavailable retained contribution stays unresolved.
+Per-model/time-bucket totals remain integer micro-USD; session totals additionally retain their
+pico-USD remainder. Ancestor budget charges release only the proven exact correction while
+preserving existing peak and reservation floors. Audit records the allocation and both delta parts.
 Requests reject unknown fields and accept at most 200 accounting records and 20 models per map.
 Never include prompts, transcript text, credentials, paths, or arbitrary provider payloads.
 
@@ -130,3 +156,61 @@ rather than guessing the missing correction. New forks start with their own corr
 Corrected totals feed subsequent session/checkpoint/daily budget checks. Proven excess historical
 child charges are released, while active child reservations remain. Applying a correction does
 not resume a paused session or clear an existing approval; use the normal reviewed Continue flow.
+
+## Recover after a control-plane database restore
+
+A runner may already have acknowledged corrections absent from a restored database. The server
+durably retains the highest valid acknowledgement reported by the owning runner. Affected accounting
+remains fenced; stale lower snapshots cannot clear it. Unrelated sessions and Stop/archive enforcement
+continue. A revision or scalar runner total alone is insufficient evidence for recovery.
+
+Before restoring, retain the complete accounting export returned by
+`GET /api/usage/claude-reconciliation/export?sessionId=<id>` with your trusted backup. The bounded
+export includes original digests, deltas, evidence, corrected event identities, and pre-correction
+ledger checkpoints. Exports include at most 20 contiguous revisions and recovery imports at most
+1,000 evidence records. Keep the latest export covering every acknowledged runner revision.
+Treat its SHA-256 as a provenance reference, not proof of authenticity; verify the backup/export's
+authority yourself. Automatic export refuses incomplete or pre-feature receipts without checkpoints.
+For older receipts, recovery requires those checkpoints from a verified accounting backup instead.
+
+For each revision, `beforeLedger` contains the original usage-ledger `revision`, `costMicrousd`,
+`remainderPicousd`, `coveredThroughSeq`, and maximum original session-event `eventSeq`. These are
+accounting coordinates and amounts, not the runner's correction revision. They establish whether the
+restored ledger still contains the unapplied contributions. Recovery validates any later accepted
+provider-reported events and retained receipts against that checkpoint. Unpriced/estimated suffixes,
+snapshot-only catch-up, missing/pruned contributions, changed history scopes, conflicting prefixes,
+or unavailable proof remain unresolved. Never manufacture a checkpoint from the current total.
+
+1. Verify the trusted export and restore scope. Add `importAuthorized: true` and `sourceSha256`
+   to its top-level object; do not add prompts, transcripts, paths, or arbitrary provider payloads.
+2. POST it to `/api/usage/claude-reconciliation/recovery/preview`. Inspect `databaseRevision`,
+   `runnerAcknowledgedRevision`, `targetRevision`, projected costs, recovered revisions, and
+   unresolved dependencies. The preview simulates changes under a rolled-back SQLite savepoint;
+   it leaves accounting, budget charges, audit, and deduplication state unchanged.
+3. Only if the entire missing chain is recoverable, separately approve that exact `digest` and POST
+   `{ "evidence": <same object>, "approvedDigest": "<digest>", "approved": true }` to
+   `/api/usage/claude-reconciliation/recovery/apply`. Ledger changes, new usage, or a newly observed
+   higher acknowledgement invalidate the preview. The whole replay and recovery receipt commit
+   atomically, retaining original correction identities and preserving post-checkpoint usage.
+4. Verify `/api/usage/claude-reconciliation/audit?sessionId=<id>`: `reconciliations` retains the
+   correction chain and `recoveries` records the operator, export provenance, recovered revisions,
+   and result. Exact retries do not repeat corrections. A committed recovery with
+   `synchronized: false` needs normal reconnect or exact retry to resend the latest revision/delta.
+
+Recovery retains the original cumulative correction delta, even if newer usage changes where an
+integer rounding unit is allocated. Already acknowledged corrections are never subtracted again;
+older snapshots receive only unacknowledged corrections. The fence clears through normal supported
+runner synchronization once every observed acknowledgement is covered. Do not reset runner revisions,
+bypass the fence, or automatically resume paused work/clear approvals.
+
+The additive accounting tables preserve older history and whole micro-USD reconciliation. Runners
+supporting protocol 199 already accept fractional USD deltas; no new runner capability is needed.
+Do not downgrade the control plane after fractional corrections: older code does not read the new
+precision receipts. Observation/recovery/precision metadata follows session deletion.
+
+For operations, query structured HTTP events `claude_cost_reconciliation_applied`,
+`claude_cost_reconciliation_recovery_applied`, and `claude_cost_reconciliation_recovery_rejected`
+by `requestId`. Applied events include `revision`, `applied`, and `synchronized`, with `entryPoint: http`;
+they exclude imported evidence and actor details. Existing runner fencing emits
+`cost_reconciliation_revision_unavailable`. Use preview reasons and scoped audit for diagnosis;
+no metrics backend or new external dependency is introduced.

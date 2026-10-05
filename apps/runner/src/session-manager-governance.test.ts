@@ -1000,6 +1000,24 @@ test("a correction preserves usage accrued before acknowledgement and applies sk
   } finally { h.cleanup(); }
 });
 
+test("fractional correction acknowledges once and retains accrued usage and revision identity", () => {
+  const h = harness({});
+  try {
+    h.store.patchMeta("s_governance", { costUsd: 0.0330025 });
+    h.sm.syncPricedSessionCost("s_governance", 0.0200012, 1, -0.0100006);
+    assert.ok(Math.abs(h.store.readMeta("s_governance")!.costUsd - 0.0230019) < 1e-12);
+    h.sm.syncPricedSessionCost("s_governance", 0.0200012, 1, -0.0100006);
+    assert.ok(Math.abs(h.store.readMeta("s_governance")!.costUsd - 0.0230019) < 1e-12);
+    h.store.patchMeta("s_governance", { costUsd: 0.0240019 });
+    h.sm.syncPricedSessionCost("s_governance", 0.0200012, 1, -0.0100006);
+    assert.ok(Math.abs(h.store.readMeta("s_governance")!.costUsd - 0.0240019) < 1e-12);
+    assert.equal(h.store.readMeta("s_governance")!.costReconciliationRevision, 1);
+    assert.equal(h.store.readMeta("s_governance")!.costReconciliationDeltaUsd, -0.0100006);
+    h.sm.syncPricedSessionCost("s_governance", 0.0200012, 1, -0.011);
+    assert.ok(Math.abs(h.store.readMeta("s_governance")!.costUsd - 0.0240019) < 1e-12);
+  } finally { h.cleanup(); }
+});
+
 test("a governance-cancelled prompt settles idle so the control plane can park its policy card", async () => {
   const h = harness({ maxToolCalls: 1 });
   try {
