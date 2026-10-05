@@ -24,7 +24,7 @@ for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844
 
 test("scope approval request shows exact changes and affected assignments",async({page})=>{
   await page.goto("/request-surfaces-e2e.html?scenario=issue-scope");
-  await page.getByRole("button", {name:"Review Request"}).click();
+  await expect(page.locator(".request-dock .request-card-foot").getByRole("button", {name:/^Approve/u})).toBeEnabled();
   await expect(page.getByText("team/repo#125",{exact:true})).toBeVisible();
   await expect(page.getByText("team/repo#124",{exact:true})).toBeVisible();
   await expect(page.getByText("closure-member-124",{exact:true})).toBeVisible();
