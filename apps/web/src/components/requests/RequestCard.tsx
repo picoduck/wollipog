@@ -187,6 +187,9 @@ export function RequestCard({
   const footerSecondary = recheck && !recovery ? [...secondary, recheck] : secondary;
   const canChooseAccount = authenticationAccountChoiceApplies(session, request, runner);
   const [choosingAccount, setChoosingAccount] = useState(false);
+  // Dismiss Recovery, Choose Another Account… and a primary do not fit one phone row; there the first
+  // two overflow into ⋯ (§3.1) rather than wrap the footer and squeeze the body under the dock's cap.
+  const phoneOverflow = signIn && tertiary !== null && canChooseAccount;
   // The sign-in method chosen among several; the first until the person picks another.
   const [chosenMethod, setChosenMethod] = useState<string | null>(null);
   const method = methods.find((option) => option.optionId === chosenMethod) ?? methods[0] ?? null;
@@ -196,11 +199,12 @@ export function RequestCard({
     if (requestOptionForIntent(request.options, "deny") === option) return "D";
     return null;
   };
-  const optionButton = (option: PermissionOption, variant: "primary" | "secondary" | "tertiary") => {
+  const optionButton = (option: PermissionOption, variant: "primary" | "secondary" | "tertiary", phoneHidden = false) => {
     const hint = keyHint(option);
     return (
       <BusyButton
         key={option.optionId}
+        data-phone-overflow={phoneHidden || undefined}
         className={variant === "primary" ? "btn primary" : variant === "tertiary" ? "btn ghost request-card-tertiary" : "btn"}
         busy={busy === option.optionId}
         progress={REQUEST_CARD_COPY.sending}
@@ -340,7 +344,7 @@ export function RequestCard({
         </div>
       )}
       <div className="request-card-foot">
-        {tertiary && optionButton(tertiary, "tertiary")}
+        {tertiary && optionButton(tertiary, "tertiary", phoneOverflow)}
         {footerSecondary.map((option) => optionButton(option, "secondary"))}
         {canChooseAccount && (
           // #2208 opens its Choose Another Account dialog from here; until then the card lists the
@@ -348,6 +352,7 @@ export function RequestCard({
           <button
             type="button"
             className="btn"
+            data-phone-overflow={phoneOverflow || undefined}
             aria-expanded={choosingAccount}
             aria-controls={choosingAccount ? accountsId : undefined}
             disabled={busy !== null || reason !== null}
@@ -357,14 +362,14 @@ export function RequestCard({
             {SIGN_IN_COPY.chooseAnotherAccount}
           </button>
         )}
-        {menuOptions.length > 0 && (
+        {(menuOptions.length > 0 || phoneOverflow) && (
           <>
             <button
               ref={menu.triggerRef}
               type="button"
-              className="icon-btn"
+              className={menuOptions.length === 0 ? "icon-btn request-card-phone-more" : "icon-btn"}
               aria-label={REQUEST_CARD_COPY.moreChoices}
-              title={REQUEST_CARD_COPY.moreChoices}
+              title={signIn ? undefined : REQUEST_CARD_COPY.moreChoices}
               aria-haspopup="menu"
               aria-expanded={menuOpen}
               aria-controls={menuOpen ? menu.menuId : undefined}
@@ -403,6 +408,34 @@ export function RequestCard({
                     {option.name}
                   </MenuItem>
                 ))}
+                {phoneOverflow && (
+                  <MenuItem
+                    aria-disabled={reason !== null || undefined}
+                    aria-describedby={reason !== null ? reasonId : undefined}
+                    onClick={() => {
+                      if (reason !== null) return;
+                      menu.close(true);
+                      setChoosingAccount((open) => !open);
+                    }}
+                  >
+                    {SIGN_IN_COPY.chooseAnotherAccount}
+                  </MenuItem>
+                )}
+                {phoneOverflow && tertiary && (
+                  <MenuItem
+                    description={tertiary.description}
+                    aria-disabled={unavailable(tertiary) || undefined}
+                    aria-describedby={describedBy(tertiary)}
+                    data-session-request-control={`option:${tertiary.optionId}`}
+                    onClick={() => {
+                      if (unavailable(tertiary)) return;
+                      menu.close(true);
+                      void decide(tertiary);
+                    }}
+                  >
+                    {tertiary.name}
+                  </MenuItem>
+                )}
               </MenuSurface>
             )}
           </>

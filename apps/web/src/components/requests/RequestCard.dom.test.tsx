@@ -110,9 +110,10 @@ async function render(element: React.ReactElement, client: Partial<ApiClient> = 
   };
 }
 
-/** The footer as a person reads it: each control's name, in order, and which is the primary. */
+/** The footer as a person reads it on a desktop: each control's name, in order, and which is the
+ * primary. The phone-only ⋯ (`.request-card-phone-more`, hidden by CSS above 760px) is left out. */
 function footer(container: HTMLElement): string[] {
-  return [...container.querySelectorAll<HTMLButtonElement>(".request-card-foot > button")].map((button) =>
+  return [...container.querySelectorAll<HTMLButtonElement>(".request-card-foot > button:not(.request-card-phone-more)")].map((button) =>
     `${button.getAttribute("aria-label") ?? button.textContent}${button.classList.contains("primary") ? " (primary)" : ""}`);
 }
 
@@ -536,6 +537,35 @@ test("Check Again on the Last Checked fact runs the runner's recheck; Dismiss Re
     assert.equal(view.container.querySelector(".request-card-body > .code-well")?.outerHTML ?? null, null);
     assert.ok(view.container.querySelector(".request-card-body > details.disclosure .code-well"));
     assert.equal(view.container.querySelector('.request-card-body dl[aria-label="Policy Match Context"]')?.outerHTML ?? null, null);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("on a phone, Dismiss Recovery and Choose Another Account… overflow into ⋯ beside the one primary", async () => {
+  const decisions: unknown[] = [];
+  const request = recovery([AUTH.acceptCurrent, AUTH.revalidate, AUTH.dismiss]);
+  const view = await renderWithRunner(
+    <RequestCard session={signInSession(request)} request={request} runnerOnline presentation="dock" />, {},
+    { approve: async (_id, body) => { decisions.push(body); return signInSession(request); } },
+  );
+  try {
+    const foot = view.container.querySelector(".request-card-foot")!;
+    // CSS hides these two below 760px and shows the ⋯ only there.
+    assert.deepEqual([...foot.querySelectorAll("[data-phone-overflow]")].map((button) => button.textContent?.replace(/D$/, "")),
+      ["Dismiss Recovery", "Choose Another Account…"]);
+    const more = foot.querySelector<HTMLButtonElement>(".request-card-phone-more")!;
+    assert.equal(more.getAttribute("aria-label"), "More Choices");
+    assert.equal(more.hasAttribute("title"), false, "no button in the sign-in card has a title");
+    await act(async () => { more.click(); await tick(); });
+    const items = () => [...domWindow.document.querySelectorAll<HTMLElement>('[data-request-card-menu] [role="menuitem"]')];
+    assert.deepEqual(items().map((item) => item.querySelector(".menu-label")?.textContent ?? item.textContent),
+      ["Choose Another Account…", "Dismiss Recovery"]);
+    await act(async () => { items()[0]!.click(); await tick(); await tick(); });
+    assert.ok(view.container.querySelector(".auth-recovery-accounts"), "the menu item opens the other accounts");
+    await act(async () => { more.click(); await tick(); });
+    await act(async () => { items()[1]!.click(); await tick(); });
+    assert.deepEqual(decisions, [{ requestId: "provider-auth:card", optionId: "auth:dismiss" }]);
   } finally {
     await view.unmount();
   }

@@ -31,7 +31,12 @@ for (const scenario of SCENARIOS) {
         if (scenario === "refused") {
           // The refusal is the state: choose a signed-out account from the card's account list.
           const choose = card.getByRole("button", { name: "Choose Another Account…" });
-          if (await choose.count()) await choose.click();
+          if (await choose.isVisible()) {
+            await choose.click();
+          } else {
+            await card.getByRole("button", { name: "More Choices" }).click();
+            await page.getByRole("menuitem", { name: "Choose Another Account…" }).click();
+          }
           await card.getByRole("button", { name: "Check and Use Team Pilot" }).click();
           await expect(card.getByRole("alert")).toBeVisible();
         } else {

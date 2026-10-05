@@ -2207,8 +2207,9 @@ follows these rules so it never crowds out the conversation it asks about:
   a mismatch Signed In Now cannot show; the runner's guidance waits behind Request Details, and a body
   cut by the dock's cap fades its lower edge. The primary is Use Current Account or Start Sign-In, and
   Recheck Authentication only when the runner offers neither (then Check Again is hidden). Dismiss
-  Recovery is a ghost tertiary at the footer's far left (on a phone the rest wrap under it), and
-  Choose Another Account… is the secondary when the session can switch accounts. While a sign-in
+  Recovery is a ghost tertiary at the footer's far left, and Choose Another Account… is the
+  secondary when the session can switch accounts; below 760px, where the two and the primary do not
+  fit one row, both overflow into ⋯ (§3.1) so the footer stays one row. While a sign-in
   runs, Cancel Sign-In is the only button, the sentence carries the sign-in's status, and the runner's
   sign-in renders in the body without repeating the account, so Open Provider Sign-In and the code
   field are in view. An agent

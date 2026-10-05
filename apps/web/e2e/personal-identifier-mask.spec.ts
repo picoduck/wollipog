@@ -11,8 +11,15 @@ const SURFACES: Array<{ name: string; open: (page: Page) => Promise<Locator>; re
     name: "the authentication account picker",
     open: async (page) => {
       await page.goto("/authentication-recovery-e2e.html?emailLabels=1");
-      // The other accounts open from the sign-in card's Choose Another Account… (#2198).
-      await page.getByRole("button", { name: "Choose Another Account…" }).click();
+      // The other accounts open from the sign-in card's Choose Another Account… (#2198), which a phone
+      // keeps in the card's ⋯.
+      const choose = page.getByRole("button", { name: "Choose Another Account…" });
+      if (await choose.isVisible()) {
+        await choose.click();
+      } else {
+        await page.getByRole("button", { name: "More Choices" }).click();
+        await page.getByRole("menuitem", { name: "Choose Another Account…" }).click();
+      }
       const recovery = page.getByRole("group", { name: "Account Recovery" });
       return recovery.locator(".auth-recovery-account").filter({ hasText: "Signed In" });
     },

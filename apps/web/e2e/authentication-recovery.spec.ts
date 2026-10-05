@@ -19,9 +19,21 @@ async function open(page: Page, query: string, title = "Authentication Required 
 
 /** The footer as a person reads it: each control's name, in order, and which is the primary. */
 async function footer(card: Locator): Promise<string[]> {
-  return card.locator(".request-card-foot > button").evaluateAll((buttons) => buttons.map((button) =>
+  return card.locator(".request-card-foot > button").evaluateAll((buttons) => buttons
+    .filter((button) => button.checkVisibility()).map((button) =>
     `${button.getAttribute("aria-label") ?? button.textContent?.replace(/\s*[AD]$/, "")}` +
     `${button.classList.contains("primary") ? " (primary)" : ""}`));
+}
+
+/** Choose Another Account…: a footer button on a desktop, an item of the card's ⋯ on a phone. */
+async function chooseAnotherAccount(page: Page, scope: Locator | Page = page): Promise<void> {
+  const button = scope.getByRole("button", { name: "Choose Another Account…" });
+  if (await button.isVisible()) {
+    await button.click();
+    return;
+  }
+  await scope.getByRole("button", { name: "More Choices" }).click();
+  await page.getByRole("menuitem", { name: "Choose Another Account…" }).click();
 }
 
 function fact(card: Locator, label: string): Locator {
@@ -100,7 +112,7 @@ test("an agent's sign-in methods show their descriptions and start the chosen on
 test("Choose Another Account… lists the other accounts, and choosing one names this exact card", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   const card = await open(page, "scenario=email");
-  await card.getByRole("button", { name: "Choose Another Account…" }).click();
+  await chooseAnotherAccount(page, card);
   const accounts = card.getByRole("region", { name: "Other Accounts" });
   await expect(accounts.locator(".auth-recovery-account")).toHaveCount(3);
   await expect(accounts).toContainText("Personal Max");
@@ -120,7 +132,7 @@ test("Choose Another Account… lists the other accounts, and choosing one names
 test("a refused selection keeps the card open and explains the next action", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   const card = await open(page, "scenario=refused");
-  await card.getByRole("button", { name: "Choose Another Account…" }).click();
+  await chooseAnotherAccount(page, card);
   await card.getByRole("button", { name: "Check and Use Team Pilot" }).click();
   const row = card.locator('[data-availability="sign_in_required"]');
   const refusal = row.getByRole("alert");
@@ -192,6 +204,25 @@ test("a body cut by the dock's cap fades its lower edge, so a cut line never rea
   }
 });
 
+test.describe("touch phone", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  test("the footer stays one row, with Dismiss Recovery and Choose Another Account… in ⋯, so the body keeps its room", async ({ page }) => {
+    for (const scenario of ["email", "signed-out", "readonly"] as const) {
+      const card = await open(page, `scenario=${scenario}&width=390&height=844`);
+      const tops = await card.locator(".request-card-foot > button").evaluateAll((buttons) => buttons
+        .filter((button) => button.checkVisibility()).map((button) => Math.round(button.getBoundingClientRect().top)));
+      expect(new Set(tops).size, `${scenario}: one footer row`).toBe(1);
+      expect(await footer(card), scenario).toEqual(["More Choices", expect.stringMatching(/\(primary\)$/)]);
+      const body = await card.locator(".request-card-body").evaluate((element) => element.getBoundingClientRect().height);
+      expect(body, `${scenario}: the body keeps room for a 44px target and more`).toBeGreaterThanOrEqual(100);
+      await card.getByRole("button", { name: "More Choices" }).click();
+      await expect(page.getByRole("menuitem")).toHaveText(["Choose Another Account…", /^Dismiss Recovery/]);
+      await page.keyboard.press("Escape");
+    }
+  });
+});
+
 for (const [width, height] of [[1440, 900], [390, 844]] as const) {
   test(`at ${width}×${height} nothing is clipped, the primary keeps its whole label, and the card body scrolls`, async ({ page }) => {
     await page.setViewportSize({ width, height });
@@ -220,7 +251,7 @@ for (const [width, height] of [[1440, 900], [390, 844]] as const) {
     // With the other accounts open the body grows past the dock's cap, and the body, not an inner
     // region, scrolls to the last account.
     const card = await open(page, `scenario=email&width=${width}&height=${height}`);
-    await card.getByRole("button", { name: "Choose Another Account…" }).click();
+    await chooseAnotherAccount(page, card);
     const last = card.getByRole("button", { name: "Check and Use Lab Sandbox" });
     await last.scrollIntoViewIfNeeded();
     await expect(last).toBeInViewport();
