@@ -9,6 +9,7 @@ import {
   governanceAuditPresentation,
   governanceDecisions,
   mergeGovernanceDecisions,
+  permissionResolutionActors,
   sameGovernanceSnapshot,
   transcriptGovernanceDecisions,
 } from "./governance.js";
@@ -206,6 +207,30 @@ test("a policy's decision names the policy, never its id, and Decided By appears
   assert.match(html, /Copy Audit ID/);
   const visible = html.replace(/<[^>]+>/g, " ");
   assert.doesNotMatch(visible, /deny-shell|ask-deploys|audit-block|hook-1|Policy ·/, "ids are only copied");
+});
+
+test("a permission's audited resolution names who settled it, and an ambiguous request id names no one (#2204)", () => {
+  const actors = permissionResolutionActors([
+    entry({ auditId: "p1", requestId: "perm-person", approvalKind: "permission", outcome: "allowed", actor: { kind: "human", id: "user-ada" } }),
+    entry({ auditId: "p2", requestId: "perm-policy", approvalKind: "permission", outcome: "allowed",
+      actor: { kind: "policy", id: "allow-read" }, governancePolicyId: "allow-read" }),
+    entry({ auditId: "p3", requestId: "perm-auth", approvalKind: "authentication", outcome: "dismissed", actor: { kind: "system", id: "auth" } }),
+    // A failed delivery is not how the request ended; the later resolution is.
+    entry({ auditId: "p4", requestId: "perm-retried", approvalKind: "permission", outcome: "delivery_failed", actor: { kind: "human", id: "user-ada" } }),
+    entry({ auditId: "p5", requestId: "perm-retried", approvalKind: "permission", outcome: "denied", actor: { kind: "human", id: "user-grace" } }),
+    // The same provider request id resolved twice (ids restart per provider process).
+    entry({ auditId: "p6", requestId: "perm-reused", approvalKind: "permission", outcome: "allowed", actor: { kind: "human", id: "user-ada" } }),
+    entry({ auditId: "p7", requestId: "perm-reused", approvalKind: "permission", outcome: "allowed", actor: { kind: "human", id: "user-ada" } }),
+    // Not a permission resolution.
+    entry({ auditId: "p8", requestId: "hook-1", approvalKind: "policy_hook", outcome: "allowed" }),
+    entry({ auditId: "p9", requestId: "perm-request", approvalKind: "permission", stage: "request", outcome: "pending" }),
+  ]);
+  assert.deepEqual([...actors], [
+    ["perm-person", { kind: "member", userId: "user-ada" }],
+    ["perm-policy", { kind: "policy", policyId: "allow-read" }],
+    ["perm-auth", { kind: "wollipog" }],
+    ["perm-retried", { kind: "member", userId: "user-grace" }],
+  ]);
 });
 
 test("non-hook audit entries produce no governance outcome", () => {

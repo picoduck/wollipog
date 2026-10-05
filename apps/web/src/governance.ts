@@ -128,6 +128,34 @@ export function governanceAuditPresentation(entry: GovernanceAuditEntry): Govern
   return policyHookOutcome(entry.stage, entry.outcome, entry.actor, entry.governancePolicyId, "audit");
 }
 
+const PERMISSION_KINDS = new Set(["permission", "authentication"]);
+const TERMINAL_RESOLUTIONS = new Set(["allowed", "denied", "dismissed", "answered"]);
+
+/**
+ * Who settled each runner permission, by request id, from the audit's terminal resolutions (#2204):
+ * a member (named relative to the viewer when rendered), a policy, or Wollipog. A provider can reuse
+ * a request id, so an id with more than one terminal resolution in the loaded audit names no one
+ * rather than borrow another occurrence's actor.
+ */
+export function permissionResolutionActors(entries: readonly GovernanceAuditEntry[]): ReadonlyMap<string, DecisionActor> {
+  const actors = new Map<string, DecisionActor | null>();
+  const seen = new Set<string>();
+  for (const entry of entries) {
+    if (!PERMISSION_KINDS.has(entry.approvalKind) || entry.stage !== "resolution" ||
+        !TERMINAL_RESOLUTIONS.has(entry.outcome) || seen.has(entry.auditId)) continue;
+    seen.add(entry.auditId);
+    const actor: DecisionActor | null = entry.actor.kind === "human"
+      ? { kind: "member", ...(entry.actor.id ? { userId: entry.actor.id } : {}) }
+      : entry.actor.kind === "policy" ? policyActor(entry.actor, entry.governancePolicyId)
+        : entry.actor.kind === "system" ? { kind: "wollipog" }
+          : null;
+    actors.set(entry.requestId, actors.has(entry.requestId) ? null : actor);
+  }
+  const named = new Map<string, DecisionActor>();
+  for (const [requestId, actor] of actors) if (actor) named.set(requestId, actor);
+  return named;
+}
+
 /**
  * Project the audit snapshot into oldest-first display decisions.
  *

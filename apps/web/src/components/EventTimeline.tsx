@@ -30,7 +30,16 @@ import {
 } from "./MeasuredVirtualList.js";
 import { CopyButton } from "./common.js";
 import { accountLabelText } from "../personal-identifiers.js";
-import { governanceDecisionRecord, permissionDecisionRecord, reviewDecisionRecord, type DecisionRecordModel } from "../decision-record.js";
+import {
+  governanceDecisionRecord,
+  PermissionResolutionActorsContext,
+  permissionDecisionRecord,
+  reviewDecisionRecord,
+  type DecisionActor,
+  type DecisionRecordModel,
+} from "../decision-record.js";
+
+const NO_PERMISSION_ACTORS: ReadonlyMap<string, DecisionActor> = new Map();
 import { DecisionRecord } from "./requests/DecisionRecord.js";
 import { AccountIcon, AgentLogIcon, BotIcon, ChevronRightIcon, CompactedIcon, CopyIcon, EditIcon, EditInForkIcon, FileEditIcon, HandOffIcon, NewFileIcon, PlanIcon, PlanInProgressIcon, PlanPendingIcon, RewindFilesIcon, ShieldIcon, StopTurnIcon, SuccessIcon, ThoughtIcon, ThreadForkIcon } from "./Icons.js";
 import { diffFileIsPlain, diffMaxLineNumber, hunkLabel, parseUnifiedDiff, type DiffFile } from "../unified-diff.js";
@@ -574,6 +583,7 @@ export const EventTimeline = memo(function EventTimeline({
   approvalContext,
   workspaceRoot,
   onOpenSession,
+  permissionActors,
 }: {
   handoff?: { open: (turn: number) => void; reason?: string };
   /** Retry Turn on a failed turn's notice; absent where a transcript cannot start a turn. */
@@ -620,12 +630,16 @@ export const EventTimeline = memo(function EventTimeline({
   workspaceRoot?: string;
   /** Open another session, such as a fork's source; must be identity-stable. */
   onOpenSession?: (sessionId: string) => void;
+  /** Who settled each permission, by request id, from the session's governance audit (#2204);
+   * must be identity-stable. */
+  permissionActors?: ReadonlyMap<string, DecisionActor>;
 }) {
   const effectiveHistoryKey = historyKey ?? "timeline";
   const scopedRevealRequest = revealRequest?.historyKey === effectiveHistoryKey ? revealRequest : null;
   return (
     <HandoffContext.Provider value={handoff}>
     <TimelineSessionLinkContext.Provider value={onOpenSession}>
+    <PermissionResolutionActorsContext.Provider value={permissionActors ?? NO_PERMISSION_ACTORS}>
     <TurnRetryContext.Provider value={turnRetry}>
     <TranscriptImageCacheProvider key={effectiveHistoryKey} enabled={historyKey !== undefined}>
     <EventTimelineBody
@@ -659,6 +673,7 @@ export const EventTimeline = memo(function EventTimeline({
     />
     </TranscriptImageCacheProvider>
     </TurnRetryContext.Provider>
+    </PermissionResolutionActorsContext.Provider>
     </TimelineSessionLinkContext.Provider>
     </HandoffContext.Provider>
   );
@@ -2323,7 +2338,7 @@ const TimelineRow = memo(function TimelineRow({
       return <TimelineDecisionRecord record={reviewDecisionRecord(item)} open={disclosureOpen} onToggle={onDisclosureToggle} />;
     case "permission":
       if (item.resolvedOptionId !== undefined) {
-        return <TimelineDecisionRecord record={permissionDecisionRecord(item)} open={disclosureOpen} onToggle={onDisclosureToggle} />;
+        return <TimelinePermissionRecord item={item} open={disclosureOpen} onToggle={onDisclosureToggle} />;
       }
       // A pending permission keeps its interim row until the request dock owns it (#2179).
       return (
@@ -2402,6 +2417,16 @@ function TimelineDecisionRecord({ record, auditId, open, onToggle }: {
   const now = useContext(TimelineClockContext);
   const openSession = useContext(TimelineSessionLinkContext);
   return <DecisionRecord record={record} auditId={auditId} open={open} onToggle={onToggle} now={now} onOpenSession={openSession} />;
+}
+
+/** A resolved permission, named by its audited actor where the session's audit has one. */
+function TimelinePermissionRecord({ item, open, onToggle }: {
+  item: Extract<TimelineItem, { kind: "permission" }>;
+  open: boolean;
+  onToggle?: () => void;
+}) {
+  const resolvedBy = useContext(PermissionResolutionActorsContext).get(item.requestId);
+  return <TimelineDecisionRecord record={permissionDecisionRecord(item, resolvedBy)} open={open} onToggle={onToggle} />;
 }
 
 /** The question row, with its parent session link where the transcript can navigate. */

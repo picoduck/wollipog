@@ -6395,6 +6395,7 @@ function SessionDetailLoaded({
                       onOpenSourceLocation={openSourceLocation}
                       onOpenInReview={mode === "expanded" ? openInReview : undefined}
                       onOpenSession={openSession}
+                      permissionActors={governanceAudit.permissionActors}
                       workspaceRoot={session.worktreePath ?? runner?.workspaces.find((workspace) => workspace.id === session.workspaceId)?.path}
                       scrollRef={scrollRef}
                       historyKey={timelineHistoryKey}

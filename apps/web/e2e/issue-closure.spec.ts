@@ -17,6 +17,9 @@ for (const width of [1440, 390]) {
     await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_REQUEST_SURFACES_E2E__.submissions())).toEqual([
       { requestId: "evidence-occurrence", optionId: "deny" },
     ]);
-    await expect(page.getByText("→ deny", { exact: true })).toBeVisible();
+    // The resolved request is its Decision Record (#2204): a past-tense outcome, never the option id.
+    const record = page.locator("details.tl-decision");
+    await expect(record.locator(".tl-decision-outcome")).toHaveText("Rejected");
+    await expect(record).not.toContainText(/→|\bdeny\b/);
   });
 }

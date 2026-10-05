@@ -1,7 +1,7 @@
 import React from "react";
 import type { GovernanceAuditEntry, PermissionOption, SessionEvent, SessionEventPayload, SessionView } from "@wollipog/protocol";
 import { EventTimeline } from "../components/EventTimeline.js";
-import { GovernancePolicyNamesContext } from "../decision-record.js";
+import { GovernancePolicyNamesContext, type DecisionActor } from "../decision-record.js";
 import { governanceDecisions } from "../governance.js";
 import { ViewerIdentityContext, viewerIdentity } from "../resolver-identity.js";
 import { StoreProvider } from "../store.js";
@@ -61,6 +61,12 @@ const items: TimelineItem[] = [
   ...governanceDecisions(audit).map((decision, index): TimelineItem => ({ kind: "governance_decision", id: 100 + index, decision })),
 ];
 
+/** The session's audit names Alice as the person who settled her two permissions. */
+const permissionActors: ReadonlyMap<string, DecisionActor> = new Map([
+  ["perm-allowed", { kind: "member", userId: "alice" }],
+  ["perm-rejected", { kind: "member", userId: "alice" }],
+]);
+
 const policies = {
   names: new Map([["no-shell-in-production", "No Shell in Production"], ["ask-before-deploys", "Ask Before Deploys"]]),
   load: () => {},
@@ -106,7 +112,7 @@ export function DecisionRecordGallery() {
     <StoreProvider connection={connection}>
       <GovernancePolicyNamesContext.Provider value={policies}>
         <ViewerIdentityContext.Provider value={viewer}>
-          <EventTimeline ariaLabel="Decision Records" items={items} onOpenSession={() => {}} />
+          <EventTimeline ariaLabel="Decision Records" items={items} onOpenSession={() => {}} permissionActors={permissionActors} />
         </ViewerIdentityContext.Provider>
       </GovernancePolicyNamesContext.Provider>
     </StoreProvider>

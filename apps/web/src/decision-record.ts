@@ -71,6 +71,13 @@ export interface GovernancePolicyNames {
   invalidate: () => void;
 }
 
+/**
+ * Who settled each permission, by request id, from the session's content-safe governance audit: the
+ * runner's `permission_resolved` names no one, and a policy can settle a permission as well as a
+ * person. Empty where the audit is not loaded (a shared page, a collapsed preview).
+ */
+export const PermissionResolutionActorsContext = createContext<ReadonlyMap<string, DecisionActor>>(new Map());
+
 export const GovernancePolicyNamesContext = createContext<GovernancePolicyNames>({
   names: null,
   load: () => {},
@@ -170,12 +177,16 @@ const UNATTRIBUTED: ReadonlySet<DecisionOutcome> = new Set([
   "replaced", "provider_resolved", "expired", "rechecked_automatically", "another_account_selected",
 ]);
 
-/** A resolved permission as a Decision Record. */
-export function permissionDecisionRecord(item: PermissionItem): DecisionRecordModel {
+/**
+ * A resolved permission as a Decision Record. A parent session's decision names the parent; any
+ * other is named only by its audited actor (`resolvedBy`), since a policy can settle a permission
+ * too. Without one the row names nobody rather than assume a person did.
+ */
+export function permissionDecisionRecord(item: PermissionItem, resolvedBy?: DecisionActor): DecisionRecordModel {
   const outcome = permissionOutcome(item);
   const actor: DecisionActor | undefined = item.resolvedByParentSessionId
     ? { kind: "parent", sessionId: item.resolvedByParentSessionId }
-    : UNATTRIBUTED.has(outcome) ? undefined : { kind: "member" };
+    : UNATTRIBUTED.has(outcome) ? undefined : resolvedBy;
   const context = item.context;
   const facts: DecisionFact[] = [];
   if (context?.toolName) facts.push({ label: "Tool", value: context.toolName });
