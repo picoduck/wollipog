@@ -482,9 +482,11 @@ export function EvidenceViewer({
             <span className="ev-viewer-step-label">{EVIDENCE_VIEWER_COPY.next}</span>
             <ChevronRightIcon size={16} />
           </button>
-          {/* Opening from a tile lands here: the next thing to do is review this item. */}
-          <button ref={primaryRef} type="button" className="btn primary" autoFocus disabled={!entry.reviewable}
-            onClick={markAndNext}>
+          {/* Opening from a tile lands here: the next thing to do is review this item. Unavailable
+              while the item loads, but never `disabled`: moving on to an item still loading must
+              not drop focus out of the dialog, where ← → and Tab no longer reach it. */}
+          <button ref={primaryRef} type="button" className="btn primary" autoFocus
+            aria-disabled={!entry.reviewable || undefined} onClick={markAndNext}>
             {EVIDENCE_VIEWER_COPY.markAndNext}
           </button>
         </>

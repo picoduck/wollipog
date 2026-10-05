@@ -755,6 +755,45 @@ test("marks made in the viewer survive a reload", async () => {
   }
 });
 
+test("stepping onto an item still loading keeps focus in the viewer, and closing there returns it to that tile", async () => {
+  domWindow.localStorage.clear();
+  // Screenshot 2's download is held, so the viewer moves onto an item it cannot show yet.
+  let release: () => void = () => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const view = await mount(sessionWith(screenshots(3)), async (artifactId) => {
+    if (artifactId === "art_2") await held;
+    return new Blob([PNG]);
+  });
+  try {
+    await view.decode("load");
+    await openTile(view, "viewport-1");
+    const primary = viewerButton("Mark Reviewed and Next");
+    assert.equal(domWindow.document.activeElement, primary as unknown as Element);
+    await act(async () => primary.click());
+    assert.equal(viewerTitle(), "Screenshot 2 of 3");
+    assert.equal(viewer()?.querySelector(".ev-viewer-stage .ev-loading")?.textContent, "Loading…");
+    assert.equal(primary.getAttribute("aria-disabled"), "true", "an item not shown yet cannot be marked");
+    assert.equal(primary.disabled, false, "but the primary keeps focus rather than dropping it out of the dialog");
+    assert.equal(domWindow.document.activeElement, primary as unknown as Element);
+    await act(async () => primary.click());
+    assert.equal(viewerTitle(), "Screenshot 2 of 3", "activating the unavailable primary does nothing");
+    assert.equal(view.container.querySelector(".ev-progress")?.textContent, "1 of 3 reviewed");
+    await press("ArrowLeft");
+    assert.equal(viewerTitle(), "Screenshot 1 of 3", "the arrow keys still reach the viewer");
+    await press("ArrowRight");
+    await press("Escape");
+    assertNoDomNode(viewer());
+    await settleFocus();
+    assert.equal(domWindow.document.activeElement, view.tile("viewport-2"),
+      "focus returns to the loading item's own tile, not to the tile the viewer was opened from");
+    release();
+    for (let turn = 0; turn < 6; turn += 1) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  } finally {
+    release();
+    await view.unmount();
+  }
+});
+
 test("an item that fails while the viewer shows it leaves the viewer, and its tile says why", async () => {
   domWindow.localStorage.clear();
   const view = await mount(sessionWith(screenshots(2)), async () => new Blob([PNG]));

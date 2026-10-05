@@ -293,13 +293,18 @@ function EvidenceTile({ review, item, viewer }: { review: EvidenceReview; item: 
   );
 }
 
-/** The control that stands for a tile when focus comes back to it: its picture, else its first live control. */
+/** What stands for a tile when focus comes back to it: its picture, else its first live control, else
+ * the tile itself (still loading, or failed with nothing to retry), so focus never lands on another one. */
 function tileFocusTarget(grid: HTMLElement | null, evidenceId: string | null): HTMLElement | null {
   const tile = [...grid?.querySelectorAll<HTMLElement>(".ev-tile") ?? []]
     .find((candidate) => candidate.dataset.evidenceId === evidenceId);
-  return tile?.querySelector<HTMLElement>(
+  if (!tile) return null;
+  const control = tile.querySelector<HTMLElement>(
     ".ev-thumb:not([hidden]):not(:disabled), button:not(:disabled), input:not(:disabled), a[href]",
-  ) ?? null;
+  );
+  if (control) return control;
+  tile.tabIndex = -1;
+  return tile;
 }
 
 /**
