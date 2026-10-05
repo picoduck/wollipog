@@ -13,6 +13,7 @@ import { skillReconciliationProviderAccountPlan } from "./provider-accounts.js";
 import { SkillStateReporter } from "./skill-state-reporter.js";
 import * as skills from "./skills.js";
 import { ChunkedSkillsSyncAssembler } from "./skills-sync.js";
+import { mergeWslSkillsResult } from "./wsl-skills.js";
 
 const empty = (): skills.ReconcileSkillsResult => ({ deployed: [], unmanaged: [], removedLinks: [] });
 const superseded = (): skills.ReconcileSkillsResult => ({ ...empty(), superseded: true, error: "Fixture supersession" });
@@ -65,9 +66,9 @@ test("cold-start burst is bounded, coalesces live IDs, and flushes full current 
   assert.equal(f.logs.filter(message => JSON.parse(message).event === "skill_request_evicted").length, 6);
   const current = { ...empty(), removedLinks: [{ path: "skills/removed", reason: "Current removal" }] };
   f.reporter.report(current, f.reporter.request("current"));
-  assert.equal(f.messages.length, 65);
+  assert.equal(f.messages.length, 64);
   assert.deepEqual(f.messages.map(message => message.requestId), [
-    ...Array.from({ length: 64 }, (_, i) => `request-${i + 6}`), "current",
+    ...Array.from({ length: 63 }, (_, i) => `request-${i + 7}`), "current",
   ]);
   assert.deepEqual(f.messages[0]!.removals, current.removedLinks);
   assert.ok(f.messages.slice(1).every(message => message.removals?.length === 0));
@@ -103,6 +104,31 @@ test("delayed queue tickets and old reconnect generations never re-emit solicite
   assert.deepEqual(f.messages.map(message => message.requestId), [undefined]);
   f.reporter.report(superseded(), f.reporter.request("new-socket"));
   assert.equal(f.messages.at(-1)!.requestId, "new-socket");
+});
+
+test("a duplicate queued before the first deferral retains the first admission deadline", () => {
+  const f = reporterFixture();
+  const first = f.reporter.request("duplicate");
+  f.advance(10_000);
+  const duplicate = f.reporter.request("duplicate");
+  assert.equal(duplicate!.expiresAt, first!.expiresAt);
+  f.advance(10_000); f.reporter.report(superseded(), first);
+  f.advance(15_000); f.reporter.report(empty(), duplicate);
+  assert.deepEqual(f.messages.map(message => message.requestId), [undefined]);
+});
+
+test("queued admissions stay bounded and old tickets cannot resurrect after eviction or settlement", () => {
+  const f = reporterFixture();
+  const first = f.reporter.request("first");
+  for (let i = 0; i < 64; i++) f.reporter.request(`queued-${i}`);
+  f.reporter.report(superseded(), first);
+  f.reporter.report(empty(), first);
+  assert.equal(f.messages[0]!.requestId, undefined);
+  const settled = f.reporter.request("settled");
+  f.reporter.report(empty(), settled);
+  f.reporter.report(superseded(), settled);
+  assert.equal(f.messages.at(-1)!.requestId, undefined);
+  f.reporter.resetRequests();
 });
 
 test("no-cache removal bookkeeping keeps only the latest bounded real event and hands it off once", () => {
@@ -222,6 +248,8 @@ function integratedFixture() {
     cacheContent: item => skills.cacheSkillSyncEntry(dataDir, [agent], item) });
   const context = {
     ...skills, runnerSupportsProtocol, skillReconciliationProviderAccountPlan,
+    mergeWslSkillsResult, reconcileWslSkills: async (_options: unknown): Promise<skills.ReconcileSkillsResult> => empty(),
+    dataDirLease: { ownerHash: "a".repeat(64) },
     controlPlaneProtocolVersion: PROTOCOL_VERSION,
     lastDesiredSkills: [initial] as skills.ReconcileSkillEntry[], metadata: { agents: [agent] },
     config: { runnerId: "fixture", dataDir, providerAccounts: accounts, skillRetention: { removedSkillDays: 1, previousVersionMinutes: 0 } },
@@ -418,5 +446,27 @@ test("the production chunked rejection producer updates the same current observa
     const state = f.db.getRunnerSkillState("fixture")!;
     assert.deepEqual(state.deployed, []);
     assert.match(state.error!, /Fixture rejected content/);
+  } finally { f.close(); }
+});
+
+test("production publication stays fenced across a stubbed WSL await without starting WSL or native helpers", async () => {
+  const f = integratedFixture();
+  try {
+    await f.queue(); const before = f.db.getRunnerSkillState("fixture")!;
+    f.context.process.platform = "win32";
+    f.context.metadata.agents = [...f.context.metadata.agents,
+      { ...f.agent, id: "wsl-fixture", context: { kind: "wsl", distro: "FixtureDistro" } }];
+    let entered!: () => void; let finish!: () => void;
+    const arrived = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { finish = resolve; });
+    f.context.reconcileWslSkills = async () => { entered(); await gate; return empty(); };
+    const pending = f.queue("wsl-fence"); await arrived;
+    f.context.metadata.agents = [...f.context.metadata.agents]; finish(); await pending;
+    const stale = f.db.getRunnerSkillState("fixture")!;
+    assert.deepEqual(stale.deployed, before.deployed);
+    assert.deepEqual(stale.unmanaged, before.unmanaged);
+    assert.match(stale.error!, /stale.*superseded/);
+    f.context.reconcileWslSkills = async () => empty(); await f.queue("wsl-current");
+    assert.equal(f.db.getRunnerSkillState("fixture")!.error, undefined);
   } finally { f.close(); }
 });

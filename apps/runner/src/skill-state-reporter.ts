@@ -18,7 +18,9 @@ export interface SkillReportRequest {
  */
 export class SkillStateReporter {
   private observation?: SkillsStateMessage;
-  private readonly deferred = new Map<string, SkillReportRequest>();
+  // Admission and deferral share one bound. Capture duplicate identity before an earlier queued
+  // pass finishes, so a later ticket cannot extend its lifetime or resurrect an evicted request.
+  private readonly requests = new Map<string, { request: SkillReportRequest; deferred: boolean }>();
   private expiryTimer?: ReturnType<typeof setTimeout>;
   private generation = 0;
   private pendingRemovals: SkillLinkRemoval[] = [];
@@ -33,15 +35,25 @@ export class SkillStateReporter {
   /** Capture before a task enters the serialized reconciliation queue. */
   request(id?: string): SkillReportRequest | undefined {
     this.prune();
-    return id === undefined ? undefined : {
-      id, expiresAt: this.now() + REQUEST_LIFETIME_MS, generation: this.generation,
-    };
+    if (id === undefined) return undefined;
+    const previous = this.requests.get(id);
+    if (previous) return previous.request;
+    if (this.requests.size === MAX_DEFERRED_REQUESTS) {
+      const oldest = [...this.requests.values()].reduce((left, right) =>
+        left.request.expiresAt <= right.request.expiresAt ? left : right).request;
+      this.requests.delete(oldest.id);
+      this.note("skill_request_evicted", oldest, { fallback: "server_timeout", capacity: MAX_DEFERRED_REQUESTS });
+    }
+    const request = { id, expiresAt: this.now() + REQUEST_LIFETIME_MS, generation: this.generation };
+    this.requests.set(id, { request, deferred: false });
+    this.armExpiry();
+    return request;
   }
 
   /** The connection boundary invalidates unanswered requests, not the last local observation. */
   resetRequests(): void {
     this.generation++;
-    this.deferred.clear();
+    this.requests.clear();
     this.armExpiry();
   }
 
@@ -54,7 +66,7 @@ export class SkillStateReporter {
         if (result.removedLinks.length) {
           this.pendingRemovals = structuredClone(result.removedLinks.slice(0, MAX_PENDING_REMOVALS));
         }
-        if (liveRequest) this.defer(liveRequest);
+        if (liveRequest) this.requests.get(liveRequest.id)!.deferred = true;
         return;
       }
       const errors = [STALE_INVENTORY_ERROR, this.observation.error, result.error,
@@ -66,6 +78,8 @@ export class SkillStateReporter {
         removals: structuredClone(result.removedLinks),
         error: [...new Set(errors)].join("; "),
       });
+      if (liveRequest) this.requests.delete(liveRequest.id);
+      this.armExpiry();
       return;
     }
 
@@ -73,7 +87,8 @@ export class SkillStateReporter {
     message.removals = structuredClone(result.removedLinks.length ? result.removedLinks : this.pendingRemovals);
     // Snapshot before calling transport so a caller or transport cannot mutate the retained copy.
     const observation = structuredClone({ ...message, removals: [] });
-    const requests = new Set(this.deferred.keys());
+    const requests = new Set([...this.requests.values()]
+      .filter(entry => entry.deferred).map(entry => entry.request.id));
     if (liveRequest) requests.add(liveRequest.id);
     const ids: Array<string | undefined> = requests.size ? [...requests] : [undefined];
     for (const [index, id] of ids.entries()) {
@@ -85,35 +100,20 @@ export class SkillStateReporter {
       // A throwing send did not hand off an observation or consume its removal event/correlation.
       this.observation = observation;
       this.pendingRemovals = [];
-      if (id !== undefined) this.deferred.delete(id);
+      if (id !== undefined) this.requests.delete(id);
     }
     this.armExpiry();
   }
 
   private live(request: SkillReportRequest): boolean {
-    return request.generation === this.generation && request.expiresAt > this.now();
-  }
-
-  private defer(request: SkillReportRequest): void {
-    const previous = this.deferred.get(request.id);
-    if (previous) {
-      if (request.expiresAt < previous.expiresAt) this.deferred.set(request.id, request);
-    } else {
-      if (this.deferred.size === MAX_DEFERRED_REQUESTS) {
-        const oldest = [...this.deferred.values()].reduce((left, right) =>
-          left.expiresAt <= right.expiresAt ? left : right);
-        this.deferred.delete(oldest.id);
-        this.note("skill_request_evicted", oldest, { fallback: "server_timeout", capacity: MAX_DEFERRED_REQUESTS });
-      }
-      this.deferred.set(request.id, request);
-    }
-    this.armExpiry();
+    return request.generation === this.generation && request.expiresAt > this.now() &&
+      this.requests.get(request.id)?.request === request;
   }
 
   private prune(): void {
-    for (const [id, request] of this.deferred) {
+    for (const [id, { request }] of this.requests) {
       if (!this.live(request)) {
-        this.deferred.delete(id);
+        this.requests.delete(id);
         this.note("skill_request_expired", request, { fallback: "server_timeout" });
       }
     }
@@ -123,8 +123,8 @@ export class SkillStateReporter {
   private armExpiry(): void {
     if (this.expiryTimer !== undefined) clearTimeout(this.expiryTimer);
     this.expiryTimer = undefined;
-    if (!this.deferred.size) return;
-    const earliest = Math.min(...[...this.deferred.values()].map(request => request.expiresAt));
+    if (!this.requests.size) return;
+    const earliest = Math.min(...[...this.requests.values()].map(entry => entry.request.expiresAt));
     this.expiryTimer = setTimeout(() => this.prune(), Math.max(1, earliest - this.now()));
     this.expiryTimer.unref?.();
   }
