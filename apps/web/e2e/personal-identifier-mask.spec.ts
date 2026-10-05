@@ -11,8 +11,9 @@ const SURFACES: Array<{ name: string; open: (page: Page) => Promise<Locator>; re
     name: "the authentication account picker",
     open: async (page) => {
       await page.goto("/authentication-recovery-e2e.html?emailLabels=1");
+      // The other accounts open from the sign-in card's Choose Another Account… (#2198).
+      await page.getByRole("button", { name: "Choose Another Account…" }).click();
       const recovery = page.getByRole("group", { name: "Account Recovery" });
-      await expect(recovery.getByText("Checked at", { exact: false })).toBeVisible();
       return recovery.locator(".auth-recovery-account").filter({ hasText: "Signed In" });
     },
     reveal: "Show Account Email",
@@ -98,8 +99,10 @@ test.describe("touch", () => {
     test(`${surface.name}: the reveal keeps a 44px touch target`, async ({ page }) => {
       const scope = await surface.open(page);
       const reveal = scope.getByRole("button", { name: surface.reveal });
-      // The request card's body scrolls on a phone (#2179); bring the control into view to hit-test it.
+      // The request card's body scrolls on a phone (#2179); bring the control into view to hit-test it,
+      // away from the body's clipping edge, where its target would be cut however large it is.
       await reveal.scrollIntoViewIfNeeded();
+      await reveal.evaluate((element) => element.scrollIntoView({ block: "center" }));
       const box = (await reveal.boundingBox())!;
       expect(box.width).toBe(box.height);
       const cx = box.x + box.width / 2;

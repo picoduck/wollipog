@@ -434,7 +434,7 @@ function AccountChoice({
   };
 
   return (
-    <section id={id} className="auth-recovery-accounts" aria-label={SIGN_IN_COPY.otherAccounts} ref={revealNode}>
+    <section id={id} className="auth-recovery-accounts" aria-label={SIGN_IN_COPY.otherAccounts} ref={revealList}>
       <h4>{SIGN_IN_COPY.otherAccounts}</h4>
       {!active ? (
         <p className="facts-help">
@@ -509,9 +509,17 @@ function AccountChoice({
   );
 }
 
-/** Bring a newly shown list or refusal into view inside the card's scrolling body. */
+/** Bring a newly shown refusal into view inside the card's scrolling body. */
 function revealNode(node: HTMLElement | null): void {
   node?.scrollIntoView?.({ block: "nearest" });
+}
+
+/** Scroll the card's body, and only it, so the newly opened list starts at its top edge: the first
+ * account is then whole, rather than cut by the body's lower edge as "nearest" would leave it. */
+function revealList(node: HTMLElement | null): void {
+  const body = node?.closest<HTMLElement>(".request-card-body");
+  if (!node || !body) return;
+  body.scrollTop += node.getBoundingClientRect().top - body.getBoundingClientRect().top;
 }
 
 function accountGuidance(account: ProviderAuthenticationAccountOption, canStartSignIn: boolean): string {

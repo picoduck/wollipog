@@ -127,13 +127,13 @@ test(`${width}px ${theme}: Usage and authentication recovery show emails by defa
   await auth.evaluate(theme => document.documentElement.dataset.theme = theme, theme);
   const recovery = auth.getByRole("group", { name: "Account Recovery" });
   await expect(recovery).toContainText("morgan.lee@example.com");
-  await expect(recovery.getByRole("button", { name: "Show Current Account Email" })).toHaveCount(0);
+  await expect(recovery.getByRole("button", { name: "Show Email" })).toHaveCount(0);
   await account.screenshot({ path: join(evidenceDir, `usage-${width}-${theme}-off.png`) });
   await recovery.screenshot({ path: join(evidenceDir, `recovery-${width}-${theme}-off.png`) });
   await privacy.click();
   await expect(account).toContainText("Email Hidden");
   expect(await account.innerHTML()).not.toContain("codex@example.com");
-  await expect(recovery.getByRole("button", { name: "Show Current Account Email" })).toBeVisible();
+  await expect(recovery.getByRole("button", { name: "Show Email" })).toBeVisible();
   expect(await recovery.innerHTML()).not.toContain("morgan.lee@example.com");
   await account.screenshot({ path: join(evidenceDir, `usage-${width}-${theme}-on.png`) });
   await recovery.screenshot({ path: join(evidenceDir, `recovery-${width}-${theme}-on.png`) });
