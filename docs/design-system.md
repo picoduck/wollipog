@@ -1623,8 +1623,10 @@ tooltip is the absolute time. Who decided is "You" (relative to the viewer, #252
 display name from the organization's policies (never "Policy · <id>"; "Policy" until the names
 load; they reload once for a policy they lack and after a policy is saved), the parent session's title, the reviewer, or "Wollipog" for a fail-closed block. A permission
 event records no one, so its row takes who settled it from the session's governance audit (a person
-or the policy that auto-resolved it); with no audited resolution for that request id, or more than
-one, the row names nobody rather than guessing. The
+or the policy that auto-resolved it), matched to that occurrence: the one audited terminal
+resolution of its request id within five minutes of its own resolution. A provider can reuse a
+request id and the audit may not hold an old occurrence, so with no match, or more than one, the
+row names nobody rather than guessing. The
 body is a §5.4 `.facts` list, each fact once: Decided By (a parent session's title links to it),
 Tool, Path, Branch, the command in a §11.7 code well, Risk for a review, and Recorded as one absolute
 time with seconds. Ids (request, audit, policy, session, review) are never shown; Copy Audit ID copies

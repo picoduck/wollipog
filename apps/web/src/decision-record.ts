@@ -71,12 +71,43 @@ export interface GovernancePolicyNames {
   invalidate: () => void;
 }
 
+/** One terminal resolution the governance audit recorded for a permission: who settled it, and when.
+ * `actor` is null for an actor a row cannot name (an agent). */
+export interface PermissionResolution {
+  actor: DecisionActor | null;
+  at: number;
+}
+
+/** The audit's terminal permission resolutions, by request id. */
+export type PermissionResolutions = ReadonlyMap<string, readonly PermissionResolution[]>;
+
 /**
- * Who settled each permission, by request id, from the session's content-safe governance audit: the
- * runner's `permission_resolved` names no one, and a policy can settle a permission as well as a
- * person. Empty where the audit is not loaded (a shared page, a collapsed preview).
+ * Who settled each permission, from the session's content-safe governance audit: the runner's
+ * `permission_resolved` names no one, and a policy can settle a permission as well as a person.
+ * Empty where the audit is not loaded (a shared page, a collapsed preview).
  */
-export const PermissionResolutionActorsContext = createContext<ReadonlyMap<string, DecisionActor>>(new Map());
+export const PermissionResolutionActorsContext = createContext<PermissionResolutions>(new Map());
+
+/** How far apart the control plane's audit time and the runner's event time may be for one
+ * resolution. Clocks differ between machines; a reused request id is resolved much further apart. */
+export const PERMISSION_RESOLUTION_WINDOW_MS = 5 * 60_000;
+
+/**
+ * Who settled this occurrence of a permission: the one audited resolution of its request id within
+ * the window of its own resolution time. A provider can reuse a request id (Codex's restart per
+ * process), and the audit may not hold an old occurrence (paging, retention), so with no match, or
+ * more than one, the row names no one rather than borrow another occurrence's actor.
+ */
+export function permissionResolutionActor(
+  resolutions: PermissionResolutions,
+  requestId: string,
+  resolvedAt: number | undefined,
+): DecisionActor | undefined {
+  if (resolvedAt === undefined || !Number.isFinite(resolvedAt)) return undefined;
+  const near = (resolutions.get(requestId) ?? []).filter((resolution) =>
+    Math.abs(resolution.at - resolvedAt) <= PERMISSION_RESOLUTION_WINDOW_MS);
+  return near.length === 1 ? near[0]!.actor ?? undefined : undefined;
+}
 
 export const GovernancePolicyNamesContext = createContext<GovernancePolicyNames>({
   names: null,

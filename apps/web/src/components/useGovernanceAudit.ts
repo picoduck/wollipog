@@ -12,7 +12,7 @@ import {
   type GovernanceAnchorEvent,
   type GovernanceDecision,
 } from "../governance.js";
-import type { DecisionActor } from "../decision-record.js";
+import type { PermissionResolutions } from "../decision-record.js";
 import { publishTimelineSnapshotDelta, type TimelineItem } from "../timeline.js";
 
 const NO_ENTRIES: GovernanceAuditEntry[] = [];
@@ -26,8 +26,8 @@ const NO_ENTRIES: GovernanceAuditEntry[] = [];
  */
 export interface GovernanceAuditState {
   decisions: GovernanceDecision[];
-  /** Who settled each permission, by request id (#2204). */
-  permissionActors: ReadonlyMap<string, DecisionActor>;
+  /** Who settled each permission, by request id and time (#2204). */
+  permissionActors: PermissionResolutions;
   available: boolean;
   hasMore: boolean;
   loadingOlder: boolean;

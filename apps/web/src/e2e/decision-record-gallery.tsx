@@ -1,8 +1,8 @@
 import React from "react";
 import type { GovernanceAuditEntry, PermissionOption, SessionEvent, SessionEventPayload, SessionView } from "@wollipog/protocol";
 import { EventTimeline } from "../components/EventTimeline.js";
-import { GovernancePolicyNamesContext, type DecisionActor } from "../decision-record.js";
-import { governanceDecisions } from "../governance.js";
+import { GovernancePolicyNamesContext } from "../decision-record.js";
+import { governanceDecisions, permissionResolutionActors } from "../governance.js";
 import { ViewerIdentityContext, viewerIdentity } from "../resolver-identity.js";
 import { StoreProvider } from "../store.js";
 import { deriveTimeline, type TimelineItem } from "../timeline.js";
@@ -62,9 +62,11 @@ const items: TimelineItem[] = [
 ];
 
 /** The session's audit names Alice as the person who settled her two permissions. */
-const permissionActors: ReadonlyMap<string, DecisionActor> = new Map([
-  ["perm-allowed", { kind: "member", userId: "alice" }],
-  ["perm-rejected", { kind: "member", userId: "alice" }],
+const permissionActors = permissionResolutionActors([
+  { auditId: "audit-allowed", requestId: "perm-allowed", approvalKind: "permission", stage: "resolution", outcome: "allowed",
+    actor: { kind: "human", id: "alice" }, scope, timestamp: at(1) },
+  { auditId: "audit-rejected", requestId: "perm-rejected", approvalKind: "permission", stage: "resolution", outcome: "denied",
+    actor: { kind: "human", id: "alice" }, scope, timestamp: at(3) },
 ]);
 
 const policies = {

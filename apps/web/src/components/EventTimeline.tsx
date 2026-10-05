@@ -35,11 +35,12 @@ import {
   PermissionResolutionActorsContext,
   permissionDecisionRecord,
   reviewDecisionRecord,
-  type DecisionActor,
+  permissionResolutionActor,
   type DecisionRecordModel,
+  type PermissionResolutions,
 } from "../decision-record.js";
 
-const NO_PERMISSION_ACTORS: ReadonlyMap<string, DecisionActor> = new Map();
+const NO_PERMISSION_ACTORS: PermissionResolutions = new Map();
 import { DecisionRecord } from "./requests/DecisionRecord.js";
 import { AccountIcon, AgentLogIcon, BotIcon, ChevronRightIcon, CompactedIcon, CopyIcon, EditIcon, EditInForkIcon, FileEditIcon, HandOffIcon, NewFileIcon, PlanIcon, PlanInProgressIcon, PlanPendingIcon, RewindFilesIcon, ShieldIcon, StopTurnIcon, SuccessIcon, ThoughtIcon, ThreadForkIcon } from "./Icons.js";
 import { diffFileIsPlain, diffMaxLineNumber, hunkLabel, parseUnifiedDiff, type DiffFile } from "../unified-diff.js";
@@ -630,9 +631,9 @@ export const EventTimeline = memo(function EventTimeline({
   workspaceRoot?: string;
   /** Open another session, such as a fork's source; must be identity-stable. */
   onOpenSession?: (sessionId: string) => void;
-  /** Who settled each permission, by request id, from the session's governance audit (#2204);
-   * must be identity-stable. */
-  permissionActors?: ReadonlyMap<string, DecisionActor>;
+  /** Who settled each permission, from the session's governance audit (#2204); must be
+   * identity-stable. */
+  permissionActors?: PermissionResolutions;
 }) {
   const effectiveHistoryKey = historyKey ?? "timeline";
   const scopedRevealRequest = revealRequest?.historyKey === effectiveHistoryKey ? revealRequest : null;
@@ -2425,7 +2426,7 @@ function TimelinePermissionRecord({ item, open, onToggle }: {
   open: boolean;
   onToggle?: () => void;
 }) {
-  const resolvedBy = useContext(PermissionResolutionActorsContext).get(item.requestId);
+  const resolvedBy = permissionResolutionActor(useContext(PermissionResolutionActorsContext), item.requestId, item.resolvedAt);
   return <TimelineDecisionRecord record={permissionDecisionRecord(item, resolvedBy)} open={open} onToggle={onToggle} />;
 }
 

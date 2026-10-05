@@ -16,6 +16,8 @@ import {
 import { GovernanceHistoryPanel } from "./components/GovernanceHistoryPanel.js";
 import {
   decisionActorName,
+  PERMISSION_RESOLUTION_WINDOW_MS,
+  permissionResolutionActor,
   decisionRecordText,
   governanceDecisionRecord,
   GovernancePolicyNamesContext,
@@ -225,12 +227,18 @@ test("a permission's audited resolution names who settled it, and an ambiguous r
     entry({ auditId: "p8", requestId: "hook-1", approvalKind: "policy_hook", outcome: "allowed" }),
     entry({ auditId: "p9", requestId: "perm-request", approvalKind: "permission", stage: "request", outcome: "pending" }),
   ]);
-  assert.deepEqual([...actors], [
-    ["perm-person", { kind: "member", userId: "user-ada" }],
-    ["perm-policy", { kind: "policy", policyId: "allow-read" }],
-    ["perm-auth", { kind: "wollipog" }],
-    ["perm-retried", { kind: "member", userId: "user-grace" }],
-  ]);
+  const who = (requestId: string, at = 1) => permissionResolutionActor(actors, requestId, at);
+  assert.deepEqual(who("perm-person"), { kind: "member", userId: "user-ada" });
+  assert.deepEqual(who("perm-policy"), { kind: "policy", policyId: "allow-read" });
+  assert.deepEqual(who("perm-auth"), { kind: "wollipog" });
+  assert.deepEqual(who("perm-retried"), { kind: "member", userId: "user-grace" }, "a failed delivery is not the outcome");
+  assert.equal(who("perm-reused"), undefined, "two resolutions in the same window name no one");
+  assert.equal(who("hook-1"), undefined);
+  assert.equal(who("perm-request"), undefined);
+  assert.equal(who("perm-person", 1 + PERMISSION_RESOLUTION_WINDOW_MS + 1), undefined,
+    "an occurrence outside the window of every audited resolution names no one");
+  assert.deepEqual(who("perm-person", 1 + PERMISSION_RESOLUTION_WINDOW_MS), { kind: "member", userId: "user-ada" });
+  assert.equal(permissionResolutionActor(actors, "perm-person", undefined), undefined, "no resolution time, no match");
 });
 
 test("non-hook audit entries produce no governance outcome", () => {

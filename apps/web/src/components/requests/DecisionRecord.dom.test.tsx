@@ -15,7 +15,7 @@ import { api, type ApiClient } from "../../api.js";
 import { ApiProvider } from "../../api-context.js";
 import { assertNoDomNode } from "../../dom-test-assertions.js";
 import { installDomTestCleanup } from "../../dom-test-cleanup.js";
-import { GovernancePolicyNamesContext, type DecisionActor, type GovernancePolicyNames } from "../../decision-record.js";
+import { GovernancePolicyNamesContext, type GovernancePolicyNames, type PermissionResolutions } from "../../decision-record.js";
 import { governanceDecisions, permissionResolutionActors } from "../../governance.js";
 import { ViewerIdentityContext, viewerIdentity } from "../../resolver-identity.js";
 import { StoreProvider } from "../../store.js";
@@ -169,7 +169,7 @@ async function mount(
   items: TimelineItem[],
   client: Partial<ApiClient> = {},
   onOpenSession?: (id: string) => void,
-  permissionActors?: ReadonlyMap<string, DecisionActor>,
+  permissionActors?: PermissionResolutions,
 ) {
   const sockets: UiSocket[] = [];
   const connection: UiConnectionRuntime = {
@@ -423,6 +423,31 @@ test("a permission names who settled it from the session's audit: you, a policy,
       "Rejected Write File",
     ]);
     assert.doesNotMatch(view.container.textContent ?? "", /allow-reads-x7|alice/);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a reused request id names each occurrence only by its own audited resolution", async () => {
+  const OLD = RESOLVED_AT - 100 * 86_400_000;
+  // The provider reused the id 100 days later. The old resolution's audit is past retention, so only
+  // the new one is in the audit; the old row must not borrow it.
+  const items = deriveTimeline([
+    event({ kind: "permission_request", requestId: "reused-id", title: "Old Request", options: OPTION_SETS.acp! }, OLD),
+    event({ kind: "permission_resolved", requestId: "reused-id", optionId: "opt-reject-once-x7", resolutionReason: "submitted" }, OLD),
+    event({ kind: "permission_request", requestId: "reused-id", title: "New Request", options: OPTION_SETS.acp! }),
+    event({ kind: "permission_resolved", requestId: "reused-id", optionId: "opt-allow-once-x7", resolutionReason: "submitted" }),
+  ]);
+  const actors = permissionResolutionActors([
+    audit({ auditId: "new", requestId: "reused-id", approvalKind: "permission", outcome: "allowed",
+      actor: { kind: "human", id: "alice" }, timestamp: RESOLVED_AT - 2_000 }),
+  ]);
+  const view = await mount(items, {}, undefined, actors);
+  try {
+    assert.deepEqual(view.rows().map((row) => row.querySelector("summary")?.getAttribute("aria-label")), [
+      "Rejected Old Request",
+      "Allowed New Request by You",
+    ]);
   } finally {
     await view.unmount();
   }
