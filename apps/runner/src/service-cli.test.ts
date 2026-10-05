@@ -756,19 +756,39 @@ test("service upgrade refuses a release without the web bundle when the control 
   assert.deepEqual(runnerRelease.downloads.map((u) => u.replace("https://dl/", "")).sort(), ["SHA256SUMS", "wollipog-runner-x86_64-unknown-linux-gnu"], "only the runner asset is fetched");
 });
 
-test("system upgrade supports service-owned and root-owned data directories with deterministic complete identities", { skip: process.platform !== "linux" }, async (t) => {
+test("system upgrade supports service-owned and root-owned data directories and publisher-owned web roots", { skip: process.platform !== "linux" }, async (t) => {
   for (const owner of ["service", "root"]) {
     const f = fake(t, { system: true, uid: 0, accountUid: MY_UID });
     assert.equal(await runServiceCli(["service", "install", "--system", ...bins(f), "--json"], f.host, f.io), 0, f.stderr());
-    const fixture = releaseFixture(f, { webBundle: false });
+    const webDist = join(f.root, "web");
+    mkdirSync(webDist, { mode: 0o755 });
+    writeFileSync(join(webDist, "index.html"), "old");
+    writeFileSync(f.layout.controlPlaneEnvFile, readFileSync(f.layout.controlPlaneEnvFile, "utf8") + `WOLLIPOG_WEB_DIST="${webDist}"\n`);
+    const fixture = releaseFixture(f);
     const base = f.host.stagingFilesystem!;
     const dataStat = base.lstat(f.layout.dataDir);
-    const identity = (stat: typeof dataStat) => owner === "root" && stat.dev === dataStat.dev && stat.ino === dataStat.ino
-      ? Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { uid: 0n }) as typeof stat : stat;
+    let archiveRoot: typeof dataStat | undefined;
+    const identity = (stat: typeof dataStat) => {
+      const uid = archiveRoot && stat.dev === archiveRoot.dev && stat.ino === archiveRoot.ino ? BigInt(MY_UID + 1)
+        : owner === "root" && stat.dev === dataStat.dev && stat.ino === dataStat.ino ? 0n : stat.uid;
+      return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { uid }) as typeof stat;
+    };
     const host: ServiceHost = {
       ...fixture.host,
       stagingFilesystem: { ...base, lstat: (path) => identity(base.lstat(path)), fstat: (fd) => identity(base.fstat(fd)) },
-      exec: async (command, args, options) => args[0] === "--version" ? { code: 0, stdout: `${command.includes("/upgrades/") ? fixture.version : "0.22.0"}\n`, stderr: "" } : fixture.host.exec(command, args, options),
+      exec: async (command, args, options) => {
+        if (args[0] === "--version") return { code: 0, stdout: `${command.includes("/upgrades/") ? fixture.version : "0.22.0"}\n`, stderr: "" };
+        if (command === "tar") {
+          const extracted = join(args[args.indexOf("-C") + 1]!, "web");
+          mkdirSync(extracted, { mode: 0o755 });
+          writeFileSync(join(extracted, "index.html"), "new");
+          // GNU tar as root restores the archive publisher UID. Inject complete identities;
+          // never run real tar/chown or claim this test directory was actually root-owned.
+          archiveRoot = base.lstat(extracted);
+          return { code: 0, stdout: "", stderr: "" };
+        }
+        return fixture.host.exec(command, args, options);
+      },
       fetch: async (url, init) => {
         const response = await fixture.host.fetch(url, init);
         if (!url.endsWith("/api/admin/status")) return response;
@@ -781,6 +801,9 @@ test("system upgrade supports service-owned and root-owned data directories with
     assert.equal(JSON.parse(io.stdout()).upgraded, true);
     assert.equal(readFileSync(join(f.root, "wollipog-runner"), "utf8"), "runner 9.9.9");
     assert.equal(readFileSync(`${join(f.root, "wollipog-runner")}.previous`, "utf8"), "#!/bin/sh\n");
+    assert.equal(readFileSync(join(webDist, "index.html"), "utf8"), "new");
+    assert.equal(readFileSync(join(`${webDist}.previous`, "index.html"), "utf8"), "old");
+    assert.ok(f.execs.some((line) => line.startsWith("chown -R ") && line.includes(webDist)), "existing post-swap ownership correction remains");
     assert.equal(existsSync(join(f.layout.dataDir, "upgrades", "download-attempt-v1")), false);
   }
 });

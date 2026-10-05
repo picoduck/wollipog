@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
-import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { constants, chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { ReleaseStaging, stagingFilesystem, validateSelectedAssets, type StagingFilesystem } from "./release-staging.js";
 import { Readable } from "node:stream";
+import { execCapture } from "./exec-capture.js";
 import {
   RUNNER_TARGET_TRIPLES,
   controlPlaneArtifactName,
@@ -139,6 +140,136 @@ function dataDirectory(t: TestContext): string {
 function attempt(root: string, fs: StagingFilesystem = stagingFilesystem, tag = "v1.2.3"): ReleaseStaging {
   return ReleaseStaging.create(root, { mode: "user", serviceUid: null }, tag, [fixtureAsset], fs);
 }
+
+// Exact separately approved native fixture: execute only synthetic shell bytes in this private
+// disposable root, never a Wollipog binary, service, archive or concurrent/death fixture.
+linuxTest("verified synthetic executable runs with only read-only receipts before and after its owned move", async (t) => {
+  const root = dataDirectory(t);
+  const bytes = Buffer.from("#!/bin/sh\necho 9.9.9\n");
+  const asset = { ...fixtureAsset, size: bytes.length, digest: `sha256:${createHash("sha256").update(bytes).digest("hex")}` };
+  const handles = new Map<number, { path: string; flags: number }>();
+  const fs: StagingFilesystem = {
+    ...stagingFilesystem,
+    open: (...args) => {
+      const fd = stagingFilesystem.open(...args);
+      assert.equal(typeof args[1], "number");
+      handles.set(fd, { path: String(args[0]), flags: args[1] as number });
+      return fd;
+    },
+    close: (fd) => { stagingFilesystem.close(fd); handles.delete(fd); },
+  };
+  const owned = ReleaseStaging.create(root, { mode: "user", serviceUid: null }, "v9.9.9", [asset], fs);
+  t.after(() => owned.finish());
+  const destination = join(owned.path, asset.name);
+  await downloadVerifiedAsset(async (_url, sink) => { sink.end(bytes); }, asset, destination, { staging: owned });
+  owned.executable(destination, () => chmodSync(destination, 0o755));
+  const probe = await execCapture(destination, ["--version"], { timeoutMs: 30_000 });
+  assert.equal(probe.code, 0, JSON.stringify(probe));
+  assert.equal(probe.stdout.trim(), "9.9.9");
+  const inode = stagingFilesystem.lstat(destination);
+  const assetHandles = [...handles].filter(([, handle]) => handle.path.endsWith(".partial"));
+  assert.equal(assetHandles.length, 1, "only one current read-only asset receipt remains");
+  for (const [fd, handle] of assetHandles) {
+    assert.equal(handle.flags & (constants.O_WRONLY | constants.O_RDWR), constants.O_RDONLY, "writer closed before execution, independently of kernel behavior");
+    assert.equal(stagingFilesystem.fstat(fd).ino, inode.ino, "handoff pins the original published inode");
+  }
+  const installed = join(root, "installed-fixture");
+  owned.beforeMove(destination);
+  renameSync(destination, installed);
+  owned.moved(destination);
+  const movedProbe = await execCapture(installed, ["--version"], { timeoutMs: 30_000 });
+  assert.equal(movedProbe.code, 0, JSON.stringify(movedProbe));
+  assert.equal(movedProbe.stdout.trim(), "9.9.9");
+  assert.equal(owned.finish(), null);
+  assert.equal(handles.size, 0);
+});
+
+linuxTest("read-only handoff failures never publish and close every writer and temporary reader", async (t) => {
+  for (const phase of ["reader-open", "reader-receipt", "reader-identity", "reader-size", "substitution", "writer-close", "reader-close", "hash-rejection"]) {
+    const root = dataDirectory(t);
+    const handles = new Map<number, { path: string; reader: boolean }>();
+    let failed = false;
+    let readerOpens = 0;
+    const fs: StagingFilesystem = {
+      ...stagingFilesystem,
+      open: (...args) => {
+        const path = String(args[0]);
+        const reader = path.endsWith(".partial") && typeof args[1] === "number" && (args[1] & (constants.O_WRONLY | constants.O_RDWR)) === 0;
+        if (reader) {
+          readerOpens++;
+          if (phase === "reader-open") throw new Error("fixture reader-open");
+          if (phase === "substitution") {
+            renameSync(path, join(root, "retained-original"));
+            writeFileSync(path, "foreign", { mode: 0o600 });
+          }
+        }
+        const fd = stagingFilesystem.open(...args);
+        handles.set(fd, { path, reader });
+        return fd;
+      },
+      fstat: (fd) => {
+        const stat = stagingFilesystem.fstat(fd);
+        if (handles.get(fd)?.reader) {
+          if (phase === "reader-receipt" || phase === "reader-close") throw new Error(`fixture ${phase}`);
+          if (phase === "reader-identity") return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { ino: stat.ino + 1n }) as typeof stat;
+          if (phase === "reader-size") return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { size: stat.size + 1n }) as typeof stat;
+        }
+        return stat;
+      },
+      close: (fd) => {
+        const handle = handles.get(fd);
+        if (!failed && readerOpens && (phase === "writer-close" && handle?.path.endsWith(".partial") && !handle.reader || phase === "reader-close" && handle?.reader)) {
+          failed = true;
+          throw new Error(`fixture ${phase}`);
+        }
+        stagingFilesystem.close(fd);
+        handles.delete(fd);
+      },
+    };
+    const owned = attempt(root, fs);
+    const destination = join(owned.path, fixtureAsset.name);
+    await assert.rejects(downloadVerifiedAsset(async (_url, sink) => { sink.end(phase === "hash-rejection" ? Buffer.alloc(fixtureBytes.length) : fixtureBytes); }, fixtureAsset, destination, { staging: owned }));
+    assert.equal(existsSync(destination), false, phase);
+    if (phase === "hash-rejection") assert.equal(readerOpens, 0, "unverified bytes never reach read-only handoff or publication");
+    const retained = phase === "substitution" || phase === "writer-close" || phase === "reader-close";
+    const cleanup = owned.finish();
+    if (retained) assert.match(cleanup!, /retained|uncertain/u, phase);
+    else assert.equal(cleanup, null, phase);
+    assert.equal(handles.size, 0, `${phase} closes every retained handle`);
+    assert.equal(existsSync(owned.path), retained, phase);
+    if (phase === "substitution") {
+      assert.deepEqual(readFileSync(join(root, "retained-original")), fixtureBytes);
+      assert.equal(readFileSync(join(owned.path, readdirSync(owned.path).find((name) => name.endsWith(".partial"))!), "utf8"), "foreign");
+    }
+  }
+});
+
+linuxTest("extracted web root symlinks and substitutions refuse moves and preserve both trees", (t) => {
+  const root = dataDirectory(t);
+  const owned = attempt(root);
+  const web = join(owned.path, "web");
+  const foreign = join(root, "foreign-web");
+  mkdirSync(foreign);
+  writeFileSync(join(foreign, "index.html"), "foreign");
+  symlinkSync(foreign, web);
+  assert.throws(() => owned.captureWeb(), /identity/u);
+  assert.match(owned.finish()!, /retained/u);
+  assert.equal(readFileSync(join(foreign, "index.html"), "utf8"), "foreign");
+
+  const next = attempt(dataDirectory(t));
+  const extracted = join(next.path, "web");
+  mkdirSync(extracted);
+  writeFileSync(join(extracted, "index.html"), "original");
+  next.captureWeb();
+  const kept = join(root, "retained-web");
+  renameSync(extracted, kept);
+  mkdirSync(extracted);
+  writeFileSync(join(extracted, "index.html"), "replacement");
+  assert.throws(() => next.beforeMove(extracted), /substituted/u);
+  assert.match(next.finish()!, /retained/u);
+  assert.equal(readFileSync(join(kept, "index.html"), "utf8"), "original");
+  assert.equal(readFileSync(join(extracted, "index.html"), "utf8"), "replacement");
+});
 
 linuxTest("failed, short, oversized and mismatched streams never publish and current receipts retire", async (t) => {
   const cases: Array<{ name: string; download: Downloader; error: RegExp }> = [

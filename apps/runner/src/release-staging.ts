@@ -50,7 +50,6 @@ export function validateSelectedAssets(assets: ReleaseAsset[]): void {
 function same(a: BigIntStats, b: BigIntStats): boolean {
   return a.dev === b.dev && a.ino === b.ino && a.uid === b.uid && a.mode === b.mode;
 }
-function absent(error: unknown): boolean { return (error as NodeJS.ErrnoException).code === "ENOENT"; }
 
 export class ReleaseStaging {
   readonly path: string;
@@ -58,6 +57,7 @@ export class ReleaseStaging {
   private readonly chain: Array<{ path: string; stat: BigIntStats }> = [];
   private readonly directories: Receipt[] = [];
   private readonly files: Receipt[] = [];
+  private readonly handoffHandles = new Set<number>();
   private readonly selected: Map<string, { size: number; digest: string | null }>;
   private readonly startedAssets = new Set<string>();
   private parentCreated = false;
@@ -236,11 +236,36 @@ export class ReleaseStaging {
     for (const name of receipt.names) if (!same(stat, this.fs.lstat(name))) throw new Error("release staging file was substituted");
   }
 
+  private closeWriter(receipt: Receipt): void {
+    // Hashing already used the original writer. Keep that inode pinned while opening its
+    // checked read handle, then close the writer before any executable probe or service use.
+    const reader = this.fs.open(receipt.path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    this.handoffHandles.add(reader);
+    try {
+      const stat = this.fs.fstat(reader);
+      this.assertChain();
+      this.assertFile(receipt);
+      if (!same(receipt.stat, stat) || !same(stat, this.fs.lstat(receipt.path)) ||
+          !stat.isFile() || stat.nlink !== 1n || stat.size !== this.fs.fstat(receipt.fd).size) {
+        throw new Error("release staging read-only handoff identity changed");
+      }
+      try { this.fs.close(receipt.fd); }
+      catch (error) { this.uncertain = true; throw error; }
+      receipt.fd = reader;
+      this.handoffHandles.delete(reader);
+    } catch (error) {
+      try { this.fs.close(reader); this.handoffHandles.delete(reader); }
+      catch { this.uncertain = true; }
+      throw error;
+    }
+  }
+
   publish(partial: string, destination: string): void {
     this.assertChain();
     const receipt = this.files.find((file) => file.path === partial)!;
     this.assertFile(receipt);
     this.fs.sync(receipt.fd);
+    this.closeWriter(receipt);
     this.fs.link(partial, destination);
     receipt.names.add(destination);
     this.assertFile(receipt);
@@ -267,7 +292,9 @@ export class ReleaseStaging {
   captureWeb(): void {
     this.assertChain();
     const stat = this.fs.lstat(join(this.path, "web"));
-    if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== this.uid) throw new Error("release staging web root identity is unavailable");
+    // Root tar restores publisher ownership; pin that actual identity before the existing
+    // move/chown instead of imposing new archive ownership semantics.
+    if (!stat.isDirectory() || stat.isSymbolicLink() || stat.ino <= 0n || stat.dev < 0n || stat.uid < 0n) throw new Error("release staging web root identity is unavailable");
     this.web = stat;
     this.inventory(this.path, this.knownNames());
   }
@@ -344,6 +371,7 @@ export class ReleaseStaging {
     } catch (error) {
       problem = `release staging retained or retirement uncertain: ${(error as Error).message.slice(0, 500)}`;
     } finally {
+      for (const fd of this.handoffHandles) { try { this.fs.close(fd); } catch { problem ??= "release staging handoff handle closure failed"; } }
       for (const file of this.files) { try { this.fs.close(file.fd); } catch { problem ??= "release staging handle closure failed"; } }
       for (const directory of this.directories) { try { this.fs.close(directory.fd); } catch { problem ??= "release staging handle closure failed"; } }
       this.closed = true;
