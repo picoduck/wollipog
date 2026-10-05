@@ -5,14 +5,29 @@ branches behind conditions that can no longer be false.
 
 ## Ground Truth
 
-Run `npx -y knip --no-progress` from the repository root. It understands this pnpm workspace and
-reports unused files, exports, and dependencies without being installed into the tree. If it cannot
+Run both commands from the repository root, saving each JSON report and stderr separately in the
+run's scratch directory:
+
+- `npx -y knip --no-progress --reporter json`
+- `npx -y knip --no-progress --production --reporter json`
+
+The default pass finds unused files, exports, and dependencies. The production pass ignores test
+usage, so it also exposes helpers reached only by tests. JSON preserves full paths; the default
+text reporter can shorten them with an ellipsis. A nonzero exit caused by reported findings is
+expected; distinguish it from an analysis failure using the JSON output and stderr. If knip cannot
 resolve the workspace, fall back to reference counting: for each exported symbol in a candidate
 file, `git grep -n "<symbol>"` across `apps/`, `packages/`, and `scripts/`, and treat a symbol whose
 only hit is its own declaration as a candidate.
 
+Before counting or triaging either report, discard records whose repository-relative file path
+contains a `.worktrees/` directory segment. They describe nested worktree copies, not this
+checkout. Do this in a scratch script without changing repository configuration, and report the
+number excluded. On 2026-10-05, nested worktrees accounted for 839 of 892 unused-file records.
+
 Cross-check candidates against the test suite: a symbol referenced only by its own test is dead
-production code plus a test that should go with it, not a live symbol.
+production code unless it is a deliberate test seam or reference oracle. Before deleting its
+tests, check whether they pin a guarantee of the live implementation: move useful cases to that
+implementation, and delete only cases that exercise retired behavior.
 
 ## Gate
 
@@ -56,6 +71,13 @@ Two classes the first sweeps re-derived independently, now named so no run deriv
   and the protocol constant pairs). An alias is dead only when one name has no consumer at all.
 - knip's "Unresolved imports" flags Vite server-absolute paths (`/src/theme.ts`) in Playwright
   specs. They resolve in the browser at runtime; confirm the target file exists on disk and move on.
+- Deliberate test seams named `*ForTest`, `*ForTests`, or `reset*` may have only test callers.
+  Names are a triage hint, not proof: inspect the test callers and the production state or behavior
+  they expose before deciding whether the seam is useful.
+- One-shot reference oracles can intentionally be test-only. `filterSubagentTimeline` and
+  `projectChildSessionRegistry` provide reference results for incremental projectors. Check whether
+  the tests compare the live projector against the oracle; deleting it can remove independent
+  correctness coverage even though production never calls it.
 
 ## Report
 
