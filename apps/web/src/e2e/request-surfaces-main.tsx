@@ -23,7 +23,7 @@ import {
 } from "../components/SessionNoticeSlot.js";
 import { RequestDock, dockRequests } from "../components/requests/RequestDock.js";
 import { RequestKindIcon, pendingRequestsTitle } from "../components/requests/request-meta.js";
-import type { RequestIntentHandler } from "../components/requests/RequestCard.js";
+import { decideDockedRequest } from "../components/requests/request-reveal.js";
 import { useSessionReadingKeys } from "../useSessionReadingKeys.js";
 import { SessionApprovalRegion, focusSessionRequest } from "../components/SessionApproval.js";
 import { EventTimeline } from "../components/EventTimeline.js";
@@ -683,8 +683,7 @@ function noticeEntries(): SessionNoticeEntry[] {
 }
 
 /** A and D, routed as the session's reading keys route them: to the dock's expanded request. */
-function ReadingKeys({ intentRef, scrollRef }: {
-  intentRef: MutableRefObject<RequestIntentHandler | null>;
+function ReadingKeys({ scrollRef }: {
   scrollRef: MutableRefObject<HTMLDivElement | null>;
 }) {
   const noop = () => {};
@@ -695,8 +694,8 @@ function ReadingKeys({ intentRef, scrollRef }: {
     actions: {
       nextSession: noop,
       previousSession: noop,
-      approve: () => { intentRef.current?.("approve"); },
-      deny: () => { intentRef.current?.("deny"); },
+      approve: () => { decideDockedRequest("dock-session", "approve"); },
+      deny: () => { decideDockedRequest("dock-session", "deny"); },
       archive: noop,
       snooze: noop,
       fork: noop,
@@ -862,7 +861,6 @@ function Fixture() {
       ({ kind: "user_message", id: 200 + index, text: `Later transcript message ${index + 1}` })) : []),
   ] : [];
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const intentRef = useRef<RequestIntentHandler | null>(null);
   const docked = dockRequests(prioritizedPendingRequests(session.pendingApproval));
   const permissionTimes = new Map(standaloneTimelineItems.flatMap((item) =>
     item.kind === "permission" && item.createdAt ? [[item.requestId, item.createdAt] as const] : []));
@@ -881,7 +879,6 @@ function Fixture() {
         headTrailing={trailing}
         onSessionUpdate={setSession}
         showKeyHints
-        intentRef={intentRef}
         keyboardOpen={keyboardOpen}
         revealRequestId={revealRequestId}
       />
@@ -890,7 +887,7 @@ function Fixture() {
 
   return (
     <ApiProvider client={client}>
-      <ReadingKeys intentRef={intentRef} scrollRef={scrollRef} />
+      <ReadingKeys scrollRef={scrollRef} />
       <main className="app" style={{ display: "block", height: "100dvh" }}>
         <section className="session-detail expanded" style={{ height: "100%" }}>
           <header className="detail-bar session-bar" style={{ justifyContent: "space-between" }}>

@@ -21,6 +21,28 @@ export function registerRequestRevealer(sessionId: string, revealer: RequestReve
   };
 }
 
+/**
+ * A and D on the dock's expanded request, wherever the keys are read: the session's reading keys,
+ * or the Sessions list while its preview shows the dock. One handler per mounted dock.
+ */
+type RequestIntent = (intent: "approve" | "deny") => boolean;
+const intents = new Map<string, RequestIntent[]>();
+
+export function registerRequestIntent(sessionId: string, handler: RequestIntent): () => void {
+  intents.set(sessionId, [handler, ...(intents.get(sessionId) ?? [])]);
+  return () => {
+    const rest = (intents.get(sessionId) ?? []).filter((candidate) => candidate !== handler);
+    if (rest.length) intents.set(sessionId, rest);
+    else intents.delete(sessionId);
+  };
+}
+
+/** True when a mounted dock took the key for its expanded request. */
+export function decideDockedRequest(sessionId: string, intent: "approve" | "deny"): boolean {
+  // The most recently mounted dock answers.
+  return (intents.get(sessionId) ?? []).slice(0, 1).some((handler) => handler(intent));
+}
+
 /** True when a mounted dock (or the notice slot holding its place) has brought the request up. */
 export function revealDockedRequest(sessionId: string, requestId: string): boolean {
   return (revealers.get(sessionId) ?? []).some((revealer) => revealer(requestId));

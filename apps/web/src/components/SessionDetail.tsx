@@ -196,8 +196,8 @@ import { SessionApprovalRegion, focusSessionRequest, useEvidenceDraftRetirement 
 import { type DescendantRequestStatus } from "./SessionRequestPanel.js";
 import { RequestDock, dockRequests } from "./requests/RequestDock.js";
 import { RequestKindIcon, pendingRequestsTitle } from "./requests/request-meta.js";
-import type { RequestIntentHandler } from "./requests/RequestCard.js";
 import { useSoftwareKeyboardOpen } from "./requests/software-keyboard.js";
+import { decideDockedRequest } from "./requests/request-reveal.js";
 import { useRemovedFocus } from "./useRemovedFocus.js";
 import { CampaignHeldChildren, type CampaignHeldChild } from "./CampaignHeldChildren.js";
 import { ComposerQuestionResponse } from "./ComposerQuestionResponse.js";
@@ -1092,8 +1092,8 @@ function SessionDetailLoaded({
   const prioritizedRequests = useMemo(() => prioritizedPendingRequests(session.pendingApproval),
     [session.pendingApproval]);
   const dockedRequests = useMemo(() => dockRequests(prioritizedRequests), [prioritizedRequests]);
+  const topRequestDocked = prioritizedRequests[0] !== undefined && dockedRequests.includes(prioritizedRequests[0]);
   useEvidenceDraftRetirement(session.id, dockedRequests);
-  const requestIntentRef = useRef<RequestIntentHandler | null>(null);
   const chatReadingRef = useRef<HTMLDivElement>(null);
   const softwareKeyboardOpen = useSoftwareKeyboardOpen();
   const [selectedRequestKey, setSelectedRequestKey] = useState<string | null>(null);
@@ -3595,15 +3595,15 @@ function SessionDetailLoaded({
   const readingActions = useMemo<SessionReadingKeyActions>(() => ({
     nextSession: () => onNextSession?.(),
     previousSession: () => onPreviousSession?.(),
-    // A and D act on the dock's expanded request (#2179); without one they keep acting on the
-    // session's top request, as in the Sessions list.
+    // A and D act on the dock's expanded request when the session's top request is docked (#2179);
+    // otherwise (a question, a worker's request) they keep acting on the top request.
     approve: () => {
-      if (requestIntentRef.current?.("approve")) return;
+      if (topRequestDocked && decideDockedRequest(session.id, "approve")) return;
       if (responseRefusal === null) onApprove?.();
       else setError(responseRefusal);
     },
     deny: () => {
-      if (requestIntentRef.current?.("deny")) return;
+      if (topRequestDocked && decideDockedRequest(session.id, "deny")) return;
       if (responseRefusal === null) onDeny?.();
       else setError(responseRefusal);
     },
@@ -3616,7 +3616,8 @@ function SessionDetailLoaded({
     reply: canAnswerPendingQuestion ? enterAnswerMode : focusComposerAtDraftEnd,
     pauseFollow: followTail.pause,
     resumeFollow: followTail.follow,
-  }), [archiveRefusal, canAnswerPendingQuestion, enterAnswerMode, focusComposerAtDraftEnd, followTail.follow, followTail.pause, onApprove, onArchive, onDeny, onNextSession, onPreviousSession, onSnooze, responseRefusal]);
+  }), [archiveRefusal, canAnswerPendingQuestion, enterAnswerMode, focusComposerAtDraftEnd, followTail.follow, followTail.pause, onApprove, onArchive, onDeny, onNextSession, onPreviousSession, onSnooze, responseRefusal,
+    session.id, topRequestDocked]);
   const sessionReadingKeys = mode === "expanded" && !isMobile;
   useSessionReadingKeys({
     enabled: sessionReadingKeys,
@@ -5948,7 +5949,6 @@ function SessionDetailLoaded({
         headTrailing={trailing}
         onSessionUpdate={loadSession}
         showKeyHints={sessionReadingKeys}
-        intentRef={requestIntentRef}
         keyboardOpen={softwareKeyboardOpen}
         revealRequestId={revealRequestId}
       />

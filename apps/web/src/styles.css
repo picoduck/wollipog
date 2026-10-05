@@ -5398,9 +5398,9 @@ textarea {
   overscroll-behavior: contain;
 }
 .request-card-body > * { flex: none; }
-@media (max-height: 520px) {
-  /* Too short to keep the card's head and footer still around a scrolling body: the whole card
-     scrolls inside the capped dock instead. */
+@container chat-reading (max-height: 480px) {
+  /* A reading column too short to keep the card's head and footer still around a scrolling body (a
+     phone in landscape, a short Sessions preview): the whole card scrolls inside the capped dock. */
   .request-dock .request-card-body { flex: none; overflow: visible; }
 }
 .request-card .request-card-body > * { margin: 0; }

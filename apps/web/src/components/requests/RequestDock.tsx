@@ -4,14 +4,13 @@ import React, {
   useLayoutEffect,
   useRef,
   useState,
-  type MutableRefObject,
   type ReactNode,
 } from "react";
 import type { PendingApproval, SessionView } from "@wollipog/protocol";
 import { relativeTime } from "../../format.js";
 import { ChevronRightIcon } from "../Icons.js";
 import { useRemovedFocus } from "../useRemovedFocus.js";
-import { registerRequestRevealer } from "./request-reveal.js";
+import { registerRequestIntent, registerRequestRevealer } from "./request-reveal.js";
 import { RequestCard, type RequestIntentHandler } from "./RequestCard.js";
 import { REQUEST_CARD_COPY, RequestKindIcon, moreRequestsLabel, waitingRequestKinds } from "./request-meta.js";
 
@@ -39,7 +38,6 @@ export function RequestDock({
   headTrailing,
   onSessionUpdate,
   showKeyHints,
-  intentRef,
   keyboardOpen = false,
   revealRequestId,
 }: {
@@ -52,7 +50,6 @@ export function RequestDock({
   headTrailing?: ReactNode;
   onSessionUpdate?: (session: SessionView) => void;
   showKeyHints?: boolean;
-  intentRef?: MutableRefObject<RequestIntentHandler | null>;
   /** The software keyboard is open, so the dock gives the transcript more room (§13.2). */
   keyboardOpen?: boolean;
   /** A request to expand and focus as the dock mounts: it was asked for while a notice held its place. */
@@ -66,6 +63,10 @@ export function RequestDock({
   const focusHeading = useRef(revealRequestId !== undefined);
   const expanded = requests.find((request) => request.requestId === selectedId) ?? requests[0];
   const waiting = requests.filter((request) => request !== expanded);
+
+  // A and D reach the expanded card through the registry, from whichever keyboard owner reads them.
+  const intentRef = useRef<RequestIntentHandler | null>(null);
+  useEffect(() => registerRequestIntent(session.id, (intent) => intentRef.current?.(intent) ?? false), [session.id]);
 
   const requestsRef = useRef(requests);
   requestsRef.current = requests;

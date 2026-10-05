@@ -21,7 +21,7 @@ import { installDomTestCleanup } from "../../dom-test-cleanup.js";
 import { assertNoDomNode } from "../../dom-test-assertions.js";
 import { RequestCard, type RequestIntentHandler } from "./RequestCard.js";
 import { RequestDock, dockRequests } from "./RequestDock.js";
-import { revealDockedRequest } from "./request-reveal.js";
+import { decideDockedRequest, revealDockedRequest } from "./request-reveal.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
@@ -421,9 +421,9 @@ test("several requests: the top priority is expanded, the rest wait as rows, a r
     await act(async () => { view.container.querySelector<HTMLButtonElement>(".request-dock-more .disclosure-trigger")!.click(); });
     assert.deepEqual([...view.container.querySelectorAll(".request-dock-row-title")].map((row) => row.textContent),
       ["Sign In to Claude Code", "Cost budget reached — $5.02 of $5.00. Continue?"]);
-    const allow = [...view.container.querySelectorAll<HTMLButtonElement>(".request-card-foot button")]
-      .find((button) => button.textContent === "Allow")!;
-    await act(async () => { allow.click(); await tick(); });
+    // A, from whichever keyboard owner reads it (the reading keys, or the Sessions list over its
+    // preview), decides the expanded request, not the top one.
+    await act(async () => { assert.equal(decideDockedRequest("session-dock", "approve"), true); await tick(); });
     assert.deepEqual(decisions, [{ requestId: "permission-deploy", optionId: "allow" }]);
     assert.equal(title(), "Sign In to Claude Code", "the next request in priority order comes up");
     assert.match(view.container.querySelector(".request-dock-more")?.textContent ?? "", /\+1 More Request/u);

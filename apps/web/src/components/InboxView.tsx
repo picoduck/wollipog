@@ -27,6 +27,7 @@ import {
   type InboxSplit,
   type InboxApprovalIntent,
 } from "../inbox.js";
+import { decideDockedRequest } from "./requests/request-reveal.js";
 import { loadKeySet, saveKeySet, SESSION_PIN_KEY } from "../pins.js";
 import { loadSeen, markSeen, markUnread, saveSeen } from "../sessions-seen.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
@@ -1173,6 +1174,9 @@ export function InboxView({
       showToast(refusal, { tone: "error" });
       return;
     }
+    // The preview's request dock may have another of the session's own requests expanded; the key
+    // acts on the card the person is reading (#2179).
+    if (approval.kind !== "question" && !approval.ownerToolUseId && decideDockedRequest(targetSession.id, intent)) return;
     if (!beginBusy(targetSession.id)) return;
     try {
       if (approval.kind === "question") {

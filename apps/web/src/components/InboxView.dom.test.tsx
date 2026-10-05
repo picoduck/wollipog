@@ -2481,6 +2481,62 @@ test("the setup suggestion is one notice above an eligible Project's list, never
   assert.deepEqual(setupNotices(), []);
 });
 
+test("A on the Sessions list acts on the preview dock's expanded request, not the session's top one (#2179)", async () => {
+  const { root } = mountTestRoot();
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "inbox-dock-intent",
+    runtimeKey: "inbox-dock-intent:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  const approvals: unknown[] = [];
+  const client = {
+    ...api,
+    approve: async (id: string, body: unknown) => { approvals.push([id, body]); return session(id, 1); },
+  } as unknown as ApiClient;
+  // A desktop list with its preview, whose bare A key is the list's (#896).
+  mobileViewport = false;
+  try {
+    await act(async () => {
+      root.render(
+        <ApiProvider client={client}>
+          <StoreProvider connection={connection} navigation={navigation}>
+            <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
+          </StoreProvider>
+        </ApiProvider>,
+      );
+    });
+    // Two policy asks: the control plane decides them, so no runner needs to be connected.
+    const ask = (requestId: string, title: string) => ({
+      requestId, kind: "policy_hook" as const, title,
+      options: [{ optionId: "allow", name: "Allow", kind: "allow_once" as const }, { optionId: "deny", name: "Deny", kind: "reject_once" as const }],
+    });
+    await act(async () => {
+      socket.push(snapshot([session("A", 30, {
+        status: "input_required",
+        pendingApproval: { ...ask("first", "Run npm test"), additionalRequests: [ask("second", "Run pnpm deploy")] },
+      })]));
+    });
+    const row = [...domWindow.document.querySelectorAll(".inbox-row")][0] as unknown as HTMLElement;
+    await act(async () => { row.click(); });
+    const dock = () => domWindow.document.querySelector(".request-dock") as unknown as HTMLElement | null;
+    assert.ok(dock(), "the preview shows the dock");
+    await act(async () => { dock()!.querySelector<HTMLButtonElement>(".request-dock-more .disclosure-trigger")!.click(); });
+    await act(async () => { dock()!.querySelector<HTMLButtonElement>(".request-dock-row")!.click(); });
+    assert.equal(dock()!.querySelector(".request-card h3")?.textContent, "Run pnpm deploy");
+    await act(async () => { row.click(); });
+    await act(async () => {
+      domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "a", bubbles: true, cancelable: true }));
+      await Promise.resolve();
+    });
+    assert.deepEqual(approvals, [["A", { requestId: "second", optionId: "allow" }]],
+      "the expanded request is decided, not the top one");
+  } finally {
+    mobileViewport = true;
+  }
+});
+
 test("every mounted root is torn down before the next test starts", () => {
   assert.deepEqual(mountedRoots, [], "a previous test left a React root mounted");
   assert.equal(
