@@ -13656,6 +13656,18 @@ body.shell-dock-dragging * {
     ) .app-rail {
       display: none;
     }
+    /* The same signal caps the request dock at 40% while typing (#2179), where no visual-viewport
+       gap is published for `useSoftwareKeyboardOpen` to read. */
+    .detail-chat:has(
+      textarea:focus:not([readonly]),
+      [contenteditable=""]:focus,
+      [contenteditable="true"]:focus,
+      input:focus:not([readonly], [type="button"], [type="checkbox"], [type="color"],
+        [type="file"], [type="image"], [type="radio"], [type="range"], [type="reset"],
+        [type="submit"])
+    ) .chat-reading > .session-notice-slot {
+      max-height: 40cqh;
+    }
   }
 
   /* From 600px the five tabs would sit about 150px apart, so they keep a 480px centered measure. */

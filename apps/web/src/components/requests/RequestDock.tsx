@@ -41,6 +41,7 @@ export function RequestDock({
   showKeyHints,
   intentRef,
   keyboardOpen = false,
+  revealRequestId,
 }: {
   session: SessionView;
   /** In priority order (`prioritizedPendingRequests`), already limited by `dockRequests`. */
@@ -54,13 +55,15 @@ export function RequestDock({
   intentRef?: MutableRefObject<RequestIntentHandler | null>;
   /** The software keyboard is open, so the dock gives the transcript more room (§13.2). */
   keyboardOpen?: boolean;
+  /** A request to expand and focus as the dock mounts: it was asked for while a notice held its place. */
+  revealRequestId?: string;
 }) {
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(() => revealRequestId ?? null);
   const [moreOpen, setMoreOpen] = useState(false);
   const listId = useId();
   const dockRef = useRef<HTMLElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
-  const focusHeading = useRef(false);
+  const focusHeading = useRef(revealRequestId !== undefined);
   const expanded = requests.find((request) => request.requestId === selectedId) ?? requests[0];
   const waiting = requests.filter((request) => request !== expanded);
 

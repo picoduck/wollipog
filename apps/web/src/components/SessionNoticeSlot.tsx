@@ -1,8 +1,9 @@
-import React, { useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuSurface } from "./Menu.js";
 import { ToneIcon } from "./Notice.js";
 import { useRemovedFocus } from "./useRemovedFocus.js";
+import { registerRequestRevealer } from "./requests/request-reveal.js";
 
 /**
  * The one notice slot between the transcript and the composer (docs/design-system.md §13.2,
@@ -62,7 +63,10 @@ export interface SessionNoticeLead {
   title: string;
   /** Its 16px icon in that menu. */
   icon: ReactNode;
-  render: (context: { trailing: ReactNode }) => ReactNode;
+  /** The requests it holds. Asked to reveal one while a notice is shown in its place, the slot shows
+   * the lead again and passes the request as `revealRequestId`. */
+  requestIds: readonly string[];
+  render: (context: { trailing: ReactNode; revealRequestId?: string }) => ReactNode;
 }
 
 /** Every entry's rank, in one table so the order is reviewed in one place (#1966). */
@@ -155,6 +159,22 @@ export function SessionNoticeSlot({ sessionId, entries, lead, onFocusLost }: {
     candidates[0];
   const rest = candidates.filter((candidate) => candidate !== shown);
 
+  // While a notice holds the lead's place, a control elsewhere asking for one of its requests (the
+  // status control, the working line's Review) brings the lead back with that request.
+  const [revealRequestId, setRevealRequestId] = useState<string | undefined>(undefined);
+  const leadHidden = lead !== undefined && shown !== undefined && !("lead" in shown);
+  const leadRequestIds = useRef<readonly string[]>([]);
+  leadRequestIds.current = lead?.requestIds ?? [];
+  useEffect(() => {
+    if (!leadHidden) return;
+    return registerRequestRevealer(sessionId, (requestId) => {
+      if (!leadRequestIds.current.includes(requestId)) return false;
+      setChoice(null);
+      setRevealRequestId(requestId);
+      return true;
+    });
+  }, [leadHidden, sessionId]);
+
   // The trigger belongs to whichever notice is shown, so after a choice it is a new button. Focus
   // follows it, rather than falling to <body> with the menu.
   useLayoutEffect(() => {
@@ -243,7 +263,7 @@ export function SessionNoticeSlot({ sessionId, entries, lead, onFocusLost }: {
 
   return (
     <div ref={slotRef} className="session-notice-slot" data-notice-key={keyOf(shown)} tabIndex={-1}>
-      {"lead" in shown ? shown.lead.render({ trailing }) : shown.entry.render({
+      {"lead" in shown ? shown.lead.render({ trailing, revealRequestId }) : shown.entry.render({
         trailing,
         ...(shown.entry.severity === "info" ? { onDismiss: () => dismissInfo(sessionId, shown.entry.key) } : {}),
       })}

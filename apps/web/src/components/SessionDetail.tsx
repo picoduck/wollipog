@@ -5901,7 +5901,8 @@ function SessionDetailLoaded({
     key: "request-dock",
     title: pendingRequestsTitle(dockedRequests.length),
     icon: <RequestKindIcon request={dockedRequests[0]!} />,
-    render: ({ trailing }) => (
+    requestIds: dockedRequests.map((request) => request.requestId),
+    render: ({ trailing, revealRequestId }) => (
       <RequestDock
         session={session}
         requests={dockedRequests}
@@ -5913,6 +5914,7 @@ function SessionDetailLoaded({
         showKeyHints={sessionReadingKeys}
         intentRef={requestIntentRef}
         keyboardOpen={softwareKeyboardOpen}
+        revealRequestId={revealRequestId}
       />
     ),
   } : undefined;

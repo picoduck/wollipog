@@ -25,7 +25,7 @@ import { RequestDock, dockRequests } from "../components/requests/RequestDock.js
 import { RequestKindIcon, pendingRequestsTitle } from "../components/requests/request-meta.js";
 import type { RequestIntentHandler } from "../components/requests/RequestCard.js";
 import { useSessionReadingKeys } from "../useSessionReadingKeys.js";
-import { SessionApprovalRegion } from "../components/SessionApproval.js";
+import { SessionApprovalRegion, focusSessionRequest } from "../components/SessionApproval.js";
 import { EventTimeline } from "../components/EventTimeline.js";
 import {
   sessionRequestPanelKey,
@@ -46,6 +46,8 @@ declare global {
       clearHold(sessionId: string): void;
       /** The next decision fails, as a runner that refuses it would. */
       failNextDecision(): void;
+      /** What the status control and the working line's Review do: bring a request into view. */
+      reveal(requestId: string): boolean;
     };
   }
 }
@@ -866,7 +868,8 @@ function Fixture() {
     key: "request-dock",
     title: pendingRequestsTitle(docked.length),
     icon: <RequestKindIcon request={docked[0]!} />,
-    render: ({ trailing }) => (
+    requestIds: docked.map((request) => request.requestId),
+    render: ({ trailing, revealRequestId }) => (
       <RequestDock
         session={viewedSession}
         requests={docked}
@@ -878,6 +881,7 @@ function Fixture() {
         showKeyHints
         intentRef={intentRef}
         keyboardOpen={keyboardOpen}
+        revealRequestId={revealRequestId}
       />
     ),
   } : undefined;
@@ -1010,6 +1014,7 @@ window.__WOLLIPOG_REQUEST_SURFACES_E2E__ = {
   openedHeldChild: () => openedHeldChild,
   clearHold: (sessionId) => clearHold(sessionId),
   failNextDecision: () => { failNextDecision = true; },
+  reveal: (requestId) => focusSessionRequest("dock-session", requestId),
 };
 
 void prepareArtifacts().then(() => createRoot(document.getElementById("root")!).render(<Fixture />));

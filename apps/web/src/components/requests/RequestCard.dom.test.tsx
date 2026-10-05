@@ -406,3 +406,39 @@ test("several requests: the top priority is expanded, the rest wait as rows, a r
     await view.unmount();
   }
 });
+
+test("a decision in flight survives expanding another request and coming back: no second decision is sent", async () => {
+  const sent: unknown[] = [];
+  let answer!: () => void;
+  const pending: PendingApproval = { ...permission(), additionalRequests: [signIn()] };
+  const view = await render(
+    <RequestDock session={sessionWith(pending)} requests={dockRequests(prioritizedPendingRequests(pending))} runnerOnline />,
+    { approve: async (_id, body) => {
+      sent.push(body);
+      await new Promise<void>((resolve) => { answer = resolve; });
+      return sessionWith(null);
+    } },
+  );
+  const expand = async (title: RegExp) => {
+    await act(async () => { view.container.querySelector<HTMLButtonElement>(".request-dock-more .disclosure-trigger")!.click(); });
+    const row = [...view.container.querySelectorAll<HTMLButtonElement>(".request-dock-row")]
+      .find((candidate) => title.test(candidate.textContent ?? ""))!;
+    await act(async () => { row.click(); });
+  };
+  const allow = () => [...view.container.querySelectorAll<HTMLButtonElement>(".request-card-foot button")]
+    .find((button) => button.textContent === "Allow")!;
+  try {
+    await expand(/Run pnpm deploy/u);
+    await act(async () => { allow().click(); });
+    assert.equal(sent.length, 1);
+    await expand(/Sign In/u);
+    await expand(/Run pnpm deploy/u);
+    assert.equal(allow().getAttribute("aria-busy"), "true", "the remounted card still shows the decision in flight");
+    await act(async () => { allow().click(); await tick(); });
+    assert.equal(sent.length, 1, "no second decision for the same occurrence");
+    await act(async () => { answer(); await tick(); });
+    assert.equal(allow().getAttribute("aria-busy"), null);
+  } finally {
+    await view.unmount();
+  }
+});

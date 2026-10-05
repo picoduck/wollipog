@@ -475,7 +475,9 @@ export function RightPanel({
               // The session's own request opens on its dock card; a descendant's in this panel.
               const own = ownRequests.find((request) => ownRequestKey(request) === requestKey);
               if (own) {
-                focusSessionRequest(session.id, own.requestId);
+                // As the Agents panel's Open Request in Session: on a phone the panel covers the dock.
+                state.close();
+                window.requestAnimationFrame(() => focusSessionRequest(session.id, own.requestId));
                 return;
               }
               onSelectedRequestKeyChange(requestKey);

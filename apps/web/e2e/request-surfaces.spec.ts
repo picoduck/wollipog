@@ -113,6 +113,15 @@ test("A and D act on the expanded request, and the keycaps show with a mouse", a
 
 test.describe("on a coarse pointer", () => {
   test.use({ hasTouch: true, isMobile: true, viewport: { width: 390, height: 844 } });
+  test("typing in the composer caps the dock at 40%, where the keyboard resizes the layout viewport", async ({ page }) => {
+    await page.goto("/request-surfaces-e2e.html?scenario=permission&tall=1");
+    await expect(card(page)).toBeVisible();
+    expect((await dockGeometry(page)).slot).toBeGreaterThan((await dockGeometry(page)).reading * 0.4 + 1);
+    await page.getByRole("textbox", { name: "Composer" }).focus();
+    const geometry = await dockGeometry(page);
+    expect(geometry.slot).toBeLessThanOrEqual(geometry.reading * 0.4 + 1);
+  });
+
   test("the keycaps are absent and the buttons are 44px", async ({ page }) => {
     await page.goto("/request-surfaces-e2e.html?scenario=permission");
     await expect(card(page)).toBeVisible();
@@ -224,6 +233,15 @@ test("the session's notices wait behind the card's +N More and the request comes
   await page.locator(".session-notice-slot").getByRole("button", { name: "+2 More" }).click();
   await page.getByRole("menuitem", { name: "Pending Request" }).click();
   await expect(card(page).getByRole("heading")).toHaveText("Run pnpm deploy?");
+
+  // A control elsewhere (the status control, the working line's Review) asking for the request
+  // while a notice holds its place brings the dock back, focused on the request.
+  await trailing.click();
+  await page.getByRole("menuitem", { name: "Skills Unavailable" }).click();
+  await expect(card(page)).toHaveCount(0);
+  expect(await page.evaluate(() => window.__WOLLIPOG_REQUEST_SURFACES_E2E__.reveal("permission-deploy"))).toBe(true);
+  await expect(card(page).getByRole("heading")).toHaveText("Run pnpm deploy?");
+  await expect(card(page).getByRole("heading")).toBeFocused();
 });
 
 test("a decision that fails is a danger notice above the footer, and the choice can be retried", async ({ page }) => {

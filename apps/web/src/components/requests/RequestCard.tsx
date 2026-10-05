@@ -23,6 +23,7 @@ import { ProviderLoginCard } from "../ProviderLoginCard.js";
 import { AuthenticationRecoveryPanel, authenticationRecoveryPanelApplies } from "../AuthenticationRecoveryPanel.js";
 import { EvidenceReviewBody, useEvidenceReview } from "./EvidenceReview.js";
 import { WorkflowDecisionSummary } from "./WorkflowDecisionSummary.js";
+import { claimDecision, decisionKey, useDecisionInFlight } from "./request-reveal.js";
 import {
   REQUEST_CARD_COPY,
   RequestKindIcon,
@@ -90,7 +91,10 @@ export function RequestCard({
   const evidence = useEvidenceReview(session.id, request);
   const workflowDecision = request.kind === "workflow_decision" ? request.workflowDecision : undefined;
   const meta = requestKindMeta(request);
-  const [busy, setBusy] = useState<string | null>(null);
+  // The decision in flight lives outside the card, which remounts when another request is expanded
+  // and this one comes back; a second decision for the same occurrence is refused until it settles.
+  const flightKey = decisionKey(session.id, request.requestId, request.occurrenceId);
+  const busy = useDecisionInFlight(flightKey);
   const [error, setError] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const menu = useAccessibleMenu(menuOpen, setMenuOpen, "request-options", "item", { reachUnavailable: true });
@@ -103,7 +107,6 @@ export function RequestCard({
   const remaining = useCountdown(request.expiresAt);
 
   useEffect(() => {
-    setBusy(null);
     setError(null);
   }, [request.requestId, request.occurrenceId]);
 
@@ -120,12 +123,11 @@ export function RequestCard({
   const describedBy = (option: PermissionOption) =>
     [reason !== null ? reasonId : null, optionReason(option)].filter(Boolean).join(" ") || undefined;
 
-  // A second press, or A held down, lands before the busy state renders; one decision is in flight.
-  const inFlight = useRef(false);
   const decide = async (option: PermissionOption) => {
-    if (inFlight.current || busy !== null || unavailable(option)) return;
-    inFlight.current = true;
-    setBusy(option.optionId);
+    if (unavailable(option)) return;
+    // Synchronous, so a second press or a held A key cannot slip in before the busy state renders.
+    const release = claimDecision(flightKey, option.optionId);
+    if (!release) return;
     setError(null);
     try {
       const updated = await api.approve(session.id, {
@@ -138,8 +140,7 @@ export function RequestCard({
     } catch (cause) {
       setError((cause as Error).message);
     } finally {
-      inFlight.current = false;
-      setBusy(null);
+      release();
     }
   };
 

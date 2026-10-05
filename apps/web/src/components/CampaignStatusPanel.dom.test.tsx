@@ -1069,6 +1069,8 @@ test("a blocker naming the Orchestrator's own request opens that request on its 
     await settle();
     await click(panel.container.querySelector(".campaign-work-row")!);
     await click([...panel.container.querySelectorAll("button")].find((button) => button.textContent === "Open Requests")!);
+    await settle();
+    assert.equal(panel.state.open, false, "the panel closes first: on a phone it would cover the dock");
     assert.deepEqual(revealed, ["occ_root"]);
     assert.deepEqual(harnessRequests.selected, [], "the child's request is not selected in its place");
   } finally {
