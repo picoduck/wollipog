@@ -1,4 +1,4 @@
-import { QuestionPoliciesPanel } from "./components/QuestionPoliciesPanel.js";
+import { ApprovalsPanel } from "./components/ApprovalsPanel.js";
 import { ExperimentGate } from "./components/ExperimentGate.js";
 import {
   useCallback,
@@ -870,14 +870,12 @@ export function Shell() {
                   />
                 ),
                 behavior: (
-                  <>
                   <BehaviorPanel
                     agentHarnessDefaults={<AgentHarnessDefaultsPanel discoveryRevision={runners} />}
                     sessionNaming={<SessionNamingPanel />}
                   />
-                  <QuestionPoliciesPanel />
-                  </>
                 ),
+                approvals: <ApprovalsPanel policyId={view.policyId} />,
                 orchestrator: <OrchestratorSettingsPanel discoveryRevision={runners} />,
                 network: <NetworkPanel tailnet={tailnet} />,
                 experimental: (

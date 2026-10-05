@@ -21,7 +21,7 @@ export type View =
   | { name: "projects"; id?: string }
   | { name: "session"; id: string; location?: SourceLocation; attention?: AttentionTarget }
   | { name: "run"; id: string }
-  | { name: "settings"; section?: SettingsSection }
+  | { name: "settings"; section?: SettingsSection; policyId?: string }
   | { name: "pod"; id: string };
 
 /**
@@ -32,18 +32,34 @@ export type View =
  * section is deep-linkable, which is what makes "see Settings → Appearance" a thing you can send
  * someone.
  */
-export type SettingsSection = "appearance" | "notifications" | "keyboard" | "behavior" | "orchestrator" | "network" | "experimental" | "about";
+export type SettingsSection = "appearance" | "notifications" | "keyboard" | "behavior" | "approvals" | "orchestrator" | "network" | "experimental" | "about";
 
 export const SETTINGS_SECTIONS: ReadonlyArray<{ id: SettingsSection; title: string }> = [
   { id: "appearance", title: "Appearance" },
   { id: "notifications", title: "Notifications" },
   { id: "keyboard", title: "Keyboard" },
   { id: "behavior", title: "Behavior" },
+  { id: "approvals", title: "Approvals" },
   { id: "orchestrator", title: "Orchestrator" },
   { id: "network", title: "Network" },
   { id: "experimental", title: "Experimental" },
   { id: "about", title: "About" },
 ];
+
+/**
+ * Settings › Approvals scrolled to one governance policy's row (#2158). Decision Records, request
+ * cards and Decision History link a policy's name here; the row carries
+ * `approvalsPolicyAnchorId(policyId)` so the same policy is found again from its id alone.
+ */
+export function approvalsPolicyView(policyId: string): View {
+  return { name: "settings", section: "approvals", policyId };
+}
+
+/** The DOM id of a policy's row in Settings › Approvals: stable, and safe in a URL fragment or a
+ * CSS selector whatever the policy id contains. */
+export function approvalsPolicyAnchorId(policyId: string): string {
+  return `approvals-policy-${encodeResourceId(policyId)}`;
+}
 
 export type ConnectionSection = "instances" | "machines" | "people";
 
@@ -315,7 +331,9 @@ export function viewPath(view: View): string {
       ? `/sessions/~${encodeResourceId(view.id)}/attention${view.attention.requestId === undefined ? "" : `/~${encodeOpaque(view.attention.requestId)}`}?epoch=${view.attention.eventEpoch}`
       : `/sessions/~${encodeResourceId(view.id)}`;
     case "run": return `/runs/~${encodeResourceId(view.id)}`;
-    case "settings": return `/settings/${view.section ?? "appearance"}`;
+    case "settings": return view.section === "approvals" && view.policyId !== undefined
+      ? `/settings/approvals/~${encodeResourceId(view.policyId)}`
+      : `/settings/${view.section ?? "appearance"}`;
     case "pod": return `/pods/~${encodeResourceId(view.id)}`;
   }
 }
@@ -380,8 +398,13 @@ export function viewFromPath(pathname: string, search = ""): View | null {
   if (path === "/settings") return { name: "settings", section: "appearance" };
   // Keep old bookmarks useful while Session Naming now lives compactly under Behavior.
   if (path === "/settings/session-naming") return { name: "settings", section: "behavior" };
-  const settingsMatch = /^\/settings\/(appearance|notifications|keyboard|behavior|orchestrator|network|experimental|about)$/.exec(path);
+  const settingsMatch = /^\/settings\/(appearance|notifications|keyboard|behavior|approvals|orchestrator|network|experimental|about)$/.exec(path);
   if (settingsMatch) return { name: "settings", section: settingsMatch[1] as SettingsSection };
+  const approvalsPolicyMatch = /^\/settings\/approvals\/~([^/]+)$/.exec(path);
+  if (approvalsPolicyMatch) {
+    const policyId = decodeResourceId(approvalsPolicyMatch[1]!);
+    return policyId === null ? null : approvalsPolicyView(policyId);
+  }
   if (path === "/projects") return { name: "projects" };
   const projectMatch = /^\/projects\/~([^/]+)$/.exec(path);
   if (projectMatch) {

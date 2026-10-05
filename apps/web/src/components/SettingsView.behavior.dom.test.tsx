@@ -4,7 +4,6 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import { ENTER_KEY_STORAGE_KEY } from "../enter-key.js";
-import { QUESTION_RESPONSE_STYLE_STORAGE_KEY } from "../question-response-style.js";
 import { SHOW_AGENT_LOGS_STORAGE_KEY } from "../agent-logs.js";
 import { BehaviorPanel } from "./SettingsView.js";
 
@@ -28,7 +27,6 @@ const priorElementGlobals = {
   // The setter announces its change with `new Event(...)`; a Node-global Event never reaches
   // happy-dom's listeners, and the row silently stops tracking the store it just wrote.
   Event: (globalThis as Record<string, unknown>)["Event"],
-  // The Question Response Style listbox positions and focuses itself on the next frame.
   requestAnimationFrame: (globalThis as Record<string, unknown>)["requestAnimationFrame"],
   cancelAnimationFrame: (globalThis as Record<string, unknown>)["cancelAnimationFrame"],
   getComputedStyle: (globalThis as Record<string, unknown>)["getComputedStyle"],
@@ -93,45 +91,6 @@ test("the Enter Key row stores the choice and reflects it back", async () => {
     assert.equal(optionByName("Send Message").getAttribute("aria-checked"), "true");
   } finally {
     domWindow.localStorage.removeItem(ENTER_KEY_STORAGE_KEY);
-    await act(async () => root.unmount());
-    container.remove();
-  }
-});
-
-test("the Question Response Style row defaults to Interactive Form and announces same-tab changes", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
-  try {
-    await act(async () => root.render(<BehaviorPanel />));
-    // A listbox since #2506: the closed trigger states the value, and each option is picked from the list.
-    const trigger = () => {
-      const match = [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) =>
-        button.getAttribute("aria-label")?.startsWith("Question Response Style:"));
-      assert.ok(match, "the Question Response Style row must render its picker");
-      return match;
-    };
-    const choose = async (name: string) => {
-      await act(async () => trigger().click());
-      const option = [...container.ownerDocument.querySelectorAll<HTMLElement>("[role=option]")].find((element) =>
-        element.textContent?.startsWith(name));
-      assert.ok(option, `the Question Response Style row must offer "${name}"`);
-      await act(async () => option.click());
-    };
-    const rowText = () => trigger().closest(".ui-row")?.textContent ?? "";
-
-    assert.equal(domWindow.localStorage.getItem(QUESTION_RESPONSE_STYLE_STORAGE_KEY), null);
-    assert.equal(trigger().getAttribute("aria-label"), "Question Response Style: Interactive Form");
-    assert.match(rowText(), /Choose options directly with keyboard-accessible form controls/);
-    await choose("Composer Response");
-    assert.equal(domWindow.localStorage.getItem(QUESTION_RESPONSE_STYLE_STORAGE_KEY), "composer");
-    assert.equal(trigger().getAttribute("aria-label"), "Question Response Style: Composer Response");
-    assert.match(rowText(), /Answer pending questions through a distinct mode in the Session composer/);
-    await choose("Interactive Form");
-    assert.equal(domWindow.localStorage.getItem(QUESTION_RESPONSE_STYLE_STORAGE_KEY), "interactive");
-    assert.equal(trigger().getAttribute("aria-label"), "Question Response Style: Interactive Form");
-  } finally {
-    domWindow.localStorage.removeItem(QUESTION_RESPONSE_STYLE_STORAGE_KEY);
     await act(async () => root.unmount());
     container.remove();
   }

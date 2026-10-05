@@ -48,7 +48,7 @@ function Surface() {
   const view = useStoreSelector((state) => state.view);
   return <div className="app" style={{ height: "100dvh", display: "block" }}><main className="main-body" style={{ height: "100%" }}>
     {view.name === "settings" ? <SettingsView section="behavior" onNavigate={navigate} onOpenShortcuts={() => undefined} panels={{
-      appearance: null, notifications: null, keyboard: null, behavior: <BehaviorPanel />,
+      appearance: null, notifications: null, keyboard: null, behavior: <BehaviorPanel />, approvals: null,
       orchestrator: null, network: null, experimental: null, about: null,
     }} /> : <section style={{ padding: 16, maxWidth: 420 }}><h1>Session Artifacts</h1><BrowserPanel session={{ id: "synthetic-artifacts" } as SessionView} /></section>}
   </main></div>;

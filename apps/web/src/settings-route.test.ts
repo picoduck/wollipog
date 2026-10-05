@@ -2,7 +2,16 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { EXTRA_PALETTE_DESTINATIONS, GLOBAL_VIEW_ITEMS, SETTINGS_SECTIONS, viewFromPath, viewPath, viewTitle } from "./navigation.js";
+import {
+  approvalsPolicyAnchorId,
+  approvalsPolicyView,
+  EXTRA_PALETTE_DESTINATIONS,
+  GLOBAL_VIEW_ITEMS,
+  SETTINGS_SECTIONS,
+  viewFromPath,
+  viewPath,
+  viewTitle,
+} from "./navigation.js";
 
 /**
  * Settings as a route.
@@ -24,6 +33,33 @@ test("every section round-trips through the URL", () => {
     // silently falls back to Appearance would make "see Settings → Network" wrong.
     assert.deepEqual(viewFromPath(path), { name: "settings", section: id });
   }
+});
+
+test("Approvals sits between Behavior and Orchestrator, in the section list and the palette (#2158)", () => {
+  const ids = SETTINGS_SECTIONS.map((section) => section.id);
+  assert.equal(ids.indexOf("approvals"), ids.indexOf("behavior") + 1);
+  assert.equal(ids.indexOf("orchestrator"), ids.indexOf("approvals") + 1);
+  assert.equal(SETTINGS_SECTIONS.find((section) => section.id === "approvals")?.title, "Approvals");
+  assert.ok(EXTRA_PALETTE_DESTINATIONS.some((entry) =>
+    entry.label === "Approvals" && entry.detail === "Settings" &&
+    entry.view.name === "settings" && entry.view.section === "approvals"));
+});
+
+test("a policy link is a route to its row in Settings › Approvals (#2158)", () => {
+  for (const policyId of ["deny-shell", "questions:review:user_1", "builtin:session-spawn-human-gate", "a/b#c?d e"]) {
+    const view = approvalsPolicyView(policyId);
+    assert.deepEqual(view, { name: "settings", section: "approvals", policyId });
+    const path = viewPath(view);
+    assert.match(path, /^\/settings\/approvals\/~[A-Za-z0-9_-]+$/);
+    assert.deepEqual(viewFromPath(path), view);
+    // The row's anchor is alphabet-only, so it is a valid fragment and selector whatever the id holds.
+    assert.match(approvalsPolicyAnchorId(policyId), /^approvals-policy-[A-Za-z0-9_-]+$/);
+  }
+  assert.notEqual(approvalsPolicyAnchorId("a"), approvalsPolicyAnchorId("b"));
+  assert.equal(viewFromPath("/settings/approvals/~!!"), null, "a malformed id is not a route");
+  // Without a policy the section is the plain section route.
+  assert.equal(viewPath({ name: "settings", section: "approvals" }), "/settings/approvals");
+  assert.equal(viewPath({ name: "settings", section: "behavior", policyId: "x" }), "/settings/behavior");
 });
 
 test("/settings alone is a section, not a dead route", () => {

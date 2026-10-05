@@ -1,4 +1,4 @@
-import React, { useId, type ReactNode, type Ref } from "react";
+import React, { useId, useLayoutEffect, useRef, type ReactNode, type Ref } from "react";
 import { CheckIcon, ChevronRightIcon } from "../Icons.js";
 import { SegmentedControl, Select, type SelectOption } from "./ChoiceControls.js";
 
@@ -46,22 +46,37 @@ function rowClass(extra: string, disabled?: boolean): string {
   return `ui-row ${extra}${disabled ? " is-disabled" : ""}`;
 }
 
-function RowBody({ title, titleId, description, descriptionId, descriptionHidden }: {
+function RowBody({ title, titleId, badge, description, descriptionId, descriptionHidden, failure }: {
   title: string;
   /** So a control can be named by the title alone. */
   titleId?: string;
+  /** A short flag after the title ("Custom"), outside the title so it is not part of the name. */
+  badge?: ReactNode;
   description?: ReactNode;
   /** So a row whose control is a separate element can point at this sentence. */
   descriptionId?: string;
   /** For a sentence the row's control already carries: exposed twice, it is announced twice. */
   descriptionHidden?: boolean;
+  /**
+   * A failed change, shown in place of the description (§8.5). The description keeps its place
+   * underneath, hidden, so the row stays exactly as tall and nothing below it moves. `undefined` is
+   * a row that cannot fail; `null` one that has not.
+   */
+  failure?: ReactNode;
 }) {
+  const titleNode = <span className="ui-row-title" id={titleId}>{title}</span>;
+  const descriptionNode = description && (
+    <span className="ui-row-desc" id={descriptionId} aria-hidden={Boolean(failure) || descriptionHidden || undefined}>
+      {description}
+    </span>
+  );
   return (
     <span className="ui-row-body">
-      <span className="ui-row-title" id={titleId}>{title}</span>
-      {description && (
-        <span className="ui-row-desc" id={descriptionId} aria-hidden={descriptionHidden || undefined}>
-          {description}
+      {badge ? <span className="ui-row-title-line">{titleNode}{badge}</span> : titleNode}
+      {failure === undefined ? descriptionNode : (
+        <span className={`ui-row-desc-slot${failure ? " is-failed" : ""}`}>
+          {descriptionNode}
+          {failure && <span className="ui-row-desc ui-row-failure">{failure}</span>}
         </span>
       )}
     </span>
@@ -215,6 +230,7 @@ export type SwitchProps = SwitchName & {
   className?: string;
   /** A settings row's text, drawn before the track (`SwitchRow`). Never "On" or "Off". */
   children?: ReactNode;
+  switchRef?: Ref<HTMLButtonElement>;
 };
 
 /**
@@ -230,9 +246,10 @@ export type SwitchProps = SwitchName & {
  * while the thing being switched off is still live, and a slow or failed request leaves that lie
  * on screen until it snaps back.
  */
-export function Switch({ checked, onChange, label, labelledBy, describedBy, disabled, busy, className, children }: SwitchProps) {
+export function Switch({ checked, onChange, label, labelledBy, describedBy, disabled, busy, className, children, switchRef }: SwitchProps) {
   return (
     <button
+      ref={switchRef}
       type="button"
       role="switch"
       aria-checked={checked}
@@ -253,44 +270,115 @@ export function Switch({ checked, onChange, label, labelledBy, describedBy, disa
 /** How long an instant setting's "Saved" check stays at the row's right edge (§8.6). */
 export const SAVED_MS = 2000;
 
+/** A change that did not save: one sentence for the row, and the action that repeats the change. */
+export interface RowFailure {
+  message: string;
+  /** The server's own words: announced with the sentence and shown as its tooltip. */
+  detail?: string;
+  onRetry: () => void;
+}
+
 /**
  * An on/off setting: the whole row is the switch.
  *
  * `saved` shows the quiet "Saved" check at the row's right edge (§8.6); the caller turns it on when
  * the change is confirmed and off `SAVED_MS` later. It is announced through a polite region beside
  * the row, because text inside the switch would become part of its name.
+ *
+ * `failure` is for a row whose change can fail (§8.5, #2158): pass `null` until one does. The
+ * sentence then takes the description's place with **Try Again** after it, and the switch keeps the
+ * confirmed value. A button cannot hold another button, so while the failure shows the row is a
+ * plain row around a standalone switch in the same column. The description stays in the layout
+ * underneath, hidden, so the row keeps its height and nothing below it moves. Focus the change of
+ * shape drops is handed to the switch; focus that has moved elsewhere is left alone.
  */
 export function SwitchRow({
   title,
+  badge,
   description,
   checked,
   disabled,
   busy,
   saved,
+  failure,
+  anchorId,
   onClick,
-}: RowShellProps & { checked: boolean; busy?: boolean; saved?: boolean }) {
+}: RowShellProps & {
+  checked: boolean;
+  busy?: boolean;
+  saved?: boolean;
+  /** A short flag after the title, such as "Custom". */
+  badge?: ReactNode;
+  failure?: RowFailure | null;
+  /** An id for links that scroll to this row. Only for a row that passes `failure`. */
+  anchorId?: string;
+}) {
   // Named by its title and described by its sentence, so the name is the setting's and nothing more.
   const id = useId();
-  const row = (
-    <Switch
-      labelledBy={`${id}-title`}
-      describedBy={description ? `${id}-desc` : undefined}
-      checked={checked}
-      disabled={disabled}
-      busy={busy}
-      className={rowClass("ui-row-switch")}
-      onChange={() => onClick?.()}
-    >
+  const switchRef = useRef<HTMLButtonElement>(null);
+  /** Whether focus was last inside this row. A removed element takes focus with it silently. */
+  const focusInside = useRef(false);
+  const failed = Boolean(failure);
+  useLayoutEffect(() => {
+    if (!focusInside.current) return;
+    const active = document.activeElement;
+    if (active === null || active === document.body || !active.isConnected) switchRef.current?.focus();
+  }, [failed, busy]);
+  const body = (
+    <RowBody
+      title={title}
+      titleId={`${id}-title`}
+      badge={badge}
+      description={description}
+      descriptionId={`${id}-desc`}
+      failure={failure === undefined ? undefined : failure && (
+        <>
+          <span id={`${id}-failure`} title={failure.detail}>{failure.message}</span>{" "}
+          <button type="button" className="link ui-row-retry" onClick={failure.onRetry}>Try Again</button>
+        </>
+      )}
+    />
+  );
+  const control = {
+    switchRef,
+    labelledBy: `${id}-title`,
+    describedBy: failed ? `${id}-failure` : description ? `${id}-desc` : undefined,
+    checked,
+    disabled,
+    busy,
+    onChange: () => onClick?.(),
+  };
+  const row = failed ? (
+    <div className={rowClass("ui-row-switch ui-row-failed")}>
       <span />
-      <RowBody title={title} titleId={`${id}-title`} description={description} descriptionId={`${id}-desc`} />
+      {body}
+      <Switch {...control} />
+    </div>
+  ) : (
+    <Switch {...control} className={rowClass("ui-row-switch")}>
+      <span />
+      {body}
       {saved && <span className="ui-row-saved" aria-hidden="true"><CheckIcon size={14} />Saved</span>}
     </Switch>
   );
-  if (saved === undefined) return row;
+  if (saved === undefined && failure === undefined) return row;
+  const status = saved ? `${title} saved` : failure ? [`${title} not saved.`, failure.message, failure.detail].filter(Boolean).join(" ") : "";
   return (
     <>
-      {row}
-      <span className="sr-only" role="status">{saved ? `${title} saved` : ""}</span>
+      {failure === undefined ? row : (
+        <div
+          className="ui-row-frame"
+          id={anchorId}
+          onFocus={() => { focusInside.current = true; }}
+          onBlur={(event) => {
+            // A removed element blurs with no next target: that is the drop this row repairs.
+            if (event.relatedTarget !== null && !event.currentTarget.contains(event.relatedTarget)) focusInside.current = false;
+          }}
+        >
+          {row}
+        </div>
+      )}
+      <span className="sr-only" role="status">{status}</span>
     </>
   );
 }
@@ -325,19 +413,35 @@ export function NavRow({
   expanded,
   controls,
   buttonRef,
-}: RowShellProps & { icon?: ReactNode; expanded?: boolean; controls?: string; buttonRef?: Ref<HTMLButtonElement> }) {
+  id,
+  badge,
+  hasPopup,
+}: RowShellProps & {
+  icon?: ReactNode;
+  expanded?: boolean;
+  controls?: string;
+  buttonRef?: Ref<HTMLButtonElement>;
+  /** An id for links that scroll to this row. */
+  id?: string;
+  /** A short flag after the title, such as an effect label. */
+  badge?: ReactNode;
+  /** For a row that opens a dialog rather than a page. */
+  hasPopup?: "dialog";
+}) {
   return (
     <button
       ref={buttonRef}
+      id={id}
       type="button"
       disabled={disabled}
       aria-expanded={expanded}
       aria-controls={controls}
+      aria-haspopup={hasPopup}
       className={rowClass("ui-row-nav", disabled)}
       onClick={onClick}
     >
       <span className="ui-row-icon" aria-hidden="true">{icon}</span>
-      <RowBody title={title} description={description} />
+      <RowBody title={title} badge={badge} description={description} />
       <span className="ui-row-chevron" aria-hidden="true"><ChevronRightIcon size={16} /></span>
     </button>
   );

@@ -15780,6 +15780,49 @@ body.shell-dock-dragging * {
 @media (forced-colors: active) {
   .ui-row-saved > svg { color: inherit; }
 }
+/* A flag after a row's title ("Custom", a policy's effect). The title wraps rather than giving way
+   to it, so a name is never cut to a few characters for a label beside it. */
+.ui-row-title-line { display: flex; align-items: baseline; gap: var(--space-2); min-width: 0; }
+.ui-row-title-line > .ui-row-title { min-width: 0; overflow-wrap: anywhere; }
+.ui-row-title-line > .status { flex: none; }
+/* A failed change in place of the description (§8.5, #2158). The description stays in the same
+   cell, hidden, so the row keeps its height and nothing below it moves. */
+.ui-row-desc-slot { display: grid; }
+.ui-row-desc-slot > .ui-row-desc { grid-area: 1 / 1; }
+.ui-row-desc-slot.is-failed > .ui-row-desc:not(.ui-row-failure) { visibility: hidden; }
+.ui-row-failure { color: var(--danger-text); }
+/* While it fails the row holds Try Again, so it is a plain row around its switch: no press or
+   hover of its own. */
+.ui-row-failed { cursor: default; }
+.ui-row-failed:hover:not(.is-disabled) { background: transparent; border-color: transparent; }
+.ui-row-failed:active:not(.is-disabled) { transform: none; }
+/* Text buttons that read as links: Try Again on a failed row, an info popover's trigger. */
+.ui-row-retry,
+.approvals-info-trigger {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+/* A row a policy link brought into view, until focus leaves it. */
+.ui-row[data-targeted],
+.ui-row-frame[data-targeted] > .ui-row { background: var(--surface-selected); }
+
+/* Settings › Approvals (#2158). */
+.approvals-info-trigger { display: inline-flex; align-items: center; gap: var(--space-1); vertical-align: bottom; }
+.approvals-info { gap: var(--space-2); }
+.approvals-info > p { margin: 0; }
+.approvals-empty { margin: 0; padding: var(--row-pad-y) var(--row-pad-x); color: var(--text-dim); font: var(--type-small); }
+.approvals-skeleton { display: grid; gap: var(--row-gap); }
+.approvals-skeleton-row { cursor: default; }
+.approvals-skeleton-row:hover:not(.is-disabled) { background: transparent; border-color: transparent; }
+.approvals-skeleton-row > .ui-row-body { gap: var(--space-2); }
+/* Label-prefixed meta items 12px apart, one line, never separated by dots (§5.2, §11.3). */
+.policy-meta { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.policy-meta-item + .policy-meta-item { margin-inline-start: var(--space-3); }
+.policy-meta-item > svg { display: inline-block; margin-right: var(--space-1); vertical-align: text-bottom; }
 
 /* Orchestrator defaults keep Behavior and Decision Delegation visibly separate while reusing the
    settings row controls and their keyboard contracts. */

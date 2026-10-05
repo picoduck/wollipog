@@ -1,5 +1,5 @@
 import { setHideAccountEmails, useAccountEmailPrivacy } from "../account-email-privacy.js";
-import React, { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
+import React, { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { ArtifactUploadSettings } from "./ArtifactUploadSettings.js";
 import { Notice } from "./Notice.js";
 import {
@@ -37,15 +37,10 @@ import { EXPERIMENT_COPY, experimentForViewName } from "../experiments.js";
 import { useExperiments } from "../use-experiments.js";
 import { destination } from "../navigation.js";
 import { NavRow, SegmentedRow, SelectRow, StaticRow, SwitchRow } from "./ui/SettingsRows.js";
-import { Select, type SelectOption } from "./ui/ChoiceControls.js";
+import { Select } from "./ui/ChoiceControls.js";
 import { SCHEME_SWATCHES, type ColorScheme, type ResolvedTheme } from "../theme.js";
 import { setEnterKeyBehavior, useEnterKeyBehavior, type EnterKeyBehavior } from "../enter-key.js";
 import { setShowAgentLogs, useShowAgentLogs } from "../agent-logs.js";
-import {
-  setQuestionResponseStyle,
-  useQuestionResponseStyle,
-  type QuestionResponseStyle,
-} from "../question-response-style.js";
 import { SETTINGS_SECTIONS, type SettingsSection, type View } from "../navigation.js";
 import type { ExperimentFlags, ExperimentId } from "../experiments.js";
 import { effortLabel, permissionModeLabel, titleCaseLabel } from "../format.js";
@@ -91,6 +86,19 @@ export function SettingsView({ section, onNavigate, panels }: SettingsViewProps)
     headingRef.current?.focus();
   }, [section]);
   const current = SETTINGS_SECTIONS.find((entry) => entry.id === section) ?? SETTINGS_SECTIONS[0]!;
+  // On a phone the section list is one scrolling row, nine sections wide: the current one is
+  // scrolled into it, or a link to Approvals lands on a list that shows only the first four. The
+  // list scrolls itself; the page does not move.
+  const sectionsRef = useRef<HTMLElement>(null);
+  useLayoutEffect(() => {
+    const list = sectionsRef.current;
+    const active = list?.querySelector<HTMLElement>('[aria-current="page"]');
+    if (!list || !active || list.scrollWidth <= list.clientWidth) return;
+    const start = active.offsetLeft - list.offsetLeft;
+    if (start < list.scrollLeft || start + active.offsetWidth > list.scrollLeft + list.clientWidth) {
+      list.scrollLeft = start - (list.clientWidth - active.offsetWidth) / 2;
+    }
+  }, [current.id]);
   return (
     // One scroll container per column (§4.5): the shell's `.main-body` scrolls Settings, so this root
     // neither reuses that class nor scrolls on its own.
@@ -99,7 +107,7 @@ export function SettingsView({ section, onNavigate, panels }: SettingsViewProps)
     <div className="settings-view">
       {/* A `tablist` would be wrong: these are ROUTES, and each one is a link a person can copy,
           bookmark, or open in a new tab. A tab swaps a panel; this navigates. */}
-      <nav className="settings-sections" aria-label="Settings Sections">
+      <nav className="settings-sections" aria-label="Settings Sections" ref={sectionsRef}>
         {SETTINGS_SECTIONS.map((entry) => (
           <a
             key={entry.id}
@@ -125,12 +133,13 @@ export function SettingsView({ section, onNavigate, panels }: SettingsViewProps)
   );
 }
 
-/** One group of rows inside a panel, with its own heading. */
-export function SettingsGroup({ title, children }: { title: string; children: ReactNode }) {
+/** One group of rows inside a panel, with its own heading and, optionally, one dim sentence. */
+export function SettingsGroup({ title, intro, children }: { title: string; intro?: ReactNode; children: ReactNode }) {
   const id = `settings-group-${title.toLowerCase().replace(/\W+/g, "-")}`;
   return (
     <section className="settings-group" aria-labelledby={id}>
       <h3 id={id}>{title}</h3>
+      {intro && <p className="settings-group-intro">{intro}</p>}
       <div className="settings-options">{children}</div>
     </section>
   );
@@ -389,26 +398,12 @@ export function PendingSetting({ title, description, reason }: { title: string; 
   );
 }
 
-const QUESTION_RESPONSE_STYLE_OPTIONS: SelectOption<QuestionResponseStyle>[] = [
-  {
-    value: "interactive",
-    label: "Interactive Form",
-    description: "Choose options directly with keyboard-accessible form controls. Stored on this device.",
-  },
-  {
-    value: "composer",
-    label: "Composer Response",
-    description: "Answer pending questions through a distinct mode in the Session composer. Stored on this device.",
-  },
-];
-
 export function BehaviorPanel({
   agentHarnessDefaults,
   sessionNaming,
 }: { agentHarnessDefaults?: ReactNode; sessionNaming?: ReactNode } = {}) {
   const privacy = useAccountEmailPrivacy();
   const enterKey = useEnterKeyBehavior();
-  const questionResponseStyle = useQuestionResponseStyle();
   const agentLogs = useShowAgentLogs();
   return (
     <>
@@ -432,16 +427,6 @@ export function BehaviorPanel({
         ]}
         value={enterKey}
         onChange={(value) => setEnterKeyBehavior(value as EnterKeyBehavior)}
-      />
-      {/* A listbox rather than pills (#2506): "Composer Response" needs about 152px and the shared
-          220px value column gives each of two equal pills 106px, so the label ran past the border. */}
-      <SelectRow
-        title="Question Response Style"
-        // The selected option's sentence, as the pills showed it: the row says what the choice does.
-        description={QUESTION_RESPONSE_STYLE_OPTIONS.find((option) => option.value === questionResponseStyle)?.description}
-        options={QUESTION_RESPONSE_STYLE_OPTIONS}
-        value={questionResponseStyle}
-        onChange={(value) => setQuestionResponseStyle(value as QuestionResponseStyle)}
       />
       <ArtifactUploadSettings />
       <PendingSetting

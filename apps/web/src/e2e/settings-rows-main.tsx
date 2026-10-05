@@ -15,6 +15,7 @@ import {
 } from "../components/SettingsView.js";
 import { DEFAULT_ORCHESTRATOR_DEFAULTS, type AgentHarnessDefaultsView } from "@wollipog/protocol";
 import { OrchestratorSettingsPanel } from "../components/OrchestratorSettingsPanel.js";
+import { ApprovalsPanel } from "../components/ApprovalsPanel.js";
 import { createApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ApiTransport } from "../api-transport.js";
@@ -135,6 +136,21 @@ const harnessDefaultsTransport: ApiTransport = {
         capabilities: ["remote-instance-v1"],
       }), { status: 200, headers: { "content-type": "application/json" } });
     }
+    // Settings › Approvals: one starter turned on and the built-in tool policy (#2158).
+    if (path === "/api/governance/policies") {
+      return Response.json({ policies: [
+        {
+          policyId: "questions:review:fixture-user", name: "Review Sharing and Retries", effect: "allow", priority: 0,
+          enabled: true, ownerUserId: "fixture-user", scope: { organizationId: "fixture-org" },
+          questionRule: { starterCategory: "review", questionPattern: "*?", answer: { text: "Yes." } }, createdAt: 1, updatedAt: 2,
+        },
+        {
+          policyId: "builtin:session-spawn-human-gate", name: "Review Agent-Created Sessions", effect: "ask",
+          priority: -1_000_000, enabled: true, builtin: true, scope: { toolName: "wollipog.create_session" }, createdAt: 0, updatedAt: 0,
+        },
+      ] });
+    }
+    if (path === "/api/identity") return Response.json({ context: { userId: "fixture-user", organizationId: "fixture-org" } });
     if (path === "/api/orchestrator-settings") {
       const drifted = new URLSearchParams(window.location.search).get("defaults") === "agent-repair";
       const defaults = structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS);
@@ -340,6 +356,7 @@ function Harness() {
                   )}
                 />
               ),
+              approvals: <ApiProvider client={harnessDefaultsApi}><ApprovalsPanel /></ApiProvider>,
               orchestrator: <ApiProvider client={harnessDefaultsApi}><OrchestratorSettingsPanel /></ApiProvider>,
               network: (
                 <NetworkPanel
