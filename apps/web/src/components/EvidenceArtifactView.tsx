@@ -424,12 +424,16 @@ export function EvidenceViewer({
   const primaryRef = useRef<HTMLButtonElement>(null);
   const stripRef = useRef<HTMLDivElement>(null);
 
+  // After every commit, not only a step: focus can fall to the page without one. Previous or Next
+  // turns disabled at either end, and the filmstrip goes when another item fails and leaves one.
+  // Out of the dialog, ← → and its Tab trap no longer reach the person.
   useLayoutEffect(() => {
-    // Previous or Next turns disabled at either end, and a disabled button drops focus to the page.
     const focused = document.activeElement;
     if (!focused || focused === document.body || (focused instanceof HTMLElement && focused.matches(":disabled"))) {
       primaryRef.current?.focus();
     }
+  });
+  useLayoutEffect(() => {
     const thumb = [...stripRef.current?.querySelectorAll<HTMLElement>(".ev-strip-thumb") ?? []]
       .find((candidate) => candidate.dataset.evidenceId === id);
     thumb?.scrollIntoView?.({ block: "nearest", inline: "nearest" });

@@ -794,6 +794,35 @@ test("stepping onto an item still loading keeps focus in the viewer, and closing
   }
 });
 
+test("focus stays in the viewer when another item fails and takes the filmstrip with it", async () => {
+  domWindow.localStorage.clear();
+  // Screenshot 2 is held, then turns out not to match: the viewer is left with one item and no filmstrip.
+  let release: () => void = () => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const view = await mount(sessionWith(screenshots(2)), async (artifactId) => {
+    if (artifactId !== "art_2") return new Blob([PNG]);
+    await held;
+    return new Blob([Buffer.from("substituted")]);
+  });
+  try {
+    await view.decode("load");
+    await openTile(view, "viewport-1");
+    const thumb = filmstrip()[0]!;
+    thumb.focus();
+    assert.equal(domWindow.document.activeElement, thumb as unknown as Element);
+    release();
+    for (let turn = 0; turn < 6; turn += 1) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    assert.equal(view.tile("viewport-2").querySelector(".ev-blocked-label")?.textContent, "Doesn't Match");
+    assert.equal(viewerTitle(), "Screenshot 1 of 2", "the item shown stays");
+    assert.deepEqual(filmstrip(), [], "one item left has no filmstrip");
+    assert.equal(domWindow.document.activeElement, viewerButton("Mark Reviewed and Next") as unknown as Element,
+      "focus moves to the primary instead of falling out of the dialog");
+  } finally {
+    release();
+    await view.unmount();
+  }
+});
+
 test("an item that fails while the viewer shows it leaves the viewer, and its tile says why", async () => {
   domWindow.localStorage.clear();
   const view = await mount(sessionWith(screenshots(2)), async () => new Blob([PNG]));
