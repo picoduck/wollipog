@@ -244,7 +244,7 @@ test("cold inventory preserves only current removals once and failed handoff ret
   assert.throws(() => f.reporter.report(current), /handoff refused/);
   assert.equal(f.counts().persisted, 0); assert.equal(f.messages.length, 0);
   b.socket.failSend = false;
-  f.reporter.report(current); assert.equal((await pending).error, undefined);
+  f.reporter.report(observed()); assert.equal((await pending).error, undefined);
   f.reporter.report(partial()); f.reporter.report(empty());
   assert.deepEqual(f.messages.flatMap(message => message.removals ?? []), current.removedLinks);
   f.scope.registered = false;
@@ -374,4 +374,21 @@ test("valid unknown authority is ignored and older server authority is never ado
   f.scope.applyRegistered({ ...c.response, protocolVersion: 208 });
   f.reporter.report(empty()); assert.equal(f.messages.at(-1)!.requestId, undefined);
   f.advance(30_000); assert.equal((await oldServerPending).error!.name, "RunnerRequestTimeoutError");
+});
+
+for (const replacement of [false, true]) test(`failed current handoff ${replacement ? "discards old-generation" : "retains bounded same-generation"} removal evidence for a fresh result`, async t => {
+  const f = fixture(t), pending = f.request(), b = f.start();
+  const removedLinks = Array.from({ length: 300 }, (_, i) => ({ path: `~/skills/removed-${i}`, reason: "Current fixture removal" }));
+  const expected = replacement ? [] : removedLinks.slice(0, 256);
+  b.socket.failSend = true;
+  assert.throws(() => f.reporter.report({ ...observed(), removedLinks }), /handoff refused/);
+  b.socket.failSend = false;
+  if (replacement) f.start();
+  // Production's next reconciliation produces a fresh result: the link was already removed.
+  f.reporter.report(empty());
+  assert.equal((await pending).error, undefined);
+  assert.deepEqual(f.messages.flatMap(message => message.removals ?? []), expected);
+  assert.deepEqual(f.db.getRunnerSkillState("fixture")!.removals, expected);
+  f.reporter.report(empty());
+  assert.deepEqual(f.messages.flatMap(message => message.removals ?? []), expected);
 });

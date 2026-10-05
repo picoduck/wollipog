@@ -139,6 +139,9 @@ export class SkillStateReporter {
 
     const message = skillsStateMessage(this.runnerId, result);
     message.removals = structuredClone(result.removedLinks.length ? result.removedLinks : this.pendingRemovals);
+    // Keep real events across a failed handoff for a fresh pass in this generation. The
+    // connection boundary clears them; successful first handoff consumes them exactly once.
+    this.pendingRemovals = structuredClone(message.removals.slice(0, MAX_PENDING_REMOVALS));
     // Snapshot before calling transport so a caller or transport cannot mutate the retained copy.
     const observation = structuredClone({ ...message, removals: [] });
     const requests = new Set([...this.requests.values()]
