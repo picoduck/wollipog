@@ -5563,6 +5563,8 @@ textarea {
     overflow-y: auto;
     overscroll-behavior: contain;
   }
+  /* The card scrolls, so its title keeps its own height rather than shrinking away. */
+  .request-dock .question-card > .question-text { flex: none; }
   /* The card's top padding stays its edge: what scrolls passes under it, not through it. */
   .request-dock .question-card::before {
     content: "";

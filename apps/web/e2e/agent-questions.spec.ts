@@ -895,6 +895,10 @@ test.describe("on a phone with the software keyboard open", () => {
     // On each step: the card's top edge is in the dock, the focused field shows whole above the
     // footer, and the footer's primary is in the dock.
     const expectFrameFieldAndFooter = async (primary: string) => {
+      // The title keeps its one line; it may scroll under the card's edge, never collapse.
+      const title = card.locator(".question-text");
+      const lineHeight = await title.evaluate((element) => parseFloat(getComputedStyle(element).lineHeight));
+      expect((await geometry(title)).height).toBeGreaterThanOrEqual(lineHeight - 1);
       const field = card.locator(".question-input");
       await field.evaluate((element) => (element as HTMLElement).focus({ preventScroll: true }));
       await expect(field).toBeFocused();
@@ -916,6 +920,28 @@ test.describe("on a phone with the software keyboard open", () => {
     await expectFrameFieldAndFooter("Submit Answers");
     await expect(card.getByRole("button", { name: "Back", exact: true })).toBeVisible();
     expect(await page.evaluate(() => ({ page: window.scrollY, reader: document.querySelector<HTMLElement>(".detail-scroll")!.scrollTop }))).toEqual(before);
+  });
+
+  test("a choice reached from the keyboard in a narrow short column shows above the card's footer (#2205 review)", async ({ page }) => {
+    await page.setViewportSize({ width: 320, height: 540 });
+    await page.goto("/agent-questions-e2e.html?set=long");
+    const card = dockedCard(page);
+    await expect(card).toBeVisible();
+    const reading = await geometry(page.locator(".chat-reading"));
+    expect(reading.height).toBeGreaterThanOrEqual(300);
+    expect(reading.height).toBeLessThanOrEqual(480);
+    const radios = card.getByRole("radio");
+    await radios.first().focus();
+    for (let index = 0; index < 5; index += 1) {
+      if (index > 0) await page.keyboard.press("ArrowDown");
+      const focused = radios.nth(index);
+      await expect(focused).toBeFocused();
+      // The focused choice's marker is in view between the card's edge and its footer (a chosen
+      // row shows its whole description, which can be taller than that space; its top comes first).
+      const [markerBox, cardBox, footBox] = [await geometry(focused), await geometry(card), await geometry(card.locator(".request-card-foot"))];
+      expect(markerBox.top).toBeGreaterThanOrEqual(cardBox.top - 0.5);
+      expect(markerBox.bottom).toBeLessThanOrEqual(footBox.top + 0.5);
+    }
   });
 
   test("a focused field compacts the card where the keyboard resizes the layout viewport instead (#2205)", async ({ page }) => {
