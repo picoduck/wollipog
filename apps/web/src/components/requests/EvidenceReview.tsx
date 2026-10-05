@@ -199,8 +199,10 @@ function EvidenceTile({ review, item }: { review: EvidenceReview; item: Evidence
   const name = review.names.get(item.evidenceId) ?? item.evidenceId;
   const state = review.state(item);
   const linkOnly = !isArtifactBackedEvidence(item);
-  // A blocked item has no mark at all: nothing it could show would make it reviewable here.
-  const mark = (state === "reviewable" || state === "waiting") && (
+  // A blocked item has no mark at all: nothing it could show would make it reviewable here. An
+  // artifact still loading has none yet either; a link-only item shows its mark disabled until
+  // its link is opened, which is what it waits on.
+  const mark = (state === "reviewable" || (linkOnly && state === "waiting")) && (
     <Checkbox
       className="ev-mark"
       label="Reviewed"
@@ -285,25 +287,27 @@ export function EvidenceReviewBody({ review }: { review: EvidenceReview }) {
           </div>
         ))}
       </div>
-      {anyShown && (
-        <p className="ev-checked"><SuccessIcon size={14} />{EVIDENCE_COPY.checked}</p>
-      )}
-      <details className="disclosure" onToggle={(event) => setDetailsOpen(event.currentTarget.open)}>
-        <summary><ChevronRightIcon className="disclosure-chevron" />{detailsOpen ? "Hide Details" : "Show Details"}</summary>
-        <div className="disclosure-body">
-          <dl className="facts">
-            <div><dt>Resource Key</dt><dd>{decision.resourceKey}</dd></div>
-            <div><dt>Resource Digest</dt><dd className="ev-digest">{decision.resourceDigest}</dd></div>
-            <div><dt>Decided By</dt><dd>{decision.authority === "orchestrator" ? "The Orchestrator" : "A person"}</dd></div>
-            {decision.humanFallback && (
-              <div>
-                <dt>Why a Person</dt>
-                <dd>UI Evidence Approval is assigned to the Orchestrator, but this request needs a person. {decision.humanFallback.reason}</dd>
-              </div>
-            )}
-          </dl>
-        </div>
-      </details>
+      <div className="ev-foot">
+        {anyShown && (
+          <p className="ev-checked"><SuccessIcon size={14} />{EVIDENCE_COPY.checked}</p>
+        )}
+        <details className="disclosure" onToggle={(event) => setDetailsOpen(event.currentTarget.open)}>
+          <summary><ChevronRightIcon className="disclosure-chevron" />{detailsOpen ? "Hide Details" : "Show Details"}</summary>
+          <div className="disclosure-body">
+            <dl className="facts">
+              <div><dt>Resource Key</dt><dd>{decision.resourceKey}</dd></div>
+              <div><dt>Resource Digest</dt><dd className="ev-digest">{decision.resourceDigest}</dd></div>
+              <div><dt>Decided By</dt><dd>{decision.authority === "orchestrator" ? "The Orchestrator" : "A person"}</dd></div>
+              {decision.humanFallback && (
+                <div>
+                  <dt>Why a Person</dt>
+                  <dd>UI Evidence Approval is assigned to the Orchestrator, but this request needs a person. {decision.humanFallback.reason}</dd>
+                </div>
+              )}
+            </dl>
+          </div>
+        </details>
+      </div>
     </div>
   );
 }

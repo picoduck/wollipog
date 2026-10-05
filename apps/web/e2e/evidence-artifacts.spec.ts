@@ -389,6 +389,56 @@ test("tiles are named in full and keep their targets on a touch phone", async ({
   }
 });
 
+/** Whether each element is drawn whole inside the card body's visible box, without a scroll. */
+async function wholeInBody(page: Page, selector: string): Promise<boolean[]> {
+  return page.locator(".request-card-body").evaluate((body, query) => {
+    const frame = body.getBoundingClientRect();
+    return [...body.querySelectorAll<HTMLElement>(query)].map((element) => {
+      const box = element.getBoundingClientRect();
+      return box.height > 0 && box.top >= frame.top - 0.5 && box.bottom <= frame.bottom + 0.5 &&
+        element.scrollWidth <= element.clientWidth + 1;
+    });
+  }, selector);
+}
+
+for (const scenario of [
+  { name: "reviewing", query: "items=4&artifacts=ready", caption: true },
+  { name: "loading", query: "items=4&artifacts=ready&hold=1", caption: false },
+  { name: "link only", query: "items=4", caption: false },
+]) {
+  test(`at 1440×900 a four-item ${scenario.name} review shows every tile's words, the caption and Show Details unscrolled`, async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await openReview(page, scenario.query);
+    if (scenario.caption) await expect(page.getByRole("img", { name: "Screenshot 4" })).toBeVisible();
+    const body = page.locator(".request-card-body");
+    // Nothing waits below the fold: the body holds the whole review.
+    expect(await body.evaluate((element) => element.scrollHeight - element.clientHeight)).toBeLessThanOrEqual(1);
+    for (const selector of [".ev-name", ".ev-id", ".ev-frame", ".ev-progress", "details.disclosure > summary"]) {
+      expect(await wholeInBody(page, selector), selector).not.toContain(false);
+    }
+    if (scenario.caption) {
+      await expect(page.locator(".ev-checked")).toBeVisible();
+      expect(await wholeInBody(page, ".ev-checked, .ev-facts")).not.toContain(false);
+      expect(await wholeInBody(page, ".ev-facts")).toHaveLength(4);
+    }
+  });
+}
+
+test("at 1440×900 a failed tile keeps its words and Retry in view, and the capped card body scrolls to the rest", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openReview(page, "items=4&artifacts=unavailable-retry");
+  await expect(page.getByRole("img", { name: "Screenshot 4" })).toBeVisible();
+  for (const selector of [".ev-name", ".ev-id", ".ev-frame", ".ev-blocked .btn"]) {
+    expect(await wholeInBody(page, selector), selector).not.toContain(false);
+  }
+  // The danger notice brings the dock to its cap; the body is the scroller, never the grid.
+  const grid = page.locator(".ev-grid");
+  expect(await grid.evaluate((element) => [getComputedStyle(element).overflowY, element.scrollHeight - element.clientHeight]))
+    .toEqual(["visible", 0]);
+  await page.locator(".ev-checked").scrollIntoViewIfNeeded();
+  expect(await wholeInBody(page, ".ev-checked")).toEqual([true]);
+});
+
 test("a virtualized transcript screenshot loads once when its row is revisited", async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto("/request-surfaces-e2e.html?scenario=artifact-timeline&items=1&artifacts=ready");

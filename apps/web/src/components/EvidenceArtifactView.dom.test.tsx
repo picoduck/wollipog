@@ -148,7 +148,7 @@ test("artifact-backed evidence is shown in its tile, verified against the decisi
     // A digest match says the file is the one the request names, not that it is a picture. Until
     // the browser has drawn it, nothing is visible and nothing can be marked reviewed.
     assert.equal(view.container.querySelector<HTMLButtonElement>(".ev-thumb")?.hidden, true);
-    assert.equal(view.checkbox("Screenshot")!.disabled, true, "a verified but undrawn image is not yet shown");
+    assertNoDomNode(view.checkbox("Screenshot"), "a verified but undrawn image is not yet shown, so it has no mark");
     assert.equal(view.container.querySelector(".ev-loading")?.textContent, "Loading…");
     assert.equal(view.footNote(), "Review 1 more to approve.");
     await view.decode("load");
@@ -197,12 +197,12 @@ test("artifact-backed video is reviewable only after a picture frame loads", asy
     const video = view.container.querySelector<HTMLVideoElement>(".ev-thumb video");
     assert.ok(video);
     assert.equal(view.container.querySelector<HTMLButtonElement>(".ev-thumb")!.hidden, true);
-    assert.equal(view.checkbox("Recording")!.disabled, true);
+    assertNoDomNode(view.checkbox("Recording"), "a loading tile has no mark");
     Object.defineProperties(video, { videoWidth: { value: 320 }, videoHeight: { value: 180 } });
     await act(async () => video.dispatchEvent(new domWindow.Event("loadedmetadata") as unknown as Event));
     assert.equal(view.container.querySelector<HTMLButtonElement>(".ev-thumb")!.hidden, true,
       "metadata alone does not prove a frame was shown");
-    assert.equal(view.checkbox("Recording")!.disabled, true);
+    assertNoDomNode(view.checkbox("Recording"));
     await act(async () => video.dispatchEvent(new domWindow.Event("loadeddata") as unknown as Event));
     assert.equal(view.container.querySelector<HTMLButtonElement>(".ev-thumb")!.hidden, false);
     // The tile holds the first frame, still and muted; the recording plays where the tile opens it.

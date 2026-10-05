@@ -3897,18 +3897,30 @@ textarea {
 /* The dock is a strip of four small tiles, so the transcript keeps its half of the column and the
    names stay in view above the footer. */
 .request-card[data-presentation="dock"] .ev-grid { grid-template-columns: repeat(4, minmax(0, 160px)); }
+/* At desktop width the dock is capped at 40% of the column, which leaves its card about 140px of
+   body. So there each tile sets its frame beside its words: a four-item review then shows every
+   name, fact and id, the caption and Show Details without scrolling. Past four, the body scrolls. */
+.request-dock .request-card-body:has(> .ev-review) { container: ev-body / inline-size; }
+@container ev-body (min-width: 780px) {
+  .request-card[data-presentation="dock"] .ev-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .ev-tile {
+    grid-template-columns: 104px minmax(0, 1fr);
+    align-items: center;
+    column-gap: var(--space-2);
+  }
+}
 .ev-cell { min-width: 0; }
 .ev-tile {
   display: grid;
   gap: var(--space-1);
   min-width: 0;
-  container: ev-tile / inline-size;
 }
 /* The frame keeps a 16:10 place for the picture before it arrives, and grows for a failure's words. */
 .ev-frame {
   position: relative;
   display: grid;
   min-width: 0;
+  container: ev-frame / inline-size;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--bg);
@@ -4053,8 +4065,11 @@ textarea {
 }
 .ev-blocked[data-tone="danger"] .ev-blocked-label { color: var(--danger-text); }
 .ev-blocked-detail { overflow-wrap: anywhere; }
-@container ev-tile (max-width: 119px) {
-  /* A tile in the dock's strip on a phone: the request-level notice says what the detail would. */
+@container ev-frame (max-width: 119px) {
+  /* A small frame (the dock's strip on a phone, or beside its words at desktop width): the
+     request-level notice says what the detail would. */
+  .ev-blocked { padding: var(--space-1); }
+  .ev-media[data-status="link"] { padding-block: var(--space-1); }
   .ev-blocked-detail,
   .ev-link-glyph { display: none; }
   /* Open Link keeps its words in a strip tile about 77px wide, whatever the UI font, and stays wider
@@ -4070,6 +4085,14 @@ textarea {
   }
   .ev-frame > .ev-mark { padding: var(--space-1); }
 }
+/* The caption and Show Details share a row while it is closed; open, the details take their own. */
+.ev-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+}
+.ev-foot > details[open] { flex-basis: 100%; }
 .ev-checked {
   display: flex;
   align-items: center;
