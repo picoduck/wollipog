@@ -7172,20 +7172,21 @@ textarea,
   color: var(--tone-text);
   font: var(--type-body-strong);
 }
-/* The title gives way first; who decided keeps its whole name, or at least half the line. */
+/* The title is the row's content: who decided gives way first, and never takes more than 40% of
+   the line, so a short title ("Deploy") reads in full beside a long policy or session name. */
 .tl-decision-title,
 .tl-decision-by {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .tl-decision-title {
-  flex: 0 1000 auto;
-  min-width: 0;
+  flex: 0 1 auto;
   color: var(--text);
 }
 .tl-decision-by {
-  flex: 0 1 auto;
-  min-width: min(50%, max-content);
+  flex: 0 1000 auto;
+  max-width: 40%;
 }
 /* --text-dim, not --text-faint: a decision's time is small text that has to clear AA. */
 .tl-decision-time {

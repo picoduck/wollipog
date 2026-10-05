@@ -90,6 +90,22 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       "Timed Out Deploy by Ask Before Deploys",
       "Blocked Write by Wollipog",
     ]);
+    // The title is the row's content: who decided gives way first and never takes more than 40% of
+    // the line, so every title here reads in full even beside a long policy or session name.
+    const layout = await rows.locator("summary").evaluateAll((summaries) => summaries.map((summary) => {
+      const title = summary.querySelector<HTMLElement>(".tl-decision-title")!;
+      const by = summary.querySelector<HTMLElement>(".tl-decision-by");
+      const line = summary.querySelector<HTMLElement>(".tl-decision-line")!.getBoundingClientRect().width;
+      return {
+        title: title.textContent,
+        titleClipped: title.scrollWidth > title.clientWidth,
+        byShare: by ? by.getBoundingClientRect().width / line : 0,
+      };
+    }));
+    for (const row of layout) {
+      expect(row.titleClipped, `"${row.title}" reads in full`).toBe(false);
+      expect(row.byShare, `"by …" beside "${row.title}" yields to it`).toBeLessThanOrEqual(0.401);
+    }
     await expect(timeline).not.toContainText("→");
     await expect(timeline).not.toContainText(/approved_for_session|session-release-orchestrator|no-shell-in-production|audit-/);
     for (const summary of await rows.locator("summary").all()) {
