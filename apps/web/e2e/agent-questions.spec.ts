@@ -368,7 +368,6 @@ for (const viewport of [
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     await page.goto("/agent-questions-e2e.html?set=long");
 
-    const bar = page.getByRole("region", { name: "Agent Questions" });
     await expect(page.locator(".request-dock").getByRole("region", { name: "Agent Questions" })).toBeVisible();
     await expect(page.getByRole("radio")).toHaveCount(5);
     await expect(page.getByRole("checkbox")).toHaveCount(0);
@@ -376,7 +375,8 @@ for (const viewport of [
     const slot = await geometry(page.locator(".chat-reading > .session-notice-slot"));
     const reading = await geometry(page.locator(".chat-reading"));
     expect(slot.height).toBeLessThanOrEqual(reading.height * 0.5 + 1);
-    await expectInsideViewport(bar, page);
+    // The dock is in view; a card taller than it scrolls inside it (in landscape, the whole card does).
+    await expectInsideViewport(page.locator(".request-dock"), page);
 
     await answerLongSet(page);
     const submit = page.getByRole("button", { name: "Submit Answers" });
@@ -881,6 +881,28 @@ test.describe("on a phone with the software keyboard open", () => {
     expect(fieldBox.top).toBeGreaterThanOrEqual(bodyBox.top - 0.5);
     expect(fieldBox.bottom).toBeLessThanOrEqual(bodyBox.bottom + 0.5);
     expect(await scrollPositions()).toEqual(before);
+  });
+
+  test("in a 390×500 keyboard-sized viewport the card stays within its edges and a focused field shows inside the dock (#2205)", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 500 });
+    await page.goto("/agent-questions-e2e.html?set=notes&keyboard=1");
+    const card = dockedCard(page);
+    await expect(card).toBeVisible();
+    const dock = page.locator(".request-dock");
+    const [slot, reading] = [await geometry(page.locator(".chat-reading > .session-notice-slot")), await geometry(page.locator(".chat-reading"))];
+    expect(slot.height).toBeLessThanOrEqual(reading.height * 0.4 + 1);
+    // The column is too short for the body to scroll, so the dock scrolls the whole card, which keeps
+    // everything inside its own border.
+    const [cardBox, bodyBox] = [await geometry(card), await geometry(card.locator(".request-card-body"))];
+    expect(bodyBox.bottom).toBeLessThanOrEqual(cardBox.bottom + 0.5);
+    expect(await dock.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+    const field = card.locator(".question-input");
+    const before = await page.evaluate(() => ({ page: window.scrollY, reader: document.querySelector<HTMLElement>(".detail-scroll")!.scrollTop }));
+    await field.evaluate((element) => (element as HTMLElement).focus({ preventScroll: true }));
+    const [fieldBox, dockBox] = [await geometry(field), await geometry(dock)];
+    expect(fieldBox.top).toBeGreaterThanOrEqual(dockBox.top - 0.5);
+    expect(fieldBox.bottom).toBeLessThanOrEqual(dockBox.bottom + 0.5);
+    expect(await page.evaluate(() => ({ page: window.scrollY, reader: document.querySelector<HTMLElement>(".detail-scroll")!.scrollTop }))).toEqual(before);
   });
 
   test("a focused field compacts the card where the keyboard resizes the layout viewport instead (#2205)", async ({ page }) => {

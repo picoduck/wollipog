@@ -632,15 +632,20 @@ export function SessionQuestionBanner({
     }
   };
 
-  // A field is scrolled into view within the body alone, the nearest edge first: scrolling every
+  // A field is scrolled into view within the card's own scrollers alone, the nearest edge first: its
+  // body, and in a column too short for the body to scroll, the dock and its slot. Scrolling every
   // ancestor would move the transcript or the page under a software keyboard.
   const revealField = (field: Element | null) => {
     const body = stepRef.current;
     if (!body || !(field instanceof HTMLElement) || !body.contains(field) || !field.matches("input:not([type=radio]):not([type=checkbox]), textarea")) return;
-    const bounds = body.getBoundingClientRect();
-    const rect = field.getBoundingClientRect();
-    if (rect.top < bounds.top) body.scrollTop -= bounds.top - rect.top;
-    else if (rect.bottom > bounds.bottom) body.scrollTop += Math.min(rect.bottom - bounds.bottom, rect.top - bounds.top);
+    const dock = body.closest<HTMLElement>(".request-dock");
+    for (const scroller of [body, dock, dock?.parentElement?.closest<HTMLElement>(".session-notice-slot")]) {
+      if (!scroller) continue;
+      const bounds = scroller.getBoundingClientRect();
+      const rect = field.getBoundingClientRect();
+      if (rect.top < bounds.top) scroller.scrollTop -= bounds.top - rect.top;
+      else if (rect.bottom > bounds.bottom) scroller.scrollTop += Math.min(rect.bottom - bounds.bottom, rect.top - bounds.top);
+    }
   };
   // The keyboard opens after the field took focus and lowers the dock's cap, which can hide it again.
   useIsomorphicLayoutEffect(() => {

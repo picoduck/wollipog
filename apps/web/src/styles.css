@@ -5545,6 +5545,9 @@ textarea {
   /* A reading column too short to keep the card's head and footer still around a scrolling body (a
      phone in landscape, a short Sessions preview): the whole card scrolls inside the capped dock. */
   .request-dock .request-card-body { flex: none; overflow: visible; }
+  /* The card keeps its full height there, so the dock scrolls it rather than the card shrinking
+     under a body that no longer scrolls and painting it past its own edge (#2205). */
+  .request-dock :is(.request-dock-card, .request-card) { flex: none; }
 }
 .request-card .request-card-body > * { margin: 0; }
 .request-card-body > .code-well > pre { max-height: none; }
