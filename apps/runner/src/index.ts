@@ -231,10 +231,11 @@ import {
   SKILL_DIRS,
   legacySessionHarnessScopes,
   skillNeedsManualVariant,
-  skillsStateMessage,
   storedSkillVersionAvailable,
   type ReconcileSkillEntry,
+  type ReconcileSkillsResult,
 } from "./skills.js";
+import { SkillStateReporter } from "./skill-state-reporter.js";
 import { handleSkillDrift, handleSkillKeptAside } from "./skill-drift.js";
 import { mergeWslSkillsResult, reconcileWslSkills } from "./wsl-skills.js";
 import { MachineSkillSnapshots } from "./skill-snapshots.js";
@@ -1452,15 +1453,12 @@ const chunkedSkillsSync = new ChunkedSkillsSyncAssembler({
 });
 
 function reportChunkedSkillsSyncRejection(result: Extract<ChunkedSyncStep, { kind: "rejected" }>): void {
-  sendUp({
-    type: "skills_state",
-    runnerId: config.runnerId,
-    ...(result.requestId ? { requestId: result.requestId } : {}),
+  skillStateReporter.report({
     deployed: [],
     unmanaged: [],
-    removals: [],
+    removedLinks: [],
     error: result.error,
-  });
+  }, skillStateReporter.request(result.requestId));
 }
 
 function beginChunkedSkillsSync(msg: SkillsSyncManifestMessage): void {
@@ -1485,8 +1483,10 @@ function completeChunkedSkillsSync(msg: Extract<ControlPlaneToRunner, { type: "s
 /** Serializes reconcile passes so concurrent syncs and discovery rescans cannot interleave the
  * link-replacement and removal steps. */
 let skillsReconcileQueue: Promise<void> = Promise.resolve();
+const skillStateReporter = new SkillStateReporter(config.runnerId, sendUp, log);
 
 function queueSkillsReconcile(requestId?: string): void {
+  const request = skillStateReporter.request(requestId);
   const run = async () => {
     // Read at run time, not queue time: a pass queued behind another always applies the freshest
     // authoritative list, and replaying it under an older requestId still reports converged truth.
@@ -1502,6 +1502,7 @@ function queueSkillsReconcile(requestId?: string): void {
         const current = config.providerAccounts[i];
         return current?.id === account.id && current.provider === account.provider && current.directory === account.directory;
       });
+    let result: ReconcileSkillsResult | undefined;
     try {
       const accountScopesEnabled = runnerSupportsProtocol(
         controlPlaneProtocolVersion,
@@ -1533,7 +1534,7 @@ function queueSkillsReconcile(requestId?: string): void {
           baseHarnessScope.add(relDir);
         }
       }
-      let result = await reconcileSkills({
+      result = await reconcileSkills({
         dataDir: config.dataDir,
         home: homedir(),
         agents: metadata.agents,
@@ -1556,6 +1557,7 @@ function queueSkillsReconcile(requestId?: string): void {
       });
       const held = heldSkillNames(result);
       for (const { account, providerAccountId } of reconciliationPlan.accountScopes) {
+        if (result.superseded || !stillCurrent()) break;
         const accountAgents = metadata.agents.filter((agent) => account.provider === "claude"
           ? agent.driver === "claude-code"
           : agent.driver === "codex" || agent.driver === "codex-app-server");
@@ -1582,7 +1584,8 @@ function queueSkillsReconcile(requestId?: string): void {
         });
         result = mergeReconcileSkillsResults(result, accountResult);
       }
-      if (process.platform === "win32" && metadata.agents.some((agent) => agent.context?.kind === "wsl")) {
+      if (!result.superseded && stillCurrent() && process.platform === "win32" &&
+          metadata.agents.some((agent) => agent.context?.kind === "wsl")) {
         const wsl = await reconcileWslSkills({
           dataDir: config.dataDir,
           ownerHash: dataDirLease.ownerHash,
@@ -1596,17 +1599,15 @@ function queueSkillsReconcile(requestId?: string): void {
         });
         result = mergeWslSkillsResult(result, wsl, metadata.agents);
       }
-      sendUp(skillsStateMessage(config.runnerId, result, requestId));
+      skillStateReporter.report(result, request, stillCurrent());
     } catch (error) {
-      sendUp({
-        type: "skills_state",
-        runnerId: config.runnerId,
-        ...(requestId !== undefined ? { requestId } : {}),
+      skillStateReporter.report({
         deployed: [],
         unmanaged: [],
-        removals: [],
+        removedLinks: result?.removedLinks ?? [],
+        ...(result?.superseded ? { superseded: true } : {}),
         error: `skill reconcile failed: ${errText(error)}`,
-      });
+      }, request, stillCurrent());
     }
   };
   skillsReconcileQueue = skillsReconcileQueue.then(run, run);
@@ -3742,6 +3743,7 @@ function connect(): void {
   automaticAccountSwitchConfigurationSynchronized = false;
   sessions.setAutomaticAccountSwitchAuthorityReady(false);
   chunkedSkillsSync.reset();
+  skillStateReporter.resetRequests();
   const socket = new WebSocket(validateControlPlaneUrl(config.controlPlaneUrl, allowInsecureTransport));
   ws = socket;
 

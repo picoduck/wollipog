@@ -217,6 +217,8 @@ export function skillNeedsManualVariant(
 }
 
 export interface ReconcileSkillsResult {
+  /** Runner-internal: this pass lost its captured authority and is not replacement inventory. */
+  superseded?: true;
   deployed: DeployedSkillState[];
   unmanaged: UnmanagedSkillInfo[];
   /** Pass-wide failure that cannot be represented by one desired entry, such as a blocked sweep. */
@@ -295,6 +297,7 @@ export function mergeReconcileSkillsResults(
     unmanaged,
     removedLinks: [...left.removedLinks, ...right.removedLinks],
     error: [...new Set(errors)].join("; ") || undefined,
+    ...(left.superseded || right.superseded ? { superseded: true as const } : {}),
     ...(drift ? { drift } : {}),
     ...(keptAside ? { keptAside } : {}),
     ...(keptAsideOmitted ? { keptAsideOmitted } : {}),
@@ -1608,7 +1611,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
       await options.acquireProviderHomeLease();
     } catch (error) {
       if (options.isCurrent && !options.isCurrent()) {
-        return scopedResult({ deployed: [], unmanaged: [], removedLinks: [],
+        return scopedResult({ superseded: true, deployed: [], unmanaged: [], removedLinks: [],
           error: "Skill synchronization was superseded while waiting for provider-home ownership." }, options.providerAccountId);
       }
       const detail = `Provider-home lease unavailable: ${errText(error)}`;
@@ -1679,7 +1682,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
     }
   }
   if (options.isCurrent && !options.isCurrent()) {
-    return scopedResult({ deployed: [], unmanaged: [], removedLinks: [],
+    return scopedResult({ superseded: true, deployed: [], unmanaged: [], removedLinks: [],
       error: "Skill synchronization was superseded while waiting for provider-home ownership." }, options.providerAccountId);
   }
   const canonicalDir = canonicalSkillsDir(home);

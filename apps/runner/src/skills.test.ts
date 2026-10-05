@@ -119,6 +119,7 @@ for (const outcome of ["granted", "refused"] as const) {
       assert.equal(captured.stillCurrent(), false);
       finish();
       const stale = await pending;
+      assert.equal(stale.superseded, true);
       assert.match(stale.error ?? "", /superseded/);
       assert.deepEqual(stale.deployed, []);
       assert.equal(existsSync(staged), true);
