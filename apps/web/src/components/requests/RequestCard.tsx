@@ -338,8 +338,35 @@ function useCountdown(expiresAt: number | undefined): number | null {
   return expiresAt === undefined ? null : Math.max(0, expiresAt - now);
 }
 
-/** One policy list per API client for the life of the page: a policy ask names its policy. */
-const policyLists = new WeakMap<ApiClient, Promise<GovernancePolicy[]>>();
+/** How long one read of the policy list names asks; a later card reads it again, so a policy added
+ * or renamed since is named as it is now. */
+export const POLICY_NAMES_FRESH_MS = 60_000;
+
+/** The policy list per API client, shared by the cards that read it within the freshness window. */
+const policyLists = new WeakMap<ApiClient, { readAt: number; policies: Promise<GovernancePolicy[]> }>();
+
+function readPolicies(api: ApiClient, policyId: string): Promise<GovernancePolicy[]> {
+  const cached = policyLists.get(api);
+  const fresh = cached && Date.now() - cached.readAt < POLICY_NAMES_FRESH_MS ? cached : null;
+  const read = () => {
+    const entry = {
+      readAt: Date.now(),
+      policies: Promise.resolve()
+        .then(() => api.governancePolicies())
+        .then((result) => result.policies)
+        .catch(() => {
+          if (policyLists.get(api) === entry) policyLists.delete(api);
+          return [] as GovernancePolicy[];
+        }),
+    };
+    policyLists.set(api, entry);
+    return entry.policies;
+  };
+  if (!fresh) return read();
+  // A policy the fresh list does not know was added since it was read.
+  return fresh.policies.then((policies) =>
+    policies.some((policy) => policy.policyId === policyId) || policyLists.get(api) !== fresh ? policies : read());
+}
 
 function useGovernancePolicyName(api: ApiClient, policyId: string | undefined): string | null {
   const [name, setName] = useState<string | null>(null);
@@ -347,18 +374,7 @@ function useGovernancePolicyName(api: ApiClient, policyId: string | undefined): 
     setName(null);
     if (!policyId) return;
     let live = true;
-    let list = policyLists.get(api);
-    if (!list) {
-      list = Promise.resolve()
-        .then(() => api.governancePolicies())
-        .then((result) => result.policies)
-        .catch(() => {
-          policyLists.delete(api);
-          return [];
-        });
-      policyLists.set(api, list);
-    }
-    void list.then((policies) => {
+    void readPolicies(api, policyId).then((policies) => {
       const policy = policies.find((candidate) => candidate.policyId === policyId);
       if (live && policy) setName(policy.name);
     });

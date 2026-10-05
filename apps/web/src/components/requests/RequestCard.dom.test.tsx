@@ -236,6 +236,35 @@ test("a policy ask names its policy and counts down to its automatic rejection",
   }
 });
 
+test("a policy added after the list was read is named, not shown by its id", async () => {
+  const policies = [{ policyId: "deploy-guard", name: "Deploy Guard" }];
+  let reads = 0;
+  const client = {
+    ...api,
+    governancePolicies: async () => { reads += 1; return { policies: [...policies] }; },
+  } as unknown as ApiClient;
+  const ask = (policyId: string): PendingApproval => ({
+    requestId: `ask-${policyId}`, kind: "policy_hook", title: "Bash requires approval.", governancePolicyId: policyId,
+    options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "reject_once" }],
+  });
+  const first = await render(<RequestCard session={sessionWith(ask("deploy-guard"))} request={ask("deploy-guard")} runnerOnline presentation="dock" />, client);
+  try {
+    await act(async () => { await tick(); });
+    assert.equal(first.container.querySelector(".request-card-policy")?.textContent, "Asked by Deploy Guard");
+  } finally {
+    await first.unmount();
+  }
+  policies.push({ policyId: "release-freeze", name: "Release Freeze" });
+  const second = await render(<RequestCard session={sessionWith(ask("release-freeze"))} request={ask("release-freeze")} runnerOnline presentation="dock" />, client);
+  try {
+    await act(async () => { await tick(); await tick(); });
+    assert.equal(second.container.querySelector(".request-card-policy")?.textContent, "Asked by Release Freeze");
+    assert.equal(reads, 2, "the list is read again for a policy it did not know");
+  } finally {
+    await second.unmount();
+  }
+});
+
 test("the chosen option keeps its label while busy, and a failed decision is a danger notice that can be retried", async () => {
   let fail = true;
   let release!: () => void;

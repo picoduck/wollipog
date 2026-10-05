@@ -230,6 +230,14 @@ test("the session's notices wait behind the card's +N More and the request comes
   await page.getByRole("menuitem", { name: "Message Not Sent" }).click();
   await expect(card(page)).toHaveCount(0);
   await expect(page.locator(".session-notice-slot .notice.t-danger")).toContainText("Message Not Sent");
+  // The chosen notice keeps the dock's capped place and scrolls there, never spilling over the composer.
+  const slot = await page.locator(".chat-reading > .session-notice-slot").evaluate((element) => ({
+    overflow: getComputedStyle(element).overflowY,
+    bottom: element.getBoundingClientRect().bottom,
+    composerTop: document.querySelector(".composer")!.getBoundingClientRect().top,
+  }));
+  expect(slot.overflow).toBe("auto");
+  expect(slot.bottom).toBeLessThanOrEqual(slot.composerTop + 1);
   await page.locator(".session-notice-slot").getByRole("button", { name: "+2 More" }).click();
   await page.getByRole("menuitem", { name: "Pending Request" }).click();
   await expect(card(page).getByRole("heading")).toHaveText("Run pnpm deploy?");

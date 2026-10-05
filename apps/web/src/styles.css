@@ -5226,12 +5226,16 @@ textarea {
   min-height: 0;
   container: chat-reading / size;
 }
+/* A notice the person chose from the card's "+N More" takes the same capped place, so the slot
+   scrolls rather than letting a long one spill over the composer. */
 .chat-reading > .session-notice-slot {
   display: flex;
   flex: none;
   flex-direction: column;
   min-height: 0;
   max-height: 40cqh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   margin: 0;
   padding: var(--space-2) max(var(--space-3), calc((100% - var(--chat-max)) / 2)) var(--space-3);
 }
