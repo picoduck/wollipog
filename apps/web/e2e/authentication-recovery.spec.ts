@@ -142,9 +142,54 @@ test("an older runner keeps the card's actions with update guidance and no ident
   const card = await open(page, "scenario=older");
   await expect(fact(card, "Signed In Now"))
     .toContainText("This machine's runner can't report the signed-in account. Update and restart the runner to see it.");
+  // The runner flagged a mismatch, but the card cannot show the account, so it does not claim one.
+  await expect(card.locator(".sign-in-sentence")).toHaveText("This machine's runner can't tell which account " +
+    "Claude Code uses. Use Current Account continues this session with whatever account Claude Code is signed in to.");
   expect(await footer(card)).toEqual(["Dismiss Recovery", "Use Current Account (primary)"]);
   await expect(fact(card, "Last Checked").getByRole("button", { name: "Check Again" })).toBeVisible();
   expect(await page.evaluate(() => window.__WOLLIPOG_AUTH_RECOVERY_E2E__.identityRequests())).toBe(0);
+});
+
+/** Whether an element is wholly inside the card body's visible part, without scrolling it. */
+async function visibleInBody(card: Locator, target: Locator): Promise<boolean> {
+  const handle = await target.elementHandle();
+  return card.evaluate((element, node) => {
+    const body = element.querySelector<HTMLElement>(".request-card-body")!.getBoundingClientRect();
+    const rect = (node as HTMLElement).getBoundingClientRect();
+    return rect.height > 0 && rect.top >= body.top - 0.5 && rect.bottom <= body.bottom + 0.5;
+  }, handle);
+}
+
+test("while a sign-in runs, what the person must do is in view without scrolling", async ({ page }) => {
+  for (const [width, height] of [[1440, 900], [390, 844]] as const) {
+    await page.setViewportSize({ width, height });
+    const card = await open(page, `scenario=signing-in&width=${width}&height=${height}`, "Signing In — Claude Code");
+    await expect(card.locator(".provider-login-head")).toHaveCount(0);
+    await expect(card.locator(".sign-in-sentence"))
+      .toHaveText("Sign in to Claude Code with Open Provider Sign-In, then paste the authorization code here.");
+    const link = card.getByRole("link", { name: "Open Provider Sign-In" });
+    const field = card.getByLabel("Authorization Code");
+    const submit = card.getByRole("button", { name: "Submit Code" });
+    expect(await visibleInBody(card, link), `${width}: Open Provider Sign-In`).toBe(true);
+    if (width === 1440) {
+      expect(await visibleInBody(card, field), "1440: the code field").toBe(true);
+      expect(await visibleInBody(card, submit), "1440: Submit Code").toBe(true);
+    }
+  }
+});
+
+test("a body cut by the dock's cap fades its lower edge, so a cut line never reads as a stray mark", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  for (const scenario of ["email", "older", "readonly", "methods"] as const) {
+    const card = await open(page, `scenario=${scenario}`, scenario === "methods" ? "Sign in to OpenCode" : undefined);
+    const state = await card.locator(".request-card-body").evaluate((body) => ({
+      overflows: body.scrollTop + body.clientHeight < body.scrollHeight - 1,
+      marked: body.hasAttribute("data-more-below"),
+      masked: getComputedStyle(body).maskImage !== "none",
+    }));
+    expect(state.marked, scenario).toBe(state.overflows);
+    expect(state.masked, scenario).toBe(state.overflows);
+  }
 });
 
 for (const [width, height] of [[1440, 900], [390, 844]] as const) {

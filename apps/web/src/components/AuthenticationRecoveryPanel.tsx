@@ -4,6 +4,7 @@ import {
   type PendingApproval,
   type ProviderAuthenticationAccountOption,
   type ProviderAuthenticationCurrentIdentity,
+  type ProviderLoginView,
   type RunnerView,
   type SessionView,
 } from "@wollipog/protocol";
@@ -75,11 +76,46 @@ export function signInSituation(approval: PendingApproval): SignInSituation | nu
   return ids.has("auth:revalidate") ? "read_only" : null;
 }
 
-/** The one sentence under the facts: the situation, and what the primary does about it. */
-export function signInSentence(situation: SignInSituation | null, provider: string, signingIn: boolean): string | null {
-  if (signingIn) return `A sign-in to ${provider} is running. Finish it below, or cancel it.`;
+/** What the facts can say about the account signed in now: shown, unknown to an older runner, or
+ * unknown for now (offline, a failed or inconclusive check). */
+export type SignedInAccountView = "seen" | "older_runner" | "unseen";
+
+/**
+ * The one sentence under the facts: the situation, and what the primary does about it. It never
+ * claims more than Signed In Now shows: a mismatch the facts cannot show is stated as unknown. While
+ * a sign-in runs it carries the sign-in's status, which the embedded sign-in does not repeat.
+ */
+export function signInSentence({ situation, provider, signingIn, loginStatus, account = "seen" }: {
+  situation: SignInSituation | null;
+  provider: string;
+  signingIn: boolean;
+  loginStatus?: ProviderLoginView["status"];
+  account?: SignedInAccountView;
+}): string | null {
+  if (signingIn) {
+    switch (loginStatus) {
+      case "awaiting_code":
+        return `Sign in to ${provider} with Open Provider Sign-In, then paste the authorization code here.`;
+      case "waiting_for_provider":
+        return `Finish signing in to ${provider} on the provider's page. This card updates when it's done.`;
+      case "failed":
+        return `The sign-in to ${provider} failed. Cancel it, then try again.`;
+      case "timed_out":
+        return `The sign-in to ${provider} timed out. Cancel it, then try again.`;
+      default:
+        return `A sign-in to ${provider} is starting. Follow it here, or cancel it.`;
+    }
+  }
   switch (situation) {
     case "different_account":
+      if (account === "older_runner") {
+        return `This machine's runner can't tell which account ${provider} uses. Use Current Account continues this ` +
+          `session with whatever account ${provider} is signed in to.`;
+      }
+      if (account === "unseen") {
+        return `Wollipog couldn't check which account ${provider} uses. Use Current Account continues this session ` +
+          `with whatever account ${provider} is signed in to.`;
+      }
       return `${provider} is signed in to a different account than this session uses. Use Current Account continues ` +
         "this session with it.";
     case "signed_out":
@@ -172,7 +208,16 @@ export function AuthenticationRecoveryPanel({
       {SIGN_IN_COPY.checkAgain}
     </BusyButton>
   );
-  const sentence = signInSentence(signInSituation(approval), provider, signingIn);
+  const sentence = signInSentence({
+    situation: signInSituation(approval),
+    provider,
+    signingIn,
+    loginStatus: providerLogin?.status,
+    account: !supported ? "older_runner"
+      : !runnerOnline || currentIdentity?.state === "failed" ||
+        (currentIdentity?.state === "loaded" && currentIdentity.value.status !== "authenticated") ? "unseen"
+      : "seen",
+  });
 
   return (
     <div className="sign-in-body" role="group" aria-label={SIGN_IN_COPY.group}>

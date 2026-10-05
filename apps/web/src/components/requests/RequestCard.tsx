@@ -176,6 +176,7 @@ export function RequestCard({
   }, [intentRef, request.options]);
 
   const signIn = request.kind === "authentication";
+  const bodyRef = useMoreBelow(signIn);
   const actions: SignInCardActions = signIn
     ? signInCardActions(request.options)
     : { ...requestCardActions(request.options), recheck: null, methods: [] };
@@ -324,7 +325,7 @@ export function RequestCard({
         {evidence ? evidence.title : request.title}
       </h3>
       {policyLine && <p className="request-card-policy">{policyLine}</p>}
-      {body.length > 0 && <div className="request-card-body">{body}</div>}
+      {body.length > 0 && <div className="request-card-body" ref={bodyRef}>{body}</div>}
       {error && (
         <Notice tone="danger" compact role="alert">
           {REQUEST_CARD_COPY.notSent} {error}
@@ -445,6 +446,34 @@ export function RequestCardHead({ kind, owner, time, trailing }: {
       {trailing && <span className="request-card-trailing">{trailing}</span>}
     </div>
   );
+}
+
+/**
+ * Marks a scrolling body `data-more-below` while content waits below its lower edge, which a sign-in
+ * card fades (#2198): a line the edge cuts then reads as more to scroll to, not as a stray mark. The
+ * mark follows the scroll position and the body's size, and every render re-measures, as `Tabs` does.
+ */
+function useMoreBelow(enabled: boolean): (node: HTMLDivElement | null) => void {
+  const [node, setNode] = useState<HTMLDivElement | null>(null);
+  const update = useRef<() => void>(() => undefined);
+  useEffect(() => {
+    if (!node) return;
+    const measure = () => {
+      node.toggleAttribute("data-more-below", enabled && node.scrollTop + node.clientHeight < node.scrollHeight - 1);
+    };
+    update.current = measure;
+    measure();
+    node.addEventListener("scroll", measure, { passive: true });
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    observer?.observe(node);
+    return () => {
+      node.removeEventListener("scroll", measure);
+      observer?.disconnect();
+      update.current = () => undefined;
+    };
+  }, [enabled, node]);
+  useEffect(() => { update.current(); });
+  return setNode;
 }
 
 /** Ticks once a second until `expiresAt`, as the milliseconds left; null without a deadline. */

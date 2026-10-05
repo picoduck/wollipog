@@ -17,8 +17,8 @@ function statusLabel(status: ProviderLoginView["status"]): string {
 
 /**
  * A provider sign-in the runner is running. `embedded` is the sign-in Request Card's body (#2198):
- * the card's Cancel Sign-In is its only button, so this drops its own Cancel, and Submit Code is not a
- * second primary.
+ * the card's facts name the account and its sentence the status, so this drops its heading (and its
+ * Cancel: the card's Cancel Sign-In is its only button), and Submit Code is not a second primary.
  */
 export function ProviderLoginCard({ runnerId, login, revealScope = "", embedded = false }: {
   runnerId: string;
@@ -79,7 +79,8 @@ export function ProviderLoginCard({ runnerId, login, revealScope = "", embedded 
       data-embedded={embedded || undefined}
       aria-label={`${accountLabelText(login.label, undefined, privacy.hide)} Provider Sign-In`}
     >
-      <div className="provider-login-head">
+      {/* Embedded, the sign-in card's facts already name the account and its sentence the status. */}
+      {!embedded && <div className="provider-login-head">
         <div>
           <strong><AccountIdentifier identity={JSON.stringify([runnerId, login.accountId, login.operationId, revealScope])} value={login.label} label="Account Email" /></strong>
           <span>{login.provider === "claude" ? "Claude" : "Codex"} · {statusLabel(login.status)}</span>
@@ -88,8 +89,8 @@ export function ProviderLoginCard({ runnerId, login, revealScope = "", embedded 
           <button type="button" className="btn ghost" disabled={busy}
             onClick={() => void dismiss()}>Dismiss</button>
         )}
-        {active && !embedded && <button type="button" className="btn ghost sm" disabled={busy} onClick={() => void cancel()}>Cancel</button>}
-      </div>
+        {active && <button type="button" className="btn ghost sm" disabled={busy} onClick={() => void cancel()}>Cancel</button>}
+      </div>}
       {login.verificationUrl && (
         <p>
           <a className="link" href={login.verificationUrl} target="_blank" rel="noreferrer">Open Provider Sign-In</a>

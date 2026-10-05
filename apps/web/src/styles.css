@@ -5722,6 +5722,11 @@ textarea {
   }
 }
 .request-card .request-card-body > * { margin: 0; }
+/* A sign-in's body fades its lower edge while more waits below (#2198), so a line the edge cuts reads
+   as more to scroll to rather than as a stray mark. */
+.request-card[data-request-kind="sign_in"] .request-card-body[data-more-below] {
+  mask-image: linear-gradient(to bottom, #000 calc(100% - var(--space-6)), transparent);
+}
 .request-card-body > .code-well > pre { max-height: none; }
 .request-card-reasons {
   display: grid;
@@ -9164,6 +9169,7 @@ textarea,
   gap: var(--space-2);
   min-width: 0;
 }
+.sign-in-body > * { margin: 0; }
 /* Its rows hold 28px controls (Show Email, Check Again), so they sit closer than text-only facts. */
 .sign-in-facts { row-gap: var(--space-1); }
 .sign-in-facts dd {
@@ -9186,11 +9192,14 @@ textarea,
   white-space: normal;
 }
 .provider-login-card[data-embedded] {
+  display: grid;
+  gap: var(--space-2);
   margin-top: 0;
   padding: 0;
   border: 0;
   background: none;
 }
+.provider-login-card[data-embedded] :is(p, form, .provider-login-device-code) { margin: 0; }
 /* The other accounts on the session's Machine, opened by Choose Another Account… until #2208's
    dialog replaces the list. */
 .auth-recovery-accounts {

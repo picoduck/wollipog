@@ -232,6 +232,40 @@ test("the sentence under the facts names the situation and what the primary does
   }
 });
 
+test("the sentence never claims a mismatch Signed In Now cannot show", async () => {
+  const different = { ...approval, options: [
+    { optionId: "auth:accept-current", name: "Use Current Account", kind: "allow_once" }, ...approval.options,
+  ] } as PendingApproval;
+  const older = await render(
+    <AuthenticationRecoveryPanel session={session()} approval={different}
+      runner={runner({ protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.providerAuthenticationAccountRecovery - 1 })}
+      runnerOnline />,
+    client().value,
+  );
+  try {
+    assert.equal(older.container.querySelector(".sign-in-sentence")?.textContent,
+      "This machine's runner can't tell which account Claude Code uses. Use Current Account continues this session " +
+      "with whatever account Claude Code is signed in to.");
+  } finally {
+    await older.cleanup();
+  }
+  for (const identity of [
+    { status: "unknown" as const, emailSupported: true, email: null, observedAt: 1 },
+    { status: "unauthenticated" as const, emailSupported: true, email: null, observedAt: 1 },
+  ]) {
+    const view = await render(
+      <AuthenticationRecoveryPanel session={session()} approval={different} runner={runner()} runnerOnline />,
+      client({ identity }).value,
+    );
+    try {
+      assert.match(view.container.querySelector(".sign-in-sentence")?.textContent ?? "",
+        /^Wollipog couldn't check which account Claude Code uses\./, identity.status);
+    } finally {
+      await view.cleanup();
+    }
+  }
+});
+
 test("Check Again runs the recheck, then reads the identity again; it is absent without one", async () => {
   const api = client();
   const runs: string[] = [];
@@ -279,6 +313,10 @@ test("while a sign-in runs only the session's account is a fact, and the sign-in
     assert.deepEqual([...card.querySelectorAll("button")].map((button) => button.textContent), ["Submit Code"],
       "the card's Cancel Sign-In is the only cancel");
     assert.equal(card.querySelector(".primary")?.outerHTML ?? null, null);
+    assert.equal(card.querySelector(".provider-login-head")?.outerHTML ?? null, null,
+      "This Session Uses already names the account; the sentence carries the status");
+    assert.equal(view.container.querySelector(".sign-in-sentence")?.textContent,
+      "Sign in to Claude Code with Open Provider Sign-In, then paste the authorization code here.");
   } finally {
     await view.cleanup();
   }

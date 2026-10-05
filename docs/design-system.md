@@ -2203,12 +2203,15 @@ follows these rules so it never crowds out the conversation it asks about:
   `KeyRound`. The body is `.facts`: This Session Uses (the configured account, masked, or Machine
   Default Sign-In, with its help beside it), Signed In Now (the provider-reported account, masked,
   with Show Email) and Last Checked (a relative time with a `.btn.sm.ghost` Check Again that runs the
-  runner's recheck), then one sentence naming the situation and what the primary does; the runner's
-  guidance waits behind Request Details. The primary is Use Current Account or Start Sign-In, and
+  runner's recheck), then one sentence naming the situation and what the primary does, never claiming
+  a mismatch Signed In Now cannot show; the runner's guidance waits behind Request Details, and a body
+  cut by the dock's cap fades its lower edge. The primary is Use Current Account or Start Sign-In, and
   Recheck Authentication only when the runner offers neither (then Check Again is hidden). Dismiss
   Recovery is a ghost tertiary at the footer's far left (on a phone the rest wrap under it), and
   Choose Another Account… is the secondary when the session can switch accounts. While a sign-in
-  runs, Cancel Sign-In is the only button and the runner's sign-in renders in the body. An agent
+  runs, Cancel Sign-In is the only button, the sentence carries the sign-in's status, and the runner's
+  sign-in renders in the body without repeating the account, so Open Provider Sign-In and the code
+  field are in view. An agent
   with several sign-in methods lists them as ChoiceRows with their descriptions visible and one
   Start Sign-In. A machine-owner-only Start Sign-In is disabled with its reason as the card's
   foot-note. No control in the card has a `title`: every name is visible or is its accessible name.
