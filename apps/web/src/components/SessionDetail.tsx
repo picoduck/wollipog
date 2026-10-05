@@ -5922,7 +5922,7 @@ function SessionDetailLoaded({
   // worker's), so it never sees the dock's focused control go. The dock's own hand-off (to the next
   // request's heading) needs a dock; with none left, focus returns to the composer or the reader.
   const dockHadRequestsRef = useRef(false);
-  const dockFocusRemoved = useRemovedFocus(chatReadingRef, ".menu-pop");
+  const dockFocusRemoved = useRemovedFocus(chatReadingRef, "[data-request-card-menu]");
   useLayoutEffect(() => {
     const had = dockHadRequestsRef.current;
     dockHadRequestsRef.current = dockedRequests.length > 0;

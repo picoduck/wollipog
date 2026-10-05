@@ -87,7 +87,7 @@ export function RequestDock({
   });
   // A decision removes the button that had focus. The next request's heading takes it, so a keyboard
   // stays in the dock; with nothing left, the request coordinator returns focus to the composer.
-  const removedFocus = useRemovedFocus(dockRef, ".menu-pop");
+  const removedFocus = useRemovedFocus(dockRef, "[data-request-card-menu]");
   useLayoutEffect(() => {
     if (removedFocus() && expanded) headingRef.current?.focus();
   });

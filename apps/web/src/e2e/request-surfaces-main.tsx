@@ -828,7 +828,9 @@ function Fixture() {
     },
   } as ApiClient;
   const standaloneTemplate = scenario === "issue-closure" ? issueClosureSession().pendingApproval! : scenario === "standalone" || scenario === "worker"
-    ? standaloneApprovalSession().pendingApproval! : DOCK_SCENARIOS[scenario]?.requests()[0] ?? null;
+    ? standaloneApprovalSession().pendingApproval!
+    // Only a provider's permission has a transcript row; a policy ask or a pause is the control plane's.
+    : DOCK_SCENARIOS[scenario]?.requests().find((request) => request.kind === "permission") ?? null;
   const standaloneTimelineItems: TimelineItem[] = standaloneTemplate ? [{
     kind: "permission",
     id: 25,

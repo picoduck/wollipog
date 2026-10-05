@@ -493,6 +493,79 @@ test("UI evidence keeps its signed links out of the card: no Request Details", a
   }
 });
 
+/** A dock over a permission and a sign-in whose decisions answer when the test says. */
+async function delayedDock() {
+  const sent: unknown[] = [];
+  const settle: Array<(failure?: string) => void> = [];
+  function Harness() {
+    const [pending, setPending] = useState<PendingApproval | null>({ ...permission(), additionalRequests: [signIn()] });
+    return (
+      <RequestDock session={sessionWith(pending)} requests={dockRequests(prioritizedPendingRequests(pending))} runnerOnline
+        onSessionUpdate={(next) => setPending(next.pendingApproval)} />
+    );
+  }
+  let current: PendingApproval | null = { ...permission(), additionalRequests: [signIn()] };
+  const view = await render(<Harness />, {
+    approve: async (_id, body) => {
+      sent.push(body);
+      const failure = await new Promise<string | undefined>((resolve) => { settle.push(resolve); });
+      if (failure) throw new ApiError(failure, 503);
+      current = removePendingRequest(current, (body as { requestId: string }).requestId);
+      return sessionWith(current);
+    },
+  });
+  const expand = async (title: RegExp) => {
+    await act(async () => { view.container.querySelector<HTMLButtonElement>(".request-dock-more .disclosure-trigger")!.click(); });
+    const row = [...view.container.querySelectorAll<HTMLButtonElement>(".request-dock-row")]
+      .find((candidate) => title.test(candidate.textContent ?? ""))!;
+    await act(async () => { row.click(); });
+  };
+  return { view, sent, settle, expand };
+}
+
+test("a choice from the ⋯ menu keeps focus in the card while it is sent, then hands it to the next request", async () => {
+  const { view, sent, settle, expand } = await delayedDock();
+  try {
+    await expand(/Run pnpm deploy/u);
+    const more = view.container.querySelector<HTMLButtonElement>('[aria-label="More Choices"]')!;
+    await act(async () => { more.focus(); more.click(); });
+    const always = [...body().querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+      .find((item) => item.textContent?.startsWith("Always Allow"))!;
+    await act(async () => { always.focus(); always.click(); });
+    assert.equal(sent.length, 1);
+    assert.equal(domWindow.document.activeElement, view.container.querySelector('[aria-label="More Choices"]'),
+      "focus waits on the ⋯ button, not on the document body");
+    await act(async () => { settle[0]!(); await tick(); });
+    assert.equal(view.container.querySelector(".request-card h3")?.textContent, "Sign In to Claude Code");
+    assert.equal(domWindow.document.activeElement, view.container.querySelector(".request-card h3"),
+      "the next request's heading takes focus");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a decision that fails after its card was remounted still shows the failure and can be retried", async () => {
+  const { view, sent, settle, expand } = await delayedDock();
+  const allow = () => [...view.container.querySelectorAll<HTMLButtonElement>(".request-card-foot button")]
+    .find((button) => button.textContent === "Allow")!;
+  try {
+    await expand(/Run pnpm deploy/u);
+    await act(async () => { allow().click(); });
+    await expand(/Sign In/u);
+    await expand(/Run pnpm deploy/u);
+    await act(async () => { settle[0]!("The runner did not accept the decision."); await tick(); });
+    assert.match(view.container.querySelector('.notice.t-danger[role="alert"]')?.textContent ?? "",
+      /Your decision wasn't sent\. The runner did not accept the decision\./u);
+    assert.equal(allow().disabled, false);
+    await act(async () => { allow().click(); });
+    assert.equal(sent.length, 2, "the retry is sent");
+    assertNoDomNode(view.container.querySelector(".notice.t-danger"), "the old failure clears with the retry");
+    await act(async () => { settle[1]!(); await tick(); });
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("a decision in flight survives expanding another request and coming back: no second decision is sent", async () => {
   const sent: unknown[] = [];
   let answer!: () => void;

@@ -32,32 +32,40 @@ export function revealDockedRequest(sessionId: string, requestId: string): boole
  * state, and refuses a second, until the first is answered.
  */
 const inFlight = new Map<string, string>();
+/** The last failed decision's message per occurrence, so a card that remounted still offers the retry. */
+const failures = new Map<string, string>();
 const inFlightListeners = new Set<() => void>();
+const notify = () => { for (const listener of [...inFlightListeners]) listener(); };
 
 export function decisionKey(sessionId: string, requestId: string, occurrenceId: string | undefined): string {
   return JSON.stringify([sessionId, requestId, occurrenceId ?? null]);
 }
 
 /** Claims the occurrence for one decision; null when another decision for it is still in flight. */
-export function claimDecision(key: string, optionId: string): (() => void) | null {
+export function claimDecision(key: string, optionId: string): ((failure?: string) => void) | null {
   if (inFlight.has(key)) return null;
   inFlight.set(key, optionId);
-  for (const listener of [...inFlightListeners]) listener();
-  return () => {
+  failures.delete(key);
+  notify();
+  return (failure) => {
     if (inFlight.get(key) !== optionId) return;
     inFlight.delete(key);
-    for (const listener of [...inFlightListeners]) listener();
+    if (failure !== undefined) failures.set(key, failure);
+    notify();
   };
+}
+
+function subscribe(listener: () => void): () => void {
+  inFlightListeners.add(listener);
+  return () => { inFlightListeners.delete(listener); };
+}
+
+/** Why the last decision for this occurrence was not sent, until the next one is. */
+export function useDecisionFailure(key: string): string | null {
+  return useSyncExternalStore(subscribe, () => failures.get(key) ?? null, () => null);
 }
 
 /** The option whose decision for this occurrence is in flight, if any. */
 export function useDecisionInFlight(key: string): string | null {
-  return useSyncExternalStore(
-    (listener) => {
-      inFlightListeners.add(listener);
-      return () => { inFlightListeners.delete(listener); };
-    },
-    () => inFlight.get(key) ?? null,
-    () => null,
-  );
+  return useSyncExternalStore(subscribe, () => inFlight.get(key) ?? null, () => null);
 }

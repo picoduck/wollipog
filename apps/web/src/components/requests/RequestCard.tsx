@@ -23,7 +23,7 @@ import { ProviderLoginCard } from "../ProviderLoginCard.js";
 import { AuthenticationRecoveryPanel, authenticationRecoveryPanelApplies } from "../AuthenticationRecoveryPanel.js";
 import { EvidenceReviewBody, useEvidenceReview } from "./EvidenceReview.js";
 import { WorkflowDecisionSummary } from "./WorkflowDecisionSummary.js";
-import { claimDecision, decisionKey, useDecisionInFlight } from "./request-reveal.js";
+import { claimDecision, decisionKey, useDecisionFailure, useDecisionInFlight } from "./request-reveal.js";
 import {
   REQUEST_CARD_COPY,
   RequestKindIcon,
@@ -95,7 +95,7 @@ export function RequestCard({
   // and this one comes back; a second decision for the same occurrence is refused until it settles.
   const flightKey = decisionKey(session.id, request.requestId, request.occurrenceId);
   const busy = useDecisionInFlight(flightKey);
-  const [error, setError] = useState<string | null>(null);
+  const error = useDecisionFailure(flightKey);
   const [menuOpen, setMenuOpen] = useState(false);
   const menu = useAccessibleMenu(menuOpen, setMenuOpen, "request-options", "item", { reachUnavailable: true });
   const idPrefix = useId().replace(/:/g, "");
@@ -105,10 +105,6 @@ export function RequestCard({
   const evidenceReasonId = `${idPrefix}-evidence-reason`;
   const policyName = useGovernancePolicyName(api, request.governancePolicyId);
   const remaining = useCountdown(request.expiresAt);
-
-  useEffect(() => {
-    setError(null);
-  }, [request.requestId, request.occurrenceId]);
 
   // Guardrail pauses and workflow decisions are resolved by the control plane; everything else is
   // answered by the runner, which must be connected to take it.
@@ -128,7 +124,7 @@ export function RequestCard({
     // Synchronous, so a second press or a held A key cannot slip in before the busy state renders.
     const release = claimDecision(flightKey, option.optionId);
     if (!release) return;
-    setError(null);
+    let failure: string | undefined;
     try {
       const updated = await api.approve(session.id, {
         requestId: request.requestId,
@@ -138,9 +134,9 @@ export function RequestCard({
       evidence?.clearDraft();
       onSessionUpdate?.(updated);
     } catch (cause) {
-      setError((cause as Error).message);
+      failure = (cause as Error).message;
     } finally {
-      release();
+      release(failure);
     }
   };
 
@@ -284,8 +280,10 @@ export function RequestCard({
               aria-haspopup="menu"
               aria-expanded={menuOpen}
               aria-controls={menuOpen ? menu.menuId : undefined}
-              disabled={busy !== null}
-              onClick={menu.toggle}
+              // Unavailable while a decision is sent, but still focusable: it is where focus waits
+              // after a choice from its menu, until the next request or the composer takes it.
+              aria-disabled={busy !== null || undefined}
+              onClick={busy !== null ? undefined : menu.toggle}
               onKeyDown={menu.onTriggerKeyDown}
             >
               <MoreHorizontalIcon />
@@ -299,6 +297,7 @@ export function RequestCard({
                 align="end"
                 onDismiss={() => menu.close(true)}
                 onKeyDown={menu.onMenuKeyDown}
+                data-request-card-menu=""
               >
                 {menuOptions.map((option) => (
                   <MenuItem
@@ -309,7 +308,7 @@ export function RequestCard({
                     data-session-request-control={`option:${option.optionId}`}
                     onClick={() => {
                       if (unavailable(option)) return;
-                      menu.close(false);
+                      menu.close(true);
                       void decide(option);
                     }}
                   >
