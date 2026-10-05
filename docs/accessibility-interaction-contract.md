@@ -70,8 +70,10 @@ git-status reader. Presentation leaves are split at stable boundaries:
 - `RequestCard` (in `components/requests/`) owns the presentation and request-scoped decision state
   of every request other than a question, on the request dock above the composer (`RequestDock`)
   and in the Requests and Agents panels. `SessionQuestionBanner` owns questions: the same card's
-  head line (`RequestCardHead`) over one question per step (`QuestionStep`), in today's placement
-  until #2205 docks it. While focus is in the card, 1–9 pick the current question's rows, Enter
+  head line (`RequestCardHead`) over one question per step (`QuestionStep`), on the request dock
+  too (#2205), where the transcript keeps the question's place as an `AskMarker` whose Jump to
+  Question focuses the card's heading, and the card's Show Where Asked moves focus to the marker's
+  row. While focus is in the card, 1–9 pick the current question's rows, Enter
   moves on, Ctrl/Cmd+Enter submits from any step and D dismisses; a field being typed in keeps its
   keys, and Session Reading's shortcuts stand aside while focus is in the card, its heading included, except
   R, which still opens Answer Mode. `SessionApprovalRegion` keeps the one focus and live-announcement owner for both.

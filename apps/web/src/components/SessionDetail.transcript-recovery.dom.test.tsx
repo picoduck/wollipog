@@ -480,26 +480,23 @@ async function settleRecovery(pages: ReturnType<typeof pageController>, fixture:
   await flushAsyncWork();
 }
 
-test("SessionDetail keeps the temporary question fallback until a virtual row is genuinely mounted", async () => {
+test("SessionDetail keeps a pending question on its dock through transcript recovery (#2205)", async () => {
   const pages = pageController();
   const fixture = await mountFixture(pages, 40, { pendingQuestion: true });
   try {
-    const fallbackQuestion = fixture.container.querySelector('[aria-label="Agent Questions"]');
-    assert.ok(fallbackQuestion, "the fallback remains reachable while transcript recovery is pending");
-    assert.equal(fixture.scroller.contains(fallbackQuestion), false);
+    const docked = () => fixture.container.querySelector('.request-dock [aria-label="Agent Questions"]');
+    assert.ok(docked(), "the question is on the dock while transcript recovery is pending");
+    assert.equal(fixture.container.querySelectorAll('[aria-label="Agent Questions"]').length, 1);
 
     await act(async () => {
       pages.releaseTail({ events: fixture.events, eventEpoch: 0, nextBefore: 0, hasMoreOlder: false, cacheComplete: true });
     });
     await flushAsyncWork();
 
+    assert.ok(docked(), "the dock keeps it once the transcript has loaded");
     assert.equal(fixture.container.querySelectorAll('[aria-label="Agent Questions"]').length, 1);
     assert.equal(fixture.container.querySelectorAll('input[type="radio"]').length, 3, "two options and Something Else");
-    const liveQuestion = fixture.container.querySelector('[aria-label="Agent Questions"]');
-    assert.ok(liveQuestion);
-    assert.equal(fixture.scroller.contains(liveQuestion), false,
-      "the fallback stays authoritative because this hydration harness mounts no virtual rows");
-    assertNoDomNode(fixture.container.querySelector("[data-virtual-row]"));
+    assertNoDomNode(fixture.scroller.querySelector('[aria-label="Agent Questions"]'), "never a transcript row");
   } finally {
     await unmountFixture(fixture);
   }

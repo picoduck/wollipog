@@ -2,7 +2,7 @@ import { useAccountEmailPrivacy } from "../account-email-privacy.js";
 import { useShowAgentLogs } from "../agent-logs.js";
 import type { AgentDriverKind, WorkflowArtifactView } from "@wollipog/protocol";
 import { createContext, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
-import { isWorkspaceReference, normalizeSourcePath, type AgentQuestion, type PlanEntry, type SessionView, type SourceLocation } from "@wollipog/protocol";
+import { isWorkspaceReference, normalizeSourcePath, type PlanEntry, type SourceLocation } from "@wollipog/protocol";
 import { type TurnUsage,
   groupTimeline,
   isCollapsibleWorkItem,
@@ -72,8 +72,8 @@ import { TranscriptImageCacheProvider } from "./TranscriptImageCache.js";
 import { EventPayloadContent } from "./EventPayloadContent.js";
 import { useTimelineClock } from "../timeline-clock.js";
 import { deriveSubagentLifecycle } from "../subagents.js";
-import { SessionTimelineQuestionRegion } from "./SessionApproval.js";
-import { QuestionHistoryRow } from "./QuestionHistoryRow.js";
+import { QuestionHistoryRow, isSettledQuestion, questionTitle, type SettledQuestionItem } from "./QuestionHistoryRow.js";
+import { AskMarker } from "./requests/AskMarker.js";
 import type { ConversationForkAvailability, EditInForkAvailability } from "../session-actions.js";
 
 type ToolItem = Extract<TimelineItem, { kind: "tool_call" }>;
@@ -115,24 +115,15 @@ export interface TimelineRevealTarget {
   disclosureKeys: readonly string[];
 }
 
+/** The session's pending questions, which wait on the request dock (#2205): their transcript rows are
+ * markers that link to the docked card and back. */
 export interface TimelineQuestionContext {
-  sessionId: string;
-  pendingQuestion: {
-    requestId: string;
-    occurrenceId?: string;
-    questions: AgentQuestion[];
-    async?: boolean;
-    recoveryReason?: "provider_restart";
-    recoveryAction?: "resume_answer";
-  } | null;
-  /** True only after the matching pinned row is mounted and measurement-ready. */
-  questionInTimeline: boolean;
-  onPendingQuestionAvailabilityChange?: (requestId: string, available: boolean) => void;
-  runnerOnline: boolean;
-  onSessionUpdate?: (session: SessionView) => void;
-  showKeyHints?: boolean;
-  /** Who asks, for the question card's head line. */
-  owner?: string;
+  /** The request ids of the session's pending questions; only their markers offer Jump to Question. */
+  pendingRequestIds: readonly string[];
+  /** Brings the docked question up and focuses it. */
+  onJumpToQuestion?: (requestId: string) => void;
+  /** The marker Show Where Asked brought the reader to, selected until the reader scrolls. */
+  selectedRequestId?: string | null;
 }
 
 /**
@@ -502,7 +493,7 @@ export type TimelineRenderRow =
     };
 
 const timelineRowKey = (row: TimelineRenderRow) => row.key;
-export const estimateTimelineRow = (row: TimelineRenderRow, pendingQuestionRequestId: string | null = null): number => {
+export const estimateTimelineRow = (row: TimelineRenderRow): number => {
   if (row.kind === "work_summary") return 28;
   if (row.kind === "subagent_summary" || row.kind === "subagent_output") return 28;
   switch (row.item.kind) {
@@ -510,12 +501,7 @@ export const estimateTimelineRow = (row: TimelineRenderRow, pendingQuestionReque
     case "agent_thought": return 28;
     case "user_message": return 72;
     case "file_edit": return 28;
-    case "question":
-      if (row.item.answered !== undefined || row.item.requestId !== pendingQuestionRequestId) return 44;
-      return 112 + row.item.questions.reduce(
-        (height, question) => height + 64 + question.options.length * 44 + (question.options.length > 0 || question.allowOther ? 44 : 0),
-        0,
-      );
+    case "question": return 44;
     case "command_output": return 96;
     case "stderr": return 28;
     case "tool_call": return 28;
@@ -612,7 +598,7 @@ export const EventTimeline = memo(function EventTimeline({
   /** Reveal a semantic event, opening only the structural disclosures that contain its row. */
   revealRequest?: TimelineRevealRequest | null;
   onRevealHandled?: (requestId: number, outcome: VirtualRevealOutcome) => void;
-  /** Authoritative pending request used to replace its matching historical question row in place. */
+  /** The session's pending questions: their rows are markers linking to the request dock (#2205). */
   questionContext?: TimelineQuestionContext;
   /** The session's root, so a step names a file by its workspace-relative path. */
   workspaceRoot?: string;
@@ -756,34 +742,6 @@ function EventTimelineBody({
     () => sessionActive ? liveWorkSummaryKey(rows) : null,
     [rows, projection.revision, sessionActive],
   );
-  const pendingQuestionRequestId = questionContext?.pendingQuestion?.requestId ?? null;
-  let pinnedQuestionRow: TimelineRenderRow | undefined;
-  if (pendingQuestionRequestId !== null) {
-    for (let index = rows.length - 1; index >= 0; index -= 1) {
-      const row = rows[index]!;
-      if (row.kind === "item" && row.item.kind === "question" &&
-          row.item.requestId === pendingQuestionRequestId && row.item.answered === undefined) {
-        pinnedQuestionRow = row;
-        break;
-      }
-    }
-  }
-  const onPendingQuestionAvailabilityChange = questionContext?.onPendingQuestionAvailabilityChange;
-  const reportPinnedQuestionAvailability = useCallback((key: string | null, available: boolean) => {
-    if (pendingQuestionRequestId === null) return;
-    onPendingQuestionAvailabilityChange?.(
-      pendingQuestionRequestId,
-      available && key === pinnedQuestionRow?.key,
-    );
-  }, [onPendingQuestionAvailabilityChange, pendingQuestionRequestId, pinnedQuestionRow?.key]);
-  useBrowserLayoutEffect(() => {
-    if (scrollRef) return;
-    const pinnedKey = pinnedQuestionRow?.key ?? null;
-    reportPinnedQuestionAvailability(pinnedKey, pinnedQuestionRow != null);
-    return () => reportPinnedQuestionAvailability(pinnedKey, false);
-  }, [pinnedQuestionRow?.key, reportPinnedQuestionAvailability, scrollRef]);
-  const estimateRow = useMemo(() => (row: TimelineRenderRow) =>
-    estimateTimelineRow(row, pendingQuestionRequestId), [pendingQuestionRequestId]);
   const revealTarget = revealRequest == null
     ? null
     : projector.current.resolveRevealTarget(revealRequest.eventId);
@@ -908,8 +866,7 @@ function EventTimelineBody({
           standaloneCopy={standaloneReplies.has(row.key)}
           inTurnMenu={item.kind === "user_message" && turnMenuPrompts.has(item.id)}
           failedTurnPrompt={item.kind === "error" ? turns.segments[turns.segmentOf.get(item.id) ?? -1]?.prompt : undefined}
-          questionContext={item.kind === "question" && row.key === pinnedQuestionRow?.key &&
-            questionContext?.questionInTimeline === true ? questionContext : undefined}
+          questionContext={item.kind === "question" ? questionContext : undefined}
         />
       </WorkRule>
     );
@@ -920,10 +877,8 @@ function EventTimelineBody({
       getKey={timelineRowKey}
       renderItem={renderRow}
       scrollRef={scrollRef}
-      estimateSize={estimateRow}
+      estimateSize={estimateTimelineRow}
       overscan={8}
-      pinnedKey={pinnedQuestionRow?.key ?? null}
-      onPinnedAvailabilityChange={reportPinnedQuestionAvailability}
       rowGap={rowGap}
       className="timeline"
       ariaLabel={ariaLabel}
@@ -2348,23 +2303,18 @@ const TimelineRow = memo(function TimelineRow({
         />
       );
     case "question": {
-      const historicalQuestion = <TimelineQuestionRow item={item} open={disclosureOpen} onToggle={onDisclosureToggle} />;
-      return questionContext ? (
-        <SessionTimelineQuestionRegion
-          sessionId={questionContext.sessionId}
-          pendingQuestion={questionContext.pendingQuestion}
-          eventRequestId={item.requestId}
-          eventQuestions={item.questions}
-          eventResolved={item.answered !== undefined}
-          eventCreatedAt={item.createdAt}
-          runnerOnline={questionContext.runnerOnline}
-          onSessionUpdate={questionContext.onSessionUpdate}
-          showKeyHints={questionContext.showKeyHints}
-          owner={questionContext.owner}
-        >
-          {historicalQuestion}
-        </SessionTimelineQuestionRegion>
-      ) : historicalQuestion;
+      // While it waits the question is answered on the request dock; its row marks where it was
+      // asked (#2205) and becomes the answered question row in the same place.
+      if (isSettledQuestion(item)) return <TimelineQuestionRow item={item} open={disclosureOpen} onToggle={onDisclosureToggle} />;
+      const pending = questionContext?.pendingRequestIds.includes(item.requestId) === true;
+      const jump = questionContext?.onJumpToQuestion;
+      return (
+        <AskMarker
+          title={questionTitle(item.questions)}
+          selected={pending && questionContext?.selectedRequestId === item.requestId}
+          onJump={pending && jump ? () => jump(item.requestId) : undefined}
+        />
+      );
     }
   }
 });
@@ -2385,7 +2335,7 @@ function TimelineDecisionRecord({ record, auditId, open, onToggle }: {
 }
 
 /** The question row, with its parent session link where the transcript can navigate. */
-function TimelineQuestionRow(props: { item: Extract<TimelineItem, { kind: "question" }>; open: boolean; onToggle?: () => void }) {
+function TimelineQuestionRow(props: { item: SettledQuestionItem; open: boolean; onToggle?: () => void }) {
   return <QuestionHistoryRow {...props} onOpenSession={useContext(TimelineSessionLinkContext)} />;
 }
 

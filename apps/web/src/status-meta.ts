@@ -208,11 +208,6 @@ const VOCABULARY = {
     permanent_failure: danger("Push Failed"),
     expired: danger("Push Expired"),
   },
-  /** An agent's question in the transcript while it waits (#2188), until the pending-question
-   * marker (#2205) replaces it. A settled question takes its word from `requestDecision`. */
-  question: {
-    awaiting_answer: warning("Awaiting Answer"),
-  },
   /**
    * How a request ended, in the past tense (#2204): the outcome word of every Decision Record (a
    * permission, a governance decision, an automated review) and of the answered-question row. Never

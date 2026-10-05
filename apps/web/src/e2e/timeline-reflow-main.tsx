@@ -487,14 +487,8 @@ function Fixture() {
               onVisibleAnchorChange={captureAnchor}
               onAnchorLost={followTailEnabled ? handleAnchorLost : undefined}
               questionContext={overflowFixtureEnabled ? {
-                sessionId: "overflow-fixture",
-                pendingQuestion: {
-                  requestId: "overflow-live-question",
-                  questions: pendingOverflowQuestions,
-                },
-                questionInTimeline: true,
-                runnerOnline: true,
-                showKeyHints: false,
+                pendingRequestIds: ["overflow-live-question"],
+                onJumpToQuestion: () => {},
               } : undefined}
             />
           </VirtualMeasurementCommitTestProvider>

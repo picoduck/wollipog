@@ -96,15 +96,15 @@ test("the policy line names the policy and counts down to its automatic rejectio
   assert.equal(requestPolicyLine(null, null), "");
 });
 
-test("the dock answers the session's own requests other than questions, in priority order", () => {
+test("the dock answers the session's own requests, questions included (#2205), in priority order", () => {
   const permission = { requestId: "p", kind: "permission", title: "Run pnpm deploy?", options: [] } as PendingApproval;
   const budget = { requestId: "b", kind: "cost_budget", title: "Cost budget reached", options: [] } as PendingApproval;
   const signIn = { requestId: "s", kind: "authentication", title: "Sign In", options: [] } as PendingApproval;
   const question = { requestId: "q", kind: "question", title: "Question", options: [] } as PendingApproval;
   const worker = { requestId: "w", kind: "permission", title: "Worker", options: [], ownerToolUseId: "tool" } as PendingApproval;
   const docked = dockRequests(prioritizedPendingRequests({ ...permission, additionalRequests: [budget, signIn, question, worker] }));
-  assert.deepEqual(docked.map((request) => request.requestId), ["s", "b", "p"]);
-  assert.equal(waitingRequestKinds(docked.slice(1)), "Budget, Permission");
+  assert.deepEqual(docked.map((request) => request.requestId), ["s", "b", "q", "p"]);
+  assert.equal(waitingRequestKinds(docked.slice(1)), "Budget, Question, Permission");
   assert.equal(moreRequestsLabel(2), "+2 More Requests");
   assert.equal(moreRequestsLabel(1), "+1 More Request");
   assert.equal(pendingRequestsTitle(1), "Pending Request");

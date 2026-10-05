@@ -128,14 +128,11 @@ export function mergeCompactAttentionOwners(
 
 export function shouldOpenPrimaryRequestInSession(
   request: SessionView["pendingApproval"] | undefined,
-  primaryRequestId: string | undefined,
   hasOpenHandler: boolean,
 ): boolean {
-  // The session's own requests other than questions are all on its request dock (#2179); a question
-  // is in the session only while it is the primary request.
-  return Boolean(hasOpenHandler && request && (request.kind === "question"
-    ? request.requestId === primaryRequestId
-    : !request.ownerToolUseId));
+  // The session's own requests, questions included, are all on its request dock (#2179, #2205); a
+  // worker's, a question too, is answered here.
+  return Boolean(hasOpenHandler && request && !request.ownerToolUseId);
 }
 
 export function childRegistryProgressKey(
@@ -633,11 +630,7 @@ export function AgentsPanel(props: Props) {
       (request.requestId === session.pendingApproval?.requestId ? primaryRequestRef.current : requestDetailRef.current)?.focus());
   }, [targetKey, targetEpochMatches, linkedRequestMissing, target, requests, projection.ambiguousIds, unresolvedOwnerIds,
     props.onSelect, session.pendingApproval?.requestId]);
-  const primaryInSession = shouldOpenPrimaryRequestInSession(
-    selectedRequest,
-    session.pendingApproval?.requestId,
-    Boolean(props.onOpenPrimaryRequest),
-  );
+  const primaryInSession = shouldOpenPrimaryRequestInSession(selectedRequest, Boolean(props.onOpenPrimaryRequest));
   useLayoutEffect(() => {
     if ((!selectedRequest || primaryInSession) && requestOwnsFocus.current) {
       requestOwnsFocus.current = false;

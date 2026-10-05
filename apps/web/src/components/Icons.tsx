@@ -74,6 +74,7 @@ import {
   ChartGantt as LucideChartGantt,
   Network as LucideNetwork,
   Route as LucideRoute,
+  Locate as LucideLocate,
   Lock as LucideLock,
   LockKeyhole as LucideLockKeyhole,
   Mail as LucideMail,
@@ -487,6 +488,11 @@ export function FolderUpIcon(props: IconProps) {
 
 export function QuestionIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideMessageCircleQuestion} {...props} />;
+}
+
+/** Show Where Asked: the question card's way back to its marker in the transcript (#2205). */
+export function LocateIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideLocate} {...props} />;
 }
 
 export function MicIcon(props: IconProps) {

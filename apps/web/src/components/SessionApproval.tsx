@@ -1,4 +1,4 @@
-import React, { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import React, { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import type { AgentQuestion, PendingApproval, SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { useOptionalStoreSelector } from "../store.js";
@@ -18,8 +18,8 @@ import {
 import { useQuestionResponseStyle } from "../question-response-style.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { clearEvidenceReviewDraft } from "../evidence-review-drafts.js";
-import { sessionAgentLabel } from "./agent-options.js";
-import { QuestionIcon } from "./Icons.js";
+import { KEYBOARD_EDITABLE, TOUCH_PHONE_MEDIA } from "../mobile-viewport.js";
+import { LocateIcon, QuestionIcon } from "./Icons.js";
 import { Notice } from "./Notice.js";
 import { StructuredQuestionText } from "./StructuredQuestionText.js";
 import { BusyButton } from "./ui/BusyButton.js";
@@ -66,63 +66,32 @@ export function useSessionResponseRefusal(sessionId: string, fallback: string | 
 }
 
 /** Stable focus/live boundary across coalesced approval replacement and final resolution. The
- * session's own non-question requests are answered on the request dock above the composer (#2179);
- * this region keeps a pending question in its current place until #2205 docks questions too. */
+ * session's own requests, questions included, are answered on the request dock above the composer
+ * (#2179, #2205); this region owns where focus goes as they come and go, and announces them. */
 export function SessionApprovalRegion({
   session,
   runnerOnline,
   fallbackFocusRef,
   alternateFallbackFocusRef,
   onFallbackFocus,
-  onSessionUpdate,
-  showKeyHints = true,
-  questionInTimeline = false,
 }: {
   session: SessionView;
   runnerOnline: boolean;
   fallbackFocusRef: RefObject<HTMLElement | null>;
   alternateFallbackFocusRef?: RefObject<HTMLElement | null>;
   onFallbackFocus?: () => boolean;
-  onSessionUpdate?: (session: SessionView) => void;
-  showKeyHints?: boolean;
-  /** Whether the pending question already has an authoritative transcript row. */
-  questionInTimeline?: boolean;
 }) {
   const approval = session.pendingApproval;
-  const questionFallback = approval?.kind === "question" && !questionInTimeline;
-  const requestPresentation = questionFallback ? "fallback" : approval?.kind === "question"
-    ? "timeline" : approval ? "dock" : "none";
   return (
-    <>
-      <SessionRequestCoordinator
-        sessionId={session.id}
-        requestId={approval?.requestId ?? null}
-        requestIsQuestion={approval?.kind === "question"}
-        requestPresentation={requestPresentation}
-        runnerOnline={runnerOnline}
-        fallbackFocusRef={fallbackFocusRef}
-        alternateFallbackFocusRef={alternateFallbackFocusRef}
-        onFallbackFocus={onFallbackFocus}
-      />
-      {questionFallback && (
-        <div data-session-request-id={approval.requestId} data-session-request-session={session.id}>
-          <SessionQuestionBanner
-            key={`${approval.requestId}:${approval.occurrenceId ?? ""}`}
-            sessionId={session.id}
-            requestId={approval.requestId}
-            occurrenceId={approval.occurrenceId}
-            questions={approval.questions ?? []}
-            isAsync={approval.async}
-            recoveryReason={approval.recoveryReason}
-            recoveryAction={approval.recoveryAction}
-            runnerOnline={runnerOnline}
-            onSessionUpdate={onSessionUpdate}
-            showKeyHints={showKeyHints}
-            owner={sessionAgentLabel(session.agentName, session.driver, session.agentId)}
-          />
-        </div>
-      )}
-    </>
+    <SessionRequestCoordinator
+      sessionId={session.id}
+      requestId={approval?.requestId ?? null}
+      requestIsQuestion={approval?.kind === "question"}
+      runnerOnline={runnerOnline}
+      fallbackFocusRef={fallbackFocusRef}
+      alternateFallbackFocusRef={alternateFallbackFocusRef}
+      onFallbackFocus={onFallbackFocus}
+    />
   );
 }
 
@@ -148,66 +117,6 @@ export function useEvidenceDraftRetirement(sessionId: string, requests: readonly
   // The signature is the set of identities.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [instanceScope, signature]);
-}
-
-/** Keep one question representation at its event's timeline position while the request is live. */
-export function SessionTimelineQuestionRegion({
-  sessionId,
-  pendingQuestion,
-  eventRequestId,
-  eventQuestions,
-  eventResolved,
-  eventCreatedAt,
-  runnerOnline,
-  onSessionUpdate,
-  showKeyHints = true,
-  owner,
-  children,
-}: {
-  sessionId: string;
-  pendingQuestion: {
-    requestId: string;
-    occurrenceId?: string;
-    questions: AgentQuestion[];
-    async?: boolean;
-    recoveryReason?: "provider_restart";
-    recoveryAction?: "resume_answer";
-  } | null;
-  eventRequestId: string;
-  eventQuestions: AgentQuestion[];
-  eventResolved: boolean;
-  /** When the question's event was recorded, for the card's head line. */
-  eventCreatedAt?: number;
-  runnerOnline: boolean;
-  onSessionUpdate?: (session: SessionView) => void;
-  showKeyHints?: boolean;
-  /** Who asks, for the card's head line. */
-  owner?: string;
-  children: ReactNode;
-}) {
-  const approval = !eventResolved && pendingQuestion?.requestId === eventRequestId
-    ? pendingQuestion
-    : null;
-  return (
-    <div data-session-request-id={approval?.requestId} data-session-request-session={approval ? sessionId : undefined}>
-      {approval ? (
-        <SessionQuestionBanner
-          sessionId={sessionId}
-          requestId={approval.requestId}
-          occurrenceId={approval.occurrenceId}
-          questions={approval.questions.length > 0 ? approval.questions : eventQuestions}
-          isAsync={approval.async}
-          recoveryReason={approval.recoveryReason}
-          recoveryAction={approval.recoveryAction}
-          runnerOnline={runnerOnline}
-          onSessionUpdate={onSessionUpdate}
-          showKeyHints={showKeyHints}
-          owner={owner}
-          createdAt={eventCreatedAt}
-        />
-      ) : children}
-    </div>
-  );
 }
 
 function requestRegionFor(element: Element | null): HTMLElement | null {
@@ -252,12 +161,11 @@ function enabledRequestControl(
     region?.querySelector<HTMLElement>("[data-session-request-focus]") ?? eligible[0] ?? null;
 }
 
-/** Persistent focus and live-announcement owner for approvals in either presentation. */
+/** Persistent focus and live-announcement owner for the session's requests. */
 function SessionRequestCoordinator({
   sessionId,
   requestId,
   requestIsQuestion,
-  requestPresentation,
   runnerOnline,
   fallbackFocusRef,
   alternateFallbackFocusRef,
@@ -266,7 +174,6 @@ function SessionRequestCoordinator({
   sessionId: string;
   requestId: string | null;
   requestIsQuestion: boolean;
-  requestPresentation: "fallback" | "timeline" | "dock" | "none";
   runnerOnline: boolean;
   fallbackFocusRef: RefObject<HTMLElement | null>;
   alternateFallbackFocusRef?: RefObject<HTMLElement | null>;
@@ -315,7 +222,7 @@ function SessionRequestCoordinator({
     }
     if (focusDestination === "fallback") focusFallback();
   }, [alternateFallbackFocusRef, fallbackFocusRef, onFallbackFocus, ownedFocusBeforeRender, requestId,
-    requestIsQuestion, requestPresentation, sessionId]);
+    requestIsQuestion, sessionId]);
 
   useEffect(() => {
     if (announcedRequestRef.current === requestId) return;
@@ -336,6 +243,16 @@ function SessionRequestCoordinator({
     ownedFocusBeforeRender, requestId, requestWasUnchangedBeforeRender, runnerOnline]);
 
   return <span className="sr-only" role="status" aria-live="polite">{announcement}</span>;
+}
+
+/** Show Where Asked on the docked question card (#2205): back to the question's marker in the
+ * transcript, which the transcript may first have to load back to. */
+export interface QuestionWhereAsked {
+  onShow: () => void;
+  /** Why the marker can't be shown: the button is disabled and this is its visible foot-note. */
+  unavailableReason: string | null;
+  /** The transcript is loading back to the marker. */
+  loading: boolean;
 }
 
 /** Where the question card puts focus after it renders: its heading, a question's answer (the field
@@ -359,6 +276,11 @@ type CardFocus =
  * Keys, while focus is in the card: 1–9 pick the current question's rows, Enter moves on (Next,
  * then Submit Answers), Ctrl/Cmd+Enter submits from any step and D dismisses. In Composer Response
  * the card is the question's context only, answered in the composer.
+ *
+ * On the request dock (#2205) the head line ends with Show Where Asked, and while the software
+ * keyboard is open the card keeps only the question and its answer: no head line, a one-line title,
+ * and Back and Next or Submit Answers in the footer. A field that takes focus is scrolled into view
+ * within the card's body, never the page.
  */
 export function SessionQuestionBanner({
   sessionId,
@@ -374,6 +296,10 @@ export function SessionQuestionBanner({
   showKeyHints = true,
   owner,
   createdAt,
+  headingRef,
+  headTrailing,
+  keyboardOpen = false,
+  whereAsked,
 }: {
   sessionId: string;
   requestId: string;
@@ -391,6 +317,13 @@ export function SessionQuestionBanner({
   owner?: string;
   /** When the question was asked, when known. */
   createdAt?: number;
+  /** Receives the card's heading, which the request dock focuses when it brings the question up. */
+  headingRef?: RefObject<HTMLElement | null>;
+  /** Controls at the end of the head line: the notice slot's "+N More" while the dock holds it. */
+  headTrailing?: ReactNode;
+  /** The software keyboard is open (§13.2). */
+  keyboardOpen?: boolean;
+  whereAsked?: QuestionWhereAsked;
 }) {
   const api = useApi();
   const storedRefusal = useSessionResponseRefusal(sessionId);
@@ -426,6 +359,10 @@ export function SessionQuestionBanner({
     return () => { liveRequestRef.current = null; };
   }, [answerKey, sessionId]);
   const titleRef = useRef<HTMLDivElement>(null);
+  const setTitle = useCallback((node: HTMLDivElement | null) => {
+    titleRef.current = node;
+    if (headingRef) headingRef.current = node;
+  }, [headingRef]);
   const stepRef = useRef<HTMLDivElement>(null);
   const previousDraftRequestRef = useRef({ sessionId, requestId: answerKey });
   // React's opaque useId contains colons. They are valid in HTML ids but break the selector-based
@@ -435,6 +372,7 @@ export function SessionQuestionBanner({
   const unsupportedId = `${labelPrefix}-unsupported`;
   const recoveryId = `${labelPrefix}-recovery`;
   const titleId = `${labelPrefix}-title`;
+  const whereAskedId = `${labelPrefix}-where-asked`;
   const recoveryRequired = recoveryReason === "provider_restart";
   const recoveryCanResume = recoveryRequired && recoveryAction === "resume_answer";
   const recoveryRequiresDismiss = recoveryRequired && !recoveryCanResume;
@@ -537,6 +475,8 @@ export function SessionQuestionBanner({
     const body = stepRef.current;
     const field = body?.querySelector<HTMLElement>(".question-input:not(:disabled)");
     if (target.kind === "title") {
+      // A new step is read from its start, wherever the last one's field had scrolled the body.
+      if (body) body.scrollTop = 0;
       titleRef.current?.focus();
     } else if (target.kind === "field") {
       field?.focus();
@@ -661,6 +601,36 @@ export function SessionQuestionBanner({
     }
   };
 
+  // A field is scrolled into view within the body alone, the nearest edge first: scrolling every
+  // ancestor would move the transcript or the page under a software keyboard.
+  const revealField = (field: Element | null) => {
+    const body = stepRef.current;
+    if (!body || !(field instanceof HTMLElement) || !body.contains(field) || !field.matches("input:not([type=radio]):not([type=checkbox]), textarea")) return;
+    const bounds = body.getBoundingClientRect();
+    const rect = field.getBoundingClientRect();
+    if (rect.top < bounds.top) body.scrollTop -= bounds.top - rect.top;
+    else if (rect.bottom > bounds.bottom) body.scrollTop += Math.min(rect.bottom - bounds.bottom, rect.top - bounds.top);
+  };
+  // The keyboard opens after the field took focus and lowers the dock's cap, which can hide it again.
+  useIsomorphicLayoutEffect(() => {
+    if (keyboardOpen) revealField(stepRef.current?.ownerDocument.activeElement ?? null);
+  // Only the keyboard opening moves the body.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [keyboardOpen]);
+
+  // On a touch phone a focused field is the software keyboard: the dock caps lower and the rail hides
+  // (styles.css). Pressing a row or a button while typing keeps the field focused until the click
+  // lands, since its blur would restore that layout between the press and the click and move the
+  // control out from under the finger. Choosing or moving on then takes focus as usual.
+  const holdFieldFocus = (event: React.MouseEvent<HTMLElement>) => {
+    const active = event.currentTarget.ownerDocument.activeElement;
+    const target = event.target as HTMLElement;
+    if (!(active instanceof HTMLElement) || !event.currentTarget.contains(active) || !active.matches(KEYBOARD_EDITABLE) ||
+        target.closest(KEYBOARD_EDITABLE) || !target.closest("button, label, input") ||
+        !event.currentTarget.ownerDocument.defaultView?.matchMedia(TOUCH_PHONE_MEDIA).matches) return;
+    event.preventDefault();
+  };
+
   const onKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
     if (event.defaultPrevented || event.nativeEvent.isComposing) return;
     const target = event.target as HTMLElement;
@@ -719,9 +689,33 @@ export function SessionQuestionBanner({
       data-tone={recoveryRequired ? "danger" : undefined}
       aria-label={QUESTION_CARD_COPY.agentQuestions}
       aria-busy={busy !== null}
+      data-keyboard-open={keyboardOpen ? "" : undefined}
       onKeyDown={onKeyDown}
+      onMouseDown={holdFieldFocus}
     >
-      <RequestCardHead kind={<><QuestionIcon />{kindLabel}</>} owner={owner} time={createdAt} />
+      <RequestCardHead
+        kind={<><QuestionIcon />{kindLabel}</>}
+        owner={owner}
+        time={createdAt}
+        trailing={whereAsked || headTrailing ? <>
+          {whereAsked && (
+            // Icon-only below 760px, under the same name (§15.1).
+            <BusyButton
+              className="btn sm ghost question-where-asked"
+              busy={whereAsked.loading}
+              progress={QUESTION_CARD_COPY.findingWhereAsked}
+              icon={<LocateIcon size={14} />}
+              aria-label={QUESTION_CARD_COPY.showWhereAsked}
+              aria-describedby={whereAsked.unavailableReason ? whereAskedId : undefined}
+              disabled={whereAsked.unavailableReason !== null}
+              onClick={whereAsked.onShow}
+            >
+              <span className="question-where-asked-label">{QUESTION_CARD_COPY.showWhereAsked}</span>
+            </BusyButton>
+          )}
+          {headTrailing}
+        </> : undefined}
+      />
       {(eyebrow.header || eyebrow.hint) && (
         <p className="question-eyebrow">
           {eyebrow.header && <span id={headerId}>{eyebrow.header}</span>}
@@ -729,7 +723,7 @@ export function SessionQuestionBanner({
         </p>
       )}
       <div
-        ref={titleRef}
+        ref={setTitle}
         className="request-card-title question-text"
         role="heading"
         aria-level={3}
@@ -742,7 +736,7 @@ export function SessionQuestionBanner({
       >
         {question ? <StructuredQuestionText>{question.question}</StructuredQuestionText> : QUESTION_CARD_COPY.noDetails}
       </div>
-      <div className="request-card-body question-list" ref={stepRef}>
+      <div className="request-card-body" ref={stepRef} onFocus={(event) => revealField(event.target)}>
         {recoveryRequired && (
           <p className="question-recovery" id={recoveryId}>
             {recoveryCanResume ? QUESTION_CARD_COPY.recoveryResume : QUESTION_CARD_COPY.recoveryDismiss}
@@ -778,10 +772,11 @@ export function SessionQuestionBanner({
           {failure.detail === QUESTION_CARD_COPY.alreadySending ? failure.detail : failureText}
         </Notice>
       )}
-      {(unsupportedQuestionFormat || composerHint) && (
+      {(unsupportedQuestionFormat || composerHint || whereAsked?.unavailableReason) && (
         <div className="request-card-reasons">
           {unsupportedQuestionFormat && <p id={unsupportedId}>{QUESTION_CARD_COPY.unsupported}</p>}
           {composerHint && <p>{QUESTION_CARD_COPY.answerInComposer}</p>}
+          {whereAsked?.unavailableReason && <p id={whereAskedId}>{whereAsked.unavailableReason}</p>}
         </div>
       )}
       {/* Why nobody can answer now. Always mounted, so going offline is announced; empty, it takes

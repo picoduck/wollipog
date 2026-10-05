@@ -38,6 +38,7 @@ import {
   requestKindMeta,
   requestPolicyLine,
 } from "./components/requests/request-meta.js";
+import { ASK_MARKER_COPY } from "./components/requests/AskMarker.js";
 import { QUESTION_CARD_COPY, questionStepLabel } from "./components/requests/QuestionStep.js";
 
 const SOURCE_ROOT = path.resolve("apps/web/src");
@@ -729,6 +730,10 @@ test("Share Transcript's titles, labels and buttons are Title Case, and its sent
   assert.ok(isSentenceCase(shareCreatedLabel(now, now).replace(/\d.*$/, "").trim()));
 });
 
+test("the pending-question marker's labels are Title Case (#2205)", () => {
+  for (const value of Object.values(ASK_MARKER_COPY)) assert.ok(isTitleCase(value) && !/[.!?…]$/.test(value), value);
+});
+
 test("the Request Card's labels and names are Title Case, and its foot-notes are sentences (#2179)", () => {
   const titles = ["moreChoices", "copyDetails", "requestDetails", "policyMatch", "pendingRequests", "waitingRequests",
     "pendingRequestTitle", "expand", "expandRequest"] as const;
@@ -763,12 +768,12 @@ test("the Request Card's labels and names are Title Case, and its foot-notes are
 
 test("the question card's labels and buttons are Title Case, and its hints and errors are sentences (#2196)", () => {
   const titles = ["agentQuestions", "question", "asyncQuestion", "recoveryRequired", "dismiss", "dismissAndContinue",
-    "back", "next", "submitAnswers", "tryAgain", "somethingElse", "somethingElseField"] as const;
+    "back", "next", "submitAnswers", "tryAgain", "somethingElse", "somethingElseField", "showWhereAsked"] as const;
   // "Choose one", "Choose any" and "Optional" are the dim line above a question: sentence fragments.
   const fragments = ["chooseOne", "chooseAny", "optional"] as const;
   const sentences = ["noDetails", "required", "chooseOption", "chooseOptions", "optionalSentence", "notSent",
     "notDismissed", "alreadySending", "sending", "dismissing", "runnerOffline", "unsupported", "answerInComposer",
-    "recoveryResume", "recoveryDismiss"] as const;
+    "recoveryResume", "recoveryDismiss", "findingWhereAsked", "whereAskedNotLoaded"] as const;
   assert.deepEqual([...titles, ...fragments, ...sentences].sort(), Object.keys(QUESTION_CARD_COPY).sort(),
     "every string is classified");
   for (const key of titles) {

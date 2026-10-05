@@ -36,6 +36,7 @@ import {
   type SessionConfig,
   type DescendantBlockedChildView,
   type DescendantRequestView,
+  type AgentQuestion,
   type PendingApproval,
   type SessionHoldView,
   type SessionReminderView,
@@ -95,6 +96,7 @@ import {
   EventTimeline,
   TranscriptErrorAlert,
   userRewindTurns,
+  type TimelineQuestionContext,
   type TimelineRevealRequest,
   type TurnRetryControl,
 } from "./EventTimeline.js";
@@ -195,6 +197,7 @@ import {
 import { SessionApprovalRegion, focusSessionRequest, useEvidenceDraftRetirement } from "./SessionApproval.js";
 import { type DescendantRequestStatus } from "./SessionRequestPanel.js";
 import { RequestDock, dockRequests } from "./requests/RequestDock.js";
+import { useQuestionWhereAsked } from "./requests/where-asked.js";
 import { RequestKindIcon, pendingRequestsTitle } from "./requests/request-meta.js";
 import { useSoftwareKeyboardOpen } from "./requests/software-keyboard.js";
 import { decideDockedRequest } from "./requests/request-reveal.js";
@@ -1092,9 +1095,8 @@ function SessionDetailLoaded({
     }
     return hold.recoveryAction;
   }, [heldChildStoreRecoveryActions, heldChildren]);
-  // The session's own requests, answered on the request dock above the composer (#2179), in
-  // attention priority order. Questions keep their place until #2205; a worker's stay in the
-  // Agents panel.
+  // The session's own requests, questions included, answered on the request dock above the
+  // composer (#2179, #2205), in attention priority order; a worker's stay in the Agents panel.
   const prioritizedRequests = useMemo(() => prioritizedPendingRequests(session.pendingApproval),
     [session.pendingApproval]);
   const dockedRequests = useMemo(() => dockRequests(prioritizedRequests), [prioritizedRequests]);
@@ -2891,7 +2893,7 @@ function SessionDetailLoaded({
     const wanted = new Set(dockedRequests.map((request) => request.requestId));
     for (let index = items.length - 1; wanted.size > 0 && index >= 0; index -= 1) {
       const item = items[index]!;
-      if (item.kind !== "permission" || !wanted.has(item.requestId)) continue;
+      if ((item.kind !== "permission" && item.kind !== "question") || !wanted.has(item.requestId)) continue;
       wanted.delete(item.requestId);
       if (item.createdAt !== undefined) times.set(item.requestId, item.createdAt);
     }
@@ -3563,21 +3565,26 @@ function SessionDetailLoaded({
     setTimelineRevealRequest(null);
     timelineRevealRequestId.current = 0;
   }, [timelineHistoryKey]);
-  const revealCurrentOperation = useCallback((eventId: number) => {
-    // Semantic navigation owns the viewport until the reader explicitly resumes following.
+  const revealTranscriptEvent = useCallback((eventId: number, place: "operation" | "question") => {
+    // Semantic navigation owns the viewport until the reader explicitly resumes following. A
+    // question's place is read back to as the reader would scroll there, so the request dock takes
+    // its strip (#2205).
     const requestId = ++timelineRevealRequestId.current;
     timelineRevealRestoreState.current = { requestId, state: followTail.state };
-    followTail.preview();
+    if (place === "question") followTail.pause();
+    else followTail.preview();
     const request: TimelineRevealRequest = {
       eventId,
       requestId,
       historyKey: timelineHistoryKey,
-      align: "center",
+      align: place === "question" ? "upper-third" : "center",
       focus: true,
     };
     timelineRevealRequestRef.current = request;
     setTimelineRevealRequest(request);
-  }, [followTail.preview, followTail.state, timelineHistoryKey]);
+  }, [followTail.pause, followTail.preview, followTail.state, timelineHistoryKey]);
+  const revealCurrentOperation = useCallback((eventId: number) => revealTranscriptEvent(eventId, "operation"),
+    [revealTranscriptEvent]);
   const handleTimelineReveal = useCallback((
     requestId: number,
     outcome: "revealed" | "unresolved" | "cancelled",
@@ -4397,54 +4404,52 @@ function SessionDetailLoaded({
   // "Agent is working" state (items 1 + 2): true the instant a send is optimistically pending
   // (before status flips) and for the whole turn while the runner reports running/starting.
   const showOptimistic = pending != null && timelineUserPrompts.length <= sendBaselineRef.current;
-  // A request id owns an immutable question schema. Keep the timeline context stable across
-  // heartbeat, usage, and lifecycle snapshots that replace the surrounding SessionView.
-  const timelinePendingQuestion = useMemo(() => pendingQuestion ? {
-    requestId: pendingQuestion.requestId,
-    occurrenceId: pendingQuestion.occurrenceId,
-    questions: pendingQuestion.questions ?? [],
-    async: pendingQuestion.async,
-    recoveryReason: pendingQuestion.recoveryReason,
-    recoveryAction: pendingQuestion.recoveryAction,
-  } : null, [session.id, pendingQuestion?.requestId, pendingQuestion?.occurrenceId,
-    pendingQuestion?.recoveryReason, pendingQuestion?.recoveryAction]);
-  const [inlineQuestionRequestId, setInlineQuestionRequestId] = useState<string | null>(null);
-  const handlePendingQuestionAvailabilityChange = useCallback((requestId: string, available: boolean) => {
-    setInlineQuestionRequestId((current) => available
-      ? current === requestId ? current : requestId
-      : current === requestId ? null : current);
-  }, []);
-  const matchingQuestionLoaded = pendingQuestion !== null && items.some((item) =>
-    item.kind === "question" && item.requestId === pendingQuestion.requestId && item.answered === undefined);
-  const questionInTimeline = matchingQuestionLoaded && inlineQuestionRequestId === pendingQuestion?.requestId;
-  const timelineQuestionContext = useMemo(() => ({
-    sessionId: session.id,
-    pendingQuestion: timelinePendingQuestion,
-    questionInTimeline,
-    onPendingQuestionAvailabilityChange: handlePendingQuestionAvailabilityChange,
-    runnerOnline,
-    onSessionUpdate: loadSession,
-    showKeyHints: !isMobile,
-    owner: sessionAgentLabel(session.agentName, session.driver, session.agentId),
-  }), [handlePendingQuestionAvailabilityChange, isMobile, loadSession, questionInTimeline, runnerOnline,
-    session.agentId, session.agentName, session.driver, session.id, timelinePendingQuestion]);
-  // The working line's Review moves focus to the request blocking the turn, wherever it can be
-  // answered: a question's transcript row while the transcript owns it (revealed like a step, since
-  // the virtual list may not have it mounted), else the request dock or the question card, else the
-  // Agents panel, which lists every pending request (a worker's beside an async question).
+  // The working line's Review and a marker's Jump to Question bring the request blocking the turn
+  // into view: on the request dock (or the notice slot holding its place), else in the Agents panel,
+  // which lists every pending request (a worker's beside an async question).
   const reviewPendingRequest = useCallback((requestId: string) => {
-    for (let index = items.length - 1; requestId === pendingQuestion?.requestId && questionInTimeline && index >= 0; index -= 1) {
-      const item = items[index]!;
-      if (item.kind === "question" && item.requestId === requestId && item.answered === undefined) {
-        revealCurrentOperation(item.id);
-        return;
-      }
-    }
     if (focusSessionRequest(session.id, requestId)) return;
     rightPanel.show("subagents");
     navigate({ name: "session", id: session.id, attention: { eventEpoch: session.eventEpoch ?? 0, requestId } });
-  }, [items, navigate, pendingQuestion?.requestId, questionInTimeline, revealCurrentOperation, rightPanel,
-    session.eventEpoch, session.id]);
+  }, [navigate, rightPanel, session.eventEpoch, session.id]);
+
+  // The pending questions, whose transcript rows are markers (#2205): the dock's, and a worker's,
+  // whose Jump to Question opens the Agents panel. Keyed by their ids, so heartbeats that replace the
+  // session view keep the transcript's context.
+  const pendingQuestionKey = prioritizedRequests.flatMap((request) => request.kind === "question" ? [request.requestId] : [])
+    .join("\n");
+  const pendingQuestionIds = useMemo(() => pendingQuestionKey ? pendingQuestionKey.split("\n") : [], [pendingQuestionKey]);
+  const revealQuestionMarker = useCallback((eventId: number) => revealTranscriptEvent(eventId, "question"),
+    [revealTranscriptEvent]);
+  const { whereAsked: dockWhereAsked, selectedRequestId: selectedMarker } = useQuestionWhereAsked({
+    items,
+    history: {
+      hasOlder: eventWindow?.hasOlder === true && !eventWindow.error && eventWindow.baseSeq > 1,
+      loadingOlder: eventWindow?.loadingOlder === true || olderInFlightRef.current,
+      complete: eventHistory?.everComplete === true && eventWindow !== undefined,
+    },
+    loadOlder,
+    pendingRequestIds: pendingQuestionIds,
+    reveal: revealQuestionMarker,
+    readerRef: scrollRef,
+    following: followTail.state === "following",
+    resetKey: timelineHistoryKey,
+  });
+  const timelineQuestionContext = useMemo<TimelineQuestionContext>(() => ({
+    pendingRequestIds: pendingQuestionIds,
+    onJumpToQuestion: reviewPendingRequest,
+    selectedRequestId: selectedMarker,
+  }), [pendingQuestionIds, reviewPendingRequest, selectedMarker]);
+  // A question whose request carries none of its questions (an older control plane) reads them from
+  // its transcript event.
+  const dockQuestions = useCallback((request: PendingApproval): AgentQuestion[] => {
+    if (request.questions?.length) return request.questions;
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+      const item = items[index]!;
+      if (item.kind === "question" && item.requestId === request.requestId && item.answered === undefined) return item.questions;
+    }
+    return [];
+  }, [items]);
   const working =
     showOptimistic || (!terminal && (session.status === "running" || session.status === "starting"));
   // The merged Working row must also survive approval/question waits: the projector keeps
@@ -5968,6 +5973,8 @@ function SessionDetailLoaded({
         followTailState={followTail.state}
         readerRef={scrollRef}
         onConceal={concealTrailing}
+        questionsFor={dockQuestions}
+        whereAsked={dockWhereAsked}
       />
     ),
   } : undefined;
@@ -6276,11 +6283,6 @@ function SessionDetailLoaded({
             fallbackFocusRef={mode === "expanded" ? inputRef : scrollRef}
             alternateFallbackFocusRef={mode === "expanded" ? scrollRef : undefined}
             onFallbackFocus={mode === "expanded" ? focusComposerAfterRequestResolution : undefined}
-            onSessionUpdate={loadSession}
-            showKeyHints={!isMobile}
-            // The fallback owns the request only until the matching pinned row is mounted and the
-            // virtual list can keep it reachable at its canonical transcript position.
-            questionInTimeline={questionInTimeline}
           />
           {/* The reading column (#2179): the transcript, then the request dock directly above the
               composer. The dock caps at a share of this column, so the transcript keeps at least

@@ -987,8 +987,6 @@ function Fixture() {
                 session={viewedSession}
                 runnerOnline={runnerOnline}
                 fallbackFocusRef={composerRef}
-                onSessionUpdate={setSession}
-                showKeyHints={false}
               />
               <div className="chat-reading">
                 <div className="detail-main">

@@ -188,6 +188,8 @@ test("explicit logical-row navigation computes exact measured corrections", () =
   assert.equal(virtualTargetScrollAdjustment({ ...geometry, align: "start" }), 320);
   assert.equal(virtualTargetScrollAdjustment({ ...geometry, align: "center" }), 60);
   assert.equal(virtualTargetScrollAdjustment({ ...geometry, align: "end" }), -200);
+  // Row centre 460 to the upper third's centre: 100 + 600 / 6 = 200.
+  assert.equal(virtualTargetScrollAdjustment({ ...geometry, align: "upper-third" }), 260);
   assert.equal(virtualTargetScrollAdjustment({ ...geometry, align: "auto" }), 0,
     "an already visible target does not move the reader");
   assert.equal(virtualTargetScrollAdjustment({

@@ -110,8 +110,6 @@ const TABLE: readonly Row[] = [
   ["workflow", "awaiting_decision", "Awaiting Decision", "warning"],
   ["workflow", "approved", "Approved", "success"],
   ["workflow", "rejected", "Rejected", "neutral"],
-  // Agent question still waiting (#2188)
-  ["question", "awaiting_answer", "Awaiting Answer", "warning"],
   // Request decision: the Decision Record's outcome word (#2204)
   ["requestDecision", "allowed", "Allowed", "success"],
   ["requestDecision", "answered", "Answered", "success"],

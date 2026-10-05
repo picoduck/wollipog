@@ -61,8 +61,8 @@ test("timeline row estimates match one quiet step row", () => {
   const question = { kind: "question" as const, id: 3, requestId: "ask", questions: [{
     id: "choice", question: "Pick one", options: [{ label: "A" }, { label: "B" }],
   }] };
-  assert.equal(estimateTimelineRow({ kind: "item", key: "question", item: question, inWork: false, depth: 0 }, "ask"), 308);
-  assert.equal(estimateTimelineRow({ kind: "item", key: "orphan", item: question, inWork: false, depth: 0 }), 44);
+  // A pending question is a one-line marker in the transcript (#2205), as its answered row is.
+  assert.equal(estimateTimelineRow({ kind: "item", key: "question", item: question, inWork: false, depth: 0 }), 44);
   assert.equal(estimateTimelineRow({
     kind: "item", key: "answered-question", item: { ...question, answered: true }, inWork: false, depth: 0,
   }), 44);
@@ -237,56 +237,35 @@ test("a canonical accepted steer keeps one quiet Steered the Current Turn fact u
   assert.match(html, /<\/div><div class="tl-receipt" data-status="steered"><span class="status[^"]*\bt-success\b[^"]*\binline\b[^"]*">Steered the Current Turn<\/span><\/div>/);
 });
 
-test("the pending question replaces its matching timeline card without a duplicate historical row", () => {
+test("a pending question's row is its marker, with Jump to Question while the session can answer it (#2205)", () => {
   const questions = [{
     id: "language",
+    header: "Language",
     question: "Which language?",
     options: [{ label: "TypeScript" }, { label: "Python" }],
   }];
-  const session = {
-    id: "session-1",
-    runnerId: "runner-1",
-    title: "Session",
-    status: "input_required",
-    pendingApproval: {
-      kind: "question",
-      requestId: "ask-1",
-      title: "Agent Questions",
-      options: [],
-      questions,
-    },
-  } as SessionView;
-  const html = renderToStaticMarkup(React.createElement(EventTimeline, {
-    items: [{ kind: "question", id: 4, requestId: "ask-1", questions }],
-    questionContext: {
-      sessionId: session.id,
-      pendingQuestion: { requestId: "ask-1", questions },
-      questionInTimeline: true,
-      runnerOnline: true,
-    },
-  }));
+  const render = (questionContext?: { pendingRequestIds: string[]; onJumpToQuestion?: () => void; selectedRequestId?: string }) =>
+    renderToStaticMarkup(React.createElement(EventTimeline, {
+      items: [{ kind: "question", id: 4, requestId: "ask-1", questions }],
+      questionContext,
+    }));
+  const html = render({ pendingRequestIds: ["ask-1"], onJumpToQuestion: () => {} });
 
-  assert.equal((html.match(/aria-label="Agent Questions"/g) ?? []).length, 1);
-  assert.equal((html.match(/Which language\?/g) ?? []).length, 1);
-  assert.doesNotMatch(html, /awaiting answer/);
-  assert.match(html, /role="radiogroup"/);
+  assert.doesNotMatch(html, /aria-label="Agent Questions"/, "the form waits on the request dock, not in the transcript");
+  assert.doesNotMatch(html, /role="radiogroup"/);
+  assert.doesNotMatch(html, /Awaiting Answer/, "the marker replaces the interim status");
+  assert.match(html, /<div class="ask-marker">/);
+  assert.match(html, /<span class="ask-marker-kind">Question<\/span><span class="ask-marker-title">Language<\/span>/);
+  assert.match(html, /<button type="button" class="btn sm ghost ask-marker-jump" aria-label="Jump to Question">/);
+  assert.match(render({ pendingRequestIds: ["ask-1"], onJumpToQuestion: () => {}, selectedRequestId: "ask-1" }),
+    /<div class="ask-marker" data-selected="">/);
+  // A question the session no longer waits on has nothing to jump to.
+  assert.doesNotMatch(render({ pendingRequestIds: [] }), /Jump to Question/);
+  assert.doesNotMatch(render(), /Jump to Question/);
 });
 
 test("a resolved question keeps one compact outcome card at the same timeline row", () => {
   const questions = [{ id: "language", question: "Which language?", options: [{ label: "TypeScript" }] }];
-  const session = {
-    id: "session-1",
-    runnerId: "runner-1",
-    title: "Session",
-    status: "input_required",
-    pendingApproval: {
-      kind: "question",
-      requestId: "ask-1",
-      title: "Agent Questions",
-      options: [],
-      questions,
-    },
-  } as SessionView;
   const html = renderToStaticMarkup(React.createElement(EventTimeline, {
     items: [{
       kind: "question",
@@ -296,12 +275,7 @@ test("a resolved question keeps one compact outcome card at the same timeline ro
       answered: false,
       resolutionReason: "replaced",
     }],
-    questionContext: {
-      sessionId: session.id,
-      pendingQuestion: { requestId: "ask-1", questions },
-      questionInTimeline: true,
-      runnerOnline: true,
-    },
+    questionContext: { pendingRequestIds: ["ask-1"] },
   }));
 
   assert.doesNotMatch(html, /aria-label="Agent Questions"/);

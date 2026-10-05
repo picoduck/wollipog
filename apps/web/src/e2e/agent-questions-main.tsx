@@ -1,16 +1,20 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { summarizeQuestionAnswers, type AgentQuestion, type SessionView } from "@wollipog/protocol";
+import { summarizeQuestionAnswers, type AgentQuestion, type PendingApproval, type SessionView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
-import { SessionQuestionBanner } from "../components/SessionApproval.js";
+import { focusSessionRequest } from "../components/SessionApproval.js";
 import { ComposerQuestionResponse } from "../components/ComposerQuestionResponse.js";
-import { EventTimeline } from "../components/EventTimeline.js";
+import { EventTimeline, type TimelineRevealRequest } from "../components/EventTimeline.js";
+import { SessionNoticeSlot } from "../components/SessionNoticeSlot.js";
+import { RequestDock } from "../components/requests/RequestDock.js";
+import { RequestKindIcon, pendingRequestsTitle } from "../components/requests/request-meta.js";
+import { useQuestionWhereAsked } from "../components/requests/where-asked.js";
+import type { TimelineItem } from "../timeline.js";
 import { QuestionRowGallery } from "./question-row-gallery.js";
 import { ResolverGallery } from "./resolver-gallery.js";
 import { setQuestionResponseStyle, useQuestionResponseStyle } from "../question-response-style.js";
-import { inTypingContext } from "../shortcuts.js";
-import { isFollowTailResumeKey } from "../useFollowTail.js";
+import { useFollowTail } from "../useFollowTail.js";
 import "../styles.css";
 
 interface AnswerCall {
@@ -35,7 +39,14 @@ if (params.has("theme")) document.documentElement.dataset.theme = params.get("th
 setQuestionResponseStyle(["composer", "text"].includes(params.get("style") ?? "") ? "composer" : "interactive");
 const initialOnline = params.get("offline") !== "1";
 const shouldFail = params.get("failure") === "1";
-const renderInFallbackSlot = params.get("slot") === "1";
+// The session around the question, as SessionDetail lays it out (#2205): the transcript with the
+// question's marker after `before` rows and before `after` rows, and the request dock above the
+// composer. `keyboard=1` simulates the software keyboard open; `unloaded=1` leaves the question's
+// event out of a fully loaded transcript, so Show Where Asked can't find it.
+const rowsBefore = Number(params.get("before") ?? 12);
+const rowsAfter = Number(params.get("after") ?? 2);
+const keyboardOpen = params.get("keyboard") === "1";
+const questionUnloaded = params.get("unloaded") === "1";
 const recoveryRequired = params.get("recovery") === "1";
 const recoveryCanResume = recoveryRequired && params.get("resume") === "1";
 // Keycaps are a fine pointer's hints; the session shows them where a keyboard is likely (#2196).
@@ -129,6 +140,13 @@ const longLabelQuestions: AgentQuestion[] = [{
   options: [{ label: "Destination transcript_overflow_identifier_" + "x".repeat(120), description: "y".repeat(160) }, { label: "Staging" }],
 }];
 
+// Two text questions whose context pushes the field below a capped card's fold (#2205).
+const noteContext = Array.from({ length: 6 }, (_, index) => `Context line ${index + 1} keeps the field further down the card.`).join("\n\n");
+const noteQuestions: AgentQuestion[] = [
+  { id: "summary", header: "Summary", question: "Summarize the release.", context: noteContext, options: [], allowOther: true },
+  { id: "followUp", header: "Follow-Up", question: "Name one follow-up.", context: noteContext, options: [], allowOther: true },
+];
+
 const replacementQuestions: AgentQuestion[] = [{
   id: "replacement",
   header: "Replacement",
@@ -190,6 +208,14 @@ const formQuestions: AgentQuestion[] = [
 
 window.agentQuestionCalls = [];
 const askedAt = Date.UTC(2026, 9, 3, 7, 30, 0);
+const SESSION_ID = "agent-question-session";
+const QUESTION_EVENT_ID = 1_000;
+
+function transcriptRow(id: number, index: number, label: string): TimelineItem {
+  return index % 2 === 0
+    ? { kind: "user_message", id, text: `${label} message ${index / 2 + 1}` }
+    : { kind: "agent_message", id, text: `${label} reply ${(index + 1) / 2}: the agent explains what it did and why.` };
+}
 
 function Fixture() {
   const responseStyle = useQuestionResponseStyle();
@@ -203,6 +229,8 @@ function Fixture() {
           ? longLabelQuestions
       : params.get("set") === "forms"
         ? formQuestions
+        : params.get("set") === "notes"
+          ? noteQuestions
         : params.get("set") === "rich"
           ? richQuestions
           : params.get("set") === "rich-single" ? richQuestions.slice(0, 1) : shortQuestions,
@@ -211,6 +239,7 @@ function Fixture() {
   const [resolved, setResolved] = useState(false);
   const [answerActive, setAnswerActive] = useState(responseStyle === "composer");
   const answerInputRef = useRef<HTMLInputElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!resolved && responseStyle === "composer") setAnswerActive(true);
@@ -249,76 +278,158 @@ function Fixture() {
   // The control plane stores a summary of what was submitted (#2188); a dismissal stores none.
   const lastCall = resolved ? [...window.agentQuestionCalls].reverse().find((call) => call.requestId === requestId) : undefined;
   const dismissed = lastCall?.action === "dismiss";
-  const questionContent = resolved ? (
-    <>
-      <p role="status">Question Answered</p>
-      <EventTimeline items={[{
-        kind: "question",
-        id: 1,
-        requestId,
-        questions,
-        createdAt: askedAt,
+  const items = useMemo<TimelineItem[]>(() => [
+    ...Array.from({ length: rowsBefore }, (_, index) => transcriptRow(index + 1, index, "Earlier")),
+    ...(questionUnloaded ? [] : [{
+      kind: "question" as const,
+      id: QUESTION_EVENT_ID,
+      requestId,
+      questions,
+      createdAt: askedAt,
+      ...(resolved ? {
         answered: !dismissed,
         resolvedAt: askedAt + 60_000,
         ...(lastCall && !dismissed ? { answers: summarizeQuestionAnswers(questions, lastCall.answers) } : {}),
-      }]} />
-    </>
-  ) : (
-    <SessionQuestionBanner
-      sessionId="agent-question-session"
-      requestId={requestId}
-      questions={questions}
-      recoveryReason={recoveryRequired ? "provider_restart" : undefined}
-      recoveryAction={recoveryCanResume ? "resume_answer" : undefined}
-      runnerOnline={runnerOnline}
-      onSessionUpdate={() => setResolved(true)}
-      showKeyHints={showKeyHints}
-      owner="Claude Code"
-      createdAt={askedAt}
-    />
-  );
+      } : {}),
+    }]),
+    ...Array.from({ length: rowsAfter }, (_, index) => transcriptRow(QUESTION_EVENT_ID + 1 + index, index, "Later")),
+  ], [dismissed, lastCall, questions, requestId, resolved]);
+  const request = useMemo<PendingApproval | null>(() => resolved ? null : {
+    kind: "question",
+    requestId,
+    title: questions[0]?.header ?? "Agent Question",
+    options: [],
+    questions,
+    ...(recoveryRequired ? { recoveryReason: "provider_restart" as const } : {}),
+    ...(recoveryCanResume ? { recoveryAction: "resume_answer" as const } : {}),
+  }, [questions, requestId, resolved]);
+  const session = useMemo(() => ({
+    id: SESSION_ID, runnerId: "runner-1", title: "Agent Questions", status: "input_required",
+    pendingApproval: request ?? undefined,
+  }) as SessionView, [request]);
+
+  // Reading back and Show Where Asked work as in a session: the reader follows its tail, and a reveal
+  // pauses it, so the dock takes its strip.
+  const followTail = useFollowTail({ scrollRef, contentRevision: items, sessionId: SESSION_ID, persistenceScope: "agent-questions-e2e" });
+  const [revealRequest, setRevealRequest] = useState<TimelineRevealRequest | null>(null);
+  const revealSerial = useRef(0);
+  const reveal = useCallback((eventId: number) => {
+    followTail.pause();
+    revealSerial.current += 1;
+    setRevealRequest({ eventId, requestId: revealSerial.current, historyKey: SESSION_ID, align: "upper-third", focus: true });
+  }, [followTail.pause]);
+  const handleRevealed = useCallback((serial: number) => {
+    setRevealRequest((current) => current?.requestId === serial ? null : current);
+  }, []);
+  const pendingRequestIds = useMemo(() => request ? [request.requestId] : [], [request]);
+  const { whereAsked, selectedRequestId } = useQuestionWhereAsked({
+    items,
+    history: { hasOlder: false, loadingOlder: false, complete: true },
+    loadOlder: () => false,
+    pendingRequestIds,
+    reveal,
+    readerRef: scrollRef,
+    following: followTail.state === "following",
+    resetKey: SESSION_ID,
+  });
+  const questionContext = useMemo(() => ({
+    pendingRequestIds,
+    onJumpToQuestion: (id: string) => { focusSessionRequest(SESSION_ID, id); },
+    selectedRequestId,
+  }), [pendingRequestIds, selectedRequestId]);
+
   const composerContent = !resolved && responseStyle === "composer" && (!recoveryRequired || recoveryCanResume) ? (
-    <div className="composer">
-      <div className={`composer-box${answerActive ? " answer-mode" : ""}`}>
-        <ComposerQuestionResponse
-          sessionId="agent-question-session"
-          requestId={requestId}
-          questions={questions}
-          runnerOnline={runnerOnline}
-          active={answerActive}
-          showWaiting
-          inputRef={answerInputRef}
-          onEnter={() => setAnswerActive(true)}
-          onExit={() => setAnswerActive(false)}
-          onSessionUpdate={() => setResolved(true)}
-        />
-      </div>
+    <div className={`composer-box${answerActive ? " answer-mode" : ""}`}>
+      <ComposerQuestionResponse
+        sessionId={SESSION_ID}
+        requestId={requestId}
+        questions={questions}
+        runnerOnline={runnerOnline}
+        active={answerActive}
+        showWaiting
+        inputRef={answerInputRef}
+        onEnter={() => setAnswerActive(true)}
+        onExit={() => setAnswerActive(false)}
+        onSessionUpdate={() => setResolved(true)}
+      />
     </div>
-  ) : null;
+  ) : (
+    <div className="composer-box"><textarea className="composer-input" aria-label="Composer" placeholder="Do anything" /></div>
+  );
 
   return (
     <ApiProvider client={client}>
-      <main
-        id="question-frame"
-        className={renderInFallbackSlot ? "session-detail" : "timeline"}
-        onKeyDown={(event) => {
-          if (renderInFallbackSlot || event.defaultPrevented || inTypingContext(event.currentTarget.ownerDocument)) return;
-          if (isFollowTailResumeKey(event)) event.preventDefault();
-        }}
-      >
-        {renderInFallbackSlot ? (
+      <main id="question-frame" className="app" style={{ display: "block", height: "100dvh" }}>
+        <section className="session-detail expanded" style={{ height: "100%" }}>
           <div className="detail-columns">
             <div className="detail-chat">
-              {questionContent}
-              <div className="detail-main">
-                <div className="detail-reader">
-                  <div className="detail-scroll">Activity Unavailable</div>
+              <div className="chat-reading">
+                <div className="detail-main">
+                  <div className="detail-reader">
+                    <div
+                      className="detail-scroll measured-virtual-scroll"
+                      role="region"
+                      aria-label="Session Activity"
+                      ref={scrollRef}
+                      tabIndex={0}
+                      data-follow-tail-state={followTail.state}
+                      onScroll={followTail.onScroll}
+                      onWheel={followTail.onWheel}
+                      onPointerMove={followTail.onPointerMove}
+                      onTouchStart={(event) => followTail.onTouchStart(event.nativeEvent)}
+                      onKeyDown={(event) => {
+                        if (!followTail.onKeyDown(event)) return;
+                        event.preventDefault();
+                        event.stopPropagation();
+                      }}
+                    >
+                      <EventTimeline
+                        items={items}
+                        scrollRef={scrollRef}
+                        historyKey={SESSION_ID}
+                        getInitialAnchor={followTail.getInitialAnchor}
+                        preserveAnchor={!followTail.isFollowing}
+                        onVisibleAnchorChange={followTail.onVisibleAnchorChange}
+                        onAnchorLost={followTail.onAnchorLost}
+                        revealRequest={revealRequest}
+                        onRevealHandled={handleRevealed}
+                        questionContext={questionContext}
+                      />
+                      {resolved && <p role="status">Question Answered</p>}
+                    </div>
+                  </div>
                 </div>
-                {composerContent}
+                {request && (
+                  <SessionNoticeSlot sessionId={SESSION_ID} entries={[]} lead={{
+                    key: "request-dock",
+                    title: pendingRequestsTitle(1),
+                    icon: <RequestKindIcon request={request} />,
+                    requestIds: [request.requestId],
+                    render: ({ trailing, revealRequestId, concealTrailing }) => (
+                      <RequestDock
+                        session={session}
+                        requests={[request]}
+                        runnerOnline={runnerOnline}
+                        owner="Claude Code"
+                        createdAt={() => askedAt}
+                        headTrailing={trailing}
+                        onSessionUpdate={() => setResolved(true)}
+                        showKeyHints={showKeyHints}
+                        keyboardOpen={keyboardOpen}
+                        revealRequestId={revealRequestId}
+                        followTailState={followTail.state}
+                        readerRef={scrollRef}
+                        onConceal={concealTrailing}
+                        whereAsked={whereAsked}
+                      />
+                    ),
+                  }} />
+                )}
               </div>
+              <div className="composer">{composerContent}</div>
             </div>
           </div>
-        ) : <>{questionContent}{composerContent}</>}
+        </section>
       </main>
     </ApiProvider>
   );

@@ -2,7 +2,7 @@ import { useContext, type ReactNode } from "react";
 import type { AgentQuestion, QuestionAnswerSummaryEntry } from "@wollipog/protocol";
 import { formatClock, formatRecordedTimestamp } from "../format.js";
 import { humanResolver, resolverName, ViewerIdentityContext, type ViewerIdentity } from "../resolver-identity.js";
-import { statusMeta, type StatusValue } from "../status-meta.js";
+import { statusMeta } from "../status-meta.js";
 import type { DecisionOutcome } from "../decision-record.js";
 import type { TimelineItem } from "../timeline.js";
 import { CheckIcon, QuestionIcon } from "./Icons.js";
@@ -12,14 +12,20 @@ import { StructuredQuestionText, structuredQuestionSummary } from "./StructuredQ
 import { ToolStep } from "./ToolStep.js";
 
 type QuestionItem = Extract<TimelineItem, { kind: "question" }>;
+/** A question that was answered, dismissed or otherwise settled. While it waits, its row is the
+ * pending-question marker (`AskMarker`, #2205). */
+export type SettledQuestionItem = QuestionItem & { answered: boolean };
 
-type QuestionOutcome = StatusValue<"question"> | Extract<DecisionOutcome,
+export function isSettledQuestion(item: QuestionItem): item is SettledQuestionItem {
+  return item.answered !== undefined;
+}
+
+type QuestionOutcome = Extract<DecisionOutcome,
   "answered" | "answered_by_policy" | "answered_by_parent" | "dismissed" | "dismissed_by_parent" | "replaced" | "expired" | "provider_resolved">;
 
-/** The row's inline status (docs/design-system.md §11.2): Awaiting Answer from the `question`
- * domain while it waits, then the past-tense outcome every Decision Record shares (#2204). */
-export function questionOutcome(item: QuestionItem): QuestionOutcome {
-  if (item.answered === undefined) return "awaiting_answer";
+/** The row's inline status (docs/design-system.md §11.2): the past-tense outcome every Decision
+ * Record shares (#2204). */
+export function questionOutcome(item: SettledQuestionItem): QuestionOutcome {
   if (item.resolvedByParentSessionId) return item.answered ? "answered_by_parent" : "dismissed_by_parent";
   if (item.answeredByPolicies?.length) return "answered_by_policy";
   if (item.resolutionReason === "replaced") return "replaced";
@@ -28,8 +34,9 @@ export function questionOutcome(item: QuestionItem): QuestionOutcome {
   return item.answered ? "answered" : "dismissed";
 }
 
-/** Line 1: the question's header, or its first line. Several questions name every header. */
-function questionTitle(questions: readonly AgentQuestion[]): string {
+/** Line 1: the question's header, or its first line. Several questions name every header. The
+ * pending question's marker (#2205) reads the same title. */
+export function questionTitle(questions: readonly AgentQuestion[]): string {
   const first = questions[0];
   if (!first) return "Question";
   const name = (question: AgentQuestion) => question.header?.trim() || structuredQuestionSummary(question.question);
@@ -84,12 +91,11 @@ function answeredBy(item: QuestionItem, viewer: ViewerIdentity | null): string |
 /** "Answered by you at 12:31 AM", or who else settled it. A parent session is named by its title,
  * a link where the transcript can navigate, or "the parent session"; never by its id. */
 function resolutionSentence(
-  item: QuestionItem,
+  item: SettledQuestionItem,
   viewer: ViewerIdentity | null,
   parentTitle: string | undefined,
   onOpenSession: ((sessionId: string) => void) | undefined,
 ): ReactNode {
-  if (item.answered === undefined) return null;
   const at = item.resolvedAt !== undefined && formatClock(item.resolvedAt) ? ` at ${formatClock(item.resolvedAt)}` : "";
   const parentId = item.resolvedByParentSessionId;
   const parent = !parentId ? null : parentTitle && onOpenSession
@@ -111,7 +117,6 @@ function resolutionSentence(
 }
 
 const SETTLED_VERB: Record<QuestionOutcome, string> = {
-  awaiting_answer: "",
   answered: "answered",
   answered_by_policy: "answered",
   answered_by_parent: "answered",
@@ -123,10 +128,10 @@ const SETTLED_VERB: Record<QuestionOutcome, string> = {
 };
 
 /** "Asked 12:30:01 AM, answered 12:31:05 AM": the exact times behind the row's one clock time. */
-function timing(item: QuestionItem): string | undefined {
+function timing(item: SettledQuestionItem): string | undefined {
   const asked = formatRecordedTimestamp(item.createdAt)?.label;
+  const settled = formatRecordedTimestamp(item.resolvedAt)?.label;
   const verb = SETTLED_VERB[questionOutcome(item)];
-  const settled = verb ? formatRecordedTimestamp(item.resolvedAt)?.label : undefined;
   const parts = [asked && `asked ${asked}`, settled && `${verb} ${settled}`].filter(Boolean);
   if (!parts.length) return undefined;
   const text = parts.join(", ");
@@ -140,7 +145,7 @@ function timing(item: QuestionItem): string | undefined {
  * they read "Answer not shown".
  */
 export function QuestionHistoryRow({ item, open, onToggle, onOpenSession }: {
-  item: QuestionItem;
+  item: SettledQuestionItem;
   open: boolean;
   onToggle?: () => void;
   /** Opens the parent session that settled it; absent where the surface cannot navigate. */
@@ -151,7 +156,7 @@ export function QuestionHistoryRow({ item, open, onToggle, onOpenSession }: {
   const title = questionTitle(item.questions);
   const answerLine = questionAnswerLine(item);
   const outcome = questionOutcome(item);
-  const meta = outcome === "awaiting_answer" ? statusMeta("question", outcome) : statusMeta("requestDecision", outcome);
+  const meta = statusMeta("requestDecision", outcome);
   const time = formatClock(item.resolvedAt ?? item.createdAt);
   const timestamp = formatRecordedTimestamp(item.resolvedAt ?? item.createdAt);
   const multiple = item.questions.length > 1;
@@ -176,10 +181,11 @@ export function QuestionHistoryRow({ item, open, onToggle, onOpenSession }: {
             return (
               <section className="tl-question-item" key={question.id}>
                 {multiple && (
-                  <div className="tl-question-label">
-                    {multiple && <strong>Question {index + 1}</strong>}
-                    {question.header && <span className="question-chip">{question.header}</span>}
-                  </div>
+                  // The question card's 12px dim header line (#2196): "Question 2 · Destination".
+                  <p className="tl-question-label">
+                    <span>Question {index + 1}</span>
+                    {question.header && <span>{question.header}</span>}
+                  </p>
                 )}
                 <StructuredQuestionText>{question.question}</StructuredQuestionText>
                 {question.context && (

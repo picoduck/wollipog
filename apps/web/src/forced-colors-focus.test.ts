@@ -62,6 +62,7 @@ const REVIEWED: ReadonlyMap<string, string> = new Map([
   [".column.drag-over { outline: 1px dashed var(--accent); outline-offset: -1px }", "a drop-target cue while dragging, not a focus indicator"],
   ["@media (forced-colors: active) .count-badge.on-icon { outline: 2px solid Canvas }", "the on-icon count badge's ring (§11.4), redrawn because forced colors drops its box-shadow; the badge is not focusable"],
   ["@media (forced-colors: active) .rail-attention-dot.on-icon { outline: 2px solid Canvas }", "the on-icon attention dot's ring (#1967), redrawn as the count badge's is; the dot is not focusable"],
+  ["@media (forced-colors: active) .ask-marker[data-selected] { outline: 2px solid Highlight }", "the question marker Show Where Asked selected (#2205), redrawn because forced colors drops its fill and accent bar; the marker is not focusable"],
   [".agents-list button[aria-current=\"true\"] { outline: 1px solid var(--border) }", "KNOWN GAP, not verified safe: this beats the global ring, so the focused current Agents item looks as it does at rest; reported as a follow-up to #1890"],
 ]);
 

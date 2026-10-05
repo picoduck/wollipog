@@ -7452,11 +7452,18 @@ textarea,
   min-width: 0;
   overflow-wrap: anywhere;
 }
+/* "Question 2 · Destination": the question card's 12px dim header line (#2196). */
 .tl-question-label {
   display: flex;
-  align-items: center;
-  gap: var(--space-2);
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin: 0;
   color: var(--text-dim);
+  font: var(--type-small);
+}
+.tl-question-label > * + *::before {
+  content: "·";
+  margin-right: var(--space-1);
 }
 .tl-question-context { color: var(--text-dim); }
 .tl-question-choices {
@@ -7487,6 +7494,60 @@ textarea,
   margin: 0;
   color: var(--text-faint);
   font: var(--type-small);
+}
+/* A pending question's marker (#2205; §13.2): one neutral row where it was asked, its icon in line
+   with a step's, while the card waits on the request dock as the only amber surface. Show Where
+   Asked gives it the selected wash (§5.2) until the reader scrolls. */
+.ask-marker {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  min-height: var(--control-h-sm);
+  padding: 0 var(--space-2) 0 calc(var(--space-1) + var(--icon-sm) + var(--space-2));
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font: var(--type-body);
+}
+/* The fill is its own rule: the scheme generator reads a colour and a fill in one rule as a text pair
+   and cannot resolve --surface-selected (as for .rail-item). --text clears it everywhere. */
+.ask-marker[data-selected] {
+  box-shadow: inset 2px 0 0 var(--accent);
+  color: var(--text);
+}
+.ask-marker[data-selected] { background: var(--surface-selected); }
+.ask-marker-icon {
+  flex: none;
+  color: var(--amber);
+}
+@media (forced-colors: active) {
+  .ask-marker-icon { color: inherit; }
+  .ask-marker[data-selected] { outline: 2px solid Highlight; }
+}
+.ask-marker-text {
+  display: flex;
+  flex: 1 1 auto;
+  gap: var(--space-1);
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.ask-marker-kind { flex: none; }
+.ask-marker-kind::after { content: " ·"; }
+.ask-marker-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+}
+@media (max-width: 760px) {
+  /* Square: `.btn.sm`'s padding and `.btn`'s max-content cap would size it by its label. */
+  .btn.ask-marker-jump {
+    width: var(--control-h-sm);
+    max-width: none;
+    padding: 0;
+  }
+  .ask-marker-jump-label { display: none; }
 }
 /* An agent a turn spawned (#2183): a step's row named after its spawning call, its role and step
    count in small meta, its status, then Open. The disclosure is a §5.5 trigger; Open is its
@@ -13357,8 +13418,8 @@ body.shell-dock-dragging * {
     order: -1;
   }
 }
-/* Capped above the transcript, a long question scrolls on its own, so the answers and the footer
-   keep their room; in the transcript and the Requests panel the card is not capped. */
+/* A long question scrolls on its own, so the answers and the footer keep their room; in the
+   Requests panel the card is not capped. */
 .question-bar > .question-text {
   flex: 0 1 auto;
   min-height: 0;
@@ -13366,23 +13427,40 @@ body.shell-dock-dragging * {
   overflow-y: auto;
   overscroll-behavior: contain;
 }
-.timeline .question-bar {
-  max-width: none;
-  max-height: none;
-  margin-top: 0;
-}
-.timeline .question-bar > .question-text,
 .request-panel-detail > .question-bar > .question-text {
   max-height: none;
   overflow: visible;
 }
-.timeline .question-list {
-  flex: none;
-  min-height: auto;
-  overflow: visible;
-  overscroll-behavior: auto;
+/* On the request dock (#2205) the dock places and caps the card. */
+.request-dock .question-bar {
+  max-width: none;
+  max-height: none;
+  margin: 0;
 }
-/* The transcript's question row and Composer Answer Mode still name a question's header this way. */
+/* Show Where Asked, after the time; icon-only on a phone under the same name (§15.1). */
+@media (max-width: 760px) {
+  /* Square: `.btn.sm`'s padding and `.btn`'s max-content cap would size it by its label. */
+  .btn.question-where-asked {
+    width: var(--control-h-sm);
+    max-width: none;
+    padding: 0;
+  }
+  .question-where-asked-label { display: none; }
+}
+/* With the software keyboard open the card keeps the question and its answer: no head line, a
+   one-line title, and Back and Next or Submit Answers (§13.2). */
+.question-card[data-keyboard-open] > .request-card-head,
+.question-card[data-keyboard-open] .question-dismiss,
+.question-card[data-keyboard-open] .question-step-note { display: none; }
+.question-card[data-keyboard-open] > .question-text {
+  display: -webkit-box;
+  max-height: none;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+}
+.question-card[data-keyboard-open] > .question-text > * { display: inline; }
+/* Composer Answer Mode still names a question's header this way, until #2212 replaces it. */
 .question-chip {
   display: inline-block;
   padding: 1px 8px;

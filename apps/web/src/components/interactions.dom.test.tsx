@@ -403,21 +403,8 @@ function ApprovalHarness({ requestId, runnerOnline = true }: { requestId: string
       ];
   return (
     <>
-      <SessionApprovalRegion
-        session={session}
-        runnerOnline={runnerOnline}
-        fallbackFocusRef={fallbackRef}
-        questionInTimeline={requestId !== null}
-      />
-      <EventTimeline items={items} questionContext={{
-        sessionId: session.id,
-        pendingQuestion: session.pendingApproval?.kind === "question" ? {
-          requestId: session.pendingApproval.requestId,
-          questions: session.pendingApproval.questions ?? [],
-        } : null,
-        questionInTimeline: requestId !== null,
-        runnerOnline,
-      }} />
+      <DockedRegion session={session} runnerOnline={runnerOnline} fallbackFocusRef={fallbackRef} />
+      <EventTimeline items={items} questionContext={{ pendingRequestIds: requestId ? [requestId] : [] }} />
       <textarea ref={fallbackRef} aria-label="Composer" />
     </>
   );
@@ -427,31 +414,13 @@ function QuestionPresentationHarness({ hydrated }: { hydrated: boolean }) {
   const fallbackRef = useRef<HTMLTextAreaElement>(null);
   const session = approvalSession("ask-a");
   const questions = session.pendingApproval?.kind === "question" ? session.pendingApproval.questions ?? [] : [];
-  const [inlineRequestId, setInlineRequestId] = React.useState<string | null>(null);
-  const questionInTimeline = inlineRequestId === "ask-a";
-  const handlePendingQuestionAvailabilityChange = React.useCallback((requestId: string, available: boolean) => {
-    setInlineRequestId((current) => available
-      ? current === requestId ? current : requestId
-      : current === requestId ? null : current);
-  }, []);
   return (
     <>
-      <SessionApprovalRegion
-        session={session}
-        runnerOnline
-        fallbackFocusRef={fallbackRef}
-        questionInTimeline={questionInTimeline}
-      />
+      <DockedRegion session={session} runnerOnline fallbackFocusRef={fallbackRef} />
       {hydrated && (
         <EventTimeline
           items={[{ kind: "question", id: 1, requestId: "ask-a", questions }]}
-          questionContext={{
-            sessionId: session.id,
-            pendingQuestion: { requestId: "ask-a", questions },
-            questionInTimeline,
-            onPendingQuestionAvailabilityChange: handlePendingQuestionAvailabilityChange,
-            runnerOnline: true,
-          }}
+          questionContext={{ pendingRequestIds: ["ask-a"] }}
         />
       )}
       <textarea ref={fallbackRef} aria-label="Composer" />
@@ -475,8 +444,8 @@ function offlinePolicySession(requestId: string, withContext: boolean): SessionV
   } as SessionView;
 }
 
-/** The session's own requests as SessionDetail shows them: the focus coordinator and question
- * fallback of the approval region, and every other request on the dock (#2179). */
+/** The session's own requests as SessionDetail shows them: the approval region's focus coordinator,
+ * and every request, questions included, on the dock (#2179, #2205). */
 function DockedRegion({ session, runnerOnline, fallbackFocusRef, alternateFallbackFocusRef }: {
   session: SessionView;
   runnerOnline: boolean;
@@ -775,7 +744,7 @@ test("Composer Response replacement falls back instead of focusing Dismiss", asy
   }
 });
 
-test("question focus and draft survive transcript hydration without exposing a second live form", async () => {
+test("a pending question keeps one form on the dock, with its focus and draft, as its transcript marker hydrates", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
   const container = happyContainer as unknown as HTMLDivElement;
@@ -790,23 +759,24 @@ test("question focus and draft survive transcript hydration without exposing a s
   await act(async () => { root.render(<QuestionPresentationHarness hydrated />); });
   assert.equal(domWindow.document.activeElement?.closest("[data-session-request-id]")?.getAttribute("data-session-request-id"), "ask-a");
   assert.equal(domWindow.document.activeElement?.getAttribute("type"), "radio",
-    "the same response control, not Dismiss, keeps focus after the presentation moves");
+    "the same response control keeps focus as the transcript arrives");
   assert.equal(domWindow.document.activeElement?.getAttribute("data-session-request-control"), "question:choice:option:0");
   assert.equal(container.querySelector<HTMLInputElement>('input[type="radio"]')?.checked, true);
   assert.equal(container.querySelectorAll('[aria-label="Agent Questions"]').length, 1);
   assert.equal(container.querySelectorAll('input[type="radio"]').length, 3, "A, B and Something Else");
-  assertNoDomNode(container.querySelector(".tl-question"),
-    "the live inline form replaces the hydrated historical card");
+  assert.equal(container.querySelector(".request-dock [aria-label='Agent Questions']") != null, true, "the form is on the dock");
+  assert.equal(container.querySelector(".ask-marker")?.textContent, "QuestionChoose for ask-a",
+    "the transcript row is the question's marker");
+  assertNoDomNode(container.querySelector(".tl-question"));
   await act(async () => { root.render(<QuestionPresentationHarness hydrated={false} />); });
   assert.equal(container.querySelectorAll('[aria-label="Agent Questions"]').length, 1,
-    "unmounting the inline timeline restores the reachable fallback");
-  assertNoDomNode(container.querySelector(".tl-question"));
+    "the dock keeps the form without the transcript");
   await act(async () => { root.unmount(); });
   clearQuestionDrafts("session-1", "ask-a");
   container.remove();
 });
 
-test("duplicate unresolved request rows expose only the latest question as interactive", async () => {
+test("a pending question's transcript rows are markers, never a second form", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
   const container = happyContainer as unknown as HTMLDivElement;
@@ -821,20 +791,13 @@ test("duplicate unresolved request rows expose only the latest question as inter
             { kind: "question", id: 1, requestId: "ask-a", questions },
             { kind: "question", id: 2, requestId: "ask-a", questions },
           ]}
-          questionContext={{
-            sessionId: session.id,
-            pendingQuestion: { requestId: "ask-a", questions },
-            questionInTimeline: true,
-            runnerOnline: true,
-          }}
+          questionContext={{ pendingRequestIds: ["ask-a"] }}
         />,
       );
     });
-    assert.equal(container.querySelectorAll('[aria-label="Agent Questions"]').length, 1);
-    assert.equal(container.querySelectorAll(".tl-question").length, 1,
-      "the earlier duplicate remains a historical card");
-    assert.equal(container.querySelector('[role="listitem"]:last-child [aria-label="Agent Questions"]') != null, true,
-      "the latest duplicate owns the live form");
+    assert.equal(container.querySelectorAll('[aria-label="Agent Questions"]').length, 0);
+    assert.equal(container.querySelectorAll(".ask-marker").length, 2);
+    assert.equal(container.querySelectorAll(".tl-question").length, 0);
   } finally {
     await act(async () => root.unmount());
     clearQuestionDrafts("session-1", "ask-a");

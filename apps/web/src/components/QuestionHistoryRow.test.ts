@@ -5,11 +5,12 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { AgentQuestion, QuestionAnswerSummaryEntry, SessionEvent, SessionEventPayload } from "@wollipog/protocol";
 import { deriveTimeline, type TimelineItem } from "../timeline.js";
 import { ViewerIdentityContext, viewerIdentity, type ViewerIdentity } from "../resolver-identity.js";
-import { QuestionHistoryRow, questionAnswerLine, questionOutcome } from "./QuestionHistoryRow.js";
+import { QuestionHistoryRow, isSettledQuestion, questionAnswerLine, questionOutcome, type SettledQuestionItem } from "./QuestionHistoryRow.js";
 
 (globalThis as typeof globalThis & { React: typeof React }).React = React;
 
 type QuestionItem = Extract<TimelineItem, { kind: "question" }>;
+
 
 const ASKED = Date.UTC(2026, 9, 3, 0, 30, 0);
 const ANSWERED = Date.UTC(2026, 9, 3, 0, 31, 0);
@@ -35,10 +36,10 @@ function event(payload: SessionEventPayload, ts: number): SessionEvent {
   return { id: seq, sessionId: "session", seq, ts, payload };
 }
 
-/** The rows the transcript builds from these stored events, as a reload would. */
-function questionFrom(events: SessionEvent[]): QuestionItem {
+/** The settled row the transcript builds from these stored events, as a reload would. */
+function questionFrom(events: SessionEvent[]): SettledQuestionItem {
   const item = deriveTimeline(events).find((candidate) => candidate.kind === "question");
-  assert.ok(item?.kind === "question");
+  assert.ok(item?.kind === "question" && isSettledQuestion(item));
   return item;
 }
 
@@ -46,7 +47,7 @@ function ask(questions: AgentQuestion[], requestId = "ask"): SessionEvent {
   return event({ kind: "question_request", requestId, questions }, ASKED);
 }
 
-function render(item: QuestionItem, open = false, viewing: ViewerIdentity | null = null): string {
+function render(item: SettledQuestionItem, open = false, viewing: ViewerIdentity | null = null): string {
   return renderToStaticMarkup(React.createElement(
     ViewerIdentityContext.Provider,
     { value: viewing },
@@ -231,7 +232,7 @@ test("each resolution says who settled it, so a reused request id never keeps an
     event({ kind: "question_request", requestId: "reused", occurrenceId: "second", questions: [destination] }, ASKED),
     answered([{ questionId: "destination", selected: ["Destination 2 (Staging)"] }],
       { occurrenceId: "second", answeredByUserId: "user-grace" }, "reused"),
-  ]).filter((item): item is QuestionItem => item.kind === "question");
+  ]).filter((item): item is SettledQuestionItem => item.kind === "question" && isSettledQuestion(item));
   assert.deepEqual(items.map((item) => resolutionOf(render(item, true, grace))!.replace(/ at .*/, "")),
     ["Answered by Ada Lovelace", "Answered by you"]);
 
@@ -245,12 +246,10 @@ test("each resolution says who settled it, so a reused request id never keeps an
   assert.equal(dismissed.answeredByUserId, undefined);
 });
 
-test("an unanswered question keeps the Awaiting Answer warning status", () => {
-  const item = questionFrom([ask([destination])]);
-  assert.equal(questionOutcome(item), "awaiting_answer");
-  const html = render(item);
-  assert.match(html, /<span class="status sm t-warning inline tl-step-status">Awaiting Answer<\/span>/);
-  assert.doesNotMatch(html, /tl-step-detail|tl-question-resolution/);
+test("an unanswered question has no answered row: its transcript row is the pending-question marker (#2205)", () => {
+  const item = deriveTimeline([ask([destination])]).find((candidate) => candidate.kind === "question");
+  assert.ok(item?.kind === "question");
+  assert.equal(isSettledQuestion(item), false);
 });
 
 test("a resolution names its occurrence, so a reused request id never moves an answer to another row", () => {

@@ -364,31 +364,25 @@ for (const viewport of [
   { name: "mobile portrait", width: 390, height: 844 },
   { name: "mobile landscape", width: 844, height: 390 },
 ]) {
-  test(`a long question set takes one step at a time and uses one natural page scroller in ${viewport.name}`, async ({ page }) => {
+  test(`a long question set takes one step at a time on the dock, whose body scrolls inside its cap, in ${viewport.name}`, async ({ page }) => {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     await page.goto("/agent-questions-e2e.html?set=long");
 
     const bar = page.getByRole("region", { name: "Agent Questions" });
-    const list = page.locator(".question-list");
+    await expect(page.locator(".request-dock").getByRole("region", { name: "Agent Questions" })).toBeVisible();
     await expect(page.getByRole("radio")).toHaveCount(5);
     await expect(page.getByRole("checkbox")).toHaveCount(0);
-    if (viewport.name === "mobile portrait") {
-      // One question per step keeps the card within a phone's height, Submit and all.
-      expect((await geometry(bar)).height).toBeLessThan(viewport.height);
-    }
-    const overflow = await list.evaluate((element) => ({
-      clientHeight: element.clientHeight,
-      scrollHeight: element.scrollHeight,
-      overflowY: getComputedStyle(element).overflowY,
-    }));
-    expect(overflow.scrollHeight).toBeLessThanOrEqual(overflow.clientHeight + 1);
-    expect(overflow.overflowY).toBe("visible");
+    // The dock never takes more than half of the reading column (§13.2), whatever the card holds.
+    const slot = await geometry(page.locator(".chat-reading > .session-notice-slot"));
+    const reading = await geometry(page.locator(".chat-reading"));
+    expect(slot.height).toBeLessThanOrEqual(reading.height * 0.5 + 1);
+    await expectInsideViewport(bar, page);
 
     await answerLongSet(page);
     const submit = page.getByRole("button", { name: "Submit Answers" });
     await submit.scrollIntoViewIfNeeded();
     await expectInsideViewport(submit, page);
-    expect(await list.evaluate((element) => element.scrollTop)).toBe(0);
+    expect(await page.evaluate(() => window.scrollY)).toBe(0);
     await submit.click();
     await expect(page.getByRole("status")).toHaveText("Question Answered");
     expect(await page.evaluate(() => window.agentQuestionCalls[0]?.answers)).toEqual({
@@ -399,27 +393,9 @@ for (const viewport of [
   });
 }
 
-test("a long history-loading fallback remains reachable inside the fixed session column", async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/agent-questions-e2e.html?set=long&slot=1");
-
-  const bar = page.getByRole("region", { name: "Agent Questions" });
-  const list = page.locator(".question-list");
-  await expectInsideViewport(bar, page);
-  await expect(list).toHaveCSS("overflow-y", "auto");
-  expect(await page.evaluate(() => window.scrollY)).toBe(0);
-
-  await answerLongSet(page);
-  const submit = page.getByRole("button", { name: "Submit Answers" });
-  await expect(submit).toBeEnabled();
-  await expectInsideViewport(submit, page);
-  await expectInsideViewport(bar, page);
-  expect(await page.evaluate(() => window.scrollY)).toBe(0);
-});
-
 test("a question taller than the capped card scrolls on its own and keeps its answers and footer in reach", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/agent-questions-e2e.html?set=long-text&slot=1");
+  await page.goto("/agent-questions-e2e.html?set=long-text");
   const bar = page.getByRole("region", { name: "Agent Questions" });
   await expectInsideViewport(bar, page);
   const title = bar.locator(".question-text");
@@ -450,14 +426,6 @@ test("an option label with a long unbroken identifier wraps inside the card at 3
   await expect(card.locator(".choice-row").first()).toBeVisible();
   expect(await card.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
-});
-
-test("in the transcript a long question is not capped", async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/agent-questions-e2e.html?set=long-text");
-  const title = page.getByRole("region", { name: "Agent Questions" }).locator(".question-text");
-  await expect(title).toHaveCSS("overflow-y", "visible");
-  expect(await title.evaluate((element) => element.scrollHeight <= element.clientHeight + 1)).toBe(true);
 });
 
 test("a replacement request cannot submit retained selections", async ({ page }) => {
@@ -579,10 +547,13 @@ test("every question row reads its outcome and answer without arrows or emoji (#
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/agent-questions-e2e.html?set=gallery");
   const rows = page.locator(".tl-question");
-  await expect(rows).toHaveCount(8);
+  await expect(rows).toHaveCount(7);
   await expect(rows.locator(".tl-step-status")).toHaveText([
-    "Answered", "Answered", "Answered", "Answered", "Answered", "Dismissed", "Answered by Policy", "Awaiting Answer",
+    "Answered", "Answered", "Answered", "Answered", "Answered", "Dismissed", "Answered by Policy",
   ]);
+  // The question still waiting is its marker, without a status (#2205).
+  await expect(page.locator(".ask-marker .ask-marker-title")).toHaveText("Checks");
+  await expect(page.locator(".ask-marker .ask-marker-jump")).toHaveCount(0);
   await expect(rows.nth(0).locator(".tl-step-detail")).toHaveText("Answer: Destination 1 (Production)");
   await expect(rows.nth(1).locator(".tl-step-detail")).toHaveText("Answer: Unit Tests, Smoke Test");
   await expect(rows.nth(2).locator(".tl-step-detail")).toHaveText(
@@ -773,6 +744,181 @@ test.describe("on a coarse pointer", () => {
       expect((await geometry(target)).height).toBeGreaterThanOrEqual(44);
       // Primary text never gives way to secondary text at phone widths.
       expect(await target.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+    }
+  });
+});
+
+// #2205: the question waits on the request dock; its transcript row is a marker, and the two link
+// both ways.
+const reader = (page: Page) => page.getByRole("region", { name: "Session Activity" });
+const dockedCard = (page: Page) => page.locator(".request-dock").getByRole("region", { name: "Agent Questions" });
+const strip = (page: Page) => page.locator(".request-dock .dock-strip");
+const marker = (page: Page) => page.locator(".ask-marker");
+
+for (const viewport of [
+  { name: "desktop", width: 1440, height: 900 },
+  { name: "phone", width: 390, height: 844 },
+]) {
+  test(`a pending question's row is its marker until answered, then the answered row in the same place, at ${viewport.name} (#2205)`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/agent-questions-e2e.html");
+    await expect(dockedCard(page)).toBeVisible();
+    await expect(reader(page).getByRole("region", { name: "Agent Questions" })).toHaveCount(0);
+    await expect(marker(page).locator(".ask-marker-kind")).toHaveText("Question");
+    await expect(marker(page).locator(".ask-marker-title")).toHaveText("Language");
+    const jump = marker(page).getByRole("button", { name: "Jump to Question", exact: true });
+    await expect(jump).toBeVisible();
+    if (viewport.width <= 760) await expect(jump.locator(".ask-marker-jump-label")).toBeHidden();
+    else await expect(jump).toHaveText("Jump to Question");
+    // The live card stays the only amber surface: the marker is a neutral row.
+    expect(await marker(page).evaluate((element) => getComputedStyle(element).backgroundColor)).toBe("rgba(0, 0, 0, 0)");
+    const row = page.locator("[data-virtual-row]").filter({ has: marker(page) });
+    const key = await row.getAttribute("data-virtual-key");
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(viewport.width);
+
+    await page.getByRole("radio", { name: /TypeScript/ }).click();
+    await page.getByRole("button", { name: "Submit Answers", exact: true }).click();
+    await expect(page.getByRole("status")).toHaveText("Question Answered");
+    await expect(marker(page)).toHaveCount(0);
+    await expect(page.locator(".request-dock")).toHaveCount(0);
+    await expect(page.locator(`[data-virtual-key="${key}"] .tl-question .tl-step-detail`)).toHaveText("Answer: TypeScript");
+  });
+
+  test(`Jump to Question from far up the transcript restores the dock from its strip and focuses its heading at ${viewport.name} (#2205)`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/agent-questions-e2e.html?after=60");
+    await expect(dockedCard(page)).toBeVisible();
+    await expect(reader(page)).toHaveAttribute("data-follow-tail-state", "following");
+    await reader(page).hover();
+    for (let wheel = 0; wheel < 12 && !(await marker(page).isVisible()); wheel += 1) await page.mouse.wheel(0, -1200);
+    await expect(marker(page)).toBeVisible();
+    await expect(reader(page)).toHaveAttribute("data-follow-tail-state", "paused");
+    await expect(strip(page)).toBeVisible();
+    await expect(dockedCard(page)).toBeHidden();
+
+    await marker(page).getByRole("button", { name: "Jump to Question", exact: true }).click();
+    await expect(dockedCard(page).getByRole("heading", { name: "Which language should the example use?" })).toBeFocused();
+    await expect(strip(page)).toHaveCount(0);
+  });
+
+  test(`Show Where Asked puts the marker in the upper third, selected until the next scroll, with the dock as a strip, at ${viewport.name} (#2205)`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/agent-questions-e2e.html?after=60");
+    const show = dockedCard(page).getByRole("button", { name: "Show Where Asked", exact: true });
+    await expect(show).toBeVisible();
+    if (viewport.width <= 760) await expect(show.locator(".question-where-asked-label")).toBeHidden();
+    else await expect(show).toHaveText("Show Where Asked");
+    await show.click();
+
+    await expect(reader(page)).toHaveAttribute("data-follow-tail-state", "paused");
+    await expect(strip(page)).toBeVisible();
+    await expect(dockedCard(page)).toBeHidden();
+    await expect(marker(page)).toHaveAttribute("data-selected", "");
+    await expect.poll(async () => {
+      const [box, area] = [await geometry(marker(page)), await geometry(reader(page))];
+      return box.top >= area.top && box.bottom <= area.top + area.height / 3;
+    }).toBe(true);
+    // The selected wash (§5.2), not the card's amber.
+    expect(await marker(page).evaluate((element) => getComputedStyle(element).backgroundColor)).not.toBe("rgba(0, 0, 0, 0)");
+
+    // The reader's next scroll ends the selection.
+    await reader(page).hover();
+    await page.mouse.wheel(0, -40);
+    await expect(marker(page)).not.toHaveAttribute("data-selected", "");
+
+    // The strip restores the card and moves focus to its heading.
+    await strip(page).locator(".dock-strip-title").click();
+    await expect(dockedCard(page).getByRole("heading", { name: "Which language should the example use?" })).toBeFocused();
+  });
+}
+
+test("Show Where Asked is disabled with its reason when the question's place isn't in the transcript (#2205)", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/agent-questions-e2e.html?unloaded=1");
+  const show = dockedCard(page).getByRole("button", { name: "Show Where Asked", exact: true });
+  await expect(show).toBeDisabled();
+  const reason = dockedCard(page).locator(".request-card-reasons").getByText("This question's place in the transcript isn't loaded.");
+  await expect(reason).toBeVisible();
+  expect(await show.getAttribute("aria-describedby")).toBe(await reason.getAttribute("id"));
+});
+
+test.describe("on a phone with the software keyboard open", () => {
+  test.use({ hasTouch: true, isMobile: true, viewport: { width: 390, height: 844 } });
+
+  test("the dock is at most 40% and the card keeps only the question, its answer, Back and the primary (#2205)", async ({ page }) => {
+    await page.goto("/agent-questions-e2e.html?set=notes&keyboard=1");
+    const card = dockedCard(page);
+    await expect(card).toBeVisible();
+    const [slot, reading] = [await geometry(page.locator(".chat-reading > .session-notice-slot")), await geometry(page.locator(".chat-reading"))];
+    expect(slot.height).toBeLessThanOrEqual(reading.height * 0.4 + 1);
+    await expect(card.locator(".request-card-head")).toBeHidden();
+    await expect(card.getByRole("button", { name: "Show Where Asked" })).toBeHidden();
+    await expect(card.getByRole("button", { name: "Dismiss" })).toBeHidden();
+    await expect(card.locator(".question-step-note")).toBeHidden();
+    const title = card.locator(".question-text");
+    const lineHeight = await title.evaluate((element) => parseFloat(getComputedStyle(element).lineHeight));
+    expect((await geometry(title)).height).toBeLessThanOrEqual(lineHeight + 1);
+
+    await card.locator(".question-input").fill("Shipped the dock.");
+    await card.getByRole("button", { name: "Next", exact: true }).click();
+    await expect(card.getByRole("button", { name: "Back", exact: true })).toBeVisible();
+    await expect(card.getByRole("button", { name: "Submit Answers", exact: true })).toBeVisible();
+
+    // The second text field, below the body's fold, scrolls into view within the body alone.
+    const body = card.locator(".request-card-body");
+    const field = card.locator(".question-input");
+    const scrollPositions = () => page.evaluate(() => ({
+      page: window.scrollY,
+      reader: document.querySelector<HTMLElement>(".detail-scroll")!.scrollTop,
+    }));
+    const before = await scrollPositions();
+    expect(await body.evaluate((element) => element.scrollTop)).toBe(0);
+    expect((await geometry(field)).bottom).toBeGreaterThan((await geometry(body)).bottom);
+    await field.evaluate((element) => (element as HTMLElement).focus({ preventScroll: true }));
+    await expect(field).toBeFocused();
+    expect(await body.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+    const [fieldBox, bodyBox] = [await geometry(field), await geometry(body)];
+    expect(fieldBox.top).toBeGreaterThanOrEqual(bodyBox.top - 0.5);
+    expect(fieldBox.bottom).toBeLessThanOrEqual(bodyBox.bottom + 0.5);
+    expect(await scrollPositions()).toEqual(before);
+  });
+
+  test("a row or Next tapped while typing in the docked card takes the tap, though the dock regrows on blur (#2205)", async ({ page }) => {
+    await page.goto("/agent-questions-e2e.html");
+    const card = dockedCard(page);
+    await card.getByRole("radio", { name: "Something Else…" }).tap();
+    await card.locator(".question-input").fill("Rust");
+    await expect(card.locator(".question-input")).toBeFocused();
+    const typescript = card.getByRole("radio", { name: /TypeScript/ });
+    await typescript.tap();
+    await expect(typescript).toBeChecked();
+    await expect(card.locator(".question-input")).toHaveCount(0);
+
+    await page.goto("/agent-questions-e2e.html?set=notes");
+    await dockedCard(page).locator(".question-input").fill("Shipped the dock.");
+    await dockedCard(page).getByRole("button", { name: "Next", exact: true }).tap();
+    await expect(dockedCard(page).locator(".question-step-note")).toContainText("Question 2 of 2");
+  });
+
+  test("Show Where Asked and Jump to Question are icon buttons named as on desktop, with 44px targets (#2205)", async ({ page }) => {
+    await page.goto("/agent-questions-e2e.html");
+    const targets = [
+      dockedCard(page).getByRole("button", { name: "Show Where Asked", exact: true }),
+      marker(page).getByRole("button", { name: "Jump to Question", exact: true }),
+    ];
+    for (const button of targets) {
+      await expect(button).toBeVisible();
+      await expect(button.locator("span")).toBeHidden();
+      const hit = await button.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        const after = getComputedStyle(element, "::after");
+        return {
+          width: rect.width - parseFloat(after.left) - parseFloat(after.right),
+          height: rect.height - parseFloat(after.top) - parseFloat(after.bottom),
+        };
+      });
+      expect(hit.width).toBeGreaterThanOrEqual(44);
+      expect(hit.height).toBeGreaterThanOrEqual(44);
     }
   });
 });

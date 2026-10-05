@@ -1521,7 +1521,6 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Queued message (`queuedMessage`: the composer queue) | Pending, Queued, Canceled: neutral · Sending, Starting, Steering…: info (pulse) · Accepted, Pending Delivery: info · Held, Delivery Uncertain: warning · Delivery Failed, Not Sent: danger. Rendered as the inline badge. |
 | Message receipt (`messageReceipt`: the one line under a sent message in the transcript — pending prompts, steering, provider commands, the rename) | Sending: a spinner and the word, no badge · Queued, Canceled, Dismissed: neutral · Delivered, Steered the Current Turn: success (inline) · Delivery Uncertain: warning · Delivery Failed, Not Sent, Not Accepted, Rejected, Rename Failed: danger. Rendered as the inline badge. |
 | Workflow gate / run decision | Awaiting Decision: warning · Approved: success (inline) · Rejected: neutral |
-| Agent question (`question`: the transcript's question row while it waits) | Awaiting Answer: warning, until the pending-question marker (#2205) replaces it. A settled question takes its word from `requestDecision`. Rendered as the inline badge. |
 | Request decision (`requestDecision`: the outcome of every Decision Record and of the settled question row, #2204) | Allowed, Answered, Answered by Policy, Answered by Parent, Rechecked Automatically: success · Rejected, Dismissed, Dismissed by Parent, Ended Early, Replaced, Expired, Resolved by Provider, Another Account Selected, Escalated, Resolved: neutral · Blocked (by a policy, or fail-closed by Wollipog): danger · Timed Out: warning. Always past tense, never a provider's option id. |
 | Pod | Active: info · Paused: neutral · Conflicted: warning · Failed: danger |
 | Campaign work item (`campaignWork`, Campaign Status) | Planned, Queued, Canceled, Scope Removed: neutral · Running: info (pulse) · Waiting: warning · Blocked: danger · Delivered: success. Rendered as the inline badge on work rows. |
@@ -2104,8 +2103,7 @@ follows these rules so it never crowds out the conversation it asks about:
   machine-owner-only sign-in) is a visible foot-note the disabled buttons reference; a failed
   decision is a compact danger notice above the footer. The dock is the notice slot's `lead`
   (`SessionNoticeSlot`), at the end of the `.chat-reading` column, a size container its caps are
-  measured against. Questions stay where they are until #2205, and a worker's request stays in the
-  Agents panel.
+  measured against. A worker's request stays in the Agents panel.
 - **A question is the same card, one question per step** (`SessionQuestionBanner` with
   `QuestionStep`, #2196). The head line is the kind ("Question", "Async Question", or "Recovery
   Required" in the danger tone after a provider restart), owner and time; then the question's header
@@ -2154,11 +2152,19 @@ follows these rules so it never crowds out the conversation it asks about:
   request updates the strip's title and count and is announced once. The request never disappears,
   and the height the dock gives back goes to the transcript without moving its reading anchor: the
   strip waits until the reader is at least that height above the tail, so nothing clamps the rows.
-- **The question and its context link both ways.** The transcript keeps a compact neutral marker
-  where a question was asked ("Question · title", with Jump to Question). The card head has Show Where
-  Asked, which scrolls the transcript so the marker sits in the upper third, gives the marker the
-  selected wash until the next scroll, and shrinks the dock to its strip. Jump to Question restores
-  the dock (or the answer panel) and moves focus to it.
+- **The question and its context link both ways** (#2205). A pending question lives only in the
+  dock; its transcript row is a compact neutral marker where it was asked (`AskMarker`: a 16px amber
+  `MessageCircleQuestion`, "Question · title", and a ghost `.btn.sm` Jump to Question), which becomes
+  the answered question row in the same place. The card head has Show Where Asked (Lucide `Locate`)
+  after the time, which scrolls the transcript so the marker sits in the upper third, gives the marker
+  the selected wash until the reader next scrolls, and pauses following, so the dock takes its strip
+  as reading back does. A marker older than the loaded transcript is loaded back to first; when it
+  can't be found, Show Where Asked is disabled with "This question's place in the transcript isn't
+  loaded." as its foot-note. Jump to Question restores the dock (or the answer panel), expands the
+  question if another request is expanded, and moves focus to its heading.
+- **The software keyboard leaves the question and its answer.** While it is open the question card
+  drops its head line, its title takes one line, and its footer keeps only Back and Next or Submit
+  Answers; a field that takes focus is scrolled into view within the card's body, never the page.
 - **Answer Mode has Show Context.** When a question is answered in the composer, the answer panel's
   header has Show Context, which shrinks the panel to its header (the question, a summary of the
   selections so far, Show Answer). Nothing resets: selections, draft and step are kept. Below 760px

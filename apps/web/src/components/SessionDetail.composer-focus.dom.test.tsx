@@ -5950,6 +5950,16 @@ test("the /respond app command enters Answer Mode and submits without sending an
       ordinary.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Enter", bubbles: true }) as never);
     });
     assert.equal(ordinary.value, "/respond 2", "an unsupported direct answer remains available to edit");
+    // The question holds the notice slot on its dock (#2205), so the composer's error waits behind
+    // its "+1 More" (§13.2).
+    const more = [...fixture.container.querySelectorAll<HTMLButtonElement>(".request-dock .session-notice-more")]
+      .find((button) => button.textContent === "+1 More");
+    assert.ok(more);
+    await act(async () => { more.click(); });
+    const noticeItem = [...fixture.container.ownerDocument.querySelectorAll<HTMLElement>("[role=menuitem]")]
+      .find((item) => item.textContent?.includes("Command"));
+    assert.ok(noticeItem, "the composer's error is listed behind the dock");
+    await act(async () => { noticeItem.click(); });
     assert.match(fixture.container.textContent ?? "", /\/respond doesn't take an answer\. Send \/respond on its own to answer in Answer Mode\./);
     assert.equal(prompts.length, 0);
     await act(async () => {

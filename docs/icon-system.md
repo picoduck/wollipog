@@ -106,7 +106,8 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `FolderOpenIcon` | Lucide | `FolderOpen` | Open in Files: shows a referenced file in the Files panel. |
 | `BanIcon` | Lucide | `Ban` | Why a choice can't be made: a disabled command's reason in the / picker. |
 | `FolderUpIcon` | Lucide | `CornerUpLeft` | Navigate to the parent directory. |
-| `QuestionIcon` | Lucide | `MessageCircleQuestion` | A question: an agent's question row in the transcript; Side Chat's launcher; the Request Card's Question kind. |
+| `QuestionIcon` | Lucide | `MessageCircleQuestion` | A question: an agent's question row and pending-question marker in the transcript; Side Chat's launcher; the Request Card's Question kind. |
+| `LocateIcon` | Lucide | `Locate` | Show Where Asked: scrolls the transcript to a docked question's marker. |
 | `MicIcon` | Lucide | `Mic` | Dictation action. |
 | `ImageIcon` | Lucide | `Image` | Image attachment; the Request Card's UI Evidence kind. |
 | `ImageOffIcon` | Lucide | `ImageOff` | Transcript media that could not load; an attached or sent image that could not be shown; the composer's refused drop target when the model can't read images. |
@@ -123,7 +124,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `ShieldCheckIcon` | Lucide | `ShieldCheck` | An Orchestrator's fixed permission mode in the composer bar. |
 | `PlanIcon` | Lucide | `ListTodo` | A plan: the composer bar's Plan toggle and a transcript plan card's head; `ListChecks` already means the background job list. |
 | `ArrowUpIcon` | Lucide | `ArrowUp` | Generic upward action. |
-| `ArrowDownIcon` | Lucide | `ArrowDown` | Generic downward action. |
+| `ArrowDownIcon` | Lucide | `ArrowDown` | Generic downward action; Jump to Question on a pending question's transcript marker, down to the request dock. |
 | `StopTurnIcon` | Lucide | `Square` | Filled and optically scaled to preserve its send-arrow balance; also a stopped turn's footer mark. |
 | `TuningIcon` | Lucide | `SlidersHorizontal` | Model or effort tuning. |
 | `GitHubIcon` | Custom Exception | `GitHub Mark` | Official brand mark with a 16-unit solid geometry. |

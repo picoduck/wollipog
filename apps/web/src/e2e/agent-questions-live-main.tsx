@@ -1,11 +1,14 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import type { SessionView } from "@wollipog/protocol";
+import { prioritizedPendingRequests, type SessionView } from "@wollipog/protocol";
 import { createApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { createBrowserApiTransport } from "../api-transport.js";
 import { EventTimeline } from "../components/EventTimeline.js";
-import { SessionApprovalRegion } from "../components/SessionApproval.js";
+import { SessionApprovalRegion, focusSessionRequest } from "../components/SessionApproval.js";
+import { SessionNoticeSlot } from "../components/SessionNoticeSlot.js";
+import { RequestDock, dockRequests } from "../components/requests/RequestDock.js";
+import { RequestKindIcon, pendingRequestsTitle } from "../components/requests/request-meta.js";
 import { ComposerQuestionResponse } from "../components/ComposerQuestionResponse.js";
 import type { TimelineItem } from "../timeline.js";
 import { useQuestionResponseStyle } from "../question-response-style.js";
@@ -29,7 +32,6 @@ function LiveQuestionFixture() {
   const [session, setSession] = useState<SessionView | null>(null);
   const [actualAsyncMessage, setActualAsyncMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [inlineQuestionRequestId, setInlineQuestionRequestId] = useState<string | null>(null);
   const fallbackFocusRef = useRef<HTMLTextAreaElement>(null);
   const answerInputRef = useRef<HTMLInputElement>(null);
   const [answerActive, setAnswerActive] = useState(false);
@@ -74,11 +76,6 @@ function LiveQuestionFixture() {
     if (pendingQuestion && responseStyle === "composer") setAnswerActive(true);
     else if (!pendingQuestion) setAnswerActive(false);
   }, [pendingQuestion?.requestId, responseStyle]);
-  const handleQuestionAvailabilityChange = useCallback((requestId: string, available: boolean) => {
-    setInlineQuestionRequestId((current) => available
-      ? current === requestId ? current : requestId
-      : current === requestId ? null : current);
-  }, []);
   if (pendingQuestion) {
     questionEventRef.current = {
       kind: "question",
@@ -94,7 +91,9 @@ function LiveQuestionFixture() {
   const timelineItems: TimelineItem[] = questionEvent
     ? [...context, { ...questionEvent, answered: pendingQuestion ? undefined : true }]
     : context;
-  const questionInTimeline = pendingQuestion != null && inlineQuestionRequestId === pendingQuestion.requestId;
+  // As SessionDetail: the question waits on the request dock above the composer and its transcript row
+  // is a marker (#2205).
+  const docked = session ? dockRequests(prioritizedPendingRequests(session.pendingApproval)) : [];
 
   return (
     <ApiProvider client={client}>
@@ -111,10 +110,8 @@ function LiveQuestionFixture() {
                 runnerOnline
                 fallbackFocusRef={fallbackFocusRef}
                 alternateFallbackFocusRef={scrollRef}
-                onSessionUpdate={setSession}
-                showKeyHints={false}
-                questionInTimeline={questionInTimeline}
               />
+              <div className="chat-reading">
               <div className="detail-main">
                 <div className="detail-reader">
                   <div className="detail-scroll measured-virtual-scroll" ref={scrollRef} tabIndex={0}>
@@ -124,26 +121,27 @@ function LiveQuestionFixture() {
                         scrollRef={scrollRef}
                         historyKey="agent-question-live-e2e"
                         questionContext={{
-                          sessionId: session.id,
-                          pendingQuestion: pendingQuestion ? {
-                            requestId: pendingQuestion.requestId,
-                            occurrenceId: pendingQuestion.occurrenceId,
-                            questions: pendingQuestion.questions ?? [],
-                            async: pendingQuestion.async,
-                            recoveryReason: pendingQuestion.recoveryReason,
-                            recoveryAction: pendingQuestion.recoveryAction,
-                          } : null,
-                          questionInTimeline,
-                          onPendingQuestionAvailabilityChange: handleQuestionAvailabilityChange,
-                          runnerOnline: true,
-                          onSessionUpdate: setSession,
-                          showKeyHints: false,
+                          pendingRequestIds: docked.flatMap((request) => request.kind === "question" ? [request.requestId] : []),
+                          onJumpToQuestion: (requestId) => focusSessionRequest(session.id, requestId),
                         }}
                       />
                     )}
                     {!session.pendingApproval && <p role="status">Question Answered</p>}
                   </div>
                 </div>
+              </div>
+              {docked.length > 0 && (
+                <SessionNoticeSlot sessionId={session.id} entries={[]} lead={{
+                  key: "request-dock",
+                  title: pendingRequestsTitle(docked.length),
+                  icon: <RequestKindIcon request={docked[0]!} />,
+                  requestIds: docked.map((request) => request.requestId),
+                  render: ({ trailing, revealRequestId, concealTrailing }) => (
+                    <RequestDock session={session} requests={docked} runnerOnline onSessionUpdate={setSession}
+                      headTrailing={trailing} revealRequestId={revealRequestId} onConceal={concealTrailing} />
+                  ),
+                }} />
+              )}
               </div>
               <div className="composer">
                 {showQueuedPrompts && queuedPrompts.length > 0 && (

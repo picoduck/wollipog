@@ -458,7 +458,7 @@ test("evidence-free event progress waits for the idle cadence, roster evidence d
   assert.equal(childRegistryRefreshDelay(true, -5), 1_000, "a clock that went backwards never yields a negative wait");
 });
 
-test("a worker-owned primary approval stays actionable in the Agents panel", () => {
+test("a worker-owned request stays actionable in the Agents panel; the session's own are on its dock", () => {
   const primary = {
     requestId: "worker-permission",
     kind: "permission",
@@ -466,23 +466,14 @@ test("a worker-owned primary approval stays actionable in the Agents panel", () 
     options: [],
     ownerToolUseId: "worker-tool",
   } as NonNullable<SessionView["pendingApproval"]>;
-  assert.equal(shouldOpenPrimaryRequestInSession(primary, primary.requestId, true), false);
-  assert.equal(shouldOpenPrimaryRequestInSession(
-    { ...primary, ownerToolUseId: undefined },
-    primary.requestId,
-    true,
-  ), true);
-  assert.equal(shouldOpenPrimaryRequestInSession(
-    { ...primary, kind: "question", questions: [] },
-    primary.requestId,
-    true,
-  ), true);
-  // Every own request other than a question is on the request dock, primary or not (#2179); a
-  // secondary question (an async one) is still answered here.
-  assert.equal(shouldOpenPrimaryRequestInSession({ ...primary, ownerToolUseId: undefined }, "another-request", true), true);
+  assert.equal(shouldOpenPrimaryRequestInSession(primary, true), false);
+  assert.equal(shouldOpenPrimaryRequestInSession({ ...primary, ownerToolUseId: undefined }, true), true);
+  // A worker's question is answered here too, as it is never docked (#2205).
+  assert.equal(shouldOpenPrimaryRequestInSession({ ...primary, kind: "question", questions: [] }, true), false);
+  // Every own request is on the request dock (#2179), a question included (#2205).
   assert.equal(shouldOpenPrimaryRequestInSession(
     { ...primary, ownerToolUseId: undefined, kind: "question", questions: [] },
-    "another-request",
     true,
-  ), false);
+  ), true);
+  assert.equal(shouldOpenPrimaryRequestInSession({ ...primary, ownerToolUseId: undefined }, false), false);
 });

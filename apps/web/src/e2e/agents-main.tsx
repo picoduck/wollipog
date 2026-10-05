@@ -1,6 +1,6 @@
 import React, { useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { PROTOCOL_VERSION, removePendingRequest, type ChildSessionRegistryPage, type SessionView } from "@wollipog/protocol";
+import { PROTOCOL_VERSION, prioritizedPendingRequests, removePendingRequest, type ChildSessionRegistryPage, type SessionView } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { StoreProvider, useStoreActions, useStoreSelector } from "../store.js";
@@ -12,6 +12,7 @@ import { UI_SOCKET_OPEN, type UiConnectionRuntime } from "../ui-transport.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { AgentsPanel } from "../components/AgentsPanel.js";
 import { SessionApprovalRegion, focusSessionRequest } from "../components/SessionApproval.js";
+import { RequestDock, dockRequests } from "../components/requests/RequestDock.js";
 import type { TimelineItem } from "../timeline.js";
 import "../styles.css";
 
@@ -99,8 +100,12 @@ function Fixture() {
     {navigationMode ? <NavigationFixture session={session} onSession={setSession} online={online} /> :
     <main style={{ maxWidth: 780, padding: 16, margin: "0 auto" }}>
       <h1 ref={primaryRef} tabIndex={-1}>Agents</h1>
-      {params.has("primary-question") && <SessionApprovalRegion session={session} runnerOnline={online}
-        fallbackFocusRef={primaryRef} showKeyHints={false} />}
+      {params.has("primary-question") && <>
+        <SessionApprovalRegion session={session} runnerOnline={online} fallbackFocusRef={primaryRef} />
+        {/* The session's own question waits on its request dock (#2205). */}
+        <RequestDock session={session} requests={dockRequests(prioritizedPendingRequests(session.pendingApproval))}
+          runnerOnline={online} onSessionUpdate={setSession} />
+      </>}
       {params.has("primary-question") && <button type="button" className="btn" onClick={() => setSession((current) => ({
         ...current,
         pendingApproval: removePendingRequest(current.pendingApproval, "permission-a"),
@@ -143,7 +148,7 @@ function NavigationFixture({ session, onSession, online }: {
       <button className="btn" onClick={() => onSession({ ...session,
         pendingApproval: removePendingRequest(session.pendingApproval, "permission-b") })}>Resolve Linked Request</button>
       <button className="btn" onClick={() => onSession({ ...session, eventEpoch: (session.eventEpoch ?? 0) + 1 })}>Reprocess Session</button>
-      <SessionApprovalRegion session={session} runnerOnline={online} fallbackFocusRef={primaryRef} showKeyHints={false} />
+      <SessionApprovalRegion session={session} runnerOnline={online} fallbackFocusRef={primaryRef} />
       <AgentsPanel key={`${session.id}:${session.eventEpoch ?? 0}`} session={session} items={items}
         runnerOnline={online} runnerProtocolVersion={PROTOCOL_VERSION} requestedId={selected} onSelect={setSelected}
         attentionTarget={view.attention}

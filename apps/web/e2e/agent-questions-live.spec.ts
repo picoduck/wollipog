@@ -123,7 +123,7 @@ async function queuePrompt(
 async function expectQuestionControlsInsideCard(page: Page): Promise<void> {
   const card = page.getByRole("region", { name: "Agent Questions" });
   const cardRect = await card.evaluate((element) => element.getBoundingClientRect().toJSON());
-  const list = page.locator(".question-list");
+  const list = page.locator(".question-card .request-card-body");
   const overflow = await list.evaluate((element) => ({
     clientWidth: element.clientWidth,
     overflowY: getComputedStyle(element).overflowY,
@@ -133,23 +133,21 @@ async function expectQuestionControlsInsideCard(page: Page): Promise<void> {
   expect(overflow.scrollLeft).toBe(0);
   expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth + 1);
   expect(["auto", "visible"]).toContain(overflow.overflowY);
-  await expect(card.locator("xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' detail-chat ')][1]"))
+  // The question waits on the request dock above the composer, never in the transcript, where its row
+  // is a marker (#2205).
+  await expect(card.locator("xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' request-dock ')][1]"))
     .toHaveCount(1);
   await expect(card.locator("xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' detail-scroll ')][1]"))
-    .toHaveCount(1);
+    .toHaveCount(0);
   await expect(page.locator('[data-virtual-kind="timeline"]')).toHaveAttribute("data-virtual-total", "49");
-  const initiallyInViewport = await card.evaluate((element) => {
-    const scroll = element.closest(".detail-scroll");
-    if (!scroll) return true;
-    const cardRect = element.getBoundingClientRect();
-    const scrollRect = scroll.getBoundingClientRect();
-    return cardRect.bottom > scrollRect.top && cardRect.top < scrollRect.bottom;
-  });
-  expect(initiallyInViewport).toBe(false);
-  await card.scrollIntoViewIfNeeded();
+  // The question is the transcript's last row; the virtual list mounts it once the reader is there.
+  await page.locator(".detail-scroll").evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  await expect(page.locator(".detail-scroll .ask-marker")).toHaveCount(1);
+  await expect(page.locator(".detail-scroll .ask-marker").getByRole("button", { name: "Jump to Question", exact: true })).toBeVisible();
+  await expect(page.locator(".detail-scroll").getByRole("radio")).toHaveCount(0);
 
   const rects = await page.locator(
-    ".question-list, .question-step, .question-text, .choice-row, .question-input",
+    ".question-card .request-card-body, .question-step, .question-text, .choice-row, .question-input",
   ).evaluateAll((elements) =>
     elements.map((element) => ({
       className: element.className,
@@ -935,7 +933,7 @@ for (const viewport of [
         await expect(card).toHaveCount(1);
         await expect(page.locator(".tl-question")).toHaveCount(0);
         await expect(card
-          .locator("xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' detail-scroll ')][1]"))
+          .locator("xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' request-dock ')][1]"))
           .toHaveCount(1);
         await expect(page.getByLabel("Queued Messages").locator(".queue-row")).toHaveCount(queuedMessages.length);
         await expect(page.getByLabel("Queued Messages").locator(".queue-text")).toHaveText(queuedMessages);
@@ -944,7 +942,10 @@ for (const viewport of [
         await expect(card.locator(".question-step-note")).toContainText("Question 1 of 2");
         await expect(mergeNow).toBeVisible();
         await expect(leaveOpen).toBeVisible();
+        // The docked card's body scrolls inside its cap (#2205); each row is reachable within it.
+        await mergeNow.scrollIntoViewIfNeeded();
         await expect(mergeNow).toBeInViewport();
+        await leaveOpen.scrollIntoViewIfNeeded();
         await expect(leaveOpen).toBeInViewport();
         await expect(customResponse).toHaveCount(0);
         await expect(submit).toHaveCount(0);
@@ -963,11 +964,12 @@ for (const viewport of [
         await deleteBranch.scrollIntoViewIfNeeded();
         await expect(deleteBranch).toBeVisible();
         await expect(keepBranch).toBeVisible();
-        await keepBranch.scrollIntoViewIfNeeded();
         await expect(deleteBranch).toBeInViewport();
+        await keepBranch.scrollIntoViewIfNeeded();
         await expect(keepBranch).toBeInViewport();
         await somethingElse.click();
         await customResponse.fill("Keep it for a follow-up");
+        await deleteBranch.scrollIntoViewIfNeeded();
         if (viewport.touch) await deleteBranch.tap();
         else await deleteBranch.click();
         await expect(deleteBranch).toBeChecked();

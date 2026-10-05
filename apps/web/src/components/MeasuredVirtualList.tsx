@@ -199,8 +199,6 @@ interface MeasuredVirtualListProps<T> {
    * that pin never fires — while the id the container points at must refer to a mounted element.
    */
   pinnedKey?: string | null;
-  /** Reports when the explicitly pinned row is mounted in a measurement-ready list. */
-  onPinnedAvailabilityChange?: (key: string | null, available: boolean) => void;
   /**
    * Roles for the virtual root and its positioned wrappers.
    *
@@ -248,7 +246,9 @@ export interface VirtualScrollAnchor {
 export interface VirtualRevealRequest {
   key: string;
   requestId: number;
-  align?: "start" | "center" | "end" | "auto";
+  /** `upper-third` centres the row in the viewport's upper third: a place shown in its context, with
+   * what follows it below (Show Where Asked, #2205). */
+  align?: "start" | "center" | "end" | "auto" | "upper-third";
   /** Focus the row after navigation so keyboard and assistive-technology users land there. */
   focus?: boolean;
 }
@@ -271,6 +271,7 @@ export function virtualTargetScrollAdjustment({
   if (align === "start") return rowStart - viewportStart;
   if (align === "end") return rowEnd - viewportEnd;
   if (align === "center") return (rowStart + rowEnd) / 2 - (viewportStart + viewportEnd) / 2;
+  if (align === "upper-third") return (rowStart + rowEnd) / 2 - (viewportStart + (viewportEnd - viewportStart) / 6);
   if (rowStart < viewportStart) return rowStart - viewportStart;
   if (rowEnd > viewportEnd) return rowEnd - viewportEnd;
   return 0;
@@ -311,19 +312,12 @@ function StaticList<T>({
   rowRole = "listitem",
   revealRequest,
   onRevealHandled,
-  pinnedKey = null,
-  onPinnedAvailabilityChange,
 }: MeasuredVirtualListProps<T>) {
   const revealExists = revealRequest != null && items.some((item) => getKey(item) === revealRequest.key);
-  const pinnedExists = pinnedKey != null && items.some((item) => getKey(item) === pinnedKey);
   useEffect(() => {
     if (!revealRequest) return;
     onRevealHandled?.(revealRequest.requestId, revealExists ? "revealed" : "unresolved");
   }, [onRevealHandled, revealExists, revealRequest]);
-  useLayoutEffect(() => {
-    onPinnedAvailabilityChange?.(pinnedKey, pinnedExists);
-    return () => onPinnedAvailabilityChange?.(pinnedKey, false);
-  }, [onPinnedAvailabilityChange, pinnedExists, pinnedKey]);
   return (
     <div className={className} role={rootRole} aria-label={ariaLabel} data-virtual-kind={dataKind}>
       {items.map((item, index) => (
@@ -355,7 +349,6 @@ function VirtualList<T>({
   ariaLabel,
   pinDraggedRow = false,
   pinnedKey = null,
-  onPinnedAvailabilityChange,
   rowGap = 0,
   dataKind,
   rootRole = "list",
@@ -411,9 +404,6 @@ function VirtualList<T>({
   onAnchorLostRef.current = onAnchorLost;
   const onRevealHandledRef = useRef(onRevealHandled);
   onRevealHandledRef.current = onRevealHandled;
-  const onPinnedAvailabilityChangeRef = useRef(onPinnedAvailabilityChange);
-  onPinnedAvailabilityChangeRef.current = onPinnedAvailabilityChange;
-  const reportedPinnedAvailabilityRef = useRef<{ key: string | null; available: boolean } | null>(null);
   const clearAnchorFrameRef = useRef<number | null>(null);
   const widthAnchorFrameRef = useRef<number | null>(null);
   const widthAnchorRef = useRef<VirtualScrollAnchor | null>(null);
@@ -535,22 +525,6 @@ function VirtualList<T>({
   const initialMeasurementVirtualizerRef = useRef(virtualizer);
   initialMeasurementVirtualizerRef.current = virtualizer;
   const mountedVirtualRows = virtualizer.getVirtualItems();
-  const pinnedRowMounted = pinnedKey != null && mountedVirtualRows.some((row) => row.key === pinnedKey);
-  useLayoutEffect(() => {
-    const available = initialMeasurementsReady && pinnedRowMounted;
-    const previous = reportedPinnedAvailabilityRef.current;
-    if (previous?.key === pinnedKey && previous.available === available) return;
-    if (previous?.key != null && previous.key !== pinnedKey && previous.available) {
-      onPinnedAvailabilityChangeRef.current?.(previous.key, false);
-    }
-    reportedPinnedAvailabilityRef.current = { key: pinnedKey, available };
-    onPinnedAvailabilityChangeRef.current?.(pinnedKey, available);
-  }, [initialMeasurementsReady, itemsVersion, pinnedKey, pinnedRowMounted]);
-  useLayoutEffect(() => () => {
-    const reported = reportedPinnedAvailabilityRef.current;
-    if (reported?.available) onPinnedAvailabilityChangeRef.current?.(reported.key, false);
-    reportedPinnedAvailabilityRef.current = null;
-  }, []);
   // Every external scrollRef host carries `measured-virtual-scroll`, disabling native anchoring.
   // Logical-key corrections and TanStack's measured-row adjustments must be the only scroll
   // owners; native anchoring sees transformed rows as ordinary flow and applies a third correction.
@@ -701,7 +675,8 @@ function VirtualList<T>({
     pendingRevealOutcomeRef.current = revealRequestId;
     setRevealPinnedKey(revealKey);
     const align = revealAlign;
-    virtualizer.scrollToIndex(index, { align, behavior: "auto" });
+    // TanStack places the row at the top first; the settle below moves it into the upper third.
+    virtualizer.scrollToIndex(index, { align: align === "upper-third" ? "start" : align, behavior: "auto" });
 
     let framesRemaining = 8;
     let focusApplied = false;

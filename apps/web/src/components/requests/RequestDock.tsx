@@ -7,10 +7,11 @@ import React, {
   type ReactNode,
   type RefObject,
 } from "react";
-import { sessionAttentionStatus, type PendingApproval, type SessionView } from "@wollipog/protocol";
+import { sessionAttentionStatus, type AgentQuestion, type PendingApproval, type SessionView } from "@wollipog/protocol";
 import { relativeTime } from "../../format.js";
 import type { FollowTailState } from "../../useFollowTail.js";
 import { ChevronRightIcon, ChevronUpIcon } from "../Icons.js";
+import { SessionQuestionBanner } from "../SessionApproval.js";
 import { useRemovedFocus } from "../useRemovedFocus.js";
 import { registerRequestIntent, registerRequestRevealer } from "./request-reveal.js";
 import { RequestCard, type RequestIntentHandler } from "./RequestCard.js";
@@ -22,15 +23,25 @@ import {
   waitingRequestKinds,
 } from "./request-meta.js";
 
-/** The requests the dock answers: the session's own, never a question (#2205 docks those) or a
- * request a worker owns (the Agents panel answers those until the session can). */
+/** The requests the dock answers: the session's own, questions included (#2205), never a request a
+ * worker owns (the Agents panel answers those until the session can). */
 export function dockRequests(requests: readonly PendingApproval[]): PendingApproval[] {
-  return requests.filter((request) => request.kind !== "question" && !request.ownerToolUseId);
+  return requests.filter((request) => !request.ownerToolUseId);
+}
+
+/** Show Where Asked for the dock's questions (#2205), from the transcript that holds their markers. */
+export interface DockWhereAsked {
+  show: (requestId: string) => void;
+  /** Why a question's marker can't be shown, or null. */
+  unavailableReason: (requestId: string) => string | null;
+  /** The question whose marker the transcript is loading back to. */
+  loadingRequestId: string | null;
 }
 
 /**
  * The request dock (docs/design-system.md §13.2; #2179): the session's pending requests directly
- * above the composer, in attention priority order.
+ * above the composer, in attention priority order. A question is the question card (#2196, #2205),
+ * whose Show Where Asked puts the dock in its strip as reading back does.
  *
  * Only the first is expanded. The rest wait behind one "+N More Requests" disclosure whose rows are
  * one-line buttons; choosing one expands it for this view without changing the order, and a decision
@@ -59,6 +70,8 @@ export function RequestDock({
   followTailState,
   readerRef,
   onConceal,
+  questionsFor,
+  whereAsked,
 }: {
   session: SessionView;
   /** In priority order (`prioritizedPendingRequests`), already limited by `dockRequests`. */
@@ -81,11 +94,17 @@ export function RequestDock({
   /** Called as the strip takes the card's place: closes the menu behind `headTrailing` (the notice
    * slot's `concealTrailing`) and answers whether it was open. */
   onConceal?: () => boolean;
+  /** A question's questions: by default the request's own. */
+  questionsFor?: (request: PendingApproval) => AgentQuestion[];
+  /** Absent where the dock has no transcript to show a question's place in. */
+  whereAsked?: DockWhereAsked;
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(() => revealRequestId ?? null);
   const [moreOpen, setMoreOpen] = useState(false);
   const listId = useId();
   const dockRef = useRef<HTMLElement>(null);
+  // A question card's heading is a `div` with the heading role (its text may hold lists); the dock
+  // only focuses it and scrolls it into view.
   const headingRef = useRef<HTMLHeadingElement>(null);
   const expandRef = useRef<HTMLButtonElement>(null);
   const cardRef = useRef<HTMLDivElement>(null);
@@ -299,21 +318,52 @@ export function RequestDock({
         data-session-request-id={collapsed ? undefined : expanded.requestId}
         data-session-request-session={collapsed ? undefined : session.id}
       >
-        <RequestCard
-          key={`${expanded.requestId}:${expanded.occurrenceId ?? ""}`}
-          session={session}
-          request={expanded}
-          runnerOnline={runnerOnline}
-          presentation="dock"
-          owner={owner}
-          createdAt={createdAt?.(expanded)}
-          headTrailing={headTrailing}
-          onSessionUpdate={onSessionUpdate}
-          showKeyHints={showKeyHints}
-          intentRef={intentRef}
-          headingRef={headingRef}
-          concealed={collapsed}
-        />
+        {expanded.kind === "question" ? (
+          <SessionQuestionBanner
+            key={`${expanded.requestId}:${expanded.occurrenceId ?? ""}`}
+            sessionId={session.id}
+            requestId={expanded.requestId}
+            occurrenceId={expanded.occurrenceId}
+            questions={questionsFor?.(expanded) ?? expanded.questions ?? []}
+            isAsync={expanded.async}
+            recoveryReason={expanded.recoveryReason}
+            recoveryAction={expanded.recoveryAction}
+            runnerOnline={runnerOnline}
+            onSessionUpdate={onSessionUpdate}
+            showKeyHints={showKeyHints}
+            owner={owner}
+            createdAt={createdAt?.(expanded)}
+            headingRef={headingRef}
+            headTrailing={headTrailing}
+            keyboardOpen={keyboardOpen}
+            whereAsked={whereAsked && {
+              // As reading back does: the dock shrinks to its strip once the reader is far enough
+              // from the tail, even if the person expanded it since leaving.
+              onShow: () => {
+                setHeldOpen(false);
+                whereAsked.show(expanded.requestId);
+              },
+              unavailableReason: whereAsked.unavailableReason(expanded.requestId),
+              loading: whereAsked.loadingRequestId === expanded.requestId,
+            }}
+          />
+        ) : (
+          <RequestCard
+            key={`${expanded.requestId}:${expanded.occurrenceId ?? ""}`}
+            session={session}
+            request={expanded}
+            runnerOnline={runnerOnline}
+            presentation="dock"
+            owner={owner}
+            createdAt={createdAt?.(expanded)}
+            headTrailing={headTrailing}
+            onSessionUpdate={onSessionUpdate}
+            showKeyHints={showKeyHints}
+            intentRef={intentRef}
+            headingRef={headingRef}
+            concealed={collapsed}
+          />
+        )}
       </div>
       <span className="sr-only" role="status" aria-live="polite" data-request-dock-announcement="">
         {announcement && <span key={announcement.serial}>{announcement.text}</span>}

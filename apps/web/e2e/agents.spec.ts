@@ -73,14 +73,16 @@ test("attention links cannot alias reused requests after reprocessing and primar
   await expect(page.getByRole("button", { name: "Open Request in Session", exact: true })).toHaveCount(0);
 });
 
-test("the session and Agents panel never mount two response forms for the same question", async ({ page }) => {
+test("a worker's question is answered on its Agents panel card, never on the dock, with one form (#2205)", async ({ page }) => {
   await page.goto("/agents-e2e.html?primary-question=1");
-  await page.getByRole("radio", { name: /Parser/ }).click();
+  await expect(page.locator(".request-dock")).toHaveCount(0);
+  await expect(page.getByRole("radio", { name: /Parser/ })).toHaveCount(0);
   await page.getByRole("button", { name: "Audit Storage · Answer Required", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Selected Worker Request", exact: true })).toBeFocused();
+  await expect(page.getByRole("button", { name: "Open Request in Session", exact: true })).toHaveCount(0);
+  await page.getByRole("radio", { name: /Parser/ }).click();
   await expect(page.getByRole("button", { name: "Submit Answers", exact: true })).toHaveCount(1);
   await expect(page.getByRole("radio", { name: /Parser/ })).toBeChecked();
-  await page.getByRole("button", { name: "Open Request in Session", exact: true }).click();
-  await expect(page.locator('[data-session-request-id="permission-a"]')).toBeFocused();
 });
 
 test("a selected child request promoted to primary moves focus to its canonical response form", async ({ page }) => {
