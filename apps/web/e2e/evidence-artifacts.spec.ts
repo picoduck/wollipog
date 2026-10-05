@@ -405,9 +405,15 @@ test("at 1440×900 the Evidence Viewer steps through a four-item review and mark
   const primary = viewer.getByRole("button", { name: "Mark Reviewed and Next" });
   await expect(primary).toBeFocused();
   // The picture fits the stage, and the footer is in view without scrolling the dialog.
-  const stage = await viewer.locator(".ev-viewer-stage").boundingBox();
-  const picture = await viewer.locator(".ev-viewer-stage img").boundingBox();
-  expect(stage && picture && picture.height <= stage.height + 1 && picture.width <= stage.width + 1).toBe(true);
+  // Measured once the dialog's opening scale has settled, and both boxes in one frame.
+  await viewer.evaluate((dialog) => Promise.all(dialog.closest(".modal")!.getAnimations({ subtree: true })
+    .map((animation) => animation.finished)));
+  expect(await viewer.locator(".ev-viewer-stage").evaluate((stage) => {
+    const frame = stage.getBoundingClientRect();
+    const picture = stage.querySelector("img")!.getBoundingClientRect();
+    return picture.width > 0 && picture.left >= frame.left - 0.5 && picture.right <= frame.right + 0.5 &&
+      picture.top >= frame.top - 0.5 && picture.bottom <= frame.bottom + 0.5;
+  })).toBe(true);
   await expect(primary).toBeInViewport();
   // Every viewable item is in the filmstrip at 72×45, and a thumbnail opens its item.
   // The dialog's name follows the item it shows, so the filmstrip is found by role alone.
