@@ -30,7 +30,7 @@ import type { GitStatus } from "./useGitStatus.js";
 import { shortcutDisplay } from "../shortcuts.js";
 import type { TimelineItem } from "../timeline.js";
 import type { GovernanceDecision } from "../governance.js";
-import { GovernanceHistoryPanel } from "./GovernanceHistoryPanel.js";
+import { DecisionHistoryPanel } from "./DecisionHistoryPanel.js";
 import { AgentsPanel } from "./AgentsPanel.js";
 import { focusSessionRequest } from "./SessionApproval.js";
 import { dockRequests } from "./requests/RequestDock.js";
@@ -182,7 +182,7 @@ const MODE_TITLES: Record<RightPanelMode, string> = {
   sidechat: "Side Chat",
   subagents: "Agents",
   background: "Background Work",
-  governance: "Governance History",
+  decisions: "Decision History",
 };
 
 /**
@@ -208,11 +208,14 @@ export function RightPanel({
   reviewFocus,
   onReviewFocusHandled,
   items,
-  governanceDecisions = EMPTY_GOVERNANCE_DECISIONS,
-  governanceAvailable = governanceDecisions.length > 0,
-  governanceHasMore = false,
-  governanceLoadingOlder = false,
-  onLoadOlderGovernance,
+  decisionHistory = EMPTY_GOVERNANCE_DECISIONS,
+  decisionHistoryStatus = "ready",
+  onRetryDecisionHistory,
+  decisionHistoryHasMore = false,
+  decisionHistoryLoadingOlder = false,
+  onLoadOlderDecisions,
+  transcriptItemForDecision,
+  onShowDecisionInTranscript,
   earlierActivityUnloaded = false,
   parentTurnEventIds = EMPTY_PARENT_TURN_EVENTS,
   onOpenParentTurn = () => undefined,
@@ -247,12 +250,16 @@ export function RightPanel({
   reviewFocus?: DiffFileFocus | null;
   onReviewFocusHandled?: () => void;
   items: TimelineItem[];
-  /** Consolidated, content-safe governance outcomes for this session, oldest-first. */
-  governanceDecisions?: readonly GovernanceDecision[];
-  governanceAvailable?: boolean;
-  governanceHasMore?: boolean;
-  governanceLoadingOlder?: boolean;
-  onLoadOlderGovernance?: () => void;
+  /** Every content-safe decision in this session, oldest-first (#2213). */
+  decisionHistory?: readonly GovernanceDecision[];
+  decisionHistoryStatus?: "loading" | "error" | "ready";
+  onRetryDecisionHistory?: () => void;
+  decisionHistoryHasMore?: boolean;
+  decisionHistoryLoadingOlder?: boolean;
+  onLoadOlderDecisions?: () => void;
+  /** The loaded transcript row that shows a decision's request, if any. */
+  transcriptItemForDecision?: (decision: GovernanceDecision) => number | undefined;
+  onShowDecisionInTranscript?: (itemId: number) => void;
   /** The transcript is showing a bounded window with older turns still unloaded. */
   earlierActivityUnloaded?: boolean;
   /** Loaded parent turns that can be revealed directly in the virtual transcript. */
@@ -499,13 +506,18 @@ export function RightPanel({
             onFocusHandled={onReviewFocusHandled}
           />
         );
-      case "governance":
+      case "decisions":
         return (
-          <GovernanceHistoryPanel
-            decisions={governanceDecisions}
-            hasMore={governanceHasMore}
-            loadingOlder={governanceLoadingOlder}
-            onLoadOlder={onLoadOlderGovernance}
+          <DecisionHistoryPanel
+            key={session.id}
+            decisions={decisionHistory}
+            status={decisionHistoryStatus}
+            onRetry={onRetryDecisionHistory}
+            hasMore={decisionHistoryHasMore}
+            loadingOlder={decisionHistoryLoadingOlder}
+            onLoadOlder={onLoadOlderDecisions}
+            transcriptItemFor={transcriptItemForDecision}
+            onShowInTranscript={onShowDecisionInTranscript}
           />
         );
       case "browser":
@@ -621,7 +633,6 @@ export function RightPanel({
             backgroundAvailable={(session.backgroundJobs?.length ?? 0) > 0 ||
               session.backgroundJobsAvailable === true ||
               session.backgroundWorkTracking != null || session.backgroundWorkState != null}
-            governanceAvailable={governanceAvailable}
             requestsAvailable={requestsAvailable}
             campaignAvailability={campaignAvailability}
           />
@@ -690,7 +701,6 @@ function Launcher({
   terminalSupported,
   terminalHint,
   backgroundAvailable,
-  governanceAvailable,
   requestsAvailable,
   campaignAvailability,
 }: {
@@ -701,7 +711,6 @@ function Launcher({
   terminalSupported: boolean;
   terminalHint: string;
   backgroundAvailable: boolean;
-  governanceAvailable: boolean;
   requestsAvailable: boolean;
   campaignAvailability: CampaignStatusAvailability;
 }) {
@@ -776,10 +785,8 @@ function Launcher({
         }
       />
       <LauncherRow
-        label="Governance History"
-        disabled={!governanceAvailable}
-        hint="No governance decisions have been recorded for this session."
-        onClick={() => onPick("governance")}
+        label="Decision History"
+        onClick={() => onPick("decisions")}
         icon={<LockIcon size={14} />}
       />
       <LauncherRow

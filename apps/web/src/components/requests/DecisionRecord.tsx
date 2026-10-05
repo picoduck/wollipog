@@ -81,6 +81,7 @@ export function DecisionRecord({
   now,
   onOpenSession,
   auditId,
+  actions,
   className,
 }: {
   record: DecisionRecordModel;
@@ -94,6 +95,9 @@ export function DecisionRecord({
   now?: number;
   /** Opens another session; absent where the surface cannot navigate (a shared page). */
   onOpenSession?: (sessionId: string) => void;
+  /** `.btn.sm` actions before Copy Audit ID, where the surface offers more (Decision History's
+   * Show in Transcript). */
+  actions?: ReactNode;
   className?: string;
 }) {
   const names = useDecisionNames(record);
@@ -166,9 +170,12 @@ export function DecisionRecord({
           ))}
           {at !== undefined && <><dt>Recorded</dt><dd><time dateTime={new Date(at).toISOString()}>{absoluteTime(at)}</time></dd></>}
         </dl>
-        {record.auditIds.length > 0 && (
+        {(actions || record.auditIds.length > 0) && (
           <div className="tl-decision-actions">
-            <CopyButton text={decisionAuditText(record)} label="Copy Audit ID" className="btn sm ghost" />
+            {actions}
+            {record.auditIds.length > 0 && (
+              <CopyButton text={decisionAuditText(record)} label="Copy Audit ID" className="btn sm ghost" />
+            )}
           </div>
         )}
       </div>

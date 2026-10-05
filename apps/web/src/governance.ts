@@ -1,10 +1,15 @@
 /**
- * Governance decisions as transcript context.
+ * Governance decisions as transcript context, and every decision in the session as Decision History.
  *
  * The control plane records an intentionally content-safe audit log: it carries actors, policy
  * ids, stages, and outcomes, but never tool input, question answers, or credentials. Everything
- * here reads only those safe fields, so both the transcript annotation and the consolidated
- * side-panel history preserve that boundary.
+ * here reads only those safe fields, so both the transcript annotation and the side panel's
+ * Decision History preserve that boundary.
+ *
+ * Two projections read the same audit. `governanceDecisions` is the transcript merge's input: the
+ * policy and fail-closed outcomes that may lack a row of their own. `decisionHistory` adds what a
+ * person decided (permissions, questions, workflow decisions, guardrail and sign-in cards), which
+ * the transcript already shows in place, so only the panel lists those (#2213).
  *
  * Placement contract: `requestId` is the only join key between an audit entry and a transcript
  * row. Resolved permissions and questions already render their own outcome in place, so those
@@ -14,6 +19,7 @@
  * anchored to the last loaded event at or before the decision's timestamp.
  */
 import type {
+  ApprovalKind,
   GovernanceActor,
   GovernanceAuditEntry,
   GovernanceAuditOutcome,
@@ -44,10 +50,12 @@ export interface GovernanceDecision extends GovernanceOutcome {
   branch?: string;
   /** An agent's question answered by a policy, rather than a tool request. */
   question?: true;
+  /** What a person decided, when it was not a tool request: names the row in Decision History. */
+  requestKind?: Exclude<ApprovalKind, "permission" | "policy_hook" | "question">;
 }
 
 /** Number of newest audit records fetched per page. Older pages are loaded to cover the visible
- * transcript window and can also be requested explicitly from Governance History. */
+ * transcript window and can also be requested explicitly from Decision History. */
 export const GOVERNANCE_AUDIT_LIMIT = 200;
 
 function policyActor(actor: GovernanceActor, governancePolicyId: string | undefined): DecisionActor {
@@ -128,20 +136,66 @@ export function governanceAuditPresentation(entry: GovernanceAuditEntry): Govern
   return policyHookOutcome(entry.stage, entry.outcome, entry.actor, entry.governancePolicyId, "audit");
 }
 
+/** The guardrail cards (§13): a person continues or stops at each. */
+const GUARDRAIL_KINDS: ReadonlySet<ApprovalKind> = new Set<ApprovalKind>([
+  "cost_budget",
+  "cost_checkpoint",
+  "cost_unpriced",
+  "daily_budget",
+  "max_tool_calls",
+]);
+
+/** Every request a person settles, other than a policy-hook ask. */
+const HUMAN_DECISION_KINDS: ReadonlySet<ApprovalKind> = new Set<ApprovalKind>([
+  "permission",
+  "question",
+  "workflow_decision",
+  "authentication",
+  ...GUARDRAIL_KINDS,
+]);
+
 /**
- * Project the audit snapshot into oldest-first display decisions.
- *
- * Deduplicated on `auditId` and ordered by timestamp while preserving the endpoint's stable
- * `(created_at, row_id)` order for ties. Random audit ids must not scramble rows across pages.
+ * What a person decided (#2213), in the `requestDecision` vocabulary: Allowed, Rejected, Answered
+ * or Dismissed (a sign-in action they chose is Resolved, since nothing was allowed). Only the
+ * terminal `resolution` a person recorded counts; a failed delivery, a consumed or revoked
+ * workflow approval, and a parent session's answer are not a person's decision. A policy-hook ask a
+ * person settled is already one of `governanceAuditPresentation`'s outcomes.
  */
-export function governanceDecisions(entries: readonly GovernanceAuditEntry[]): GovernanceDecision[] {
+export function humanDecisionPresentation(entry: GovernanceAuditEntry): GovernanceOutcome | null {
+  if (entry.stage !== "resolution" || entry.actor.kind !== "human" || !HUMAN_DECISION_KINDS.has(entry.approvalKind)) {
+    return null;
+  }
+  const actor: DecisionActor = { kind: "member", ...(entry.actor.id ? { userId: entry.actor.id } : {}) };
+  const question = entry.approvalKind === "question";
+  switch (entry.outcome) {
+    case "allowed":
+      if (question) return null;
+      return entry.approvalKind === "authentication"
+        ? { outcome: "resolved", actor, detail: "A sign-in action was chosen." }
+        : { outcome: "allowed", actor, detail: "The request was allowed." };
+    case "denied":
+      return question ? null : { outcome: "rejected", actor, detail: "The request was rejected." };
+    case "answered":
+      return question ? { outcome: "answered", actor, detail: "The question was answered." } : null;
+    case "dismissed":
+      return { outcome: "dismissed", actor, detail: "The request was dismissed." };
+    default:
+      return null;
+  }
+}
+
+function projectDecisions(
+  entries: readonly GovernanceAuditEntry[],
+  present: (entry: GovernanceAuditEntry) => GovernanceOutcome | null,
+): GovernanceDecision[] {
   const seen = new Set<string>();
   const decisions: GovernanceDecision[] = [];
   for (const entry of entries) {
-    const outcome = governanceAuditPresentation(entry);
+    const outcome = present(entry);
     if (!outcome || seen.has(entry.auditId)) continue;
     seen.add(entry.auditId);
     const { toolName, path, branch } = entry.scope;
+    const kind = entry.approvalKind;
     decisions.push({
       ...outcome,
       auditId: entry.auditId,
@@ -151,10 +205,40 @@ export function governanceDecisions(entries: readonly GovernanceAuditEntry[]): G
       ...(toolName ? { toolName } : {}),
       ...(path ? { path } : {}),
       ...(branch ? { branch } : {}),
-      ...(entry.approvalKind === "question" ? { question: true as const } : {}),
+      ...(kind === "question" ? { question: true as const } : {}),
+      ...(kind !== "permission" && kind !== "policy_hook" && kind !== "question" ? { requestKind: kind } : {}),
     });
   }
   return decisions.sort((a, b) => a.timestamp - b.timestamp);
+}
+
+/**
+ * Project the audit snapshot into oldest-first display decisions: the transcript merge's input.
+ *
+ * Deduplicated on `auditId` and ordered by timestamp while preserving the endpoint's stable
+ * `(created_at, row_id)` order for ties. Random audit ids must not scramble rows across pages.
+ */
+export function governanceDecisions(entries: readonly GovernanceAuditEntry[]): GovernanceDecision[] {
+  return projectDecisions(entries, governanceAuditPresentation);
+}
+
+/**
+ * Every decision in the session, oldest-first, for Decision History (#2213): the transcript's
+ * governance decisions plus what a person decided. A guardrail card a person settles is recorded
+ * twice, under its visible and its replay request id, at the same instant; it is one decision.
+ */
+export function decisionHistory(entries: readonly GovernanceAuditEntry[]): GovernanceDecision[] {
+  const settled = new Set<string>();
+  return projectDecisions(entries, (entry) => {
+    const governance = governanceAuditPresentation(entry);
+    if (governance) return governance;
+    const human = humanDecisionPresentation(entry);
+    if (!human || !GUARDRAIL_KINDS.has(entry.approvalKind)) return human;
+    const key = `${entry.approvalKind}\u0000${entry.outcome}\u0000${entry.actor.id ?? ""}\u0000${entry.timestamp}`;
+    if (settled.has(key)) return null;
+    settled.add(key);
+    return human;
+  });
 }
 
 /** Audit ids are append-only records, so the id list identifies the snapshot's content. */

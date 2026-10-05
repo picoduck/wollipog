@@ -48,7 +48,6 @@ const BASELINE: Readonly<Record<string, number>> = {
   "components/CreateProjectDialog.tsx": 1,
   "components/FilesPanel.tsx": 3,
   "components/GitDiffViewer.tsx": 1,
-  "components/GovernanceHistoryPanel.tsx": 1,
   "components/InstancesPanel.tsx": 1,
   "components/NewRunDialog.tsx": 1,
   "components/NewSessionDialog.tsx": 1,

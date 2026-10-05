@@ -4,6 +4,8 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { GovernanceAuditEntry } from "@wollipog/protocol";
 import {
+  decisionHistory,
+  humanDecisionPresentation,
   landedGovernanceAnchors,
   governanceAnchorSeq,
   governanceAuditPresentation,
@@ -12,7 +14,6 @@ import {
   sameGovernanceSnapshot,
   transcriptGovernanceDecisions,
 } from "./governance.js";
-import { GovernanceHistoryPanel } from "./components/GovernanceHistoryPanel.js";
 import {
   decisionActorName,
   decisionRecordText,
@@ -22,6 +23,7 @@ import {
 } from "./decision-record.js";
 import { ViewerIdentityContext, viewerIdentity, type ViewerIdentity } from "./resolver-identity.js";
 import { isCollapsibleWorkItem, type TimelineItem } from "./timeline.js";
+import { DecisionHistoryPanel } from "./components/DecisionHistoryPanel.js";
 
 function entry(overrides: Partial<GovernanceAuditEntry>): GovernanceAuditEntry {
   return {
@@ -130,7 +132,7 @@ function historyAs(
     React.createElement(
       ViewerIdentityContext.Provider,
       { value: viewing },
-      React.createElement(GovernanceHistoryPanel, { decisions }),
+      React.createElement(DecisionHistoryPanel, { decisions }),
     ),
   ));
 }
@@ -327,42 +329,60 @@ test("a transcript with no governance activity keeps its array identity", () => 
   assert.equal(mergeGovernanceDecisions(items, [], events), items);
 });
 
-test("governance history renders every outcome newest-first behind a closed disclosure", () => {
-  const decisions = governanceDecisions([
-    entry({ auditId: "a", requestId: "hook-a", timestamp: 100 }),
-    entry({ auditId: "b", requestId: "hook-b", timestamp: 200, outcome: "denied" }),
-    entry({ auditId: "c", requestId: "hook-c", timestamp: 300, stage: "policy_decision", actor: { kind: "policy", id: "deny-shell" }, outcome: "denied" }),
+test("a person's decisions are in Decision History in the requestDecision vocabulary, never the transcript merge (#2213)", () => {
+  const person = { kind: "human" as const, id: "user-ada" };
+  const entries = [
+    entry({ auditId: "allow", requestId: "perm-1", approvalKind: "permission", outcome: "allowed", actor: person, timestamp: 100, scope: { sessionId: "session-1", runnerId: "runner-1", toolName: "Bash" } }),
+    entry({ auditId: "reject", requestId: "perm-2", approvalKind: "permission", outcome: "denied", actor: person, timestamp: 200 }),
+    entry({ auditId: "answer", requestId: "question-1", approvalKind: "question", outcome: "answered", actor: person, timestamp: 300 }),
+    entry({ auditId: "block", requestId: "hook-1", stage: "policy_decision", outcome: "denied", actor: { kind: "policy", id: "deny-shell" }, governancePolicyId: "deny-shell", timestamp: 400 }),
+  ];
+  assert.deepEqual(governanceDecisions(entries).map((decision) => decision.auditId), ["block"],
+    "the transcript merge keeps its current inputs");
+  const history = decisionHistory(entries);
+  assert.deepEqual(history.map((decision) => decision.outcome), ["allowed", "rejected", "answered", "blocked"]);
+  assert.deepEqual(history.map((decision) => governanceDecisionRecord(decision).title), ["Bash", "Tool Request", "Question", "Tool Request"]);
+  assert.deepEqual(history[0]!.actor, { kind: "member", userId: "user-ada" });
+});
+
+test("only a person's terminal resolution is their decision", () => {
+  const person = { kind: "human" as const, id: "user-ada" };
+  const present = (overrides: Partial<GovernanceAuditEntry>) =>
+    humanDecisionPresentation(entry({ actor: person, ...overrides }))?.outcome ?? null;
+  assert.equal(present({ approvalKind: "permission", outcome: "dismissed" }), "dismissed");
+  assert.equal(present({ approvalKind: "question", outcome: "dismissed" }), "dismissed");
+  assert.equal(present({ approvalKind: "workflow_decision", outcome: "allowed" }), "allowed");
+  assert.equal(present({ approvalKind: "workflow_decision", outcome: "denied" }), "rejected");
+  assert.equal(present({ approvalKind: "authentication", outcome: "allowed" }), "resolved");
+  assert.equal(present({ approvalKind: "cost_budget", outcome: "allowed" }), "allowed");
+  assert.equal(present({ approvalKind: "max_tool_calls", outcome: "denied" }), "rejected");
+  // Not a person's decision: a failed delivery, a consumed approval, a request, a parent's answer,
+  // a policy-hook ask (the governance presentation owns those).
+  assert.equal(present({ approvalKind: "permission", outcome: "delivery_failed" }), null);
+  assert.equal(present({ approvalKind: "workflow_decision", outcome: "consumed" }), null);
+  assert.equal(present({ approvalKind: "permission", stage: "request", outcome: "pending" }), null);
+  assert.equal(present({ approvalKind: "question", outcome: "answered", actor: { kind: "agent", id: "parent" } }), null);
+  assert.equal(present({ approvalKind: "policy_hook", outcome: "allowed" }), null);
+});
+
+test("Decision History titles a person's non-tool decisions by what they settled", () => {
+  const person = { kind: "human" as const, id: "user-ada" };
+  const titles = decisionHistory([
+    entry({ auditId: "w", approvalKind: "workflow_decision", outcome: "allowed", actor: person, timestamp: 1 }),
+    entry({ auditId: "a", approvalKind: "authentication", outcome: "dismissed", actor: person, timestamp: 2 }),
+    entry({ auditId: "c", approvalKind: "cost_checkpoint", outcome: "allowed", actor: person, timestamp: 3 }),
+  ]).map((decision) => governanceDecisionRecord(decision).title);
+  assert.deepEqual(titles, ["Workflow Decision", "Sign-In", "Cost Checkpoint"]);
+});
+
+test("a guardrail decision recorded under both of its request ids is one Decision History row", () => {
+  const person = { kind: "human" as const, id: "user-ada" };
+  const history = decisionHistory([
+    entry({ auditId: "visible", requestId: "card-1", approvalKind: "max_tool_calls", outcome: "allowed", actor: person, timestamp: 500 }),
+    entry({ auditId: "replay", requestId: "trip-1", approvalKind: "max_tool_calls", outcome: "allowed", actor: person, timestamp: 500 }),
+    entry({ auditId: "later", requestId: "card-2", approvalKind: "max_tool_calls", outcome: "allowed", actor: person, timestamp: 900 }),
   ]);
-  const html = renderToStaticMarkup(React.createElement(GovernanceHistoryPanel, { decisions, hasMore: true }));
-  assert.deepEqual(
-    Array.from(html.matchAll(/data-audit-id="([^"]+)"/g), (match) => match[1]),
-    ["c", "b", "a"],
-  );
-  assert.doesNotMatch(html, /<details open/);
-  assert.match(html, /aria-label="Blocked Tool Request by Policy"/);
-  assert.match(html, />Load Older Decisions<\/button>/);
-});
-
-test("governance history explains an unpresentable page while older decisions remain", () => {
-  const html = renderToStaticMarkup(React.createElement(GovernanceHistoryPanel, {
-    decisions: [],
-    hasMore: true,
-  }));
-  assert.match(html, /No governance decisions are visible in this page yet\./);
-  assert.doesNotMatch(html, /<ol/);
-  assert.match(html, />Load Older Decisions<\/button>/);
-});
-
-test("governance history keeps the paging control focusable while a page loads", () => {
-  const html = renderToStaticMarkup(React.createElement(GovernanceHistoryPanel, {
-    decisions: governanceDecisions([entry({ auditId: "loading" })]),
-    hasMore: true,
-    loadingOlder: true,
-  }));
-  assert.match(html, /aria-busy="true"/);
-  assert.match(html, /aria-disabled="true"/);
-  assert.doesNotMatch(html, / disabled=""/);
-  assert.match(html, />Loading Older Decisions…<\/button>/);
+  assert.deepEqual(history.map((decision) => decision.auditId), ["visible", "later"]);
 });
 
 test("a governance row never splits a collapsible work run", () => {

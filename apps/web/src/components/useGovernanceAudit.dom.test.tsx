@@ -76,7 +76,7 @@ test("transcript-window backfill follows cursors until the oldest visible activi
   container.remove();
 });
 
-test("manual governance-history paging prepends the next older page", async () => {
+test("manual Decision History paging prepends the next older page", async () => {
   const calls: Array<string | undefined> = [];
   const audit = (auditId: string, timestamp: number): GovernanceAuditEntry => ({
     ...entry, auditId, requestId: `hook-${auditId}`, timestamp,
@@ -390,7 +390,7 @@ test("an older response issued against a replaced snapshot is discarded before i
   container.remove();
 });
 
-test("raw audit rows do not expose an empty Governance tab", async () => {
+test("a person's permission decision reaches Decision History but not the transcript merge (#2213)", async () => {
   const client = {
     governanceAudit: async () => ({
       entries: [{ ...entry, approvalKind: "permission" as const }],
@@ -410,7 +410,74 @@ test("raw audit rows do not expose an empty Governance tab", async () => {
     await new Promise((resolve) => setImmediate(resolve));
   });
   assert.equal(latest?.decisions.length, 0);
-  assert.equal(latest?.available, false);
+  assert.deepEqual(latest?.history.map((decision) => decision.outcome), ["allowed"]);
+  assert.equal(latest?.status, "ready");
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("a failed first load is an error until Retry loads the newest page", async () => {
+  let calls = 0;
+  const client = {
+    governanceAudit: async () => {
+      calls += 1;
+      if (calls === 1) throw new Error("audit unavailable");
+      return { entries: [entry], hasMore: false };
+    },
+  } as unknown as ApiClient;
+  let latest: GovernanceAuditState | undefined;
+  function Probe() {
+    latest = useGovernanceAudit("session-1", "revision-1", true);
+    return null;
+  }
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<ApiProvider client={client}><Probe /></ApiProvider>);
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+  assert.equal(latest?.status, "error");
+  assert.equal(latest?.history.length, 0);
+  await act(async () => {
+    latest!.retry();
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+  assert.equal(calls, 2);
+  assert.equal(latest?.status, "ready");
+  assert.equal(latest?.history.length, 1);
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("a failed refresh keeps the decisions already loaded", async () => {
+  let calls = 0;
+  const client = {
+    governanceAudit: async () => {
+      calls += 1;
+      if (calls > 1) throw new Error("audit unavailable");
+      return { entries: [entry], hasMore: false };
+    },
+  } as unknown as ApiClient;
+  let latest: GovernanceAuditState | undefined;
+  function Probe({ revision }: { revision: string }) {
+    latest = useGovernanceAudit("session-1", revision, true);
+    return null;
+  }
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<ApiProvider client={client}><Probe revision="r1" /></ApiProvider>);
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+  await act(async () => {
+    root.render(<ApiProvider client={client}><Probe revision="r2" /></ApiProvider>);
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+  assert.equal(calls, 2);
+  assert.equal(latest?.status, "ready");
+  assert.equal(latest?.history.length, 1);
   await act(async () => { root.unmount(); });
   container.remove();
 });

@@ -1613,7 +1613,7 @@ summary the control plane sends with it, which the runner records as `answers` o
 reads "Answered" with no second line. Shared transcripts exclude every question event.
 
 **Decision Records** (#2204). A finished decision is one `DecisionRecord`
-(`components/requests/DecisionRecord.tsx`), the same in the transcript and in Governance History:
+(`components/requests/DecisionRecord.tsx`), the same in the transcript and in Decision History:
 resolved permissions, governance decisions and automated reviews. Pending permissions are not
 records; the request dock owns them (#2179). The row is a `<details class="disclosure">` whose
 summary is `--control-h` tall (44px on touch): the §5.5 chevron, a 16px outcome icon in its tone
@@ -1633,6 +1633,19 @@ time with seconds. Ids (request, audit, policy, session, review) are never shown
 them. The chosen option's kind decides the word (`allow_*` Allowed, `reject_*` Rejected, `cancel`
 Ended Early, even though the runner records a chosen Cancel as a dismissal); the runner's own
 sign-in resolutions keep their words.
+
+**Decision History** (#2213) is the side panel's list of every decision in the session: what the
+person allowed, rejected, answered or dismissed (permissions, questions, workflow decisions,
+guardrail and sign-in cards), read from the content-safe audit, alongside the policy and fail-closed
+outcomes. The transcript keeps its own inputs, so a person's decisions, already rows there, are not
+repeated. Rows are Decision Records, newest first, under §5.2 day group headers ("Today",
+"Yesterday", then the date), below a full-width §10.2 segmented filter, **All**, **You** and
+**Policies**, kept while the panel is open. An open row adds **Show in Transcript** before Copy
+Audit ID; when the request's row is not in the loaded transcript it is `aria-disabled` with "Not in
+the loaded transcript." beside it. **Load Older Decisions** is a `.btn.sm` `BusyButton` at the
+list's left edge after the last row. Loading is skeleton rows at `--control-h` after 300ms, a
+failed load a danger notice with **Retry**, and an empty session a compact "No Decisions Yet"
+state; the launcher row is always enabled.
 
 Facts are not statuses: "Detached Work: Untracked", "Changes Present", "Worktree", "Kept Aside" are
 meta (§11.3). This table lives in code as one `statusMeta(domain, value) → {label, tone, pulse}` map;

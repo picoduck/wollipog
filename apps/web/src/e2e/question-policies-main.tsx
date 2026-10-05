@@ -5,8 +5,8 @@ import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { ApprovalsPanel } from "../components/ApprovalsPanel.js";
 import { SettingsView } from "../components/SettingsView.js";
-import { GovernanceHistoryPanel } from "../components/GovernanceHistoryPanel.js";
-import { governanceDecisions } from "../governance.js";
+import { DecisionHistoryPanel } from "../components/DecisionHistoryPanel.js";
+import { decisionHistory } from "../governance.js";
 import { EventTimeline } from "../components/EventTimeline.js";
 import { ViewerIdentityContext, viewerIdentity } from "../resolver-identity.js";
 import { GovernancePolicyNamesContext } from "../decision-record.js";
@@ -87,7 +87,7 @@ const client: ApiClient = {
   },
 };
 const now = Date.now();
-const hookDecisions = governanceDecisions([{
+const hookDecisions = decisionHistory([{
   auditId: "older-human-approval", requestId: "policy-hook-transport:0", approvalKind: "policy_hook",
   stage: "resolution", outcome: "allowed", actor: { kind: "human", id: "alice" },
   scope: { organizationId: "org", sessionId: "example", runnerId: "runner" }, timestamp: now - 120_000,
@@ -119,8 +119,8 @@ function GovernanceFixture() {
     }, {
       kind: "governance_decision", id: 11, decision: hookDecisions[1]!,
     }]} />
-    <h2>Governance History</h2>
-    <GovernanceHistoryPanel
+    <h2>Decision History</h2>
+    <DecisionHistoryPanel
       decisions={visibleDecisions}
       hasMore={!olderLoaded}
       onLoadOlder={() => setOlderLoaded(true)}

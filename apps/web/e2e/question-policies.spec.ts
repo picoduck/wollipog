@@ -265,7 +265,7 @@ test("policy attribution fits mobile", async ({ page }) => {
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
 
-test("governance history pages older decisions and keeps the native decision after its tool request", async ({ page }) => {
+test("decision history pages older decisions and keeps the native decision after its tool request", async ({ page }) => {
   await page.goto("/question-policies-e2e.html");
   const timeline = page.getByRole("list", { name: "Native Governance Event" });
   await timeline.getByRole("button", { name: /^Worked.*1 Command/ }).click();
@@ -274,17 +274,17 @@ test("governance history pages older decisions and keeps the native decision aft
   const timelineText = await timeline.innerText();
   expect(timelineText.indexOf("Run Shell Command")).toBeLessThan(timelineText.indexOf("Blocked"));
 
-  const history = page.getByRole("list", { name: "Governance History" });
+  const history = page.locator(".decision-history");
   await expect(history.locator("[data-audit-id]")).toHaveCount(1);
   if (process.env.GOVERNANCE_EVIDENCE) {
-    await page.screenshot({ path: process.env.GOVERNANCE_EVIDENCE + "/governance-history-before.png", fullPage: true });
+    await page.screenshot({ path: process.env.GOVERNANCE_EVIDENCE + "/decision-history-before.png", fullPage: true });
   }
   await page.getByRole("button", { name: "Load Older Decisions" }).click();
   await expect(history.locator("[data-audit-id]")).toHaveCount(2);
   await expect(history.locator("summary").last()).toHaveAccessibleName("Allowed Tool Request by You");
   await expect(page.getByRole("button", { name: "Load Older Decisions" })).toHaveCount(0);
   if (process.env.GOVERNANCE_EVIDENCE) {
-    await page.screenshot({ path: process.env.GOVERNANCE_EVIDENCE + "/governance-history-after.png", fullPage: true });
+    await page.screenshot({ path: process.env.GOVERNANCE_EVIDENCE + "/decision-history-after.png", fullPage: true });
   }
 });
 

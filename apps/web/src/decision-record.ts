@@ -195,6 +195,17 @@ export function permissionDecisionRecord(item: PermissionItem): DecisionRecordMo
   };
 }
 
+/** What a person settled, when it was neither a tool request nor a question (#2213). */
+const REQUEST_KIND_TITLES: Record<NonNullable<GovernanceDecision["requestKind"]>, string> = {
+  workflow_decision: "Workflow Decision",
+  authentication: "Sign-In",
+  cost_budget: "Cost Budget",
+  cost_checkpoint: "Cost Checkpoint",
+  cost_unpriced: "Unpriced Usage",
+  daily_budget: "Daily Budget",
+  max_tool_calls: "Tool Call Limit",
+};
+
 /** A governance decision as a Decision Record. The audit is content-safe, so there is no command. */
 export function governanceDecisionRecord(decision: GovernanceDecision): DecisionRecordModel {
   const facts: DecisionFact[] = [];
@@ -203,7 +214,9 @@ export function governanceDecisionRecord(decision: GovernanceDecision): Decision
   if (decision.branch) facts.push({ label: "Branch", value: decision.branch });
   return {
     outcome: decision.outcome,
-    title: decision.question ? "Question" : decision.toolName ?? "Tool Request",
+    title: decision.question ? "Question"
+      : decision.requestKind ? REQUEST_KIND_TITLES[decision.requestKind]
+        : decision.toolName ?? "Tool Request",
     ...(decision.actor ? { actor: decision.actor } : {}),
     at: decision.timestamp,
     detail: decision.detail,

@@ -46,9 +46,13 @@ test("parseStoredRightPanelWidth: numeric strings parse and clamp", () => {
 });
 
 test("parseStoredRightPanelMode: valid modes pass through", () => {
-  for (const m of ["launcher", "review", "files", "browser", "sidechat", "subagents", "background", "governance"] as const) {
+  for (const m of ["launcher", "review", "files", "browser", "sidechat", "subagents", "background", "decisions"] as const) {
     assert.equal(parseStoredRightPanelMode(m), m);
   }
+});
+
+test("parseStoredRightPanelMode: a stored Governance History reopens as Decision History (#2213)", () => {
+  assert.equal(parseStoredRightPanelMode("governance"), "decisions");
 });
 
 test("parseStoredRightPanelMode: transient, retired, missing, and invalid modes fall back to the launcher", () => {

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { GovernanceAuditEntry } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import {
+  decisionHistory,
   GOVERNANCE_AUDIT_LIMIT,
   governanceDecisions,
   landedGovernanceAnchors,
@@ -23,8 +24,15 @@ const NO_ENTRIES: GovernanceAuditEntry[] = [];
  * idempotent while the server cursor preserves the database's tied-timestamp ordering.
  */
 export interface GovernanceAuditState {
+  /** The transcript merge's input: policy and fail-closed outcomes. */
   decisions: GovernanceDecision[];
-  available: boolean;
+  /** Every decision in the session, for Decision History (#2213). */
+  history: GovernanceDecision[];
+  /** Whether the newest page has loaded for this session, or its first load failed. A failed
+   * refresh after a load keeps the loaded decisions. */
+  status: "loading" | "error" | "ready";
+  /** Tries the newest page again after a failed first load. */
+  retry: () => void;
   hasMore: boolean;
   loadingOlder: boolean;
   loadOlder: () => void;
@@ -79,6 +87,8 @@ export function useGovernanceAudit(
   });
   const pageRef = useRef(page);
   pageRef.current = page;
+  const [failedSessionId, setFailedSessionId] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     if (!enabled) {
@@ -91,6 +101,7 @@ export function useGovernanceAudit(
     void api.governanceAudit(sessionId, GOVERNANCE_AUDIT_LIMIT)
       .then((response) => {
         if (active) {
+          setFailedSessionId(null);
           setPage((previous) => {
             if (previous.sessionId !== sessionId) {
               return {
@@ -131,21 +142,18 @@ export function useGovernanceAudit(
         }
       })
       .catch(() => {
-        if (active && pageRef.current.sessionId !== sessionId) {
-          setPage({
-            sessionId,
-            entries: NO_ENTRIES,
-            hasMore: false,
-            loadedOlder: false,
-            loadingOlder: false,
-            autoLoadBlocked: false,
-          });
-        }
+        // Only a first load fails visibly: a refresh that fails keeps the decisions already shown.
+        if (active && pageRef.current.sessionId !== sessionId) setFailedSessionId(sessionId);
       });
     return () => {
       active = false;
     };
-  }, [api, enabled, revision, sessionId]);
+  }, [api, attempt, enabled, revision, sessionId]);
+
+  const retry = useCallback(() => {
+    setFailedSessionId(null);
+    setAttempt((value) => value + 1);
+  }, []);
 
   const loadOlder = useCallback(() => {
     const current = pageRef.current;
@@ -213,11 +221,15 @@ export function useGovernanceAudit(
     sessionId,
   ]);
 
-  const visibleEntries = page.sessionId === sessionId ? page.entries : NO_ENTRIES;
+  const loaded = page.sessionId === sessionId;
+  const visibleEntries = loaded ? page.entries : NO_ENTRIES;
   const decisions = useMemo(() => governanceDecisions(visibleEntries), [visibleEntries]);
+  const history = useMemo(() => decisionHistory(visibleEntries), [visibleEntries]);
   return {
     decisions,
-    available: decisions.length > 0 || (page.sessionId === sessionId && page.hasMore),
+    history,
+    status: loaded ? "ready" : failedSessionId === sessionId ? "error" : "loading",
+    retry,
     hasMore: page.sessionId === sessionId && page.hasMore,
     loadingOlder: page.sessionId === sessionId && page.loadingOlder,
     loadOlder,

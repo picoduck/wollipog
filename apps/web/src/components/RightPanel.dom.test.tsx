@@ -118,14 +118,14 @@ const governanceDecision: GovernanceDecision = {
 function PanelHarness({
   initialSession = liveSession,
   initialRunnerOnline = true,
-  governanceDecisions,
-  governanceHasMore,
+  decisionHistory,
+  decisionHistoryHasMore,
   onState,
 }: {
   initialSession?: SessionView;
   initialRunnerOnline?: boolean;
-  governanceDecisions?: readonly GovernanceDecision[];
-  governanceHasMore?: boolean;
+  decisionHistory?: readonly GovernanceDecision[];
+  decisionHistoryHasMore?: boolean;
   onState: (state: RightPanelState) => void;
 }) {
   const state = useRightPanelState();
@@ -160,9 +160,9 @@ function PanelHarness({
         runnerProtocolVersion={null}
         git={git}
         items={agentItems}
-        governanceDecisions={governanceDecisions}
-        governanceHasMore={governanceHasMore}
-        onLoadOlderGovernance={() => {}}
+        decisionHistory={decisionHistory}
+        decisionHistoryHasMore={decisionHistoryHasMore}
+        onLoadOlderDecisions={() => {}}
         onOpenSourceLocation={() => {}}
         onClearSourceLocation={() => {}}
         onOpenTerminal={() => {}}
@@ -279,33 +279,54 @@ async function mountPanel(element: React.ReactElement) {
   };
 }
 
-test("Governance History renders only its list, empty state, and paging control", async () => {
+test("Decision History renders only its list, empty state, and paging control", async () => {
   // Every state the mode can reach must be free of the placeholder hint that used to trail the
   // panel body for any mode outside a hard-coded allow list (#1201).
   for (const [name, props] of [
-    ["populated", { governanceDecisions: [governanceDecision], governanceHasMore: false }],
-    ["empty page with more available", { governanceDecisions: [], governanceHasMore: true }],
-    ["empty", { governanceDecisions: [], governanceHasMore: false }],
+    ["populated", { decisionHistory: [governanceDecision], decisionHistoryHasMore: false }],
+    ["empty page with more available", { decisionHistory: [], decisionHistoryHasMore: true }],
+    ["empty", { decisionHistory: [], decisionHistoryHasMore: false }],
   ] as const) {
     let state!: RightPanelState;
     const panel = await mountPanel(<PanelHarness {...props} onState={(next) => { state = next; }} />);
     try {
-      await act(async () => state.show("governance"));
+      await act(async () => state.show("decisions"));
+      assert.equal(panel.container.querySelector(".rp-title")?.textContent, "Decision History");
       const body = panel.container.querySelector(".rp-body")!;
       assert.doesNotMatch(body.textContent ?? "", /Coming soon/, `${name} must not render a placeholder hint`);
       if (name === "populated") {
         assert.match(body.textContent ?? "", /AllowedTool Requestby Policy/);
-        assertNoDomNode(body.querySelector(".governance-history-more"), "no paging control without more pages");
+        assertNoDomNode(body.querySelector(".decision-history-more"), "no paging control without more pages");
       } else if (name === "empty page with more available") {
-        assert.match(body.textContent ?? "", /No governance decisions are visible in this page yet\./);
-        assert.equal(body.querySelector(".governance-history-more")?.textContent, "Load Older Decisions");
+        assert.match(body.textContent ?? "", /No decisions are loaded yet\./);
+        assert.equal(body.querySelector(".decision-history-more")?.textContent, "Load Older Decisions");
       } else {
-        assert.match(body.textContent ?? "", /No governance decisions have been recorded for this session\./);
-        assertNoDomNode(body.querySelector(".governance-history-more"));
+        assert.match(body.textContent ?? "", /No Decisions Yet/);
+        assert.match(body.textContent ?? "", /Decisions you and your approval policies make in this session appear here\./);
+        assertNoDomNode(body.querySelector(".decision-history-more"));
       }
     } finally {
       await panel.dispose();
     }
+  }
+});
+
+test("the Decision History launcher row is enabled with no decisions and opens the empty state (#2213)", async () => {
+  let state!: RightPanelState;
+  const panel = await mountPanel(<PanelHarness decisionHistory={[]} onState={(next) => { state = next; }} />);
+  try {
+    await act(async () => state.show("launcher"));
+    const row = [...panel.container.querySelectorAll<HTMLButtonElement>(".rp-launcher .rp-row")]
+      .find((candidate) => candidate.textContent === "Decision History");
+    assert.ok(row, "the launcher lists Decision History");
+    assert.equal(row.disabled, false);
+    assert.equal(row.getAttribute("aria-disabled"), null);
+    await act(async () => row.click());
+    assert.equal(state.mode, "decisions");
+    assert.match(panel.container.querySelector(".rp-body")?.textContent ?? "", /No Decisions Yet/);
+    assert.doesNotMatch(panel.container.textContent ?? "", /Governance History/);
+  } finally {
+    await panel.dispose();
   }
 });
 
