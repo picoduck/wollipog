@@ -129,8 +129,9 @@ export function Modal({
   back,
 }: {
   title: string;
-  /** Optional one-line description under the title, in `--text-dim` (§7.2). */
-  description?: string;
+  /** Optional one-line description under the title, in `--text-dim` (§7.2). Phrasing content only:
+   * it renders inside a paragraph. */
+  description?: ReactNode;
   onClose: () => void;
   children: ReactNode;
   footer?: ReactNode;

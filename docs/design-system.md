@@ -2133,7 +2133,10 @@ follows these rules so it never crowds out the conversation it asks about:
   is its 16:10 frame with the Reviewed mark on the picture's corner, its name by media type
   ("Screenshot 2", "Recording", "Link"; numbered only when the request has several), the capture's
   pixel size once shown, and the evidence id in mono, which ellipsizes; the name wraps and never
-  truncates. An artifact tile that is still loading has no mark yet. Activating a shown tile opens it (the Evidence Viewer, #2207, takes this over). A tile
+  truncates. An artifact tile that is still loading has no mark yet. Activating a shown tile opens
+  the Evidence Viewer on it (below). In a frame under 120px on a touch screen the mark's 44px target
+  grows out past the frame's corner rather than over the picture, so a tap on the tile's middle
+  opens the viewer. A tile
   that can't show its evidence is `.ev-blocked` in place of the picture: `ShieldX` "Doesn't Match",
   `CircleAlert` "Can't Load" (with Retry when trying again can help) or "Can't Show", in danger
   ink; `LockKeyhole` "Not Shown" in neutral ink on a plain-HTTP page. A blocked tile has no mark,
@@ -2143,6 +2146,24 @@ follows these rules so it never crowds out the conversation it asks about:
   until every item can be reviewed." or "Approve needs HTTPS or localhost. Deny works from here."
   Small buttons in a tile borrow only height for their 44px touch target, so the strip never
   scrolls sideways.
+- **The Evidence Viewer is where evidence is reviewed** (`EvidenceViewer` in
+  `components/EvidenceArtifactView.tsx`, #2207): a `Modal` with `size="full"` (§7.1), a full-height
+  sheet with a back arrow on phones (§7.5). Its title is the item's name and how many of its kind
+  there are ("Screenshot 2 of 4"; the bare name when it is the only one), with the capture's pixel
+  size and the evidence id in mono as the description. The picture fills what the header,
+  filmstrip and footer leave. Under it, `.ev-strip` holds a 72×45 thumbnail for every viewable item
+  in grid order, the current one selected in accent and each reviewed one with a check chip; a
+  thumbnail jumps to its item. Previous and Next, and ← and → outside a player or field, move
+  through the same items; blocked, Not Shown and link-only items are never in it, and an item that
+  fails while shown closes the viewer so its tile can say why. The footer's left slot holds the
+  **Reviewed** checkbox and the foot-note ("2 of 4 reviewed"), then Previous, Next and **Mark
+  Reviewed and Next**, the primary, which marks the item and moves on, or closes on the last.
+  Opening focuses the primary; closing returns focus to the tile of the item last shown. Marks are
+  the grid's own, so its progress and saved draft follow them. While the viewer is open every
+  artifact loads, not only those near the viewport. On a phone, Previous and Next are 48px squares
+  named by hidden words, and the primary takes the rest of their row, under a row with the checkbox
+  and foot-note.
+  A recording plays in the viewer with its controls.
 - **Reading back shrinks it to a strip.** While the reader scrolls up away from the live tail (the
   follow-tail state is paused), the dock becomes one 44px `.dock-strip` on the card's warning
   surface: kind icon, the expanded request's title, its position ("1 of 3") and Expand, icon-only

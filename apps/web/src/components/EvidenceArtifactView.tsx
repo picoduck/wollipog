@@ -1,11 +1,20 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Notice } from "./Notice.js";
 import { MAX_PROMPT_IMAGE_BYTES, MAX_SESSION_VIDEO_BYTES, PROMPT_IMAGE_MIME_TYPES, type WorkflowDecisionResourceSnapshot } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { sha256Hex } from "../artifact-preview.js";
 import { Modal } from "./common.js";
-import { DecisionBlockedIcon, ErrorIcon, PlayIcon, SecureContextRequiredIcon } from "./Icons.js";
+import {
+  CheckIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  DecisionBlockedIcon,
+  ErrorIcon,
+  PlayIcon,
+  SecureContextRequiredIcon,
+} from "./Icons.js";
+import { Checkbox } from "./ui/ChoiceControls.js";
 
 export type EvidenceItem = Extract<
   WorkflowDecisionResourceSnapshot,
@@ -67,6 +76,14 @@ type LoadState =
 /** The pixel size the browser drew a shown artifact at: the capture's viewport. */
 export interface EvidenceDimensions { width: number; height: number }
 
+/** A shown artifact's checked bytes, lent by its tile to the Evidence Viewer (#2207). The tile owns
+ * the object URL and revokes it; `fail` withdraws the item exactly as a failed draw in the tile does. */
+export interface EvidenceSource {
+  url: string;
+  video: boolean;
+  fail: () => void;
+}
+
 /**
  * A tile's state that is not a picture (§12.4; #2197): a 16px icon, a Title Case label and one short
  * sentence, with Retry when trying again can help. Shown in the tile's frame, where the image would be.
@@ -95,27 +112,41 @@ export function EvidenceArtifactView({
   name,
   onStatusChange,
   onDimensions,
+  onOpen,
+  onSource,
+  eager = false,
 }: {
   item: EvidenceItem & { artifactId: string; mediaType: string };
   /** The tile's readable name ("Screenshot 2"), which also names its controls. */
   name: string;
   onStatusChange: (evidenceId: string, status: EvidenceArtifactStatus) => void;
   onDimensions?: (dimensions: EvidenceDimensions) => void;
+  /** Opens the Evidence Viewer on this item; the tile's picture is its one target. */
+  onOpen?: () => void;
+  /** Lends the checked bytes to the viewer while they are shown, and takes them back (null) otherwise. */
+  onSource?: (evidenceId: string, source: EvidenceSource | null) => void;
+  /** Load now, without waiting for the tile to approach the viewport: the viewer steps through every item. */
+  eager?: boolean;
 }) {
   const api = useApi();
   const [state, setState] = useState<LoadState>({ status: "pending" });
   const [visible, setVisible] = useState(typeof IntersectionObserver === "undefined");
   const [attempt, setAttempt] = useState(0);
-  const [enlarged, setEnlarged] = useState(false);
   const isVideo = item.mediaType.toLowerCase().startsWith("video/");
   const containerRef = useRef<HTMLDivElement>(null);
-  const enlargeRef = useRef<HTMLButtonElement>(null);
   const onStatusChangeRef = useRef(onStatusChange);
   onStatusChangeRef.current = onStatusChange;
   const onDimensionsRef = useRef(onDimensions);
   onDimensionsRef.current = onDimensions;
+  const onSourceRef = useRef(onSource);
+  onSourceRef.current = onSource;
   const statusRef = useRef<LoadState["status"]>("pending");
   statusRef.current = state.status;
+
+  // Once loading starts it is never undone by `eager` turning off: that would revoke shown bytes.
+  useEffect(() => {
+    if (eager) setVisible(true);
+  }, [eager]);
 
   useEffect(() => {
     if (visible || !containerRef.current || typeof IntersectionObserver === "undefined") return;
@@ -217,6 +248,15 @@ export function EvidenceArtifactView({
 
   const retry = useCallback(() => setAttempt((current) => current + 1), []);
 
+  // Only bytes the browser has drawn here are lent to the viewer, so it can never show an item the
+  // tile shows as Loading, Doesn't Match, Can't Load or Not Shown.
+  const shownUrl = state.status === "ready" ? state.url : null;
+  useEffect(() => {
+    if (!shownUrl) return;
+    onSourceRef.current?.(item.evidenceId, { url: shownUrl, video: isVideo, fail: onImageError });
+    return () => onSourceRef.current?.(item.evidenceId, null);
+  }, [item.evidenceId, isVideo, onImageError, shownUrl]);
+
   return (
     <div className="ev-media" ref={containerRef} data-status={state.status} aria-busy={
       state.status === "pending" || state.status === "loading" || state.status === "decoding" || undefined}>
@@ -227,14 +267,13 @@ export function EvidenceArtifactView({
         <>
           {/* The tile's one viewer target. Mounted while decoding so the browser attempts the draw,
               but hidden and inert until it succeeds: a broken image must never look like evidence
-              that was shown. The Evidence Viewer (#2207) takes over this button's activation. */}
+              that was shown. */}
           <button
             type="button"
             className="ev-thumb"
-            ref={enlargeRef}
             hidden={state.status !== "ready"}
             disabled={state.status !== "ready"}
-            onClick={() => setEnlarged(true)}
+            onClick={onOpen}
             aria-label={`Open ${name}`}
             data-ev-viewer-target=""
           >
@@ -262,21 +301,6 @@ export function EvidenceArtifactView({
                 onError={onImageError} />
             )}
           </button>
-          {enlarged && state.status === "ready" && (
-            <Modal
-              title={name}
-              description={item.evidenceId}
-              onClose={() => setEnlarged(false)}
-              size="lg"
-              returnFocusRef={enlargeRef}
-            >
-              {isVideo
-                // A recording that fails while it plays was not shown either: its review is withdrawn.
-                ? <video className="ev-full" src={imageUrl} controls playsInline preload="auto" aria-label={`Play ${name}`}
-                  onError={onImageError} />
-                : <img className="ev-full" src={imageUrl} alt={name} />}
-            </Modal>
-          )}
         </>
       )}
       {state.status === "mismatch" && (
@@ -328,5 +352,177 @@ export function EvidenceSecureContextNotice({ evidence }: { evidence: readonly E
         localhost on the machine that runs it.
       </p>
     </Notice>
+  );
+}
+
+/** One item the Evidence Viewer can show: an artifact-backed image or recording that is shown, or still
+ * loading, in its tile. Blocked, Not Shown and link-only items are never entries. */
+export interface EvidenceViewerEntry {
+  item: EvidenceItem & { artifactId: string; mediaType: string };
+  /** The tile's name ("Screenshot 2"). */
+  name: string;
+  /** The viewer's title ("Screenshot 2 of 4"). */
+  title: string;
+  /** The tile's checked bytes; null while the tile is still loading them. */
+  source: EvidenceSource | null;
+  /** The capture's viewport once shown ("390 × 760"). */
+  facts: string | null;
+  /** Shown here and so may be marked Reviewed. */
+  reviewable: boolean;
+  reviewed: boolean;
+}
+
+export const EVIDENCE_VIEWER_COPY = {
+  previous: "Previous",
+  next: "Next",
+  reviewed: "Reviewed",
+  markAndNext: "Mark Reviewed and Next",
+  items: "Evidence Items",
+  progress: (reviewed: number, total: number) => `${reviewed} of ${total} reviewed`,
+} as const;
+
+/** Arrow keys belong to a focused player's seek bar or a text field, not to the viewer. */
+function keepsArrowKeys(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable || target.matches("video, audio, textarea, select")) return true;
+  return target instanceof HTMLInputElement && !["checkbox", "radio", "button"].includes(target.type);
+}
+
+/**
+ * Where UI evidence is reviewed (docs/design-system.md §7; #2207): a full dialog, a full-height sheet
+ * on phones, over the review's grid. It shows one item with its viewport facts and id, steps through
+ * the viewable items in grid order with Previous, Next, ← and →, and lists them as a filmstrip with
+ * their Reviewed marks. Marks go through the grid's own review, so its progress and saved draft move
+ * with them. Mark Reviewed and Next marks the item and moves on, or closes on the last.
+ */
+export function EvidenceViewer({
+  entries,
+  currentId,
+  reviewedCount,
+  total,
+  onShow,
+  onReviewed,
+  onClose,
+  returnFocusRef,
+}: {
+  entries: readonly EvidenceViewerEntry[];
+  currentId: string;
+  /** The whole review's count, as the grid's progress line reads it. */
+  reviewedCount: number;
+  total: number;
+  onShow: (evidenceId: string) => void;
+  onReviewed: (evidenceId: string, checked: boolean) => void;
+  onClose: () => void;
+  /** The tile of the item last shown, read when the viewer closes. */
+  returnFocusRef: { readonly current: HTMLElement | null };
+}) {
+  const index = Math.max(entries.findIndex((entry) => entry.item.evidenceId === currentId), 0);
+  const entry = entries[index]!;
+  const previous = entries[index - 1];
+  const next = entries[index + 1];
+  const id = entry.item.evidenceId;
+  const primaryRef = useRef<HTMLButtonElement>(null);
+  const stripRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    // Previous or Next turns disabled at either end, and a disabled button drops focus to the page.
+    const focused = document.activeElement;
+    if (!focused || focused === document.body || (focused instanceof HTMLElement && focused.matches(":disabled"))) {
+      primaryRef.current?.focus();
+    }
+    const thumb = [...stripRef.current?.querySelectorAll<HTMLElement>(".ev-strip-thumb") ?? []]
+      .find((candidate) => candidate.dataset.evidenceId === id);
+    thumb?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  }, [id]);
+
+  const markAndNext = () => {
+    if (!entry.reviewable) return;
+    onReviewed(id, true);
+    if (next) onShow(next.item.evidenceId);
+    else onClose();
+  };
+  const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    if (keepsArrowKeys(event.target)) return;
+    event.preventDefault();
+    const target = event.key === "ArrowLeft" ? previous : next;
+    if (target) onShow(target.item.evidenceId);
+  };
+
+  const { facts } = entry;
+  return (
+    <Modal
+      title={entry.title}
+      description={<>{facts && <span className="ev-viewer-facts">{facts}</span>}<span className="ev-viewer-id">{id}</span></>}
+      onClose={onClose}
+      size="full"
+      phoneSheet="full"
+      className="ev-viewer"
+      returnFocusRef={returnFocusRef}
+      onKeyDown={onKeyDown}
+      footer={(
+        <>
+          <div className="ev-viewer-state">
+            <Checkbox
+              label={EVIDENCE_VIEWER_COPY.reviewed}
+              checked={entry.reviewed}
+              disabled={!entry.reviewable}
+              onChange={(checked) => onReviewed(id, checked)}
+            />
+            <p className="ev-viewer-note">{EVIDENCE_VIEWER_COPY.progress(reviewedCount, total)}</p>
+          </div>
+          <button type="button" className="btn ev-viewer-step" disabled={!previous} aria-keyshortcuts="ArrowLeft"
+            onClick={() => previous && onShow(previous.item.evidenceId)}>
+            <ChevronLeftIcon size={16} />
+            <span className="ev-viewer-step-label">{EVIDENCE_VIEWER_COPY.previous}</span>
+          </button>
+          <button type="button" className="btn ev-viewer-step" disabled={!next} aria-keyshortcuts="ArrowRight"
+            onClick={() => next && onShow(next.item.evidenceId)}>
+            <span className="ev-viewer-step-label">{EVIDENCE_VIEWER_COPY.next}</span>
+            <ChevronRightIcon size={16} />
+          </button>
+          {/* Opening from a tile lands here: the next thing to do is review this item. */}
+          <button ref={primaryRef} type="button" className="btn primary" autoFocus disabled={!entry.reviewable}
+            onClick={markAndNext}>
+            {EVIDENCE_VIEWER_COPY.markAndNext}
+          </button>
+        </>
+      )}
+    >
+      <div className="ev-viewer-stage" data-status={entry.source ? "ready" : "loading"}>
+        {!entry.source ? <span className="ev-loading">Loading…</span>
+          : entry.source.video
+            // A recording that fails while it plays was not shown either: its review is withdrawn.
+            ? <video key={id} className="ev-viewer-media" src={entry.source.url} controls playsInline preload="auto"
+              aria-label={`Play ${entry.name}`} onError={entry.source.fail} />
+            : <img key={id} className="ev-viewer-media" src={entry.source.url} alt={entry.name} onError={entry.source.fail} />}
+      </div>
+      {entries.length > 1 && (
+        <div className="ev-strip" role="list" aria-label={EVIDENCE_VIEWER_COPY.items} ref={stripRef}>
+          {entries.map((candidate) => (
+            <div role="listitem" key={candidate.item.evidenceId}>
+              <button
+                type="button"
+                className="ev-strip-thumb"
+                data-evidence-id={candidate.item.evidenceId}
+                data-reviewed={candidate.reviewed || undefined}
+                aria-current={candidate.item.evidenceId === id ? "true" : undefined}
+                onClick={() => onShow(candidate.item.evidenceId)}
+              >
+                {!candidate.source ? <span className="ev-strip-wait" aria-hidden="true" />
+                  : candidate.source.video
+                    ? <video src={candidate.source.url} muted playsInline preload="metadata" aria-hidden="true" tabIndex={-1} />
+                    : <img src={candidate.source.url} alt="" />}
+                <span className="sr-only">
+                  {candidate.reviewed ? `${candidate.name}, ${EVIDENCE_VIEWER_COPY.reviewed}` : candidate.name}
+                </span>
+                {candidate.reviewed && <span className="ev-strip-mark" aria-hidden="true"><CheckIcon size={14} /></span>}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </Modal>
   );
 }

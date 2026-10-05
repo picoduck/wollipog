@@ -4084,6 +4084,12 @@ textarea {
     white-space: nowrap;
   }
   .ev-frame > .ev-mark { padding: var(--space-1); }
+  /* A frame this small has no room for two 44px targets side by side, so on a touch screen the
+     mark's grows out past the frame's corner instead of over the picture: a tap on the middle of a
+     strip tile opens the Evidence Viewer rather than ticking the mark (#2207). */
+  @media (pointer: coarse) {
+    .ev-frame > .ev-mark::after { inset: calc(-1 * var(--space-4)) 0 0 calc(-1 * var(--space-4)); }
+  }
 }
 /* The caption and Show Details share a row while it is closed; open, the details take their own. */
 .ev-foot {
@@ -4112,13 +4118,126 @@ textarea {
   font-family: var(--font-mono);
   overflow-wrap: anywhere;
 }
-.ev-full {
-  display: block;
-  max-width: 100%;
-  max-height: 78vh;
-  margin: 0 auto;
-  object-fit: contain;
+/* The Evidence Viewer (#2207; §7.1, §7.5): a full dialog, a full-height sheet on phones. The picture
+   takes whatever height the header, filmstrip and footer leave, so the footer never scrolls away. */
+.ev-viewer .modal-desc {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--space-3);
+  font: var(--type-small);
+}
+.ev-viewer-facts { font-variant-numeric: tabular-nums; }
+.ev-viewer-id {
+  min-width: 0;
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+.ev-viewer .modal-body { gap: var(--space-3); }
+.ev-viewer-stage {
+  position: relative;
+  display: grid;
+  flex: 1 1 auto;
+  place-items: center;
+  min-height: 160px;
+  border-radius: var(--radius-md);
   background: var(--bg);
+}
+.ev-viewer-media {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+/* 72×45 thumbnails, 16:10 like a tile's frame and over the 44px touch height (§15.3). */
+.ev-strip {
+  display: flex;
+  flex: none;
+  gap: var(--space-2);
+  padding: var(--space-1);
+  overflow-x: auto;
+}
+.ev-strip > [role="listitem"] { flex: none; }
+.ev-strip-thumb {
+  position: relative;
+  display: block;
+  width: 72px;
+  height: 45px;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  cursor: pointer;
+}
+.ev-strip-thumb > :is(img, video) {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.ev-strip-thumb[data-reviewed] { border-color: var(--accent); }
+/* The item shown is selected, so it takes the accent edge on both sides of its border (§16.1). */
+.ev-strip-thumb[aria-current="true"] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.ev-strip-wait {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: var(--bg-elev-2);
+}
+.ev-strip-mark {
+  position: absolute;
+  top: var(--space-0-5);
+  left: var(--space-0-5);
+  display: grid;
+  place-items: center;
+  width: var(--space-4);
+  height: var(--space-4);
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: var(--on-accent);
+}
+@media (forced-colors: active) {
+  .ev-strip-mark { color: inherit; }
+}
+/* The footer's left slot repeats the review's state (§7.3); the steps and the primary follow it. */
+.ev-viewer-state {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  min-width: 0;
+  margin-right: auto;
+}
+.ev-viewer-note {
+  margin: 0;
+  color: var(--text-dim);
+  font: var(--type-small);
+  font-variant-numeric: tabular-nums;
+}
+@media (max-width: 760px) {
+  /* The state takes its own row; Previous and Next keep 48px squares named by their hidden words,
+     and the primary takes the rest of the row. */
+  .ev-viewer-state {
+    flex-basis: 100%;
+    justify-content: space-between;
+    margin-right: 0;
+  }
+  .modal-foot > .btn.ev-viewer-step {
+    flex: none;
+    width: 48px;
+  }
+  .ev-viewer-step-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
 }
 .agents-panel {
   display: flex;

@@ -1,4 +1,4 @@
-import React, { useEffect, useId, useState } from "react";
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { PendingApproval, WorkflowDecisionView } from "@wollipog/protocol";
 import { useInstanceScope } from "../../instance-scope.js";
 import {
@@ -15,6 +15,7 @@ import {
   EvidenceArtifactView,
   EvidenceBlocked,
   EvidenceSecureContextNotice,
+  EvidenceViewer,
   evidenceIntegrityCheckAvailable,
   evidenceStatusBlocksReview,
   isArtifactBackedEvidence,
@@ -22,6 +23,8 @@ import {
   UnrenderableEvidenceArtifact,
   type EvidenceArtifactStatus,
   type EvidenceDimensions,
+  type EvidenceSource,
+  type EvidenceViewerEntry,
 } from "../EvidenceArtifactView.js";
 
 type EvidenceSnapshot = Extract<WorkflowDecisionView["resourceSnapshot"], { category: "ui_evidence_approval" }>;
@@ -68,6 +71,24 @@ export function evidenceItemNames(evidence: readonly EvidenceItem[]): Map<string
     seen.set(kind, position);
     return [item.evidenceId, totals.get(kind)! > 1 ? `${kind} ${position}` : kind];
   }));
+}
+
+/** The Evidence Viewer's titles (#2207): a tile's name and how many of its kind there are, "Screenshot 2
+ * of 4", or the bare name when it is the only one ("Recording"). */
+export function evidenceViewerTitles(evidence: readonly EvidenceItem[]): Map<string, string> {
+  const names = evidenceItemNames(evidence);
+  const totals = new Map<EvidenceKind, number>();
+  for (const item of evidence) totals.set(evidenceKind(item), (totals.get(evidenceKind(item)) ?? 0) + 1);
+  return new Map(evidence.map((item) => {
+    const name = names.get(item.evidenceId) ?? item.evidenceId;
+    const total = totals.get(evidenceKind(item))!;
+    return [item.evidenceId, total > 1 ? `${name} of ${total}` : name];
+  }));
+}
+
+/** A shown capture's viewport, as its tile and the Evidence Viewer state it: "960 × 600". */
+function evidenceFacts(dimensions: EvidenceDimensions): string {
+  return `${dimensions.width} × ${dimensions.height}`;
 }
 
 /** "Review 4 screenshots before approving"; "items" when the request mixes kinds. */
@@ -191,11 +212,21 @@ export function useEvidenceReview(sessionId: string, request: PendingApproval): 
   };
 }
 
+/** What a tile shares with the Evidence Viewer (#2207): its bytes and size once shown, and how to open it. */
+interface EvidenceTileViewer {
+  dimensions: EvidenceDimensions | null;
+  onDimensions: (evidenceId: string, dimensions: EvidenceDimensions) => void;
+  onSource: (evidenceId: string, source: EvidenceSource | null) => void;
+  onOpen: (evidenceId: string) => void;
+  /** The viewer is open, so every item loads now rather than as it nears the viewport. */
+  eager: boolean;
+}
+
 /** One evidence item as a tile (#2197): its frame with the Reviewed mark on it, then its name, the
- * capture's size once shown, and its id. */
-function EvidenceTile({ review, item }: { review: EvidenceReview; item: EvidenceItem }) {
+ * capture's size once shown, and its id. Its picture opens the Evidence Viewer (#2207). */
+function EvidenceTile({ review, item, viewer }: { review: EvidenceReview; item: EvidenceItem; viewer: EvidenceTileViewer }) {
   const nameId = `${useId().replace(/:/g, "")}-name`;
-  const [dimensions, setDimensions] = useState<EvidenceDimensions | null>(null);
+  const { dimensions } = viewer;
   const name = review.names.get(item.evidenceId) ?? item.evidenceId;
   const state = review.state(item);
   const linkOnly = !isArtifactBackedEvidence(item);
@@ -213,7 +244,9 @@ function EvidenceTile({ review, item }: { review: EvidenceReview; item: Evidence
     />
   );
   const frame = isRenderableEvidence(item)
-    ? <EvidenceArtifactView item={item} name={name} onStatusChange={review.onArtifactStatus} onDimensions={setDimensions} />
+    ? <EvidenceArtifactView item={item} name={name} onStatusChange={review.onArtifactStatus}
+      onDimensions={(next) => viewer.onDimensions(item.evidenceId, next)} onSource={viewer.onSource}
+      onOpen={() => viewer.onOpen(item.evidenceId)} eager={viewer.eager} />
     : isArtifactBackedEvidence(item) ? <UnrenderableEvidenceArtifact item={item} />
       : item.uri ? (
         // No picture to carry the mark, so it sits under Open Link inside the frame.
@@ -243,7 +276,7 @@ function EvidenceTile({ review, item }: { review: EvidenceReview; item: Evidence
       );
   return (
     <article className="ev-tile" data-state={state} data-reviewed={review.reviewed(item) || undefined}
-      aria-labelledby={nameId}>
+      data-evidence-id={item.evidenceId} aria-labelledby={nameId}>
       <div className="ev-frame">
         {frame}
         {!linkOnly && mark}
@@ -251,7 +284,7 @@ function EvidenceTile({ review, item }: { review: EvidenceReview; item: Evidence
       <div className="ev-meta">
         <span className="ev-name" id={nameId}>{name}</span>
         {dimensions && state === "reviewable" && (
-          <span className="ev-facts">{dimensions.width} × {dimensions.height}</span>
+          <span className="ev-facts">{evidenceFacts(dimensions)}</span>
         )}
         {linkOnly && state === "waiting" && <span className="ev-facts">Open it to review.</span>}
         <span className="ev-id" title={item.evidenceId}>{item.evidenceId}</span>
@@ -260,15 +293,75 @@ function EvidenceTile({ review, item }: { review: EvidenceReview; item: Evidence
   );
 }
 
+/** The control that stands for a tile when focus comes back to it: its picture, else its first live control. */
+function tileFocusTarget(grid: HTMLElement | null, evidenceId: string | null): HTMLElement | null {
+  const tile = [...grid?.querySelectorAll<HTMLElement>(".ev-tile") ?? []]
+    .find((candidate) => candidate.dataset.evidenceId === evidenceId);
+  return tile?.querySelector<HTMLElement>(
+    ".ev-thumb:not([hidden]):not(:disabled), button:not(:disabled), input:not(:disabled), a[href]",
+  ) ?? null;
+}
+
 /**
  * The evidence of a UI evidence decision as a grid of named tiles (docs/design-system.md §13.2;
  * #2197): the HTTPS notice when this page cannot check artifacts, a notice when an item can't be
- * reviewed, a progress line, the tiles, one digest caption, and Show Details.
+ * reviewed, a progress line, the tiles, one digest caption, and Show Details. A tile's picture opens
+ * the Evidence Viewer (#2207) over the grid, on the same review.
  */
 export function EvidenceReviewBody({ review }: { review: EvidenceReview }) {
   const { decision, evidence } = review;
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [viewing, setViewing] = useState<string | null>(null);
+  const [sources, setSources] = useState<Record<string, EvidenceSource>>({});
+  const [dimensions, setDimensions] = useState<Record<string, EvidenceDimensions>>({});
+  const gridRef = useRef<HTMLDivElement>(null);
+  const lastShownRef = useRef<string | null>(null);
+  // Read as the viewer closes, so focus returns to the tile of the item last shown, whichever it was.
+  const returnFocusRef = useMemo(() => ({
+    get current() { return tileFocusTarget(gridRef.current, lastShownRef.current); },
+  }), []);
   const states = evidence.map(review.state);
+  const show = useCallback((evidenceId: string) => {
+    lastShownRef.current = evidenceId;
+    setViewing(evidenceId);
+  }, []);
+  const onSource = useCallback((evidenceId: string, source: EvidenceSource | null) => setSources((current) => {
+    if (source) return current[evidenceId] === source ? current : { ...current, [evidenceId]: source };
+    if (!Object.hasOwn(current, evidenceId)) return current;
+    const { [evidenceId]: _withdrawn, ...rest } = current;
+    return rest;
+  }), []);
+  const onDimensions = useCallback((evidenceId: string, next: EvidenceDimensions) => setDimensions((current) =>
+    current[evidenceId]?.width === next.width && current[evidenceId]?.height === next.height
+      ? current : { ...current, [evidenceId]: next }), []);
+  // Grid order, without what the grid shows as blocked or Not Shown, and without link-only items,
+  // which keep Open Link on their tile. An item still loading is an entry: the viewer loads it.
+  const titles = evidenceViewerTitles(evidence);
+  const entries: EvidenceViewerEntry[] = evidence.flatMap((item, index) => {
+    if (!isRenderableEvidence(item) || (states[index] !== "reviewable" && states[index] !== "waiting")) return [];
+    return [{
+      item,
+      name: review.names.get(item.evidenceId) ?? item.evidenceId,
+      title: titles.get(item.evidenceId) ?? item.evidenceId,
+      source: states[index] === "reviewable" ? sources[item.evidenceId] ?? null : null,
+      facts: dimensions[item.evidenceId] ? evidenceFacts(dimensions[item.evidenceId]!) : null,
+      reviewable: states[index] === "reviewable",
+      reviewed: review.reviewed(item),
+    }];
+  });
+  // An item that fails while it is shown (a recording that stops playing) leaves the viewer, and
+  // focus returns to its tile, which now says what happened.
+  const current = viewing !== null && entries.some((entry) => entry.item.evidenceId === viewing) ? viewing : null;
+  useEffect(() => {
+    if (viewing !== null && current === null) setViewing(null);
+  }, [current, viewing]);
+  const tileViewer = (item: EvidenceItem): EvidenceTileViewer => ({
+    dimensions: dimensions[item.evidenceId] ?? null,
+    onDimensions,
+    onSource,
+    onOpen: show,
+    eager: current !== null,
+  });
   const anyShown = evidence.some((item, index) => states[index] === "reviewable" && isArtifactBackedEvidence(item));
   return (
     <div className="ev-review">
@@ -280,13 +373,25 @@ export function EvidenceReviewBody({ review }: { review: EvidenceReview }) {
       <p className="ev-progress" role="status" aria-live="polite">
         {review.reviewedCount} of {evidence.length} reviewed
       </p>
-      <div className="ev-grid" role="list" aria-label="Evidence Items">
+      <div className="ev-grid" role="list" aria-label="Evidence Items" ref={gridRef}>
         {evidence.map((item) => (
           <div role="listitem" key={item.evidenceId} className="ev-cell">
-            <EvidenceTile review={review} item={item} />
+            <EvidenceTile review={review} item={item} viewer={tileViewer(item)} />
           </div>
         ))}
       </div>
+      {current !== null && (
+        <EvidenceViewer
+          entries={entries}
+          currentId={current}
+          reviewedCount={review.reviewedCount}
+          total={evidence.length}
+          onShow={show}
+          onReviewed={review.setReviewed}
+          onClose={() => setViewing(null)}
+          returnFocusRef={returnFocusRef}
+        />
+      )}
       <div className="ev-foot">
         {anyShown && (
           <p className="ev-checked"><SuccessIcon size={14} />{EVIDENCE_COPY.checked}</p>

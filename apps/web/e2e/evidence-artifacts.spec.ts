@@ -389,6 +389,99 @@ test("tiles are named in full and keep their targets on a touch phone", async ({
   }
 });
 
+/** The smaller of an element's laid-out width and height, unaffected by a dialog's opening animation. */
+const drawnSize = (locator: Locator) => locator.evaluate((element: HTMLElement) =>
+  Math.min(element.offsetWidth, element.offsetHeight));
+
+test("at 1440×900 the Evidence Viewer steps through a four-item review and marks each item as it goes", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openReview(page, "items=4&artifacts=ready");
+  await expect(page.getByRole("img", { name: "Screenshot 4" })).toBeVisible();
+  await tile(page, "viewport-2").getByRole("button", { name: "Open Screenshot 2" }).click();
+  const viewer = page.getByRole("dialog", { name: "Screenshot 2 of 4" });
+  await expect(viewer).toBeVisible();
+  await expect(viewer.locator(".ev-viewer-facts")).toHaveText("390 × 760");
+  await expect(viewer.locator(".ev-viewer-id")).toHaveText("viewport-2");
+  const primary = viewer.getByRole("button", { name: "Mark Reviewed and Next" });
+  await expect(primary).toBeFocused();
+  // The picture fits the stage, and the footer is in view without scrolling the dialog.
+  const stage = await viewer.locator(".ev-viewer-stage").boundingBox();
+  const picture = await viewer.locator(".ev-viewer-stage img").boundingBox();
+  expect(stage && picture && picture.height <= stage.height + 1 && picture.width <= stage.width + 1).toBe(true);
+  await expect(primary).toBeInViewport();
+  // Every viewable item is in the filmstrip at 72×45, and a thumbnail opens its item.
+  // The dialog's name follows the item it shows, so the filmstrip is found by role alone.
+  const thumbs = page.getByRole("dialog").locator(".ev-strip-thumb");
+  await expect(thumbs).toHaveCount(4);
+  for (let index = 0; index < 4; index += 1) {
+    expect(await thumbs.nth(index).evaluate((element: HTMLElement) => [element.offsetWidth, element.offsetHeight]))
+      .toEqual([72, 45]);
+  }
+  await page.keyboard.press("ArrowRight");
+  await expect(page.getByRole("dialog", { name: "Screenshot 3 of 4" })).toBeVisible();
+  await page.keyboard.press("ArrowLeft");
+  await expect(viewer).toBeVisible();
+  await primary.click();
+  await expect(page.getByRole("dialog", { name: "Screenshot 3 of 4" })).toBeVisible();
+  await expect(page.locator(".ev-progress")).toHaveText("1 of 4 reviewed");
+  await expect(thumbs.nth(1)).toHaveAccessibleName("Screenshot 2, Reviewed");
+  await expect(thumbs.nth(1).locator(".ev-strip-mark")).toBeVisible();
+  await thumbs.nth(3).click();
+  await page.getByRole("button", { name: "Mark Reviewed and Next" }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.locator(".ev-progress")).toHaveText("2 of 4 reviewed");
+  await expect(tile(page, "viewport-4").getByRole("button", { name: "Open Screenshot 4" })).toBeFocused();
+  // The marks are the grid's own, so they are kept across a reload.
+  await page.reload();
+  await expect(page.getByRole("img", { name: "Screenshot 4" })).toBeVisible();
+  await expect(page.locator(".ev-progress")).toHaveText("2 of 4 reviewed");
+});
+
+test("the Evidence Viewer never shows an item the grid shows as Doesn't Match", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openReview(page, "items=4&artifacts=mismatch");
+  await expect(tile(page, "viewport-2").locator(".ev-blocked-label")).toHaveText("Doesn't Match");
+  await expect(tile(page, "viewport-2").locator(".ev-thumb")).toHaveCount(0);
+  await tile(page, "viewport-1").getByRole("button", { name: "Open Screenshot 1" }).click();
+  const viewer = page.getByRole("dialog");
+  await expect(viewer.locator(".ev-strip-thumb")).toHaveCount(3);
+  await page.keyboard.press("ArrowRight");
+  await expect(viewer).toHaveAccessibleName("Screenshot 3 of 4");
+});
+
+test("on a 390px touch phone the Evidence Viewer is a full-height sheet with a back arrow and 44px targets", async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+  const page = await context.newPage();
+  try {
+    await openReview(page, "items=4&artifacts=ready");
+    await expect(page.getByRole("img", { name: "Screenshot 4" })).toBeVisible();
+    // A tap on the middle of a strip tile opens the viewer: the Reviewed mark's touch target grows
+    // out past the frame's corner, not over the picture.
+    const thumb = tile(page, "viewport-2").getByRole("button", { name: "Open Screenshot 2" });
+    expect(await thumb.evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      return element.contains(document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2));
+    })).toBe(true);
+    await thumb.tap();
+    const viewer = page.getByRole("dialog", { name: "Screenshot 2 of 4" });
+    await expect(viewer).toBeVisible();
+    expect(await page.locator(".modal.sheet-full").evaluate((element: HTMLElement) => [element.offsetWidth, element.offsetHeight]))
+      .toEqual([390, 844]);
+    for (const name of ["Previous", "Next", "Mark Reviewed and Next"]) {
+      expect(await drawnSize(viewer.getByRole("button", { name, exact: true })), name).toBeGreaterThanOrEqual(44);
+    }
+    for (const box of await viewer.locator(".ev-strip-thumb").all()) expect(await drawnSize(box)).toBeGreaterThanOrEqual(44);
+    await expect(viewer.getByRole("button", { name: "Mark Reviewed and Next" })).toBeInViewport();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(0);
+    await viewer.getByRole("button", { name: "Next", exact: true }).tap();
+    await expect(page.getByRole("dialog", { name: "Screenshot 3 of 4" })).toBeVisible();
+    await page.getByRole("dialog").getByRole("button", { name: "Back", exact: true }).tap();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
+});
+
 /** Whether each element is drawn whole inside the card body's visible box, without a scroll. */
 async function wholeInBody(page: Page, selector: string): Promise<boolean[]> {
   return page.locator(".request-card-body").evaluate((body, query) => {
