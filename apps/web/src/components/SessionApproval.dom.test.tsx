@@ -282,20 +282,22 @@ for (const action of ["submit", "dismiss"] as const) {
   });
 }
 
-test("retired form validation cannot focus the replacement question", async () => {
+test("validation focus lands in the same commit, so a replacement question keeps its own focus", async () => {
   const { container, root } = mount();
   const originalRaf = domWindow.requestAnimationFrame;
-  let focusCallback: FrameRequestCallback | undefined;
-  domWindow.requestAnimationFrame = ((callback: FrameRequestCallback) => { focusCallback = callback; return 1; }) as unknown as typeof originalRaf;
+  let frames = 0;
+  domWindow.requestAnimationFrame = ((() => { frames += 1; return 1; }) as unknown) as typeof originalRaf;
   try {
     const questions = [{ id: "note", question: "Required note", options: [], allowOther: true }];
     await renderBanner(root, questions, true, api, "question-old");
     await act(async () => press(container.querySelector("section")!, "Enter", { ctrlKey: true }));
-    assert.ok(focusCallback);
+    assert.equal(domWindow.document.activeElement, container.querySelector(".question-input"),
+      "the invalid field has focus before the next key is read");
+    assert.equal(frames, 0, "no focus move is left waiting for a later frame");
     await renderBanner(root, questions, true, api, "question-new");
     const dismiss = button(container, "dismiss");
     dismiss.focus();
-    focusCallback(0);
+    await renderBanner(root, questions, true, api, "question-new");
     assert.equal(domWindow.document.activeElement, dismiss);
   } finally {
     domWindow.requestAnimationFrame = originalRaf;
@@ -572,7 +574,8 @@ test("no helper or error text shows before Next; afterwards the unanswered quest
       { id: "target", question: "Choose a target", options: [{ label: "Staging" }, { label: "Production" }] },
       { id: "note", question: "Add a note", options: [], allowOther: true },
     ], true, api, "question-steps");
-    assertNoDomNode(container.querySelector(".field-error, .field-helper, .request-card-reasons, [role='alert']"));
+    assertNoDomNode(container.querySelector(".field-error, .field-helper, [role='alert']"));
+    assert.equal(container.querySelector(".request-card-reasons")?.textContent, "", "the live line waits, empty");
     assert.doesNotMatch(container.textContent ?? "", /Complete all required responses|Correct the response errors/);
     const next = button(container, "next");
     assert.equal(next.disabled, false, "Next stays available and reveals what is missing");
@@ -757,7 +760,9 @@ test("an online-to-offline transition keeps choices reachable and explains every
     assert.ok(rows(container).every(({ input }) => input.getAttribute("aria-disabled") === null));
     const status = container.querySelector<HTMLElement>('[role="status"][aria-atomic="true"]')!;
     assert.equal(status.textContent, "");
-    assertNoDomNode(container.querySelector(".request-card-reasons"), "no empty status row takes space");
+    // The visible reason is the live line itself: one copy of the words, mounted before it is needed.
+    assert.ok(status.matches(".request-card-reasons.question-reason"));
+    assert.equal(container.querySelectorAll(".request-card-reasons").length, 1);
 
     await renderBanner(root, questions, false);
     const offline = "Responses are unavailable until the runner reconnects.";

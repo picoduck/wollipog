@@ -507,11 +507,12 @@ test("an online question becoming offline remains keyboard-discoverable without 
   const card = page.getByRole("region", { name: "Agent Questions" });
   const status = card.locator('[role="status"][aria-atomic="true"]');
   await expect(status).toHaveText("");
-  await expect(card.locator(".request-card-reasons")).toHaveCount(0);
+  // Empty, the live line takes no room: it cancels the card's gap.
+  expect((await geometry(status)).height).toBe(0);
 
   await page.evaluate(() => window.setAgentQuestionOnline(false));
   await expect(status).toHaveText("Responses are unavailable until the runner reconnects.");
-  await expect(card.locator(".request-card-reasons")).toHaveText("Responses are unavailable until the runner reconnects.");
+  await expect(page.getByText("Responses are unavailable until the runner reconnects.", { exact: true })).toBeVisible();
 
   const firstRadio = page.getByRole("radio", { name: /Canary/ });
   const secondRadio = page.getByRole("radio", { name: /Blue-Green/ });

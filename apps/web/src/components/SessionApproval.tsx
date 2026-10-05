@@ -338,6 +338,14 @@ function SessionRequestCoordinator({
   return <span className="sr-only" role="status" aria-live="polite">{announcement}</span>;
 }
 
+/** Where the question card puts focus after it renders: its heading, a question's answer (the field
+ * to fix, else the chosen or first row), one named control, or the Something Else field. */
+type CardFocus =
+  | { kind: "title" }
+  | { kind: "answer"; questionId: string }
+  | { kind: "control"; name: string }
+  | { kind: "field" };
+
 /**
  * An agent's questions on the Request Card (docs/design-system.md §13.2; #2196), one question per
  * step over one request-keyed draft that also keeps the step, so a remounted card returns to the
@@ -405,6 +413,7 @@ export function SessionQuestionBanner({
   // The questions whose errors show: each one the person tried to move past unanswered (§8.5).
   const [attempted, setAttempted] = useState<ReadonlySet<string>>(() => new Set());
   const [failure, setFailure] = useState<{ action: "submit" | "dismiss"; detail: string } | null>(null);
+  const [focusRequest, setFocusRequest] = useState<{ target: CardFocus; serial: number } | null>(null);
   const operationPendingRef = useRef<object | null>(null);
   const liveRequestRef = useRef<object | null>(null);
   useLayoutEffect(() => {
@@ -515,37 +524,46 @@ export function SessionQuestionBanner({
     updateDraft(target, { kind: "choice", labels });
   };
 
-  /** After the next paint, unless the card has moved on to another request by then. */
-  const afterRender = (action: () => void) => {
-    const request = liveRequestRef.current;
-    window.requestAnimationFrame(() => {
-      if (liveRequestRef.current === request) action();
-    });
-  };
-  const focusStepControl = (target: AgentQuestion | undefined) => afterRender(() => {
+  // Focus moves in the commit that renders its target, before the next key is read: a step change
+  // unmounts the focused row, and a key typed in between would otherwise land on the page.
+  const requestFocus = (target: CardFocus) => setFocusRequest((current) => ({ target, serial: (current?.serial ?? 0) + 1 }));
+  useIsomorphicLayoutEffect(() => {
+    const target = focusRequest?.target;
     if (!target) return;
     const body = stepRef.current;
     const field = body?.querySelector<HTMLElement>(".question-input:not(:disabled)");
-    const choice = body?.querySelector<HTMLElement>("input[type=radio]:checked, input[type=checkbox]:checked") ??
-      body?.querySelector<HTMLElement>("input[type=radio], input[type=checkbox]");
-    // The text is the answer to fix when there is no choice to make or Something Else is chosen.
-    const textFirst = target.options.length === 0 || questionOtherChosen(target, draftValue(target.id));
-    (textFirst ? field ?? choice : choice ?? field)?.focus();
-  });
-  const goToStep = (next: number, focus: "title" | "control" = "title") => {
+    if (target.kind === "title") {
+      titleRef.current?.focus();
+    } else if (target.kind === "field") {
+      field?.focus();
+    } else if (target.kind === "control") {
+      [...body?.querySelectorAll<HTMLElement>("[data-session-request-control]") ?? []]
+        .find((candidate) => candidate.dataset.sessionRequestControl === target.name)?.focus();
+    } else {
+      const question = questions.find((candidate) => candidate.id === target.questionId);
+      const choice = body?.querySelector<HTMLElement>("input[type=radio]:checked, input[type=checkbox]:checked") ??
+        body?.querySelector<HTMLElement>("input[type=radio], input[type=checkbox]");
+      // The text is the answer to fix when there is no choice to make or Something Else is chosen.
+      const textFirst = !question || question.options.length === 0 || questionOtherChosen(question, draftValue(question.id));
+      (textFirst ? field ?? choice : choice ?? field)?.focus();
+    }
+  // Only a new request moves focus; the draft it reads is the one this commit rendered.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusRequest]);
+  const goToStep = (next: number, focus: "title" | "answer" = "title") => {
     const clamped = Math.min(Math.max(next, 0), Math.max(stepCount - 1, 0));
     storeQuestionStep(sessionId, answerKey, clamped);
     setDrafts((current) => current.requestId === answerKey ? { ...current, step: clamped } : current);
-    if (focus === "title") afterRender(() => titleRef.current?.focus());
-    else focusStepControl(questions[clamped]);
+    const target = questions[clamped];
+    requestFocus(focus === "title" || !target ? { kind: "title" } : { kind: "answer", questionId: target.id });
   };
   /** Reveal the errors of `invalid` and move to the first of them (§8.5). */
   const showErrors = (invalid: readonly AgentQuestion[]) => {
     setAttempted((current) => new Set([...current, ...invalid.map((candidate) => candidate.id)]));
     const first = invalid[0];
     const firstStep = first ? questions.indexOf(first) : -1;
-    if (firstStep >= 0 && firstStep !== step) goToStep(firstStep, "control");
-    else focusStepControl(first);
+    if (firstStep >= 0 && firstStep !== step) goToStep(firstStep, "answer");
+    else if (first) requestFocus({ kind: "answer", questionId: first.id });
   };
 
   const submit = async () => {
@@ -629,12 +647,10 @@ export function SessionQuestionBanner({
     if (!question || controlsDisabled || question.options.length === 0) return;
     if (index < question.options.length) {
       choose(question, index);
-      const control = `question:${question.id}:option:${index}`;
-      afterRender(() => [...stepRef.current?.querySelectorAll<HTMLElement>("[data-session-request-control]") ?? []]
-        .find((candidate) => candidate.dataset.sessionRequestControl === control)?.focus());
+      requestFocus({ kind: "control", name: `question:${question.id}:option:${index}` });
     } else if (index === question.options.length) {
       choose(question, "other");
-      afterRender(() => stepRef.current?.querySelector<HTMLElement>(".question-input:not(:disabled)")?.focus());
+      requestFocus({ kind: "field" });
     }
   };
 
@@ -687,6 +703,7 @@ export function SessionQuestionBanner({
   const failureText = failure?.action === "dismiss" ? QUESTION_CARD_COPY.notDismissed : QUESTION_CARD_COPY.notSent;
   const submitLabel = failure?.action === "submit" ? QUESTION_CARD_COPY.tryAgain : QUESTION_CARD_COPY.submitAnswers;
   const navigateOnly = !answerable;
+  const composerHint = !interactive && questions.length > 0 && !recoveryRequiresDismiss;
 
   return (
     <section
@@ -754,15 +771,17 @@ export function SessionQuestionBanner({
           {failure.detail === QUESTION_CARD_COPY.alreadySending ? failure.detail : failureText}
         </Notice>
       )}
-      {(availability || unsupportedQuestionFormat || !interactive) && (
+      {(unsupportedQuestionFormat || composerHint) && (
         <div className="request-card-reasons">
-          {/* The live line below announces it; this is the same words, for the eye. */}
-          {availability && <p aria-hidden="true">{availability}</p>}
           {unsupportedQuestionFormat && <p id={unsupportedId}>{QUESTION_CARD_COPY.unsupported}</p>}
-          {!interactive && questions.length > 0 && !recoveryRequiresDismiss && <p>{QUESTION_CARD_COPY.answerInComposer}</p>}
+          {composerHint && <p>{QUESTION_CARD_COPY.answerInComposer}</p>}
         </div>
       )}
-      <span className="sr-only" id={availabilityId} role="status" aria-atomic="true">{availability ?? ""}</span>
+      {/* Why nobody can answer now. Always mounted, so going offline is announced; empty, it takes
+          no room (styles.css). */}
+      <p className="request-card-reasons question-reason" id={availabilityId} role="status" aria-atomic="true">
+        {availability ?? ""}
+      </p>
       <div className="request-card-foot">
         {!recoveryRequiresDismiss && (
           <BusyButton

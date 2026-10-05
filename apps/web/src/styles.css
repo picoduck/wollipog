@@ -13198,6 +13198,9 @@ body.shell-dock-dragging * {
   color: var(--text-dim-on-tint);
   font: var(--type-body);
 }
+/* The live line for why nobody can answer stays mounted; while empty it cancels the card's gap,
+   so no blank row waits under the body. */
+.question-reason:empty { margin-top: calc(-1 * var(--space-2)); }
 .question-step {
   display: flex;
   flex-direction: column;
