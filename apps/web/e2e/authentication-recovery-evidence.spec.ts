@@ -45,8 +45,9 @@ for (const scenario of SCENARIOS) {
         }
         await page.locator("#frame").screenshot({ path: join(evidenceDir!, `${prefix}-${scenario}-${size.name}-${theme}.png`) });
         // On a phone, where Dismiss Recovery and Choose Another Account… went: the card's ⋯, open.
-        const more = card.locator(".request-card-phone-more");
-        if (scenario === "email" && size.name === "phone" && await more.isVisible()) {
+        if (scenario === "email" && size.name === "phone") {
+          const more = card.getByRole("button", { name: "More Choices" });
+          await expect(more).toBeVisible();
           await more.click();
           // The phone menu is a bottom sheet that slides in; capture it settled.
           await expect(page.getByRole("menuitem").last()).toBeInViewport({ ratio: 1 });

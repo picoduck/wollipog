@@ -196,7 +196,8 @@ export function RequestCard({
   const phoneOverflow = signIn && tertiary !== null && canChooseAccount && isPhone;
   const cardRef = useRef<HTMLElement | null>(null);
   const chooseRef = useRef<HTMLButtonElement | null>(null);
-  const removedFocus = useRemovedFocus(cardRef, "[data-request-card-menu]");
+  // Only this card's own menu counts as its focus: another card's menu is that card's to hand back.
+  const removedFocus = useRemovedFocus(cardRef, `[id="${menu.menuId}"]`);
   const wasPhoneOverflow = useRef(phoneOverflow);
   useLayoutEffect(() => {
     if (wasPhoneOverflow.current === phoneOverflow) return;
@@ -205,7 +206,13 @@ export function RequestCard({
     // back. The ⋯'s menu goes with its trigger, and focus held by a swapped control (or the open menu)
     // moves to the control that now offers the same choices, rather than to nowhere.
     if (!phoneOverflow && menuOptions.length === 0) setMenuOpen(false);
-    if (removedFocus()) (phoneOverflow ? menu.triggerRef.current : chooseRef.current)?.focus({ preventScroll: true });
+    if (!removedFocus()) return;
+    // The counterpart may be disabled while a decision is sent; the card's heading always takes focus.
+    const counterpart = phoneOverflow ? menu.triggerRef.current : chooseRef.current;
+    const target = counterpart && !counterpart.disabled
+      ? counterpart
+      : cardRef.current?.querySelector<HTMLElement>(".request-card-title");
+    target?.focus({ preventScroll: true });
   });
   // The sign-in method chosen among several; the first until the person picks another.
   const [chosenMethod, setChosenMethod] = useState<string | null>(null);

@@ -608,6 +608,50 @@ test("on a phone, Dismiss Recovery and Choose Another Account… overflow into �
   }
 });
 
+test("crossing the phone breakpoint keeps focus in the card that held it, even while a decision is sent", async () => {
+  const setViewport = async (width: number) => {
+    await act(async () => { domWindow.happyDOM.setViewport({ width, height: 844 }); await tick(); });
+  };
+  const first = recovery([AUTH.acceptCurrent, AUTH.revalidate, AUTH.dismiss]);
+  const second = { ...recovery([AUTH.login, AUTH.revalidate, AUTH.dismiss]), requestId: "provider-auth:second" };
+  let settle: () => void = () => undefined;
+  await setViewport(390);
+  const view = await renderWithRunner(
+    <>
+      <RequestCard session={signInSession(first)} request={first} runnerOnline presentation="dock" />
+      <RequestCard session={signInSession(second, { id: "session-second" })} request={second} runnerOnline presentation="panel" />
+    </>, {},
+    { approve: async () => { await new Promise<void>((done) => { settle = done; }); return signInSession(first); } },
+  );
+  const cards = () => [...view.container.querySelectorAll<HTMLElement>(".request-card")];
+  const items = () => [...(domWindow.document.querySelectorAll('[data-request-card-menu] [role="menuitem"]') as unknown as NodeListOf<HTMLElement>)];
+  const more = (card: HTMLElement) => card.querySelector<HTMLButtonElement>('.request-card-foot > button[aria-label="More Choices"]')!;
+  try {
+    // Two sign-in cards: focus in the second card's menu stays with the second card when widening.
+    await act(async () => { more(cards()[1]!).click(); await tick(); });
+    await act(async () => { items()[0]!.focus(); await tick(); });
+    await setViewport(1440);
+    assert.ok(cards()[1]!.contains(domWindow.document.activeElement as unknown as Node),
+      "the other card does not take focus from this one's menu");
+    assert.equal(domWindow.document.activeElement?.textContent, "Choose Another Account…");
+
+    // Dismiss Recovery from the phone menu, still being sent: widening finds Choose Another Account…
+    // disabled, so the card's heading takes focus.
+    await setViewport(390);
+    await act(async () => { more(cards()[0]!).click(); await tick(); });
+    const dismiss = items().find((item) => item.textContent?.startsWith("Dismiss Recovery"))!;
+    await act(async () => { dismiss.click(); await tick(); });
+    await act(async () => { more(cards()[0]!).focus(); await tick(); });
+    await setViewport(1440);
+    assert.equal(domWindow.document.activeElement?.classList.contains("request-card-title"), true);
+    assert.ok(cards()[0]!.contains(domWindow.document.activeElement as unknown as Node));
+  } finally {
+    await act(async () => { settle(); await tick(); });
+    await view.unmount();
+    await setViewport(1024);
+  }
+});
+
 test("Choose Another Account… opens the Machine's other accounts in the card body", async () => {
   const request = recovery([AUTH.acceptCurrent, AUTH.revalidate, AUTH.dismiss]);
   const view = await renderWithRunner(
