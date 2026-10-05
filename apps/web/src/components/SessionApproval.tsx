@@ -638,13 +638,18 @@ export function SessionQuestionBanner({
   const revealField = (field: Element | null) => {
     const body = stepRef.current;
     if (!body || !(field instanceof HTMLElement) || !body.contains(field) || !field.matches("input:not([type=radio]):not([type=checkbox]), textarea")) return;
+    const card = body.parentElement;
     const dock = body.closest<HTMLElement>(".request-dock");
-    for (const scroller of [body, dock, dock?.parentElement?.closest<HTMLElement>(".session-notice-slot")]) {
+    for (const scroller of [body, card, dock, dock?.parentElement?.closest<HTMLElement>(".session-notice-slot")]) {
       if (!scroller) continue;
       const bounds = scroller.getBoundingClientRect();
+      // The card scrolls under its footer in a short column (styles.css): the field must clear it.
+      const foot = scroller === card ? card.querySelector<HTMLElement>(":scope > .request-card-foot") : null;
+      const bottom = foot && getComputedStyle(foot).position === "sticky"
+        ? Math.min(bounds.bottom, foot.getBoundingClientRect().top) : bounds.bottom;
       const rect = field.getBoundingClientRect();
       if (rect.top < bounds.top) scroller.scrollTop -= bounds.top - rect.top;
-      else if (rect.bottom > bounds.bottom) scroller.scrollTop += Math.min(rect.bottom - bounds.bottom, rect.top - bounds.top);
+      else if (rect.bottom > bottom) scroller.scrollTop += Math.min(rect.bottom - bottom, rect.top - bounds.top);
     }
   };
   // The keyboard opens after the field took focus and lowers the dock's cap, which can hide it again.

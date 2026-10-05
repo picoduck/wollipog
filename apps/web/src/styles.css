@@ -5549,6 +5549,38 @@ textarea {
      under a body that no longer scrolls and painting it past its own edge (#2205). */
   .request-dock :is(.request-dock-card, .request-card) { flex: none; }
 }
+@container chat-reading (min-height: 300px) and (max-height: 480px) {
+  /* Where the dock still holds a line of the question with its footer (a phone with the keyboard
+     open), a question keeps its frame and footer instead (§13.2): the card is the dock's height and
+     scrolls its own title and body under a footer that stays at its bottom edge, so Back and Next or
+     Submit Answers stay in reach (#2205). Shorter, the dock scrolls the whole card as above. */
+  .request-dock .request-dock-card:has(> .question-card),
+  .request-dock .question-card {
+    flex: 0 1 auto;
+    min-height: 0;
+  }
+  .request-dock .question-card {
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  /* The card's top padding stays its edge: what scrolls passes under it, not through it. */
+  .request-dock .question-card::before {
+    content: "";
+    position: sticky;
+    top: calc(-1 * var(--space-3));
+    flex: none;
+    height: var(--space-3);
+    margin: calc(-1 * var(--space-3)) 0 calc(-1 * var(--space-2));
+    background: inherit;
+  }
+  .request-dock .question-card > .request-card-foot {
+    position: sticky;
+    bottom: calc(-1 * var(--space-3));
+    margin-bottom: calc(-1 * var(--space-3));
+    padding: var(--space-2) 0 var(--space-3);
+    background: inherit;
+  }
+}
 .request-card .request-card-body > * { margin: 0; }
 .request-card-body > .code-well > pre { max-height: none; }
 .request-card-reasons {

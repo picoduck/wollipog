@@ -883,7 +883,7 @@ test.describe("on a phone with the software keyboard open", () => {
     expect(await scrollPositions()).toEqual(before);
   });
 
-  test("in a 390×500 keyboard-sized viewport the card stays within its edges and a focused field shows inside the dock (#2205)", async ({ page }) => {
+  test("in a 390×500 keyboard-sized viewport the card keeps its frame and footer, and a focused field shows above the footer (#2205)", async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 500 });
     await page.goto("/agent-questions-e2e.html?set=notes&keyboard=1");
     const card = dockedCard(page);
@@ -891,17 +891,30 @@ test.describe("on a phone with the software keyboard open", () => {
     const dock = page.locator(".request-dock");
     const [slot, reading] = [await geometry(page.locator(".chat-reading > .session-notice-slot")), await geometry(page.locator(".chat-reading"))];
     expect(slot.height).toBeLessThanOrEqual(reading.height * 0.4 + 1);
-    // The column is too short for the body to scroll, so the dock scrolls the whole card, which keeps
-    // everything inside its own border.
-    const [cardBox, bodyBox] = [await geometry(card), await geometry(card.locator(".request-card-body"))];
-    expect(bodyBox.bottom).toBeLessThanOrEqual(cardBox.bottom + 0.5);
-    expect(await dock.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
-    const field = card.locator(".question-input");
     const before = await page.evaluate(() => ({ page: window.scrollY, reader: document.querySelector<HTMLElement>(".detail-scroll")!.scrollTop }));
-    await field.evaluate((element) => (element as HTMLElement).focus({ preventScroll: true }));
-    const [fieldBox, dockBox] = [await geometry(field), await geometry(dock)];
-    expect(fieldBox.top).toBeGreaterThanOrEqual(dockBox.top - 0.5);
-    expect(fieldBox.bottom).toBeLessThanOrEqual(dockBox.bottom + 0.5);
+    // On each step: the card's top edge is in the dock, the focused field shows whole above the
+    // footer, and the footer's primary is in the dock.
+    const expectFrameFieldAndFooter = async (primary: string) => {
+      const field = card.locator(".question-input");
+      await field.evaluate((element) => (element as HTMLElement).focus({ preventScroll: true }));
+      await expect(field).toBeFocused();
+      const dockBox = await geometry(dock);
+      const within = (box: { top: number; bottom: number }) => {
+        expect(box.top).toBeGreaterThanOrEqual(dockBox.top - 0.5);
+        expect(box.bottom).toBeLessThanOrEqual(dockBox.bottom + 0.5);
+      };
+      const [cardBox, fieldBox, footBox] = [await geometry(card), await geometry(field), await geometry(card.locator(".request-card-foot"))];
+      expect(cardBox.top).toBeGreaterThanOrEqual(dockBox.top - 0.5);
+      within(fieldBox);
+      expect(fieldBox.bottom).toBeLessThanOrEqual(footBox.top + 0.5);
+      within(await geometry(card.getByRole("button", { name: primary, exact: true })));
+      expect(await dock.evaluate((element) => element.scrollTop)).toBe(0);
+    };
+    await expectFrameFieldAndFooter("Next");
+    await card.locator(".question-input").fill("Shipped the dock.");
+    await card.getByRole("button", { name: "Next", exact: true }).click();
+    await expectFrameFieldAndFooter("Submit Answers");
+    await expect(card.getByRole("button", { name: "Back", exact: true })).toBeVisible();
     expect(await page.evaluate(() => ({ page: window.scrollY, reader: document.querySelector<HTMLElement>(".detail-scroll")!.scrollTop }))).toEqual(before);
   });
 
