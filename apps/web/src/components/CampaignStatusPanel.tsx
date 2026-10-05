@@ -55,6 +55,7 @@ import { useTimelineClock } from "../timeline-clock.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { DetailSkeleton, Skeleton } from "./common.js";
 import { ChevronLeftIcon } from "./Icons.js";
+import { CampaignIssueScopePanel } from "./CampaignIssueScopePanel.js";
 import { Notice } from "./Notice.js";
 import { StaleContent } from "./StaleContent.js";
 import { State } from "./State.js";
@@ -235,6 +236,7 @@ function AvailableCampaignStatus({
           <StaleContent stale={data.offline}>
             <div className="campaign-status-sections">
               <CampaignSummarySection data={data} now={now} />
+              <CampaignIssueScopePanel session={session} campaignId={availability.campaignSessionId} />
               <CampaignWorkList
                 data={data}
                 filters={memory.filters}

@@ -450,7 +450,7 @@ export function provisionAgentControl(
     // Persisted session metadata written before protocol v164 has no `integrationIsolation`, and a
     // resume re-provisions from exactly that metadata. Accept its absence here and resolve it to the
     // conservative value for the shape below, rather than forcing callers to invent one.
-    { orchestrator?: { strictProjectIsolation: boolean; integrationIsolation?: boolean; issueNumbers?: number[] } } &
+    { orchestrator?: { strictProjectIsolation: boolean; integrationIsolation?: boolean; issueNumbers?: number[]; issueScope?: import("@wollipog/protocol").CampaignIssueScope } } &
     { repoPath?: string; worktreePath?: string | null },
   config: {
     controlPlaneUrl: string;

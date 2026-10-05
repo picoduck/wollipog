@@ -135,6 +135,8 @@ function fakeClient(
   const calls: Calls = { list: [], detail: [], forge: [] };
   const client = {
     ...api,
+    campaignIssueScope: async (id: string) => ({ campaignSessionId: id, repository: "team/repo", issueNumbers: [], revision: 0,
+      supported: true, canPropose: false, outsideScope: [] }),
     childSessions: () => Promise.reject(new ApiError("No registry in this fixture.", 404)),
     campaignWorkItems: async (id: string, query: string) => {
       calls.list.push(`${id}?${query}`);

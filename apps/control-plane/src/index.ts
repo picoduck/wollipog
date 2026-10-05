@@ -1,3 +1,4 @@
+import { registerCampaignIssueScopeRoutes } from "./campaign-issue-scope-routes.js";
 /**
  * Control plane: routes UI commands to runners, ingests runner events, persists
  * everything, and streams live updates to the UI.
@@ -1323,6 +1324,12 @@ app.register(async (instance) => {
         for (const projectId of db.projectIdsForRunner(runnerId)) hub.projectChangedById(projectId);
         // If this runner is a box's runner (connected through the SSH tunnel), flip it online.
         orchestrator.onRunnerRegistered(runnerId, credential.credentialId);
+        for (const campaign of db.listSessions({ includeArchived: true })) {
+          if (campaign.orchestratorPolicy?.issueScope && db.campaignRootForMember(campaign.id) === campaign.id &&
+              [campaign, ...db.campaignDescendantIds(campaign.id).flatMap((id) => { const s = db.getSession(id); return s ? [s] : []; })].some((s) => s.runnerId === runnerId)) {
+            void svc.synchronizeCampaignIssueScope(campaign.id);
+          }
+        }
         // Registration completes with the machine's authoritative desired skill set so a fresh
         // (or reconnected) runner converges without waiting for the next library mutation.
         pushSkillsSync(runnerId);
@@ -1377,6 +1384,9 @@ app.register(async (instance) => {
         if (runnerId && !hub.resolveRunnerRequest(msg, runnerId)) {
           app.log.warn(`runner ${runnerId} sent an unsolicited workflow action admission receipt`);
         }
+        break;
+      case "campaign_issue_scope_result":
+        if (runnerId) hub.resolveRunnerRequest(msg, runnerId);
         break;
       case "github_issue_closure_result":
         if (runnerId) hub.resolveRunnerRequest(msg, runnerId);
@@ -3977,6 +3987,8 @@ app.post("/api/sessions/:id/orchestrator-campaign/recommendations/:recommendatio
     { ...(req.body as Omit<AdjudicateCampaignRecommendationRequest, "recommendationId">), recommendationId },
     (sessionId) => db.canAccessSession(principal, sessionId)));
 });
+
+registerCampaignIssueScopeRoutes(app, {db,svc,requestPrincipal});
 
 app.post("/api/sessions/:id/github-issue-closures", async (req, reply) => {
   const { id } = req.params as { id: string };

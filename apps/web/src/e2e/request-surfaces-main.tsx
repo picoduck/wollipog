@@ -230,6 +230,14 @@ function evidenceSession(): SessionView {
   } as SessionView;
 }
 
+function issueScopeSession(): SessionView {
+  const base=evidenceSession();
+  const snapshot={category:"campaign_issue_scope" as const,repository:"team/repo",expectedRevision:1,before:[123,124],additions:[125],removals:[124],
+    explanation:"Update the intended epic members.",affectedAssignments:[{sessionId:"child",issue:124}],affectedDecisions:["closure-member-124"],activeChildren:[{sessionId:"child",title:"Implement Member Work",assignmentDigest:"a".repeat(64)}]};
+  return {...base,title:"Campaign Issue Scope",pendingApproval:{...base.pendingApproval!,title:"Campaign Issue Scope Approval Required",context:{input:JSON.stringify(snapshot)},
+    workflowDecision:{...base.pendingApproval!.workflowDecision!,category:"campaign_issue_scope",resourceSnapshot:snapshot,controllingSessionId:base.id,authority:"human"}}};
+}
+
 function issueClosureSession(): SessionView {
   const base = evidenceSession();
   const snapshot = { category: "issue_closure" as const, repository: "team/repo", issue: 123,
@@ -708,7 +716,7 @@ function ReadingKeys({ scrollRef }: {
 }
 
 function Fixture() {
-  const [session, setSession] = useState(() => scenario === "issue-closure" ? issueClosureSession() : scenario === "continuation"
+  const [session, setSession] = useState(() => scenario === "issue-scope" ? issueScopeSession() : scenario === "issue-closure" ? issueClosureSession() : scenario === "continuation"
     ? continuationSession()
     : scenario === "held" || scenario === "both"
     ? heldCampaignSession()
@@ -826,7 +834,7 @@ function Fixture() {
       return updated;
     },
   } as ApiClient;
-  const standaloneTemplate = scenario === "issue-closure" ? issueClosureSession().pendingApproval! : scenario === "standalone" || scenario === "worker"
+  const standaloneTemplate = scenario === "issue-scope" ? issueScopeSession() : scenario === "issue-closure" ? issueClosureSession().pendingApproval! : scenario === "standalone" || scenario === "worker"
     ? standaloneApprovalSession().pendingApproval!
     // Only a provider's permission has a transcript row; a policy ask or a pause is the control plane's.
     : DOCK_SCENARIOS[scenario]?.requests().find((request) => request.kind === "permission") ?? null;

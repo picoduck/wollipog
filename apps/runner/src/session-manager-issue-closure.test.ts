@@ -90,7 +90,7 @@ function fixture(t: TestContext, mode: CloseMode = "closed") {
     manager = new SessionManager(() => {}, () => {}, store, "test-runner");
     return store;
   };
-  return { root, repository, commands, inspect, execute, snapshot, restart, diskMeta,
+  return { root, repository, commands, inspect, execute, snapshot, restart, diskMeta, scope: (message: Omit<Extract<import("@wollipog/protocol").CampaignIssueScopeMessage, {operation:"synchronize"}>, "sessionId" | "requestId" | "type">) => manager.campaignIssueScope({ type: "campaign_issue_scope", requestId: "scope", sessionId, ...message } as import("@wollipog/protocol").CampaignIssueScopeMessage),
     store: () => store, mutations: () => commands.filter((command) => command.file === "gh" && command.args[0] === "issue") };
 }
 
@@ -190,4 +190,24 @@ test("an explicitly local target can inspect and execute a scoped closure", asyn
   assert.equal(result.ok, true, result.error ?? "Expected a successful runner response");
   assert.equal(result.result?.outcome, "closed");
   assert.equal(f.mutations().length, 1);
+});
+
+
+test("runner scope synchronization persists across recreation and refuses stale revisions and repositories", async (t) => {
+  const f=fixture(t);
+  const original = await f.snapshot();
+  const scope = { repository: "example/project", issueNumbers: [123,124], revision: 1, authorizedByUserId: "human", authorizedAt: Date.now() };
+  const applied=await f.scope({operation:"synchronize",scope});
+  assert.equal(applied.ok,true,applied.error ?? "Expected synchronization");
+  assert.deepEqual(f.diskMeta().orchestrator!.issueScope,scope);
+  f.restart();
+  assert.deepEqual(f.store().readMeta(sessionId)!.orchestrator!.issueNumbers,[123,124]);
+  assert.equal((await f.execute(original)).ok,false,"old closure without scope revision cannot execute");
+  assert.equal((await f.execute({...original,scopeRevision:1,repository:"other/project"})).ok,false,"repository is authority-bound");
+  const removed={...scope,issueNumbers:[124],revision:2};
+  assert.equal((await f.scope({operation:"synchronize",scope:removed})).ok,true);
+  assert.equal((await f.scope({operation:"synchronize",scope})).ok,false);
+  assert.equal((await f.scope({operation:"synchronize",scope:{...removed,issueNumbers:[123]}})).ok,false,"same revision cannot change authority");
+  assert.equal((await f.execute({...original,scopeRevision:1})).ok,false);
+  assert.equal(f.mutations().length,0);
 });

@@ -269,6 +269,15 @@ const visibleItems = scenario === "planless" ? items.filter((item) => item.id ==
 
 const client = {
   ...api,
+  campaignIssueScope: async (id: string) => ({ campaignSessionId: id, repository: "team/repo", issueNumbers: [], revision: 0,
+    supported: true, canPropose: true, outsideScope: [{ workItemId: "scope-fixture", title: "Member work", issue: { repository: "team/repo", number: 124 }, sessionId: "s_child" }],
+    candidates: [{ issue: { repository: "team/repo", number: 123 }, title: "Composer Epic", source: "umbrella" as const },
+      { issue: { repository: "team/repo", number: 124 }, title: "Member Work", source: "member_checklist" as const }] }),
+  proposeCampaignIssueScope: async (_id: string, proposal: import("@wollipog/protocol").CampaignIssueScopeRequest) => {
+    (window as unknown as { __SCOPE_PROPOSAL__: unknown }).__SCOPE_PROPOSAL__ = proposal;
+    return { status: "pending" } as import("@wollipog/protocol").WorkflowDecisionView;
+  },
+
   childSessions: () => Promise.reject(new ApiError("No registry in this fixture.", 404)),
   campaignWorkItems: async (_id: string, query: string) => {
     queries.push(query);

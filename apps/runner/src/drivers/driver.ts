@@ -223,7 +223,7 @@ export interface DriverOptions {
   /** Non-secret artifact capability/policy note, re-created at launch/resume. */
   artifactGuidance?: string;
   config: SessionConfig;
-  orchestrator?: { strictProjectIsolation: boolean; integrationIsolation?: boolean; issueNumbers?: number[] };
+  orchestrator?: { strictProjectIsolation: boolean; integrationIsolation?: boolean; issueNumbers?: number[]; issueScope?: import("@wollipog/protocol").CampaignIssueScope };
   context: AgentContext;
   /** Optional discovery-verified flags/modes. Absent only for legacy runners/sessions. */
   capabilities?: AgentCapabilities;

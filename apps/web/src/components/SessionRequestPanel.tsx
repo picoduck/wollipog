@@ -60,6 +60,7 @@ export function requestTypeLabel(request: PendingApproval): string {
     if (category === "pr_merge") return "PR Merge";
     if (category === "merged_branch_deletion") return "Branch Deletion";
     if (category === "issue_closure") return "Issue Closure";
+    if (category === "campaign_issue_scope") return "Campaign Issue Scope";
     if (category === "follow_up_issue_publication") return "Issue Publication";
     if (category === "implementation_question") return "Implementation Decision";
     return "Workflow Decision";

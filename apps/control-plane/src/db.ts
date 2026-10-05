@@ -10142,7 +10142,7 @@ export class ControlPlaneDb {
   /** Whether the session's ownership scope itself names this person (#1780): the owning user, a
    * member of the owning team, or a member of the owning organization. Unlike `canAccessSession`,
    * an organization owner or admin role grants nothing beyond that. */
-  isSessionOwner(principal: HumanPrincipal, sessionId: string): boolean {
+  isSessionOwner(principal: Pick<HumanPrincipal, "userId" | "organizationId">, sessionId: string): boolean {
     const scope = this.sessionScope(sessionId);
     if (!scope || principal.organizationId !== scope.organizationId) return false;
     if (scope.owner.kind === "organization") return scope.owner.organizationId === principal.organizationId;
@@ -13179,7 +13179,7 @@ export class ControlPlaneDb {
     if (unique.length === 0 || unique.length > 100 || !this.sessionWasHumanCreatedOrchestrator(id)) return null;
     const policy = this.sessionOrchestratorPolicy(id);
     if (!policy) return null;
-    if (policy.issueNumbers?.length) return [...policy.issueNumbers];
+    if (policy.issueScope || policy.issueNumbers?.length) return [...(policy.issueNumbers ?? [])];
     const previous = JSON.stringify(policy);
     policy.issueNumbers = unique;
     const result = this.stmt(
@@ -13187,6 +13187,37 @@ export class ControlPlaneDb {
     ).run(JSON.stringify(policy), now, id, previous);
     if (Number(result.changes) === 1) return unique;
     return this.sessionOrchestratorPolicy(id)?.issueNumbers ?? null;
+  }
+
+  /** Approval, authority update, and consumption share a transaction: a replay cannot widen scope. */
+  approveCampaignIssueScope(occurrenceId: string, userId: string, now: number): WorkflowDecisionView | null {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const decision = this.workflowDecisionByOccurrence(occurrenceId);
+      const snapshot = decision?.resourceSnapshot;
+      const root = decision ? this.getSession(decision.sessionId) : null;
+      const policy = root?.orchestratorPolicy;
+      if (!decision || decision.status !== "pending" || decision.authority !== "human" || snapshot?.category !== "campaign_issue_scope" ||
+          !root || !policy || (policy.issueScope?.revision ?? 0) !== snapshot.expectedRevision ||
+          JSON.stringify([...(policy.issueNumbers ?? [])].sort((a,b) => a-b)) !== JSON.stringify(snapshot.before)) {
+        this.db.exec("ROLLBACK"); return null;
+      }
+      const scope: import("@wollipog/protocol").CampaignIssueScope = { repository: snapshot.repository,
+        issueNumbers: [...snapshot.before.filter((n) => !snapshot.removals.includes(n)), ...snapshot.additions].sort((a,b) => a-b),
+        revision: snapshot.expectedRevision + 1, authorizedByUserId: userId, authorizedAt: now };
+      for (const id of [root.id, ...this.campaignDescendantIds(root.id)]) {
+        const memberPolicy = this.sessionOrchestratorPolicy(id);
+        if (!memberPolicy) continue;
+        memberPolicy.issueNumbers = [...scope.issueNumbers];
+        memberPolicy.issueScope = scope;
+        this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(memberPolicy), now, id);
+      }
+      if (!this.resolveWorkflowDecision(occurrenceId, "human", "approved", now) || !this.consumeWorkflowDecision(occurrenceId, now)) {
+        throw new Error("Scope approval was resolved concurrently");
+      }
+      this.db.exec("COMMIT");
+      return this.workflowDecisionByOccurrence(occurrenceId);
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
 
   createSession(input: NewSessionInput): SessionView {
@@ -26490,6 +26521,14 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
       typeof value.execution?.integrationIsolation !== "boolean" ||
       !parentControlDecisionPolicyFromJson(JSON.stringify(value.delegation.decisions))) return null;
   behavior.childHarness = childHarness;
+  if (value.issueScopeProposalEpic !== undefined && (!Number.isSafeInteger(value.issueScopeProposalEpic) || value.issueScopeProposalEpic < 1)) return null;
+  if (value.issueScope && (typeof value.issueScope.repository !== "string" || !/^[\w.-]+\/[\w.-]+$/u.test(value.issueScope.repository) ||
+      !Array.isArray(value.issueScope.issueNumbers) || value.issueScope.issueNumbers.length > 100 ||
+      value.issueScope.issueNumbers.some((n) => !Number.isSafeInteger(n) || n < 1) ||
+      !Number.isSafeInteger(value.issueScope.revision) || value.issueScope.revision < 1 ||
+      typeof value.issueScope.authorizedByUserId !== "string" || !value.issueScope.authorizedByUserId ||
+      !Number.isSafeInteger(value.issueScope.authorizedAt) || value.issueScope.authorizedAt < 1 ||
+      JSON.stringify(value.issueScope.issueNumbers) !== JSON.stringify(value.issueNumbers ?? []))) return null;
   if (value.issueNumbers) value.issueNumbers = [...new Set(value.issueNumbers)];
   const validSources = new Set([
     "system_default", "user_default", "session_override", "compatibility_fallback", "legacy_session", "active_campaign",

@@ -105,6 +105,8 @@ const AGENT_CONTROL_API_ROUTES = new Set([
   "GET /api/sessions/:id/events",
   "POST /api/sessions",
   "POST /api/sessions/:id/config",
+  "GET /api/sessions/:id/campaign/issue-scope",
+  "POST /api/sessions/:id/campaign/issue-scope/proposals",
   "POST /api/sessions/:id/github-issue-closures",
   "POST /api/sessions/:id/github-issue-closures/:occurrenceId/execute",
   "POST /api/sessions/:id/workflow-decisions",
@@ -143,6 +145,8 @@ const AGENT_CONTROL_API_ROUTES = new Set([
 const ORCHESTRATOR_API_ROUTES = new Set([
   "GET /api/compatibility", "GET /api/runners", "GET /api/sessions", "GET /api/sessions/:id",
   "GET /api/sessions/:id/events", "GET /api/governance/policies",
+  "GET /api/sessions/:id/campaign/issue-scope",
+  "POST /api/sessions/:id/campaign/issue-scope/proposals",
   "POST /api/sessions/:id/github-issue-closures",
   "POST /api/sessions/:id/github-issue-closures/:occurrenceId/execute",
   "POST /api/sessions/:id/workflow-decisions", "GET /api/sessions/:id/workflow-decisions/:occurrenceId",

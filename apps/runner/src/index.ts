@@ -2109,6 +2109,10 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       }));
       break;
     }
+    case "campaign_issue_scope": {
+      runCommandTask("campaign_issue_scope", sessions.campaignIssueScope(msg).then(sendUp));
+      break;
+    }
     case "github_issue_closure": {
       runCommandTask("github_issue_closure", sessions.githubIssueClosure(msg).then(sendUp));
       break;

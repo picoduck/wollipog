@@ -190,7 +190,7 @@ export function RequestCard({
   // carries signed links the review must not expose.
   const decisionCategory = workflowDecision?.resourceSnapshot.category;
   const decisionDetails = workflowDecision && decisionCategory !== "issue_closure" &&
-    decisionCategory !== "ui_evidence_approval" ? request.context?.input : undefined;
+    decisionCategory !== "campaign_issue_scope" && decisionCategory !== "ui_evidence_approval" ? request.context?.input : undefined;
   const facts = [
     { label: "Tool", value: request.context?.toolName },
     { label: "Path", value: request.context?.path },

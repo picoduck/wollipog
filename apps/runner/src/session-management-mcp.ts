@@ -215,6 +215,17 @@ async function cancellableSleep(deps: McpDeps, milliseconds: number): Promise<bo
   }
 }
 
+async function campaignIssueScopeCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
+  let actual = deps.controlPlaneProtocolVersion;
+  if (!Number.isInteger(actual)) {
+    const compatibility = await cpFetch(deps, "GET", "/api/compatibility");
+    if (!compatibility.ok) return errorResult("Campaign issue scope compatibility could not be verified; update Wollipog and reconnect");
+    actual = compatibility.data?.protocolVersion;
+  }
+  return Number.isInteger(actual) && actual! >= RUNNER_CAPABILITY_MIN_PROTOCOL.campaignIssueScopeChanges
+    ? null : errorResult("Campaign issue scope changes require control plane protocol v208; update Wollipog and reconnect");
+}
+
 async function issueClosureCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
   let actual = deps.controlPlaneProtocolVersion;
   if (!Number.isInteger(actual)) {
@@ -878,6 +889,7 @@ const CAMPAIGN_WORK_LEDGER_TOOLS = ["record_campaign_plan", "update_campaign_wor
   "adjudicate_campaign_recommendation", "get_campaign_work_items"];
 const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "list_sessions", "get_session", "get_session_events",
   "get_campaign", "record_campaign_follow_up", "verify_campaign_child", ...CAMPAIGN_WORK_LEDGER_TOOLS,
+  "get_campaign_issue_scope", "request_campaign_issue_scope_change",
   "request_github_issue_closure", "close_github_issue",
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question", "resolve_descendant_approval",
   "resolve_descendant_workflow_decision", "review_descendant_ui_evidence", "request_workflow_decision", "get_workflow_decision", "consume_workflow_decision",
@@ -885,13 +897,41 @@ const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "l
   "wait_session", "list_governance_policies", "get_governance_policy", "create_session", "prompt_session",
   "stop_session", "stop_background_job", "restart_session", "archive_session", "set_guardrails", "create_worktree",
   "attach_worktree", "select_worktree", "discard_worktree"]);
-const PARENT_CONTROL_TOOLS = new Set(["request_github_issue_closure", "close_github_issue",
+const PARENT_CONTROL_TOOLS = new Set(["get_campaign_issue_scope", "request_campaign_issue_scope_change", "request_github_issue_closure", "close_github_issue",
   "get_campaign", "record_campaign_follow_up", "verify_campaign_child", ...CAMPAIGN_WORK_LEDGER_TOOLS,
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question",
   "resolve_descendant_approval", "resolve_descendant_workflow_decision", "review_descendant_ui_evidence",
 ]);
 
 export const TOOLS: McpTool[] = [
+  {
+    name: "get_campaign_issue_scope",
+    description: "Inspect the root campaign's authorized repository-qualified issue scope, revision, outside-scope work, and optional epic membership candidates. Native sub-issues and leading checklist entries in member sections are proposals only; dependencies and incidental references grant no authority. Use before delegating an epic and after any human scope change.",
+    inputSchema: { type: "object", properties: { epic: { type: "integer", minimum: 1 } }, additionalProperties: false },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
+      const compatibility = await campaignIssueScopeCompatibilityError(deps);
+      if (compatibility) return compatibility;
+      const result = await cpFetch(deps, "GET", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/campaign/issue-scope${typeof args.epic === "number" ? `?epic=${args.epic}` : ""}`, undefined, deps.requestTimeoutMs ?? 75_000);
+      return result.ok ? textResult(result.data) : errorResult(result.message);
+    },
+  },
+  {
+    name: "request_campaign_issue_scope_change",
+    description: "Propose exact repository-qualified issue additions and removals against the revision from get_campaign_issue_scope. Always requires an authenticated human, including under Parent Control. Human approval atomically applies and consumes the change; do not consume it yourself. Closure retains its separate human approval. Pending, denied, stale and replayed requests never widen authority.",
+    inputSchema: { type: "object", properties: {
+      requestId: { type: "string" }, expectedRevision: { type: "integer", minimum: 0 }, explanation: { type: "string", minLength: 1, maxLength: 4000 },
+      additions: { type: "array", maxItems: 100, items: { type: "object", properties: { repository: { type: "string" }, number: { type: "integer", minimum: 1 } }, required: ["repository", "number"], additionalProperties: false } },
+      removals: { type: "array", maxItems: 100, items: { type: "object", properties: { repository: { type: "string" }, number: { type: "integer", minimum: 1 } }, required: ["repository", "number"], additionalProperties: false } },
+    }, required: ["requestId", "expectedRevision", "explanation", "additions", "removals"], additionalProperties: false },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
+      const compatibility = await campaignIssueScopeCompatibilityError(deps);
+      if (compatibility) return compatibility;
+      const result = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/campaign/issue-scope/proposals`, args, deps.requestTimeoutMs ?? 150_000);
+      return result.ok ? textResult({ decision: result.data }) : errorResult(result.message);
+    },
+  },
   {
     name: "request_github_issue_closure",
     description: "Propose closing one human-authorized campaign issue. The runner derives the repository, title, issue revision, and related open PRs; the server adds active child assignments. Always asks a human, regardless of Parent Control. An already-closed issue is reported without posting a comment.",

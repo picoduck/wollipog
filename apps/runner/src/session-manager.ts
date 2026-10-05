@@ -1,6 +1,8 @@
 import { artifactGuidance } from "./artifact-guidance.js";
 import { effectiveProjectMemoryKey, prepareProjectMemory, prepareProjectMemoryArgs, projectMemoryKey, projectMemoryUnavailable } from "./project-memory.js";
 import { isTerminal } from "@wollipog/protocol";
+import { inspectCampaignIssueScope } from "./campaign-issue-scope.js";
+import { boundedIssueNumbers } from "@wollipog/protocol";
 import { executeGithubIssueClosure, inspectGithubIssueClosure, issueClosureRun, IssueClosureInspectionError } from "./github-issue-closure.js";
 import type { GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
 import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage } from "@wollipog/protocol";
@@ -541,6 +543,7 @@ interface SteeringOperation {
 }
 
 interface ActiveSession {
+  orchestratorLaunchPolicy?: Pick<import("@wollipog/protocol").OrchestratorLaunchPolicy, "issueNumbers" | "issueScope">;
   projectMemoryKey?: string;
   projectMemoryFailureKey?: string;
   sessionId: string;
@@ -5496,7 +5499,7 @@ export class SessionManager {
         driver: spec.driver ?? "acp",
         context,
         config: spec.config ?? {},
-        orchestrator: spec.orchestrator ?? this.store.readMeta(spec.sessionId)?.orchestrator,
+        orchestrator: (() => { const saved = this.store.readMeta(spec.sessionId)?.orchestrator; return (saved?.issueScope?.revision ?? 0) > (spec.orchestrator?.issueScope?.revision ?? 0) ? saved : spec.orchestrator ?? saved; })(),
         executionTarget: spec.executionTarget ?? this.store.readMeta(spec.sessionId)?.executionTarget,
       });
     } catch (error) {
@@ -5727,7 +5730,7 @@ export class SessionManager {
       config: spec.config ?? {},
       projectMemory: spec.projectMemory ?? prior?.projectMemory,
       artifactUploads: spec.artifactUploads ?? prior?.artifactUploads ?? "manual",
-      orchestrator: spec.orchestrator ?? prior?.orchestrator,
+      orchestrator: (prior?.orchestrator?.issueScope?.revision ?? 0) > (spec.orchestrator?.issueScope?.revision ?? 0) ? prior?.orchestrator : spec.orchestrator ?? prior?.orchestrator,
       acpSessionContext,
       acpSessionOverrides,
       tokensIn: priorResumeId ? (prior?.tokensIn ?? 0) : 0,
@@ -7941,6 +7944,7 @@ export class SessionManager {
     }
     const pendingProviderAccountSwitch = this.pendingProviderAccount(meta);
     const entry: ActiveSession = {
+      orchestratorLaunchPolicy: meta.orchestrator,
       projectMemoryKey: effectiveProjectMemoryKey(meta),
       sessionId,
       launchGeneration,
@@ -16201,6 +16205,43 @@ export class SessionManager {
     }
   }
 
+  /** Only the authenticated control-plane channel can send authoritative scope synchronization. */
+  async campaignIssueScope(message: import("@wollipog/protocol").CampaignIssueScopeMessage): Promise<import("@wollipog/protocol").CampaignIssueScopeResultMessage> {
+    const base = { type: "campaign_issue_scope_result" as const, requestId: message.requestId, sessionId: message.sessionId };
+    const meta = this.store.readMeta(message.sessionId);
+    if (!meta?.orchestrator || !meta.repoPath || (meta.executionTarget && meta.executionTarget.kind !== "local")) {
+      return { ...base, ok: false, error: "Campaign issue scope requires a runner-local Orchestrator repository" };
+    }
+    try {
+      const run = issueClosureRun(meta.context, meta.repoPath);
+      if (message.operation === "inspect") {
+        if (message.epic !== undefined && (!Number.isSafeInteger(message.epic) || message.epic < 1) ||
+            message.issues !== undefined && !boundedIssueNumbers(message.issues)) return { ...base, ok: false, error: "Invalid bounded issue selection" };
+        return { ...base, ok: true, ...await inspectCampaignIssueScope(run, message.epic, message.issues) };
+      }
+      const live = this.active.get(message.sessionId)?.orchestratorLaunchPolicy;
+      if (live && message.scope?.revision > (live.issueScope?.revision ?? 0)) live.issueNumbers = [];
+      const scope = message.scope;
+      if (!scope || !boundedIssueNumbers(scope.issueNumbers) || !Number.isSafeInteger(scope.revision) || scope.revision < 1 ||
+          typeof scope.repository !== "string" || !/^[\w.-]+\/[\w.-]+$/u.test(scope.repository) ||
+          !scope.authorizedByUserId || !Number.isSafeInteger(scope.authorizedAt) || scope.authorizedAt < 1) return { ...base, ok: false, error: "Invalid authoritative scope" };
+      const { repository } = await inspectCampaignIssueScope(run);
+      if (repository !== scope.repository.toLowerCase()) return { ...base, ok: false, error: "Scope repository differs from the runner's origin" };
+      const fresh = this.store.readMeta(message.sessionId);
+      const current = fresh?.orchestrator?.issueScope;
+      if (!fresh?.orchestrator || current && (scope.revision < current.revision || scope.revision === current.revision && JSON.stringify(scope) !== JSON.stringify(current))) {
+        return { ...base, ok: false, error: "Stale or conflicting campaign scope revision" };
+      }
+      const updated = this.store.patchMeta(message.sessionId, { orchestrator: { ...fresh.orchestrator, issueNumbers: [...scope.issueNumbers], issueScope: scope } });
+      if (!updated) return { ...base, ok: false, error: "Could not persist campaign scope" };
+      // The Claude auto-approval closure reads this exact object on each ask. Update it in place
+      // so removals apply to the current process, as well as the next restart.
+      if (live) { live.issueNumbers = [...scope.issueNumbers]; live.issueScope = scope; }
+      this.log(JSON.stringify({ event: "campaign_issue_scope_synchronized", sessionId: message.sessionId, revision: scope.revision }));
+      return { ...base, ok: true, repository, revision: scope.revision };
+    } catch { return { ...base, ok: false, error: "Cannot inspect or synchronize campaign scope; verify origin and gh authentication" }; }
+  }
+
   /** Execute only trusted, human-approved closures, with a durable fence before mutation. */
   async githubIssueClosure(message: GithubIssueClosureMessage): Promise<GithubIssueClosureResultMessage> {
     const base = { type: "github_issue_closure_result" as const, requestId: message.requestId, sessionId: message.sessionId };
@@ -16213,15 +16254,23 @@ export class SessionManager {
     if (!meta.orchestrator.issueNumbers?.includes(issue)) {
       return { ...base, ok: false, error: "Issue is outside the human-authorized campaign scope" };
     }
+    const revision = message.operation === "inspect" ? message.scopeRevision : message.snapshot.scopeRevision;
+    if (meta.orchestrator.issueScope && revision !== meta.orchestrator.issueScope.revision) return { ...base, ok: false, error: "Campaign scope revision is stale; synchronize and request renewed review" };
     const run = issueClosureRun(meta.context, meta.repoPath);
     try {
-      if (message.operation === "inspect") return { ...base, ok: true, inspection: await inspectGithubIssueClosure(issue, run) };
+      if (message.operation === "inspect") {
+        const inspection = await inspectGithubIssueClosure(issue, run);
+        if (meta.orchestrator.issueScope && inspection.repository.toLowerCase() !== meta.orchestrator.issueScope.repository) return { ...base, ok: false, error: "Repository differs from the authorized scope" };
+        return { ...base, ok: true, inspection };
+      }
+      if (meta.orchestrator.issueScope && message.snapshot.repository.toLowerCase() !== meta.orchestrator.issueScope.repository) return { ...base, ok: false, error: "Closure repository differs from the authorized scope" };
       const digest = createHash("sha256").update(JSON.stringify(message.snapshot)).digest("hex");
       const result = await executeGithubIssueClosure(message.snapshot, run, () => {
         const fresh = this.store.readMeta(message.sessionId);
         const attempts = fresh?.githubIssueClosureAttempts ?? {};
         if (!fresh || attempts[message.occurrenceId] || Object.keys(attempts).length >= 1000 ||
-            isTerminal(fresh.status) || !fresh.orchestrator?.issueNumbers?.includes(issue)) return false;
+            isTerminal(fresh.status) || !fresh.orchestrator?.issueNumbers?.includes(issue) ||
+            (fresh.orchestrator.issueScope && revision !== fresh.orchestrator.issueScope.revision)) return false;
         return this.store.patchMeta(message.sessionId, {
           githubIssueClosureAttempts: { ...attempts, [message.occurrenceId]: digest },
         }) !== null;

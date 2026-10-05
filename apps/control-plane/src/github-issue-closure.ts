@@ -32,7 +32,8 @@ export function normalizeIssueClosureSnapshot(value: Record<string, unknown>): G
     if (!record(child) || !bounded(child.sessionId, 256) || !bounded(child.title, 1024) || !sha(child.assignmentDigest)) return null;
     activeChildren.push({ sessionId: child.sessionId, title: child.title, assignmentDigest: child.assignmentDigest });
   }
-  return { category: "issue_closure", repository: value.repository, issue: value.issue as number,
+  if (value.scopeRevision !== undefined && (!Number.isSafeInteger(value.scopeRevision) || (value.scopeRevision as number) < 1)) return null;
+  return { ...(value.scopeRevision === undefined ? {} : { scopeRevision: value.scopeRevision as number }), category: "issue_closure", repository: value.repository, issue: value.issue as number,
     title: value.title, url: value.url as string, forgeDigest: value.forgeDigest,
     reason: value.reason as GithubIssueClosureSnapshot["reason"], explanation: value.explanation,
     evidence: [...value.evidence] as string[], ...(value.comment === undefined ? {} : { comment: value.comment as string }),

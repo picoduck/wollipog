@@ -651,7 +651,9 @@
 //      provider reported for the call (Codex command items today), and a failed step shows it
 //      exactly. Additive + optional: older runners send none, so clients keep matching exit code
 //      text in the output, and older clients ignore the field.
-export const PROTOCOL_VERSION = 207;
+// 208: human-approved, revisioned campaign issue scope and bounded epic member proposals.
+export const PROTOCOL_VERSION = 208;
+export { boundedIssueNumbers, epicChecklistMembers, normalizeCampaignIssueScopeSnapshot } from "./campaign-issue-scope.js";
 export const UNIVERSAL_QUESTION_TEXT_MIN_PROTOCOL = 202;
 
 export type ArtifactUploadPreference = "manual" | "wollipog_automatic" | "external_hosting";
@@ -903,6 +905,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   orchestratorExecutionPolicy: 144,
   orchestratorChildHarnessPolicy: 157,
   orchestratorIssueScope: 158,
+  campaignIssueScopeChanges: 208,
   orchestratorIssueClosure: 194,
   /** v196 control plane records the campaign work ledger. Checked by the runner's ledger MCP tools
    * and CLI commands against the connected control plane, not against a runner. */
@@ -2297,7 +2300,7 @@ export const WORKFLOW_DECISION_CATEGORIES = [
 ] as const;
 export type DelegatableWorkflowDecisionCategory = typeof WORKFLOW_DECISION_CATEGORIES[number];
 /** Issue closure is permanently human-owned and never appears in delegation settings. */
-export type WorkflowDecisionCategory = DelegatableWorkflowDecisionCategory | "issue_closure";
+export type WorkflowDecisionCategory = DelegatableWorkflowDecisionCategory | "issue_closure" | "campaign_issue_scope";
 export type WorkflowDecisionAuthority = "human" | "orchestrator";
 
 export type ParentControlDecisionPolicy = Record<DelegatableWorkflowDecisionCategory, WorkflowDecisionAuthority>;
@@ -2349,10 +2352,11 @@ export interface OrchestratorExecutionDefaults {
 }
 
 /** Runner launch policy for one Orchestrator session. Issue numbers are admitted only from the
- * authenticated human's explicit initial campaign request; they are not user defaults and an
+ * authenticated human's explicit initial request or confirmed scope change; they are not user defaults and an
  * agent-created nested session may only inherit, never mint or broaden, the root scope. */
 export interface OrchestratorLaunchPolicy extends OrchestratorExecutionDefaults {
   issueNumbers?: number[];
+  issueScope?: CampaignIssueScope;
 }
 
 export interface OrchestratorDefaults {
@@ -2398,8 +2402,11 @@ export interface OrchestratorPolicySources {
  * and source; editing user defaults never reaches an existing session. */
 export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
   version: 1;
-  /** Immutable GitHub issue-write scope admitted from the root authenticated-human request. */
+  /** Human initial epic request, persisted before runner echo; this is a proposal seed, never authority. */
+  issueScopeProposalEpic?: number;
+  /** Finite GitHub issue-write scope admitted from the initial request or an exact human-approved scope change. */
   issueNumbers?: number[];
+  issueScope?: CampaignIssueScope;
   sources: OrchestratorPolicySources;
 }
 
@@ -4084,6 +4091,69 @@ export interface WorkflowDecisionOption {
   description?: string;
 }
 
+/** Authority is independent of ledger membership. Revision zero denotes a legacy initial scope. */
+export interface CampaignIssueScope {
+  repository: string;
+  issueNumbers: number[];
+  revision: number;
+  authorizedByUserId: string;
+  authorizedAt: number;
+}
+
+import type { CampaignIssueRef } from "./campaign-work-ledger.js";
+export interface CampaignIssueScopeRequest {
+  requestId: string;
+  expectedRevision: number;
+  additions: CampaignIssueRef[];
+  removals: CampaignIssueRef[];
+  explanation: string;
+}
+
+export interface CampaignIssueScopeSnapshot {
+  category: "campaign_issue_scope";
+  repository: string;
+  expectedRevision: number;
+  before: number[];
+  additions: number[];
+  removals: number[];
+  explanation: string;
+  affectedAssignments: Array<{ sessionId: string; issue: number }>;
+  affectedDecisions: string[];
+  activeChildren: Array<{ sessionId: string; title: string; assignmentDigest: string }>;
+}
+
+export interface CampaignIssueScopeView {
+  campaignSessionId: string;
+  repository: string;
+  issueNumbers: number[];
+  revision: number;
+  authorization?: CampaignIssueScope;
+  supported: boolean;
+  compatibilityMessage?: string;
+  canPropose: boolean;
+  candidateMessage?: string;
+  outsideScope: Array<{ workItemId: string; title: string; issue: CampaignIssueRef; sessionId: string | null }>;
+  candidates?: Array<{ issue: CampaignIssueRef; title: string; source: "umbrella" | "sub_issue" | "member_checklist" }>;
+}
+
+export type CampaignIssueScopeMessage = {
+  type: "campaign_issue_scope";
+  requestId: string;
+  sessionId: string;
+} & ({ operation: "inspect"; epic?: number; issues?: number[] } |
+     { operation: "synchronize"; scope: CampaignIssueScope });
+
+export interface CampaignIssueScopeResultMessage {
+  type: "campaign_issue_scope_result";
+  requestId: string;
+  sessionId: string;
+  ok: boolean;
+  repository?: string;
+  revision?: number;
+  candidates?: CampaignIssueScopeView["candidates"];
+  error?: string;
+}
+
 export interface GithubIssueClosureInspection {
   repository: string;
   issue: number;
@@ -4105,6 +4175,7 @@ export interface GithubIssueClosureRequest {
 }
 
 export interface GithubIssueClosureSnapshot extends Omit<GithubIssueClosureInspection, "state"> {
+  scopeRevision?: number;
   category: "issue_closure";
   reason: GithubIssueClosureRequest["reason"];
   explanation: string;
@@ -4120,6 +4191,7 @@ export interface GithubIssueClosureResult {
 
 export type WorkflowDecisionResourceSnapshot =
   | GithubIssueClosureSnapshot
+  | CampaignIssueScopeSnapshot
   | {
       category: "implementation_question";
       question: string;
@@ -7959,7 +8031,7 @@ export type GithubIssueClosureMessage = {
   requestId: string;
   sessionId: string;
 } & (
-  | { operation: "inspect"; issue: number }
+  | { operation: "inspect"; issue: number; scopeRevision?: number }
   | { operation: "execute"; occurrenceId: string; snapshot: GithubIssueClosureSnapshot }
 );
 
@@ -8449,6 +8521,7 @@ export type RunnerToControlPlane =
   | WorkflowActionAdmissionRecordedMessage
   | WorkflowActionReconciliationResultMessage
   | GithubIssueClosureResultMessage
+  | CampaignIssueScopeResultMessage
   | CampaignForgeObserveResultMessage
   | AgentControlCredentialMessage
   | SessionRuntimeUpdatedMessage
@@ -10167,6 +10240,7 @@ export type ControlPlaneToRunner =
   | RecordWorkflowActionAdmissionMessage
   | ReconcileWorkflowActionMessage
   | GithubIssueClosureMessage
+  | CampaignIssueScopeMessage
   | CampaignForgeObserveMessage
   | AgentControlCredentialRegisteredMessage
   | { type: "set_session_artifact_uploads"; sessionId: string; preference: ArtifactUploadPreference }

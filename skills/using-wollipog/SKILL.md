@@ -266,3 +266,28 @@ are verified outcomes, `refused` requires renewed review, and `uncertain` means 
 accepted the action. Inspect uncertain outcomes without replaying the comment or closure.
 Issue closure does not attest implementation or campaign completion. Unsupported peers, nonlocal
 execution targets, or incomplete bounded conflict evidence refuse the operation clearly.
+
+
+## Inspecting and Changing Campaign Issue Scope
+
+Before delegating an epic, use `get_campaign_issue_scope` (CLI: `wollipog issue-scope get --epic <number>`).
+It returns authorized repository-qualified issues, a revision, recorded work outside scope, and reviewable
+umbrella/member candidates. Native GitHub sub-issues and leading checklist entries under Units, Members,
+Child Issues, Sub-Issues, or Implementation Issues are candidates; dependencies and incidental references
+are not members and never grant authority. Inspect candidates and select the intended members.
+
+To recover or extend an existing campaign, use `request_campaign_issue_scope_change` (CLI:
+`wollipog issue-scope request --proposal '<json>'`) with `requestId`, `expectedRevision`, `explanation`,
+and exact `additions` and `removals`, each an array of `{ "repository": "owner/repo", "number": 123 }`.
+An authenticated human must approve the exact change, even under Parent Control. The human approval
+operation applies and consumes it atomically; the agent cannot resolve or consume its own scope proposal.
+Pending, denied, stale and replayed proposals leave scope unchanged. After approval, re-read the scope.
+Humans can inspect, resolve epic candidates, and request changes in Campaign Status's Authorized Issue Scope.
+
+Scope changes preserve conversation and work history. Removals display affected assignments and revoke
+outstanding action decisions; issue closure retains its separate human approval. Active Orchestrator
+participants must use the campaign's runner and repository workspace. Updates require protocol v208
+on the control plane and participating runners; unsupported peers must be updated and reconnected.
+The authoritative revision is persisted on both sides, delivered on reconnect and restart, and checked
+again by closure execution. An offline or unsynchronized runner cannot execute a revised closure.
+Ledger recording, assignments, ordinary prompts, and epic links never modify authority.

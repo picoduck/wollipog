@@ -1,4 +1,5 @@
 import React from "react";
+import { CampaignIssueScopeSummary } from "../CampaignIssueScopePanel.js";
 import type { WorkflowDecisionResourceSnapshot } from "@wollipog/protocol";
 import { IssueClosureSummary } from "../IssueClosureSummary.js";
 
@@ -11,6 +12,8 @@ export function WorkflowDecisionSummary({ snapshot }: { snapshot: WorkflowDecisi
         <p>{snapshot.question}</p>
         <ul>{snapshot.options.map((option) => <li key={option.optionId}>{option.label}</li>)}</ul>
       </>;
+    case "campaign_issue_scope":
+      return <CampaignIssueScopeSummary snapshot={snapshot} />;
     case "issue_closure":
       return <IssueClosureSummary snapshot={snapshot} />;
     case "pr_merge":

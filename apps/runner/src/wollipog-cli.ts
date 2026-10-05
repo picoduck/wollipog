@@ -157,6 +157,19 @@ function invocationArgs(argv: string[]): string[] {
 
 function command(args: string[]): { tool: string; input: Record<string, unknown> } | { error: string } {
   const words = positional(args);
+  if (words[0] === "issue-scope") {
+    if (optionPresent(args, "--session")) return { error: "issue-scope commands act only on the injected session" };
+    if (words[1] === "get") {
+      const epic = option(args, "--epic");
+      if (epic && (!/^[1-9][0-9]*$/u.test(epic) || !Number.isSafeInteger(Number(epic)))) return { error: "epic must be a positive issue number" };
+      return { tool: "get_campaign_issue_scope", input: epic ? { epic: Number(epic) } : {} };
+    }
+    if (words[1] === "request") {
+      const proposal = jsonObjectOption(args, "--proposal");
+      return "error" in proposal ? proposal : { tool: "request_campaign_issue_scope_change", input: proposal.value };
+    }
+    return { error: "use issue-scope get [--epic <number>] or issue-scope request --proposal <json>" };
+  }
   if (words[0] === "issue-closure") {
     if (optionPresent(args, "--session")) return { error: "issue-closure commands act only on the injected session" };
     const groupIndex = args.indexOf("issue-closure");
@@ -612,6 +625,8 @@ export async function runWollipogCli(
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionArtifactFileAttach
     : parsed.tool === "reconcile_workflow_decision"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionReconciliation
+    : ["get_campaign_issue_scope", "request_campaign_issue_scope_change"].includes(parsed.tool)
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignIssueScopeChanges
     : ["request_github_issue_closure", "close_github_issue"].includes(parsed.tool)
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueClosure
     : ["record_campaign_plan", "update_campaign_work_item", "assign_campaign_work_item",

@@ -255,6 +255,7 @@ export type RunnerRequestResult =
   | PolicyHookDecisionRecordedMessage
   | WorkflowActionAdmissionRecordedMessage
   | WorkflowActionReconciliationResultMessage
+  | import("@wollipog/protocol").CampaignIssueScopeResultMessage
   | GithubIssueClosureResultMessage
   | CampaignForgeObserveResultMessage
   | ProviderLoginResultMessage

@@ -1083,6 +1083,10 @@ export function createApiClient(transport: ApiTransport) {
       `/api/sessions/${encodeURIComponent(id)}/descendant-requests`,
       { signal },
     ),
+  campaignIssueScope: (id: string, epic?: number, signal?: AbortSignal) =>
+    req<import("@wollipog/protocol").CampaignIssueScopeView>(`/api/sessions/${encodeURIComponent(id)}/campaign/issue-scope${epic === undefined ? "" : `?epic=${epic}`}`, { signal }),
+  proposeCampaignIssueScope: (id: string, proposal: import("@wollipog/protocol").CampaignIssueScopeRequest) =>
+    req<import("@wollipog/protocol").WorkflowDecisionView>(`/api/sessions/${encodeURIComponent(id)}/campaign/issue-scope/proposals`, { method: "POST", body: JSON.stringify(proposal) }),
   /** Campaign Status (#2417). `id` may be the campaign root session or any member. */
   campaignWorkItems: (id: string, query: string, signal?: AbortSignal) =>
     req<CampaignWorkItemsPage>(`/api/sessions/${encodeURIComponent(id)}/campaign/work-items?${query}`, { signal }),
