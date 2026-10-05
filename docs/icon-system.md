@@ -93,7 +93,8 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `PlanInProgressIcon` | Lucide | `CircleDot` | The plan step in progress. |
 | `ErrorIcon` | Lucide | `CircleAlert` | The danger tone icon on toasts and notices; the failed count on a work ledger line; a UI evidence tile that Can't Load or Can't Show. |
 | `KeyboardIcon` | Lucide | `Keyboard` | Keyboard shortcuts. |
-| `AccountIcon` | Lucide | `CircleUserRound` | The provider account a session runs under; the Request Card's Sign-In kind. |
+| `AccountIcon` | Lucide | `CircleUserRound` | The provider account a session runs under. |
+| `SignInIcon` | Lucide | `KeyRound` | The Request Card's Sign-In kind: a sign-in the session waits for (#2198). |
 | `LockIcon` | Lucide | `Lock` | Locked or restricted state; a masked identifier that is not an email. |
 | `SecureContextRequiredIcon` | Lucide | `LockKeyhole` | A page that must be HTTPS or localhost to check evidence: the HTTPS or Localhost Required notice and a UI evidence tile that is Not Shown. |
 | `PlayIcon` | Lucide | `Play` | A recording: the mark over a UI evidence tile's first frame. |

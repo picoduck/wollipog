@@ -11,7 +11,7 @@ import React, {
 import type { GovernancePolicy, PendingApproval, PermissionOption, SessionView } from "@wollipog/protocol";
 import { useApi } from "../../api-context.js";
 import type { ApiClient } from "../../api.js";
-import { relativeTime } from "../../format.js";
+import { relativeTime, titleCaseLabel } from "../../format.js";
 import { useOptionalStoreSelector } from "../../store.js";
 import { sessionCommandRefusal } from "../../session-command-permissions.js";
 import { useAccessibleMenu } from "../interactions.js";
@@ -19,9 +19,15 @@ import { MenuItem, MenuSurface } from "../Menu.js";
 import { ChevronRightIcon, MoreHorizontalIcon } from "../Icons.js";
 import { Notice } from "../Notice.js";
 import { BusyButton } from "../ui/BusyButton.js";
+import { ChoiceRows } from "../ui/ChoiceControls.js";
 import { CopyButton } from "../common.js";
 import { ProviderLoginCard } from "../ProviderLoginCard.js";
-import { AuthenticationRecoveryPanel, authenticationRecoveryPanelApplies } from "../AuthenticationRecoveryPanel.js";
+import {
+  AuthenticationRecoveryPanel,
+  SIGN_IN_COPY,
+  authenticationAccountChoiceApplies,
+  authenticationRecoveryPanelApplies,
+} from "../AuthenticationRecoveryPanel.js";
 import { EvidenceReviewBody, useEvidenceReview } from "./EvidenceReview.js";
 import { WorkflowDecisionSummary } from "./WorkflowDecisionSummary.js";
 import { claimDecision, decisionKey, useDecisionFailure, useDecisionInFlight } from "./request-reveal.js";
@@ -32,6 +38,8 @@ import {
   requestKindMeta,
   requestOptionForIntent,
   requestPolicyLine,
+  signInCardActions,
+  type SignInCardActions,
 } from "./request-meta.js";
 
 /** A one-key decision on the card: true when the card took the key, whether or not it could act. */
@@ -112,6 +120,7 @@ export function RequestCard({
   const reasonId = `${idPrefix}-reason`;
   const signInReasonId = `${idPrefix}-sign-in-reason`;
   const evidenceReasonId = `${idPrefix}-evidence-reason`;
+  const accountsId = `${idPrefix}-accounts`;
   const policyName = useGovernancePolicyName(api, request.governancePolicyId);
   const remaining = useCountdown(request.expiresAt);
 
@@ -166,19 +175,29 @@ export function RequestCard({
     };
   }, [intentRef, request.options]);
 
-  const { secondary, menu: menuOptions, primary } = requestCardActions(request.options);
+  const signIn = request.kind === "authentication";
+  const actions: SignInCardActions = signIn
+    ? signInCardActions(request.options)
+    : { ...requestCardActions(request.options), recheck: null, methods: [] };
+  const { tertiary, secondary, menu: menuOptions, primary, recheck, methods } = actions;
+  const recovery = authenticationRecoveryPanelApplies(session, request);
+  const canChooseAccount = authenticationAccountChoiceApplies(session, request, runner);
+  const [choosingAccount, setChoosingAccount] = useState(false);
+  // The sign-in method chosen among several; the first until the person picks another.
+  const [chosenMethod, setChosenMethod] = useState<string | null>(null);
+  const method = methods.find((option) => option.optionId === chosenMethod) ?? methods[0] ?? null;
   const keyHint = (option: PermissionOption): string | null => {
     if (!showKeyHints) return null;
     if (requestOptionForIntent(request.options, "approve") === option) return "A";
     if (requestOptionForIntent(request.options, "deny") === option) return "D";
     return null;
   };
-  const optionButton = (option: PermissionOption, primaryButton: boolean) => {
+  const optionButton = (option: PermissionOption, variant: "primary" | "secondary" | "tertiary") => {
     const hint = keyHint(option);
     return (
       <BusyButton
         key={option.optionId}
-        className={primaryButton ? "btn primary" : "btn"}
+        className={variant === "primary" ? "btn primary" : variant === "tertiary" ? "btn ghost request-card-tertiary" : "btn"}
         busy={busy === option.optionId}
         progress={REQUEST_CARD_COPY.sending}
         disabled={(busy !== null && busy !== option.optionId) || unavailable(option)}
@@ -186,7 +205,8 @@ export function RequestCard({
         data-session-request-control={`option:${option.optionId}`}
         onClick={() => void decide(option)}
       >
-        {option.name}
+        {/* An agent's own sign-in choices are its words, not Wollipog's: Title Case them as labels. */}
+        {methods.length > 0 ? titleCaseLabel(option.name) : option.name}
         {hint && <kbd aria-hidden="true">{hint}</kbd>}
       </BusyButton>
     );
@@ -211,11 +231,39 @@ export function RequestCard({
     remaining,
   );
   const body: ReactNode[] = [
-    request.kind === "authentication" && providerLogin
-      ? <ProviderLoginCard key="login" runnerId={session.runnerId} login={providerLogin} /> : null,
-    authenticationRecoveryPanelApplies(session, request)
-      ? <AuthenticationRecoveryPanel key="recovery" session={session} approval={request} runner={runner}
-        runnerOnline={runnerOnline} /> : null,
+    signIn && providerLogin && !recovery
+      ? <ProviderLoginCard key="login" runnerId={session.runnerId} login={providerLogin} embedded /> : null,
+    recovery ? (
+      <AuthenticationRecoveryPanel
+        key="recovery"
+        session={session}
+        approval={request}
+        runner={runner}
+        runnerOnline={runnerOnline}
+        recheck={recheck ? {
+          run: () => decide(recheck),
+          busy: busy === recheck.optionId,
+          disabled: (busy !== null && busy !== recheck.optionId) || unavailable(recheck),
+          describedBy: describedBy(recheck),
+        } : undefined}
+        choosingAccount={canChooseAccount && choosingAccount}
+        accountsId={accountsId}
+      />
+    ) : null,
+    methods.length > 0 ? (
+      <ChoiceRows
+        key="methods"
+        label={SIGN_IN_COPY.signInMethods}
+        value={method?.optionId ?? null}
+        onChange={setChosenMethod}
+        options={methods.map((option) => ({
+          value: option.optionId,
+          title: titleCaseLabel(option.name),
+          description: option.description ? <>{option.description}</> : undefined,
+        }))}
+        className="sign-in-methods"
+      />
+    ) : null,
     evidence ? <EvidenceReviewBody key="evidence" review={evidence} /> : null,
     workflowDecision && !evidence ? <WorkflowDecisionSummary key="decision" snapshot={workflowDecision.resourceSnapshot} /> : null,
     decisionDetails ? (
@@ -229,13 +277,26 @@ export function RequestCard({
         </div>
       </details>
     ) : null,
-    input ? (
+    // A sign-in's request details are the runner's guidance: where to sign in and with which command.
+    input && recovery ? (
+      <details key="input" className="disclosure">
+        <summary><ChevronRightIcon className="disclosure-chevron" />{REQUEST_CARD_COPY.requestDetails}</summary>
+        <div className="disclosure-body">
+          <div className="code-well">
+            <pre>{input}</pre>
+            <CopyButton text={input} iconOnly ariaLabel={REQUEST_CARD_COPY.copyDetails} className="icon-btn sm"
+              tooltip={false} />
+          </div>
+        </div>
+      </details>
+    ) : input ? (
       <div key="input" className="code-well">
         <pre>{input}</pre>
-        <CopyButton text={input} iconOnly ariaLabel={REQUEST_CARD_COPY.copyDetails} className="icon-btn sm" />
+        <CopyButton text={input} iconOnly ariaLabel={REQUEST_CARD_COPY.copyDetails} className="icon-btn sm"
+          tooltip={!signIn} />
       </div>
     ) : null,
-    facts.length > 0 ? (
+    facts.length > 0 && !signIn ? (
       <dl key="facts" className="facts" aria-label={REQUEST_CARD_COPY.policyMatch}>
         {facts.map((fact) => <div key={fact.label}><dt>{fact.label}</dt><dd>{fact.value}</dd></div>)}
       </dl>
@@ -275,7 +336,23 @@ export function RequestCard({
         </div>
       )}
       <div className="request-card-foot">
-        {secondary.map((option) => optionButton(option, false))}
+        {tertiary && optionButton(tertiary, "tertiary")}
+        {secondary.map((option) => optionButton(option, "secondary"))}
+        {canChooseAccount && (
+          // #2208 opens its Choose Another Account dialog from here; until then the card lists the
+          // Machine's other accounts in its body.
+          <button
+            type="button"
+            className="btn"
+            aria-expanded={choosingAccount}
+            aria-controls={choosingAccount ? accountsId : undefined}
+            disabled={busy !== null || reason !== null}
+            aria-describedby={reason !== null ? reasonId : undefined}
+            onClick={() => setChoosingAccount((open) => !open)}
+          >
+            {SIGN_IN_COPY.chooseAnotherAccount}
+          </button>
+        )}
         {menuOptions.length > 0 && (
           <>
             <button
@@ -326,7 +403,20 @@ export function RequestCard({
             )}
           </>
         )}
-        {primary && optionButton(primary, true)}
+        {primary && optionButton(primary, "primary")}
+        {method && (
+          <BusyButton
+            className="btn primary"
+            busy={methods.some((option) => busy === option.optionId)}
+            progress={REQUEST_CARD_COPY.sending}
+            disabled={(busy !== null && !methods.some((option) => busy === option.optionId)) || unavailable(method)}
+            aria-describedby={describedBy(method)}
+            data-session-request-control="option:sign-in-method"
+            onClick={() => void decide(method)}
+          >
+            {SIGN_IN_COPY.startSignIn}
+          </BusyButton>
+        )}
       </div>
     </section>
   );

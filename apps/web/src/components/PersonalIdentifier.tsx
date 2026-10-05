@@ -26,6 +26,7 @@ export function PersonalIdentifierRevealButton({
   onToggle,
   controls,
   withText = false,
+  tooltip = true,
 }: {
   /** Title Case name of what is hidden, e.g. "Account Email", or "Emails" for a picker's toggle. */
   label: string;
@@ -34,6 +35,9 @@ export function PersonalIdentifierRevealButton({
   controls?: string;
   /** Show the action as text beside the icon, for picker-level toggles with room for it. */
   withText?: boolean;
+  /** False where a surface keeps every control's name out of `title` (the sign-in Request Card,
+   * #2198); the accessible name still says what the control does. */
+  tooltip?: boolean;
 }) {
   const action = `${revealed ? "Hide" : "Show"} ${label}`;
   return (
@@ -42,7 +46,7 @@ export function PersonalIdentifierRevealButton({
       className={withText ? "btn sm ghost pid-toggle" : "icon-btn sm pid-toggle"}
       aria-label={withText ? undefined : action}
       aria-controls={controls}
-      title={withText ? undefined : action}
+      title={withText || !tooltip ? undefined : action}
       onClick={onToggle}
     >
       {revealed ? <EyeOffIcon size={14} /> : <EyeIcon size={14} />}
@@ -101,6 +105,7 @@ export function PersonalIdentifier({
   kind,
   lead,
   className,
+  revealTooltip,
 }: {
   value: string;
   /** Title Case name of the value, e.g. "Account Email"; used for the reveal control. */
@@ -115,6 +120,8 @@ export function PersonalIdentifier({
   /** Visible label before a masked value, such as "Account", for a place with no label of its own. */
   lead?: string;
   className?: string;
+  /** The reveal control's `tooltip`. */
+  revealTooltip?: boolean;
 }) {
   const [revealed, toggle] = usePersonalIdentifierReveal(value);
   const masked = sensitive ?? isPersonalIdentifier(value);
@@ -135,6 +142,7 @@ export function PersonalIdentifier({
         label={label}
         revealed={revealed}
         onToggle={toggle}
+        tooltip={revealTooltip}
       />
     </span>
   );

@@ -9,6 +9,7 @@ import {
   requestKindMeta,
   requestOptionForIntent,
   requestPolicyLine,
+  signInCardActions,
   waitingRequestKinds,
 } from "./request-meta.js";
 import { dockRequests } from "./RequestDock.js";
@@ -118,4 +119,40 @@ test("the software keyboard is open when the visual viewport is a keyboard short
     "a browser toolbar moving is not a keyboard");
   assert.equal(softwareKeyboardOpen({ innerHeight: 844, visualViewport: viewport(500) }), true);
   assert.equal(softwareKeyboardOpen({ innerHeight: 844, visualViewport: null }), false);
+});
+
+test("a sign-in's footer has one primary for its state, Dismiss Recovery apart, and Check Again for the rest", () => {
+  const option = (optionId: string, kind: PermissionOption["kind"]): PermissionOption => ({ optionId, name: optionId, kind });
+  const accept = option("auth:accept-current", "allow_once");
+  const login = option("auth:login", "allow_once");
+  const revalidate = option("auth:revalidate", "allow_once");
+  const dismiss = option("auth:dismiss", "reject_once");
+  const cancel = option("auth:cancel", "reject_once");
+
+  const different = signInCardActions([accept, login, revalidate, dismiss]);
+  assert.equal(different.primary, accept, "Use Current Account outranks Start Sign-In");
+  assert.equal(different.recheck, revalidate);
+  assert.equal(different.tertiary, dismiss);
+  assert.deepEqual(ids(different.secondary), ["auth:login"], "a second runner action is a secondary, never a primary");
+  assert.deepEqual(different.menu, [], "nor hidden behind a menu");
+
+  const readOnly = signInCardActions([revalidate, dismiss]);
+  assert.equal(readOnly.primary, revalidate);
+  assert.equal(readOnly.recheck, null, "no Check Again when Recheck Authentication is the primary");
+
+  assert.deepEqual(signInCardActions([cancel]), {
+    tertiary: null, secondary: [cancel], menu: [], primary: null, recheck: null, methods: [],
+  });
+  const retained = signInCardActions([option("auth:dismiss", "reject_once")]);
+  assert.equal(retained.tertiary, null, "a lone Dismiss is the footer's secondary, not stranded at the left");
+  assert.deepEqual(ids(retained.secondary), ["auth:dismiss"]);
+
+  const methods = [option("auth_1_method_1", "allow_once"), option("auth_1_method_2", "allow_once")];
+  const acp = signInCardActions([...methods, option("auth_1_cancel", "reject_once")]);
+  assert.deepEqual(acp.methods, methods);
+  assert.equal(acp.primary, null, "the card's own Start Sign-In uses the chosen method");
+  assert.deepEqual(ids(acp.secondary), ["auth_1_cancel"]);
+  const one = signInCardActions([methods[0]!, option("auth_1_cancel", "reject_once")]);
+  assert.equal(one.primary, methods[0], "a single method is its own primary");
+  assert.deepEqual(one.methods, []);
 });

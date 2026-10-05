@@ -57,6 +57,8 @@ export function titleCaseLabel(value: string): string {
       return segments.map((segment, segmentIndex) => {
         if (!segment) return segment;
         if (/^[A-Z0-9]+$/.test(segment)) return segment;
+        // A name cased on purpose (ChatGPT, OpenCode) keeps its casing, as an acronym does.
+        if (/^[A-Z][a-z0-9]*[A-Z]/.test(segment)) return segment;
         const lower = segment.toLowerCase();
         const override = TITLE_CASE_OVERRIDES[lower];
         if (override) return override;

@@ -40,6 +40,7 @@ import {
 } from "./components/requests/request-meta.js";
 import { ASK_MARKER_COPY } from "./components/requests/AskMarker.js";
 import { QUESTION_CARD_COPY, questionStepLabel } from "./components/requests/QuestionStep.js";
+import { SIGN_IN_COPY } from "./components/AuthenticationRecoveryPanel.js";
 
 const SOURCE_ROOT = path.resolve("apps/web/src");
 const MINOR_WORDS = new Set([
@@ -75,7 +76,7 @@ const MINOR_WORDS = new Set([
  */
 const PHRASAL_PARTICLES = new Set(["down", "in", "off", "on", "out", "over", "up"]);
 const PHRASAL_VERBS = new Set([
-  "back", "check", "clean", "follow", "hand", "log", "look", "opt", "pick", "set", "sign", "start",
+  "back", "check", "clean", "follow", "hand", "log", "look", "opt", "pick", "set", "sign", "signed", "start",
   "take", "turn",
 ]);
 const LABEL_TAGS = new Set(["button", "caption", "dt", "h1", "h2", "h3", "h4", "h5", "h6", "legend", "summary", "th"]);
@@ -793,6 +794,25 @@ test("the question card's labels and buttons are Title Case, and its hints and e
   }
   // The step count is a foot-note, written as the issue words it.
   assert.equal(questionStepLabel(1, 3), "Question 2 of 3");
+});
+
+test("the sign-in card's labels are Title Case and its help lines are sentences (#2198)", () => {
+  const sentences = ["rechecking", "labelHelp", "defaultHelp"] as const;
+  for (const [key, value] of Object.entries(SIGN_IN_COPY)) {
+    if ((sentences as readonly string[]).includes(key)) {
+      assert.ok(/[.…]$/.test(value) && isSentenceCase(value), `${key}: ${value}`);
+    } else {
+      assert.ok(isTitleCase(value) && !/[.!?]$/.test(value), `${key}: ${value}`);
+    }
+  }
+  // The labels the issue names, exactly.
+  for (const label of ["This Session Uses", "Signed In Now", "Last Checked", "Check Again", "Start Sign-In",
+    "Choose Another Account…"]) {
+    assert.ok(Object.values(SIGN_IN_COPY).includes(label as never), label);
+  }
+  assert.equal(REQUEST_CARD_COPY.signInOwner, "Only a machine owner or organization admin can sign in on this machine.");
+  assert.deepEqual(titleCaseFailures(parseSource(path.join(SOURCE_ROOT, "components/AuthenticationRecoveryPanel.tsx"))).failures,
+    []);
 });
 
 test("the session menus' labels are Title Case, with an ellipsis only where a dialog or confirmation follows (#2161)", () => {

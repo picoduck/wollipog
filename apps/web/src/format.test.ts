@@ -35,6 +35,10 @@ test("titleCaseLabel formats trusted compact UI labels while preserving acronyms
   assert.equal(titleCaseLabel("out-of-band review"), "Out-of-Band Review");
   assert.equal(titleCaseLabel("chatops and github status"), "Chat-Ops and GitHub Status");
   assert.equal(titleCaseLabel("agent-1 Agent"), "Agent-1 Agent");
+  // A name cased on purpose keeps its casing: an agent's sign-in methods (#2198).
+  assert.equal(titleCaseLabel("ChatGPT plus or pro"), "ChatGPT Plus or Pro");
+  assert.equal(titleCaseLabel("OpenCode zen"), "OpenCode Zen");
+  assert.equal(titleCaseLabel("API key"), "API Key");
 });
 
 test("formatTokens: small counts are exact", () => {

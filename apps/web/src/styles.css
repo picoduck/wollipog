@@ -5737,9 +5737,13 @@ textarea {
   justify-content: flex-end;
   gap: var(--space-2);
 }
+/* A tertiary option sits at the far left, apart from the rest (§3.2): a sign-in's Dismiss Recovery. */
+.request-card-foot > .request-card-tertiary { margin-right: auto; }
 @media (max-width: 760px) {
   /* One footer row on a phone, where the dock is in thumb reach. */
   .request-card[data-presentation="dock"] .request-card-foot { flex-wrap: nowrap; }
+  /* Except beside a tertiary: the rest wrap under it rather than push it off the card's edge. */
+  .request-card[data-presentation="dock"] .request-card-foot:has(> .request-card-tertiary) { flex-wrap: wrap; }
 }
 /* In the Requests panel the detail scrolls as one page, so a short panel never squeezes the card's
    body away; the footer sticks to the panel's lower edge on the card's own wash. */
@@ -9152,53 +9156,57 @@ textarea,
 .provider-login-card form input {
   width: 100%;
 }
-/* Authentication Required account context (#1649): provider-reported identity kept visibly
-   separate from the configured label, then the other accounts on the same Machine. */
-.auth-recovery {
+/* The sign-in Request Card's body (#2198): the sign-in as facts (§5.4), one sentence for what the
+   card's primary does, and Check Again on the Last Checked fact. Nothing is boxed: the card is the
+   only frame. */
+.sign-in-body {
   display: grid;
-  gap: 10px;
-  flex: 0 0 100%;
+  gap: var(--space-2);
   min-width: 0;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg);
-  color: var(--text);
-  font-size: var(--text-sm);
 }
-.auth-recovery-identity {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 10px;
-  margin: 0;
-}
-.auth-recovery-identity dt,
-.auth-recovery-accounts h4 {
-  margin: 0;
-  color: var(--text-faint);
-  font-size: var(--text-xs);
-  font-weight: 700;
-}
-.auth-recovery-identity dd {
-  display: grid;
-  gap: 3px;
-  margin: 3px 0 0;
-  overflow-wrap: anywhere;
-}
-.auth-recovery-hint,
-.auth-recovery-note {
-  margin: 0;
-  color: var(--text-dim);
-}
-.auth-recovery-email {
-  display: inline-flex;
+/* Its rows hold 28px controls (Show Email, Check Again), so they sit closer than text-only facts. */
+.sign-in-facts { row-gap: var(--space-1); }
+.sign-in-facts dd {
+  display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-1) var(--space-2);
 }
+/* A fact's help, or a value that is a sentence, in the secondary tier: beside the value while the row
+   has room, so the sentence under the facts stays in a 1440x900 dock, and under it on a phone. */
+.sign-in-facts .facts-help {
+  min-width: 0;
+  color: var(--text-dim-on-tint);
+  font: var(--type-small);
+}
+.sign-in-sentence { color: var(--text); }
+.sign-in-methods .choice-row-desc {
+  display: block;
+  overflow: visible;
+  white-space: normal;
+}
+.provider-login-card[data-embedded] {
+  margin-top: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+}
+/* The other accounts on the session's Machine, opened by Choose Another Account… until #2208's
+   dialog replaces the list. */
 .auth-recovery-accounts {
   display: grid;
-  gap: 8px;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.auth-recovery-accounts h4 {
+  margin: 0;
+  color: var(--text-dim-on-tint);
+  font: var(--type-label);
+}
+.auth-recovery-accounts .facts-help {
+  margin: 0;
+  color: var(--text-dim-on-tint);
+  font: var(--type-small);
 }
 .auth-recovery-account-list {
   display: grid;

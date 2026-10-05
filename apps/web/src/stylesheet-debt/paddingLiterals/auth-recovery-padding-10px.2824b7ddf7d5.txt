@@ -1,1 +1,0 @@
-|.auth-recovery|padding|10px

@@ -72,6 +72,7 @@ export function CopyButton({
   ariaLabel,
   role,
   iconOnly = false,
+  tooltip = true,
 }: {
   text: string;
   /** Turns `text` into what is copied, run only when the button is pressed (Copy Response's plain text). */
@@ -84,6 +85,9 @@ export function CopyButton({
   role?: "menuitem";
   /** Keep compact utility surfaces visual while retaining a descriptive accessible name. */
   iconOnly?: boolean;
+  /** False where a surface keeps every control's name out of the title attribute (the sign-in
+   * Request Card, #2198); the accessible name still says what the button does. */
+  tooltip?: boolean;
 }) {
   const [status, setStatus] = useState<"idle" | "copied" | "failed">("idle");
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -176,7 +180,7 @@ export function CopyButton({
         type="button"
         className={`${className}${iconOnly ? "" : " copy-btn-labeled"}${status !== "idle" ? ` copy-status-${status}` : ""}`}
         onClick={copy}
-        title={ariaLabel ?? "Copy to Clipboard"}
+        title={tooltip ? ariaLabel ?? "Copy to Clipboard" : undefined}
         aria-label={ariaLabel ?? label}
         aria-describedby={describedBy}
         role={role}

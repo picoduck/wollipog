@@ -68,6 +68,7 @@ import {
   Inbox as LucideInbox,
   Info as LucideInfo,
   Keyboard as LucideKeyboard,
+  KeyRound as LucideKeyRound,
   Link as LucideLink,
   List as LucideList,
   ListChecks as LucideListChecks,
@@ -436,6 +437,11 @@ export function ErrorIcon(props: IconProps) {
 
 export function KeyboardIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideKeyboard} {...props} />;
+}
+
+/** A sign-in the session waits for: the Request Card's Sign-In kind (#2198). */
+export function SignInIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideKeyRound} {...props} />;
 }
 
 /** The provider account a session runs under. */

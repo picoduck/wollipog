@@ -2199,6 +2199,19 @@ follows these rules so it never crowds out the conversation it asks about:
   named by hidden words, and the primary takes the rest of their row, under a row with the checkbox
   and foot-note.
   A recording plays in the viewer with its controls.
+- **A sign-in states facts and offers one primary** (`signInCardActions()`, #2198). Its kind icon is
+  `KeyRound`. The body is `.facts`: This Session Uses (the configured account, masked, or Machine
+  Default Sign-In, with its help beside it), Signed In Now (the provider-reported account, masked,
+  with Show Email) and Last Checked (a relative time with a `.btn.sm.ghost` Check Again that runs the
+  runner's recheck), then one sentence naming the situation and what the primary does; the runner's
+  guidance waits behind Request Details. The primary is Use Current Account or Start Sign-In, and
+  Recheck Authentication only when the runner offers neither (then Check Again is hidden). Dismiss
+  Recovery is a ghost tertiary at the footer's far left (on a phone the rest wrap under it), and
+  Choose Another Account… is the secondary when the session can switch accounts. While a sign-in
+  runs, Cancel Sign-In is the only button and the runner's sign-in renders in the body. An agent
+  with several sign-in methods lists them as ChoiceRows with their descriptions visible and one
+  Start Sign-In. A machine-owner-only Start Sign-In is disabled with its reason as the card's
+  foot-note. No control in the card has a `title`: every name is visible or is its accessible name.
 - **Reading back shrinks it to a strip.** While the reader scrolls up away from the live tail (the
   follow-tail state is paused), the dock becomes one 44px `.dock-strip` on the card's warning
   surface: kind icon, the expanded request's title, its position ("1 of 3") and Expand, icon-only

@@ -18,11 +18,19 @@ import type { RightPanelState } from "../components/RightPanel.js";
 import type { RightPanelMode } from "../right-panel.js";
 import "../styles.css";
 
-/** Real-browser SessionDetail with a Claude Code Authentication Required card (#1649).
- * `?scenario=email` (default) reports a provider email, `no-email` reports none, `older` is a
- * pre-v180 runner, `readonly` is a viewer who cannot manage the Machine, and `refused` makes the
- * runner refuse the chosen account as signed out. `?emailLabels=1` names two of the other accounts
- * with an email, as people often do. `?theme=light|dark`, `?width=`, `?height=`. */
+/** Real-browser SessionDetail with a sign-in card (#1649, #2198), one scenario per state the
+ * runner can put it in:
+ * - `email` (default): signed in as a different account than the session uses (Use Current Account);
+ * - `no-email`: the same, but the provider reports no email;
+ * - `signed-out`: nobody is signed in and the runner can start a sign-in (Start Sign-In);
+ * - `not-manager`: signed out, for a viewer who cannot manage the Machine;
+ * - `readonly`: signed out, and the runner cannot start a sign-in here (Recheck Authentication);
+ * - `methods`: an ACP agent (OpenCode) that offers several sign-in methods;
+ * - `signing-in`: a sign-in the runner is running for this session, waiting for a pasted code;
+ * - `older`: a pre-v180 runner that cannot report the signed-in account;
+ * - `refused`: signed in as a different account, and the runner refuses another account as signed out.
+ * `?emailLabels=1` names two of the other accounts with an email, as people often do.
+ * `?theme=light|dark`, `?width=`, `?height=`. */
 const params = new URLSearchParams(window.location.search);
 const scenario = params.get("scenario") ?? "email";
 const frameWidth = Number(params.get("width") ?? "1100");
@@ -32,7 +40,7 @@ document.documentElement.setAttribute("data-theme", params.get("theme") === "lig
 
 declare global {
   interface Window {
-    __WOLLIPOG_AUTH_RECOVERY_E2E__: { selections(): unknown[]; identityRequests(): number };
+    __WOLLIPOG_AUTH_RECOVERY_E2E__: { selections(): unknown[]; decisions(): unknown[]; identityRequests(): number };
   }
 }
 
@@ -40,9 +48,11 @@ const SESSION_ID = "auth-recovery-e2e-session";
 const STARTED = Date.now() - 4 * 60_000;
 const CARD = "provider-auth:recovery-e2e";
 const selections: unknown[] = [];
+const decisions: unknown[] = [];
 let identityRequests = 0;
 window.__WOLLIPOG_AUTH_RECOVERY_E2E__ = {
   selections: () => [...selections],
+  decisions: () => [...decisions],
   identityRequests: () => identityRequests,
 };
 
@@ -60,11 +70,19 @@ const runner = {
     env: {},
     driver: "claude-code",
     available: true,
+  }, {
+    id: "opencode",
+    name: "OpenCode",
+    command: "opencode",
+    args: ["acp"],
+    env: {},
+    driver: "acp",
+    available: true,
   }],
   workspaces: [],
   connectedAt: 1,
   lastSeen: 1,
-  canManage: scenario !== "readonly",
+  canManage: scenario !== "not-manager",
   protocolVersion: scenario === "older"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.providerAuthenticationAccountRecovery - 1
     : RUNNER_CAPABILITY_MIN_PROTOCOL.providerAuthenticationAccountRecovery,
@@ -74,35 +92,96 @@ const runner = {
     { id: "claude-team", label: emailLabels ? "team.pilot@example.org" : "Team Pilot", provider: "claude", authStatus: "unauthenticated" },
     { id: "claude-lab", label: "Lab Sandbox", provider: "claude", authStatus: "unknown" },
   ],
-  providerLogins: [],
+  providerLogins: scenario === "signing-in" ? [{
+    operationId: "login-e2e",
+    accountId: "claude-work",
+    label: "Work Subscription",
+    provider: "claude",
+    status: "awaiting_code",
+    verificationUrl: "https://claude.ai/oauth/authorize?code=true",
+    expectsCode: true,
+    sessionId: SESSION_ID,
+    startedAt: Date.now() - 30_000,
+  }] : [],
 } as unknown as RunnerView;
 
-const reason = "Provider account identity mismatch: email differed. Account values are redacted.";
+// The runner's options for each state (session-manager.ts `providerAuthenticationOptions`, and
+// acp.ts `chooseAuthMethod` for an agent with several sign-in methods).
+const OPTION = {
+  acceptCurrent: {
+    optionId: "auth:accept-current",
+    name: "Use Current Account",
+    description: "Explicitly accept the current authenticated state for this session only.",
+    kind: "allow_once",
+  },
+  login: {
+    optionId: "auth:login",
+    name: "Start Sign-In",
+    description: "Run the provider's login flow in this exact runner context. Output stays on the runner.",
+    kind: "allow_once",
+  },
+  revalidate: {
+    optionId: "auth:revalidate",
+    name: "Recheck Authentication",
+    description: "Ask the provider in this exact context whether authentication is now valid.",
+    kind: "allow_once",
+  },
+  dismiss: {
+    optionId: "auth:dismiss",
+    name: "Dismiss Recovery",
+    description: "Discard any retained prompt and make the session promptable without retrying provider work.",
+    kind: "reject_once",
+  },
+  cancel: {
+    optionId: "auth:cancel",
+    name: "Cancel Sign-In",
+    description: "Stop only this runner-owned provider sign-in attempt.",
+    kind: "reject_once",
+  },
+} as const;
+const methods = scenario === "methods";
+const signedOut = scenario === "signed-out" || scenario === "not-manager" || scenario === "readonly";
+const options = methods
+  ? [
+    { optionId: "auth_1_method_1", name: "OpenCode Zen", description: "Sign in at opencode.ai in a browser, then return here.",
+      kind: "allow_once" },
+    { optionId: "auth_1_method_2", name: "GitHub Copilot", description: "Use a GitHub Copilot subscription through a device code.",
+      kind: "allow_once" },
+    { optionId: "auth_1_method_3", name: "API key", description: "Read the provider API key from this machine's environment.",
+      kind: "allow_once" },
+    { optionId: "auth_1_cancel", name: "Cancel sign-in", kind: "reject_once" },
+  ]
+  : scenario === "signing-in"
+  ? [OPTION.cancel]
+  : scenario === "readonly"
+  ? [OPTION.revalidate, OPTION.dismiss]
+  : signedOut
+  ? [OPTION.login, OPTION.revalidate, OPTION.dismiss]
+  : [OPTION.acceptCurrent, OPTION.revalidate, OPTION.dismiss];
+
+const reason = signedOut
+  ? "Claude Code reported that no account is signed in."
+  : "Provider account identity mismatch: email differed. Account values are redacted.";
+const title = methods ? "Sign in to OpenCode"
+  : scenario === "signing-in" ? "Signing In — Claude Code" : "Authentication Required — Claude Code";
 const pendingApproval = {
   kind: "authentication" as const,
-  requestId: CARD,
-  title: "Authentication Required — Claude Code",
-  options: [
-    {
-      optionId: "auth:accept-current",
-      name: "Use Current Account",
-      description: "Explicitly accept the current authenticated state for this session only.",
-      kind: "allow_once",
+  requestId: methods ? "auth_1" : CARD,
+  title,
+  options,
+  ...(methods ? {} : {
+    context: {
+      toolName: "Claude Code",
+      input: [
+        "Provider: Claude Code",
+        "Machine: this native runner",
+        scenario === "readonly"
+          ? "Run `claude auth login` in that exact context, then recheck authentication."
+          : "Run `claude auth login` in that exact context, or use Start Sign-In, then recheck authentication.",
+        reason,
+      ].join("\n"),
     },
-    {
-      optionId: "auth:revalidate",
-      name: "Recheck Authentication",
-      description: "Ask the provider in this exact context whether authentication is now valid.",
-      kind: "allow_once",
-    },
-    {
-      optionId: "auth:dismiss",
-      name: "Dismiss Recovery",
-      description: "Discard any retained prompt and make the session promptable without retrying provider work.",
-      kind: "reject_once",
-    },
-  ],
-  context: { toolName: "Claude Code", input: `Provider: Claude Code\n${reason}` },
+  }),
 };
 
 const session = {
@@ -111,8 +190,8 @@ const session = {
   workspaceId: null,
   workspaceName: null,
   projectId: null,
-  agentId: "claude",
-  agentName: "Claude Code",
+  agentId: methods ? "opencode" : "claude",
+  agentName: methods ? "OpenCode" : "Claude Code",
   title: "Refactor Billing Webhooks",
   status: "input_required",
   column: "input_required",
@@ -127,7 +206,7 @@ const session = {
   eventEpoch: 0,
   preview: null,
   pendingApproval,
-  driver: "claude-code",
+  driver: methods ? "acp" : "claude-code",
   model: "claude-opus",
   effort: null,
   permissionMode: null,
@@ -135,13 +214,12 @@ const session = {
   tokensOut: 1337,
   costUsd: 0.42,
   adopted: false,
-  providerAccountId: "claude-work",
-  providerAccountLabel: "Work Subscription",
+  ...(methods ? {} : { providerAccountId: "claude-work", providerAccountLabel: "Work Subscription" }),
 } as unknown as SessionView;
 
 const events: SessionEvent[] = [
   { kind: "user_message", text: "Move the billing webhooks onto the new queue.", images: [] },
-  { kind: "permission_request", requestId: CARD, title: pendingApproval.title, options: pendingApproval.options,
+  { kind: "permission_request", requestId: pendingApproval.requestId, title: pendingApproval.title, options: pendingApproval.options,
     purpose: "authentication", context: pendingApproval.context },
 ].map((payload, index) => ({
   id: index + 1,
@@ -212,10 +290,10 @@ const client = {
     identityRequests += 1;
     return {
       identity: {
-        status: "authenticated" as const,
+        status: signedOut ? "unauthenticated" as const : "authenticated" as const,
         emailSupported: true,
-        email: scenario === "no-email" ? null : "morgan.lee@example.com",
-        observedAt: new Date(2026, 8, 23, 16, 42).getTime(),
+        email: scenario === "no-email" || signedOut ? null : "morgan.lee@example.com",
+        observedAt: Date.now() - 2 * 60_000,
       },
     };
   },
@@ -235,6 +313,11 @@ const client = {
     return { accepted: true as const };
   },
   startProviderLogin: async () => ({}) as never,
+  // The card stays as it is, so a capture shows what the person pressed rather than the next state.
+  approve: async (_id: string, input: { requestId: string; optionId: string }) => {
+    decisions.push(input);
+    return session;
+  },
 } as unknown as ApiClient;
 
 function Fixture() {

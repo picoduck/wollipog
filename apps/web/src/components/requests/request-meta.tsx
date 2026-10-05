@@ -1,11 +1,11 @@
 import React from "react";
 import type { PendingApproval, PermissionOption } from "@wollipog/protocol";
 import {
-  AccountIcon,
   CostIcon,
   ImageIcon,
   QuestionIcon,
   ShieldIcon,
+  SignInIcon,
   ToolIcon,
   WorkflowDecisionsIcon,
 } from "../Icons.js";
@@ -68,13 +68,16 @@ export function RequestKindIcon({ request }: { request: Pick<PendingApproval, "k
     case "tool_calls": return <ToolIcon />;
     case "workflow_decision": return <WorkflowDecisionsIcon />;
     case "ui_evidence": return <ImageIcon />;
-    case "sign_in": return <AccountIcon />;
+    case "sign_in": return <SignInIcon />;
     case "question": return <QuestionIcon />;
     case "permission": return <ShieldIcon />;
   }
 }
 
 export interface RequestCardActions {
+  /** A quiet option at the footer's far left, apart from the others (§3.2): a sign-in's Dismiss
+   * Recovery. */
+  tertiary: PermissionOption | null;
   /** `reject_*` options, in the provider's order: secondary buttons before the menu. */
   secondary: PermissionOption[];
   /** `allow_always` and every other option: the ⋯ menu before the primary. */
@@ -94,7 +97,71 @@ export function requestCardActions(options: readonly PermissionOption[]): Reques
   const primary = options.find((option) => option.kind === "allow_once") ?? null;
   const secondary = options.filter((option) => option.kind === "reject_once" || option.kind === "reject_always");
   const menu = options.filter((option) => option !== primary && !secondary.includes(option));
-  return { secondary, menu, primary };
+  return { tertiary: null, secondary, menu, primary };
+}
+
+export interface SignInCardActions extends RequestCardActions {
+  /** `auth:revalidate` when it is not the primary: the Last Checked fact's Check Again. */
+  recheck: PermissionOption | null;
+  /** An agent's sign-in methods, when it offers several: one is chosen, then Start Sign-In. */
+  methods: PermissionOption[];
+}
+
+const SIGN_IN_OPTION = {
+  acceptCurrent: "auth:accept-current",
+  login: "auth:login",
+  revalidate: "auth:revalidate",
+  dismiss: "auth:dismiss",
+  cancel: "auth:cancel",
+} as const;
+
+/**
+ * A sign-in card's footer (#2198): one primary for the state the session is in, whatever else the
+ * runner offers. Labels stay the runner's option names, which its messages refer to.
+ *
+ * - Signed in as a different account: Use Current Account. Signed out: Start Sign-In. When the runner
+ *   can do neither here, Recheck Authentication is the primary; otherwise it is the Last Checked
+ *   fact's Check Again (`recheck`) and not in the footer.
+ * - Dismiss Recovery is the tertiary at the far left, unless it is the only choice (the
+ *   retained-messages follow-up), where it is the secondary a lone reject always is.
+ * - While a sign-in runs, Cancel Sign-In is the only button.
+ * - An agent with several sign-in methods (an ACP agent such as OpenCode) lists them as `methods`, and
+ *   the card's one Start Sign-In uses the chosen one; its own cancel stays a secondary.
+ */
+export function signInCardActions(options: readonly PermissionOption[]): SignInCardActions {
+  const find = (optionId: string) => options.find((option) => option.optionId === optionId) ?? null;
+  const cancel = find(SIGN_IN_OPTION.cancel);
+  if (cancel) return { tertiary: null, secondary: [cancel], menu: [], primary: null, recheck: null, methods: [] };
+  if (!options.some((option) => option.optionId.startsWith("auth:"))) {
+    const methods = options.filter((option) => option.kind === "allow_once");
+    if (methods.length > 1) {
+      return {
+        tertiary: null,
+        secondary: options.filter((option) => !methods.includes(option)),
+        menu: [],
+        primary: null,
+        recheck: null,
+        methods,
+      };
+    }
+    return { ...requestCardActions(options), recheck: null, methods: [] };
+  }
+  const revalidate = find(SIGN_IN_OPTION.revalidate);
+  const primary = find(SIGN_IN_OPTION.acceptCurrent) ?? find(SIGN_IN_OPTION.login) ?? revalidate;
+  const recheck = primary === revalidate ? null : revalidate;
+  const dismiss = find(SIGN_IN_OPTION.dismiss);
+  // Anything else the runner offers (Start Sign-In beside Use Current Account) is a visible secondary,
+  // never a second primary and never hidden behind a menu.
+  const rest = options.filter((option) => option !== primary && option !== recheck && option !== dismiss);
+  const alone = !primary && rest.length === 0;
+  return {
+    tertiary: dismiss && !alone ? dismiss : null,
+    secondary: dismiss && alone ? [dismiss] : rest,
+    menu: [],
+    primary,
+    recheck,
+    methods: [],
+  };
 }
 
 /** The one-key intent a keycap names, only where exactly one option has that kind (as the Inbox's A
@@ -132,7 +199,7 @@ export const REQUEST_CARD_COPY = {
   expand: "Expand",
   expandRequest: "Expand Request",
   runnerOffline: "Decisions are unavailable until the runner reconnects.",
-  signInOwner: "Only the machine owner or an organization admin can start sign-in.",
+  signInOwner: "Only a machine owner or organization admin can sign in on this machine.",
   notSent: "Your decision wasn't sent.",
   sending: "Sending your decision…",
 } as const;

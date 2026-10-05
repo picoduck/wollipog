@@ -15,7 +15,17 @@ function statusLabel(status: ProviderLoginView["status"]): string {
   return "Sign-In Failed";
 }
 
-export function ProviderLoginCard({ runnerId, login, revealScope = "" }: { runnerId: string; login: ProviderLoginView; revealScope?: string }) {
+/**
+ * A provider sign-in the runner is running. `embedded` is the sign-in Request Card's body (#2198):
+ * the card's Cancel Sign-In is its only button, so this drops its own Cancel, and Submit Code is not a
+ * second primary.
+ */
+export function ProviderLoginCard({ runnerId, login, revealScope = "", embedded = false }: {
+  runnerId: string;
+  login: ProviderLoginView;
+  revealScope?: string;
+  embedded?: boolean;
+}) {
   const privacy = useAccountEmailPrivacy();
   const api = useApi();
   const [code, setCode] = useState("");
@@ -66,6 +76,7 @@ export function ProviderLoginCard({ runnerId, login, revealScope = "" }: { runne
     <article
       className="provider-login-card"
       data-provider-login-status={login.status}
+      data-embedded={embedded || undefined}
       aria-label={`${accountLabelText(login.label, undefined, privacy.hide)} Provider Sign-In`}
     >
       <div className="provider-login-head">
@@ -77,7 +88,7 @@ export function ProviderLoginCard({ runnerId, login, revealScope = "" }: { runne
           <button type="button" className="btn ghost" disabled={busy}
             onClick={() => void dismiss()}>Dismiss</button>
         )}
-        {active && <button type="button" className="btn ghost sm" disabled={busy} onClick={() => void cancel()}>Cancel</button>}
+        {active && !embedded && <button type="button" className="btn ghost sm" disabled={busy} onClick={() => void cancel()}>Cancel</button>}
       </div>
       {login.verificationUrl && (
         <p>
@@ -102,7 +113,7 @@ export function ProviderLoginCard({ runnerId, login, revealScope = "" }: { runne
               onChange={(event) => setCode(event.target.value)}
             />
           </label>
-          <button type="submit" className="btn primary sm" disabled={busy || !code.trim()}>
+          <button type="submit" className={embedded ? "btn sm" : "btn primary sm"} disabled={busy || !code.trim()}>
             {busy ? "Submitting…" : "Submit Code"}
           </button>
         </form>
