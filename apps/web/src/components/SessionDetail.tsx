@@ -4425,8 +4425,9 @@ function SessionDetailLoaded({
     runnerOnline,
     onSessionUpdate: loadSession,
     showKeyHints: !isMobile,
+    owner: sessionAgentLabel(session.agentName, session.driver, session.agentId),
   }), [handlePendingQuestionAvailabilityChange, isMobile, loadSession, questionInTimeline, runnerOnline,
-    session.id, timelinePendingQuestion]);
+    session.agentId, session.agentName, session.driver, session.id, timelinePendingQuestion]);
   // The working line's Review moves focus to the request blocking the turn, wherever it can be
   // answered: a question's transcript row while the transcript owns it (revealed like a step, since
   // the virtual list may not have it mounted), else the request dock or the question card, else the

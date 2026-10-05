@@ -69,8 +69,11 @@ git-status reader. Presentation leaves are split at stable boundaries:
 - `SessionHeader` owns header actions and the transcript-share dialog.
 - `RequestCard` (in `components/requests/`) owns the presentation and request-scoped decision state
   of every request other than a question, on the request dock above the composer (`RequestDock`)
-  and in the Requests and Agents panels; `SessionQuestionBanner` owns questions until #2196.
-  `SessionApprovalRegion` keeps the one focus and live-announcement owner for both.
+  and in the Requests and Agents panels. `SessionQuestionBanner` owns questions: the same card's
+  head line (`RequestCardHead`) over one question per step (`QuestionStep`), in today's placement
+  until #2205 docks it. While focus is in the card, 1–9 pick the current question's rows, Enter
+  moves on, Ctrl/Cmd+Enter submits from any step and D dismisses; a field being typed in keeps its
+  keys. `SessionApprovalRegion` keeps the one focus and live-announcement owner for both.
 - `EventTimeline` and `RightPanel` remain their existing independently testable seams.
 
 The detail coordinator subscribes only to its owning runner and box. The shared git-status result is

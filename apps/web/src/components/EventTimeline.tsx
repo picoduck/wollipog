@@ -131,6 +131,8 @@ export interface TimelineQuestionContext {
   runnerOnline: boolean;
   onSessionUpdate?: (session: SessionView) => void;
   showKeyHints?: boolean;
+  /** Who asks, for the question card's head line. */
+  owner?: string;
 }
 
 /**
@@ -2354,9 +2356,11 @@ const TimelineRow = memo(function TimelineRow({
           eventRequestId={item.requestId}
           eventQuestions={item.questions}
           eventResolved={item.answered !== undefined}
+          eventCreatedAt={item.createdAt}
           runnerOnline={questionContext.runnerOnline}
           onSessionUpdate={questionContext.onSessionUpdate}
           showKeyHints={questionContext.showKeyHints}
+          owner={questionContext.owner}
         >
           {historicalQuestion}
         </SessionTimelineQuestionRegion>

@@ -1,1 +1,0 @@
-|.question-recovery|padding|10px

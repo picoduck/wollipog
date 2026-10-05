@@ -99,7 +99,6 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   ["components/PeopleDevicesPanel.tsx", "native-select", 4],
   ["components/PodsView.tsx", "native-select", 8],
   ["components/ProjectLocationDialog.tsx", "native-select", 1],
-  ["components/SessionApproval.tsx", "question-option", 2],
   // A fenced block's Wrap Lines button (#2152): one on/off toggle per block, not one of N options.
   ["components/Markdown.tsx", "aria-pressed", 1],
   ["components/SessionDetail.tsx", "aria-pressed", 2],
@@ -116,8 +115,8 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
      ratchet working rather than an exemption being granted. */
   ["components/AgentSessionDiscoveryDialog.tsx", "raw-radiogroup", 1],
   /* ReviewPanel's findings selector and GitDiffViewer's line selectors became `Checkbox` with
-     #2044, which took both files' last raw-choice entries off. */
-  ["components/SessionApproval.tsx", "raw-radiogroup", 2],
+     #2044, which took both files' last raw-choice entries off. The question card's options became
+     ChoiceRows with #2196, which took SessionApproval's raw radios and `.question-option` off. */
   ["components/CommandPalette.tsx", "raw-radiogroup", 2],
   // Like CommandPalette, the composer's / and @ pickers (#2155) are transient command and path
   // navigation rather than a persisted setting or one-of-N form choice. Listbox/option is the

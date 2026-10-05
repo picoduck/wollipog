@@ -2106,6 +2106,21 @@ follows these rules so it never crowds out the conversation it asks about:
   (`SessionNoticeSlot`), at the end of the `.chat-reading` column, a size container its caps are
   measured against. Questions stay where they are until #2205, and a worker's request stays in the
   Agents panel.
+- **A question is the same card, one question per step** (`SessionQuestionBanner` with
+  `QuestionStep`, #2196). The head line is the kind ("Question", "Async Question", or "Recovery
+  Required" in the danger tone after a provider restart), owner and time; then the question's header
+  with "Choose one", "Choose any" or "Optional" as 12px dim text, the question as the title, its
+  context, and its options as ChoiceRows (§8.4) whose last row is **Something Else…**, which opens a
+  text field in the step. Each description is one line; the chosen row shows all of it. The footer is
+  Dismiss (ghost) at the far left, "Question 2 of 3" with step dots when there are several, Back from
+  step 2, and Next or **Submit Answers** as the one primary, last; on a narrow card the step count
+  takes its own row above the buttons. Nothing is marked before Next or Submit Answers: then the
+  unanswered question shows a field error (§8.5) and takes focus. A failed submission is a compact
+  danger notice above the footer, the answers stay and the primary reads **Try Again**. The step is
+  kept with the request's draft, so a card that remounts returns to the same question. While focus
+  is in the card, 1–9 pick rows, Enter moves on, Ctrl/Cmd+Enter submits from any step and D
+  dismisses; their keycaps show on fine pointers only. In Composer Response the card lists the
+  options and is answered in the composer.
 - **Reading back shrinks it to a strip.** While the reader scrolls up away from the live tail (the
   follow-tail state is paused), the dock becomes one 44px `.dock-strip` on the card's warning
   surface: kind icon, the expanded request's title, its position ("1 of 3") and Expand, icon-only

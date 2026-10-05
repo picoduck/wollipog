@@ -494,7 +494,7 @@ test("SessionDetail keeps the temporary question fallback until a virtual row is
     await flushAsyncWork();
 
     assert.equal(fixture.container.querySelectorAll('[aria-label="Agent Questions"]').length, 1);
-    assert.equal(fixture.container.querySelectorAll('[role="radio"]').length, 2);
+    assert.equal(fixture.container.querySelectorAll('input[type="radio"]').length, 3, "two options and Something Else");
     const liveQuestion = fixture.container.querySelector('[aria-label="Agent Questions"]');
     assert.ok(liveQuestion);
     assert.equal(fixture.scroller.contains(liveQuestion), false,

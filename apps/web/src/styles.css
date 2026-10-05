@@ -3862,7 +3862,9 @@ textarea {
   display: grid;
   gap: var(--space-2);
 }
+/* The panel's detail scrolls as one page (below), so the question card is not capped here. */
 .request-panel-detail > .question-bar {
+  max-height: none;
   margin: 0;
 }
 .request-panel-empty {
@@ -5608,8 +5610,7 @@ textarea {
   line-height: 1.4;
   overflow-wrap: anywhere;
 }
-.composer-answer-question > .md,
-.question-text > .md {
+.composer-answer-question > .md {
   margin-top: 4px;
 }
 .composer-answer-question .md,
@@ -5620,9 +5621,7 @@ textarea {
   max-width: 100%;
 }
 .composer-answer-question .md p,
-.composer-answer-context .md p,
-.question-text .md p,
-.question-context .md p {
+.composer-answer-context .md p {
   margin-bottom: 6px;
 }
 .composer-answer-context,
@@ -13135,21 +13134,6 @@ body.shell-dock-dragging * {
 
 /* --------- Trust surface: approval context + structured question card ---------- */
 
-.question-main {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  width: 100%;
-}
-.question-title {
-  flex: 1;
-  color: var(--amber-on-tint);
-  font: var(--type-body);
-}
-.question-actions {
-  display: flex;
-  gap: var(--space-2);
-}
 /* Why a refused person cannot decide this request (#1857): a full-width line under the options. */
 .approval-refusal {
   width: 100%;
@@ -13174,89 +13158,103 @@ body.shell-dock-dragging * {
   word-break: break-word;
   width: 100%;
 }
-/* The question card (#2196 rebuilds it on the Request Card). Aligned with the centered chat column
-   below it, on the amber wash a live request uses. */
+/* The question card (#2196): a Request Card (`.request-card`, above) with one question per step.
+   `.question-bar` only places it: aligned with the centered chat column below it, and capped where
+   it waits above the transcript so its head and footer stay in view while its body scrolls. */
 .question-bar {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: var(--space-3);
   width: 100%;
-  min-width: 0;
   max-width: var(--chat-max);
-  min-height: 0;
   max-height: min(560px, 60dvh);
   margin: var(--space-3) auto 0;
-  padding: var(--space-3) var(--space-4);
-  overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--amber) 32%, transparent);
-  border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--amber) 7%, var(--bg-elev));
 }
-.question-bar .question-main,
-.question-bar > .form-error {
-  flex: none;
+/* The footer reflows by the card's own width: a narrow side panel is as tight as a phone. */
+.question-card { container: question-card / inline-size; }
+/* A provider restart that needs recovery is the one question that reads as a failure (§13.2). */
+.request-card[data-tone="danger"] {
+  border-color: color-mix(in srgb, var(--red) 32%, transparent);
+  background: color-mix(in srgb, var(--red) 7%, var(--bg-elev));
 }
-.question-context {
-  margin: -2px 0 6px;
-  color: var(--text-dim);
-  font-size: var(--text-base);
-  line-height: 1.45;
+.request-card[data-tone="danger"] .request-card-kind { color: var(--danger-text); }
+/* The question's header and "Choose one" or "Choose any": 12px dim text above the question. */
+.question-eyebrow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  min-width: 0;
+  color: var(--text-dim-on-tint);
+  font: var(--type-small);
   overflow-wrap: anywhere;
 }
-.question-availability,
-.question-submit-hint {
-  margin-top: 8px;
-  color: var(--text-dim);
-  font-size: var(--text-sm);
-  line-height: 1.4;
+.question-eyebrow > * + *::before {
+  content: "·";
+  margin-right: var(--space-1);
+}
+.question-context {
+  color: var(--text-dim-on-tint);
+  font: var(--type-body);
+  overflow-wrap: anywhere;
 }
 .question-recovery {
-  margin: 10px 0;
-  padding: 10px 12px;
-  border-left: 3px solid var(--amber);
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--amber) 10%, transparent);
   color: var(--text-dim-on-tint);
-  font-size: var(--text-base);
-  line-height: 1.45;
+  font: var(--type-body);
 }
-.question-availability:empty {
-  margin-top: 0;
-}
-.question-list {
+.question-step {
   display: flex;
   flex-direction: column;
-  flex: 1 1 auto;
-  gap: 10px;
+  gap: var(--space-3);
   min-width: 0;
-  min-height: 0;
-  margin-top: 10px;
-  padding-right: 4px;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  -webkit-overflow-scrolling: touch;
-  width: 100%;
+}
+.question-answer { min-width: 0; }
+/* Each description is one line, on phones too; the chosen row shows all of it. */
+.question-card .choice-row-desc { -webkit-line-clamp: 1; }
+.question-card .choice-row:has(> :is(.radio-mark, .checkbox-mark) > input:checked) .choice-row-desc {
+  display: block;
+  overflow: visible;
+  white-space: normal;
+}
+.question-input { display: block; }
+/* Dismiss at the far left, then the step count, Back and the primary, last (§3.2). */
+.question-dismiss { margin-right: auto; }
+.question-step-note {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-dim-on-tint);
+  font: var(--type-small);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.question-step-dots {
+  display: inline-flex;
+  gap: var(--space-1);
+}
+.question-step-dots > span {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--border-strong);
+}
+.question-step-dots > .is-current { background: var(--text); }
+@container question-card (max-width: 479px) {
+  /* The buttons keep their full labels: the step count takes a row of its own above them. */
+  .question-step-note {
+    flex-basis: 100%;
+    order: -1;
+  }
 }
 .timeline .question-bar {
   max-width: none;
-  min-height: auto;
   max-height: none;
   margin-top: 0;
-  overflow: visible;
 }
 .timeline .question-list {
   flex: none;
   min-height: auto;
-  padding-right: 0;
   overflow: visible;
   overscroll-behavior: auto;
 }
-.question-block .question-text {
-  font-weight: 600;
-  margin-bottom: 6px;
-  overflow-wrap: anywhere;
-}
+/* The transcript's question row and Composer Answer Mode still name a question's header this way. */
 .question-chip {
   display: inline-block;
   padding: 1px 8px;
@@ -13266,50 +13264,6 @@ body.shell-dock-dragging * {
   color: var(--text-dim);
   font-size: 11px;
   font-weight: 500;
-}
-.question-options {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.question-option {
-  display: flex;
-  min-width: 0;
-  max-width: 100%;
-  gap: 8px;
-  align-items: flex-start;
-  text-align: left;
-  padding: 6px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg-elev);
-  color: var(--text);
-  cursor: pointer;
-}
-.question-option > span:last-child {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-.question-option:not(:disabled):not([aria-disabled="true"]):hover {
-  border-color: var(--border-strong);
-}
-.question-option:disabled,
-.question-option[aria-disabled="true"] {
-  cursor: not-allowed;
-  opacity: .6;
-}
-.question-option.on {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
-}
-.question-option .question-label {
-  display: block;
-  font-weight: 500;
-}
-.question-option .question-desc {
-  display: block;
-  color: var(--text-dim);
-  font-size: 12px;
 }
 .question-text-options {
   margin: 0;
@@ -13328,25 +13282,6 @@ body.shell-dock-dragging * {
   color: var(--text-dim);
   font-size: var(--text-sm);
 }
-.question-input-label {
-  display: block;
-  margin-top: 8px;
-  color: var(--text-dim);
-  font-size: var(--text-sm);
-  font-weight: var(--weight-semibold);
-}
-.question-input {
-  display: block;
-  width: 100%;
-  margin-top: 4px;
-  color: var(--text);
-  font-weight: var(--weight-normal);
-}
-.question-field-error {
-  display: block;
-  margin-top: 4px;
-  font-weight: var(--weight-normal);
-}
 .tl-perm-head {
   display: flex;
   align-items: center;
@@ -13360,9 +13295,7 @@ body.shell-dock-dragging * {
 .tl-perm-head > * { min-width: 0; max-width: 100%; }
 /* Glyph wrappers that had no rules, so the characters inherited the surrounding size and sat off
    the baseline. A fixed box keeps them aligned with the text beside them. */
-.perm-icon,
-.question-icon,
-.question-mark {
+.perm-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -14001,13 +13934,7 @@ body.shell-dock-dragging * {
   }
   .background-work-group-head { align-items: center; }
 
-  /* Questions: keep the response buttons on their own tappable row. */
-  .question-main {
-    flex-wrap: wrap;
-    row-gap: var(--space-2);
-  }
-  .approval-actions,
-  .question-actions {
+  .approval-actions {
     flex-wrap: wrap;
   }
   /* Request review is one full-height page on phones. The page itself owns scrolling so evidence

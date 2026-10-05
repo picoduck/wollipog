@@ -250,16 +250,12 @@ export function RequestCard({
       aria-labelledby={titleId}
       aria-busy={busy !== null || undefined}
     >
-      <div className="request-card-head">
-        <span className="request-card-kind"><RequestKindIcon request={request} />{meta.label}</span>
-        {(owner || time) && (
-          <span className="request-card-meta">
-            {owner && <span>{owner}</span>}
-            {time ? <span>{relativeTime(time)}</span> : null}
-          </span>
-        )}
-        {headTrailing && <span className="request-card-trailing">{headTrailing}</span>}
-      </div>
+      <RequestCardHead
+        kind={<><RequestKindIcon request={request} />{meta.label}</>}
+        owner={owner}
+        time={time}
+        trailing={headTrailing}
+      />
       <h3 className="request-card-title" id={titleId} ref={headingRef} tabIndex={-1} data-session-request-focus="">
         {request.title}
       </h3>
@@ -331,6 +327,28 @@ export function RequestCard({
         {primary && optionButton(primary, true)}
       </div>
     </section>
+  );
+}
+
+/** The card's head line: the kind's icon and label, then who asks and when, then trailing controls.
+ * Shared with the question card (#2196), which builds its own body and footer. */
+export function RequestCardHead({ kind, owner, time, trailing }: {
+  kind: ReactNode;
+  owner?: string;
+  time?: number;
+  trailing?: ReactNode;
+}) {
+  return (
+    <div className="request-card-head">
+      <span className="request-card-kind">{kind}</span>
+      {(owner || time) && (
+        <span className="request-card-meta">
+          {owner && <span>{owner}</span>}
+          {time ? <span>{relativeTime(time)}</span> : null}
+        </span>
+      )}
+      {trailing && <span className="request-card-trailing">{trailing}</span>}
+    </div>
   );
 }
 

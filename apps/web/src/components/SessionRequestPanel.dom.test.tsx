@@ -616,9 +616,10 @@ test("a Viewer cannot answer a descendant question whose child view has not reac
         />
       </ApiProvider>,
     ));
-    assert.equal(container.querySelector(".question-availability")?.textContent, reason,
+    assert.equal(container.querySelector('.question-card [role="status"][aria-atomic="true"]')?.textContent, reason,
       "the requester's own verdict stands in for the missing child view");
-    const actions = [...container.querySelectorAll<HTMLButtonElement>(".question-actions button")];
+    assert.equal(container.querySelector(".question-card .request-card-reasons")?.textContent, reason, "and the card shows it");
+    const actions = [...container.querySelectorAll<HTMLButtonElement>(".question-card .request-card-foot button")];
     assert.ok(actions.length > 0);
     assert.ok(actions.every((button) => button.disabled));
     await act(async () => { for (const button of actions) button.click(); });

@@ -424,6 +424,9 @@ export interface ChoiceRowOption<T extends string> {
   disabled?: boolean;
   /** Why it is disabled. Rendered as the row's second line — §11.3: never hide a setting that could exist. */
   disabledReason?: string;
+  /** `data-*` attributes for the row's input, for a caller that finds its controls again (the
+   * question card restores focus to the same choice when it moves, #2196). */
+  inputData?: Readonly<Record<`data-${string}`, string>>;
 }
 
 /**
@@ -461,6 +464,7 @@ export function ChoiceRow({
   meta,
   disabled,
   disabledReason,
+  inputData,
   compact,
   show,
 }: Omit<ChoiceRowOption<string>, "value"> & {
@@ -488,6 +492,7 @@ export function ChoiceRow({
   const select = () => { if (!disabled) onSelect(); };
   const mark = (
     <ChoiceMark
+      {...inputData}
       type={type}
       name={name}
       checked={checked}
@@ -569,6 +574,9 @@ export function ChoiceRows<T extends string>({
   multiple,
   className,
   id,
+  labelledBy,
+  describedBy,
+  invalid,
   show,
 }: {
   options: readonly ChoiceRowOption<T>[];
@@ -577,6 +585,13 @@ export function ChoiceRows<T extends string>({
   label: string;
   className?: string;
   id?: string;
+  /** Visible text that names the group instead of `label` (a question above its options). */
+  labelledBy?: string;
+  /** The group's description: a field error while it shows (§8.5), or why nothing can be chosen. */
+  describedBy?: string;
+  /** The group's answer is invalid (§8.5). Announced on a radio group; a checkbox group has no
+   * invalid state of its own, so its error is reached through `describedBy`. */
+  invalid?: boolean;
   /** Each row's body shows that row in a detail beside the list (ChoiceRow's `show`): `value` is
    * the row shown, and `controls` the detail's id. */
   show?: { value: NoInfer<T> | null; onShow: (value: T) => void; controls?: string };
@@ -592,7 +607,10 @@ export function ChoiceRows<T extends string>({
       id={id}
       className={`choice-rows${className ? ` ${className}` : ""}`}
       role={multiple ? "group" : "radiogroup"}
-      aria-label={label}
+      aria-label={labelledBy ? undefined : label}
+      aria-labelledby={labelledBy}
+      aria-describedby={describedBy}
+      aria-invalid={!multiple && invalid ? true : undefined}
     >
       {options.map((option) => (
         <ChoiceRow
@@ -608,6 +626,7 @@ export function ChoiceRows<T extends string>({
           meta={option.meta}
           disabled={option.disabled}
           disabledReason={option.disabledReason}
+          inputData={option.inputData}
           show={show && { current: show.value === option.value, onShow: () => show.onShow(option.value), controls: show.controls }}
         />
       ))}

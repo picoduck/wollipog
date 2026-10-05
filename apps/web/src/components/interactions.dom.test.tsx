@@ -737,12 +737,14 @@ test("approval replacement and resolution preserve owned keyboard focus", async 
   const root = createRoot(container);
   await act(async () => { root.render(<ApprovalHarness requestId="ask-a" />); });
   const liveRegion = container.querySelector('[role="status"]');
-  container.querySelector<HTMLElement>('[role="radio"]')!.focus();
+  container.querySelector<HTMLElement>('input[type="radio"]')!.focus();
 
   await act(async () => { root.render(<ApprovalHarness requestId="ask-b" />); });
   assert.equal(container.querySelector('[role="status"]'), liveRegion, "the live region remains mounted across row replacement");
   assert.equal(liveRegion?.textContent, "Agent request updated");
-  assert.equal(domWindow.document.activeElement?.textContent?.replace(/\s+/g, " ").trim(), "Dismiss D");
+  // A new question is read before it is answered (#2196): focus lands on its heading, never Dismiss.
+  assert.equal(domWindow.document.activeElement?.getAttribute("role"), "heading");
+  assert.equal(domWindow.document.activeElement?.textContent?.trim(), "Choose for ask-b");
 
   await act(async () => { root.render(<ApprovalHarness requestId={null} />); });
   assert.equal(domWindow.document.activeElement?.getAttribute("aria-label"), "Composer");
@@ -775,7 +777,7 @@ test("question focus and draft survive transcript hydration without exposing a s
   const container = happyContainer as unknown as HTMLDivElement;
   const root = createRoot(container);
   await act(async () => { root.render(<QuestionPresentationHarness hydrated={false} />); });
-  const response = container.querySelector<HTMLElement>('[role="radio"]')!;
+  const response = container.querySelector<HTMLInputElement>('input[type="radio"]')!;
   await act(async () => { response.click(); });
   response.focus();
   await act(async () => { root.render(<QuestionPresentationHarness hydrated={false} />); });
@@ -783,11 +785,12 @@ test("question focus and draft survive transcript hydration without exposing a s
 
   await act(async () => { root.render(<QuestionPresentationHarness hydrated />); });
   assert.equal(domWindow.document.activeElement?.closest("[data-session-request-id]")?.getAttribute("data-session-request-id"), "ask-a");
-  assert.equal(domWindow.document.activeElement?.getAttribute("role"), "radio",
+  assert.equal(domWindow.document.activeElement?.getAttribute("type"), "radio",
     "the same response control, not Dismiss, keeps focus after the presentation moves");
-  assert.equal(container.querySelector<HTMLElement>('[role="radio"]')?.getAttribute("aria-checked"), "true");
+  assert.equal(domWindow.document.activeElement?.getAttribute("data-session-request-control"), "question:choice:option:0");
+  assert.equal(container.querySelector<HTMLInputElement>('input[type="radio"]')?.checked, true);
   assert.equal(container.querySelectorAll('[aria-label="Agent Questions"]').length, 1);
-  assert.equal(container.querySelectorAll('[role="radio"]').length, 2);
+  assert.equal(container.querySelectorAll('input[type="radio"]').length, 3, "A, B and Something Else");
   assertNoDomNode(container.querySelector(".tl-question"),
     "the live inline form replaces the hydrated historical card");
   await act(async () => { root.render(<QuestionPresentationHarness hydrated={false} />); });
@@ -841,7 +844,7 @@ test("offline question replacement falls back instead of targeting a disabled ra
   const container = happyContainer as unknown as HTMLDivElement;
   const root = createRoot(container);
   await act(async () => { root.render(<ApprovalHarness requestId="ask-a" />); });
-  container.querySelector<HTMLElement>("[role=\"radio\"]")!.focus();
+  container.querySelector<HTMLElement>('input[type="radio"]')!.focus();
 
   await act(async () => { root.render(<ApprovalHarness requestId="ask-b" runnerOnline={false} />); });
   assert.equal(domWindow.document.activeElement?.getAttribute("aria-label"), "Composer");
@@ -855,7 +858,7 @@ test("taking a pending question offline moves owned focus to the composer", asyn
   const container = happyContainer as unknown as HTMLDivElement;
   const root = createRoot(container);
   await act(async () => { root.render(<ApprovalHarness requestId="ask-a" />); });
-  container.querySelector<HTMLElement>("[role=\"radio\"]")!.focus();
+  container.querySelector<HTMLElement>('input[type="radio"]')!.focus();
 
   await act(async () => { root.render(<ApprovalHarness requestId="ask-a" runnerOnline={false} />); });
   assert.equal(domWindow.document.activeElement?.getAttribute("aria-label"), "Composer");
@@ -898,7 +901,7 @@ test("approval replacement does not reclaim focus after a null-target blur", asy
   const container = happyContainer as unknown as HTMLDivElement;
   const root = createRoot(container);
   await act(async () => { root.render(<ApprovalHarness requestId="ask-a" />); });
-  const choice = container.querySelector<HTMLElement>('[role="radio"]')!;
+  const choice = container.querySelector<HTMLElement>('input[type="radio"]')!;
   choice.focus();
   await act(async () => { choice.blur(); });
   await act(async () => { root.render(<ApprovalHarness requestId="ask-b" />); });

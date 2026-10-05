@@ -1,1 +1,0 @@
-|.question-option|padding|6px

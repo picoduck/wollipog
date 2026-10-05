@@ -7,7 +7,7 @@ for (const action of ["submit", "dismiss"] as const) {
         await page.setViewportSize(transition === "replace" ? { width: 1280, height: 800 } : { width: 390, height: 844 });
         await page.goto(`/agent-questions-e2e.html?hold=1${result === "reject" ? "&failure=1" : ""}`);
         if (action === "submit") await page.getByRole("radio", { name: /TypeScript/ }).click();
-        await page.getByRole("button", { name: action === "submit" ? "Submit" : "Dismiss", exact: true }).click();
+        await page.getByRole("button", { name: action === "submit" ? "Submit Answers" : "Dismiss", exact: true }).click();
         const form = page.getByRole("region", { name: "Agent Questions" });
         await expect(form).toHaveAttribute("aria-busy", "true");
         if (transition === "clear and remount") {
@@ -23,9 +23,9 @@ for (const action of ["submit", "dismiss"] as const) {
         await expect(fresh).toBeFocused();
         await expect(form).toHaveAttribute("aria-busy", "false");
         await expect(page.getByRole("alert")).toHaveCount(0);
-        await page.getByRole("button", { name: "Submit", exact: true }).click();
-        if (result === "resolve") await expect(page.getByRole("status")).toHaveText("Question Answered");
-        else await expect(page.getByRole("alert")).toContainText("The runner rejected this answer");
+        await page.getByRole("button", { name: "Submit Answers", exact: true }).click();
+        if (result === "resolve") await expect(page.getByRole("status").filter({ hasText: "Question Answered" })).toHaveCount(1);
+        else await expect(page.getByRole("alert")).toContainText("Couldn't send your answers. Try again.");
         expect(await page.evaluate(() => window.agentQuestionCalls.map(({ requestId, action, answers }) => ({ requestId, action, answers })))).toEqual([
           { requestId: "ask-1", action, answers: action === "submit" ? { language: "TypeScript" } : {} },
           { requestId: "ask-2", action: "submit", answers: { replacement: "Another Fresh Answer" } },
@@ -76,13 +76,6 @@ async function expectInsideViewport(locator: Locator, page: Page) {
   expect(box.bottom).toBeLessThanOrEqual(viewport.height + 0.5);
 }
 
-async function answerLongSet(page: Page) {
-  await page.getByRole("radio", { name: /Canary/ }).click();
-  await page.getByRole("checkbox", { name: /Unit Tests/ }).click();
-  await page.getByRole("checkbox", { name: /Browser Tests/ }).click();
-  await page.getByRole("radio", { name: /Overnight/ }).click();
-}
-
 const signedEvidenceUrl = "https://evidence.example/private/mobile-capture.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=temporary-access-key&X-Amz-Signature=very-long-private-signature#full-resolution";
 
 test("320 px Interactive Form safely formats rich text and keeps resolved questions compact", async ({ page }) => {
@@ -100,7 +93,7 @@ test("320 px Interactive Form safely formats rich text and keeps resolved questi
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
 
   await page.getByRole("radio", { name: "Staging" }).click();
-  await page.getByRole("button", { name: "Submit" }).click();
+  await page.getByRole("button", { name: "Submit Answers" }).click();
   await expect(page.getByRole("status")).toHaveText("Question Answered");
   const history = page.locator(".tl-question");
   await expect(history.locator(".tl-step-title")).toHaveText("Target");
@@ -150,10 +143,18 @@ test("desktop questions select and submit the exact current answers", async ({ p
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto("/agent-questions-e2e.html");
 
-  const submit = page.getByRole("button", { name: "Submit" });
-  await expect(submit).toBeDisabled();
-  await page.getByRole("radio", { name: /TypeScript/ }).click();
+  const card = page.getByRole("region", { name: "Agent Questions" });
+  await expect(card.locator(".request-card-head")).toContainText("Question");
+  await expect(card.locator(".request-card-head")).toContainText("Claude Code");
+  const submit = page.getByRole("button", { name: "Submit Answers" });
   await expect(submit).toBeEnabled();
+  await expect(card.locator(".field-error")).toHaveCount(0);
+  await submit.click();
+  await expect(card.locator(".field-error")).toHaveText("Choose an option.");
+  await expect(page.getByRole("radio", { name: /TypeScript/ })).toBeFocused();
+  expect(await page.evaluate(() => window.agentQuestionCalls)).toEqual([]);
+  await page.getByRole("radio", { name: /TypeScript/ }).click();
+  await expect(card.locator(".field-error")).toHaveCount(0);
   await submit.click();
 
   await expect(page.getByRole("status")).toHaveText("Question Answered");
@@ -174,10 +175,12 @@ for (const viewport of [
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     await page.goto("/agent-questions-e2e.html?recovery=1");
 
-    await expect(page.getByText("Agent Question Recovery Required")).toBeVisible();
+    await expect(page.locator(".request-card-kind")).toHaveText("Recovery Required");
     await expect(page.getByText(/original answer channel is no longer available/)).toBeVisible();
     await expect(page.getByRole("radio", { name: /TypeScript/ })).toBeDisabled();
-    await expect(page.getByRole("button", { name: "Submit" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Submit Answers" })).toHaveCount(0);
+    await expect(page.locator(".request-card-foot .btn.primary")).toHaveText("Dismiss and Continue");
+    await expectInsideViewport(page.getByRole("button", { name: "Dismiss and Continue" }), page);
     await page.getByRole("button", { name: "Dismiss and Continue" }).click();
 
     await expect(page.getByRole("status")).toHaveText("Question Answered");
@@ -193,14 +196,14 @@ for (const viewport of [
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     await page.goto("/agent-questions-e2e.html?recovery=1&resume=1");
 
-    await expect(page.getByText("Agent Question Recovery Required")).toBeVisible();
+    await expect(page.locator(".request-card-kind")).toHaveText("Recovery Required");
     await expect(page.getByText(/resume the existing agent conversation and deliver these answers once/)).toBeVisible();
     await expect(page.getByText(/Prior tool calls will not be replayed/)).toBeVisible();
     const choice = page.getByRole("radio", { name: /TypeScript/ });
     await expect(choice).toBeEnabled();
     await expectInsideViewport(choice, page);
     await choice.click();
-    await page.getByRole("button", { name: "Submit" }).click();
+    await page.getByRole("button", { name: "Submit Answers" }).click();
 
     await expect(page.getByRole("status")).toHaveText("Question Answered");
     expect(await page.evaluate(() => window.agentQuestionCalls)).toEqual([{
@@ -249,34 +252,42 @@ test("Interactive Form preserves and recovers bounded multi-select choices", asy
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto("/agent-questions-e2e.html?set=forms");
 
-  const submit = page.getByRole("button", { name: "Submit" });
+  const card = page.getByRole("region", { name: "Agent Questions" });
+  const next = page.getByRole("button", { name: "Next", exact: true });
+  const note = card.locator(".question-step-note");
+  await expect(note).toContainText("Question 1 of 5");
+  await page.getByRole("radio", { name: /Staging/ }).click();
+  await next.click();
+
+  await expect(note).toContainText("Question 2 of 5");
   const unit = page.getByRole("checkbox", { name: /Unit Tests/ });
   const browser = page.getByRole("checkbox", { name: /Browser Tests/ });
   const smoke = page.getByRole("checkbox", { name: /Smoke Test/ });
-  await page.getByRole("radio", { name: /Staging/ }).click();
-  await page.locator('.question-input[type="password"]').fill("s3cret");
-  await page.locator('.question-input[type="number"]').fill("3");
-
   await unit.click();
-  await expect(unit).toBeChecked();
-  await expect(submit).toBeDisabled();
   await browser.click();
-  await expect(browser).toBeChecked();
-  await expect(submit).toBeEnabled();
-
   await smoke.click();
   await expect(unit).toBeChecked();
   await expect(browser).toBeChecked();
   await expect(smoke).toBeChecked();
-  await expect(submit).toBeDisabled();
-  await expect(page.getByRole("alert")).toHaveText("Select at most 2 options.");
+  await expect(card.locator(".field-error")).toHaveCount(0);
+  await next.click();
+  await expect(note).toContainText("Question 2 of 5");
+  await expect(card.locator(".field-error")).toHaveText("Select at most 2 options.");
 
   await unit.click();
   await expect(unit).not.toBeChecked();
-  await expect(browser).toBeChecked();
-  await expect(smoke).toBeChecked();
-  await expect(submit).toBeEnabled();
-  await submit.click();
+  await expect(card.locator(".field-error")).toHaveCount(0);
+  await next.click();
+  await expect(note).toContainText("Question 3 of 5");
+  await next.click();
+  await page.locator('.question-input[type="password"]').fill("s3cret");
+  await next.click();
+  await page.locator('.question-input[type="number"]').fill("3");
+  await page.getByRole("button", { name: "Back", exact: true }).click();
+  await expect(page.locator('.question-input[type="password"]')).toHaveValue("s3cret");
+  await next.click();
+  await expect(page.locator('.question-input[type="number"]')).toHaveValue("3");
+  await page.getByRole("button", { name: "Submit Answers" }).click();
 
   await expect(page.getByRole("status")).toHaveText("Question Answered");
   expect(await page.evaluate(() => window.agentQuestionCalls[0]?.answers)).toEqual({
@@ -339,39 +350,45 @@ test("offline Composer Response preserves its draft boundary and recovers after 
   expect(await page.evaluate(() => window.agentQuestionCalls[0]?.answers)).toEqual({ language: "TypeScript" });
 });
 
+async function answerLongSet(page: Page) {
+  const next = page.getByRole("button", { name: "Next", exact: true });
+  await page.getByRole("radio", { name: /Canary/ }).click();
+  await next.click();
+  await page.getByRole("checkbox", { name: /Unit Tests/ }).click();
+  await page.getByRole("checkbox", { name: /Browser Tests/ }).click();
+  await next.click();
+  await page.getByRole("radio", { name: /Overnight/ }).click();
+}
+
 for (const viewport of [
   { name: "mobile portrait", width: 390, height: 844 },
   { name: "mobile landscape", width: 844, height: 390 },
 ]) {
-  test(`an over-height question set uses one natural page scroller in ${viewport.name}`, async ({ page }) => {
+  test(`a long question set takes one step at a time and uses one natural page scroller in ${viewport.name}`, async ({ page }) => {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     await page.goto("/agent-questions-e2e.html?set=long");
 
     const bar = page.getByRole("region", { name: "Agent Questions" });
     const list = page.locator(".question-list");
-    const submit = page.getByRole("button", { name: "Submit" });
-    const dismiss = page.getByRole("button", { name: "Dismiss" });
-    await expectInsideViewport(submit, page);
-    await expectInsideViewport(dismiss, page);
-
+    await expect(page.getByRole("radio")).toHaveCount(5);
+    await expect(page.getByRole("checkbox")).toHaveCount(0);
+    if (viewport.name === "mobile portrait") {
+      // One question per step keeps the card within a phone's height, Submit and all.
+      expect((await geometry(bar)).height).toBeLessThan(viewport.height);
+    }
     const overflow = await list.evaluate((element) => ({
       clientHeight: element.clientHeight,
       scrollHeight: element.scrollHeight,
-      scrollTop: element.scrollTop,
       overflowY: getComputedStyle(element).overflowY,
     }));
     expect(overflow.scrollHeight).toBeLessThanOrEqual(overflow.clientHeight + 1);
-    expect(overflow.scrollTop).toBe(0);
     expect(overflow.overflowY).toBe("visible");
-    expect((await geometry(bar)).height).toBeGreaterThan(viewport.height);
-
-    await page.getByRole("radio", { name: /Overnight/ }).scrollIntoViewIfNeeded();
-    await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
-    await expect(page.getByRole("radio", { name: /Overnight/ })).toBeInViewport();
-    expect(await list.evaluate((element) => element.scrollTop)).toBe(0);
 
     await answerLongSet(page);
-    await expect(submit).toBeEnabled();
+    const submit = page.getByRole("button", { name: "Submit Answers" });
+    await submit.scrollIntoViewIfNeeded();
+    await expectInsideViewport(submit, page);
+    expect(await list.evaluate((element) => element.scrollTop)).toBe(0);
     await submit.click();
     await expect(page.getByRole("status")).toHaveText("Question Answered");
     expect(await page.evaluate(() => window.agentQuestionCalls[0]?.answers)).toEqual({
@@ -388,19 +405,16 @@ test("a long history-loading fallback remains reachable inside the fixed session
 
   const bar = page.getByRole("region", { name: "Agent Questions" });
   const list = page.locator(".question-list");
-  const submit = page.getByRole("button", { name: "Submit" });
   await expectInsideViewport(bar, page);
-  await expectInsideViewport(submit, page);
   await expect(list).toHaveCSS("overflow-y", "auto");
   expect(await page.evaluate(() => window.scrollY)).toBe(0);
 
-  await page.getByRole("radio", { name: /Overnight/ }).scrollIntoViewIfNeeded();
-  await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
-  expect(await page.evaluate(() => window.scrollY)).toBe(0);
-
   await answerLongSet(page);
+  const submit = page.getByRole("button", { name: "Submit Answers" });
   await expect(submit).toBeEnabled();
   await expectInsideViewport(submit, page);
+  await expectInsideViewport(bar, page);
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
 });
 
 test("a replacement request cannot submit retained selections", async ({ page }) => {
@@ -408,14 +422,15 @@ test("a replacement request cannot submit retained selections", async ({ page })
   await page.goto("/agent-questions-e2e.html");
 
   await page.getByRole("radio", { name: /TypeScript/ }).click();
-  await expect(page.getByRole("button", { name: "Submit" })).toBeEnabled();
   await page.evaluate(() => window.replaceAgentQuestion());
 
-  const submit = page.getByRole("button", { name: "Submit" });
+  const submit = page.getByRole("button", { name: "Submit Answers" });
   await expect(page.getByText("This is a new request. Choose its answer.")).toBeVisible();
-  await expect(submit).toBeDisabled();
   await expect(page.getByRole("radio", { checked: true })).toHaveCount(0);
-  await page.getByRole("radio", { name: /^Fresh Answer / }).click();
+  await submit.click();
+  await expect(page.locator(".field-error")).toHaveText("Choose an option.");
+  expect(await page.evaluate(() => window.agentQuestionCalls)).toEqual([]);
+  await page.getByRole("radio", { name: /^Fresh Answer/ }).click();
   await submit.click();
 
   const calls = await page.evaluate(() => window.agentQuestionCalls);
@@ -431,33 +446,51 @@ test("busy and submission-error states stay visible and recoverable on mobile", 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/agent-questions-e2e.html?hold=1");
   await page.getByRole("radio", { name: /TypeScript/ }).click();
-  await page.getByRole("button", { name: "Submit" }).click();
+  const submit = page.getByRole("button", { name: "Submit Answers" });
+  await submit.click();
 
   const bar = page.getByRole("region", { name: "Agent Questions" });
   await expect(bar).toHaveAttribute("aria-busy", "true");
-  await expect(page.getByRole("button", { name: "Submitting…" })).toBeDisabled();
-  await expectInsideViewport(page.getByRole("button", { name: "Submitting…" }), page);
+  // The label stays; BusyButton shows the spinner and refuses another press.
+  await expect(submit).toHaveAttribute("aria-busy", "true");
+  await expect(submit).toBeDisabled();
+  await expect(page.getByText(/Submitting…|Dismissing…/)).toHaveCount(0);
+  await expectInsideViewport(submit, page);
   await page.evaluate(() => window.releaseAgentQuestion());
   await expect(page.getByRole("status")).toHaveText("Question Answered");
 
   await page.goto("/agent-questions-e2e.html?failure=1");
   await page.getByRole("radio", { name: /TypeScript/ }).click();
-  await page.getByRole("button", { name: "Submit" }).click();
+  await page.getByRole("button", { name: "Submit Answers" }).click();
   const alert = page.getByRole("alert");
+  await expect(alert).toContainText("Couldn't send your answers. Try again.");
+  await alert.getByRole("button", { name: "Show Details" }).click();
   await expect(alert).toContainText("The runner rejected this answer. Try again.");
-  await expect(page.getByRole("button", { name: "Submit" })).toBeEnabled();
+  await expect(page.getByRole("radio", { name: /TypeScript/ })).toBeChecked();
+  const tryAgain = page.getByRole("button", { name: "Try Again" });
+  await expect(tryAgain).toBeEnabled();
   await expectInsideViewport(alert, page);
-  await expectInsideViewport(page.getByRole("button", { name: "Submit" }), page);
+  await expectInsideViewport(tryAgain, page);
+  const [alertBox, footBox] = [await geometry(alert), await geometry(page.locator(".request-card-foot"))];
+  expect(alertBox.bottom).toBeLessThanOrEqual(footBox.top);
+  await tryAgain.click();
+  expect(await page.evaluate(() => window.agentQuestionCalls.length)).toBe(2);
 });
 
 test("offline questions explain the state and can be dismissed after reconnecting", async ({ page }) => {
   await page.setViewportSize({ width: 844, height: 390 });
   await page.goto("/agent-questions-e2e.html?set=long&offline=1");
 
-  await expect(page.getByText(/Runner Offline/)).toBeVisible();
-  await expect(page.getByRole("button", { name: "Submit" })).toBeDisabled();
+  await expect(page.locator(".request-card-reasons")).toHaveText("Responses are unavailable until the runner reconnects.");
+  // Reading on is still possible; answering is not.
+  const next = page.getByRole("button", { name: "Next", exact: true });
+  await expect(next).toBeEnabled();
+  await next.click();
+  await next.click();
+  await expect(page.getByRole("button", { name: "Submit Answers" })).toBeDisabled();
   const dismiss = page.getByRole("button", { name: "Dismiss" });
   await expect(dismiss).toBeDisabled();
+  await dismiss.scrollIntoViewIfNeeded();
   await expectInsideViewport(dismiss, page);
 
   await page.evaluate(() => window.setAgentQuestionOnline(true));
@@ -471,35 +504,31 @@ test("an online question becoming offline remains keyboard-discoverable without 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/agent-questions-e2e.html?set=long");
 
-  const availability = page.locator(".question-availability");
-  await expect(availability).toHaveAttribute("role", "status");
-  await expect(availability).toHaveText("");
-  await expect(availability).not.toHaveCSS("display", "none");
+  const card = page.getByRole("region", { name: "Agent Questions" });
+  const status = card.locator('[role="status"][aria-atomic="true"]');
+  await expect(status).toHaveText("");
+  await expect(card.locator(".request-card-reasons")).toHaveCount(0);
 
   await page.evaluate(() => window.setAgentQuestionOnline(false));
-  await expect(availability).toHaveText("Responses are unavailable until the runner reconnects.");
+  await expect(status).toHaveText("Responses are unavailable until the runner reconnects.");
+  await expect(card.locator(".request-card-reasons")).toHaveText("Responses are unavailable until the runner reconnects.");
 
   const firstRadio = page.getByRole("radio", { name: /Canary/ });
   const secondRadio = page.getByRole("radio", { name: /Blue-Green/ });
   await expect(firstRadio).toHaveAttribute("aria-disabled", "true");
-  await expect(firstRadio).toHaveAttribute("tabindex", "0");
-  await expect(secondRadio).toHaveAttribute("tabindex", "-1");
   await expect(page.getByRole("radiogroup", { name: /Choose the release strategy/ }))
     .toHaveAccessibleDescription(/Responses are unavailable until the runner reconnects/);
-  await expect(page.getByRole("group", { name: /Select every validation/ }))
-    .toHaveAccessibleDescription(/Responses are unavailable until the runner reconnects/);
-  await expect(firstRadio).toHaveCSS("cursor", "not-allowed");
-  await expect(firstRadio).toHaveCSS("opacity", "0.6");
+  await expect(firstRadio.locator("xpath=ancestor::label[1]")).toHaveCSS("cursor", "not-allowed");
 
   await firstRadio.focus();
   await firstRadio.press("ArrowDown");
   await expect(secondRadio).toBeFocused();
-  await expect(secondRadio).toHaveAttribute("aria-checked", "false");
+  await expect(secondRadio).not.toBeChecked();
   await firstRadio.focus();
-  await expect(firstRadio).toBeFocused();
   await firstRadio.press("Space");
-  await expect(firstRadio).toHaveAttribute("aria-checked", "false");
-  await expect(page.getByRole("checkbox", { name: /Unit Tests/ })).toHaveAttribute("tabindex", "0");
+  await expect(firstRadio).not.toBeChecked();
+  await firstRadio.press("1");
+  await expect(firstRadio).not.toBeChecked();
 });
 
 test("every question row reads its outcome and answer without arrows or emoji (#2188)", async ({ page }) => {
@@ -589,13 +618,20 @@ for (const width of [1280, 390]) {
       await page.setViewportSize({ width, height: 844 });
       await page.goto(`/agent-questions-e2e.html?set=forms&style=${style}`);
       if (style === "interactive") {
-        const inputs = page.locator('.question-input');
-        await expect(inputs).toHaveCount(5);
-        await inputs.nth(0).fill("Canary");
-        await inputs.nth(1).fill("Unit Tests");
-        await inputs.nth(3).fill("abc");
-        await inputs.nth(4).fill("3");
-        await page.getByRole("button", { name: "Submit", exact: true }).click();
+        const input = page.locator(".question-input");
+        const next = page.getByRole("button", { name: "Next", exact: true });
+        await expect(input).toHaveCount(0);
+        await page.getByRole("radio", { name: "Something Else…" }).click();
+        await input.fill("Canary");
+        await next.click();
+        await page.getByRole("checkbox", { name: "Something Else…" }).click();
+        await input.fill("Unit Tests");
+        await next.click();
+        await next.click();
+        await input.fill("abc");
+        await next.click();
+        await input.fill("3");
+        await page.getByRole("button", { name: "Submit Answers", exact: true }).click();
       } else {
         const input = page.locator('.composer-answer-input');
         await page.getByRole("button", { name: "Other Response", exact: true }).click();
@@ -619,3 +655,80 @@ for (const width of [1280, 390]) {
     });
   }
 }
+
+for (const theme of ["dark", "light"] as const) {
+  test(`on a fine pointer number keys pick, Enter advances and keycaps show (${theme})`, async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(`/agent-questions-e2e.html?set=long&keys=1&theme=${theme}`);
+    const card = page.getByRole("region", { name: "Agent Questions" });
+    await expect(card.locator(".choice-row-meta kbd")).toHaveText(["1", "2", "3", "4", "5"]);
+    await expect(card.locator(".choice-row-meta kbd").first()).toBeVisible();
+    await expect(page.getByRole("button", { name: "Next", exact: true }).locator("kbd")).toHaveText("Enter");
+
+    await card.locator(".question-text").focus();
+    await page.keyboard.press("2");
+    await expect(page.getByRole("radio", { name: /Blue-Green/ })).toBeChecked();
+    await page.keyboard.press("Enter");
+    await expect(card.locator(".question-step-note")).toContainText("Question 2 of 3");
+    await page.keyboard.press("1");
+    await page.keyboard.press("3");
+    await expect(page.getByRole("checkbox", { checked: true })).toHaveCount(2);
+    await page.keyboard.press("Enter");
+    await page.keyboard.press("5");
+    await expect(page.getByRole("radio", { name: "Something Else…" })).toBeChecked();
+    await expect(page.locator(".question-input")).toBeFocused();
+    await page.keyboard.type("At dawn");
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("status")).toHaveText("Question Answered");
+    expect(await page.evaluate(() => window.agentQuestionCalls[0]?.answers)).toEqual({
+      strategy: "Blue-Green",
+      checks: ["Unit Tests", "Accessibility Audit"],
+      window: "At dawn",
+    });
+  });
+}
+
+test("Ctrl+Enter submits from the first step", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/agent-questions-e2e.html?set=rich&keys=1");
+  await page.getByRole("radio", { name: "Production" }).click();
+  await page.getByRole("button", { name: "Next", exact: true }).click();
+  await page.getByRole("checkbox", { name: /Unit Tests/ }).click();
+  await page.getByRole("button", { name: "Back", exact: true }).click();
+  await expect(page.locator(".question-step-note")).toContainText("Question 1 of 2");
+  await page.getByRole("radio", { name: "Production" }).press("Control+Enter");
+  await expect(page.getByRole("status")).toHaveText("Question Answered");
+  expect(await page.evaluate(() => window.agentQuestionCalls[0]?.answers)).toEqual({
+    target: "Production",
+    checks: ["Unit Tests"],
+  });
+});
+
+test.describe("on a coarse pointer", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  test("rows and footer buttons are 44px targets, keycaps are hidden and descriptions are one line", async ({ page }) => {
+    await page.goto("/agent-questions-e2e.html?set=long&keys=1");
+    expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
+    const card = page.getByRole("region", { name: "Agent Questions" });
+    for (const kbd of await card.locator("kbd").all()) await expect(kbd).toBeHidden();
+    for (const box of await card.locator(".choice-row").evaluateAll((rows) => rows.map((row) => row.getBoundingClientRect().height))) {
+      expect(box).toBeGreaterThanOrEqual(44);
+    }
+    const descriptions = card.locator(".choice-row-desc");
+    const lineHeight = await descriptions.first().evaluate((element) => parseFloat(getComputedStyle(element).lineHeight));
+    for (const height of await descriptions.evaluateAll((elements) => elements.map((element) => element.getBoundingClientRect().height))) {
+      expect(height).toBeLessThanOrEqual(lineHeight + 1);
+    }
+    await page.getByRole("radio", { name: /Canary/ }).tap();
+    const chosen = card.locator(".choice-row", { has: page.getByRole("radio", { name: /Canary/ }) }).locator(".choice-row-desc");
+    expect((await geometry(chosen)).height).toBeGreaterThan(lineHeight * 1.5);
+    await page.getByRole("button", { name: "Next", exact: true }).tap();
+    for (const name of ["Dismiss", "Back", "Next"]) {
+      const target = page.getByRole("button", { name, exact: true });
+      expect((await geometry(target)).height).toBeGreaterThanOrEqual(44);
+      // Primary text never gives way to secondary text at phone widths.
+      expect(await target.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+    }
+  });
+});

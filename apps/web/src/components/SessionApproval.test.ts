@@ -3,6 +3,7 @@ import test from "node:test";
 import React from "react";
 import type { SessionView } from "@wollipog/protocol";
 import { renderToStaticMarkup } from "react-dom/server";
+import { clearQuestionDrafts, storeQuestionStep } from "../question-response.js";
 import {
   approvalFocusDestination,
   SessionApprovalRegion,
@@ -96,47 +97,66 @@ test("a question stranded by restart preserves context but offers only the expli
     }],
   }));
 
-  assert.match(html, /Agent Question Recovery Required/);
+  assert.match(html, /data-tone="danger"/);
+  assert.match(html, /Recovery Required/);
   assert.match(html, /original answer channel is no longer available/);
   assert.match(html, /No prior tool calls will be replayed/);
   assert.match(html, /Which target should receive the deployment\?/);
   assert.match(html, /Production/);
   assert.match(html, /Staging/);
-  assert.match(html, /Dismiss and Continue/);
-  assert.doesNotMatch(html, />Submit</);
-  assert.equal((html.match(/role="radio"[^>]*aria-disabled="true"/g) ?? []).length, 2);
+  assert.equal((html.match(/class="btn primary"/g) ?? []).length, 1, "one primary");
+  assert.match(html, /class="btn primary"[^>]*>Dismiss and Continue/);
+  assert.doesNotMatch(html, /Submit Answers/);
+  // Every row, Something Else included, refuses a choice while it stays reachable.
+  assert.equal((html.match(/type="radio"[^>]*aria-disabled="true"/g) ?? []).length, 3);
 });
 
-test("question choices expose labelled radio and checkbox semantics with one radio tab stop", () => {
-  const html = renderToStaticMarkup(React.createElement(SessionQuestionBanner, {
+test("question choices are native radios and checkboxes in labelled ChoiceRows, one question per step", () => {
+  const questions = [
+    {
+      id: "single",
+      header: "Choice",
+      question: "Pick one",
+      multiSelect: false,
+      options: [{ label: "A" }, { label: "B" }],
+    },
+    {
+      id: "multi",
+      question: "Pick any",
+      multiSelect: true,
+      options: [{ label: "X" }, { label: "Y" }],
+    },
+  ];
+  const render = (requestId: string) => renderToStaticMarkup(React.createElement(SessionQuestionBanner, {
     sessionId: "s1",
-    requestId: "ask-1",
+    requestId,
     runnerOnline: true,
-    questions: [
-      {
-        id: "single",
-        header: "Choice",
-        question: "Pick one",
-        multiSelect: false,
-        options: [{ label: "A" }, { label: "B" }],
-      },
-      {
-        id: "multi",
-        question: "Pick any",
-        multiSelect: true,
-        options: [{ label: "X" }, { label: "Y" }],
-      },
-    ],
+    questions,
   }));
-  assert.match(html, /role="radiogroup" aria-labelledby=/);
-  assert.match(html, /role="radiogroup"[^>]*aria-describedby="[^"]+-requirement-0"[^>]*aria-required="true"/);
-  assert.equal((html.match(/role="radio"/g) ?? []).length, 2);
-  assert.equal((html.match(/role="checkbox"/g) ?? []).length, 2);
-  assert.equal((html.match(/role="radio"[^>]*aria-checked="false"[^>]*tabindex="0"/g) ?? []).length, 1);
-  assert.equal((html.match(/role="radio"[^>]*aria-checked="false"[^>]*tabindex="-1"/g) ?? []).length, 1);
+  const first = render("ask-1");
+  assert.match(first, /class="choice-rows" role="radiogroup" aria-labelledby="[^"]+-header-0 [^"]+-title"/);
+  assert.match(first, /role="radiogroup"[^>]*aria-describedby="[^"]+-requirement-0"/);
+  assert.equal((first.match(/type="radio"/g) ?? []).length, 3, "A, B and Something Else");
+  assert.equal((first.match(/type="checkbox"/g) ?? []).length, 0, "the second question waits for its step");
+  assert.doesNotMatch(first, /role="radio"|role="checkbox"|[☑☐●○]/);
+  assert.match(first, />Something Else…</);
+  assert.match(first, /Choice<\/span><span>Choose one/);
+  assert.match(first, /Question 1 of 2/);
+  assert.doesNotMatch(first, /select all that apply|question-chip/);
+
+  storeQuestionStep("s1", "ask-step-2", 1);
+  try {
+    const second = render("ask-step-2");
+    assert.match(second, /class="choice-rows" role="group" aria-labelledby="[^"]+-title"/);
+    assert.equal((second.match(/type="checkbox"/g) ?? []).length, 3, "X, Y and Something Else");
+    assert.match(second, /<p class="question-eyebrow"><span>Choose any<\/span><\/p>/);
+    assert.match(second, /Question 2 of 2/);
+  } finally {
+    clearQuestionDrafts("s1", "ask-step-2");
+  }
 });
 
-test("multi-select questions offer custom input and require a response before Submit", () => {
+test("a choice question keeps its text field behind Something Else, and Submit Answers stays available", () => {
   const html = renderToStaticMarkup(React.createElement(SessionQuestionBanner, {
     sessionId: "s1",
     requestId: "ask-unsupported",
@@ -150,10 +170,13 @@ test("multi-select questions offer custom input and require a response before Su
     }],
   }));
 
-  assert.match(html, /class="input question-input"/);
+  assert.doesNotMatch(html, /question-input/, "the field opens when Something Else is chosen");
+  assert.match(html, />Something Else…</);
   assert.doesNotMatch(html, /This question format is unsupported/);
-  assert.match(html, /<button[^>]*disabled=""[^>]*>Submit<\/button>/);
-  assert.match(html, /role="checkbox"/);
+  // §8.5: a short form's primary stays enabled; pressing it reveals what is missing.
+  assert.match(html, /<button[^>]*class="btn primary"[^>]*>Submit Answers<kbd aria-hidden="true">Enter<\/kbd><\/button>/);
+  assert.doesNotMatch(html, /<button[^>]*disabled=""[^>]*>Submit Answers/);
+  assert.doesNotMatch(html, /field-error|Complete all required responses/);
 });
 
 test("question selection is empty immediately when a new request replaces the old one", () => {
@@ -169,56 +192,69 @@ test("approval focus follows owned replacements and final resolution only", () =
   assert.equal(approvalFocusDestination("ask-a", "ask-a", true), null);
 });
 
-test("provider form questions render context and constrained free-text controls", () => {
-  const html = renderToStaticMarkup(React.createElement(SessionQuestionBanner, {
-    sessionId: "s-form",
-    requestId: "ask-form",
-    runnerOnline: true,
-    questions: [
-      {
-        id: "token",
-        header: "Token",
-        question: "Enter the temporary token",
-        context: "Deploy MCP: Choose deployment settings",
-        options: [],
-        allowOther: true,
-        secret: true,
-        maxLength: 120,
-      },
-      {
-        id: "retries",
-        header: "Retries",
-        question: "How many retries?",
-        context: "Retry policy for the deployment",
-        options: [],
-        allowOther: true,
-        inputFormat: "integer",
-        minimum: 1,
-        maximum: 5,
-      },
-      {
-        id: "note",
-        header: "Note",
-        question: "Optional note",
-        context: "This note is stored with the deployment",
-        options: [],
-        allowOther: true,
-        required: false,
-      },
-    ],
-  }));
-  assert.match(html, /Deploy MCP: Choose deployment settings/);
-  assert.match(html, /Retry policy for the deployment/);
-  assert.match(html, /This note is stored with the deployment/);
-  assert.equal((html.match(/class="question-context"/g) ?? []).length, 3);
-  assert.match(html, /<span[^>]*>Response<\/span>/);
-  assert.match(html, /type="password"[^>]*maxLength="120"/);
-  assert.match(html, /type="number"[^>]*inputMode="numeric"[^>]*step="1"[^>]*min="1"[^>]*max="5"/);
-  assert.match(html, /<span class="muted sm"> \(optional\)<\/span>/);
-  assert.match(html, /aria-labelledby="[^"]+-question-0 [^"]+-response-0"/);
-  assert.match(html, /aria-labelledby="[^"]+-question-1 [^"]+-response-1"/);
-  assert.match(html, /aria-labelledby="[^"]+-question-2 [^"]+-response-2"/);
-  assert.equal((html.match(/aria-required="true" required=""/g) ?? []).length, 2);
-  assert.equal((html.match(/aria-required="false"/g) ?? []).length, 1);
-  assert.equal((html.match(/aria-describedby="[^"]+-context-[0-2] [^"]+-requirement-[0-2]"/g) ?? []).length, 3);
+test("provider form questions render context and constrained free-text controls, one per step", () => {
+  const questions = [
+    {
+      id: "token",
+      header: "Token",
+      question: "Enter the temporary token",
+      context: "Deploy MCP: Choose deployment settings",
+      options: [],
+      allowOther: true,
+      secret: true,
+      maxLength: 120,
+    },
+    {
+      id: "retries",
+      header: "Retries",
+      question: "How many retries?",
+      context: "Retry policy for the deployment",
+      options: [],
+      allowOther: true,
+      inputFormat: "integer" as const,
+      minimum: 1,
+      maximum: 5,
+    },
+    {
+      id: "note",
+      header: "Note",
+      question: "Optional note",
+      context: "This note is stored with the deployment",
+      options: [],
+      allowOther: true,
+      required: false,
+    },
+  ];
+  const render = (step: number) => {
+    storeQuestionStep("s-form", "ask-form", step);
+    try {
+      return renderToStaticMarkup(React.createElement(SessionQuestionBanner, {
+        sessionId: "s-form",
+        requestId: "ask-form",
+        runnerOnline: true,
+        questions,
+      }));
+    } finally {
+      clearQuestionDrafts("s-form", "ask-form");
+    }
+  };
+  const [token, retries, note] = [render(0), render(1), render(2)];
+  assert.match(token, /Deploy MCP: Choose deployment settings/);
+  assert.match(retries, /Retry policy for the deployment/);
+  assert.match(note, /This note is stored with the deployment/);
+  for (const html of [token, retries, note]) {
+    assert.equal((html.match(/class="question-context"/g) ?? []).length, 1);
+    assert.match(html, /class="input question-input"[^>]*aria-labelledby="[^"]+-header-[0-2] [^"]+-title"/);
+    assert.match(html, /aria-describedby="[^"]+-context-[0-2] [^"]+-requirement-[0-2]"/);
+  }
+  assert.match(token, /type="password"[^>]*maxLength="120"/);
+  assert.match(retries, /type="number"[^>]*inputMode="numeric"[^>]*step="1"[^>]*min="1"[^>]*max="5"/);
+  assert.match(note, /Note<\/span><span>Optional<\/span>/);
+  assert.match(token, /aria-required="true"/);
+  assert.match(retries, /aria-required="true"/);
+  assert.match(note, /aria-required="false"/);
+  assert.match(token, />Next</);
+  assert.doesNotMatch(token, />Back</);
+  assert.match(retries, />Back<[\s\S]*>Next</);
+  assert.match(note, />Back<[\s\S]*>Submit Answers</);
 });

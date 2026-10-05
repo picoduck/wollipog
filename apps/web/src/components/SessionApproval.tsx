@@ -1,10 +1,5 @@
 import React, { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
-import {
-  DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH,
-  type AgentQuestion,
-  type PendingApproval,
-  type SessionView,
-} from "@wollipog/protocol";
+import type { AgentQuestion, PendingApproval, SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { useOptionalStoreSelector } from "../store.js";
 import { sessionCommandRefusal } from "../session-command-permissions.js";
@@ -14,16 +9,29 @@ import {
   isAnswerableAgentQuestion,
   questionDraftAnswers,
   questionDraftSelections,
-  questionDraftText,
   storedQuestionDrafts,
+  storedQuestionStep,
   storeQuestionDrafts,
+  storeQuestionStep,
   type QuestionResponseDraft,
 } from "../question-response.js";
 import { useQuestionResponseStyle } from "../question-response-style.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { clearEvidenceReviewDraft } from "../evidence-review-drafts.js";
-import { handleRovingChoiceKeyDown } from "./interactions.js";
+import { sessionAgentLabel } from "./agent-options.js";
+import { QuestionIcon } from "./Icons.js";
+import { Notice } from "./Notice.js";
 import { StructuredQuestionText } from "./StructuredQuestionText.js";
+import { BusyButton } from "./ui/BusyButton.js";
+import { RequestCardHead } from "./requests/RequestCard.js";
+import {
+  QUESTION_CARD_COPY,
+  QuestionStep,
+  questionEyebrowParts,
+  questionOtherChosen,
+  questionStepLabel,
+  type QuestionChoice,
+} from "./requests/QuestionStep.js";
 import { revealDockedRequest } from "./requests/request-reveal.js";
 
 const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
@@ -110,6 +118,7 @@ export function SessionApprovalRegion({
             runnerOnline={runnerOnline}
             onSessionUpdate={onSessionUpdate}
             showKeyHints={showKeyHints}
+            owner={sessionAgentLabel(session.agentName, session.driver, session.agentId)}
           />
         </div>
       )}
@@ -148,9 +157,11 @@ export function SessionTimelineQuestionRegion({
   eventRequestId,
   eventQuestions,
   eventResolved,
+  eventCreatedAt,
   runnerOnline,
   onSessionUpdate,
   showKeyHints = true,
+  owner,
   children,
 }: {
   sessionId: string;
@@ -165,9 +176,13 @@ export function SessionTimelineQuestionRegion({
   eventRequestId: string;
   eventQuestions: AgentQuestion[];
   eventResolved: boolean;
+  /** When the question's event was recorded, for the card's head line. */
+  eventCreatedAt?: number;
   runnerOnline: boolean;
   onSessionUpdate?: (session: SessionView) => void;
   showKeyHints?: boolean;
+  /** Who asks, for the card's head line. */
+  owner?: string;
   children: ReactNode;
 }) {
   const approval = !eventResolved && pendingQuestion?.requestId === eventRequestId
@@ -187,6 +202,8 @@ export function SessionTimelineQuestionRegion({
           runnerOnline={runnerOnline}
           onSessionUpdate={onSessionUpdate}
           showKeyHints={showKeyHints}
+          owner={owner}
+          createdAt={eventCreatedAt}
         />
       ) : children}
     </div>
@@ -220,7 +237,9 @@ function enabledRequestControl(
   const region = [...regions].find((candidate) => candidate.dataset.sessionRequestId === requestId &&
     candidate.dataset.sessionRequestSession === sessionId);
   const controls = [...region?.querySelectorAll<HTMLElement>(
-    'button:not(:disabled):not([aria-disabled="true"]), [role="radio"][tabindex="0"]:not(:disabled):not([aria-disabled="true"]), [role="checkbox"]:not(:disabled):not([aria-disabled="true"]), input:not(:disabled)',
+    // A question's choice rows are native inputs that stay reachable while they refuse a choice
+    // (`aria-disabled`), so they are no landing place then.
+    'button:not(:disabled):not([aria-disabled="true"]), input:not(:disabled):not([aria-disabled="true"])',
   ) ?? []];
   // Composer Response owns entry outside this request region. On replacement, do not turn the
   // card's destructive Dismiss action into the implicit focus target for the user's next Enter.
@@ -319,7 +338,20 @@ function SessionRequestCoordinator({
   return <span className="sr-only" role="status" aria-live="polite">{announcement}</span>;
 }
 
-/** Structured agent questions with two presentations over one request-keyed canonical draft. */
+/**
+ * An agent's questions on the Request Card (docs/design-system.md §13.2; #2196), one question per
+ * step over one request-keyed draft that also keeps the step, so a remounted card returns to the
+ * same question with the same answers.
+ *
+ * Top to bottom: the head line (kind, owner, time), the question's header with "Choose one" or
+ * "Choose any", the question as the card's heading, the step's body, a failed submission's notice,
+ * the reasons nobody can answer now, and a footer whose order is fixed (§3.2): Dismiss at the far
+ * left, the step count, Back, then Next or Submit Answers as the one primary, last.
+ *
+ * Keys, while focus is in the card: 1–9 pick the current question's rows, Enter moves on (Next,
+ * then Submit Answers), Ctrl/Cmd+Enter submits from any step and D dismisses. In Composer Response
+ * the card is the question's context only, answered in the composer.
+ */
 export function SessionQuestionBanner({
   sessionId,
   requestId,
@@ -332,6 +364,8 @@ export function SessionQuestionBanner({
   responseRefusal: responseRefusalOverride,
   onSessionUpdate,
   showKeyHints = true,
+  owner,
+  createdAt,
 }: {
   sessionId: string;
   requestId: string;
@@ -345,12 +379,16 @@ export function SessionQuestionBanner({
   responseRefusal?: string | null;
   onSessionUpdate?: (session: SessionView) => void;
   showKeyHints?: boolean;
+  /** Plain text for the head line: who asks. */
+  owner?: string;
+  /** When the question was asked, when known. */
+  createdAt?: number;
 }) {
   const api = useApi();
   const storedRefusal = useSessionResponseRefusal(sessionId);
   const responseRefusal = responseRefusalOverride === undefined ? storedRefusal : responseRefusalOverride;
   // A refused person reads the question like one whose runner is offline: every response control
-  // is unavailable and the availability line says why. Runner Offline itself stays the runner's.
+  // is unavailable and the foot-note says why.
   const responsesAvailable = runnerOnline && responseRefusal === null;
   const responseStyle = useQuestionResponseStyle();
   const answerKey = isAsync && occurrenceId ? `${requestId}:${occurrenceId}` : requestId;
@@ -358,12 +396,15 @@ export function SessionQuestionBanner({
   const [drafts, setDrafts] = useState<{
     requestId: string;
     values: Record<string, QuestionResponseDraft>;
+    step: number;
   }>(() => ({
     requestId: answerKey,
     values: storedQuestionDrafts(sessionId, answerKey),
+    step: storedQuestionStep(sessionId, answerKey),
   }));
-  const [validationAttempted, setValidationAttempted] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // The questions whose errors show: each one the person tried to move past unanswered (§8.5).
+  const [attempted, setAttempted] = useState<ReadonlySet<string>>(() => new Set());
+  const [failure, setFailure] = useState<{ action: "submit" | "dismiss"; detail: string } | null>(null);
   const operationPendingRef = useRef<object | null>(null);
   const liveRequestRef = useRef<object | null>(null);
   useLayoutEffect(() => {
@@ -372,13 +413,16 @@ export function SessionQuestionBanner({
     operationPendingRef.current = null;
     return () => { liveRequestRef.current = null; };
   }, [answerKey, sessionId]);
-  const questionBlockRefs = useRef(new Map<string, HTMLDivElement | null>());
+  const titleRef = useRef<HTMLDivElement>(null);
+  const stepRef = useRef<HTMLDivElement>(null);
   const previousDraftRequestRef = useRef({ sessionId, requestId: answerKey });
   // React's opaque useId contains colons. They are valid in HTML ids but break the selector-based
   // HTMLInputElement.list lookup used by some DOM implementations, so keep this idref family plain.
   const labelPrefix = useId().replace(/:/g, "");
   const availabilityId = `${labelPrefix}-availability`;
+  const unsupportedId = `${labelPrefix}-unsupported`;
   const recoveryId = `${labelPrefix}-recovery`;
+  const titleId = `${labelPrefix}-title`;
   const recoveryRequired = recoveryReason === "provider_restart";
   const recoveryCanResume = recoveryRequired && recoveryAction === "resume_answer";
   const recoveryRequiresDismiss = recoveryRequired && !recoveryCanResume;
@@ -389,30 +433,55 @@ export function SessionQuestionBanner({
       clearQuestionDrafts(previous.sessionId, previous.requestId);
       clearQuestionDrafts(sessionId, answerKey);
       previousDraftRequestRef.current = { sessionId, requestId: answerKey };
-      setDrafts({ requestId: answerKey, values: {} });
+      setDrafts({ requestId: answerKey, values: {}, step: 0 });
     } else {
-      setDrafts({ requestId: answerKey, values: storedQuestionDrafts(sessionId, answerKey) });
+      setDrafts({
+        requestId: answerKey,
+        values: storedQuestionDrafts(sessionId, answerKey),
+        step: storedQuestionStep(sessionId, answerKey),
+      });
     }
-    setValidationAttempted(false);
+    setAttempted(new Set());
     setBusy(null);
-    setError(null);
+    setFailure(null);
   }, [answerKey, sessionId]);
 
   useEffect(() => {
-    setDrafts({ requestId: answerKey, values: storedQuestionDrafts(sessionId, answerKey) });
-    setValidationAttempted(false);
+    setDrafts({
+      requestId: answerKey,
+      values: storedQuestionDrafts(sessionId, answerKey),
+      step: storedQuestionStep(sessionId, answerKey),
+    });
+    setAttempted(new Set());
   }, [answerKey, responseStyle, sessionId]);
 
-  const draftValues = drafts.requestId === answerKey ? drafts.values : {};
+  const ownDrafts = drafts.requestId === answerKey;
+  const draftValues = ownDrafts ? drafts.values : {};
   const draftValue = (questionId: string) => Object.hasOwn(draftValues, questionId) ? draftValues[questionId] : undefined;
   const resolved = questionDraftAnswers(questions, draftValues);
+  const errorFor = (question: AgentQuestion) => {
+    const error = Object.hasOwn(resolved.errors, question.id) ? resolved.errors[question.id] : undefined;
+    if (error === undefined || question.options.length === 0) return error;
+    // Nothing chosen yet: the error names the choice, not a response to type.
+    const draft = draftValue(question.id);
+    return questionOtherChosen(question, draft) || questionDraftSelections(question, draft).length > 0 ? error
+      : question.multiSelect ? QUESTION_CARD_COPY.chooseOptions : QUESTION_CARD_COPY.chooseOption;
+  };
   const unsupportedQuestionFormat = questions.some((question) => !isAnswerableAgentQuestion(question));
+  const interactive = responseStyle === "interactive";
   const controlsDisabled = busy !== null || !responsesAvailable || unsupportedQuestionFormat || recoveryRequiresDismiss;
-  const fixedChoicesNativelyDisabled = busy !== null || unsupportedQuestionFormat || recoveryRequiresDismiss;
+  // The form can be answered here: Next checks the step and the last step submits.
+  const answerable = interactive && questions.length > 0 && responsesAvailable && !unsupportedQuestionFormat &&
+    !recoveryRequiresDismiss;
+  const stepCount = questions.length;
+  const step = Math.min(Math.max(ownDrafts ? drafts.step : 0, 0), Math.max(stepCount - 1, 0));
+  const question = questions[step];
+  const lastStep = step >= stepCount - 1;
 
-  const updateDraft = (question: AgentQuestion, value: QuestionResponseDraft) => {
+  const updateDraft = (target: AgentQuestion, value: QuestionResponseDraft) => {
     setDrafts((current) => {
-      const values = { ...(current.requestId === answerKey ? current.values : {}), [question.id]: value };
+      const own = current.requestId === answerKey;
+      const values = { ...(own ? current.values : {}), [target.id]: value };
       const cacheable: Record<string, QuestionResponseDraft> = {};
       for (const candidate of questions) {
         if (candidate.secret || !Object.hasOwn(values, candidate.id)) continue;
@@ -424,44 +493,78 @@ export function SessionQuestionBanner({
         });
       }
       storeQuestionDrafts(sessionId, answerKey, cacheable);
-      return { requestId: answerKey, values };
+      return { requestId: answerKey, values, step: own ? current.step : 0 };
     });
   };
 
-  const toggle = (question: AgentQuestion, label: string) => {
-    const selected = questionDraftSelections(question, draftValue(question.id));
-    const labels = question.multiSelect
+  const choose = (target: AgentQuestion, choice: QuestionChoice) => {
+    if (controlsDisabled) return;
+    const draft = draftValue(target.id);
+    const otherChosen = questionOtherChosen(target, draft);
+    if (choice === "other") {
+      if (otherChosen && target.multiSelect) updateDraft(target, { kind: "choice", labels: [] });
+      else if (!otherChosen) updateDraft(target, { kind: "other", value: "" });
+      return;
+    }
+    const label = target.options[choice]?.label;
+    if (label === undefined) return;
+    const selected = questionDraftSelections(target, draft);
+    const labels = target.multiSelect
       ? selected.includes(label) ? selected.filter((candidate) => candidate !== label) : [...selected, label]
       : [label];
-    updateDraft(question, { kind: "choice", labels });
+    updateDraft(target, { kind: "choice", labels });
   };
 
-  const complete = !unsupportedQuestionFormat && Object.keys(resolved.errors).length === 0;
+  /** After the next paint, unless the card has moved on to another request by then. */
+  const afterRender = (action: () => void) => {
+    const request = liveRequestRef.current;
+    window.requestAnimationFrame(() => {
+      if (liveRequestRef.current === request) action();
+    });
+  };
+  const focusStepControl = (target: AgentQuestion | undefined) => afterRender(() => {
+    if (!target) return;
+    const body = stepRef.current;
+    const field = body?.querySelector<HTMLElement>(".question-input:not(:disabled)");
+    const choice = body?.querySelector<HTMLElement>("input[type=radio]:checked, input[type=checkbox]:checked") ??
+      body?.querySelector<HTMLElement>("input[type=radio], input[type=checkbox]");
+    // The text is the answer to fix when there is no choice to make or Something Else is chosen.
+    const textFirst = target.options.length === 0 || questionOtherChosen(target, draftValue(target.id));
+    (textFirst ? field ?? choice : choice ?? field)?.focus();
+  });
+  const goToStep = (next: number, focus: "title" | "control" = "title") => {
+    const clamped = Math.min(Math.max(next, 0), Math.max(stepCount - 1, 0));
+    storeQuestionStep(sessionId, answerKey, clamped);
+    setDrafts((current) => current.requestId === answerKey ? { ...current, step: clamped } : current);
+    if (focus === "title") afterRender(() => titleRef.current?.focus());
+    else focusStepControl(questions[clamped]);
+  };
+  /** Reveal the errors of `invalid` and move to the first of them (§8.5). */
+  const showErrors = (invalid: readonly AgentQuestion[]) => {
+    setAttempted((current) => new Set([...current, ...invalid.map((candidate) => candidate.id)]));
+    const first = invalid[0];
+    const firstStep = first ? questions.indexOf(first) : -1;
+    if (firstStep >= 0 && firstStep !== step) goToStep(firstStep, "control");
+    else focusStepControl(first);
+  };
 
   const submit = async () => {
-    if (operationPendingRef.current || busy !== null || !responsesAvailable || unsupportedQuestionFormat || recoveryRequiresDismiss) return;
-    if (Object.keys(resolved.errors).length > 0) {
-      setValidationAttempted(true);
-      const validatingRequest = liveRequestRef.current;
-      const firstInvalid = questions.find((question) => Object.hasOwn(resolved.errors, question.id));
-      window.requestAnimationFrame(() => {
-        if (liveRequestRef.current !== validatingRequest) return;
-        questionBlockRefs.current.get(firstInvalid?.id ?? "")
-          ?.querySelector<HTMLElement>("input:not(:disabled), button:not(:disabled):not([aria-disabled=true])")
-          ?.focus();
-      });
+    if (operationPendingRef.current || busy !== null || !answerable) return;
+    const invalid = questions.filter((candidate) => errorFor(candidate) !== undefined);
+    if (invalid.length > 0) {
+      showErrors(invalid);
       return;
     }
     const releaseOperation = claimQuestionResponseOperation(sessionId, answerKey);
     if (!releaseOperation) {
-      setError("Another response is already being submitted for this question.");
+      setFailure({ action: "submit", detail: QUESTION_CARD_COPY.alreadySending });
       return;
     }
     const submittedRequest = liveRequestRef.current;
     const operation = {};
     operationPendingRef.current = operation;
     setBusy("submit");
-    setError(null);
+    setFailure(null);
     try {
       const updated = await api.answerQuestion(sessionId, {
         requestId, ...(occurrenceId ? { occurrenceId } : {}), answers: resolved.answers, action: "submit",
@@ -470,7 +573,7 @@ export function SessionQuestionBanner({
       clearQuestionDrafts(sessionId, answerKey);
       onSessionUpdate?.(updated);
     } catch (cause) {
-      if (liveRequestRef.current === submittedRequest) setError((cause as Error).message);
+      if (liveRequestRef.current === submittedRequest) setFailure({ action: "submit", detail: (cause as Error).message });
     } finally {
       releaseOperation();
       if (operationPendingRef.current === operation) operationPendingRef.current = null;
@@ -482,14 +585,14 @@ export function SessionQuestionBanner({
     if (operationPendingRef.current || busy !== null || !responsesAvailable) return;
     const releaseOperation = claimQuestionResponseOperation(sessionId, answerKey);
     if (!releaseOperation) {
-      setError("Another response is already being submitted for this question.");
+      setFailure({ action: "dismiss", detail: QUESTION_CARD_COPY.alreadySending });
       return;
     }
     const submittedRequest = liveRequestRef.current;
     const operation = {};
     operationPendingRef.current = operation;
     setBusy("dismiss");
-    setError(null);
+    setFailure(null);
     try {
       const updated = await api.answerQuestion(sessionId, {
         requestId, ...(occurrenceId ? { occurrenceId } : {}), answers: {}, action: "dismiss",
@@ -498,7 +601,7 @@ export function SessionQuestionBanner({
       clearQuestionDrafts(sessionId, answerKey);
       onSessionUpdate?.(updated);
     } catch (cause) {
-      if (liveRequestRef.current === submittedRequest) setError((cause as Error).message);
+      if (liveRequestRef.current === submittedRequest) setFailure({ action: "dismiss", detail: (cause as Error).message });
     } finally {
       releaseOperation();
       if (operationPendingRef.current === operation) operationPendingRef.current = null;
@@ -506,213 +609,231 @@ export function SessionQuestionBanner({
     }
   };
 
+  /** Next: an answerable step must be answered before the card moves on; reading moves freely. */
+  const next = () => {
+    if (lastStep || busy !== null) return;
+    if (answerable && question && errorFor(question) !== undefined) {
+      showErrors([question]);
+      return;
+    }
+    goToStep(step + 1);
+  };
+  const back = () => {
+    if (step > 0 && busy === null) goToStep(step - 1);
+  };
+  const advance = () => {
+    if (lastStep) void submit();
+    else next();
+  };
+  const pick = (index: number) => {
+    if (!question || controlsDisabled || question.options.length === 0) return;
+    if (index < question.options.length) {
+      choose(question, index);
+      const control = `question:${question.id}:option:${index}`;
+      afterRender(() => [...stepRef.current?.querySelectorAll<HTMLElement>("[data-session-request-control]") ?? []]
+        .find((candidate) => candidate.dataset.sessionRequestControl === control)?.focus());
+    } else if (index === question.options.length) {
+      choose(question, "other");
+      afterRender(() => stepRef.current?.querySelector<HTMLElement>(".question-input:not(:disabled)")?.focus());
+    }
+  };
+
+  const onKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
+    if (event.defaultPrevented || event.nativeEvent.isComposing) return;
+    const target = event.target as HTMLElement;
+    // A choice row's input takes the card's keys; a field being typed in keeps them.
+    const typing = target.isContentEditable || target.matches("textarea, select") ||
+      (target.tagName === "INPUT" && !["radio", "checkbox"].includes((target as HTMLInputElement).type));
+    if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey) {
+      if (!interactive) return;
+      event.preventDefault();
+      void submit();
+      return;
+    }
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    if (event.key === "Enter") {
+      // A button, link or disclosure keeps its own Enter.
+      if (!interactive || target.closest("button, a[href], summary")) return;
+      event.preventDefault();
+      if (!event.repeat) advance();
+      return;
+    }
+    if (typing || event.repeat) return;
+    if (/^[1-9]$/.test(event.key)) {
+      if (!answerable) return;
+      event.preventDefault();
+      pick(Number(event.key) - 1);
+      return;
+    }
+    if (event.key === "d" || event.key === "D") {
+      event.preventDefault();
+      void dismiss();
+    }
+  };
+
+  const availability = responseRefusal ?? (runnerOnline ? null : QUESTION_CARD_COPY.runnerOffline);
+  const sharedDescriptions = [
+    recoveryRequired ? recoveryId : null,
+    availability ? availabilityId : null,
+    unsupportedQuestionFormat ? unsupportedId : null,
+  ].filter((id): id is string => id !== null);
+  const actionDescription = [availability ? availabilityId : null, unsupportedQuestionFormat ? unsupportedId : null]
+    .filter(Boolean).join(" ") || undefined;
+  const eyebrow = question ? questionEyebrowParts(question) : { header: null, hint: null };
+  const headerId = `${labelPrefix}-header-${step}`;
+  const keyHints = showKeyHints && interactive;
+  const kindLabel = recoveryRequired ? QUESTION_CARD_COPY.recoveryRequired
+    : isAsync ? QUESTION_CARD_COPY.asyncQuestion : QUESTION_CARD_COPY.question;
+  const failureText = failure?.action === "dismiss" ? QUESTION_CARD_COPY.notDismissed : QUESTION_CARD_COPY.notSent;
+  const submitLabel = failure?.action === "submit" ? QUESTION_CARD_COPY.tryAgain : QUESTION_CARD_COPY.submitAnswers;
+  const navigateOnly = !answerable;
+
   return (
     <section
-      className={`question-bar question-style-${responseStyle}`}
-      aria-label="Agent Questions"
+      className={`request-card question-card question-bar question-style-${responseStyle}`}
+      data-request-kind="question"
+      data-tone={recoveryRequired ? "danger" : undefined}
+      aria-label={QUESTION_CARD_COPY.agentQuestions}
       aria-busy={busy !== null}
-      onKeyDown={(event) => {
-        if (responseStyle !== "interactive" || event.key !== "Enter" || (!event.ctrlKey && !event.metaKey)) return;
-        event.preventDefault();
-        void submit();
-      }}
+      onKeyDown={onKeyDown}
     >
-      <div className="question-main">
-        <span className="question-icon" aria-hidden="true">❓</span>
-        <span className="question-title">
-          {isAsync ? "Async Agent Question" : recoveryRequired
-            ? "Agent Question Recovery Required"
-            : `The agent has ${questions.length === 1 ? "a question" : `${questions.length} questions`}`}
-          {!runnerOnline && <span className="muted"> · Runner Offline</span>}
-        </span>
-        <div className="question-actions">
-          <button
-            className="btn ghost sm"
-            type="button"
+      <RequestCardHead kind={<><QuestionIcon />{kindLabel}</>} owner={owner} time={createdAt} />
+      {(eyebrow.header || eyebrow.hint) && (
+        <p className="question-eyebrow">
+          {eyebrow.header && <span id={headerId}>{eyebrow.header}</span>}
+          {eyebrow.hint && <span>{eyebrow.hint}</span>}
+        </p>
+      )}
+      <div
+        ref={titleRef}
+        className="request-card-title question-text"
+        role="heading"
+        aria-level={3}
+        id={titleId}
+        tabIndex={-1}
+        // A card that can be answered here names its question as the landing place: it is read
+        // before it is answered. Composer Response answers in the composer, and a card nobody can
+        // answer now leaves focus to the next enabled control or the composer.
+        data-session-request-focus={interactive && responsesAvailable ? "" : undefined}
+      >
+        {question ? <StructuredQuestionText>{question.question}</StructuredQuestionText> : QUESTION_CARD_COPY.noDetails}
+      </div>
+      <div className="request-card-body question-list" ref={stepRef}>
+        {recoveryRequired && (
+          <p className="question-recovery" id={recoveryId}>
+            {recoveryCanResume ? QUESTION_CARD_COPY.recoveryResume : QUESTION_CARD_COPY.recoveryDismiss}
+          </p>
+        )}
+        {question && (
+          <QuestionStep
+            key={`${answerKey}:${question.id}`}
+            question={question}
+            ids={{
+              header: eyebrow.header ? headerId : undefined,
+              title: titleId,
+              context: `${labelPrefix}-context-${step}`,
+              requirement: `${labelPrefix}-requirement-${step}`,
+              error: `${labelPrefix}-error-${step}`,
+              somethingElse: `${labelPrefix}-something-else-${step}`,
+            }}
+            responseStyle={responseStyle}
+            draft={draftValue(question.id)}
+            error={attempted.has(question.id) ? errorFor(question) : undefined}
+            disabled={controlsDisabled}
+            inputDisabled={controlsDisabled}
+            describedBy={sharedDescriptions}
+            showKeyHints={keyHints && answerable}
+            onChoose={(choice) => choose(question, choice)}
+            onText={(value) => updateDraft(question, { kind: "other", value })}
+          />
+        )}
+      </div>
+      {failure && (
+        <Notice tone="danger" compact role="alert"
+          details={failure.detail !== QUESTION_CARD_COPY.alreadySending ? failure.detail : undefined}>
+          {failure.detail === QUESTION_CARD_COPY.alreadySending ? failure.detail : failureText}
+        </Notice>
+      )}
+      {(availability || unsupportedQuestionFormat || !interactive) && (
+        <div className="request-card-reasons">
+          {/* The live line below announces it; this is the same words, for the eye. */}
+          {availability && <p aria-hidden="true">{availability}</p>}
+          {unsupportedQuestionFormat && <p id={unsupportedId}>{QUESTION_CARD_COPY.unsupported}</p>}
+          {!interactive && questions.length > 0 && !recoveryRequiresDismiss && <p>{QUESTION_CARD_COPY.answerInComposer}</p>}
+        </div>
+      )}
+      <span className="sr-only" id={availabilityId} role="status" aria-atomic="true">{availability ?? ""}</span>
+      <div className="request-card-foot">
+        {!recoveryRequiresDismiss && (
+          <BusyButton
+            className="btn ghost question-dismiss"
+            busy={busy === "dismiss"}
+            progress={QUESTION_CARD_COPY.dismissing}
             data-session-request-control="dismiss"
-            aria-describedby={!responsesAvailable ? availabilityId : undefined}
-            disabled={busy !== null || !responsesAvailable}
+            aria-describedby={availability ? availabilityId : undefined}
+            disabled={busy === "submit" || !responsesAvailable}
             onClick={() => void dismiss()}
           >
-            {busy === "dismiss" ? "Dismissing…" : recoveryRequired ? "Dismiss and Continue" : "Dismiss"} {showKeyHints && busy === null && <kbd>D</kbd>}
+            {recoveryRequired ? QUESTION_CARD_COPY.dismissAndContinue : QUESTION_CARD_COPY.dismiss}
+            {showKeyHints && <kbd aria-hidden="true">D</kbd>}
+          </BusyButton>
+        )}
+        {stepCount > 1 && (
+          <span className="question-step-note">
+            {questionStepLabel(step, stepCount)}
+            <span className="question-step-dots" aria-hidden="true">
+              {questions.map((candidate, index) => (
+                <span key={candidate.id} className={index === step ? "is-current" : undefined} />
+              ))}
+            </span>
+          </span>
+        )}
+        {step > 0 && (
+          <button type="button" className="btn" data-session-request-control="back" disabled={busy !== null} onClick={back}>
+            {QUESTION_CARD_COPY.back}
           </button>
-          {responseStyle === "interactive" && questions.length > 0 && !recoveryRequiresDismiss && (
-            <button
-              className="btn sm primary"
-              type="button"
-              data-session-request-control="submit"
-              aria-describedby={!responsesAvailable ? availabilityId : undefined}
-              disabled={busy !== null || !responsesAvailable || !complete}
-              onClick={() => void submit()}
-            >
-              {busy === "submit" ? "Submitting…" : "Submit"}
-            </button>
-          )}
-        </div>
+        )}
+        {!lastStep && (
+          <button
+            type="button"
+            className={navigateOnly ? "btn" : "btn primary"}
+            data-session-request-control="next"
+            disabled={busy !== null}
+            onClick={next}
+          >
+            {QUESTION_CARD_COPY.next}
+            {keyHints && answerable && <kbd aria-hidden="true">Enter</kbd>}
+          </button>
+        )}
+        {lastStep && interactive && questions.length > 0 && !recoveryRequiresDismiss && (
+          <BusyButton
+            className="btn primary"
+            busy={busy === "submit"}
+            progress={QUESTION_CARD_COPY.sending}
+            data-session-request-control="submit"
+            aria-describedby={actionDescription}
+            disabled={busy === "dismiss" || !answerable}
+            onClick={() => void submit()}
+          >
+            {submitLabel}
+            {keyHints && answerable && <kbd aria-hidden="true">Enter</kbd>}
+          </BusyButton>
+        )}
+        {recoveryRequiresDismiss && (
+          <BusyButton
+            className="btn primary"
+            busy={busy === "dismiss"}
+            progress={QUESTION_CARD_COPY.dismissing}
+            data-session-request-control="dismiss"
+            aria-describedby={availability ? availabilityId : undefined}
+            disabled={!responsesAvailable}
+            onClick={() => void dismiss()}
+          >
+            {QUESTION_CARD_COPY.dismissAndContinue}
+            {showKeyHints && <kbd aria-hidden="true">D</kbd>}
+          </BusyButton>
+        )}
       </div>
-      <div id={availabilityId} className="question-availability" role="status" aria-atomic="true">
-        {responseRefusal ?? (runnerOnline ? "" : "Responses are unavailable until the runner reconnects.")}
-      </div>
-      {recoveryRequired && (
-        <div className="question-recovery" id={recoveryId} role="status">
-          {recoveryCanResume
-            ? "The runner restarted after this question was asked. Submit the preserved form to resume the existing agent conversation and deliver these answers once. Prior tool calls will not be replayed."
-            : "The runner restarted after this question was asked, so its original answer channel is no longer available. Review the preserved question, then dismiss it and send a new prompt to continue safely. No prior tool calls will be replayed."}
-        </div>
-      )}
-      {responseStyle === "composer" && questions.length > 0 && !recoveryRequiresDismiss && (
-        <div className="question-submit-hint">
-          Respond through Answer Mode in the Session composer. Press R or use <code>/respond</code>.
-        </div>
-      )}
-      {responseStyle === "interactive" && responsesAvailable && busy === null && questions.length > 0 && !complete && !recoveryRequiresDismiss && (
-        <div className="question-submit-hint">
-          {unsupportedQuestionFormat
-            ? "This question format is unsupported. Dismiss the question to continue."
-            : validationAttempted || Object.keys(resolved.errors).some((id) => questionDraftText(draftValue(id)).trim())
-              ? "Correct the response errors before submitting."
-              : "Complete all required responses before submitting."}
-        </div>
-      )}
-      <div className="question-list">
-        {questions.map((question, questionIndex) => {
-          const questionLabelId = `${labelPrefix}-question-${questionIndex}`;
-          const responseLabelId = `${labelPrefix}-response-${questionIndex}`;
-          const contextId = `${labelPrefix}-context-${questionIndex}`;
-          const requirementId = `${labelPrefix}-requirement-${questionIndex}`;
-          const responseErrorId = `${labelPrefix}-response-error-${questionIndex}`;
-          const offeredChoicesId = `${labelPrefix}-offered-choices-${questionIndex}`;
-          const draft = draftValue(question.id);
-          const rawValue = questionDraftText(draft);
-          const selected = questionDraftSelections(question, draft);
-          const responseError = Object.hasOwn(resolved.errors, question.id) ? resolved.errors[question.id] : undefined;
-          const showResponseError = Boolean(responseError && (validationAttempted || rawValue.trim()));
-          const controlDescriptionIds = [
-            question.context ? contextId : null,
-            requirementId,
-            recoveryRequired ? recoveryId : null,
-            !responsesAvailable ? availabilityId : null,
-          ]
-            .filter((value): value is string => value !== null);
-          const inputDescriptionIds = [...controlDescriptionIds, showResponseError ? responseErrorId : null]
-            .filter((value): value is string => value !== null)
-            .join(" ");
-          return (
-            <div
-              className="question-block"
-              key={question.id}
-              ref={(element) => { questionBlockRefs.current.set(question.id, element); }}
-            >
-              <div className="question-text" id={questionLabelId}>
-                {question.header && <span className="question-chip">{question.header}</span>}
-                <StructuredQuestionText>{question.question}</StructuredQuestionText>
-                {question.multiSelect && <span className="muted sm"> (select all that apply)</span>}
-              </div>
-              <span className="sr-only" id={requirementId}>
-                {question.required === false ? "This question is optional." : "An answer to this question is required."}
-              </span>
-              {question.context && (
-                <div className="question-context" id={contextId}>
-                  <StructuredQuestionText>{question.context}</StructuredQuestionText>
-                </div>
-              )}
-              {responseStyle === "interactive" && question.options.length > 0 && (
-                <div
-                  className="question-options"
-                  role={question.multiSelect ? "group" : "radiogroup"}
-                  aria-labelledby={questionLabelId}
-                  aria-describedby={inputDescriptionIds}
-                  aria-required={question.multiSelect ? undefined : question.required !== false}
-                  onKeyDown={question.multiSelect ? undefined : (event) => handleRovingChoiceKeyDown(
-                    event,
-                    "radio",
-                    { includeAriaDisabled: !responsesAvailable, activate: responsesAvailable },
-                  )}
-                >
-                  {question.options.map((option, optionIndex) => {
-                    const on = selected.includes(option.label);
-                    return (
-                      <button
-                        key={option.label}
-                        type="button"
-                        data-session-request-control={`question:${question.id}:option:${optionIndex}`}
-                        role={question.multiSelect ? "checkbox" : "radio"}
-                        aria-checked={on}
-                        aria-disabled={controlsDisabled || undefined}
-                        disabled={fixedChoicesNativelyDisabled}
-                        tabIndex={fixedChoicesNativelyDisabled
-                          ? -1
-                          : question.multiSelect ? 0 : on || (selected.length === 0 && optionIndex === 0) ? 0 : -1}
-                        className={`question-option${on ? " on" : ""}`}
-                        title={option.description}
-                        onClick={() => { if (!controlsDisabled) toggle(question, option.label); }}
-                      >
-                        <span className="question-mark" aria-hidden="true">{question.multiSelect ? (on ? "☑" : "☐") : on ? "●" : "○"}</span>
-                        <span>
-                          <span className="question-label">{option.label}</span>
-                          {option.description && <span className="question-desc">{option.description}</span>}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-              {responseStyle === "interactive" && isAnswerableAgentQuestion(question) && (
-                <label className="question-input-label">
-                  <span id={responseLabelId}>{question.options.length > 0 ? "Other Response" : "Response"}</span>
-                  {question.required === false && <span className="muted sm"> (optional)</span>}
-                  <input
-                    className="input question-input"
-                    data-session-request-control={`question:${question.id}:input`}
-                    aria-labelledby={`${questionLabelId} ${responseLabelId}`}
-                    aria-describedby={inputDescriptionIds}
-                    aria-invalid={showResponseError ? true : undefined}
-                    aria-required={question.options.length === 0 ? question.required !== false : undefined}
-                    required={question.options.length === 0 && question.required !== false}
-                    disabled={controlsDisabled}
-                    type={question.secret
-                      ? "password"
-                      : question.inputFormat === "date-time"
-                        ? "datetime-local"
-                        : question.inputFormat === "integer" || question.inputFormat === "number"
-                          ? "number"
-                          : question.inputFormat ?? "text"}
-                    inputMode={question.inputFormat === "integer" ? "numeric" : question.inputFormat === "number" ? "decimal" : undefined}
-                    step={question.inputFormat === "integer" ? 1 : question.inputFormat === "number" ? "any" : undefined}
-                    min={question.minimum}
-                    max={question.maximum}
-                    minLength={question.minLength}
-                    maxLength={question.maxLength ?? DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH}
-                    value={draft?.kind === "other" || (draft?.kind === "entry"
-                      && (question.options.length === 0 || (!question.multiSelect && question.allowOther && selected.length === 0)))
-                      ? rawValue : ""}
-                    autoComplete="off"
-                    onChange={(event) => updateDraft(question, { kind: "other", value: event.target.value })}
-                  />
-                  {showResponseError && (
-                    <span className="form-error question-field-error" id={responseErrorId} role="alert">
-                      {responseError}
-                    </span>
-                  )}
-                </label>
-              )}
-              {responseStyle === "composer" && question.options.length > 0 && (
-                <>
-                  <ol className="question-text-options" id={offeredChoicesId} aria-label="Offered Choices">
-                    {question.options.map((option) => (
-                      <li key={option.label}>
-                        <span className="question-label">{option.label}</span>
-                        {option.description && <span className="question-desc">{option.description}</span>}
-                      </li>
-                    ))}
-                  </ol>
-                </>
-              )}
-            </div>
-          );
-        })}
-      </div>
-      {error && <div className="form-error" role="alert">Could not answer the question: {error}</div>}
     </section>
   );
 }

@@ -38,6 +38,8 @@ const shouldFail = params.get("failure") === "1";
 const renderInFallbackSlot = params.get("slot") === "1";
 const recoveryRequired = params.get("recovery") === "1";
 const recoveryCanResume = recoveryRequired && params.get("resume") === "1";
+// Keycaps are a fine pointer's hints; the session shows them where a keyboard is likely (#2196).
+const showKeyHints = params.get("keys") === "1";
 let shouldHold = params.get("hold") === "1";
 let releasePending: (() => void) | null = null;
 
@@ -251,7 +253,9 @@ function Fixture() {
       recoveryAction={recoveryCanResume ? "resume_answer" : undefined}
       runnerOnline={runnerOnline}
       onSessionUpdate={() => setResolved(true)}
-      showKeyHints={false}
+      showKeyHints={showKeyHints}
+      owner="Claude Code"
+      createdAt={askedAt}
     />
   );
   const composerContent = !resolved && responseStyle === "composer" && (!recoveryRequired || recoveryCanResume) ? (

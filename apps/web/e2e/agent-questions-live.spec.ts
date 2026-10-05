@@ -149,7 +149,7 @@ async function expectQuestionControlsInsideCard(page: Page): Promise<void> {
   await card.scrollIntoViewIfNeeded();
 
   const rects = await page.locator(
-    ".question-list, .question-block, .question-text, .question-option, .question-input",
+    ".question-list, .question-step, .question-text, .choice-row, .question-input",
   ).evaluateAll((elements) =>
     elements.map((element) => ({
       className: element.className,
@@ -416,14 +416,11 @@ for (const style of ["interactive", "composer"] as const) test(`Claude AskUserQu
 
     await expect(page.getByRole("region", { name: "Agent Questions" })).toBeVisible();
     if (style === "interactive") {
-      const submit = page.getByRole("button", { name: "Submit" });
-      await expect(submit).toBeDisabled();
       await page.getByRole("radio", { name: /Canary/ }).click();
-      await expect(submit).toBeDisabled();
+      await page.getByRole("button", { name: "Next", exact: true }).click();
       await page.getByRole("checkbox", { name: /Unit Tests/ }).click();
       await page.getByRole("checkbox", { name: /Browser Tests/ }).click();
-      await expect(submit).toBeEnabled();
-      await submit.click();
+      await page.getByRole("button", { name: "Submit Answers" }).click();
     } else {
       const response = page.locator(".composer-answer-input");
       await response.fill("1");
@@ -486,12 +483,10 @@ for (const style of ["interactive", "composer"] as const) test(`Codex structured
 
     await expect(page.getByRole("region", { name: "Agent Questions" })).toBeVisible();
     if (style === "interactive") {
-      const submit = page.getByRole("button", { name: "Submit" });
-      await expect(submit).toBeDisabled();
       await page.getByRole("radio", { name: /Staging/ }).click();
+      await page.getByRole("button", { name: "Next", exact: true }).click();
       await page.getByRole("textbox", { name: /Release Note/ }).fill("Ship after checks pass");
-      await expect(submit).toBeEnabled();
-      await submit.click();
+      await page.getByRole("button", { name: "Submit Answers" }).click();
     } else {
       const response = page.locator(".composer-answer-input");
       await response.fill("1");
@@ -563,13 +558,13 @@ for (const viewport of [
     await expect(page.locator(".tl-agent-msg")).toHaveCount(1);
     await expect(page.locator(".tl-agent-msg")).toContainText("I will keep investigating.");
     const card = page.getByRole("region", { name: "Agent Questions" });
-    await expect(card).toContainText("Async Agent Question");
+    await expect(card.locator(".request-card-kind")).toHaveText("Async Question");
     await page.reload();
-    await expect(card).toContainText("Async Agent Question");
+    await expect(card.locator(".request-card-kind")).toHaveText("Async Question");
     if (viewport.name === "desktop") {
       await stack.restart();
       await page.reload();
-      await expect(card).toContainText("Async Agent Question");
+      await expect(card.locator(".request-card-kind")).toHaveText("Async Question");
     }
     const evidenceDir = process.env.WOLLIPOG_ISSUE_1602_EVIDENCE_DIR;
     if (evidenceDir) {
@@ -580,7 +575,7 @@ for (const viewport of [
       }
     }
     await card.getByRole("radio", { name: "Patch" }).click();
-    await card.getByRole("button", { name: "Submit" }).click();
+    await card.getByRole("button", { name: "Submit Answers" }).click();
     await expect.poll(async () => {
       try { return JSON.parse(await readFile(stack.receiptPath, "utf8")); }
       catch { return null; }
@@ -789,16 +784,19 @@ for (const provider of ["claude", "codex"] as const) {
           const card = page.getByRole("region", { name: "Agent Questions" });
           await expect(card).toBeVisible();
           await expect(card).toHaveCount(1);
-          await expect(page.getByText("Agent Question Recovery Required")).toBeVisible();
+          await expect(card.locator(".request-card-kind")).toHaveText("Recovery Required");
           await expect(page.getByText(/resume the existing agent conversation and deliver these answers once/)).toBeVisible();
           if (style === "interactive") {
-            const submit = page.getByRole("button", { name: "Submit" });
+            const submit = page.getByRole("button", { name: "Submit Answers" });
+            const next = page.getByRole("button", { name: "Next", exact: true });
             if (provider === "claude") {
               await page.getByRole("radio", { name: /Canary/ }).click();
+              await next.click();
               await page.getByRole("checkbox", { name: /Unit Tests/ }).click();
               await page.getByRole("checkbox", { name: /Browser Tests/ }).click();
             } else {
               await page.getByRole("radio", { name: /Staging/ }).click();
+              await next.click();
               await page.getByRole("textbox", { name: /Release Note/ }).fill("Ship after checks pass");
             }
             await expect(submit).toBeEnabled();
@@ -924,51 +922,56 @@ for (const viewport of [
         await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
         await page.reload();
 
-        const submit = page.getByRole("button", { name: "Submit" });
+        const submit = page.getByRole("button", { name: "Submit Answers" });
+        const next = page.getByRole("button", { name: "Next", exact: true });
         const mergeNow = page.getByRole("radio", { name: /Merge Now \(Recommended\)/ });
         const leaveOpen = page.getByRole("radio", { name: /Leave Open/ });
         const deleteBranch = page.getByRole("radio", { name: /Delete Branch \(Recommended\)/ });
         const keepBranch = page.getByRole("radio", { name: /Keep Branch/ });
-        const otherResponses = page.getByLabel("Other Response");
-        await expect(page.getByRole("region", { name: "Agent Questions" })).toBeVisible();
-        await expect(page.getByRole("region", { name: "Agent Questions" })).toHaveCount(1);
+        const somethingElse = page.getByRole("radio", { name: "Something Else…" });
+        const customResponse = page.locator(".question-input");
+        const card = page.getByRole("region", { name: "Agent Questions" });
+        await expect(card).toBeVisible();
+        await expect(card).toHaveCount(1);
         await expect(page.locator(".tl-question")).toHaveCount(0);
-        await expect(page.getByRole("region", { name: "Agent Questions" })
+        await expect(card
           .locator("xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' detail-scroll ')][1]"))
           .toHaveCount(1);
         await expect(page.getByLabel("Queued Messages").locator(".queue-row")).toHaveCount(queuedMessages.length);
         await expect(page.getByLabel("Queued Messages").locator(".queue-text")).toHaveText(queuedMessages);
         await expectQuestionControlsInsideCard(page);
-        await expect(page.getByRole("region", { name: "Agent Questions" })
-          .getByText("Should I squash-merge pull request #342 now?", { exact: false })).toBeVisible();
+        await expect(card.getByText("Should I squash-merge pull request #342 now?", { exact: false })).toBeVisible();
+        await expect(card.locator(".question-step-note")).toContainText("Question 1 of 2");
         await expect(mergeNow).toBeVisible();
         await expect(leaveOpen).toBeVisible();
         await expect(mergeNow).toBeInViewport();
         await expect(leaveOpen).toBeInViewport();
-        await expect(otherResponses).toHaveCount(2);
-        await expect(submit).toBeDisabled();
+        await expect(customResponse).toHaveCount(0);
+        await expect(submit).toHaveCount(0);
 
-        await otherResponses.nth(0).fill("Merge after another review");
-        await expect(submit).toBeDisabled();
+        await somethingElse.click();
+        await customResponse.fill("Merge after another review");
         await mergeNow.focus();
         await page.keyboard.press("Space");
-        await expect(mergeNow).toHaveAttribute("aria-checked", "true");
-        await expect(otherResponses.nth(0)).toHaveValue("");
-        await expect(submit).toBeDisabled();
+        await expect(mergeNow).toBeChecked();
+        await expect(customResponse).toHaveCount(0);
+        if (viewport.touch) await next.tap();
+        else await next.click();
 
+        await expect(card.getByText("Should I delete the remote branch after merging?", { exact: false })).toBeVisible();
+        await expect(card.locator(".question-step-note")).toContainText("Question 2 of 2");
         await deleteBranch.scrollIntoViewIfNeeded();
-        await expect(page.getByRole("region", { name: "Agent Questions" })
-          .getByText("Should I delete the remote branch after merging?", { exact: false })).toBeVisible();
         await expect(deleteBranch).toBeVisible();
         await expect(keepBranch).toBeVisible();
         await keepBranch.scrollIntoViewIfNeeded();
         await expect(deleteBranch).toBeInViewport();
         await expect(keepBranch).toBeInViewport();
-        await otherResponses.nth(1).fill("Keep it for a follow-up");
+        await somethingElse.click();
+        await customResponse.fill("Keep it for a follow-up");
         if (viewport.touch) await deleteBranch.tap();
         else await deleteBranch.click();
-        await expect(deleteBranch).toHaveAttribute("aria-checked", "true");
-        await expect(otherResponses.nth(1)).toHaveValue("");
+        await expect(deleteBranch).toBeChecked();
+        await expect(customResponse).toHaveCount(0);
         await expect(submit).toBeEnabled();
         if (viewport.touch) await submit.tap();
         else await submit.click();
@@ -1019,11 +1022,14 @@ for (const provider of ["claude", "codex"] as const) {
         await page.goto(`/agent-questions-live-e2e.html#${fragment}`);
         const answers = provider === "claude" ? ["Regional canary", "Unit Tests"] : ["Canary", "Custom release note"];
         if (style === "interactive") {
-          const inputs = page.locator('.question-input');
-          await expect(inputs).toHaveCount(2);
-          await inputs.nth(0).fill(answers[0]!);
-          await inputs.nth(1).fill(answers[1]!);
-          await page.getByRole("button", { name: "Submit", exact: true }).click();
+          const input = page.locator(".question-input");
+          await expect(input).toHaveCount(0);
+          await page.getByRole("radio", { name: "Something Else…" }).click();
+          await input.fill(answers[0]!);
+          await page.getByRole("button", { name: "Next", exact: true }).click();
+          if (provider === "claude") await page.getByRole("checkbox", { name: "Something Else…" }).click();
+          await input.fill(answers[1]!);
+          await page.getByRole("button", { name: "Submit Answers", exact: true }).click();
         } else {
           const input = page.locator('.composer-answer-input');
           await page.getByRole("button", { name: "Other Response", exact: true }).click();
