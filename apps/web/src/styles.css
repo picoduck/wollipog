@@ -5749,13 +5749,6 @@ textarea {
   .request-card[data-presentation="dock"] .request-card-foot { flex-wrap: nowrap; }
   /* Except beside a tertiary: the rest wrap under it rather than push it off the card's edge. */
   .request-card[data-presentation="dock"] .request-card-foot:has(> .request-card-tertiary) { flex-wrap: wrap; }
-  /* A sign-in's Dismiss Recovery and Choose Another Account… overflow into ⋯ (§3.1) where all three
-     would not fit one row, so the footer stays one row and the body keeps its room. */
-  .request-card-foot > [data-phone-overflow] { display: none; }
-}
-/* The ⋯ that holds them exists only on a phone. */
-@media (min-width: 761px) {
-  .request-card-foot > .request-card-phone-more { display: none; }
 }
 /* In the Requests panel the detail scrolls as one page, so a short panel never squeezes the card's
    body away; the footer sticks to the panel's lower edge on the card's own wash. */

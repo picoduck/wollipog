@@ -22,6 +22,8 @@ import { BusyButton } from "../ui/BusyButton.js";
 import { ChoiceRows } from "../ui/ChoiceControls.js";
 import { CopyButton } from "../common.js";
 import { ProviderLoginCard } from "../ProviderLoginCard.js";
+import { useIsMobile } from "../useIsMobile.js";
+import { useRemovedFocus } from "../useRemovedFocus.js";
 import {
   AuthenticationRecoveryPanel,
   SIGN_IN_COPY,
@@ -189,7 +191,22 @@ export function RequestCard({
   const [choosingAccount, setChoosingAccount] = useState(false);
   // Dismiss Recovery, Choose Another Account… and a primary do not fit one phone row; there the first
   // two overflow into ⋯ (§3.1) rather than wrap the footer and squeeze the body under the dock's cap.
-  const phoneOverflow = signIn && tertiary !== null && canChooseAccount;
+  // The layout comes from the phone query, so only one set of these controls exists at a time.
+  const isPhone = useIsMobile();
+  const phoneOverflow = signIn && tertiary !== null && canChooseAccount && isPhone;
+  const cardRef = useRef<HTMLElement | null>(null);
+  const chooseRef = useRef<HTMLButtonElement | null>(null);
+  const removedFocus = useRemovedFocus(cardRef, "[data-request-card-menu]");
+  const wasPhoneOverflow = useRef(phoneOverflow);
+  useLayoutEffect(() => {
+    if (wasPhoneOverflow.current === phoneOverflow) return;
+    wasPhoneOverflow.current = phoneOverflow;
+    // Crossing 760px swaps Dismiss Recovery and Choose Another Account… for the ⋯ that holds them, or
+    // back. The ⋯'s menu goes with its trigger, and focus held by a swapped control (or the open menu)
+    // moves to the control that now offers the same choices, rather than to nowhere.
+    if (!phoneOverflow && menuOptions.length === 0) setMenuOpen(false);
+    if (removedFocus()) (phoneOverflow ? menu.triggerRef.current : chooseRef.current)?.focus({ preventScroll: true });
+  });
   // The sign-in method chosen among several; the first until the person picks another.
   const [chosenMethod, setChosenMethod] = useState<string | null>(null);
   const method = methods.find((option) => option.optionId === chosenMethod) ?? methods[0] ?? null;
@@ -199,12 +216,11 @@ export function RequestCard({
     if (requestOptionForIntent(request.options, "deny") === option) return "D";
     return null;
   };
-  const optionButton = (option: PermissionOption, variant: "primary" | "secondary" | "tertiary", phoneHidden = false) => {
+  const optionButton = (option: PermissionOption, variant: "primary" | "secondary" | "tertiary") => {
     const hint = keyHint(option);
     return (
       <BusyButton
         key={option.optionId}
-        data-phone-overflow={phoneHidden || undefined}
         className={variant === "primary" ? "btn primary" : variant === "tertiary" ? "btn ghost request-card-tertiary" : "btn"}
         busy={busy === option.optionId}
         progress={REQUEST_CARD_COPY.sending}
@@ -313,6 +329,7 @@ export function RequestCard({
 
   return (
     <section
+      ref={cardRef}
       className="request-card"
       data-presentation={presentation}
       data-request-kind={meta.kind}
@@ -344,15 +361,15 @@ export function RequestCard({
         </div>
       )}
       <div className="request-card-foot">
-        {tertiary && optionButton(tertiary, "tertiary", phoneOverflow)}
+        {tertiary && !phoneOverflow && optionButton(tertiary, "tertiary")}
         {footerSecondary.map((option) => optionButton(option, "secondary"))}
-        {canChooseAccount && (
+        {canChooseAccount && !phoneOverflow && (
           // #2208 opens its Choose Another Account dialog from here; until then the card lists the
           // Machine's other accounts in its body.
           <button
             type="button"
+            ref={chooseRef}
             className="btn"
-            data-phone-overflow={phoneOverflow || undefined}
             aria-expanded={choosingAccount}
             aria-controls={choosingAccount ? accountsId : undefined}
             disabled={busy !== null || reason !== null}
@@ -367,7 +384,7 @@ export function RequestCard({
             <button
               ref={menu.triggerRef}
               type="button"
-              className={menuOptions.length === 0 ? "icon-btn request-card-phone-more" : "icon-btn"}
+              className="icon-btn"
               aria-label={REQUEST_CARD_COPY.moreChoices}
               title={signIn ? undefined : REQUEST_CARD_COPY.moreChoices}
               aria-haspopup="menu"
@@ -410,10 +427,11 @@ export function RequestCard({
                 ))}
                 {phoneOverflow && (
                   <MenuItem
-                    aria-disabled={reason !== null || undefined}
+                    aria-disabled={busy !== null || reason !== null || undefined}
                     aria-describedby={reason !== null ? reasonId : undefined}
                     onClick={() => {
-                      if (reason !== null) return;
+                      // As the footer's button: not while a decision is sent, nor when nobody can act.
+                      if (busy !== null || reason !== null) return;
                       menu.close(true);
                       setChoosingAccount((open) => !open);
                     }}

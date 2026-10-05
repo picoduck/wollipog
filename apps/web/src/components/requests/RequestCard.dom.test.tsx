@@ -110,10 +110,9 @@ async function render(element: React.ReactElement, client: Partial<ApiClient> = 
   };
 }
 
-/** The footer as a person reads it on a desktop: each control's name, in order, and which is the
- * primary. The phone-only ⋯ (`.request-card-phone-more`, hidden by CSS above 760px) is left out. */
+/** The footer as a person reads it: each control's name, in order, and which is the primary. */
 function footer(container: HTMLElement): string[] {
-  return [...container.querySelectorAll<HTMLButtonElement>(".request-card-foot > button:not(.request-card-phone-more)")].map((button) =>
+  return [...container.querySelectorAll<HTMLButtonElement>(".request-card-foot > button")].map((button) =>
     `${button.getAttribute("aria-label") ?? button.textContent}${button.classList.contains("primary") ? " (primary)" : ""}`);
 }
 
@@ -542,32 +541,70 @@ test("Check Again on the Last Checked fact runs the runner's recheck; Dismiss Re
   }
 });
 
-test("on a phone, Dismiss Recovery and Choose Another Account… overflow into ⋯ beside the one primary", async () => {
+test("on a phone, Dismiss Recovery and Choose Another Account… overflow into ⋯, and focus follows a crossing", async () => {
   const decisions: unknown[] = [];
+  let settle: () => void = () => undefined;
   const request = recovery([AUTH.acceptCurrent, AUTH.revalidate, AUTH.dismiss]);
+  const setViewport = async (width: number) => {
+    await act(async () => { domWindow.happyDOM.setViewport({ width, height: 844 }); await tick(); });
+  };
+  await setViewport(390);
   const view = await renderWithRunner(
     <RequestCard session={signInSession(request)} request={request} runnerOnline presentation="dock" />, {},
-    { approve: async (_id, body) => { decisions.push(body); return signInSession(request); } },
+    {
+      approve: async (_id, body) => {
+        decisions.push(body);
+        if ((body as { optionId: string }).optionId === "auth:accept-current") await new Promise<void>((done) => { settle = done; });
+        return signInSession(request);
+      },
+    },
   );
+  const items = () => [...(domWindow.document.querySelectorAll('[data-request-card-menu] [role="menuitem"]') as unknown as NodeListOf<HTMLElement>)];
+  const button = (name: string) => [...view.container.querySelectorAll<HTMLButtonElement>(".request-card-foot > button")]
+    .find((candidate) => (candidate.getAttribute("aria-label") ?? candidate.textContent) === name);
   try {
-    const foot = view.container.querySelector(".request-card-foot")!;
-    // CSS hides these two below 760px and shows the ⋯ only there.
-    assert.deepEqual([...foot.querySelectorAll("[data-phone-overflow]")].map((button) => button.textContent?.replace(/D$/, "")),
-      ["Dismiss Recovery", "Choose Another Account…"]);
-    const more = foot.querySelector<HTMLButtonElement>(".request-card-phone-more")!;
-    assert.equal(more.getAttribute("aria-label"), "More Choices");
+    assert.deepEqual(footer(view.container), ["More Choices", "Use Current Account (primary)"], "one phone row");
+    const more = button("More Choices")!;
     assert.equal(more.hasAttribute("title"), false, "no button in the sign-in card has a title");
     await act(async () => { more.click(); await tick(); });
-    const items = () => [...domWindow.document.querySelectorAll<HTMLElement>('[data-request-card-menu] [role="menuitem"]')];
     assert.deepEqual(items().map((item) => item.querySelector(".menu-label")?.textContent ?? item.textContent),
       ["Choose Another Account…", "Dismiss Recovery"]);
     await act(async () => { items()[0]!.click(); await tick(); await tick(); });
     assert.ok(view.container.querySelector(".auth-recovery-accounts"), "the menu item opens the other accounts");
+
+    // While a decision is sent, the menu's Choose Another Account… is unavailable, as the button is.
+    await act(async () => { button("Use Current Account")!.click(); await tick(); });
     await act(async () => { more.click(); await tick(); });
-    await act(async () => { items()[1]!.click(); await tick(); });
-    assert.deepEqual(decisions, [{ requestId: "provider-auth:card", optionId: "auth:dismiss" }]);
+    if (items().length === 0) {
+      // The trigger refuses clicks while busy; a keyboard can still open the menu.
+      await act(async () => {
+        more.focus();
+        more.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }) as unknown as Event);
+        await tick();
+      });
+    }
+    const choose = items().find((item) => item.textContent?.startsWith("Choose Another Account…"));
+    assert.equal(choose?.getAttribute("aria-disabled"), "true");
+    await act(async () => { choose?.click(); await tick(); });
+    assert.ok(view.container.querySelector(".auth-recovery-accounts"), "still open: the click did nothing");
+    await act(async () => { settle(); await tick(); await tick(); });
+    await act(async () => { body().dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); await tick(); });
+
+    // Widening with focus in the open phone menu closes it and hands focus to Choose Another Account….
+    await act(async () => { more.click(); await tick(); });
+    if (items().length > 0) await act(async () => { items()[0]!.focus(); await tick(); });
+    await setViewport(1440);
+    assert.equal(items().length, 0, "the menu went with its trigger");
+    assert.deepEqual(footer(view.container), ["Dismiss Recovery", "Choose Another Account…", "Use Current Account (primary)"]);
+    assert.equal(domWindow.document.activeElement?.textContent, "Choose Another Account…");
+
+    // Narrowing with focus on a swapped control hands it to the ⋯.
+    await setViewport(390);
+    assert.equal(domWindow.document.activeElement?.getAttribute("aria-label"), "More Choices");
+    assert.deepEqual(decisions, [{ requestId: "provider-auth:card", optionId: "auth:accept-current" }]);
   } finally {
     await view.unmount();
+    await setViewport(1024);
   }
 });
 
