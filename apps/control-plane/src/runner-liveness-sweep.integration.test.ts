@@ -252,5 +252,29 @@ test(
     assert.equal(child.exitCode, null, `control plane exited after the sweep\n${output}`);
     const health = await fetch(`${httpBase}/healthz`);
     assert.equal(health.status, 200, "healthz still serves after the sweep");
+
+    // Replay frames themselves prove the authenticated transport is alive. Under load, a
+    // heartbeat may sit behind this traffic; it must not turn a busy connection into a reconnect
+    // loop. Exercise real stateful frames, which go through the inventory FIFO rather than the
+    // heartbeat bypass, for several complete liveness deadlines.
+    socket = await openRegisteredRunner(wsBase);
+    const replaySocket = socket;
+    const replay = setInterval(() => {
+      if (replaySocket.readyState === 1) replaySocket.send(JSON.stringify({
+        type: "session_queue", sessionId: SESSION_ID, queue: [],
+      }));
+    }, 100);
+    t.after(() => clearInterval(replay));
+    await delay(2_500);
+    clearInterval(replay);
+    assert.equal(replaySocket.readyState, 1,
+      `the sweep terminated a runner that was continuously sending authenticated replay frames\n${output}`);
+
+    // Activity extends the same finite deadline, not a permanent exemption: once replay and
+    // heartbeats both stop, the ordinary half-open termination still applies.
+    const idleClose = new Promise<number>((resolvePromise) => replaySocket.once("close", resolvePromise));
+    assert.equal(await Promise.race([idleClose, delay(5_000).then(() => {
+      throw new Error("silent runner was not terminated after replay stopped");
+    })]), 1006);
   },
 );

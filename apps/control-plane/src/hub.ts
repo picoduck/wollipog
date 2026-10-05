@@ -306,6 +306,7 @@ export class Hub {
   private readonly maxUiConnectionStartsPerWindow: number;
   private readonly maxUiConnectionStartsGlobalPerWindow: number;
   private readonly runnerSockets = new Map<string, Socket>();
+  private readonly runnerReceiveActivity = new WeakMap<Socket, number>();
   /** In-flight runner request/response calls (git actions), keyed by requestId. */
   private readonly pendingRequests = new Map<string, PendingRequest>();
   /** Ephemeral per-session prompt queue state (runner-reported; never persisted). Overlaid onto the
@@ -398,6 +399,18 @@ export class Hub {
    * socket must be dropped even though it once authenticated as this runner. */
   isCurrentRunnerSocket(runnerId: string, socket: Socket): boolean {
     return this.runnerSockets.get(runnerId) === socket;
+  }
+
+  /** Accepted frames on the current authenticated connection prove transport liveness even
+   * when a heartbeat is behind inventory traffic. Keep this in memory to avoid a durable write
+   * for every replay frame. A replaced socket must never refresh its replacement's deadline. */
+  noteRunnerReceiveActivity(runnerId: string, socket: Socket, now: number): void {
+    if (this.isCurrentRunnerSocket(runnerId, socket)) this.runnerReceiveActivity.set(socket, now);
+  }
+
+  runnerLastReceiveActivity(runnerId: string): number | null {
+    const socket = this.runnerSockets.get(runnerId);
+    return socket ? this.runnerReceiveActivity.get(socket) ?? null : null;
   }
 
   isRunnerOnline(runnerId: string): boolean {

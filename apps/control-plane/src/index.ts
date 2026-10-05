@@ -332,8 +332,8 @@ function parseUiProtocolVersion(query: unknown): number | null {
 }
 const HEARTBEAT_INTERVAL_MS = Number(process.env.CONTROL_PLANE_HEARTBEAT_MS ?? 10_000);
 const RUNNER_PRE_AUTH_TIMEOUT_MS = runnerAuthTimeoutMs(process.env.CONTROL_PLANE_RUNNER_AUTH_TIMEOUT_MS);
-// A runner heartbeat every HEARTBEAT_INTERVAL_MS refreshes last_seen. If none lands within three
-// intervals the socket is presumed half-open (laptop sleep / Wi-Fi drop / NAT rebind leaves it
+// Heartbeats refresh durable last_seen; accepted frames also prove the live connection is active.
+// If neither arrives within three intervals the socket is presumed half-open (sleep / NAT rebind leaves it
 // readyState=OPEN with no FIN/RST): the liveness sweep terminates it so the normal onGone cleanup
 // runs, instead of keeping the runner "online" with lost prompts until the OS TCP timeout fires.
 const RUNNER_HEARTBEAT_TIMEOUT_MS = HEARTBEAT_INTERVAL_MS * 3;
@@ -1781,6 +1781,9 @@ app.register(async (instance) => {
     // Validate both on arrival and at application time; neither unauthenticated nor replaced
     // sockets can accumulate messages that later gain authority.
     if (msg.type !== "register" && (!runnerId || !hub.isCurrentRunnerSocket(runnerId, runnerClient))) return;
+    if (runnerId && msg.type !== "register") {
+      hub.noteRunnerReceiveActivity(runnerId, runnerClient, Date.now());
+    }
     if (runnerFrameBypassesInventory(msg.type)) void handleRunnerFrame(msg);
     else frameQueue.enqueue(msg, raw.byteLength);
   });
@@ -6163,8 +6166,8 @@ artifactMaintenanceTimer.unref();
 // Half-open-socket liveness sweep. A runner whose socket silently died (sleep / Wi-Fi drop / NAT
 // rebind) stays readyState=OPEN with no FIN/RST, so onGone never fires: the runner reads 'online'
 // and its sessions 'running' forever, and prompts written to the dead socket are lost. The app-level
-// heartbeat refreshes last_seen; here we act on it. Any online runner whose socket the hub still
-// holds but whose last_seen is older than RUNNER_HEARTBEAT_TIMEOUT_MS is presumed dead — terminate it
+// Heartbeats refresh last_seen; any accepted frame on the current connection also proves liveness.
+// An online runner with neither activity source within RUNNER_HEARTBEAT_TIMEOUT_MS is presumed dead — terminate it
 // so the EXISTING onGone path (markOffline / failRunnerSessions / shell + box cleanup) runs exactly
 // as for a clean disconnect. pendingStaleClose stops a second terminate before onGone detaches the
 // socket; onGone's own stale-socket guard (detachRunner returning false) keeps cleanup single-shot.
@@ -6183,7 +6186,8 @@ const runnerLivenessTimer = setInterval(() => {
       }
       // connected_at seeds last_seen at registration, so lastSeen is always populated for an online
       // runner; fall back defensively so a null can never read as "infinitely fresh".
-      const lastSeen = runner.lastSeen ?? runner.connectedAt ?? 0;
+      const lastSeen = Math.max(runner.lastSeen ?? runner.connectedAt ?? 0,
+        hub.runnerLastReceiveActivity(runnerId) ?? 0);
       if (now - lastSeen <= RUNNER_HEARTBEAT_TIMEOUT_MS) {
         pendingStaleClose.delete(runnerId);
         continue;
