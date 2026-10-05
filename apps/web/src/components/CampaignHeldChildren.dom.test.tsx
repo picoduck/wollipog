@@ -89,15 +89,20 @@ test("held children list each child's link, hold reason, recovery action, and he
   );
   const view = await mount(list(held, 1));
   try {
-    const section = view.container.querySelector<HTMLElement>("section.campaign-held-children");
+    const section = view.container.querySelector<HTMLElement>("section.notice");
     assert.ok(section);
-    const headingId = section.getAttribute("aria-labelledby");
-    assert.equal(view.container.querySelector(`[id="${headingId}"]`)?.textContent, "Held Children",
-      "the section's accessible name matches its visible Title Case label");
-    const link = section.querySelector<HTMLAnchorElement>("a.campaign-held-child-link");
+    assert.ok(section.classList.contains("t-neutral"), "a hold is neutral status, not a warning");
+    assert.equal(section.querySelector(".notice-title")?.firstChild?.textContent, "Held Children ");
+    assert.equal(section.querySelector(".notice-title .count-badge")?.textContent, "1");
+    assert.equal(section.getAttribute("aria-label"), "Held Children (1)",
+      "the region is named by its visible Title Case title, with the count the badge hides from assistive technology");
+    const heldList = section.querySelector<HTMLElement>("ul.held-children");
+    assert.equal(heldList?.tabIndex, 0, "the list is focusable so a keyboard can scroll it");
+    const link = section.querySelector<HTMLAnchorElement>("a.held-child-link");
     assert.equal(link?.textContent, "Fix #12: Worktree Branch");
     assert.equal(link?.getAttribute("href"), viewPath({ name: "session", id: "child/one" }));
-    const terms = [...section.querySelectorAll("dt")].map((node) => node.textContent);
+    assert.equal(section.querySelectorAll("dl.facts").length, 1, "one facts list per hold");
+    const terms = [...section.querySelectorAll("dl.facts dt")].map((node) => node.textContent);
     assert.deepEqual(terms, ["Hold", "Reason", "Recovery Action", "Held Decision Resumes"]);
     const text = section.textContent ?? "";
     assert.match(text, /Worktree Recovery/);
@@ -126,7 +131,7 @@ test("held children list each child's link, hold reason, recovery action, and he
 
     // The projection drops the child once its hold clears, and the entry goes with it.
     await view.render(list([], 0));
-    assertNoDomNode(view.container.querySelector("section.campaign-held-children"));
+    assertNoDomNode(view.container.querySelector("section.notice"));
   } finally {
     await view.dispose();
   }
@@ -155,12 +160,13 @@ test("held children render an unfamiliar hold kind generically and fall back to 
     />,
   );
   try {
-    const entries = [...view.container.querySelectorAll("li.campaign-held-child")];
+    const entries = [...view.container.querySelectorAll("ul.held-children > li")];
     assert.equal(entries.length, 2);
-    assert.equal(view.container.querySelector(".campaign-held-children-count")?.textContent, "2");
+    assert.equal(view.container.querySelector(".notice-title .count-badge")?.textContent, "2");
+    assert.equal(view.container.querySelector("section.notice")?.getAttribute("aria-label"), "Held Children (2)");
     const second = entries[1]!;
     assert.equal(second.querySelector("a")?.textContent, "child-b");
-    assert.equal(second.querySelector("dl")?.getAttribute("data-hold-kind"), "handoff_barrier");
+    assert.equal(second.querySelector("dl.facts")?.getAttribute("data-hold-kind"), "handoff_barrier");
     assert.match(second.textContent ?? "", /Handoff Barrier/);
     assert.match(second.textContent ?? "", /A prompt is queued behind a handoff barrier\./);
     assert.equal(second.querySelector("dd code")?.textContent, "wollipog session prompt");

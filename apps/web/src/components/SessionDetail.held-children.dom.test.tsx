@@ -152,9 +152,9 @@ test("a campaign parent's session detail lists held children from its projection
     await settle();
     await settle();
 
-    const section = () => container.querySelector<HTMLElement>("section.campaign-held-children");
+    const section = () => container.querySelector<HTMLElement>('.campaign-notices section[aria-label^="Held Children"]');
     assert.ok(section(), "the held-children list renders in the campaign parent's detail");
-    const links = () => [...section()!.querySelectorAll("a.campaign-held-child-link")].map((link) => link.textContent);
+    const links = () => [...section()!.querySelectorAll("a.held-child-link")].map((link) => link.textContent);
     assert.deepEqual(links(), ["Stored\u0000Title", "Polled Title"],
       "store titles map to their own child, and a child missing from the store takes the polled title");
     assert.match(section()!.textContent ?? "", /1 other blocked child is not listed here/);

@@ -2105,6 +2105,11 @@ button.status { cursor: pointer; }
 .notice.compact .notice-body { flex: 1 1 12rem; }
 .notice.compact .notice-actions { margin-top: 0; }
 .notice.compact .notice-dismiss { margin: 0; }
+/* Opened details take the line under the sentence, and the icon stays on the sentence's line, which
+   is as tall as its Show Details toggle. */
+.notice.compact .notice-details-body { flex-basis: 100%; }
+.notice.compact:has(> .notice-content > .notice-details-body) { align-items: start; }
+.notice.compact:has(> .notice-content > .notice-details-body) > .notice-icon { height: var(--control-h-sm); }
 /* The page banner spans the top of the main area (§13.3): no radius, no side edges, a hairline
    in the tone below it. */
 .notice.page-banner {
@@ -5458,10 +5463,11 @@ textarea {
 .session-notice-tone { display: inline-flex; color: var(--tone); }
 .session-notice-more { font-variant-numeric: tabular-nums; }
 @media (max-width: 760px) {
-  /* One action row: the resolving action fills it, a disclosure toggle keeps its own width. */
-  .session-notice-slot .notice-actions { flex-wrap: nowrap; }
-  .session-notice-slot .notice-actions > .btn:first-child:not(.notice-details-toggle) { flex: 1 1 auto; max-width: none; }
-  .session-notice-slot .notice-actions > .notice-details-toggle { flex: none; }
+  /* One action row: the resolving action fills it, a disclosure toggle keeps its own width. The
+     campaign notices under the session bar follow the same rule (#2157). */
+  :is(.session-notice-slot, .campaign-notices) .notice-actions { flex-wrap: nowrap; }
+  :is(.session-notice-slot, .campaign-notices) .notice-actions > .btn:first-child:not(.notice-details-toggle) { flex: 1 1 auto; max-width: none; }
+  :is(.session-notice-slot, .campaign-notices) .notice-actions > .notice-details-toggle { flex: none; }
 }
 /* Worktree Missing (#1976): the session notice slot's rank-1 danger notice. One question, Create New
    or Use Existing, answered in one row whose fields and button share the control height and line
@@ -9083,52 +9089,47 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   color: var(--danger-text);
   border-color: color-mix(in srgb, var(--red) 40%, transparent);
 }
-/* A held child is a condition to clear, not a request: warning-edged status, no controls. */
-.campaign-held-children {
+/* Campaign notices (§13.2, #2036, #2157): Campaign Continuation, then Held Children, at the top of the
+   chat column under the session bar, on the composer's width and gutters. */
+.campaign-notices {
   display: grid;
+  flex: none;
   gap: var(--space-2);
-  margin: 8px 12px;
-  padding: 10px 12px;
-  color: var(--text);
-  background: var(--bg-elev-2);
-  border: 1px solid var(--warning);
-  border-radius: var(--radius-md);
+  padding-top: var(--space-2);
+  padding-right: max(var(--space-3), calc((100% - var(--chat-max)) / 2));
+  padding-left: max(var(--space-3), calc((100% - var(--chat-max)) / 2));
 }
-.campaign-held-children-head { display: flex; align-items: baseline; gap: var(--space-2); }
-.campaign-held-children-count { color: var(--text-dim); font-variant-numeric: tabular-nums; }
-.campaign-held-children-summary { margin: 0; color: var(--text-dim); }
-/* Up to 32 children can be held; the transcript below keeps its room and the list scrolls. */
-.campaign-held-children-list {
+/* Held Children: up to 32 children can be held, so the list scrolls and the transcript below keeps
+   its room. Each child is its link, then one `.facts` list per hold. */
+.held-children {
   display: grid;
-  gap: var(--space-2);
-  max-height: min(40dvh, 28rem);
-  margin: 0;
+  gap: var(--space-3);
+  max-height: 280px;
+  margin: var(--space-2) 0 0;
   padding: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
   list-style: none;
 }
-.campaign-held-child {
+.held-children > li {
   display: grid;
-  gap: var(--space-1);
+  gap: var(--space-2);
   min-width: 0;
   padding-top: var(--space-2);
   border-top: 1px solid var(--border);
 }
-.campaign-held-child-link { font-weight: 600; overflow-wrap: anywhere; }
-.campaign-held-child-hold { display: grid; gap: var(--space-1); margin: 0; }
-.campaign-held-child-hold > div {
-  display: grid;
-  grid-template-columns: minmax(0, 10rem) minmax(0, 1fr);
-  gap: var(--space-2);
-}
-.campaign-held-child-hold dt { color: var(--text-dim); }
-.campaign-held-child-hold dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
-.campaign-held-child-hold small { color: var(--text-faint); }
-.campaign-held-child-resumes { margin: 0; padding: 0; list-style: none; }
+.held-child-link { font: var(--type-body-strong); overflow-wrap: anywhere; }
+.held-child-resumes { margin: 0; padding: 0; list-style: none; }
+.notice-title > .count-badge { margin-left: var(--space-1); vertical-align: text-bottom; }
 
-@media (max-width: 600px) {
-  .campaign-held-child-hold > div { grid-template-columns: minmax(0, 1fr); gap: 0; }
+@media (max-width: 760px) {
+  .held-children { max-height: 220px; }
+  /* A phone stacks each hold's label over its value. */
+  .held-children .facts {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 0;
+  }
+  .held-children .facts > div + div > dt { margin-top: var(--space-2); }
 }
 
 .project-location-setup-status {

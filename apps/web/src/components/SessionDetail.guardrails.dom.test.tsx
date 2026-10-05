@@ -62,102 +62,215 @@ function page(): HTMLElement {
   return domWindow.document.body as unknown as HTMLElement;
 }
 
-test("campaign continuation status explains missing results and exposes explicit acknowledgement", async () => {
-  const acknowledged: string[] = [];
+type CampaignContinuation = Parameters<typeof CampaignContinuationNotice>[0]["continuation"];
+
+function continuation(overrides: Partial<CampaignContinuation>): CampaignContinuation {
+  return {
+    state: "pending",
+    pendingEvents: 3,
+    continuationId: "campaign_cont_one",
+    commandId: "campaign_prompt_one",
+    eventFromSeq: 4,
+    eventThroughSeq: 6,
+    attemptCount: 2,
+    updatedAt: 10,
+    ...overrides,
+  };
+}
+
+async function mountContinuation(element: React.ReactElement) {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
-  await act(async () => {
-    root.render(<CampaignContinuationNotice continuation={{
-      state: "missing_result",
-      pendingEvents: 3,
-      continuationId: "campaign_cont_one",
-      commandId: "campaign_prompt_one",
-      eventFromSeq: 4,
-      eventThroughSeq: 6,
-      attemptCount: 2,
-      updatedAt: 10,
-      error: "Provider result was not persisted.",
-      canAcknowledgeMissingResult: true,
-    }} onAcknowledge={(commandId) => acknowledged.push(commandId)} />);
-  });
-  try {
-    const notice = page().querySelector<HTMLElement>('[aria-label="Campaign Continuation: Missing Result"]');
-    assert.ok(notice);
-    assert.match(notice.textContent ?? "", /3 Pending Events · Attempt 2/);
-    assert.match(notice.textContent ?? "", /will not be replayed automatically/);
-    const acknowledge = page().querySelector<HTMLButtonElement>("button");
-    assert.equal(acknowledge?.textContent, "Acknowledge Missing Result");
-    await act(async () => fireDomEvent.click(acknowledge!));
-    assert.deepEqual(acknowledged, ["campaign_prompt_one"]);
-  } finally {
-    await act(async () => root.unmount());
-    container.remove();
+  await act(async () => root.render(element));
+  return {
+    container,
+    notice: () => container.querySelector<HTMLElement>(".notice"),
+    render: (next: React.ReactElement) => act(async () => root.render(next)),
+    async dispose() {
+      await act(async () => root.unmount());
+      container.remove();
+    },
+  };
+}
+
+test("each campaign continuation state reads in plain words with its title, tone and body (#2157)", async () => {
+  const cases: Array<{
+    name: string;
+    continuation: CampaignContinuation;
+    tone: string;
+    title: string | null;
+    body: string;
+  }> = [
+    {
+      name: "missing result",
+      continuation: continuation({ state: "missing_result", canAcknowledgeMissingResult: true, error: "No result." }),
+      tone: "t-warning",
+      title: "Update Result Missing",
+      body: "The Orchestrator accepted an update but never reported a result. It won't be sent again automatically.",
+    },
+    {
+      name: "failed with retry",
+      continuation: continuation({ state: "failed", canRetry: true, error: "Runner queue remained full." }),
+      tone: "t-danger",
+      title: "Couldn't Resume the Orchestrator",
+      body: "Automatic retries stopped. Retry when the problem is fixed.",
+    },
+    {
+      name: "failed, retrying automatically",
+      continuation: continuation({ state: "failed", error: "Runner queue remained full." }),
+      tone: "t-warning",
+      title: null,
+      body: "Couldn't resume the Orchestrator. Wollipog will try again.",
+    },
+    {
+      name: "pending",
+      continuation: continuation({ state: "pending" }),
+      tone: "t-neutral",
+      title: null,
+      body: "Catching up on 3 updates before the Orchestrator continues.",
+    },
+    {
+      name: "running",
+      continuation: continuation({ state: "running", pendingEvents: 1 }),
+      tone: "t-neutral",
+      title: null,
+      body: "The Orchestrator is working through 1 update.",
+    },
+    {
+      name: "held",
+      continuation: continuation({ state: "held" }),
+      tone: "t-neutral",
+      title: null,
+      body: "Updates are kept until the current hold clears.",
+    },
+  ];
+  for (const testCase of cases) {
+    const view = await mountContinuation(
+      <CampaignContinuationNotice continuation={testCase.continuation} onAcknowledge={() => {}} onRetry={() => {}} />,
+    );
+    try {
+      const notice = view.notice();
+      assert.ok(notice, testCase.name);
+      assert.ok(notice.classList.contains(testCase.tone), `${testCase.name}: ${notice.className}`);
+      assert.equal(notice.getAttribute("data-state"), testCase.continuation.state, testCase.name);
+      assert.equal(notice.classList.contains("compact"), testCase.title === null,
+        `${testCase.name}: a titled notice is full size and a progress line is compact`);
+      assert.equal(notice.querySelector(".notice-title")?.textContent ?? null, testCase.title, testCase.name);
+      if (testCase.title) assert.equal(notice.getAttribute("aria-label"), testCase.title, testCase.name);
+      assert.equal(notice.querySelector(".notice-body")?.textContent, testCase.body, testCase.name);
+      assert.doesNotMatch(notice.textContent ?? "", /durable|coalescing|reconciling|terminal result/iu,
+        `${testCase.name}: no internal jargon`);
+      // The counts and the error are details, never under the explanation.
+      assertNoDomNode(notice.querySelector(".facts"), `${testCase.name}: no facts until Show Details`);
+      assert.doesNotMatch(notice.textContent ?? "", /Attempt|Runner queue|No result\./u, testCase.name);
+      assertNoDomNode(notice.querySelector(".notice-meta"), `${testCase.name}: no meta lines`);
+    } finally {
+      await view.dispose();
+    }
   }
 });
 
-test("a Viewer reads the campaign continuation's Acknowledge disabled with a visible reason (#1857)", async () => {
+test("campaign continuation details list pending updates, the attempt and the error in a code well", async () => {
+  const view = await mountContinuation(
+    <CampaignContinuationNotice
+      continuation={continuation({ state: "failed", canRetry: true, attemptCount: 5, error: "Runner queue remained full." })}
+      onRetry={() => {}}
+    />,
+  );
+  try {
+    const toggle = [...view.container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Show Details");
+    assert.ok(toggle, "Show Details is in the action row");
+    await act(async () => fireDomEvent.click(toggle));
+    const facts = view.container.querySelector<HTMLElement>(".notice-details-body dl.facts");
+    assert.ok(facts);
+    assert.deepEqual([...facts.querySelectorAll("dt")].map((term) => term.textContent),
+      ["Pending Updates", "Attempt", "Error"]);
+    assert.deepEqual([...facts.querySelectorAll("dd")].map((value) => value.textContent),
+      ["3", "5", "Runner queue remained full."]);
+    assert.equal(facts.querySelector("dd .code-well code")?.textContent, "Runner queue remained full.");
+    assert.equal(view.notice()?.querySelector(".notice-body")?.textContent,
+      "Automatic retries stopped. Retry when the problem is fixed.", "the explanation stays in view");
+
+    await view.render(<CampaignContinuationNotice continuation={continuation({ state: "pending" })} />);
+    assert.deepEqual([...view.container.querySelectorAll(".facts dt")].map((term) => term.textContent),
+      ["Pending Updates", "Attempt"], "without an error there is no Error fact");
+  } finally {
+    await view.dispose();
+  }
+});
+
+test("Acknowledge and Retry Now resolve the continuation and keep their labels while busy", async () => {
   const acknowledged: string[] = [];
-  const reason = "Your Viewer role is read-only.";
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
-  await act(async () => {
-    root.render(<CampaignContinuationNotice continuation={{
-      state: "missing_result",
-      pendingEvents: 3,
-      continuationId: "campaign_cont_viewer",
-      commandId: "campaign_prompt_viewer",
-      eventFromSeq: 4,
-      eventThroughSeq: 6,
-      attemptCount: 2,
-      updatedAt: 10,
-      canAcknowledgeMissingResult: true,
-    }} actionRefusal={reason} onAcknowledge={(commandId) => acknowledged.push(commandId)} />);
-  });
-  try {
-    const acknowledge = page().querySelector<HTMLButtonElement>("button")!;
-    assert.equal(acknowledge.disabled, true);
-    const described = acknowledge.getAttribute("aria-describedby");
-    assert.equal(described ? domWindow.document.getElementById(described)?.textContent : null, reason);
-    await act(async () => fireDomEvent.click(acknowledge));
-    assert.deepEqual(acknowledged, []);
-  } finally {
-    await act(async () => root.unmount());
-    container.remove();
-  }
-});
-
-test("campaign continuation status exposes an explicit retry after automatic retrying stops", async () => {
   const retried: string[] = [];
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
-  await act(async () => {
-    root.render(<CampaignContinuationNotice continuation={{
-      state: "failed",
-      pendingEvents: 2,
-      continuationId: "campaign_cont_failed",
-      commandId: "campaign_prompt_failed",
-      eventFromSeq: 7,
-      eventThroughSeq: 8,
-      attemptCount: 3,
-      updatedAt: 10,
-      error: "Runner queue remained full.",
-      canRetry: true,
-    }} onRetry={(commandId) => retried.push(commandId)} />);
-  });
+  const missing = continuation({ state: "missing_result", canAcknowledgeMissingResult: true });
+  const failed = continuation({ state: "failed", canRetry: true, commandId: "campaign_prompt_failed" });
+  const view = await mountContinuation(
+    <CampaignContinuationNotice continuation={missing} onAcknowledge={(commandId) => acknowledged.push(commandId)} />,
+  );
+  const action = () => view.container.querySelector<HTMLButtonElement>("button:not(.notice-details-toggle)")!;
   try {
-    const notice = page().querySelector<HTMLElement>('[aria-label="Campaign Continuation: Failed"]');
-    assert.ok(notice);
-    assert.match(notice.textContent ?? "", /Automatic retrying stopped/);
-    const retry = page().querySelector<HTMLButtonElement>("button");
-    assert.equal(retry?.textContent, "Retry Campaign Continuation");
-    await act(async () => fireDomEvent.click(retry!));
+    assert.equal(action().textContent, "Acknowledge");
+    await act(async () => fireDomEvent.click(action()));
+    assert.deepEqual(acknowledged, ["campaign_prompt_one"]);
+
+    await view.render(<CampaignContinuationNotice continuation={missing} acknowledgementPending
+      onAcknowledge={(commandId) => acknowledged.push(commandId)} />);
+    assert.equal(action().textContent, "Acknowledge", "the label stays while busy");
+    assert.equal(action().getAttribute("aria-busy"), "true");
+    assert.match(view.container.textContent ?? "", /Acknowledging the missing result…/u, "progress is announced");
+    await act(async () => fireDomEvent.click(action()));
+    assert.deepEqual(acknowledged, ["campaign_prompt_one"], "a busy button refuses a second press");
+
+    await view.render(<CampaignContinuationNotice continuation={failed} onRetry={(commandId) => retried.push(commandId)} />);
+    assert.equal(action().textContent, "Retry Now");
+    await act(async () => fireDomEvent.click(action()));
     assert.deepEqual(retried, ["campaign_prompt_failed"]);
+    await view.render(<CampaignContinuationNotice continuation={failed} acknowledgementPending
+      onRetry={(commandId) => retried.push(commandId)} />);
+    assert.equal(action().textContent, "Retry Now", "the label stays while busy");
+    assert.equal(action().getAttribute("aria-busy"), "true");
+    assert.match(view.container.textContent ?? "", /Retrying the Orchestrator…/u);
   } finally {
-    await act(async () => root.unmount());
-    container.remove();
+    await view.dispose();
+  }
+});
+
+test("a Viewer reads the continuation's action disabled with the reason as visible text it describes (#1857)", async () => {
+  const reason = "Your Viewer role is read-only.";
+  const acknowledged: string[] = [];
+  for (const shown of [
+    continuation({ state: "missing_result", canAcknowledgeMissingResult: true }),
+    continuation({ state: "failed", canRetry: true }),
+  ]) {
+    const view = await mountContinuation(
+      <CampaignContinuationNotice continuation={shown} actionRefusal={reason}
+        onAcknowledge={(commandId) => acknowledged.push(commandId)} onRetry={(commandId) => acknowledged.push(commandId)} />,
+    );
+    try {
+      const button = view.container.querySelector<HTMLButtonElement>("button:not(.notice-details-toggle)")!;
+      assert.equal(button.disabled, true);
+      assert.equal(button.getAttribute("title"), null, "the reason is never only a tooltip");
+      const described = button.getAttribute("aria-describedby");
+      const line = described ? domWindow.document.getElementById(described) : null;
+      assert.equal(line?.textContent, reason);
+      assert.ok(view.notice()?.querySelector(".notice-body")?.contains(line as never), "the reason is a visible body line");
+      await act(async () => fireDomEvent.click(button));
+      assert.deepEqual(acknowledged, []);
+    } finally {
+      await view.dispose();
+    }
+  }
+
+  // A notice with nothing to act on shows no refusal.
+  const view = await mountContinuation(
+    <CampaignContinuationNotice continuation={continuation({ state: "pending" })} actionRefusal={reason} />,
+  );
+  try {
+    assert.doesNotMatch(view.container.textContent ?? "", /Viewer/u);
+  } finally {
+    await view.dispose();
   }
 });
 

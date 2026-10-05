@@ -347,9 +347,15 @@ test("campaign notices stay under the session bar, in order, outside the slot (#
     client: { descendantRequests: async () => ({ requests: [], blockedChildren: [] }) },
   });
   try {
-    const continuation = fixture.container.querySelector('[aria-label="Campaign Continuation: Failed"]');
-    const held = fixture.container.querySelector(".campaign-held-children");
+    const continuation = fixture.container.querySelector('[aria-label="Couldn\'t Resume the Orchestrator"]');
+    const held = fixture.container.querySelector('section[aria-label="Held Children (1)"]');
     assert.ok(continuation && held, "both campaign notices render");
+    const band = continuation.parentElement!;
+    assert.ok(band.classList.contains("campaign-notices") && held.parentElement === band,
+      "both share the campaign band");
+    assert.equal(band.parentElement?.className, "detail-chat");
+    assert.equal(band.parentElement?.firstElementChild, band,
+      "the band heads the chat column, directly under the session bar and on the column's edges (#2157)");
     assertNoDomNode(continuation.closest(".session-notice-slot"), "Campaign Continuation is not a slot entry");
     assertNoDomNode(held.closest(".session-notice-slot"), "Held Children is not a slot entry");
     assert.ok(continuation.compareDocumentPosition(held) & domWindow.Node.DOCUMENT_POSITION_FOLLOWING,

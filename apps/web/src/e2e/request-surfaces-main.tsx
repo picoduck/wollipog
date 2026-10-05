@@ -49,6 +49,14 @@ const heldChildReader = readerParam === "viewer"
   : undefined;
 // `stoppable=1` reports the bounded hold as a v190 runner does, which can stop one of its jobs (#1780).
 const stoppableJobs = new URLSearchParams(window.location.search).get("stoppable") === "1";
+// `continuation=<state>` picks the continuation the `continuation` scenario shows: `missing_result`
+// (the default), `failed` (automatic retries stopped), `failed-auto` (Wollipog retries it), `pending`,
+// `running` or `held`. `busy=1` shows its action running and `refusal=1` refuses it to the reader.
+// `scenario=gallery` stacks every state; `scenario=both` shows a failed continuation over Held Children.
+const continuationParam = new URLSearchParams(window.location.search).get("continuation") ?? "missing_result";
+const continuationBusy = new URLSearchParams(window.location.search).get("busy") === "1";
+const continuationRefusal = new URLSearchParams(window.location.search).get("refusal") === "1"
+  ? "Your Viewer role is read-only." : null;
 const includeDescendants = scenario === "descendants" || scenario === "held" ||
   new URLSearchParams(window.location.search).get("children") === "1";
 const requestedPollStatus = new URLSearchParams(window.location.search).get("pollStatus");
@@ -325,6 +333,38 @@ function descendantRequests(): DescendantRequestView[] {
   });
 }
 
+type CampaignContinuation = NonNullable<NonNullable<SessionView["orchestratorCampaign"]>["continuation"]>;
+
+const CONTINUATION_STATES = ["missing_result", "failed", "failed-auto", "pending", "running", "held"] as const;
+
+function continuationFor(state: string): CampaignContinuation {
+  const base = {
+    pendingEvents: 3,
+    continuationId: `campaign_cont_${state}`,
+    commandId: "campaign_prompt_evidence",
+    eventFromSeq: 8,
+    eventThroughSeq: 10,
+    attemptCount: 2,
+    updatedAt: Date.now(),
+  };
+  if (state === "failed" || state === "failed-auto") {
+    return {
+      ...base,
+      state: "failed",
+      attemptCount: 5,
+      error: "Runner queue remained full after 5 attempts (runner-7 rejected the prompt: queue_full).",
+      ...(state === "failed" ? { canRetry: true } : {}),
+    };
+  }
+  if (state === "pending" || state === "running" || state === "held") return { ...base, state };
+  return {
+    ...base,
+    state: "missing_result",
+    error: "Provider accepted the turn but no terminal result was persisted.",
+    canAcknowledgeMissingResult: true,
+  };
+}
+
 function continuationSession(): SessionView {
   return {
     ...evidenceSession(),
@@ -347,18 +387,7 @@ function continuationSession(): SessionView {
       children: { total: 4, active: 1, waitingHuman: 0, blocked: 0, verified: 2, cleanupPending: 1 },
       pendingDecisions: { human: 0, orchestrator: 1 },
       followUps: { unique: 0, duplicates: 0 },
-      continuation: {
-        state: "missing_result",
-        pendingEvents: 3,
-        continuationId: "campaign_cont_evidence",
-        commandId: "campaign_prompt_evidence",
-        eventFromSeq: 8,
-        eventThroughSeq: 10,
-        attemptCount: 2,
-        updatedAt: Date.now(),
-        error: "Provider accepted the turn but no terminal result was persisted.",
-        canAcknowledgeMissingResult: true,
-      },
+      continuation: continuationFor(continuationParam),
     },
   } as SessionView;
 }
@@ -402,7 +431,7 @@ function heldCampaignSession(): SessionView {
     orchestratorCampaign: {
       ...base.orchestratorCampaign!,
       status: "blocked",
-      continuation: undefined,
+      continuation: scenario === "both" ? continuationFor("failed") : undefined,
       children: { total: 5, active: 1, waitingHuman: 1, blocked: boundedHold ? 1 : 3, verified: 0, cleanupPending: 0 },
       pendingRequests: { human: 8, orchestrator: 4 },
       heldChildren: boundedHold ? [boundedHandoffHeldChild()] : [
@@ -443,8 +472,10 @@ function heldCampaignSession(): SessionView {
 function Fixture() {
   const [session, setSession] = useState(() => scenario === "issue-closure" ? issueClosureSession() : scenario === "continuation"
     ? continuationSession()
-    : scenario === "held"
+    : scenario === "held" || scenario === "both"
     ? heldCampaignSession()
+    : scenario === "gallery"
+    ? continuationSession()
     : scenario === "descendants" || scenario === "polling" ? {
         ...evidenceSession(),
         status: "running",
@@ -580,23 +611,39 @@ function Fixture() {
               />
             ) : <span />}
           </header>
-          {scenario === "continuation" && session.orchestratorCampaign?.continuation && (
-            <CampaignContinuationNotice
-              continuation={session.orchestratorCampaign.continuation}
-              onAcknowledge={(commandId) => void client.resolvePendingPrompt(session.id, commandId, "dismiss")}
-              onRetry={(commandId) => void client.resolvePendingPrompt(session.id, commandId, "retry")}
-            />
-          )}
-          {scenario === "held" && session.orchestratorCampaign && (
-            <CampaignHeldChildren
-              heldChildren={session.orchestratorCampaign.heldChildren ?? []}
-              blocked={session.orchestratorCampaign.children.blocked}
-              childTitle={(id) => HELD_CHILD_TITLES[id]}
-              onOpenChild={(id) => { openedHeldChild = id; }}
-            />
-          )}
           <div className="detail-columns">
             <div className="detail-chat">
+              {/* As SessionDetail renders them: the head of the chat column, under the session bar. */}
+              {(session.orchestratorCampaign?.continuation && (scenario === "continuation" || scenario === "both") ||
+                scenario === "gallery" || (session.orchestratorCampaign?.heldChildren?.length ?? 0) > 0) && (
+                <div className="campaign-notices">
+                  {(scenario === "continuation" || scenario === "both") && session.orchestratorCampaign?.continuation && (
+                    <CampaignContinuationNotice
+                      continuation={session.orchestratorCampaign.continuation}
+                      acknowledgementPending={continuationBusy}
+                      actionRefusal={continuationRefusal}
+                      onAcknowledge={(commandId) => void client.resolvePendingPrompt(session.id, commandId, "dismiss")}
+                      onRetry={(commandId) => void client.resolvePendingPrompt(session.id, commandId, "retry")}
+                    />
+                  )}
+                  {scenario === "gallery" && CONTINUATION_STATES.map((state) => (
+                    <CampaignContinuationNotice
+                      key={state}
+                      continuation={continuationFor(state)}
+                      onAcknowledge={() => {}}
+                      onRetry={() => {}}
+                    />
+                  ))}
+                  {(scenario === "held" || scenario === "both") && session.orchestratorCampaign && (
+                    <CampaignHeldChildren
+                      heldChildren={session.orchestratorCampaign.heldChildren ?? []}
+                      blocked={session.orchestratorCampaign.children.blocked}
+                      childTitle={(id) => HELD_CHILD_TITLES[id]}
+                      onOpenChild={(id) => { openedHeldChild = id; }}
+                    />
+                  )}
+                </div>
+              )}
               {(scenario === "legacy" || scenario === "standalone" || scenario === "worker" || scenario === "issue-closure") && (
                 <SessionApprovalRegion
                   session={session}

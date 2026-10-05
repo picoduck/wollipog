@@ -6135,27 +6135,6 @@ function SessionDetailLoaded({
           // focus-rescue anchor there; the mobile layout keeps the app bar and its own anchor.
           titleId={!isMobile ? "page-title" : undefined}
         />
-        {/* Campaign notices, not session notices (§13.2; #2036): they describe the campaign, not
-            whether this session can take its next turn, so they stay here, in this order, rather
-            than in the notice slot above the composer. */}
-        {session.orchestratorCampaign?.continuation && (
-          <CampaignContinuationNotice
-            continuation={session.orchestratorCampaign.continuation}
-            acknowledgementPending={pendingPromptAction?.commandId === session.orchestratorCampaign.continuation.commandId}
-            actionRefusal={queueRefusal}
-            onAcknowledge={(commandId) => void resolvePendingPrompt(commandId, "dismiss")}
-            onRetry={(commandId) => void resolvePendingPrompt(commandId, "retry")}
-          />
-        )}
-        {heldChildren.length > 0 && (
-          <CampaignHeldChildren
-            heldChildren={heldChildren}
-            blocked={session.orchestratorCampaign?.children?.blocked ?? heldChildren.length}
-            childTitle={heldChildTitle}
-            recoveryAction={heldChildRecoveryAction}
-            onOpenChild={(childSessionId) => navigate({ name: "session", id: childSessionId })}
-          />
-        )}
         </>
       ) : (
         <>
@@ -6220,6 +6199,32 @@ function SessionDetailLoaded({
             `session-body` container, so docking follows the room the right panel leaves. */}
         <div className="detail-body" ref={setDetailBody}>
         <div className="detail-chat">
+          {/* Campaign notices, not session notices (§13.2; #2036): they describe the campaign, not
+              whether this session can take its next turn, so they head the chat column directly
+              under the session bar, in this order, on its edges (#2157), rather than in the notice
+              slot above the composer. */}
+          {mode === "expanded" && (session.orchestratorCampaign?.continuation || heldChildren.length > 0) && (
+            <div className="campaign-notices">
+              {session.orchestratorCampaign?.continuation && (
+                <CampaignContinuationNotice
+                  continuation={session.orchestratorCampaign.continuation}
+                  acknowledgementPending={pendingPromptAction?.commandId === session.orchestratorCampaign.continuation.commandId}
+                  actionRefusal={queueRefusal}
+                  onAcknowledge={(commandId) => void resolvePendingPrompt(commandId, "dismiss")}
+                  onRetry={(commandId) => void resolvePendingPrompt(commandId, "retry")}
+                />
+              )}
+              {heldChildren.length > 0 && (
+                <CampaignHeldChildren
+                  heldChildren={heldChildren}
+                  blocked={session.orchestratorCampaign?.children?.blocked ?? heldChildren.length}
+                  childTitle={heldChildTitle}
+                  recoveryAction={heldChildRecoveryAction}
+                  onOpenChild={(childSessionId) => navigate({ name: "session", id: childSessionId })}
+                />
+              )}
+            </div>
+          )}
           {/* Inside the CHAT COLUMN (not .session-detail) so the card centers against the
               same width the transcript and composer use — with the right panel open, a
               session-wide card would sit visibly off-axis from the column it belongs to. */}
@@ -7370,6 +7375,41 @@ function LegacyWorkspaceChip({ session }: { session: SessionView }) {
   );
 }
 
+type CampaignContinuation = NonNullable<NonNullable<SessionView["orchestratorCampaign"]>["continuation"]>;
+
+/** What each continuation state tells a person (#2157): a titled notice where someone must act, one
+ * plain sentence where Wollipog is still working on it. The counts and the provider's error are
+ * details, behind Show Details. */
+function campaignContinuationCopy(continuation: CampaignContinuation): {
+  tone: "warning" | "danger" | "neutral";
+  title?: string;
+  body: string;
+} {
+  const updates = `${continuation.pendingEvents} ${continuation.pendingEvents === 1 ? "update" : "updates"}`;
+  switch (continuation.state) {
+    case "missing_result":
+      return {
+        tone: "warning",
+        title: "Update Result Missing",
+        body: "The Orchestrator accepted an update but never reported a result. It won't be sent again automatically.",
+      };
+    case "failed":
+      return continuation.canRetry === true
+        ? {
+            tone: "danger",
+            title: "Couldn't Resume the Orchestrator",
+            body: "Automatic retries stopped. Retry when the problem is fixed.",
+          }
+        : { tone: "warning", body: "Couldn't resume the Orchestrator. Wollipog will try again." };
+    case "running":
+      return { tone: "neutral", body: `The Orchestrator is working through ${updates}.` };
+    case "held":
+      return { tone: "neutral", body: "Updates are kept until the current hold clears." };
+    default:
+      return { tone: "neutral", body: `Catching up on ${updates} before the Orchestrator continues.` };
+  }
+}
+
 export function CampaignContinuationNotice({
   continuation,
   acknowledgementPending = false,
@@ -7377,7 +7417,7 @@ export function CampaignContinuationNotice({
   onAcknowledge,
   onRetry,
 }: {
-  continuation: NonNullable<NonNullable<SessionView["orchestratorCampaign"]>["continuation"]>;
+  continuation: CampaignContinuation;
   acknowledgementPending?: boolean;
   /** Why the signed-in person may not resolve the continuation (#1857). */
   actionRefusal?: string | null;
@@ -7385,66 +7425,69 @@ export function CampaignContinuationNotice({
   onRetry?: (commandId: string) => void;
 }) {
   const refusalId = `campaign-continuation-refusal-${useId().replace(/:/gu, "")}`;
-  const label = continuation.state === "missing_result"
-    ? "Missing Result"
-    : titleCaseLabel(continuation.state);
-  const eventLabel = `${continuation.pendingEvents} Pending ${continuation.pendingEvents === 1 ? "Event" : "Events"}`;
-  const explanation = continuation.state === "pending"
-    ? "Wollipog is coalescing durable campaign events before resuming the Orchestrator."
-    : continuation.state === "running"
-      ? "The Orchestrator is reconciling durable descendant campaign events."
-      : continuation.state === "held"
-        ? "Campaign events are preserved until the current human, lifecycle, or guardrail blocker clears."
-        : continuation.state === "failed"
-          ? continuation.canRetry
-            ? "Automatic retrying stopped. Retry the continuation when the failure is resolved."
-            : "The continuation failed. Wollipog will retry it with bounded backoff."
-          : "The provider accepted this continuation, but no terminal result was recorded. It will not be replayed automatically.";
+  const copy = campaignContinuationCopy(continuation);
   const canAcknowledge = continuation.state === "missing_result" &&
     continuation.canAcknowledgeMissingResult === true && Boolean(continuation.commandId) && onAcknowledge;
   const canRetry = continuation.state === "failed" && continuation.canRetry === true &&
     Boolean(continuation.commandId) && onRetry;
+  const refused = actionRefusal !== null && Boolean(canAcknowledge || canRetry);
   return (
     <Notice
-      tone={continuation.state === "failed" || continuation.state === "missing_result" ? "warning" : "neutral"}
+      tone={copy.tone}
+      compact={!copy.title}
       dataState={continuation.state}
       role="status"
-      ariaLabel={`Campaign Continuation: ${label}`}
-      ariaBusy={acknowledgementPending}
-      title={`Campaign Continuation: ${label}`}
+      ariaLabel={copy.title}
+      title={copy.title}
       actions={(canAcknowledge || canRetry) && (
         <>
           {canAcknowledge && (
-            <button
-              type="button"
+            <BusyButton
               className="btn sm"
-              disabled={acknowledgementPending || actionRefusal !== null}
-              title={actionRefusal ?? undefined}
-              aria-describedby={actionRefusal !== null ? refusalId : undefined}
+              busy={acknowledgementPending}
+              progress="Acknowledging the missing result…"
+              disabled={actionRefusal !== null}
+              aria-describedby={refused ? refusalId : undefined}
               onClick={() => onAcknowledge(continuation.commandId!)}
             >
-              {acknowledgementPending ? "Acknowledging…" : "Acknowledge Missing Result"}
-            </button>
+              Acknowledge
+            </BusyButton>
           )}
           {canRetry && (
-            <button
-              type="button"
+            <BusyButton
               className="btn sm"
-              disabled={acknowledgementPending || actionRefusal !== null}
-              title={actionRefusal ?? undefined}
-              aria-describedby={actionRefusal !== null ? refusalId : undefined}
+              busy={acknowledgementPending}
+              progress="Retrying the Orchestrator…"
+              disabled={actionRefusal !== null}
+              aria-describedby={refused ? refusalId : undefined}
               onClick={() => onRetry(continuation.commandId!)}
             >
-              {acknowledgementPending ? "Retrying…" : "Retry Campaign Continuation"}
-            </button>
+              Retry Now
+            </BusyButton>
           )}
         </>
       )}
+      details={(
+        <dl className="facts">
+          <div>
+            <dt>Pending Updates</dt>
+            <dd>{continuation.pendingEvents}</dd>
+          </div>
+          <div>
+            <dt>Attempt</dt>
+            <dd>{continuation.attemptCount}</dd>
+          </div>
+          {continuation.error && (
+            <div>
+              <dt>Error</dt>
+              <dd><div className="code-well"><code>{continuation.error}</code></div></dd>
+            </div>
+          )}
+        </dl>
+      )}
     >
-      <p>{explanation}</p>
-      <p className="notice-meta">{eventLabel} · Attempt {continuation.attemptCount}</p>
-      {continuation.error && <p className="notice-meta">{continuation.error}</p>}
-      {actionRefusal !== null && (canAcknowledge || canRetry) && <p className="notice-meta" id={refusalId}>{actionRefusal}</p>}
+      <p>{copy.body}</p>
+      {refused && <p id={refusalId}>{actionRefusal}</p>}
     </Notice>
   );
 }

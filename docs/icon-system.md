@@ -141,6 +141,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `OrchestratorControlsIcon` | Lucide | `Waypoints` | An Orchestrator's parent control and workflow gates: the + menu's Orchestrator Controls… row. `Workflow` already means workflow runs. |
 | `ExternalLinkIcon` | Lucide | `ExternalLink` | A link that opens outside Wollipog. |
 | `WrenchIcon` | Lucide | `Wrench` | Project setup suggestion. |
+| `HeldIcon` | Lucide | `CirclePause` | Child sessions held from starting their next turn: the Held Children campaign notice. |
 | `ExperimentIcon` | Lucide | `FlaskConical` | An experimental feature, on the page a turned-off experiment's route shows. |
 | `VersionIcon` | Lucide | `Tag` | A numbered version ("v3") in a meta row. |
 | `UpdatedIcon` | Lucide | `History` | When something last changed, in a meta row. |

@@ -1,7 +1,10 @@
-import { Fragment, useId, type MouseEvent } from "react";
+import { Fragment, type MouseEvent } from "react";
 import type { OrchestratorCampaignProjection, SessionHoldView } from "@wollipog/protocol";
 import { relativeTime, titleCaseLabel } from "../format.js";
 import { viewPath } from "../navigation.js";
+import { CountBadge } from "./CountBadge.js";
+import { HeldIcon } from "./Icons.js";
+import { Notice } from "./Notice.js";
 
 export type CampaignHeldChild = NonNullable<OrchestratorCampaignProjection["heldChildren"]>[number];
 
@@ -24,7 +27,8 @@ function RecoveryText({ text }: { text: string }) {
 /**
  * Campaign children that cannot start their next turn, read from the same campaign projection
  * as the Blocked count so the two always agree (#1760). A hold has nothing to answer, so this is
- * a status list with links to each child, never a request row with answer or approve controls.
+ * a neutral notice listing each child's link and its holds as facts (#2157), never a request row
+ * with answer or approve controls.
  */
 export function CampaignHeldChildren({
   heldChildren,
@@ -41,7 +45,6 @@ export function CampaignHeldChildren({
   recoveryAction?: (sessionId: string, hold: SessionHoldView) => string;
   onOpenChild: (sessionId: string) => void;
 }) {
-  const headingId = `campaign-held-children-${useId().replace(/:/gu, "")}`;
   if (heldChildren.length === 0) return null;
   const held = heldChildren.length;
   const open = (event: MouseEvent<HTMLAnchorElement>, sessionId: string) => {
@@ -50,13 +53,17 @@ export function CampaignHeldChildren({
     event.preventDefault();
     onOpenChild(sessionId);
   };
+  // The count badge is hidden from assistive technology, so the region's name carries the count.
+  const name = `Held Children (${held})`;
   return (
-    <section className="campaign-held-children" aria-labelledby={headingId}>
-      <div className="campaign-held-children-head">
-        <strong id={headingId}>Held Children</strong>
-        <span className="campaign-held-children-count">{held}</span>
-      </div>
-      <p className="campaign-held-children-summary">
+    <Notice
+      as="section"
+      tone="neutral"
+      icon={<HeldIcon />}
+      ariaLabel={name}
+      title={<>Held Children <CountBadge count={held} /></>}
+    >
+      <p>
         {held === 1 ? "This child cannot" : "These children cannot"} start another turn until the hold clears.
         {" "}A hold has nothing to answer.
         {/* The projection lists at most 32 held children, so the rest of Blocked may be held too. */}
@@ -64,23 +71,23 @@ export function CampaignHeldChildren({
           "not listed here, such as failed or stopped children."}
       </p>
       {/* Focusable so a keyboard can scroll the list once it reaches its height limit. */}
-      <ul className="campaign-held-children-list" tabIndex={0} aria-labelledby={headingId}>
+      <ul className="held-children" tabIndex={0} aria-label={name}>
         {heldChildren.map((child) => {
           const title = childTitle(child.sessionId) || child.sessionId;
           return (
-            <li key={child.sessionId} className="campaign-held-child">
+            <li key={child.sessionId}>
               <a
-                className="campaign-held-child-link"
+                className="held-child-link"
                 href={viewPath({ name: "session", id: child.sessionId })}
                 onClick={(event) => open(event, child.sessionId)}
               >
                 {title}
               </a>
               {child.holds.map((hold) => (
-                <dl key={hold.holdId} className="campaign-held-child-hold" data-hold-kind={hold.kind}>
+                <dl key={hold.holdId} className="facts" data-hold-kind={hold.kind}>
                   <div>
                     <dt>Hold</dt>
-                    <dd>{holdKindLabel(hold.kind)}<small> · {relativeTime(hold.since)}</small></dd>
+                    <dd>{holdKindLabel(hold.kind)} · {relativeTime(hold.since)}</dd>
                   </div>
                   <div>
                     <dt>Reason</dt>
@@ -94,15 +101,14 @@ export function CampaignHeldChildren({
                     <div>
                       <dt>Held Decision Resumes</dt>
                       <dd>
-                        <ul className="campaign-held-child-resumes">
+                        <ul className="held-child-resumes">
                           {hold.heldResumes.map((resume) => (
                             <li key={resume.occurrenceId}>
-                              <code>{resume.occurrenceId}</code>
-                              <small> · {relativeTime(resume.since)}</small>
+                              <code>{resume.occurrenceId}</code> · {relativeTime(resume.since)}
                             </li>
                           ))}
                         </ul>
-                        <small>Each is delivered once after the hold clears.</small>
+                        Each is delivered once after the hold clears.
                       </dd>
                     </div>
                   )}
@@ -112,6 +118,6 @@ export function CampaignHeldChildren({
           );
         })}
       </ul>
-    </section>
+    </Notice>
   );
 }

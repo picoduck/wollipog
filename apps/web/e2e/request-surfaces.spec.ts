@@ -75,11 +75,16 @@ test("legacy inline evidence fixture reproduces the mobile over-height review", 
 test("missing campaign continuation result is visible and explicitly acknowledged", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto("/request-surfaces-e2e.html?scenario=continuation");
-  const notice = page.getByRole("status", { name: "Campaign Continuation: Missing Result" });
+  const notice = page.getByRole("status", { name: "Update Result Missing" });
   await expect(notice).toBeVisible();
-  await expect(notice).toContainText("3 Pending Events · Attempt 2");
-  await expect(notice).toContainText("It will not be replayed automatically");
-  await page.getByRole("button", { name: "Acknowledge Missing Result" }).click();
+  await expect(notice).toContainText("The Orchestrator accepted an update but never reported a result. " +
+    "It won't be sent again automatically.");
+  // The counts and the provider's error wait behind Show Details (#2157).
+  await expect(notice).not.toContainText("Attempt");
+  await notice.getByRole("button", { name: "Show Details" }).click();
+  await expect(notice.locator(".facts dt")).toHaveText(["Pending Updates", "Attempt", "Error"]);
+  await expect(notice.locator(".facts dd")).toHaveText(["3", "2", "Provider accepted the turn but no terminal result was persisted."]);
+  await page.getByRole("button", { name: "Acknowledge" }).click();
   await expect(notice).toHaveCount(0);
   await expect.poll(() => page.evaluate(() =>
     window.__WOLLIPOG_REQUEST_SURFACES_E2E__.submissions())).toEqual([{
@@ -319,7 +324,7 @@ for (const viewport of [
     await page.goto("/request-surfaces-e2e.html?scenario=held");
     const held = page.getByRole("region", { name: "Held Children" });
     await expect(held).toBeVisible();
-    const entries = held.locator(".campaign-held-child");
+    const entries = held.locator(".held-children > li");
     await expect(entries).toHaveCount(2);
     await expect(held).toContainText("1 other blocked child is not listed here, such as failed or stopped children.");
 
@@ -339,7 +344,7 @@ for (const viewport of [
     // A hold asks nothing: no control beyond the child link, and no row in the request inbox.
     await expect(held.getByRole("button")).toHaveCount(0);
     await expect(held.getByRole("textbox")).toHaveCount(0);
-    await assertNoHorizontalOverflow(page, ".campaign-held-children");
+    await assertNoHorizontalOverflow(page, ".campaign-notices");
     await page.getByRole("button", { name: "Needs Your Input: 8 Requests" }).click();
     await expect(page.locator(".request-panel-row")).toHaveCount(12);
     await expect(page.locator(".request-panel-row", { hasText: /Fix #165[01]/u })).toHaveCount(0);
@@ -357,10 +362,57 @@ for (const viewport of [
     await expect(held).toHaveCount(0);
   });
 
+  test(`Held Children is a neutral notice whose list scrolls within its cap by keyboard at ${viewport.name} (#2157)`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/request-surfaces-e2e.html?scenario=held");
+    const held = page.getByRole("region", { name: "Held Children" });
+    await expect(held).toHaveClass(/\bt-neutral\b/u);
+    await expect(held.locator(".notice-title")).toHaveText("Held Children 2");
+    const list = held.locator("ul.held-children");
+    const cap = viewport.width <= 760 ? 220 : 280;
+    expect(await list.evaluate((element) => getComputedStyle(element).maxHeight)).toBe(`${cap}px`);
+    expect((await list.boundingBox())!.height).toBeLessThanOrEqual(cap);
+    // On phones each hold stacks its label over its value.
+    const term = held.locator("dl.facts dt").first();
+    const value = held.locator("dl.facts dd").first();
+    const [termBox, valueBox] = [(await term.boundingBox())!, (await value.boundingBox())!];
+    if (viewport.width <= 760) expect(valueBox.y).toBeGreaterThan(termBox.y + termBox.height - 1);
+    else expect(valueBox.x).toBeGreaterThan(termBox.x + termBox.width);
+
+    const overflows = await list.evaluate((element) => element.scrollHeight > element.clientHeight);
+    expect(overflows).toBe(true);
+    await list.focus();
+    await expect(list).toBeFocused();
+    await page.keyboard.press("PageDown");
+    await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+  });
+
+  test(`both campaign notices head the chat column on its edges, Campaign Continuation first, at ${viewport.name} (#2157)`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/request-surfaces-e2e.html?scenario=both");
+    const continuation = page.getByRole("status", { name: "Couldn't Resume the Orchestrator" });
+    const held = page.getByRole("region", { name: "Held Children" });
+    await expect(continuation).toBeVisible();
+    await expect(continuation).toHaveClass(/\bt-danger\b/u);
+    await expect(held).toBeVisible();
+    const bar = (await page.locator(".session-bar").boundingBox())!;
+    const first = (await continuation.boundingBox())!;
+    const second = (await held.boundingBox())!;
+    const composer = (await page.locator(".composer-box").boundingBox())!;
+    expect(first.y).toBeGreaterThanOrEqual(bar.y + bar.height);
+    expect(second.y).toBeGreaterThan(first.y + first.height - 1);
+    for (const box of [first, second]) {
+      expect(Math.abs(box.x - composer.x)).toBeLessThanOrEqual(1);
+      expect(Math.abs(box.x + box.width - (composer.x + composer.width))).toBeLessThanOrEqual(1);
+    }
+    await expect(continuation.getByRole("button", { name: "Retry Now" })).toBeVisible();
+    await assertNoHorizontalOverflow(page, ".campaign-notices");
+  });
+
   test(`a Viewer's worktree-recovery advice names who can recover it, not the worktree tools, at ${viewport.name} (#1867)`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await page.goto("/request-surfaces-e2e.html?scenario=held&reader=viewer");
-    const recovery = page.getByRole("region", { name: "Held Children" }).locator(".campaign-held-child").nth(0);
+    const recovery = page.getByRole("region", { name: "Held Children" }).locator(".held-children > li").nth(0);
     await expect(recovery.getByRole("link", { name: "Fix #1650: Keep a Decision Resume Across Worktree Recovery" }))
       .toBeVisible();
     await expect(recovery).toContainText(
@@ -370,7 +422,7 @@ for (const viewport of [
       .toHaveText("git -C /home/dev/worktrees/issue-1650 switch fix/issue-1650-decision-resume");
     await expect(recovery).not.toContainText("select_worktree");
     await expect(recovery).not.toContainText("create_worktree");
-    await assertNoHorizontalOverflow(page, ".campaign-held-children");
+    await assertNoHorizontalOverflow(page, ".campaign-notices");
   });
 }
 
@@ -382,7 +434,7 @@ for (const viewport of [
     await page.setViewportSize(viewport);
     await page.goto("/request-surfaces-e2e.html?scenario=held&bounded=1");
     const held = page.getByRole("region", { name: "Held Children" });
-    const entry = held.locator(".campaign-held-child");
+    const entry = held.locator(".held-children > li");
     await expect(entry).toHaveCount(1);
     await expect(entry.getByRole("link", { name: "Fix #1778: Bound a Handoff Held by a Never-Ending Job" })).toBeVisible();
     await expect(entry).toContainText("Worktree Rebind");
@@ -394,13 +446,13 @@ for (const viewport of [
     await expect(entry).toContainText("Do not restart the session to get past this hold: a restart discards the queued messages.");
     await expect(entry).not.toContainText("restart_session");
     await expect(entry).toContainText("wd_occ_merge_1778");
-    await assertNoHorizontalOverflow(page, ".campaign-held-children");
+    await assertNoHorizontalOverflow(page, ".campaign-notices");
   });
 
   test(`a held child whose runner keeps the queue across a restart says what a restart keeps, at ${viewport.name} (#1779)`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await page.goto("/request-surfaces-e2e.html?scenario=held&bounded=legacy&restart=keeps");
-    const entry = page.getByRole("region", { name: "Held Children" }).locator(".campaign-held-child");
+    const entry = page.getByRole("region", { name: "Held Children" }).locator(".held-children > li");
     await expect(entry).toHaveCount(1);
     await expect(entry.locator("dt")).toHaveText(["Hold", "Reason", "Recovery Action", "Held Decision Resumes"]);
     await expect(entry).toContainText(
@@ -410,21 +462,21 @@ for (const viewport of [
       "decision the session has not yet consumed is revoked, and the " +
       "restarted session is told which ones to request again.");
     await expect(entry).not.toContainText("discarded");
-    await assertNoHorizontalOverflow(page, ".campaign-held-children");
+    await assertNoHorizontalOverflow(page, ".campaign-notices");
 
     await page.goto("/request-surfaces-e2e.html?scenario=held&bounded=1&restart=keeps");
     await expect(entry).toHaveCount(1);
     await expect(entry).toContainText("Prefer waiting to restarting the session: a restart keeps the queued messages but " +
       "ends every background job and starts a new conversation.");
     await expect(entry).not.toContainText("discards");
-    await assertNoHorizontalOverflow(page, ".campaign-held-children");
+    await assertNoHorizontalOverflow(page, ".campaign-notices");
   });
 
   // The harness renders each held child's advice as the projection carries it, as Held Children does
   // for a child the dashboard has not loaded (#1875).
   test(`a queue-held child's advice names only what the person reading it may do, at ${viewport.name} (#1875)`, async ({ page }) => {
     await page.setViewportSize(viewport);
-    const entry = page.getByRole("region", { name: "Held Children" }).locator(".campaign-held-child");
+    const entry = page.getByRole("region", { name: "Held Children" }).locator(".held-children > li");
     const recovery = entry.locator("dd").nth(2);
 
     await page.goto("/request-surfaces-e2e.html?scenario=held&bounded=legacy&stoppable=1");
@@ -440,7 +492,7 @@ for (const viewport of [
     await expect(recovery).not.toContainText("stop_background_job");
     await expect(recovery).not.toContainText("Stop Job");
     await expect(recovery).not.toContainText("restart");
-    await assertNoHorizontalOverflow(page, ".campaign-held-children");
+    await assertNoHorizontalOverflow(page, ".campaign-notices");
 
     await page.goto("/request-surfaces-e2e.html?scenario=held&bounded=legacy&stoppable=1&reader=admin");
     await expect(entry).toHaveCount(1);
@@ -455,6 +507,6 @@ for (const viewport of [
     await expect(recovery).toContainText(
       "the hold clears only when someone who can act on this session steps in; ask its owner.");
     await expect(recovery).not.toContainText("restart_session");
-    await assertNoHorizontalOverflow(page, ".campaign-held-children");
+    await assertNoHorizontalOverflow(page, ".campaign-notices");
   });
 }

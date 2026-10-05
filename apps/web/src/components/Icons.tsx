@@ -20,6 +20,7 @@ import {
   CircleUserRound as LucideCircleUserRound,
   CircleDot as LucideCircleDot,
   CircleGauge as LucideCircleGauge,
+  CirclePause as LucideCirclePause,
   Clock3 as LucideClock3,
   Code as LucideCode,
   Columns3 as LucideColumns3,
@@ -743,6 +744,10 @@ export function ExternalLinkIcon(props: IconProps) {
 
 export function WrenchIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideWrench} {...props} />;
+}
+
+export function HeldIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideCirclePause} {...props} />;
 }
 
 export function ExperimentIcon(props: IconProps) {

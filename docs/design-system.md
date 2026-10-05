@@ -918,7 +918,7 @@ One recipe for every read-only label and value list. It is the §19.4 merge of t
 - A region may set the list's spacing or size (the background work panel uses `--type-small`) but
   not its structure.
 - Replaces `.agent-details-grid`, `.background-work-job-meta`, `.usage-totals`,
-  `.subscription-buckets`, `.skills-orphan-facts` and `.settings-about`. Eleven more `<dl>` recipes
+  `.subscription-buckets`, `.skills-orphan-facts` and `.settings-about`. Ten more `<dl>` recipes
   remain (§19.4); each area moves its own onto `.facts` when it is redesigned.
 
 ### 5.5 Disclosure (Expand and Collapse)
@@ -2012,6 +2012,21 @@ exactly one: the most severe, then the lowest rank.
   Campaign Continuation's pending, running and held states are neutral progress, a tone the slot does
   not have; and a failed continuation whose automatic retries have stopped needs a person, so it must
   not wait behind a danger condition's "+N More".
+- **Campaign notices** (#2157) are `Notice`s in `.campaign-notices`, the head of the chat column, on
+  the composer's width and gutters. Campaign Continuation speaks plainly by state: a missing result
+  is the warning "Update Result Missing" ("The Orchestrator accepted an update but never reported a
+  result. It won't be sent again automatically.") with **Acknowledge**; a failure whose automatic
+  retries stopped is the danger "Couldn't Resume the Orchestrator" ("Automatic retries stopped. Retry
+  when the problem is fixed.") with **Retry Now**. A failure Wollipog still retries is a compact
+  warning, "Couldn't resume the Orchestrator. Wollipog will try again."; pending, running and held are
+  compact neutral lines ("Catching up on 3 updates before the Orchestrator continues.", "The
+  Orchestrator is working through 3 updates.", "Updates are kept until the current hold clears.").
+  Pending Updates, Attempt and Error (in a code well, §11.7) are `.facts` behind Show Details. Both
+  actions are `BusyButton`s, and a person who may not act reads the refusal as a body line. Held
+  Children is a neutral notice with the `CirclePause` icon and a count badge in its title: the
+  summary sentence, then a focusable list capped at 280px (220px on phones) that scrolls. Each child
+  is its session link, followed by one `.facts` list per hold (Hold, Reason, Recovery Action with its
+  backtick spans as code, Held Decision Resumes); on phones each label stacks over its value.
 - A condition nothing waits on is info, compact and dismissible: skills that a container or cloud
   session cannot use (the dismissal is kept per session on the device, and the Pinned Summary keeps
   a Skills: Not Available row) and the Project setup suggestion (dismissed for the Project on the
@@ -2021,7 +2036,7 @@ exactly one: the most severe, then the lowest rank.
   never stretch", §3.1) and a disclosure toggle such as Show Details keeps its own width.
 
 Replaces `.quarantine-banner`, `.skills-unavailable-notice`, `.worktree-setup-notice`,
-`.campaign-continuation-notice`, `.box-hint`, `.composer-error`, `.composer-attachment-notice`,
+`.campaign-continuation-notice`, `.campaign-held-children`, `.box-hint`, `.composer-error`, `.composer-attachment-notice`,
 `.queued-error`, `.form-error` (when used as a banner), `.settings-inline-error`, `.skills-git-held`
 and `PendingSetting`.
 
@@ -2318,7 +2333,7 @@ Never use CSS `text-transform` to achieve either. Enum values pass through `stat
 | `.tag`, `.tag-machine`, `.tag-agent`, `.tag-wt`, `.atag`, `.os-badge`, `.cctx-chip` | plain meta (`.meta-item`) or `.chip` (neutral) |
 | `.tab-count`, `.group-count` | `.count` (plain) or `.count-badge` (attention) |
 | rail `.rail-badge`, More sheet `.rail-more-count` (removed, #1967) | `CountBadge`, or `.rail-attention-dot` for Connections (§11.4) |
-| `.quarantine-banner`, `.skills-unavailable-notice`, `.worktree-setup-notice`, `.campaign-continuation-notice`, `.box-hint`, `.composer-error`, `.composer-attachment-notice`, `.queued-error`, `.settings-inline-error`, `.settings-pending-reason`, `.skills-git-held`, `.error-boundary` | `.notice` (`.t-*`, `.compact`) |
+| `.quarantine-banner`, `.skills-unavailable-notice`, `.worktree-setup-notice`, `.campaign-continuation-notice`, `.campaign-held-children`, `.box-hint`, `.composer-error`, `.composer-attachment-notice`, `.queued-error`, `.settings-inline-error`, `.settings-pending-reason`, `.skills-git-held`, `.error-boundary` | `.notice` (`.t-*`, `.compact`) |
 | `.toast` + 4px left stripe, `.toast-region` under the bar | `.toast` + tone icon; `.toast-region` bottom right (bottom center on phones) above `--toast-clear` (§13.1) |
 | offline banner, pairing banner | `.notice.page-banner` |
 | `.empty` (bordered card), `.empty-title` 15px, `.inbox-zero-mark ✓`, `.sidechat-empty`, `.background-work-empty`, `.subagents-empty`, `.rp-launcher` centring, "Select a …" detail placeholders | `.state` (`.state-icon`, `.state-title`, `.state-body`, `.actions`), top-left aligned; `.overview` default detail |
@@ -2475,12 +2490,12 @@ local name so the two do not collide.
 - **Settings:** `.setting-row` details, `.set-sublabel`, `.update-block`, `.modal-body.allow-overflow`
   (unneeded once #1800 portals menus out of dialogs).
 
-**Remaining `<dl>` recipes.** Eleven other label and value lists still carry their own rules and
+**Remaining `<dl>` recipes.** Ten other label and value lists still carry their own rules and
 move onto `.facts` with their area: `.context-popover-facts`, `.session-usage-facts`,
 `.auth-recovery-identity`, `.shortcut-list`, `.instance-meta`, `.governance-decision-facts`,
-`.runner-meta`, `.connection-details-list`, `.campaign-held-child-hold`, `.approval-selector-context`
-and `.automation-facts`. (`.workspace-reference-details` moved onto `.facts` with the File Reference
-dialog, #2177.)
+`.runner-meta`, `.connection-details-list`, `.approval-selector-context` and `.automation-facts`.
+(`.workspace-reference-details` moved onto `.facts` with the File Reference dialog, #2177, and
+`.campaign-held-child-hold` with Held Children, #2157.)
 
 ---
 
