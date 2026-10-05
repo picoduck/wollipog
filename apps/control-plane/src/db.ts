@@ -13189,6 +13189,20 @@ export class ControlPlaneDb {
     return this.sessionOrchestratorPolicy(id)?.issueNumbers ?? null;
   }
 
+  campaignIssueScopeRootsForRunner(runnerId: string): SessionView[] {
+    const rows = this.stmt(`SELECT id FROM sessions WHERE runner_id=?
+      AND CASE WHEN json_valid(orchestrator_policy) THEN json_type(orchestrator_policy, '$.issueScope') ELSE NULL END='object'`)
+      .all(runnerId) as Array<{id:string}>;
+    const roots = new Set(rows.flatMap(({id}) => { const root=this.campaignRootForMember(id); return root ? [root] : []; }));
+    return [...roots].flatMap((id) => { const root=this.getSession(id); return root?.orchestratorPolicy?.issueScope ? [root] : []; });
+  }
+
+  campaignSharesRepositoryWorkspace(root: SessionView, member: Pick<SessionView, "id" | "runnerId" | "workspaceId">): boolean {
+    const path = (s: Pick<SessionView, "id" | "runnerId" | "workspaceId">) => this.getAdHocWorkspacePath(s.id) ??
+      (s.workspaceId ? this.getWorkspacePath(s.runnerId, s.workspaceId) : null);
+    return root.runnerId === member.runnerId && root.workspaceId === member.workspaceId && path(root) === path(member);
+  }
+
   /** Approval, authority update, and consumption share a transaction: a replay cannot widen scope. */
   approveCampaignIssueScope(occurrenceId: string, userId: string, now: number): WorkflowDecisionView | null {
     this.db.exec("BEGIN IMMEDIATE");
@@ -13208,8 +13222,12 @@ export class ControlPlaneDb {
       for (const id of [root.id, ...this.campaignDescendantIds(root.id)]) {
         const memberPolicy = this.sessionOrchestratorPolicy(id);
         if (!memberPolicy) continue;
-        memberPolicy.issueNumbers = [...scope.issueNumbers];
-        memberPolicy.issueScope = scope;
+        const member = this.getSession(id)!;
+        // Retired participants may belong to a different repository. Record the revision, but
+        // never transfer this repository's issue numbers into their launch permission policy.
+        const memberScope = this.campaignSharesRepositoryWorkspace(root, member) ? scope : { ...scope, issueNumbers: [] };
+        memberPolicy.issueNumbers = [...memberScope.issueNumbers];
+        memberPolicy.issueScope = memberScope;
         this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(memberPolicy), now, id);
       }
       if (!this.resolveWorkflowDecision(occurrenceId, "human", "approved", now) || !this.consumeWorkflowDecision(occurrenceId, now)) {

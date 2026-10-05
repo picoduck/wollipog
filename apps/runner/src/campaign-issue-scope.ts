@@ -14,6 +14,16 @@ export async function inspectCampaignIssueScope(run: Run, epic?: number, issues:
     }
     return { title: raw.title as string, body: (raw.body ?? "") as string };
   };
+  const readIssues = async (numbers: number[]) => {
+    if (candidates.length + numbers.length > 100) throw new Error("Issue selection exceeds 100 issues; select a smaller explicit scope");
+    const results: Array<{number:number;title:string}> = [];
+    // Bound subprocess/network concurrency while avoiding one round trip per issue in series.
+    for (let offset=0; offset<numbers.length; offset+=4) {
+      const batch = await Promise.all(numbers.slice(offset,offset+4).map(async (number) => ({number,...await readIssue(number)})));
+      results.push(...batch);
+    }
+    return results;
+  };
   if (epic !== undefined) {
     const umbrella = await readIssue(epic);
     candidates.push({ issue: { repository, number: epic }, title: umbrella.title, source: "umbrella" });
@@ -27,18 +37,14 @@ export async function inspectCampaignIssueScope(run: Run, epic?: number, issues:
       }
       candidates.push({ issue: { repository, number: child.number }, title: child.title, source: "sub_issue" });
     }
-    for (const number of epicChecklistMembers(umbrella.body, repository)) {
-      if (candidates.some((c) => c.issue.number === number)) continue;
-      const member = await readIssue(number);
-      candidates.push({ issue: { repository, number }, title: member.title, source: "member_checklist" });
-      if (candidates.length > 100) throw new Error("Epic scope exceeds 100 issues; select explicit issues");
+    const checklist = epicChecklistMembers(umbrella.body, repository).filter((number) => !candidates.some((c) => c.issue.number === number));
+    for (const member of await readIssues(checklist)) {
+      candidates.push({ issue: { repository, number: member.number }, title: member.title, source: "member_checklist" });
     }
   }
-  for (const number of issues) {
-    if (!candidates.some((c) => c.issue.number === number)) {
-      const issue = await readIssue(number);
-      candidates.push({ issue: { repository, number }, title: issue.title, source: "member_checklist" });
-    }
+  const explicit = issues.filter((number) => !candidates.some((c) => c.issue.number === number));
+  for (const issue of await readIssues(explicit)) {
+    candidates.push({ issue: { repository, number: issue.number }, title: issue.title, source: "member_checklist" });
   }
   return { repository, candidates };
 }

@@ -4142,7 +4142,7 @@ export class SessionsService {
       ? campaignController.orchestratorPolicy?.issueNumbers
       : undefined;
     if (campaignController && campaignNeedsEpicScope(this.db, campaignController)) {
-      return fail("Confirm the epic's authorized issue scope in Campaign Status before delegating work. Use get_campaign_issue_scope and request_campaign_issue_scope_change, then wait for human approval.", 409);
+      return fail(scopeCompatibility(this.db, campaignController) ?? "Confirm the epic's authorized issue scope in Campaign Status before delegating work. Use get_campaign_issue_scope and request_campaign_issue_scope_change, then wait for human approval.", 409);
     }
     const inheritedIssueScope = campaignController?.orchestratorPolicy?.issueScope ?? snapshotSpec?.orchestrator?.issueScope;
     if (orchestratorPolicy && inheritedIssueScope && !runnerSupportsProtocol(runner.protocolVersion, "campaignIssueScopeChanges")) {
@@ -6424,6 +6424,13 @@ export class SessionsService {
     if (session.orchestratorPolicy?.issueScope && !runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "campaignIssueScopeChanges")) {
       return fail("Revisioned campaign scope requires a protocol-v208 runner; update and reconnect before restarting.", 409);
     }
+    if (session.orchestratorPolicy?.issueScope) {
+      const campaignId = this.db.campaignRootForMember(sessionId);
+      const campaign = campaignId ? this.db.getSession(campaignId) : null;
+      if (!campaign || !this.db.campaignSharesRepositoryWorkspace(campaign, session)) {
+        return fail("A scoped Orchestrator must restart in the campaign's runner and repository workspace. Restore its campaign workspace or start an independent campaign.", 409);
+      }
+    }
     const supportsIssueScope = runnerSupportsProtocol(
       this.db.getRunner(session.runnerId)?.protocolVersion,
       "orchestratorIssueScope",
@@ -7513,12 +7520,12 @@ export class SessionsService {
     if (!view.ok || !view.data) return failAs(view);
     if (request?.expectedRevision !== view.data.revision) return fail("Campaign scope changed. Refresh and propose against the current revision.", 409);
     for (const member of scopeParticipants(this.db, root)) {
-      if (member.runnerId !== root.runnerId || member.workspaceId !== root.workspaceId || !member.workspaceId && this.db.getAdHocWorkspacePath(member.id) !== this.db.getAdHocWorkspacePath(root.id)) {
+      if (!this.db.campaignSharesRepositoryWorkspace(root, member)) {
         return fail("All active Orchestrator participants must use the campaign's runner and repository workspace before changing issue scope. Move or finish the other participants, then retry.", 409);
       }
     }
     const snapshot = scopeSnapshot(this.db, root, view.data.repository, request);
-    if (!snapshot) return fail("Provide unique repository-qualified additions/removals, a current revision, and an explanation; at most 100 issues may be authorized.", 400);
+    if (!snapshot) return fail("Provide unique repository-qualified additions/removals, a current revision, and an explanation. Review supports at most 100 issues and 100 active child assignments; finish some child work or resolve outstanding requests before retrying a larger campaign.", 400);
     try {
       const requestId = `issue_scope_validate_${randomUUID()}`;
       const response = await this.hub.requestFromRunner(root.runnerId, requestId,
@@ -7530,7 +7537,7 @@ export class SessionsService {
       if (!latest || (latest.orchestratorPolicy?.issueScope?.revision ?? 0) !== snapshot.expectedRevision) return fail("Campaign scope changed during inspection; refresh and propose again.", 409);
       return this.createWorkflowDecision(sessionId, { requestId: request.requestId, resourceKey: `campaign_issue_scope:${sessionId}`,
         resourceSnapshot: snapshot }, canAccess, { trustedIssueScope: true });
-    } catch { return fail("Issue validation failed. Reconnect the runner and verify gh authentication, then retry.", 409); }
+    } catch { return fail("GitHub issue validation timed out or failed. Try a smaller explicit proposal and verify the runner's GitHub access, then retry.", 409); }
   }
 
   async synchronizeCampaignIssueScope(sessionId: string): Promise<boolean> {

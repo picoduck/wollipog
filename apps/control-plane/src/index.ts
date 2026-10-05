@@ -1324,9 +1324,8 @@ app.register(async (instance) => {
         for (const projectId of db.projectIdsForRunner(runnerId)) hub.projectChangedById(projectId);
         // If this runner is a box's runner (connected through the SSH tunnel), flip it online.
         orchestrator.onRunnerRegistered(runnerId, credential.credentialId);
-        for (const campaign of db.listSessions({ includeArchived: true })) {
-          if (campaign.orchestratorPolicy?.issueScope && db.campaignRootForMember(campaign.id) === campaign.id &&
-              [campaign, ...db.campaignDescendantIds(campaign.id).flatMap((id) => { const s = db.getSession(id); return s ? [s] : []; })].some((s) => s.runnerId === runnerId)) {
+        if (runnerSupportsProtocol(msg.protocolVersion, "campaignIssueScopeChanges")) {
+          for (const campaign of db.campaignIssueScopeRootsForRunner(runnerId)) {
             void svc.synchronizeCampaignIssueScope(campaign.id);
           }
         }

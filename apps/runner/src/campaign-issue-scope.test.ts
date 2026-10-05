@@ -24,3 +24,19 @@ test("runner fails closed on incomplete, external or excessive membership", asyn
     await assert.rejects(inspectCampaignIssueScope(run, 1));
   }
 });
+
+test("large explicit scope validation bounds concurrent GitHub reads and preserves exact issue order", async () => {
+  let inFlight=0, maximum=0;
+  const issues=Array.from({length:100},(_,i)=>i+1);
+  const run=async (command:string,args:string[])=> {
+    if(command==="git") return "https://github.com/team/repo.git";
+    inFlight++;maximum=Math.max(maximum,inFlight);
+    await new Promise<void>((resolve)=>setImmediate(resolve));
+    inFlight--;
+    const number=Number(args.at(-1)!.split("/").at(-1));
+    return JSON.stringify({number,title:`Issue ${number}`,body:null,html_url:`https://github.com/team/repo/issues/${number}`});
+  };
+  const result=await inspectCampaignIssueScope(run,undefined,issues);
+  assert.deepEqual(result.candidates.map((candidate)=>candidate.issue.number),issues);
+  assert.equal(maximum,4,"avoid both serial timeout amplification and unbounded subprocess fanout");
+});

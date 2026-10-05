@@ -21,7 +21,7 @@ Outstanding action decisions are revoked conservatively on any approved scope ch
 
 Protocol v208 capability-gates the complete operation before any update. Active Orchestrator participants
 must share the campaign runner and repository workspace; finish or move incompatible participants first.
-The control plane persists the authoritative policy on all Orchestrator members. The runner stores the
+The control plane persists the authoritative policy on matching Orchestrator members and records an empty scope at the same revision on retired participants in another repository workspace. Restarts and provider launches independently preserve the repository boundary. The runner stores the
 scope revision and updates live Claude permission classification, then restores it on reconnect/restart.
 Closure inspection and execution are fenced against both repository and scope revision. Synchronization
 failure is recoverable by reconnecting/updating the runner; closure remains refused until synchronization.

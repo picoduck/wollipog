@@ -25312,3 +25312,70 @@ test("human campaign scope recovery, additions, denial, removal and closure use 
     await new Promise((resolve) => setTimeout(resolve,0));
   } finally { db.close(); }
 });
+
+test("scope approval cannot authorize a stopped Orchestrator in another repository workspace", async () => {
+  const {db,hub,svc}=makeHarness();
+  try {
+    const meta=runnerMeta();
+    meta.workspaces.push({id:"other-workspace",name:"Other",path:"/repos/other"});
+    meta.agents.find((a)=>a.id==="test-orchestrator")!.capabilities={models:[],effortLevels:[],slashCommands:[],supportsImages:false,supportsApprovals:true,permissionModes:["default","orchestrator"]};
+    db.registerRunner(meta,Date.now(),PROTOCOL_VERSION);
+    const created=svc.createSession({runnerId:RUNNER_ID,workspaceId:WORKSPACE_ID,agentId:"test-orchestrator",config:{permissionMode:"orchestrator"},prompt:"Orchestrate issues #12 and #13.",orchestrator:{execution:{strictProjectIsolation:false}}},undefined,undefined,false,false,false,{defaultOwnerUserId:"owner"});
+    assert.ok(created.ok && created.data,created.error);
+    const id=created.data.id;
+    db.updateSessionStatus(id,"running",Date.now());
+    db.addProjectLocation(created.data.projectId!,{runnerId:RUNNER_ID,workspaceId:"other-workspace"});
+    const child=svc.createSession({runnerId:RUNNER_ID,workspaceId:"other-workspace",agentId:"test-orchestrator",config:{permissionMode:"orchestrator"},prompt:"Coordinate other work."},undefined,undefined,false,false,false,{parentSessionId:id});
+    assert.ok(child.ok && child.data,child.error);
+    assert.deepEqual(child.data.orchestratorPolicy!.issueNumbers??[],[]);
+    db.updateSessionStatus(child.data.id,"stopped",Date.now());
+    hub.requestHandler=(m)=> {
+      if(m.type!=="campaign_issue_scope") throw new Error("unexpected command");
+      return {type:"campaign_issue_scope_result",requestId:m.requestId,sessionId:m.sessionId,ok:true,repository:"team/repo",...(m.operation==="synchronize"?{revision:m.scope.revision}:{candidates:(m.issues??[]).map((number)=>({issue:{repository:"team/repo",number},title:"Member",source:"sub_issue" as const}))})};
+    };
+    const proposed=await svc.proposeCampaignIssueScope(id,{requestId:"add-member",expectedRevision:0,additions:[{repository:"team/repo",number:14}],removals:[],explanation:"Include member"});
+    assert.ok(proposed.ok && proposed.data,proposed.error);
+    const approved=svc.resolveWorkflowDecision(id,id,proposed.data.occurrenceId,{outcome:"approve"},"human",{kind:"human",id:"owner"},()=>true);
+    assert.ok(approved.ok,approved.error);
+    assert.deepEqual(db.getSession(child.data.id)!.orchestratorPolicy!.issueNumbers,[],"a stopped foreign workspace must receive no issue authority");
+    assert.deepEqual(db.campaignIssueScopeRootsForRunner(RUNNER_ID).map((s)=>s.id),[id],"reconnect selects each revisioned campaign once");
+    assert.deepEqual(db.campaignIssueScopeRootsForRunner("unrelated-runner"),[]);
+    const restarted=svc.restart(child.data.id);
+    assert.equal(restarted.ok,false,"restart must retain the campaign repository boundary");
+    assert.match(restarted.error!,/campaign.*repository workspace/);
+    await new Promise((resolve)=>setTimeout(resolve,0));
+  } finally {db.close();}
+});
+
+test("human-only campaigns can confirm scope and separately approve closure with Parent Control off", async () => {
+  const {db,hub,svc}=makeHarness();
+  try {
+    const meta=runnerMeta();
+    meta.agents.find((a)=>a.id==="test-orchestrator")!.capabilities={models:[],effortLevels:[],slashCommands:[],supportsImages:false,supportsApprovals:true,permissionModes:["default","orchestrator"]};
+    db.registerRunner(meta,Date.now(),PROTOCOL_VERSION);
+    const decisions={implementation_question:"human",pr_merge:"human",merged_branch_deletion:"human",follow_up_issue_publication:"human",ui_evidence_approval:"human"} as const;
+    const created=svc.createSession({runnerId:RUNNER_ID,workspaceId:WORKSPACE_ID,agentId:"test-orchestrator",config:{permissionMode:"orchestrator"},prompt:"Orchestrate epic #123.",orchestrator:{delegation:{parentControl:"off",decisions}}},undefined,undefined,false,false,false,{defaultOwnerUserId:"owner"});
+    assert.ok(created.ok && created.data,created.error);
+    const id=created.data.id;
+    assert.equal(created.data.parentControl,"off");
+    assert.equal(created.data.parentControlPolicy!.revision,0,"human-only fallback is materialized by SessionView");
+    db.updateSessionStatus(id,"running",Date.now());
+    hub.requestHandler=(m)=> {
+      if(m.type==="campaign_issue_scope") return {type:"campaign_issue_scope_result",requestId:m.requestId,sessionId:m.sessionId,ok:true,repository:"team/repo",...(m.operation==="synchronize"?{revision:m.scope.revision}:{candidates:(m.issues??[123]).map((number)=>({issue:{repository:"team/repo",number},title:"Epic",source:"umbrella" as const}))})};
+      if(m.type==="github_issue_closure") return {type:"github_issue_closure_result",requestId:m.requestId,sessionId:m.sessionId,ok:true,inspection:{repository:"team/repo",issue:123,title:"Epic",url:"https://github.com/team/repo/issues/123",state:"OPEN",forgeDigest:"a".repeat(64),openPullRequests:[]}};
+      throw new Error("unexpected command");
+    };
+    const proposed=await svc.proposeCampaignIssueScope(id,{requestId:"confirm",expectedRevision:0,additions:[{repository:"team/repo",number:123}],removals:[],explanation:"Include epic"});
+    assert.ok(proposed.ok && proposed.data,proposed.error);
+    assert.equal(proposed.data.authority,"human");
+    assert.equal(proposed.data.policyRevision,0);
+    const approved=svc.resolveWorkflowDecision(id,id,proposed.data.occurrenceId,{outcome:"approve"},"human",{kind:"human",id:"owner"},()=>true);
+    assert.ok(approved.ok,approved.error);
+    const closure=await svc.requestGithubIssueClosure(id,{requestId:"closure",issue:123,reason:"completed",explanation:"Delivered",evidence:["Verified"]});
+    assert.ok(closure.ok && closure.data?.decision,closure.error);
+    const resolved=svc.resolveWorkflowDecision(id,id,closure.data.decision.occurrenceId,{outcome:"approve"},"human",{kind:"human",id:"owner"},()=>true);
+    assert.ok(resolved.ok,resolved.error);
+    assert.equal(resolved.data!.status,"approved","scope approval did not consume the separate closure approval");
+    await new Promise((resolve)=>setTimeout(resolve,0));
+  } finally {db.close();}
+});

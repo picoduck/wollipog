@@ -7691,6 +7691,14 @@ export class SessionManager {
         isolation,
       }, { isCurrent: () => this.launchIsCurrent(sessionId, launchGeneration) });
       if (!this.launchIsCurrent(sessionId, launchGeneration)) throw new Error("session launch changed during provider-home acquisition");
+      // A restart or fork may carry repository-bound authority into a changed launch directory.
+      // Verify the actual origin before any provider can classify issue writes as routine.
+      const preparedScope = this.store.readMeta(sessionId)?.orchestrator?.issueScope;
+      if (preparedScope) {
+        const { repository } = await inspectCampaignIssueScope(issueClosureRun(meta.context, meta.repoPath));
+        if (repository !== preparedScope.repository.toLowerCase()) throw new Error("Launch repository differs from the authorized campaign issue scope; restore the campaign repository before restarting");
+        if (!this.launchIsCurrent(sessionId, launchGeneration)) throw new Error("session launch changed during repository verification");
+      }
       // Scope synchronization can finish during any preparation or provider-home wait.
       // Refresh at the last synchronous boundary before the driver captures its live policy.
       const authoritativeScope = this.store.readMeta(sessionId)?.orchestrator?.issueScope;
@@ -16227,7 +16235,7 @@ export class SessionManager {
         return { ...base, ok: true, ...await inspectCampaignIssueScope(run, message.epic, message.issues) };
       }
       const live = this.active.get(message.sessionId)?.orchestratorLaunchPolicy;
-      if (live && message.scope?.revision > (live.issueScope?.revision ?? 0)) live.issueNumbers = [];
+      if (live && message.scope?.revision >= (live.issueScope?.revision ?? 0)) live.issueNumbers = [];
       const scope = message.scope;
       if (!scope || !boundedIssueNumbers(scope.issueNumbers) || !Number.isSafeInteger(scope.revision) || scope.revision < 1 ||
           typeof scope.repository !== "string" || !/^[\w.-]+\/[\w.-]+$/u.test(scope.repository) ||
