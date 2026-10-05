@@ -524,6 +524,7 @@ function Fixture() {
               requests={dockRequests(prioritizedPendingRequests(dockSession.pendingApproval))}
               runnerOnline
               followTailState={followTailEnabled ? followTail.state : undefined}
+              readerRef={scrollRef}
             />
           </div>
         )}

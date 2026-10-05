@@ -749,6 +749,44 @@ test("a request arriving while collapsed updates the strip's count, or its title
   }
 });
 
+test("a repeated announcement is spoken again, and a new occurrence under the same request id is an arrival", async () => {
+  const region = (view: { container: HTMLElement }) => view.container.querySelector("[data-request-dock-announcement]")!;
+  const watch = (view: { container: HTMLElement }) => {
+    const changes: number[] = [];
+    const observer = new domWindow.MutationObserver((records) => { changes.push(records.length); });
+    observer.observe(region(view) as never, { childList: true, characterData: true, subtree: true });
+    return { changes, stop: () => observer.disconnect() };
+  };
+  // Two permissions with the same words: the first arrives and goes, the second arrives.
+  const twin = (requestId: string): PendingApproval => ({ ...permission(), requestId });
+  const view = await render(<ReadingBackHarness pending={signIn()} state="paused" />);
+  try {
+    await view.rerender(<ReadingBackHarness pending={{ ...signIn(), additionalRequests: [twin("first")] }} state="paused" />);
+    assert.equal(region(view).textContent, "Approval Required: Run pnpm deploy?");
+    await view.rerender(<ReadingBackHarness pending={signIn()} state="paused" />);
+    const watched = watch(view);
+    await view.rerender(<ReadingBackHarness pending={{ ...signIn(), additionalRequests: [twin("second")] }} state="paused" />);
+    watched.stop();
+    assert.equal(region(view).textContent, "Approval Required: Run pnpm deploy?");
+    assert.ok(watched.changes.length > 0, "the same words for a different request still change the live region");
+  } finally {
+    await view.unmount();
+  }
+
+  // The provider asks again under the same request id: a new occurrence, with new words.
+  const asked = (occurrenceId: string, title: string): PendingApproval => ({ ...permission(), occurrenceId, title });
+  const again = await render(<ReadingBackHarness pending={{ ...signIn(), additionalRequests: [asked("one", "Run pnpm deploy?")] }}
+    state="paused" />);
+  try {
+    assert.equal(region(again).textContent, "");
+    await again.rerender(<ReadingBackHarness pending={{ ...signIn(), additionalRequests: [asked("two", "Run pnpm deploy --force?")] }}
+      state="paused" />);
+    assert.equal(region(again).textContent, "Approval Required: Run pnpm deploy --force?");
+  } finally {
+    await again.unmount();
+  }
+});
+
 test("a card that shrinks under focus hands it to Expand, and a control elsewhere asking for the request restores it", async () => {
   const pending = { ...permission(), additionalRequests: [signIn()] };
   const view = await render(<ReadingBackHarness pending={pending} state="following" />);

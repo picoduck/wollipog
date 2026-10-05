@@ -1488,6 +1488,40 @@ test("the request dock shrinks to its strip and back without moving the first vi
   expect(Math.abs(expanded.offset - anchor!.offset)).toBeLessThanOrEqual(1);
 });
 
+test("near the tail the dock keeps its card until the reader is far enough up that the strip cannot move the rows (#2195)", async ({ page }) => {
+  await page.goto("/timeline-reflow-e2e.html?follow=1&dock=1");
+  const reader = page.getByTestId("reader");
+  const dock = page.locator(".request-dock");
+  await expect(dock.locator(".request-card")).toBeVisible();
+  await expect(reader).toHaveAttribute("data-follow-tail-state", "following");
+  await page.getByTestId("preview-follow").click();
+  await reader.evaluate((element) => {
+    element.scrollTop = element.scrollHeight - element.clientHeight - 80;
+    element.dispatchEvent(new Event("scroll"));
+  });
+  await waitForStableReaderGeometry(page);
+  const givenBack = (await dock.boundingBox())!.height - 44;
+  expect(givenBack).toBeGreaterThan(80);
+  const anchor = await stableAnchor(page);
+
+  // Paused 80px above the tail: the strip would give back more than there is below, so it waits.
+  const paused = await recordRowOffsets(page, anchor.key!, () => page.getByTestId("pause-follow").click());
+  await expect(reader).toHaveAttribute("data-follow-tail-state", "paused");
+  await expect(dock.locator(".request-card")).toBeVisible();
+  expect(paused.every((offset) => offset !== null && Math.abs(offset - anchor.offset) <= 1), JSON.stringify(paused)).toBe(true);
+
+  // Reading further up than that: the strip shows and the browser has nothing to clamp.
+  const target = await reader.evaluate((element, distance) => {
+    element.scrollTop -= distance;
+    element.dispatchEvent(new Event("scroll"));
+    return element.scrollTop;
+  }, Math.ceil(givenBack) + 40);
+  await expect(dock.locator(".dock-strip")).toBeVisible();
+  await waitForStableReaderGeometry(page);
+  expect(Math.abs(await reader.evaluate((element) => element.scrollTop) - target)).toBeLessThanOrEqual(1);
+  await expect(reader).toHaveAttribute("data-follow-tail-state", "paused");
+});
+
 test("a reader-driven return to a streaming tail resumes following", async ({ page }) => {
   await page.goto("/timeline-reflow-e2e.html?follow=1");
   const reader = page.getByTestId("reader");

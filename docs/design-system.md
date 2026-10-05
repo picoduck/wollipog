@@ -2113,7 +2113,8 @@ follows these rules so it never crowds out the conversation it asks about:
   focus; activating the strip or Expand restores it and moves focus to the card's heading, and it stays
   expanded until the reader is back at the tail. A and D do nothing while the strip shows. A new
   request updates the strip's title and count and is announced once. The request never disappears,
-  and the height the dock gives back goes to the transcript without moving its reading anchor.
+  and the height the dock gives back goes to the transcript without moving its reading anchor: the
+  strip waits until the reader is at least that height above the tail, so nothing clamps the rows.
 - **The question and its context link both ways.** The transcript keeps a compact neutral marker
   where a question was asked ("Question · title", with Jump to Question). The card head has Show Where
   Asked, which scrolls the transcript so the marker sits in the upper third, gives the marker the

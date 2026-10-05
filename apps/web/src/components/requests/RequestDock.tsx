@@ -5,6 +5,7 @@ import React, {
   useRef,
   useState,
   type ReactNode,
+  type RefObject,
 } from "react";
 import { sessionAttentionStatus, type PendingApproval, type SessionView } from "@wollipog/protocol";
 import { relativeTime } from "../../format.js";
@@ -38,7 +39,8 @@ export function dockRequests(requests: readonly PendingApproval[]): PendingAppro
  *
  * While the reader scrolls back away from the live tail (`followTailState` is "paused"), the dock
  * shrinks to one 44px strip (#2195): the expanded request's icon, title and position, and Expand.
- * The request never disappears, A and D do nothing until it is expanded again, and a request that
+ * It waits until the reader is far enough above the tail that the height it gives back cannot move
+ * the rows being read. The request never disappears, A and D do nothing until it is expanded again, and a request that
  * arrives meanwhile is announced once. Returning to the tail restores the card and leaves focus where
  * it is; activating the strip restores it and moves focus to its heading, and it then stays expanded
  * until the reader is back at the tail.
@@ -55,6 +57,7 @@ export function RequestDock({
   keyboardOpen = false,
   revealRequestId,
   followTailState,
+  readerRef,
 }: {
   session: SessionView;
   /** In priority order (`prioritizedPendingRequests`), already limited by `dockRequests`. */
@@ -71,6 +74,9 @@ export function RequestDock({
   revealRequestId?: string;
   /** The transcript's follow-tail state: while it is "paused" the dock shows its strip. */
   followTailState?: FollowTailState;
+  /** The transcript's scroller, whose room below the reading position the strip waits for. Without
+   * one the strip shows as soon as the reader is paused. */
+  readerRef?: RefObject<HTMLElement | null>;
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(() => revealRequestId ?? null);
   const [moreOpen, setMoreOpen] = useState(false);
@@ -85,14 +91,42 @@ export function RequestDock({
   // Reading back shrinks the dock to its strip, unless the person expanded it since leaving the tail.
   const readingBack = followTailState === "paused";
   const [heldOpen, setHeldOpen] = useState(revealRequestId !== undefined);
-  if (!readingBack && heldOpen) setHeldOpen(false);
-  const collapsed = readingBack && !heldOpen;
+  const [shrunk, setShrunk] = useState(false);
+  if (!readingBack && (heldOpen || shrunk)) {
+    setHeldOpen(false);
+    setShrunk(false);
+  }
+  const collapsed = readingBack && !heldOpen && shrunk;
   const collapsedRef = useRef(collapsed);
   collapsedRef.current = collapsed;
+  const shrinkableRef = useRef(false);
+  shrinkableRef.current = readingBack && !heldOpen && !shrunk;
   const restore = () => {
     focusHeading.current = true;
     setHeldOpen(true);
   };
+  // The strip waits until the reader is at least the height it gives back above the tail. Nearer, the
+  // taller transcript would have nothing below its rows to fill, and the browser's clamp would move
+  // them; there the reader is still about to read the request anyway.
+  const shrinkIfRoom = useRef(() => {});
+  shrinkIfRoom.current = () => {
+    if (!shrinkableRef.current) return;
+    const reader = readerRef?.current;
+    const dock = dockRef.current;
+    if (reader && dock) {
+      const givenBack = dock.getBoundingClientRect().height - DOCK_STRIP_HEIGHT_PX;
+      if (reader.scrollHeight - reader.scrollTop - reader.clientHeight < givenBack) return;
+    }
+    setShrunk(true);
+  };
+  useLayoutEffect(() => shrinkIfRoom.current());
+  useEffect(() => {
+    const reader = readerRef?.current;
+    if (!reader) return;
+    const onScroll = () => shrinkIfRoom.current();
+    reader.addEventListener("scroll", onScroll, { passive: true });
+    return () => reader.removeEventListener("scroll", onScroll);
+  }, [readerRef]);
 
   // A and D reach the expanded card through the registry, from whichever keyboard owner reads them.
   // The strip takes them and does nothing, so no request is decided while it cannot be read.
@@ -139,15 +173,18 @@ export function RequestDock({
     if (waiting.length === 0) setMoreOpen(false);
   }, [waiting.length]);
 
-  // A request that arrives while the strip shows is announced once; the card speaks for itself.
-  const [announcement, setAnnouncement] = useState("");
-  const seenRef = useRef<ReadonlySet<string>>(new Set(requests.map((request) => request.requestId)));
+  // A request that arrives while the strip shows is announced once; the card speaks for itself. An
+  // arrival is a new occurrence, since a provider may ask again under the same request id, and each
+  // announcement is a new node, so one that repeats the last one's words is still spoken.
+  const [announcement, setAnnouncement] = useState<{ text: string; serial: number } | null>(null);
+  const seenRef = useRef<ReadonlySet<string>>(new Set(requests.map(occurrenceKey)));
   useEffect(() => {
-    const arrived = requests.filter((request) => !seenRef.current.has(request.requestId));
-    seenRef.current = new Set(requests.map((request) => request.requestId));
-    if (!collapsed) setAnnouncement("");
+    const arrived = requests.filter((request) => !seenRef.current.has(occurrenceKey(request)));
+    seenRef.current = new Set(requests.map(occurrenceKey));
+    if (!collapsed) setAnnouncement(null);
     else if (arrived.length > 0) {
-      setAnnouncement(arrived.map((request) => requestAnnouncement(session, request)).join(" "));
+      const text = arrived.map((request) => requestAnnouncement(session, request)).join(" ");
+      setAnnouncement((previous) => ({ text, serial: (previous?.serial ?? 0) + 1 }));
     }
   }, [collapsed, requests, session]);
 
@@ -249,10 +286,17 @@ export function RequestDock({
         </>
       )}
       <span className="sr-only" role="status" aria-live="polite" data-request-dock-announcement="">
-        {announcement}
+        {announcement && <span key={announcement.serial}>{announcement.text}</span>}
       </span>
     </section>
   );
+}
+
+/** The strip's height (`.dock-strip`), which the dock keeps of the card's while reading back. */
+const DOCK_STRIP_HEIGHT_PX = 44;
+
+function occurrenceKey(request: PendingApproval): string {
+  return JSON.stringify([request.requestId, request.occurrenceId ?? null]);
 }
 
 /** "Approval Required: Run a potentially destructive command": what the request needs, and its title. */

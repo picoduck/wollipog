@@ -913,6 +913,7 @@ function Fixture() {
         keyboardOpen={keyboardOpen}
         revealRequestId={revealRequestId}
         followTailState={followTailEnabled ? followTail.state : undefined}
+        readerRef={scrollRef}
       />
     ),
   } : undefined;
