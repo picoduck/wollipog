@@ -2127,13 +2127,15 @@ follows these rules so it never crowds out the conversation it asks about:
   `LockKeyhole`; once per card, only on a page that cannot check digests and only when an item is an
   artifact it could show), a compact danger notice "Deny this request and ask for a new capture."
   whenever an item can't be reviewed, `.ev-progress` ("1 of 4 reviewed", a polite status), the
-  `.ev-grid` (`repeat(auto-fill, minmax(150px, 1fr))`; a strip of four tiles of at most 160px in the
-  dock), one `.ev-checked` caption (`CircleCheck` in green) once any artifact is shown, and Show
-  Details (§5.5) with the resource key, digest, who decides and, for a human fallback, why. A tile
+  `.ev-grid` (`repeat(auto-fill, minmax(150px, 1fr))`; a strip of four tiles in the dock, at most
+  160px each on a phone, while a dock body 780px or wider sets each tile's 104px frame beside its
+  words so a four-item review fits under the dock's cap with nothing scrolled away), then one row
+  holding the `.ev-checked` caption (`CircleCheck` in green, once any artifact is shown) and Show
+  Details (§5.5), which takes its own line when opened, with the resource key, digest, who decides and, for a human fallback, why. A tile
   is its 16:10 frame with the Reviewed mark on the picture's corner, its name by media type
   ("Screenshot 2", "Recording", "Link"; numbered only when the request has several), the capture's
   pixel size once shown, and the evidence id in mono, which ellipsizes; the name wraps and never
-  truncates. Activating a shown tile opens it (the Evidence Viewer, #2207, takes this over). A tile
+  truncates. An artifact tile that is still loading has no mark yet. Activating a shown tile opens it (the Evidence Viewer, #2207, takes this over). A tile
   that can't show its evidence is `.ev-blocked` in place of the picture: `ShieldX` "Doesn't Match",
   `CircleAlert` "Can't Load" (with Retry when trying again can help) or "Can't Show", in danger
   ink; `LockKeyhole` "Not Shown" in neutral ink on a plain-HTTP page. A blocked tile has no mark,
