@@ -13208,6 +13208,9 @@ body.shell-dock-dragging * {
   min-width: 0;
 }
 .question-answer { min-width: 0; }
+/* Option labels and descriptions are the provider's text: a long identifier wraps inside the row
+   rather than widening the card and the transcript around it. */
+.question-card :is(.choice-row-title, .choice-row-desc) { overflow-wrap: anywhere; }
 /* Each description is one line, on phones too; the chosen row shows all of it. */
 .question-card .choice-row-desc { -webkit-line-clamp: 1; }
 .question-card .choice-row:has(> :is(.radio-mark, .checkbox-mark) > input:checked) .choice-row-desc {

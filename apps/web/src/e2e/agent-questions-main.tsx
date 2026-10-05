@@ -122,6 +122,13 @@ const longTextQuestions: AgentQuestion[] = [{
   options: [{ label: "Proceed" }, { label: "Hold" }],
 }];
 
+// Provider labels can hold one long identifier with nowhere to break (#2196).
+const longLabelQuestions: AgentQuestion[] = [{
+  id: "destination",
+  question: "Choose the live destination.",
+  options: [{ label: "Destination transcript_overflow_identifier_" + "x".repeat(120), description: "y".repeat(160) }, { label: "Staging" }],
+}];
+
 const replacementQuestions: AgentQuestion[] = [{
   id: "replacement",
   header: "Replacement",
@@ -192,6 +199,8 @@ function Fixture() {
       ? longQuestions
       : params.get("set") === "long-text"
         ? longTextQuestions
+        : params.get("set") === "long-label"
+          ? longLabelQuestions
       : params.get("set") === "forms"
         ? formQuestions
         : params.get("set") === "rich"

@@ -77,7 +77,7 @@ test("the session and Agents panel never mount two response forms for the same q
   await page.goto("/agents-e2e.html?primary-question=1");
   await page.getByRole("radio", { name: /Parser/ }).click();
   await page.getByRole("button", { name: "Audit Storage · Answer Required", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Submit", exact: true })).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Submit Answers", exact: true })).toHaveCount(1);
   await expect(page.getByRole("radio", { name: /Parser/ })).toBeChecked();
   await page.getByRole("button", { name: "Open Request in Session", exact: true }).click();
   await expect(page.locator('[data-session-request-id="permission-a"]')).toBeFocused();

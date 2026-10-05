@@ -443,6 +443,15 @@ test("a question taller than the capped card scrolls on its own and keeps its an
   expect(await page.evaluate(() => window.agentQuestionCalls[0]?.answers)).toEqual({ plan: "Proceed" });
 });
 
+test("an option label with a long unbroken identifier wraps inside the card at 320px", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 700 });
+  await page.goto("/agent-questions-e2e.html?set=long-label");
+  const card = page.getByRole("region", { name: "Agent Questions" });
+  await expect(card.locator(".choice-row").first()).toBeVisible();
+  expect(await card.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
+});
+
 test("in the transcript a long question is not capped", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/agent-questions-e2e.html?set=long-text");
