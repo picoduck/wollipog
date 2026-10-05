@@ -5,9 +5,11 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { SessionEvent, SessionView } from "@wollipog/protocol";
 import { Store } from "./store.js";
+import { installDomTestCleanup } from "./dom-test-cleanup.js";
 import { hasSavedFollowTailAnchor, useFollowTail, type FollowTailApi } from "./useFollowTail.js";
 
 const dom = new Window({ url: "http://localhost" });
+installDomTestCleanup(dom);
 for (const [name, value] of Object.entries({
   window: dom, document: dom.document, HTMLElement: dom.HTMLElement,
   Element: dom.Element, Node: dom.Node, React, IS_REACT_ACT_ENVIRONMENT: true,
