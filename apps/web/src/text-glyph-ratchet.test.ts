@@ -31,13 +31,12 @@ export const TEXT_GLYPHS = ["×", "✕", "✓", "▸", "▾", "↻", "←", "→
 
 // The area epics that own the recorded sites. An epic that is filed carries its number; the rest are
 // named by area and gain a number when filed.
-const TRANSCRIPT = "Transcript epic (not yet filed)";
 const COMPOSER = "Composer epic (not yet filed)";
 const SESSION_FRAME = "Session Page Frame and Header epic (not yet filed)";
 const SESSIONS_LIST = "Sessions List and Board epic (not yet filed)";
 const REVIEW = "Review Panel epic (not yet filed)";
 const SIDE_PANEL = "Side Panel epic (not yet filed)";
-const APPROVALS = "Approvals epic (not yet filed)";
+const APPROVALS = "Approvals, Questions and Governance epic (#2226)";
 const AUTOMATIONS = "Automations epic (not yet filed)";
 const CONNECTIONS = "Connections epic (not yet filed)";
 const PODS = "Pods epic (not yet filed)";
@@ -48,14 +47,6 @@ const TERMINAL = "Terminal epic (not yet filed)";
 const RECORDED: readonly (readonly [string, string, string, string])[] = [
   ["components/AutomationsView.tsx", "▸", "▸", AUTOMATIONS],
   ["components/AutomationsView.tsx", "×", "×", AUTOMATIONS],
-  ["components/EventTimeline.tsx", "→", "→ Dismissed by Parent", TRANSCRIPT],
-  ["components/EventTimeline.tsx", "→", "→ Approved by Parent", TRANSCRIPT],
-  ["components/EventTimeline.tsx", "→", "→ Denied by Parent", TRANSCRIPT],
-  ["components/EventTimeline.tsx", "→", "→ Replaced", TRANSCRIPT],
-  ["components/EventTimeline.tsx", "→", "→ Resolved by Provider", TRANSCRIPT],
-  ["components/EventTimeline.tsx", "→", "→ Dismissed", TRANSCRIPT],
-  ["components/EventTimeline.tsx", "→", "→", TRANSCRIPT],
-  ["components/EventTimeline.tsx", "→", "→ Dismissed", TRANSCRIPT],
   ["components/FilesPanel.tsx", "↻", "↻ Refresh", SIDE_PANEL],
   ["components/GitDiffViewer.tsx", "▾", "▾", REVIEW],
   ["components/GitDiffViewer.tsx", "▸", "▸", REVIEW],

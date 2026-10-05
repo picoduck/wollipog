@@ -22,6 +22,7 @@ import { disablePush, enablePush, pushAvailable, reconcilePushSubscription, type
 import { pickTopmost } from "./layers.js";
 import { useIsMobile } from "./components/useIsMobile.js";
 import { ViewerIdentityProvider } from "./components/ViewerIdentityProvider.js";
+import { GovernancePolicyNamesProvider } from "./components/GovernancePolicyNamesProvider.js";
 import { SessionPanelToggles } from "./components/SessionPanelToggles.js";
 import { parseStoredDockVisible } from "./dock.js";
 import { isInboxBlocked } from "./inbox.js";
@@ -779,6 +780,7 @@ export function Shell() {
           tabIndex={-1}
         >
           <ViewerIdentityProvider>
+          <GovernancePolicyNamesProvider>
           <SearchPaletteContext.Provider value={openPalette}>
           <AppBarSearchProvider onSearch={isMobile ? openPalette : undefined}>
           <ErrorBoundary
@@ -897,6 +899,7 @@ export function Shell() {
           </ErrorBoundary>
           </AppBarSearchProvider>
           </SearchPaletteContext.Provider>
+          </GovernancePolicyNamesProvider>
           </ViewerIdentityProvider>
         </div>
         {/* Bottom shell dock: session-scoped terminals in the compact desktop layout. Mounted only

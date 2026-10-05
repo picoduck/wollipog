@@ -208,18 +208,39 @@ const VOCABULARY = {
     permanent_failure: danger("Push Failed"),
     expired: danger("Push Expired"),
   },
-  /** An agent's question in the transcript (#2188). The resolved outcomes are the words #2204's
-   * decision records share; Awaiting Answer stays until the pending-question marker replaces it. */
+  /** An agent's question in the transcript while it waits (#2188), until the pending-question
+   * marker (#2205) replaces it. A settled question takes its word from `requestDecision`. */
   question: {
     awaiting_answer: warning("Awaiting Answer"),
+  },
+  /**
+   * How a request ended, in the past tense (#2204): the outcome word of every Decision Record (a
+   * permission, a governance decision, an automated review) and of the answered-question row. Never
+   * a provider's option id.
+   */
+  requestDecision: {
+    allowed: success("Allowed"),
     answered: success("Answered"),
     answered_by_policy: success("Answered by Policy"),
     answered_by_parent: success("Answered by Parent"),
+    /** A sign-in request the runner settled itself when the account recovered. */
+    rechecked_automatically: success("Rechecked Automatically"),
+    rejected: neutral("Rejected"),
     dismissed: neutral("Dismissed"),
     dismissed_by_parent: neutral("Dismissed by Parent"),
+    /** The request was cancelled, or the approval aborted before it could finish. */
+    ended_early: neutral("Ended Early"),
     replaced: neutral("Replaced"),
     expired: neutral("Expired"),
     provider_resolved: neutral("Resolved by Provider"),
+    another_account_selected: neutral("Another Account Selected"),
+    /** An automated reviewer handed the request to a person. */
+    escalated: neutral("Escalated"),
+    /** A chosen option whose kind says neither allow nor reject. */
+    resolved: neutral("Resolved"),
+    /** Denied by a policy, or fail-closed by Wollipog. */
+    blocked: danger("Blocked"),
+    timed_out: warning("Timed Out"),
   },
   /** A workflow gate, a run decision, and the run itself. */
   workflow: {

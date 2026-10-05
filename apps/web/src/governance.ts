@@ -13,106 +13,119 @@
  * histories have only the audit record, so those are materialized as compact chronological rows
  * anchored to the last loaded event at or before the decision's timestamp.
  */
-import type { GovernanceActor, GovernanceAuditEntry } from "@wollipog/protocol";
-import { humanResolver, resolverName, type ViewerIdentity } from "./resolver-identity.js";
+import type {
+  GovernanceActor,
+  GovernanceAuditEntry,
+  GovernanceAuditOutcome,
+  GovernanceAuditStage,
+} from "@wollipog/protocol";
+import type { DecisionActor, DecisionOutcome } from "./decision-record.js";
 import { isCollapsibleWorkItem, type TimelineItem } from "./timeline.js";
 
-export type GovernanceOutcomeTone = "allowed" | "denied" | "timed-out" | "policy";
-
 export interface GovernanceOutcome {
-  /** Viewer-neutral label; a member's decision is named relative to the viewer when rendered. */
-  label: string;
+  /** The past-tense outcome word, from the `requestDecision` vocabulary (#2204). */
+  outcome: DecisionOutcome;
+  /** Who decided. A member is named relative to the viewer when rendered (#2527) and a policy by
+   * its display name; neither id is ever shown. */
+  actor?: DecisionActor;
   detail: string;
-  tone: GovernanceOutcomeTone;
-  /** A member approved or denied the request (#2527). `actorId` is their user id, never shown. */
-  human?: { verb: "Approved" | "Denied"; actorId?: string };
 }
 
 /** A single user-visible governance outcome, reduced to content-safe display fields. */
 export interface GovernanceDecision extends GovernanceOutcome {
   auditId: string;
   requestId: string;
-  /** Content-safe actor description, e.g. "Policy · rule-1"; a member is named when rendered. */
-  decidedBy: string;
   policyId?: string;
   timestamp: number;
+  /** What the request was for, from the audit's content-safe scope. Native policy-hook events carry
+   * no scope, so a transcript row from one has none of these. */
+  toolName?: string;
+  path?: string;
+  branch?: string;
+  /** An agent's question answered by a policy, rather than a tool request. */
+  question?: true;
 }
 
 /** Number of newest audit records fetched per page. Older pages are loaded to cover the visible
  * transcript window and can also be requested explicitly from Governance History. */
 export const GOVERNANCE_AUDIT_LIMIT = 200;
 
-export function governanceAuditPresentation(entry: GovernanceAuditEntry): GovernanceOutcome | null {
-  if (entry.approvalKind === "question" && entry.actor.kind === "policy" && entry.outcome === "answered") {
-    return { label: "Answered by Policy", detail: `Question answered by policy ${entry.governancePolicyId ?? entry.actor.id}.`, tone: "allowed" };
-  }
-  if (entry.approvalKind !== "policy_hook") return null;
-  if (entry.stage === "policy_decision" && entry.outcome === "denied") {
-    return { label: "Blocked by Policy", detail: "The matched policy denied this tool.", tone: "policy" };
-  }
-  if (entry.stage !== "resolution") return null;
-  if (entry.outcome === "timed_out") {
-    return { label: "Approval Timed Out", detail: "The policy deadline expired, so the tool was denied.", tone: "timed-out" };
-  }
-  if (entry.outcome === "aborted") {
-    return { label: "Approval Aborted", detail: "The approval ended before the tool could run.", tone: "denied" };
-  }
-  if (entry.actor.kind === "system" && entry.outcome === "denied") {
+function policyActor(actor: GovernanceActor, governancePolicyId: string | undefined): DecisionActor {
+  const policyId = governancePolicyId ?? (actor.kind === "policy" ? actor.id : undefined);
+  return policyId ? { kind: "policy", policyId } : { kind: "policy" };
+}
+
+/**
+ * A policy hook's terminal outcome, shared by the audit snapshot and the native
+ * `policy_hook_decision` event so the two can never word the same decision differently.
+ *
+ * The audit records a policy's denial twice (its `policy_decision` and its `resolution`), so only
+ * the first is a row there. A native event is only ever the terminal record, so for one every
+ * allow or deny is a row.
+ */
+export function policyHookOutcome(
+  stage: GovernanceAuditStage,
+  outcome: GovernanceAuditOutcome,
+  actor: GovernanceActor,
+  governancePolicyId: string | undefined,
+  source: "audit" | "event",
+): GovernanceOutcome | null {
+  if (stage === "policy_decision" && outcome === "denied") {
     return {
-      label: "Blocked Fail-Closed",
+      outcome: "blocked",
+      actor: actor.kind === "system" ? { kind: "wollipog" } : policyActor(actor, governancePolicyId),
+      detail: actor.kind === "system"
+        ? "The tool was denied because its approval could not be completed safely."
+        : "The matched policy denied this tool.",
+    };
+  }
+  if (stage !== "resolution") return null;
+  if (outcome === "timed_out") {
+    return {
+      outcome: "timed_out",
+      ...(governancePolicyId ? { actor: { kind: "policy", policyId: governancePolicyId } } : {}),
+      detail: "The policy deadline expired, so the tool was denied.",
+    };
+  }
+  if (outcome === "aborted") {
+    return { outcome: "ended_early", detail: "The approval ended before the tool could run." };
+  }
+  if (actor.kind === "system" && outcome === "denied") {
+    return {
+      outcome: "blocked",
+      actor: { kind: "wollipog" },
       detail: "The tool was denied because its approval could not be completed safely.",
-      tone: "denied",
     };
   }
-  if (entry.actor.kind === "policy" && entry.outcome === "allowed") {
-    return { label: "Allowed by Policy", detail: "The matched policy allowed this tool.", tone: "allowed" };
+  if (actor.kind === "policy" && outcome === "allowed") {
+    return { outcome: "allowed", actor: policyActor(actor, governancePolicyId), detail: "The matched policy allowed this tool." };
   }
-  if (entry.actor.kind === "human" && entry.outcome === "allowed") {
+  if (actor.kind === "policy" && outcome === "denied" && source === "event") {
+    return { outcome: "blocked", actor: policyActor(actor, governancePolicyId), detail: "The matched policy denied this tool." };
+  }
+  if (actor.kind === "human" && (outcome === "allowed" || outcome === "denied")) {
     return {
-      label: "Approved",
-      detail: "The suspended tool invocation resumed.",
-      tone: "allowed",
-      human: humanDecision("Approved", entry.actor),
+      outcome: outcome === "allowed" ? "allowed" : "rejected",
+      actor: { kind: "member", ...(actor.id ? { userId: actor.id } : {}) },
+      detail: outcome === "allowed" ? "The suspended tool invocation resumed." : "The suspended tool invocation was blocked.",
     };
   }
-  if (entry.actor.kind === "human" && entry.outcome === "denied") {
-    return {
-      label: "Denied",
-      detail: "The suspended tool invocation was blocked.",
-      tone: "denied",
-      human: humanDecision("Denied", entry.actor),
-    };
-  }
+  if (source === "audit") return null;
+  if (outcome === "allowed") return { outcome: "allowed", detail: "The tool was allowed." };
+  if (outcome === "denied") return { outcome: "blocked", detail: "The tool was denied." };
   return null;
 }
 
-function humanDecision(verb: "Approved" | "Denied", actor: GovernanceActor): NonNullable<GovernanceOutcome["human"]> {
-  return { verb, ...(actor.id ? { actorId: actor.id } : {}) };
-}
-
-const ACTOR_LABELS: Record<string, string> = {
-  human: "Member",
-  policy: "Policy",
-  agent: "Agent",
-  system: "System",
-};
-
-/** "Policy · rule-1". A member's user id is never shown: they are named when rendered. */
-function decidedByLabel(actor: GovernanceActor): string {
-  const kind = ACTOR_LABELS[actor.kind] ?? actor.kind;
-  return actor.id && actor.kind !== "human" ? `${kind} · ${actor.id}` : kind;
-}
-
-/** "Approved by You", "Denied by Ada Lovelace", or "Approved by Another Member" (#2527). */
-export function governanceDecisionLabel(decision: GovernanceOutcome, viewer: ViewerIdentity | null): string {
-  const resolver = decision.human ? humanResolver(viewer, decision.human.actorId) : null;
-  return resolver ? `${decision.human!.verb} by ${resolverName(resolver, { titleCase: true })}` : decision.label;
-}
-
-/** The Decided By fact: "You", the member's display name, or "Another Member". */
-export function governanceDecidedBy(decision: GovernanceDecision, viewer: ViewerIdentity | null): string {
-  const resolver = decision.human ? humanResolver(viewer, decision.human.actorId) : null;
-  return resolver ? resolverName(resolver, { titleCase: true }) : decision.decidedBy;
+export function governanceAuditPresentation(entry: GovernanceAuditEntry): GovernanceOutcome | null {
+  if (entry.approvalKind === "question" && entry.actor.kind === "policy" && entry.outcome === "answered") {
+    return {
+      outcome: "answered_by_policy",
+      actor: policyActor(entry.actor, entry.governancePolicyId),
+      detail: "A routine question policy answered this question.",
+    };
+  }
+  if (entry.approvalKind !== "policy_hook") return null;
+  return policyHookOutcome(entry.stage, entry.outcome, entry.actor, entry.governancePolicyId, "audit");
 }
 
 /**
@@ -128,13 +141,17 @@ export function governanceDecisions(entries: readonly GovernanceAuditEntry[]): G
     const outcome = governanceAuditPresentation(entry);
     if (!outcome || seen.has(entry.auditId)) continue;
     seen.add(entry.auditId);
+    const { toolName, path, branch } = entry.scope;
     decisions.push({
       ...outcome,
       auditId: entry.auditId,
       requestId: entry.requestId,
-      decidedBy: decidedByLabel(entry.actor),
       ...(entry.governancePolicyId ? { policyId: entry.governancePolicyId } : {}),
       timestamp: entry.timestamp,
+      ...(toolName ? { toolName } : {}),
+      ...(path ? { path } : {}),
+      ...(branch ? { branch } : {}),
+      ...(entry.approvalKind === "question" ? { question: true as const } : {}),
     });
   }
   return decisions.sort((a, b) => a.timestamp - b.timestamp);
@@ -168,7 +185,7 @@ export function transcriptGovernanceDecisions(
   return decisions.filter((decision) =>
     !represented.has(decision.requestId) &&
     !represented.has(decision.auditId) &&
-    (!nativeRequests.has(decision.requestId) || decision.label === "Blocked Fail-Closed"));
+    (!nativeRequests.has(decision.requestId) || decision.actor?.kind === "wollipog"));
 }
 
 export interface GovernanceAnchorEvent {

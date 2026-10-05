@@ -3,6 +3,7 @@ import { test } from "node:test";
 import fc from "fast-check";
 import { AGENT_SPAWN_OBSERVATION_CAP } from "@wollipog/protocol";
 import type { EventPayloadReference, SessionEvent, SessionEventPayload } from "@wollipog/protocol";
+import { governanceAuditPresentation } from "./governance.js";
 import {
   advanceAutomaticAccountSwitchNotice,
   deriveSidePaneContent,
@@ -1033,6 +1034,7 @@ test("authentication request identity changes coalesce until the current request
     context: { toolName: "Claude Code", input: "Sign-in finished; recheck authentication." },
     resolvedOptionId: "auth:revalidate",
     resolutionReason: "submitted",
+    resolvedAt: events.at(-1)!.ts,
   });
 
   const live = new TimelineBuilder();
@@ -1118,13 +1120,11 @@ test("native policy-hook decisions retain the runner sequence between exact tool
   assert.ok(native?.kind === "governance_decision");
   assert.equal(native.id, decision.seq);
   assert.deepEqual(native.decision, {
+    outcome: "allowed",
+    actor: { kind: "member", userId: "device-1" },
+    detail: "The suspended tool invocation resumed.",
     auditId: "audit-native",
     requestId: "hook-native",
-    label: "Approved",
-    detail: "The suspended tool invocation resumed.",
-    tone: "allowed",
-    human: { verb: "Approved", actorId: "device-1" },
-    decidedBy: "Member",
     policyId: "policy-native",
     timestamp: decision.ts,
   });
@@ -1164,10 +1164,17 @@ test("native policy-hook decisions render policy allows and abandoned approvals"
     }),
   ]);
   const decisions = items.flatMap((item) => item.kind === "governance_decision" ? [item.decision] : []);
-  assert.deepEqual(decisions.map((decision) => decision.label), [
-    "Allowed by Policy", "Approval Aborted", "Approval Aborted",
-  ]);
-  assert.equal(decisions.at(-1)?.tone, "denied", "native and audit fallback tones agree for aborts");
+  assert.deepEqual(decisions.map((decision) => decision.outcome), ["allowed", "ended_early", "ended_early"]);
+  assert.deepEqual(decisions[0]!.actor, { kind: "policy", policyId: "allow-read" });
+  assert.deepEqual(decisions.at(-1), {
+    ...governanceAuditPresentation({
+      auditId: "x", requestId: "x", approvalKind: "policy_hook", stage: "resolution", outcome: "aborted",
+      actor: { kind: "policy", id: "policy-stopped" }, scope: { sessionId: "s", runnerId: "r" }, timestamp: 0,
+    }),
+    auditId: "audit-policy-aborted",
+    requestId: "hook-policy-aborted",
+    timestamp: decisions.at(-1)!.timestamp,
+  }, "native and audit outcomes agree for aborts");
 });
 
 test("native policy-hook system denials identify the fail-closed safety boundary", () => {
@@ -1185,10 +1192,10 @@ test("native policy-hook system denials identify the fail-closed safety boundary
   ]);
   const decision = items.find((item) => item.kind === "governance_decision");
   assert.ok(decision?.kind === "governance_decision");
-  assert.equal(decision.decision.label, "Blocked Fail-Closed");
+  assert.equal(decision.decision.outcome, "blocked");
   assert.equal(decision.decision.detail,
     "The tool was denied because its approval could not be completed safely.");
-  assert.equal(decision.decision.decidedBy, "System · decision-history-unavailable");
+  assert.deepEqual(decision.decision.actor, { kind: "wollipog" }, "decided by Wollipog, never the system id");
 });
 
 test("routine native policy-hook allows stay inside one Worked block across tools", () => {

@@ -79,7 +79,10 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `WrapLinesIcon` | Lucide | `WrapText` | The Wrap Lines toggle in a markdown code block's header. |
 | `WarningIcon` | Lucide | `TriangleAlert` | Generic warning state. |
 | `InfoIcon` | Lucide | `Info` | Generic information state; the info and neutral tone icon on toasts and notices; the session bar's Pinned Summary toggle, which opens the session's details column. |
-| `SuccessIcon` | Lucide | `CircleCheck` | The success tone icon on toasts and notices; a completed plan step. |
+| `SuccessIcon` | Lucide | `CircleCheck` | The success tone icon on toasts and notices; a completed plan step; an allowed or answered Decision Record. |
+| `DecisionClosedIcon` | Lucide | `CircleX` | A Decision Record that ended without going ahead: Rejected, Dismissed, Ended Early, Replaced, Resolved by Provider. |
+| `DecisionBlockedIcon` | Lucide | `ShieldX` | A Decision Record blocked by a policy or fail-closed. |
+| `DecisionTimedOutIcon` | Lucide | `TimerOff` | A Decision Record whose deadline passed. |
 | `PlanPendingIcon` | Lucide | `Circle` | A plan step not started yet. |
 | `PlanInProgressIcon` | Lucide | `CircleDot` | The plan step in progress. |
 | `ErrorIcon` | Lucide | `CircleAlert` | The danger tone icon on toasts and notices; the failed count on a work ledger line. |

@@ -108,10 +108,10 @@ const git: GitStatus = {
 const governanceDecision: GovernanceDecision = {
   auditId: "audit-1",
   requestId: "req-1",
-  decidedBy: "Policy · allow-read",
-  label: "Allowed by Policy",
+  outcome: "allowed",
+  actor: { kind: "policy", policyId: "allow-read" },
+  policyId: "allow-read",
   detail: "The matched policy allowed this tool.",
-  tone: "allowed",
   timestamp: 1_700_000_000_000,
 };
 
@@ -294,7 +294,7 @@ test("Governance History renders only its list, empty state, and paging control"
       const body = panel.container.querySelector(".rp-body")!;
       assert.doesNotMatch(body.textContent ?? "", /Coming soon/, `${name} must not render a placeholder hint`);
       if (name === "populated") {
-        assert.match(body.textContent ?? "", /Allowed by Policy/);
+        assert.match(body.textContent ?? "", /AllowedTool Requestby Policy/);
         assertNoDomNode(body.querySelector(".governance-history-more"), "no paging control without more pages");
       } else if (name === "empty page with more available") {
         assert.match(body.textContent ?? "", /No governance decisions are visible in this page yet\./);

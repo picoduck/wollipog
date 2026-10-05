@@ -5193,68 +5193,6 @@ textarea {
 .approval-bar.cost-budget .approval-text {
   color: var(--red);
 }
-/* Governance decisions as transcript context (issue #808): a compact single row at the
-   chronological position of the decision, with the audit facts behind a disclosure. The same row
-   is reused by the consolidated Governance History in the side panel. */
-.tl-governance {
-  margin: 2px 0;
-}
-.tl-governance-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 0;
-  cursor: pointer;
-  list-style: none;
-  font-size: var(--text-sm);
-}
-.tl-governance-head::-webkit-details-marker { display: none; }
-.tl-governance-head::before {
-  content: "\25b8";
-  /* --text-faint is below AA at this size; --text-dim is the tier that clears it. */
-  color: var(--text-dim);
-  font-size: var(--text-xs);
-  transition: transform var(--dur-fast) var(--ease-out);
-}
-.governance-decision[open] > .tl-governance-head::before { transform: rotate(90deg); }
-.governance-icon { font-size: var(--text-xs); }
-.governance-label {
-  font-weight: 600;
-  border-inline-start: 2px solid var(--border);
-  padding-inline-start: 6px;
-}
-.tl-governance.allowed .governance-label,
-.governance-history-row.allowed .governance-label { border-inline-start-color: var(--green); }
-.tl-governance.denied .governance-label,
-.tl-governance.policy .governance-label,
-.governance-history-row.denied .governance-label,
-.governance-history-row.policy .governance-label { border-inline-start-color: var(--red); }
-.tl-governance.timed-out .governance-label,
-.governance-history-row.timed-out .governance-label { border-inline-start-color: var(--yellow); }
-.governance-decision-body {
-  margin: 2px 0 4px 18px;
-  font-size: var(--text-xs);
-}
-.governance-decision-detail {
-  margin: 0 0 4px;
-  color: var(--text-dim);
-}
-.governance-decision-facts {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 2px 8px;
-  margin: 0;
-}
-.governance-decision-facts dt {
-  color: var(--text-dim);
-  font-weight: 600;
-}
-.governance-decision-facts dd {
-  margin: 0;
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-.governance-decision-request { font-family: var(--font-mono); }
 .governance-history {
   list-style: none;
   margin: 0;
@@ -5269,12 +5207,6 @@ textarea {
 }
 .governance-history-row:last-child { border-bottom: none; }
 .governance-history-more { margin: 12px; }
-.governance-history-time {
-  margin-inline-start: auto;
-  color: var(--text-dim);
-  font-size: var(--text-xs);
-  white-space: nowrap;
-}
 /* Phase 7: cost-budget ceiling input in the session-controls row */
 
 .composer {
@@ -7123,7 +7055,8 @@ textarea,
   color: var(--positive-text);
 }
 /* The body starts where the title does: past the chevron, the icon and their two gaps. */
-.tl-step-body {
+.tl-step-body,
+.tl-decision-body {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
@@ -7207,6 +7140,71 @@ textarea,
 }
 /* An agent's question (#2188): each question once, its options with a check on the chosen ones,
    free text, and who answered. */
+/* Decision Record (#2204, §5.5, §11.2): one quiet row per finished decision, in the transcript and
+   in the decision history. The step recipe at --control-h (44px on touch): the chevron, a 16px
+   outcome icon in its tone, the outcome word, what was requested and who decided, then how long
+   ago. The title gives way before who decided; neither wraps. */
+.tl-decision { min-width: 0; }
+.tl-decision > .tl-decision-head {
+  display: flex;
+  gap: var(--space-2);
+  width: 100%;
+  min-width: 0;
+  min-height: var(--control-h);
+  font: var(--type-body);
+}
+.tl-decision-icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--tone);
+}
+.tl-decision-line {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.tl-decision-outcome {
+  flex: none;
+  color: var(--tone-text);
+  font: var(--type-body-strong);
+}
+/* The title gives way first; who decided keeps its whole name, or at least half the line. */
+.tl-decision-title,
+.tl-decision-by {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tl-decision-title {
+  flex: 0 1000 auto;
+  min-width: 0;
+  color: var(--text);
+}
+.tl-decision-by {
+  flex: 0 1 auto;
+  min-width: min(50%, max-content);
+}
+/* --text-dim, not --text-faint: a decision's time is small text that has to clear AA. */
+.tl-decision-time {
+  flex: none;
+  color: var(--text-dim);
+  font: var(--type-small);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.tl-decision-detail {
+  margin: 0;
+  color: var(--text-dim);
+}
+.tl-decision-body .code-well > pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.tl-decision-actions { display: flex; }
+@media (forced-colors: active) {
+  .tl-decision-icon,
+  .tl-decision-outcome { color: inherit; }
+}
 .tl-question { min-width: 0; }
 .tl-question-body {
   display: flex;
@@ -7563,7 +7561,6 @@ textarea,
   border: 1px dashed var(--border-strong);
   border-radius: var(--radius-sm);
 }
-.tl-perm > .bubble-text,
 .tl-perm > .perm-context {
   flex: 1 1 100%;
   min-width: 0;
@@ -7575,9 +7572,6 @@ textarea,
 }
 .tl-perm-review {
   margin-left: auto;
-}
-.perm-resolved {
-  color: var(--green);
 }
 /* Working line (#2170, §11.1, §11.3): while a turn runs, one line in a fixed order (the state, the
    elapsed time, the current step and at most one action), plus an exception line only when
@@ -13265,9 +13259,6 @@ body.shell-dock-dragging * {
 .tl-perm-head > * { min-width: 0; max-width: 100%; }
 /* Glyph wrappers that had no rules, so the characters inherited the surrounding size and sat off
    the baseline. A fixed box keeps them aligned with the text beside them. */
-/* min-width, not width: .perm-icon is not always a glyph — EventTimeline renders the word
-   "Review" through it for automated-review events, and a fixed 16px box would collapse that to an
-   overlap with the label beside it. */
 .perm-icon,
 .approval-icon,
 .question-mark {

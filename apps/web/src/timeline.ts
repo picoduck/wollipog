@@ -1,11 +1,10 @@
 import { AGENT_SPAWN_OBSERVATION_CAP } from "@wollipog/protocol";
-import type { GovernanceDecision } from "./governance.js";
+import { policyHookOutcome, type GovernanceDecision } from "./governance.js";
 import type {
   AgentQuestion,
   ApprovalContext,
   AuthoritativeSubagentLifecycle,
   EventPayloadReference,
-  GovernanceActor,
   GovernanceReviewer,
   PermissionOption,
   PlanEntry,
@@ -207,6 +206,8 @@ export type TimelineItem =
       resolvedOptionId?: string | null;
       resolutionReason?: StructuredRequestResolutionReason;
       resolvedByParentSessionId?: string;
+      /** Runner-recorded time of the resolution, for the Decision Record (#2204). */
+      resolvedAt?: number;
       context?: ApprovalContext;
     }
   | {
@@ -364,56 +365,18 @@ export const MAX_OPEN_PROVIDER_TEXT_ITEMS = 128;
  */
 export const MAX_TRACKED_TOOL_CALL_STATEMENTS = AGENT_SPAWN_OBSERVATION_CAP;
 
-const GOVERNANCE_ACTOR_LABELS: Record<GovernanceActor["kind"], string> = {
-  human: "Member",
-  policy: "Policy",
-  agent: "Agent",
-  system: "System",
-};
-
 function nativePolicyHookDecision(ev: SessionEvent): GovernanceDecision | null {
   const payload = ev.payload;
   if (payload.kind !== "policy_hook_decision") return null;
   if ((payload.stage !== "policy_decision" && payload.stage !== "resolution") ||
       (payload.outcome !== "allowed" && payload.outcome !== "denied" &&
        payload.outcome !== "timed_out" && payload.outcome !== "aborted")) return null;
-  const tone = payload.outcome === "timed_out" ? "timed-out"
-    : payload.outcome === "aborted" ? "denied"
-    : payload.outcome === "allowed" ? "allowed"
-      : payload.actor.kind === "policy" ? "policy" : "denied";
-  const label = payload.outcome === "timed_out" ? "Approval Timed Out"
-    : payload.outcome === "aborted" ? "Approval Aborted"
-    : payload.actor.kind === "system" && payload.outcome === "denied" ? "Blocked Fail-Closed"
-    : payload.outcome === "allowed"
-      ? payload.actor.kind === "human" ? "Approved" : "Allowed by Policy"
-      : payload.actor.kind === "human" ? "Denied" : "Blocked by Policy";
-  const detail = payload.outcome === "timed_out"
-    ? "The policy deadline expired, so the tool was denied."
-    : payload.outcome === "aborted"
-      ? "The approval ended before the tool could run."
-    : payload.actor.kind === "system" && payload.outcome === "denied"
-      ? "The tool was denied because its approval could not be completed safely."
-    : payload.outcome === "allowed"
-      ? payload.actor.kind === "human"
-        ? "The suspended tool invocation resumed."
-        : "The matched policy allowed this tool."
-      : payload.actor.kind === "human"
-        ? "The suspended tool invocation was blocked."
-        : "The matched policy denied this tool.";
-  const actor = GOVERNANCE_ACTOR_LABELS[payload.actor.kind];
-  // A member's decision is named relative to the viewer when rendered (#2527); their user id is
-  // carried for that comparison and never shown.
-  const human: GovernanceDecision["human"] = label === "Approved" || label === "Denied"
-    ? { verb: label, ...(payload.actor.id ? { actorId: payload.actor.id } : {}) }
-    : undefined;
+  const outcome = policyHookOutcome(payload.stage, payload.outcome, payload.actor, payload.governancePolicyId, "event");
+  if (!outcome) return null;
   return {
+    ...outcome,
     auditId: payload.auditId,
     requestId: payload.requestId,
-    label,
-    detail,
-    tone,
-    ...(human ? { human } : {}),
-    decidedBy: payload.actor.id && payload.actor.kind !== "human" ? `${actor} · ${payload.actor.id}` : actor,
     ...(payload.governancePolicyId ? { policyId: payload.governancePolicyId } : {}),
     timestamp: ev.ts,
   };
@@ -448,7 +411,8 @@ const WORK_KINDS = new Set(["agent_thought", "tool_call", "command_output", "std
 export function isCollapsibleWorkItem(item: TimelineItem): boolean {
   return WORK_KINDS.has(item.kind) ||
     (item.kind === "review_decision" && item.outcome === "allowed") ||
-    (item.kind === "governance_decision" && item.decision.tone === "allowed");
+    (item.kind === "governance_decision" &&
+      (item.decision.outcome === "allowed" || item.decision.outcome === "answered_by_policy"));
 }
 
 const PROMPT_FAILED_PREFIX = /^prompt failed:\s*/i;
@@ -1285,7 +1249,8 @@ export class TimelineBuilder {
         const authIndex = p.purpose === "authentication" ? this.activeAuthenticationIndex : null;
         const i = indexed ?? authIndex;
         if (i != null && this.items[i]?.kind === "permission") {
-          const prior = this.items[i];
+          // A reopened request drops its earlier resolution's actor and time with its outcome.
+          const { resolvedByParentSessionId: _parent, resolvedAt: _at, ...prior } = this.items[i];
           if (prior.requestId !== p.requestId) this.permIndex.delete(prior.requestId);
           this.items[i] = {
             ...prior,
@@ -1326,6 +1291,7 @@ export class TimelineBuilder {
             ...(p.resolvedByParentSessionId
               ? { resolvedByParentSessionId: p.resolvedByParentSessionId }
               : {}),
+            ...(Number.isFinite(ev.ts) ? { resolvedAt: ev.ts } : {}),
           };
           this.permIndex.delete(p.requestId);
           if (this.activeAuthenticationIndex === idx) this.activeAuthenticationIndex = null;

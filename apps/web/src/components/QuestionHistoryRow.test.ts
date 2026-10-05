@@ -165,7 +165,9 @@ test("a Parent Control answer reads Answered by Parent", () => {
     { resolvedByParentSessionId: "parent-session-1" })]);
   assert.equal(item.resolvedByParentSessionId, "parent-session-1");
   assert.equal(questionOutcome(item), "answered_by_parent");
-  assert.match(visibleText(render(item, true)), /Answered by parent session parent-sessi… at /);
+  const text = visibleText(render(item, true));
+  assert.match(text, /Answered by the parent session at /, "the parent's title when it is loaded, never its id");
+  assert.doesNotMatch(text, /parent-sessi/);
 });
 
 test("an older runner's answer without a summary reads Answered with no answer line and no error", () => {

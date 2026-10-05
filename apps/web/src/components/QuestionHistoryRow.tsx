@@ -1,18 +1,24 @@
-import { useContext } from "react";
+import { useContext, type ReactNode } from "react";
 import type { AgentQuestion, QuestionAnswerSummaryEntry } from "@wollipog/protocol";
 import { formatClock, formatRecordedTimestamp } from "../format.js";
 import { humanResolver, resolverName, ViewerIdentityContext, type ViewerIdentity } from "../resolver-identity.js";
 import { statusMeta, type StatusValue } from "../status-meta.js";
+import type { DecisionOutcome } from "../decision-record.js";
 import type { TimelineItem } from "../timeline.js";
 import { CheckIcon, QuestionIcon } from "./Icons.js";
+import { useSessionDisplayTitle } from "./requests/DecisionRecord.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { StructuredQuestionText, structuredQuestionSummary } from "./StructuredQuestionText.js";
 import { ToolStep } from "./ToolStep.js";
 
 type QuestionItem = Extract<TimelineItem, { kind: "question" }>;
 
-/** The row's inline status (docs/design-system.md §11.2, the `question` domain). */
-export function questionOutcome(item: QuestionItem): StatusValue<"question"> {
+type QuestionOutcome = StatusValue<"question"> | Extract<DecisionOutcome,
+  "answered" | "answered_by_policy" | "answered_by_parent" | "dismissed" | "dismissed_by_parent" | "replaced" | "expired" | "provider_resolved">;
+
+/** The row's inline status (docs/design-system.md §11.2): Awaiting Answer from the `question`
+ * domain while it waits, then the past-tense outcome every Decision Record shares (#2204). */
+export function questionOutcome(item: QuestionItem): QuestionOutcome {
   if (item.answered === undefined) return "awaiting_answer";
   if (item.resolvedByParentSessionId) return item.answered ? "answered_by_parent" : "dismissed_by_parent";
   if (item.answeredByPolicies?.length) return "answered_by_policy";
@@ -63,8 +69,6 @@ export function questionAnswerLine(item: QuestionItem): string | null {
   return parts.length ? parts.join(" · ") : null;
 }
 
-const shortId = (id: string) => (id.length > 12 ? `${id.slice(0, 12)}…` : id);
-
 /**
  * The member who answered, relative to the viewer (#2527): "you", their display name, or "another
  * member". Null keeps the sentence neutral: the viewer is unknown, or in a shared organization the
@@ -77,14 +81,23 @@ function answeredBy(item: QuestionItem, viewer: ViewerIdentity | null): string |
   return resolver ? resolverName(resolver) : null;
 }
 
-/** "Answered by you at 12:31 AM", or who else settled it. */
-function resolutionSentence(item: QuestionItem, viewer: ViewerIdentity | null): string | null {
+/** "Answered by you at 12:31 AM", or who else settled it. A parent session is named by its title,
+ * a link where the transcript can navigate, or "the parent session"; never by its id. */
+function resolutionSentence(
+  item: QuestionItem,
+  viewer: ViewerIdentity | null,
+  parentTitle: string | undefined,
+  onOpenSession: ((sessionId: string) => void) | undefined,
+): ReactNode {
   if (item.answered === undefined) return null;
   const at = item.resolvedAt !== undefined && formatClock(item.resolvedAt) ? ` at ${formatClock(item.resolvedAt)}` : "";
-  const parent = item.resolvedByParentSessionId ? `parent session ${shortId(item.resolvedByParentSessionId)}` : null;
+  const parentId = item.resolvedByParentSessionId;
+  const parent = !parentId ? null : parentTitle && onOpenSession
+    ? <button type="button" className="link" onClick={() => onOpenSession(parentId)}>{parentTitle}</button>
+    : parentTitle ?? "the parent session";
   switch (questionOutcome(item)) {
-    case "answered_by_parent": return `Answered by ${parent}${at}.`;
-    case "dismissed_by_parent": return `Dismissed by ${parent}${at}.`;
+    case "answered_by_parent": return <>Answered by {parent}{at}.</>;
+    case "dismissed_by_parent": return <>Dismissed by {parent}{at}.</>;
     case "answered_by_policy": return `Answered by policy ${item.answeredByPolicies!.join(", ")}${at}.`;
     case "replaced": return `Replaced by a newer question${at}.`;
     case "expired": return `Expired${at}.`;
@@ -97,7 +110,7 @@ function resolutionSentence(item: QuestionItem, viewer: ViewerIdentity | null): 
   }
 }
 
-const SETTLED_VERB: Record<StatusValue<"question">, string> = {
+const SETTLED_VERB: Record<QuestionOutcome, string> = {
   awaiting_answer: "",
   answered: "answered",
   answered_by_policy: "answered",
@@ -126,20 +139,24 @@ function timing(item: QuestionItem): string | undefined {
  * chosen ones, free text in quotes, and who answered. Secret and email answers were never stored, so
  * they read "Answer not shown".
  */
-export function QuestionHistoryRow({ item, open, onToggle }: {
+export function QuestionHistoryRow({ item, open, onToggle, onOpenSession }: {
   item: QuestionItem;
   open: boolean;
   onToggle?: () => void;
+  /** Opens the parent session that settled it; absent where the surface cannot navigate. */
+  onOpenSession?: (sessionId: string) => void;
 }) {
   const viewer = useContext(ViewerIdentityContext);
+  const parentTitle = useSessionDisplayTitle(item.resolvedByParentSessionId);
   const title = questionTitle(item.questions);
   const answerLine = questionAnswerLine(item);
-  const meta = statusMeta("question", questionOutcome(item));
+  const outcome = questionOutcome(item);
+  const meta = outcome === "awaiting_answer" ? statusMeta("question", outcome) : statusMeta("requestDecision", outcome);
   const time = formatClock(item.resolvedAt ?? item.createdAt);
   const timestamp = formatRecordedTimestamp(item.resolvedAt ?? item.createdAt);
   const multiple = item.questions.length > 1;
   const byQuestion = new Map((item.answered ? item.answers ?? [] : []).map((entry) => [entry.questionId, entry]));
-  const resolution = resolutionSentence(item, viewer);
+  const resolution = resolutionSentence(item, viewer, parentTitle, onOpenSession);
   return (
     <div className="tl-question">
       <ToolStep

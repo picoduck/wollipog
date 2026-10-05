@@ -556,12 +556,13 @@ for (const width of [1440, 390]) {
 
     // Approvals are routine work and fold into the turn's work group; expand any such group.
     for (const group of await timeline.getByRole("button", { name: /^Worked/ }).all()) await group.click();
-    const decisions = timeline.locator(".tl-governance");
-    await expect(decisions.locator(".governance-label")).toHaveText([
-      "Approved by You", "Denied by Grace Hopper", "Approved by Another Member",
+    const decisions = timeline.locator("details.tl-decision");
+    await expect(decisions.locator(".tl-decision-outcome")).toHaveText(["Allowed", "Rejected", "Allowed"]);
+    await expect(decisions.locator(".tl-decision-by")).toHaveText([
+      "by You", "by Grace Hopper", "by Another Member",
     ]);
     for (const decision of await decisions.all()) await decision.locator("summary").click();
-    await expect(decisions.locator(".governance-decision-facts dd:nth-of-type(1)")).toHaveText([
+    await expect(decisions.locator(".facts dd:nth-of-type(1)")).toHaveText([
       "You", "Grace Hopper", "Another Member",
     ]);
 
@@ -579,7 +580,7 @@ test("a single-member installation keeps reading every answer and decision as it
     /^Answered by you at /, /^Answered by you at /, /^Answered by you at /,
   ]);
   for (const group of await timeline.getByRole("button", { name: /^Worked/ }).all()) await group.click();
-  await expect(timeline.locator(".governance-label")).toHaveText(["Approved by You", "Denied by You", "Approved by You"]);
+  await expect(timeline.locator(".tl-decision-by")).toHaveText(["by You", "by You", "by You"]);
 });
 
 for (const width of [1280, 390]) {

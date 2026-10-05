@@ -30,8 +30,9 @@ import {
 } from "./MeasuredVirtualList.js";
 import { CopyButton } from "./common.js";
 import { accountLabelText } from "../personal-identifiers.js";
-import { GovernanceDecisionFacts, GovernanceDecisionLabel } from "./GovernanceDecision.js";
-import { AccountIcon, AgentLogIcon, BotIcon, ChevronRightIcon, CompactedIcon, CopyIcon, EditIcon, EditInForkIcon, FileEditIcon, HandOffIcon, NewFileIcon, PlanIcon, PlanInProgressIcon, PlanPendingIcon, RewindFilesIcon, StopTurnIcon, SuccessIcon, ThoughtIcon, ThreadForkIcon } from "./Icons.js";
+import { governanceDecisionRecord, permissionDecisionRecord, reviewDecisionRecord, type DecisionRecordModel } from "../decision-record.js";
+import { DecisionRecord } from "./requests/DecisionRecord.js";
+import { AccountIcon, AgentLogIcon, BotIcon, ChevronRightIcon, CompactedIcon, CopyIcon, EditIcon, EditInForkIcon, FileEditIcon, HandOffIcon, NewFileIcon, PlanIcon, PlanInProgressIcon, PlanPendingIcon, RewindFilesIcon, ShieldIcon, StopTurnIcon, SuccessIcon, ThoughtIcon, ThreadForkIcon } from "./Icons.js";
 import { diffFileIsPlain, diffMaxLineNumber, hunkLabel, parseUnifiedDiff, type DiffFile } from "../unified-diff.js";
 import { markdownPlainText } from "./markdown-plain-text.js";
 import { TranscriptActionMenu, transcriptActionAvailable, type TranscriptAction } from "./TranscriptActions.js";
@@ -183,22 +184,6 @@ export function TranscriptErrorAlert({
       {announcement && <span key={announcement.eventId}>{announcement.message}</span>}
     </span>
   );
-}
-
-/** Runner-initiated authentication outcomes that were never offered as a card button. Every other
- * resolution keeps its established option-id display. */
-const RUNNER_RESOLUTION_LABELS: Record<string, string> = {
-  "auth:automatic-retry": "Rechecked Automatically",
-  "auth:select-account": "Another Account Selected",
-};
-
-export function permissionResolutionLabel(
-  options: ReadonlyArray<{ optionId: string }>,
-  optionId: string,
-): string {
-  // Providers choose their own option ids, so an offered option always keeps its raw id display.
-  if (options.some((option) => option.optionId === optionId)) return optionId;
-  return Object.hasOwn(RUNNER_RESOLUTION_LABELS, optionId) ? RUNNER_RESOLUTION_LABELS[optionId]! : optionId;
 }
 
 export function timelineFileSourceLocation(path: string): SourceLocation | null {
@@ -2335,21 +2320,12 @@ const TimelineRow = memo(function TimelineRow({
       // The row shows only its turn's footer ("Stopped at …"); EventTimelineBody renders that.
       return null;
     case "review_decision":
-      return (
-        <div className="tl-perm">
-          <div className="tl-perm-head">
-            <span className="perm-icon">Review</span>
-            <span>Automated Review</span>
-            <span className="perm-resolved">
-              {titleCaseLabel(item.outcome.replace("_", " "))}{item.riskLevel ? ` (${titleCaseLabel(item.riskLevel)} Risk)` : ""}
-            </span>
-            <span>{titleCaseLabel(item.reviewer.kind)}{item.reviewer.id ? ` · ${item.reviewer.id}` : ""}</span>
-            <ActivityTimestampMeta startedAt={item.createdAt} pointWhenEqual />
-          </div>
-          {item.rationale && <div className="bubble-text">{item.rationale}</div>}
-        </div>
-      );
+      return <TimelineDecisionRecord record={reviewDecisionRecord(item)} open={disclosureOpen} onToggle={onDisclosureToggle} />;
     case "permission":
+      if (item.resolvedOptionId !== undefined) {
+        return <TimelineDecisionRecord record={permissionDecisionRecord(item)} open={disclosureOpen} onToggle={onDisclosureToggle} />;
+      }
+      // A pending permission keeps its interim row until the request dock owns it (#2179).
       return (
         <div
           className="tl-perm"
@@ -2357,32 +2333,9 @@ const TimelineRow = memo(function TimelineRow({
           data-session-request-session={approvalContext?.sessionId}
         >
           <div className="tl-perm-head">
-            <span className="perm-icon">🔐</span>
+            <span className="perm-icon" aria-hidden="true"><ShieldIcon size={16} /></span>
             <span>{item.title}</span>
-            {item.resolvedOptionId !== undefined ? (
-              <span className="perm-resolved">
-                {item.resolvedByParentSessionId
-                  ? item.resolvedOptionId == null
-                    ? `→ Dismissed by Parent ${item.resolvedByParentSessionId}`
-                    : (() => {
-                      const option = item.options.find((candidate) => candidate.optionId === item.resolvedOptionId);
-                      return option?.kind === "allow_once" || (option?.kind == null && item.resolvedOptionId === "allow");
-                    })()
-                      ? `→ Approved by Parent ${item.resolvedByParentSessionId}`
-                      : `→ Denied by Parent ${item.resolvedByParentSessionId}`
-                  : item.resolutionReason === "replaced"
-                  ? "→ Replaced"
-                  : item.resolutionReason === "provider_resolved"
-                    ? "→ Resolved by Provider"
-                    : item.resolutionReason === "dismissed"
-                      ? "→ Dismissed"
-                      : item.resolvedOptionId
-                      ? `→ ${permissionResolutionLabel(item.options, item.resolvedOptionId)}`
-                      : "→ Dismissed"}
-              </span>
-            ) : (
-              <span className="perm-pending">awaiting decision…</span>
-            )}
+            <span className="perm-pending">awaiting decision…</span>
             {approvalContext && (
               <button
                 className="btn primary sm tl-perm-review"
@@ -2409,30 +2362,17 @@ const TimelineRow = memo(function TimelineRow({
           )}
         </div>
       );
-    case "governance_decision": {
-      const decision = item.decision;
+    case "governance_decision":
       return (
-        <div className={`tl-governance ${decision.tone}`} data-audit-id={decision.auditId}>
-          <details
-            className="governance-decision"
-            open={disclosureOpen}
-            onToggle={(event) => {
-              if (event.nativeEvent.isTrusted && event.currentTarget.open !== disclosureOpen) onDisclosureToggle?.();
-            }}
-          >
-            <summary className="tl-governance-head">
-              <span className="governance-icon" aria-hidden="true">⚖️</span>
-              <span className="sr-only">Governance Decision: </span>
-              <GovernanceDecisionLabel decision={decision} />
-              <ActivityTimestampMeta startedAt={decision.timestamp} pointWhenEqual />
-            </summary>
-            <GovernanceDecisionFacts decision={decision} />
-          </details>
-        </div>
+        <TimelineDecisionRecord
+          record={governanceDecisionRecord(item.decision)}
+          auditId={item.decision.auditId}
+          open={disclosureOpen}
+          onToggle={onDisclosureToggle}
+        />
       );
-    }
     case "question": {
-      const historicalQuestion = <QuestionHistoryRow item={item} open={disclosureOpen} onToggle={onDisclosureToggle} />;
+      const historicalQuestion = <TimelineQuestionRow item={item} open={disclosureOpen} onToggle={onDisclosureToggle} />;
       return questionContext ? (
         <SessionTimelineQuestionRegion
           sessionId={questionContext.sessionId}
@@ -2450,6 +2390,24 @@ const TimelineRow = memo(function TimelineRow({
     }
   }
 });
+
+/** A Decision Record in the transcript: the timeline's clock for its relative time, and its parent
+ * session link where the transcript can navigate. */
+function TimelineDecisionRecord({ record, auditId, open, onToggle }: {
+  record: DecisionRecordModel;
+  auditId?: string;
+  open: boolean;
+  onToggle?: () => void;
+}) {
+  const now = useContext(TimelineClockContext);
+  const openSession = useContext(TimelineSessionLinkContext);
+  return <DecisionRecord record={record} auditId={auditId} open={open} onToggle={onToggle} now={now} onOpenSession={openSession} />;
+}
+
+/** The question row, with its parent session link where the transcript can navigate. */
+function TimelineQuestionRow(props: { item: Extract<TimelineItem, { kind: "question" }>; open: boolean; onToggle?: () => void }) {
+  return <QuestionHistoryRow {...props} onOpenSession={useContext(TimelineSessionLinkContext)} />;
+}
 
 const RUNNING_TOOL_STATUSES = new Set(["pending", "in_progress", "running"]);
 

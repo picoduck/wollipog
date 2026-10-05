@@ -8,6 +8,8 @@ import { GovernanceHistoryPanel } from "../components/GovernanceHistoryPanel.js"
 import { governanceDecisions } from "../governance.js";
 import { EventTimeline } from "../components/EventTimeline.js";
 import { ViewerIdentityContext, viewerIdentity } from "../resolver-identity.js";
+import { GovernancePolicyNamesContext } from "../decision-record.js";
+import { DecisionRecordGallery } from "./decision-record-gallery.js";
 import "../styles.css";
 
 const params = new URLSearchParams(location.search);
@@ -66,7 +68,16 @@ function GovernanceFixture() {
   </>;
 }
 
-createRoot(document.getElementById("root")!).render(<ApiProvider client={client}>
+/** The policy behind the native decision, named as Settings › Approvals names it. */
+const policyNames = { names: new Map([["deny-shell", "Deny Shell Commands"]]), load: () => {} };
+
+const root = createRoot(document.getElementById("root")!);
+if (params.get("set") === "decisions") {
+  root.render(<main className="session-detail" style={{ maxWidth: 860, margin: "24px auto", padding: "0 16px" }}>
+    <DecisionRecordGallery />
+  </main>);
+} else root.render(<ApiProvider client={client}>
+  <GovernancePolicyNamesContext.Provider value={policyNames}>
   <ViewerIdentityContext.Provider value={soloViewer}>
   <main className="settings-panel" style={{ maxWidth: 760, margin: "24px auto", padding: 20 }}>
     <h2>Behavior</h2><QuestionPoliciesPanel />
@@ -79,4 +90,5 @@ createRoot(document.getElementById("root")!).render(<ApiProvider client={client}
     <GovernanceFixture />
   </main>
   </ViewerIdentityContext.Provider>
+  </GovernancePolicyNamesContext.Provider>
 </ApiProvider>);

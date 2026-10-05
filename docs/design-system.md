@@ -1521,7 +1521,8 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Queued message (`queuedMessage`: the composer queue) | Pending, Queued, Canceled: neutral · Sending, Starting, Steering…: info (pulse) · Accepted, Pending Delivery: info · Held, Delivery Uncertain: warning · Delivery Failed, Not Sent: danger. Rendered as the inline badge. |
 | Message receipt (`messageReceipt`: the one line under a sent message in the transcript — pending prompts, steering, provider commands, the rename) | Sending: a spinner and the word, no badge · Queued, Canceled, Dismissed: neutral · Delivered, Steered the Current Turn: success (inline) · Delivery Uncertain: warning · Delivery Failed, Not Sent, Not Accepted, Rejected, Rename Failed: danger. Rendered as the inline badge. |
 | Workflow gate / run decision | Awaiting Decision: warning · Approved: success (inline) · Rejected: neutral |
-| Agent question (`question`: the transcript's question row) | Answered, Answered by Policy, Answered by Parent: success · Dismissed, Dismissed by Parent, Replaced, Expired, Resolved by Provider: neutral · Awaiting Answer: warning, until the pending-question marker (#2205) replaces it. Rendered as the inline badge; the resolved words are the decision-record outcomes #2204 shares. |
+| Agent question (`question`: the transcript's question row while it waits) | Awaiting Answer: warning, until the pending-question marker (#2205) replaces it. A settled question takes its word from `requestDecision`. Rendered as the inline badge. |
+| Request decision (`requestDecision`: the outcome of every Decision Record and of the settled question row, #2204) | Allowed, Answered, Answered by Policy, Answered by Parent, Rechecked Automatically: success · Rejected, Dismissed, Dismissed by Parent, Ended Early, Replaced, Expired, Resolved by Provider, Another Account Selected, Escalated, Resolved: neutral · Blocked (by a policy, or fail-closed by Wollipog): danger · Timed Out: warning. Always past tense, never a provider's option id. |
 | Pod | Active: info · Paused: neutral · Conflicted: warning · Failed: danger |
 | Campaign work item (`campaignWork`, Campaign Status) | Planned, Queued, Canceled, Scope Removed: neutral · Running: info (pulse) · Waiting: warning · Blocked: danger · Delivered: success. Rendered as the inline badge on work rows. |
 | Provider account | Signed In: success (inline) · Sign-In Required: warning · Signed Out: neutral |
@@ -1610,6 +1611,23 @@ and their Decided By fact names the member the same way. The answer is the conte
 summary the control plane sends with it, which the runner records as `answers` on that request's
 `question_resolved`; a dismissal records none, and an answer from an older runner or control plane
 reads "Answered" with no second line. Shared transcripts exclude every question event.
+
+**Decision Records** (#2204). A finished decision is one `DecisionRecord`
+(`components/requests/DecisionRecord.tsx`), the same in the transcript and in Governance History:
+resolved permissions, governance decisions and automated reviews. Pending permissions are not
+records; the request dock owns them (#2179). The row is a `<details class="disclosure">` whose
+summary is `--control-h` tall (44px on touch): the §5.5 chevron, a 16px outcome icon in its tone
+(`CircleCheck` success, `CircleX` neutral, `ShieldX` danger, `TimerOff` warning, §18), the
+`requestDecision` word in its tone, the request's title, "by" who decided, and a relative time whose
+tooltip is the absolute time. Who decided is "You" (relative to the viewer, #2527), a policy's
+display name from the organization's policies (never "Policy · <id>"; "Policy" until the names
+load), the parent session's title, the reviewer, or "Wollipog" for a fail-closed block. A permission
+event records no member, so in a shared organization its row names nobody rather than guessing. The
+body is a §5.4 `.facts` list, each fact once: Decided By (a parent session's title links to it),
+Tool, Path, Branch, the command in a §11.7 code well, Risk for a review, and Recorded as one absolute
+time with seconds. Ids (request, audit, policy, session, review) are never shown; Copy Audit ID copies
+them. The chosen option's kind decides the word (`allow_*` Allowed, `reject_*` Rejected, `cancel`
+Ended Early); the runner's own sign-in resolutions keep their words.
 
 Facts are not statuses: "Detached Work: Untracked", "Changes Present", "Worktree", "Kept Aside" are
 meta (§11.3). This table lives in code as one `statusMeta(domain, value) → {label, tone, pulse}` map;

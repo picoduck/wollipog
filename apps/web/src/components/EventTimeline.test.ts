@@ -22,11 +22,11 @@ import {
   turnResponseText,
   turnSpanDescription,
   stabilizeWorkGroupKeys,
-  permissionResolutionLabel,
   timelineFileSourceLocation,
   userRewindTurns,
   type TimelineRenderRow,
 } from "./EventTimeline.js";
+import { permissionResolutionLabel } from "../decision-record.js";
 import { reanchorAtLogicalIndex } from "./MeasuredVirtualList.js";
 import type { EditInForkAvailability } from "../session-actions.js";
 
@@ -361,8 +361,10 @@ test("delegated question and approval histories identify the controlling parent"
     ],
   }));
   assert.match(html, /<span class="status sm t-success inline tl-step-status">Answered by Parent<\/span>/);
-  assert.match(html, /Answered by parent session parent-sessi…\./);
-  assert.match(html, /Approved by Parent parent-session/);
+  assert.match(html, /Answered by the parent session\./);
+  assert.match(html, /aria-label="Allowed Run command by Parent Session"/);
+  // Without the parent's title loaded the row still never shows its id; the id is only copied.
+  assert.doesNotMatch(html.replace(/<[^>]+>/g, " "), /parent-session/);
 });
 
 test("each settled turn has one More Turn Actions menu with Your Message then This Turn, and distinct glyphs", () => {
@@ -1763,15 +1765,22 @@ test("an unusable Edit as a New Turn stays listed on every user message, disable
   assert.equal((usable.match(/aria-label="Edit as a New Turn"/g) ?? []).length, 2);
 });
 
-test("only never-offered runner authentication outcomes get readable resolution labels", () => {
+test("a chosen option reads as its past-tense outcome, never as its id (#2204)", () => {
   assert.equal(permissionResolutionLabel([], "auth:select-account"), "Another Account Selected");
   assert.equal(permissionResolutionLabel([], "auth:automatic-retry"), "Rechecked Automatically");
-  assert.equal(permissionResolutionLabel([{ optionId: "trust" }], "trust"), "trust",
-    "an offered option keeps its established raw id display");
-  assert.equal(permissionResolutionLabel([{ optionId: "auth:select-account" }], "auth:select-account"),
-    "auth:select-account", "a provider option that reuses a runner id is still shown raw");
-  assert.equal(permissionResolutionLabel([], "toString"), "toString",
-    "an id matching an inherited property is never replaced");
+  assert.equal(permissionResolutionLabel([{ optionId: "reject", kind: "reject_once" }], "reject"), "Rejected");
+  assert.equal(permissionResolutionLabel([{ optionId: "trust", kind: "allow_always" }], "trust"), "Allowed");
+  assert.equal(permissionResolutionLabel([{ optionId: "skip", kind: "reject_once" }], "skip"), "Rejected");
+  assert.equal(permissionResolutionLabel([{ optionId: "cancel", kind: "cancel" }], "cancel"), "Ended Early");
+  assert.equal(permissionResolutionLabel([{ optionId: "trust" }], "trust"), "Resolved",
+    "an option with no kind and no common id is Resolved, not its raw id");
+  assert.equal(permissionResolutionLabel([{ optionId: "allow" }], "allow"), "Allowed");
+  assert.equal(permissionResolutionLabel([{ optionId: "deny" }], "deny"), "Rejected");
+  assert.equal(permissionResolutionLabel([{ optionId: "auth:select-account", kind: "allow_once" }], "auth:select-account"),
+    "Allowed", "a provider option that reuses a runner id is decided by its kind");
+  assert.equal(permissionResolutionLabel([], "toString"), "Resolved",
+    "an id matching an inherited property is never replaced by it");
+  assert.equal(permissionResolutionLabel([], null), "Dismissed");
 });
 
 /** Every incremental projection must equal a from-scratch one: folding retries may only ever cost

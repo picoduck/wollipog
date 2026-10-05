@@ -188,7 +188,7 @@ export const CSS_SURFACE = {
   "appearance", "background", "background-clip", "background-position",
   "background-size", "border", "border-bottom", "border-bottom-left-radius",
   "border-bottom-right-radius", "border-collapse", "border-color",
-  "border-inline-start", "border-inline-start-color", "border-left",
+  "border-inline-start", "border-left",
   "border-radius", "border-right", "border-style", "border-top", "border-top-color",
   "border-top-left-radius", "border-top-right-radius", "bottom", "box-shadow", "box-sizing",
   "clip", "clip-path", "color", "color-scheme", "column-gap", "container", "container-type", "content",

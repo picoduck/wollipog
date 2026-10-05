@@ -259,8 +259,13 @@ for (const viewport of [
     await page.getByRole("button", { name: "Trust This Configuration" }).click();
     await expect(panel).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Review Request" })).toHaveCount(0);
-    await expect(requestRow).toHaveCount(1);
-    await expect(requestRow).toContainText("trust");
+    // The resolved request becomes its Decision Record (#2204): the outcome word, never the option id.
+    await expect(requestRow).toHaveCount(0);
+    const record = page.locator("details.tl-decision");
+    await expect(record).toHaveCount(1);
+    await expect(record.locator(".tl-decision-outcome")).toHaveText("Allowed");
+    await expect(record.locator(".tl-decision-title")).toHaveText("Trust Worktree Setup Configuration?");
+    await expect(record).not.toContainText(/\btrust\b|→/);
     await expect.poll(() => page.evaluate(() =>
       window.__WOLLIPOG_REQUEST_SURFACES_E2E__.submissions())).toEqual([{
         requestId: "worktree-setup:one:hash",

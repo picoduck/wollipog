@@ -7,14 +7,19 @@ import {
   landedGovernanceAnchors,
   governanceAnchorSeq,
   governanceAuditPresentation,
-  governanceDecidedBy,
-  governanceDecisionLabel,
   governanceDecisions,
   mergeGovernanceDecisions,
   sameGovernanceSnapshot,
   transcriptGovernanceDecisions,
 } from "./governance.js";
 import { GovernanceHistoryPanel } from "./components/GovernanceHistoryPanel.js";
+import {
+  decisionActorName,
+  decisionRecordText,
+  governanceDecisionRecord,
+  GovernancePolicyNamesContext,
+  type DecisionNames,
+} from "./decision-record.js";
 import { ViewerIdentityContext, viewerIdentity, type ViewerIdentity } from "./resolver-identity.js";
 import { isCollapsibleWorkItem, type TimelineItem } from "./timeline.js";
 
@@ -48,44 +53,55 @@ function work(id: number): TimelineItem {
 }
 
 test("hook governance audit has distinct policy, human, timeout, and abandonment outcomes", () => {
-  assert.equal(governanceAuditPresentation(entry({
+  assert.deepEqual(governanceAuditPresentation(entry({
     stage: "policy_decision",
     outcome: "denied",
     actor: { kind: "policy", id: "deny-shell" },
-  }))?.label, "Blocked by Policy");
+  })), {
+    outcome: "blocked",
+    actor: { kind: "policy", policyId: "deny-shell" },
+    detail: "The matched policy denied this tool.",
+  });
   assert.deepEqual(governanceAuditPresentation(entry({ outcome: "denied" })), {
-    label: "Denied",
+    outcome: "rejected",
+    actor: { kind: "member", userId: "user-ada" },
     detail: "The suspended tool invocation was blocked.",
-    tone: "denied",
-    human: { verb: "Denied", actorId: "user-ada" },
   });
   assert.deepEqual(governanceAuditPresentation(entry({
     outcome: "denied",
     actor: { kind: "system", id: "decision-history-unavailable" },
   })), {
-    label: "Blocked Fail-Closed",
+    outcome: "blocked",
+    actor: { kind: "wollipog" },
     detail: "The tool was denied because its approval could not be completed safely.",
-    tone: "denied",
   });
-  assert.equal(governanceAuditPresentation(entry({
+  assert.deepEqual(governanceAuditPresentation(entry({
     outcome: "timed_out",
     actor: { kind: "system", id: "policy-ask-timeout" },
-  }))?.label, "Approval Timed Out");
-  assert.deepEqual(governanceAuditPresentation(entry({ outcome: "allowed" }))?.human, { verb: "Approved", actorId: "user-ada" });
-  assert.equal(governanceAuditPresentation(entry({
+    governancePolicyId: "ask-deploys",
+  })), {
+    outcome: "timed_out",
+    actor: { kind: "policy", policyId: "ask-deploys" },
+    detail: "The policy deadline expired, so the tool was denied.",
+  });
+  assert.deepEqual(governanceAuditPresentation(entry({ outcome: "allowed" }))?.actor, { kind: "member", userId: "user-ada" });
+  assert.equal(governanceAuditPresentation(entry({ outcome: "allowed" }))?.outcome, "allowed");
+  assert.deepEqual(governanceAuditPresentation(entry({
     outcome: "allowed",
     actor: { kind: "policy", id: "allow-read" },
-  }))?.label, "Allowed by Policy");
+  }))?.outcome, "allowed");
   assert.equal(governanceAuditPresentation(entry({
     outcome: "aborted",
     actor: { kind: "system", id: "session-stopped" },
-  }))?.label, "Approval Aborted");
+  }))?.outcome, "ended_early");
   assert.equal(governanceAuditPresentation(entry({
     approvalKind: "question",
     stage: "policy_decision",
     outcome: "answered",
     actor: { kind: "policy", id: "questions:review" },
-  }))?.label, "Answered by Policy");
+  }))?.outcome, "answered_by_policy");
+  // The audit records a policy's denial at policy_decision and again at resolution: one row.
+  assert.equal(governanceAuditPresentation(entry({ outcome: "denied", actor: { kind: "policy", id: "deny-shell" } })), null);
 });
 
 function viewer(userId: string, members: Array<[string, string]>): ViewerIdentity {
@@ -103,54 +119,93 @@ function viewer(userId: string, members: Array<[string, string]>): ViewerIdentit
   });
 }
 
-function historyAs(viewing: ViewerIdentity | null, decisions: ReturnType<typeof governanceDecisions>): string {
+function historyAs(
+  viewing: ViewerIdentity | null,
+  decisions: ReturnType<typeof governanceDecisions>,
+  policies: ReadonlyMap<string, string> | null = null,
+): string {
   return renderToStaticMarkup(React.createElement(
-    ViewerIdentityContext.Provider,
-    { value: viewing },
-    React.createElement(GovernanceHistoryPanel, { decisions }),
+    GovernancePolicyNamesContext.Provider,
+    { value: { names: policies, load: () => {} } },
+    React.createElement(
+      ViewerIdentityContext.Provider,
+      { value: viewing },
+      React.createElement(GovernanceHistoryPanel, { decisions }),
+    ),
   ));
 }
+
+function names(viewing: ViewerIdentity | null, policies: Record<string, string> = {}): DecisionNames {
+  return { viewer: viewing, policyName: (id) => policies[id], sessionTitle: () => undefined };
+}
+
+const rowText = (decision: ReturnType<typeof governanceDecisions>[number], viewing: ViewerIdentity | null, policies?: Record<string, string>) =>
+  decisionRecordText(governanceDecisionRecord(decision), names(viewing, policies));
 
 test("a member's decision is named relative to the viewer, never by raw user id (#2527)", () => {
   const ada = viewer("user-ada", [["user-ada", "Ada Lovelace"], ["user-grace", "Grace Hopper"], ["user-anon", " "]]);
   const grace = viewer("user-grace", [["user-ada", "Ada Lovelace"], ["user-grace", "Grace Hopper"]]);
-  const [approved] = governanceDecisions([entry({ outcome: "allowed" })]);
+  const [approved] = governanceDecisions([entry({ outcome: "allowed", scope: { sessionId: "s", runnerId: "r", toolName: "Bash" } })]);
   const [denied] = governanceDecisions([entry({ outcome: "denied", actor: { kind: "human", id: "user-grace" } })]);
   const [unnamed] = governanceDecisions([entry({ outcome: "denied", actor: { kind: "human", id: "user-anon" } })]);
   const [departed] = governanceDecisions([entry({ outcome: "allowed", actor: { kind: "human", id: "user-gone" } })]);
 
-  assert.equal(governanceDecisionLabel(approved!, ada), "Approved by You");
-  assert.equal(governanceDecidedBy(approved!, ada), "You");
-  assert.equal(governanceDecisionLabel(approved!, grace), "Approved by Ada Lovelace");
-  assert.equal(governanceDecidedBy(approved!, grace), "Ada Lovelace");
-  assert.equal(governanceDecisionLabel(denied!, ada), "Denied by Grace Hopper");
-  assert.equal(governanceDecisionLabel(unnamed!, ada), "Denied by Another Member");
-  assert.equal(governanceDecisionLabel(departed!, ada), "Approved by Another Member");
-  assert.equal(governanceDecidedBy(departed!, ada), "Another Member");
+  assert.equal(rowText(approved!, ada), "Allowed Bash by You");
+  assert.equal(decisionActorName(approved!.actor, names(grace)), "Ada Lovelace");
+  assert.equal(rowText(approved!, grace), "Allowed Bash by Ada Lovelace");
+  assert.equal(rowText(denied!, ada), "Rejected Tool Request by Grace Hopper");
+  assert.equal(rowText(unnamed!, ada), "Rejected Tool Request by Another Member");
+  assert.equal(rowText(departed!, ada), "Allowed Tool Request by Another Member");
 
   // A single-member installation keeps "You", whatever id an older record carries.
   const solo = viewer("user-local", [["user-local", "Local owner"]]);
-  assert.equal(governanceDecisionLabel(departed!, solo), "Approved by You");
-  assert.equal(governanceDecidedBy(departed!, solo), "You");
+  assert.equal(rowText(departed!, solo), "Allowed Tool Request by You");
 
   // An unknown viewer, or a shared decision with no recorded member, stays neutral.
-  assert.equal(governanceDecisionLabel(approved!, null), "Approved");
-  assert.equal(governanceDecidedBy(approved!, null), "Member");
+  assert.equal(rowText(approved!, null), "Allowed Bash");
   const [anonymous] = governanceDecisions([entry({ outcome: "allowed", actor: { kind: "human" } })]);
-  assert.equal(governanceDecisionLabel(anonymous!, ada), "Approved");
-
-  // Policy decisions are unchanged.
-  const [policy] = governanceDecisions([entry({ outcome: "allowed", actor: { kind: "policy", id: "allow-read" } })]);
-  assert.equal(governanceDecisionLabel(policy!, ada), "Allowed by Policy");
-  assert.equal(governanceDecidedBy(policy!, ada), "Policy · allow-read");
+  assert.equal(rowText(anonymous!, ada), "Allowed Tool Request");
 
   const history = historyAs(grace, [approved!, denied!, departed!]);
-  assert.match(history, /Approved by Ada Lovelace/);
-  assert.match(history, /Denied by You/);
-  assert.match(history, /Approved by Another Member/);
-  assert.match(history, /<dd>Ada Lovelace<\/dd>/);
+  assert.match(history, /aria-label="Allowed Bash by Ada Lovelace"/);
+  assert.match(history, /aria-label="Rejected Tool Request by You"/);
+  assert.match(history, /aria-label="Allowed Tool Request by Another Member"/);
+  assert.match(history, /<dt>Decided By<\/dt><dd>Ada Lovelace<\/dd>/);
   assert.doesNotMatch(history, /user-(ada|grace|gone)/, "no raw user id is rendered");
-  assert.doesNotMatch(historyAs(null, [approved!, denied!]), /user-|by You/);
+  assert.doesNotMatch(historyAs(null, [approved!, denied!]), /user-|by You|Decided By/);
+});
+
+test("a policy's decision names the policy, never its id, and Decided By appears once (#2204)", () => {
+  const [blocked] = governanceDecisions([entry({
+    auditId: "audit-block", stage: "policy_decision", outcome: "denied",
+    actor: { kind: "policy", id: "deny-shell" }, governancePolicyId: "deny-shell",
+    scope: { sessionId: "s", runnerId: "r", toolName: "Bash", path: "/repo", branch: "main" },
+  })]);
+  const [timedOut] = governanceDecisions([entry({
+    auditId: "audit-timeout", outcome: "timed_out", actor: { kind: "system", id: "policy-ask-timeout" },
+    governancePolicyId: "ask-deploys",
+  })]);
+  const [failClosed] = governanceDecisions([entry({
+    auditId: "audit-fail", outcome: "denied", actor: { kind: "system", id: "decision-history-unavailable" },
+  })]);
+  const policies = new Map([["deny-shell", "No Shell in Production"], ["ask-deploys", "Ask Before Deploys"]]);
+  assert.equal(rowText(blocked!, null, Object.fromEntries(policies)), "Blocked Bash by No Shell in Production");
+  assert.equal(rowText(timedOut!, null, Object.fromEntries(policies)), "Timed Out Tool Request by Ask Before Deploys");
+  assert.equal(rowText(failClosed!, null), "Blocked Tool Request by Wollipog");
+  // Before the names load (or where they cannot), a policy is "Policy", never its id.
+  assert.equal(rowText(blocked!, null), "Blocked Bash by Policy");
+
+  const html = historyAs(null, [blocked!, timedOut!, failClosed!], policies);
+  assert.match(html, /data-decision-outcome="blocked"[^>]*data-audit-id="audit-block"/);
+  assert.match(html, /<span class="tl-decision-outcome t-danger">Blocked<\/span>/);
+  assert.match(html, /<span class="tl-decision-outcome t-warning">Timed Out<\/span>/);
+  assert.match(html, /<span class="tl-decision-by">by No Shell in Production<\/span>/);
+  assert.equal(html.match(/<dt>Decided By<\/dt>/g)?.length, 3, "Decided By once per row");
+  assert.match(html, /<dt>Tool<\/dt><dd>Bash<\/dd><dt>Path<\/dt><dd>\/repo<\/dd><dt>Branch<\/dt><dd>main<\/dd>/);
+  assert.match(html, /<dt>Recorded<\/dt>/);
+  assert.match(html, /Copy Audit ID/);
+  const visible = html.replace(/<[^>]+>/g, " ");
+  assert.doesNotMatch(visible, /deny-shell|ask-deploys|audit-block|hook-1|Policy ·/, "ids are only copied");
 });
 
 test("non-hook audit entries produce no governance outcome", () => {
@@ -165,7 +220,6 @@ test("decisions are deduplicated, oldest-first, and preserve server order for ti
     entry({ auditId: "c", requestId: "hook-c", timestamp: 300 }),
   ]);
   assert.deepEqual(decisions.map((d) => d.auditId), ["b", "a", "c"]);
-  assert.equal(decisions[0]!.decidedBy, "Member", "a member's user id is never part of the stored label");
 });
 
 test("decisions never carry request content, answers, or credentials", () => {
@@ -174,7 +228,7 @@ test("decisions never carry request content, answers, or credentials", () => {
     governancePolicyId: "deny-shell",
   })]);
   assert.deepEqual(Object.keys(decision!).sort(), [
-    "auditId", "decidedBy", "detail", "human", "label", "policyId", "requestId", "timestamp", "tone",
+    "actor", "auditId", "detail", "outcome", "policyId", "requestId", "timestamp",
   ]);
   assert.doesNotMatch(JSON.stringify(decision), /deadbeef/);
 });
@@ -285,7 +339,7 @@ test("governance history renders every outcome newest-first behind a closed disc
     ["c", "b", "a"],
   );
   assert.doesNotMatch(html, /<details open/);
-  assert.match(html, /Blocked by Policy/);
+  assert.match(html, /aria-label="Blocked Tool Request by Policy"/);
   assert.match(html, />Load Older Decisions<\/button>/);
 });
 

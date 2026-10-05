@@ -18,6 +18,7 @@ import {
   ChevronRight as LucideChevronRight,
   Circle as LucideCircle,
   CircleUserRound as LucideCircleUserRound,
+  CircleX as LucideCircleX,
   CircleDot as LucideCircleDot,
   CircleGauge as LucideCircleGauge,
   Clock3 as LucideClock3,
@@ -94,6 +95,7 @@ import {
   Shield as LucideShield,
   ShieldAlert as LucideShieldAlert,
   ShieldCheck as LucideShieldCheck,
+  ShieldX as LucideShieldX,
   SlidersHorizontal as LucideSlidersHorizontal,
   Smartphone as LucideSmartphone,
   Sparkles as LucideSparkles,
@@ -101,6 +103,7 @@ import {
   SquareTerminal as LucideSquareTerminal,
   Tag as LucideTag,
   Terminal as LucideTerminal,
+  TimerOff as LucideTimerOff,
   Trash2 as LucideTrash2,
   TriangleAlert as LucideTriangleAlert,
   Upload as LucideUpload,
@@ -353,9 +356,26 @@ export function InfoIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideInfo} {...props} />;
 }
 
-/** The success tone's icon on toasts and notices (docs/design-system.md §13). */
+/** The success tone's icon on toasts and notices (docs/design-system.md §13); an allowed or answered
+ * Decision Record (#2204). */
 export function SuccessIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideCircleCheck} {...props} />;
+}
+
+/** A Decision Record that ended without going ahead: rejected, dismissed, ended early, replaced or
+ * resolved by the provider (#2204). */
+export function DecisionClosedIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideCircleX} {...props} />;
+}
+
+/** A Decision Record blocked by a policy or fail-closed (#2204). */
+export function DecisionBlockedIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideShieldX} {...props} />;
+}
+
+/** A Decision Record whose deadline passed (#2204). */
+export function DecisionTimedOutIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideTimerOff} {...props} />;
 }
 
 /** A plan step not started yet (docs/design-system.md §18); a completed step is `SuccessIcon`. */
