@@ -153,7 +153,10 @@ import { sessionAgentLabel } from "./agent-options.js";
 import {
   loadOlderSessionEvents,
   recoverSessionHistory,
+  recoverSessionHistoryGap,
   recoverSessionHistoryWindow,
+  type SessionHistoryRecoveryOptions,
+  type SessionHistoryWindowOptions,
   shouldReadOpeningWindow,
 } from "../history-recovery.js";
 import { routedSessionPlaceholder, shouldHydrateRoutedSession } from "../detail-placeholder.js";
@@ -1024,6 +1027,8 @@ function SessionDetailLoaded({
     return history?.eventEpoch === (s.sessions.get(sessionId)?.eventEpoch ?? 0) ? history : undefined;
   });
   everCompletedRef.current = eventHistory?.everComplete === true;
+  const latestSessionRef = useRef(session);
+  latestSessionRef.current = session;
   const eventWindow = useStoreSelector((s) => {
     const window = s.eventWindows.get(sessionId);
     return window?.eventEpoch === (s.sessions.get(sessionId)?.eventEpoch ?? 0) ? window : undefined;
@@ -2411,10 +2416,71 @@ function SessionDetailLoaded({
     saveSeen(markSeen(loadSeen(instanceScope), sessionId, ts), instanceScope);
   }, [instanceScope, mode, sessionId, session?.lastEventAt]);
 
+  // A newly opened conversation can already exist in the REST API while the UI socket is
+  // connecting or its stream acknowledgement is missing. Read one bounded opening window and
+  // refresh the creation-time row independently; neither requires live stream admission.
+  // Revision -1 keeps this provisional read from advancing the frozen reconnect cursor.
+  useEffect(() => {
+    if (conn === "unauthorized" || (conn === "online" && recoveryRevision != null) ||
+        everCompletedRef.current || hasSavedFollowTailAnchor(instanceScope, sessionId)) return;
+    let cancelled = false;
+    const epoch = recoveryEventEpoch;
+    const generation = recoveryGeneration;
+    const revision = -1;
+    beginEventHistoryLoad(sessionId, epoch, revision, generation);
+    // Metadata cannot hold up the transcript. A creation-time Starting row can precede provider
+    // readiness, so recheck only that state every two seconds, at most five more times. An
+    // acknowledgement, navigation, epoch change or connection phase cancels the whole operation.
+    let metadataRetryTimer: number | undefined;
+    let metadataAttempts = 0;
+    const refreshMetadata = () => {
+      if (cancelled || (metadataAttempts > 0 && latestSessionRef.current.status !== "starting")) return;
+      const requestedRow = latestSessionRef.current;
+      metadataAttempts++;
+      void api.session(sessionId).then(({ session: refreshed }) => {
+        if (cancelled || refreshed.id !== sessionId) return;
+        const latest = latestSessionRef.current;
+        // A same-millisecond live upsert still owns its newer row identity. Do not let an older
+        // in-flight HTTP response replace it merely because the timestamps happen to match.
+        if (refreshed.updatedAt >= latest.updatedAt &&
+            (latest === requestedRow || refreshed.updatedAt > latest.updatedAt) &&
+            (refreshed.eventEpoch ?? 0) >= (latest.eventEpoch ?? 0)) {
+          loadSession(refreshed);
+        }
+        if (refreshed.status === "starting" && latest.status === "starting" && metadataAttempts <= 5) {
+          metadataRetryTimer = window.setTimeout(refreshMetadata, 2_000);
+        }
+      }).catch(() => { /* Preserve the latest row; the transcript reports its REST failure below. */ });
+    };
+    refreshMetadata();
+    void recoverSessionHistoryWindow(
+      { sessionId, eventEpoch: epoch, recoveryRevision: revision },
+      {
+        fetchTailPage: api.getSessionEventTailPage,
+        applyWindow: (id, events, pageEpoch, pageRevision, complete, hasOlder, turnAligned) =>
+          loadEvents(id, events, pageEpoch, pageRevision, complete, generation, hasOlder, turnAligned),
+        isCurrent: () => !cancelled,
+      },
+    ).then((result) => {
+      if (!cancelled && !result.complete) {
+        // Unsupported backward reads wait for ordinary acknowledged recovery. Do not start an
+        // unbounded forward walk here and recreate the slow opening path.
+        failEventHistoryLoad(sessionId, "Could not load session activity before the live connection was ready.", epoch, revision, generation);
+      }
+    }).catch(() => {
+      if (!cancelled) failEventHistoryLoad(sessionId, "Could not load session activity.", epoch, revision, generation);
+    });
+    return () => {
+      cancelled = true;
+      if (metadataRetryTimer !== undefined) window.clearTimeout(metadataRetryTimer);
+    };
+  }, [api, instanceScope, sessionId, conn, recoveryRevision, recoveryEventEpoch, recoveryGeneration,
+    historyRetry, beginEventHistoryLoad, failEventHistoryLoad, loadEvents, loadSession]);
+
   // Opening a session reads a bounded window at the TAIL: one request paints the newest activity
   // no matter how long the session is. Reopening after an outage instead backfills only the gap
-  // since what we already have (loadEvents is stable, so this runs once per session, not on every
-  // streamed event). Also re-runs when the socket comes back ONLINE: events broadcast during the
+  // since what we already have, with a fixed page budget before tail replacement while following.
+  // Also re-runs when the socket comes back ONLINE: events broadcast during the
   // outage never arrived, and without this re-fetch the timeline silently misses them until the
   // user navigates away and back. The cursor is frozen when the requested subscription revision is
   // sent, so live events cannot move it past an outage gap.
@@ -2430,47 +2496,41 @@ function SessionDetailLoaded({
     const epoch = recoveryEventEpoch;
     const generation = recoveryGeneration;
     const isCurrent = () => !cancelled;
-    const forwardRecovery = () => recoverSessionHistory(
-      { sessionId, after, eventEpoch: epoch, recoveryRevision },
-      {
-        fetchPage: api.getSessionEventPage,
-        applyPage: (id, events, pageEpoch, revision, complete) =>
-          loadEvents(id, events, pageEpoch, revision, complete, generation),
-        isCurrent,
-        retryOnIdleTimeout: true,
-      },
-    );
-    // Nothing cached and no gap to close: this is an open, so read the window instead of walking
-    // the log forward from its first event. Any other cursor means a reconnect gap the forward
-    // chain owns. A control plane without backward reads answers `supported: false`, and the
-    // forward chain runs exactly as before.
-    //
-    // A reader with a saved position is deliberately excluded: that position can sit below the
-    // window, and restoring it depends on those rows arriving in this same load. Reading only the
-    // tail would strand them away from where they stopped, so those loads keep the full chain until
-    // the list can restore an anchor against a windowed history.
-    //
-    // "Nothing cached" is asked of completed HISTORY, not of the event array: a live event
-    // delivered between the subscription acknowledgement and this effect would otherwise divert a
-    // long session back to walking its log from seq 0. Live rows sit at the tail, so they merge
-    // into the window they arrive beside.
+    const historyOptions: SessionHistoryRecoveryOptions = {
+      fetchPage: api.getSessionEventPage,
+      applyPage: (id, events, pageEpoch, revision, complete) =>
+        loadEvents(id, events, pageEpoch, revision, complete, generation),
+      isCurrent,
+      retryOnIdleTimeout: true,
+    };
+    const windowOptions: SessionHistoryWindowOptions = {
+      fetchTailPage: api.getSessionEventTailPage,
+      applyWindow: (id, events, pageEpoch, revision, complete, hasOlder, turnAligned) =>
+        loadEvents(id, events, pageEpoch, revision, complete, generation, hasOlder, turnAligned),
+      isCurrent,
+    };
+    const request = { sessionId, after, eventEpoch: epoch, recoveryRevision };
+    const forwardRecovery = () => recoverSessionHistory(request, historyOptions);
+    const canReplaceWithWindow = () => !hasSavedFollowTailAnchor(instanceScope, sessionId);
+    // A zero cursor reads the tail even if a provisional REST window already painted before the
+    // socket acknowledgement. Small reconnect gaps retain their rows; long gaps use a fixed
+    // forward-page budget before replacing the tail. Check paused state again at that boundary so
+    // a reader who starts reading during recovery keeps the rows their saved position depends on.
+    // Paused positions keep contiguous forward recovery so tail replacement cannot remove the
+    // row restored from the retained reader window.
     const openWindow = shouldReadOpeningWindow({
       recoveryAfter: after,
-      historyEverCompleted: everCompletedRef.current,
-      hasSavedReadingPosition: hasSavedFollowTailAnchor(instanceScope, sessionId),
+      hasSavedReadingPosition: !canReplaceWithWindow(),
     });
     beginEventHistoryLoad(sessionId, epoch, recoveryRevision, generation);
     const load = openWindow
-      ? recoverSessionHistoryWindow(
-        { sessionId, eventEpoch: epoch, recoveryRevision },
-        {
-          fetchTailPage: api.getSessionEventTailPage,
-          applyWindow: (id, events, pageEpoch, revision, complete, hasOlder, turnAligned) =>
-            loadEvents(id, events, pageEpoch, revision, complete, generation, hasOlder, turnAligned),
-          isCurrent,
-        },
-      ).then((result) => (result.supported ? result.complete : forwardRecovery()))
-      : forwardRecovery();
+      ? recoverSessionHistoryWindow(request, windowOptions)
+        .then((result) => (result.supported ? result.complete : forwardRecovery()))
+      : recoverSessionHistoryGap(request, {
+        history: historyOptions,
+        window: windowOptions,
+        canReplaceWithWindow,
+      });
     void load.then((complete) => {
       if (!cancelled && !complete) {
         failEventHistoryLoad(sessionId, "Timeline recovery ended before the complete history was available.", epoch, recoveryRevision, generation);

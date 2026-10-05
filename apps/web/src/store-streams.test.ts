@@ -374,7 +374,6 @@ test("a mid-connection reset invalidates the frozen recovery cursor from the old
   assert.equal(
     shouldReadOpeningWindow({
       recoveryAfter: store.recoveryAfter("s1"),
-      historyEverCompleted: store.getState().eventHistory.get("s1")?.everComplete ?? false,
       hasSavedReadingPosition: false,
     }),
     true,
@@ -422,7 +421,6 @@ test("a reset re-epochs a non-relevant (off-view) session and still drops its fr
   assert.equal(
     shouldReadOpeningWindow({
       recoveryAfter: store.recoveryAfter("s1"),
-      historyEverCompleted: store.getState().eventHistory.get("s1")?.everComplete ?? false,
       hasSavedReadingPosition: false,
     }),
     true,

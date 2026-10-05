@@ -112,7 +112,8 @@ class FakeSocket implements UiSocket {
   onmessage: ((event: { data: string }) => void) | null = null;
   onclose: ((event: { code: number }) => void) | null = null;
   onerror: (() => void) | null = null;
-  send() {}
+  sent: Array<{ type: string; revision?: number }> = [];
+  send(data: string) { this.sent.push(JSON.parse(data)); }
   close() {}
   push(message: ControlPlaneToUi) { this.onmessage?.({ data: JSON.stringify(message) }); }
 }
@@ -144,11 +145,20 @@ function EventSeeder({ sessionId, events }: { sessionId: string; events: Session
   return null;
 }
 
+function SessionObserver({ sessionId, observe }: {
+  sessionId: string; observe: (value: SessionView | undefined) => void;
+}) {
+  const value = useStoreSelector((state) => state.sessions.get(sessionId));
+  React.useEffect(() => observe(value), [observe, value]);
+  return null;
+}
+
 /** Controllable history endpoints: recovery stays "refreshing" until a response is released.
  * A fresh mount with no saved reading position takes the tail-first OPENING-WINDOW path
  * (getSessionEventTailPage); the forward page endpoint remains stubbed for the fallback. */
 function pageController() {
   const forward: Array<(value: SessionEventsResponse) => void> = [];
+  let forwardCalls = 0;
   const tail: Array<{
     resolve: (value: SessionEventsResponse) => void;
     reject: (reason: Error) => void;
@@ -161,7 +171,8 @@ function pageController() {
   }> = [];
   return {
     tailCalls,
-    fetchPage: () => new Promise<SessionEventsResponse>((resolve) => { forward.push(resolve); }),
+    forwardCalls: () => forwardCalls,
+    fetchPage: () => { forwardCalls++; return new Promise<SessionEventsResponse>((resolve) => { forward.push(resolve); }); },
     fetchTailPage: (
       id: string,
       before: number | undefined,
@@ -192,6 +203,7 @@ interface Fixture {
   scroller: HTMLElement;
   events: SessionEvent[];
   socket: FakeSocket;
+  readSession: () => SessionView | undefined;
   renderMode: (mode: "preview" | "expanded") => Promise<void>;
 }
 
@@ -209,6 +221,8 @@ async function mountFixture(
     steeringAttempts,
     sessionOverrides,
     client: clientOverrides,
+    acknowledgeSubscription = true,
+    strictMode = false,
   }: {
     pinnedOpen?: boolean;
     pendingQuestion?: boolean;
@@ -218,6 +232,8 @@ async function mountFixture(
     steeringAttempts?: SessionView["steeringAttempts"];
     sessionOverrides?: Partial<SessionView>;
     client?: Partial<ApiClient>;
+    acknowledgeSubscription?: boolean;
+    strictMode?: boolean;
   } = {},
 ): Promise<Fixture> {
   fixtureSequence += 1;
@@ -307,11 +323,13 @@ async function mountFixture(
       },
     });
   }
+  let observedSession: SessionView | undefined;
+  const observeSession = (value: SessionView | undefined) => { observedSession = value; };
   const renderMode = async (nextMode: "preview" | "expanded") => {
-    await act(async () => root.render(
-      <ApiProvider client={client}>
+    const content = <ApiProvider client={client}>
         <StoreProvider connection={connection} navigation={navigation}>
           <EventSeeder sessionId={currentSession.id} events={events} />
+          <SessionObserver sessionId={currentSession.id} observe={observeSession} />
           <SessionDetail
             sessionId={currentSession.id}
             mode={nextMode}
@@ -321,15 +339,15 @@ async function mountFixture(
             composerDraftLoader={async () => null}
           />
         </StoreProvider>
-      </ApiProvider>,
-    ));
+      </ApiProvider>;
+    await act(async () => root.render(strictMode ? <React.StrictMode>{content}</React.StrictMode> : content));
   };
   await renderMode(mode);
   await act(async () => {
     socket.push({
       type: "snapshot",
       capabilities: {
-        sessionSubscriptions: false,
+        sessionSubscriptions: !acknowledgeSubscription,
         boundedDelivery: false,
         paginatedSessionHistory: false,
         projects: true,
@@ -345,7 +363,7 @@ async function mountFixture(
   await flushAsyncWork();
   const scroller = container.querySelector(".detail-scroll") as HTMLElement | null;
   assert.ok(scroller, "the transcript reader is mounted");
-  return { sessionId: currentSession.id, container, root, scroller, events, socket, renderMode };
+  return { sessionId: currentSession.id, container, root, scroller, events, socket, renderMode, readSession: () => observedSession };
 }
 
 async function unmountFixture(fixture: Fixture) {
@@ -500,6 +518,170 @@ test("SessionDetail keeps a pending question on its dock through transcript reco
   } finally {
     await unmountFixture(fixture);
   }
+});
+
+test("a cold conversation reads REST history and refreshes Starting before subscription acknowledgement", async () => {
+  const pages = pageController();
+  let metadataCalls = 0;
+  const fixture = await mountFixture(pages, 0, {
+    acknowledgeSubscription: false,
+    sessionOverrides: { status: "starting" },
+    client: { session: async (id) => { metadataCalls++; return { session: session(id) }; } },
+  });
+  try {
+    assert.equal(pages.tailCalls.length, 1, "opening history must not wait for a socket acknowledgement");
+    assert.equal(metadataCalls, 1, "the row is refreshed through the same authorized REST client");
+    assert.equal(fixture.readSession()?.status, "idle", "Starting settles without the lost live upsert");
+    assert.ok(fixture.container.querySelector(".transcript-skeleton"));
+    await act(async () => pages.releaseTail({
+      events: [], eventEpoch: 0, nextBefore: 0, hasMoreOlder: false, cacheComplete: true,
+    }));
+    await flushAsyncWork();
+    assertNoDomNode(fixture.container.querySelector(".transcript-skeleton"));
+    assert.match(fixture.scroller.textContent ?? "", /Start the Conversation/u);
+    assert.equal(pages.forwardCalls(), 0, "the provisional read stays bounded");
+    await fixture.renderMode("expanded");
+    assert.equal(pages.tailCalls.length, 1, "unrelated renders do not retry the provisional read");
+    const revision = fixture.socket.sent.filter((message) => message.type === "session_subscriptions").at(-1)?.revision;
+    assert.ok(revision != null);
+    await act(async () => fixture.socket.push({
+      type: "session_subscriptions_applied", revision, sessionIds: [fixture.sessionId], podIds: [],
+    }));
+    await flushAsyncWork();
+    assert.equal(pages.tailCalls.length, 2, "acknowledged recovery rechecks the bounded tail");
+    assert.equal(pages.forwardCalls(), 0, "provisional completeness cannot divert recovery into a full forward walk");
+  } finally { await unmountFixture(fixture); }
+});
+
+test("a missing acknowledgement cannot strand Starting after the initial REST read precedes readiness", async () => {
+  const pages = pageController();
+  let metadataCalls = 0;
+  const fixture = await mountFixture(pages, 0, {
+    acknowledgeSubscription: false,
+    sessionOverrides: { status: "starting" },
+    client: { session: async (id) => ({
+      session: { ...session(id), status: ++metadataCalls === 1 ? "starting" : "idle" },
+    }) },
+  });
+  try {
+    assert.equal(fixture.readSession()?.status, "starting");
+    await act(async () => pages.releaseTail({
+      events: [], eventEpoch: 0, nextBefore: 0, hasMoreOlder: false, cacheComplete: true,
+    }));
+    await flushAsyncWork(2_050);
+    assert.equal(fixture.readSession()?.status, "idle", "provider readiness reaches the row through bounded REST refresh");
+    assert.equal(metadataCalls, 2);
+    assert.equal(pages.tailCalls.length, 1, "readiness polling does not reread the transcript");
+  } finally { await unmountFixture(fixture); }
+});
+
+test("acknowledgement cancels the pending Starting metadata refresh", async () => {
+  const pages = pageController();
+  let metadataCalls = 0;
+  const fixture = await mountFixture(pages, 0, {
+    acknowledgeSubscription: false,
+    sessionOverrides: { status: "starting" },
+    client: { session: async (id) => { metadataCalls++; return { session: { ...session(id), status: "starting" } }; } },
+  });
+  try {
+    assert.equal(metadataCalls, 1);
+    const revision = fixture.socket.sent.filter((message) => message.type === "session_subscriptions").at(-1)?.revision;
+    assert.ok(revision != null);
+    await act(async () => fixture.socket.push({
+      type: "session_subscriptions_applied", revision, sessionIds: [fixture.sessionId], podIds: [],
+    }));
+    await flushAsyncWork(2_050);
+    assert.equal(metadataCalls, 1, "live admission owns status once acknowledged");
+  } finally { await unmountFixture(fixture); }
+});
+
+test("live readiness stops a scheduled Starting metadata retry before it sends another request", async () => {
+  const pages = pageController();
+  let metadataCalls = 0;
+  const fixture = await mountFixture(pages, 0, {
+    acknowledgeSubscription: false,
+    sessionOverrides: { status: "starting" },
+    client: { session: async (id) => { metadataCalls++; return { session: { ...session(id), status: "starting" } }; } },
+  });
+  try {
+    assert.equal(metadataCalls, 1);
+    await act(async () => fixture.socket.push({
+      type: "session_upsert", session: { ...session(fixture.sessionId), updatedAt: 2 },
+    }));
+    await flushAsyncWork(2_050);
+    assert.equal(metadataCalls, 1, "the scheduled retry checks the latest live row before sending");
+    assert.equal(fixture.readSession()?.status, "idle");
+  } finally { await unmountFixture(fixture); }
+});
+
+test("a provisional history read cannot replace an acknowledged recovery", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages, 0, { acknowledgeSubscription: false });
+  try {
+    assert.equal(pages.tailCalls.length, 1);
+    const revision = fixture.socket.sent.filter((message) => message.type === "session_subscriptions").at(-1)?.revision;
+    assert.ok(revision != null);
+    await act(async () => fixture.socket.push({
+      type: "session_subscriptions_applied", revision, sessionIds: [fixture.sessionId], podIds: [],
+    }));
+    await flushAsyncWork();
+    assert.equal(pages.tailCalls.length, 2, "acknowledged recovery owns a new read");
+    await act(async () => pages.releaseTail({
+      events: [], eventEpoch: 0, nextBefore: 0, hasMoreOlder: false, cacheComplete: true,
+    }));
+    await flushAsyncWork();
+    assert.ok(fixture.container.querySelector(".transcript-skeleton"), "the late provisional response is ignored");
+    await act(async () => pages.releaseTail({
+      events: [], eventEpoch: 0, nextBefore: 0, hasMoreOlder: false, cacheComplete: true,
+    }));
+    await flushAsyncWork();
+    assertNoDomNode(fixture.container.querySelector(".transcript-skeleton"));
+  } finally { await unmountFixture(fixture); }
+});
+
+test("StrictMode cannot consume the provisional history load during its setup rehearsal", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages, 0, { acknowledgeSubscription: false, strictMode: true });
+  try {
+    assert.ok(pages.tailCalls.length > 0);
+    await act(async () => {
+      for (let index = 0; index < pages.tailCalls.length; index++) pages.releaseTail({
+        events: [], eventEpoch: 0, nextBefore: 0, hasMoreOlder: false, cacheComplete: true,
+      });
+    });
+    await flushAsyncWork();
+    assertNoDomNode(fixture.container.querySelector(".transcript-skeleton"), "the active setup owns a response even after cleanup rehearsal");
+  } finally { await unmountFixture(fixture); }
+});
+
+test("an older REST metadata response cannot overwrite a newer live session row", async () => {
+  const pages = pageController();
+  let resolveMetadata!: (value: { session: SessionView }) => void;
+  const fixture = await mountFixture(pages, 0, {
+    acknowledgeSubscription: false,
+    sessionOverrides: { status: "starting" },
+    client: { session: () => new Promise((resolve) => { resolveMetadata = resolve; }) },
+  });
+  try {
+    await act(async () => fixture.socket.push({
+      type: "session_upsert", session: { ...session(fixture.sessionId), status: "running", updatedAt: 1 },
+    }));
+    await act(async () => resolveMetadata({ session: session(fixture.sessionId) }));
+    await flushAsyncWork();
+    assert.equal(fixture.readSession()?.status, "running");
+  } finally { await unmountFixture(fixture); }
+});
+
+test("a server without backward history support waits for acknowledgement without a forward walk", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages, 0, { acknowledgeSubscription: false });
+  try {
+    assert.equal(pages.tailCalls.length, 1);
+    await act(async () => pages.releaseTail({ events: [] }));
+    await flushAsyncWork();
+    assert.equal(pages.forwardCalls(), 0);
+    assertNoDomNode(fixture.container.querySelector(".transcript-skeleton"), "an unsupported provisional read becomes retryable");
+  } finally { await unmountFixture(fixture); }
 });
 
 test("SessionDetail keeps a standalone request reachable through skeleton and empty transcript states", async () => {

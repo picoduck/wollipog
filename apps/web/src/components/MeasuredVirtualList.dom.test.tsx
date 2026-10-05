@@ -205,6 +205,35 @@ test("the list's height and row positions never transition, whatever a styleshee
   }
 });
 
+test("StrictMode restores an already-loaded saved reader row and viewport offset", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const visible: Array<{ key: string; offset: number }> = [];
+  try {
+    await act(async () => {
+      root.render(
+        <React.StrictMode>
+          <AnchorRecoveryFixture
+            items={["older-row-1", "older-row-2", "saved-row", "newer-row-1", "newer-row-2"]}
+            recoveryPending={false}
+            onVisibleAnchorChange={(anchor) => visible.push(anchor)}
+          />
+        </React.StrictMode>,
+      );
+    });
+    const reader = container.querySelector<HTMLElement>("[data-testid='anchor-recovery-reader']");
+    assert.ok(reader);
+    assert.ok(Math.abs(reader.scrollTop - 248) < 1,
+      `the saved row must retain its 16px offset after StrictMode effect replay; scrollTop=${reader.scrollTop}`);
+    assert.ok(visible.every((anchor) => anchor.key === "saved-row" && Math.abs(anchor.offset - 16) < 1),
+      "mounting an already-loaded window must not publish a replacement position before restoration");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 test("a missing saved key waits for incomplete history and restores the original key", async () => {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);

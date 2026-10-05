@@ -1224,8 +1224,9 @@ function VirtualList<T>({
     if (widthAnchorFrameRef.current != null) cancelAnimationFrame(widthAnchorFrameRef.current);
     if (lostAnchorFrameRef.current != null) cancelAnimationFrame(lostAnchorFrameRef.current);
     if (revealFrameRef.current != null) cancelAnimationFrame(revealFrameRef.current);
-    pendingAnchorRef.current = null;
-    anchorCorrectionRequiresIntentRef.current = false;
+    // StrictMode replays this setup with the same refs. Cancel its scheduled work, but keep the
+    // logical restore until the replacement setup can measure an already-loaded reader window.
+    // A real unmount releases these refs; no callback remains scheduled against its old viewport.
     clearAnchorFrameRef.current = null;
     widthAnchorFrameRef.current = null;
     widthAnchorRef.current = null;

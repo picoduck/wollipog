@@ -148,16 +148,21 @@ function storeSnapshot(key: string, snapshot: FollowTailSnapshot): void {
 
 /** Whether a reader has a saved position for this session, without disturbing it.
  *
- * A saved position can sit anywhere in the history, including below a bounded opening window, and
- * restoring it needs those rows to arrive. Callers use this to choose the load shape: a session
- * nobody has paused in opens at its tail, while one with a saved position keeps loading the history
- * the restore depends on. */
+ * Store retains a bounded contiguous reader window across navigation, so saved positions restore
+ * against already-loaded rows. Eviction or an event-epoch change expires the matching position;
+ * callers can then open at the tail without walking the whole log to restore an absent row. */
 export function hasSavedFollowTailAnchor(scope: string, sessionId: string): boolean {
   const snapshot = followTailSnapshots.get(snapshotKey(scope, sessionId));
   // Exactly what `getInitialAnchor` would hand back. A visible anchor is recorded continuously,
   // including while following, so testing the anchor alone would report every session ever
   // rendered as needing restoration.
   return snapshot != null && snapshot.state !== "following" && snapshot.anchor != null;
+}
+
+/** A position whose rows were evicted or replaced must not turn the next open into a full-log
+ * fetch. Expire only this instance's reader; another instance may still hold its own window. */
+export function expireFollowTailAnchor(scope: string, sessionId: string): void {
+  followTailSnapshots.delete(snapshotKey(scope, sessionId));
 }
 
 export function isFollowTailUpwardReadingKey(event: FollowTailKey): boolean {

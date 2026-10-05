@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { SessionEvent, SessionEventsResponse } from "@wollipog/protocol";
+import type { SessionEvent, SessionEventsResponse, SessionView } from "@wollipog/protocol";
+import { Store } from "./store.js";
 import {
   loadOlderSessionEvents,
   recoverSessionHistories,
   recoverSessionHistory,
+  recoverSessionHistoryGap,
   recoverSessionHistoryWindow,
   sessionHistoryEpochKey,
   shouldReadOpeningWindow,
@@ -688,15 +690,239 @@ test("opening-fill pages request and preserve semantic turn alignment", async ()
 });
 
 test("the opening window survives a live event that lands before the load starts", () => {
-  const cold = { recoveryAfter: 0, historyEverCompleted: false, hasSavedReadingPosition: false };
+  const cold = { recoveryAfter: 0, hasSavedReadingPosition: false };
   assert.equal(shouldReadOpeningWindow(cold), true);
-  // A live event delivered between the subscription acknowledgement and the load populates the
-  // event array but completes no history. An active long session must still open at its tail.
-  assert.equal(shouldReadOpeningWindow({ ...cold, historyEverCompleted: false }), true);
+  // The decision does not depend on cached rows: live pre-ack delivery and a provisional REST
+  // window both leave a zero frozen cursor that must read the tail instead of walking from zero.
   // A reconnect gap belongs to the forward chain, whose frozen cursor cannot skip outage events.
   assert.equal(shouldReadOpeningWindow({ ...cold, recoveryAfter: 4_800 }), false);
-  // A transcript already loaded for this epoch is gap-filled, not re-windowed.
-  assert.equal(shouldReadOpeningWindow({ ...cold, historyEverCompleted: true }), false);
   // A reader paused somewhere keeps the history their restore depends on.
   assert.equal(shouldReadOpeningWindow({ ...cold, hasSavedReadingPosition: true }), false);
+});
+
+
+test("a long reconnect gap follows at most four pages before replacing the tail window", async () => {
+  const cursors: number[] = [];
+  const windows: number[][] = [];
+  const request = { sessionId: "s1", after: 10, eventEpoch: 3, recoveryRevision: 7 };
+  const complete = await recoverSessionHistoryGap(request, {
+    history: {
+      fetchPage: async (_id, after) => {
+        cursors.push(after);
+        const nextAfter = Math.min(after + 200, 139_881);
+        return { events: [event(nextAfter)], eventEpoch: 3, nextAfter,
+          hasMoreCached: nextAfter < 139_881, cacheComplete: true };
+      },
+      applyPage: () => {},
+      isCurrent: () => true,
+    },
+    window: {
+      fetchTailPage: async () => ({ events: [event(139_880), event(139_881)],
+        eventEpoch: 3, hasMoreOlder: true, cacheComplete: true }),
+      applyWindow: (_id, events) => windows.push(events.map((entry) => entry.seq)),
+      isCurrent: () => true,
+    },
+    canReplaceWithWindow: () => true,
+  });
+  assert.equal(complete, true);
+  assert.deepEqual(cursors, [10, 210, 410, 610]);
+  assert.deepEqual(windows, [[139_880, 139_881]]);
+});
+
+test("a short reconnect gap retains its earlier reading rows without a tail read", async () => {
+  const applied: number[] = [];
+  let tailReads = 0;
+  assert.equal(await recoverSessionHistoryGap(
+    { sessionId: "s1", after: 10, eventEpoch: 3, recoveryRevision: 7 },
+    {
+      history: {
+        fetchPage: async (_id, after) => ({ events: [event(after + 1)], eventEpoch: 3,
+          nextAfter: after + 1, hasMoreCached: after < 11, cacheComplete: true }),
+        applyPage: (_id, events) => applied.push(...events.map((entry) => entry.seq)),
+        isCurrent: () => true,
+      },
+      window: {
+        fetchTailPage: async () => { tailReads += 1; throw new Error("unexpected tail read"); },
+        applyWindow: () => {},
+        isCurrent: () => true,
+      },
+      canReplaceWithWindow: () => true,
+    },
+  ), true);
+  assert.deepEqual(applied, [11, 12]);
+  assert.equal(tailReads, 0);
+});
+
+test("pausing during reconnect continues from the applied cursor and preserves the reader", async () => {
+  const cursors: number[] = [];
+  const applied: number[] = [];
+  let paused = false;
+  let tailReads = 0;
+  assert.equal(await recoverSessionHistoryGap(
+    { sessionId: "s1", after: 10, eventEpoch: 3, recoveryRevision: 7 },
+    {
+      history: {
+        fetchPage: async (_id, after) => {
+          cursors.push(after);
+          if (after === 13) paused = true;
+          return { events: [event(after + 1)], eventEpoch: 3, nextAfter: after + 1,
+            hasMoreCached: after < 15, cacheComplete: true };
+        },
+        applyPage: (_id, events) => applied.push(...events.map((entry) => entry.seq)),
+        isCurrent: () => true,
+      },
+      window: {
+        fetchTailPage: async () => { tailReads += 1; throw new Error("unexpected tail read"); },
+        applyWindow: () => {},
+        isCurrent: () => true,
+      },
+      canReplaceWithWindow: () => !paused,
+    },
+  ), true);
+  assert.deepEqual(cursors, [10, 11, 12, 13, 14, 15]);
+  assert.deepEqual(applied, [11, 12, 13, 14, 15, 16]);
+  assert.equal(tailReads, 0);
+});
+
+test("reconnect fallback resumes the applied forward cursor on an older control plane", async () => {
+  const cursors: number[] = [];
+  const applied: number[] = [];
+  let tailReads = 0;
+  assert.equal(await recoverSessionHistoryGap(
+    { sessionId: "s1", after: 10, eventEpoch: 3, recoveryRevision: 7 },
+    {
+      history: {
+        fetchPage: async (_id, after) => {
+          cursors.push(after);
+          return { events: [event(after + 1)], eventEpoch: 3, nextAfter: after + 1,
+            hasMoreCached: after < 15, cacheComplete: true };
+        },
+        applyPage: (_id, events) => applied.push(...events.map((entry) => entry.seq)),
+        isCurrent: () => true,
+      },
+      window: {
+        fetchTailPage: async () => { tailReads += 1; return { events: [event(1)] }; },
+        applyWindow: () => { throw new Error("legacy prefix must not replace the timeline"); },
+        isCurrent: () => true,
+      },
+      canReplaceWithWindow: () => true,
+    },
+  ), true);
+  assert.deepEqual(cursors, [10, 11, 12, 13, 14, 15]);
+  assert.deepEqual(applied, [11, 12, 13, 14, 15, 16]);
+  assert.equal(tailReads, 1);
+});
+
+test("an obsolete reconnect epoch never switches to a current tail window", async () => {
+  let tailReads = 0;
+  assert.equal(await recoverSessionHistoryGap(
+    { sessionId: "s1", after: 10, eventEpoch: 3, recoveryRevision: 7 },
+    {
+      history: {
+        fetchPage: async () => ({ events: [event(1)], eventEpoch: 4, nextAfter: 1,
+          hasMoreCached: false, cacheComplete: true }),
+        applyPage: () => { throw new Error("obsolete epoch must not apply"); },
+        isCurrent: () => true,
+      },
+      window: {
+        fetchTailPage: async () => { tailReads += 1; throw new Error("unexpected tail read"); },
+        applyWindow: () => {},
+        isCurrent: () => true,
+      },
+      canReplaceWithWindow: () => true,
+    },
+  ), false);
+  assert.equal(tailReads, 0);
+});
+
+
+test("pausing while the replacement tail is in flight preserves the forward reading rows", async () => {
+  let paused = false;
+  const cursors: number[] = [];
+  const applied: number[] = [];
+  assert.equal(await recoverSessionHistoryGap(
+    { sessionId: "s1", after: 10, eventEpoch: 3, recoveryRevision: 7 },
+    {
+      history: {
+        fetchPage: async (_id, after) => {
+          cursors.push(after);
+          return { events: [event(after + 1)], eventEpoch: 3, nextAfter: after + 1,
+            hasMoreCached: after < 15, cacheComplete: true };
+        },
+        applyPage: (_id, events) => applied.push(...events.map((entry) => entry.seq)),
+        isCurrent: () => true,
+      },
+      window: {
+        fetchTailPage: async () => {
+          paused = true;
+          return { events: [event(16)], eventEpoch: 3, hasMoreOlder: true, cacheComplete: true };
+        },
+        applyWindow: () => { throw new Error("paused reading rows must not be replaced"); },
+        isCurrent: () => true,
+      },
+      canReplaceWithWindow: () => !paused,
+    },
+  ), true);
+  assert.deepEqual(cursors, [10, 11, 12, 13, 14, 15]);
+  assert.deepEqual(applied, [11, 12, 13, 14, 15, 16]);
+});
+
+
+test("reconnect tail replacement merges newer live rows and keeps omitted history reachable", async () => {
+  const store = new Store();
+  store.dispatch({ type: "msg", msg: {
+    type: "snapshot", capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [{ id: "s1", eventEpoch: 3 } as SessionView], runs: [], pods: [],
+  } });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  store.prepareSubscriptionRecovery(1, ["s1"]);
+  store.dispatch({ type: "msg", msg: {
+    type: "session_subscriptions_applied", revision: 1, sessionIds: ["s1"], podIds: [],
+  } });
+  store.beginEventHistoryLoad("s1", 3, 1, generation);
+  store.loadEvents("s1", [event(9), event(10)], 3, 1, true, generation, true);
+  store.prepareSubscriptionRecovery(2, ["s1"]);
+  store.dispatch({ type: "msg", msg: {
+    type: "session_subscriptions_applied", revision: 2, sessionIds: ["s1"], podIds: [],
+  } });
+  store.beginEventHistoryLoad("s1", 3, 2, generation);
+  assert.equal(await recoverSessionHistoryGap(
+    { sessionId: "s1", after: store.recoveryAfter("s1"), eventEpoch: 3, recoveryRevision: 2 },
+    {
+      history: {
+        fetchPage: async (_id, after) => ({ events: [event(after + 1)], eventEpoch: 3,
+          nextAfter: after + 1, hasMoreCached: true, cacheComplete: true }),
+        applyPage: (id, events, epoch, revision, complete) =>
+          store.loadEvents(id, events, epoch, revision, complete, generation),
+        isCurrent: () => true,
+      },
+      window: {
+        fetchTailPage: async () => {
+          store.dispatch({ type: "msg", msg: { type: "session_event", event: event(139_882) } });
+          return { events: [event(139_880), event(139_881)], eventEpoch: 3,
+            hasMoreOlder: true, cacheComplete: true };
+        },
+        applyWindow: (id, events, epoch, revision, complete, hasOlder, turnAligned) =>
+          store.loadEvents(id, events, epoch, revision, complete, generation, hasOlder, turnAligned),
+        isCurrent: () => true,
+      },
+      canReplaceWithWindow: () => true,
+    },
+  ), true);
+  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq),
+    [139_880, 139_881, 139_882]);
+  assert.equal(store.recoveryAfter("s1"), 139_882);
+  assert.equal(store.getState().eventWindows.get("s1")?.hasOlder, true);
+  const before = store.eventWindowBase("s1");
+  const older = await loadOlderSessionEvents("s1", before, 3, async (_id, cursor) => {
+    assert.equal(cursor, 139_880);
+    return { events: [event(139_878), event(139_879)], eventEpoch: 3,
+      hasMoreOlder: true, cacheComplete: true };
+  });
+  assert.ok(older);
+  store.loadOlderEvents("s1", older.events, older.hasOlder, before, older.eventEpoch);
+  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq),
+    [139_878, 139_879, 139_880, 139_881, 139_882]);
+  assert.equal(store.recoveryAfter("s1"), 139_882, "older reads cannot rewind the recovered cursor");
 });

@@ -3,6 +3,7 @@ import type { SessionEvent, SessionEventsResponse } from "@wollipog/protocol";
 export const SESSION_EVENT_PAGE_LIMIT = 200;
 export const SESSION_HISTORY_RECOVERY_CONCURRENCY = 6;
 export const SESSION_HISTORY_FLEET_TURN_PAGES = 8;
+export const SESSION_HISTORY_RECONNECT_PAGE_BUDGET = 4;
 
 /** Events in the first opening-window round trip. Rendered geometry may request bounded aligned
  * older pages afterward because many streamed events can collapse into one short timeline row. */
@@ -184,20 +185,16 @@ export async function recoverSessionHistory(
 /**
  * Whether an open should read the bounded tail window rather than the forward gap chain.
  *
- * - `recoveryAfter` is the cursor frozen when the acknowledged subscription was sent. Anything
- *   above zero is a reconnect gap the forward chain owns.
- * - `historyEverCompleted` asks about fetched HISTORY, not about the event array: a live event
- *   delivered between the acknowledgement and the load would otherwise send a long session back to
- *   walking its log from seq 0. Live rows sit at the tail and merge into the window beside them.
- * - `hasSavedReadingPosition` keeps the full chain for a reader who paused somewhere, since that
- *   position can sit below the window and restoring it depends on those rows arriving.
+ * A frozen cursor of zero has no retained gap to close, including after a provisional REST
+ * window painted before the WebSocket subscription was acknowledged. Re-reading the bounded
+ * window keeps that acknowledgement from restarting a full forward walk from zero.
+ * A paused reader still needs the history containing their saved anchor.
  */
 export function shouldReadOpeningWindow(input: {
   recoveryAfter: number;
-  historyEverCompleted: boolean;
   hasSavedReadingPosition: boolean;
 }): boolean {
-  return input.recoveryAfter === 0 && !input.historyEverCompleted && !input.hasSavedReadingPosition;
+  return input.recoveryAfter === 0 && !input.hasSavedReadingPosition;
 }
 
 export interface SessionHistoryWindowRequest {
@@ -298,6 +295,49 @@ export async function recoverSessionHistoryWindow(
     await wait(idlePollMs);
   }
   return { supported: true, complete: false };
+}
+
+/** Fill a small reconnect gap without discarding previously loaded reading rows. A long outage
+ * must not replay the whole log into a following reader: after a fixed page budget, replace it
+ * with the current tail window and leave omitted rows reachable through older-page navigation.
+ * Paused readers retain their forward chain, including someone who pauses during the budgeted
+ * requests. Older control planes resume that chain at its applied cursor if backward reads are
+ * unavailable. An obsolete epoch or cancelled recovery never triggers a replacement window. */
+export async function recoverSessionHistoryGap(
+  request: SessionHistoryRecoveryRequest,
+  options: {
+    history: SessionHistoryRecoveryOptions;
+    window: SessionHistoryWindowOptions;
+    canReplaceWithWindow: () => boolean;
+  },
+): Promise<boolean> {
+  const result = await recoverSessionHistoryTurn(request, {
+    ...options.history,
+    maxPagesPerTurn: options.canReplaceWithWindow() ? SESSION_HISTORY_RECONNECT_PAGE_BUDGET : undefined,
+  });
+  if (result.complete) return true;
+  if (!result.yielded || !options.history.isCurrent()) return false;
+  if (options.canReplaceWithWindow()) {
+    let readerPaused = false;
+    const window = await recoverSessionHistoryWindow(request, {
+      ...options.window,
+      applyWindow: (...args) => {
+        // The reader can detach while the tail request is in flight, after the budget boundary.
+        // Do not discard the row they just chose; finish the contiguous forward chain instead.
+        if (!options.canReplaceWithWindow()) {
+          readerPaused = true;
+          return;
+        }
+        options.window.applyWindow(...args);
+      },
+    });
+    if (window.supported && !readerPaused) return window.complete;
+    if (!options.history.isCurrent()) return false;
+  }
+  return recoverSessionHistory(
+    { ...request, after: result.after },
+    { ...options.history, maxPagesPerTurn: undefined },
+  );
 }
 
 /** Fetch one page older than the loaded window. Opening fill opts into turn alignment; later
