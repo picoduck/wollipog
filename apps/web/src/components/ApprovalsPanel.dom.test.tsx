@@ -319,7 +319,12 @@ test("leaving a policy link and coming back to it scrolls to the row again", asy
     const { rerender } = await mount(<ApprovalsPanel policyId="ask-deploys" />, stub(TOOL_POLICIES).client);
     await rerender(<ApprovalsPanel />);
     await rerender(<ApprovalsPanel policyId="ask-deploys" />);
-    assert.deepEqual(scrolled, [approvalsPolicyAnchorId("ask-deploys"), approvalsPolicyAnchorId("ask-deploys")]);
+    // And by way of a policy that is not listed (deleted since the link was made).
+    await rerender(<ApprovalsPanel policyId="deleted-policy" />);
+    await rerender(<ApprovalsPanel policyId="ask-deploys" />);
+    // A re-render on the same link does not scroll again.
+    await rerender(<ApprovalsPanel policyId="ask-deploys" />);
+    assert.deepEqual(scrolled, Array(3).fill(approvalsPolicyAnchorId("ask-deploys")));
   } finally {
     domWindow.HTMLElement.prototype.scrollIntoView = original;
   }

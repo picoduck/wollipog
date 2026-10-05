@@ -113,12 +113,11 @@ function AnsweringQuestionsGroup() {
  */
 function useScrollToPolicy(policyId: string | undefined, ready: boolean) {
   const done = useRef<string | null>(null);
+  // Every change of link is a new arrival, including a return from a policy that was not listed.
+  // Declared first, so it runs before the scroll below on the same change.
+  useEffect(() => { done.current = null; }, [policyId]);
   useEffect(() => {
-    if (policyId === undefined) {
-      done.current = null;
-      return;
-    }
-    if (!ready || done.current === policyId) return;
+    if (policyId === undefined || !ready || done.current === policyId) return;
     const row = document.getElementById(approvalsPolicyAnchorId(policyId));
     if (!row) return;
     done.current = policyId;
