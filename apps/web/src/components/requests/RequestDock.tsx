@@ -70,14 +70,20 @@ export function RequestDock({
 
   const requestsRef = useRef(requests);
   requestsRef.current = requests;
+  const expandedIdRef = useRef(expanded?.requestId);
+  expandedIdRef.current = expanded?.requestId;
   useEffect(() => registerRequestRevealer(session.id, (requestId) => {
     if (!requestsRef.current.some((request) => request.requestId === requestId)) return false;
+    setMoreOpen(false);
+    if (expandedIdRef.current === requestId) {
+      // Already expanded: nothing need render for it, so focus it now and leave no flag behind for
+      // an unrelated later render to act on.
+      headingRef.current?.focus();
+      headingRef.current?.scrollIntoView?.({ block: "nearest" });
+      return true;
+    }
     focusHeading.current = true;
     setSelectedId(requestId);
-    setMoreOpen(false);
-    // The same request again does not re-render, so focus it here as well.
-    headingRef.current?.focus();
-    headingRef.current?.scrollIntoView?.({ block: "nearest" });
     return true;
   }), [session.id]);
 

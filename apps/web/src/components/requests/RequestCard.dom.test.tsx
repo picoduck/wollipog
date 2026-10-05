@@ -566,6 +566,33 @@ test("a decision that fails after its card was remounted still shows the failure
   }
 });
 
+test("revealing the request already expanded leaves no focus behind to take back from the composer later", async () => {
+  const pending: PendingApproval = { ...permission(), additionalRequests: [signIn()] };
+  function Harness({ tick: renderTick }: { tick: number }) {
+    return (
+      <>
+        <RequestDock session={sessionWith(pending)} requests={dockRequests(prioritizedPendingRequests(pending))} runnerOnline
+          owner={`Claude Code ${renderTick}`} />
+        <textarea aria-label="Composer" />
+      </>
+    );
+  }
+  const view = await render(<Harness tick={0} />);
+  try {
+    await act(async () => { revealDockedRequest("session-dock", "permission-deploy"); });
+    await act(async () => { revealDockedRequest("session-dock", "permission-deploy"); });
+    const heading = view.container.querySelector(".request-card h3");
+    assert.equal(heading?.textContent, "Run pnpm deploy?");
+    assert.equal(domWindow.document.activeElement, heading);
+    const composer = view.container.querySelector("textarea")!;
+    await act(async () => { composer.focus(); });
+    await view.rerender(<Harness tick={1} />);
+    assert.equal(domWindow.document.activeElement, composer, "an unrelated render does not move focus to the card");
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("a decision in flight survives expanding another request and coming back: no second decision is sent", async () => {
   const sent: unknown[] = [];
   let answer!: () => void;
