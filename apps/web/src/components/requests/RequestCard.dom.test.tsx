@@ -104,6 +104,8 @@ async function render(element: React.ReactElement, client: Partial<ApiClient> = 
     rerender: async (next: React.ReactElement) => {
       await act(async () => { root.render(<ApiProvider client={fullClient}>{next}</ApiProvider>); await tick(); });
     },
+    /** For a caller's own `act`, so the render batches with whatever else it does there. */
+    rerenderSync: (next: React.ReactElement) => { root.render(<ApiProvider client={fullClient}>{next}</ApiProvider>); },
     unmount: async () => { await act(async () => root.unmount()); container.remove(); },
   };
 }
@@ -817,13 +819,30 @@ test("a card that shrinks under focus hands it to Expand, and a control elsewher
 
 test("the notice slot's +N More menu in the card's head closes as the strip takes the card's place, with focus on Expand", async () => {
   const pending = permission();
-  function SlotHarness({ state }: { state: FollowTailState }) {
+  const entry = (key: string, title: string) =>
+    ({ key, severity: "info" as const, rank: 8, title, render: ({ trailing }: { trailing: React.ReactNode }) => <div>{trailing}</div> });
+  const skills = entry("skills", "Skills Unavailable");
+  const setup = entry("setup", "Set Up This Project");
+  // A transcript scroller whose room below the reading position the test sets: no room holds the strip
+  // back while paused, and a scroll into room lets it take over.
+  const scroller = domWindow.document.createElement("div") as unknown as HTMLElement;
+  let room = -1_000;
+  const metrics: Record<string, () => number> = { scrollHeight: () => room, scrollTop: () => 0, clientHeight: () => 0 };
+  for (const [name, value] of Object.entries(metrics)) {
+    Object.defineProperty(scroller, name, { configurable: true, get: value });
+  }
+  const readerRef = { current: scroller };
+  function SlotHarness({ state, entries = [skills], reader }: {
+    state: FollowTailState;
+    entries?: ReturnType<typeof entry>[];
+    reader?: typeof readerRef;
+  }) {
     const session = sessionWith(pending);
     const requests = dockRequests(prioritizedPendingRequests(pending));
     return (
       <SessionNoticeSlot
         sessionId={session.id}
-        entries={[{ key: "skills", severity: "info", rank: 8, title: "Skills Unavailable", render: ({ trailing }) => <div>{trailing}</div> }]}
+        entries={entries}
         lead={{
           key: "request-dock",
           title: "Pending Request",
@@ -831,7 +850,7 @@ test("the notice slot's +N More menu in the card's head closes as the strip take
           requestIds: requests.map((request) => request.requestId),
           render: ({ trailing, concealTrailing }) => (
             <RequestDock session={session} requests={requests} runnerOnline headTrailing={trailing}
-              followTailState={state} onConceal={concealTrailing} />
+              followTailState={state} onConceal={concealTrailing} readerRef={reader} />
           ),
         }}
       />
@@ -851,6 +870,29 @@ test("the notice slot's +N More menu in the card's head closes as the strip take
     assert.equal(domWindow.document.activeElement, view.container.querySelector(".dock-strip-expand"));
   } finally {
     await view.unmount();
+  }
+
+  // The focused notice resolves in the same update a scroll lets the strip take over: its item is gone
+  // before the dock looks, and focus still lands on Expand rather than on the page.
+  const both = await render(<SlotHarness state="paused" entries={[skills, setup]} reader={readerRef} />);
+  try {
+    assert.ok(cardShown(both), "paused with no room below: the card stays");
+    const more = both.container.querySelector<HTMLButtonElement>(".request-card .session-notice-more")!;
+    await act(async () => { more.focus(); more.click(); });
+    const item = [...body().querySelectorAll<HTMLElement>('[role="menuitem"]')].find((candidate) =>
+      candidate.textContent === "Skills Unavailable")!;
+    await act(async () => { item.focus(); });
+    await both.rerender(<SlotHarness state="paused" entries={[skills, setup]} reader={readerRef} />);
+    await act(async () => {
+      room = 1_000;
+      scroller.dispatchEvent(new domWindow.Event("scroll") as unknown as Event);
+      both.rerenderSync(<SlotHarness state="paused" entries={[setup]} reader={readerRef} />);
+    });
+    assert.ok(both.container.querySelector(".dock-strip"));
+    assertNoDomNode(body().querySelector('[role="menu"]'));
+    assert.equal(domWindow.document.activeElement, both.container.querySelector(".dock-strip-expand"));
+  } finally {
+    await both.unmount();
   }
 });
 

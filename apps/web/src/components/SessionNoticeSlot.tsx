@@ -68,8 +68,9 @@ export interface SessionNoticeLead {
   requestIds: readonly string[];
   /** `concealTrailing` closes the "+N More" menu, for a lead that hides the control it was given
    * (the request dock behind its reading-back strip). The menu is portalled, so hiding its trigger
-   * does not hide it. */
-  render: (context: { trailing: ReactNode; revealRequestId?: string; concealTrailing: () => void }) => ReactNode;
+   * does not hide it. It answers whether the menu was open, so the lead can take the focus the menu
+   * may have held. */
+  render: (context: { trailing: ReactNode; revealRequestId?: string; concealTrailing: () => boolean }) => ReactNode;
 }
 
 /** Every entry's rank, in one table so the order is reviewed in one place (#1966). */
@@ -266,7 +267,10 @@ export function SessionNoticeSlot({ sessionId, entries, lead, onFocusLost }: {
 
   return (
     <div ref={slotRef} className="session-notice-slot" data-notice-key={keyOf(shown)} tabIndex={-1}>
-      {"lead" in shown ? shown.lead.render({ trailing, revealRequestId, concealTrailing: () => setMenuOpen(false) }) : shown.entry.render({
+      {"lead" in shown ? shown.lead.render({ trailing, revealRequestId, concealTrailing: () => {
+        setMenuOpen(false);
+        return menuOpen;
+      } }) : shown.entry.render({
         trailing,
         ...(shown.entry.severity === "info" ? { onDismiss: () => dismissInfo(sessionId, shown.entry.key) } : {}),
       })}

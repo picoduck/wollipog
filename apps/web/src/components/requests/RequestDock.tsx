@@ -79,8 +79,8 @@ export function RequestDock({
    * one the strip shows as soon as the reader is paused. */
   readerRef?: RefObject<HTMLElement | null>;
   /** Called as the strip takes the card's place: closes the menu behind `headTrailing` (the notice
-   * slot's `concealTrailing`). */
-  onConceal?: () => void;
+   * slot's `concealTrailing`) and answers whether it was open. */
+  onConceal?: () => boolean;
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(() => revealRequestId ?? null);
   const [moreOpen, setMoreOpen] = useState(false);
@@ -187,8 +187,12 @@ export function RequestDock({
     const menu = active?.closest<HTMLElement>('[role="menu"]');
     const menuFromCard = menu?.id !== undefined && menu.id !== "" &&
       [...(card?.querySelectorAll("[aria-controls]") ?? [])].some((trigger) => trigger.getAttribute("aria-controls") === menu.id);
-    onConceal?.();
-    if (active && (card?.contains(active) || active.closest("[data-request-card-menu]") || menuFromCard)) {
+    // A menu that was open may already have lost its focused item in this same update, leaving focus
+    // nowhere; it was the card's, so it goes to Expand too.
+    const closedOpenMenu = onConceal?.() === true;
+    const focusLost = !active || active === card?.ownerDocument.body;
+    if ((closedOpenMenu && focusLost) ||
+        (active && (card?.contains(active) || active.closest("[data-request-card-menu]") || menuFromCard))) {
       expandRef.current?.focus({ preventScroll: true });
     }
   });
