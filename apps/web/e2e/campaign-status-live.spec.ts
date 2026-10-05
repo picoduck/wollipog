@@ -278,6 +278,8 @@ test("Campaign Status reads the live Read API for a campaign, its items and a me
   await openCampaignStatus(page, seeded.rootId);
   const panel = page.locator(".campaign-status");
   await expect(summaryBox(page)).toContainText("1 of 7 Delivered");
+  await expect(panel).toContainText("The campaign runner is disconnected. Saved issue scope is shown");
+  await expect(panel.getByRole("button", { name: "Request Scope Approval" })).toHaveCount(0);
   await expect(summaryBox(page)).toContainText("1 rejected, 0 deferred, 1 duplicate");
   // Slice 6 cost: $4.90 attributed with one record unpriced, so the total is a partially priced lower bound.
   await expect(summaryBox(page)).toContainText("$4.90");

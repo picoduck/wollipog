@@ -7492,6 +7492,10 @@ export class SessionsService {
     const compatibility = scopeCompatibility(this.db, root);
     const stored = root.orchestratorPolicy.issueScope;
     if (compatibility) return ok({ ...scopeView(this.db, root, stored?.repository ?? ""), supported: false, compatibilityMessage: compatibility });
+    if (!this.hub.isRunnerOnline(root.runnerId)) return ok({
+      ...scopeView(this.db, root, stored?.repository ?? ""), supported: false,
+      compatibilityMessage: "The campaign runner is disconnected. Saved issue scope is shown; reconnect the runner to verify the repository and request changes.",
+    });
     try {
       const requestId = `issue_scope_inspect_${randomUUID()}`;
       const seed = epic ?? (resolveInitialEpic && !stored ? root.orchestratorPolicy.issueScopeProposalEpic ?? initialCampaignEpic(this.db.initialUserMessageText(root.id) ?? "") ?? undefined : undefined);
@@ -7518,6 +7522,7 @@ export class SessionsService {
     if (unsupported) return fail(unsupported, 409);
     const view = await this.campaignIssueScope(sessionId, undefined, canAccess, false);
     if (!view.ok || !view.data) return failAs(view);
+    if (!view.data.supported) return fail(view.data.compatibilityMessage ?? "Campaign issue scope changes are unavailable.", 409);
     if (request?.expectedRevision !== view.data.revision) return fail("Campaign scope changed. Refresh and propose against the current revision.", 409);
     for (const member of scopeParticipants(this.db, root)) {
       if (!this.db.campaignSharesRepositoryWorkspace(root, member)) {

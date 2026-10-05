@@ -94,7 +94,7 @@ export function CampaignIssueScopePanel({ session, campaignId }: { session: Sess
         <ul className="campaign-detail-list">{view.outsideScope.map((item) => <li key={item.workItemId}>{item.issue.repository}#{item.issue.number}: {item.title}</li>)}</ul>
         Add the intended issues through a scope approval to enable their closure requests.
       </Notice>}
-      {!view.supported ? <Notice tone="neutral" title="Runner Update Required">{view.compatibilityMessage}</Notice> : view.canPropose ? <>
+      {!view.supported ? <Notice tone="neutral" title="Scope Changes Unavailable">{view.compatibilityMessage}</Notice> : view.canPropose ? <>
         {view.candidates && view.candidates.length > 0 && <fieldset className="field"><legend>Proposed Epic Members</legend>
           <p>Choose the umbrella issue and intended members. Dependencies and incidental references are excluded.</p>
           <ul className="campaign-detail-list">{view.candidates.map((candidate) => <li key={candidate.issue.number}><Checkbox
