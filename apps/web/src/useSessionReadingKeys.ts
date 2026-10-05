@@ -59,7 +59,8 @@ function terminalOwnsFocus(targetDocument: Document): boolean {
 }
 
 /** A question card answers its own keys (#2196): 1–9, Enter and D act on its question, so while
- * focus is anywhere in the card, its heading included, no reading shortcut acts on the session. */
+ * focus is anywhere in the card, its heading included, no reading shortcut acts on the session —
+ * except R, which the card leaves to Reply: it is how Composer Response opens Answer Mode. */
 function questionCardOwnsFocus(targetDocument: Document): boolean {
   const active = targetDocument.activeElement;
   return active instanceof Element && Boolean(active.closest(".question-card"));
@@ -120,7 +121,7 @@ export function useSessionReadingKeys({
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented || shortcutLayerActive(document) || terminalOwnsFocus(document) ||
-        questionCardOwnsFocus(document)) {
+        (questionCardOwnsFocus(document) && !matchesShortcut(event, "session-reading-reply"))) {
         sequenceRef.current = null;
         return;
       }

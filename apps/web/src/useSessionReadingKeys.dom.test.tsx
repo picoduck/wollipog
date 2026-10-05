@@ -336,16 +336,19 @@ test("typing, native controls, layers, focus zones, and xterm keep their key own
   fixture.container.remove();
 });
 
-test("a question card owns every key while focus is on its heading (#2196)", async () => {
+test("a question card owns its keys while focus is on its heading, leaving R to Reply (#2196)", async () => {
   const fixture = await renderHarness();
   // The heading is a focusable div, not a native control, so only the card's ownership keeps D on
   // its question rather than the session's top request.
   fixture.container.querySelector<HTMLElement>(".question-card [role=heading]")!.focus();
-  for (const key of ["d", "a", "e", "s", "r", "j", "1"]) {
+  for (const key of ["d", "a", "e", "s", "j", "1"]) {
     assert.equal(dispatchKey(key).defaultPrevented, false, key);
   }
   assert.deepEqual(fixture.calls, []);
   assert.deepEqual(fixture.scrollCalls, []);
+  // R is the card's way into Answer Mode in Composer Response, after Back or Next focused the heading.
+  assert.equal(dispatchKey("r").defaultPrevented, true);
+  assert.deepEqual(fixture.calls, ["reply"]);
 
   await act(async () => { fixture.root.unmount(); });
   fixture.container.remove();
