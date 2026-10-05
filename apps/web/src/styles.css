@@ -7172,8 +7172,9 @@ textarea,
   color: var(--tone-text);
   font: var(--type-body-strong);
 }
-/* The title is the row's content: who decided gives way first, and never takes more than 40% of
-   the line, so a short title ("Deploy") reads in full beside a long policy or session name. */
+/* The title is the row's content: who decided gets only the room the whole title leaves (a zero
+   basis that grows), never more than 40% of the line, so a short title ("Deploy") reads in full
+   beside a long policy or session name and a long title squeezes "by …" out first. */
 .tl-decision-title,
 .tl-decision-by {
   min-width: 0;
@@ -7185,7 +7186,7 @@ textarea,
   color: var(--text);
 }
 .tl-decision-by {
-  flex: 0 1000 auto;
+  flex: 1 1 0;
   max-width: 40%;
 }
 /* --text-dim, not --text-faint: a decision's time is small text that has to clear AA. */

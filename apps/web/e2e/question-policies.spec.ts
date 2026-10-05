@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Locator } from "@playwright/test";
 
 test("starter categories start off, persist independently, and retain their value after a failed save", async ({ page }) => {
   await page.goto("/question-policies-e2e.html");
@@ -74,6 +74,28 @@ test("governance history pages older decisions and keeps the native decision aft
   }
 });
 
+/**
+ * The title is a decision row's content: who decided gets only the room the whole title leaves and
+ * never more than 40% of the line. A short title ("Deploy") reads in full beside a long policy or
+ * session name; a title is clipped only once "by …" has given up all of its room.
+ */
+async function expectTitlesKeepPriority(rows: Locator) {
+  const layout = await rows.locator("summary").evaluateAll((summaries) => summaries.map((summary) => {
+    const title = summary.querySelector<HTMLElement>(".tl-decision-title")!;
+    const by = summary.querySelector<HTMLElement>(".tl-decision-by");
+    const line = summary.querySelector<HTMLElement>(".tl-decision-line")!.getBoundingClientRect().width;
+    const byWidth = by ? by.getBoundingClientRect().width : 0;
+    return { title: title.textContent, titleClipped: title.scrollWidth > title.clientWidth, byWidth, byShare: byWidth / line };
+  }));
+  for (const row of layout) {
+    expect(row.byShare, `"by …" beside "${row.title}" takes at most 40% of the line`).toBeLessThanOrEqual(0.401);
+    if (row.titleClipped) expect(row.byWidth, `"${row.title}" is clipped only after "by …" gave way`).toBeLessThan(1);
+  }
+  for (const short of ["Bash", "Deploy", "Write"]) {
+    expect(layout.find((row) => row.title === short)?.titleClipped, `"${short}" reads in full`).toBe(false);
+  }
+}
+
 for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
   test(`decision records read as one past-tense line with their facts behind the chevron at ${viewport.width}px (#2204)`, async ({ page }) => {
     await page.setViewportSize(viewport);
@@ -90,22 +112,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
       "Timed Out Deploy by Ask Before Deploys",
       "Blocked Write by Wollipog",
     ]);
-    // The title is the row's content: who decided gives way first and never takes more than 40% of
-    // the line, so every title here reads in full even beside a long policy or session name.
-    const layout = await rows.locator("summary").evaluateAll((summaries) => summaries.map((summary) => {
-      const title = summary.querySelector<HTMLElement>(".tl-decision-title")!;
-      const by = summary.querySelector<HTMLElement>(".tl-decision-by");
-      const line = summary.querySelector<HTMLElement>(".tl-decision-line")!.getBoundingClientRect().width;
-      return {
-        title: title.textContent,
-        titleClipped: title.scrollWidth > title.clientWidth,
-        byShare: by ? by.getBoundingClientRect().width / line : 0,
-      };
-    }));
-    for (const row of layout) {
-      expect(row.titleClipped, `"${row.title}" reads in full`).toBe(false);
-      expect(row.byShare, `"by …" beside "${row.title}" yields to it`).toBeLessThanOrEqual(0.401);
-    }
+    await expectTitlesKeepPriority(rows);
     await expect(timeline).not.toContainText("→");
     await expect(timeline).not.toContainText(/approved_for_session|session-release-orchestrator|no-shell-in-production|audit-/);
     for (const summary of await rows.locator("summary").all()) {
@@ -133,5 +140,7 @@ test.describe("on a coarse pointer", () => {
     for (const summary of await summaries.all()) {
       expect((await summary.boundingBox())!.height).toBeGreaterThanOrEqual(44);
     }
+    // Touch type is larger, so this is where a title is most at risk of being squeezed.
+    await expectTitlesKeepPriority(page.getByRole("list", { name: "Decision Records" }).locator("details.tl-decision"));
   });
 });
