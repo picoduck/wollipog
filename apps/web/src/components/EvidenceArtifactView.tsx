@@ -271,7 +271,9 @@ export function EvidenceArtifactView({
               returnFocusRef={enlargeRef}
             >
               {isVideo
-                ? <video className="ev-full" src={imageUrl} controls playsInline preload="auto" aria-label={`Play ${name}`} />
+                // A recording that fails while it plays was not shown either: its review is withdrawn.
+                ? <video className="ev-full" src={imageUrl} controls playsInline preload="auto" aria-label={`Play ${name}`}
+                  onError={onImageError} />
                 : <img className="ev-full" src={imageUrl} alt={name} />}
             </Modal>
           )}

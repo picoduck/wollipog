@@ -218,6 +218,12 @@ test("artifact-backed video is reviewable only after a picture frame loads", asy
     assert.equal(playing.hasAttribute("controls"), true);
     await act(async () => view.checkbox("Recording")!.click());
     assert.equal(view.button("Approve").disabled, false);
+    // Playback that fails in the dialog withdraws the review, as a failed first frame would.
+    await act(async () => playing.dispatchEvent(new domWindow.Event("error") as unknown as Event));
+    assertNoDomNode(domWindow.document.querySelector('video[aria-label="Play Recording"]'), "the failed player closes");
+    assert.equal(view.tile("clip").querySelector(".ev-blocked-label")?.textContent, "Can't Load");
+    assertNoDomNode(view.checkbox("Recording"));
+    assert.equal(view.button("Approve").disabled, true);
   } finally { await view.unmount(); }
 });
 
@@ -357,7 +363,11 @@ test("a link-only item can be marked reviewed only after its link was opened in 
     assert.equal(view.footNote(), "Review 1 more to approve.");
     assert.equal(view.button("Approve").getAttribute("aria-describedby"),
       view.container.querySelector(".request-card-reasons > p")?.id, "Approve is described by the foot-note");
-    // A middle click opens the link too.
+    // A secondary click only opens the context menu, which opens nothing by itself.
+    await act(async () => view.tile("clip").querySelector("a")!.dispatchEvent(
+      new domWindow.MouseEvent("auxclick", { bubbles: true, button: 2 }) as unknown as Event));
+    assert.equal(view.checkbox("Link 2")!.disabled, true, "a right click is not an opened link");
+    // A middle click opens the link.
     await act(async () => view.tile("clip").querySelector("a")!.dispatchEvent(
       new domWindow.MouseEvent("auxclick", { bubbles: true, button: 1 }) as unknown as Event));
     await act(async () => view.checkbox("Link 2")!.click());

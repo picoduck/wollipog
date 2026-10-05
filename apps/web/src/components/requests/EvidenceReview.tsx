@@ -223,10 +223,12 @@ function EvidenceTile({ review, item }: { review: EvidenceReview; item: Evidence
             target="_blank"
             rel="noreferrer"
             aria-describedby={nameId}
-            // Middle-click and the context menu's Open Link in New Tab arrive as auxclick and as
-            // a click with a modifier; each opens the link, so each counts as opened.
+            // A plain or modifier click, Enter, and a middle click (auxclick) each open the link,
+            // so each counts as opened. The context menu's Open in New Tab tells the page nothing,
+            // so a link opened only that way still waits for one of these.
             onClick={() => review.markOpened(item.evidenceId)}
-            onAuxClick={() => review.markOpened(item.evidenceId)}
+            // auxclick also fires for the secondary button, which only opens the menu.
+            onAuxClick={(event) => { if (event.button === 1) review.markOpened(item.evidenceId); }}
           >
             Open Link
           </a>
