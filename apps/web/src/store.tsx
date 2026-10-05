@@ -2069,6 +2069,12 @@ export function useStoreSelector<T>(selector: (s: State) => T, isEqual: (a: T, b
   return useSyncExternalStore(store.subscribe, getSnapshot);
 }
 
+/** The store's `navigate`, or undefined where no store is mounted (a shared page, a harness): for
+ * a link that leads into the app only where the app is there to open it. */
+export function useOptionalNavigate(): Store["navigate"] | undefined {
+  return useContext(StoreContext)?.navigate;
+}
+
 /** Store-backed enhancement for components that also have intentional standalone renderers. */
 export function useOptionalStoreSelector<T>(
   selector: (s: State) => T,

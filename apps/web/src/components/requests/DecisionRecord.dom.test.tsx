@@ -18,6 +18,7 @@ import { installDomTestCleanup } from "../../dom-test-cleanup.js";
 import { GovernancePolicyNamesContext, type GovernancePolicyNames } from "../../decision-record.js";
 import { governanceDecisions } from "../../governance.js";
 import { ViewerIdentityContext, viewerIdentity } from "../../resolver-identity.js";
+import { approvalsPolicyView, viewPath } from "../../navigation.js";
 import { StoreProvider } from "../../store.js";
 import { deriveTimeline, type TimelineItem } from "../../timeline.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../../ui-transport.js";
@@ -321,6 +322,14 @@ test("policy decisions load the policy names once, name the policy, and keep its
     assert.deepEqual(terms, ["Decided By", "Tool", "Recorded"]);
     assert.equal(terms.filter((term) => term === "Decided By").length, 1);
     assert.doesNotMatch(view.container.textContent ?? "", /x7|audit-|hook-|Policy ·/, "ids are only copied");
+
+    // The policy's name leads to its row in Settings › Approvals (#2158), as a real link.
+    const policyLink = blocked!.querySelector<HTMLAnchorElement>("dd a.link")!;
+    assert.equal(policyLink.textContent, "No Shell in Production");
+    const target = viewPath(approvalsPolicyView("deny-shell-x7"));
+    assert.equal(policyLink.getAttribute("href"), target);
+    await act(async () => { policyLink.click(); });
+    assert.equal(domWindow.location.pathname, target, "activating it opens Approvals at that policy");
 
     let copied = "";
     Object.defineProperty(domWindow.navigator, "clipboard", {

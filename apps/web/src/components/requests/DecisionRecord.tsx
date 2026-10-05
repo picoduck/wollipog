@@ -8,10 +8,11 @@ import {
   type DecisionRecordModel,
 } from "../../decision-record.js";
 import { formatRecordedRelativeTime, formatRecordedTimestamp } from "../../format.js";
+import { approvalsPolicyView, viewPath } from "../../navigation.js";
 import { ViewerIdentityContext } from "../../resolver-identity.js";
 import { sessionDisplayTitle } from "../../session-title.js";
 import { statusMeta, type StatusTone } from "../../status-meta.js";
-import { useOptionalStoreSelector } from "../../store.js";
+import { useOptionalNavigate, useOptionalStoreSelector } from "../../store.js";
 import { CopyButton } from "../common.js";
 import {
   ChevronRightIcon,
@@ -70,7 +71,8 @@ export function useSessionDisplayTitle(sessionId: string | undefined): string | 
  * first and Recorded last; ids are only ever copied, through Copy Audit ID.
  *
  * The parent session's title links to that session from the Decided By fact, not from the summary,
- * so the summary stays one control.
+ * so the summary stays one control. A policy's name links the same way to its row in Settings ›
+ * Approvals (#2158), where the app is there to open it.
  */
 export function DecisionRecord({
   record,
@@ -100,8 +102,24 @@ export function DecisionRecord({
   const by = decisionActorName(record.actor, names);
   const at = Number.isFinite(record.at) ? record.at! : undefined;
   const actor = record.actor;
+  const navigate = useOptionalNavigate();
+  const policyView = actor?.kind === "policy" && actor.policyId && navigate ? approvalsPolicyView(actor.policyId) : null;
   const decidedBy: ReactNode = actor?.kind === "parent" && by && onOpenSession
     ? <button type="button" className="link" onClick={() => onOpenSession(actor.sessionId)}>{by}</button>
+    : policyView && by && navigate ? (
+      // A real link, so it can be opened in a new tab or copied like every other route.
+      <a
+        className="link"
+        href={viewPath(policyView)}
+        onClick={(event) => {
+          if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+          event.preventDefault();
+          navigate(policyView);
+        }}
+      >
+        {by}
+      </a>
+    )
     : by;
   return (
     <details

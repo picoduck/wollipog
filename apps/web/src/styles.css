@@ -15819,6 +15819,8 @@ body.shell-dock-dragging * {
 .approvals-skeleton-row { cursor: default; }
 .approvals-skeleton-row:hover:not(.is-disabled) { background: transparent; border-color: transparent; }
 .approvals-skeleton-row > .ui-row-body { gap: var(--space-2); }
+/* No leading icon, so no icon gutter: the names line up with the switch rows above. */
+.tool-policy-row > .ui-row-icon { width: 0; }
 /* Label-prefixed meta items 12px apart, one line, never separated by dots (§5.2, §11.3). */
 .policy-meta { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .policy-meta-item + .policy-meta-item { margin-inline-start: var(--space-3); }

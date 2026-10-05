@@ -416,6 +416,7 @@ export function NavRow({
   id,
   badge,
   hasPopup,
+  className,
 }: RowShellProps & {
   icon?: ReactNode;
   expanded?: boolean;
@@ -427,6 +428,7 @@ export function NavRow({
   badge?: ReactNode;
   /** For a row that opens a dialog rather than a page. */
   hasPopup?: "dialog";
+  className?: string;
 }) {
   return (
     <button
@@ -437,7 +439,7 @@ export function NavRow({
       aria-expanded={expanded}
       aria-controls={controls}
       aria-haspopup={hasPopup}
-      className={rowClass("ui-row-nav", disabled)}
+      className={rowClass(className ? `ui-row-nav ${className}` : "ui-row-nav", disabled)}
       onClick={onClick}
     >
       <span className="ui-row-icon" aria-hidden="true">{icon}</span>

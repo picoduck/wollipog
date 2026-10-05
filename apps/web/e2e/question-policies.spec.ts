@@ -75,6 +75,9 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
         "Block the Staging Network", "Review Agent-Created Sessions",
       ]);
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(viewport.width);
+      // Tool policy names start where the switch rows' names do: no empty icon gutter.
+      const left = async (rows: Locator) => Math.round((await rows.locator(".ui-row-title").first().boundingBox())!.x);
+      expect(await left(tools(page))).toBe(await left(routine(page)));
       // A name is the row's content: it is never cut short for the labels and meta beside it.
       for (const title of await page.locator(".settings-panel .ui-row-title").all()) {
         expect(await title.evaluate((element) => element.scrollWidth <= element.clientWidth + 1), await title.innerText()).toBe(true);
