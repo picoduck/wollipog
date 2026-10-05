@@ -17,12 +17,12 @@
     "node-pty": "1.1.0",
     "shell-quote": "1.11.0",
     "smol-toml": "^1.9.0",
-    "ws": "^8.21.3"
+    "ws": "^8.22.0"
   },
   "devDependencies": {
     "@agentclientprotocol/sdk": "1.2.1",
     "@types/node": "^26.6.2",
-    "@types/ws": "^8.5.13",
+    "@types/ws": "^8.18.2",
     "@wollipog/test-support": "workspace:*",
     "esbuild": "^0.28.2",
     "postject": "^1.0.0-alpha.6",
