@@ -551,7 +551,7 @@ function releaseFixture(f: Fake, options: { version?: string; webBundle?: boolea
   return { host, downloads, files, version, badVersion: options.badVersion === true };
 }
 
-test("service upgrade stages, verifies, swaps, restarts, and keeps the previous generation", async (t) => {
+test("service upgrade stages, verifies, swaps, restarts, and keeps the previous generation", { skip: process.platform !== "linux" }, async (t) => {
   const f = fake(t);
   assert.equal(await runServiceCli(["service", "install", ...bins(f), "--json"], f.host, f.io), 0, f.stderr());
   // Give the installed executables a version and make the env file name a web dist.
@@ -627,7 +627,7 @@ test("service upgrade stages, verifies, swaps, restarts, and keeps the previous 
   assert.equal(JSON.parse(again.stdout()).release, "v9.9.9");
 });
 
-test("service upgrade rolls back when the new control plane does not report the release version, and refuses bad downloads", async (t) => {
+test("service upgrade rolls back when the new control plane does not report the release version, and refuses bad downloads", { skip: process.platform !== "linux" }, async (t) => {
   const f = fake(t);
   assert.equal(await runServiceCli(["service", "install", ...bins(f), "--json"], f.host, f.io), 0, f.stderr());
   const cpBin = join(f.root, "control-plane");
@@ -715,7 +715,7 @@ test("service upgrade rolls back when the new control plane does not report the 
   assert.ok(!existsSync(`${freshCp}.previous`));
 });
 
-test("service upgrade refuses a release without the web bundle when the control plane serves the dashboard, and upgrades runner-only hosts by unit state", async (t) => {
+test("service upgrade refuses a release without the web bundle when the control plane serves the dashboard, and upgrades runner-only hosts by unit state", { skip: process.platform !== "linux" }, async (t) => {
   const f = fake(t);
   assert.equal(await runServiceCli(["service", "install", ...bins(f), "--json"], f.host, f.io), 0, f.stderr());
   const cpBin = join(f.root, "control-plane");
