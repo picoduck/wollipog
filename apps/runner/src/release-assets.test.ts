@@ -220,6 +220,10 @@ linuxTest("read-only handoff failures never publish and close every writer and t
         const handle = handles.get(fd);
         if (!failed && readerOpens && (phase === "writer-close" && handle?.path.endsWith(".partial") && !handle.reader || phase === "reader-close" && handle?.reader)) {
           failed = true;
+          // Linux may report an error after releasing the number. A pre-release throw
+          // would incorrectly require the application to retry an uncertain descriptor.
+          stagingFilesystem.close(fd);
+          handles.delete(fd);
           throw new Error(`fixture ${phase}`);
         }
         stagingFilesystem.close(fd);

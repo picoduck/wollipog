@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chmodSync, cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, constants, cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -864,4 +864,70 @@ test("cleanup failure after a healthy upgrade reports retained staging without r
   assert.equal(readFileSync(`${join(f.root, "wollipog-runner")}.previous`, "utf8"), "#!/bin/sh\n");
   assert.equal(f.execs.slice(before).filter((line) => line.includes("restart")).length, 2, "cleanup does not restart services for rollback");
   assert.equal(existsSync(join(f.layout.dataDir, "upgrades", "download-attempt-v1", "owner.json")), true);
+});
+
+test("upgrade close errors preserve pre-swap bytes or healthy installed generations without stale retries", { skip: process.platform !== "linux" }, async (t) => {
+  for (const phase of ["writer", "final-owner"]) await t.test(phase, async (t) => {
+    const f = fake(t);
+    assert.equal(await runServiceCli(["service", "install", ...bins(f), "--json"], f.host, f.io), 0, f.stderr());
+    const fixture = releaseFixture(f, { webBundle: false });
+    const base = f.host.stagingFilesystem!;
+    const handles = new Map<number, { path: string; flags: number }>();
+    const foreign = new Set<number>();
+    const staleCloses: number[] = [];
+    let faulted = false;
+    let probes = 0;
+    const host: ServiceHost = {
+      ...fixture.host,
+      stagingFilesystem: {
+        ...base,
+        open: (...args) => {
+          const fd = base.open(...args);
+          handles.set(fd, { path: String(args[0]), flags: args[1] as number });
+          return fd;
+        },
+        close: (fd) => {
+          if (foreign.has(fd)) { staleCloses.push(fd); throw new Error("fixture stale close"); }
+          const handle = handles.get(fd)!;
+          base.close(fd); handles.delete(fd);
+          if (!faulted && (phase === "writer" ? handle.path.endsWith(".partial") &&
+            (handle.flags & (constants.O_WRONLY | constants.O_RDWR)) === constants.O_RDWR : handle.path.endsWith("/owner.json"))) {
+            faulted = true; foreign.add(fd);
+            throw Object.assign(new Error("fixture close EIO"), { code: "EIO" });
+          }
+        },
+      },
+      exec: async (command, args, options) => {
+        if (args[0] !== "--version") return fixture.host.exec(command, args, options);
+        if (command.includes("/upgrades/")) probes++;
+        return { code: 0, stdout: `${command.includes("/upgrades/") ? fixture.version : "0.22.0"}\n`, stderr: "" };
+      },
+      fetch: async (url, init) => {
+        const response = await fixture.host.fetch(url, init);
+        if (!url.endsWith("/api/admin/status")) return response;
+        const body = JSON.parse(await response.text());
+        return { ...response, text: async () => JSON.stringify({ ...body, appVersion: fixture.version }) };
+      },
+    };
+    const before = f.execs.length;
+    const io = makeIo();
+    assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], host, io.io), 1);
+    assert.equal(faulted, true);
+    assert.deepEqual(staleCloses, []);
+    assert.equal(handles.size, 0);
+    const installed = join(f.root, "wollipog-runner");
+    if (phase === "writer") {
+      assert.match(JSON.parse(io.stdout()).error, /fixture close EIO.*uncertain/u);
+      assert.equal(probes, 0, "failed writer closure grants no executable probe");
+      assert.equal(readFileSync(installed, "utf8"), "#!/bin/sh\n");
+      assert.equal(existsSync(`${installed}.previous`), false);
+      assert.equal(f.execs.slice(before).filter((line) => line.includes("restart")).length, 0);
+      assert.ok(existsSync(join(f.layout.dataDir, "upgrades", "download-attempt-v1", "owner.json")));
+    } else {
+      assert.match(JSON.parse(io.stdout()).error, /completed and is healthy, but .*closure failed/u);
+      assert.equal(readFileSync(installed, "utf8"), "runner 9.9.9");
+      assert.equal(readFileSync(`${installed}.previous`, "utf8"), "#!/bin/sh\n");
+      assert.equal(f.execs.slice(before).filter((line) => line.includes("restart")).length, 2, "final close error does not trigger rollback");
+    }
+  });
 });

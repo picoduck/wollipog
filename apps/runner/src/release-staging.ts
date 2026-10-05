@@ -26,7 +26,24 @@ export const stagingFilesystem = {
   write: writeSync, read: readSync,
 };
 export type StagingFilesystem = typeof stagingFilesystem;
-type Receipt = { path: string; fd: number; stat: BigIntStats; names: Set<string> };
+/** A token owns one open generation, never a number after a Linux close attempt. */
+class OwnedDescriptor {
+  constructor(private value: number | undefined) {}
+
+  get fd(): number {
+    if (this.value === undefined) throw new Error("release staging descriptor authority was retired");
+    return this.value;
+  }
+
+  close(fs: StagingFilesystem): void {
+    const fd = this.value;
+    this.value = undefined;
+    // Linux releases the number before errors can be reported. Never retry it, even when
+    // an injected adapter cannot establish whether release happened.
+    if (fd !== undefined) fs.close(fd);
+  }
+}
+type Receipt = { path: string; handle: OwnedDescriptor; stat: BigIntStats; names: Set<string> };
 const LOCAL_TYPES = new Set([0xef53n, 0x58465342n, 0x9123683en, 0x01021994n, 0x794c7630n]);
 const OWNER = "owner.json";
 const SLOT = "download-attempt-v1";
@@ -57,7 +74,7 @@ export class ReleaseStaging {
   private readonly chain: Array<{ path: string; stat: BigIntStats }> = [];
   private readonly directories: Receipt[] = [];
   private readonly files: Receipt[] = [];
-  private readonly handoffHandles = new Set<number>();
+  private readonly handoffHandles = new Set<OwnedDescriptor>();
   private readonly selected: Map<string, { size: number; digest: string | null }>;
   private readonly startedAssets = new Set<string>();
   private parentCreated = false;
@@ -97,21 +114,30 @@ export class ReleaseStaging {
     }
   }
 
-  private pin(path: string, directory: boolean, fd?: number): Receipt {
-    const handle = fd ?? this.fs.open(path, constants.O_RDONLY | constants.O_NOFOLLOW | (directory ? constants.O_DIRECTORY : 0));
+  private open(path: string, flags: number, mode?: number): OwnedDescriptor {
+    return new OwnedDescriptor(this.fs.open(path, flags, mode));
+  }
+
+  private close(handle: OwnedDescriptor): void {
+    try { handle.close(this.fs); }
+    catch (error) { this.uncertain = true; throw error; }
+  }
+
+  private pin(path: string, directory: boolean, opened?: OwnedDescriptor): Receipt {
+    const handle = opened ?? this.open(path, constants.O_RDONLY | constants.O_NOFOLLOW | (directory ? constants.O_DIRECTORY : 0));
     try {
-      const stat = this.fs.fstat(handle);
+      const stat = this.fs.fstat(handle.fd);
       const named = this.fs.lstat(path);
       if (!same(stat, named) || stat.ino <= 0n || stat.dev < 0n || stat.uid !== this.uid ||
           (stat.mode & 0o7777n) !== (directory ? 0o700n : 0o600n) ||
           (directory ? !stat.isDirectory() : !stat.isFile() || stat.nlink !== 1n)) {
         throw new Error(`release staging identity or private permissions unavailable: ${path}`);
       }
-      const receipt = { path, fd: handle, stat, names: new Set([path]) };
+      const receipt = { path, handle, stat, names: new Set([path]) };
       if (directory) this.directories.push(receipt); else this.files.push(receipt);
       return receipt;
     } catch (error) {
-      this.fs.close(handle);
+      this.close(handle);
       throw error;
     }
   }
@@ -139,25 +165,25 @@ export class ReleaseStaging {
     }
     if (!LOCAL_TYPES.has(this.fs.type(this.dataDir))) throw new Error("release staging refuses an unsupported filesystem");
     // The dataDir may belong to the system service account; pin it without pretending root owns it.
-    const dataFd = this.fs.open(this.dataDir, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_DIRECTORY);
+    const dataHandle = this.open(this.dataDir, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_DIRECTORY);
     let dataStat: BigIntStats;
-    try { dataStat = this.fs.fstat(dataFd); }
-    catch (error) { this.fs.close(dataFd); throw error; }
-    if (!same(dataStat, this.chain[this.chain.length - 1]!.stat)) { this.fs.close(dataFd); throw new Error("release staging data directory was substituted"); }
-    this.directories.push({ path: this.dataDir, fd: dataFd, stat: dataStat, names: new Set() });
+    try { dataStat = this.fs.fstat(dataHandle.fd); }
+    catch (error) { this.close(dataHandle); throw error; }
+    if (!same(dataStat, this.chain[this.chain.length - 1]!.stat)) { this.close(dataHandle); throw new Error("release staging data directory was substituted"); }
+    this.directories.push({ path: this.dataDir, handle: dataHandle, stat: dataStat, names: new Set() });
     this.assertChain();
     const parent = dirname(this.path);
     try { this.fs.mkdir(parent, { mode: 0o700 }); this.parentCreated = true; }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
     this.parent = this.pin(parent, true);
     if (!LOCAL_TYPES.has(this.fs.type(parent))) throw new Error("release staging parent filesystem is unsupported");
-    if (this.parentCreated) this.fs.sync(dataFd);
+    if (this.parentCreated) this.fs.sync(dataHandle.fd);
     this.inventory(parent, new Set());
     this.assertChain();
     this.fs.mkdir(this.path, { mode: 0o700 });
     this.reservation = this.pin(this.path, true);
     if (!LOCAL_TYPES.has(this.fs.type(this.path))) throw new Error("release staging attempt filesystem is unsupported");
-    this.fs.sync(this.parent.fd);
+    this.fs.sync(this.parent.handle.fd);
     this.inventory(parent, new Set([SLOT]));
     const marker = this.createFile(OWNER);
     const record = Buffer.from(JSON.stringify({ schema: 1, nonce: this.nonce, tag,
@@ -166,15 +192,15 @@ export class ReleaseStaging {
     }) + "\n");
     let offset = 0;
     while (offset < record.length) {
-      const count = this.fs.write(marker.fd, record, offset, record.length - offset);
+      const count = this.fs.write(marker.handle.fd, record, offset, record.length - offset);
       if (count <= 0) throw new Error("release staging owner record write made no progress");
       offset += count;
     }
-    this.fs.sync(marker.fd);
+    this.fs.sync(marker.handle.fd);
     const actual = Buffer.alloc(record.length);
-    if (this.fs.read(marker.fd, actual, 0, actual.length, 0) !== record.length || !actual.equals(record) || this.fs.fstat(marker.fd).size !== BigInt(record.length)) throw new Error("release staging owner record is incomplete");
+    if (this.fs.read(marker.handle.fd, actual, 0, actual.length, 0) !== record.length || !actual.equals(record) || this.fs.fstat(marker.handle.fd).size !== BigInt(record.length)) throw new Error("release staging owner record is incomplete");
     this.assertFile(marker);
-    this.fs.sync(this.reservation.fd);
+    this.fs.sync(this.reservation.handle.fd);
     this.ownerRecord = record;
     this.initialized = true;
   }
@@ -201,22 +227,22 @@ export class ReleaseStaging {
   assertChain(): void {
     if (this.closed || this.uncertain) throw new Error("release staging identity is unavailable or uncertain");
     for (const { path, stat } of this.chain) if (!same(stat, this.fs.lstat(path))) throw new Error("release staging ancestor was substituted");
-    for (const receipt of this.directories) if (!same(receipt.stat, this.fs.fstat(receipt.fd)) || !same(receipt.stat, this.fs.lstat(receipt.path))) throw new Error("release staging directory was substituted");
+    for (const receipt of this.directories) if (!same(receipt.stat, this.fs.fstat(receipt.handle.fd)) || !same(receipt.stat, this.fs.lstat(receipt.path))) throw new Error("release staging directory was substituted");
     const marker = this.files.find((file) => file.path === join(this.path, OWNER));
     if (this.initialized && marker?.names.size) {
       this.assertFile(marker);
       const expected = this.ownerRecord!;
-      if (this.fs.fstat(marker.fd).size !== BigInt(expected.length)) throw new Error("release staging immutable owner record changed");
+      if (this.fs.fstat(marker.handle.fd).size !== BigInt(expected.length)) throw new Error("release staging immutable owner record changed");
       const bytes = Buffer.alloc(expected.length);
-      if (this.fs.read(marker.fd, bytes, 0, bytes.length, 0) !== bytes.length || !bytes.equals(expected)) throw new Error("release staging immutable owner record changed");
+      if (this.fs.read(marker.handle.fd, bytes, 0, bytes.length, 0) !== bytes.length || !bytes.equals(expected)) throw new Error("release staging immutable owner record changed");
     }
   }
 
   private createFile(name: string): Receipt {
     this.assertChain();
     const path = join(this.path, name);
-    const fd = this.fs.open(path, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_NOFOLLOW, 0o600);
-    try { return this.pin(path, false, fd); }
+    const handle = this.open(path, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_NOFOLLOW, 0o600);
+    try { return this.pin(path, false, handle); }
     catch (error) { this.uncertain = true; throw error; }
   }
 
@@ -227,11 +253,11 @@ export class ReleaseStaging {
     this.assertChain();
     this.startedAssets.add(asset.name);
     const receipt = this.createFile(`${asset.name}.${this.nonce}.partial`);
-    return { fd: receipt.fd, path: receipt.path, size: selected.size };
+    return { fd: receipt.handle.fd, path: receipt.path, size: selected.size };
   }
 
   private assertFile(receipt: Receipt): void {
-    const stat = this.fs.fstat(receipt.fd);
+    const stat = this.fs.fstat(receipt.handle.fd);
     if (!same(receipt.stat, stat) || !stat.isFile() || stat.nlink !== BigInt(receipt.names.size)) throw new Error("release staging file identity or link count changed");
     for (const name of receipt.names) if (!same(stat, this.fs.lstat(name))) throw new Error("release staging file was substituted");
   }
@@ -239,22 +265,22 @@ export class ReleaseStaging {
   private closeWriter(receipt: Receipt): void {
     // Hashing already used the original writer. Keep that inode pinned while opening its
     // checked read handle, then close the writer before any executable probe or service use.
-    const reader = this.fs.open(receipt.path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const reader = this.open(receipt.path, constants.O_RDONLY | constants.O_NOFOLLOW);
     this.handoffHandles.add(reader);
     try {
-      const stat = this.fs.fstat(reader);
+      const stat = this.fs.fstat(reader.fd);
       this.assertChain();
       this.assertFile(receipt);
       if (!same(receipt.stat, stat) || !same(stat, this.fs.lstat(receipt.path)) ||
-          !stat.isFile() || stat.nlink !== 1n || stat.size !== this.fs.fstat(receipt.fd).size) {
+          !stat.isFile() || stat.nlink !== 1n || stat.size !== this.fs.fstat(receipt.handle.fd).size) {
         throw new Error("release staging read-only handoff identity changed");
       }
-      try { this.fs.close(receipt.fd); }
-      catch (error) { this.uncertain = true; throw error; }
-      receipt.fd = reader;
+      this.close(receipt.handle);
+      receipt.handle = reader;
       this.handoffHandles.delete(reader);
     } catch (error) {
-      try { this.fs.close(reader); this.handoffHandles.delete(reader); }
+      this.handoffHandles.delete(reader);
+      try { this.close(reader); }
       catch { this.uncertain = true; }
       throw error;
     }
@@ -264,7 +290,7 @@ export class ReleaseStaging {
     this.assertChain();
     const receipt = this.files.find((file) => file.path === partial)!;
     this.assertFile(receipt);
-    this.fs.sync(receipt.fd);
+    this.fs.sync(receipt.handle.fd);
     this.closeWriter(receipt);
     this.fs.link(partial, destination);
     receipt.names.add(destination);
@@ -273,7 +299,7 @@ export class ReleaseStaging {
     this.fs.unlink(partial);
     receipt.names.delete(partial);
     this.assertFile(receipt);
-    try { this.fs.sync(this.reservation!.fd); }
+    try { this.fs.sync(this.reservation!.handle.fd); }
     catch (error) { this.uncertain = true; throw error; }
   }
 
@@ -282,7 +308,7 @@ export class ReleaseStaging {
     const receipt = this.files.find((file) => file.path === partial);
     if (!receipt) throw new Error("release download has no current file receipt");
     this.assertFile(receipt);
-    if (this.fs.fstat(receipt.fd).size !== BigInt(size)) throw new Error("release download file length changed");
+    if (this.fs.fstat(receipt.handle.fd).size !== BigInt(size)) throw new Error("release download file length changed");
   }
 
   private knownNames(): Set<string> {
@@ -315,7 +341,7 @@ export class ReleaseStaging {
     this.beforeMove(path);
     const receipt = this.files.find((file) => file.names.has(path))!;
     chmod();
-    const stat = this.fs.fstat(receipt.fd);
+    const stat = this.fs.fstat(receipt.handle.fd);
     if (stat.dev !== receipt.stat.dev || stat.ino !== receipt.stat.ino || stat.uid !== receipt.stat.uid ||
         (stat.mode & 0o7777n) !== 0o755n || !same(stat, this.fs.lstat(path))) throw new Error("release staging executable permission change has uncertain identity");
     receipt.stat = stat;
@@ -352,9 +378,9 @@ export class ReleaseStaging {
         this.assertChain();
         this.fs.rmdir(this.path);
         this.directories.splice(this.directories.indexOf(this.reservation), 1);
-        this.fs.close(this.reservation.fd);
+        this.close(this.reservation.handle);
         this.reservation = undefined;
-        this.fs.sync(this.parent!.fd);
+        this.fs.sync(this.parent!.handle.fd);
       } else {
         // A created but unreceipted reservation must not be mistaken for an empty parent.
         if (this.parent) this.inventory(this.parent.path, new Set());
@@ -364,17 +390,17 @@ export class ReleaseStaging {
         this.inventory(this.parent.path, new Set());
         this.fs.rmdir(this.parent.path);
         this.directories.splice(this.directories.indexOf(this.parent), 1);
-        this.fs.close(this.parent.fd);
+        this.close(this.parent.handle);
         this.parent = undefined;
-        this.fs.sync(this.directories[0]!.fd);
+        this.fs.sync(this.directories[0]!.handle.fd);
       }
     } catch (error) {
       problem = `release staging retained or retirement uncertain: ${(error as Error).message.slice(0, 500)}`;
     } finally {
-      for (const fd of this.handoffHandles) { try { this.fs.close(fd); } catch { problem ??= "release staging handoff handle closure failed"; } }
-      for (const file of this.files) { try { this.fs.close(file.fd); } catch { problem ??= "release staging handle closure failed"; } }
-      for (const directory of this.directories) { try { this.fs.close(directory.fd); } catch { problem ??= "release staging handle closure failed"; } }
       this.closed = true;
+      for (const handle of this.handoffHandles) { try { this.close(handle); } catch { problem ??= "release staging handoff handle closure failed"; } }
+      for (const file of this.files) { try { this.close(file.handle); } catch { problem ??= "release staging handle closure failed"; } }
+      for (const directory of this.directories) { try { this.close(directory.handle); } catch { problem ??= "release staging handle closure failed"; } }
     }
     return problem;
   }
