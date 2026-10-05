@@ -85,6 +85,10 @@ up to five additional reads. A newer live status, acknowledgement, navigation, e
 request, or connection-phase change stops the retries. The transcript is not re-fetched, and
 exhaustion retains the latest server-reported state.
 
+Once a mounted conversation has been acknowledged and its history has completed, unrelated fleet
+subscription changes use ordinary forward recovery without repeating provisional REST reads.
+Connection loss resets that guard so a missing reconnect acknowledgement can use REST again.
+
 A completed contiguous provisional REST window supplies a cursor for the acknowledged read, even
 if the reader pauses after it paints. That cursor is capped at the recorded HTTP tail and belongs to
 the current event epoch and reconnect generation; newer live events cannot move it past a gap. The

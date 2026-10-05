@@ -2415,8 +2415,29 @@ function SessionDetailLoaded({
   // connecting or its stream acknowledgement is missing. Read one bounded opening window and
   // refresh the creation-time row independently; neither requires live stream admission.
   // Revision -1 keeps this provisional read from advancing the frozen reconnect cursor.
+  // Completion is read at a subscription transition, rather than restarting this effect when
+  // a history response completes and cancelling its independent Starting metadata timer.
+  const completedOpeningRef = useRef(false);
+  completedOpeningRef.current = eventHistory?.everComplete === true;
+  const acknowledgedOpeningRef = useRef<{
+    api: typeof api; instanceScope: string; sessionId: string; eventEpoch: number; generation: number;
+  } | null>(null);
   useEffect(() => {
-    if (conn === "unauthorized" || (conn === "online" && recoveryRevision != null)) return;
+    // Busy sessions elsewhere replace the fleet subscription while this detail remains live.
+    // Once this mounted opening was acknowledged, wait for its ordinary forward gap recovery
+    // instead of fetching another metadata row and replacement tail on every fleet change.
+    // A real outage clears the receipt so a missing reconnect acknowledgement can use REST again.
+    if (conn !== "online") acknowledgedOpeningRef.current = null;
+    if (conn === "online" && recoveryRevision != null) {
+      acknowledgedOpeningRef.current = {
+        api, instanceScope, sessionId, eventEpoch: recoveryEventEpoch, generation: recoveryGeneration,
+      };
+      return;
+    }
+    const acknowledged = acknowledgedOpeningRef.current;
+    if (conn === "unauthorized" || (conn === "online" && completedOpeningRef.current && acknowledged?.api === api &&
+        acknowledged.instanceScope === instanceScope && acknowledged.sessionId === sessionId &&
+        acknowledged.eventEpoch === recoveryEventEpoch && acknowledged.generation === recoveryGeneration)) return;
     let cancelled = false;
     const epoch = recoveryEventEpoch;
     const generation = recoveryGeneration;

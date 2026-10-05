@@ -2676,3 +2676,113 @@ test("pausing a cached reader during a provisional tail read preserves its row a
     assert.equal(pages.tailCalls.length, 2, "readiness polling cannot retry the skipped tail");
   } finally { await unmountFixture(fixture); }
 });
+
+
+test("unrelated busy-session subscriptions do not reread an already acknowledged conversation", async () => {
+  const pages = pageController();
+  let metadataCalls = 0;
+  const fixture = await mountFixture(pages, 12, {
+    acknowledgeSubscription: false,
+    client: { session: async (id) => { metadataCalls++; return { session: session(id) }; } },
+  });
+  try {
+    await act(async () => pages.releaseTail({
+      events: fixture.events, eventEpoch: 0, hasMoreOlder: false, cacheComplete: true, turnAligned: true,
+    }));
+    await flushAsyncWork();
+    const firstRevision = fixture.socket.sent.filter((message) => message.type === "session_subscriptions").at(-1)?.revision;
+    assert.ok(firstRevision != null);
+    await act(async () => fixture.socket.push({
+      type: "session_subscriptions_applied", revision: firstRevision, sessionIds: [fixture.sessionId], podIds: [],
+    }));
+    await flushAsyncWork();
+    await act(async () => pages.releaseForward({
+      events: [], eventEpoch: 0, nextAfter: 24, hasMoreCached: false, cacheComplete: true,
+    }));
+    await flushAsyncWork();
+    assert.equal(pages.tailCalls.length, 1);
+    assert.equal(metadataCalls, 1);
+    const otherSessionId = `${fixture.sessionId}-busy-neighbor`;
+    await act(async () => fixture.socket.push({
+      type: "session_upsert", session: { ...session(otherSessionId), status: "running" },
+    }));
+    await flushAsyncWork();
+    const nextRevision = fixture.socket.sent.filter((message) => message.type === "session_subscriptions").at(-1)?.revision;
+    assert.ok(nextRevision != null && nextRevision > firstRevision, "the busy neighbor changes the real fleet subscription");
+    assert.equal(metadataCalls, 1, "a transient fleet acknowledgement cannot restart provisional metadata reads");
+    assert.equal(pages.tailCalls.length, 1, "an already acknowledged detail does not request a replacement tail");
+    assert.equal(pages.forwardCalls(), 1, "normal gap recovery still waits for the new acknowledgement");
+    await act(async () => fixture.socket.push({
+      type: "session_subscriptions_applied", revision: nextRevision,
+      sessionIds: [fixture.sessionId, otherSessionId], podIds: [],
+    }));
+    await flushAsyncWork();
+    assert.deepEqual(pages.forwardAfters, [24, 24], "the new acknowledgement recovers from the existing tail");
+    await act(async () => pages.releaseForward({
+      events: [{ id: 25, sessionId: fixture.sessionId, seq: 25, ts: 25,
+        payload: { kind: "agent_message", text: "gap after fleet acknowledgement", final: true } }],
+      eventEpoch: 0, nextAfter: 25, hasMoreCached: false, cacheComplete: true,
+    }));
+    await flushAsyncWork();
+    assert.deepEqual(fixture.readLoadedEvents()?.map((event) => event.id),
+      [...fixture.events.map((event) => event.id), 25], "acknowledged gap recovery preserves the loaded conversation");
+    await act(async () => fixture.setConnection("connecting"));
+    await flushAsyncWork();
+    assert.equal(metadataCalls, 2, "a real connection loss re-enables independent REST metadata");
+    assert.equal(pages.tailCalls.length, 2, "a missing reconnect acknowledgement can still use the bounded REST tail");
+  } finally { await unmountFixture(fixture); }
+});
+
+
+test("fleet acknowledgement churn cannot strand an unfinished opening but skips a complete empty window", async () => {
+  const pages = pageController();
+  let metadataCalls = 0;
+  const fixture = await mountFixture(pages, 0, {
+    acknowledgeSubscription: false,
+    client: { session: async (id) => { metadataCalls++; return { session: session(id) }; } },
+  });
+  try {
+    const firstRevision = fixture.socket.sent.filter((message) => message.type === "session_subscriptions").at(-1)?.revision;
+    assert.ok(firstRevision != null);
+    await act(async () => fixture.socket.push({
+      type: "session_subscriptions_applied", revision: firstRevision, sessionIds: [fixture.sessionId], podIds: [],
+    }));
+    await flushAsyncWork();
+    assert.equal(pages.tailCalls.length, 2, "the first acknowledgement starts ordinary opening recovery");
+    const otherSessionId = `${fixture.sessionId}-busy-neighbor`;
+    await act(async () => fixture.socket.push({
+      type: "session_upsert", session: { ...session(otherSessionId), status: "running" },
+    }));
+    await flushAsyncWork();
+    assert.equal(pages.tailCalls.length, 3,
+      "an acknowledged but unfinished opening still has a bounded REST path when the next ack is missing");
+    assert.equal(metadataCalls, 2);
+    const empty = { events: [], eventEpoch: 0, hasMoreOlder: false, cacheComplete: true };
+    await act(async () => pages.releaseTail(empty));
+    await act(async () => pages.releaseTail(empty));
+    await flushAsyncWork();
+    assert.ok(fixture.container.querySelector(".transcript-skeleton"), "the two cancelled reads cannot finish the opening");
+    await act(async () => pages.releaseTail(empty));
+    await flushAsyncWork();
+    assertNoDomNode(fixture.container.querySelector(".transcript-skeleton"), "provisional REST finishes without the fleet acknowledgement");
+    const nextRevision = fixture.socket.sent.filter((message) => message.type === "session_subscriptions").at(-1)?.revision;
+    assert.ok(nextRevision != null && nextRevision > firstRevision);
+    await act(async () => fixture.socket.push({
+      type: "session_subscriptions_applied", revision: nextRevision,
+      sessionIds: [fixture.sessionId, otherSessionId], podIds: [],
+    }));
+    await flushAsyncWork();
+    assert.equal(pages.tailCalls.length, 4, "ordinary acknowledgement rechecks the complete empty tail");
+    await act(async () => pages.releaseTail(empty));
+    await flushAsyncWork();
+    await act(async () => fixture.socket.push({
+      type: "session_upsert", session: { ...session(otherSessionId), status: "idle", updatedAt: 2 },
+    }));
+    await flushAsyncWork();
+    const stoppedRevision = fixture.socket.sent.filter((message) => message.type === "session_subscriptions").at(-1)?.revision;
+    assert.ok(stoppedRevision != null && stoppedRevision > nextRevision);
+    assert.equal(metadataCalls, 2, "complete empty history also suppresses redundant provisional metadata");
+    assert.equal(pages.tailCalls.length, 4, "a complete empty window does not need a fleet-triggered replacement");
+    assertNoDomNode(fixture.container.querySelector(".transcript-skeleton"));
+  } finally { await unmountFixture(fixture); }
+});
