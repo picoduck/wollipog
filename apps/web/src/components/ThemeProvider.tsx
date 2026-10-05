@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from "react";
+import React, { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   DENSITY_STORAGE_KEY,
   SCHEME_STORAGE_KEY,
@@ -70,6 +70,19 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const resolved = resolveTheme(preference, systemDark);
   // The desktop window's own title bar follows too, where the platform lets it (#1979).
   useNativeWindowTheme(preference, resolved);
+
+  // The first palette is on the document before any child renders. The layout effects below run
+  // after every child's, and a child that measures in its own (Settings scrolls its section list)
+  // makes the browser resolve styles then: on a page without the head bootstrap that is the
+  // default palette, and every transitioned colour then animates from it to the real one.
+  // Idempotent, so a render React discards or repeats costs nothing.
+  const appliedFirstPalette = useRef(false);
+  if (!appliedFirstPalette.current && typeof document !== "undefined") {
+    appliedFirstPalette.current = true;
+    applyThemeToDocument(document, resolved);
+    applySchemeToDocument(document, scheme);
+    applyDensityToDocument(document, density);
+  }
 
   // The head bootstrap already applies the first palette before CSS paints. Keep the DOM,
   // browser chrome, and persisted preference in sync before subsequent React paints.
