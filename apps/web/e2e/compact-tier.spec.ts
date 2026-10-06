@@ -80,18 +80,9 @@ async function measureChrome(page: Page) {
           return [filter.left - search.left, search.right - filter.right];
         })(),
       } : null,
-      footerClipped: footerClipped(),
+      // The Sessions shortcut rail and activity footer are retired (#2214) at every width.
+      retiredFooter: document.querySelectorAll(".inbox-shortcut-rail, .inbox-activity-footer").length,
     };
-
-    /** Sessions footer shortcuts the footer's hidden-scrollbar strip cuts off, even partly. */
-    function footerClipped() {
-      const strip = document.querySelector(".inbox-shortcut-rail");
-      if (!strip || strip.getClientRects().length === 0) return [];
-      const edge = box(strip);
-      return [...strip.querySelectorAll("button")]
-        .filter((button) => box(button).left < edge.left - 0.5 || box(button).right > edge.right + 0.5)
-        .map((button) => button.getAttribute("aria-label"));
-    }
   });
 }
 
@@ -109,7 +100,7 @@ for (const width of [761, 834, 940, 1099]) {
         expect(chrome.mainScroll, `${where}: the main column scrolls sideways`).toBeLessThanOrEqual(0);
         expect(chrome.railOverflow, `${where}: the rail scrolls`).toBeLessThanOrEqual(0);
         expect(chrome.railItemsOutside, `${where}: rail items off screen`).toEqual([]);
-        expect(chrome.footerClipped, `${where}: Sessions footer shortcuts cut off`).toEqual([]);
+        expect(chrome.retiredFooter, `${where}: no shortcut rail or activity footer`).toBe(0);
         if (route.query.startsWith("view=")) {
           expect(chrome.bar, `${where}: a detail bar`).not.toBeNull();
           expect(chrome.bar!.height, `${where}: the detail bar is one 48px row`).toBe(48);
@@ -353,36 +344,11 @@ test.describe("either side of the tier", () => {
     expect(chrome.pane!.filterInset).toEqual([0, 0]);
   });
 
-  test("a footer with room keeps every keycap and count", async ({ page }) => {
+  test("a wide Sessions list has no shortcut rail or activity footer either (#2214)", async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 860 });
     await open(page, "path=%2Finbox", "Sessions");
-    await expect(page.locator(".inbox-activity-footer")).not.toHaveAttribute("data-fit");
-    await expect(page.locator(".inbox-shortcut-rail kbd").first()).toBeVisible();
-    await expect(page.locator(".inbox-activity-minor").first()).toBeVisible();
+    expect((await measureChrome(page)).retiredFooter).toBe(0);
   });
-});
-
-/**
- * The Sessions footer's shortcuts sit in a strip with a hidden scrollbar, so one that does not fit
- * is simply cut off. The labelled rail takes 144px of the footer's width, so both rails are checked.
- */
-test.describe("the Sessions footer in the compact tier", () => {
-  for (const [width, labelled] of [[940, false], [940, true], [761, true]] as const) {
-    test(`no shortcut is cut off at ${width}px with the labelled rail ${labelled ? "on" : "off"}`, async ({ page }) => {
-      await page.setViewportSize({ width, height: 860 });
-      await open(page, "path=%2Finbox", "Sessions");
-      if (labelled) await expandRail(page);
-      const shortcuts = page.locator(".inbox-shortcut-rail button");
-      await expect(shortcuts.first()).toBeVisible();
-      expect(await shortcuts.count()).toBeGreaterThanOrEqual(6);
-      expect((await measureChrome(page)).footerClipped).toEqual([]);
-      // Whatever the footer gave up, every shortcut and count keeps its accessible name.
-      await expect(page.getByRole("group", { name: "Session Shortcuts" }).getByRole("button"))
-        .toHaveCount(await shortcuts.count());
-      await expect(page.getByLabel("Sessions Activity Summary")).toContainText("Running");
-      await expect(page.getByLabel("Sessions Activity Summary")).toContainText("Stalled");
-    });
-  }
 });
 
 test.describe("at 940×600 with a mouse, the desktop app's minimum window", () => {

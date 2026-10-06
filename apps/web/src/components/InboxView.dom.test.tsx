@@ -1787,7 +1787,7 @@ test("row and card context menus share one surface, act on their target, and nev
   menu = domWindow.document.querySelector('[role="menu"]') as unknown as HTMLElement;
   assert.equal(menu?.getAttribute("aria-label"), "Session Actions for Session A",
     "a board card opens the same menu");
-  assert.equal([...menu.querySelectorAll('[role="menuitem"]')].at(0)?.textContent, "Rename Session…");
+  assert.equal([...menu.querySelectorAll('[role="menuitem"]')].at(0)?.textContent, "Reply");
   await act(async () => {
     (domWindow.document.querySelector(".menu-backdrop") as unknown as HTMLElement).click();
   });
@@ -1918,11 +1918,13 @@ test("a Viewer's Inbox archive and decision shortcuts and row menu send nothing 
     });
     await act(async () => { await Promise.resolve(); });
   }
-  const rail = container.querySelector<HTMLElement>('[aria-label="Shortcuts for Session A"]');
-  assert.ok(rail, "the rail shows the selected session");
-  for (const selector of ['[aria-label="Approve"]', '[aria-label="Deny"]', '[aria-label^="Archive"]']) {
-    assert.equal(rail!.querySelector<HTMLButtonElement>(selector)?.disabled, true, `${selector} is disabled`);
-  }
+  assertNoDomNode(container.querySelector(".inbox-shortcut-rail"), "there is no shortcut rail (#2214)");
+  // The row's own Archive stays, says why, and sends nothing.
+  const rowArchive = row.parentElement!.querySelector<HTMLButtonElement>('.inbox-row-action[aria-label^="Archive"]')!;
+  assert.equal(rowArchive.getAttribute("aria-disabled"), "true");
+  assert.equal(rowArchive.title, reason);
+  await act(async () => { rowArchive.click(); });
+  await act(async () => { await Promise.resolve(); });
 
   const shell = [...container.querySelectorAll<HTMLElement>(".inbox-row-shell")]
     .find((candidate) => candidate.textContent?.includes("Session A"))!;
@@ -1932,7 +1934,7 @@ test("a Viewer's Inbox archive and decision shortcuts and row menu send nothing 
   const menu = domWindow.document.querySelector('[role="menu"]') as unknown as HTMLElement;
   assert.ok(menu, "the row menu still opens");
   const item = (label: string) => [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
-    .find((candidate) => candidate.textContent === label)!;
+    .find((candidate) => candidate.querySelector(".menu-text")?.textContent === label)!;
   assert.equal(item("Rename Session…").disabled, true);
   assert.equal(item("Archive").disabled, true);
   assert.equal(item("Pin Session").disabled, false, "Pin is per person and stays available");
@@ -2010,12 +2012,14 @@ test("row and card context menus pin their exact target, reorder immediately, pe
     }) as never);
   });
   let menu = domWindow.document.querySelector('[role="menu"]') as unknown as HTMLElement;
+  assert.equal(selectedRowTitle(container), "Session B",
+    "opening a desktop row's menu selects the row, so the menu, preview and keys share one session (#2214)");
+  assert.deepEqual(rowTitles(container), ["Session A", "Session B"], "selecting it moves no row");
   const pin = [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
-    .find((item) => item.textContent === "Pin Session")!;
+    .find((item) => item.querySelector(".menu-text")?.textContent === "Pin Session")!;
   await act(async () => { pin.click(); });
   assertNoDomNode(domWindow.document.querySelector('[role="menu"]'), "pinning dismisses the menu");
   assert.deepEqual(rowTitles(container), ["Session B", "Session A"], "the targeted session moves immediately");
-  assert.equal(selectedRowTitle(container), "Session A", "right-click pinning never selects its target");
   assert.deepEqual([...loadKeySet(SESSION_PIN_KEY)], ["B"], "pinning uses the existing browser persistence");
   const grid = container.querySelector(".inbox-list") as unknown as HTMLElement;
   assert.equal(domWindow.document.activeElement, grid, "a non-dialog action restores the collection focus");
@@ -2032,11 +2036,13 @@ test("row and card context menus pin their exact target, reorder immediately, pe
   });
   menu = domWindow.document.querySelector('[role="menu"]') as unknown as HTMLElement;
   assert.equal(menu.getAttribute("aria-label"), "Session Actions for Session B");
-  await act(async () => {
-    menu.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }) as never);
-  });
+  for (const _step of ["Rename Session…", "Unpin Session"]) {
+    await act(async () => {
+      menu.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }) as never);
+    });
+  }
   const focusedPin = domWindow.document.activeElement as unknown as HTMLButtonElement | null;
-  assert.equal(focusedPin?.textContent, "Unpin Session", "the pin action is arrow-key reachable");
+  assert.equal(focusedPin?.querySelector(".menu-text")?.textContent, "Unpin Session", "the pin action is arrow-key reachable");
   await act(async () => { focusedPin!.click(); });
   assert.deepEqual(rowTitles(container), ["Session A", "Session B"]);
   assert.equal(loadKeySet(SESSION_PIN_KEY).size, 0);
@@ -2054,7 +2060,7 @@ test("row and card context menus pin their exact target, reorder immediately, pe
   menu = domWindow.document.querySelector('[role="menu"]') as unknown as HTMLElement;
   await act(async () => {
     [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
-      .find((item) => item.textContent === "Pin Session")!.click();
+      .find((item) => item.querySelector(".menu-text")?.textContent === "Pin Session")!.click();
   });
   assert.deepEqual(
     [...domWindow.document.querySelectorAll(".board .card-title")].map((title) => title.textContent),
@@ -2087,9 +2093,9 @@ test("a touch long-press opens the row menu and suppresses the tap it rode in on
   await act(async () => { socket.push(snapshot([session("A", 30), session("B", 20)])); });
 
   try {
-    // Desktop auto-selects the first snapshot row, so the guard is that the PRESSED row's
-    // synthetic click does not steal that selection — the gesture opened a menu, not a tap.
-    const before = selectedRowTitle(container);
+    // Opening a desktop row's menu selects the row (#2214), so the guard is what a tap would also
+    // do: a row tap focuses the grid. The release's synthetic click must leave focus in the menu
+    // the gesture opened.
     const rowButton = [...container.querySelectorAll<HTMLElement>(".inbox-row")]
       .find((row) => row.textContent?.includes("Session B"))!;
     await act(async () => {
@@ -2105,8 +2111,9 @@ test("a touch long-press opens the row menu and suppresses the tap it rode in on
       rowButton.dispatchEvent(new domWindow.PointerEvent("pointerup", { bubbles: true, pointerId: 7, pointerType: "touch" } as never) as never);
       rowButton.dispatchEvent(new domWindow.MouseEvent("click", { bubbles: true, cancelable: true }) as never);
     });
-    assert.equal(selectedRowTitle(container), before, "the long-press gesture is not also a tap");
-    assert.notEqual(selectedRowTitle(container), "Session B");
+    assert.equal(selectedRowTitle(container), "Session B", "the menu selected its row");
+    assert.ok(domWindow.document.querySelector('[role="menu"]')?.contains(domWindow.document.activeElement),
+      "the long-press gesture is not also a tap: focus stays in the menu");
   } finally {
     mobileViewport = true;
   }
@@ -2214,15 +2221,19 @@ test("a quick tap after a dismissed long-press still selects, and an archived ta
     });
     assertNoDomNode(domWindow.document.querySelector('[role="menu"]'));
 
-    // Immediately (inside the old 700ms grace): a fresh short tap must act normally.
+    // Immediately (inside the old 700ms grace): a fresh short tap must act normally. The menu
+    // selected Session B (#2214), so the tap goes to Session A.
+    assert.equal(selectedRowTitle(container), "Session B");
+    const rowA = [...container.querySelectorAll<HTMLElement>(".inbox-row")]
+      .find((row) => row.textContent?.includes("Session A"))!;
     await act(async () => {
-      rowButton.dispatchEvent(new domWindow.PointerEvent("pointerdown", {
+      rowA.dispatchEvent(new domWindow.PointerEvent("pointerdown", {
         bubbles: true, pointerId: 4, pointerType: "touch", clientX: 41, clientY: 51,
       } as never) as never);
-      rowButton.dispatchEvent(new domWindow.PointerEvent("pointerup", { bubbles: true, pointerId: 4, pointerType: "touch" } as never) as never);
-      rowButton.dispatchEvent(new domWindow.MouseEvent("click", { bubbles: true, cancelable: true }) as never);
+      rowA.dispatchEvent(new domWindow.PointerEvent("pointerup", { bubbles: true, pointerId: 4, pointerType: "touch" } as never) as never);
+      rowA.dispatchEvent(new domWindow.MouseEvent("click", { bubbles: true, cancelable: true }) as never);
     });
-    assert.equal(selectedRowTitle(container), "Session B",
+    assert.equal(selectedRowTitle(container), "Session A",
       "a new press is a new intent; the previous grace must not swallow it");
 
     // Reopen, then archive the target from "another client": the menu closes and hands focus off.
@@ -2738,6 +2749,258 @@ test("A on the Sessions list acts on the preview dock's expanded request, not th
     });
     assert.deepEqual(approvals, [["A", { requestId: "second", optionId: "allow" }]],
       "the expanded request is decided, not the top one");
+  } finally {
+    mobileViewport = true;
+  }
+});
+
+function capabilitySnapshot(sessions: SessionView[]): UiSnapshotMessage {
+  return {
+    ...snapshot(sessions),
+    capabilities: {
+      sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false,
+      sessionReminders: true, stopBeforeArchive: true,
+    },
+    runners: [{
+      runnerId: "runner-1", hostname: "build-box", os: "linux", version: "1", status: "online", agents: [],
+      workspaces: [], connectedAt: 1, lastSeen: 1, protocolVersion: PROTOCOL_VERSION,
+    }],
+  } as UiSnapshotMessage;
+}
+
+/** The open menu's item labels, without keycaps or second lines. */
+function menuLabels(): string[] {
+  return [...domWindow.document.querySelectorAll('[role="menu"] [role="menuitem"]')]
+    .map((item) => item.querySelector(".menu-text")?.textContent ?? "");
+}
+
+function menuItem(label: string): HTMLButtonElement {
+  return ([...domWindow.document.querySelectorAll('[role="menu"] [role="menuitem"]')] as unknown as HTMLButtonElement[])
+    .find((item) => item.querySelector(".menu-text")?.textContent === label)!;
+}
+
+test("the Sessions list has no shortcut rail or activity footer, and each row carries Snooze, Archive and ⋯ (#2214)", async () => {
+  mobileViewport = false;
+  setWindowFocused(true);
+  setVisibility("visible");
+  const { container, root } = mountTestRoot();
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "row-actions",
+    runtimeKey: "row-actions:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  const archived: string[] = [];
+  const client = {
+    ...api,
+    setArchived: async (id: string, value: boolean) => {
+      archived.push(id);
+      return { ...session(id, 30, { status: "completed" }), archived: value };
+    },
+  } as unknown as ApiClient;
+  try {
+    await act(async () => {
+      root.render(
+        <ApiProvider client={client}>
+          <StoreProvider connection={connection} navigation={navigation}>
+            <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
+          </StoreProvider>
+        </ApiProvider>,
+      );
+    });
+    await act(async () => {
+      socket.push(capabilitySnapshot([session("A", 30, { status: "running" }), session("B", 20, { status: "completed" })]));
+    });
+    assertNoDomNode(container.querySelector(".inbox-shortcut-rail"));
+    assertNoDomNode(container.querySelector(".inbox-activity-footer"));
+    assert.doesNotMatch(container.textContent ?? "", /\b0 (Running|Queued|Starting|Blocked|Stalled)\b/,
+      "no zero count is shown anywhere");
+
+    const shellOf = (title: string) => [...container.querySelectorAll<HTMLElement>(".inbox-row-shell")]
+      .find((row) => row.textContent?.includes(title))!;
+    const actionsOf = (title: string) => [...shellOf(title).querySelectorAll<HTMLButtonElement>(".inbox-row-action")]
+      .map((button) => [button.getAttribute("aria-label"), button.title]);
+    // The same archive label as the menu, the preview bar and the confirmation; each tooltip names its key.
+    assert.deepEqual(actionsOf("Session A"), [
+      ["Snooze", "Snooze (H)"],
+      ["Archive and Stop…", "Archive and Stop… (E)"],
+      ["More Actions", "More Actions (Shift+F10)"],
+    ]);
+    assert.deepEqual(actionsOf("Session B")[1], ["Archive", "Archive (E)"]);
+    for (const button of shellOf("Session A").querySelectorAll<HTMLButtonElement>(".inbox-row-action")) {
+      assert.equal(button.tabIndex, -1, "the list owns the keyboard, so no row action is a tab stop");
+    }
+
+    // Archive acts on its own row, not on the selection.
+    assert.equal(selectedRowTitle(container), "Session A");
+    await act(async () => { shellOf("Session B").querySelector<HTMLButtonElement>('[aria-label="Archive"]')!.click(); });
+    await act(async () => { await Promise.resolve(); });
+    assert.deepEqual(archived, ["B"]);
+
+    // Snooze opens the Snooze dialog for its own row.
+    await act(async () => { shellOf("Session A").querySelector<HTMLButtonElement>('[aria-label="Snooze"]')!.click(); });
+    assert.ok(domWindow.document.querySelector('[role="dialog"]'), "Snooze opens its dialog");
+  } finally {
+    mobileViewport = true;
+  }
+});
+
+test("a desktop row's ⋯ selects the row without moving any, so the menu, preview and keys share one session (#2214)", async () => {
+  mobileViewport = false;
+  setWindowFocused(true);
+  setVisibility("visible");
+  const { container, root } = mountTestRoot();
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "row-more-selects",
+    runtimeKey: "row-more-selects:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  try {
+    await act(async () => {
+      root.render(
+        <StoreProvider connection={connection} navigation={navigation}>
+          <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
+        </StoreProvider>,
+      );
+    });
+    await act(async () => {
+      socket.push(capabilitySnapshot([
+        session("A", 30),
+        session("B", 20, { status: "running", worktreePath: "/work/b" }),
+        session("C", 10),
+      ]));
+    });
+    // A running session sorts first, so Session B leads and Session A is selected.
+    const order = rowTitles(container);
+    assert.deepEqual(order, ["Session B", "Session A", "Session C"]);
+    await act(async () => {
+      [...container.querySelectorAll<HTMLElement>(".inbox-row")].find((row) => row.textContent?.includes("Session A"))!.click();
+    });
+    assert.equal(selectedRowTitle(container), "Session A");
+    const shellB = [...container.querySelectorAll<HTMLElement>(".inbox-row-shell")]
+      .find((row) => row.textContent?.includes("Session B"))!;
+    await act(async () => { shellB.querySelector<HTMLButtonElement>(".inbox-row-more")!.click(); });
+    assert.equal(selectedRowTitle(container), "Session B", "the row the menu belongs to is selected");
+    assert.equal(container.querySelector(".session-preview-bar .detail-bar-title")?.textContent, "Session B",
+      "and the preview follows it");
+    assert.equal(domWindow.document.querySelector('[role="menu"]')?.getAttribute("aria-label"),
+      "Session Actions for Session B");
+    assert.deepEqual(menuLabels(), [
+      "Reply", "Rename Session…", "Pin Session", "Mark Unread", "Fork Conversation…", "Snooze…", "Archive and Stop…",
+    ]);
+    // The menu reads the preview's own Fork availability: disabled, with its reason as a second line.
+    const fork = menuItem("Fork Conversation…");
+    assert.equal(fork.disabled, true);
+    assert.ok(fork.querySelector(".menu-desc")?.textContent, "the reason is a visible second line");
+    // The keys act on the selection, which is now this session, so the items show their keycaps.
+    assert.equal(menuItem("Archive and Stop…").querySelector(".menu-trail kbd")?.textContent, "E");
+
+    // A newer event while the menu is open moves no row: the displayed order is held.
+    await act(async () => { socket.push({ type: "session_upsert", session: session("C", 99) }); });
+    assert.deepEqual(rowTitles(container), order);
+  } finally {
+    mobileViewport = true;
+  }
+});
+
+test("the phone sheet keeps Fork's reasons without a preview, and leaves it out where it can never fork (#2214)", async () => {
+  mobileViewport = true;
+  const { container, root } = mountTestRoot();
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "phone-sheet-fork",
+    runtimeKey: "phone-sheet-fork:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  await act(async () => {
+    root.render(
+      <StoreProvider connection={connection} navigation={navigation}>
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
+      </StoreProvider>,
+    );
+  });
+  await act(async () => {
+    socket.push(capabilitySnapshot([
+      session("Running", 30, { status: "running", worktreePath: "/work/running" }),
+      session("Waiting", 20, { status: "idle", worktreePath: "/work/waiting" }),
+      session("Plain", 10, { status: "idle" }),
+    ]));
+  });
+  const openMenu = async (title: string) => {
+    const shell = [...container.querySelectorAll<HTMLElement>(".inbox-row-shell")]
+      .find((row) => row.textContent?.includes(title))!;
+    await act(async () => { shell.querySelector<HTMLButtonElement>(".inbox-row-more")!.click(); });
+    const menu = domWindow.document.querySelector('[role="menu"]') as unknown as HTMLElement;
+    assert.equal(menu.querySelector(".menu-head")?.textContent, title, "the sheet is titled with the session's title");
+    return menu;
+  };
+  const close = async () => {
+    await act(async () => { (domWindow.document.querySelector(".menu-backdrop") as unknown as HTMLElement).click(); });
+  };
+
+  await openMenu("Session Running");
+  assert.equal(menuItem("Fork Conversation…").disabled, true);
+  assert.equal(menuItem("Fork Conversation…").querySelector(".menu-desc")?.textContent,
+    "Wait for the current turn or approval before creating a fork.");
+  assert.equal(domWindow.document.querySelectorAll('[role="menu"] kbd').length, 0, "a phone shows no keycaps");
+  await close();
+
+  await openMenu("Session Waiting");
+  assert.equal(menuItem("Fork Conversation…").querySelector(".menu-desc")?.textContent,
+    "Open the session to fork its latest turn.");
+  await close();
+
+  await openMenu("Session Plain");
+  assert.equal(menuLabels().includes("Fork Conversation…"), false, "a session without a worktree can never fork");
+  await close();
+});
+
+test("U and the menu's Mark Unread and Mark Read toggle a session's unread dot (#2214)", async () => {
+  mobileViewport = false;
+  setWindowFocused(true);
+  setVisibility("visible");
+  const { container, root } = mountTestRoot();
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "toggle-unread",
+    runtimeKey: "toggle-unread:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  try {
+    await act(async () => {
+      root.render(
+        <StoreProvider connection={connection} navigation={navigation}>
+          <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
+        </StoreProvider>,
+      );
+    });
+    await act(async () => { socket.push(capabilitySnapshot([session("A", 30), session("B", 20)])); });
+    const unreadTitles = () => [...container.querySelectorAll(".inbox-row-shell.unread .inbox-row-title")]
+      .map((title) => title.textContent);
+    const shellB = () => [...container.querySelectorAll<HTMLElement>(".inbox-row-shell")]
+      .find((row) => row.textContent?.includes("Session B"))!;
+    await act(async () => {
+      shellB().dispatchEvent(new domWindow.MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 5, clientY: 5 }) as never);
+    });
+    await act(async () => { menuItem("Mark Unread").click(); });
+    assert.deepEqual(unreadTitles(), ["Session B"]);
+    await act(async () => {
+      shellB().dispatchEvent(new domWindow.MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 5, clientY: 5 }) as never);
+    });
+    await act(async () => { menuItem("Mark Read").click(); });
+    assert.deepEqual(unreadTitles(), []);
+    // U toggles the selected session the same way.
+    for (const expected of [["Session B"], []]) {
+      await act(async () => {
+        domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "u", bubbles: true, cancelable: true }));
+      });
+      assert.deepEqual(unreadTitles(), expected);
+    }
   } finally {
     mobileViewport = true;
   }

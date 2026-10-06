@@ -12031,80 +12031,6 @@ body.shell-dock-dragging * {
   outline: var(--focus-width) solid var(--focus);
   outline-offset: calc(-1 * var(--focus-width));
 }
-.inbox-activity-footer {
-  display: flex;
-  height: 34px;
-  min-height: 34px;
-  max-height: 34px;
-  flex: none;
-  align-items: center;
-  gap: 8px;
-  overflow: hidden;
-  padding: 3px 8px 3px 12px;
-  border-top: 1px solid var(--border);
-  color: var(--text-faint);
-  background: var(--bg-elev);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-}
-.inbox-activity-summary {
-  display: flex;
-  flex: none;
-  align-items: center;
-  gap: 12px;
-}
-.inbox-activity-footer .blocked { color: var(--accent-2); }
-.inbox-activity-footer .stalled { color: var(--danger-text); }
-.inbox-shortcut-rail,
-.inbox-shortcut-context,
-.inbox-shortcut-standard {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 3px;
-}
-.inbox-shortcut-rail {
-  overflow-x: auto;
-  flex: 1;
-  scrollbar-width: none;
-}
-/* The auto margin packs the shortcuts to the end while they fit and collapses to zero when they
-   overflow, so the first shortcut stays reachable; `justify-content: flex-end` put it off-screen. */
-.inbox-shortcut-rail > :first-child { margin-inline-start: auto; }
-.inbox-shortcut-rail::-webkit-scrollbar { display: none; }
-.inbox-shortcut-rail.is-empty { min-height: 25px; }
-.inbox-shortcut-context {
-  flex: none;
-  padding-right: 5px;
-  border-right: 1px solid var(--border);
-}
-.inbox-shortcut-standard { flex: none; }
-.inbox-shortcut-rail button {
-  display: inline-flex;
-  flex: none;
-  align-items: center;
-  gap: 4px;
-  padding: 3px 6px;
-  border: 0;
-  border-radius: 4px;
-  color: var(--text-dim);
-  background: transparent;
-  cursor: pointer;
-  font: var(--type-small);
-}
-.inbox-shortcut-rail button:hover:not(:disabled) { color: var(--text); background: var(--bg-elev-2); }
-.inbox-shortcut-rail button:disabled { opacity: .45; cursor: wait; }
-/* A footer too narrow for every shortcut (InboxShortcutRail's useShortcutsFit, #1969) first drops
-   the keycaps, then the minor counts; those stay in the accessibility tree. */
-.inbox-activity-footer[data-fit] .inbox-shortcut-rail kbd { display: none; }
-.inbox-activity-footer[data-fit="counts"] .inbox-activity-minor {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
-}
 /* A Sessions row (#2209, docs/design-system.md §5.2). Desktops and tablets draw flat two-line rows,
    each exactly --row-h-2 with no gap between them, so the list fits the rows its layout promises
    (§6.3). A phone keeps its three-line card (`.stacked`), which keeps its gap. */
@@ -12379,6 +12305,44 @@ body.shell-dock-dragging * {
   white-space: nowrap;
 }
 .inbox-row-time.snoozed { color: var(--text-dim); }
+/* The row's trailing actions (#2214, §3.3, §5.2): Snooze, Archive and ⋯. A fine pointer sees them
+   while it hovers the row or focus is inside it, at the end of the title line over the row's own
+   fill, so the status line's badge and time stay in view. A coarse pointer sees only ⋯, always, at
+   full touch size in a column the row keeps free for it. */
+.inbox-row-actions {
+  position: absolute;
+  right: var(--space-2);
+  bottom: var(--space-0-5);
+  display: none;
+  align-items: center;
+  gap: var(--space-0-5);
+  padding-left: var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev-2);
+}
+.inbox-row-shell.selected .inbox-row-actions { background: var(--surface-selected); }
+.inbox-row-shell.stacked .inbox-row-actions { right: var(--space-2); bottom: auto; top: 50%; transform: translateY(-50%); }
+/* Fine pointers draw ⋯ at the size of its two siblings. */
+.icon-btn.inbox-row-more { width: var(--control-h-sm); height: var(--control-h-sm); }
+@media (pointer: fine) {
+  :is(.inbox-row-shell:hover, .inbox-row-shell:focus-within) .inbox-row-actions { display: inline-flex; }
+  /* The row keeps its hover fill while the pointer is on its actions, which are beside its button. */
+  .inbox-row-shell:is(:hover, :focus-within):not(.selected, .stacked) .inbox-row { background: var(--bg-elev-2); }
+}
+@media (pointer: coarse) {
+  .inbox-row-actions {
+    top: 50%;
+    right: 0;
+    bottom: auto;
+    display: inline-flex;
+    padding-left: 0;
+    background: transparent;
+    transform: translateY(-50%);
+  }
+  .inbox-row-action:not(.inbox-row-more) { display: none; }
+  .icon-btn.inbox-row-more { width: var(--control-h); height: var(--control-h); }
+  .inbox-row-shell .inbox-row { padding-right: var(--control-h); }
+}
 /* Forced colors drops fills, so the selected bar (wider, with no fill beside it) and the unread dot
    are painted in system colours. After the rules they override, which they tie with. */
 @media (forced-colors: active) {
@@ -12582,9 +12546,6 @@ body.shell-dock-dragging * {
   .inbox-thread-family-text { display: none; }
   /* A phone drops the base ref off the status line; the branch keeps what is left of the line. */
   .inbox-row-base { display: none; }
-  .inbox-activity-footer { gap: 6px; padding-inline: 6px; }
-  .inbox-activity-summary { max-width: 100%; flex: 0 1 auto; gap: 6px; margin-right: auto; margin-left: auto; white-space: nowrap; }
-  .inbox-shortcut-rail { display: none; }
 }
 
 .git-action {

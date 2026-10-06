@@ -1,10 +1,12 @@
 import type { SessionReminderView, SessionView } from "@wollipog/protocol";
-import { memo } from "react";
+import { memo, type MouseEvent } from "react";
 import { useLongPress } from "./interactions.js";
+import { sessionArchiveControlLabel } from "../archive-actions.js";
 import { STALL_THRESHOLD_MS, showsActivityStrip, type SessionActivity } from "../activity.js";
 import { relativeTime } from "../format.js";
 import { formatReminderReturn } from "../reminder-schedule.js";
 import { reminderBadgeDescription } from "../session-reminders.js";
+import { sessionArchiveActionRefusal } from "../session-command-permissions.js";
 import { sessionRowStatus } from "../session-row-status.js";
 import { sessionDisplayTitle } from "../session-title.js";
 import { useOptionalStoreSelector } from "../store.js";
@@ -12,7 +14,7 @@ import { displayBaseRef, pullRequestStateLabel, sessionBranchState } from "../wo
 import { AgentIcon } from "./AgentIcon.js";
 import { ActivityStrip } from "./ActivityStrip.js";
 import { SessionPinIndicator, ThreadDot } from "./common.js";
-import { AlarmClockIcon, BranchIcon, PullRequestIcon } from "./Icons.js";
+import { AlarmClockIcon, ArchiveIcon, BranchIcon, MoreHorizontalIcon, PullRequestIcon } from "./Icons.js";
 import { SessionRowStatusBadge } from "./SessionRowStatusBadge.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { inboxThreadChildrenLabel, type InboxThreadChildren } from "../inbox.js";
@@ -59,12 +61,18 @@ export interface InboxRowProps {
   threadLast?: boolean;
   threadChildren?: string | null;
   threadCollapsed?: boolean;
+  /** Whether archiving a running session stops it first, which decides the Archive button's label. */
+  stopBeforeArchiveSupported?: boolean;
   /** Take the id, so the parent can pass ONE stable callback to every row. */
   onSelect: (sessionId: string) => void;
   onExpand: (sessionId: string) => void;
   onToggleThread?: (sessionId: string) => void;
-  /** Right-click, long-press, or keyboard context menu for this row's session (#154). */
+  /** Right-click, long-press, the row's ⋯, or keyboard context menu for this row's session (#154). */
   onSessionMenu: (sessionId: string, anchor: { x: number; y: number }) => void;
+  /** The row's trailing Snooze (#2214). Absent where the control plane has no reminders. */
+  onSnooze?: (sessionId: string) => void;
+  /** The row's trailing Archive (#2214). */
+  onArchive?: (sessionId: string) => void;
 }
 
 /** When a row last did something: its newest event, else its last update, so no row shows "—". */
@@ -91,10 +99,13 @@ function InboxRowInner({
   threadLast = false,
   threadChildren = null,
   threadCollapsed = false,
+  stopBeforeArchiveSupported = false,
   onSelect,
   onExpand,
   onToggleThread,
   onSessionMenu,
+  onSnooze,
+  onArchive,
 }: InboxRowProps) {
   const longPress = useLongPress(({ x, y }) => onSessionMenu(session.id, { x, y }));
   // A surface without a store (a harness page) cannot see the runner, so it keeps the conservative
@@ -198,6 +209,62 @@ function InboxRowInner({
       {relativeTime(lastActivityAt)}
     </time>
   );
+  /* The row's trailing actions (#2214, §3.3, §5.2): Snooze, Archive and ⋯, after the row button
+     rather than in it, since a button cannot nest a button. A fine pointer sees them on hover or
+     focus-within, over the row's own fill at the end of the title line, so the status and the time
+     stay in view; a coarse pointer sees only ⋯, always, in a column the row keeps free for it. The
+     list owns the keyboard, so none is a tab stop, and a press never takes focus from the list.
+     Each tooltip names the key that does the same from the list. */
+  const archiveLabel = sessionArchiveControlLabel(session, stopBeforeArchiveSupported);
+  const archiveRefusal = sessionArchiveActionRefusal(session);
+  const keepListFocus = (event: MouseEvent) => event.preventDefault();
+  const actions = (
+    <span className="inbox-row-actions">
+      {onSnooze && (
+        <button
+          type="button"
+          tabIndex={-1}
+          className="icon-btn sm inbox-row-action"
+          aria-label="Snooze"
+          title="Snooze (H)"
+          onMouseDown={keepListFocus}
+          onClick={() => onSnooze(session.id)}
+        >
+          <AlarmClockIcon />
+        </button>
+      )}
+      {onArchive && (
+        <button
+          type="button"
+          tabIndex={-1}
+          className="icon-btn sm inbox-row-action"
+          aria-label={archiveLabel}
+          // A refused person keeps the button, which says why and does nothing (#1857).
+          aria-disabled={archiveRefusal !== null || undefined}
+          title={archiveRefusal ?? `${archiveLabel} (E)`}
+          onMouseDown={keepListFocus}
+          onClick={() => onArchive(session.id)}
+        >
+          <ArchiveIcon />
+        </button>
+      )}
+      <button
+        type="button"
+        tabIndex={-1}
+        className="icon-btn inbox-row-action inbox-row-more"
+        aria-label="More Actions"
+        title="More Actions (Shift+F10)"
+        aria-haspopup="menu"
+        onMouseDown={keepListFocus}
+        onClick={(event) => {
+          const box = event.currentTarget.getBoundingClientRect();
+          onSessionMenu(session.id, { x: box.left, y: box.bottom });
+        }}
+      >
+        <MoreHorizontalIcon />
+      </button>
+    </span>
+  );
   const titleLine = (
     <span className="inbox-row-copy">
       <span className="inbox-row-title">{title}</span>
@@ -272,6 +339,7 @@ function InboxRowInner({
             </>
           )}
         </button>
+        {actions}
       </div>
     </div>
   );

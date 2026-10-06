@@ -1,1 +1,0 @@
-|.inbox-shortcut-context|padding-right|5px

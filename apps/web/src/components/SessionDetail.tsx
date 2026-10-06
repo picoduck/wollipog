@@ -65,7 +65,7 @@ import {
 import { sessionAccountSwitchApplicable, SwitchAccountDialog } from "./SwitchAccountDialog.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { SessionPlaceholder } from "./SessionPlaceholder.js";
-import { sessionArchiveActionLabel, sessionUnarchiveRestarts } from "../archive-actions.js";
+import { sessionArchiveControlLabel, sessionUnarchiveRestarts } from "../archive-actions.js";
 import { unarchiveSession } from "../session-unarchive.js";
 import { TranscriptSkeleton, transcriptLoadingSentence } from "./TranscriptSkeleton.js";
 import { TranscriptEmptyState, TranscriptHistoryNotice, transcriptEmptyKind } from "./TranscriptReadingStates.js";
@@ -535,6 +535,8 @@ function invalidateComposerMutationRecovery(key: string): void {
 export type SessionDetailMode = "preview" | "expanded";
 
 export interface PreviewForkControls {
+  /** The previewed session these controls fork, so a caller never applies them to another. */
+  sessionId: string;
   availability: ConversationForkAvailability;
   fork: () => void;
 }
@@ -4121,11 +4123,12 @@ function SessionDetailLoaded({
     [forkContext, latestConversationForkTurn, latestKnownTurn],
   );
   const previewForkControls = useMemo<PreviewForkControls>(() => ({
+    sessionId,
     availability: latestForkAvailability,
     fork: () => {
       if (latestForkAvailability.available) void onFork(latestForkAvailability.forkTurn);
     },
-  }), [latestForkAvailability, onFork]);
+  }), [latestForkAvailability, onFork, sessionId]);
   useLayoutEffect(() => {
     if (mode !== "preview" || !onPreviewForkReady) return;
     onPreviewForkReady(previewForkControls);
@@ -6278,7 +6281,7 @@ function SessionDetailLoaded({
           runnerOnline={runnerOnline}
           machineName={runnerDisp.name}
           agentLabel={sessionAgentLabel(session.agentName, session.driver, session.agentId)}
-          archiveLabel={sessionArchiveActionLabel(session, stopBeforeArchiveSupported)}
+          archiveLabel={sessionArchiveControlLabel(session, stopBeforeArchiveSupported)}
           onSnooze={onSnooze}
           onArchive={onArchive}
           onSessionMenu={onSessionMenu}

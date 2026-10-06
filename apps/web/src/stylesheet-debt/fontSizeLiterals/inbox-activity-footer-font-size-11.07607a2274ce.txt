@@ -1,1 +1,0 @@
-|.inbox-activity-footer|font-size|11

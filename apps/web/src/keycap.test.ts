@@ -101,7 +101,7 @@ test("the subject check reads the keycap, not the surface around it", () => {
 });
 
 test("hint labels beside a keycap use the small type token in --text-dim", () => {
-  for (const selector of [".shortcut-hint", ".inbox-shortcut-rail button"]) {
+  for (const selector of [".shortcut-hint"]) {
     const body = new Map<string, string>();
     for (const node of topLevelRule(css, selector).nodes) if (node.type === "decl") body.set(node.prop, node.value);
     assert.equal(body.get("font"), "var(--type-small)", selector);

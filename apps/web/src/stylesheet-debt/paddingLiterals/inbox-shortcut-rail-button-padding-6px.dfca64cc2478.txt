@@ -1,1 +1,0 @@
-|.inbox-shortcut-rail button|padding|6px

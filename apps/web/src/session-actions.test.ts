@@ -7,6 +7,7 @@ import {
   checkpointHandoffUnavailableReason,
   composerPrimaryAction,
   conversationForkAvailability,
+  conversationForkAvailabilityWithoutTranscript,
   editInForkAvailability,
   forkFailureIsAmbiguous,
   isTerminalDeliveryReceipt,
@@ -130,6 +131,33 @@ test("plain conversation forks share runtime gates and preserve Claude and Pi la
   if (!noCheckpoint.available) {
     assert.match(noCheckpoint.reason, /Complete a conversation turn/);
     assert.equal(noCheckpoint.offered, true, "a worktree session without a finished turn will be able to fork");
+  }
+});
+
+test("a session without a loaded transcript keeps every fork reason that needs no checkpoint (#2214)", () => {
+  const context = { ...base, providerSupported: true, forkInProgress: false };
+  const unloaded = "Open the session to fork its latest turn.";
+  // Nothing else blocks: the item stays offered, disabled with where the fork can be made.
+  assert.deepEqual(conversationForkAvailabilityWithoutTranscript(context, unloaded),
+    { available: false, offered: true, reason: unloaded });
+  // A running turn says so, as the transcript-backed gate does.
+  assert.deepEqual(conversationForkAvailabilityWithoutTranscript({ ...context, status: "running" }, unloaded),
+    { available: false, offered: true, reason: "Wait for the current turn or approval before creating a fork." });
+  // A session that can never fork is not offered, whatever else is true.
+  for (const never of [{ ...context, hasWorktree: false }, { ...context, providerSupported: false }]) {
+    const availability = conversationForkAvailabilityWithoutTranscript(never, unloaded);
+    assert.equal(availability.available === false && availability.offered, false);
+  }
+  // Every other temporary block reads exactly as conversationForkAvailability reads it.
+  for (const blocked of [
+    { ...context, runnerOnline: false },
+    { ...context, forkInProgress: true },
+    { ...context, queuedPrompts: 1 },
+    { ...context, busy: true },
+    { ...context, forkRefusal: "Your Viewer role is read-only." },
+  ]) {
+    assert.deepEqual(conversationForkAvailabilityWithoutTranscript(blocked, unloaded),
+      conversationForkAvailability(2, 2, blocked));
   }
 });
 

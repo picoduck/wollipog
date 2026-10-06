@@ -63,6 +63,18 @@ export function sessionArchiveActionLabel(
   return sessionArchiveRequiresStop(session, stopBeforeArchiveSupported) ? "Archive and Stop" : "Archive";
 }
 
+/** The label of every Sessions control that archives one session (#2214): a row's Archive, the
+ * preview bar's, and the context menu item. `sessionArchiveActionLabel()`, with the ellipsis of a
+ * control that asks first (§9.1) when archiving also stops the session or retries a failed stop:
+ * "Archive", "Archive and Stop…" or "Retry Stop…". */
+export function sessionArchiveControlLabel(
+  session: ArchiveActionSession,
+  stopBeforeArchiveSupported: boolean,
+): string {
+  const label = sessionArchiveActionLabel(session, stopBeforeArchiveSupported);
+  return !session.archived && sessionArchiveRequiresStop(session, stopBeforeArchiveSupported) ? `${label}…` : label;
+}
+
 /** A refused Unarchive and Restart reports the archive state the server left behind, and only that
  * receipt makes the outcome certain: the same 409 can mean "refused by preflight, still archived" or
  * "an earlier request already restored this session". Without the receipt — a dropped connection, a

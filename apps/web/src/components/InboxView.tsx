@@ -1,5 +1,5 @@
-import { type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { prioritizedPendingRequests, type SessionReminderView, type SessionView, type SetSessionReminderRequest, type SnoozeScheduleInput, type SourceLocation } from "@wollipog/protocol";
+import { type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { prioritizedPendingRequests, providerSupportsConversationFork, type SessionReminderView, type SessionView, type SetSessionReminderRequest, type SnoozeScheduleInput, type SourceLocation } from "@wollipog/protocol";
 import { archiveAndStopMessage, archiveResultMessage, archiveResultTone, sessionArchiveRequiresStop } from "../archive-actions.js";
 import { sessionArchiveActionRefusal, sessionCommandRefusal } from "../session-command-permissions.js";
 import {
@@ -27,6 +27,14 @@ import {
   type InboxApprovalIntent,
 } from "../inbox.js";
 import { decideDockedRequest } from "./requests/request-reveal.js";
+import { resolveCaps } from "../caps.js";
+import {
+  conversationForkAvailabilityWithoutTranscript,
+  pendingQueuedPromptCount,
+  sessionForkInProgress,
+  subscribeSessionForks,
+  type ConversationForkAvailability,
+} from "../session-actions.js";
 import { loadKeySet, saveKeySet, SESSION_PIN_KEY } from "../pins.js";
 import { isUnread, loadSeen, markSeen, markUnread, saveSeen } from "../sessions-seen.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
@@ -35,7 +43,6 @@ import { destination, encodeResourceId, type AttentionTarget, type SessionsTab }
 import { useApi } from "../api-context.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { InboxList, type InboxListEntry } from "./InboxList.js";
-import { InboxShortcutRail } from "./InboxShortcutRail.js";
 import { CreateProjectDialog } from "./CreateProjectDialog.js";
 import { ProjectSplitMenu } from "./ProjectSplitMenu.js";
 import { SessionDetail, type PreviewForkControls } from "./SessionDetail.js";
@@ -74,6 +81,9 @@ import { runnerDisplay } from "../runners.js";
 const PROJECT_PIN_KEY = "wollipog.projects.pinned";
 const SEEN_DWELL_MS = 1_500;
 const inboxScrollPositions = new Map<string, number>();
+/** Why the context menu cannot fork a session no preview has loaded: only its transcript knows the
+ * checkpoint a fork starts from. */
+const FORK_NEEDS_TRANSCRIPT_REASON = "Open the session to fork its latest turn.";
 
 export function filterInboxSplitsForReminderMode(
   baseSplits: readonly InboxSplit[],
@@ -843,10 +853,17 @@ export function InboxView({
       restoreTarget: restoreTarget ? () => restoreTarget() ?? listRestore() : listRestore,
     });
   }, []);
-  const openRowSessionMenu = useCallback(
-    (sessionId: string, anchor: { x: number; y: number }) => openSessionMenuAt(sessionId, anchor),
-    [openSessionMenuAt],
-  );
+  // A desktop row's menu (its ⋯, right-click or Shift+F10) selects the row first (#2214), so the
+  // menu, the preview and the list's keys all act on one session, and Fork Conversation reads the
+  // preview's own availability. The displayed order is held first, as keyboard navigation holds
+  // it, so selecting never moves a row out from under the menu. A phone opens no preview.
+  const openRowSessionMenu = useCallback((sessionId: string, anchor: { x: number; y: number }) => {
+    if (!isMobile && sessionId !== selectedSessionIdRef.current) {
+      holdOrderAfterNavigation();
+      selectSession(sessionId, activeSplit?.key ?? null);
+    }
+    openSessionMenuAt(sessionId, anchor);
+  }, [activeSplit?.key, holdOrderAfterNavigation, isMobile, openSessionMenuAt, selectSession]);
   useEffect(() => {
     if (!sessionMenu) return;
     // Valid means ON THE SURFACE, not merely in the catalog: another client archiving the
@@ -1014,6 +1031,19 @@ export function InboxView({
     saveSeen(next, instanceScope);
     setSeen(next);
   }, [instanceScope, sessions]);
+  /** U and the menu's Mark Unread / Mark Read (#2214): an unread session is marked read, any other
+   * unread. */
+  const toggleUnread = useCallback((sessionId: string) => {
+    const session = sessions.get(sessionId);
+    if (!session) return;
+    if (!isUnread(seen, session.id, session.lastEventAt)) {
+      setUnread(sessionId);
+      return;
+    }
+    const next = markSeen(loadSeen(instanceScope), sessionId, session.lastEventAt ?? session.updatedAt);
+    saveSeen(next, instanceScope);
+    setSeen(next);
+  }, [instanceScope, seen, sessions, setUnread]);
 
   const saveReminder = useCallback(async (
     sessionId: string,
@@ -1137,6 +1167,13 @@ export function InboxView({
     }
   }, [activeSplit?.key, api, beginBusy, confirm, displayedIds, endBusy, loadSession, onCollapse, onExpand, selectSession, sessionRemindersSupported, sessions, showToast, showUndo, stopBeforeArchiveSupported]);
 
+  // The rows' trailing Archive and Snooze (#2214): ONE stable callback each, so the memoised rows
+  // do not re-render whenever archive()'s own dependencies change.
+  const archiveRef = useRef(archive);
+  archiveRef.current = archive;
+  const archiveRow = useCallback((sessionId: string) => { void archiveRef.current(sessionId); }, []);
+  const snoozeRow = useCallback((sessionId: string) => setSnoozeSessionId(sessionId), []);
+
   /** Open the session with one exact request focused; the session's own request card takes it. */
   const openRequest = useCallback((targetSession: SessionView, requestId: string) => {
     selectSession(targetSession.id, activeSplit?.key ?? null);
@@ -1234,7 +1271,7 @@ export function InboxView({
     archive: () => { if (displayedSelection) void archive(displayedSelection); },
     snooze: () => { if (displayedSelection && sessionRemindersSupported) setSnoozeSessionId(displayedSelection); },
     pin: () => { if (displayedSelection) togglePin(displayedSelection); },
-    unread: () => { if (displayedSelection) setUnread(displayedSelection); },
+    unread: () => { if (displayedSelection) toggleUnread(displayedSelection); },
     reply: () => { if (displayedSelection) expand(displayedSelection, true); },
     resumeFollow: () => {
       const controls = previewNavigationRef.current;
@@ -1250,10 +1287,44 @@ export function InboxView({
       const scroll = viewRef.current?.querySelector<HTMLElement>(".detail-scroll");
       pageInboxPreview(scroll, "previous", previewNavigationRef.current?.beginProgrammaticScroll);
     },
-  }), [activeSplit?.key, archive, collapseThread, decide, displayedIds, displayedSelection, expand, expandThread, goToParent, moveSelection, openTopRequest, previewForkControls, selectRow, selectSplit, sessionRemindersSupported, setUnread, showToast, splits, toggleAllThreads, togglePin, toggleThread]);
+  }), [activeSplit?.key, archive, collapseThread, decide, displayedIds, displayedSelection, expand, expandThread, goToParent, moveSelection, openTopRequest, previewForkControls, selectRow, selectSplit, sessionRemindersSupported, showToast, splits, toggleAllThreads, togglePin, toggleThread, toggleUnread]);
   // Board mode has no row selection, so the list's j/k/a/d… vocabulary would act on an invisible
   // row; only the shared toolbar (tabs, search, toggle) stays keyboard-reachable there.
   useInboxKeys(!isMobile && !expanded && !boardMode, keyActions);
+  // The context menu's session, and its Fork Conversation (#2214, #2161). The previewed session's
+  // transcript knows the checkpoint a fork starts from, so its item reads the preview's own
+  // availability and forks through it. Any other session is offered exactly where it could fork,
+  // and keeps every reason a transcript is not needed for (a running turn among them).
+  const menuSession = sessionMenu ? sessions.get(sessionMenu.sessionId) : undefined;
+  const menuForkInProgress = useSyncExternalStore(
+    subscribeSessionForks,
+    () => menuSession ? sessionForkInProgress(menuSession.id) : false,
+  );
+  const menuPreviewFork = menuSession && !expanded && !boardMode && previewForkControls?.sessionId === menuSession.id
+    ? previewForkControls
+    : null;
+  const menuForkAvailability = useMemo<ConversationForkAvailability | undefined>(() => {
+    if (!menuSession) return undefined;
+    if (menuPreviewFork) return menuPreviewFork.availability;
+    const runner = runners.get(menuSession.runnerId);
+    return conversationForkAvailabilityWithoutTranscript({
+      driver: menuSession.driver,
+      providerSupported: providerSupportsConversationFork(menuSession.driver, resolveCaps(runner, menuSession)),
+      hasWorktree: menuSession.worktreePath != null,
+      runnerOnline: runner?.status === "online",
+      runnerProtocolVersion: runner?.protocolVersion,
+      status: menuSession.status,
+      queuedPrompts: pendingQueuedPromptCount(menuSession.queued),
+      busy: busySessionIds.has(menuSession.id),
+      forkInProgress: menuForkInProgress,
+      forkRefusal: sessionCommandRefusal(menuSession, "fork"),
+    }, !isMobile && !boardMode && menuSession.id === surfaceSessionId
+      ? "Fork availability is still loading."
+      : FORK_NEEDS_TRANSCRIPT_REASON);
+  }, [boardMode, busySessionIds, isMobile, menuForkInProgress, menuPreviewFork, menuSession, runners, surfaceSessionId]);
+  const forkFromMenu = useCallback((sessionId: string) => {
+    if (previewForkControls?.sessionId === sessionId) previewForkControls.fork();
+  }, [previewForkControls]);
   const boardSessions = useMemo(() => liveEntries.map((entry) => entry.session), [liveEntries]);
   const setupNoticeSessionIds = useMemo(
     () => worktreeSetupNoticeSessionIds(
@@ -1513,46 +1584,10 @@ export function InboxView({
           onPointerTargetChange={handlePointerTargetChange}
           onPointerPressChange={handlePointerPressChange}
           onSessionMenu={openRowSessionMenu}
+          onArchive={archiveRow}
+          {...(sessionRemindersSupported ? { onSnooze: snoozeRow } : {})}
+          stopBeforeArchiveSupported={stopBeforeArchiveSupported}
         />
-        )}
-        {!boardMode && (
-        <footer className="inbox-activity-footer" aria-label="Sessions Status and Shortcuts">
-          <div className="inbox-activity-summary" aria-label="Sessions Activity Summary">
-            <span className="inbox-activity-minor">{activityCounts.running} Running</span>
-            <span className="inbox-activity-minor">{activityCounts.queued} Queued</span>
-            <span className="inbox-activity-minor">{activityCounts.starting} Starting</span>
-            <span className="blocked">{activeSplit?.blockedCount ?? 0} Blocked</span>
-            <span className="stalled" aria-live="polite">{activeSplit?.stalledCount ?? 0} Stalled</span>
-          </div>
-          <InboxShortcutRail
-            session={displayedSelectedSession}
-            pinned={displayedSelection ? pinnedSessions.has(displayedSelection) : false}
-            stopBeforeArchiveSupported={stopBeforeArchiveSupported}
-            busy={displayedSelection ? busySessionIds.has(displayedSelection) : false}
-            forkAvailability={previewForkControls?.availability ?? {
-              available: false,
-              offered: true,
-              reason: "Fork availability is still loading.",
-            }}
-            onApprove={() => {
-              if (displayedSelection) void decide(displayedSelection, "approve")
-                .catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" }));
-            }}
-            onDeny={() => {
-              if (displayedSelection) void decide(displayedSelection, "deny")
-                .catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" }));
-            }}
-            onReply={() => { if (displayedSelection) expand(displayedSelection, true); }}
-            onExpand={() => { if (displayedSelection) expand(displayedSelection); }}
-            onFork={() => previewForkControls?.fork()}
-            onTogglePin={() => { if (displayedSelection) togglePin(displayedSelection); }}
-            onMarkUnread={() => { if (displayedSelection) setUnread(displayedSelection); }}
-            onArchive={() => { if (displayedSelection) void archive(displayedSelection); }}
-            {...(sessionRemindersSupported ? {
-              onSnooze: () => { if (displayedSelection) setSnoozeSessionId(displayedSelection); },
-            } : {})}
-          />
-        </footer>
         )}
       </section>
 
@@ -1642,14 +1677,22 @@ export function InboxView({
           }}
         />
       )}
-      {sessionMenu && sessions.has(sessionMenu.sessionId) && (
+      {sessionMenu && menuSession && (
         <SessionContextMenu
           state={sessionMenu}
-          sessionTitle={sessions.get(sessionMenu.sessionId)!.title}
+          session={menuSession}
           pinned={pinnedSessions.has(sessionMenu.sessionId)}
+          unread={isUnread(seen, menuSession.id, menuSession.lastEventAt)}
           snoozeAvailable={sessionRemindersSupported}
           reminder={reminders.get(sessionMenu.sessionId)}
+          stopBeforeArchiveSupported={stopBeforeArchiveSupported}
+          forkAvailability={menuForkAvailability}
+          // The list's keys act on the selected row, so its keycaps are shown only for that session.
+          showKeys={!isMobile && !boardMode && !expanded && sessionMenu.sessionId === displayedSelection}
           onClose={() => setSessionMenu(null)}
+          onReply={(sessionId) => expand(sessionId, true)}
+          onToggleUnread={toggleUnread}
+          onFork={forkFromMenu}
           onRename={(sessionId) => {
             // The dialog snapshots focus AFTER the menu item unmounts, so it needs a durable
             // return target — the same resolver the menu itself restores through.
@@ -1667,8 +1710,8 @@ export function InboxView({
               .catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" }));
           }}
           onArchive={(sessionId) => { void archive(sessionId); }}
-          renameRefusal={sessionCommandRefusal(sessions.get(sessionMenu.sessionId)!, "rename")}
-          archiveRefusal={sessionArchiveActionRefusal(sessions.get(sessionMenu.sessionId)!)}
+          renameRefusal={sessionCommandRefusal(menuSession, "rename")}
+          archiveRefusal={sessionArchiveActionRefusal(menuSession)}
         />
       )}
       {renameSession && sessions.has(renameSession.sessionId) && (

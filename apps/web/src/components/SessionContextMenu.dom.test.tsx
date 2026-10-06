@@ -3,7 +3,8 @@ import test from "node:test";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { SessionReminderView } from "@wollipog/protocol";
+import type { SessionReminderView, SessionView } from "@wollipog/protocol";
+import type { ConversationForkAvailability } from "../session-actions.js";
 import { SessionContextMenu, type SessionContextMenuState } from "./SessionContextMenu.js";
 import { useLongPress } from "./interactions.js";
 
@@ -31,16 +32,40 @@ interface Log {
   snoozed: string[];
   dismissed: string[];
   archived: string[];
+  replied: string[];
+  toggledUnread: string[];
+  forked: string[];
+}
+
+type MenuSession = Pick<SessionView, "title" | "archiveStatus" | "archived" | "status">;
+const idle: MenuSession = { title: "Fix the Parser", archived: false, status: "completed" };
+
+/** The items' labels, without their keycaps or second lines. */
+function labels(menu: HTMLElement): string[] {
+  return [...menu.querySelectorAll('[role="menuitem"]')].map((item) => item.querySelector(".menu-text")?.textContent ?? "");
+}
+
+function item(menu: HTMLElement, label: string): HTMLButtonElement {
+  return [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+    .find((candidate) => candidate.querySelector(".menu-text")?.textContent === label)!;
 }
 
 async function mount(overrides: {
+  session?: MenuSession;
+  unread?: boolean;
+  stopBeforeArchiveSupported?: boolean;
+  forkAvailability?: ConversationForkAvailability;
+  showKeys?: boolean;
   pinned?: boolean;
   snoozeAvailable?: boolean;
   reminder?: SessionReminderView;
   renameRefusal?: string | null;
   archiveRefusal?: string | null;
 } = {}): Promise<{ root: Root; log: Log; menu: HTMLElement }> {
-  const log: Log = { closed: 0, restored: 0, renamed: [], toggledPin: [], snoozed: [], dismissed: [], archived: [] };
+  const log: Log = {
+    closed: 0, restored: 0, renamed: [], toggledPin: [], snoozed: [], dismissed: [], archived: [], replied: [],
+    toggledUnread: [], forked: [],
+  };
   const restoreHost = domWindow.document.createElement("button") as unknown as HTMLElement;
   domWindow.document.body.append(restoreHost as never);
   restoreHost.addEventListener("focus", () => { log.restored += 1; });
@@ -56,11 +81,18 @@ async function mount(overrides: {
     root.render(
       <SessionContextMenu
         state={state}
-        sessionTitle="Fix the Parser"
+        session={overrides.session ?? idle}
+        unread={overrides.unread ?? false}
+        stopBeforeArchiveSupported={overrides.stopBeforeArchiveSupported ?? true}
+        {...(overrides.forkAvailability ? { forkAvailability: overrides.forkAvailability } : {})}
+        showKeys={overrides.showKeys ?? false}
         pinned={overrides.pinned ?? false}
         snoozeAvailable={overrides.snoozeAvailable ?? true}
         {...(overrides.reminder ? { reminder: overrides.reminder } : {})}
         onClose={() => { log.closed += 1; }}
+        onReply={(id) => log.replied.push(id)}
+        onToggleUnread={(id) => log.toggledUnread.push(id)}
+        onFork={(id) => log.forked.push(id)}
         onRename={(id) => log.renamed.push(id)}
         onTogglePin={(id) => log.toggledPin.push(id)}
         onSnooze={(id) => log.snoozed.push(id)}
@@ -85,11 +117,12 @@ test("the menu names its session, offers its actions, and takes initial focus", 
   const { root, menu } = await mount();
   try {
     assert.equal(menu.getAttribute("aria-label"), "Session Actions for Fix the Parser");
-    const items = [...menu.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent);
-    assert.deepEqual(items, ["Rename Session…", "Pin Session", "Snooze…", "Archive"]);
-    assert.equal(domWindow.document.activeElement?.textContent, "Rename Session…",
+    assert.deepEqual(labels(menu), ["Reply", "Rename Session…", "Pin Session", "Mark Unread", "Snooze…", "Archive"]);
+    assert.equal(domWindow.document.activeElement?.textContent, "Reply",
       "the virtualized collections never focus rows, so the menu takes focus itself");
-    assert.ok(menu.querySelector(".menu-item.danger")?.textContent === "Archive");
+    assert.ok(menu.querySelector(".menu-item.danger .menu-text")?.textContent === "Archive");
+    assert.equal(menu.querySelector(".menu-head")?.textContent, "Fix the Parser",
+      "the phone sheet is titled with the session's one-line title");
     assert.ok(domWindow.document.querySelector(".menu-backdrop"),
       "the backdrop enrolls the menu in the shell's Escape ladder");
   } finally {
@@ -107,12 +140,9 @@ test("returned reminders expose Snooze Again and direct dismissal", async () => 
   };
   const { root, log, menu } = await mount({ reminder: fired });
   try {
-    const items = [...menu.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent);
-    assert.deepEqual(items, ["Rename Session…", "Pin Session", "Snooze Again…", "Dismiss Reminder", "Archive"]);
-    await act(async () => {
-      [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
-        .find((item) => item.textContent === "Dismiss Reminder")!.click();
-    });
+    assert.deepEqual(labels(menu),
+      ["Reply", "Rename Session…", "Pin Session", "Mark Unread", "Snooze Again…", "Dismiss Reminder", "Archive"]);
+    await act(async () => { item(menu, "Dismiss Reminder").click(); });
     assert.deepEqual(log.dismissed, ["s-1"]);
     assert.equal(log.restored, 1);
   } finally {
@@ -123,8 +153,7 @@ test("returned reminders expose Snooze Again and direct dismissal", async () => 
 test("snooze is omitted when reminders are unsupported", async () => {
   const { root, menu } = await mount({ snoozeAvailable: false });
   try {
-    const items = [...menu.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent);
-    assert.deepEqual(items, ["Rename Session…", "Pin Session", "Archive"]);
+    assert.deepEqual(labels(menu), ["Reply", "Rename Session…", "Pin Session", "Mark Unread", "Archive"]);
   } finally {
     await unmount(root);
   }
@@ -133,9 +162,7 @@ test("snooze is omitted when reminders are unsupported", async () => {
 test("dialog actions close without restoring focus; pin, archive, and dismissal restore it", async () => {
   const { root, log, menu } = await mount();
   try {
-    await act(async () => {
-      (menu.querySelectorAll('[role="menuitem"]')[0] as unknown as HTMLButtonElement).click();
-    });
+    await act(async () => { item(menu, "Rename Session…").click(); });
     assert.deepEqual(log.renamed, ["s-1"]);
     assert.equal(log.closed, 1);
     assert.equal(log.restored, 0, "the rename dialog takes focus; restoring would fight it");
@@ -146,8 +173,7 @@ test("dialog actions close without restoring focus; pin, archive, and dismissal 
   const pin = await mount({ pinned: true });
   try {
     await act(async () => {
-      [...pin.menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
-        .find((item) => item.textContent === "Unpin Session")!.click();
+      item(pin.menu, "Unpin Session").click();
     });
     assert.deepEqual(pin.log.toggledPin, ["s-1"], "the action keeps the menu target identity");
     assert.equal(pin.log.closed, 1);
@@ -178,7 +204,7 @@ test("Escape and arrow roving come from the collection-owned keyboard handler", 
     await act(async () => {
       menu.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }) as never);
     });
-    assert.equal(domWindow.document.activeElement?.textContent, "Pin Session");
+    assert.equal(domWindow.document.activeElement?.textContent, "Rename Session…");
     await act(async () => {
       menu.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as never);
     });
@@ -193,10 +219,8 @@ test("a Viewer's Rename and Archive stay listed, disabled and described by the r
   const reason = "Your Viewer role is read-only.";
   const { root, log, menu } = await mount({ renameRefusal: reason, archiveRefusal: reason });
   try {
-    const item = (label: string) => [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
-      .find((candidate) => candidate.textContent === label)!;
     for (const label of ["Rename Session…", "Archive"]) {
-      const button = item(label);
+      const button = item(menu, label);
       assert.equal(button.disabled, true, `${label} is disabled`);
       assert.equal(button.title, reason);
       const described = button.getAttribute("aria-describedby");
@@ -204,15 +228,14 @@ test("a Viewer's Rename and Archive stay listed, disabled and described by the r
         `${label} is described by the visible reason`);
     }
     assert.equal(menu.querySelectorAll(".menu-note").length, 1, "one shared reason is shown once");
-    assert.equal(domWindow.document.activeElement?.textContent, "Pin Session",
-      "initial focus skips the disabled Rename item");
+    assert.equal(domWindow.document.activeElement?.textContent, "Reply", "initial focus is the first enabled item");
     await act(async () => {
-      item("Rename Session…").click();
-      item("Archive").click();
+      item(menu, "Rename Session…").click();
+      item(menu, "Archive").click();
     });
     assert.deepEqual(log.renamed, []);
     assert.deepEqual(log.archived, []);
-    await act(async () => { item("Pin Session").click(); });
+    await act(async () => { item(menu, "Pin Session").click(); });
     assert.deepEqual(log.toggledPin, ["s-1"], "per-person Pin still works");
   } finally {
     await unmount(root);
@@ -259,8 +282,7 @@ test("the click a long-press releases onto a phone sheet item runs nothing", asy
   const pressRoot = await longPressAndRelease();
   const { root, log, menu } = await mount();
   try {
-    const pin = [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
-      .find((item) => item.textContent === "Pin Session")!;
+    const pin = item(menu, "Pin Session");
     await act(async () => { pin.click(); });
     assert.deepEqual(log.toggledPin, [], "the release click is swallowed");
     await act(async () => { pin.click(); });
@@ -279,12 +301,123 @@ test("a release onto the phone sheet's title row spends the grace, so the next i
   try {
     await act(async () => { menu.querySelector<HTMLElement>(".menu-head")!.click(); });
     assert.equal(domWindow.document.querySelector('[role="menu"]') !== null, true, "the release closes nothing");
-    const pin = [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
-      .find((item) => item.textContent === "Pin Session")!;
-    await act(async () => { pin.click(); });
+    await act(async () => { item(menu, "Pin Session").click(); });
     assert.deepEqual(log.toggledPin, ["s-1"]);
   } finally {
     await act(async () => { pressRoot.unmount(); });
     await unmount(root);
+  }
+});
+
+test("every item of a forkable session, in order, with its icon and one separator before the archive item (#2214)", async () => {
+  const { root, log, menu } = await mount({ forkAvailability: { available: true, forkTurn: 3 } });
+  try {
+    assert.deepEqual(labels(menu),
+      ["Reply", "Rename Session…", "Pin Session", "Mark Unread", "Fork Conversation…", "Snooze…", "Archive"]);
+    for (const menuItem of menu.querySelectorAll('[role="menuitem"]')) {
+      assert.ok(menuItem.querySelector(".menu-icon svg"), `${menuItem.textContent} leads with its icon`);
+    }
+    const children = [...menu.children];
+    const separators = children.filter((child) => child.getAttribute("role") === "separator");
+    assert.equal(separators.length, 1, "one separator");
+    assert.equal(children[children.indexOf(separators[0]!) + 1], item(menu, "Archive"), "it comes right before Archive");
+    await act(async () => { item(menu, "Fork Conversation…").click(); });
+    assert.deepEqual(log.forked, ["s-1"]);
+    assert.equal(log.restored, 0, "the fork's confirmation takes focus");
+  } finally {
+    await unmount(root);
+  }
+
+  const replied = await mount();
+  try {
+    await act(async () => { item(replied.menu, "Reply").click(); });
+    assert.deepEqual(replied.log.replied, ["s-1"]);
+  } finally {
+    await unmount(replied.root);
+  }
+});
+
+test("the archive item reads Archive, Archive and Stop… or Retry Stop… with the shared label (#2214)", async () => {
+  const cases: Array<[MenuSession, boolean, string]> = [
+    [idle, true, "Archive"],
+    [{ ...idle, status: "running" }, true, "Archive and Stop…"],
+    // A session waiting for its next prompt still has a live process to stop.
+    [{ ...idle, status: "idle" }, true, "Archive and Stop…"],
+    [{ ...idle, status: "running", archiveStatus: "stop_failed" }, true, "Retry Stop…"],
+    // A control plane that cannot stop first archives a running session without asking.
+    [{ ...idle, status: "running" }, false, "Archive"],
+  ];
+  for (const [session, stopBeforeArchiveSupported, label] of cases) {
+    const { root, menu } = await mount({ session, stopBeforeArchiveSupported });
+    try {
+      assert.equal(labels(menu).at(-1), label, `${session.status} ${session.archiveStatus ?? ""}`);
+    } finally {
+      await unmount(root);
+    }
+  }
+});
+
+test("Fork Conversation is disabled with its reason as a visible second line, and absent where it can never fork", async () => {
+  const reason = "Wait for the current turn or approval before creating a fork.";
+  const running = await mount({ forkAvailability: { available: false, offered: true, reason } });
+  try {
+    const fork = item(running.menu, "Fork Conversation…");
+    assert.equal(fork.disabled, true);
+    assert.equal(fork.querySelector(".menu-desc")?.textContent, reason);
+    assert.equal(domWindow.document.getElementById(fork.getAttribute("aria-describedby")!)?.textContent, reason);
+    await act(async () => { fork.click(); });
+    assert.deepEqual(running.log.forked, []);
+  } finally {
+    await unmount(running.root);
+  }
+
+  const never = await mount({
+    forkAvailability: { available: false, offered: false, reason: "This provider does not support conversation forks." },
+  });
+  try {
+    assert.equal(labels(never.menu).includes("Fork Conversation…"), false);
+  } finally {
+    await unmount(never.root);
+  }
+});
+
+test("Mark Unread becomes Mark Read for an unread session, and Pin becomes Unpin for a pinned one", async () => {
+  const { root, log, menu } = await mount({ unread: true, pinned: true });
+  try {
+    assert.deepEqual(labels(menu).slice(2, 4), ["Unpin Session", "Mark Read"]);
+    await act(async () => { item(menu, "Mark Read").click(); });
+    assert.deepEqual(log.toggledUnread, ["s-1"]);
+    assert.equal(log.restored, 1, "marking opens no dialog, so keyboard position returns");
+  } finally {
+    await unmount(root);
+  }
+});
+
+test("items with a Sessions list key show its keycap only where the key acts on this session (#2214)", async () => {
+  const { root, menu } = await mount({ showKeys: true, forkAvailability: { available: true, forkTurn: 1 } });
+  try {
+    const keycaps = Object.fromEntries([...menu.querySelectorAll('[role="menuitem"]')].map((menuItem) => [
+      menuItem.querySelector(".menu-text")?.textContent,
+      menuItem.querySelector(".menu-trail kbd")?.textContent ?? null,
+    ]));
+    assert.deepEqual(keycaps, {
+      "Reply": "R",
+      "Rename Session…": null,
+      "Pin Session": "S",
+      "Mark Unread": "U",
+      "Fork Conversation…": "F",
+      "Snooze…": "H",
+      "Archive": "E",
+    });
+    assert.equal(item(menu, "Archive").getAttribute("aria-keyshortcuts"), "E");
+  } finally {
+    await unmount(root);
+  }
+
+  const elsewhere = await mount({ showKeys: false });
+  try {
+    assert.equal(elsewhere.menu.querySelectorAll("kbd").length, 0, "no keycap for a session the keys do not act on");
+  } finally {
+    await unmount(elsewhere.root);
   }
 });

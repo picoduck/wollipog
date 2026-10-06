@@ -357,7 +357,7 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
   {
     id: "inbox-unread",
     group: "Sessions List",
-    label: "Mark Unread",
+    label: "Mark Unread or Read",
     scope: "Sessions List",
     binding: { key: "u", bare: true },
   },

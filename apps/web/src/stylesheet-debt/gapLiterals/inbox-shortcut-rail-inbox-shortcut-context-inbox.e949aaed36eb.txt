@@ -1,1 +1,0 @@
-|.inbox-shortcut-rail,.inbox-shortcut-context,.inbox-shortcut-standard|gap|3px

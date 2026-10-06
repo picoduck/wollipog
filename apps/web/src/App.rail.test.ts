@@ -15,7 +15,6 @@ const inbox = readFileSync(new URL("./components/InboxView.tsx", import.meta.url
 const groupTabs = readFileSync(new URL("./components/SessionGroupTabs.tsx", import.meta.url), "utf8");
 const inboxList = readFileSync(new URL("./components/InboxList.tsx", import.meta.url), "utf8");
 const inboxRow = readFileSync(new URL("./components/InboxRow.tsx", import.meta.url), "utf8");
-const inboxShortcutRail = readFileSync(new URL("./components/InboxShortcutRail.tsx", import.meta.url), "utf8");
 const projectSplitMenu = readFileSync(new URL("./components/ProjectSplitMenu.tsx", import.meta.url), "utf8");
 const menuSurface = readFileSync(new URL("./components/Menu.tsx", import.meta.url), "utf8");
 const projectsView = readFileSync(new URL("./components/ProjectsView.tsx", import.meta.url), "utf8");
@@ -147,8 +146,10 @@ test("the desktop rail is grouped, searchable and has one current-page treatment
   assert.doesNotMatch(rail, /FolderSolidIcon/, "no rail glyph is filled");
 });
 
-test("heartbeat activity feeds cards, preview, split/footer counts, and independent rail badges", () => {
-  assert.match(inbox, /stalledCount[\s\S]*inbox-activity-footer/);
+test("heartbeat activity feeds cards, preview, split counts, and independent rail badges", () => {
+  // #2214: the counts live on the tabs and the rail; the Sessions footer that restated them is gone.
+  assert.match(inbox, /<CountBadge count=\{split\.stalledCount\} tone="danger" \/>/);
+  assert.doesNotMatch(inbox, /inbox-activity-footer/);
   assert.match(inboxList, /state\.activity\.get\(props\.session\.id\)/);
   // #2210: the Sessions preview shows one status and no activity strip; the rows carry it.
   assert.doesNotMatch(detail, /<ActivityStrip\b/, "the preview bar has no activity strip");
@@ -248,25 +249,18 @@ test("the global keyboard layer wires rail navigation, Inbox search, creation, a
 });
 
 test("Inbox focus, unread state, and shortcuts use non-overlapping visual treatments", () => {
-  assert.equal([inboxList, inboxRow, css].join("\n").includes("inbox-row-actions"), false,
-    "session rows must remain compact and contain no shortcut rail");
-  assert.match(inbox, /<footer className="inbox-activity-footer"[\s\S]*?<InboxShortcutRail/,
-    "the shortcut rail belongs to the full-width Inbox footer");
-  assert.match(inboxShortcutRail, /session\.pendingApproval[\s\S]*?label="Approve"[\s\S]*?label="Deny"/,
-    "approval actions are contextual to the selected session");
-  assert.match(inboxShortcutRail, /inbox-shortcut-rail is-empty/);
-  assert.doesNotMatch(inboxShortcutRail, /inbox-shortcut-rail empty/,
-    "the empty shortcut rail must not inherit the global dashed empty-state card");
-  assert.match(css, /\.inbox-activity-footer\s*\{[^}]*height:\s*34px;[^}]*min-height:\s*34px;[^}]*max-height:\s*34px;[^}]*flex:\s*none;[^}]*overflow:\s*hidden;/,
-    "the Inbox footer stays fixed immediately above the resize divider");
-  assert.match(css, /\.inbox-shortcut-rail\s*\{[^}]*overflow-x:\s*auto;[^}]*scrollbar-width:\s*none;[^}]*\}[\s\S]*\.inbox-shortcut-rail::-webkit-scrollbar\s*\{\s*display:\s*none;/,
-    "overflowing shortcuts remain scrollable without a cross-axis scrollbar clipping the fixed footer");
+  // #2214: no second action surface. Keys are taught on controls, and each row's own trailing
+  // actions (Snooze, Archive and ⋯) sit over the row's fill: on hover or focus-within for a fine
+  // pointer, and only ⋯, always, for a coarse one.
+  assert.doesNotMatch([inbox, inboxList, inboxRow, css].join("\n"), /inbox-shortcut-rail|inbox-activity-footer|InboxShortcutRail/,
+    "the shortcut rail and the activity footer are gone");
+  assert.match(inboxRow, /className="inbox-row-actions"/);
+  assert.match(css, /@media \(pointer: fine\) \{\s*:is\(\.inbox-row-shell:hover, \.inbox-row-shell:focus-within\) \.inbox-row-actions \{ display: inline-flex; \}/,
+    "a fine pointer sees the row's actions on hover or focus-within");
+  assert.match(css, /@media \(pointer: coarse\) \{[^}]*\.inbox-row-actions \{[^}]*display: inline-flex;[^}]*\}\s*\.inbox-row-action:not\(\.inbox-row-more\) \{ display: none; \}/,
+    "a coarse pointer sees only the row's ⋯, always");
   assert.match(css, /\.inbox-zero\s*\{[^}]*min-height:\s*0;[^}]*flex:\s*1;[^}]*overflow:\s*auto;/,
-    "the empty state consumes the flexible list area so the footer remains bottom-pinned");
-  assert.doesNotMatch(css, /\.inbox-shortcut-rail\s*\{[^}]*justify-content:/,
-    "justifying an overflowing rail to its end puts its first shortcut out of scroll reach");
-  assert.match(css, /\.inbox-shortcut-rail > :first-child\s*\{\s*margin-inline-start:\s*auto;\s*\}/,
-    "shortcuts still pack to the trailing edge while they fit, through an auto margin that collapses on overflow");
+    "the empty state consumes the flexible list area");
   assert.doesNotMatch(css, /\.inbox-(list|preview)-pane:has\([^{]*focus-visible/,
     "the panes are never framed on focus; F6 marks a zone with a brief top-edge line instead");
   assert.match(css, /\.inbox-list:focus-visible,[\s\S]*?\.detail-scroll:focus-visible \{ outline: none; \}/,

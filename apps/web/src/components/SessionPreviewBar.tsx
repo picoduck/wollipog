@@ -36,7 +36,7 @@ export function SessionPreviewBar({
   runnerOnline: boolean;
   machineName: string;
   agentLabel: string;
-  /** `sessionArchiveActionLabel()`: the icon button's name and the start of its tooltip. */
+  /** `sessionArchiveControlLabel()`: the icon button's name and the start of its tooltip. */
   archiveLabel: string;
   /** Absent where the control plane has no reminders. */
   onSnooze?: () => void;

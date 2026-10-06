@@ -185,6 +185,24 @@ export function conversationForkAvailability(
   return { available: true, forkTurn: forkTurn! };
 }
 
+/**
+ * Fork Conversation for a session whose transcript is not loaded (the Sessions context menu, #2214).
+ * Whether it is offered, and every reason that does not depend on the latest checkpoint, read as
+ * `conversationForkAvailability` reads them, in its order. Without a transcript nothing proves a
+ * checkpoint to fork from, so a session nothing else blocks is still not available: it gets
+ * `unloadedReason`, which says where the fork can be made.
+ */
+export function conversationForkAvailabilityWithoutTranscript(
+  context: ConversationForkContext,
+  unloadedReason: string,
+): ConversationForkAvailability {
+  // A stand-in latest turn passes the two checks that need the transcript and no other.
+  const availability = conversationForkAvailability(1, 1, context);
+  return availability.available
+    ? { available: false, offered: context.hasWorktree && context.providerSupported, reason: unloadedReason }
+    : availability;
+}
+
 /** A lost response or server-side 5xx cannot prove whether the non-idempotent fork committed. */
 export function forkFailureIsAmbiguous(httpStatus?: number): boolean {
   return httpStatus === undefined || httpStatus >= 500;

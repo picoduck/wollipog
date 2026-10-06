@@ -140,100 +140,20 @@ test("pending snooze excludes attention from Active across list, board, search, 
   await expect(card.locator('[aria-label="Reminder: Snoozed"]')).toBeVisible();
 });
 
-test("the Inbox footer centers readable counts on phones and keeps shortcuts trailing on desktop", async ({ page }) => {
-  await page.setViewportSize({ width: 1280, height: 800 });
+test("the Sessions list runs to its pane's lower edge with no footer or shortcut rail at any width (#2214)", async ({ page }) => {
   await openHarness(page);
-
-  const footer = page.locator('footer[aria-label="Sessions Status and Shortcuts"]');
-  const summary = footer.getByLabel("Sessions Activity Summary");
-  const shortcuts = footer.locator(".inbox-shortcut-rail");
-  await expect(shortcuts).toBeVisible();
-  await expect(shortcuts.getByRole("button", { name: "Reply" })).toBeVisible();
-  const desktopGeometry = await footer.evaluate((element) => {
-    const rail = element.querySelector<HTMLElement>(".inbox-shortcut-rail")!.getBoundingClientRect();
-    const bounds = element.getBoundingClientRect();
-    return {
-      contained: element.scrollWidth <= element.clientWidth,
-      railTrailingGap: bounds.right - rail.right,
-    };
-  });
-  expect(desktopGeometry.contained).toBe(true);
-  expect(desktopGeometry.railTrailingGap).toBeLessThanOrEqual(9);
-
-  for (const width of [390, 320]) {
+  for (const width of [1280, 834, 390]) {
     await page.setViewportSize({ width, height: 844 });
-    await expect(shortcuts).toBeHidden();
-    await expect(summary.locator("span")).toHaveText([
-      "0 Running",
-      "0 Queued",
-      "0 Starting",
-      "1 Blocked",
-      "0 Stalled",
-    ]);
-
-    const phoneGeometry = await footer.evaluate((element) => {
-      const bounds = element.getBoundingClientRect();
-      const counts = element.querySelector<HTMLElement>(".inbox-activity-summary")!.getBoundingClientRect();
-      return {
-        centered: Math.abs((counts.left + counts.right) / 2 - (bounds.left + bounds.right) / 2),
-        contained: element.scrollWidth <= element.clientWidth,
-        height: bounds.height,
-      };
+    await expect(page.locator(".inbox-row-shell").first()).toBeVisible();
+    await expect(page.locator(".inbox-activity-footer, .inbox-shortcut-rail")).toHaveCount(0);
+    const gap = await page.locator(".inbox-list-pane").evaluate((pane) => {
+      const list = pane.querySelector<HTMLElement>(".inbox-list")!.getBoundingClientRect();
+      return pane.getBoundingClientRect().bottom - list.bottom;
     });
-    expect(phoneGeometry.centered).toBeLessThanOrEqual(1);
-    expect(phoneGeometry.contained).toBe(true);
-    expect(phoneGeometry.height).toBe(34);
+    expect(gap, `at ${width}px nothing sits under the list`).toBeLessThanOrEqual(1);
   }
-
-  const wideFace = await page.evaluate(() => {
-    const widthIn = (family: string) => {
-      const probe = document.createElement("span");
-      probe.textContent = "12 Running 24 Blocked 5 Stalled";
-      probe.style.cssText =
-        `position:absolute;visibility:hidden;white-space:nowrap;font-size:11px;font-family:${family}`;
-      document.body.append(probe);
-      const width = probe.getBoundingClientRect().width;
-      probe.remove();
-      return width;
-    };
-    const absent = widthIn('"a face no machine has, 96d10"');
-    return ["DejaVu Sans", "Liberation Sans"].find((face) => widthIn(`"${face}"`) !== absent) ?? null;
-  });
-  expect(wideFace, "no wide face to measure: install fonts-dejavu-core (CI renders in DejaVu Sans)")
-    .not.toBeNull();
-  await page.addStyleTag({
-    content: `.inbox-activity-footer, .inbox-activity-footer * { font-family: "${wideFace}" !important; }`,
-  });
-  const crowdedCounts = ["12 Running", "8 Queued", "3 Starting", "24 Blocked", "5 Stalled"];
-  await summary.locator("span").evaluateAll((spans, values) => {
-    for (const [index, span] of spans.entries()) span.textContent = values[index]!;
-  }, crowdedCounts);
-  await expect(summary.locator("span")).toHaveText(crowdedCounts);
-  const crowdedGeometry = await footer.evaluate((element) => ({
-    contained: element.scrollWidth <= element.clientWidth,
-    summaryContained: element.querySelector<HTMLElement>(".inbox-activity-summary")!.scrollWidth <=
-      element.querySelector<HTMLElement>(".inbox-activity-summary")!.clientWidth,
-  }));
-  expect(crowdedGeometry.contained).toBe(true);
-  expect(crowdedGeometry.summaryContained).toBe(true);
-
-  const overflowingCounts = ["1234 Running", "5678 Queued", "9012 Starting", "3456 Blocked", "7890 Stalled"];
-  await summary.locator("span").evaluateAll((spans, values) => {
-    for (const [index, span] of spans.entries()) span.textContent = values[index]!;
-  }, overflowingCounts);
-  const leadingOverflow = await footer.evaluate((element) => {
-    const bounds = element.getBoundingClientRect();
-    const padding = Number.parseFloat(getComputedStyle(element).paddingInlineStart);
-    const firstCount = element.querySelector<HTMLElement>(".inbox-activity-summary span")!.getBoundingClientRect();
-    return bounds.left + padding - firstCount.left;
-  });
-  expect(leadingOverflow, "an over-wide summary keeps its leading count reachable").toBeLessThanOrEqual(0.5);
-
   await page.getByRole("radio", { name: "Board" }).click();
-  await expect(footer).toHaveCount(0);
-  await page.getByRole("radio", { name: "List" }).click();
-  await expect(summary).toBeVisible();
-  await expect(shortcuts).toBeHidden();
+  await expect(page.locator(".inbox-activity-footer, .inbox-shortcut-rail")).toHaveCount(0);
 });
 
 test("a returned session explains its snooze and offers state-aware actions", async ({ page }) => {
@@ -365,7 +285,7 @@ async function tapAt(cdp: CDPSession, point: { x: number; y: number }) {
   await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
 }
 
-test("a held finger on a row opens its menu without selecting or opening it", async ({ page }) => {
+test("a held finger on a row opens its menu, selecting the row on desktop but never opening it", async ({ page }) => {
   await openHarness(page);
   const cdp = await touchSession(page);
   const selectedBefore = await page.locator('.inbox-row-shell[aria-selected="true"] .inbox-row-title').textContent();
@@ -374,16 +294,17 @@ test("a held finger on a row opens its menu without selecting or opening it", as
   await expect(page.locator('[role="menu"]')).toHaveAttribute("aria-label", "Session Actions for Queued Session");
   await expect(page.locator(".inbox-view.expanded")).toHaveCount(0, "a press is not an open");
   expect(harnessPath(page)).toBe("/");
-  await expect(page.locator('.inbox-row-shell[aria-selected="true"] .inbox-row-title'))
-    .toHaveText(selectedBefore!, "and not a select");
+  // A desktop row's menu selects its row first (#2214), so the menu, the preview and the keys share it.
+  expect(selectedBefore).not.toBe("Queued Session");
+  await expect(page.locator('.inbox-row-shell[aria-selected="true"] .inbox-row-title')).toHaveText("Queued Session");
 
   // Dismissal on touch is a tap on the backdrop — which must NOT be swallowed by the grace
   // that protected the menu from its own opening click.
   await tapAt(cdp, { x: 20, y: 500 });
   await expect(page.locator('[role="menu"]')).toHaveCount(0);
-  await tapAt(cdp, await centerOf(page.locator(".inbox-row-shell", { hasText: "Queued Session" })));
+  await tapAt(cdp, await centerOf(page.locator(".inbox-row-shell", { hasText: "Running Session" }).locator(".inbox-row-title")));
   await expect(page.locator('.inbox-row-shell[aria-selected="true"] .inbox-row-title'))
-    .toHaveText("Queued Session", "the previous press's grace must not swallow the tap");
+    .toHaveText("Running Session", "the previous press's grace must not swallow the tap");
 });
 
 test("pin indicators keep their shape and card geometry across viewports, densities, and palettes", async ({ page }) => {
@@ -547,4 +468,68 @@ test("a drag begun from a card stands the pending press down", async ({ page }) 
   await new Promise((resolve) => setTimeout(resolve, 700));
   await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
   await expect(page.locator('[role="menu"]')).toHaveCount(0, "the drag owns the gesture");
+});
+
+test.describe("on a touch tablet at 834×1112 (#2214)", () => {
+  test.use({ viewport: { width: 834, height: 1112 }, hasTouch: true });
+
+  test("the selected session's request decisions are fully visible in the preview without scrolling", async ({ page }) => {
+    await openHarness(page);
+    expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
+    await page.locator(".inbox-row", { hasText: "Approval Session" }).click();
+    const preview = page.locator(".inbox-preview-pane");
+    await expect(preview.locator(".session-preview-bar")).toContainText("Approval Session");
+    // The request card at the top of the preview (#2210) holds the decisions that left the rail:
+    // its primary and the ⋯ with every other choice, all wholly on screen without scrolling.
+    const foot = preview.locator(".request-card-foot");
+    await expect(foot.getByRole("button", { name: /^Allow/u })).toBeVisible();
+    const controls = await foot.getByRole("button").evaluateAll((buttons) => buttons.map((element) => {
+      const box = element.getBoundingClientRect();
+      const pane = element.closest(".inbox-preview-pane")!.getBoundingClientRect();
+      return {
+        name: element.getAttribute("aria-label") ?? element.textContent,
+        inside: box.top >= pane.top && box.bottom <= pane.bottom && box.bottom <= window.innerHeight,
+      };
+    }));
+    expect(controls.length, JSON.stringify(controls)).toBeGreaterThanOrEqual(2);
+    for (const control of controls) expect(control.inside, `${control.name} sits wholly on screen`).toBe(true);
+    expect(await preview.locator(".detail-scroll").evaluate((element) => element.scrollTop)).toBe(0);
+    // Each row shows only its ⋯ on touch, at least 44px, and no rail or footer takes the list's height.
+    const shell = page.locator(".inbox-row-shell", { hasText: "Approval Session" });
+    const more = shell.locator(".inbox-row-more");
+    await expect(more).toBeVisible();
+    const size = await more.evaluate((element) => element.getBoundingClientRect());
+    expect(Math.min(size.width, size.height)).toBeGreaterThanOrEqual(44);
+    await expect(shell.locator(".inbox-row-action:not(.inbox-row-more)")).toHaveCount(2);
+    for (const hidden of await shell.locator(".inbox-row-action:not(.inbox-row-more)").all()) await expect(hidden).toBeHidden();
+    await expect(page.locator(".inbox-activity-footer, .inbox-shortcut-rail")).toHaveCount(0);
+  });
+});
+
+test.describe("with a mouse at 1440×900 (#2214)", () => {
+  test.use({ viewport: { width: 1440, height: 900 } });
+
+  test("hovering a row shows Snooze, Archive and ⋯ without hiding its status or time", async ({ page }) => {
+    await openHarness(page);
+    const row = page.locator(".inbox-row-shell", { hasText: "Review Session" });
+    const actions = row.locator(".inbox-row-actions");
+    await expect(actions).toBeHidden();
+    await row.hover();
+    await expect(actions).toBeVisible();
+    const names = await actions.getByRole("button").evaluateAll((buttons) => buttons.map((button) => button.getAttribute("aria-label")));
+    expect(names[0]).toBe("Snooze");
+    expect(names[1]).toMatch(/^(Archive|Archive and Stop…|Retry Stop…)$/u);
+    expect(names[2]).toBe("More Actions");
+    const overlap = await row.evaluate((shell) => {
+      const actionsBox = shell.querySelector(".inbox-row-actions")!.getBoundingClientRect();
+      const covered = (selector: string) => {
+        const element = shell.querySelector(selector);
+        if (!element) return null;
+        const box = element.getBoundingClientRect();
+        return box.right > actionsBox.left && box.left < actionsBox.right && box.bottom > actionsBox.top && box.top < actionsBox.bottom;
+      };
+      return { status: covered(".inbox-row-status-line .row-status"), time: covered(".inbox-row-time") };
+    });
+    expect(overlap).toEqual({ status: false, time: false });
+  });
 });

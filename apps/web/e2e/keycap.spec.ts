@@ -103,26 +103,13 @@ test.describe("with a fine pointer at 1440px", () => {
     expect(sizes, "every row's keycap is the same size").toEqual(["11px 18"]);
   });
 
-  test("an enlarged text size keeps the Sessions footer's keycaps inside its fixed height", async ({ page }) => {
-    // The footer is 34px with overflow hidden; the keycap box is px like every control, so only its
-    // text grows with the reader's text size and the shortcut buttons are never clipped.
+  test("the Sessions context menu draws the same keycap in each item's trailing slot (#2214)", async ({ page }) => {
     await page.goto(PREVIEW);
-    await page.addStyleTag({ content: "html { font-size: 32px; }" });
-    const footer = page.locator(".inbox-activity-footer");
-    const buttons = page.locator(".inbox-shortcut-rail button");
-    await expect(buttons.first().locator("kbd")).toBeVisible();
-    const geometry = await footer.evaluate((element) => {
-      const box = element.getBoundingClientRect();
-      return [...element.querySelectorAll(".inbox-shortcut-rail button, .inbox-shortcut-rail kbd")].map((child) => {
-        const rect = child.getBoundingClientRect();
-        return { top: rect.top - box.top, bottom: box.bottom - rect.bottom };
-      });
-    });
-    expect(geometry.length).toBeGreaterThan(1);
-    for (const { top, bottom } of geometry) {
-      expect(top, "inside the footer's top edge").toBeGreaterThanOrEqual(0);
-      expect(bottom, "inside the footer's bottom edge").toBeGreaterThanOrEqual(0);
-    }
+    await page.locator(".inbox-list").focus();
+    await page.keyboard.press("Shift+F10");
+    const archive = page.getByRole("menuitem", { name: /^Archive/ });
+    await expectKeycap(page, archive.locator(".menu-trail kbd"), "context menu keycap");
+    await expect(archive).toHaveAttribute("aria-keyshortcuts", "E");
   });
 
   test("the Sessions search field's / is the same keycap once the field opens", async ({ page }) => {
@@ -177,8 +164,12 @@ for (const width of [390, 1440]) {
         await expect(jump).toBeVisible();
         await expect(jump).toHaveAccessibleName("Jump to Latest");
         await expect(jump.locator("kbd")).toBeHidden();
-        await expect(page.locator(".inbox-shortcut-rail button").first()).toBeVisible();
-        await expect(page.locator(".inbox-shortcut-rail kbd").first()).toBeHidden();
+        // A row's ⋯ is always there on a touch screen, and its menu shows no keycaps (#2214).
+        await page.locator(".inbox-row-more").first().click();
+        await expect(page.getByRole("menu")).toBeVisible();
+        await expect(page.locator('[role="menu"] kbd')).toHaveCount(0);
+        await page.keyboard.press("Escape");
+        await expect(page.getByRole("menu")).toHaveCount(0);
         // An expanded session's idle composer offers no Reply keycap on a touch screen.
         await page.getByRole("button", { name: "Open Session", exact: true }).click();
         await expect(page.locator(".composer-box")).toBeVisible();

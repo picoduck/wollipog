@@ -44,6 +44,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `BoardIcon` | Lucide | `Columns3` | Generic board columns. |
 | `ListIcon` | Lucide | `List` | Generic list layout. |
 | `AlarmClockIcon` | Lucide | `AlarmClock` | Snooze: a snoozed Sessions row's return time (#2209) and the Sessions preview bar's Snooze button (#2210). |
+| `DismissReminderIcon` | Lucide | `AlarmClockOff` | Dismiss Reminder in the Sessions context menu (#2214). |
 | `ConnectionsIcon` | Lucide | `MonitorCog` | Runner connection management. |
 | `RunsIcon` | Lucide | `Workflow` | Generic workflow runs. |
 | `PodsIcon` | Lucide | `UsersRound` | Collaboration group. |
@@ -61,6 +62,10 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `ChevronUpIcon` | Lucide | `ChevronUp` | Expand on the request dock's reading-back strip. |
 | `PlusIcon` | Lucide | `Plus` | Generic add action. |
 | `PinIcon` | Lucide | `Pin` | Pinned session state. |
+| `UnpinIcon` | Lucide | `PinOff` | Unpin Session in the Sessions context menu (#2214). |
+| `ReplyIcon` | Lucide | `Reply` | Reply to a session: open it with the composer focused (#2214). |
+| `MarkUnreadIcon` | Lucide | `MessageSquareDot` | Mark a session unread (#2214); `Mail` already means an email address. |
+| `MarkReadIcon` | Lucide | `MessageSquareCheck` | Mark a session read (#2214). |
 | `MoreHorizontalIcon` | Lucide | `Ellipsis` | Horizontal overflow menu. |
 | `MoreVerticalIcon` | Lucide | `EllipsisVertical` | Vertical overflow menu. |
 | `ShareIcon` | Lucide | `Share` | Generic share action. |

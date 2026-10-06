@@ -1,1 +1,0 @@
-|.inbox-activity-footer|gap|8px

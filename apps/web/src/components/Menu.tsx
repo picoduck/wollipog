@@ -229,6 +229,9 @@ export interface MenuSurfaceProps extends Omit<HTMLAttributes<HTMLDivElement>, "
   anchor: MenuAnchor;
   /** The accessible name, and the sheet's title row on a phone. */
   label: string;
+  /** The phone sheet's title row, when it should read differently from the accessible name (a
+   * session menu is titled with the session's title). */
+  sheetTitle?: string;
   /** A visible title row shown at every width, replacing the phone-only one (Model Settings). */
   head?: ReactNode;
   /** `dialog` for a popover of detail or form fields (Session Status); never for a list of actions. */
@@ -269,6 +272,7 @@ export function MenuSurface({
   surfaceRef,
   anchor,
   label,
+  sheetTitle,
   head,
   role = "menu",
   kind = "menu",
@@ -320,7 +324,7 @@ export function MenuSurface({
         style={{ ...(fixedWidth === undefined ? null : { width: fixedWidth }), ...placement, ...style }}
       >
         <div className="sheet-grabber" aria-hidden="true" />
-        {head ?? <div className="menu-head" aria-hidden="true">{label}</div>}
+        {head ?? <div className="menu-head" aria-hidden="true">{sheetTitle ?? label}</div>}
         {children}
       </div>
     </>

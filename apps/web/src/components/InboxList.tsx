@@ -99,6 +99,11 @@ export const InboxList = forwardRef<HTMLDivElement, {
   onPointerPressChange?: (pointerId: number, active: boolean, pointerType: string) => void;
   /** One stable callback shared by every row (#154); the keyboard path anchors at the row's box. */
   onSessionMenu: (sessionId: string, anchor: { x: number; y: number }) => void;
+  /** Each row's trailing Snooze and Archive (#2214): stable callbacks, like the ones above. */
+  onSnooze?: (sessionId: string) => void;
+  onArchive?: (sessionId: string) => void;
+  /** Decides the label of each row's Archive. */
+  stopBeforeArchiveSupported?: boolean;
 }>(function InboxList({
   entries,
   selectedSessionId,
@@ -120,6 +125,9 @@ export const InboxList = forwardRef<HTMLDivElement, {
   onPointerTargetChange,
   onPointerPressChange,
   onSessionMenu,
+  onSnooze,
+  onArchive,
+  stopBeforeArchiveSupported = false,
 }, ref) {
   // The breakpoint, read ONCE for the whole list rather than once per mounted card. The same answer
   // decides the rows' shape and the estimate the virtualizer positions unmeasured rows with, and
@@ -260,6 +268,9 @@ export const InboxList = forwardRef<HTMLDivElement, {
             onExpand,
             onToggleThread,
             onSessionMenu,
+            onSnooze,
+            onArchive,
+            stopBeforeArchiveSupported,
           } satisfies Omit<InboxRowProps, "activity" | "activityNow">;
           return activityBySession && activityNow !== undefined
             ? <InboxRow {...rowProps} activity={activityBySession.get(session.id)} activityNow={activityNow} />

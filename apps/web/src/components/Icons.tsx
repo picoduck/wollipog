@@ -1,6 +1,7 @@
 import React, { type SVGProps, useId } from "react";
 import {
   AlarmClock as LucideAlarmClock,
+  AlarmClockOff as LucideAlarmClockOff,
   Archive as LucideArchive,
   ArrowDown as LucideArrowDown,
   ArrowRightLeft as LucideArrowRightLeft,
@@ -79,6 +80,8 @@ import {
   LockKeyhole as LucideLockKeyhole,
   Mail as LucideMail,
   MessageCircleQuestion as LucideMessageCircleQuestion,
+  MessageSquareCheck as LucideMessageSquareCheck,
+  MessageSquareDot as LucideMessageSquareDot,
   Mic as LucideMic,
   Monitor as LucideMonitor,
   MonitorCog as LucideMonitorCog,
@@ -90,9 +93,11 @@ import {
   Paperclip as LucidePaperclip,
   Pencil as LucidePencil,
   Pin as LucidePin,
+  PinOff as LucidePinOff,
   Play as LucidePlay,
   Plus as LucidePlus,
   RefreshCw as LucideRefreshCw,
+  Reply as LucideReply,
   ScrollText as LucideScrollText,
   Search as LucideSearch,
   Settings as LucideSettings,
@@ -220,6 +225,11 @@ export function AlarmClockIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideAlarmClock} {...props} />;
 }
 
+/** Dismiss Reminder: clear a returned reminder (#2214). */
+export function DismissReminderIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideAlarmClockOff} {...props} />;
+}
+
 export function ConnectionsIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideMonitorCog} {...props} />;
 }
@@ -288,6 +298,26 @@ export function PlusIcon(props: IconProps) {
 
 export function PinIcon(props: IconProps) {
   return <LibraryIcon glyph={LucidePin} {...props} />;
+}
+
+/** Unpin Session (#2214). */
+export function UnpinIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucidePinOff} {...props} />;
+}
+
+/** Reply to a session: open it with the composer focused (#2214). */
+export function ReplyIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideReply} {...props} />;
+}
+
+/** Mark Unread: bring back a session's unread dot (#2214). */
+export function MarkUnreadIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideMessageSquareDot} {...props} />;
+}
+
+/** Mark Read: clear a session's unread dot (#2214). */
+export function MarkReadIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideMessageSquareCheck} {...props} />;
 }
 
 export function MoreHorizontalIcon(props: IconProps) {

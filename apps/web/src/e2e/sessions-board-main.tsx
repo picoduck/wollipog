@@ -3,6 +3,7 @@ import { Shell } from "../App.js";
 import { ThemeProvider } from "../components/ThemeProvider.js";
 import { createRoot } from "react-dom/client";
 import {
+  PROTOCOL_VERSION,
   type BoardColumn,
   type ControlPlaneToUi,
   type RunnerView,
@@ -39,6 +40,9 @@ const empty = new URLSearchParams(location.search).has("empty");
 const threads = new URLSearchParams(location.search).has("threads");
 const openAiThreadParent = new URLSearchParams(location.search).get("thread-provider") === "openai";
 const reminderConflict = new URLSearchParams(location.search).get("reminder-conflict");
+/** Sessions in the lifecycle states the archive label and Fork Conversation tell apart (#2214): a
+ * running turn in a worktree, a finished session, and a control plane that stops before archiving. */
+const lifecycle = new URLSearchParams(location.search).has("lifecycle");
 
 const runner: RunnerView = {
   runnerId: "runner-1",
@@ -218,6 +222,14 @@ if (groups) {
   );
 }
 
+if (lifecycle) {
+  runner.protocolVersion = PROTOCOL_VERSION;
+  for (const value of sessions) {
+    if (value.id === "s-running") Object.assign(value, { status: "running", worktreePath: "/repo/.worktrees/running" });
+    if (value.id === "s-review") Object.assign(value, { status: "completed", worktreePath: "/repo/.worktrees/review" });
+  }
+}
+
 if (empty) sessions.splice(0);
 
 const reminders: SessionReminderView[] = [
@@ -259,6 +271,7 @@ function snapshot(): UiSnapshotMessage {
       projects: false,
       sessionReminders: true,
       indefiniteSessionReminders: true,
+      ...(lifecycle ? { stopBeforeArchive: true } : {}),
     },
     runners: groups ? [structuredClone(runner), structuredClone(secondRunner)] : [structuredClone(runner)],
     boxes: [],

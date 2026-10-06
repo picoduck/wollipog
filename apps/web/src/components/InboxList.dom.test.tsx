@@ -131,7 +131,10 @@ test("inbox list exposes selection semantics and mouse select/expand paths", asy
   assert.equal(pinned.getAttribute("title"), "Pinned Session");
   assert.equal(rows[0]!.children.length, 1,
     "selection must not expand a session row with embedded shortcut actions");
-  assertNoDomNode(container.querySelector(".inbox-row-actions"));
+  // Every row carries the same trailing actions, selected or not (#2214); here, without reminders
+  // or an archive handler, that is only ⋯.
+  assert.deepEqual(rows.map((row) => [...row.querySelectorAll(".inbox-row-action")].map((button) => button.getAttribute("aria-label"))),
+    [["More Actions"], ["More Actions"]]);
   assert.equal(grid.getAttribute("aria-activedescendant"), rows[0]!.id,
     "the active descendant must reference the actual row");
 
