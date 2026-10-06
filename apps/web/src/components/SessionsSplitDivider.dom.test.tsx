@@ -73,3 +73,30 @@ test("the divider names itself, reports percent, and moves by whole rows from th
   assert.equal(stored.at(-1), INBOX_SPLIT_RATIO_DEFAULT, "a double-click restores the default");
   await act(async () => root.unmount());
 });
+
+test("a drag the divider does not finish leaves no unsnapped height on the grid (#2710 review)", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const grid = createRef<HTMLDivElement>();
+  const stored: number[] = [];
+  const render = (stacked: boolean) => root.render(
+    <div ref={grid}>
+      {stacked && <SessionsSplitDivider grid={grid} geometry={GEOMETRY} rows={6} onRatioChange={(ratio) => stored.push(ratio)} />}
+    </div>,
+  );
+  await act(async () => { render(true); });
+  const divider = container.querySelector<HTMLElement>('[role="separator"]')!;
+  const pointer = (type: string, clientY: number) => new domWindow.PointerEvent(type, {
+    bubbles: true, cancelable: true, pointerId: 7, button: 0, clientY,
+  });
+  act(() => { divider.dispatchEvent(pointer("pointerdown", 344) as never); });
+  act(() => { divider.dispatchEvent(pointer("pointermove", 370) as never); });
+  assert.equal(grid.current!.style.getPropertyValue("--sessions-list-h"), "370px", "the list follows the pointer");
+
+  // B opens the board mid-drag: the divider unmounts before any release.
+  await act(async () => { render(false); });
+  assert.equal(grid.current!.style.getPropertyValue("--sessions-list-h"), "", "the stacked grid returns to whole rows");
+  assert.deepEqual(stored, [], "an unfinished drag stores nothing");
+  await act(async () => root.unmount());
+});

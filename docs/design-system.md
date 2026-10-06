@@ -1082,11 +1082,13 @@ master-detail pages stay side by side.
   panes and `.master-detail-resize` are placed by grid row, so Preview Right (#2219) can place them by
   column. The divider draws the hairline itself, on the preview's first pixel, so the list's last row
   keeps its full height; its keyboard focus draws the 2px `--focus` line over a transparent outline,
-  which forced colors paints. The stored range stays 25–75%, so where the split area is taller than
-  about 930px (56px rows) Home stops at the 25% floor rather than three rows. Tab is a plain focus
+  which forced colors paints. The stored range stays 25–75% and bounds the row range too, so every
+  count survives a reload: where the split area is taller than about 930px (56px rows) Home stops at
+  the 25% floor rather than three rows, and End at the 75% cap. An unfinished drag (the divider
+  unmounts for the board or a phone width) clears its height. Tab is a plain focus
   move on Sessions: the bare Tab and Shift+Tab that used to switch tabs from the list are retired,
-  and the tab row keeps ←/→. The docked request card at the top of the preview draws `--elev-1` over
-  an opaque slot, so the transcript visibly scrolls beneath it.
+  and the tab row keeps ←/→. The docked request card at the top of the preview sits in an opaque slot
+  with a 1px `--border` hairline and `--elev-1`, so the transcript visibly scrolls beneath it.
 
 ---
 

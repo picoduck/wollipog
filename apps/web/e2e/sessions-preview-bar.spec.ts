@@ -143,7 +143,7 @@ test.describe("at 1440×900", () => {
   test("in a short preview the request scrolls whole, so its command never shrinks away", async ({ page }) => {
     await open(page);
     await select(page, BLOCKED);
-    await page.getByRole("separator", { name: "Resize Sessions Preview" }).focus();
+    await page.getByRole("separator", { name: "Resize List and Preview" }).focus();
     await page.keyboard.press("End");
     const preview = page.locator(".session-detail.preview");
     await expect.poll(() => preview.evaluate((element) => element.getBoundingClientRect().height)).toBeLessThan(400);

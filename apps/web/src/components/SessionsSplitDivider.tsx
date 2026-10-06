@@ -1,4 +1,4 @@
-import { type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type RefObject, useRef, useState } from "react";
+import { type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type RefObject, useEffect, useRef, useState } from "react";
 import { INBOX_SPLIT_RATIO_DEFAULT } from "../inbox.js";
 import {
   sessionsListHeight,
@@ -32,6 +32,12 @@ export function SessionsSplitDivider({
 }) {
   const drag = useRef<{ pointerId: number; offset: number; height: number } | null>(null);
   const [dragging, setDragging] = useState(false);
+  // A drag the divider does not live to finish (B opens the board, or the window narrows to a phone)
+  // must not leave its unsnapped height on the grid for the next stacked layout.
+  useEffect(() => () => {
+    if (drag.current) grid.current?.style.removeProperty(LIST_HEIGHT_PROPERTY);
+    drag.current = null;
+  }, [grid]);
   const range = sessionsListRowRange(geometry);
   const height = sessionsListHeight(rows, geometry);
   const commitRows = (next: number) => {

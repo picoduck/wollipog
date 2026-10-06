@@ -286,8 +286,10 @@ for (const viewport of [{ width: 1440, height: 900, touch: false }, { width: 834
           const page = getComputedStyle(document.documentElement);
           const probe = document.createElement("span");
           probe.style.boxShadow = "var(--elev-1)";
+          probe.style.backgroundColor = "var(--border)";
           element.append(probe);
           const elevation = getComputedStyle(probe).boxShadow;
+          const border = getComputedStyle(probe).backgroundColor;
           probe.remove();
           return {
             gap: Math.max(top, firstVisible?.top ?? top) - card.bottom,
@@ -295,6 +297,8 @@ for (const viewport of [{ width: 1440, height: 900, touch: false }, { width: 834
             hasRow: firstVisible !== undefined,
             shadow: style.boxShadow,
             elevation,
+            hairline: { width: style.borderBottomWidth, style: style.borderBottomStyle, color: style.borderBottomColor },
+            border,
             background: style.backgroundColor,
             onTop: (() => {
               const hit = document.elementFromPoint(card.left + 4, element.getBoundingClientRect().bottom - 1);
@@ -305,6 +309,8 @@ for (const viewport of [{ width: 1440, height: 900, touch: false }, { width: 834
         expect(geometry.hasRow, "a transcript row is in view beneath the dock").toBe(true);
         expect(geometry.gap).toBeGreaterThanOrEqual(geometry.space2);
         expect(geometry.shadow).toBe(geometry.elevation);
+        expect(geometry.hairline, "a hairline that reads on a dark canvas too")
+          .toEqual({ width: "1px", style: "solid", color: geometry.border });
         expect(geometry.background, "an opaque slot, so the transcript passes beneath it").not.toBe("rgba(0, 0, 0, 0)");
         expect(geometry.onTop, "the slot paints over the transcript").toBe(true);
       });

@@ -12505,9 +12505,11 @@ body.shell-dock-dragging * {
   overscroll-behavior: contain;
   margin: 0;
   padding: var(--space-2) max(var(--page-gutter), calc(100% - var(--page-gutter) - var(--chat-max))) var(--space-2) var(--page-gutter);
-  /* The transcript scrolls beneath the dock, so the dock draws an edge over it (#2217). */
+  /* The transcript scrolls beneath the dock, so the dock draws an edge over it (#2217): a hairline,
+     which dark themes need because --elev-1 barely shows on their canvas, and the shadow. */
   position: relative;
   z-index: var(--z-sticky);
+  border-bottom: 1px solid var(--border);
   background: var(--bg);
   box-shadow: var(--elev-1);
 }

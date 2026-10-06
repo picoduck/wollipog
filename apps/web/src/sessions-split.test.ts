@@ -38,23 +38,27 @@ test("the list keeps at least three rows and leaves the preview at least 240px",
   assert.equal(sessionsListRowsForRatio(0.75, short), 3);
 });
 
-test("a stored ratio for a row count reads back as the same count, inside the stored range", () => {
-  for (const geometry of [DESKTOP, TABLET, { area: 600, rowHeight: 56, pad: 8 }, { area: 1337, rowHeight: 60, pad: 8 }]) {
+test("every count in the row range is stored and read back as itself, through the store's clamp", () => {
+  const geometries: SessionsSplitGeometry[] = [
+    DESKTOP, TABLET, { area: 600, rowHeight: 56, pad: 8 }, { area: 1337, rowHeight: 56, pad: 8 },
+    { area: 1337, rowHeight: 60, pad: 8 }, { area: 2000, rowHeight: 64, pad: 8 }, { area: 300, rowHeight: 56, pad: 8 },
+  ];
+  for (const geometry of geometries) {
     const { min, max } = sessionsListRowRange(geometry);
     for (let rows = min; rows <= max; rows += 1) {
-      const raw = sessionsRatioForRows(rows, geometry);
-      const readBack = sessionsListRowsForRatio(clampInboxSplitRatio(raw), geometry);
-      // Past the stored 25–75% range, the count is the range's own end.
-      const expected = raw < INBOX_SPLIT_RATIO_MIN ? sessionsListRowsForRatio(INBOX_SPLIT_RATIO_MIN, geometry)
-        : raw > INBOX_SPLIT_RATIO_MAX ? sessionsListRowsForRatio(INBOX_SPLIT_RATIO_MAX, geometry)
-          : rows;
-      assert.equal(readBack, expected, `${rows} rows in ${geometry.area}px`);
+      const readBack = sessionsListRowsForRatio(clampInboxSplitRatio(sessionsRatioForRows(rows, geometry)), geometry);
+      assert.equal(readBack, rows, `${rows} rows in ${geometry.area}px of ${geometry.rowHeight}px rows`);
     }
   }
-  // At 1440×900 every count from Home's three to End's nine survives a reload.
-  for (let rows = 3; rows <= 9; rows += 1) {
-    assert.equal(sessionsListRowsForRatio(clampInboxSplitRatio(sessionsRatioForRows(rows, DESKTOP)), DESKTOP), rows);
-  }
+});
+
+test("in a tall split area the stored 25–75% range bounds Home and End (#2710 review)", () => {
+  // 1337px of 56px rows: the preview minimum would allow 19 rows, but 75% holds only 17, and 25% is 5.
+  const tall: SessionsSplitGeometry = { area: 1337, rowHeight: 56, pad: 8 };
+  assert.deepEqual(sessionsListRowRange(tall), { min: 5, max: 17 });
+  assert.equal(sessionsListRowsForRatio(INBOX_SPLIT_RATIO_MAX, tall), 17);
+  assert.equal(sessionsListRowsForRatio(INBOX_SPLIT_RATIO_MIN, tall), 5);
+  assert.equal(sessionsListRowsForHeight(8 + 19 * 56, tall), 17, "a drag past the cap snaps to the cap");
 });
 
 test("a dragged height snaps to the nearer whole row, inside the row range", () => {

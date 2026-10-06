@@ -1,4 +1,4 @@
-import { INBOX_SPLIT_RATIO_DEFAULT } from "./inbox.js";
+import { INBOX_SPLIT_RATIO_DEFAULT, INBOX_SPLIT_RATIO_MAX, INBOX_SPLIT_RATIO_MIN } from "./inbox.js";
 
 /**
  * The stacked Sessions list and preview (docs/design-system.md §6.3, #2217). The list's height is
@@ -18,11 +18,18 @@ export interface SessionsSplitGeometry {
   pad: number;
 }
 
-/** The list's row count bounds. A window too short for both keeps the three rows. */
+/**
+ * The list's row count bounds. The stored ratio's own 25–75% range bounds them too, so every count
+ * in range survives a reload: in a tall split area Home stops at the 25% floor's rows and End at the
+ * 75% cap's. A window too short for both keeps the three rows.
+ */
 export function sessionsListRowRange({ area, rowHeight, pad }: SessionsSplitGeometry): { min: number; max: number } {
-  const min = SESSIONS_LIST_MIN_ROWS;
-  if (!(area > 0) || !(rowHeight > 0)) return { min, max: min };
-  return { min, max: Math.max(min, Math.floor((area - SESSIONS_PREVIEW_MIN_PX - pad) / rowHeight)) };
+  if (!(area > 0) || !(rowHeight > 0)) return { min: SESSIONS_LIST_MIN_ROWS, max: SESSIONS_LIST_MIN_ROWS };
+  // The epsilon keeps an exact fit from rounding down a row through floating-point error.
+  const rowsIn = (height: number) => Math.floor((height - pad) / rowHeight + 1e-6);
+  const min = Math.max(SESSIONS_LIST_MIN_ROWS, rowsIn(INBOX_SPLIT_RATIO_MIN * area));
+  const max = Math.min(rowsIn(area - SESSIONS_PREVIEW_MIN_PX), rowsIn(INBOX_SPLIT_RATIO_MAX * area));
+  return { min, max: Math.max(min, max) };
 }
 
 function clampRows(rows: number, geometry: SessionsSplitGeometry): number {
