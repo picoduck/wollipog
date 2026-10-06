@@ -144,17 +144,18 @@ export function SnoozeDialog({
   });
 
   const now = new Date();
-  const parsed = resolveSchedule();
-  function resolveSchedule(): ParsedReminderSchedule | null {
+  // Resolved when its inputs change, not on every render: a draft such as "in 2 hours" keeps the
+  // instant it was given through a live update, a reconciliation or a Return Early toggle.
+  const parsed = useMemo((): ParsedReminderSchedule | null => {
     if (loadedReminder && !scheduleTouched) {
       return returnedReminder ? null : storedReminderSchedule(loadedReminder);
     }
     if (!choice) return null;
     const schedule = choice === "custom"
-      ? selectedSuggestion ?? parseReminderExpression(expression, now)
-      : parseReminderExpression(choice, now);
+      ? selectedSuggestion ?? parseReminderExpression(expression, new Date())
+      : parseReminderExpression(choice, new Date());
     return schedule?.scheduleKind === "someday" && !supportsSomeday ? null : schedule;
-  }
+  }, [choice, expression, loadedReminder, returnedReminder, scheduleTouched, selectedSuggestion, supportsSomeday]);
   // The field's error shows once it was left after an edit, or on submit (§8.5), and clears as soon
   // as the value resolves. An untouched stored schedule is never wrong.
   const fieldError = custom && showFieldError && !parsed
@@ -232,8 +233,12 @@ export function SnoozeDialog({
 
   const choose = (next: SnoozeChoice, byPointer: boolean) => {
     // A pointer on Custom… goes on to its field; arrows stay in the tiles so they can keep moving.
+    // When Custom… is already chosen its field is mounted and nothing re-renders, so focus it now.
+    if (next === choice) {
+      if (next === "custom" && byPointer) expressionRef.current?.focus();
+      return;
+    }
     if (next === "custom" && byPointer) focusDraftRef.current = true;
-    if (next === choice) return;
     setScheduleTouched(true);
     setChoice(next);
     setSuggestionsOpen(false);

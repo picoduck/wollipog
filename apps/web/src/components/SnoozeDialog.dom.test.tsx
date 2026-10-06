@@ -1,6 +1,6 @@
 import { fireDomEvent } from "./test-dom-events.js";
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { mock } from "node:test";
 import React, { act, type ReactElement } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
@@ -1103,6 +1103,59 @@ test("a complete typed schedule leaves Enter to the form even while broader sugg
     assert.equal(saved.length, 1);
     assert.equal(saved[0]?.originalExpression, "tomorrow at 3 pm");
     assert.equal(saved[0]?.scheduledFor, expected?.scheduleKind === "timed" ? expected.scheduledFor : undefined);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a typed relative time keeps its instant through a live change and draft reuse", async () => {
+  mock.timers.enable({ apis: ["Date"], now: Date.UTC(2026, 9, 6, 15, 0) });
+  const original = pendingReminder({ scheduledFor: Date.UTC(2026, 9, 7, 15, 0) });
+  let accepted: SetSessionReminderRequest | undefined;
+  const dialog = (reminder: SessionReminderView | undefined) => <SnoozeDialog
+    sessionTitle={TITLE}
+    reminder={reminder}
+    onClose={() => undefined}
+    onSave={async (request) => { accepted = request; }}
+    onRemove={async () => undefined}
+  />;
+  const view = await mount(dialog(original));
+  try {
+    await typeSchedule("in 2 hours");
+    const typedSummary = summary();
+    // Ten minutes pass before the reminder is removed elsewhere and the draft is reused.
+    mock.timers.tick(10 * 60_000);
+    await act(async () => { returnEarly().click(); });
+    await view.rerender(dialog(undefined));
+    await press(buttonNamed("Create New Reminder from Draft"));
+    assert.equal(summary(), typedSummary, "the summary keeps the instant the words were given");
+    await press(primary());
+    assert.equal(accepted?.scheduledFor, Date.UTC(2026, 9, 6, 17, 0));
+  } finally {
+    await view.unmount();
+    mock.timers.reset();
+  }
+});
+
+test("a pointer on an already chosen Custom… goes to its field at once and leaves later focus alone", async () => {
+  const stored = pendingReminder();
+  const dialog = (reminder: SessionReminderView) => <SnoozeDialog
+    sessionTitle={TITLE}
+    reminder={reminder}
+    onClose={() => undefined}
+    onSave={async () => undefined}
+    onRemove={async () => undefined}
+  />;
+  const view = await mount(dialog(stored));
+  try {
+    assert.equal(tileNamed("Custom…")?.getAttribute("aria-checked"), "true");
+    tileNamed("Custom…")!.focus();
+    await chooseTile("Custom…", true);
+    assert.equal(domWindow.document.activeElement, field(), "the click goes on to Snooze Until");
+
+    returnEarly().focus();
+    await view.rerender(dialog({ ...stored, revision: 2, updatedAt: 2 }));
+    assert.equal(domWindow.document.activeElement, returnEarly(), "a later commit does not pull focus into the field");
   } finally {
     await view.unmount();
   }

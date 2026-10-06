@@ -6060,6 +6060,9 @@ textarea {
   color: var(--text-dim);
   font: var(--type-small);
 }
+/* Snooze's footer also holds Remove Reminder, so its reason takes the room left beside the three
+   buttons and wraps there, rather than pushing the primary onto a second row. */
+.modal-foot > .snooze-blocked-reason { flex: 1 1 0; }
 @media (max-width: 760px) {
   .modal-foot > :is(.session-move-reason, .switch-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason) { flex-basis: 100%; }
 }
@@ -10693,6 +10696,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  margin: 0;
   color: var(--text);
   font: var(--type-body);
 }
@@ -10705,6 +10709,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   .snooze-summary > svg { color: inherit; }
 }
 .snooze-reconciling {
+  margin: 0;
   color: var(--text-dim);
   font: var(--type-small);
 }

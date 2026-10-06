@@ -139,6 +139,9 @@ for (const theme of ["dark", "light"] as const) {
       await expect(dialog.getByRole("alert").filter({ hasText: "Reminder Changed" })).toBeVisible();
       await expect(dialog.getByRole("button", { name: "Reload Reminder" })).toBeVisible();
       await expect(dialog.locator(".snooze-blocked-reason")).toHaveText("Reload the reminder before saving.");
+      const footer = await dialog.locator(".modal-foot > :is(.modal-tertiary, .btn)").evaluateAll((elements) =>
+        elements.map((element) => Math.round(element.getBoundingClientRect().top)));
+      expect(new Set(footer).size, "Remove Reminder, Cancel and Update Reminder share one row").toBe(1);
       await evidence(page, `desktop-${theme}-conflict`);
     });
   });
