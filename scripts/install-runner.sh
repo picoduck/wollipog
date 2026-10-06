@@ -379,8 +379,13 @@ if [ "$with_control_plane" -eq 1 ]; then
   marker_partial=""
   new_web_marker=0
   web_committed=0
+  web_publication_started=0
   keep_web_evidence=0
   cleanup_headless() {
+    if [ "$web_publication_started" -eq 1 ] && [ "$web_committed" -eq 0 ]; then
+      keep_web_evidence=1
+      echo "Dashboard publication did not commit; retained owned evidence at $web_stage. Inspect it and dashboard paths $web_dir and ${web_dir}.previous before retrying; no data permissions were repaired." >&2
+    fi
     [ -z "$cp_partial" ] || rm -f "$cp_partial"
     [ -z "$web_partial" ] || rm -f "$web_partial"
     [ -z "$marker_partial" ] || rm -f "$marker_partial"
@@ -430,9 +435,14 @@ if [ "$with_control_plane" -eq 1 ]; then
       keep_web_evidence=1
       echo "Dashboard publication and rollback failed; retained owned evidence at $web_stage. Inspect it before retrying; no data permissions were repaired." >&2
     else
+      web_publication_started=0
       echo "Dashboard publication failed; the previous dashboard generations were restored." >&2
     fi
   }
+  # Arm cleanup before any move: a handled signal can arrive after a successful rename
+  # but before its saved-state bookkeeping. Retain uncertain evidence until commit or
+  # proven complete rollback; a retained stage name never grants a later attempt ownership.
+  web_publication_started=1
   if path_present "${web_dir}.previous"; then
     mv "${web_dir}.previous" "$web_stage/previous" || { rollback_web; exit 1; }
     previous_saved=1

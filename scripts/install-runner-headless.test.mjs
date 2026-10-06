@@ -26,6 +26,19 @@ function executable(path, body) {
   chmodSync(path, 0o755);
 }
 
+// Signal only the fixture installer parent, once, at a confirmed utility boundary.
+// Before skips the operation; after runs the real utility successfully before signaling.
+const signalInjection = `
+inject_signal() {
+  [ "$TEST_SIGNAL_BOUNDARY:$TEST_SIGNAL_TIMING" = "$1:$2" ] || return 1
+  [ ! -e "$TEST_SIGNAL_SENT" ] || return 1
+  case "$TEST_SIGNAL" in HUP|INT|TERM) ;; *) exit 95 ;; esac
+  printf '%s\\n' "$1:$2:$TEST_SIGNAL" > "$TEST_SIGNAL_SENT"
+  echo "fixture signal $1:$2:$TEST_SIGNAL" >&2
+  kill -s "$TEST_SIGNAL" "$PPID"
+}
+`;
+
 function sha256(buffer) {
   return createHash("sha256").update(buffer).digest("hex");
 }
@@ -91,7 +104,18 @@ PATH="$TEST_ORIGINAL_PATH"; export PATH
 exec tar "$@"
 `);
   executable(join(fakeBin, "mv"), `
+${signalInjection}
 for arg in "$@"; do case "$arg" in -f) ;; "$TEST_ROOT/"*) ;; *) exit 94 ;; esac; done
+boundary=
+if [ "$#" -eq 2 ]; then
+  case "$1:$2" in
+    "$TEST_WEB_DIR.previous":*/.wollipog-web.stage.*/previous) boundary=save-previous ;;
+    "$TEST_WEB_DIR":"$TEST_WEB_DIR.previous") boundary=save-current ;;
+    */.wollipog-web.stage.*/web:"$TEST_WEB_DIR") boundary=promote ;;
+    "$TEST_WEB_DIR.previous":"$TEST_WEB_DIR") boundary=restore-current ;;
+    */.wollipog-web.stage.*/previous:"$TEST_WEB_DIR.previous") boundary=restore-previous ;;
+  esac
+fi
 if [ "$#" -eq 2 ] && [ "$2" = "$TEST_WEB_DIR" ]; then
   case "$1" in
     */.wollipog-web.stage.*/web) case "$TEST_FAULT" in promote|rollback) exit 86 ;; esac ;;
@@ -103,7 +127,29 @@ if [ "$#" -eq 2 ] && [ "$TEST_FAULT" = save-previous ] && [ "$1" = "$TEST_WEB_DI
 fi
 if [ "$#" -eq 2 ] && [ "$TEST_FAULT" = save-current ] && [ "$1" = "$TEST_WEB_DIR" ] && [ "$2" = "$TEST_WEB_DIR.previous" ]; then exit 89; fi
 PATH="$TEST_ORIGINAL_PATH"; export PATH
+if [ -n "$boundary" ]; then
+  if inject_signal "$boundary" before; then exit 0; fi
+  mv "$@"
+  if inject_signal "$boundary" after; then exit 0; fi
+  exit 0
+fi
 exec mv "$@"
+`);
+  executable(join(fakeBin, "rm"), `
+${signalInjection}
+for arg in "$@"; do case "$arg" in -f|-rf|"") ;; "$TEST_ROOT/"*) ;; *) exit 94 ;; esac; done
+boundary=
+if [ "$#" -eq 2 ] && [ "$1" = -rf ]; then
+  case "$2" in */.wollipog-web.stage.*) boundary=cleanup-stage ;; esac
+fi
+PATH="$TEST_ORIGINAL_PATH"; export PATH
+if [ -n "$boundary" ]; then
+  if inject_signal "$boundary" before; then exit 0; fi
+  rm "$@"
+  if inject_signal "$boundary" after; then exit 0; fi
+  exit 0
+fi
+exec rm "$@"
 `);
   executable(join(fakeBin, "ln"), `
 if [ "$#" -eq 2 ] && [ "$2" = "$TEST_WEB_MARKER" ] && [ "$TEST_FAULT" = marker ]; then exit 88; fi
@@ -122,7 +168,7 @@ exec cmp "$@"
   // Keep curl/gh fixture-owned so the installer cannot reach ambient credentials or network.
   if (options.omitCmp) {
     for (const command of ["awk", "basename", "cat", "chmod", "cp", "cut", "dirname", "grep", "head", "mkdir",
-      "mktemp", "rm", "rmdir", "sed", "sh"]) {
+      "mktemp", "rmdir", "sed", "sh"]) {
       const found = spawnSync("sh", ["-c", 'command -v "$1"', "fixture-tool", command], { encoding: "utf8" });
       assert.equal(found.status, 0, `required fixture utility: ${command}`);
       symlinkSync(found.stdout.trim(), join(fakeBin, command));
@@ -137,8 +183,10 @@ exec cmp "$@"
     assert.equal(cmpLookup.stdout, "");
   }
   let fault = "";
+  let interruption = {};
   const run = (...args) => spawnSync("sh", ["-c", 'umask 022\nexec sh "$@"', "installer-test", installer, ...args], {
     encoding: "utf8",
+    timeout: 30_000,
     env: {
       PATH: options.omitCmp ? fakeBin : `${fakeBin}:${process.env.PATH ?? ""}`,
       HOME: home,
@@ -148,12 +196,17 @@ exec cmp "$@"
       TEST_RELEASE_TAG: releaseTag,
       TEST_ROOT: root,
       TEST_ORIGINAL_PATH: process.env.PATH ?? "",
-      TEST_WEB_DIR: join(home, ".local", "bin", "web"),
+      TEST_WEB_DIR: options.legacy ? join(home, ".local", "share", "wollipog", "web") : join(home, ".local", "bin", "web"),
       TEST_WEB_MARKER: join(home, ".local", "bin", ".wollipog-web-layout-v1"),
       TEST_FAULT: fault,
+      TEST_SIGNAL: interruption.signal ?? "",
+      TEST_SIGNAL_BOUNDARY: interruption.boundary ?? "",
+      TEST_SIGNAL_TIMING: interruption.timing ?? "",
+      TEST_SIGNAL_SENT: join(root, "signal-sent"),
     },
   });
-  return { root, home, run, setFault: (value) => { fault = value; } };
+  return { root, home, run, setFault: (value) => { fault = value; },
+    setInterruption: (value) => { interruption = value; rmSync(join(root, "signal-sent"), { force: true }); } };
 }
 
 const admissionAsset = {
@@ -480,6 +533,158 @@ posixTest("headless sibling bundle restores both owned generations after publica
       if (fault !== "extract") assert.match(result.stderr, /previous dashboard generations were restored/u);
     }
   });
+});
+
+function interruptedPublicationFixture(t, { legacy = false, generations = "both" } = {}) {
+  const h = harness({ legacy });
+  t.after(() => rmSync(h.root, { recursive: true, force: true }));
+  const web = legacy ? join(h.home, ".local", "share", "wollipog", "web") : siblingWeb(h);
+  const parent = dirname(web);
+  mkdirSync(parent, { recursive: true });
+  if (!legacy && generations !== "fresh") writeFileSync(layoutMarker(h), markerBytes);
+  if (generations === "both" || generations === "current") {
+    mkdirSync(web); writeFileSync(join(web, "index.html"), "original current generation");
+  }
+  if (generations === "both" || generations === "previous") {
+    mkdirSync(web + ".previous"); writeFileSync(join(web + ".previous", "index.html"), "original previous generation");
+  }
+  const data = join(h.home, ".local", "share", "wollipog", "control-plane");
+  const config = join(h.home, ".config", "wollipog");
+  for (const dir of [data, config]) {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(dir, "inert-sentinel"), "stored private bytes", { mode: 0o600 });
+  }
+  const originals = [snapshot(web), snapshot(web + ".previous")];
+  const privateBefore = [snapshot(data), snapshot(config)];
+  const markerBefore = snapshot(layoutMarker(h));
+  return { h, web, parent, originals, markerBefore, assertPrivate() {
+    assert.deepEqual([snapshot(data), snapshot(config)], privateBefore);
+    assert.equal(existsSync(join(h.home, ".local", "bin", ".wollipog-web-install.lock")), false);
+  } };
+}
+
+function retainedPublicationStage(fixture, interruption, result) {
+  const { h, web, parent } = fixture;
+  assert.equal(result.error, undefined, "fixture installer must finish without timeout");
+  assert.notEqual(result.status, 0, result.stderr + result.stdout);
+  const injection = `${interruption.boundary}:${interruption.timing}:${interruption.signal}`;
+  assert.equal(readFileSync(join(h.root, "signal-sent"), "utf8"), injection + "\n");
+  assert.ok(result.stderr.includes("fixture signal " + injection));
+  const stages = readdirSync(parent).filter((name) => name.startsWith(".wollipog-web.stage."));
+  assert.equal(stages.length, 1);
+  const stage = join(parent, stages[0]);
+  assert.ok(result.stderr.includes("retained owned evidence at " + stage));
+  assert.ok(result.stderr.includes("Inspect it and dashboard paths " + web + " and " + web + ".previous before retrying"));
+  assert.equal(readdirSync(parent).some((name) => name.startsWith(".wollipog-web.download.")), false);
+  fixture.assertPrivate();
+  return stage;
+}
+
+posixTest("headless publication retains each generation across HUP/INT/TERM before moves and after successful renames", async (t) => {
+  for (const legacy of [false, true]) for (const signal of ["HUP", "INT", "TERM"]) {
+    for (const boundary of ["save-previous", "save-current", "promote"]) for (const timing of ["before", "after"]) {
+      await t.test(`${legacy ? "legacy" : "sibling"}:${boundary}:${timing}:${signal}`, (t) => {
+        const f = interruptedPublicationFixture(t, { legacy });
+        const interruption = { boundary, timing, signal };
+        f.h.setInterruption(interruption);
+        const stage = retainedPublicationStage(f, interruption, f.h.run("--control-plane"));
+        const previousMoved = boundary !== "save-previous" || timing === "after";
+        const currentMoved = boundary === "promote" || boundary === "save-current" && timing === "after";
+        assert.deepEqual(snapshot(previousMoved ? join(stage, "previous") : f.web + ".previous"), f.originals[1]);
+        assert.deepEqual(snapshot(currentMoved ? f.web + ".previous" : f.web), f.originals[0]);
+        const promoted = boundary === "promote" && timing === "after";
+        assert.equal(readFileSync(join(promoted ? f.web : join(stage, "web"), "index.html"), "utf8"), "<html>dashboard</html>");
+        if (currentMoved && !promoted) assert.equal(existsSync(f.web), false);
+        if (!previousMoved) assert.equal(existsSync(join(stage, "previous")), false);
+        if (promoted) assert.equal(existsSync(join(stage, "web")), false);
+        assert.deepEqual(snapshot(layoutMarker(f.h)), f.markerBefore);
+      });
+    }
+  }
+});
+
+posixTest("headless publication retains evidence for fresh and partial owned layouts at promotion bookkeeping gaps", async (t) => {
+  for (const generations of ["fresh", "current", "previous"]) for (const signal of ["HUP", "INT", "TERM"]) {
+    for (const timing of ["before", "after"]) await t.test(`${generations}:${timing}:${signal}`, (t) => {
+      const f = interruptedPublicationFixture(t, { generations });
+      const interruption = { boundary: "promote", timing, signal };
+      f.h.setInterruption(interruption);
+      const stage = retainedPublicationStage(f, interruption, f.h.run("--control-plane"));
+      assert.deepEqual(snapshot(f.web + ".previous"), f.originals[0]);
+      assert.deepEqual(snapshot(join(stage, "previous")), f.originals[1]);
+      const promoted = timing === "after";
+      assert.equal(readFileSync(join(promoted ? f.web : join(stage, "web"), "index.html"), "utf8"), "<html>dashboard</html>");
+      if (!promoted) assert.equal(existsSync(f.web), false);
+      if (generations === "fresh") {
+        assert.equal(existsSync(layoutMarker(f.h)), promoted, "fresh marker removed only when no dashboard was promoted");
+        if (promoted) assert.equal(readFileSync(layoutMarker(f.h), "utf8"), markerBytes);
+      } else assert.deepEqual(snapshot(layoutMarker(f.h)), f.markerBefore);
+    });
+  }
+});
+
+posixTest("headless publication keeps the guard armed during interrupted ordinary rollback", async (t) => {
+  for (const signal of ["HUP", "INT", "TERM"]) for (const boundary of ["restore-current", "restore-previous"]) {
+    for (const timing of ["before", "after"]) await t.test(`${boundary}:${timing}:${signal}`, (t) => {
+      const f = interruptedPublicationFixture(t);
+      const interruption = { boundary, timing, signal };
+      f.h.setFault("promote");
+      f.h.setInterruption(interruption);
+      const stage = retainedPublicationStage(f, interruption, f.h.run("--control-plane"));
+      const currentRestored = boundary === "restore-previous" || timing === "after";
+      const previousRestored = boundary === "restore-previous" && timing === "after";
+      assert.deepEqual(snapshot(currentRestored ? f.web : f.web + ".previous"), f.originals[0]);
+      assert.deepEqual(snapshot(previousRestored ? f.web + ".previous" : join(stage, "previous")), f.originals[1]);
+      assert.equal(readFileSync(join(stage, "web", "index.html"), "utf8"), "<html>dashboard</html>");
+      assert.deepEqual(snapshot(layoutMarker(f.h)), f.markerBefore);
+    });
+  }
+});
+
+posixTest("headless committed publication cleans disposable scratch even when completed cleanup is interrupted", async (t) => {
+  for (const signal of ["HUP", "INT", "TERM"]) for (const timing of ["before", "after"]) {
+    await t.test(`${timing}:${signal}`, (t) => {
+      const f = interruptedPublicationFixture(t);
+      f.h.setInterruption({ boundary: "cleanup-stage", timing, signal });
+      const result = f.h.run("--control-plane");
+      assert.equal(result.error, undefined);
+      assert.notEqual(result.status, 0);
+      assert.equal(readFileSync(join(f.h.root, "signal-sent"), "utf8"), `cleanup-stage:${timing}:${signal}\n`);
+      assert.doesNotMatch(result.stderr, /retained owned evidence/u);
+      assert.equal(readFileSync(join(f.web, "index.html"), "utf8"), "<html>dashboard</html>");
+      assert.deepEqual(snapshot(f.web + ".previous"), f.originals[0]);
+      assert.deepEqual(snapshot(layoutMarker(f.h)), f.markerBefore);
+      assert.deepEqual(readdirSync(f.parent).filter((name) => name.startsWith(".wollipog-web.stage.") || name.startsWith(".wollipog-web.download.")), []);
+      f.assertPrivate();
+    });
+  }
+});
+
+posixTest("later attempts never adopt or clean retained stages or similarly named foreign paths", (t) => {
+  const f = interruptedPublicationFixture(t);
+  const interruption = { boundary: "save-current", timing: "after", signal: "TERM" };
+  f.h.setInterruption(interruption);
+  const stage = retainedPublicationStage(f, interruption, f.h.run("--control-plane"));
+  const retained = snapshot(stage);
+  const foreign = join(f.parent, ".wollipog-web.stage.foreign");
+  const link = join(f.parent, ".wollipog-web.stage.foreign-link");
+  mkdirSync(foreign);
+  writeFileSync(join(foreign, "index.html"), "unrelated generation");
+  symlinkSync(foreign, link);
+  const foreignBefore = [snapshot(foreign), snapshot(link)];
+  f.h.setInterruption({});
+  const retry = f.h.run("--control-plane");
+  assert.equal(retry.status, 0, retry.stderr + retry.stdout);
+  assert.deepEqual(snapshot(stage), retained);
+  assert.deepEqual([snapshot(foreign), snapshot(link)], foreignBefore);
+  // A retained stage cannot substitute for missing namespace provenance.
+  rmSync(layoutMarker(f.h));
+  const before = snapshot(f.h.home);
+  const unmarked = f.h.run("--control-plane");
+  assert.notEqual(unmarked.status, 0);
+  assert.match(unmarked.stderr, /Refusing/u);
+  assert.deepEqual(snapshot(f.h.home), before);
+  f.assertPrivate();
 });
 
 posixTest("headless sibling bundle preserves legacy refresh and explicitly discloses mixed-layout env boundaries", (t) => {
