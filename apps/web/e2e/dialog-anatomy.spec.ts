@@ -11,8 +11,12 @@ async function openSessions(page: Page) {
 }
 
 async function openProjectMenu(page: Page) {
-  await page.getByRole("tab", { name: /Alpha/ }).hover();
-  await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
+  const tab = page.getByRole("tab", { name: /Alpha/ });
+  const trigger = page.getByRole("button", { name: "Project Actions for Alpha" });
+  await tab.hover();
+  // Without hover only the active Project tab shows its actions (#2180), so select it first.
+  if (!await trigger.isVisible()) await tab.click();
+  await trigger.click();
 }
 
 async function anatomy(dialog: Locator) {

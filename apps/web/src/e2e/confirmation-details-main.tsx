@@ -148,15 +148,18 @@ function Harness() {
   const surface = params.get("surface") ?? "update";
   if (surface === "project-archive") {
     // Without Stop-before-archive support the same split offers plain "Archive Sessions". The tab
-    // group reveals the trigger on hover, as in the Command Inbox tab strip.
+    // group reveals the trigger on hover, as in the Sessions tab row; it is the selected tab, the
+    // only one whose trigger shows without hover (#2180).
     return (
       <ApiProvider>
         <FeedbackProvider>
-          <div className="inbox-tab-group">
-            <span>Invoicing</span>
-            <ProjectSplitMenu split={projectSplit} runner={projectRunner}
-              stopBeforeArchiveSupported={params.get("variant") !== "archive"}
-              pinned={false} onPinnedChange={() => undefined} onNewSession={() => undefined} />
+          <div role="tablist" aria-label="Session Groups">
+            <div className="inbox-tab-group" role="presentation">
+              <button type="button" role="tab" aria-selected="true" className="tab">Invoicing</button>
+              <ProjectSplitMenu split={projectSplit} runner={projectRunner}
+                stopBeforeArchiveSupported={params.get("variant") !== "archive"}
+                pinned={false} onPinnedChange={() => undefined} onNewSession={() => undefined} />
+            </div>
           </div>
         </FeedbackProvider>
       </ApiProvider>
