@@ -87,7 +87,7 @@ async function reconnectWithGap(page: Page, lastSeq: number) {
   return start;
 }
 
-async function boundedRecovery(page: Page, start: number) {
+async function boundedRecovery(page: Page, start: number, firstCursor = 56) {
   // StrictMode's cancelled mount rehearsal may fetch the first page once more. It does not own
   // the four-page recovery chain. Reject a sixth attempt promptly instead of hydrating the gap.
   await expect.poll(async () => {
@@ -100,7 +100,7 @@ async function boundedRecovery(page: Page, start: number) {
   expect(forward.length).toBeLessThanOrEqual(5);
   const cursors = [...new Set(forward.map((request) => request.after))];
   expect(cursors).toHaveLength(4);
-  expect(cursors).toEqual([56, 256, 456, 656]);
+  expect(cursors).toEqual([firstCursor, firstCursor + 200, firstCursor + 400, firstCursor + 600]);
   expect(forward.filter((request) => request.after === cursors[0]).length).toBeLessThanOrEqual(2);
   for (const cursor of cursors.slice(1)) expect(forward.filter((request) => request.after === cursor)).toHaveLength(1);
   expect(requests.filter((request) => request.direction === "backward" && request.after === 0)).toHaveLength(1);
@@ -122,6 +122,36 @@ async function resumeLatest(page: Page, lastSeq: number, start: number) {
   expect(await reads(page, start)).toEqual(before);
   await expect(page.getByRole("button", { name: "Load Later Activity", exact: true })).toHaveCount(0);
 }
+
+test("an initially empty reader populated by live events can pause and recover a large gap within the same bound", async ({ page }) => {
+  const path = `/sessions/~${Buffer.from("session-alpha", "utf16le").toString("base64url")}`;
+  await page.goto(`/command-inbox-projects-e2e.html?scenario=paused-history-gap&initialEmpty=1&sessionShell=1&path=${encodeURIComponent(path)}`);
+  await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.sessionEventPageRequests()
+    .some((request) => request.sessionId === "session-alpha" && request.direction === "backward" && request.after === 0))).toBe(true);
+  await expect(reader(page)).toHaveAttribute("aria-busy", "false");
+  await expect(reader(page).locator("[data-virtual-row]")).toHaveCount(0);
+  await page.evaluate(() => {
+    for (let index = 1; index <= 16; index++) {
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitSessionEvent("session-alpha", index % 2 === 1
+        ? { kind: "user_message", text: `Public live question ${index}.`, turnId: `empty-reader-turn-${index}` }
+        : { kind: "agent_message", text: `Public live response ${index}. ${"Live context gives the reader room to pause. ".repeat(12)}`,
+            final: true, messageId: `empty-reader-message-${index}` });
+    }
+  });
+  await expect(reader(page).getByText(/^Public live response 16\./)).toBeVisible();
+  await settle(page);
+  const anchor = await pause(page);
+  const start = await reconnectWithGap(page, 1_000_000);
+  const background = await boundedRecovery(page, start, 16);
+  await expect(page.getByRole("button", { name: "Retry", exact: true })).toHaveCount(0);
+  await expectAnchor(page, anchor);
+  await page.getByRole("button", { name: "Load Later Activity", exact: true }).click();
+  await expect.poll(async () => (await reads(page, start)).length).toBe(background.length + 1);
+  await expect(page.getByRole("button", { name: "Load Later Activity", exact: true })).toBeEnabled();
+  await expectAnchor(page, anchor);
+  expect((await reads(page, start)).at(-1)?.after).toBe(816);
+  await resumeLatest(page, 1_000_000, start);
+});
 
 for (const lastSeq of [10_000, 1_000_000]) {
   test(`a paused reader recovers a ${lastSeq}-event gap within a fixed budget, then reads later activity`, async ({ page }) => {

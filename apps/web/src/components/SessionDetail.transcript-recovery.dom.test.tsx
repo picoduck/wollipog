@@ -3156,3 +3156,67 @@ test("resume between a provisional response fence and its continuation retries o
     assert.equal(pages.tailCalls.length, reads + 1);
   } finally { await unmountFixture(fixture); }
 });
+
+
+test("live activity after an empty opening can stage a bounded gap for a paused reader", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages, 0, { acknowledgeSubscription: false });
+  try {
+    Object.defineProperties(fixture.scroller, {
+      offsetHeight: { configurable: true, value: 500 },
+      offsetWidth: { configurable: true, value: 800 },
+      clientWidth: { configurable: true, value: 800 },
+    });
+    setScrollerMetrics(fixture.scroller, { clientHeight: 500, scrollHeight: 2_500, scrollTop: 900 });
+    await act(async () => pages.releaseTail({
+      events: [], eventEpoch: 0, hasMoreOlder: false, cacheComplete: true,
+    }));
+    await flushAsyncWork();
+    assert.equal(fixture.scroller.getAttribute("aria-busy"), "false", "the authoritative empty opening has settled");
+
+    const liveRows = cachedTranscriptEvents(fixture.sessionId, 12);
+    await act(async () => {
+      for (const event of liveRows) fixture.socket.push({ type: "session_event", event });
+    });
+    await flushAsyncWork(30);
+    assert.ok(fixture.container.querySelector("[data-virtual-row]"), "live rows provide a real measured reading anchor");
+    await pauseMeasuredReader(fixture);
+    const anchorTop = fixture.scroller.scrollTop;
+    const anchorText = fixture.container.querySelector("[data-virtual-row]")?.textContent;
+    assert.ok(anchorText);
+
+    const revision = fixture.socket.sent.filter((message) => message.type === "session_subscriptions").at(-1)?.revision;
+    assert.ok(revision != null);
+    await act(async () => fixture.socket.push({
+      type: "session_subscriptions_applied", revision, sessionIds: [fixture.sessionId], podIds: [],
+    }));
+    await flushAsyncWork();
+    assert.deepEqual(pages.forwardAfters, [0], "the first acknowledgement retains its frozen opening cursor");
+    const gapRows = cachedTranscriptEvents(fixture.sessionId, 400);
+    for (let page = 0; page < 4; page++) {
+      await act(async () => pages.releaseForward({
+        events: gapRows.slice(page * 200, (page + 1) * 200), eventEpoch: 0,
+        nextAfter: (page + 1) * 200, hasMoreCached: true, cacheComplete: true,
+      }));
+      await flushAsyncWork();
+    }
+    assert.deepEqual(pages.forwardAfters, [0, 200, 400, 600], "gap recovery stops after four forward pages");
+    assert.equal(pages.tailCalls.length, 2, "the oversized gap uses one supported tail read");
+    const laterRows = liveRows.map((event) => ({ ...event, id: event.id + 10_000, seq: event.seq + 10_000 }));
+    await act(async () => pages.releaseTail({
+      events: laterRows, eventEpoch: 0, hasMoreOlder: true, cacheComplete: true, turnAligned: true,
+    }));
+    await flushAsyncWork(30);
+    assertNoDomNode(fixture.container.querySelector(".transcript-history-notice[data-state='error']"),
+      "the empty opening's populated reader accepts its valid paused recovery owner");
+    assert.ok(fixture.container.querySelector("[data-later-activity-gap='available']"),
+      "the bounded tail is staged as later activity rather than discarded");
+    assert.equal(fixture.scroller.getAttribute("aria-busy"), "false");
+    assert.equal(followState(fixture), "paused");
+    assert.equal(fixture.scroller.scrollTop, anchorTop, "the paused reader retains its pixel offset");
+    assert.ok(fixture.container.textContent?.includes(anchorText), "the anchored live row remains rendered");
+    assert.deepEqual(fixture.readLoadedEvents()?.map((event) => event.seq), gapRows.map((event) => event.seq),
+      "the deferred disjoint tail cannot replace the paused rows");
+    assert.equal(pages.forwardCalls(), 4, "staging cannot begin an unbounded forward walk");
+  } finally { await unmountFixture(fixture); }
+});

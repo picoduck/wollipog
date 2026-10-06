@@ -1742,7 +1742,8 @@ export class Store {
       if (owner && action.gapWindowFence === owner) {
         // The same bounded operation still owns its completion/error after this replacement.
         // Its old staged arrays and page tickets are dropped below, not promoted implicitly.
-        owner.baseSeq = next.eventWindows.get(action.sessionId)?.baseSeq ?? 0;
+        const base = next.eventWindows.get(action.sessionId)?.baseSeq ?? 0;
+        owner.baseSeq = base > 0 ? base : next.events.get(action.sessionId)?.length ? 1 : 0;
       } else this.gapOperations.delete(action.sessionId);
       this.pendingGapLive.delete(action.sessionId);
     }
@@ -1840,7 +1841,7 @@ export class Store {
       if (!fence || !this.currentGapFence(fence) || next.eventEpochs.get(event.sessionId) !== fence.eventEpoch ||
           this.gapPauseChecks.get(event.sessionId)?.() !== true) return next;
       const reading = previous.events.get(event.sessionId) ?? [];
-      const after = contiguousEventHighWater(reading, (window?.baseSeq ?? fence.baseSeq) - 1);
+      const after = contiguousEventHighWater(reading, Math.max(0, (window?.baseSeq ?? fence.baseSeq) - 1));
       // Only future delivery is deferred. A row already visible before pause may itself be the
       // reader's anchor and must never be removed to manufacture a contiguous reading window.
       if (event.seq <= after || reading.some(row => row.seq === event.seq)) return next;
@@ -2097,8 +2098,12 @@ export class Store {
     shouldDeferLive?: () => boolean,
   ): EventGapFence | null => {
     const window = this.state.eventWindows.get(sessionId);
+    const reading = this.state.events.get(sessionId);
+    // Empty authoritative logs have base0. Once live rows arrive they can own recovery from
+    // seq1, while a missing initial prefix still fails contiguity rather than being skipped.
+    const baseSeq = window?.baseSeq === 0 && reading?.length ? 1 : window?.baseSeq ?? reading?.[0]?.seq ?? 0;
     const fence: EventGapFence = { sessionId, eventEpoch, recoveryRevision, recoveryGeneration,
-      operationId: ++this.gapRequestSequence, baseSeq: window?.baseSeq ?? this.state.events.get(sessionId)?.[0]?.seq ?? 0 };
+      operationId: ++this.gapRequestSequence, baseSeq };
     const prior = this.gapOperations.get(sessionId);
     this.gapOperations.set(sessionId, fence);
     if (fence.baseSeq <= 0 || !this.currentGapFence(fence)) {
@@ -2141,7 +2146,7 @@ export class Store {
         events: mergeEvents(this.state.events.get(fence.sessionId), pending.events), window, settled: false });
     }
     const reading = this.state.events.get(fence.sessionId) ?? [];
-    const contiguousTail = contiguousEventHighWater(reading, (window?.baseSeq ?? reading[0]?.seq ?? fence.baseSeq) - 1);
+    const contiguousTail = contiguousEventHighWater(reading, Math.max(0, (window?.baseSeq ?? reading[0]?.seq ?? fence.baseSeq) - 1));
     if (pending?.fence === fence && pending.observedTailSeq > contiguousTail &&
         !this.state.eventHistory.get(fence.sessionId)?.error) {
       this.failEventHistoryLoad(fence.sessionId,
@@ -2200,7 +2205,7 @@ export class Store {
     let retainedTail = bounded.events;
     if (retainedTail[0]!.seq <= after + 1) {
       const merged = mergeEvents(reading, retainedTail);
-      readingEnd = contiguousEventHighWater(merged, (window.baseSeq ?? fence.baseSeq) - 1);
+      readingEnd = contiguousEventHighWater(merged, Math.max(0, (window.baseSeq ?? fence.baseSeq) - 1));
       retainedReading = merged.filter(event => event.seq <= readingEnd);
       if (readingEnd >= observedTailSeq) {
         this.pendingGapLive.delete(fence.sessionId);

@@ -2612,8 +2612,8 @@ function SessionDetailLoaded({
         history: historyOptions,
         window: windowOptions,
         canReplaceWithWindow,
-        deferWindow: (_id, events, pageEpoch, _revision, complete, hasOlder, turnAligned) =>
-          !cancelled && gapFence !== null && pageEpoch === gapFence.eventEpoch &&
+        deferWindow: gapFence === null ? undefined : (_id, events, pageEpoch, _revision, complete, hasOlder, turnAligned) =>
+          !cancelled && pageEpoch === gapFence.eventEpoch &&
           deferEventTail(gapFence, events, complete, hasOlder, turnAligned),
       });
     void load.then((complete) => {

@@ -447,3 +447,99 @@ test("finishing dropped live preserves an existing recovery error", () => {
   store.finishEventGapRecovery(fence);
   assert.equal(store.getState().eventHistory.get("s1")!.error, "Existing recovery failure");
 });
+
+function emptyThenLiveFixture(firstLiveSeq = 1) {
+  const store = new Store();
+  store.dispatch({ type: "msg", msg: { type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true }, runners: [], boxes: [],
+    sessions: [{ id: "s1", eventEpoch: 0 } as SessionView], runs: [], pods: [],
+  } });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  store.prepareSubscriptionRecovery(1, ["s1"]);
+  store.dispatch({ type: "msg", msg: { type: "session_subscriptions_applied", revision: 1, sessionIds: ["s1"], podIds: [] } });
+  store.beginEventHistoryLoad("s1", 0, 1, generation);
+  store.loadEvents("s1", [], 0, 1, true, generation, false);
+  assert.equal(store.getState().eventWindows.get("s1")!.baseSeq, 0);
+  for (const row of events(firstLiveSeq, firstLiveSeq + 9)) store.dispatch({ type: "msg", msg: { type: "session_event", event: row } });
+  store.prepareSubscriptionRecovery(2, ["s1"]);
+  store.dispatch({ type: "msg", msg: { type: "session_subscriptions_applied", revision: 2, sessionIds: ["s1"], podIds: [] } });
+  store.beginEventHistoryLoad("s1", 0, 2, generation);
+  return { store, generation };
+}
+
+test("a populated initial empty window can own paused staged recovery without changing its rows or cursor", () => {
+  const { store, generation } = emptyThenLiveFixture();
+  const reading = store.getState().events.get("s1");
+  const cursor = store.recoveryAfter("s1");
+  const fence = store.beginEventGapRecovery("s1", 0, 2, generation, () => true);
+  assert.ok(fence, "live rows make the initial zero-base window a valid reading slice");
+  assert.equal(fence.baseSeq, 1);
+  assert.equal(store.isEventGapRecoveryCurrent(fence), true);
+  assert.equal(store.getState().events.get("s1"), reading);
+  assert.equal(store.recoveryAfter("s1"), cursor);
+  store.dispatch({ type: "msg", msg: { type: "session_event", event: event(10_010) } });
+  assert.equal(store.getState().events.get("s1"), reading);
+  assert.equal(store.deferEventTail(fence, events(10_000, 10_009), true, true), true);
+  const request = store.beginLaterEventsLoad("s1")!;
+  assert.equal(request.after, 10);
+  assert.equal(store.loadLaterEvents(request, { events: events(11, 210), eventEpoch: 0,
+    nextAfter: 210, hasMoreCached: true, cacheComplete: true }), true);
+  assert.equal(store.getState().events.get("s1")![0]!.seq, 1);
+  assert.equal(store.getState().events.get("s1")!.at(-1)!.seq, 210);
+  assert.equal(store.promoteDeferredEventTail(fence), true);
+  assert.equal(store.getState().events.get("s1")![0]!.seq, 10_000);
+  assert.equal(store.getState().events.get("s1")!.at(-1)!.seq, 10_010);
+});
+
+test("a zero-base owner connects an adjacent tail and retains ordinary completion contiguity", () => {
+  const { store, generation } = emptyThenLiveFixture();
+  const fence = store.beginEventGapRecovery("s1", 0, 2, generation, () => true);
+  assert.ok(fence);
+  assert.equal(store.deferEventTail(fence, events(11, 20), true, false), true);
+  assert.deepEqual(store.getState().events.get("s1")!.map(row => row.seq), events(1, 20).map(row => row.seq));
+  assert.equal(store.getState().eventWindows.get("s1")!.laterGap, undefined);
+  store.finishEventGapRecovery(fence);
+  assert.equal(store.getState().eventHistory.get("s1")!.error, null);
+  assert.equal(store.isEventGapRecoveryCurrent(fence), false);
+});
+
+test("zero-base live owners still reject stale epoch, generation and replacement completions", () => {
+  const { store, generation } = emptyThenLiveFixture();
+  assert.equal(store.beginEventGapRecovery("s1", 1, 2, generation), null);
+  assert.equal(store.beginEventGapRecovery("s1", 0, 2, generation - 1), null);
+  const fence = store.beginEventGapRecovery("s1", 0, 2, generation, () => true);
+  assert.ok(fence);
+  store.loadEvents("s1", events(1, 10), 0, 2, true, generation, false);
+  assert.equal(store.deferEventTail(fence, events(10_000, 10_009), true, true), false);
+  assert.equal(store.getState().events.get("s1")!.at(-1)!.seq, 10);
+});
+
+test("a populated zero-base window cannot certify a missing initial prefix from its first live seq", () => {
+  const { store, generation } = emptyThenLiveFixture(11);
+  assert.equal(store.recoveryAfter("s1"), 0);
+  const fence = store.beginEventGapRecovery("s1", 0, 2, generation, () => true);
+  assert.ok(fence);
+  assert.equal(fence.baseSeq, 1, "a known empty log begins at seq1 even if delivery missed its prefix");
+  const reading = store.getState().events.get("s1");
+  assert.equal(store.deferEventTail(fence, events(10_000, 10_009), true, true), false);
+  assert.equal(store.getState().events.get("s1"), reading);
+  assert.equal(store.recoveryAfter("s1"), 0);
+  store.loadEvents("s1", events(1, 10), 0, 2, false, generation);
+  assert.equal(store.deferEventTail(fence, events(21, 30), true, false), true);
+  assert.deepEqual(store.getState().events.get("s1")!.map(row => row.seq), events(1, 30).map(row => row.seq));
+  assert.equal(store.getState().eventWindows.get("s1")!.laterGap, undefined);
+});
+
+test("an owned empty replacement retains a valid populated zero-base operation", () => {
+  const { store, generation } = emptyThenLiveFixture();
+  const fence = store.beginEventGapRecovery("s1", 0, 2, generation, () => true);
+  assert.ok(fence);
+  assert.equal(store.loadEventGapWindow(fence, [], true, false), true);
+  assert.equal(store.getState().eventWindows.get("s1")!.baseSeq, 0);
+  assert.equal(fence.baseSeq, 1);
+  assert.equal(store.isEventGapRecoveryCurrent(fence), true);
+  assert.equal(store.deferEventTail(fence, events(11, 20), true, false), true);
+  assert.equal(store.getState().events.get("s1")!.at(-1)!.seq, 20);
+  assert.equal(store.getState().eventWindows.get("s1")!.laterGap, undefined);
+});

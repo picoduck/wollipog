@@ -906,6 +906,12 @@ if (SCENARIO === "preview-follow" || READER_RECOVERY_SCENARIO ||
     });
   }
 }
+if (SYNTHETIC_HISTORY_GAP && FIXTURE_QUERY.get("initialEmpty") === "1") {
+  const value = model.sessions.find((candidate) => candidate.id === "session-alpha");
+  if (!value) throw new Error("The empty reader fixture requires session-alpha");
+  sessionEvents.set(value.id, []);
+  Object.assign(value, { messageCount: 0, updatedAt: 0, lastEventAt: 0 });
+}
 let fixtureProviderCommandAttachmentPolicy: ProviderComposerCommand["attachmentPolicy"] = "send";
 let orchestratorRoleSupported = false;
 let updateFixtureProviderCommandAttachmentPolicy:
