@@ -6051,8 +6051,9 @@ textarea {
 /* Move to Project, Move to Workspace and New Workspace (#2163). Why the primary is disabled
    (§7.3): the footer's left slot, small and dim; its own row on a phone, above the two buttons.
    Guardrails (#2175) puts its one footer line here too: what empty means, or a Viewer's refusal.
-   Hand Off (#2186) says why Create Handoff is disabled: "Choose a supported service tier." */
-.modal-foot > :is(.session-move-reason, .switch-account-reason, .guardrails-reason, .handoff-reason) {
+   Hand Off (#2186) says why Create Handoff is disabled: "Choose a supported service tier." Snooze
+   (#2181) says why a reminder conflict refuses its primary: "Reload the reminder before saving." */
+.modal-foot > :is(.session-move-reason, .switch-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason) {
   flex: 0 1 auto;
   min-width: 0;
   margin: 0 auto 0 0;
@@ -6060,7 +6061,7 @@ textarea {
   font: var(--type-small);
 }
 @media (max-width: 760px) {
-  .modal-foot > :is(.session-move-reason, .switch-account-reason, .guardrails-reason, .handoff-reason) { flex-basis: 100%; }
+  .modal-foot > :is(.session-move-reason, .switch-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason) { flex-basis: 100%; }
 }
 /* Switch Account (#2149): one dim sentence about what moves, then the Accounts head and its rows. */
 .switch-account-rule {
@@ -10660,37 +10661,53 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   width: 100%;
   min-width: 0;
 }
-.snooze-form { display: grid; gap: 10px; }
-.snooze-form > p { margin: 0; color: var(--text-dim); line-height: 1.5; }
-.snooze-presets { display: flex; flex-wrap: wrap; gap: 7px; }
-.snooze-form .field-label { margin: 4px 0 -4px; }
-.snooze-form .field-hint { color: var(--text-faint); font-size: var(--text-sm); line-height: 1.4; }
+/* Snooze (#2181; docs/design-system.md §7.2, §8.1, §8.4, §8.5): the session's title as the
+   one-line description, six equal preset tiles, the Snooze Until field under Custom…, one checkbox
+   and one summary line. */
+.snooze-session-title {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.snooze-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}
+/* The tiles' error sits 4px under them, as a field's does under its control (§8.1). */
+.snooze-choice {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
 .snooze-expression-combobox { position: relative; }
 .snooze-suggestions { font-size: var(--text-sm); }
-.snooze-conflict {
-  display: grid;
-  justify-items: start;
-  gap: 6px;
-  padding: 10px;
-  border: 1px solid color-mix(in srgb, var(--yellow) 45%, var(--border));
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--yellow) 8%, var(--bg-elev-2));
-  color: var(--text-dim-on-tint);
-  font-size: var(--text-sm);
-  line-height: 1.4;
+.snooze-outcome {
+  display: flex;
+  flex-direction: column;
 }
-.snooze-conflict strong { color: var(--text); }
-.snooze-policy { margin-top: var(--space-1); }
-.snooze-preview {
-  display: grid;
-  gap: 3px;
-  padding: 10px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-elev-2);
+/* A live region that is always present, so the line it gains is announced; empty, it takes no room. */
+.snooze-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text);
+  font: var(--type-body);
+}
+.snooze-summary:not(:empty) { margin-top: var(--space-3); }
+.snooze-summary > svg {
+  flex: none;
   color: var(--text-dim);
-  font-size: var(--text-sm);
 }
-.snooze-preview strong { color: var(--text); font-size: var(--text-xs); letter-spacing: 0.04em; text-transform: uppercase; }
+@media (forced-colors: active) {
+  .snooze-summary > svg { color: inherit; }
+}
+.snooze-reconciling {
+  color: var(--text-dim);
+  font: var(--type-small);
+}
 /* Related fields share a row of two equal columns, and one column under 480px (§8.1): a track is at
    least half of 480px less the gap, so a second fits only from 480px, and empty tracks collapse.
    The row sizes itself rather than asking a size container, because at the build floor a size
@@ -16769,6 +16786,62 @@ body.shell-dock-dragging * {
 .choice-row-show > .choice-row-body { display: contents; }
 .choice-row-show :is(.choice-row-desc, .choice-row-reason) { grid-column: 1 / -1; }
 .choice-row-show > .choice-row-meta { grid-row: 1; grid-column: 2; }
+/* Choice tiles (§8.4, #2181): equal tiles for a few short presets whose second line is the reason
+   to pick one, three across and two on a phone (§7.5). Each is a radio named by its label and
+   described by its detail, with the choice row's selected fill and a trailing check. */
+.choice-tiles {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+.choice-tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-start;
+  min-width: 0;
+  min-height: var(--row-h);
+  padding: var(--space-2) var(--space-6) var(--space-2) var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+@media (hover: hover) {
+  .choice-tile:hover:not([aria-checked="true"], [aria-disabled="true"]) { background: var(--bg-elev-2); }
+}
+.choice-tile[aria-checked="true"] { background: var(--surface-selected); }
+.choice-tile[aria-disabled="true"] { cursor: not-allowed; }
+.choice-tile-label {
+  max-width: 100%;
+  font: var(--type-body-strong);
+  overflow-wrap: anywhere;
+}
+.choice-tile-detail {
+  max-width: 100%;
+  color: var(--text-dim);
+  font: var(--type-small);
+  overflow-wrap: anywhere;
+}
+.choice-tile[aria-disabled="true"] :is(.choice-tile-label, .choice-tile-detail) { color: var(--text-faint); }
+.choice-tile-check {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+  color: var(--accent);
+}
+@media (forced-colors: active) {
+  .choice-tile[aria-checked="true"] { border-color: Highlight; }
+  .choice-tile-check { color: inherit; }
+}
+@media (max-width: 760px) {
+  .choice-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .choice-tile { min-height: var(--space-12); }
+}
 @media (pointer: coarse) {
   /* A 44px-wide target for the box, as tall as the row. */
   .choice-row-mark-target {

@@ -20,6 +20,14 @@ async function openNewSnoozeDialog(page: Page) {
   await expect(page.getByRole("heading", { name: "Snooze Session" })).toBeVisible();
 }
 
+/** Custom… reveals the one Snooze Until field (#2181). */
+async function chooseCustom(page: Page): Promise<Locator> {
+  await page.getByRole("radio", { name: "Custom…" }).click();
+  const expression = page.getByRole("combobox", { name: "Snooze Until" });
+  await expect(expression).toBeFocused();
+  return expression;
+}
+
 test("Snooze typeahead preserves the keyboard-first create flow", async ({ page }, testInfo) => {
   const pause = (milliseconds: number) => EVIDENCE_CAPTURE
     ? page.waitForTimeout(milliseconds)
@@ -27,14 +35,20 @@ test("Snooze typeahead preserves the keyboard-first create flow", async ({ page 
   await page.setViewportSize({ width: 1280, height: 900 });
   await openNewSnoozeDialog(page);
 
-  const expression = page.getByRole("combobox", { name: "Natural Language" });
+  // The tiles' one stop opens focused; End selects Custom… and Tab goes on to its field.
   const submit = page.getByRole("button", { name: "Snooze Session", exact: true });
-  await expect(expression).toHaveValue("");
-  await expect(expression).toBeFocused();
-  await expect(submit).toBeDisabled();
-  await expect(page.getByText("Choose a preset or enter a future schedule.")).toBeVisible();
+  // Later Today is unavailable late in the evening, when the stop is the next tile.
+  await expect(page.locator(".choice-tile:focus")).toHaveCount(1);
+  await expect(submit).toBeEnabled();
   if (EVIDENCE_CAPTURE) await page.screenshot({ path: testInfo.outputPath("desktop-empty.png") });
   await pause(2_500);
+  await page.keyboard.press("End");
+  await expect(page.getByRole("radio", { name: "Custom…" })).toBeFocused();
+  await expect(page.getByRole("radio", { name: "Custom…" })).toHaveAttribute("aria-checked", "true");
+  await page.keyboard.press("Tab");
+  const expression = page.getByRole("combobox", { name: "Snooze Until" });
+  await expect(expression).toHaveValue("");
+  await expect(expression).toBeFocused();
 
   await expression.fill("tomorrow at 3:30");
   const listbox = page.getByRole("listbox", { name: "Schedule Suggestions" });
@@ -71,7 +85,7 @@ test("Snooze suggestions remain touch-sized and contained on mobile", async ({ p
   await page.setViewportSize({ width: 390, height: 844 });
   await openNewSnoozeDialog(page);
 
-  const expression = page.getByRole("combobox", { name: "Natural Language" });
+  const expression = await chooseCustom(page);
   await expression.fill("fri aft");
   const listbox = page.getByRole("listbox", { name: "Schedule Suggestions" });
   await expect(listbox).toBeVisible();
@@ -90,7 +104,7 @@ test("Snooze suggestions remain touch-sized and contained on mobile", async ({ p
   await listbox.getByRole("option").filter({ hasText: "Friday Afternoon" }).click();
   await expect(expression).toHaveValue("Friday Afternoon");
   await expect(listbox).toHaveCount(0);
-  await expect(page.getByText("Schedule Source: Autocomplete")).toBeVisible();
+  await expect(page.locator(".snooze-summary")).toHaveText(/^Returns Friday, .+ at 1:00 PM\.$/);
   await expect(page.getByRole("button", { name: "Snooze Session", exact: true })).toBeEnabled();
   if (EVIDENCE_CAPTURE) await page.screenshot({ path: testInfo.outputPath("mobile-selected.png") });
   await pause(4_000);
@@ -101,7 +115,7 @@ test("Snooze suggestions remain touch-sized and contained on mobile", async ({ p
 test("each Snooze suggestion is named by its expression and described by its time", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await openNewSnoozeDialog(page);
-  const expression = page.getByRole("combobox", { name: "Natural Language" });
+  const expression = await chooseCustom(page);
   const options = page.getByRole("listbox", { name: "Schedule Suggestions" }).getByRole("option");
 
   await expression.fill("tomorrow at 3:30");
@@ -158,7 +172,7 @@ test.describe("a short suggestions list on a phone", () => {
     // not placed again when its suggestions change.
     await dialogMotionSettled(page);
 
-    const expression = page.getByRole("combobox", { name: "Natural Language" });
+    const expression = await chooseCustom(page);
     const list = page.getByRole("listbox", { name: "Schedule Suggestions" });
 
     await expression.fill("tomorrow at 3:30");
@@ -186,13 +200,13 @@ test("calendar-relative presets and weekday clocks use the same authoritative pr
   await openNewSnoozeDialog(page);
 
   await page.getByRole("radio", { name: "Next Month" }).click();
-  await expect(page.getByText("Schedule Source: Preset — Next Month")).toBeVisible();
+  await expect(page.locator(".snooze-summary")).toHaveText(/^Returns \w+day, \w{3} 1(?:, \d{4})? at 9:00 AM\.$/);
   await expect(page.getByRole("button", { name: "Snooze Session", exact: true })).toBeEnabled();
 
-  const expression = page.getByRole("combobox", { name: "Natural Language" });
+  const expression = await chooseCustom(page);
   await expression.fill("wed at 15:30");
   await expect(page.getByRole("listbox", { name: "Schedule Suggestions" })).toBeVisible();
-  await expect(page.locator(".snooze-preview")).toContainText("Schedule Source: Natural Language");
+  await expect(page.locator(".snooze-summary")).toHaveText(/^Returns Wednesday, .+ at 3:30 PM\.$/);
   await expect(page.getByRole("button", { name: "Snooze Session", exact: true })).toBeEnabled();
 });
 
@@ -200,11 +214,10 @@ test("Someday clearly has no timer on desktop and mobile", async ({ page }, test
   const verifySomeday = async (screenshotName: string) => {
     await openNewSnoozeDialog(page);
     await page.getByRole("radio", { name: "Someday", exact: true }).click();
-    await expect(page.locator(".snooze-preview")).toContainText("Someday — no automatic return time.");
-    await expect(page.locator(".snooze-preview")).toContainText("Time Zone: Not Applicable");
-    await expect(page.getByRole("radio", { name: /Until Activity/ })).toHaveAccessibleDescription(/There is no automatic return time/);
-    await page.getByRole("radio", { name: /Regardless/ }).click();
-    await expect(page.getByRole("radio", { name: /Regardless/ })).toHaveAccessibleDescription(/Stay snoozed until you reschedule or remove the reminder/);
+    await expect(page.getByRole("radio", { name: "Someday", exact: true })).toHaveAccessibleDescription("No set time");
+    await expect(page.locator(".snooze-summary")).toHaveText("Stays snoozed until it needs you or you wake it.");
+    await page.getByRole("checkbox", { name: "Return Early If It Needs Me" }).uncheck();
+    await expect(page.locator(".snooze-summary")).toHaveText("Stays snoozed until you wake it.");
     await expect(page.getByRole("button", { name: "Snooze Session", exact: true })).toBeEnabled();
     if (EVIDENCE_CAPTURE) await page.screenshot({ path: testInfo.outputPath(screenshotName) });
     await page.getByRole("button", { name: "Snooze Session", exact: true }).click();
@@ -222,7 +235,7 @@ test("a stationary pointer does not choose a suggestion for typed Enter submissi
   await page.setViewportSize({ width: 1280, height: 900 });
   await openNewSnoozeDialog(page);
 
-  const expression = page.getByRole("combobox", { name: "Natural Language" });
+  const expression = await chooseCustom(page);
   const bounds = await expression.boundingBox();
   expect(bounds).not.toBeNull();
   await page.mouse.move(bounds!.x + 24, bounds!.y + bounds!.height + 36);

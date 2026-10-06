@@ -3,22 +3,30 @@ import type { SessionReminderView, SessionReminderWakePolicy, SetSessionReminder
 import { ApiError } from "../api.js";
 import {
   browserTimeZone,
-  exactReminderSchedule,
   formatReminderInstant,
+  formatReminderReturnDay,
+  formatReminderTileTime,
   parseReminderExpression,
+  reminderExpressionError,
   storedReminderSchedule,
   suggestReminderExpressions,
+  timeZoneDisplayName,
   type ParsedReminderSchedule,
 } from "../reminder-schedule.js";
 import { useAnchoredMenuStyle } from "./interactions.js";
 import { Modal } from "./common.js";
+import { FieldError } from "./FieldError.js";
+import { AlarmClockIcon } from "./Icons.js";
+import { Notice } from "./Notice.js";
+import { BusyButton } from "./ui/BusyButton.js";
 import {
-  ChoiceRows,
+  Checkbox,
+  ChoiceTiles,
   InlineListbox,
-  SegmentedControl,
   SELECT_MENU_MAX_HEIGHT_PX,
   selectMenuDesiredHeight,
   useTouchTargetMode,
+  type ChoiceTileOption,
 } from "./ui/ChoiceControls.js";
 
 const REMINDER_PRESETS = [
@@ -29,12 +37,29 @@ const REMINDER_PRESETS = [
   { expression: "someday", label: "Someday" },
 ] as const;
 type ReminderPresetExpression = typeof REMINDER_PRESETS[number]["expression"];
-const REMINDER_PRESET_OPTIONS = REMINDER_PRESETS.map((preset) => ({
-  value: preset.expression,
-  label: preset.label,
-}));
+/** A preset tile, or Custom…, which reveals the Snooze Until field. */
+type SnoozeChoice = ReminderPresetExpression | "custom";
 
+const EXPRESSION_ID = "snooze-expression";
+const EXPRESSION_HELPER_ID = "snooze-expression-helper";
+const EXPRESSION_ERROR_ID = "snooze-expression-error";
+const CHOICE_ERROR_ID = "snooze-choice-error";
+const BLOCKED_REASON_ID = "snooze-blocked-reason";
+/** Opening focus goes to the field only with a fine pointer, as Modal's does: on a touch phone it
+ * would raise the keyboard over a sheet the person has not read yet. */
+const FINE_POINTER_MEDIA = "(pointer: fine)";
+
+/**
+ * Snooze a session, edit its reminder or snooze it again (#2181).
+ *
+ * Six equal ChoiceTiles lead (docs/design-system.md §8.4), each with the time it resolves to; Custom…
+ * reveals one Snooze Until field that takes phrases and named dates alike, with its error under it
+ * (§8.5). One checkbox maps to the wake policy, and one line says when the session returns. The
+ * primary stays enabled while the schedule is incomplete and moves focus to what is missing; it is
+ * refused only during a reminder conflict, whose reason sits in the footer (§7.3).
+ */
 export function SnoozeDialog({
+  sessionTitle,
   reminder,
   onClose,
   onSave,
@@ -43,6 +68,8 @@ export function SnoozeDialog({
   returnFocusRef,
   supportsSomeday = false,
 }: {
+  /** The session's one-line title, the dialog's description. */
+  sessionTitle: string;
   reminder?: SessionReminderView;
   onClose: () => void;
   onSave: (request: SetSessionReminderRequest, previous?: SessionReminderView) => Promise<void>;
@@ -54,17 +81,19 @@ export function SnoozeDialog({
   returnFocusRef?: { current: HTMLElement | null };
 }) {
   const [loadedReminder, setLoadedReminder] = useState<SessionReminderView | undefined>(() => reminder);
-  const initialDraft = draftForReminder(loadedReminder);
+  const [initialDraft] = useState(() => draftForReminder(loadedReminder, supportsSomeday));
+  const [choice, setChoice] = useState<SnoozeChoice | null>(initialDraft.choice);
   const [expression, setExpression] = useState(initialDraft.expression);
-  const [exact, setExact] = useState(initialDraft.exact);
-  const [selectedPreset, setSelectedPreset] = useState<ReminderPresetExpression | null>(null);
   const [selectedSuggestion, setSelectedSuggestion] = useState<ParsedReminderSchedule | null>(null);
   const [suggestionsOpen, setSuggestionsOpen] = useState(false);
   const [activeSuggestion, setActiveSuggestion] = useState(-1);
   const [wakePolicy, setWakePolicy] = useState<SessionReminderWakePolicy>(initialDraft.wakePolicy);
   const [scheduleTouched, setScheduleTouched] = useState(false);
+  const [expressionEdited, setExpressionEdited] = useState(false);
+  const [showFieldError, setShowFieldError] = useState(false);
+  const [showChoiceError, setShowChoiceError] = useState(false);
   const [creatingFromDraft, setCreatingFromDraft] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
+  const [pending, setPending] = useState<"save" | "remove" | null>(null);
   const [reconciling, setReconciling] = useState(false);
   const [reconciled, setReconciled] = useState<{
     reminder: SessionReminderView | null;
@@ -73,21 +102,22 @@ export function SnoozeDialog({
   const [error, setError] = useState<string | null>(null);
   const [reconciliationFailed, setReconciliationFailed] = useState(false);
   const expressionRef = useRef<HTMLInputElement>(null);
+  const tilesRef = useRef<HTMLDivElement>(null);
   const suggestionListId = `${useId()}-suggestions`;
-  const focusExpressionAfterReloadRef = useRef(false);
+  /** Set when the next commit should focus the draft's control: after a reload, or a pointer on Custom…. */
+  const focusDraftRef = useRef(false);
   const reconcilingRef = useRef(false);
   const submittingRef = useRef(false);
   const liveReminderKey = reminderKey(reminder);
   const liveReminderKeyRef = useRef(liveReminderKey);
   liveReminderKeyRef.current = liveReminderKey;
-  const localTimeZone = browserTimeZone();
-  const storedTimeZone = loadedReminder?.scheduleKind === "someday" ? undefined : loadedReminder?.timeZone;
-  const timeZone = loadedReminder && !scheduleTouched ? storedTimeZone : localTimeZone;
+  const submitting = pending !== null;
   const returnedReminder = loadedReminder?.state === "fired" ? loadedReminder : undefined;
   const reschedulingFiredReminder = returnedReminder !== undefined && !creatingFromDraft;
   const currentReminder = reconciled ? reconciled.reminder ?? undefined : reminder;
   const mutationReminder = creatingFromDraft ? undefined : loadedReminder;
   const conflict = submitting ? null : reminderConflict(mutationReminder, currentReminder);
+  const custom = choice === "custom";
   const suggestions = useMemo(
     () => suggestReminderExpressions(expression, new Date())
       .filter((suggestion) => supportsSomeday || suggestion.scheduleKind !== "someday"),
@@ -97,7 +127,7 @@ export function SnoozeDialog({
     ? -1
     : Math.min(activeSuggestion, suggestions.length - 1);
   const activeSuggestionValue = suggestions[activeSuggestionIndex];
-  const suggestionPopupOpen = suggestionsOpen && suggestions.length > 0;
+  const suggestionPopupOpen = custom && suggestionsOpen && suggestions.length > 0;
   const coarsePointer = useTouchTargetMode();
   const suggestionListStyle = useAnchoredMenuStyle(suggestionPopupOpen, expressionRef, {
     desiredHeight: selectMenuDesiredHeight({
@@ -112,46 +142,75 @@ export function SnoozeDialog({
     measureKey: suggestions,
     maxHeight: SELECT_MENU_MAX_HEIGHT_PX,
   });
-  const parsed = useMemo(() => {
+
+  const now = new Date();
+  const parsed = resolveSchedule();
+  function resolveSchedule(): ParsedReminderSchedule | null {
     if (loadedReminder && !scheduleTouched) {
       return returnedReminder ? null : storedReminderSchedule(loadedReminder);
     }
-    if (selectedSuggestion) return selectedSuggestion;
-    if (selectedPreset) {
-      const preset = parseReminderExpression(selectedPreset, new Date());
-      return preset?.scheduleKind === "someday" && !supportsSomeday ? null : preset;
-    }
-    const schedule = exact
-      ? exactReminderSchedule(exact)
-      : parseReminderExpression(expression, new Date());
+    if (!choice) return null;
+    const schedule = choice === "custom"
+      ? selectedSuggestion ?? parseReminderExpression(expression, now)
+      : parseReminderExpression(choice, now);
     return schedule?.scheduleKind === "someday" && !supportsSomeday ? null : schedule;
-  }, [exact, expression, localTimeZone, loadedReminder, returnedReminder, scheduleTouched, selectedPreset, selectedSuggestion, supportsSomeday]);
-  const scheduleSource = returnedReminder && !scheduleTouched
-    ? "None Selected"
-    : loadedReminder && !scheduleTouched
-    ? "Stored Reminder"
-    : selectedSuggestion
-      ? "Autocomplete"
-      : selectedPreset
-        ? `Preset — ${REMINDER_PRESETS.find((preset) => preset.expression === selectedPreset)?.label ?? "Selected"}`
-      : exact
-        ? "Exact Date and Time"
-        : expression.trim()
-          ? "Natural Language"
-          : "None Selected";
-  const scheduleMessage = parsed?.scheduleKind === "someday"
-    ? "Someday — no automatic return time."
-    : parsed
-    ? formatReminderInstant(parsed.scheduledFor, parsed.timeZone)
-    : invalidScheduleMessage(expression, exact, selectedPreset, supportsSomeday);
-  const showingSomeday = parsed?.scheduleKind === "someday" ||
-    (!scheduleTouched && loadedReminder?.scheduleKind === "someday");
+  }
+  // The field's error shows once it was left after an edit, or on submit (§8.5), and clears as soon
+  // as the value resolves. An untouched stored schedule is never wrong.
+  const fieldError = custom && showFieldError && !parsed
+    ? reminderExpressionError(expression, now, supportsSomeday)
+    : null;
+  const choiceError = !custom && showChoiceError && !parsed
+    ? choice ? reminderExpressionError(choice, now, supportsSomeday) : "Choose when it returns."
+    : null;
+  const tiles: ChoiceTileOption<SnoozeChoice>[] = [
+    ...REMINDER_PRESETS
+      .filter((preset) => supportsSomeday || preset.expression !== "someday")
+      .map((preset) => {
+        const schedule = parseReminderExpression(preset.expression, now);
+        return {
+          value: preset.expression,
+          label: preset.label,
+          detail: schedule ? formatReminderTileTime(schedule, now.getTime()) : "Too late today",
+          disabled: !schedule,
+        };
+      }),
+    {
+      value: "custom",
+      label: "Custom…",
+      detail: custom && parsed ? formatReminderTileTime(parsed, now.getTime()) : "Type a time",
+      disabled: false,
+    },
+  ];
+  const summary = !parsed
+    ? null
+    : parsed.scheduleKind === "someday"
+      ? wakePolicy === "until_activity"
+        ? "Stays snoozed until it needs you or you wake it."
+        : "Stays snoozed until you wake it."
+      : `Returns ${formatReminderReturnDay(parsed.scheduledFor, parsed.timeZone, now.getTime())}.`;
+  const primaryLabel = creatingFromDraft
+    ? "Create New Reminder"
+    : reschedulingFiredReminder
+      ? "Snooze Again"
+      : loadedReminder ? "Update Reminder" : "Snooze Session";
+  const blockedReason = !conflict
+    ? null
+    : currentReminder
+      ? "Reload the reminder before saving."
+      : "Create a new reminder or start over before saving.";
+
+  // Opening focus (§7.2): the field when the draft is Custom… and a fine pointer is in use,
+  // otherwise the tiles' one stop. This runs after Modal's own opening focus, a child effect.
+  useEffect(() => {
+    focusDraftControl(window.matchMedia?.(FINE_POINTER_MEDIA).matches ?? true);
+  }, []);
 
   useLayoutEffect(() => {
-    if (!focusExpressionAfterReloadRef.current) return;
-    focusExpressionAfterReloadRef.current = false;
-    expressionRef.current?.focus();
-  }, [creatingFromDraft, loadedReminder]);
+    if (!focusDraftRef.current) return;
+    focusDraftRef.current = false;
+    focusDraftControl(true);
+  });
 
   useEffect(() => {
     setReconciled((current) => current && current.liveKey !== liveReminderKey ? null : current);
@@ -163,24 +222,43 @@ export function SnoozeDialog({
       ?.scrollIntoView?.({ block: "nearest" });
   }, [activeSuggestionIndex, suggestionListId, suggestionPopupOpen]);
 
+  function focusDraftControl(field: boolean) {
+    if (field && expressionRef.current) {
+      expressionRef.current.focus();
+      return;
+    }
+    tilesRef.current?.querySelector<HTMLElement>('.choice-tile[tabindex="0"]')?.focus();
+  }
+
+  const choose = (next: SnoozeChoice, byPointer: boolean) => {
+    // A pointer on Custom… goes on to its field; arrows stay in the tiles so they can keep moving.
+    if (next === "custom" && byPointer) focusDraftRef.current = true;
+    if (next === choice) return;
+    setScheduleTouched(true);
+    setChoice(next);
+    setSuggestionsOpen(false);
+  };
+
   const reload = () => {
-    const next = draftForReminder(currentReminder);
-    focusExpressionAfterReloadRef.current = true;
+    const next = draftForReminder(currentReminder, supportsSomeday);
+    focusDraftRef.current = true;
     setCreatingFromDraft(false);
     setLoadedReminder(currentReminder);
+    setChoice(next.choice);
     setExpression(next.expression);
-    setExact(next.exact);
-    setSelectedPreset(null);
     setSelectedSuggestion(null);
     setSuggestionsOpen(false);
     setWakePolicy(next.wakePolicy);
     setScheduleTouched(false);
+    setExpressionEdited(false);
+    setShowFieldError(false);
+    setShowChoiceError(false);
     setError(null);
     setReconciliationFailed(false);
   };
 
   const createNewFromDraft = () => {
-    focusExpressionAfterReloadRef.current = true;
+    focusDraftRef.current = true;
     setCreatingFromDraft(true);
     setError(null);
     setReconciliationFailed(false);
@@ -203,7 +281,7 @@ export function SnoozeDialog({
       setError(null);
       setReconciliationFailed(false);
     } catch (cause) {
-      setError(`Unable to load the current reminder state. ${(cause as Error).message}`);
+      setError(`Couldn't load the current reminder. ${(cause as Error).message}`);
       setReconciliationFailed(true);
     } finally {
       reconcilingRef.current = false;
@@ -212,9 +290,20 @@ export function SnoozeDialog({
   };
 
   const submit = async (schedule = parsed) => {
-    if (!schedule || submittingRef.current || conflict) return;
+    if (submittingRef.current || conflict) return;
+    if (!schedule) {
+      // Short form (§8.5): the primary stays enabled, and pressing it shows what is missing there.
+      if (custom) {
+        setShowFieldError(true);
+        expressionRef.current?.focus();
+      } else {
+        setShowChoiceError(true);
+        focusDraftControl(false);
+      }
+      return;
+    }
     submittingRef.current = true;
-    setSubmitting(true);
+    setPending("save");
     setError(null);
     setReconciliationFailed(false);
     try {
@@ -232,23 +321,22 @@ export function SnoozeDialog({
       if (cause instanceof ApiError && cause.status === 409) await reconcile();
     } finally {
       submittingRef.current = false;
-      setSubmitting(false);
+      setPending(null);
     }
   };
 
-  const selectSuggestion = (suggestion: NonNullable<typeof activeSuggestionValue>, submitAfterSelection = false) => {
+  const selectSuggestion = (suggestion: ParsedReminderSchedule, submitAfterSelection = false) => {
     setScheduleTouched(true);
-    setSelectedPreset(null);
     setSelectedSuggestion(suggestion);
-    setExact("");
     setExpression(suggestion.originalExpression);
     setSuggestionsOpen(false);
     if (submitAfterSelection) void submit(suggestion);
   };
 
   const remove = async () => {
-    if (!onRemove || !loadedReminder || creatingFromDraft || submitting || conflict) return;
-    setSubmitting(true);
+    if (!onRemove || !loadedReminder || creatingFromDraft || submittingRef.current || conflict) return;
+    submittingRef.current = true;
+    setPending("remove");
     setError(null);
     setReconciliationFailed(false);
     try {
@@ -258,10 +346,12 @@ export function SnoozeDialog({
       setError((cause as Error).message);
       if (cause instanceof ApiError && cause.status === 409) await reconcile();
     } finally {
-      setSubmitting(false);
+      submittingRef.current = false;
+      setPending(null);
     }
   };
 
+  const dismissing = loadedReminder?.state === "fired";
   return (
     <Modal
       {...(returnFocusRef ? { returnFocusRef } : {})}
@@ -270,58 +360,54 @@ export function SnoozeDialog({
         : reschedulingFiredReminder
           ? "Snooze Again"
           : loadedReminder ? "Edit Reminder" : "Snooze Session"}
+      description={<span className="snooze-session-title" title={sessionTitle}>{sessionTitle}</span>}
       onClose={onClose}
-      describedBy="snooze-description"
-      tertiary={!creatingFromDraft && loadedReminder && onRemove ? <button
+      tertiary={!creatingFromDraft && loadedReminder && onRemove ? <BusyButton
         className="btn ghost"
-        type="button"
+        busy={pending === "remove"}
+        progress={dismissing ? "Dismissing the reminder…" : "Removing the reminder…"}
         onClick={() => void remove()}
-        disabled={submitting}
+        disabled={pending === "save"}
         aria-disabled={Boolean(conflict) || undefined}
       >
-        {loadedReminder.state === "fired" ? "Dismiss Reminder" : "Remove Reminder"}
-      </button> : undefined}
+        {dismissing ? "Dismiss Reminder" : "Remove Reminder"}
+      </BusyButton> : undefined}
       footer={<>
+        {blockedReason && <p className="snooze-blocked-reason" id={BLOCKED_REASON_ID}>{blockedReason}</p>}
         <button className="btn" type="button" onClick={onClose} disabled={submitting}>Cancel</button>
-        <button
+        <BusyButton
           className="btn primary"
           type="submit"
           form="snooze-session-form"
-          disabled={!parsed || submitting}
+          busy={pending === "save"}
+          progress={creatingFromDraft
+            ? "Creating the reminder…"
+            : loadedReminder && !reschedulingFiredReminder ? "Updating the reminder…" : "Snoozing the session…"}
+          disabled={pending === "remove"}
           aria-disabled={Boolean(conflict) || undefined}
+          aria-describedby={blockedReason ? BLOCKED_REASON_ID : undefined}
         >
-          {submitting
-            ? "Saving…"
-            : creatingFromDraft
-              ? "Create New Reminder"
-              : reschedulingFiredReminder
-                ? "Snooze Again"
-                : loadedReminder ? "Update Reminder" : "Snooze Session"}
-        </button>
+          {primaryLabel}
+        </BusyButton>
       </>}
     >
-      <form id="snooze-session-form" className="snooze-form" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
-        <p id="snooze-description">
-          {creatingFromDraft
-            ? "The preserved schedule, time zone, and wake policy will create a new reminder. The removed reminder will not be restored."
-            : returnedReminder
-            ? returnedReminder.scheduleKind === "someday"
-              ? "This session returned from a Someday snooze after activity. Choose a new schedule to snooze it again."
-              : `This session returned from snooze after ${formatReminderInstant(returnedReminder.scheduledFor, returnedReminder.timeZone)}. Choose a new time to snooze it again.`
-            : "Snoozing changes Sessions visibility only. Running work and lifecycle state continue unchanged."}
-        </p>
+      <form
+        id="snooze-session-form"
+        className="snooze-form"
+        noValidate
+        onSubmit={(event) => { event.preventDefault(); void submit(); }}
+      >
         <span className="sr-only" role="status" aria-live="polite">
           {creatingFromDraft
             ? "Creating a new reminder from the preserved draft. The removed reminder will not be restored."
             : ""}
         </span>
         {conflict && (
-          <div className="snooze-conflict" role="alert" aria-live="assertive">
-            <strong>Stored Reminder Changed</strong>
-            <span>{conflict} Your local draft is preserved. {currentReminder
-              ? "Continue reviewing it, or reload before saving."
-              : "Create a new reminder from this draft, or discard it and start from defaults."}</span>
-            {currentReminder ? (
+          <Notice
+            tone="warning"
+            role="alert"
+            title="Reminder Changed"
+            actions={currentReminder ? (
               <button className="btn sm" type="button" onClick={reload}>Reload Reminder</button>
             ) : (<>
               <button className="btn sm" type="button" onClick={createNewFromDraft}>
@@ -329,143 +415,144 @@ export function SnoozeDialog({
               </button>
               <button className="btn sm" type="button" onClick={reload}>Start New Reminder</button>
             </>)}
+          >
+            {conflict} Your changes here are kept. {currentReminder
+              ? "Reload it to see the current reminder."
+              : "Create a new reminder from them, or start over."}
+          </Notice>
+        )}
+        <div className="snooze-choice">
+          <ChoiceTiles
+            label="Return Time"
+            options={tiles}
+            value={choice}
+            onChange={choose}
+            groupRef={tilesRef}
+            invalid={Boolean(choiceError)}
+            describedBy={choiceError ? CHOICE_ERROR_ID : undefined}
+          />
+          {choiceError && <FieldError id={CHOICE_ERROR_ID}>{choiceError}</FieldError>}
+        </div>
+        {custom && (
+          <div className="field">
+            <label className="field-label" htmlFor={EXPRESSION_ID}>Snooze Until</label>
+            <div className="snooze-expression-combobox">
+              <input
+                ref={expressionRef}
+                id={EXPRESSION_ID}
+                className="input"
+                role="combobox"
+                aria-autocomplete="list"
+                aria-haspopup="listbox"
+                aria-expanded={suggestionPopupOpen}
+                aria-controls={suggestionPopupOpen ? suggestionListId : undefined}
+                aria-activedescendant={suggestionPopupOpen && activeSuggestionValue
+                  ? `${suggestionListId}-${activeSuggestionIndex}`
+                  : undefined}
+                aria-invalid={fieldError ? true : undefined}
+                aria-describedby={fieldError ? EXPRESSION_ERROR_ID : EXPRESSION_HELPER_ID}
+                value={expression}
+                onChange={(event) => {
+                  setScheduleTouched(true);
+                  setExpressionEdited(true);
+                  setSelectedSuggestion(null);
+                  setExpression(event.target.value);
+                  setActiveSuggestion(-1);
+                  setSuggestionsOpen(Boolean(event.target.value.trim()));
+                }}
+                onBlur={() => {
+                  setSuggestionsOpen(false);
+                  if (expressionEdited && !submittingRef.current) setShowFieldError(true);
+                }}
+                onKeyDown={(event) => {
+                  if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+                  if (event.key === "Tab") {
+                    setSuggestionsOpen(false);
+                    return;
+                  }
+                  if (event.key === "Escape" && suggestionPopupOpen) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setSuggestionsOpen(false);
+                    return;
+                  }
+                  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                    if (suggestions.length === 0) return;
+                    event.preventDefault();
+                    if (!suggestionPopupOpen) {
+                      setSuggestionsOpen(true);
+                      setActiveSuggestion(event.key === "ArrowDown" ? 0 : suggestions.length - 1);
+                      return;
+                    }
+                    if (activeSuggestionIndex < 0) {
+                      setActiveSuggestion(event.key === "ArrowDown" ? 0 : suggestions.length - 1);
+                      return;
+                    }
+                    const delta = event.key === "ArrowDown" ? 1 : -1;
+                    setActiveSuggestion((activeSuggestionIndex + delta + suggestions.length) % suggestions.length);
+                    return;
+                  }
+                  if (event.key === "Enter" && suggestionPopupOpen && activeSuggestionValue) {
+                    event.preventDefault();
+                    selectSuggestion(activeSuggestionValue, true);
+                  }
+                }}
+                autoComplete="off"
+              />
+              {suggestionPopupOpen && (
+                <InlineListbox
+                  id={suggestionListId}
+                  label="Schedule Suggestions"
+                  options={suggestions}
+                  activeIndex={activeSuggestionIndex}
+                  getKey={(suggestion) => suggestion.originalExpression}
+                  onActiveChange={setActiveSuggestion}
+                  onSelect={selectSuggestion}
+                  className="snooze-suggestions ui-searchable-combobox-list menu listbox"
+                  style={suggestionListStyle}
+                  optionText={(suggestion) => ({
+                    label: suggestion.originalExpression,
+                    description: suggestion.scheduleKind === "someday"
+                      ? "No automatic return time"
+                      : formatReminderInstant(suggestion.scheduledFor, suggestion.timeZone),
+                  })}
+                />
+              )}
+            </div>
+            {fieldError
+              ? <FieldError id={EXPRESSION_ERROR_ID}>{fieldError}</FieldError>
+              : (
+                <p className="field-helper" id={EXPRESSION_HELPER_ID}>
+                  Try “in 2 hours”, “tomorrow 3pm” or “dec 10 9am”. Times use {timeZoneDisplayName(browserTimeZone())}.
+                </p>
+              )}
           </div>
         )}
-        {reconciling && <p className="form-error" role="status">Loading current reminder state…</p>}
-        {error && !reconciling && <p className="form-error" role="alert">
-          {error}
-          {reconciliationFailed && onReconcile && <>{" "}<button className="btn sm" type="button" onClick={() => void reconcile()}>
-            Retry Reconciliation
-          </button></>}
-        </p>}
-        <SegmentedControl
-          className="snooze-presets"
-          label="Reminder Presets"
-          options={supportsSomeday
-            ? REMINDER_PRESET_OPTIONS
-            : REMINDER_PRESET_OPTIONS.filter((option) => option.value !== "someday")}
-          value={selectedPreset}
-          onChange={(preset) => {
-            setScheduleTouched(true);
-            setSelectedPreset(preset);
-            setSelectedSuggestion(null);
-            setExact("");
-            setExpression("");
-            setSuggestionsOpen(false);
-          }}
-        />
-        <label className="field-label" htmlFor="snooze-expression">Natural Language</label>
-        <div className="snooze-expression-combobox">
-          <input
-            ref={expressionRef}
-            id="snooze-expression"
-            className="input"
-            role="combobox"
-            aria-autocomplete="list"
-            aria-haspopup="listbox"
-            aria-expanded={suggestionPopupOpen}
-            aria-controls={suggestionPopupOpen ? suggestionListId : undefined}
-            aria-activedescendant={suggestionPopupOpen && activeSuggestionValue
-              ? `${suggestionListId}-${activeSuggestionIndex}`
-              : undefined}
-            aria-describedby="snooze-expression-hint"
-            value={expression}
-            onChange={(event) => {
-              setScheduleTouched(true);
-              setSelectedPreset(null);
-              setSelectedSuggestion(null);
-              setExact("");
-              setExpression(event.target.value);
-              setActiveSuggestion(-1);
-              setSuggestionsOpen(Boolean(event.target.value.trim()));
-            }}
-            onBlur={() => setSuggestionsOpen(false)}
-            onKeyDown={(event) => {
-              if (event.nativeEvent.isComposing || event.keyCode === 229) return;
-              if (event.key === "Tab") {
-                setSuggestionsOpen(false);
-                return;
-              }
-              if (event.key === "Escape" && suggestionPopupOpen) {
-                event.preventDefault();
-                event.stopPropagation();
-                setSuggestionsOpen(false);
-                return;
-              }
-              if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-                if (suggestions.length === 0) return;
-                event.preventDefault();
-                if (!suggestionPopupOpen) {
-                  setSuggestionsOpen(true);
-                  setActiveSuggestion(event.key === "ArrowDown" ? 0 : suggestions.length - 1);
-                  return;
-                }
-                if (activeSuggestionIndex < 0) {
-                  setActiveSuggestion(event.key === "ArrowDown" ? 0 : suggestions.length - 1);
-                  return;
-                }
-                const delta = event.key === "ArrowDown" ? 1 : -1;
-                setActiveSuggestion((activeSuggestionIndex + delta + suggestions.length) % suggestions.length);
-                return;
-              }
-              if (event.key === "Enter" && suggestionPopupOpen && activeSuggestionValue) {
-                event.preventDefault();
-                selectSuggestion(activeSuggestionValue, true);
-              }
-            }}
-            placeholder="Try “in 2 hours”"
-            autoComplete="off"
-            autoFocus
+        <div className="snooze-outcome">
+          <Checkbox
+            checked={wakePolicy === "until_activity"}
+            label="Return Early If It Needs Me"
+            helper="An approval, a question, a failure or finished background work brings it back sooner."
+            onChange={(checked) => setWakePolicy(checked ? "until_activity" : "regardless")}
           />
-          {suggestionPopupOpen && (
-            <InlineListbox
-              id={suggestionListId}
-              label="Schedule Suggestions"
-              options={suggestions}
-              activeIndex={activeSuggestionIndex}
-              getKey={(suggestion) => suggestion.originalExpression}
-              onActiveChange={setActiveSuggestion}
-              onSelect={selectSuggestion}
-              className="snooze-suggestions ui-searchable-combobox-list menu listbox"
-              style={suggestionListStyle}
-              optionText={(suggestion) => ({
-                label: suggestion.originalExpression,
-                description: suggestion.scheduleKind === "someday"
-                  ? "No automatic return time"
-                  : formatReminderInstant(suggestion.scheduledFor, suggestion.timeZone),
-              })}
-            />
-          )}
+          {/* Always in the document, so the line that appears is announced (a live region that is
+              added with its text often is not). Empty, it has no height. */}
+          <p className="snooze-summary" role="status" aria-live="polite">
+            {summary && <><AlarmClockIcon size={16} aria-hidden="true" /><span>{summary}</span></>}
+          </p>
         </div>
-        <span className="field-hint" id="snooze-expression-hint">Start typing to see schedules supported by the reminder parser. Numeric dates belong in Exact Date and Time.</span>
-        <label className="field-label" htmlFor="snooze-exact">Exact Date and Time</label>
-        <input id="snooze-exact" className="input" type="datetime-local" value={exact} onChange={(event) => { setScheduleTouched(true); setSelectedPreset(null); setSelectedSuggestion(null); setSuggestionsOpen(false); setExact(event.target.value); }} />
-        <ChoiceRows<SessionReminderWakePolicy>
-          className="snooze-policy"
-          label="Wake Policy"
-          value={wakePolicy}
-          options={[
-            {
-              value: "until_activity", title: "Until Activity",
-              description: parsed?.scheduleKind === "someday"
-                ? "Return for an agent response, approval, question, failure, or managed background result. There is no automatic return time."
-                : "Return at this time or sooner for an agent response, approval, question, failure, or managed background result.",
-            },
-            {
-              value: "regardless", title: "Regardless",
-              description: parsed?.scheduleKind === "someday"
-                ? "Stay snoozed until you reschedule or remove the reminder. Approvals, questions, and failures remain available in Snoozed."
-                : "Return only at the scheduled time. Approvals, questions, and failures remain available on the session in Snoozed.",
-            },
-          ]}
-          onChange={setWakePolicy}
-        />
-        <div className="snooze-preview" role="status" aria-live="polite">
-          <strong>{showingSomeday ? "Return Schedule" : "Scheduled Instant"}</strong>
-          <span>{scheduleMessage}</span>
-          <span>Schedule Source: {scheduleSource}</span>
-          <span>Time Zone: {showingSomeday ? "Not Applicable" : timeZone}</span>
-        </div>
+        {reconciling && <p className="snooze-reconciling" role="status">Loading the current reminder…</p>}
+        {error && !reconciling && (
+          <Notice
+            tone="danger"
+            role="alert"
+            actions={reconciliationFailed && onReconcile ? (
+              <button className="btn sm" type="button" onClick={() => void reconcile()}>Retry Reconciliation</button>
+            ) : undefined}
+          >
+            {error}
+          </Notice>
+        )}
       </form>
     </Modal>
   );
@@ -475,50 +562,23 @@ function reminderKey(reminder?: SessionReminderView): string {
   return reminder ? `${reminder.reminderId}:${reminder.revision}:${reminder.state}` : "absent";
 }
 
-function draftForReminder(reminder?: SessionReminderView): {
+/**
+ * Where a dialog starts. A new snooze and a fired one choose afresh; a Someday reminder starts on
+ * its tile; a timed one starts on Custom… with its own words, saved as its stored instant until
+ * something changes.
+ */
+function draftForReminder(reminder: SessionReminderView | undefined, supportsSomeday: boolean): {
+  choice: SnoozeChoice | null;
   expression: string;
-  exact: string;
   wakePolicy: SessionReminderWakePolicy;
 } {
-  const exact = reminder && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(reminder.originalExpression)
-    ? reminder.originalExpression : "";
   return {
-    expression: exact ? "" : reminder?.originalExpression ?? "",
-    exact,
+    choice: !reminder || reminder.state === "fired"
+      ? null
+      : reminder.scheduleKind === "someday" && supportsSomeday ? "someday" : "custom",
+    expression: reminder?.scheduleKind === "someday" ? "" : reminder?.originalExpression ?? "",
     wakePolicy: reminder?.wakePolicy ?? "until_activity",
   };
-}
-
-function invalidScheduleMessage(
-  expression: string,
-  exact: string,
-  selectedPreset: ReminderPresetExpression | null,
-  supportsSomeday: boolean,
-): string {
-  if (exact) return "Choose an exact date and time in the future.";
-  if (selectedPreset === "later today") return "Later Today is no longer available. Choose another future schedule.";
-  const normalized = expression.trim().toLocaleLowerCase().replace(/\s+/g, " ");
-  if (!normalized) return "Choose a preset or enter a future schedule.";
-  if (normalized === "someday" && !supportsSomeday) {
-    return "Someday requires a newer control plane. Update Wollipog or choose a timed schedule.";
-  }
-  if (/^\d{1,4}[/-]\d{1,2}[/-]\d{1,4}$/.test(normalized)) {
-    return "Numeric dates are ambiguous. Use Exact Date and Time instead.";
-  }
-  if (/^in 0 (minute|minutes|hour|hours|day|days)$/.test(normalized)) {
-    return "That schedule is not in the future. Choose a positive interval.";
-  }
-  const todayClock = /^today(?: at)? (\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/.exec(normalized);
-  if (todayClock) {
-    const hour = Number(todayClock[1]);
-    const minute = Number(todayClock[2] ?? "0");
-    const validHour = todayClock[3] ? hour >= 1 && hour <= 12 : hour <= 23;
-    if (!validHour || minute > 59) {
-      return "Enter a valid clock time, such as today at 3:30 PM.";
-    }
-    return "That time is not in the future. Choose a later time or use tomorrow.";
-  }
-  return "Complete a supported phrase or choose a schedule suggestion.";
 }
 
 function reminderConflict(

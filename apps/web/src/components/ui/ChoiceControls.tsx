@@ -634,6 +634,89 @@ export function ChoiceRows<T extends string>({
   );
 }
 
+/* ------------------------------------------------------------------------------------------------
+ * ChoiceTiles
+ * ---------------------------------------------------------------------------------------------- */
+
+export interface ChoiceTileOption<T extends string> {
+  value: T;
+  /** Title Case label, the tile's accessible name. */
+  label: string;
+  /** The short second line (Snooze's resolved time), the tile's accessible description. */
+  detail: string;
+  /** Unavailable: reachable by arrows, refused on activation, its `detail` saying why. */
+  disabled?: boolean;
+}
+
+/**
+ * Equal tiles for a few short presets whose second line is the reason to pick one (§8.4): Snooze's
+ * Later Today, Tomorrow Morning and the rest, each with the time it resolves to (#2181). Three
+ * across, two on a phone, each a `radio` in one `radiogroup` with the choice row's selected
+ * treatment and a trailing check.
+ *
+ * Buttons with the roving pattern, as SegmentedControl's are, so `onChange` can tell a pointer (a
+ * click count) from arrows, Space and Enter (none): a tile that reveals a field moves focus there
+ * only for a pointer, and arrows keep moving through the tiles.
+ */
+export function ChoiceTiles<T extends string>({
+  options,
+  value,
+  onChange,
+  label,
+  className,
+  describedBy,
+  invalid,
+  groupRef,
+}: {
+  options: readonly ChoiceTileOption<T>[];
+  value: NoInfer<T> | null;
+  onChange: (value: T, byPointer: boolean) => void;
+  /** The group's accessible name. Required: an unlabelled radiogroup announces only its options. */
+  label: string;
+  className?: string;
+  /** The group's field error while it shows (§8.5). */
+  describedBy?: string;
+  invalid?: boolean;
+  groupRef?: React.Ref<HTMLDivElement>;
+}) {
+  const ids = useId();
+  const stopAt = rovingChoiceStop(options.map((option) => ({ selected: option.value === value, disabled: option.disabled })));
+  return (
+    <div
+      ref={groupRef}
+      className={`choice-tiles${className ? ` ${className}` : ""}`}
+      role="radiogroup"
+      aria-label={label}
+      aria-invalid={invalid || undefined}
+      aria-describedby={describedBy}
+      onKeyDown={(event) => handleRovingChoiceKeyDown(event, "radio", { includeAriaDisabled: true })}
+    >
+      {options.map((option, index) => {
+        const selected = option.value === value;
+        const id = `${ids}-${index}`;
+        return (
+          <button
+            key={option.value}
+            type="button"
+            role="radio"
+            className="choice-tile"
+            aria-checked={selected}
+            aria-disabled={option.disabled || undefined}
+            aria-labelledby={`${id}-label`}
+            aria-describedby={`${id}-detail`}
+            tabIndex={index === stopAt ? 0 : -1}
+            onClick={(event) => { if (!option.disabled) onChange(option.value, event.detail > 0); }}
+          >
+            <span className="choice-tile-label" id={`${id}-label`}>{option.label}</span>
+            <span className="choice-tile-detail" id={`${id}-detail`}>{option.detail}</span>
+            {selected && <CheckIcon className="choice-tile-check" size={16} aria-hidden="true" />}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export interface ChoiceListOption<T extends string> {
   value: T;
   /** Title Case label. */

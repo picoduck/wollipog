@@ -55,6 +55,7 @@ import type { NewSessionPreset } from "./NewSessionDialog.js";
 import { BoardIcon, ListIcon, SearchIcon } from "./Icons.js";
 import { PageHeader } from "./PageHeader.js";
 import { shortcutDisplay } from "../shortcuts.js";
+import { sessionDisplayTitle } from "../session-title.js";
 import { Board } from "./Board.js";
 import type { SessionsViewMode } from "../sessions-view-mode.js";
 import { sessionAgentLabel } from "./agent-options.js";
@@ -1685,6 +1686,7 @@ export function InboxView({
       {snoozeSessionId && sessionRemindersSupported && (
         <SnoozeDialog
           key={snoozeSessionId}
+          sessionTitle={sessionDisplayTitle(sessions.get(snoozeSessionId)?.title ?? "")}
           reminder={reminders.get(snoozeSessionId)}
           supportsSomeday={indefiniteSessionRemindersSupported}
           {...(snoozeReturnFocusRef ? { returnFocusRef: snoozeReturnFocusRef } : {})}

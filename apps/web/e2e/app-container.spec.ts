@@ -126,8 +126,9 @@ for (const banner of [false, true]) {
     await forceFloorEngine(page);
     await page.locator(".inbox-row-shell").first().click({ button: "right" });
     await page.getByRole("menuitem", { name: "Snooze…", exact: true }).click();
-    const expression = page.getByRole("combobox", { name: "Natural Language" });
     await dialogMotionSettled(page);
+    await page.getByRole("radio", { name: "Custom…" }).click();
+    const expression = page.getByRole("combobox", { name: "Snooze Until" });
     await expression.fill("fri");
     const list = page.getByRole("listbox").filter({ has: page.getByRole("option") }).last();
     await expect(list.getByRole("option").first()).toBeVisible();

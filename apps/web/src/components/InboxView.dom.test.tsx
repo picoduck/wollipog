@@ -1363,18 +1363,16 @@ test("a two-client reminder upsert preserves the open Inbox Snooze draft and foc
     .at(0)!;
   assert.ok(snooze);
   await act(async () => { snooze.click(); });
+  // A timed reminder opens on Custom…, its Snooze Until field holding the stored words (#2181).
   const expression = container.querySelector<HTMLInputElement>("#snooze-expression")!;
-  const exact = container.querySelector<HTMLInputElement>("#snooze-exact")!;
+  const returnEarly = () => container.querySelector<HTMLInputElement>('.snooze-outcome .checkbox input[type="checkbox"]')!;
   await act(async () => {
-    expression.value = "today at 3:30 pm";
+    expression.value = "tomorrow 3pm";
     fireDomEvent.change(expression);
-    exact.value = "2099-04-05T06:30";
-    fireDomEvent.change(exact);
-    [...container.querySelectorAll<HTMLLabelElement>(".snooze-policy .choice-row")]
-      .find((row) => row.textContent?.includes("Regardless"))!.click();
-    exact.focus();
+    returnEarly().click();
+    expression.focus();
   });
-  const draftTimeZone = [...container.querySelectorAll(".snooze-preview span")].at(-1)?.textContent;
+  const draftSummary = container.querySelector(".snooze-summary")?.textContent;
 
   await act(async () => {
     socket.push({
@@ -1391,11 +1389,10 @@ test("a two-client reminder upsert preserves the open Inbox Snooze draft and foc
     });
   });
 
-  assert.equal(domWindow.document.activeElement, exact);
-  assert.equal(expression.value, "today at 3:30 pm");
-  assert.equal(exact.value, "2099-04-05T06:30");
-  assert.equal(container.querySelector('.snooze-policy input:checked')?.closest("label")?.textContent?.includes("Regardless"), true);
-  assert.equal([...container.querySelectorAll(".snooze-preview span")].at(-1)?.textContent, draftTimeZone);
+  assert.equal(domWindow.document.activeElement, expression);
+  assert.equal(expression.value, "tomorrow 3pm");
+  assert.equal(returnEarly().checked, false);
+  assert.equal(container.querySelector(".snooze-summary")?.textContent, draftSummary);
   assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /updated in another client/i);
   const submit = container.querySelector<HTMLButtonElement>('button[type="submit"]')!;
   assert.equal(submit.disabled, false);
@@ -1405,8 +1402,7 @@ test("a two-client reminder upsert preserves the open Inbox Snooze draft and foc
     .find((button) => button.textContent === "Cancel")!;
   await act(async () => { cancel.click(); });
   await act(async () => { snooze.click(); });
-  assert.equal(container.querySelector<HTMLInputElement>("#snooze-expression")?.value, "");
-  assert.equal(container.querySelector<HTMLInputElement>("#snooze-exact")?.value, "2099-05-06T07:45");
+  assert.equal(container.querySelector<HTMLInputElement>("#snooze-expression")?.value, "2099-05-06T07:45");
   assertNoDomNode(container.querySelector('[role="alert"]'), "closing still discards the local draft normally");
 
 });
@@ -1486,29 +1482,25 @@ test("a 409 reconciles the open Snooze dialog without WebSocket delivery", async
   const snooze = [...container.querySelectorAll<HTMLButtonElement>('button[aria-label="Snooze"]')].at(0)!;
   await act(async () => { snooze.click(); });
   const expression = container.querySelector<HTMLInputElement>("#snooze-expression")!;
-  const exact = container.querySelector<HTMLInputElement>("#snooze-exact")!;
   await act(async () => {
-    expression.value = "today at 3:30 pm";
+    expression.value = "tomorrow 3pm";
     fireDomEvent.change(expression);
-    exact.value = "2099-04-05T06:30";
-    fireDomEvent.change(exact);
-    exact.focus();
+    expression.focus();
     container.querySelector<HTMLButtonElement>('button[type="submit"]')!.click();
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
 
   assert.equal(writes.length, 1);
   assert.equal(reads, 1);
-  assert.equal(expression.value, "today at 3:30 pm");
-  assert.equal(exact.value, "2099-04-05T06:30");
-  assert.equal(domWindow.document.activeElement, exact);
+  assert.equal(expression.value, "tomorrow 3pm");
+  assert.equal(domWindow.document.activeElement, expression);
   assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /updated in another client/i);
 
   await act(async () => {
     [...container.querySelectorAll<HTMLButtonElement>("button")]
       .find((button) => button.textContent === "Reload Reminder")!.click();
   });
-  assert.equal(container.querySelector<HTMLInputElement>("#snooze-exact")?.value, "2099-05-06T07:45");
+  assert.equal(expression.value, "2099-05-06T07:45");
   assert.equal(domWindow.document.activeElement, expression);
   await act(async () => { container.querySelector<HTMLButtonElement>('button[type="submit"]')!.click(); });
   assert.equal(writes.length, 2);

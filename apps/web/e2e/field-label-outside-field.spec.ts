@@ -8,10 +8,10 @@ import { dialogMotionSettled } from "./dialog-motion.js";
  * above the control. Archived Sessions: the search label and the filters' `.field-label`s. The
  * Automations editor (and the Outbound Events form on its grid): each grid label's own text, each
  * `.automation-field`'s `.field-label`, and its fieldset legends; a grid label's helper stays dim,
- * 4px under the control. The labels that open
- * redesigns own (Snooze #2181, Rename Project #2199) keep the older dim rule until those land;
- * whichever lands first drops its case below. The message-action form went with #2185, which loads
- * Edit as a New Turn straight into the composer.
+ * 4px under the control. The label an open redesign owns (Rename Project #2199) keeps the older
+ * dim rule until it lands and drops its case below. Snooze's went with #2181, whose Snooze Until is
+ * a §8.1 field, and the message-action form with #2185, which loads Edit as a New Turn straight
+ * into the composer.
  */
 
 type Theme = "dark" | "light";
@@ -158,23 +158,6 @@ for (const theme of ["dark", "light"] as const) {
       });
       expect(look).toEqual({ color: dim, size: "12px", lineHeight: "20px", weight: "500", margin });
     }
-
-    test("Snooze (#2181) keeps its labels", async ({ page }) => {
-      await page.goto("/sessions-board-e2e.html");
-      await setTheme(page, theme);
-      await expect(page.locator(".page-tabs .tabs-bar")).toBeVisible();
-      await page.locator(".inbox-row-shell", { hasText: "Running Session" }).getByRole("button").first().click();
-      const directSnooze = page.getByRole("button", { name: "Snooze", exact: true }).first();
-      if (await directSnooze.isVisible()) {
-        await directSnooze.click();
-      } else {
-        await page.getByRole("button", { name: "More Actions" }).click();
-        await page.getByRole("menuitem", { name: "Snooze…", exact: true }).click();
-      }
-      const dialog = page.getByRole("dialog", { name: "Snooze Session" });
-      await expect(dialog.locator(".field-label").first()).toBeVisible();
-      for (const label of await dialog.locator(".field-label").all()) await expectUnchanged(page, label, "4px 0px -4px");
-    });
 
     test("Rename Project (#2199) keeps its label", async ({ page }) => {
       await page.goto("/command-inbox-projects-e2e.html");
