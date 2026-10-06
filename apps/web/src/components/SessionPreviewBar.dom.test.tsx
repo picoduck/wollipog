@@ -3,7 +3,7 @@ import test from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { ControlPlaneToUi, PendingApproval, ProjectView, RunnerView, SessionView } from "@wollipog/protocol";
+import type { ControlPlaneToUi, PendingApproval, ProjectView, RunnerView, SessionReminderView, SessionView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ViewNavigation } from "../navigation.js";
@@ -13,6 +13,7 @@ import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-t
 import { FeedbackContext } from "./FeedbackProvider.js";
 import { SessionDetail } from "./SessionDetail.js";
 import { SessionPreviewBar } from "./SessionPreviewBar.js";
+import { InboxRow } from "./InboxRow.js";
 import { decideDockedRequest } from "./requests/request-reveal.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
@@ -410,5 +411,94 @@ test("D sends nothing while the preview's question cannot be answered, and the c
     assert.deepEqual(calls, [], "no dismissal is sent without a runner");
   } finally {
     await preview.unmount();
+  }
+});
+
+/** The selected row and the preview bar, rendered from one store so both read the same runner. */
+async function renderRowAndBar(
+  value: SessionView,
+  { runnerOnline = true, reminder, stalled = false }: { runnerOnline?: boolean; reminder?: SessionReminderView; stalled?: boolean } = {},
+) {
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "row-parity-test", runtimeKey: `row-parity-test:${value.id}`, createSocket: () => socket, close() {},
+  };
+  const navigation: ViewNavigation = { current: () => ({ name: "inbox" }), push: () => {}, listen: () => () => {} };
+  const { container, root } = mount();
+  await act(async () => root.render(
+    <StoreProvider connection={connection} navigation={navigation}>
+      <InboxRow optionId="row" session={value} projectName="Payments Service" selected unread={false} pinned={false}
+        rowIndex={1} threeRow={false} stalled={stalled} activityNow={0} reminder={reminder}
+        onSelect={() => {}} onExpand={() => {}} onSessionMenu={() => {}} />
+      <SessionPreviewBar session={value} runnerOnline={runnerOnline} machineName="Mac Studio"
+        agentLabel="Claude Code" archiveLabel="Archive" />
+    </StoreProvider>,
+  ));
+  await act(async () => socket.push({
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+    runners: [{ ...runner, status: runnerOnline ? "online" : "offline" }], boxes: [], projects: [project],
+    sessions: [value], runs: [], pods: [],
+  } as ControlPlaneToUi));
+  await settle();
+  const badge = (scope: Element | null) => {
+    const status = scope?.querySelector(".status");
+    return status ? {
+      label: status.firstChild?.textContent ?? "",
+      tone: [...status.classList].find((name) => name.startsWith("t-")),
+    } : null;
+  };
+  const row = container.querySelector(".inbox-row-shell");
+  const bar = container.querySelector("header.session-preview-bar");
+  return {
+    row: badge(row?.querySelector(".row-status") ?? null),
+    rowMore: row?.querySelector(".row-status-more > [aria-hidden]")?.textContent ?? null,
+    bar: badge(bar),
+    barMore: bar?.querySelector(".session-status-more")?.textContent ?? null,
+    async unmount() {
+      await act(async () => root.unmount());
+      container.remove();
+    },
+  };
+}
+
+const firedReminder = {
+  reminderId: "r", sessionId: "previewed", scheduledFor: 1_000, timeZone: "UTC", originalExpression: "later",
+  wakePolicy: "regardless", state: "fired", firedAt: 2, wakeReason: "scheduled", revision: 1, createdAt: 1, updatedAt: 1,
+} as unknown as SessionReminderView;
+
+test("the selected row and the preview bar show the same status for every seeded status, but for the row's documented exceptions", async () => {
+  // Both rank with sessionStatusSummary() (#2182). The row adds three rules of its own (#2209), which
+  // the preview bar, holding exactly one badge, does not: Awaiting Prompt shows no row badge, a fired
+  // reminder shows Returned, and a stalled session's badge takes the danger tone.
+  for (const seeded of SEEDED) {
+    const shown = await renderRowAndBar(seeded.session, { runnerOnline: seeded.runnerOnline ?? true });
+    try {
+      assert.ok(shown.bar, `${seeded.name}: the preview bar has its badge`);
+      if (shown.bar!.label === "Awaiting Prompt") {
+        assert.equal(shown.row, null, `${seeded.name}: an idle row shows no badge (#2209's exception)`);
+        continue;
+      }
+      assert.deepEqual(shown.row, shown.bar, `${seeded.name}: the row's badge is the preview bar's`);
+      assert.equal(shown.rowMore, shown.barMore, `${seeded.name}: the same "+N"`);
+    } finally {
+      await shown.unmount();
+    }
+  }
+
+  const returned = await renderRowAndBar(session(), { reminder: firedReminder });
+  try {
+    assert.equal(returned.row?.label, "Returned from Snooze", "a fired reminder is the row's Returned");
+    assert.equal(returned.bar?.label, "Awaiting Prompt", "the preview bar keeps the lifecycle");
+  } finally {
+    await returned.unmount();
+  }
+
+  const stalled = await renderRowAndBar(session({ status: "running", activeTurnId: "turn-1" }), { stalled: true });
+  try {
+    assert.deepEqual(stalled.row, { label: "Running", tone: "t-danger" }, "a stalled row's badge turns danger");
+    assert.deepEqual(stalled.bar, { label: "Running", tone: "t-info" }, "the preview bar keeps the lifecycle's tone");
+  } finally {
+    await stalled.unmount();
   }
 });

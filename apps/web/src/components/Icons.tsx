@@ -215,7 +215,7 @@ export function ListIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideList} {...props} />;
 }
 
-/** A snoozed row's return time (#2209). */
+/** Snooze: a snoozed row's return time (#2209) and the Sessions preview bar's Snooze button (#2210). */
 export function AlarmClockIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideAlarmClock} {...props} />;
 }

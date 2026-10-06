@@ -4,7 +4,7 @@ import { sessionStatusSummary } from "../status-meta.js";
 import { sessionDisplayTitle } from "../session-title.js";
 import { sessionBranchState } from "../worktree-identity.js";
 import { AgentIcon } from "./AgentIcon.js";
-import { ArchiveIcon, BranchIcon, ComputerIcon, MoreHorizontalIcon, SnoozedIcon } from "./Icons.js";
+import { AlarmClockIcon, ArchiveIcon, BranchIcon, ComputerIcon, MoreHorizontalIcon } from "./Icons.js";
 import { ConditionBadge } from "./SessionStatusButton.js";
 
 /** Where the preview's ⋯ asks the Sessions list to open the session's context menu. */
@@ -68,7 +68,7 @@ export function SessionPreviewBar({
         <div className="detail-bar-actions">
           {onSnooze && (
             <button type="button" className="icon-btn" aria-label="Snooze" title="Snooze (H)" onClick={onSnooze}>
-              <SnoozedIcon />
+              <AlarmClockIcon />
             </button>
           )}
           {onArchive && (

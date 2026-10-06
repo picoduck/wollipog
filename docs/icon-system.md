@@ -43,7 +43,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `ProjectsIcon` | Lucide | `FolderKanban` | Project collection navigation. |
 | `BoardIcon` | Lucide | `Columns3` | Generic board columns. |
 | `ListIcon` | Lucide | `List` | Generic list layout. |
-| `AlarmClockIcon` | Lucide | `AlarmClock` | A snoozed Sessions row's return time (#2209). |
+| `AlarmClockIcon` | Lucide | `AlarmClock` | Snooze: a snoozed Sessions row's return time (#2209) and the Sessions preview bar's Snooze button (#2210). |
 | `ConnectionsIcon` | Lucide | `MonitorCog` | Runner connection management. |
 | `RunsIcon` | Lucide | `Workflow` | Generic workflow runs. |
 | `PodsIcon` | Lucide | `UsersRound` | Collaboration group. |
