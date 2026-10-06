@@ -305,7 +305,7 @@ jobs:
       # #2123). Across 2,516 successful installs from 2026-09-20 to 2026-09-30 the step took a
       # median of 20 seconds and a p99 of 61, but a slow yet moving mirror (73 kB/s) stretched one
       # to 321, so six minutes clears every measured success. A stall then costs six minutes plus a
-      # retry rather than the shard's 25. A step timeout signals only the step's shell, so a
+      # retry rather than the whole shard budget. A step timeout signals only the step's shell, so a
       # timed-out attempt's Playwright and root apt processes keep running and holding the apt and
       # dpkg locks; the retry kills them and finishes any interrupted dpkg run before installing
       # again, reusing any packages the first attempt finished downloading.

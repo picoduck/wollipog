@@ -71,8 +71,12 @@ The active install path is either the cached-browser **system-dependency** path
 or the cache-miss **browser-with-dependencies** path. Each has two six-minute
 attempts; count the first and retry of the active path, not both exclusive paths.
 All sampled installs used the cache-hit path. There is no measured cold-cache
-sample here: cold setup is conservatively accounted from its configured bounds,
-not from invented successful timings. A second failed attempt still fails the job.
+sample here: the cold install attempts are accounted from their configured bounds,
+not from invented successful timings. The cache-miss post-job browser-cache save
+is also unmeasured and has no separate step deadline; it uses the modeled reserve
+rather than the measured warm-cache cleanup allowance. Natural-run observation
+must therefore establish actual margin for that path. A second failed attempt
+still fails the job.
 
 | Allowance | Seconds | Basis |
 | --- | --- | --- |
@@ -114,6 +118,13 @@ retry despite successful **conclusion**, while success or cancellation does not.
 No real apt commands, process signals, network, hosted stalls or timing sleeps
 are needed. Near-bound setup plus each measured remainder is an arithmetic replay,
 not evidence that those maxima occurred together on a hosted runner.
+
+The existing obsolete merge-group monitor stops after 35 minutes or 35 polls.
+A near-budget browser job, plus any queue wait, can outlive that monitoring window;
+an integration becoming obsolete late may retain its runners until CI finishes.
+This fails safely by retaining CI, and does not weaken required aggregation.
+The monitor's separate deadlines are unchanged here. The existing merge queue
+allows 60 minutes for check responses; queue wait still affects that outer window.
 
 Local checks and one passing PR/merge group do **not** complete issue #2700.
 Delivery requires **five consecutive naturally occurring complete main or
