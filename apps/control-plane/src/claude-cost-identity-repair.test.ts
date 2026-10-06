@@ -193,3 +193,45 @@ test("missing identities and revision-zero adjusted baselines stay fenced; old p
     assert.equal(reconciliationSnapshotAvailable(db, snapshot), false);
   } finally { db.close(); }
 });
+
+test("verified repair can clear an old corrupt observation after the runner returns to a sane lower coordinate", () => {
+  const { db, snapshot } = fixture();
+  try {
+    observeReconciliationSnapshot(db, { ...snapshot, costReconciliationRevision: Number.MAX_SAFE_INTEGER, costReconciliationDeltaUsd: 0 });
+    observeReconciliationSnapshot(db, snapshot);
+    assert.equal(observedReconciliationRevision(db, "session"), Number.MAX_SAFE_INTEGER);
+    const input = repairEvidence(db, snapshot);
+    const preview = previewClaudeAcknowledgementRepair(db, principal, input);
+    assert.equal(preview.repairable, true, preview.unresolved.join(","));
+    applyClaudeAcknowledgementRepair(db, principal, input, preview.digest);
+    const frame = acknowledgementRepairFrame(db, "session")!;
+    assert.equal(frame.costReconciliationRepair!.expected.revision, 0);
+    observeReconciliationSnapshot(db, { ...snapshot, costReconciliationDeltaUsd: 0, costReconciliationRepairId: preview.digest });
+    assert.equal(observedReconciliationRevision(db, "session"), 0);
+    assert.equal(reconciliationSnapshotAvailable(db, { ...snapshot, costReconciliationDeltaUsd: 0, costReconciliationRepairId: preview.digest }), true);
+  } finally { db.close(); }
+});
+
+test("an unconfirmed repair invalidated by concurrent usage can be superseded by a fresh verified preview", () => {
+  const { db, snapshot, now } = fixture();
+  try {
+    const corrupt = { ...snapshot, costReconciliationRevision: Number.MAX_SAFE_INTEGER, costReconciliationDeltaUsd: 0 };
+    observeReconciliationSnapshot(db, corrupt);
+    const first = repairEvidence(db, corrupt), firstPreview = previewClaudeAcknowledgementRepair(db, principal, first);
+    applyClaudeAcknowledgementRepair(db, principal, first, firstPreview.digest);
+    db.appendEvent("session", { kind: "token_usage", model: "claude-test", costUsd: 0.001, inputTokens: 1 }, now + 5, { accrueUsage: true, runnerSeq: 5, historyEpoch: 1 });
+    assert.equal(acknowledgementRepairFrame(db, "session"), null);
+    const current = { ...corrupt, costUsd: db.sessionCostUsd("session"), tokensIn: 41, seq: 5 };
+    const second = repairEvidence(db, current), secondPreview = previewClaudeAcknowledgementRepair(db, principal, second);
+    assert.equal(secondPreview.repairable, true, secondPreview.unresolved.join(","));
+    applyClaudeAcknowledgementRepair(db, principal, second, secondPreview.digest);
+    assert.notEqual(secondPreview.digest, firstPreview.digest);
+    assert.throws(() => applyClaudeAcknowledgementRepair(db, principal, first, firstPreview.digest), /superseded/);
+    observeReconciliationSnapshot(db, { ...current, costReconciliationRevision: 0, costReconciliationRepairId: firstPreview.digest });
+    assert.equal(observedReconciliationRevision(db, "session"), Number.MAX_SAFE_INTEGER);
+    const repaired = { ...current, costReconciliationRevision: 0, costReconciliationRepairId: secondPreview.digest };
+    observeReconciliationSnapshot(db, repaired);
+    assert.equal(reconciliationSnapshotAvailable(db, repaired), true);
+    assert.equal(db.sessionCostUsd("session"), current.costUsd);
+  } finally { db.close(); }
+});

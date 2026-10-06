@@ -240,7 +240,9 @@ This procedure repairs metadata only. It neither reconstructs missing costs nor 
 correction audits, tokens, budget floors, replay coverage, or approval cards. It is suitable, for
 example, when a verified owning-runner baseline matches the complete authoritative accounting
 checkpoint but its correction revision was corrupted to 9007199254740991. A lower snapshot alone
-never clears that observation. Genuine missing corrections must use restore recovery first.
+never clears that observation. Verified repair can compare and swap the runner's current sane lower
+coordinate while auditing the older corrupt observation separately. Genuine missing corrections must
+use restore recovery first.
 
 1. Independently verify the complete authoritative accounting state and the owning runner's current
    accounting-only metadata. A current database export or a runner scalar alone cannot establish

@@ -71,14 +71,15 @@ function plan(db: ControlPlaneDb, principal: HumanPrincipal, input: RepairEviden
   if (input.runner.historyEpoch !== checkpoint.historyEpoch || input.runner.seq !== checkpoint.ledger.seq ||
       !sameAccountingUsd(input.runner.costUsd, db.sessionCostUsd(input.sessionId)) || input.runner.tokensIn !== checkpoint.ledger.tokensIn || input.runner.tokensOut !== checkpoint.ledger.tokensOut ||
       input.runner.deltaUsd !== checkpoint.correction.deltaUsd) unresolved.push("runner baseline is not established by the verified accounting checkpoint; recover missing corrections or usage first");
-  if (input.runner.revision !== observation.revision) unresolved.push("runner revision differs from the durable observation");
-  if (observation.coordinate) {
-    const observed = JSON.parse(String(observation.coordinate));
-    if (input.runner.revision !== observed.revision || input.runner.identity !== observed.identity || input.runner.deltaUsd !== observed.deltaUsd) unresolved.push("runner coordinate differs from the durable observation");
+  // An observation is intentionally sticky; it may describe an earlier corrupt runner state.
+  // Bind it to approval, but CAS against the independently verified *current* runner metadata.
+  if (input.runner.revision > observation.revision) unresolved.push("runner acknowledgement must be observed before repair preview");
+  if (previous && input.runner.repairId !== previous.digest) {
+    const expectedGeneration = previous.confirmed ? previous.digest : JSON.parse(String(previous.evidence_json)).runner.repairId;
+    if (input.runner.repairId !== expectedGeneration) unresolved.push("runner repair generation is not current");
   }
-  if (previous && input.runner.repairId !== previous.digest) unresolved.push("runner repair generation is not current");
   return { digest, sessionId: input.sessionId, historyEpoch: input.historyEpoch, observation,
-    currentRevision: observation.revision, proposedCorrection: checkpoint.correction,
+    currentRevision: observation.revision, runnerRevision: input.runner.revision, proposedCorrection: checkpoint.correction,
     costUsd: db.sessionCostUsd(input.sessionId), unresolved, repairable: unresolved.length === 0,
     runnerEffect: "Compare and swap metadata only; preserve cost, tokens and approvals. Remain fenced until identity-aware acknowledgement. No automatic resume." };
 }
