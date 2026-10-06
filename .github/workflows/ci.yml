@@ -241,14 +241,18 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false
     name: Browser End-to-End Tests
     runs-on: ubuntu-22.04
-    # Measured on 2026-09-30 over 310 passing jobs, four shards took a median 14 minutes and at most
-    # 16.6 (995 seconds, setup included): past the fifteen-minute budget, which cancelled shards
-    # whose tests had all passed (#2067). Five shards cut the median to 11.4 minutes over three runs;
-    # the slowest took 16.3 (975 seconds: a slow dependency install plus shard 1's production pass).
-    # Playwright splits by test count, not time, so which shard is slowest moves as files are added.
-    # Twenty-five keeps over eight minutes spare for a slow runner, and stays below the old thirty so
-    # a doubling of the suite is a loud failure rather than a creep towards the cap (#842).
-    timeout-minutes: 25
+    # A recovered six-minute install timeout plus 377 passing tests still exhausted 25 minutes
+    # (#2700, run 37478932815). Thirty-six identified jobs on 2026-10-06 include all five shards
+    # on current main: the slowest non-install remainder was 1448 seconds, including other setup,
+    # tests, shard 1's production pass and cleanup. Queue wait is separate. The active cache-hit OR
+    # cache-miss install path allows two six-minute attempts; do not add both exclusive paths.
+    # 720s attempts + 1450s rounded remainder + 30s timeout enforcement + 180s reserve = 2380s.
+    # Forty minutes leaves 20s more rounding slack. This replaces the stale 16.3-minute envelope
+    # behind #2067's below-thirty goal; it remains finite so hung or doubled workloads fail loudly.
+    # scripts/workflow-browser-budget.test.mjs derives the allowance from the actual steps and
+    # recorded phase evidence. Remeasure when changing the workload; docs/ci-browser-budget.md
+    # records the cold-cache uncertainty and the five-natural-run delivery requirement.
+    timeout-minutes: 40
     strategy:
       # Every shard reports. With fail-fast the first real failure cancels its siblings, and the
       # aggregator below reads a cancelled job as a budget hit — so one broken test would be
