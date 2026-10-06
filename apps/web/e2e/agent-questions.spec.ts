@@ -490,6 +490,68 @@ test("in a short phone column the card scrolls as a whole rather than leaving it
   expect(await page.evaluate(() => window.agentQuestionCalls[0]?.answers)).toEqual({ scope: "Change the Scope" });
 });
 
+/** The scrolling card's edges (#2698): which hairlines are drawn, and how far the card scrolls. */
+const cardEdges = (card: Locator) => card.evaluate((element) => {
+  const drawn = (style: CSSStyleDeclaration, side: "Top" | "Bottom") =>
+    style.content !== "none" && style[`border${side}Style`] === "solid" && style[`border${side}Width`] === "1px";
+  const foot = element.querySelector(".request-card-foot")!;
+  return {
+    above: drawn(getComputedStyle(element, "::before"), "Bottom"),
+    below: drawn(getComputedStyle(foot, "::before"), "Top"),
+    range: element.scrollHeight - element.clientHeight,
+  };
+});
+
+for (const theme of ["dark", "light"] as const) {
+  test(`a card scrolling under its footer draws a hairline at each edge it can still scroll past (#2698, ${theme})`, async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 640 });
+    await page.goto(`/agent-questions-e2e.html?set=paragraph&more=1&theme=${theme}`);
+    const card = dockedCard(page);
+    // At the start the answers are under the footer: the line above it says so.
+    const start = await cardEdges(card);
+    expect(start).toMatchObject({ above: false, below: true });
+    expect(start.range).toBeGreaterThan(100);
+    // Midway both edges have content past them; the lines take no room.
+    await card.evaluate((element) => { element.scrollTop = 60; });
+    await expect.poll(() => cardEdges(card)).toEqual({ above: true, below: true, range: start.range });
+    // At the end nothing is left below.
+    await card.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    await expect.poll(() => cardEdges(card)).toEqual({ above: true, below: false, range: start.range });
+    // Expanded, the rest of the question and the answers are below again.
+    await card.evaluate((element) => { element.scrollTop = 0; });
+    await card.getByRole("button", { name: "Show Full Question" }).click();
+    await expect.poll(async () => (await cardEdges(card)).below).toBe(true);
+  });
+}
+
+test("a card whose body scrolls on its own, or that is not capped, draws no edge lines (#2698)", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/agent-questions-e2e.html?set=paragraph&more=1");
+  const card = dockedCard(page);
+  await expect(card).toBeVisible();
+  expect(await card.evaluate((element) => element.hasAttribute("data-card-scrolls"))).toBe(false);
+  expect(await cardEdges(card)).toMatchObject({ above: false, below: false });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/agent-questions-e2e.html?set=short");
+  expect(await cardEdges(dockedCard(page))).toEqual({ above: false, below: false, range: 0 });
+});
+
+test("in forced colors the edge lines are still drawn (#2698)", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 640 });
+  await page.emulateMedia({ forcedColors: "active" });
+  await page.goto("/agent-questions-e2e.html?set=paragraph&more=1");
+  const card = dockedCard(page);
+  await card.evaluate((element) => { element.scrollTop = 60; });
+  await expect.poll(() => cardEdges(card)).toMatchObject({ above: true, below: true });
+  const colors = await card.evaluate((element) => [
+    getComputedStyle(element, "::before").borderBottomColor,
+    getComputedStyle(element.querySelector(".request-card-foot")!, "::before").borderTopColor,
+    getComputedStyle(element).backgroundColor,
+  ]);
+  expect(colors[0]).not.toBe(colors[2]);
+  expect(colors[1]).not.toBe(colors[2]);
+});
+
 test("on a 1440px desktop a question that fits has no toggle, and a paragraph fits whole (#2683)", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   for (const set of ["short", "paragraph"]) {

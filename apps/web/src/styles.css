@@ -13560,6 +13560,24 @@ body.shell-dock-dragging * {
   padding: var(--space-2) 0 var(--space-3);
   background: inherit;
 }
+/* While content scrolls under the footer or the top edge, that edge shows a `--border` hairline
+   (#2698), as a sticky header does once content scrolls under it (§2.6), so answers under the
+   footer read as more to come rather than a card that ends there. SessionApproval.tsx marks the
+   edges only while the card itself scrolls. A border, not a fade: nothing above it is dimmed to
+   look disabled, and it stays drawn in forced colors. Neither line takes room. */
+.question-card[data-clip-end] > .request-card-foot::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  border-top: 1px solid var(--border);
+  pointer-events: none;
+}
+.question-card[data-clip-start]::before {
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--border);
+}
 /* On the request dock (#2205) the dock places and caps the card. */
 .request-dock .question-bar {
   max-width: none;

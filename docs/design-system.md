@@ -2147,6 +2147,9 @@ follows these rules so it never crowds out the conversation it asks about:
   something, and gives way with the head line while the software keyboard is open. In a capped card
   (the dock, the Agents panel), an expanded question, or a card that would leave its body less than
   about a row, scrolls as a whole under a footer that stays at its bottom edge, inside the cap.
+  While content is under the footer or above the top padding, that edge shows a `--border`
+  hairline, as a sticky header does (§2.6), so answers under the footer read as more to come
+  (#2698); neither line takes room.
 - **UI evidence is a grid of named tiles** (`components/requests/EvidenceReview.tsx`, #2197). The
   card's title says what to do ("Review 4 screenshots before approving") unless the request has a
   title of its own. The body is, top to bottom: the HTTPS or Localhost Required notice (warning,

@@ -498,6 +498,32 @@ export function SessionQuestionBanner({
     if (above > 0) card.scrollTop -= above;
   }, [titleExpanded]);
 
+  // While the card itself scrolls (expanded, cramped, or a short column's container rule), the edges
+  // it can still scroll past fade (#2698), as a tab row's do. The marks follow the scroll position,
+  // the card's size and its content's; a render that switches the layout re-marks after it commits.
+  const updateClip = useRef<() => void>(() => undefined);
+  useIsomorphicLayoutEffect(() => {
+    const card = cardRef.current;
+    if (!card) return;
+    const update = () => {
+      const scrolls = card.scrollHeight > card.clientHeight + 1 &&
+        card.ownerDocument.defaultView?.getComputedStyle(card).overflowY !== "visible";
+      card.toggleAttribute("data-clip-start", scrolls && card.scrollTop > 1);
+      card.toggleAttribute("data-clip-end", scrolls && card.scrollTop + card.clientHeight < card.scrollHeight - 1);
+    };
+    updateClip.current = update;
+    update();
+    card.addEventListener("scroll", update, { passive: true });
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(update);
+    observer?.observe(card);
+    for (const child of [titleRef.current, stepRef.current]) if (child) observer?.observe(child);
+    return () => {
+      card.removeEventListener("scroll", update);
+      observer?.disconnect();
+    };
+  }, []);
+  useIsomorphicLayoutEffect(() => updateClip.current());
+
   const updateDraft = (target: AgentQuestion, value: QuestionResponseDraft) => {
     setDrafts((current) => {
       const own = current.requestId === answerKey;
