@@ -148,9 +148,6 @@ export function conversationForkAvailability(
   // fork and the Sessions list's F shortcut read the same reasons in the same order.
   const offered = context.hasWorktree && context.providerSupported;
   if (context.forkRefusal) return { available: false, offered, reason: context.forkRefusal };
-  if (!Number.isInteger(forkTurn) || forkTurn! <= 0) {
-    return { available: false, offered, reason: "Complete a conversation turn before creating a fork." };
-  }
   if (!context.hasWorktree) {
     return { available: false, offered, reason: "Conversation forks require an isolated worktree session." };
   }
@@ -171,6 +168,11 @@ export function conversationForkAvailability(
   }
   if (context.queuedPrompts > 0) {
     return { available: false, offered, reason: "Cancel or wait for queued messages before creating a fork." };
+  }
+  // After the running turn and the queue: a session busy with its first turn says so, as every other
+  // surface does without a transcript, rather than asking for a turn it is already taking (#2214).
+  if (!Number.isInteger(forkTurn) || forkTurn! <= 0) {
+    return { available: false, offered, reason: "Complete a conversation turn before creating a fork." };
   }
   if (context.busy) {
     return { available: false, offered, reason: "Another session action is already in progress." };

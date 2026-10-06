@@ -140,9 +140,13 @@ test("a session without a loaded transcript keeps every fork reason that needs n
   // Nothing else blocks: the item stays offered, disabled with where the fork can be made.
   assert.deepEqual(conversationForkAvailabilityWithoutTranscript(context, unloaded),
     { available: false, offered: true, reason: unloaded });
-  // A running turn says so, as the transcript-backed gate does.
-  assert.deepEqual(conversationForkAvailabilityWithoutTranscript({ ...context, status: "running" }, unloaded),
-    { available: false, offered: true, reason: "Wait for the current turn or approval before creating a fork." });
+  // A running turn says so, as the transcript-backed gate does, even for a first turn that has left no
+  // checkpoint yet: the desktop preview and the phone sheet give one reason for one session.
+  const running = { available: false, offered: true, reason: "Wait for the current turn or approval before creating a fork." };
+  assert.deepEqual(conversationForkAvailabilityWithoutTranscript({ ...context, status: "running" }, unloaded), running);
+  assert.deepEqual(conversationForkAvailability(undefined, undefined, { ...context, status: "running" }), running);
+  assert.deepEqual(conversationForkAvailability(undefined, undefined, { ...context, queuedPrompts: 2 }),
+    conversationForkAvailabilityWithoutTranscript({ ...context, queuedPrompts: 2 }, unloaded));
   // A session that can never fork is not offered, whatever else is true.
   for (const never of [{ ...context, hasWorktree: false }, { ...context, providerSupported: false }]) {
     const availability = conversationForkAvailabilityWithoutTranscript(never, unloaded);

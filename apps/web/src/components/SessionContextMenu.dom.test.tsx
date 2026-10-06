@@ -96,7 +96,7 @@ async function mount(overrides: {
         onSetUnread={(id, unread) => log.setUnread.push([id, unread])}
         onFork={(id) => {
           log.forked.push(id);
-          log.forkFocus.push(domWindow.document.activeElement === restoreHost);
+          log.forkFocus.push((domWindow.document.activeElement as unknown) === restoreHost);
         }}
         onRename={(id) => log.renamed.push(id)}
         onTogglePin={(id) => log.toggledPin.push(id)}
