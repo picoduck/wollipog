@@ -19638,6 +19638,29 @@ test("workflow runs preserve an exact Project Location for every member", () => 
   }
 });
 
+test("a long task leaves room in every workflow member's title for its role (#2209)", () => {
+  const { db, svc } = makeHarness();
+  const location = db.findProjectLocation(RUNNER_ID, WORKSPACE_ID)!;
+  const task = `${"Refactor the deployment pipeline so every stage reports its own health ".repeat(3)}\nthen ship it`;
+  const created = svc.createWorkflowRun({
+    runnerId: RUNNER_ID,
+    workspaceId: WORKSPACE_ID,
+    projectId: location.projectId,
+    projectLocationId: location.id,
+    workflowId: "builtin:build-review",
+    task,
+    agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID },
+    orchestratorAgentId: "test-orchestrator",
+  });
+  assert.ok(created.ok && created.data, created.error);
+  const titles = created.data!.sessions.map((session) => session.title);
+  assert.equal(new Set(titles).size, titles.length, `every member title is distinct: ${JSON.stringify(titles)}`);
+  for (const title of titles) {
+    assert.ok(title.length <= 120, title);
+    assert.match(title, /^Refactor the deployment pipeline.*… · \S+$/, "a word-boundary task title, then the role");
+  }
+});
+
 test("workflow workers adopt team Project scope while a trusted orchestrator stays organization-scoped", () => {
   const { db, svc } = makeHarness();
   const { project, location, scope } = makeTeamOwnedProject(db);

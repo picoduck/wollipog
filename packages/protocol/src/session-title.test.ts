@@ -29,6 +29,12 @@ test("a line of exactly the limit stays whole, and one character more is cut", (
   assert.equal(titleFromPrompt(`${exact}g`), `${"a".repeat(PROMPT_TITLE_MAX - 6)}…`);
 });
 
+test("a smaller budget cuts at a word boundary within it", () => {
+  const title = titleFromPrompt("Refactor the deployment pipeline so every stage reports its own health and status", 60);
+  assert.equal(title, "Refactor the deployment pipeline so every stage reports…");
+  assert.ok(title.length <= 60);
+});
+
 test("trailing punctuation before the cut is dropped, and a word with no boundary is cut mid-word", () => {
   const punctuated = `${"alpha ".repeat(18)}omega, ${"z".repeat(40)}`;
   assert.match(titleFromPrompt(punctuated), /omega…$/);

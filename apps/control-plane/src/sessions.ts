@@ -1246,6 +1246,9 @@ export function launchForRestart(db: ControlPlaneDb, session: SessionView): Agen
 /** Placeholder title for a session created without a first prompt (named by its first message). */
 const UNTITLED = "Untitled session";
 
+/** A run's title derived from its task, short enough that each member's " · <role>" still fits in 120. */
+const RUN_TASK_TITLE_MAX = 60;
+
 /** Persist capability-dependent harness defaults at creation time so the selector, stored
  * session, and launch argv all describe the same mode. Older sessions with no stored mode keep
  * the driver's compatibility fallback and are deliberately not migrated. */
@@ -10969,7 +10972,7 @@ export class SessionsService {
 
     const now = Date.now();
     const runId = shortId("r_");
-    const title = (req.title?.trim() || titleFromPrompt(req.task) || definition.name).slice(0, 120);
+    const title = (req.title?.trim() || titleFromPrompt(req.task, RUN_TASK_TITLE_MAX) || definition.name).slice(0, 120);
     const titleSource = req.title?.trim() ? "user" as const : "generated" as const;
     this.db.createRun({
       id: runId,
@@ -11139,7 +11142,7 @@ export class SessionsService {
     }
 
     const now = Date.now();
-    const title = (req.title?.trim() || titleFromPrompt(req.task) || definition.name).slice(0, 120);
+    const title = (req.title?.trim() || titleFromPrompt(req.task, RUN_TASK_TITLE_MAX) || definition.name).slice(0, 120);
     const titleSource = req.title?.trim() ? "user" as const : "generated" as const;
     const runMaxCalls = req.maxToolCalls != null ? Math.floor(req.maxToolCalls) : 0;
     const runCheckpoints = normalizeCostCheckpoints(req.config?.costCheckpointsUsd);
@@ -12016,7 +12019,7 @@ export class SessionsService {
 
     const now = Date.now();
     const runId = shortId("r_");
-    const title = (req.title?.trim() || titleFromPrompt(req.task) || "Multi-agent run").slice(0, 120);
+    const title = (req.title?.trim() || titleFromPrompt(req.task, RUN_TASK_TITLE_MAX) || "Multi-agent run").slice(0, 120);
     const titleSource = req.title?.trim() ? "user" as const : "generated" as const;
     this.db.createRun({
       id: runId,
