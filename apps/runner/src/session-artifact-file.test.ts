@@ -129,8 +129,8 @@ test("every unusable file fails with a specific message and yields no bytes", as
     writeFileSync(join(dir, "notes.png"), "this is text wearing a .png name");
     cases.push(["wrong content", join(dir, "notes.png"), /not a PNG, JPEG, GIF, or WebP image, MP4, or WebM video/u]);
 
-    // Sparse, so the limit is exercised without writing 8 MiB; it must be refused from its size
-    // alone, before any read.
+    // Sparse, so the image limit is exercised without writing 8 MiB to disk. Media reads allow
+    // the larger video limit up front, then enforce the image limit after recognizing its content.
     writeFileSync(join(dir, "huge.png"), PNG);
     truncateSync(join(dir, "huge.png"), MAX_PROMPT_IMAGE_BYTES + 1);
     cases.push(["oversized", join(dir, "huge.png"), new RegExp(`at most ${MAX_PROMPT_IMAGE_BYTES} bytes`, "u")]);

@@ -974,9 +974,12 @@ test("live scratch text restores valid values and falls back for missing or refu
         choice: stored === "split" ? "split" : "unified",
         text: "  half a sentence",
       });
-      await act(async () => root.render(<Scratch fallback="split" />));
+      const nextFallback = stored === "split" ? "unified" : "split";
+      await act(async () => root.render(<Scratch fallback={nextFallback} />));
       assert.equal(JSON.parse(host.textContent!).choice, "split",
-        "missing or refused scratch stays unowned and follows a new fallback");
+        stored === "split"
+          ? "valid scratch keeps ownership when the fallback changes"
+          : "missing or refused scratch stays unowned and follows a new fallback");
     }
   } finally {
     await act(async () => root.unmount());
