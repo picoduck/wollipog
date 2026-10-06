@@ -74,10 +74,17 @@ sudo wollipog service install --system --public-origin https://wollipog.example.
 The installer places `wollipog`, `wollipog-runner`, and `wollipog-control-plane` in `~/.local/bin`
 and a fresh dashboard bundle in `~/.local/bin/web`, each verified against GitHub's publisher
 digest and the release's `SHA256SUMS`. Public dashboard assets live separately from the private
-`~/.local/share/wollipog` data root, which a fresh install creates with mode `0700`. Missing shared
-ancestors are created with mode `0755`; existing home, shared-directory and data-root modes and
-owners are preserved. Generic upgrade admission remains strict and refuses an existing root
-with an unsupported owner, mode or ancestor; installation does not repair it.
+`~/.local/share/wollipog` data root.
+
+The installer first creates `~/.local/bin` and any missing `~/.local` under the caller's ambient
+umask. It later creates a missing `~/.local/share` under scoped umask `022` (mode `0755`) and a
+fresh `~/.local/share/wollipog` data root under scoped umask `077` (mode `0700`). Scoped directory
+creation leaves the caller's umask unchanged; existing home, shared-directory and data-root modes
+and owners are preserved. For example, an otherwise ordinary fresh install under umask `077`
+can create `~/.local` and `~/.local/bin` as `0700`; later creation of `~/.local/share` under scoped
+`022` does not change those existing ancestors or guarantee access for another account.
+Generic upgrade admission remains strict and refuses an existing root with an unsupported owner,
+mode or ancestor; installation does not repair it.
 
 `service install` finds the control plane and the public bundle beside the CLI on its own;
 `--control-plane-bin`, `--runner-bin`, and `--web-dist` remain available for other layouts.
