@@ -14,7 +14,14 @@ import {
   sessionAttentionBreakdown,
 } from "@wollipog/protocol";
 import { BACKGROUND_DELIVERY_STATUS, backgroundDeliveryAccessibleName } from "../background-delivery-status.js";
-import { quarantinedStatusMeta, queueReasonLabel, sessionLifecycleMeta, statusMeta, type StatusMeta } from "../status-meta.js";
+import {
+  childRequestsLabel,
+  quarantinedStatusMeta,
+  queueReasonLabel,
+  sessionLifecycleMeta,
+  statusMeta,
+  type StatusMeta,
+} from "../status-meta.js";
 
 export { quarantinedStatusMeta, sessionLifecycleMeta };
 import { reminderBadgeDescription, reminderBadgeLabel, type SnoozedAttentionReason } from "../session-reminders.js";
@@ -227,15 +234,20 @@ export function AttentionBadge({ session, ariaLabel, onOpen }: {
 }) {
   const attention = sessionAttentionStatus(session);
   if (!attention) return null;
-  const campaignCount = !session.pendingApproval && attention.label === "Needs Your Input"
-    ? session.orchestratorCampaign?.pendingRequests?.human ?? 0
-    : 0;
   return (
     <StatusBadge meta={statusMeta("attention", attention.kind)} label={attention.label}
-      title={attention.description} ariaLabel={ariaLabel ?? attention.label} onClick={onOpen}>
-      {campaignCount > 0 && <StatusCount>{campaignCount}</StatusCount>}
-    </StatusBadge>
+      title={attention.description} ariaLabel={ariaLabel ?? attention.label} onClick={onOpen} />
   );
+}
+
+/**
+ * Whether the session's attention is only its campaign's: no request of its own needs the person,
+ * so the protocol's "Needs Your Input" stands for the human-owned child requests, which the one
+ * "N Child Requests" status says instead (#2206).
+ */
+function attentionIsChildRequestsOnly(session: Parameters<typeof sessionAttentionBreakdown>[0]): boolean {
+  return (session.orchestratorCampaign?.pendingRequests?.human ?? 0) > 0 &&
+    sessionAttentionBreakdown(session).every((group) => group.count === 0);
 }
 
 /** One child's dot on a parent's family chip (#896). Literal class names, so the stylesheet guard can
@@ -303,7 +315,7 @@ export function SessionStatusIndicators({
   session,
   disconnected = false,
   onOpenAttention,
-  onOpenCampaignRequests,
+  onOpenChildRequests,
   attention = "badge",
 }: {
   session: Pick<SessionView, "status" | "pendingApproval" | "archiveStatus" | "archiveOperation" |
@@ -312,7 +324,8 @@ export function SessionStatusIndicators({
   /** The session's runner is not connected (offline, or not known to this client). */
   disconnected?: boolean;
   onOpenAttention?: () => void;
-  onOpenCampaignRequests?: () => void;
+  /** Opens the Requests panel's list of child requests; the attention target by default. */
+  onOpenChildRequests?: () => void;
   /** Board cards show the per-kind pills; headers keep the single badge that opens the panel. */
   attention?: "badge" | "pills";
 }) {
@@ -329,10 +342,10 @@ export function SessionStatusIndicators({
     historyQuarantine: session.historyQuarantine,
     runnerOnline,
   });
-  const attentionStatus = sessionAttentionStatus(session);
-  const humanCampaignRequests = session.orchestratorCampaign?.pendingRequests?.human ?? 0;
-  const orchestratorActions = session.orchestratorCampaign?.pendingRequests?.orchestrator ?? 0;
-  const openCampaignRequests = onOpenCampaignRequests ?? onOpenAttention;
+  // Child requests are one status, "N Child Requests", whatever else the session needs (#2206). The
+  // Orchestrator's own share is counted only inside the Requests panel.
+  const childRequests = session.orchestratorCampaign?.pendingRequests?.human ?? 0;
+  const attentionStatus = attentionIsChildRequestsOnly(session) ? null : sessionAttentionStatus(session);
   const queueHoldReason = session.status === "queued" && !session.capacityWait && session.queueHold
     ? session.holds?.find((hold) => hold.holdId === session.queueHold?.holdId)?.reason
     : undefined;
@@ -358,28 +371,14 @@ export function SessionStatusIndicators({
           title={queueHoldReason}
           ariaLabel={`Queue Reason: ${queueHoldReason ?? "A handoff is waiting on background work."}`} />
       )}
-      {attention === "pills"
+      {attentionStatus && (attention === "pills"
         ? <AttentionPills session={session} />
-        : <AttentionBadge session={session} ariaLabel={attentionStatus
-          ? humanCampaignRequests > 0 && !session.pendingApproval
-            ? `Needs Your Input: ${humanCampaignRequests} Requests`
-            : `Attention: ${attentionStatus.label}`
-          : undefined} onOpen={onOpenAttention} />}
-      {humanCampaignRequests > 0 && session.pendingApproval && (
-        <StatusBadge meta={statusMeta("attention", "input_required")}
-          title={`${humanCampaignRequests} human-owned campaign requests need your input.`}
-          ariaLabel={`Needs Your Input: ${humanCampaignRequests} Requests`}
-          onClick={openCampaignRequests}>
-          <StatusCount>{humanCampaignRequests}</StatusCount>
-        </StatusBadge>
-      )}
-      {orchestratorActions > 0 && (
-        <StatusBadge tone="neutral" label="Orchestrator Action"
-          title="The Orchestrator has descendant requests assigned to it."
-          ariaLabel={`Orchestrator Action: ${orchestratorActions} Requests`}
-          onClick={openCampaignRequests}>
-          <StatusCount>{orchestratorActions}</StatusCount>
-        </StatusBadge>
+        : <AttentionBadge session={session} ariaLabel={`Attention: ${attentionStatus.label}`} onOpen={onOpenAttention} />)}
+      {childRequests > 0 && (
+        <StatusBadge tone="warning" label={childRequestsLabel(childRequests)}
+          title={`${childRequests} ${childRequests === 1 ? "request from a child session needs" : "requests from child sessions need"} your input.`}
+          ariaLabel={childRequestsLabel(childRequests)}
+          onClick={onOpenChildRequests ?? onOpenAttention} />
       )}
       {disconnected && (
         <StatusBadge tone="danger" label="Disconnected" title="The session runner is disconnected."

@@ -45,7 +45,7 @@ function body(): HTMLElement {
 
 async function renderHeader(
   overrides: Partial<SessionView>,
-  options: { runnerOnline?: boolean; workers?: number } = {},
+  options: { runnerOnline?: boolean; workers?: number; childRequests?: number } = {},
 ): Promise<{ root: Root; opened: Opened; rerender: (next: Partial<SessionView>) => Promise<void> }> {
   const opened: Opened = { attention: 0, background: 0, workers: 0, requests: 0 };
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
@@ -73,7 +73,7 @@ async function renderHeader(
               ? { count: options.workers, workers: true, onOpen: () => { opened.workers += 1; } }
               : undefined}
             onOpenAttention={() => { opened.attention += 1; }}
-            onOpenCampaignRequests={() => { opened.requests += 1; }}
+            childRequests={{ count: options.childRequests ?? 0, onOpen: () => { opened.requests += 1; } }}
             onOpenBackgroundWork={() => {
               opened.background += 1;
               opened.focusAtBackground = domWindow.document.activeElement as unknown as Element | null;
@@ -128,6 +128,47 @@ test("an approval and an answer request show the breakdown's first kind with +1"
     assert.match(trigger().className, /\bbtn ghost\b/, "the control is a ghost button, not a pill");
   } finally {
     await cleanUp(root);
+  }
+});
+
+test("8 human-owned and 4 Orchestrator-owned child requests are one 8 Child Requests condition that opens the Requests panel (#2206)", async () => {
+  const { root, opened } = await renderHeader({
+    status: "running",
+    orchestratorCampaign: { pendingRequests: { human: 8, orchestrator: 4 } } as SessionView["orchestratorCampaign"],
+  }, { childRequests: 8 });
+  try {
+    assert.deepEqual(barBadges(), ["8 Child Requests"], "one status, and no other request badge");
+    assert.match(trigger().querySelector(".status")?.className ?? "", /\bt-warning\b/u);
+    assert.equal(trigger().getAttribute("aria-label"), "Session Status: 8 Child Requests");
+    await act(async () => { trigger().click(); });
+    const rows = [...popover()!.querySelectorAll(".session-status-row")];
+    assert.deepEqual(rows.map((row) => row.querySelector(".status")?.textContent), ["8 Child Requests"]);
+    assert.equal(rows[0]!.querySelector(".session-status-text")?.textContent,
+      "8 requests from child sessions need your input.");
+    assert.doesNotMatch(popover()!.textContent ?? "", /Orchestrator Action|Descendant Requests|Needs Your Input/u);
+    await act(async () => { rowButton("Open Requests").click(); });
+    assert.equal(opened.requests, 1);
+    assert.equal(opened.attention, 0);
+  } finally {
+    await cleanUp(root);
+  }
+});
+
+test("child requests outside a campaign are counted from the descendant poll, and none shows no condition (#2206)", async () => {
+  let rendered = await renderHeader({ status: "running" }, { childRequests: 3 });
+  try {
+    assert.deepEqual(barBadges(), ["3 Child Requests"]);
+  } finally {
+    await cleanUp(rendered.root);
+  }
+  rendered = await renderHeader({
+    status: "running",
+    orchestratorCampaign: { pendingRequests: { human: 0, orchestrator: 4 } } as SessionView["orchestratorCampaign"],
+  });
+  try {
+    assert.deepEqual(barBadges(), ["Running"], "the Orchestrator's own requests are counted only in the panel");
+  } finally {
+    await cleanUp(rendered.root);
   }
 });
 

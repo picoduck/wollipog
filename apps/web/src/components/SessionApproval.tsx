@@ -308,6 +308,7 @@ export function SessionQuestionBanner({
   whereAsked,
   intentRef,
   topRequest = true,
+  presentation,
 }: {
   sessionId: string;
   requestId: string;
@@ -336,6 +337,8 @@ export function SessionQuestionBanner({
   intentRef?: MutableRefObject<RequestIntentHandler | null>;
   /** The session's top request, whose A keeps its meaning on the session's other surfaces. */
   topRequest?: boolean;
+  /** As the Request Card's: the Requests panel's detail draws it flush with a sticky footer (#2206). */
+  presentation?: "dock" | "panel";
 }) {
   const api = useApi();
   const storedRefusal = useSessionResponseRefusal(sessionId);
@@ -827,6 +830,7 @@ export function SessionQuestionBanner({
     <section
       className={`request-card question-card question-bar question-style-${responseStyle}`}
       data-request-kind="question"
+      data-presentation={presentation}
       data-tone={recoveryRequired ? "danger" : undefined}
       aria-label={QUESTION_CARD_COPY.agentQuestions}
       aria-busy={busy !== null}

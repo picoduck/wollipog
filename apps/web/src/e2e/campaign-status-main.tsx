@@ -434,7 +434,6 @@ function PanelForSession({ state, session, onOpenSession }: { state: RightPanelS
       descendantRequests={session.orchestratorCampaign ? descendantRequests : []}
       selectedRequestKey={selectedRequestKey}
       onSelectedRequestKeyChange={(key) => { selectedRequestKey = key; }}
-      onSessionUpdate={() => {}}
     />
   );
 }

@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, type MutableRefObject } from "react";
+import { useCallback, useRef, useState, type MutableRefObject } from "react";
 import { createRoot } from "react-dom/client";
 import {
   pendingRequests,
@@ -32,8 +32,10 @@ import {
   sessionRequestPanelKey,
   type DescendantRequestStatus,
 } from "../components/SessionRequestPanel.js";
-import { SessionStatusIndicators } from "../components/common.js";
+import { SessionStatusButton } from "../components/SessionStatusButton.js";
+import { useDismissiblePopover } from "../components/interactions.js";
 import type { RightPanelMode } from "../right-panel.js";
+import { sessionStatusSummary } from "../status-meta.js";
 import type { TimelineItem } from "../timeline.js";
 import "../styles.css";
 
@@ -41,6 +43,8 @@ declare global {
   interface Window {
     __WOLLIPOG_REQUEST_SURFACES_E2E__: {
       openedChild(): DescendantRequestView | null;
+      /** How often the Requests panel's Retry asked for the child requests again. */
+      retries(): number;
       submissions(): unknown[];
       artifactRequests(): string[];
       /** The fixture links an Open Link activated; the page never navigates to them. */
@@ -97,6 +101,9 @@ const continuationParam = new URLSearchParams(window.location.search).get("conti
 const continuationBusy = new URLSearchParams(window.location.search).get("busy") === "1";
 const continuationRefusal = new URLSearchParams(window.location.search).get("refusal") === "1"
   ? "Your Viewer role is read-only." : null;
+// `scenario=empty` is a campaign with nothing pending: the Requests panel's "Nothing Waiting" (#2206).
+const requestScenario = scenario === "descendants" || scenario === "polling" || scenario === "held" ||
+  scenario === "empty";
 const includeDescendants = scenario === "descendants" || scenario === "held" ||
   new URLSearchParams(window.location.search).get("children") === "1";
 const requestedPollStatus = new URLSearchParams(window.location.search).get("pollStatus");
@@ -171,6 +178,7 @@ async function prepareArtifacts(): Promise<void> {
 
 let openedChild: DescendantRequestView | null = null;
 let openedHeldChild: string | null = null;
+let retries = 0;
 let clearHold: (sessionId: string) => void = () => {};
 let addRequest: (kind: "sign-in" | "budget") => void = () => {};
 const submissions: unknown[] = [];
@@ -742,14 +750,14 @@ function Fixture() {
     ? heldCampaignSession()
     : scenario === "gallery"
     ? continuationSession()
-    : scenario === "descendants" || scenario === "polling" ? {
+    : scenario === "descendants" || scenario === "polling" || scenario === "empty" ? {
         ...evidenceSession(),
         status: "running",
         pendingApproval: null,
         orchestratorCampaign: {
           pendingRequests: scenario === "descendants"
             ? { human: 8, orchestrator: 4 }
-            : { human: 1, orchestrator: 0 },
+            : scenario === "empty" ? { human: 0, orchestrator: 0 } : { human: 1, orchestrator: 0 },
         } as SessionView["orchestratorCampaign"],
       } as SessionView
     : scenario === "standalone" || scenario === "worker"
@@ -772,9 +780,10 @@ function Fixture() {
       respond: { allowed: false, reason: "Your Viewer role can read this session but not answer its requests." },
     },
   } as SessionView : session;
-  const descendants = useMemo(() => includeDescendants ? descendantRequests() : [], []);
-  const [open, setOpen] = useState(false);
-  const [mode, setMode] = useState<RightPanelMode>("requests");
+  const [descendants, setDescendants] = useState(() => includeDescendants ? descendantRequests() : []);
+  // `panel=<mode>` starts with the side panel open in that mode (`launcher` for its list of tools).
+  const [open, setOpen] = useState(query.has("panel"));
+  const [mode, setMode] = useState<RightPanelMode>(() => (query.get("panel") as RightPanelMode | null) ?? "requests");
   const [width, setWidth] = useState(420);
   clearHold = (sessionId: string) => setSession((current) => {
     const campaign = current.orchestratorCampaign!;
@@ -796,9 +805,18 @@ function Fixture() {
       pendingApproval: { ...first!, additionalRequests: [...rest, arriving] },
     } as SessionView;
   });
-  const [selectedKey, setSelectedKey] = useState<string | null>(() => includeDescendants
-    ? sessionRequestPanelKey(descendants[0]!.sessionId, descendants[0]!.occurrenceId)
-    : null);
+  // `open=<n>` opens the Requests panel on the nth child request rather than its list.
+  const [selectedKey, setSelectedKey] = useState<string | null>(() => {
+    const opened = descendants[Number(query.get("open")) - 1];
+    return query.has("open") && opened ? sessionRequestPanelKey(opened.sessionId, opened.occurrenceId) : null;
+  });
+  const [statusOpen, setStatusOpen] = useState(false);
+  const statusPopover = useDismissiblePopover(statusOpen, setStatusOpen, "session-status");
+  const openChildRequests = useCallback(() => {
+    setSelectedKey(null);
+    setMode("requests");
+    setOpen(true);
+  }, []);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const state: RightPanelState = {
     open,
@@ -844,7 +862,8 @@ function Fixture() {
         throw new ApiError("The runner did not accept the decision.", 503);
       }
       if (sessionId !== session.id) {
-        setOpen(false);
+        // A child's request leaves the Requests panel once it is answered.
+        setDescendants((current) => current.filter((item) => item.sessionId !== sessionId));
         return session;
       }
       // Only the decided request leaves; the others stay pending in their order.
@@ -939,14 +958,23 @@ function Fixture() {
     <ApiProvider client={client}>
       <ReadingKeys scrollRef={scrollRef} />
       <main className="app" style={{ display: "block", height: "100dvh" }}>
+        {/* The app's main column, the `app` size container the compact tier answers to (§2.10). */}
+        <div className="main" style={{ height: "100%" }}>
         <section className="session-detail expanded" style={{ height: "100%" }}>
           <header className="detail-bar session-bar" style={{ justifyContent: "space-between" }}>
             <h1 className="detail-bar-title session-bar-title">{session.title}</h1>
-            {scenario === "descendants" || scenario === "polling" || scenario === "held" ? (
-              <SessionStatusIndicators
-                session={session}
-                onOpenAttention={() => setOpen(true)}
-                onOpenCampaignRequests={() => setOpen(true)}
+            {requestScenario ? (
+              // The session bar's one status control (#2182), counting child requests as one
+              // condition (#2206).
+              <SessionStatusButton
+                summary={sessionStatusSummary(session, {
+                  descendantRequests: descendants.filter((item) => item.responseOwner === "human").length,
+                })}
+                open={statusOpen}
+                popover={statusPopover}
+                onToggle={statusPopover.toggle}
+                onTriggerKeyDown={statusPopover.onTriggerKeyDown}
+                actions={{ onOpenAttention: openChildRequests, onOpenChildRequests: openChildRequests }}
               />
             ) : <span />}
           </header>
@@ -1053,12 +1081,13 @@ function Fixture() {
               descendantRequestStatus={descendantRequestStatus}
               selectedRequestKey={selectedKey}
               onSelectedRequestKeyChange={setSelectedKey}
-              onSessionUpdate={setSession}
               onDescendantsUpdate={() => {}}
+              onRetryDescendantRequests={() => { retries += 1; }}
               onOpenChildRequest={(request) => { openedChild = request; }}
             />
           </div>
         </section>
+        </div>
       </main>
     </ApiProvider>
   );
@@ -1066,6 +1095,7 @@ function Fixture() {
 
 window.__WOLLIPOG_REQUEST_SURFACES_E2E__ = {
   openedChild: () => openedChild,
+  retries: () => retries,
   submissions: () => submissions,
   artifactRequests: () => [...artifactRequests],
   openedLinks: () => [...openedLinks],

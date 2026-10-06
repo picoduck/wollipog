@@ -3710,6 +3710,34 @@ textarea {
 }
 .share-address-detail code,
 .share-error-detail { font-family: var(--font-mono); }
+/* In the compact tier (761–1099px, §15.2) the Requests panel opens over the transcript from the
+   right, as a sheet over a scrim on the chat column (#2206); a press on the scrim closes it. The
+   session bar stays outside it. Elsewhere the scrim is not drawn. */
+.rp-scrim { display: none; }
+@container app (max-width: 1099px) {
+  .detail-columns:has(> .right-panel[data-mode="requests"]) { position: relative; }
+  .detail-columns > .rp-scrim {
+    display: block;
+    position: absolute;
+    inset: 0;
+    z-index: var(--z-panel);
+    background: var(--modal-backdrop);
+    animation: modal-fade-in var(--dur-base) var(--ease-out);
+  }
+  .detail-columns > .right-panel[data-mode="requests"] {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: var(--z-panel);
+    margin: 0;
+    border-top: none;
+    border-right: none;
+    border-bottom: none;
+    box-shadow: var(--elev-2);
+  }
+  .detail-columns:has(> .right-panel[data-mode="requests"]) > .right-panel-resizer { display: none; }
+}
 .right-panel-resizer {
   width: 7px;
   flex-shrink: 0;
@@ -3756,138 +3784,95 @@ textarea {
   display: flex;
   flex-direction: column;
 }
+/* The Requests panel (#2206; docs/design-system.md §6, §6.2): a list that opens each child request in
+   a detail in its place, at every width. Each view is one scroller below the panel head. */
 .rp-body:has(> .request-panel) {
   overflow: hidden;
   padding: 0;
 }
 .request-panel {
-  display: grid;
-  grid-template-rows: minmax(120px, 36%) minmax(0, 1fr);
+  display: flex;
   flex: 1;
+  flex-direction: column;
   min-height: 0;
-}
-.request-panel.request-panel-single {
-  grid-template-rows: minmax(0, 1fr);
 }
 .request-panel-list {
+  flex: 1;
   min-height: 0;
-  overflow: auto;
-  padding: 10px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--space-2) var(--space-2) var(--space-4);
+}
+.request-panel-group + .request-panel-group { margin-top: var(--space-3); }
+/* A group header (§5.2) with its count (§11.4): a warning count badge for what waits for the person,
+   a plain count for what the Orchestrator is handling. */
+.request-panel-group-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: var(--space-8);
+  margin: 0;
+  padding: 0 var(--space-3);
+  color: var(--text-dim);
+  font: var(--type-label);
+}
+.request-panel-group-count {
+  color: var(--text-faint);
+  font: var(--type-micro);
+  font-variant-numeric: tabular-nums;
+}
+.request-panel-rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+/* The kind icon says who the request waits on: amber for the person, faint for the Orchestrator. */
+.request-panel-row[data-response-owner="human"] .row-icon { color: var(--amber); }
+.request-panel-row[data-response-owner="orchestrator"] .row-icon { color: var(--text-faint); }
+/* Skeleton rows at the real rows' anatomy (§12.3). */
+.request-panel-skeleton { padding: var(--space-2); }
+.request-panel-skeleton .row-body { gap: var(--space-2); }
+.request-panel-state { padding: 0 var(--space-4); }
+/* The detail's head: All Requests, the position in the group with ‹ ›, then the child session. */
+.request-panel-detail-head {
+  display: grid;
+  flex: none;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3) var(--space-2) var(--space-2);
   border-bottom: 1px solid var(--border);
 }
-.request-panel-count {
-  margin: 0 4px 8px;
+.request-panel-nav {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px 14px;
-  color: var(--text-faint);
-  font-size: var(--text-xs);
-  font-weight: 700;
-  letter-spacing: .04em;
-  text-transform: uppercase;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
 }
-.request-panel-count strong {
-  color: var(--text);
-}
-.request-panel-owner-group {
-  margin: 10px 4px 5px;
+.request-panel-back { margin-right: auto; }
+.request-panel-position {
   color: var(--text-dim);
-  font-size: var(--text-xs);
-  font-weight: 650;
+  font: var(--type-small);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
-.request-panel-row {
-  display: grid;
-  gap: 3px;
-  width: 100%;
-  min-height: 54px;
-  margin: 0 0 5px;
-  padding: 8px 10px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  color: var(--text-dim);
-  background: transparent;
-  text-align: left;
-  cursor: pointer;
-}
-.request-panel-row:hover,
-.request-panel-row.selected {
-  border-color: var(--border);
-  background: var(--bg-elev-2);
-}
-.request-panel-row:focus-visible {
-  outline: var(--focus-width) solid var(--focus);
-  outline-offset: -2px;
-}
-.request-panel-row-title {
+.request-panel-child {
+  min-width: 0;
+  padding-inline: var(--space-2);
   overflow: hidden;
-  color: var(--text);
-  font-weight: 650;
+  font: var(--type-small);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.request-panel-row > span:not(.request-panel-row-title) {
-  font-size: var(--text-xs);
-}
 .request-panel-detail {
+  flex: 1;
   min-height: 0;
-  overflow: auto;
-  padding: 14px;
-}
-.request-panel-detail-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 10px;
-}
-.request-panel-detail-head h3,
-.request-panel-detail-head p {
-  margin: 0;
-}
-.request-panel-detail-head p {
-  margin-top: 3px;
-  color: var(--text-faint);
-  font-size: var(--text-xs);
-}
-.request-owner {
-  display: inline-flex;
-  margin-bottom: 12px;
-  padding: 3px 7px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
-  color: var(--text-dim);
-  background: var(--bg-elev-2);
-  font-size: var(--text-xs);
-  font-weight: 650;
-}
-.request-owner[data-response-owner="orchestrator"] {
-  color: var(--accent);
-}
-.request-readonly {
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg);
-  color: var(--text-dim);
-}
-.request-readonly > p {
-  margin-top: 0;
-}
-.request-structured-summary {
-  display: grid;
-  gap: var(--space-2);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 var(--space-4);
 }
 /* The panel's detail scrolls as one page (below), so the question card is not capped here. */
 .request-panel-detail > .question-bar {
   max-height: none;
   margin: 0;
-}
-.request-panel-empty {
-  padding: 20px;
-  color: var(--text-dim);
-}
-.request-panel-empty h3 {
-  color: var(--text);
 }
 /* UI evidence as a grid of named tiles (#2197; docs/design-system.md §13.2): the Request Card's body
    for this kind. The card's body is the one scroller; nothing here scrolls on its own. */
@@ -5750,15 +5735,32 @@ textarea {
   /* Except beside a tertiary: the rest wrap under it rather than push it off the card's edge. */
   .request-card[data-presentation="dock"] .request-card-foot:has(> .request-card-tertiary) { flex-wrap: wrap; }
 }
-/* In the Requests panel the detail scrolls as one page, so a short panel never squeezes the card's
-   body away; the footer sticks to the panel's lower edge on the card's own wash. */
-.request-panel-detail > .request-card { flex: none; }
-.request-panel-detail > .request-card .request-card-body { overflow: visible; }
-.request-panel-detail > .request-card .request-card-foot {
+/* The card in a side panel's detail (#2206): flush on the panel, with no wash or frame, a title-sized
+   heading, and its footer stuck to the panel's lower edge above a hairline. The detail scrolls as one
+   page, so a short panel never squeezes the card's body away. */
+.request-card[data-presentation="panel"] {
+  flex: none;
+  padding: var(--space-4) 0 0;
+  border: 0;
+  background: none;
+}
+.request-card[data-presentation="panel"] > .request-card-title { font: var(--type-title); }
+.request-card[data-presentation="panel"] > .request-card-body { overflow: visible; }
+.request-card[data-presentation="panel"] > .request-card-foot {
   position: sticky;
   bottom: 0;
-  padding-block: var(--space-2);
-  background: color-mix(in srgb, var(--amber) 7%, var(--bg-elev));
+  margin-top: var(--space-2);
+  padding-block: var(--space-3);
+  border-top: 1px solid var(--border);
+  background: var(--bg-elev);
+}
+/* A request someone else answers has no footer; its last line keeps the panel's bottom space. */
+.request-card[data-presentation="panel"][data-read-only] { padding-bottom: var(--space-4); }
+.request-card[data-read-only] .request-card-kind { color: var(--text-dim); }
+.request-card-questions {
+  display: grid;
+  gap: var(--space-2);
+  padding-left: var(--space-5);
 }
 .agents-panel .request-card { flex: none; }
 .session-notice-tone { display: inline-flex; color: var(--tone); }
@@ -14262,28 +14264,6 @@ body.shell-dock-dragging * {
 
   .approval-actions {
     flex-wrap: wrap;
-  }
-  /* Request review is one full-height page on phones. The page itself owns scrolling so evidence
-     rows, request metadata, and actions never compete through nested touch scrollers. */
-  .rp-body:has(> .request-panel) {
-    overflow: hidden;
-  }
-  .request-panel {
-    display: block;
-    overflow-y: auto;
-    overscroll-behavior: contain;
-  }
-  .request-panel-list,
-  .request-panel-detail {
-    overflow: visible;
-    max-height: none;
-  }
-  .request-panel-list {
-    border-bottom: 1px solid var(--border);
-  }
-  .request-panel-detail-head {
-    align-items: stretch;
-    flex-direction: column;
   }
   /* Composer: six lines at most, above the software keyboard. */
   .composer-input { max-height: calc(6 * 22px); }

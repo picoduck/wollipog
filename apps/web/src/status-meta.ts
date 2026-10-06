@@ -388,12 +388,9 @@ export function quarantinedStatusMeta(
 export type SessionConditionKind =
   /** One attention kind (`sessionAttentionBreakdown()`): a request the person answers. */
   | "attention"
-  /** Human-owned campaign requests, listed in the Requests panel. */
-  | "campaign_requests"
-  /** Unresolved requests of descendant sessions, listed in the Requests panel. */
-  | "descendant_requests"
-  /** Campaign requests assigned to the Orchestrator rather than to the person. */
-  | "orchestrator_requests"
+  /** Human-owned requests of child sessions, campaign and descendant alike, listed in the Requests
+   * panel (#2206). The Orchestrator's own share is counted only inside that panel. */
+  | "child_requests"
   /** The session's aggregate background work: Lost, Waiting on External Job, Continuation Pending. */
   | "background_work"
   /** A background result that has not come back to the conversation. */
@@ -441,7 +438,7 @@ export interface SessionStatusSummary {
 export interface SessionStatusContext {
   /** The session's machine is connected. Unknown counts as connected; only offline is Disconnected. */
   runnerOnline?: boolean;
-  /** Unresolved requests of descendant sessions (the Requests panel's count). */
+  /** Unresolved human-owned requests of descendant sessions (the Requests panel's "Waiting for You"). */
   descendantRequests?: number;
   /** Live workers (the Agents panel's count). */
   activeWorkers?: number;
@@ -484,6 +481,11 @@ function plural(count: number, one: string, many: string): string {
   return count === 1 ? one : many;
 }
 
+/** The one condition for child requests (#2206): "1 Child Request", "8 Child Requests". */
+export function childRequestsLabel(count: number): string {
+  return `${count} ${plural(count, "Child Request", "Child Requests")}`;
+}
+
 /** The short name of why a queued session is waiting for capacity. */
 export function queueReasonLabel(kind: NonNullable<SessionView["capacityWait"]>["kind"]): string {
   return kind === "runner_capacity"
@@ -509,8 +511,9 @@ export function queueReasonLabel(kind: NonNullable<SessionView["capacityWait"]>[
  *
  * The badge is the first of these that applies:
  * 1. What needs the person: each attention kind in `sessionAttentionBreakdown()` order (the Sessions
- *    list's priority), then human-owned campaign requests, then descendant requests, then a
- *    background result that is blocked or missing (Result Blocked, Result Missing; #2275).
+ *    list's priority), then human-owned child requests ("8 Child Requests", campaign and descendant
+ *    together; #2206), then a background result that is blocked or missing (Result Blocked, Result
+ *    Missing; #2275).
  * 2. Background Work Lost.
  * 3. Disconnected, when the session's machine is offline.
  * 4. Waiting on External Job (or Continuation Pending) while the session is otherwise awaiting its
@@ -520,8 +523,8 @@ export function queueReasonLabel(kind: NonNullable<SessionView["capacityWait"]>[
  *
  * `more` counts the other conditions in rule 1, never a passive state, so "+N" is the same at every
  * width. `conditions` lists everything in that order for the popover, followed by the passive rows
- * (background work while the agent is busy, a result still on its way back, workers, Orchestrator
- * requests and queue reasons).
+ * (background work while the agent is busy, a result still on its way back, workers and queue
+ * reasons). Requests the Orchestrator owns are not a condition: their count is in the Requests panel.
  */
 export function sessionStatusSummary(
   session: SessionStatusSource,
@@ -547,24 +550,17 @@ export function sessionStatusSummary(
       attentionKind: group.kind,
     });
   }
-  if (humanCampaignRequests > 0) {
+  // A campaign's request counts already include its descendants' requests, and come from the same
+  // projection as its notices; without a campaign, the descendant poll is the count.
+  const childRequests = session.orchestratorCampaign?.pendingRequests
+    ? humanCampaignRequests
+    : context.descendantRequests ?? 0;
+  if (childRequests > 0) {
     needs.push({
-      kind: "campaign_requests",
-      meta: statusMeta("attention", "input_required"),
-      description: `${humanCampaignRequests} human-owned campaign ${plural(humanCampaignRequests, "request needs", "requests need")} your input.`,
+      kind: "child_requests",
+      meta: { label: childRequestsLabel(childRequests), tone: "warning", pulse: false },
+      description: `${childRequests} ${plural(childRequests, "request from a child session needs", "requests from child sessions need")} your input.`,
       needsYou: true,
-      count: humanCampaignRequests,
-    });
-  }
-  // A campaign's request counts already include its descendants' requests.
-  const descendantRequests = context.descendantRequests ?? 0;
-  if (descendantRequests > 0 && !session.orchestratorCampaign?.pendingRequests) {
-    needs.push({
-      kind: "descendant_requests",
-      meta: { label: "Descendant Requests", tone: "warning", pulse: false },
-      description: `${descendantRequests} ${plural(descendantRequests, "request from a descendant session is", "requests from descendant sessions are")} unresolved.`,
-      needsYou: true,
-      count: descendantRequests,
     });
   }
 
@@ -630,16 +626,6 @@ export function sessionStatusSummary(
       meta: { label: `${workers} ${plural(workers, "Worker", "Workers")}`, tone: "info", pulse: true },
       description: `${workers} ${plural(workers, "worker is", "workers are")} running for this session.`,
       needsYou: false,
-    });
-  }
-  const orchestratorRequests = session.orchestratorCampaign?.pendingRequests?.orchestrator ?? 0;
-  if (orchestratorRequests > 0) {
-    conditions.push({
-      kind: "orchestrator_requests",
-      meta: { label: "Orchestrator Action", tone: "neutral", pulse: false },
-      description: `The Orchestrator has ${orchestratorRequests} descendant ${plural(orchestratorRequests, "request", "requests")} assigned to it.`,
-      needsYou: false,
-      count: orchestratorRequests,
     });
   }
   if (session.status === "queued" && session.capacityWait) {

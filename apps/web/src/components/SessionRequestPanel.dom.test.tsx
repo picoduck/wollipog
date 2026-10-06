@@ -8,6 +8,7 @@ import { pendingRequests, type DescendantRequestView, type SessionView } from "@
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
+import { viewPath } from "../navigation.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { loadEvidenceReviewDraft, saveEvidenceReviewDraft } from "../evidence-review-drafts.js";
 import { clearQuestionDrafts, storedQuestionDrafts } from "../question-response.js";
@@ -138,11 +139,9 @@ function ChildPanel({ child, client }: { child: DescendantRequestView; client: A
     <ApiProvider client={client}>
       <SessionRequestPanel
         session={parentSession()}
-        runnerOnline
         descendants={[child]}
         selectedKey={sessionRequestPanelKey(child.sessionId, child.occurrenceId)}
         onSelectedKeyChange={() => {}}
-        onSessionUpdate={() => {}}
         onDescendantsUpdate={() => {}}
         onOpenChild={() => {}}
       />
@@ -151,33 +150,6 @@ function ChildPanel({ child, client }: { child: DescendantRequestView; client: A
 }
 
 const footButtons = (container: HTMLElement) => [...container.querySelectorAll<HTMLButtonElement>(".request-card-foot button")];
-
-test("the session's own request is not listed in the panel: the dock above the composer answers it", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
-  try {
-    await act(async () => root.render(
-      <ApiProvider client={api as ApiClient}>
-        <SessionRequestPanel
-          session={standaloneApprovalSession()}
-          runnerOnline
-          descendants={[]}
-          selectedKey={null}
-          onSelectedKeyChange={() => {}}
-          onSessionUpdate={() => {}}
-          onDescendantsUpdate={() => {}}
-          onOpenChild={() => {}}
-        />
-      </ApiProvider>,
-    ));
-    assert.match(container.textContent ?? "", /No Pending Requests/);
-    assertNoDomNode(container.querySelector(".request-card"));
-  } finally {
-    await act(async () => root.unmount());
-    container.remove();
-  }
-});
 
 test("a child's eight-item evidence review persists acknowledgement drafts and submits exact ids", async () => {
   domWindow.localStorage.clear();
@@ -327,76 +299,54 @@ test("a child's cost checkpoint keeps Stop before the one primary Continue", asy
   }
 });
 
-test("empty descendant inbox distinguishes loading, unavailable, and authoritative empty states", async () => {
-  const session = { ...evidenceSession(), pendingApproval: null } as SessionView;
+test("the session's own request is not listed in the panel: the dock above the composer answers it", async () => {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
-  const render = (descendantStatus: "loading" | "unavailable" | "ready") => root.render(
-    <ApiProvider client={api}>
-      <SessionRequestPanel
-        session={session}
-        runnerOnline
-        descendants={[]}
-        descendantStatus={descendantStatus}
-        selectedKey={null}
-        onSelectedKeyChange={() => {}}
-        onSessionUpdate={() => {}}
-        onDescendantsUpdate={() => {}}
-        onOpenChild={() => {}}
-      />
-    </ApiProvider>,
-  );
   try {
-    await act(async () => render("loading"));
-    assert.match(container.textContent ?? "", /Loading Requests/);
-    assert.doesNotMatch(container.textContent ?? "", /No Pending Requests/);
-
-    await act(async () => render("unavailable"));
-    assert.match(container.textContent ?? "", /Requests Unavailable/);
-    assert.match(container.textContent ?? "", /retry automatically/);
-    assertNoDomNode(container.querySelector("button"), "unverified request controls fail closed");
-
-    await act(async () => render("ready"));
-    assert.match(container.textContent ?? "", /No Pending Requests/);
+    await act(async () => root.render(
+      <ApiProvider client={api as ApiClient}>
+        <SessionRequestPanel
+          session={standaloneApprovalSession()}
+          descendants={[]}
+          selectedKey={null}
+          onSelectedKeyChange={() => {}}
+          onDescendantsUpdate={() => {}}
+          onOpenChild={() => {}}
+        />
+      </ApiProvider>,
+    ));
+    assert.match(container.textContent ?? "", /Nothing Waiting/);
+    assertNoDomNode(container.querySelector(".request-card"));
   } finally {
     await act(async () => root.unmount());
     container.remove();
   }
 });
 
-test("descendant inbox exposes count, ownership, keyboard selection, and canonical child links", async () => {
-  const session = { ...evidenceSession(), pendingApproval: null } as SessionView;
-  const human: DescendantRequestView = {
-    sessionId: "child-human",
-    sessionTitle: "Human Child",
+/** A child's question or, for the Orchestrator, a merge decision: the Requests panel's two groups. */
+function childRequest(index: number, owner: "human" | "orchestrator"): DescendantRequestView {
+  const sessionId = `child-${index}`;
+  const occurrenceId = `occurrence-${index}`;
+  return {
+    sessionId,
+    sessionTitle: `Child Session ${index}`,
     runnerId: "runner",
     runnerOnline: true,
-    eventEpoch: 8,
-    createdAt: Date.now() - 60_000,
-    responseOwner: "human",
-    occurrenceId: "human-occurrence",
-    request: {
-      requestId: "human-question",
-      occurrenceId: "human-occurrence",
+    eventEpoch: index,
+    createdAt: Date.now() - index * 60_000,
+    responseOwner: owner,
+    occurrenceId,
+    request: owner === "human" ? {
+      requestId: `question-${index}`,
+      occurrenceId,
       kind: "question",
       title: "Question",
       options: [],
-      questions: [{ id: "target", question: "Choose a target", options: [{ label: "Staging" }] }],
-    },
-  };
-  const orchestrator: DescendantRequestView = {
-    sessionId: "child-orchestrator",
-    sessionTitle: "Orchestrator Child",
-    runnerId: "runner",
-    runnerOnline: true,
-    eventEpoch: 9,
-    createdAt: Date.now() - 120_000,
-    responseOwner: "orchestrator",
-    occurrenceId: "orchestrator-occurrence",
-    request: {
-      requestId: "orchestrator-decision",
-      occurrenceId: "orchestrator-occurrence",
+      questions: [{ id: "target", question: `Choose a target for child ${index}`, options: [{ label: "Staging" }] }],
+    } : {
+      requestId: `merge-${index}`,
+      occurrenceId,
       kind: "workflow_decision",
       title: "PR Merge Approval Required",
       options: [
@@ -404,16 +354,16 @@ test("descendant inbox exposes count, ownership, keyboard selection, and canonic
         { optionId: "deny", name: "Deny", kind: "reject_once" },
       ],
       workflowDecision: {
-        requestId: "merge-1",
-        occurrenceId: "orchestrator-occurrence",
-        sessionId: "child-orchestrator",
-        controllingSessionId: "session-evidence-panel",
+        requestId: `merge-request-${index}`,
+        occurrenceId,
+        sessionId,
+        controllingSessionId: "session-parent",
         category: "pr_merge",
-        resourceKey: "pr-44",
+        resourceKey: `pr-${40 + index}`,
         resourceSnapshot: {
           category: "pr_merge",
           repository: "picoduck/wollipog",
-          pullRequest: 44,
+          pullRequest: 40 + index,
           headSha: "b".repeat(40),
           reviewResult: "merge",
           requiredChecks: { headSha: "b".repeat(40), status: "passed", checkedAt: 1, checks: [] },
@@ -422,53 +372,224 @@ test("descendant inbox exposes count, ownership, keyboard selection, and canonic
         policyRevision: 3,
         authority: "orchestrator",
         status: "pending",
-        createdAt: Date.now() - 120_000,
+        createdAt: Date.now() - index * 60_000,
       },
     },
   };
-  const opened: DescendantRequestView[] = [];
-  let selected = sessionRequestPanelKey(human.sessionId, human.occurrenceId);
+}
+
+/** Eight requests waiting for the person, then four the Orchestrator handles, interleaved as they arrive. */
+const campaignRequests = () => Array.from({ length: 12 }, (_, index) =>
+  childRequest(index + 1, index % 3 === 2 ? "orchestrator" : "human"));
+
+let setNavigatorDescendants: (next: DescendantRequestView[]) => void = () => {};
+
+/** The panel as the session page holds it: the open request is the page's state. */
+function Navigator({ descendants: initial, initialKey = null, onOpenChild = () => {}, onRetry, onOpenDecisionHistory, status }: {
+  descendants: DescendantRequestView[];
+  initialKey?: string | null;
+  onOpenChild?: (request: DescendantRequestView) => void;
+  onRetry?: () => void;
+  onOpenDecisionHistory?: () => void;
+  status?: "loading" | "unavailable" | "ready";
+}) {
+  const [descendants, setDescendants] = React.useState(initial);
+  const [selected, setSelected] = React.useState<string | null>(initialKey);
+  setNavigatorDescendants = setDescendants;
+  return (
+    <ApiProvider client={api}>
+      <SessionRequestPanel
+        session={{ ...evidenceSession(), pendingApproval: null } as SessionView}
+        descendants={descendants}
+        descendantStatus={status}
+        selectedKey={selected}
+        onSelectedKeyChange={setSelected}
+        onDescendantsUpdate={() => {}}
+        onOpenChild={onOpenChild}
+        onRetry={onRetry}
+        onOpenDecisionHistory={onOpenDecisionHistory}
+      />
+    </ApiProvider>
+  );
+}
+
+async function mountNavigator(props: Parameters<typeof Navigator>[0]) {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
-  const render = () => root.render(
-    <ApiProvider client={api}>
-      <SessionRequestPanel
-        session={session}
-        runnerOnline
-        descendants={[human, orchestrator]}
-        selectedKey={selected}
-        onSelectedKeyChange={(key) => { selected = key ?? selected; render(); }}
-        onSessionUpdate={() => {}}
-        onDescendantsUpdate={() => {}}
-        onOpenChild={(request) => opened.push(request)}
-      />
-    </ApiProvider>,
-  );
+  await act(async () => root.render(<Navigator {...props} />));
+  return {
+    container,
+    rows: () => [...container.querySelectorAll<HTMLButtonElement>(".request-panel-row")],
+    button: (name: string) => [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((candidate) => (candidate.getAttribute("aria-label") ?? candidate.textContent?.trim()) === name),
+    position: () => container.querySelector(".request-panel-position")?.textContent,
+    cleanUp: async () => {
+      await act(async () => root.unmount());
+      container.remove();
+    },
+  };
+}
+
+const active = () => domWindow.document.activeElement as unknown as Element | null;
+
+test("empty, loading and unavailable are a compact state, skeleton rows and a danger notice with Retry (#2206)", async () => {
+  let retries = 0;
+  let historyOpened = 0;
+  let view = await mountNavigator({ descendants: [], status: "loading" });
   try {
-    await act(async () => render());
-    assert.match(container.querySelector(".request-panel-count")?.textContent ?? "", /Needs Your Input 1/);
-    assert.match(container.querySelector(".request-panel-count")?.textContent ?? "", /Orchestrator Action 1/);
-    const list = container.querySelector<HTMLElement>('.request-panel-list')!;
-    const rows = [...container.querySelectorAll<HTMLButtonElement>('.request-panel-row')];
-    assert.equal(rows.length, 2);
-    assert.match(rows[0]!.textContent ?? "", /Human/);
-    await act(async () => {
-      rows[0]!.focus();
-      list.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }) as never);
-    });
-    assert.equal(rows[1]!.getAttribute("aria-current"), "true");
-    assert.match(container.querySelector(".request-owner")?.textContent ?? "", /Assigned to Orchestrator/);
-    assertNoDomNode(container.querySelector(".request-readonly button, .request-card"),
-      "the human dashboard does not expose controls for an Orchestrator-owned decision");
-    assert.match(container.querySelector(".request-structured-summary")?.textContent ?? "", /Pull Request#44/);
-    const open = [...container.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent === "Open Child Session")!;
-    await act(async () => open.click());
-    assert.deepEqual(opened, [orchestrator]);
+    assert.doesNotMatch(view.container.textContent ?? "", /Nothing Waiting/, "a load is never empty");
+    assertNoDomNode(view.container.querySelector(".request-panel-skeleton"), "nothing new under 300ms (§12.3)");
+    await act(async () => { await new Promise((resolve) => domWindow.setTimeout(resolve, 350)); });
+    const skeleton = view.container.querySelector(".request-panel-skeleton");
+    assert.equal(skeleton?.getAttribute("role"), "status");
+    assert.equal(skeleton?.querySelectorAll(".row.row-2 .skeleton-bar.title").length, 4, "skeleton rows at the rows' anatomy");
+    assert.equal(skeleton?.textContent, "Loading requests…");
   } finally {
-    await act(async () => root.unmount());
-    container.remove();
+    await view.cleanUp();
+  }
+
+  view = await mountNavigator({ descendants: [], status: "unavailable", onRetry: () => { retries += 1; } });
+  try {
+    const notice = view.container.querySelector(".notice");
+    assert.match(notice?.className ?? "", /\bt-danger\b/u);
+    assert.match(notice?.textContent ?? "", /Couldn't Load Requests/);
+    assert.match(notice?.textContent ?? "", /can't be checked right now\./);
+    assert.deepEqual([...view.container.querySelectorAll("button")].map((button) => button.textContent), ["Retry"],
+      "unverified request controls fail closed: Retry is the only control");
+    await act(async () => view.button("Retry")!.click());
+    assert.equal(retries, 1);
+  } finally {
+    await view.cleanUp();
+  }
+
+  view = await mountNavigator({ descendants: [], status: "ready", onOpenDecisionHistory: () => { historyOpened += 1; } });
+  try {
+    assert.equal(view.container.querySelector(".state.compact .state-title")?.textContent, "Nothing Waiting");
+    assert.equal(view.container.querySelector(".state-body")?.textContent,
+      "Requests from this session and its child sessions appear here.");
+    await act(async () => view.button("Decision History")!.click());
+    assert.equal(historyOpened, 1);
+  } finally {
+    await view.cleanUp();
+  }
+});
+
+test("the list has Waiting for You and Orchestrator Is Handling, with two-line rows that arrow keys move through (#2206)", async () => {
+  const view = await mountNavigator({ descendants: campaignRequests() });
+  try {
+    const heads = [...view.container.querySelectorAll(".request-panel-group-head")];
+    assert.deepEqual(heads.map((head) => head.textContent), ["Waiting for You8", "Orchestrator Is Handling4"]);
+    assert.ok(heads[0]!.querySelector(".count-badge"), "what waits for the person carries a count badge");
+    assertNoDomNode(view.container.querySelector(".request-panel-count, .request-panel-owner-group, .request-owner"),
+      "the uppercase eyebrow, count row and owner pill are gone");
+    const rows = view.rows();
+    assert.equal(rows.length, 12);
+    for (const row of rows) {
+      assert.match(row.className, /\brow row-2\b/u);
+      assert.equal(row.querySelectorAll(".row-title, .row-sub").length, 2, "two lines");
+      assert.doesNotMatch(row.textContent ?? "", /Pending|Human/u);
+      assertNoDomNode(row.querySelector(".is-selected, [aria-current]"));
+    }
+    assert.equal(rows[0]!.querySelector(".row-title")?.textContent, "Choose a target for child 1");
+    assert.equal(rows[0]!.querySelector(".row-sub")?.textContent, "Question in Child Session 1");
+    assert.equal(rows[8]!.querySelector(".row-sub")?.textContent, "PR Merge in Child Session 3");
+    assert.equal(rows[0]!.dataset.responseOwner, "human");
+    assert.equal(rows[8]!.dataset.responseOwner, "orchestrator");
+    assert.deepEqual(rows.map((row) => row.tabIndex), rows.map((_, index) => index === 0 ? 0 : -1), "one Tab stop");
+
+    const list = view.container.querySelector<HTMLElement>(".request-panel-list")!;
+    const key = (name: string) => act(async () => {
+      fireDomEvent.keyDown(active() as never, { key: name });
+    });
+    await act(async () => rows[0]!.focus());
+    await key("ArrowDown");
+    assert.equal(active(), rows[1]);
+    await key("End");
+    assert.equal(active(), rows[11], "the arrows cross from one group into the next");
+    await key("Home");
+    assert.equal(active(), rows[0]);
+    assert.ok(list.contains(active() as never));
+  } finally {
+    await view.cleanUp();
+  }
+});
+
+test("a row opens its request in the list's place; ‹ › step through its group and All Requests returns to its row (#2206)", async () => {
+  const opened: DescendantRequestView[] = [];
+  const view = await mountNavigator({ descendants: campaignRequests(), onOpenChild: (request) => opened.push(request) });
+  try {
+    await act(async () => view.rows()[1]!.click());
+    assertNoDomNode(view.container.querySelector(".request-panel-list"), "the detail replaces the list");
+    assert.equal(view.position(), "Request 2 of 8");
+    const card = view.container.querySelector(".request-panel-detail .question-card");
+    assert.equal(card?.getAttribute("data-presentation"), "panel");
+    assert.equal(active(), card?.querySelector(".request-card-title"), "focus lands on the request it opened");
+    assert.match(card?.querySelector(".request-card-title")?.textContent ?? "", /child 2/);
+
+    await act(async () => view.button("Next Request")!.click());
+    assert.equal(view.position(), "Request 3 of 8");
+    assert.match(view.container.querySelector(".request-card-title")?.textContent ?? "", /child 4/,
+      "the Orchestrator's request between them is in its own group");
+    await act(async () => view.button("Previous Request")!.click());
+    await act(async () => view.button("Previous Request")!.click());
+    assert.equal(view.position(), "Request 1 of 8");
+    assert.equal(view.button("Previous Request")!.getAttribute("aria-disabled"), "true");
+    await act(async () => view.button("Previous Request")!.click());
+    assert.equal(view.position(), "Request 1 of 8", "nothing before the first");
+
+    // The child session's title links to it, in place of Open Child Session.
+    const link = view.container.querySelector<HTMLAnchorElement>("a.request-panel-child")!;
+    assert.equal(link.textContent, "Child Session 1");
+    assert.equal(link.getAttribute("href"), viewPath({ name: "session", id: "child-1" }));
+    assert.equal(view.button("Open Child Session"), undefined);
+    await act(async () => { link.click(); });
+    assert.deepEqual(opened.map((request) => request.sessionId), ["child-1"]);
+
+    await act(async () => view.button("All Requests")!.click());
+    assert.equal(view.rows().length, 12);
+    assert.equal(active(), view.rows()[0], "focus returns to the row of the request it left");
+    assert.equal(view.rows()[0]!.tabIndex, 0);
+  } finally {
+    await view.cleanUp();
+  }
+});
+
+test("a request the Orchestrator handles is the same card, read-only, with a neutral notice and its facts (#2206)", async () => {
+  const view = await mountNavigator({ descendants: campaignRequests() });
+  try {
+    await act(async () => view.rows()[8]!.click());
+    assert.equal(view.position(), "Request 1 of 4");
+    const card = view.container.querySelector<HTMLElement>(".request-panel-detail .request-card")!;
+    assert.equal(card.dataset.presentation, "panel");
+    assert.equal(card.dataset.readOnly, "");
+    assert.equal(card.querySelector(".notice")?.textContent, "The Orchestrator is handling this request.");
+    assert.match(card.querySelector(".notice")?.className ?? "", /\bt-neutral\b/u);
+    assert.match(card.querySelector(".facts")?.textContent ?? "", /Pull Request#43/);
+    assertNoDomNode(card.querySelector("button, .request-card-foot"),
+      "the person has no control over a decision the Orchestrator owns");
+  } finally {
+    await view.cleanUp();
+  }
+});
+
+test("an answered request gives way to the next in its group, and the last one to the list (#2206)", async () => {
+  const requests = campaignRequests().filter((request) => request.responseOwner === "human").slice(0, 2)
+    .concat(campaignRequests().filter((request) => request.responseOwner === "orchestrator").slice(0, 1));
+  const view = await mountNavigator({ descendants: requests });
+  try {
+    await act(async () => view.rows()[0]!.click());
+    assert.equal(view.position(), "Request 1 of 2");
+    await act(async () => setNavigatorDescendants(requests.slice(1)));
+    assert.equal(view.position(), "Request 1 of 1");
+    assert.match(view.container.querySelector(".request-card-title")?.textContent ?? "", /child 2/);
+    assert.equal(active(), view.container.querySelector(".request-card-title"), "focus stays with the requests");
+    // With nothing left waiting for the person, the list comes back rather than the Orchestrator's.
+    await act(async () => setNavigatorDescendants(requests.slice(2)));
+    assert.equal(view.rows().length, 1);
+    assertNoDomNode(view.container.querySelector(".request-panel-detail"));
+  } finally {
+    await view.cleanUp();
   }
 });
 
@@ -501,11 +622,9 @@ test("switching between descendant questions preserves each request's draft", as
     <ApiProvider client={api}>
       <SessionRequestPanel
         session={session}
-        runnerOnline
         descendants={requests}
         selectedKey={selected}
         onSelectedKeyChange={(key) => { selected = key ?? selected; render(); }}
-        onSessionUpdate={() => {}}
         onDescendantsUpdate={() => {}}
         onOpenChild={() => {}}
       />
@@ -520,9 +639,11 @@ test("switching between descendant questions preserves each request's draft", as
     });
     const storedDraft = storedQuestionDrafts("child-one", "question-one").response;
     assert.equal(storedDraft?.kind === "other" ? storedDraft.value : undefined, "Keep this draft");
-    const rows = () => [...container.querySelectorAll<HTMLButtonElement>(".request-panel-row")];
-    await act(async () => rows()[1]!.click());
-    await act(async () => rows()[0]!.click());
+    const step = (name: string) => [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.getAttribute("aria-label") === name)!;
+    await act(async () => step("Next Request").click());
+    assert.match(container.querySelector(".request-card-title")?.textContent ?? "", /Answer two/);
+    await act(async () => step("Previous Request").click());
     assert.equal(container.querySelector<HTMLInputElement>(".question-input")?.value, "Keep this draft");
   } finally {
     clearQuestionDrafts("child-one", "question-one");
@@ -611,11 +732,9 @@ test("a Viewer cannot answer a descendant question whose child view has not reac
       <ApiProvider client={client}>
         <SessionRequestPanel
           session={session}
-          runnerOnline
           descendants={[child]}
           selectedKey={sessionRequestPanelKey(child.sessionId, child.occurrenceId)}
           onSelectedKeyChange={() => {}}
-          onSessionUpdate={() => {}}
           onDescendantsUpdate={() => {}}
           onOpenChild={() => {}}
         />

@@ -955,7 +955,8 @@ shown only while a machine reports copies.
 ## 6. Master-Detail Layout
 
 Used side by side by Agent Skills, Projects, Connections › Machines (when selected), Settings
-(section nav plus content), and the Requests panel. Sessions (list plus preview) uses the stacked
+(section nav plus content). The Requests panel is too narrow for two panes, so it is a navigator at
+every width (§6.4). Sessions (list plus preview) uses the stacked
 variant by default and offers side by side as a user preference (§6.3).
 
 ```
@@ -1074,6 +1075,22 @@ master-detail pages stay side by side.
 - **Empty.** An empty list replaces both panes with one state (§6.1); no divider is drawn.
 
 ---
+
+### 6.4 Navigator (the Requests Panel)
+
+The Requests panel (`SessionRequestPanel`, #2206) is a list and a detail that replaces it, at every
+width, as a phone's two routes are (§6.2). The list has the groups "Waiting for You" (a warning count
+badge, §11.4) and "Orchestrator Is Handling" (a plain count), each a group header over two-line rows
+(§5.2): the kind's icon (`--amber` for what waits for the person, `--text-faint` for the
+Orchestrator's), the request's title and a short time, then "<Kind> in <child session>". Arrow keys,
+Home and End move through the rows. Choosing one replaces the list with its detail: a head with
+"‹ All Requests", "Request 2 of 8" and ‹ › to step through the request's group in list order, and the
+child session's title as a link to it; then the Request Card in its panel presentation (§13.2). "‹ All
+Requests" returns to the list, at its scroll position, with focus on the request's row. An answered
+request gives way to the next one in its group, and with none left the list comes back. Loading is
+skeleton rows, unavailable a danger notice with Retry, and empty the compact state "Nothing Waiting"
+with a link to Decision History. In the compact tier the panel opens over the transcript from the
+right with a scrim (§15.2); on a phone it is the full-screen panel.
 
 ## 7. Dialogs and Sheets
 
@@ -2130,6 +2147,11 @@ follows these rules so it never crowds out the conversation it asks about:
   decision is a compact danger notice above the footer. The dock is the notice slot's `lead`
   (`SessionNoticeSlot`), at the end of the `.chat-reading` column, a size container its caps are
   measured against. A worker's request stays in the Agents panel.
+  In a panel's detail (`presentation="panel"`, #2206) the card is flush on the panel, with no wash or
+  frame, its title in `--type-title`, and its footer stuck to the panel's lower edge above a
+  `--border` hairline; questions, permissions, workflow decisions and evidence all use it. A request
+  the Orchestrator handles is the same card, read-only (`readOnlyNotice`): a neutral compact notice,
+  "The Orchestrator is handling this request.", then its facts, and no footer.
 - **A question is the same card, one question per step** (`SessionQuestionBanner` with
   `QuestionStep`, #2196). The head line is the kind ("Question", "Async Question", or "Recovery
   Required" in the danger tone after a provider restart), owner and time; then the question's header

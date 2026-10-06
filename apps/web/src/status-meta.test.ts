@@ -293,7 +293,7 @@ test("a delivery that waits on the person ranks after requests and before Backgr
     backgroundWorkState: "orphaned",
   } as Partial<SessionStatusSource>), { descendantRequests: 2, runnerOnline: false });
   assert.deepEqual(summary.conditions.map((condition) => condition.kind),
-    ["campaign_requests", "background_delivery", "background_work", "disconnected"]);
+    ["child_requests", "background_delivery", "background_work", "disconnected"]);
   assert.equal(summary.more, 1);
 });
 

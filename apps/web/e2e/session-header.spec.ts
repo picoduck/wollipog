@@ -151,7 +151,7 @@ for (const viewport of [
   });
 }
 
-test("the Requests panel stays open until descendant polling authoritatively settles", async ({ page }) => {
+test("the Requests panel follows descendant polling, and says Nothing Waiting once it settles empty (#2206)", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto("/command-inbox-projects-e2e.html?scenario=preview-follow&fullShell=1");
   await page.evaluate(() => localStorage.clear());
@@ -169,34 +169,36 @@ test("the Requests panel stays open until descendant polling authoritatively set
   await expect.poll(() => page.evaluate(() =>
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.descendantRequestCallCount())).toBe(1);
 
-  // The campaign request is the bar's one status (#2182); its popover row opens the Requests panel.
+  // The child request is the bar's one status (#2182, #2206); its popover row opens the Requests panel.
   const trigger = page.locator(".session-bar .session-status-button");
-  await expect(trigger).toHaveAccessibleName("Session Status: Needs Your Input, 1 Request");
+  await expect(trigger).toHaveAccessibleName("Session Status: 1 Child Request");
   await trigger.click();
   await page.getByRole("dialog", { name: "Session Status" }).getByRole("button", { name: "Open Requests" }).click();
   const panel = page.getByRole("complementary", { name: "Requests" });
   await expect(panel).toBeVisible();
-  await expect(panel.getByRole("heading", { name: "Loading Requests" })).toBeVisible();
+  // Loading is skeleton rows, never "Nothing Waiting" (§12.3).
+  await expect(panel.locator(".request-panel-skeleton")).toBeVisible();
+  await expect(panel).not.toContainText("Nothing Waiting");
 
   await page.evaluate(() => {
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleDeferredDescendantRequests();
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.failNextDescendantRequests();
   });
-  await expect(panel.getByRole("heading", { name: "Descendant Request Fixture" })).toBeVisible();
+  await expect(panel.locator(".request-panel-row")).toContainText("Descendant Request Fixture");
   await expect.poll(() => page.evaluate(() =>
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.descendantRequestCallCount())).toBeGreaterThanOrEqual(2);
-  await expect(panel.getByRole("heading", { name: "Requests Unavailable" })).toBeVisible();
+  await expect(panel.locator(".notice.t-danger")).toContainText("Couldn't Load Requests");
   await expect(panel.locator(".request-panel-row")).toHaveCount(0);
 
   await expect.poll(() => page.evaluate(() =>
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.descendantRequestCallCount())).toBeGreaterThanOrEqual(3);
-  await expect(panel.getByRole("heading", { name: "Descendant Request Fixture" })).toBeVisible();
+  await expect(panel.locator(".request-panel-row")).toContainText("Descendant Request Fixture");
 
+  // Settled empty, the panel stays open and says so, rather than closing under the reader.
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setDescendantRequests("empty"));
   await expect.poll(() => page.evaluate(() =>
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.descendantRequestCallCount())).toBeGreaterThanOrEqual(4);
-  await expect(panel).toHaveCount(0);
-  await expect(trigger).toBeFocused();
+  await expect(panel.locator(".state-title")).toHaveText("Nothing Waiting");
 });
 
 test("a request answered on the dock never opens the Requests panel, and the generic toggle stays on the launcher", async ({ page }) => {
@@ -651,7 +653,7 @@ for (const viewport of [
       // The campaign request needs the person, so it is the one badge; background work, the worker
       // and the Orchestrator's request are rows of the popover, never "+N".
       const status = header.locator(".session-status-button");
-      await expect(status).toHaveAccessibleName("Session Status: Needs Your Input, 1 Request");
+      await expect(status).toHaveAccessibleName("Session Status: 1 Child Request");
       await expect(header.locator(".status")).toHaveCount(1);
       await expect(status.locator(".session-status-more")).toHaveCount(0);
       await expect(header.locator('[data-live="background-work"]'))
@@ -781,8 +783,9 @@ for (const viewport of [
       const statusPopover = page.getByRole("dialog", { name: "Session Status" });
       await expect(statusPopover).toBeVisible();
       const rows = statusPopover.locator(".session-status-row");
-      await expect(rows.locator(".status")).toHaveText(["Needs Your Input1, 1 Request", "Waiting on External Job", "1 Worker", "Orchestrator Action1, 1 Request"]);
-      await expect(rows.locator("button")).toHaveText(["Open Requests", "Open", "Open Agents", "Open Requests"]);
+      // Child requests are one condition; the Orchestrator's share is counted only in the panel (#2206).
+      await expect(rows.locator(".status")).toHaveText(["1 Child Request", "Waiting on External Job", "1 Worker"]);
+      await expect(rows.locator("button")).toHaveText(["Open Requests", "Open", "Open Agents"]);
       // On a phone every popover is a bottom sheet across the screen (docs/design-system.md §9.2).
       await dialogMotionSettled(page);
       const popoverGeometry = await statusPopover.evaluate((element) => {

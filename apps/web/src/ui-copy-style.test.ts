@@ -41,6 +41,8 @@ import {
 import { ASK_MARKER_COPY } from "./components/requests/AskMarker.js";
 import { QUESTION_CARD_COPY, questionStepLabel } from "./components/requests/QuestionStep.js";
 import { SIGN_IN_COPY } from "./components/AuthenticationRecoveryPanel.js";
+import { REQUEST_PANEL_COPY, requestPanelPositionLabel } from "./components/SessionRequestPanel.js";
+import { childRequestsLabel } from "./status-meta.js";
 
 const SOURCE_ROOT = path.resolve("apps/web/src");
 const MINOR_WORDS = new Set([
@@ -764,6 +766,27 @@ test("the Request Card's labels and names are Title Case, and its foot-notes are
   // Every label written into the card and dock's markup is Title Case too.
   const failures = ["RequestCard.tsx", "RequestDock.tsx", "EvidenceReview.tsx", "WorkflowDecisionSummary.tsx"]
     .flatMap((file) => titleCaseFailures(parseSource(path.join(SOURCE_ROOT, "components/requests", file))).failures);
+  assert.deepEqual(failures, []);
+});
+
+test("the Requests panel's labels are Title Case, and its notice and state sentences are sentences (#2206)", () => {
+  const titles = ["waitingForYou", "orchestratorHandling", "pendingRequests", "allRequests", "previousRequest",
+    "nextRequest", "childSession", "nothingWaiting", "decisionHistory", "unavailable", "retry"] as const;
+  const sentences = ["orchestratorNotice", "nothingWaitingBody", "unavailableBody", "loading"] as const;
+  assert.deepEqual([...titles, ...sentences].sort(), Object.keys(REQUEST_PANEL_COPY).sort(), "every string is classified");
+  for (const key of titles) {
+    assert.ok(isTitleCase(REQUEST_PANEL_COPY[key]) && !/[.!?…]$/.test(REQUEST_PANEL_COPY[key]), `${key}: ${REQUEST_PANEL_COPY[key]}`);
+  }
+  for (const key of sentences) {
+    // "Orchestrator" is the role's name.
+    const value = REQUEST_PANEL_COPY[key].replace("The Orchestrator", "The orchestrator");
+    assert.ok(/[.…]$/.test(value) && isSentenceCase(value), `${key}: ${REQUEST_PANEL_COPY[key]}`);
+  }
+  // The detail's position and the bar's one child-request status, written as the issue words them.
+  assert.equal(requestPanelPositionLabel(2, 8), "Request 2 of 8");
+  assert.equal(childRequestsLabel(1), "1 Child Request");
+  assert.equal(childRequestsLabel(8), "8 Child Requests");
+  const failures = titleCaseFailures(parseSource(path.join(SOURCE_ROOT, "components/SessionRequestPanel.tsx"))).failures;
   assert.deepEqual(failures, []);
 });
 

@@ -52,8 +52,8 @@ async function applyStatuses(page: Page, patch: { status: string; backgroundWork
 }
 
 /**
- * A passive condition beside the approval: an Orchestrator Action is a row of the Session Status
- * popover, so it must never take the bar's one badge or count toward its "+N" (#2182).
+ * Requests the Orchestrator handles beside the approval: they are counted only in the Requests
+ * panel (#2206), so they must never take the bar's one badge or count toward its "+N" (#2182).
  */
 async function addOrchestratorAction(page: Page) {
   await page.evaluate(() => {

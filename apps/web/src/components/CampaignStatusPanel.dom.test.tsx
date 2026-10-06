@@ -218,7 +218,6 @@ function PanelWithAvailability({ session: current, onState, onOpen }: {
         harnessRequests.selected.push(key);
         setSelectedRequestKey(key);
       }}
-      onSessionUpdate={() => {}}
     />
   );
 }

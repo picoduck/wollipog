@@ -42,6 +42,14 @@ const card = (page: Page) => page.locator(".request-dock .request-card");
 const footButton = (page: Page, name: string) => card(page).locator(".request-card-foot").getByRole("button", { name, exact: true });
 const submissions = (page: Page) => page.evaluate(() => window.__WOLLIPOG_REQUEST_SURFACES_E2E__.submissions());
 
+/** The session bar's one status control, and its popover row's Open Requests (#2182, #2206). */
+const statusControl = (page: Page) => page.locator("header.session-bar .session-status-button");
+async function openRequests(page: Page) {
+  await statusControl(page).click();
+  await page.getByRole("dialog", { name: "Session Status" }).getByRole("button", { name: "Open Requests" }).click();
+}
+const panelRows = (page: Page) => page.locator(".request-panel-row");
+
 for (const viewport of [
   { name: "desktop", width: 1440, height: 900 },
   { name: "phone", width: 390, height: 844 },
@@ -334,8 +342,9 @@ test("a decision that fails is a danger notice above the footer, and the choice 
 test("child evidence actions stay reachable in a short desktop panel", async ({ page }) => {
   await page.setViewportSize({ width: 900, height: 480 });
   await page.goto("/request-surfaces-e2e.html?scenario=descendants");
-  await page.getByRole("button", { name: "Needs Your Input: 8 Requests" }).click();
-  await expect(page.locator(".request-panel-row")).toHaveCount(12);
+  await openRequests(page);
+  await expect(panelRows(page)).toHaveCount(12);
+  await panelRows(page).first().click();
   const panelCard = page.locator(".request-panel-detail .request-card");
   await expect(panelCard).toHaveAttribute("data-presentation", "panel");
   await assertInside(page, ".request-panel-detail", panelCard.locator(".request-card-foot"));
@@ -347,7 +356,7 @@ test("child evidence actions stay reachable in a short desktop panel", async ({ 
     // One control height with this mouse (#1799); a touch screen makes it 44px.
     expect((await panelCard.getByRole("button", { name, exact: true }).boundingBox())!.height).toBe(32);
   }
-  await page.getByRole("button", { name: "Open Child Session" }).click();
+  await page.getByRole("link", { name: "Child Session 1" }).click();
   await expect.poll(() => page.evaluate(() =>
     window.__WOLLIPOG_REQUEST_SURFACES_E2E__.openedChild()?.sessionId)).toBe("child-1");
 });
@@ -440,14 +449,21 @@ for (const viewport of [
   test(`descendant polling states remain readable on ${viewport.name}`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await page.goto("/request-surfaces-e2e.html?scenario=polling&pollStatus=loading");
-    await page.getByRole("button", { name: "Needs Your Input: 1 Requests" }).click();
-    await expect(page.getByRole("heading", { name: "Loading Requests" })).toBeVisible();
+    await openRequests(page);
+    // Skeleton rows at the rows' height and anatomy (§12.3), announced once.
+    const skeleton = page.locator(".request-panel-skeleton");
+    await expect(skeleton).toHaveAttribute("role", "status");
+    await expect(skeleton.locator(".row.row-2")).toHaveCount(4);
+    expect((await skeleton.locator(".row").first().boundingBox())!.height).toBe(56);
     await assertNoHorizontalOverflow(page, "#right-panel");
 
     await page.goto("/request-surfaces-e2e.html?scenario=polling&pollStatus=unavailable");
-    await page.getByRole("button", { name: "Needs Your Input: 1 Requests" }).click();
-    await expect(page.getByRole("heading", { name: "Requests Unavailable" })).toBeVisible();
-    await expect(page.locator(".request-panel-empty button")).toHaveCount(0);
+    await openRequests(page);
+    const notice = page.locator(".request-panel .notice.t-danger");
+    await expect(notice).toContainText("Couldn't Load Requests");
+    await expect(page.locator(".request-panel button")).toHaveText(["Retry"]);
+    await notice.getByRole("button", { name: "Retry" }).click();
+    await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_REQUEST_SURFACES_E2E__.retries())).toBe(1);
     await assertNoHorizontalOverflow(page, "#right-panel");
   });
 }
@@ -514,42 +530,125 @@ for (const viewport of [
   { name: "mobile", width: 390, height: 844 },
   { name: "desktop", width: 1280, height: 800 },
 ]) {
-  test(`high-count descendant requests use one inbox on ${viewport.name}`, async ({ page }) => {
+  test(`child requests are one status, and the Requests panel is a list that opens each on its card, on ${viewport.name} (#2206)`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await page.goto("/request-surfaces-e2e.html?scenario=descendants");
     await expect(page.locator(".descendant-request-region")).toHaveCount(0);
-    const trigger = page.getByRole("button", { name: "Needs Your Input: 8 Requests" });
-    await expect(trigger).toBeVisible();
-    await expect(page.getByRole("button", { name: "Orchestrator Action: 4 Requests" })).toBeVisible();
-    await trigger.click();
-    await expect(page.locator(".request-panel-row")).toHaveCount(12);
-    await expect(page.locator(".request-panel-count")).toContainText("Needs Your Input 8");
-    await expect(page.locator(".request-panel-count")).toContainText("Orchestrator Action 4");
-    await assertNoHorizontalOverflow(page, ".request-panel");
+    // One "8 Child Requests" condition, and no other request badge in the bar.
+    await expect(statusControl(page)).toHaveAccessibleName("Session Status: 8 Child Requests");
+    await expect(page.locator("header.session-bar .status")).toHaveText(["8 Child Requests"]);
+    await expect(page.locator("header.session-bar")).not.toContainText(/Orchestrator Action|Needs Your Input/u);
+    await openRequests(page);
 
-    const rows = page.locator(".request-panel-row");
-    await rows.nth(8).scrollIntoViewIfNeeded();
-    await rows.nth(8).click();
-    await expect(page.locator(".request-owner")).toHaveText("Assigned to Orchestrator");
-    await expect(page.locator(".request-readonly")).toContainText(
-      "must respond through its session-management tools",
-    );
-    await expect(page.locator(".request-readonly .request-card, .request-readonly button")).toHaveCount(0);
-    await page.getByRole("button", { name: "Open Child Session" }).click();
+    await expect(page.locator(".request-panel-group-head")).toHaveText(["Waiting for You8", "Orchestrator Is Handling4"]);
+    await expect(panelRows(page)).toHaveCount(12);
+    for (const height of await panelRows(page).evaluateAll((rows) => rows.map((row) => row.getBoundingClientRect().height))) {
+      // Two-line rows (§5.2): 56px under this mouse; a touch screen makes them 64px.
+      expect(height).toBe(56);
+    }
+    await expect(page.locator(".request-panel-list")).not.toContainText(/Pending|Human/u);
+    await assertNoHorizontalOverflow(page, ".request-panel-list");
+
+    // Arrow keys move through the rows; a row opens its request in the list's place.
+    await panelRows(page).first().focus();
+    await page.keyboard.press("ArrowDown");
+    await expect(panelRows(page).nth(1)).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page.locator(".request-panel-list")).toHaveCount(0);
+    await expect(page.locator(".request-panel-position")).toHaveText("Request 2 of 8");
+    const questionCard = page.locator(".request-panel-detail .question-card");
+    await expect(questionCard).toHaveAttribute("data-presentation", "panel");
+    await expect(questionCard.locator(".request-card-foot")).toHaveCSS("position", "sticky");
+    await page.getByRole("button", { name: "Next Request" }).click();
+    await expect(page.locator(".request-panel-position")).toHaveText("Request 3 of 8");
+    await page.getByRole("button", { name: "All Requests" }).click();
+    await expect(panelRows(page)).toHaveCount(12);
+    await expect(panelRows(page).nth(2)).toBeFocused();
+
+    // A request the Orchestrator handles: the same card, read-only.
+    await panelRows(page).nth(8).click();
+    await expect(page.locator(".request-panel-position")).toHaveText("Request 1 of 4");
+    const readOnly = page.locator(".request-panel-detail .request-card[data-read-only]");
+    await expect(readOnly).toHaveAttribute("data-presentation", "panel");
+    await expect(readOnly.locator(".notice")).toHaveText("The Orchestrator is handling this request.");
+    await expect(readOnly.getByRole("button")).toHaveCount(0);
+    await page.getByRole("link", { name: "Child Session 3" }).click();
     await expect.poll(() => page.evaluate(() =>
       window.__WOLLIPOG_REQUEST_SURFACES_E2E__.openedChild()?.sessionId)).toBe("child-3");
 
-    await rows.nth(11).scrollIntoViewIfNeeded();
-    await expect(rows.nth(11)).toBeVisible();
-    await page.getByRole("button", { name: "Close Panel" }).click();
-    await expect(trigger).toBeFocused();
-    await trigger.click();
-    await expect(rows.nth(8)).toHaveAttribute("aria-current", "true");
+    await page.getByRole("button", { name: "All Requests" }).click();
+    const close = page.getByRole("button", { name: "Close Panel" });
+    await expect(close).toHaveText("");
+    await expect(close.locator("svg")).toHaveCount(1);
+    await close.click();
+    await expect(statusControl(page)).toBeFocused();
+    await openRequests(page);
+    await expect(panelRows(page)).toHaveCount(12);
     await page.keyboard.press("Escape");
     await expect(page.getByRole("complementary", { name: "Requests" })).toHaveCount(0);
-    await expect(trigger).toBeFocused();
   });
 }
+
+test.describe("on a phone's touch screen", () => {
+  test.use({ hasTouch: true });
+  test("at 390px tapping a row opens its request as the panel's own full-screen view, with a back control (#2206)", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto("/request-surfaces-e2e.html?scenario=descendants");
+    await openRequests(page);
+    const panel = page.locator("#right-panel");
+    const box = (await panel.boundingBox())!;
+    expect(box.x).toBe(0);
+    expect(box.width).toBe(390);
+    await panelRows(page).nth(1).tap();
+    await expect(page.locator(".request-panel-list")).toHaveCount(0);
+    await expect(page.locator(".request-panel-detail .question-card")).toBeVisible();
+    // One back control out of a request: All Requests, not also the panel list's.
+    await expect(page.getByRole("button", { name: "Back to Panel List" })).toHaveCount(0);
+    await page.getByRole("button", { name: "All Requests" }).tap();
+    await expect(panelRows(page)).toHaveCount(12);
+    await expect(page.locator(".request-panel-row.is-selected, .request-panel-row[aria-current]")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Back to Panel List" })).toBeVisible();
+  });
+});
+
+test("at 940px the Requests panel opens over the transcript from the right, with a scrim that closes it (#2206)", async ({ page }) => {
+  await page.setViewportSize({ width: 940, height: 800 });
+  await page.goto("/request-surfaces-e2e.html?scenario=descendants");
+  const chatBefore = (await page.locator(".detail-chat").boundingBox())!;
+  await openRequests(page);
+  const panel = (await page.locator("#right-panel").boundingBox())!;
+  const chat = (await page.locator(".detail-chat").boundingBox())!;
+  expect(chat.width).toBe(chatBefore.width);
+  expect(panel.x + panel.width).toBeCloseTo(chat.x + chat.width, 0);
+  expect(panel.x).toBeLessThan(chat.x + chat.width - 200);
+  const scrim = page.locator(".rp-scrim");
+  await expect(scrim).toBeVisible();
+  await page.mouse.click(chat.x + 40, chat.y + 200);
+  await expect(page.getByRole("complementary", { name: "Requests" })).toHaveCount(0);
+  // Wider, the panel docks beside the transcript and there is no scrim.
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openRequests(page);
+  await expect(scrim).toBeHidden();
+  const docked = (await page.locator("#right-panel").boundingBox())!;
+  const narrowed = (await page.locator(".detail-chat").boundingBox())!;
+  expect(narrowed.x + narrowed.width).toBeLessThanOrEqual(docked.x);
+});
+
+test("with nothing pending the launcher's Requests row opens Nothing Waiting, which links to Decision History (#2206)", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/request-surfaces-e2e.html?scenario=empty&panel=launcher");
+  // No child-request condition when nothing waits for the person.
+  await expect(page.locator("header.session-bar .status")).not.toContainText(/Child Request/u);
+  const row = page.locator(".rp-launcher .rp-row", { hasText: /^Requests$/u });
+  await expect(row).toBeEnabled();
+  await expect(row).not.toHaveAttribute("title", /.+/u);
+  await row.click();
+  const state = page.locator(".request-panel .state");
+  await expect(state.locator(".state-title")).toHaveText("Nothing Waiting");
+  await expect(state).toContainText("Requests from this session and its child sessions appear here.");
+  await state.getByRole("button", { name: "Decision History" }).click();
+  await expect(page.locator(".rp-title")).toHaveText("Decision History");
+});
 
 for (const viewport of [
   { name: "desktop", width: 1280, height: 800 },
@@ -581,8 +680,8 @@ for (const viewport of [
     await expect(held.getByRole("button")).toHaveCount(0);
     await expect(held.getByRole("textbox")).toHaveCount(0);
     await assertNoHorizontalOverflow(page, ".campaign-notices");
-    await page.getByRole("button", { name: "Needs Your Input: 8 Requests" }).click();
-    await expect(page.locator(".request-panel-row")).toHaveCount(12);
+    await openRequests(page);
+    await expect(panelRows(page)).toHaveCount(12);
     await expect(page.locator(".request-panel-row", { hasText: /Fix #165[01]/u })).toHaveCount(0);
     await page.getByRole("button", { name: "Close Panel" }).click();
 

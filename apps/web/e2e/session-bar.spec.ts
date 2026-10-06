@@ -42,15 +42,15 @@ async function setTitle(page: Page, title: string) {
   }, title);
 }
 
-const STATUS_NAME = "Session Status: Needs Your Input, 1 Request";
+const STATUS_NAME = "Session Status: 1 Child Request";
 
-/** The bar shows one status (#2182): the campaign request that needs the person, as one badge. */
+/** The bar shows one status (#2182): the child request that needs the person, as one badge (#2206). */
 async function expectOneStatus(page: Page) {
   const bar = page.locator("header.session-bar");
   const control = bar.locator(".session-status-button");
   await expect(control).toHaveAccessibleName(STATUS_NAME);
   await expect(bar.locator(".status")).toHaveCount(1);
-  await expect(control.locator(".status")).toContainText("Needs Your Input");
+  await expect(control.locator(".status")).toContainText("1 Child Request");
   // The facts the bar used to carry are in the Pinned Summary, and the rest is in the popover.
   await expect(bar.getByText(/Ready for Review|Uncommitted Changes|Changes Present|Orchestrator Action/)).toHaveCount(0);
 }
@@ -341,7 +341,7 @@ for (const width of [761, 834, 940, 1099]) {
     expect(geometry.overflow).toBe(false);
     // The badge gives up its label before the title drops under its readable width (§15.2).
     expect(geometry.title.width).toBeGreaterThanOrEqual(200);
-    if (geometry.dot) expect(geometry.tooltip).toBe("Needs Your Input");
+    if (geometry.dot) expect(geometry.tooltip).toBe("1 Child Request");
     expect(geometry.title.right).toBeLessThanOrEqual(geometry.statuses.left + 0.5);
     expect(geometry.statuses.right).toBeLessThanOrEqual(geometry.actions.left + 0.5);
     expect(geometry.actions.right).toBeLessThanOrEqual(geometry.bar.right);

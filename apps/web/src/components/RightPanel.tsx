@@ -1,5 +1,5 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
-import { CampaignIcon, ChevronLeftIcon, CommandLineIcon, DiffIcon, FolderIcon, GlobeIcon, QuestionIcon, InboxIcon, JobsIcon, LockIcon, TeamIcon } from "./Icons.js";
+import { CampaignIcon, ChevronLeftIcon, CloseIcon, CommandLineIcon, DiffIcon, FolderIcon, GlobeIcon, QuestionIcon, InboxIcon, JobsIcon, LockIcon, TeamIcon } from "./Icons.js";
 import {
   pendingRequests,
   runnerCapabilityRequirement,
@@ -225,9 +225,9 @@ export function RightPanel({
   descendantRequestStatus = "idle",
   selectedRequestKey = null,
   onSelectedRequestKeyChange = () => undefined,
-  onSessionUpdate,
   onDescendantsUpdate = () => undefined,
   onOpenChildRequest = () => undefined,
+  onRetryDescendantRequests,
   campaignAvailability = HIDDEN_CAMPAIGN,
   onOpenSession = () => undefined,
 }: {
@@ -271,9 +271,10 @@ export function RightPanel({
   descendantRequestStatus?: DescendantRequestStatus;
   selectedRequestKey?: string | null;
   onSelectedRequestKeyChange?: (key: string | null) => void;
-  onSessionUpdate?: (session: SessionView) => void;
   onDescendantsUpdate?: () => void;
   onOpenChildRequest?: (request: DescendantRequestView) => void;
+  /** Checks the child requests again after they could not be loaded. */
+  onRetryDescendantRequests?: () => void;
   /** Whether this session belongs to an issue campaign whose status the panel can show (#2417). */
   campaignAvailability?: CampaignStatusAvailability;
   /** Opens another session from a panel link, keeping the panel and its mode. */
@@ -417,7 +418,6 @@ export function RightPanel({
   };
 
   // The session's own requests are on its request dock (#2179); this panel lists its descendants'.
-  const requestsAvailable = descendantRequests.length > 0;
   const ownRequests = dockRequests(pendingRequests(session.pendingApproval));
   const ownRequestKey = (request: (typeof ownRequests)[number]) =>
     sessionRequestPanelKey(session.id, request.occurrenceId ?? request.requestId);
@@ -444,19 +444,19 @@ export function RightPanel({
           <div className="hint warn">{filesHint}</div>
         );
       case "requests":
-        return onSessionUpdate ? (
+        return (
           <SessionRequestPanel
             session={session}
-            runnerOnline={runnerOnline}
             descendants={descendantRequests}
             descendantStatus={descendantRequestStatus}
             selectedKey={selectedRequestKey}
             onSelectedKeyChange={onSelectedRequestKeyChange}
-            onSessionUpdate={onSessionUpdate}
             onDescendantsUpdate={onDescendantsUpdate}
             onOpenChild={onOpenChildRequest}
+            onRetry={onRetryDescendantRequests}
+            onOpenDecisionHistory={() => state.setMode("decisions")}
           />
-        ) : null;
+        );
       case "campaign":
         return campaignAvailability.kind === "hidden" ? null : (
           <CampaignStatusPanel
@@ -597,9 +597,19 @@ export function RightPanel({
         onKeyDown={onResizerKeyDown}
         onDoubleClick={() => state.setWidth(() => RIGHT_PANEL_DEFAULT_WIDTH)}
       />
-      <aside id="right-panel" className="right-panel" style={{ width: effectiveWidth }} aria-label={MODE_TITLES[state.mode]}>
+      {/* In the compact tier the Requests panel opens over the transcript (#2206, §15.2); the scrim
+          is drawn only there (styles.css), and a press on it closes the panel. */}
+      {state.mode === "requests" && <div className="rp-scrim" aria-hidden="true" onClick={state.close} />}
+      <aside
+        id="right-panel"
+        className="right-panel"
+        data-mode={state.mode}
+        style={{ width: effectiveWidth }}
+        aria-label={MODE_TITLES[state.mode]}
+      >
         <div className="rp-head">
-          {state.mode !== "launcher" && (
+          {/* An open request has its own "‹ All Requests" (#2206), so one back control leads out of it. */}
+          {state.mode !== "launcher" && !(state.mode === "requests" && selectedRequestKey !== null) && (
             <button
               type="button"
               className="icon-btn rp-back"
@@ -619,12 +629,16 @@ export function RightPanel({
             )}
           </span>
           <button type="button" className="icon-btn rp-close" onClick={state.close} title="Close Panel" aria-label="Close Panel">
-            {state.mode === "requests" ? "Close" : "×"}
+            <CloseIcon />
           </button>
         </div>
         {state.mode === "launcher" ? (
           <Launcher
-            onPick={(m) => state.setMode(m)}
+            onPick={(m) => {
+              // The Requests row opens the list, never a request left open from an earlier visit.
+              if (m === "requests") onSelectedRequestKeyChange(null);
+              state.setMode(m);
+            }}
             onOpenTerminal={onOpenTerminal}
             filesSupported={filesSupported}
             filesHint={filesHint}
@@ -633,7 +647,6 @@ export function RightPanel({
             backgroundAvailable={(session.backgroundJobs?.length ?? 0) > 0 ||
               session.backgroundJobsAvailable === true ||
               session.backgroundWorkTracking != null || session.backgroundWorkState != null}
-            requestsAvailable={requestsAvailable}
             campaignAvailability={campaignAvailability}
           />
         ) : (
@@ -701,7 +714,6 @@ function Launcher({
   terminalSupported,
   terminalHint,
   backgroundAvailable,
-  requestsAvailable,
   campaignAvailability,
 }: {
   onPick: (mode: RightPanelMode) => void;
@@ -711,7 +723,6 @@ function Launcher({
   terminalSupported: boolean;
   terminalHint: string;
   backgroundAvailable: boolean;
-  requestsAvailable: boolean;
   campaignAvailability: CampaignStatusAvailability;
 }) {
   return (
@@ -722,10 +733,9 @@ function Launcher({
           {!terminalSupported && <div>{terminalHint}</div>}
         </div>
       )}
+      {/* Always available: with nothing pending it opens "Nothing Waiting" (#2206). */}
       <LauncherRow
         label="Requests"
-        disabled={!requestsAvailable}
-        hint="No requests are pending for this session or its descendants."
         onClick={() => onPick("requests")}
         icon={<InboxIcon size={14} />}
       />

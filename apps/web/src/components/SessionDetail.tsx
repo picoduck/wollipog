@@ -1118,13 +1118,17 @@ function SessionDetailLoaded({
   const detailChatRef = useRef<HTMLDivElement>(null);
   const softwareKeyboardOpen = useSoftwareKeyboardOpen();
   const [selectedRequestKey, setSelectedRequestKey] = useState<string | null>(null);
-  const requestPanelModeActive = mode === "expanded" && rightPanel.mode === "requests";
-  useLayoutEffect(() => {
-    if (!requestPanelModeActive || descendantRequests.length > 0 ||
-        (descendantRequestStatus !== "idle" && descendantRequestStatus !== "ready")) return;
-    rightPanel.setMode("launcher");
-    if (rightPanel.open) rightPanel.close();
-  }, [descendantRequests.length, descendantRequestStatus, requestPanelModeActive, rightPanel]);
+  // The bar's one child-request status counts what waits for the person (#2206); the Orchestrator's
+  // share is counted inside the Requests panel.
+  const humanDescendantRequests = useMemo(
+    () => descendantRequests.filter((request) => request.responseOwner === "human").length,
+    [descendantRequests],
+  );
+  // Opened from the bar, the Requests panel starts at its list; with nothing pending it says so.
+  const openChildRequests = useCallback(() => {
+    setSelectedRequestKey(null);
+    rightPanel.show("requests");
+  }, [rightPanel]);
   const anchorRecoveryPending = eventHistory?.refreshing === true ||
     (conn === "online" && eventHistory?.everComplete !== true && eventHistory?.error == null && !eventWindow?.laterGap);
   const recoveryRevision = useStoreSelector((s) =>
@@ -6336,11 +6340,7 @@ function SessionDetailLoaded({
             workers: true,
             onOpen: () => rightPanel.show("subagents"),
           } : undefined}
-          descendantRequests={descendantRequests.length > 0 ? {
-            count: descendantRequests.length,
-            // Reopening the inbox must not replace the row the user last selected.
-            onOpen: () => rightPanel.show("requests"),
-          } : undefined}
+          childRequests={{ count: humanDescendantRequests, onOpen: openChildRequests }}
           onOpenBackgroundWork={() => rightPanel.show("background")}
           onOpenAttention={() => {
             // The top request is answered on the dock when it is the session's own.
@@ -6355,7 +6355,7 @@ function SessionDetailLoaded({
               return;
             }
             if (requests.length === 0 && (session.orchestratorCampaign?.pendingRequests?.human ?? 0) > 0) {
-              rightPanel.show("requests");
+              openChildRequests();
               return;
             }
             // Navigation makes the target reload-safe; the direct state transition also makes a
@@ -6366,7 +6366,6 @@ function SessionDetailLoaded({
               ...(requests.length === 1 ? { requestId: requests[0]!.requestId } : {}),
             } });
           }}
-          onOpenCampaignRequests={() => rightPanel.show("requests")}
           // The unified bar replaces the app-level top bar on desktop, so it owns the page-title
           // focus-rescue anchor there; the mobile layout keeps the app bar and its own anchor.
           titleId={!isMobile ? "page-title" : undefined}
@@ -7249,8 +7248,8 @@ function SessionDetailLoaded({
           onOpenSession={(id) => navigate({ name: "session", id })}
           selectedRequestKey={selectedRequestKey}
           onSelectedRequestKeyChange={setSelectedRequestKey}
-          onSessionUpdate={loadSession}
           onDescendantsUpdate={refreshDescendantRequestsAfterResolution}
+          onRetryDescendantRequests={refreshDescendantRequestsAfterResolution}
           onOpenChildRequest={(request) => {
             rightPanel.close();
             navigate({

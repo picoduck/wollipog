@@ -16,7 +16,8 @@ async function openSeparator(page: Page, theme: "dark" | "light") {
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto(URL);
   await page.evaluate((value) => document.documentElement.dataset.theme = value, theme);
-  await page.getByRole("button", { name: "Needs Your Input: 8 Requests" }).click();
+  await page.locator("header.session-bar .session-status-button").click();
+  await page.getByRole("dialog", { name: "Session Status" }).getByRole("button", { name: "Open Requests" }).click();
   const separator = page.getByRole("separator", { name: "Resize Panel" });
   await expect(separator).toBeVisible();
   await page.mouse.move(0, 0);

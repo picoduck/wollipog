@@ -21,6 +21,7 @@ import { Notice } from "../Notice.js";
 import { BusyButton } from "../ui/BusyButton.js";
 import { ChoiceRows } from "../ui/ChoiceControls.js";
 import { CopyButton } from "../common.js";
+import { StructuredQuestionText } from "../StructuredQuestionText.js";
 import { ProviderLoginCard } from "../ProviderLoginCard.js";
 import { useIsMobile } from "../useIsMobile.js";
 import { useRemovedFocus } from "../useRemovedFocus.js";
@@ -52,7 +53,8 @@ export interface RequestCardProps {
   session: SessionView;
   request: PendingApproval;
   runnerOnline: boolean;
-  /** The dock above the composer, or a side panel's detail (child and worker requests). */
+  /** The dock above the composer, or a side panel's detail (child and worker requests): flush, with
+   * a larger title and a footer that sticks to the panel's edge (#2206). */
   presentation: "dock" | "panel";
   /** Plain text: who asks. The agent, or "Plan Reviewer, a subagent". Omitted where the surrounding
    * surface already names it. */
@@ -70,6 +72,9 @@ export interface RequestCardProps {
   /** The dock shows its reading-back strip in the card's place (#2195). The card stays mounted, so a
    * sign-in code being typed or an evidence review keeps its state, but its menu closes. */
   concealed?: boolean;
+  /** Someone else answers this request (an Orchestrator-owned child request, #2206): the card says
+   * so in a neutral notice under its title and shows the request's facts, with no actions. */
+  readOnlyNotice?: string;
 }
 
 /**
@@ -94,6 +99,7 @@ export function RequestCard({
   intentRef,
   headingRef,
   concealed = false,
+  readOnlyNotice,
 }: RequestCardProps) {
   const api = useApi();
   const runner = useOptionalStoreSelector((state) => state.runners.get(session.runnerId));
@@ -163,7 +169,7 @@ export function RequestCard({
   const decideRef = useRef(decide);
   decideRef.current = decide;
   useEffect(() => {
-    if (!intentRef) return;
+    if (!intentRef || readOnlyNotice) return;
     const handler: RequestIntentHandler = (intent) => {
       const option = requestOptionForIntent(request.options, intent);
       if (option) void decideRef.current(option);
@@ -175,7 +181,7 @@ export function RequestCard({
     return () => {
       if (intentRef.current === handler) intentRef.current = null;
     };
-  }, [intentRef, request.options]);
+  }, [intentRef, readOnlyNotice, request.options]);
 
   const signIn = request.kind === "authentication";
   const bodyRef = useMoreBelow(signIn);
@@ -261,7 +267,24 @@ export function RequestCard({
     request.governancePolicyId ? policyName ?? request.governancePolicyId : null,
     remaining,
   );
-  const body: ReactNode[] = [
+  const readOnly = readOnlyNotice !== undefined;
+  const body: ReactNode[] = readOnly ? [
+    // Facts only: what is being decided, never a control that would act on it.
+    workflowDecision ? <WorkflowDecisionSummary key="decision" snapshot={workflowDecision.resourceSnapshot} /> : null,
+    request.kind === "question" && request.questions?.length ? (
+      <ol key="questions" className="request-card-questions">
+        {request.questions.map((question) => (
+          <li key={question.id}><StructuredQuestionText>{question.question}</StructuredQuestionText></li>
+        ))}
+      </ol>
+    ) : null,
+    input ? <div key="input" className="code-well"><pre>{input}</pre></div> : null,
+    facts.length > 0 ? (
+      <dl key="facts" className="facts">
+        {facts.map((fact) => <div key={fact.label}><dt>{fact.label}</dt><dd>{fact.value}</dd></div>)}
+      </dl>
+    ) : null,
+  ].filter(Boolean) : [
     signIn && providerLogin && !recovery
       ? <ProviderLoginCard key="login" runnerId={session.runnerId} login={providerLogin} embedded /> : null,
     recovery ? (
@@ -340,6 +363,7 @@ export function RequestCard({
       className="request-card"
       data-presentation={presentation}
       data-request-kind={meta.kind}
+      data-read-only={readOnly ? "" : undefined}
       aria-labelledby={titleId}
       aria-busy={busy !== null || undefined}
     >
@@ -350,16 +374,17 @@ export function RequestCard({
         trailing={headTrailing}
       />
       <h3 className="request-card-title" id={titleId} ref={headingRef} tabIndex={-1} data-session-request-focus="">
-        {evidence ? evidence.title : request.title}
+        {evidence && !readOnly ? evidence.title : request.title}
       </h3>
+      {readOnly && <Notice tone="neutral" compact>{readOnlyNotice}</Notice>}
       {policyLine && <p className="request-card-policy">{policyLine}</p>}
       {body.length > 0 && <div className="request-card-body" ref={bodyRef}>{body}</div>}
-      {error && (
+      {error && !readOnly && (
         <Notice tone="danger" compact role="alert">
           {REQUEST_CARD_COPY.notSent} {error}
         </Notice>
       )}
-      {(reason !== null || signInBlocked || evidence?.footNote) && (
+      {!readOnly && (reason !== null || signInBlocked || evidence?.footNote) && (
         <div className="request-card-reasons">
           {reason !== null && <p id={reasonId}>{reason}</p>}
           {signInBlocked && <p id={signInReasonId}>{REQUEST_CARD_COPY.signInOwner}</p>}
@@ -367,7 +392,7 @@ export function RequestCard({
           {evidence?.footNote && <p id={evidenceReasonId}>{evidence.footNote}</p>}
         </div>
       )}
-      <div className="request-card-foot">
+      {!readOnly && <div className="request-card-foot">
         {tertiary && !phoneOverflow && optionButton(tertiary, "tertiary")}
         {footerSecondary.map((option) => optionButton(option, "secondary"))}
         {canChooseAccount && !phoneOverflow && (
@@ -481,7 +506,7 @@ export function RequestCard({
             {SIGN_IN_COPY.startSignIn}
           </BusyButton>
         )}
-      </div>
+      </div>}
     </section>
   );
 }

@@ -454,8 +454,9 @@ test("session indicators preserve simultaneous lifecycle and attention dimension
     assert.ok(container.querySelector('[role="group"][aria-label="Session Status"]'));
     assert.equal(container.querySelector('[aria-label="Activity: Running"]')?.textContent?.trim(), "Running");
     assert.equal(container.querySelector('[aria-label="Attention: Answer Required"]')?.textContent?.trim(), "Answer Required");
-    assert.match(container.querySelector('[aria-label="Needs Your Input: 2 Requests"]')?.textContent ?? "", /Needs Your Input\s*2/u);
-    assert.match(container.querySelector('[aria-label="Orchestrator Action: 3 Requests"]')?.textContent ?? "", /Orchestrator Action\s*3/u);
+    // Child requests are one status (#2206): the Orchestrator's share is counted only in the panel.
+    assert.equal(container.querySelector('[aria-label="2 Child Requests"]')?.textContent?.trim(), "2 Child Requests");
+    assert.doesNotMatch(container.textContent ?? "", /Orchestrator Action|Needs Your Input/u);
     assert.equal(container.querySelector('[aria-label="Health: Disconnected"]')?.textContent?.trim(), "Disconnected");
     assert.equal(
       container.querySelector('[aria-label="Queue Reason: Execution target cloud-a is using 2 of 2 slots"]')
@@ -473,7 +474,7 @@ test("session indicators preserve simultaneous lifecycle and attention dimension
   }
 });
 
-test("direct attention and campaign request badges keep distinct destinations", async () => {
+test("direct attention and the one child-request badge keep distinct destinations (#2206)", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
   const container = happyContainer as unknown as HTMLDivElement;
@@ -496,19 +497,19 @@ test("direct attention and campaign request badges keep distinct destinations", 
           } as SessionView["orchestratorCampaign"],
         }}
         onOpenAttention={() => { directOpens += 1; }}
-        onOpenCampaignRequests={() => { campaignOpens += 1; }}
+        onOpenChildRequests={() => { campaignOpens += 1; }}
       />);
     });
     const direct = container.querySelector('[aria-label="Attention: Answer Required"]') as HTMLButtonElement;
-    const humanCampaign = container.querySelector('[aria-label="Needs Your Input: 2 Requests"]') as HTMLButtonElement;
-    const orchestratorCampaign = container.querySelector('[aria-label="Orchestrator Action: 3 Requests"]') as HTMLButtonElement;
+    const childRequests = container.querySelector('[aria-label="2 Child Requests"]') as HTMLButtonElement;
+    assert.equal(container.querySelectorAll(".status").length, 2, "attention and child requests, nothing else");
+    assert.equal(childRequests.className.includes("t-warning"), true);
     await act(async () => {
       direct.click();
-      humanCampaign.click();
-      orchestratorCampaign.click();
+      childRequests.click();
     });
     assert.equal(directOpens, 1);
-    assert.equal(campaignOpens, 2);
+    assert.equal(campaignOpens, 1);
   } finally {
     await act(async () => root.unmount());
     happyContainer.remove();

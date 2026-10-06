@@ -11,8 +11,8 @@ import { useIsCompact } from "./useIsMobile.js";
 export interface SessionStatusActions {
   /** Opens the session's own requests: the request panel, or Agents for a worker's request. */
   onOpenAttention?: () => void;
-  onOpenCampaignRequests?: () => void;
-  onOpenDescendantRequests?: () => void;
+  /** Opens the Requests panel's list of child requests (#2206). */
+  onOpenChildRequests?: () => void;
   onOpenBackgroundWork?: () => void;
   onOpenWorkers?: () => void;
   /** The step a background result that waits on the person takes from its row (#2275): Stop Job…
@@ -51,11 +51,8 @@ function conditionAction(condition: SessionCondition, actions: SessionStatusActi
         : condition.attentionKind === "authentication_required"
           ? action("Sign In…", actions.onOpenAttention)
           : action("Review Request", actions.onOpenAttention);
-    case "campaign_requests":
-    case "orchestrator_requests":
-      return action("Open Requests", actions.onOpenCampaignRequests);
-    case "descendant_requests":
-      return action("Open Requests", actions.onOpenDescendantRequests);
+    case "child_requests":
+      return action("Open Requests", actions.onOpenChildRequests);
     case "background_delivery":
       if (condition.needsYou && actions.deliveryStep) {
         const step = actions.deliveryStep;

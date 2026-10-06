@@ -1,1 +1,0 @@
-|.request-panel-list|padding|10px

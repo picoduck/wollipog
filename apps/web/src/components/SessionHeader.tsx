@@ -91,10 +91,9 @@ export function SessionHeader({
   renderMoveProjectDialog,
   topbarControls,
   activeSubagents,
-  descendantRequests,
+  childRequests,
   onOpenBackgroundWork,
   onOpenAttention,
-  onOpenCampaignRequests,
   titleId,
   developmentBuild = DEVELOPMENT_BUILD,
   restartBlockedReason,
@@ -154,12 +153,12 @@ export function SessionHeader({
   topbarControls?: ReactNode;
   /** Live structured subagents remain visible even while the parent awaits its next prompt. */
   activeSubagents?: { count: number; onOpen: () => void; workers?: boolean };
-  /** Consolidated unresolved descendant requests owned by the dedicated request panel. */
-  descendantRequests?: { count: number; onOpen: () => void };
+  /** Child requests the person answers in the Requests panel (#2206): `count` is the descendant
+   * poll's human-owned requests, which a campaign's own counts replace; `onOpen` opens its list. */
+  childRequests?: { count: number; onOpen: () => void };
   /** Opens the inspectable managed-job inventory. */
   onOpenBackgroundWork?: () => void;
   onOpenAttention?: () => void;
-  onOpenCampaignRequests?: () => void;
   /** Set when this bar owns the page heading (`page-title` focus-rescue anchor). */
   titleId?: string;
   /** Contributor hints (the dashboard-origin build variable) appear only in development builds. */
@@ -253,7 +252,7 @@ export function SessionHeader({
   const signOutOffered = session.driver === "acp" && !terminal && runnerOnline && logoutSupported && providerLogoutSupported;
   const statusSummary = sessionStatusSummary(session, {
     runnerOnline,
-    descendantRequests: descendantRequests?.count,
+    descendantRequests: childRequests?.count,
     activeWorkers: activeSubagents?.count,
   });
   const deliveryStep = useBackgroundDeliveryStep({
@@ -712,8 +711,7 @@ export function SessionHeader({
         small={isMobile}
         actions={{
           onOpenAttention,
-          onOpenCampaignRequests: onOpenCampaignRequests ?? onOpenAttention,
-          onOpenDescendantRequests: descendantRequests?.onOpen,
+          onOpenChildRequests: childRequests?.onOpen ?? onOpenAttention,
           onOpenBackgroundWork,
           onOpenWorkers: activeSubagents?.onOpen,
           deliveryStep,

@@ -1,1 +1,0 @@
-|.request-panel-count|text-transform|uppercase

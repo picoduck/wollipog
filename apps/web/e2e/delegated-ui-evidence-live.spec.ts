@@ -8,6 +8,7 @@ import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { ControlPlaneDb } from "../../control-plane/src/db.js";
+import { viewPath } from "../src/navigation.js";
 import {
   defaultLocalDeviceTokenPath, loadOrCreateLocalDeviceToken,
 } from "../../control-plane/src/local-device-credential.js";
@@ -106,10 +107,18 @@ test("a browser sees delegated image review complete through live scoped routes 
       db.updateSessionStatus(seeded.childId, "running", Date.now());
     } finally { db.close(); }
 
-    // The Board's cards list every condition; the Sessions preview shows only its one ranked
-    // status (#2210), where the Orchestrator's passive count is not one.
-    await page.goto(`${base}/board#pair=${ownerToken}`);
-    await expect(page.getByText(/Orchestrator Action/u)).toBeVisible();
+    await page.goto(`${base}/#pair=${ownerToken}`);
+    await expect(page.getByText("Evidence Child", { exact: true }).first()).toBeVisible({ timeout: 30_000 });
+    // The parent's Requests panel lists the child's decision under what the Orchestrator is
+    // handling (#2206); the bar counts only what waits for the person.
+    await page.goto(`${base}${viewPath({ name: "session", id: seeded.parentId })}`);
+    const toggle = page.getByRole("button", { name: "Side Panel" }).first();
+    await expect(toggle).toBeVisible({ timeout: 30_000 });
+    if (await toggle.getAttribute("aria-pressed") !== "true") await toggle.click();
+    await page.locator(".rp-launcher .rp-row", { hasText: /^Requests$/u }).click();
+    const handling = page.locator(".request-panel-group", { hasText: "Orchestrator Is Handling" });
+    await expect(handling.locator(".request-panel-row")).toHaveCount(1, { timeout: 30_000 });
+    await expect(handling.locator(".request-panel-row")).toContainText("Evidence Child");
     const route = `${base}/api/sessions/${seeded.parentId}/descendant-requests`;
     const agentHeaders = { authorization: `Bearer ${seeded.parentToken}`,
       "x-wollipog-agent-session": seeded.parentId, "content-type": "application/json" };
@@ -141,8 +150,8 @@ test("a browser sees delegated image review complete through live scoped routes 
     expect((await acknowledge("0".repeat(64))).status).toBe(409);
     expect((await acknowledge(seeded.evidence.sha256)).status).toBe(200);
     expect((await resolveDecision()).status).toBe(200);
-    await expect(page.getByText(/Orchestrator Action/u)).toHaveCount(0);
-    await expect(page.getByText("Evidence Child", { exact: true })).toBeVisible();
+    // The panel's poll drops the resolved decision and says so.
+    await expect(page.locator(".request-panel .state-title")).toHaveText("Nothing Waiting", { timeout: 30_000 });
     const staleReview = await fetch(`${route}/review-ui-evidence`, {
       method: "POST", headers: agentHeaders,
       body: JSON.stringify({ sessionId: seeded.childId, occurrenceId: seeded.occurrenceId, evidenceId: "capture" }),

@@ -1,1 +1,0 @@
-|.request-panel-detail-head|gap|10px

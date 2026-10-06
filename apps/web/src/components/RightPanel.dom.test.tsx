@@ -330,6 +330,48 @@ test("the Decision History launcher row is enabled with no decisions and opens t
   }
 });
 
+test("the Requests launcher row is enabled with nothing pending and opens Nothing Waiting (#2206)", async () => {
+  let state!: RightPanelState;
+  const panel = await mountPanel(<PanelHarness onState={(next) => { state = next; }} />);
+  try {
+    await act(async () => state.show("launcher"));
+    const row = [...panel.container.querySelectorAll<HTMLButtonElement>(".rp-launcher .rp-row")]
+      .find((candidate) => candidate.textContent === "Requests");
+    assert.ok(row, "the launcher lists Requests");
+    assert.equal(row.disabled, false);
+    assert.equal(row.getAttribute("aria-disabled"), null);
+    assert.equal(row.getAttribute("title"), null, "no tooltip stands in for a reason");
+    await act(async () => row.click());
+    assert.equal(state.mode, "requests");
+    const body = panel.container.querySelector(".rp-body")!;
+    assert.equal(body.querySelector(".state-title")?.textContent, "Nothing Waiting");
+    const history = [...body.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Decision History");
+    assert.ok(history, "the empty state links to Decision History (#2213)");
+    await act(async () => history.click());
+    assert.equal(state.mode, "decisions");
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("the close button is an icon named Close Panel in every mode, Requests included (#2206)", async () => {
+  let state!: RightPanelState;
+  const panel = await mountPanel(<PanelHarness onState={(next) => { state = next; }} />);
+  try {
+    for (const mode of ["launcher", "requests", "decisions", "subagents"] as const) {
+      await act(async () => state.show(mode));
+      const close = panel.container.querySelector<HTMLButtonElement>(".rp-close")!;
+      assert.equal(close.getAttribute("aria-label"), "Close Panel", mode);
+      assert.match(close.className, /\bicon-btn\b/u, mode);
+      assert.equal(close.textContent, "", `${mode}: no "Close" or × text`);
+      assert.ok(close.querySelector("svg"), `${mode}: an icon`);
+    }
+  } finally {
+    await panel.dispose();
+  }
+});
+
 test("a persisted terminal mode restores the launcher instead of an empty panel", async () => {
   // Older builds reserved a "terminal" panel mode that nothing could open; the value can still
   // sit in localStorage, and restoring it must land on the launcher (#1201).

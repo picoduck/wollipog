@@ -62,31 +62,40 @@ test("rule 1: authentication needs the person like any other request", () => {
   assert.equal(summary.primary.needsYou, true);
 });
 
-test("rule 1: human campaign requests follow the session's own requests, then descendant requests", () => {
+test("rule 1: child requests follow the session's own requests as one condition, N Child Requests (#2206)", () => {
   const campaign = { pendingRequests: { human: 2, orchestrator: 0 } } as SessionStatusSource["orchestratorCampaign"];
   const withRequest = sessionStatusSummary(session({
     status: "input_required",
     pendingApproval: approval,
     orchestratorCampaign: campaign,
   }));
-  assert.deepEqual(withRequest.conditions.map((condition) => condition.kind), ["attention", "campaign_requests"]);
-  assert.equal(withRequest.conditions[1]!.count, 2);
+  assert.deepEqual(withRequest.conditions.map((condition) => condition.kind), ["attention", "child_requests"]);
+  assert.equal(withRequest.conditions[1]!.meta.label, "2 Child Requests");
+  assert.equal(withRequest.conditions[1]!.meta.tone, "warning");
   assert.equal(withRequest.more, 1);
 
-  // With no request of its own, the campaign's requests are the badge, named for what they need.
+  // With no request of its own, the child requests are the badge.
   const campaignOnly = sessionStatusSummary(session({ orchestratorCampaign: campaign }));
-  assert.equal(campaignOnly.primary.kind, "campaign_requests");
-  assert.equal(campaignOnly.primary.meta.label, "Needs Your Input");
+  assert.equal(campaignOnly.primary.kind, "child_requests");
+  assert.equal(campaignOnly.primary.meta.label, "2 Child Requests");
   assert.equal(campaignOnly.more, 0);
 
+  // Without a campaign, the descendant poll's human-owned requests are the count.
   const descendants = sessionStatusSummary(session({ status: "input_required", pendingApproval: approval }), {
-    descendantRequests: 3,
+    descendantRequests: 1,
   });
-  assert.deepEqual(descendants.conditions.map((condition) => condition.kind), ["attention", "descendant_requests"]);
+  assert.deepEqual(descendants.conditions.map((condition) => condition.kind), ["attention", "child_requests"]);
+  assert.equal(descendants.conditions[1]!.meta.label, "1 Child Request");
   assert.equal(descendants.more, 1);
   // A campaign's request counts already include its descendants', so they are not counted twice.
-  assert.equal(sessionStatusSummary(session({ orchestratorCampaign: campaign }), { descendantRequests: 3 })
-    .conditions.some((condition) => condition.kind === "descendant_requests"), false);
+  assert.deepEqual(sessionStatusSummary(session({ orchestratorCampaign: campaign }), { descendantRequests: 3 })
+    .conditions.filter((condition) => condition.kind === "child_requests").map((condition) => condition.meta.label),
+  ["2 Child Requests"]);
+  // No condition at all when nothing waits for the person, however many the Orchestrator handles.
+  const orchestratorOnly = sessionStatusSummary(session({
+    orchestratorCampaign: { pendingRequests: { human: 0, orchestrator: 4 } } as SessionStatusSource["orchestratorCampaign"],
+  }), { descendantRequests: 0 });
+  assert.deepEqual(orchestratorOnly.conditions.map((condition) => condition.kind), ["lifecycle"]);
 });
 
 test("rule 2: an idle session with lost background work and no attention shows Background Work Lost", () => {
@@ -167,7 +176,7 @@ test("passive conditions are popover rows after the badge, never counted in +N",
   assert.equal(summary.primary.meta.label, "Queued");
   assert.equal(summary.more, 0);
   assert.deepEqual(summary.conditions.map((condition) => condition.kind),
-    ["lifecycle", "background_delivery", "workers", "orchestrator_requests", "queue_reason"]);
+    ["lifecycle", "background_delivery", "workers", "queue_reason"]);
   assert.equal(summary.conditions.find((condition) => condition.kind === "workers")!.meta.label, "2 Workers");
   // A queue reason is a fact, listed as a row and never drawn as a badge.
   const queue = summary.conditions.at(-1)!;
