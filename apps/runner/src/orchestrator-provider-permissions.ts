@@ -557,15 +557,3 @@ export function classifyRoutineClaudeOrchestratorPermission(
   if (isRoutineClaudeOrchestratorBash(record.command, allowedIssueNumbers, workspacePath)) return "allow";
   return isRoutineCoordinationAttempt(record.command, allowedIssueNumbers) ? "reformulate" : "interactive";
 }
-
-/** Auto-approval is confined to Orchestrator Bash asks with a bounded input and issue scope. */
-export function isRoutineClaudeOrchestratorPermission(
-  toolName: unknown,
-  input: unknown,
-  allowedIssueNumbers: readonly number[] = [],
-  workspacePath?: string,
-): boolean {
-  return classifyRoutineClaudeOrchestratorPermission(
-    toolName, input, allowedIssueNumbers, workspacePath,
-  ) === "allow";
-}

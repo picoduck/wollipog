@@ -442,15 +442,6 @@ export function writeClaudeSettingsSet(
   protectedWrite(file, contents);
 }
 
-/** Manager-hook-only settings (no managed-worktree guard). Retained for call sites and tests
- * that provision the policy transport on its own. */
-export function writeClaudeHookSettings(
-  file: string,
-  options: ClaudeManagerHookOptions,
-): void {
-  writeClaudeSettingsSet(file, options, null);
-}
-
 /** Startup cleanup: persisted launch args heal settings on demand, so stale files need not linger. */
 export function sweepClaudeHookFiles(configDir = defaultHookConfigDir()): number {
   if (!existsSync(configDir)) return 0;

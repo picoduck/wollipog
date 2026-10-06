@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, wri
 import { platform, tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { test } from "node:test";
-import { isProjectLocalExecutable, launchForVersionManagerHit, launchTargetStillMatches, pickWindowsExecutable, resolveNativeCandidates, resolvedLaunchIdentity, run, sortVersionsDesc, wslCandidateScanArgs, wslInspectArgs, wslVersionManagerArgs } from "./resolve.js";
+import { isProjectLocalExecutable, launchForVersionManagerHit, launchTargetStillMatches, pickWindowsExecutable, resolveNativeCandidates, resolvedLaunchIdentity, run, sortVersionsDesc, wslCandidateScanArgs, wslInspectArgs } from "./resolve.js";
 import { interpretCodexAppServerProbe } from "./codex-app-server.js";
 
 test("run preserves a string execFile error code for retryable spawn diagnostics", async () => {
@@ -194,9 +194,9 @@ test("launchForVersionManagerHit: node scripts wrap, real binaries run direct", 
   assert.deepEqual(noNode, { command: shim, args: [] });
 });
 
-test("wslVersionManagerArgs: name rides as a positional arg, never inside the script", () => {
+test("wslCandidateScanArgs: name rides as a positional arg, never inside the script", () => {
   const hostile = 'codex"; rm -rf ~; echo "';
-  const args = wslVersionManagerArgs("Ubuntu-24.04", hostile);
+  const args = wslCandidateScanArgs("Ubuntu-24.04", hostile);
   assert.deepEqual(args.slice(0, 5), ["-d", "Ubuntu-24.04", "--exec", "sh", "-c"]);
   const script = args[5]!;
   assert.ok(!script.includes(hostile), "name never interpolated into the script");

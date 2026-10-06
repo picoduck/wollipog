@@ -14,7 +14,7 @@ import {
   describeProviderCredentialScope,
   displayableProviderEmail,
 } from "./provider-auth-recovery.js";
-import { writeRunnerCredentialFile } from "./runner-credential-file.js";
+import { stageRunnerCredentialFile } from "./runner-credential-file.js";
 import type { SessionMeta } from "./session-store.js";
 import type { AgentProcess } from "./spawn.js";
 import type { ProviderLoginSupervisor, ResolvedProviderLogin } from "./provider-login.js";
@@ -177,7 +177,7 @@ test("runner auth evidence survives transport credential rotation and controller
   const session = meta({ driver: "claude-code", command: "claude" });
   const evidenceKeyFile = join(dir, "credentials", "provider-auth-evidence-hmac.key");
   try {
-    writeRunnerCredentialFile(dir, "transport-token-before-rotation");
+    stageRunnerCredentialFile(dir, "transport-token-before-rotation").promote();
     const legacyRecorded = await createTestProviderAuthRecovery(
       run,
       "transport-token-before-rotation",
@@ -276,7 +276,7 @@ test("runner auth evidence survives transport credential rotation and controller
     assert.equal(rollback.matches, false, "rolling v2 evidence back to v1 must fail closed");
     assert.equal(rollback.evidenceGenerationMismatch, true);
 
-    writeRunnerCredentialFile(dir, "transport-token-after-rotation");
+    stageRunnerCredentialFile(dir, "transport-token-after-rotation").promote();
     config.token = "transport-token-after-rotation";
     const reconstructed = createRunnerProviderAuthRecovery(config, run);
     assert.equal(reconstructed.describe(session)?.id, recordedScope?.id);

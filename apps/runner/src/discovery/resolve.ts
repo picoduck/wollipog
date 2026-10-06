@@ -371,23 +371,6 @@ export async function listWslDistros(): Promise<string[]> {
     .filter((l) => l.length > 0 && !/docker-desktop/i.test(l));
 }
 
-/** In-distro version-manager scan. The name rides as a POSITIONAL arg ($1), never interpolated
- * (same stance as fs-browse). Prints three lines on a hit: bin dir, realpath, first line of the
- * target (for node-shebang detection). `sort -rV` = newest version first (GNU coreutils — present
- * on every WSL distro). Exported for argv-shape tests. */
-export function wslVersionManagerArgs(distro: string, name: string): string[] {
-  const script =
-    'for base in "$HOME/.nvm/versions/node" "$HOME/.local/share/fnm/node-versions"; do ' +
-    '[ -d "$base" ] || continue; ' +
-    'for v in $(ls -1 "$base" 2>/dev/null | sort -rV); do ' +
-    'for sub in bin installation/bin; do d="$base/$v/$sub"; ' +
-    '[ -x "$d/$1" ] || continue; ' +
-    'printf "%s\\n" "$d"; rp=$(readlink -f "$d/$1"); printf "%s\\n" "$rp"; ' +
-    'head -c 128 "$rp" 2>/dev/null | tr -d "\\0" | head -n 1; exit 0; ' +
-    "done; done; done; exit 3";
-  return ["-d", distro, "--exec", "sh", "-c", script, "sh", name];
-}
-
 /** True when a resolved path lives under a node version manager's install tree — a hit there
  * is (almost always) a node-script shim that can't exec without that version's node. */
 function isVersionManagerPath(p: string): boolean {

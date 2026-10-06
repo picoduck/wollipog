@@ -4,7 +4,6 @@ import fc from "fast-check";
 import {
   classifyRoutineClaudeOrchestratorPermission,
   isRoutineClaudeOrchestratorBash,
-  isRoutineClaudeOrchestratorPermission,
 } from "./orchestrator-provider-permissions.js";
 
 const issueIds = fc.uniqueArray(fc.integer({ min: 1, max: 999_999_999 }), {
@@ -232,15 +231,15 @@ test("observed routine inspection attempts are reformulated instead of becoming 
 
 test("permission classification rejects non-Bash and expanded Bash input shapes", () => {
   const command = "for n in 1 2; do gh issue view $n; done";
-  assert.equal(isRoutineClaudeOrchestratorPermission("Bash", { command }), true);
-  assert.equal(isRoutineClaudeOrchestratorPermission("Read", { command }), false);
-  assert.equal(isRoutineClaudeOrchestratorPermission("Bash", { command, run_in_background: true }), false);
-  assert.equal(isRoutineClaudeOrchestratorPermission("Bash", { command, timeout: 120_001 }), false);
-  assert.equal(isRoutineClaudeOrchestratorPermission("Bash", { command, timeout: 30_000 }), true);
-  assert.equal(isRoutineClaudeOrchestratorPermission(
+  assert.equal(classifyRoutineClaudeOrchestratorPermission("Bash", { command }), "allow");
+  assert.equal(classifyRoutineClaudeOrchestratorPermission("Read", { command }), "interactive");
+  assert.equal(classifyRoutineClaudeOrchestratorPermission("Bash", { command, run_in_background: true }), "interactive");
+  assert.equal(classifyRoutineClaudeOrchestratorPermission("Bash", { command, timeout: 120_001 }), "interactive");
+  assert.equal(classifyRoutineClaudeOrchestratorPermission("Bash", { command, timeout: 30_000 }), "allow");
+  assert.equal(classifyRoutineClaudeOrchestratorPermission(
     "Bash", { command: "gh issue edit 1 --add-assignee @me" }, [1],
-  ), true);
-  assert.equal(isRoutineClaudeOrchestratorPermission(
+  ), "allow");
+  assert.equal(classifyRoutineClaudeOrchestratorPermission(
     "Bash", { command: "gh issue edit 2 --add-assignee @me" }, [1],
-  ), false);
+  ), "interactive");
 });

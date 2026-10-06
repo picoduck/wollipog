@@ -2606,16 +2606,6 @@ function guardianApprovalReviewReceipt(p: Json): ReviewDecision["approvalReviewR
   };
 }
 
-/** Backward-compatible visible summary helper retained for callers outside the driver. */
-export function reviewSummary(p: Json): string | null {
-  const decision = parseReviewDecision(p);
-  if (!decision) return null;
-  const verb = decision.outcome === "allowed" ? "approved" : decision.outcome.replace("_", " ");
-  const risk = decision.riskLevel ? ` (${decision.riskLevel} risk)` : "";
-  const why = decision.rationale ? `: ${decision.rationale}` : "";
-  return `[AI review] ${verb}${risk}${why}`;
-}
-
 function approvalTitle(params: Json): string {
   if (params?.command) return `Run: ${truncate(String(params.command), 80)}`;
   if (params?.changes || params?.fileChange) return "Apply file changes";

@@ -18,7 +18,6 @@ import {
   DEFAULT_MODE_QUESTION_FEATURE,
   diagnosticValue,
   parseReviewDecision,
-  reviewSummary,
   waitForWslProviderAttemptTeardown,
 } from "./codex-app-server.js";
 import type { DriverCallbacks, DriverOptions } from "./driver.js";
@@ -3380,23 +3379,6 @@ test("buildCodexTurnParams: passes model, effort, and service tier through, skip
   assert.equal(unsupported.serviceTier, undefined, "tiers from another model are never sent");
   const d = buildCodexTurnParams(cfg("workspace-write", { model: "default" }), "t", "/w", []);
   assert.equal(d.model, undefined);
-});
-
-test("reviewSummary: terminal verdict -> '[AI review] <verb> (<risk> risk): <why>'", () => {
-  assert.equal(
-    reviewSummary({ review: { id: "r1", status: "approved", riskLevel: "low", rationale: "reads only" } }),
-    "[AI review] approved (low risk): reads only",
-  );
-  assert.equal(reviewSummary({ id: "r2", status: "denied", riskLevel: "high" }), "[AI review] denied (high risk)");
-  // nested under .item is also accepted (defensive against the unstable shape)
-  assert.equal(reviewSummary({ item: { id: "r3", status: "approved" } }), "[AI review] approved");
-});
-
-test("reviewSummary: in-progress / unknown / missing status -> null (no event)", () => {
-  assert.equal(reviewSummary({ review: { status: "inProgress" } }), null);
-  assert.equal(reviewSummary({ status: "bogus" }), null);
-  assert.equal(reviewSummary({}), null);
-  assert.equal(reviewSummary(null), null);
 });
 
 test("parseReviewDecision emits a reviewer-neutral bounded terminal decision", () => {

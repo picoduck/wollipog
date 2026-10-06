@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { stageRunnerCredentialFile, writeRunnerCredentialFile } from "./runner-credential-file.js";
+import { stageRunnerCredentialFile } from "./runner-credential-file.js";
 
 function withTempDir(fn: (dir: string) => void): void {
   const dir = mkdtempSync(join(tmpdir(), "wollipog-credentials-"));
@@ -12,7 +12,7 @@ function withTempDir(fn: (dir: string) => void): void {
 
 test("runner credential file is mode 600", () => {
   withTempDir((dir) => {
-    const credential = writeRunnerCredentialFile(dir, "opaque-runner-token");
+    const credential = stageRunnerCredentialFile(dir, "opaque-runner-token").promote();
     assert.equal(readFileSync(credential, "utf8"), "opaque-runner-token");
     if (process.platform !== "win32") assert.equal(statSync(credential).mode & 0o777, 0o600);
   });
@@ -20,7 +20,7 @@ test("runner credential file is mode 600", () => {
 
 test("pending runner rotation preserves the active runner token until acknowledged cutover", () => {
   withTempDir((dir) => {
-    const active = writeRunnerCredentialFile(dir, "opaque-active-token");
+    const active = stageRunnerCredentialFile(dir, "opaque-active-token").promote();
     const retried = stageRunnerCredentialFile(dir, "opaque-retried-token");
     assert.equal(retried.activePath, active);
     assert.equal(readFileSync(active, "utf8"), "opaque-active-token");

@@ -45,10 +45,3 @@ export function stageRunnerCredentialFile(
     },
   };
 }
-
-/** One protected runner-local source for the active runner credential. Per-session MCP configs
- * reference this path and therefore never duplicate plaintext secrets. Direct callers opt into an
- * immediate cutover; the runner daemon uses stageRunnerCredentialFile and waits for registration. */
-export function writeRunnerCredentialFile(dataDir: string, token: string): string {
-  return stageRunnerCredentialFile(dataDir, token).promote();
-}

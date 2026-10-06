@@ -225,11 +225,6 @@ function persistentSettings(readEnvironment: CompatibleEnvironmentReader): Claud
   };
 }
 
-export function claudePersistentSettings(env: Environment): ClaudePersistentSettings {
-  return persistentSettings((currentName, legacyName, warn) =>
-    readSettingEnv(env, currentName, legacyName, warn));
-}
-
 /** Surface daemon-level legacy lifetime aliases before any session transcript exists. Values are
  * deliberately discarded so startup diagnostics disclose names only. */
 export function warnLegacyClaudeLifetimeEnvironment(

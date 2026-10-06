@@ -11,7 +11,6 @@ import {
   claudeHookProtectionsPath,
   claudeHookTokenPath,
   removeClaudeHookFiles,
-  writeClaudeHookSettings,
   writeClaudeSettingsSet,
   writeHookCircuitState,
 } from "../hook-settings.js";
@@ -31,7 +30,6 @@ import {
   claudeErrorResultText,
   PROVIDER_AUTHENTICATION_ERROR,
   claudePermissionArgs,
-  claudePersistentSettings,
   claudePersistentSettingsForAgent,
   claudeRoutineControlChannelMode,
   createPersistentSettingWarningEmitter,
@@ -220,33 +218,33 @@ test("auth failures retain a secret-free diagnostic when no structured callback 
 
 test("persistent settings default on, accept zero/unbounded values, and reject footguns loudly", () => {
   assert.equal(CLAUDE_GRACEFUL_STOP_BUDGET_MS, 11_500);
-  assert.deepEqual(claudePersistentSettings({}), {
+  assert.deepEqual(claudePersistentSettingsForAgent({}, {}), {
     enabled: true,
     idleMs: 3_600_000,
     pendingMaxMs: 604_800_000,
     handoffWaitMaxMs: 3_600_000,
     warnings: [],
   });
-  assert.equal(claudePersistentSettings({ [CLAUDE_PERSISTENT_FLAG]: "0" }).enabled, false);
+  assert.equal(claudePersistentSettingsForAgent({ [CLAUDE_PERSISTENT_FLAG]: "0" }, {}).enabled, false);
   assert.deepEqual(
-    claudePersistentSettings({
+    claudePersistentSettingsForAgent({
       [CLAUDE_PERSISTENT_FLAG]: "1",
       [CLAUDE_PERSISTENT_IDLE_MS]: "0",
       [CLAUDE_PENDING_MAX_MS]: "0",
-    }),
+    }, {}),
     { enabled: true, idleMs: 0, pendingMaxMs: 0, handoffWaitMaxMs: 3_600_000, warnings: [] },
   );
-  assert.equal(claudePersistentSettings({ [CLAUDE_PERSISTENT_IDLE_MS]: "999999999999" }).idleMs, 999_999_999_999);
-  const rejected = claudePersistentSettings({ [CLAUDE_PERSISTENT_IDLE_MS]: "29999" });
+  assert.equal(claudePersistentSettingsForAgent({ [CLAUDE_PERSISTENT_IDLE_MS]: "999999999999" }, {}).idleMs, 999_999_999_999);
+  const rejected = claudePersistentSettingsForAgent({ [CLAUDE_PERSISTENT_IDLE_MS]: "29999" }, {});
   assert.equal(rejected.idleMs, 3_600_000);
   assert.match(rejected.warnings.join("\n"), /WOLLIPOG_CLAUDE_PERSISTENT_IDLE_MS.*rejected/);
 });
 
 test("the handoff wait bound defaults to an hour, can be disabled, and rejects nonsense (#1778)", () => {
-  assert.equal(claudePersistentSettings({}).handoffWaitMaxMs, 3_600_000);
-  assert.equal(claudePersistentSettings({ [CLAUDE_HANDOFF_WAIT_MAX_MS]: "0" }).handoffWaitMaxMs, 0);
-  assert.equal(claudePersistentSettings({ [CLAUDE_HANDOFF_WAIT_MAX_MS]: "900000" }).handoffWaitMaxMs, 900_000);
-  const rejected = claudePersistentSettings({ [CLAUDE_HANDOFF_WAIT_MAX_MS]: "soon" });
+  assert.equal(claudePersistentSettingsForAgent({}, {}).handoffWaitMaxMs, 3_600_000);
+  assert.equal(claudePersistentSettingsForAgent({ [CLAUDE_HANDOFF_WAIT_MAX_MS]: "0" }, {}).handoffWaitMaxMs, 0);
+  assert.equal(claudePersistentSettingsForAgent({ [CLAUDE_HANDOFF_WAIT_MAX_MS]: "900000" }, {}).handoffWaitMaxMs, 900_000);
+  const rejected = claudePersistentSettingsForAgent({ [CLAUDE_HANDOFF_WAIT_MAX_MS]: "soon" }, {});
   assert.equal(rejected.handoffWaitMaxMs, 3_600_000);
   assert.match(rejected.warnings.join("\n"), /WOLLIPOG_CLAUDE_HANDOFF_WAIT_MAX_MS="soon" was rejected/);
   // Per-agent configuration wins over the daemon's, as for the other lifetimes.
@@ -261,23 +259,23 @@ test("the handoff wait bound defaults to an hour, can be disabled, and rejects n
 });
 
 test("persistent settings prefer Wollipog names and warn on legacy fallback", () => {
-  const preferred = claudePersistentSettings({
+  const preferred = claudePersistentSettingsForAgent({
     [CLAUDE_PERSISTENT_FLAG]: "0",
     [LEGACY_CLAUDE_PERSISTENT_FLAG]: "1",
     [CLAUDE_PERSISTENT_IDLE_MS]: "30000",
     [LEGACY_CLAUDE_PERSISTENT_IDLE_MS]: "60000",
     [CLAUDE_PENDING_MAX_MS]: "0",
     [LEGACY_CLAUDE_PENDING_MAX_MS]: "30000",
-  });
+  }, {});
   assert.deepEqual(preferred, {
     enabled: false, idleMs: 30_000, pendingMaxMs: 0, handoffWaitMaxMs: 3_600_000, warnings: [],
   });
 
-  const legacy = claudePersistentSettings({
+  const legacy = claudePersistentSettingsForAgent({
     [LEGACY_CLAUDE_PERSISTENT_FLAG]: "0",
     [LEGACY_CLAUDE_PERSISTENT_IDLE_MS]: "30000",
     [LEGACY_CLAUDE_PENDING_MAX_MS]: "0",
-  });
+  }, {});
   assert.equal(legacy.enabled, false);
   assert.equal(legacy.idleMs, 30_000);
   assert.equal(legacy.pendingMaxMs, 0);
@@ -3020,12 +3018,12 @@ test("one-shot first/resume turns heal managed hook settings and circuit-open pe
   const root = mkdtempSync(join(tmpdir(), "wollipog-claude-hook-driver-"));
   try {
     const settings = join(root, "sess.settings.json");
-    writeClaudeHookSettings(settings, {
+    writeClaudeSettingsSet(settings, {
       sessionId: "sess",
       launch: { command: "runner", args: ["--policy-hook"] },
       cpHttpUrl: "http://127.0.0.1:4317",
       tokenFile: claudeHookTokenPath(settings),
-    });
+    }, null);
     const base = {
       ...baseOpts,
       args: ["--settings", settings],
@@ -3100,13 +3098,13 @@ test("a successful cooldown re-probe publishes runner-owned hook elicitation rec
   const root = mkdtempSync(join(tmpdir(), "wollipog-claude-hook-recovery-"));
   try {
     const settings = join(root, "sess.settings.json");
-    writeClaudeHookSettings(settings, {
+    writeClaudeSettingsSet(settings, {
       sessionId: "sess",
       launch: { command: "runner", args: ["--policy-hook"] },
       cpHttpUrl: "http://127.0.0.1:4317",
       tokenFile: claudeHookTokenPath(settings),
       askCapable: true,
-    });
+    }, null);
     const events: SessionEventPayload[] = [];
     const children: any[] = [];
     const launches: any[] = [];
@@ -3340,12 +3338,12 @@ test("Claude fork bootstrap heals and carries the managed hook settings", async 
   const root = mkdtempSync(join(tmpdir(), "wollipog-claude-hook-fork-"));
   try {
     const settings = join(root, "source.settings.json");
-    writeClaudeHookSettings(settings, {
+    writeClaudeSettingsSet(settings, {
       sessionId: "source",
       launch: { command: "runner", args: ["--policy-hook"] },
       cpHttpUrl: "http://127.0.0.1:4317",
       tokenFile: claudeHookTokenPath(settings),
-    });
+    }, null);
     const source = "11111111-2222-3333-4444-555555555555";
     const child = fakeProcess();
     const launches: any[] = [];

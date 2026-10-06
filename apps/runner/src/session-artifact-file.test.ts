@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { MAX_PROMPT_IMAGE_BYTES, MAX_SESSION_VIDEO_BYTES } from "@wollipog/protocol";
-import { readImageFileForAttach, readMediaFileForAttach, sniffImageMediaType, sniffVideoMediaType } from "./session-artifact-file.js";
+import { readMediaFileForAttach, sniffImageMediaType, sniffVideoMediaType } from "./session-artifact-file.js";
 
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from("pixels")]);
 const WEBM = Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x87, 0x42, 0x82, 0x84]), Buffer.from("webm"), Buffer.alloc(8)]);
@@ -63,7 +63,6 @@ test("video attachment reads a content-typed bounded file without trusting its e
     assert.equal(found.ok, true);
     if (found.ok) assert.deepEqual({ kind: found.kind, mediaType: found.mediaType, sizeBytes: found.sizeBytes },
       { kind: "video", mediaType: "video/webm", sizeBytes: WEBM.length });
-    assert.equal((await readImageFileForAttach(file)).ok, false);
     writeFileSync(file, Buffer.concat([
       Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x8b, 0x42, 0x82, 0x88]), Buffer.from("matroska"), Buffer.from("webm"),
     ]));
@@ -94,8 +93,9 @@ test("an image file is read with its content-derived type, exact size, and diges
     // Named .txt on purpose: the name must not decide the type.
     const file = join(dir, "capture.txt");
     writeFileSync(file, PNG);
-    const read = await readImageFileForAttach(file);
+    const read = await readMediaFileForAttach(file);
     assert.ok(read.ok, read.ok ? "" : read.error);
+    assert.equal(read.kind, "screenshot");
     assert.equal(read.mediaType, "image/png");
     assert.equal(read.sizeBytes, PNG.length);
     assert.equal(read.sha256, createHash("sha256").update(PNG).digest("hex"));
@@ -105,7 +105,7 @@ test("an image file is read with its content-derived type, exact size, and diges
     if (process.platform !== "win32") {
       const link = join(dir, "link.png");
       symlinkSync(file, link);
-      assert.ok((await readImageFileForAttach(link)).ok, "a symbolic link to a regular file reads the file");
+      assert.ok((await readMediaFileForAttach(link)).ok, "a symbolic link to a regular file reads the file");
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -127,7 +127,7 @@ test("every unusable file fails with a specific message and yields no bytes", as
     cases.push(["empty", join(dir, "empty.png"), /file is empty/u]);
 
     writeFileSync(join(dir, "notes.png"), "this is text wearing a .png name");
-    cases.push(["wrong content", join(dir, "notes.png"), /not a PNG, JPEG, GIF, or WebP image/u]);
+    cases.push(["wrong content", join(dir, "notes.png"), /not a PNG, JPEG, GIF, or WebP image, MP4, or WebM video/u]);
 
     // Sparse, so the limit is exercised without writing 8 MiB; it must be refused from its size
     // alone, before any read.
@@ -136,7 +136,7 @@ test("every unusable file fails with a specific message and yields no bytes", as
     cases.push(["oversized", join(dir, "huge.png"), new RegExp(`at most ${MAX_PROMPT_IMAGE_BYTES} bytes`, "u")]);
 
     for (const [label, path, expected] of cases) {
-      const read = await readImageFileForAttach(path);
+      const read = await readMediaFileForAttach(path);
       assert.equal(read.ok, false, label);
       assert.match(read.ok ? "" : read.error, expected, label);
       assert.equal("bytes" in read, false, `${label}: a failure carries no content`);
@@ -144,7 +144,7 @@ test("every unusable file fails with a specific message and yields no bytes", as
 
     writeFileSync(join(dir, "exact.png"), PNG);
     truncateSync(join(dir, "exact.png"), MAX_PROMPT_IMAGE_BYTES);
-    assert.ok((await readImageFileForAttach(join(dir, "exact.png"))).ok, "exactly the limit is accepted");
+    assert.ok((await readMediaFileForAttach(join(dir, "exact.png"))).ok, "exactly the limit is accepted");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -157,21 +157,21 @@ test("a file that changes size after it was checked is refused without an unboun
     // its buffer from the new length; the bounded read takes one byte more than it checked.
     const growing = join(dir, "growing.png");
     writeFileSync(growing, PNG);
-    const grown = await readImageFileForAttach(growing, () => truncateSync(growing, MAX_PROMPT_IMAGE_BYTES * 4));
+    const grown = await readMediaFileForAttach(growing, () => truncateSync(growing, MAX_PROMPT_IMAGE_BYTES * 4));
     assert.equal(grown.ok, false);
     assert.match(grown.ok ? "" : grown.error, /changed size while it was being read/u);
 
     const appended = join(dir, "appended.png");
     writeFileSync(appended, PNG);
-    const longer = await readImageFileForAttach(appended, () => appendFileSync(appended, "x"));
+    const longer = await readMediaFileForAttach(appended, () => appendFileSync(appended, "x"));
     assert.match(longer.ok ? "" : longer.error, /changed size/u, "even one extra byte is a different file");
 
     const shrinking = join(dir, "shrinking.png");
     writeFileSync(shrinking, PNG);
-    const shorter = await readImageFileForAttach(shrinking, () => truncateSync(shrinking, 9));
+    const shorter = await readMediaFileForAttach(shrinking, () => truncateSync(shrinking, 9));
     assert.match(shorter.ok ? "" : shorter.error, /changed size/u, "a half-written capture is not evidence");
 
-    assert.ok((await readImageFileForAttach(appended, () => {})).ok, "an untouched file still reads");
+    assert.ok((await readMediaFileForAttach(appended, () => {})).ok, "an untouched file still reads");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

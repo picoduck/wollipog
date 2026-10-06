@@ -167,10 +167,6 @@ async function readFileForAttach(
   }
 }
 
-export function readImageFileForAttach(path: string, afterSizeCheck?: () => void | Promise<void>): Promise<ImageFileRead> {
-  return readFileForAttach(path, false, afterSizeCheck);
-}
-
 export function readMediaFileForAttach(path: string, afterSizeCheck?: () => void | Promise<void>): Promise<ImageFileRead> {
   return readFileForAttach(path, true, afterSizeCheck);
 }
