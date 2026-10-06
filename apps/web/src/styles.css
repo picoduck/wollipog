@@ -12103,6 +12103,9 @@ body.shell-dock-dragging * {
   pointer-events: none;
 }
 .inbox-row-primary-cell { position: relative; display: block; min-width: 0; }
+/* A selected row's leading edge is its accent bar; its badge already says it is stalled (#2215 retires
+   the rail). */
+.inbox-row-shell.stalled.selected::before { content: none; }
 /* ---- Threads (#896): a parent and its children as one unit, the children indented under a spine.
    Every row is still ONE card: a collapsed parent's children leave the row list rather than hiding
    inside a taller row, so the virtualizer's per-shape estimate still holds for every row. ---- */
@@ -12279,6 +12282,10 @@ body.shell-dock-dragging * {
 .inbox-row-sender-line > .inbox-row-flags { margin-left: auto; }
 /* The phone card's status line: the time is trailing, and the branch between gives way. */
 .inbox-row-shell.stacked .inbox-row-status-line > .inbox-row-time { margin-left: auto; }
+/* The densest phone line (a long badge, the strip and a weekday return time) does not fit 320px, so
+   the badge is what gives way: its label is clipped, and its accessible name and tooltip stay whole. */
+.inbox-row-shell.stacked .inbox-row-status-line > .row-status { flex: 0 1 auto; min-width: 0; }
+.inbox-row-shell.stacked .row-status > .status { min-width: 0; overflow: hidden; }
 /* Meta (§11.3): plain text, each item after its 14px icon, 12px apart. */
 .inbox-row-git {
   display: flex;

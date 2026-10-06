@@ -154,7 +154,7 @@ test.describe("on the Sessions page", () => {
       bar: getComputedStyle(shell.querySelector(".inbox-row-primary-cell")!, "::after").content,
       background: getComputedStyle(shell.querySelector(".inbox-row")!).backgroundColor,
     })));
-    for (const tap of [null, "Blocked:", "Snoozed:"] as const) {
+    for (const tap of [null, "Blocked: Approve", "Snoozed: Revisit"] as const) {
       if (tap) await page.locator(".inbox-row-shell", { hasText: tap }).locator(".inbox-row").click();
       const rows = await drawn();
       expect(rows.filter((row) => row.active)).toHaveLength(1);
@@ -367,14 +367,14 @@ test.describe("with a row in every status", () => {
       test(`at ${width}×${height} every row is exactly --row-h-2 whatever its status, strip, branch or flags (${density})`, async ({ page }) => {
         await page.setViewportSize({ width, height });
         await page.goto(`${ROWS}?density=${density}&selectedUnread=1`);
-        await expect(page.locator(".inbox-row")).toHaveCount(14);
+        await expect(page.locator(".inbox-row")).toHaveCount(15);
         const token = await rowToken(page);
         expect(token).toBe(density === "compact" ? 56 : 60);
         // The fixture really is every shape: one badge or none, "+N", a strip or none, a branch or
         // none, flags, a snoozed time cell, and selected, unread, and selected-and-unread rows.
         await expect(page.locator(".row-status-more")).toHaveCount(1);
-        await expect(page.locator(".inbox-row-activity")).toHaveCount(6);
-        await expect(page.locator(".inbox-row-time.snoozed")).toHaveCount(1);
+        await expect(page.locator(".inbox-row-activity")).toHaveCount(7);
+        await expect(page.locator(".inbox-row-time.snoozed")).toHaveCount(2);
         await expect(page.locator(".inbox-row-shell.selected.unread")).toHaveCount(1);
         await expect(page.locator(".inbox-row-shell.unread:not(.selected)")).toHaveCount(2);
         await expect(page.locator(".inbox-row-shell.stalled .status.t-danger")).toHaveCount(1);
@@ -383,6 +383,52 @@ test.describe("with a row in every status", () => {
       });
     }
   }
+
+  // Cross-model review of #2209: the densest phone status line (Authentication Required, the strip and
+  // a weekday return time) clipped its time at 320px. The badge is what gives way; the strip and the
+  // time stay whole inside the line.
+  for (const width of [320, 390] as const) {
+    test(`a phone card's status line keeps its strip and time whole at ${width}px`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 844 });
+      await page.goto(ROWS);
+      await expect(page.locator(".inbox-row")).toHaveCount(15);
+      const lines = await page.locator(".inbox-row-status-line").evaluateAll((nodes) => nodes.map((line) => {
+        const box = line.getBoundingClientRect();
+        const inside = (selector: string) => {
+          const item = line.querySelector<HTMLElement>(selector);
+          if (!item) return null;
+          const itemBox = item.getBoundingClientRect();
+          return itemBox.left >= box.left - 0.5 && itemBox.right <= box.right + 0.5 && itemBox.width > 0;
+        };
+        return {
+          title: line.closest(".inbox-row")!.querySelector(".inbox-row-title")!.textContent,
+          time: inside(".inbox-row-time"),
+          strip: inside(".inbox-row-activity"),
+          badge: inside(".row-status"),
+        };
+      }));
+      const dense = lines.find((line) => line.title?.startsWith("Snoozed and Blocked"))!;
+      expect(dense).toMatchObject({ time: true, strip: true, badge: true });
+      for (const line of lines) {
+        expect(line.time, `${line.title}: the time stays whole`).toBe(true);
+        if (line.strip !== null) expect(line.strip, `${line.title}: the strip stays whole`).toBe(true);
+        if (line.badge !== null) expect(line.badge, `${line.title}: the badge stays inside the line`).toBe(true);
+      }
+    });
+  }
+
+  // Cross-model review of #2209: the stalled rail was painted over the selected row's accent bar.
+  test("a selected stalled row shows the selection bar, not the stalled rail", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(`${ROWS}?selected=session-stalled`);
+    const shell = page.locator(".inbox-row-shell", { hasText: "Stalled:" });
+    await expect(shell).toHaveClass(/selected/);
+    expect(await shell.evaluate((node) => ({
+      rail: getComputedStyle(node, "::before").content,
+      bar: getComputedStyle(node.querySelector(".inbox-row-primary-cell")!, "::after").content,
+      danger: node.querySelectorAll(".status.t-danger").length,
+    }))).toEqual({ rail: "none", bar: "\"\"", danger: 1 });
+  });
 
   test("the branch shows only where the list is 600px or wider", async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
@@ -403,7 +449,7 @@ test.describe("with a row in every status", () => {
     test(`selected, unread and keyboard focus are three treatments, with one neutral inset ring (${theme})`, async ({ page }) => {
       await page.setViewportSize({ width: 1440, height: 900 });
       await page.goto(`${ROWS}?theme=${theme}&selected=session-blocked`);
-      await expect(page.locator(".inbox-row")).toHaveCount(14);
+      await expect(page.locator(".inbox-row")).toHaveCount(15);
       const read = (title: string) => page.locator(".inbox-row-shell", { hasText: title }).evaluate((shell) => {
         const row = shell.querySelector<HTMLElement>(".inbox-row")!;
         const style = getComputedStyle(row);
@@ -431,8 +477,8 @@ test.describe("with a row in every status", () => {
       });
 
       const plain = await read("Idle: Plan");
-      const unread = await read("Unread:");
-      const selectedUnread = await read("Blocked:");
+      const unread = await read("Unread: Review");
+      const selectedUnread = await read("Blocked: Approve");
       expect(plain).toMatchObject({ bar: null, dot: null, outline: null, boxShadow: "none" });
       // Unread: the dot and a heavier title, and nothing on the row's box.
       expect(unread).toMatchObject({ bar: null, dot: tokens.blue, titleWeight: "600", background: plain.background,
@@ -445,7 +491,7 @@ test.describe("with a row in every status", () => {
       // Keyboard focus in the list: one inset ring in the neutral focus colour, on the active row only.
       await page.keyboard.press("Tab");
       await expect(page.locator(".inbox-list")).toBeFocused();
-      const focused = await read("Blocked:");
+      const focused = await read("Blocked: Approve");
       expect(focused.outline).toEqual({ width: "2px", offset: "-2px", color: tokens.focus });
       expect(tokens.focus).not.toBe(tokens.accent);
       expect(await page.locator(".inbox-row").evaluateAll((rows) =>
@@ -458,7 +504,7 @@ test.describe("with a row in every status", () => {
     await page.emulateMedia({ forcedColors: "active" });
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(ROWS);
-    await expect(page.locator(".inbox-row")).toHaveCount(14);
+    await expect(page.locator(".inbox-row")).toHaveCount(15);
     const transparent = "rgba(0, 0, 0, 0)";
     const seen = await page.evaluate(() => {
       const shell = (title: string) => [...document.querySelectorAll(".inbox-row-shell")]

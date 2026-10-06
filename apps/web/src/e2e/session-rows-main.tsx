@@ -88,7 +88,14 @@ const SESSION_ROWS: readonly InboxListEntry[] = [
     lastEventAt: SESSION_ROWS_NOW - minutes(25) }), projectName: "Wollipog", unread: true },
   { session: session("session-snoozed", "Snoozed: Revisit the Flaky Merge-Group Test", {}),
     projectName: "Wollipog", unread: false, reminder: pendingReminder },
-  { session: session("session-returned", "Returned From Snooze: Check the Release Notes", {}),
+  // The densest phone status line: a long badge, the strip and a weekday return time at once.
+  { session: session("session-snoozed-blocked", "Snoozed and Blocked: Sign In to the Package Registry", {
+    status: "input_required", lastEventAt: SESSION_ROWS_NOW - minutes(3),
+    pendingApproval: { kind: "authentication", requestId: "provider-auth:registry", title: "Authentication Required", options: [] },
+  } as unknown as Partial<SessionView>), projectName: "Wollipog", unread: false,
+  reminder: { ...pendingReminder, reminderId: "reminder-snoozed-blocked", sessionId: "session-snoozed-blocked",
+    scheduledFor: SESSION_ROWS_NOW + minutes(60 * 24 * 3) } },
+  { session: session("session-returned","Returned From Snooze: Check the Release Notes", {}),
     projectName: "Docs", unread: false, reminder: firedReminder },
   { session: session("session-external", "Waiting on an External Job: Nightly Bundle Build", {
     backgroundWorkState: "running" }), projectName: "Wollipog", unread: false },
@@ -114,6 +121,7 @@ const ACTIVITY = new Map<string, SessionActivity>([
   ["session-blocked", activityAt(6, 7, 8, 12)],
   ["session-stalled", activityAt(17, 18, 21, 23)],
   ["session-starting", activityAt(0)],
+  ["session-snoozed-blocked", activityAt(3, 4, 6)],
 ]);
 
 function SessionRows() {
