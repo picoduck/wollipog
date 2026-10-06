@@ -1,1 +1,0 @@
-|.board-count|font-size|12.5

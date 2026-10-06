@@ -376,7 +376,7 @@ function RunDetailContent({ runId }: { runId: string }) {
 
       {(artifacts.length > 0 || artifactError) && (
         <section className="run-artifacts" aria-label="Workflow Artifacts">
-          <div className="run-artifacts-head">Artifacts <span className="column-count">{artifacts.length}</span></div>
+          <div className="run-artifacts-head">Artifacts <span className="count">{artifacts.length}</span></div>
           {artifactError && <Notice tone="danger" compact>{artifactError}</Notice>}
           <div className="run-artifact-list">
             {artifacts.map((artifact) => (

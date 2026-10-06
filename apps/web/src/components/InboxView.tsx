@@ -66,6 +66,7 @@ import { PageHeader } from "./PageHeader.js";
 import { shortcutDisplay } from "../shortcuts.js";
 import { sessionDisplayTitle } from "../session-title.js";
 import { Board } from "./Board.js";
+import { BoardFilterTools } from "./BoardFilters.js";
 import type { SessionsViewMode } from "../sessions-view-mode.js";
 import { dispatchVirtualViewportIntent } from "../viewport-intent.js";
 import { virtualTargetScrollAdjustment } from "./MeasuredVirtualList.js";
@@ -1508,6 +1509,7 @@ export function InboxView({
                     Apply New Order
                   </button>
                 )}
+                {boardMode && <BoardFilterTools sessions={boardSessions} />}
                 <SessionsSearchField
                   value={query}
                   onChange={changeQuery}

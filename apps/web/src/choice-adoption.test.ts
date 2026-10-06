@@ -92,7 +92,6 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   ["components/AddBoxDialog.tsx", "native-select", 1],
   ["components/AgentSessionDiscoveryDialog.tsx", "agent-pick", 1],
   ["components/AutomationsView.tsx", "native-select", 12],
-  ["components/Board.tsx", "native-select", 2],
   ["components/FilesPanel.tsx", "native-select", 1],
   ["components/GitDiffViewer.tsx", "native-select", 1],
   ["components/NewRunDialog.tsx", "native-select", 6],
@@ -109,6 +108,9 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   // A page-header toggle secondary (§3.1), Sessions' Snoozed (#2159): one on/off filter, never one
   // of N options. The view switch beside it is the SegmentedControl.
   ["components/PageHeader.tsx", "aria-pressed", 1],
+  // The Board's Machine, Agent and Filters menu buttons (#2201) are pressed while their filter is
+  // set, as the issue specifies: one on/off state per button. The choice itself is in their menus.
+  ["components/BoardFilters.tsx", "aria-pressed", 1],
   /* Raw choice markup, found only once the inventory started counting semantics rather than
      class names. These are bespoke controls phase 6 has not reached yet.
      SettingsView used to be the one exception — a hand-rolled radiogroup wrapping RadioRow
@@ -142,6 +144,9 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   // trailing check on the current one. Choosing a row selects that tab, so it navigates rather
   // than sets a form value.
   ["components/SessionGroupTabs.tsx", "raw-radiogroup", 1],
+  // The Board's Machine and Agent menus (#2201) are §9.1's radio-like menus: All and one MenuItem
+  // row per machine or agent with the trailing check. They replaced Board.tsx's two native selects.
+  ["components/BoardFilters.tsx", "raw-radiogroup", 4],
   ["components/EditorSelect.tsx", "raw-radiogroup", 1],
   ["components/InstanceSelector.tsx", "raw-radiogroup", 1],
   ["components/PodsView.tsx", "raw-radiogroup", 1],

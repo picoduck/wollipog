@@ -3164,31 +3164,23 @@ button.status { cursor: pointer; }
   display: flex;
   flex-direction: column;
 }
-.board-wrap > .toolbar {
-  justify-content: space-between;
-  margin-bottom: var(--space-3);
+/* The Board's tools in the Sessions tab row (#2201, §10.1): menu buttons that name their choice,
+   a quiet "10 of 29" and Clear. A long machine or agent name ends in an ellipsis rather than
+   widening the row; the menu shows it whole. */
+.board-filter { gap: var(--space-1); max-width: 200px; }
+.board-filter-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.board-filter > svg { flex: none; }
+/* A ghost button's transparent rest outranks the shared on state, so it is restated (§3.1). */
+.btn.ghost.board-filter[aria-pressed="true"] {
+  background: var(--bg-elev-3);
+  border-color: var(--control-outline);
 }
-.filters {
-  display: flex;
-  align-items: flex-end;
-  gap: 12px;
-}
-.filter {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 11px;
+.board-filter-note {
+  flex: none;
   color: var(--text-faint);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-.filter select {
-  text-transform: none;
-  letter-spacing: 0;
-}
-.board-count {
-  font-size: 12.5px;
-  color: var(--text-faint);
+  font: var(--type-small);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 /* Fields (docs/design-system.md §8.1): the sunken --field-bg, a 3:1 --control-outline edge and one
    control height. The height is zero-specificity so a component that embeds a borderless field
@@ -3276,57 +3268,55 @@ textarea {
   }
 }
 
+/* Columns are unboxed (#2201, §5.1): no border and no fill, so the cards are the only boxes. An
+   empty column folds to a 40px strip with its header on end; while a card is dragged, every strip
+   opens to full width so it is easy to drop on. */
 .board {
   flex: 1;
   min-height: 0;
-  display: grid;
-  grid-template-columns: repeat(5, minmax(230px, 1fr));
-  gap: 14px;
+  display: flex;
+  gap: var(--space-3);
   overflow-x: auto;
 }
 .column {
   display: flex;
+  flex: 1 1 0;
   flex-direction: column;
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+  min-width: 230px;
   min-height: 0;
 }
+.column.is-empty { flex: 0 0 var(--space-10); min-width: var(--space-10); }
+.board.is-dragging .column.is-empty { flex: 1 1 0; min-width: 230px; }
 .column-head {
   display: flex;
+  flex: none;
   align-items: center;
-  justify-content: space-between;
-  padding: 11px 13px;
-  font-size: 12px;
-  font-weight: 650;
-  text-transform: uppercase;
-  letter-spacing: 0.7px;
-  color: var(--text-dim);
-  border-bottom: 1px solid var(--border);
+  gap: var(--space-2);
+  height: var(--control-h);
+  padding: 0 var(--space-1);
+  font: var(--type-body-strong);
+  color: var(--text);
+  white-space: nowrap;
 }
-.col-running .column-head {
-  color: var(--blue);
+.column-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--tone);
 }
-.col-input_required .column-head {
-  color: var(--amber);
+.column-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.board:not(.is-dragging) .column.is-empty > .column-head {
+  writing-mode: vertical-rl;
+  height: auto;
+  padding: var(--space-1) 0;
+  align-self: center;
 }
-.col-review .column-head {
-  color: var(--teal);
-}
-.col-done .column-head {
-  color: var(--green);
-}
-.column-count {
-  background: var(--bg-elev-3);
-  border-radius: 999px;
-  padding: 0 8px;
-  font-size: 11px;
-  color: var(--text-dim);
-}
+.board:not(.is-dragging) .column.is-empty > .column-body { display: none; }
 .column-body {
   flex: 1;
   overflow-y: auto;
-  padding: 10px;
+  padding: var(--space-1);
 }
 .column-virtual-list {
   width: 100%;
@@ -14131,7 +14121,6 @@ body.shell-dock-dragging * {
     flex: 0 0 84vw;
     scroll-snap-align: start;
   }
-  .board-wrap > .toolbar { flex-wrap: wrap; }
 
 
   /* The app topbar owns mobile Session identity. This is the only second bar: statuses at the

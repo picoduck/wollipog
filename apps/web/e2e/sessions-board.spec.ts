@@ -245,7 +245,8 @@ test("dragging a card to another column persists the move", async ({ page }) => 
   await openHarness(page, "/board");
   const card = page.locator(".board .card", { hasText: "Running Session" });
   await expect(card).toBeVisible();
-  await card.dragTo(page.locator(".column.col-done .column-body"));
+  // An empty column is a strip (#2201) and the whole column is the drop target.
+  await card.dragTo(page.locator(".column.col-done"));
 
   await expect
     .poll(() => page.evaluate(() => window.__setColumnCalls))

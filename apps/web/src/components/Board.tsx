@@ -1,12 +1,12 @@
 import { BoardIcon } from "./Icons.js";
 import { State, useSnapshotState } from "./State.js";
-import { type DragEvent, type MouseEvent, useMemo, useRef, useState } from "react";
+import { type DragEvent, type MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import { BOARD_COLUMNS, type BoardColumn, type BoxView, type SessionReminderView, type SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { relativeTime } from "../format.js";
 import { destination } from "../navigation.js";
-import { machineOptionLabels, runnerDisplay } from "../runners.js";
+import { runnerDisplay } from "../runners.js";
 import { SessionStatusIndicators, ReminderBadge, SessionPinIndicator, SnoozedAttentionBadge, ThreadDot } from "./common.js";
 import { inboxThreadChildrenLabel, inboxThreadChildState, isInboxBlocked, type InboxThreadChildren } from "../inbox.js";
 import { useLongPress } from "./interactions.js";
@@ -15,14 +15,25 @@ import { sessionAgentLabel } from "./agent-options.js";
 import { MeasuredVirtualList } from "./MeasuredVirtualList.js";
 import { useExperiments } from "../use-experiments.js";
 import { snoozedSessionAttentionReason } from "../session-reminders.js";
+import { activeBoardFilterCount, filterBoardSessions } from "./BoardFilters.js";
 
 const sessionCardKey = (session: SessionView) => session.id;
 const estimateSessionCard = (session: SessionView) => session.pendingApproval ? 230 : session.preview ? 155 : 120;
 
+/** A column header's status dot (§11.1): Running is info, Needs Input warning, the rest neutral. */
+const COLUMN_TONE: Record<BoardColumn, "neutral" | "info" | "warning"> = {
+  queued: "neutral",
+  running: "info",
+  input_required: "warning",
+  review: "neutral",
+  done: "neutral",
+};
+
 /**
  * The Sessions view's board mode: the same scoped session list the list mode renders (project
  * split, search, and reminder filtering applied by the parent), grouped into status columns.
- * The Machine and Agent filters below are board-local refinements on top of that shared scope.
+ * The Machine and Agent filters are board-local refinements on top of that shared scope; their
+ * menu buttons live in the Sessions tab row (`BoardFilterTools`, #2201).
  */
 export function Board({ sessions: scoped, reminders = new Map(), stalledSessionIds = new Set(), pinnedSessionIds = new Set(), searchActive, onShowAll, onNewSession, onSessionMenu }: {
   /** Already scoped by the Sessions toolbar: unarchived, split, query, and reminder mode. */
@@ -50,12 +61,6 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
   const boxes = useStoreSelector((s) => s.boxes);
   const filters = useStoreSelector((s) => s.filters);
 
-  const agentOptions = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const r of runners.values()) for (const a of r.agents) map.set(a.id, a.name);
-    return [...map.entries()];
-  }, [runners]);
-
   const boxByRunner = useMemo(() => {
     const m = new Map<string, BoxView>();
     for (const b of boxes.values()) m.set(b.runnerId, b);
@@ -63,21 +68,10 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
   }, [boxes]);
   const machineName = (runnerId: string) =>
     runnerDisplay(runners.get(runnerId), boxByRunner.get(runnerId), runnerId).name;
-  // Two Machines may share a name; filtering by the wrong one silently hides the sessions you want.
-  const machineLabels = useMemo(
-    () => machineOptionLabels([...runners.values()], (runnerId) => boxByRunner.get(runnerId)),
-    [boxByRunner, runners],
-  );
 
   const scopedCount = scoped.length;
-  const filtered = Boolean(filters.runnerId || filters.agentId);
-  const visible = useMemo(
-    () =>
-      scoped
-        .filter((s) => !filters.runnerId || s.runnerId === filters.runnerId)
-        .filter((s) => !filters.agentId || s.agentId === filters.agentId),
-    [scoped, filters],
-  );
+  const filtered = activeBoardFilterCount(filters) > 0;
+  const visible = useMemo(() => filterBoardSessions(scoped, filters), [scoped, filters]);
 
   const byColumn = useMemo(() => {
     const cols = new Map<string, SessionView[]>();
@@ -111,11 +105,41 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
   // into child elements, so a plain boolean would flicker off mid-hover.
   const [dragOverCol, setDragOverCol] = useState<BoardColumn | null>(null);
   const dragDepth = useRef(new Map<BoardColumn, number>());
+  // While a card is dragged, empty columns open from their 40px strips to full width so they are
+  // easy to aim at. The change waits a task: Chromium cancels a drag whose source reflows inside
+  // its own dragstart.
+  const [dragging, setDragging] = useState(false);
+  const dragTimer = useRef<number | null>(null);
+  const startDrag = () => {
+    if (dragTimer.current !== null) window.clearTimeout(dragTimer.current);
+    dragTimer.current = window.setTimeout(() => {
+      dragTimer.current = null;
+      setDragging(true);
+    }, 0);
+  };
+  useEffect(() => () => {
+    if (dragTimer.current !== null) window.clearTimeout(dragTimer.current);
+  }, []);
+  // A card that unmounts mid-drag (a live column move) never receives its dragend, so any drag that
+  // ends anywhere closes the strips again.
+  useEffect(() => {
+    if (!dragging) return;
+    const end = () => setDragging(false);
+    window.addEventListener("dragend", end, true);
+    window.addEventListener("drop", end, true);
+    return () => {
+      window.removeEventListener("dragend", end, true);
+      window.removeEventListener("drop", end, true);
+    };
+  }, [dragging]);
   // dragend fires on the SOURCE card for every outcome incl. Escape / drop-outside —
   // the only reliable place to clear highlight + depth state after an aborted drag.
   const clearDragState = () => {
+    if (dragTimer.current !== null) window.clearTimeout(dragTimer.current);
+    dragTimer.current = null;
     dragDepth.current.clear();
     setDragOverCol(null);
+    setDragging(false);
   };
   const colDragProps = (colId: BoardColumn) => ({
     onDragEnter: (e: DragEvent<HTMLDivElement>) => {
@@ -142,6 +166,7 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
       e.preventDefault();
       dragDepth.current.set(colId, 0);
       setDragOverCol(null);
+      setDragging(false);
       const id = e.dataTransfer.getData("text/wollipog-session");
       if (!id) return;
       if (allSessions.get(id)?.column === colId) return;
@@ -153,51 +178,6 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
 
   return (
     <div className="board-wrap" tabIndex={-1}>
-      <div className="toolbar">
-        <div className="filters">
-          <label className="filter">
-            <span>Machine</span>
-            <select
-              value={filters.runnerId ?? ""}
-              onChange={(e) => setFilters({ runnerId: e.target.value || null })}
-            >
-              <option value="">All Machines</option>
-              {[...runners.values()].map((r) => (
-                <option key={r.runnerId} value={r.runnerId}>
-                  {machineLabels.get(r.runnerId) ?? machineName(r.runnerId)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="filter">
-            <span>Agent</span>
-            <select
-              value={filters.agentId ?? ""}
-              onChange={(e) => setFilters({ agentId: e.target.value || null })}
-            >
-              <option value="">All Agents</option>
-              {agentOptions.map(([id, name]) => (
-                <option key={id} value={id}>
-                  {name}
-                </option>
-              ))}
-            </select>
-          </label>
-          {(filters.runnerId || filters.agentId) && (
-            <button
-              className="btn ghost sm"
-              onClick={() => setFilters({ runnerId: null, agentId: null })}
-            >
-              Clear
-            </button>
-          )}
-        </div>
-        <div className="board-count">
-          {visible.length} Session{visible.length === 1 ? "" : "s"}
-        </div>
-      </div>
-
-
       {visible.length === 0 && (snapshot.offline || snapshot.loading) ? (
         // No snapshot, or no connection: an empty map proves nothing yet (§12.5).
         <State variant={snapshot.offline ? "offline" : "loading"}>
@@ -211,6 +191,7 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
         filtered && scopedCount > 0 ? (
           <State
             variant="no-results"
+            compact
             icon={<BoardIcon />}
             title="No Matching Sessions"
             actions={
@@ -255,18 +236,22 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
           </State>
         )
       ) : (
-        <div className="board">
+        <div className={`board${dragging ? " is-dragging" : ""}`}>
           {BOARD_COLUMNS.map((col) => {
             const list = byColumn.get(col.id) ?? [];
+            // An empty column folds to a 40px strip with its header turned on end (#2201); it stays a
+            // drop target, and opens to full width while a card is dragged.
+            const empty = list.length === 0;
             return (
               <div
                 key={col.id}
-                className={`column col-${col.id}${dragOverCol === col.id ? " drag-over" : ""}`}
+                className={`column col-${col.id}${empty ? " is-empty" : ""}${dragOverCol === col.id ? " drag-over" : ""}`}
                 {...colDragProps(col.id)}
               >
                 <div className="column-head">
-                  <span>{col.title}</span>
-                  <span className="column-count">{list.length}</span>
+                  <span className={`column-dot t-${COLUMN_TONE[col.id]}`} aria-hidden="true" />
+                  <span className="column-title">{col.title}</span>
+                  <span className="count">{list.length}</span>
                 </div>
                 <BoardColumnBody
                   sessions={list}
@@ -276,6 +261,7 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
                   runnerOnline={(runnerId) => runners.get(runnerId)?.status === "online"}
                   onOpen={(sessionId) => navigate({ name: "session", id: sessionId })}
                   threadChildren={threadChildren}
+                  onDragStart={startDrag}
                   onDragEnd={clearDragState}
                   onSessionMenu={onSessionMenu}
                 />
@@ -296,6 +282,7 @@ function BoardColumnBody({
   runnerOnline,
   onOpen,
   threadChildren,
+  onDragStart,
   onDragEnd,
   onSessionMenu,
 }: {
@@ -306,6 +293,7 @@ function BoardColumnBody({
   runnerOnline: (runnerId: string) => boolean;
   onOpen: (sessionId: string) => void;
   threadChildren: ReadonlyMap<string, InboxThreadChildren>;
+  onDragStart: () => void;
   onDragEnd: () => void;
   onSessionMenu: (sessionId: string, anchor: { x: number; y: number }, restoreTarget: () => HTMLElement | null) => void;
 }) {
@@ -325,6 +313,7 @@ function BoardColumnBody({
             runnerOnline={runnerOnline(session.runnerId)}
             onOpen={() => onOpen(session.id)}
             threadChildren={threadChildren.get(session.id) ?? null}
+            onDragStart={onDragStart}
             onDragEnd={onDragEnd}
             onSessionMenu={onSessionMenu}
           />
@@ -349,6 +338,7 @@ function SessionCard({
   runnerOnline,
   onOpen,
   threadChildren,
+  onDragStart,
   onDragEnd,
   onSessionMenu,
 }: {
@@ -359,6 +349,7 @@ function SessionCard({
   runnerOnline: boolean;
   onOpen: () => void;
   threadChildren: InboxThreadChildren | null;
+  onDragStart: () => void;
   onDragEnd: () => void;
   onSessionMenu: (sessionId: string, anchor: { x: number; y: number }, restoreTarget: () => HTMLElement | null) => void;
 }) {
@@ -417,6 +408,7 @@ function SessionCard({
         longPress.handlers.onDragStart();
         e.dataTransfer.setData("text/wollipog-session", session.id);
         e.dataTransfer.effectAllowed = "move";
+        onDragStart();
       }}
       onDragEnd={onDragEnd}
     >

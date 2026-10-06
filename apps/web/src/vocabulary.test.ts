@@ -141,7 +141,7 @@ test("machine selectors render disambiguated Machine labels", () => {
     // Both of these rendered a bare runnerDisplay().name. The Board filter silently hides the
     // sessions you wanted; the Location dialog creates the (Machine, Workspace) pair against the
     // wrong host, which is the costlier of the two.
-    "./components/Board.tsx",
+    "./components/BoardFilters.tsx",
     "./components/ProjectLocationDialog.tsx",
   ]) {
     const source = read(path);

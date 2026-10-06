@@ -247,6 +247,41 @@ if (groups) {
   );
 }
 
+// The Board's Machine and Agent filters (#2201): two named machines whose agents include one each
+// machine reports unavailable and one with a 70-character name, and 29 active sessions of which 10
+// run Claude Code. Nothing is Done, so that column folds to a strip.
+const filtersScenario = new URLSearchParams(location.search).has("filters");
+if (filtersScenario) {
+  runner.displayName = "Studio Mac";
+  runner.agents = [
+    { id: "codex", name: "Codex", command: "codex", args: [], env: {}, driver: "codex-app-server", available: true },
+    { id: "claude", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code", available: true },
+    { id: "research", name: "Research Agent With Extended Repository Context and Staging Credentials",
+      command: "research", args: [], env: {}, driver: "acp", available: true },
+    { id: "gemini", name: "Gemini CLI", command: "gemini", args: [], env: {}, driver: "acp", available: false,
+      unavailableReason: "Gemini CLI is not installed on this machine." },
+  ];
+  secondRunner.displayName = "Build Server 02";
+  secondRunner.agents = [
+    { id: "codex", name: "Codex", command: "codex", args: [], env: {}, driver: "codex-app-server", available: true },
+    { id: "aider", name: "Aider", command: "aider", args: [], env: {}, driver: "acp", available: false },
+  ];
+  const columns: BoardColumn[] = ["running", "input_required", "review"];
+  for (let index = 0; index < 10; index += 1) {
+    sessions.push(session(`s-claude-${index}`, `Claude Code Session ${index + 1}`, columns[index % 3]!, {
+      agentId: "claude", agentName: "Claude Code", driver: "claude-code",
+      ...(columns[index % 3] === "input_required"
+        ? { status: "input_required", pendingApproval: { requestId: `claude-${index}`, title: "Approve Command", options: [] } as never }
+        : {}),
+    }));
+  }
+  for (let index = 0; index < 15; index += 1) {
+    sessions.push(session(`s-build-${index}`, `Build Session ${index + 1}`, index % 2 === 0 ? "running" : "review", {
+      runnerId: secondRunner.runnerId,
+    }));
+  }
+}
+
 if (lifecycle) {
   runner.protocolVersion = PROTOCOL_VERSION;
   for (const value of sessions) {
@@ -298,7 +333,7 @@ function snapshot(): UiSnapshotMessage {
       indefiniteSessionReminders: true,
       ...(lifecycle ? { stopBeforeArchive: true } : {}),
     },
-    runners: groups ? [structuredClone(runner), structuredClone(secondRunner)] : [structuredClone(runner)],
+    runners: groups || filtersScenario ? [structuredClone(runner), structuredClone(secondRunner)] : [structuredClone(runner)],
     boxes: [],
     sessions: structuredClone(entryHydrated ? sessions : sessions.filter((value) => value.id !== "s-approval")),
     reminders: structuredClone(reminders),

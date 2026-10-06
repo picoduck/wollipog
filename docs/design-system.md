@@ -823,10 +823,10 @@ A row of tools above the content they act on: search, filters, view switches and
 
 - `.toolbar`: one row, `display: flex; align-items: center; gap: var(--space-2); min-width: 0`.
   Every control in it uses one control height (§3.2).
-- The toolbar is only the row. Where it sits (the Board's filters, the Archive filter card, the
-  space above a machine list) is the region's decision, written as that region's rule on
-  `.toolbar` (`.board-wrap > .toolbar`). Regions do not define their own toolbar class. The
-  Sessions tab row's tools sit in its tab bar's `.tabs-tools` (§10.1).
+- The toolbar is only the row. Where it sits (the Archive filter card, the space above a machine
+  list) is the region's decision, written as that region's rule on `.toolbar`. Regions do not
+  define their own toolbar class. The Sessions tab row's tools, the Board's Machine and Agent
+  filters included, sit in its tab bar's `.tabs-tools` (§10.1); the Board has no toolbar of its own.
 - `.filter-btn` (`FilterButton`) is the phone "Filters" button that opens the filter sheet (§15.1):
   a `.btn` that says "Filters", with `aria-haspopup="dialog"`. While any filter is applied it is
   `.is-set`, which gives it the `--control-outline` edge of a chosen control (§3.1), and it shows
@@ -858,6 +858,12 @@ A path trail, such as the Files panel's folder path.
 
 At most **one bordered level** inside a page region. No card inside a card inside a card; a Surface
 may contain rows, never another Surface. Inside dialogs, Surfaces are allowed only for lists and code.
+
+The Sessions Board (#2201) is the model case: its columns have no border and no fill, so the cards
+are the only boxes. A column's header is its Title Case name after a 6px status dot (§11.1: Running
+info, Needs Input warning, Queued, Review and Done neutral) with a plain count (§11.4), never
+uppercased or tracked. An empty column folds to a 40px strip with its header on end and stays a
+drop target; while a card is dragged, every strip opens to full width.
 
 ### 5.2 Rows
 
@@ -1503,6 +1509,18 @@ compact widths, detail sub-views.
 - **Counts follow a search** (#2200): while the row's search holds a query, each tab counts its
   matching sessions and its badges count only matches, so a tab with none stays in place reading a
   plain 0 with no badge. Clearing the query restores the totals.
+- **Board filters** (`BoardFilterTools`, #2201): in Board mode `.tabs-tools` holds, before the
+  search, two `.btn.sm.ghost` menu buttons, "All Machines" and "All Agents" with a trailing
+  `ChevronDown`. Each names its choice once one is set (ending in an ellipsis past 200px) and is
+  `aria-pressed` while set. Each opens a §9.1 menu of `menuitemradio` rows with the trailing check:
+  All, then the machines by their disambiguated names, or each machine's agents in a group under
+  its name as a `MenuLabel`. An agent its machine reports unavailable is an `aria-disabled` row with
+  its `unavailableReason` (or "Not available on {machine}.") as the second line. A set filter adds a
+  quiet "10 of 29" (`--type-small`, `--text-faint`, tabular) and a ghost **Clear**. Below 1100px,
+  phones included until the phone Board (#2216), the two fold into one **Filters** menu button with
+  the plain count of active filters, `aria-pressed` while any is set and named "Filters, 1 Active";
+  its menu holds a Machine group and an Agent group, then **Clear Filters** after a separator while
+  any is set, so the row keeps room for the group tabs.
 
 ### 10.2 Segmented Control (Switch the Mode or Filter of the Same Content)
 
