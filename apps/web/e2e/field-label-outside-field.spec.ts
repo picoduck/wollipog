@@ -162,7 +162,7 @@ for (const theme of ["dark", "light"] as const) {
     test("Snooze (#2181) keeps its labels", async ({ page }) => {
       await page.goto("/sessions-board-e2e.html");
       await setTheme(page, theme);
-      await expect(page.locator(".inbox-list-pane > .toolbar")).toBeVisible();
+      await expect(page.locator(".page-tabs .tabs-bar")).toBeVisible();
       await page.locator(".inbox-row-shell", { hasText: "Running Session" }).getByRole("button").first().click();
       const directSnooze = page.getByRole("button", { name: "Snooze", exact: true }).first();
       if (await directSnooze.isVisible()) {

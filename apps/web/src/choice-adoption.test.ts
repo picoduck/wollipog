@@ -138,6 +138,10 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   // That toggle folded into ⋯ (#2159): a §9.1 MenuItem with the trailing check, as the checkbox
   // item it is. One on/off item, not a choice among options.
   ["components/PageHeader.tsx", "raw-radiogroup", 1],
+  // All Groups (#2180) is §9.1's radio-like menu: one MenuItem row per Sessions tab with the
+  // trailing check on the current one. Choosing a row selects that tab, so it navigates rather
+  // than sets a form value.
+  ["components/SessionGroupTabs.tsx", "raw-radiogroup", 1],
   ["components/EditorSelect.tsx", "raw-radiogroup", 1],
   ["components/InstanceSelector.tsx", "raw-radiogroup", 1],
   ["components/PodsView.tsx", "raw-radiogroup", 1],

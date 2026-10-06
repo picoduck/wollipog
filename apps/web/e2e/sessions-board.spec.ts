@@ -14,7 +14,7 @@ const PAGE = "/sessions-board-e2e.html";
 
 async function openHarness(page: Page, path = "/") {
   await page.goto(`${PAGE}?path=${encodeURIComponent(path)}`);
-  await expect(page.locator(".inbox-list-pane > .toolbar")).toBeVisible();
+  await expect(page.locator(".page-tabs .tabs-bar")).toBeVisible();
 }
 
 function harnessPath(page: Page): string | null {
@@ -23,10 +23,10 @@ function harnessPath(page: Page): string | null {
 
 /** The Sessions tab row's search field against its tabs, measured in the page. */
 function toolbarGeometry(page: Page) {
-  return page.locator(".inbox-list-pane > .toolbar").evaluate((toolbar) => {
+  return page.locator(".page-tabs .tabs-bar").evaluate((toolbar) => {
     const input = toolbar.querySelector<HTMLInputElement>(".inbox-search input")!;
     const search = input.closest(".inbox-search")!.getBoundingClientRect();
-    const tabs = toolbar.querySelector(".inbox-tabs")!.getBoundingClientRect();
+    const tabs = toolbar.querySelector(".tabs")!.getBoundingClientRect();
     // An input's scrollWidth ignores its placeholder, so the placeholder is measured in the input's font.
     const style = getComputedStyle(input);
     const context = document.createElement("canvas").getContext("2d")!;
@@ -481,7 +481,7 @@ test("long-pressed rows and cards pin their target, persist the state, and expos
   await expect(page.locator(".inbox-view.expanded")).toHaveCount(0);
 
   await page.reload();
-  await expect(page.locator(".inbox-list-pane > .toolbar")).toBeVisible();
+  await expect(page.locator(".page-tabs .tabs-bar")).toBeVisible();
   const persistedQueued = page.locator(".inbox-row-shell", { hasText: "Queued Session" });
   await expect(persistedQueued.getByLabel("Pinned Session")).toBeVisible();
   await persistedQueued.click({ button: "right" });

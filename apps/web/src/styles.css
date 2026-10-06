@@ -11868,18 +11868,6 @@ body.shell-dock-dragging * {
   flex-direction: column;
   container: list / inline-size;
 }
-/* The Sessions tab row: one tab-row tall (§10.1), padded only at its sides. */
-.inbox-list-pane > .toolbar {
-  min-height: var(--control-h-lg);
-  padding: 0 var(--space-3);
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-elev);
-}
-/* The Sessions tab row fills the toolbar's height, so the active underline sits on its hairline. */
-.inbox-tabs {
-  flex: 1;
-  align-self: stretch;
-}
 .inbox-order-update { white-space: nowrap; }
 .inbox-tab-group {
   position: relative;
@@ -11936,12 +11924,15 @@ body.shell-dock-dragging * {
   color: var(--accent);
   background: transparent;
 }
+/* Without hover, only the active Project tab shows ⋯, beside the tab rather than over it, so no
+   tab reserves room for it (#2180). It moves out of the tab row in #2199. */
 @media (hover: none), (pointer: coarse) {
+  .inbox-tab-group:not(:has(> .tab[aria-selected="true"])) > .inbox-project-menu { display: none; }
   .inbox-project-menu {
-    right: 0;
-    left: auto;
+    position: static;
     width: var(--control-h);
     opacity: 1;
+    transform: none;
   }
   .inbox-project-menu-trigger {
     flex: 0 0 var(--control-h);
@@ -11950,7 +11941,6 @@ body.shell-dock-dragging * {
     height: var(--control-h);
     pointer-events: auto;
   }
-  .inbox-tab-group.has-menu > .tab { padding-right: calc(var(--control-h) + var(--space-1)); }
 }
 .inbox-search {
   display: flex;
@@ -12553,9 +12543,12 @@ body.shell-dock-dragging * {
 }
 
 @media (max-width: 760px) {
-  .inbox-list-pane > .toolbar { align-items: stretch; flex-direction: column-reverse; padding: var(--space-2) var(--space-2) 0; }
-  /* The search field takes a full-width row of its own above the tabs (#2082). The tab row is a
-     column here, so the field keeps its own height. */
+  /* The search field takes a full-width row of its own above the tabs (#2082): the tab bar wraps,
+     and its tools come first. */
+  .page-tabs:has(> .tabs-bar) { height: auto; }
+  .tabs-bar { flex-wrap: wrap; row-gap: var(--space-2); height: auto; }
+  .tabs-bar > .tabs { flex: 1 1 0; height: var(--control-h-lg); }
+  .tabs-tools { order: -1; flex: 1 0 100%; margin-left: 0; }
   .inbox-search { width: 100%; min-width: 0; flex: none; margin-bottom: 0; }
   .inbox-search input { width: auto; flex: 1; opacity: 1; pointer-events: auto; }
   .inbox-search-key { display: inline-flex; }
@@ -16448,6 +16441,8 @@ body.shell-dock-dragging * {
   min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;
+  /* A tab scrolled into view stops clear of the edge fade, so its count stays legible. */
+  scroll-padding-inline: var(--space-6);
   scrollbar-width: none;
 }
 .tabs::-webkit-scrollbar { display: none; }
@@ -16484,6 +16479,39 @@ body.shell-dock-dragging * {
 }
 /* The row clips its overflow, so the ring is drawn inside the tab. */
 .tab:focus-visible { outline-offset: calc(-1 * var(--focus-width)); }
+/* A tab bar: the tab row, then a button listing every tab (All Groups), then `.tabs-tools`, the
+   row's trailing tools, at its far end. The tab row takes only the width its tabs need, so the
+   list button follows the last tab until the row overflows. */
+.tabs-bar {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  height: 100%;
+}
+.tabs-bar > .tabs {
+  flex: 0 1 auto;
+  align-self: stretch;
+}
+.tabs-bar > .tabs-all { flex: none; }
+.tabs-tools {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+/* A session group's name (#2180): at most 200px in a tab, ending in an ellipsis; the count and
+   badges after it never shrink. A name two groups share adds its machine as quiet text. */
+.group-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tab > .group-name { max-width: 200px; }
+.group-name-machine { color: var(--text-faint); font-weight: var(--weight-normal); }
 
 /* Counts (§11.4). A plain count sits 4px after its label; a count that needs the user is a 16px
    count badge, amber, or red for the danger tone. Zero is never shown in color. */

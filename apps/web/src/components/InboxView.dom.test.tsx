@@ -235,7 +235,7 @@ function snoozedCount(container: HTMLDivElement): string | null {
 
 /** The selected tab's count: active sessions with Snoozed off, snoozed ones with it on. */
 function selectedTabCount(container: HTMLDivElement): string | undefined {
-  return container.querySelector('.inbox-tabs .tab[aria-selected="true"] > .count')?.textContent ?? undefined;
+  return container.querySelector('.tabs-bar .tab[aria-selected="true"] > .count')?.textContent ?? undefined;
 }
 
 function rowTitles(container: HTMLDivElement): string[] {
@@ -401,7 +401,7 @@ test("InboxView preserves the server-authoritative Project count when reminders 
       pods: [],
     });
   });
-  const projectTab = [...container.querySelectorAll<HTMLElement>(".inbox-tabs .tab")]
+  const projectTab = [...container.querySelectorAll<HTMLElement>(".tabs-bar .tab")]
     .find((tab) => tab.textContent?.includes("Project One"));
   assert.equal(projectTab?.querySelector(".count")?.textContent, "7");
   await act(async () => { projectTab!.click(); });
@@ -467,7 +467,7 @@ test("Active and Snoozed badges follow the selected Project split and live remin
   assert.equal(selectedTabCount(container), "3");
   assert.equal(snoozedCount(container), "2");
 
-  const alphaTab = [...container.querySelectorAll<HTMLButtonElement>(".inbox-tabs .tab")]
+  const alphaTab = [...container.querySelectorAll<HTMLButtonElement>(".tabs-bar .tab")]
     .find((tab) => tab.textContent?.includes("Alpha"))!;
   await act(async () => { alphaTab.click(); });
   assert.equal(selectedTabCount(container), "1");
@@ -483,7 +483,7 @@ test("Active and Snoozed badges follow the selected Project split and live remin
   assert.equal(selectedTabCount(container), "0");
   assert.equal(snoozedCount(container), "2");
 
-  const betaTab = [...container.querySelectorAll<HTMLButtonElement>(".inbox-tabs .tab")]
+  const betaTab = [...container.querySelectorAll<HTMLButtonElement>(".tabs-bar .tab")]
     .find((tab) => tab.textContent?.includes("Beta"))!;
   await act(async () => { betaTab.click(); });
   assert.equal(selectedTabCount(container), "2");
@@ -544,7 +544,7 @@ test("the Sessions header's New Session uses the active tab's preset, and ⋯ ex
   assert.equal(accessibleText(newSession), "New Session", "the keycap is not part of the name");
   await act(async () => { newSession.click(); });
   assert.deepEqual(presets, [undefined], "All has no preset");
-  const projectTab = [...container.querySelectorAll<HTMLButtonElement>(".inbox-tabs .tab")]
+  const projectTab = [...container.querySelectorAll<HTMLButtonElement>(".tabs-bar .tab")]
     .find((tab) => tab.textContent?.includes("Project One"))!;
   await act(async () => { projectTab.click(); });
   await act(async () => { newSession.click(); });
@@ -627,7 +627,7 @@ test("group tabs draw blocked and stalled counts as aria-hidden badges and name 
       pods: [],
     });
   });
-  const tab = (name: string) => [...container.querySelectorAll<HTMLElement>(".inbox-tabs .tab")]
+  const tab = (name: string) => [...container.querySelectorAll<HTMLElement>(".tabs-bar .tab")]
     .find((candidate) => candidate.textContent?.startsWith(name))!;
 
   const alphaTab = tab("Alpha");
@@ -647,6 +647,92 @@ test("group tabs draw blocked and stalled counts as aria-hidden badges and name 
   assertNoDomNode(betaTab.querySelector(".count-badge"), "a tab with nothing blocked or stalled draws no badge");
   assert.equal(accessibleText(betaTab), "Beta1");
   assert.doesNotMatch(accessibleText(betaTab), /Blocked|Stalled/);
+
+  // #2180: the tablist names what it holds, and the tooltip gives the full name, the breakdown in
+  // sentence case and the shortcut. The stalled session is also running.
+  assert.equal(alphaTab.closest('[role="tablist"]')?.getAttribute("aria-label"), "Session Groups");
+  assert.equal(alphaTab.title, "Alpha\n3 sessions: 2 need you, 1 stalled, 1 running\nSwitch group (Tab / Shift+Tab)");
+  assert.equal(betaTab.title, "Beta\n1 session\nSwitch group (Tab / Shift+Tab)");
+});
+
+test("two groups with one name each name their machine in the tab, All Groups and their accessible names (#2180)", async () => {
+  const { container, root } = mountTestRoot();
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "inbox-duplicate-groups-test",
+    runtimeKey: "inbox-duplicate-groups-test:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  const project = (id: string, name: string, runnerId: string): ProjectView => ({
+    id,
+    name,
+    hidden: false,
+    locations: [{
+      id: `${id}-location`, projectId: id, runnerId, workspaceId: `${id}-workspace`, name, path: `/src/${id}`,
+      source: "reported", availability: "available", isDefault: true, createdAt: 1, updatedAt: 1,
+    }],
+    activeSessionCount: 1,
+    unarchivedSessionCount: 1,
+    totalSessionCount: 1,
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  const runner = (runnerId: string, displayName: string) => ({
+    runnerId, displayName, hostname: `${runnerId}.local`, os: "linux" as const, version: "1", status: "online" as const,
+    agents: [], workspaces: [], connectedAt: 1, lastSeen: 1, protocolVersion: PROTOCOL_VERSION,
+  });
+
+  await act(async () => {
+    root.render(
+      <StoreProvider connection={connection} navigation={navigation}>
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
+      </StoreProvider>,
+    );
+  });
+  await act(async () => {
+    socket.push({
+      type: "snapshot",
+      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+      runners: [runner("runner-a", "Studio Mac"), runner("runner-b", "Build Server 02")],
+      boxes: [],
+      sessions: [
+        session("docs-a", 3, { projectId: "docs-a", runnerId: "runner-a" }),
+        session("docs-b", 2, { projectId: "docs-b", runnerId: "runner-b" }),
+        session("api", 1, { projectId: "api", runnerId: "runner-a" }),
+      ],
+      projects: [project("docs-a", "Docs Site", "runner-a"), project("docs-b", "Docs Site", "runner-b"), project("api", "API", "runner-a")],
+      runs: [],
+      pods: [],
+    });
+  });
+
+  const tabs = [...container.querySelectorAll<HTMLElement>(".tabs-bar .tab")];
+  assert.deepEqual(tabs.map(accessibleText), [
+    "All3", "API1", "Docs Site on Studio Mac1", "Docs Site on Build Server 021", "No Project0",
+  ]);
+  const docsTab = tabs[3]!;
+  assert.equal(docsTab.querySelector(".group-name-machine")?.textContent, " on Build Server 02",
+    "the machine is quiet text inside the capped label");
+  assert.match(docsTab.title, /^Docs Site on Build Server 02\n/);
+  assertNoDomNode(tabs[1]!.querySelector(".group-name-machine"), "a unique name stays bare");
+
+  const allGroups = container.querySelector<HTMLButtonElement>('.tabs-bar > button[aria-label="All Groups"]')!;
+  assert.equal(allGroups.title, "All Groups");
+  await act(async () => { allGroups.click(); });
+  const menu = domWindow.document.querySelector('[role="menu"][aria-label="All Groups"]')!;
+  const rows = [...menu.querySelectorAll('[role="menuitemradio"]')] as unknown as HTMLButtonElement[];
+  assert.deepEqual(rows.map((row) => row.getAttribute("aria-label")), [
+    "All, 3", "API, 1", "Docs Site on Studio Mac, 1", "Docs Site on Build Server 02, 1", "No Project, 0",
+  ]);
+  assert.deepEqual(rows.map((row) => row.getAttribute("aria-checked")), ["true", "false", "false", "false", "false"]);
+
+  // Choosing a row selects its tab and returns focus to All Groups.
+  await act(async () => { rows[3]!.click(); });
+  assertNoDomNode(domWindow.document.querySelector('[role="menu"][aria-label="All Groups"]'), "choosing closes the menu");
+  assert.equal(container.querySelector('.tabs-bar .tab[aria-selected="true"]'), docsTab);
+  assert.equal(domWindow.document.activeElement, allGroups);
+  assert.deepEqual(rowTitles(container), ["Session docs-b"]);
 });
 
 // #2051: a durable Project archive runs on the server over every unarchived session, so the
@@ -702,7 +788,7 @@ test("a Project's archive confirmation lists its sessions from Active and Snooze
       pods: [],
     });
   });
-  const alphaTab = [...container.querySelectorAll<HTMLButtonElement>(".inbox-tabs .tab")]
+  const alphaTab = [...container.querySelectorAll<HTMLButtonElement>(".tabs-bar .tab")]
     .find((tab) => tab.textContent?.includes("Alpha"))!;
   await act(async () => { alphaTab.click(); });
   const body = domWindow.document.body as unknown as HTMLElement;
@@ -772,9 +858,9 @@ test("the tab the URL names survives widening from a phone to a desktop that rem
       pods: [],
     });
   });
-  const tab = (name: string) => [...container.querySelectorAll<HTMLButtonElement>(".inbox-tabs .tab")]
+  const tab = (name: string) => [...container.querySelectorAll<HTMLButtonElement>(".tabs-bar .tab")]
     .find((candidate) => candidate.textContent?.includes(name))!;
-  const selected = () => container.querySelector('.inbox-tabs .tab[aria-selected="true"]')?.textContent ?? "";
+  const selected = () => container.querySelector('.tabs-bar .tab[aria-selected="true"]')?.textContent ?? "";
 
   // The desktop remembers Alpha.
   await act(async () => { tab("Alpha").click(); });
@@ -1590,7 +1676,7 @@ test("board mode shares the Sessions toolbar scope and toggles back to the list"
     "the canvas is programmatically focusable so the F6 list zone still has a landing spot");
   assertNoDomNode(container.querySelector(".inbox-list"), "and not the list");
   assertNoDomNode(container.querySelector(".inbox-splitter"), "the preview split belongs to list mode");
-  assert.ok(container.querySelector(".inbox-tabs"), "the shared split tabs stay above the board");
+  assert.ok(container.querySelector(".tabs-bar"), "the shared split tabs stay above the board");
   assert.equal(container.querySelectorAll(".board .card").length, 2,
     "archived sessions never reach the board columns");
 
@@ -2577,7 +2663,7 @@ test("the setup suggestion is one notice above an eligible Project's list, never
   });
   const setupNotices = () => [...container.querySelectorAll('[aria-label^="Set Up"]')];
   const openTab = async (name: string) => {
-    const tab = [...container.querySelectorAll<HTMLElement>(".inbox-tabs .tab")].find((candidate) => candidate.textContent?.includes(name));
+    const tab = [...container.querySelectorAll<HTMLElement>(".tabs-bar .tab")].find((candidate) => candidate.textContent?.includes(name));
     assert.ok(tab, `missing the ${name} tab`);
     await act(async () => { tab.click(); });
   };

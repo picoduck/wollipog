@@ -12,6 +12,7 @@ const rail = readFileSync(new URL("./components/Rail.tsx", import.meta.url), "ut
 const railTooltip = readFileSync(new URL("./components/RailTooltip.tsx", import.meta.url), "utf8");
 const settingsTrigger = readFileSync(new URL("./components/SettingsTrigger.tsx", import.meta.url), "utf8");
 const inbox = readFileSync(new URL("./components/InboxView.tsx", import.meta.url), "utf8");
+const groupTabs = readFileSync(new URL("./components/SessionGroupTabs.tsx", import.meta.url), "utf8");
 const inboxList = readFileSync(new URL("./components/InboxList.tsx", import.meta.url), "utf8");
 const inboxRow = readFileSync(new URL("./components/InboxRow.tsx", import.meta.url), "utf8");
 const inboxShortcutRail = readFileSync(new URL("./components/InboxShortcutRail.tsx", import.meta.url), "utf8");
@@ -289,7 +290,7 @@ test("Inbox project tabs stay balanced, hide overflow chrome, and reveal context
     "focus returns to the Inbox once the list it should land on is the one that is mounted");
   assert.match(inbox, /onKeyDown=\{\(event\) => \{[\s\S]*event\.key !== "Escape"[\s\S]*exitSearch\(\)/,
     "Escape exits the search field even when the query is already empty");
-  assert.match(inbox, /inbox-tab-group\$\{hasMenu \? " has-menu" : ""\}/,
+  assert.match(groupTabs, /<div className="inbox-tab-group" role="presentation"[\s\S]{0,1200}\{menu\}\s*<\/div>/,
     "project actions are owned by their tab instead of a separate layout item");
   // The shared menu surface (#1803) is the portal: ProjectSplitMenu renders it.
   assert.match(projectSplitMenu, /<MenuSurface/,
@@ -298,15 +299,19 @@ test("Inbox project tabs stay balanced, hide overflow chrome, and reveal context
     "the shared menu surface is portalled to <body>");
   assert.match(css, /\.menu,\s*\.popover\s*\{[^}]*overflow-y:\s*auto;/,
     "capped Project action menus scroll instead of painting outside their surface");
-  // The toolbar is one tab-row tall (§10.1): the 40px tabs fill it, so it pads only its sides.
-  assert.match(css, /\.inbox-list-pane > \.toolbar\s*\{[^}]*min-height:\s*var\(--control-h-lg\);[^}]*padding:\s*0 var\(--space-3\);/);
-  assert.match(css, /\n\.toolbar\s*\{[^}]*align-items:\s*center;/);
+  // The group tabs are the page header's tab row (§4.2, #2180): one tab-row tall, on its hairline.
+  assert.match(inbox, /<PageHeader[\s\S]*tabs=\{\(\s*<SessionGroupTabs/, "the group tabs sit in the page header's tab slot");
+  assert.match(css, /\.tabs-bar\s*\{[^}]*flex:\s*1;[^}]*align-items:\s*center;[^}]*height:\s*100%;/);
   // The strip is the shared tab row (§10.1), which scrolls sideways without scrollbar chrome.
-  assert.match(inbox, /<TabList[^>]*className="inbox-tabs"/, "the Project tabs are the shared tab row");
+  assert.match(groupTabs, /<TabList label="Session Groups">/, "the group tabs are the shared tab row");
   assert.match(css, /\.tabs\s*\{[^}]*overflow-x:\s*auto;[^}]*overflow-y:\s*hidden;[^}]*scrollbar-width:\s*none;/);
   assert.match(css, /\.tabs::-webkit-scrollbar\s*\{\s*display:\s*none;/);
-  assert.match(css, /@media \(hover: none\), \(pointer: coarse\)[\s\S]*\.inbox-project-menu\s*\{[^}]*width:\s*var\(--control-h\);[\s\S]*\.inbox-project-menu-trigger\s*\{[^}]*flex:\s*0 0 var\(--control-h\);[^}]*min-width:\s*var\(--control-h\);[^}]*height:\s*var\(--control-h\);[\s\S]*\.inbox-tab-group\.has-menu > \.tab\s*\{\s*padding-right:\s*calc\(var\(--control-h\) \+ var\(--space-1\)\);/,
-    "touch layouts reserve enough room for the always-visible Project action target");
+  assert.match(css, /@media \(hover: none\), \(pointer: coarse\)[\s\S]*\.inbox-project-menu\s*\{[^}]*position:\s*static;[^}]*width:\s*var\(--control-h\);[\s\S]*\.inbox-project-menu-trigger\s*\{[^}]*flex:\s*0 0 var\(--control-h\);[^}]*min-width:\s*var\(--control-h\);[^}]*height:\s*var\(--control-h\);/,
+    "on touch the active Project tab's action target is a full control beside the tab");
+  assert.match(css, /\.inbox-tab-group:not\(:has\(> \.tab\[aria-selected="true"\]\)\) > \.inbox-project-menu \{ display: none; \}/,
+    "only the active Project tab shows its action target on touch");
+  assert.doesNotMatch(css, /\.inbox-tab-group[^{]*> \.tab\s*\{\s*padding-right/,
+    "no tab reserves room for the action target (#2180)");
   // A §10.1 tab has no side padding, so an overlay would cover a short tab's middle and take its
   // click. On fine pointers ⋯ appears in the 24px gap after the tab, so the tabs stay evenly spaced.
   assert.match(css, /\.inbox-project-menu\s*\{[^}]*left:\s*100%;[^}]*width:\s*var\(--space-6\);/,

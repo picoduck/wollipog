@@ -191,6 +191,33 @@ for (let index = 0; index < moreBlocked; index += 1) {
   }));
 }
 
+// Ten session groups on two machines (#2180): one with a 90-character name, two both named Docs
+// Site, and one with a session waiting on the user beside a running one.
+const groups = new URLSearchParams(location.search).has("groups");
+const secondRunner: RunnerView = { ...structuredClone(runner), runnerId: "runner-2", hostname: "build-02", displayName: "Build Server 02" };
+if (groups) {
+  runner.displayName = "Studio Mac";
+  const group = (index: number, workspaceName: string, runnerId = runner.runnerId, overrides: Partial<SessionView> = {}) =>
+    session(`s-group-${index}`, `${workspaceName} Session`, "running", {
+      runnerId,
+      workspaceId: `workspace-group-${index}`,
+      workspaceName,
+      ...overrides,
+    });
+  sessions.push(
+    group(1, "Platform Reliability — Incident Follow-Ups, Postmortem Actions and Platform Hardening 2026"),
+    group(2, "Docs Site"),
+    group(3, "Docs Site", secondRunner.runnerId),
+    group(4, "Billing", runner.runnerId, { status: "running" }),
+    group(5, "Billing", runner.runnerId, { workspaceId: "workspace-group-4", status: "input_required",
+      pendingApproval: { requestId: "group-5", title: "Approve Command", options: [] } as never }),
+    group(6, "Design System"),
+    group(7, "Infrastructure"),
+    group(8, "Marketing Site"),
+    group(9, "Mobile App", secondRunner.runnerId),
+  );
+}
+
 if (empty) sessions.splice(0);
 
 const reminders: SessionReminderView[] = [
@@ -233,7 +260,7 @@ function snapshot(): UiSnapshotMessage {
       sessionReminders: true,
       indefiniteSessionReminders: true,
     },
-    runners: [structuredClone(runner)],
+    runners: groups ? [structuredClone(runner), structuredClone(secondRunner)] : [structuredClone(runner)],
     boxes: [],
     sessions: structuredClone(sessions),
     reminders: structuredClone(reminders),

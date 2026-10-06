@@ -25,7 +25,7 @@ for (const pointer of ["fine", "coarse"] as const) {
     test(`the Sessions and Connections tabs are ${tab}px, underlined rather than filled`, async ({ page }) => {
       await page.goto(shell("/inbox"));
       expect(await coarse(page)).toBe(pointer === "coarse");
-      for (const height of await heights(page, ".inbox-tabs .tab")) expect(height).toBe(tab);
+      for (const height of await heights(page, ".tabs-bar .tab")) expect(height).toBe(tab);
 
       await page.goto(shell("/connections"));
       const tabs = page.getByRole("tablist", { name: "Connection Settings" }).getByRole("tab");

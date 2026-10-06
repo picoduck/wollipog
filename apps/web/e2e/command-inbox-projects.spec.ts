@@ -490,7 +490,7 @@ test("desktop can apply a pending Inbox order without losing selection or scroll
   expect(selectedKey).not.toBeNull();
   // The page header's controls and the tab row's search field. The pending-order button is
   // conditional, so none of these may move when it appears or leaves (#1675).
-  const stationaryToolbar = () => page.locator(".page-header .page-actions > *, .inbox-list-pane > .toolbar > .inbox-search")
+  const stationaryToolbar = () => page.locator(".page-header .page-actions > *, .tabs-tools > .inbox-search")
     .evaluateAll((elements) => elements.map((element) => {
       const rect = element.getBoundingClientRect();
       return { name: element.className, left: rect.left, right: rect.right };
@@ -511,7 +511,7 @@ test("desktop can apply a pending Inbox order without losing selection or scroll
   await expect(applyOrder).toBeVisible();
   expect(await stationaryToolbar()).toEqual(toolbarWithoutButton);
   const applyOrderBox = await applyOrder.boundingBox();
-  const searchBox = await page.locator(".inbox-list-pane > .toolbar > .inbox-search").boundingBox();
+  const searchBox = await page.locator(".tabs-tools > .inbox-search").boundingBox();
   expect(applyOrderBox && searchBox && applyOrderBox.x + applyOrderBox.width <= searchBox.x).toBe(true);
   // The toolbar gives the button its width from the Project tabs, not by clipping the button.
   expect(await applyOrder.evaluate((button) => button.scrollWidth <= button.clientWidth)).toBe(true);
@@ -1768,7 +1768,7 @@ test.describe("coarse pointer Project actions", () => {
     expect(box).not.toBeNull();
     const visibleTarget = await trigger.evaluate((element) => {
       const target = element.getBoundingClientRect();
-      const clippingRow = element.closest(".inbox-tabs")!.getBoundingClientRect();
+      const clippingRow = element.closest(".tabs")!.getBoundingClientRect();
       return {
         width: Math.max(0, Math.min(target.right, clippingRow.right) - Math.max(target.left, clippingRow.left)),
         height: Math.max(0, Math.min(target.bottom, clippingRow.bottom) - Math.max(target.top, clippingRow.top)),

@@ -1451,8 +1451,16 @@ compact widths, detail sub-views.
 - Counts: 4px after the label, `--type-micro` `--text-faint`, tabular. An attention count uses a warning
   count badge (§11.4) instead.
 - Overflow: horizontal scroll with a 24px edge fade on the clipped side; the active tab scrolls into
-  view on load. On phones, more than 4 tabs become a Select-styled "view picker" in the app bar.
+  view on load, clear of the fade. On phones, more than 4 tabs become a Select-styled "view picker"
+  in the app bar.
 - Tabs change the URL.
+- **Tab bar** (`.tabs-bar`, Sessions' groups, #2180): a row of user-named tabs that can run long.
+  The tab row, then a `.icon-btn.sm` list button (`ChevronDown`, "All Groups") that opens a §9.1
+  menu of `menuitemradio` rows, one per tab in tab order (the name, the plain count, its badges and
+  the trailing check on the current one), then `.tabs-tools` at the far end for the row's tools
+  (search, filters). A tab's label is at most 200px and ends in an ellipsis, with the full name in
+  its tooltip; the count and badges never truncate. Two tabs with the same name add what tells them
+  apart as quiet text ("Docs Site on Build Server 02").
 
 ### 10.2 Segmented Control (Switch the Mode or Filter of the Same Content)
 

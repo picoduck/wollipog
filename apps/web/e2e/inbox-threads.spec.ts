@@ -13,7 +13,7 @@ const EVIDENCE = ".agents/tmp/inbox-threads";
 
 async function openList(page: Page, path = "/") {
   await page.goto(`${PAGE}&path=${encodeURIComponent(path)}`);
-  await expect(page.locator(".inbox-list-pane > .toolbar")).toBeVisible();
+  await expect(page.locator(".page-tabs .tabs-bar")).toBeVisible();
 }
 
 const titles = (page: Page) => page.locator(".inbox-row-title").allTextContents();
@@ -92,7 +92,7 @@ test("t, Shift+T, p, and the arrows drive the thread, the chevron is the pointer
   await expect(parentRow(page).locator(".inbox-thread-family-text")).toHaveText("4 Children · 2 Awaiting Input");
   await page.screenshot({ path: `${EVIDENCE}/desktop-collapsed.png`, fullPage: true });
   await page.reload();
-  await expect(page.locator(".inbox-list-pane > .toolbar")).toBeVisible();
+  await expect(page.locator(".page-tabs .tabs-bar")).toBeVisible();
   await expect(page.locator(".inbox-row-shell.thread-child")).toHaveCount(0);
   await expect(parentRow(page).locator(".inbox-thread-toggle")).toHaveAttribute("aria-expanded", "false");
 
@@ -262,7 +262,7 @@ test("the mobile thread toggle confines paint beside both provider icons at both
   const cdp = await enableTouch(page);
   for (const provider of ["claude", "openai"] as const) {
     await page.goto(`${PAGE}&thread-provider=${provider}`);
-    await expect(page.locator(".inbox-list-pane > .toolbar")).toBeVisible();
+    await expect(page.locator(".page-tabs .tabs-bar")).toBeVisible();
     expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
     for (const density of ["compact", "comfortable"] as const) {
       await page.evaluate((value) => {

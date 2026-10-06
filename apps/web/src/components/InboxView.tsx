@@ -1,6 +1,5 @@
 import { type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { prioritizedPendingRequests, type SessionReminderView, type SessionView, type SetSessionReminderRequest, type SnoozeScheduleInput, type SourceLocation } from "@wollipog/protocol";
-import { TabList } from "./Tabs.js";
 import { archiveAndStopMessage, archiveResultMessage, archiveResultTone, sessionArchiveRequiresStop } from "../archive-actions.js";
 import { sessionArchiveActionRefusal, sessionCommandRefusal } from "../session-command-permissions.js";
 import {
@@ -67,19 +66,13 @@ import { worktreeSetupNoticeSessionIds } from "../worktree-setup-notice.js";
 import { ProviderLoginCard } from "./ProviderLoginCard.js";
 import { RecommendedSkillsNotice } from "./RecommendedSkillsNotice.js";
 import { ProjectSetupSuggestion } from "./WorktreeSetupNotice.js";
-import { CountBadge } from "./CountBadge.js";
+import { SessionGroupTabs } from "./SessionGroupTabs.js";
+import { sessionGroupLabels, sessionGroupRunnerId } from "../session-groups.js";
+import { runnerDisplay } from "../runners.js";
 
 const PROJECT_PIN_KEY = "wollipog.projects.pinned";
 const SEEN_DWELL_MS = 1_500;
 const inboxScrollPositions = new Map<string, number>();
-
-/** A tab's attention counts in words ("2 Blocked, 1 Stalled"), naming only the nonzero ones. */
-function attentionWords({ blockedCount, stalledCount }: Pick<InboxSplit, "blockedCount" | "stalledCount">): string {
-  return [
-    blockedCount > 0 ? `${blockedCount} Blocked` : "",
-    stalledCount > 0 ? `${stalledCount} Stalled` : "",
-  ].filter(Boolean).join(", ");
-}
 
 export function filterInboxSplitsForReminderMode(
   baseSplits: readonly InboxSplit[],
@@ -205,6 +198,7 @@ export function InboxView({
   const stalledIndex = useStoreSelector((state) => state.stalledSessionIds);
   const stalledRevision = useStoreSelector((state) => state.stalledRevision);
   const runners = useStoreSelector((state) => state.runners);
+  const boxes = useStoreSelector((state) => state.boxes);
   const worktreeSetupConfigSupported = useStoreSelector((state) => state.worktreeSetupConfigSupported);
   const worktreeSetupNoticeDismissals = useStoreSelector((state) => state.worktreeSetupNoticeDismissals);
   const snapshotLoaded = useStoreSelector((state) => state.snapshotLoaded);
@@ -432,6 +426,11 @@ export function InboxView({
     snoozed: filterInboxSplitsForReminderMode(baseSplits, reminders, "snoozed", stalledSessionIds),
   }), [baseSplits, reminders, stalledSessionIds]);
   const splits = reminderSplits[reminderMode];
+  // Two groups with one name each add their machine (#2180).
+  const groupLabels = useMemo(() => {
+    const boxByRunner = new Map([...boxes.values()].map((box) => [box.runnerId, box]));
+    return sessionGroupLabels(baseSplits, (runnerId) => runnerDisplay(runners.get(runnerId), boxByRunner.get(runnerId), runnerId).name);
+  }, [baseSplits, boxes, runners]);
   const activeSplit = inboxSplitByKey(splits, inbox.splitKey);
   const snoozedActiveSplit = inboxSplitByKey(reminderSplits.snoozed, inbox.splitKey);
   const snoozedCount = snoozedActiveSplit?.count ?? 0;
@@ -1343,6 +1342,79 @@ export function InboxView({
           ...(onOpenShortcuts ? [{ label: "Keyboard Shortcuts", onClick: onOpenShortcuts }] : []),
         ]}
         primary={{ label: "New Session", shortcut: shortcutDisplay("new-session"), onClick: newSession }}
+        tabs={(
+          <SessionGroupTabs
+            splits={splits}
+            labels={groupLabels}
+            activeKey={activeSplit?.key ?? null}
+            snoozed={reminderMode === "snoozed"}
+            onSelect={selectSplit}
+            onTabKeyDown={onTabKeyDown}
+            tabRef={(key, node) => {
+              if (node) tabRefs.current.set(key ?? "all", node);
+              else tabRefs.current.delete(key ?? "all");
+            }}
+            tabMenu={(split, active) => {
+              if (split.project === null) return null;
+              const durableProjectId = split.project.kind === "durable" ? split.project.project.id : undefined;
+              const pinned = split.key !== null && (pinnedProjects.has(split.key) ||
+                (split.project.kind === "durable" && split.project.legacyKeys.some((key) => pinnedProjects.has(key))));
+              return (
+                <ProjectSplitMenu
+                  split={split}
+                  unfilteredSplit={baseSplits.find((candidate) => candidate.key === split.key)}
+                  active={active}
+                  runner={runners.get(sessionGroupRunnerId(split) ?? "")}
+                  stopBeforeArchiveSupported={stopBeforeArchiveSupported}
+                  pinned={pinned}
+                  onPinnedChange={(enabled) => setProjectPinned(split, enabled)}
+                  onNewSession={(preset) => onNewSession?.(preset)}
+                  onManageProject={durableProjectId ? () => navigate({ name: "projects", id: durableProjectId }) : undefined}
+                />
+              );
+            }}
+            tools={(
+              <>
+                <span className="sr-only" aria-live="polite" aria-atomic="true">
+                  {orderUpdateAvailable ? "A newer Sessions order is available." : ""}
+                </span>
+                {orderUpdateAvailable && (
+                  <button
+                    type="button"
+                    className="btn sm inbox-order-update"
+                    title="Apply the latest session order."
+                    onClick={applyCanonicalOrder}
+                  >
+                    Apply New Order
+                  </button>
+                )}
+                <label className={`inbox-search${query ? " has-query" : ""}`}>
+                  <span className="sr-only">Search Sessions</span>
+                  <SearchIcon size={16} />
+                  <input
+                    value={query}
+                    onChange={(event) => changeQuery(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey &&
+                          !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229 && !isMobile && !boardMode) {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        setSearchFocusPending(true);
+                        return;
+                      }
+                      if (event.key !== "Escape") return;
+                      event.preventDefault();
+                      event.stopPropagation();
+                      exitSearch();
+                    }}
+                    placeholder="Search sessions"
+                  />
+                  <kbd className="inbox-search-key" aria-hidden="true">/</kbd>
+                </label>
+              </>
+            )}
+          />
+        )}
       />
     )}
     <div className={`inbox-view${expanded ? " expanded" : ""}${boardMode ? " board-mode" : ""}`} ref={viewRef} data-focus-zone={expanded ? "main" : "list"}>
@@ -1353,98 +1425,6 @@ export function InboxView({
         aria-hidden={expanded || undefined}
         inert={expanded || undefined}
       >
-        <div className="toolbar">
-          <TabList className="inbox-tabs" label="Sessions Tabs">
-            {splits.map((split) => {
-              const active = split.key === activeSplit?.key;
-              const hasMenu = split.project !== null;
-              const durableProjectId = split.project?.kind === "durable" ? split.project.project.id : undefined;
-              const pinned = split.key !== null && (pinnedProjects.has(split.key) ||
-                (split.project?.kind === "durable" && split.project.legacyKeys.some((key) => pinnedProjects.has(key))));
-              const attention = attentionWords(split);
-              return (
-                <div className={`inbox-tab-group${hasMenu ? " has-menu" : ""}`} role="presentation" key={split.key ?? "all"}>
-                  <button
-                    type="button"
-                    ref={(node) => {
-                      const refKey = split.key ?? "all";
-                      if (node) tabRefs.current.set(refKey, node);
-                      else tabRefs.current.delete(refKey);
-                    }}
-                    role="tab"
-                    aria-selected={active}
-                    tabIndex={active ? 0 : -1}
-                    className="tab"
-                    onClick={() => selectSplit(split.key)}
-                    onKeyDown={(event) => onTabKeyDown(event, split.key)}
-                    title="Switch Sessions tab (Tab / Shift+Tab)"
-                  >
-                    {split.name}
-                    <span className="count">{split.count}</span>
-                    {/* Attention counts are count badges (§10.1, §11.4): amber for blocked, red for
-                        stalled. The badges are aria-hidden, so the tab's name says them in words. */}
-                    <CountBadge count={split.blockedCount} />
-                    <CountBadge count={split.stalledCount} tone="danger" />
-                    {attention && <span className="sr-only">, {attention}</span>}
-                  </button>
-                  {hasMenu && (
-                    <ProjectSplitMenu
-                      split={split}
-                      unfilteredSplit={baseSplits.find((candidate) => candidate.key === split.key)}
-                      active={active}
-                      runner={runners.get(
-                        split.project?.kind === "durable"
-                          ? split.project.primaryLocation?.runnerId ?? ""
-                          : split.project?.runnerId ?? "",
-                      )}
-                      stopBeforeArchiveSupported={stopBeforeArchiveSupported}
-                      pinned={pinned}
-                      onPinnedChange={(enabled) => setProjectPinned(split, enabled)}
-                      onNewSession={(preset) => onNewSession?.(preset)}
-                      onManageProject={durableProjectId ? () => navigate({ name: "projects", id: durableProjectId }) : undefined}
-                    />
-                  )}
-                </div>
-              );
-            })}
-          </TabList>
-          <span className="sr-only" aria-live="polite" aria-atomic="true">
-            {orderUpdateAvailable ? "A newer Sessions order is available." : ""}
-          </span>
-          {orderUpdateAvailable && (
-            <button
-              type="button"
-              className="btn sm inbox-order-update"
-              title="Apply the latest session order."
-              onClick={applyCanonicalOrder}
-            >
-              Apply New Order
-            </button>
-          )}
-          <label className={`inbox-search${query ? " has-query" : ""}`}>
-            <span className="sr-only">Search Sessions</span>
-            <SearchIcon size={16} />
-            <input
-              value={query}
-              onChange={(event) => changeQuery(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey &&
-                    !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229 && !isMobile && !boardMode) {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  setSearchFocusPending(true);
-                  return;
-                }
-                if (event.key !== "Escape") return;
-                event.preventDefault();
-                event.stopPropagation();
-                exitSearch();
-              }}
-              placeholder="Search sessions"
-            />
-            <kbd className="inbox-search-key" aria-hidden="true">/</kbd>
-          </label>
-        </div>
         {machineProviderLogins.length > 0 && (
           <section className="inbox-provider-logins" aria-label="Machine Provider Sign-Ins">
             {machineProviderLogins.map(({ runnerId, login }) => (
