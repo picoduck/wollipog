@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { pairingUrlForOrigin, resolvePublicOrigin, validatePublicOrigin } from "./public-origin.js";
+import { resolvePublicOrigin, validatePublicOrigin } from "./public-origin.js";
 
 test("resolvePublicOrigin accepts bare https origins and normalizes trailing slashes", () => {
   assert.deepEqual(resolvePublicOrigin("https://wollipog.example.ts.net/"), {
@@ -40,9 +40,4 @@ test("resolvePublicOrigin warns about plain HTTP beyond loopback but not on loop
   const local = resolvePublicOrigin("http://localhost:4317");
   assert.equal(local.origin, "http://localhost:4317");
   assert.equal(local.warning, null);
-});
-
-test("pairingUrlForOrigin embeds the token in the fragment only", () => {
-  assert.equal(pairingUrlForOrigin("https://host.example", "tok_abc"), "https://host.example/#pair=tok_abc");
-  assert.equal(pairingUrlForOrigin("https://host.example///", "tok_abc"), "https://host.example/#pair=tok_abc");
 });

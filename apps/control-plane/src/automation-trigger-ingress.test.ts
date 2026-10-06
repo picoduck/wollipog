@@ -5,7 +5,6 @@ import {
   AUTOMATION_TRIGGER_MAX_BODY_BYTES,
   AUTOMATION_TRIGGER_MAX_PARAMETER_BYTES,
   AUTOMATION_TRIGGER_MAX_PROMPT_BYTES,
-  AUTOMATION_TRIGGER_MEDIA_TYPE,
   LEGACY_AUTOMATION_TRIGGER_MEDIA_TYPE,
   automationTriggerBodySha256,
   newAutomationTriggerSecret,
@@ -138,15 +137,13 @@ test("trigger body parser rejects malformed JSON-subset syntax and strings", () 
 });
 
 test("the registered raw-body parser enforces the published HTTP size ceiling", async () => {
-  assert.equal(AUTOMATION_TRIGGER_MEDIA_TYPE, WOLLIPOG_AUTOMATION_TRIGGER_MEDIA_TYPE,
-    "the post-release producer must publish the Wollipog identity");
   const app = Fastify();
   registerAutomationTriggerContentTypeParser(app);
   app.post("/hook", { bodyLimit: AUTOMATION_TRIGGER_MAX_BODY_BYTES }, async (request, reply) => (
     Buffer.isBuffer(request.body) ? reply.code(204).send() : reply.code(415).send()
   ));
   const accepted = await app.inject({
-    method: "POST", url: "/hook", headers: { "content-type": AUTOMATION_TRIGGER_MEDIA_TYPE },
+    method: "POST", url: "/hook", headers: { "content-type": WOLLIPOG_AUTOMATION_TRIGGER_MEDIA_TYPE },
     payload: Buffer.from('{"eventId":"x"}'),
   });
   assert.equal(accepted.statusCode, 204);
@@ -156,7 +153,7 @@ test("the registered raw-body parser enforces the published HTTP size ceiling", 
   });
   assert.equal(legacy.statusCode, 204);
   const oversized = await app.inject({
-    method: "POST", url: "/hook", headers: { "content-type": AUTOMATION_TRIGGER_MEDIA_TYPE },
+    method: "POST", url: "/hook", headers: { "content-type": WOLLIPOG_AUTOMATION_TRIGGER_MEDIA_TYPE },
     payload: Buffer.alloc(AUTOMATION_TRIGGER_MAX_BODY_BYTES + 1, 0x61),
   });
   assert.equal(oversized.statusCode, 413);

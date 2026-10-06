@@ -45,8 +45,3 @@ export function validatePublicOrigin(value: string): PublicOriginResolution {
     : null;
   return { origin, warning, error: null };
 }
-
-/** A complete pairing link for a browser or the desktop app's Add Remote Instance dialog. */
-export function pairingUrlForOrigin(origin: string, token: string): string {
-  return `${origin.replace(/\/+$/, "")}/#pair=${token}`;
-}

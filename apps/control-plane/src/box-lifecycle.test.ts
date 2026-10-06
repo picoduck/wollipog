@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { SessionView } from "@wollipog/protocol";
 import {
-  blockingRunnerSessions,
   boxLifecycleConflict,
   canAuthorizeLegacyDataAdoption,
   decideBoxLifecycle,
@@ -30,10 +29,18 @@ test("box lifecycle protection includes every non-terminal runner session", () =
     session("stopped", "box-runner", "stopped"),
     session("other", "another-runner", "running"),
   ];
-  assert.deepEqual(
-    blockingRunnerSessions(sessions, "box-runner").map(({ id }) => id),
-    ["queued", "running", "approval", "idle"],
+  const decision = decideScopedBoxLifecycleForRunners(sessions, ["box-runner"], false, "update", () => true);
+  assert.equal(decision.ok, false);
+  if (!decision.ok) {
+    assert.equal(decision.conflict.activeSessionCount, 4);
+    assert.deepEqual(decision.conflict.activeSessions.map(({ id }) => id),
+      ["queued", "running", "approval", "idle"]);
+  }
+  // Pin the input-required case independently: other active sessions must not mask its removal.
+  const approvalOnly = decideScopedBoxLifecycleForRunners(
+    [session("approval", "box-runner", "input_required")], ["box-runner"], false, "update", () => true,
   );
+  assert.equal(approvalOnly.ok, false, "a resumable session waiting for input still blocks replacement");
 });
 
 test("box lifecycle force parsing fails closed and conflict payload stays bounded", () => {

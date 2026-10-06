@@ -4,14 +4,6 @@ import type { UsageAggregationQuery } from "./db.js";
 const DRIVERS = new Set<AgentDriverKind>(["acp", "claude-code", "codex", "codex-app-server", "pi"]);
 const DAY_MS = 86_400_000;
 
-/** Monday 00:00:00 UTC for the week containing `timestamp`. UTC arithmetic keeps daylight-saving
- * changes out of accounting boundaries and makes the same instant bucket identically everywhere. */
-export function startOfUtcWeek(timestamp: number): number {
-  const day = Math.floor(timestamp / DAY_MS) * DAY_MS;
-  const daysSinceMonday = (new Date(day).getUTCDay() + 6) % 7;
-  return day - daysSinceMonday * DAY_MS;
-}
-
 function boundedFilter(value: unknown, name: string): string | undefined {
   if (value === undefined || value === null || value === "") return undefined;
   if (typeof value !== "string" || value.length > 256) throw new RangeError(`${name} must be at most 256 characters`);

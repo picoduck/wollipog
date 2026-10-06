@@ -1,7 +1,6 @@
 import type {
   WorkflowDefinitionSpec,
   WorkflowNodeDefinition,
-  WorkflowNodeStatus,
 } from "@wollipog/protocol";
 
 export type WorkflowValidation =
@@ -180,21 +179,6 @@ export function validateWorkflowDefinition(input: unknown): WorkflowValidation {
   }
   if (schedulable.size !== nodes.length) return { ok: false, error: "workflow artifact dependencies deadlock on the first traversal" };
   return { ok: true, value: input as unknown as WorkflowDefinitionSpec };
-}
-
-const NODE_TRANSITIONS: Record<WorkflowNodeStatus, readonly WorkflowNodeStatus[]> = {
-  pending: ["ready", "skipped", "stopped"],
-  ready: ["running", "waiting_gate", "skipped", "stopped"],
-  running: ["ready", "succeeded", "failed", "stopped"],
-  waiting_gate: ["succeeded", "failed", "stopped"],
-  succeeded: ["ready"], // explicit review-loop re-entry; the instance transition cap remains authoritative
-  failed: ["ready"],
-  skipped: [],
-  stopped: [],
-};
-
-export function canTransitionWorkflowNode(from: WorkflowNodeStatus, to: WorkflowNodeStatus): boolean {
-  return NODE_TRANSITIONS[from].includes(to);
 }
 
 export const BUILD_REVIEW_WORKFLOW: WorkflowDefinitionSpec = {

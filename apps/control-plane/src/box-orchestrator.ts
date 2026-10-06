@@ -143,24 +143,6 @@ export function binaryIsCurrent(deployedVersion: string | null, localHash: strin
   return deployedVersion === localHash;
 }
 
-/** Attempt-private upload path. Distinct epochs prevent a superseded reconnect from promoting a
- * newer attempt's bytes or interleaving two scp writers. */
-export function stagedRunnerPath(epoch: number): string {
-  if (!Number.isSafeInteger(epoch) || epoch < 1) throw new Error(`invalid deployment epoch: ${epoch}`);
-  return `${REMOTE_RUNNER_PATH}.new-${epoch}`;
-}
-
-/** Login-shell-safe cleanup: the quoted find pattern is not expanded by zsh when no files match. */
-export function buildStageSweepCommand(): string {
-  return "mkdir -p .agent-manager && find .agent-manager -maxdepth 1 -name 'agent-manager-runner.new-*' -mmin +60 -delete";
-}
-
-/** Promote only after a complete scp. `mv` is atomic because staging and live paths share a dir. */
-export function buildPromoteCommand(epoch: number): string {
-  const staged = stagedRunnerPath(epoch);
-  return `chmod +x ${staged} && mv -f ${staged} ${REMOTE_RUNNER_PATH}`;
-}
-
 const REMOTE_RUNNER_CONTENT_ROOT = ".agent-manager/runners";
 
 function checkedRunnerDigest(sha256: string): string {

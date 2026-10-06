@@ -14,8 +14,6 @@ const TIMESTAMP = /^(?:0|[1-9][0-9]{0,12})$/;
 const NONCE = /^[A-Za-z0-9_-]{16,128}$/;
 const EVENT_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const PARAMETER_NAME = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
-/** Current producer/documentation identity. Legacy remains accepted during the compatibility window. */
-export const AUTOMATION_TRIGGER_MEDIA_TYPE = WOLLIPOG_AUTOMATION_TRIGGER_MEDIA_TYPE;
 export { LEGACY_AUTOMATION_TRIGGER_MEDIA_TYPE, WOLLIPOG_AUTOMATION_TRIGGER_MEDIA_TYPE };
 export const AUTOMATION_TRIGGER_MAX_BODY_BYTES = 16 * 1024;
 export const AUTOMATION_TRIGGER_MAX_PROMPT_BYTES = 8 * 1024;

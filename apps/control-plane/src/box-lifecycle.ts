@@ -9,18 +9,6 @@ export interface BoxLifecycleSession {
   status: SessionStatus;
 }
 
-/** Sessions whose runner-owned process or queued work would be interrupted by replacing the
- * supervised SSH tunnel. Idle/input-required sessions still own resumable process state and are
- * intentionally included; an operator may proceed only through the explicit force contract. */
-export function blockingRunnerSessions(
-  sessions: readonly Pick<SessionView, "id" | "runnerId" | "title" | "status">[],
-  runnerId: string,
-): BoxLifecycleSession[] {
-  return sessions
-    .filter((session) => session.runnerId === runnerId && !TERMINAL_SESSION_STATUSES.has(session.status))
-    .map(({ id, title, status }) => ({ id, title, status }));
-}
-
 export function parseBoxLifecycleForce(body: unknown): { ok: true; force: boolean } | { ok: false; error: string } {
   if (body === null || body === undefined) return { ok: true, force: false };
   if (typeof body !== "object" || Array.isArray(body)) return { ok: false, error: "request body must be an object" };

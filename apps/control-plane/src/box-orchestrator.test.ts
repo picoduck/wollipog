@@ -8,10 +8,8 @@ import {
   buildContentAddressedAttestationCommand,
   buildContentAddressedPromoteCommand,
   buildContentAddressedStageCommand,
-  buildPromoteCommand,
   buildRemoteCommand,
   buildSshArgs,
-  buildStageSweepCommand,
   buildTokenDeployCommand,
   classifyRunnerUpdate,
   contentAddressedRunnerPath,
@@ -27,7 +25,6 @@ import {
   ReleaseAssetNotFoundError,
   remoteCredentialPath,
   runnerAssetNames,
-  stagedRunnerPath,
   stagedContentAddressedRunnerPath,
   tripleFromUname,
 } from "./box-orchestrator.js";
@@ -847,21 +844,7 @@ test("buildSshArgs opens the reverse tunnel and runs the remote command last", (
   assert.deepEqual(args.slice(-3), ["--", "me@devbox", "RC"]);
 });
 
-test("deployment commands are atomic, zsh-safe, permission-safe, and epoch-isolated", () => {
-  assert.equal(stagedRunnerPath(7), ".agent-manager/agent-manager-runner.new-7");
-  assert.notEqual(stagedRunnerPath(7), stagedRunnerPath(8), "reconnect attempts never share an scp destination");
-  assert.throws(() => stagedRunnerPath(0), /invalid deployment epoch/);
-
-  const sweep = buildStageSweepCommand();
-  assert.match(sweep, /find \.agent-manager .* -name 'agent-manager-runner\.new-\*'/);
-  assert.ok(!sweep.includes("rm .agent-manager/agent-manager-runner.new-*"), "never expose an unmatched glob to zsh");
-
-  const promote = buildPromoteCommand(7);
-  assert.equal(
-    promote,
-    "chmod +x .agent-manager/agent-manager-runner.new-7 && " +
-      "mv -f .agent-manager/agent-manager-runner.new-7 .agent-manager/agent-manager-runner",
-  );
+test("credential deployment is atomic, permission-safe, and identity-isolated", () => {
   const credentialId = "rcred_0123456789abcdef0123456789abcdef";
   assert.equal(remoteCredentialPath(credentialId), `.agent-manager/credentials/${credentialId}`);
   assert.throws(() => remoteCredentialPath("../token"), /invalid runner credential id/);

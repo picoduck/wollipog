@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { WorkflowDefinitionSpec } from "@wollipog/protocol";
-import { BUILD_REVIEW_WORKFLOW, canTransitionWorkflowNode, validateWorkflowDefinition } from "./workflow-graphs.js";
+import { BUILD_REVIEW_WORKFLOW, validateWorkflowDefinition } from "./workflow-graphs.js";
 
 test("built-in build-review workflow is a bounded, artifact-wired review loop", () => {
   const result = validateWorkflowDefinition(BUILD_REVIEW_WORKFLOW);
@@ -62,12 +62,4 @@ test("workflow validation accepts human/policy gates and rejects unsafe or disco
   const deadlockResult = validateWorkflowDefinition(cyclicInputDeadlock);
   assert.match(deadlockResult.ok ? "" : deadlockResult.error, /deadlock/);
   assert.match(validateWorkflowDefinition({ ...gated, nodes: gated.nodes.map((node) => node.nodeId === "policy" ? { ...node, inputs: [{ name: "missing", kind: "verdict" as const }] } : node) }).ok ? "" : validateWorkflowDefinition({ ...gated, nodes: gated.nodes.map((node) => node.nodeId === "policy" ? { ...node, inputs: [{ name: "missing", kind: "verdict" as const }] } : node) }).error, /unproduced/);
-});
-
-test("workflow node state machine permits retry/loop re-entry but not terminal resurrection", () => {
-  assert.equal(canTransitionWorkflowNode("pending", "ready"), true);
-  assert.equal(canTransitionWorkflowNode("running", "ready"), true);
-  assert.equal(canTransitionWorkflowNode("succeeded", "ready"), true);
-  assert.equal(canTransitionWorkflowNode("stopped", "ready"), false);
-  assert.equal(canTransitionWorkflowNode("skipped", "running"), false);
 });
