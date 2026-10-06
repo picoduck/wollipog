@@ -93,6 +93,20 @@ test("duplicate names show their machine in the tab and in All Groups", async ({
   await expect(page.getByRole("menuitemradio", { name: /^Docs Site on Build Server 02, 1/ })).toBeVisible();
 });
 
+test("on a phone search takes its own full-width row above the tabs, and All Groups stays beside them", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openGroups(page);
+  const box = async (selector: string) => (await page.locator(selector).boundingBox())!;
+  const [bar, search, tabs, allGroups] = await Promise.all([
+    box(".tabs-bar"), box(".tabs-tools > .inbox-search"), box(".tabs-bar > .tabs"), box(".tabs-bar > .tabs-all"),
+  ]);
+  expect(search.width).toBe(bar.width);
+  expect(search.y + search.height).toBeLessThanOrEqual(tabs.y);
+  expect(allGroups.x).toBeGreaterThanOrEqual(tabs.x + tabs.width);
+  expect(allGroups.y + allGroups.height / 2).toBeCloseTo(tabs.y + tabs.height / 2, 0);
+  expect(allGroups.x + allGroups.width).toBeLessThanOrEqual(bar.x + bar.width);
+});
+
 test("Tab and Shift+Tab still move between groups", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await openGroups(page);

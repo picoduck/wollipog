@@ -12543,12 +12543,8 @@ body.shell-dock-dragging * {
 }
 
 @media (max-width: 760px) {
-  /* The search field takes a full-width row of its own above the tabs (#2082): the tab bar wraps,
-     and its tools come first. */
-  .page-tabs:has(> .tabs-bar) { height: auto; }
-  .tabs-bar { flex-wrap: wrap; row-gap: var(--space-2); height: auto; }
-  .tabs-bar > .tabs { flex: 1 1 0; height: var(--control-h-lg); }
-  .tabs-tools { order: -1; flex: 1 0 100%; margin-left: 0; }
+  /* The search field takes a full-width row of its own above the tabs (#2082); the tab bar's
+     phone rules, after its own, put it there. */
   .inbox-search { width: 100%; min-width: 0; flex: none; margin-bottom: 0; }
   .inbox-search input { width: auto; flex: 1; opacity: 1; pointer-events: auto; }
   .inbox-search-key { display: inline-flex; }
@@ -16512,6 +16508,14 @@ body.shell-dock-dragging * {
 }
 .tab > .group-name { max-width: 200px; }
 .group-name-machine { color: var(--text-faint); font-weight: var(--weight-normal); }
+/* Phones: the bar wraps and its tools come first, a full-width row above the tabs (#2082), while
+   the list button stays beside the scrolling tab row. */
+@media (max-width: 760px) {
+  .page-tabs:has(> .tabs-bar) { height: auto; }
+  .tabs-bar { flex-wrap: wrap; row-gap: var(--space-2); height: auto; }
+  .tabs-bar > .tabs { flex: 1 1 0; height: var(--control-h-lg); }
+  .tabs-tools { order: -1; flex: 1 0 100%; margin-left: 0; }
+}
 
 /* Counts (§11.4). A plain count sits 4px after its label; a count that needs the user is a 16px
    count badge, amber, or red for the danger tone. Zero is never shown in color. */

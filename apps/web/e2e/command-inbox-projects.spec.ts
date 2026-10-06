@@ -1763,7 +1763,13 @@ test.describe("coarse pointer Project actions", () => {
 
   test("Project action targets are 44px and support a tap action without hover", async ({ page }) => {
     const trigger = page.getByRole("button", { name: "Project Actions for Alpha" });
+    // On touch only the active Project tab shows its action target (#2180), beside the tab.
+    await expect(trigger).toBeHidden();
+    await page.getByRole("tab", { name: /^Alpha/ }).tap();
     await expect(trigger).toBeVisible();
+    const alphaTab = await page.getByRole("tab", { name: /^Alpha/ }).boundingBox();
+    expect((await trigger.boundingBox())!.x, "the target sits after the tab, not over it")
+      .toBeGreaterThanOrEqual(alphaTab!.x + alphaTab!.width);
     const box = await trigger.boundingBox();
     expect(box).not.toBeNull();
     const visibleTarget = await trigger.evaluate((element) => {
