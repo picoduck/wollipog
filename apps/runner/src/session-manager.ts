@@ -5649,10 +5649,10 @@ export class SessionManager {
     const priorResumeId = prior?.driver === driver && (driver === "codex-app-server" || driver === "pi")
       ? prior.agentSessionId
       : null;
-    // A fresh Claude conversation keeps this Wollipog session's corrected lifetime baseline.
+    // A fresh provider conversation keeps this Wollipog session's corrected lifetime baseline.
     // Clearing it would lose the repair generation and make every subsequent snapshot stale.
-    const retainAccounting = !!priorResumeId || prior?.driver === driver && driver === "claude-code" &&
-      (prior.costReconciliationRevision !== undefined || prior.costReconciliationRepairId !== undefined);
+    const retainAccounting = !!priorResumeId || prior?.costReconciliationRevision !== undefined ||
+      prior?.costReconciliationRepairId !== undefined;
     const priorManagedPiState = prior?.adoptedProviderState?.driver === "pi"
       ? prior.adoptedProviderState
       : undefined;
@@ -5800,8 +5800,7 @@ export class SessionManager {
         prior = latest;
         // Price/repair frames can commit while Restart waits for this serialized transition.
         // Bind the replacement row to the latest lifetime baseline and generation, not its preview.
-        if (!!priorResumeId || latest.driver === driver && driver === "claude-code" &&
-            (latest.costReconciliationRevision !== undefined || latest.costReconciliationRepairId !== undefined)) {
+        if (!!priorResumeId || latest.costReconciliationRevision !== undefined || latest.costReconciliationRepairId !== undefined) {
           meta.costUsd = latest.costUsd;
           meta.tokensIn = latest.tokensIn;
           meta.tokensOut = latest.tokensOut;

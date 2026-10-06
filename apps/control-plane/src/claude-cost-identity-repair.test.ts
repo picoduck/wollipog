@@ -38,7 +38,7 @@ function repairEvidence(db: ControlPlaneDb, snapshot: SessionSnapshot) {
     repairId: snapshot.costReconciliationRepairId, costUsd: snapshot.costUsd, tokensIn: snapshot.tokensIn, tokensOut: snapshot.tokensOut, seq: snapshot.seq, historyEpoch: snapshot.historyEpoch! } };
 }
 
-for (const corrected of [false, true]) for (const confirmed of [false, true]) test(`Claude Restart preserves cross-peer repair acknowledgement: corrected=${corrected}, confirmed=${confirmed}`, async () => {
+for (const driver of ["claude-code", "codex"] as const) for (const corrected of [false, true]) for (const confirmed of [false, true]) test(`Claude Restart preserves cross-peer repair acknowledgement: driver=${driver}, corrected=${corrected}, confirmed=${confirmed}`, async () => {
   const root = mkdtempSync(join(tmpdir(), "repair-restart-"));
   const store = new SessionStore(join(root, "runner-sessions"));
   const f = fixture(":memory:", store.projectedHistoryEpoch(1, PROTOCOL_VERSION));
@@ -68,7 +68,7 @@ for (const corrected of [false, true]) for (const confirmed of [false, true]) te
     assert.equal(store.readMeta("session")!.costReconciliationRepairId, preview.digest, "wire-epoch CAS commits the approved repair");
     if (confirmed) observeReconciliationSnapshot(f.db, store.projectSnapshotForProtocol(manager.snapshotForControlPlane(store.readMeta("session")!), PROTOCOL_VERSION));
     assert.equal(await manager.start({ sessionId: "session", agentId: "claude", workspaceId: "repo", workspacePath: root,
-      driver: "claude-code", command: "claude", args: [], env: {}, context: { kind: "native" }, useWorktree: false }), true);
+      driver, command: driver === "claude-code" ? "claude" : "codex", args: [], env: {}, context: { kind: "native" }, useWorktree: false }), true);
     const restarted = store.projectSnapshotForProtocol(manager.snapshotForControlPlane(store.readMeta("session")!), PROTOCOL_VERSION);
     assert.notEqual(store.readMeta("session")!.agentSessionId, "old-conversation");
     observeReconciliationSnapshot(f.db, restarted);

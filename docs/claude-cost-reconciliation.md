@@ -229,7 +229,9 @@ Equal/stale observations stay read-only unless they establish a new durable conf
 Upgrade both peers before new corrections. Previously reconciled runner metadata has numeric
 coordinates without identities; it must use the verified repair procedure below before synchronizing.
 Never automatically adopt the server's identity for an old number. Forks start with fresh accounting
-metadata; continuation/restart retain the existing coordinate and repair generation. Control-plane
+metadata; continuation/restart retain the existing coordinate and repair generation, including a
+Restart using a changed agent driver on the same Wollipog session ID. Accounting belongs to that
+session's lifetime, while provider conversations may start fresh. Control-plane
 or runner downgrade after content-bound corrections or repairs is unsupported. After restore, recover
 the verified original chain before ordinary corrections; a same-number conflicting chain cannot be
 resolved by guessing which total is newer.
