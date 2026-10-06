@@ -3225,8 +3225,22 @@ test("a synchronous no-close retirement failure is reported while retaining its 
   }
 });
 
-test("a failed synchronous retirement automatically resumes deletion after exact exit", async () => {
+test("a failed synchronous retirement automatically resumes deletion after exact exit", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-provider-retirement-sync-delete-"));
+  let manager: SessionManager | undefined;
+  let deletion: Promise<void> | undefined;
+  let teardown: Promise<void> | undefined;
+  let releaseTail!: () => void;
+  const tail = new Promise<void>((resolve) => { releaseTail = resolve; });
+  const removeFixture = () => teardown ??= (async () => {
+    try {
+      // Automatic deletion still owns boundary cleanup after the row and worktree disappear.
+      await deletion;
+    } finally {
+      manager?.shutdownAll();
+      rmSync(root, { recursive: true, force: true });
+    }
+  })();
   try {
     const repo = join(root, "repo");
     mkdirSync(repo);
@@ -3246,7 +3260,7 @@ test("a failed synchronous retirement automatically resumes deletion after exact
       reportExit = callbacks.onExit;
       return client;
     };
-    const manager = new SessionManager(
+    manager = new SessionManager(
       () => {}, () => {}, store, "runner", undefined, factory as never, root, 1,
     );
     const spec = { ...launchSpec(repo, "retirement-sync-delete"), useWorktree: true };
@@ -3257,6 +3271,8 @@ test("a failed synchronous retirement automatically resumes deletion after exact
       admitted: Set<string>;
       closing: Map<string, { client: unknown }>;
       pendingDeletions: Set<string>;
+      deleting: Set<string>;
+      reapWorktree(record: WorktreeCleanupRecord, cleanupCurrentGeneration?: boolean): Promise<void>;
     };
 
     await assert.rejects(manager.delete(spec.sessionId), /dispose failed/);
@@ -3265,9 +3281,17 @@ test("a failed synchronous retirement automatically resumes deletion after exact
     assert.equal(store.has(spec.sessionId), true);
     assert.equal(existsSync(worktreePath), true);
 
+    const deleteSession = manager.delete.bind(manager);
+    t.mock.method(manager, "delete", (sessionId: string) => deletion = deleteSession(sessionId));
+    const reapWorktree = internals.reapWorktree.bind(manager);
+    let tailEntered = false;
+    t.mock.method(internals, "reapWorktree", async (...args: Parameters<typeof reapWorktree>) => {
+      await reapWorktree(...args);
+      tailEntered = true;
+      await tail;
+    });
     reportExit(1);
-    for (let attempt = 0; attempt < 500 &&
-        (store.has(spec.sessionId) || existsSync(worktreePath)); attempt++) {
+    for (let attempt = 0; attempt < 500 && !tailEntered; attempt++) {
       await new Promise<void>((resolve) => setTimeout(resolve, 10));
     }
     assert.equal(internals.closing.has(spec.sessionId), false);
@@ -3275,9 +3299,21 @@ test("a failed synchronous retirement automatically resumes deletion after exact
     assert.equal(internals.admitted.has(spec.sessionId), false);
     assert.equal(store.has(spec.sessionId), false);
     assert.equal(existsSync(worktreePath), false);
-    manager.shutdownAll();
+    assert.equal(tailEntered, true, "the automatic retry must reach its controlled deletion tail");
+    assert.ok(deletion, "exact-client exit must invoke the real automatic deletion retry");
+    assert.equal(internals.deleting.has(spec.sessionId), true,
+      "row/worktree disappearance precedes complete deletion");
+    const fixtureRemoval = removeFixture();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(existsSync(root), true, "fixture removal must wait for the held deletion tail");
+    assert.equal(internals.deleting.has(spec.sessionId), true, "shutdown must also wait for deletion");
+    releaseTail();
+    await fixtureRemoval;
+    assert.equal(internals.deleting.has(spec.sessionId), false);
+    assert.equal(existsSync(root), false, "completed deletion permits fixture-root removal");
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    releaseTail();
+    await removeFixture();
   }
 });
 

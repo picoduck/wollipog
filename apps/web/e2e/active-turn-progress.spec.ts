@@ -99,6 +99,37 @@ test("the working line remains compact and readable in a narrow viewport", async
   await expect(page.getByTestId("opened-subagent")).toHaveText("release-audit-agent");
 });
 
+test("Open Agent survives a late tail measurement after revealing a step", async ({ page }) => {
+  const progress = await openScenario(page, "failing", { width: 390, height: 844 });
+  await revealAndSettle(page, progress.getByRole("button", { name: "Coordinate Release Audit" }), "Coordinate Release Audit");
+  const openAgent = progress.getByRole("button", { name: "Open Agent" });
+  await openAgent.scrollIntoViewIfNeeded();
+  await openAgent.click({ trial: true });
+  const reader = page.getByTestId("reader");
+  await reader.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  await expect(reader).toHaveAttribute("data-follow-tail-state", "following");
+  await expect.poll(() => reader.evaluate((element) =>
+    element.scrollHeight - element.clientHeight - element.scrollTop)).toBeLessThanOrEqual(1);
+  const list = page.locator(".timeline");
+  const oldHeight = await list.evaluate((element) => element.getBoundingClientRect().height);
+  // Deliver a late measured-row growth while the pointer is held. This is the estimate-to-actual
+  // tail correction that raced pointerdown/pointerup in the old fixture (#2703).
+  await openAgent.evaluate((button) => {
+    button.addEventListener("pointerdown", () => {
+      const rows = document.querySelectorAll<HTMLElement>(".timeline [data-virtual-row]");
+      const last = rows[rows.length - 1]!;
+      last.style.minHeight = `${last.getBoundingClientRect().height + 160}px`;
+    }, { once: true });
+  });
+  const bounds = await openAgent.boundingBox();
+  expect(bounds).not.toBeNull();
+  await page.mouse.move(bounds!.x + bounds!.width / 2, bounds!.y + bounds!.height / 2);
+  await page.mouse.down();
+  await expect.poll(() => list.evaluate((element) => element.getBoundingClientRect().height)).toBeGreaterThan(oldHeight + 100);
+  await page.mouse.up();
+  await expect(page.getByTestId("opened-subagent")).toHaveText("release-audit-agent");
+});
+
 test("a running turn without failures is one line with no exception line", async ({ page }) => {
   const progress = await openScenario(page, "running", { width: 390, height: 844 });
   await expectWorkingLine(progress);

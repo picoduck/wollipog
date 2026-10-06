@@ -5,6 +5,7 @@ import { WorkingIndicator } from "../components/WorkingIndicator.js";
 import { EventTimeline, type TimelineRevealRequest } from "../components/EventTimeline.js";
 import type { TimelineItem } from "../timeline.js";
 import { deriveActiveTurnProgress } from "../turn-progress.js";
+import { useFollowTail } from "../useFollowTail.js";
 import "../styles.css";
 
 /** `?scenario=` picks the turn: running, failing (the default), silent, approval, or agents (a running,
@@ -116,8 +117,16 @@ function Fixture() {
   const [openedSubagent, setOpenedSubagent] = useState("None");
   const nextReveal = useRef(0);
   const stableItems = useMemo(() => items, []);
+  const followTail = useFollowTail({
+    scrollRef,
+    contentRevision: stableItems,
+    sessionId: "active-turn-progress-e2e",
+    rows: stableItems,
+  });
   // Production reveals a request row the same way it reveals a step (SessionDetail).
   const reveal = (eventId: number) => {
+    if (scenario === "approval") followTail.pause();
+    else followTail.preview();
     nextReveal.current += 1;
     setRevealRequest({
       eventId,
@@ -137,11 +146,32 @@ function Fixture() {
       >
         {openedSubagent}
       </output>
-      <div className="detail-scroll" ref={scrollRef} data-testid="reader" style={{ overflowX: "hidden" }} tabIndex={0}>
+      <div
+        className="detail-scroll measured-virtual-scroll"
+        ref={scrollRef}
+        data-testid="reader"
+        data-follow-tail-state={followTail.state}
+        style={{ overflowX: "hidden" }}
+        tabIndex={0}
+        onScroll={followTail.onScroll}
+        onWheel={followTail.onWheel}
+        onPointerMove={followTail.onPointerMove}
+        onTouchStart={(event) => followTail.onTouchStart(event.nativeEvent)}
+        onPointerDown={(event) => {
+          if (event.pointerType === "touch") followTail.onTouchPointerDown(event);
+        }}
+        onKeyDown={(event) => {
+          if (followTail.onKeyDown(event)) event.preventDefault();
+        }}
+      >
         <EventTimeline
           items={stableItems}
           scrollRef={scrollRef}
           historyKey="active-turn-progress-e2e"
+          getInitialAnchor={followTail.getInitialAnchor}
+          preserveAnchor={!followTail.isFollowing}
+          onVisibleAnchorChange={followTail.onVisibleAnchorChange}
+          onAnchorLost={followTail.onAnchorLost}
           revealRequest={revealRequest}
           onRevealHandled={() => setRevealRequest(null)}
           sessionActive
