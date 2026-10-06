@@ -15,6 +15,7 @@ import { SessionDetail } from "./SessionDetail.js";
 import { SessionPreviewBar } from "./SessionPreviewBar.js";
 import { decideDockedRequest } from "./requests/request-reveal.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 /**
  * #2210: the Sessions preview's detail bar. One status, the same one the session bar and the rows
@@ -213,7 +214,7 @@ test("the preview bar's actions: Snooze and Archive icon buttons, ⋯ and Open S
     assert.deepEqual(buttons.slice(0, 3).map((button) => button.className), ["icon-btn", "icon-btn", "icon-btn"]);
     assert.equal(buttons[3]!.className, "btn session-preview-open", "Open Session is a .btn, not the primary");
     assert.equal(buttons[3]!.querySelector("kbd")?.getAttribute("aria-hidden"), "true", "the keycap is not in its name");
-    assert.equal(container.querySelector(".session-preview-bar .detail-bar-back"), null, "the preview has no back button");
+    assertNoDomNode(container.querySelector(".session-preview-bar .detail-bar-back"), "the preview has no back button");
     for (const button of buttons) await act(async () => button.click());
     assert.deepEqual(calls, ["snooze", "archive", "menu", "open"]);
     assert.equal(menuRestore!(), buttons[2], "the menu hands focus back to ⋯");
@@ -302,10 +303,10 @@ test("the preview keeps only the bar's one status and the facts: no chips, Detac
     const detail = container.querySelector(".session-detail.preview")!;
     assert.ok(detail, "the preview renders");
     assert.equal(detail.querySelectorAll(".tag").length, 0, "no .tag chips");
-    assert.equal(detail.querySelector(".session-preview-meta"), null);
-    assert.equal(detail.querySelector(".activity-strip"), null, "no activity strip");
-    assert.equal(detail.querySelector(".context-control, .context-ring"), null, "no context meter");
-    assert.equal(detail.querySelector(".session-usage-info"), null, "no cost");
+    assertNoDomNode(detail.querySelector(".session-preview-meta"));
+    assertNoDomNode(detail.querySelector(".activity-strip"), "no activity strip");
+    assertNoDomNode(detail.querySelector(".context-control, .context-ring"), "no context meter");
+    assertNoDomNode(detail.querySelector(".session-usage-info"), "no cost");
     const text = detail.textContent ?? "";
     assert.doesNotMatch(text, /Detached Work/);
     assert.doesNotMatch(text, /\$4\.27|Cost/);
@@ -329,13 +330,13 @@ test("a pending request heads the preview, under the meta line and before the re
     const chatReading = detail.querySelector(".detail-chat > .chat-reading")!;
     assert.ok(slot!.compareDocumentPosition(chatReading) & domWindow.Node.DOCUMENT_POSITION_FOLLOWING,
       "the request comes before the transcript");
-    assert.equal(chatReading.querySelector(".session-notice-slot"), null, "nothing docks at the bottom");
+    assertNoDomNode(chatReading.querySelector(".session-notice-slot"), "nothing docks at the bottom");
     const facts = detail.querySelector(".session-preview-facts")!;
     assert.ok(facts.compareDocumentPosition(slot!) & domWindow.Node.DOCUMENT_POSITION_FOLLOWING, "under the meta line");
     assert.equal(slot!.querySelector(".request-card-title")?.textContent, "Run the Migration", "the top request is expanded");
     assert.match(slot!.querySelector(".request-dock-more")?.textContent ?? "", /\+1 More Request/);
-    assert.equal(detail.querySelector(".approval-bar"), null);
-    assert.equal(slot!.querySelector(".dock-strip"), null, "a preview's card never shrinks to its strip");
+    assertNoDomNode(detail.querySelector(".approval-bar"));
+    assertNoDomNode(slot!.querySelector(".dock-strip"), "a preview's card never shrinks to its strip");
   } finally {
     await preview.unmount();
   }
@@ -351,7 +352,7 @@ test("a question in the preview offers Answer in Session, which opens the sessio
     assert.ok(card, "the preview's question card");
     assert.equal(card.querySelector(".request-card-title")?.textContent, "Which ledger should be reconciled first?");
     assert.equal(card.querySelector(".request-card-policy")?.textContent, "1 more question in this request.");
-    assert.equal(card.querySelector("input, textarea, [role='radio'], [role='checkbox']"), null, "no answer form");
+    assertNoDomNode(card.querySelector("input, textarea, [role='radio'], [role='checkbox']"), "no answer form");
     const answer = [...card.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.startsWith("Answer in Session"))!;
     assert.ok(answer, "Answer in Session");
     await act(async () => answer.click());

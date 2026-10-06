@@ -149,7 +149,8 @@ test("the desktop rail is grouped, searchable and has one current-page treatment
 test("heartbeat activity feeds cards, preview, split/footer counts, and independent rail badges", () => {
   assert.match(inbox, /stalledCount[\s\S]*inbox-activity-footer/);
   assert.match(inboxList, /state\.activity\.get\(props\.session\.id\)/);
-  assert.match(detail, /<ActivityStrip activity=\{activity\} now=\{activityNow\}/);
+  // #2210: the Sessions preview shows one status and no activity strip; the rows carry it.
+  assert.doesNotMatch(detail, /<ActivityStrip\b/, "the preview bar has no activity strip");
   assert.match(app, /sessionVisibleForReminderMode\(session, reminders\.get\(session\.id\), "ordinary"\)[\s\S]*activeSessions\.filter\(isInboxBlocked\)[\s\S]*activeSessions\.filter\(\(session\) => stalledSessionIds\.has\(session\.id\)\)/,
     "the rail's Blocked and Stalled badges must derive from the same Active membership as Sessions");
   assert.match(rail, /const attentionState = \{ blocked: blockedCount, stalled: stalledCount, machines \};/,
@@ -163,8 +164,11 @@ test("the transcript's lower edge has one floating tail control, and context and
   // to the composer column, and context, cost and the Reply hint moved into the composer.
   // #2179: the reading column then ends with the request dock, the notice slot's lead, directly
   // above the composer.
-  assert.match(detail, /<div className="detail-reader">[\s\S]*<TranscriptTailControl[\s\S]*role="status" data-transcript-recovery-status>\{recoveryAnnouncement\}<\/span>\s*<\/div>\s*\{\/\*[\s\S]*?\*\/\}\s*\{requestDockLead && \(\s*<SessionNoticeSlot[\s\S]*?lead=\{requestDockLead\}[\s\S]*?\/>\s*\)\}\s*<\/div>\s*\{mode === "expanded" && \(\s*<div\s+className="composer"/,
+  assert.match(detail, /<div className="detail-reader">[\s\S]*<TranscriptTailControl[\s\S]*role="status" data-transcript-recovery-status>\{recoveryAnnouncement\}<\/span>\s*<\/div>\s*\{\/\*[\s\S]*?\*\/\}\s*\{mode === "expanded" && requestDockLead && \(\s*<SessionNoticeSlot[\s\S]*?lead=\{requestDockLead\}[\s\S]*?\/>\s*\)\}\s*<\/div>\s*\{mode === "expanded" && \(\s*<div\s+className="composer"/,
     "the anchor and the one recovery live region end the reader, and the request dock alone sits between it and the composer");
+  // #2210: a preview has no composer, so its dock heads the chat column instead.
+  assert.match(detail, /<div className="detail-chat" ref=\{detailChatRef\}>\s*\{\/\*[\s\S]*?\*\/\}\s*\{mode === "preview" && requestDockLead && \(\s*<SessionNoticeSlot/,
+    "the preview's request dock is the first thing in its chat column");
   assert.doesNotMatch(detail, /transcript-status-|<ShortcutHint/,
     "no element of the retired status strip, nor its Reply hint button, remains");
   assert.doesNotMatch(detail, /follow-tail-chip|follow-tail-control|transcript-recovery-slot|TranscriptRecoveryStripEcho|label="Page Up"|label="Page Down"/,
@@ -183,8 +187,8 @@ test("the transcript's lower edge has one floating tail control, and context and
   assert.match(detail, /<div\s+ref=\{composerBoxRef\}\s+className=\{`composer-box/, "the column measured is the composer card's own");
   assert.match(detail, /const contextWindow = resolveContextWindowCapacity\(session, agentCaps\?\.models \?\? \[\]\);/,
     "every meter placement consumes the shared capacity result");
-  assert.equal(detail.match(/<ContextWindowMeter session=\{session\} resolution=\{contextWindow\}/g)?.length, 4,
-    "the preview header, the composer bar, its own row and Answer Mode each place the meter once");
+  assert.equal(detail.match(/<ContextWindowMeter session=\{session\} resolution=\{contextWindow\}/g)?.length, 3,
+    "the composer bar, its own row and Answer Mode each place the meter once; the preview has none (#2210)");
   // Answer Mode replaces the bar, Model Settings included, so it carries the two triggers itself.
   assert.match(detail, /usage=\{composerAnswerActive \? <>\s*<ContextWindowMeter session=\{session\} resolution=\{contextWindow\} placement="bar" \/>\s*<SessionUsageControl session=\{session\} placement="bar" \/>\s*<\/> : null\}\s*usageOwnRow=\{composerUsageNarrow\}/);
   // The Reply shortcut's hint is a keycap in the idle, unfocused composer's placeholder row.

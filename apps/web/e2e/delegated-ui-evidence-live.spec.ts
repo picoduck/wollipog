@@ -106,7 +106,9 @@ test("a browser sees delegated image review complete through live scoped routes 
       db.updateSessionStatus(seeded.childId, "running", Date.now());
     } finally { db.close(); }
 
-    await page.goto(`${base}/#pair=${ownerToken}`);
+    // The Board's cards list every condition; the Sessions preview shows only its one ranked
+    // status (#2210), where the Orchestrator's passive count is not one.
+    await page.goto(`${base}/board#pair=${ownerToken}`);
     await expect(page.getByText(/Orchestrator Action/u)).toBeVisible();
     const route = `${base}/api/sessions/${seeded.parentId}/descendant-requests`;
     const agentHeaders = { authorization: `Bearer ${seeded.parentToken}`,

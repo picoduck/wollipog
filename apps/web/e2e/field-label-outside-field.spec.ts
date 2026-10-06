@@ -164,7 +164,7 @@ for (const theme of ["dark", "light"] as const) {
       await setTheme(page, theme);
       await expect(page.locator(".inbox-list-pane > .toolbar")).toBeVisible();
       await page.locator(".inbox-row-shell", { hasText: "Running Session" }).getByRole("button").first().click();
-      const directSnooze = page.getByRole("button", { name: "Snooze", exact: true });
+      const directSnooze = page.getByRole("button", { name: "Snooze", exact: true }).first();
       if (await directSnooze.isVisible()) {
         await directSnooze.click();
       } else {

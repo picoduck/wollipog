@@ -117,7 +117,6 @@ test("no surface keeps its own watchdog delivery selection (#2329)", () => {
     "status-meta.ts",
     "session-reminders.ts",
     "components/PinnedSummary.tsx",
-    "components/SessionDetail.tsx",
     "components/BackgroundWorkPanel.tsx",
   ]) {
     assert.match(readFileSync(join(root, surface), "utf8"), /\bshownWatchdogDelivery\(/, surface);
