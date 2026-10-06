@@ -1,4 +1,4 @@
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { SessionReminderView, SessionReminderWakePolicy, SetSessionReminderRequest } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import {
@@ -106,6 +106,7 @@ export function SnoozeDialog({
   const suggestionListId = `${useId()}-suggestions`;
   /** Set when the next commit should focus the draft's control: after a reload, or a pointer on Custom…. */
   const focusDraftRef = useRef(false);
+  const [, redraw] = useReducer((count: number) => count + 1, 0);
   const reconcilingRef = useRef(false);
   const submittingRef = useRef(false);
   const liveReminderKey = reminderKey(reminder);
@@ -169,8 +170,8 @@ export function SnoozeDialog({
       .filter((preset) => supportsSomeday || preset.expression !== "someday")
       .map((preset) => {
         // The chosen tile shows the draft's own instant, which is what saving sends, not a fresh
-        // resolution that moves on with the clock.
-        const schedule = choice === preset.expression && parsed ? parsed : parseReminderExpression(preset.expression, now);
+        // resolution that moves on with the clock. `choose` never keeps a preset that does not resolve.
+        const schedule = choice === preset.expression ? parsed : parseReminderExpression(preset.expression, now);
         return {
           value: preset.expression,
           label: preset.label,
@@ -238,6 +239,12 @@ export function SnoozeDialog({
     // When Custom… is already chosen its field is mounted and nothing re-renders, so focus it now.
     if (next === choice) {
       if (next === "custom" && byPointer) expressionRef.current?.focus();
+      return;
+    }
+    // A tile drawn before the clock passed its time (Later Today after 9 PM) is refused when
+    // chosen, and the dialog redraws to say why, so a chosen preset always has its instant.
+    if (next !== "custom" && !parseReminderExpression(next, new Date())) {
+      redraw();
       return;
     }
     if (next === "custom" && byPointer) focusDraftRef.current = true;

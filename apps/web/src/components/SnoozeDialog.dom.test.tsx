@@ -1168,6 +1168,39 @@ test("a chosen preset's tile, summary and saved instant agree after the clock mo
   }
 });
 
+test("a preset that expired before it was clicked is refused, and the dialog never keeps a preset without its time", async () => {
+  // Opened at 20:55 local, when Later Today (23:55) is still offered.
+  mock.timers.enable({ apis: ["Date"], now: new Date(2026, 9, 6, 20, 55).getTime() });
+  const saved: SetSessionReminderRequest[] = [];
+  const view = await mount(<SnoozeDialog
+    sessionTitle={TITLE}
+    onClose={() => undefined}
+    onSave={async (request) => { saved.push(request); }}
+  />);
+  try {
+    const laterToday = () => tileNamed("Later Today")!;
+    assert.equal(laterToday().hasAttribute("aria-disabled"), false);
+    // Ten minutes later, with nothing redrawn, Later Today would cross midnight.
+    mock.timers.tick(10 * 60_000);
+    await chooseTile("Later Today");
+    assert.equal(laterToday().getAttribute("aria-checked"), "false", "the expired preset is not chosen");
+    assert.equal(laterToday().getAttribute("aria-disabled"), "true");
+    assert.equal(ariaReferencedText(laterToday(), "aria-describedby"), "Too late today");
+
+    // Overnight, Later Today is offered again but was never chosen, so nothing is advertised.
+    mock.timers.tick(12 * 3_600_000);
+    await act(async () => { returnEarly().click(); });
+    assert.equal(laterToday().getAttribute("aria-checked"), "false");
+    assert.equal(summary(), "");
+    await press(primary());
+    assert.equal(saved.length, 0);
+    assert.equal(body.querySelector(".snooze-choice > .field-error")?.textContent, "Choose when it returns.");
+  } finally {
+    await view.unmount();
+    mock.timers.reset();
+  }
+});
+
 test("a pointer on an already chosen Custom… goes to its field at once and leaves later focus alone", async () => {
   const stored = pendingReminder();
   const dialog = (reminder: SessionReminderView) => <SnoozeDialog
