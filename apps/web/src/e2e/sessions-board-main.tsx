@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import { Shell } from "../App.js";
 import { ThemeProvider } from "../components/ThemeProvider.js";
 import { createRoot } from "react-dom/client";
@@ -15,9 +15,11 @@ import {
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
+import { CommandPalette } from "../components/CommandPalette.js";
 import { InboxView } from "../components/InboxView.js";
 import { Rail } from "../components/Rail.js";
 import type { RightPanelState } from "../components/RightPanel.js";
+import { SearchPaletteContext } from "../components/search-palette-context.js";
 import { InstanceScopeProvider } from "../instance-scope.js";
 import { viewFromPath, viewPath, type View, type ViewNavigation } from "../navigation.js";
 import { sessionsDestination } from "../sessions-view-mode.js";
@@ -212,11 +214,13 @@ if (groups) {
     group(1, "Platform Reliability — Incident Follow-Ups, Postmortem Actions and Platform Hardening 2026"),
     group(2, "Docs Site"),
     group(3, "Docs Site", secondRunner.runnerId),
-    group(4, "Billing", runner.runnerId, { status: "running" }),
+    group(4, "Billing", runner.runnerId, { status: "running", title: "Move the billing buckets to terraform",
+      updatedAt: Date.now(), lastEventAt: Date.now() }),
     group(5, "Billing", runner.runnerId, { workspaceId: "workspace-group-4", status: "input_required",
       pendingApproval: { requestId: "group-5", title: "Approve Command", options: [] } as never }),
     group(6, "Design System"),
-    group(7, "Infrastructure"),
+    group(7, "Infrastructure", runner.runnerId, { title: "Plan the terraform state migration",
+      updatedAt: Date.now(), lastEventAt: Date.now() }),
     group(8, "Marketing Site"),
     group(9, "Mobile App", secondRunner.runnerId),
   );
@@ -449,7 +453,10 @@ function HarnessShell() {
   // The same hooks the app shell mounts — the point of this harness is that these are not copies.
   useSessionsViewToggleKey(true, view, navigate);
   useSessionsViewModeMemory(view, SCOPE);
+  // The shell's search palette, so Sessions' Search Transcripts opens it with its query (#2200).
+  const [palette, setPalette] = useState<string | null>(null);
   return (
+    <SearchPaletteContext.Provider value={(query) => setPalette(query ?? "")}>
     <div className="app">
       <Rail
         view={view}
@@ -476,7 +483,9 @@ function HarnessShell() {
           {view.name === "projects" && <div className="fixture-projects">Projects Fixture</div>}
         </div>
       </main>
+      {palette !== null && <CommandPalette initialQuery={palette} onClose={() => setPalette(null)} />}
     </div>
+    </SearchPaletteContext.Provider>
   );
 }
 

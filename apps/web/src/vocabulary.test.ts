@@ -81,7 +81,7 @@ test("no user-facing string calls a Machine a box", () => {
  * legitimate copy like "Search Wollipog sessions" would have failed CI.
  */
 const EXPECTED_PLACEHOLDERS: ReadonlyArray<[string, string]> = [
-  ["./components/InboxView.tsx", "Search sessions"],
+  ["./components/SessionsSearch.tsx", "Search sessions"],
   ["./components/ProjectsView.tsx", "Search projects"],
   ["./components/ReviewPanel.tsx", "PR title"],
   ["./components/ReviewPanel.tsx", "MR title"],

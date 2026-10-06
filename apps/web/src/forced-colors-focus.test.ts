@@ -44,7 +44,6 @@ const REVIEWED: ReadonlyMap<string, string> = new Map([
   [".composer-answer-input { outline: none }", "a text field: forced colors keeps the caret, which marks focus"],
   [".palette-input { outline: none }", "a text field: forced colors keeps the caret, which marks focus"],
   [".project-manager-search input { outline: 0 }", "a text field: forced colors keeps the caret, which marks focus"],
-  [".inbox-search input { outline: 0 }", "a text field: forced colors keeps the caret, which marks focus"],
   [".archive-search input { outline: 0 }", "a text field: forced colors keeps the caret, which marks focus"],
   [".shell-search:focus { outline: none; border-color: var(--focus) }", "a text input: forced colors keeps the caret, which marks focus"],
   [".shell-input:focus { outline: none; border-color: var(--focus) }", "a text input: forced colors keeps the caret, which marks focus"],

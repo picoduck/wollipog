@@ -465,7 +465,7 @@ export function ArchivedSessionsView() {
     <section className="page wide archive-view" aria-labelledby="page-title">
       <PageHeader title={destination("archived").name} />
       <div className="toolbar">
-        <label className={`archive-search${queryInput ? " has-query" : ""}`}>
+        <label className="archive-search">
           <span>Search Sessions and Transcripts</span>
           <div>
             <SearchIcon size={16} aria-hidden="true" />

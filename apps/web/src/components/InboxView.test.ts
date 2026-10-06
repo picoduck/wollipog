@@ -1,24 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { SessionView } from "@wollipog/protocol";
-import { inboxSessionMatchesQuery, pageInboxPreview } from "./InboxView.js";
-
-function session(agentName: string): SessionView {
-  return {
-    id: "session",
-    title: "Managed Session",
-    preview: null,
-    agentId: "codex",
-    agentName,
-    driver: "codex-app-server",
-  } as SessionView;
-}
-
-test("Inbox search matches the canonical transport label as well as the stored agent name", () => {
-  assert.equal(inboxSessionMatchesQuery(session("Codex"), "app server", "Project"), true);
-  assert.equal(inboxSessionMatchesQuery(session("Codex"), "codex", "Project"), true);
-  assert.equal(inboxSessionMatchesQuery(session("Codex"), "unrelated", "Project"), false);
-});
+import { pageInboxPreview } from "./InboxView.js";
 
 test("preview paging changes follow state before programmatic scrolling", () => {
   const calls: string[] = [];

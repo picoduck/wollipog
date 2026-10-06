@@ -178,13 +178,13 @@ test("search Enter hands the preserved filter to the Sessions grid for keyboard 
   await expect(page.locator(`#${repairedActiveId}`)).toBeAttached();
   await expect(page.locator(`#${repairedActiveId}`)).toBeInViewport();
 
-  // An empty result set retains both input focus and the existing no-match announcement.
+  // An empty result set retains input focus and announces No Matches in place of both panes (#2200).
   await page.keyboard.press("/");
   await search.fill("nothing matches this");
   await search.press("Enter");
   await expect(search).toBeFocused();
   await expect(search).toHaveValue("nothing matches this");
-  await expect(page.getByText("No Matching Sessions", { exact: true })).toBeVisible();
+  await expect(page.getByText("No Matches", { exact: true })).toBeVisible();
   await expect(page.getByRole("grid", { name: "Sessions", exact: true })).toHaveCount(0);
 });
 

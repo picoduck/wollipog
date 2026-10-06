@@ -112,7 +112,11 @@ function EntryIcon({ entry }: { entry: PaletteEntry }): ReactNode {
  * destinations and actions it names. A meta-harness aggregating N machines is unusable without
  * global search.
  */
-export function CommandPalette({ onClose }: { onClose: () => void }) {
+export function CommandPalette({ initialQuery = "", onClose }: {
+  /** The query the palette opens with: Sessions' Search Transcripts passes its own (#2200). */
+  initialQuery?: string;
+  onClose: () => void;
+}) {
   const api = useApi();
   const instanceScope = useInstanceScope();
   const isMobile = useIsMobile();
@@ -122,7 +126,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
   const railPreferences = useRailPreferences();
   const [catalogSessions, setCatalogSessions] = useState(() => new Map(sessions));
   const [recent] = useState(() => loadRecentSessions(instanceScope));
-  const [q, setQ] = useState("");
+  const [q, setQ] = useState(initialQuery);
   // The active row by key, so a section arriving above it (late transcript hits) does not move it.
   const [activeKey, setActiveKey] = useState<string | null>(null);
   // The hits and the query they answer. Earlier hits stay on screen until the next ones replace them.
@@ -133,6 +137,11 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
   );
   const listboxId = `command-palette-${useId().replace(/:/g, "")}`;
   useCommandPaletteFocus(inputRef, returnFocusRef);
+  // A query it opens with is one to refine, so the caret follows it.
+  useEffect(() => {
+    const input = inputRef.current;
+    if (input && initialQuery) input.setSelectionRange(input.value.length, input.value.length);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps -- only the query the palette opened with
   // A control that held focus can leave the palette: crossing 760px removes Cancel, and a late
   // session catalog can replace the no-results actions with rows. Focus then falls to <body>, outside
   // the dialog, where Tab and Escape no longer reach it, so the commit that removed it hands focus

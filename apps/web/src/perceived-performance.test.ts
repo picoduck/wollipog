@@ -112,7 +112,7 @@ test("typing cancels a pending focus handoff", () => {
   // request armed; clearing the second search fired it and stole focus mid-typing.
   assert.match(view, /const changeQuery = useCallback\(\(next: string\) => \{[\s\S]{0,160}setExitPending\(false\)/,
     "an ordinary input change must invalidate the outstanding request");
-  assert.match(view, /onChange=\{\(event\) => changeQuery\(event\.target\.value\)\}/,
+  assert.match(view, /<SessionsSearchField\s+value=\{query\}\s+onChange=\{changeQuery\}/,
     "the input must go through the invalidating setter, not setQuery directly");
 });
 
@@ -142,7 +142,7 @@ test("typing is decoupled from filtering", () => {
   // of the intent, and an easy thing to do by accident when wiring this up.
   assert.doesNotMatch(view, /value=\{deferredQuery\}/,
     "the input renders the immediate query; only the filtering is deferred");
-  assert.match(view, /const normalizedQuery = deferredQuery/,
+  assert.match(view, /const normalizedQuery = normalizeSessionsQuery\(deferredQuery\)/,
     "the filtering must actually consume the deferred value");
 });
 

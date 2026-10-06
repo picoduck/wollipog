@@ -100,6 +100,7 @@ import {
   Reply as LucideReply,
   ScrollText as LucideScrollText,
   Search as LucideSearch,
+  SearchX as LucideSearchX,
   Settings as LucideSettings,
   Share as LucideShare,
   Shield as LucideShield,
@@ -350,6 +351,10 @@ export function UpdateIcon(props: IconProps) {
 
 export function SearchIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideSearch} {...props} />;
+}
+
+export function SearchOffIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideSearchX} {...props} />;
 }
 
 export function CloseIcon(props: IconProps) {

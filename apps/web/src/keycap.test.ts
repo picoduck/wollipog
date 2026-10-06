@@ -15,7 +15,7 @@ import { contrast, everyPalette, SCHEMES, THEMES } from "./palettes.js";
 const css = readFileSync(fileURLToPath(new URL("./styles.css", import.meta.url)), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
 
 /** The classes that name a keycap element rather than the surface around it. */
-const KEYCAP_CLASSES = ["rp-kbd", "follow-tail-kbd", "inbox-search-key"];
+const KEYCAP_CLASSES = ["rp-kbd", "follow-tail-kbd"];
 
 /** True when the rule's subject — the last compound of the selector — is a keycap. */
 function targetsKeycap(selector: string): boolean {

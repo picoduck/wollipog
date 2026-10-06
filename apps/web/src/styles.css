@@ -11904,54 +11904,16 @@ body.shell-dock-dragging * {
 .inbox-tab-group:has(> .inbox-project-actions) > .tab {
   scroll-margin-inline-end: calc(var(--space-1) + var(--control-h-sm) + var(--space-6));
 }
+/* The Sessions search (#2200, §8.4): an `.input-affix` field at the end of the tab row's tools,
+   always open and one width, so focusing or typing in it moves nothing beside it. 200px once the
+   main column is in the compact tier (§2.10). The `/` keycap is its suffix, on fine pointers only. */
 .inbox-search {
-  display: flex;
-  width: var(--control-h);
-  min-width: var(--control-h);
-  height: var(--control-h);
-  align-items: center;
-  gap: 6px;
-  overflow: hidden;
-  margin-bottom: 0;
-  padding: 5px 8px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  color: var(--text-dim);
-  background: var(--bg);
-  cursor: text;
-  transition: width var(--dur-base) var(--ease-out), min-width var(--dur-base) var(--ease-out), border-color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
+  flex: none;
+  width: 240px;
 }
-.inbox-search:focus-within,
-.inbox-search.has-query {
-  width: min(250px, 28vw);
-  min-width: 150px;
+@container app (max-width: 1099px) {
+  .inbox-search { width: 200px; }
 }
-.inbox-search:focus-within { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
-.inbox-search > .app-icon { flex: none; }
-.inbox-search input {
-  width: 0;
-  min-width: 0;
-  flex: 0 1 0;
-  border: 0;
-  outline: 0;
-  opacity: 0;
-  pointer-events: none;
-  color: var(--text);
-  background: transparent;
-  font: inherit;
-  transition: width var(--dur-base) var(--ease-out), opacity var(--dur-fast) var(--ease-out);
-}
-.inbox-search:focus-within input,
-.inbox-search.has-query input {
-  width: auto;
-  flex: 1;
-  opacity: 1;
-  pointer-events: auto;
-}
-/* The `/` keycap shows only while the field is open. `:where()` keeps these at one class, so the
-   coarse-pointer keycap hide still wins on a touch screen. */
-.inbox-search-key { display: none; }
-:where(.inbox-search:focus-within, .inbox-search.has-query) .inbox-search-key { display: inline-flex; }
 .inbox-list {
   min-height: 0;
   flex: 1;
@@ -12360,6 +12322,13 @@ body.shell-dock-dragging * {
   overflow: auto;
   padding: 0 var(--space-4);
 }
+/* No Matches takes both panes' place (#2200, §6.1), on the page grid like any state that spans them. */
+.inbox-no-matches {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  padding: 0 var(--page-gutter) var(--space-12);
+}
 .inbox-splitter {
   position: relative;
   z-index: 2;
@@ -12471,9 +12440,7 @@ body.shell-dock-dragging * {
 @media (max-width: 760px) {
   /* The search field takes a full-width row of its own above the tabs (#2082); the tab bar's
      phone rules, after its own, put it there. */
-  .inbox-search { width: 100%; min-width: 0; flex: none; margin-bottom: 0; }
-  .inbox-search input { width: auto; flex: 1; opacity: 1; pointer-events: auto; }
-  .inbox-search-key { display: inline-flex; }
+  .inbox-search { width: 100%; }
   /* A phone has no width for a 26px indent or the chip's words: the spine narrows and the family
      chip keeps only its dots, which still say how many children and which of them wait (#896). */
   .inbox-row-shell.thread-child { margin-left: 14px; }

@@ -87,6 +87,8 @@ async function mount(options: {
   view?: View;
   appBarSearchOnPhoneOnly?: boolean;
   catalog?: () => Promise<{ sessions: SessionView[] }>;
+  /** The query the palette opens with, as Sessions' Search Transcripts passes it (#2200). */
+  initialQuery?: string;
 } = {}) {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
@@ -135,7 +137,7 @@ async function mount(options: {
         </AppBarSearchProvider>
         <input aria-label="Elsewhere" />
         <ViewProbe />
-        {open && <CommandPalette onClose={() => setOpen(false)} />}
+        {open && <CommandPalette initialQuery={options.initialQuery} onClose={() => setOpen(false)} />}
       </>
     );
   }
@@ -293,6 +295,18 @@ test("transcript search: a hint under three characters, a searching row, and ear
     ui.searches.at(-1)!.resolve([{ sessionId: "s-other", title: "Other work", snippet: "the ⟪login⟫ ⟪form⟫" }]);
   });
   assert.deepEqual(ui.sections(), [["In Transcripts", ["Other work"]]], "and are replaced when they do");
+});
+
+test("a palette opened with a query searches it at once, with the caret after it (#2200)", async () => {
+  const ui = await mount({ initialQuery: "login" });
+  await ui.key(ui.doc.body, "k", { ctrlKey: true });
+  const input = ui.input();
+  assert.equal(input.value, "login");
+  assert.equal(ui.doc.activeElement, input);
+  assert.equal(input.selectionStart, 5, "the caret follows the query, to refine it");
+  assert.match(ui.doc.querySelector('.palette [role="status"]')!.textContent!, /Searching transcripts…/);
+  await settle(250);
+  assert.equal(ui.searches.at(-1)?.query, "login");
 });
 
 test("no results: the sentence, Clear Search and Search Archived Sessions", async () => {

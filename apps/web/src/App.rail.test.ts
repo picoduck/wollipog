@@ -101,7 +101,7 @@ test("the application shell is rail-first and the legacy sidebar is fully retire
 
 test("the desktop rail is grouped, searchable and has one current-page treatment (#1958)", () => {
   // Search: the first Work item, opening the same palette as Ctrl/Cmd+K, never a destination.
-  assert.match(app, /const openPalette = useCallback\(\(\) => setPaletteOpen\(true\), \[\]\);/);
+  assert.match(app, /const openPalette = useCallback\(\(query\?: string\) => setPalette\(typeof query === "string" \? query : ""\), \[\]\);/);
   assert.match(app, /onSearch: openPalette,/);
   assert.match(rail, /entries\.splice\(Math\.max\(0, entries\.findIndex\(\(entry\) => entryGroup\(entry\) === "work"\)\), 0, "search"\)/);
   assert.match(rail, /aria-label="Search"[\s\S]*?aria-keyshortcuts=\{shortcutAriaKeys\("search"\)\}[\s\S]*?data-rail-tip="Search"[\s\S]*?data-rail-keys=\{shortcutDisplay\("search"\)\}/);
@@ -400,15 +400,14 @@ test("Inbox unifies Session and Project creation while the shell exposes no dupl
   assert.match(pageHeader, /className="icon-btn detail-bar-back"[^>]*aria-label=\{backLabel\}/);
 });
 
-test("Inbox Search is compact by default and expands for keyboard or populated use", () => {
-  assert.match(inbox, /className=\{`inbox-search\$\{query \? " has-query" : ""\}`\}/);
-  assert.match(inbox, /<SearchIcon size=\{16\} \/>/);
-  assert.match(css, /\.inbox-search\s*\{[^}]*width:\s*var\(--control-h\);[^}]*min-width:\s*var\(--control-h\);[^}]*height:\s*var\(--control-h\);/,
-    "idle Search only occupies one icon target");
-  assert.match(css, /\.inbox-search:focus-within,\s*\.inbox-search\.has-query\s*\{[^}]*width:\s*min\(250px, 28vw\);[^}]*min-width:\s*150px;/,
-    "focus and a retained query both keep Search expanded");
-  assert.match(css, /\.inbox-search:focus-within input,\s*\.inbox-search\.has-query input\s*\{[^}]*opacity:\s*1;[^}]*pointer-events:\s*auto;/);
-  assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.inbox-search\s*\{[^}]*width:\s*100%;[^}]*flex:\s*none;/,
+test("Sessions Search is one fixed width whether idle, focused or holding a query (#2200)", () => {
+  assert.match(inbox, /<SessionsSearchField\b/);
+  assert.match(css, /\.inbox-search\s*\{[^}]*flex:\s*none;[^}]*width:\s*240px;/, "240px on a wide main column");
+  assert.match(css, /@container app \(max-width: 1099px\)\s*\{\s*\.inbox-search\s*\{\s*width:\s*200px;/,
+    "200px in the compact tier");
+  assert.doesNotMatch(css, /\.inbox-search[^{]*:focus-within[^{]*\{/, "focus never restyles the field's box");
+  assert.doesNotMatch(css, /\.inbox-search[^{]*\{[^}]*transition/, "the field never animates a width");
+  assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.inbox-search\s*\{\s*width:\s*100%;\s*\}/,
     "small screens give Search a full-width row of its own (#2082)");
 });
 

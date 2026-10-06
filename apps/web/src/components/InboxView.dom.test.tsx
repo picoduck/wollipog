@@ -1610,7 +1610,7 @@ test("desktop search Enter focuses the exact filtered result set without activat
   await pressSearchEnter();
   assert.equal(domWindow.document.activeElement, search);
   assertNoDomNode(container.querySelector(".inbox-list"));
-  assert.match(container.querySelector(".inbox-zero")?.textContent ?? "", /No Matching Sessions/);
+  assert.equal(container.querySelector(".inbox-no-matches .state-title")?.textContent, "No Matches");
 
   // Modified and composing Enter remain input-owned even when results exist.
   await filter("Session");

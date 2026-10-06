@@ -501,7 +501,7 @@ test("desktop can apply a pending Inbox order without losing selection or scroll
     }));
   const toolbarWithoutButton = await stationaryToolbar();
   expect(toolbarWithoutButton.map(({ name }) => name)).toEqual([
-    "page-controls", "btn ghost page-action", "overflow-menu page-more", "btn primary page-primary", "inbox-search",
+    "page-controls", "btn ghost page-action", "overflow-menu page-more", "btn primary page-primary", "input-affix inbox-search",
   ]);
 
   await page.evaluate(() => {

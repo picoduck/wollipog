@@ -74,6 +74,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `RefreshIcon` | Lucide | `RefreshCw` | Generic refresh action. |
 | `UpdateIcon` | Lucide | `Upload` | Install or upload an update. |
 | `SearchIcon` | Lucide | `Search` | Generic search action. |
+| `SearchOffIcon` | Lucide | `SearchX` | A search with no matches: the Sessions No Matches state. |
 | `CloseIcon` | Lucide | `X` | Generic close action. |
 | `SettingsIcon` | Lucide | `Settings` | Generic settings navigation. |
 | `UserPlusIcon` | Lucide | `UserPlus` | Add a collaborator. |

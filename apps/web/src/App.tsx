@@ -644,9 +644,10 @@ export function Shell() {
   }, [isMobile, navigate, instanceScope]);
 
   // The global search palette: the rail's Search, the phone app bars' Search icon, and Ctrl/Cmd+K.
-  const [paletteOpen, setPaletteOpen] = useState(false);
-  const openPalette = useCallback(() => setPaletteOpen(true), []);
-  const togglePalette = useCallback(() => setPaletteOpen((v) => !v), []);
+  // Null while closed, else the query it opens with (Sessions' Search Transcripts passes one).
+  const [palette, setPalette] = useState<string | null>(null);
+  const openPalette = useCallback((query?: string) => setPalette(typeof query === "string" ? query : ""), []);
+  const togglePalette = useCallback(() => setPalette((current) => current === null ? "" : null), []);
   useSearchShortcut(togglePalette);
 
   // `?` opens the discoverable reference without stealing punctuation from editors or xterm.
@@ -928,7 +929,7 @@ export function Shell() {
       )}
       {dialog?.kind === "run" && <NewRunDialog onClose={() => setDialog(null)} />}
       {dialog?.kind === "pod" && <NewPodDialog onClose={() => setDialog(null)} />}
-      {paletteOpen && <CommandPalette onClose={() => setPaletteOpen(false)} />}
+      {palette !== null && <CommandPalette initialQuery={palette} onClose={() => setPalette(null)} />}
       {shortcutReferenceOpen && (
         <ShortcutReference
           onClose={closeShortcutReference}

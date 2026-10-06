@@ -1294,6 +1294,7 @@ wide as the trigger and at least 280px, never narrower, so descriptions do not w
 | Switch | 32×18 track (40×24 on touch), `--radius-pill`, `--control-outline` edge; on = `--accent` track. **For settings that apply instantly.** Label is the row title, and `aria-label` matches it. Never a button that says "On"/"Off". Built by `Switch` (`.ui-switch-control`, `SettingsRows.tsx`): `SwitchRow` renders it with the row's title and description inside, so the whole row is the target, named by its title and described by its description; standalone, beside other controls in a row, it is the bare track, named by its `label` or `aria-labelledby`, with the 44px coarse-pointer hit area. |
 | ChoiceRow | One component for radio cards, member checklists, instance pickers: leading control, title, one-line description, trailing meta; selected = `--surface-selected` + accent control; hover distinct. Markers align in one column. **Selection follows the checked input**: the row's selected look and its `aria-checked` (or `:checked`) come from one value, so the look never disagrees with what is announced. Built by `ChoiceRows` (`.choice-rows`; `multiple` for checkboxes) over `ChoiceRow` (`.choice-row`, a `<label>` around a native radio or checkbox): the marker sits on the title's first line, the description is one ellipsized line on desktop and at most two on phones (full text in the tooltip and the accessible description), and rows are `--row-h` tall at least (40px, 48px coarse). An unavailable row keeps its size, reads faint, shows its reason in place of the description, and is `aria-disabled` rather than `disabled`, so arrows still reach it and announce the reason while selection is refused. `ChoiceList` (`.choice-list`) is the compact form: radio rows with a trailing value and no description, for pickers inside sheets. A list beside a detail (Import from Git's skills beside their files) passes `show`: the marker becomes a target of its own, the rest of the row is a button that shows the row without changing its marker, the fill follows the row shown (`aria-current`), and the meta moves onto the title's line so the description has the row's width. |
 | ChoiceTiles | Equal tiles for a few short presets whose second line is the reason to pick one: Snooze's presets, each with the time it resolves to (#2181). A `radiogroup` of `radio` buttons, three across and two on a phone, each at least `--row-h` (48px on a phone); the label (`--type-body-strong`) is the tile's name and its detail (`--type-small`, `--text-dim`) its description. Selected is the choice row's `--surface-selected` with a trailing 16px accent check; arrows move and select. An unavailable tile stays reachable, reads faint and says why in its detail. `onChange` reports whether a pointer chose the tile, so a tile that reveals a field (Custom…) moves focus there only for a pointer. Built by `ChoiceTiles` (`.choice-tiles`, `.choice-tile`). |
+| Search field | An `.input-affix` text field with a 14px `Search` prefix, always open and one width: focusing or typing never resizes it or moves what sits beside it. Its placeholder names what it searches and its tooltip what it matches. Sessions' (#2200, `SessionsSearchField`) ends the tab row's tools: 240px, 200px in the compact tier, the full row on a phone; placeholder "Search sessions", tooltip "Searches titles, agents, projects and the latest message.", a `/` keycap suffix on fine pointers (§11.5, §16.2). Escape clears it; Enter moves focus to the first result. While it holds a query the tab counts follow the results (§10.1), the preview follows the first result when the selected session leaves them, and a query with none shows No Matches (§12.2). |
 | File picker | A dropzone row: icon, "Drop files here or", `.btn.sm` "Choose Folder…". Never the native "Choose Files / No file chosen". |
 | Number with unit | `.w-xs` input with the unit as a suffix inside the field ("30 s"). |
 
@@ -1466,6 +1467,9 @@ compact widths, detail sub-views.
   a `.icon-btn.sm` ⋯ ("Docs Site Actions"), outside the tab; a right-click, Shift+F10 or the
   context-menu key on any project tab opens the same menu without selecting it, and Escape returns
   focus to that tab (#2199).
+- **Counts follow a search** (#2200): while the row's search holds a query, each tab counts its
+  matching sessions and its badges count only matches, so a tab with none stays in place reading a
+  plain 0 with no badge. Clearing the query restores the totals.
 
 ### 10.2 Segmented Control (Switch the Mode or Filter of the Same Content)
 
@@ -1840,6 +1844,12 @@ One `State` component with variants; the states are **mutually exclusive** in th
 Inline in the list: `Search` icon, "No skills match “terr”." and a `.btn.sm` "Clear Search". Neutral
 tone, never a success mark. Inside a picker's open list (§8.4) the row is the icon and the sentence, and an optional create row
 follows it instead of Clear Search: the query lives in the field, where clearing it is one keystroke.
+
+Sessions (#2200) replaces both panes, list and preview, with one No Matches state (§6.1): the
+search-off icon (`SearchOffIcon`), the title "No Matches", "No sessions match “terraform” in Docs
+Site." ("in any group" on All), then **Clear Search** (`.btn`; Escape does the same) and **Search
+Transcripts** (`.btn.ghost`), which opens the command palette with the query. Built by
+`SessionsNoMatches`.
 
 ### 12.3 Loading
 
