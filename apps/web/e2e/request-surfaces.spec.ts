@@ -565,7 +565,12 @@ for (const viewport of [
     await expect(panelRows(page)).toHaveCount(12);
     await expect(panelRows(page).nth(2)).toBeFocused();
 
-    // A request the Orchestrator handles: the same card, read-only.
+    // A request the Orchestrator handles: the same card, read-only. The list keeps its place across
+    // the visit (§6.2).
+    const list = page.locator(".request-panel-list");
+    await list.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    const scrolled = await list.evaluate((element) => element.scrollTop);
+    expect(scrolled).toBeGreaterThan(0);
     await panelRows(page).nth(8).click();
     await expect(page.locator(".request-panel-position")).toHaveText("Request 1 of 4");
     const readOnly = page.locator(".request-panel-detail .request-card[data-read-only]");
@@ -577,6 +582,8 @@ for (const viewport of [
       window.__WOLLIPOG_REQUEST_SURFACES_E2E__.openedChild()?.sessionId)).toBe("child-3");
 
     await page.getByRole("button", { name: "All Requests" }).click();
+    await expect(panelRows(page).nth(8)).toBeFocused();
+    expect(await list.evaluate((element) => element.scrollTop)).toBe(scrolled);
     const close = page.getByRole("button", { name: "Close Panel" });
     await expect(close).toHaveText("");
     await expect(close.locator("svg")).toHaveCount(1);

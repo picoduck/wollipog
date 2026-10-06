@@ -3,7 +3,8 @@ import { after, before, beforeEach, test } from "node:test";
 import React, { act, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { SessionView } from "@wollipog/protocol";
+import type { DescendantRequestView, SessionView } from "@wollipog/protocol";
+import { sessionRequestPanelKey } from "./SessionRequestPanel.js";
 import type { TimelineItem } from "../timeline.js";
 import { panelReturnFocusTarget, RightPanel, useRightPanelState, type RightPanelState } from "./RightPanel.js";
 import type { GovernanceDecision } from "../governance.js";
@@ -120,12 +121,18 @@ function PanelHarness({
   initialRunnerOnline = true,
   decisionHistory,
   decisionHistoryHasMore,
+  descendantRequests,
+  descendantRequestStatus,
+  selectedRequestKey,
   onState,
 }: {
   initialSession?: SessionView;
   initialRunnerOnline?: boolean;
   decisionHistory?: readonly GovernanceDecision[];
   decisionHistoryHasMore?: boolean;
+  descendantRequests?: readonly DescendantRequestView[];
+  descendantRequestStatus?: "idle" | "loading" | "ready" | "unavailable";
+  selectedRequestKey?: string | null;
   onState: (state: RightPanelState) => void;
 }) {
   const state = useRightPanelState();
@@ -162,6 +169,9 @@ function PanelHarness({
         items={agentItems}
         decisionHistory={decisionHistory}
         decisionHistoryHasMore={decisionHistoryHasMore}
+        descendantRequests={descendantRequests}
+        descendantRequestStatus={descendantRequestStatus}
+        selectedRequestKey={selectedRequestKey}
         onLoadOlderDecisions={() => {}}
         onOpenSourceLocation={() => {}}
         onClearSourceLocation={() => {}}
@@ -352,6 +362,46 @@ test("the Requests launcher row is enabled with nothing pending and opens Nothin
     assert.equal(state.mode, "decisions");
   } finally {
     await panel.dispose();
+  }
+});
+
+test("the panel head's back control leaves only while a request's detail is shown (#2206)", async () => {
+  const child: DescendantRequestView = {
+    sessionId: "child-1",
+    sessionTitle: "Child Session 1",
+    runnerId: "runner-1",
+    runnerOnline: true,
+    eventEpoch: 1,
+    createdAt: Date.now(),
+    responseOwner: "human",
+    occurrenceId: "occurrence-1",
+    request: {
+      requestId: "question-1",
+      occurrenceId: "occurrence-1",
+      kind: "question",
+      title: "Question",
+      options: [],
+      questions: [{ id: "target", question: "Choose a target", options: [{ label: "Staging" }] }],
+    },
+  };
+  const key = sessionRequestPanelKey(child.sessionId, child.occurrenceId);
+  for (const [name, props, backShown] of [
+    ["the open request's detail", { descendantRequests: [child], descendantRequestStatus: "ready" }, false],
+    // Polling failed with the request open: the panel shows its unavailable state, not the detail.
+    ["unavailable with the request still selected", { descendantRequests: [], descendantRequestStatus: "unavailable" }, true],
+    ["loading with the request still selected", { descendantRequests: [], descendantRequestStatus: "loading" }, true],
+  ] as const) {
+    let state!: RightPanelState;
+    const panel = await mountPanel(<PanelHarness {...props} selectedRequestKey={key} onState={(next) => { state = next; }} />);
+    try {
+      await act(async () => state.show("requests"));
+      const back = panel.container.querySelector('.rp-head [aria-label="Back to Panel List"]');
+      assert.equal(back !== null, backShown, name);
+      assert.equal(panel.container.querySelector(".request-panel-back") !== null, !backShown,
+        `${name}: exactly one way back`);
+    } finally {
+      await panel.dispose();
+    }
   }
 });
 

@@ -593,6 +593,26 @@ test("an answered request gives way to the next in its group, and the last one t
   }
 });
 
+test("the replacement keeps the request's place in its own group when the other group changes too (#2206)", async () => {
+  const [h1, h2, o1, o2] = [childRequest(1, "human"), childRequest(2, "human"), childRequest(3, "orchestrator"),
+    childRequest(6, "orchestrator")];
+  const view = await mountNavigator({ descendants: [h1!, h2!, o1!, o2!] });
+  try {
+    await act(async () => view.rows()[2]!.click());
+    assert.equal(view.position(), "Request 1 of 2");
+    assert.equal(view.container.querySelector("a.request-panel-child")?.textContent, "Child Session 3");
+    // One poll answers H1 and the Orchestrator's O1: O2 is now first in the Orchestrator's group.
+    await act(async () => setNavigatorDescendants([h2!, o2!]));
+    assert.equal(view.position(), "Request 1 of 1");
+    assert.equal(view.container.querySelector("a.request-panel-child")?.textContent, "Child Session 6");
+    // A request arriving in the other group moves nothing either.
+    await act(async () => setNavigatorDescendants([childRequest(4, "human"), childRequest(5, "human"), h2!, o2!]));
+    assert.equal(view.container.querySelector("a.request-panel-child")?.textContent, "Child Session 6");
+  } finally {
+    await view.cleanUp();
+  }
+});
+
 test("switching between descendant questions preserves each request's draft", async () => {
   const session = { ...evidenceSession(), pendingApproval: null } as SessionView;
   const question = (suffix: string): DescendantRequestView => ({

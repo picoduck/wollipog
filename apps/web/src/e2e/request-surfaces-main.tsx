@@ -315,6 +315,8 @@ function standaloneApprovalSession(): SessionView {
 function descendantRequests(): DescendantRequestView[] {
   return Array.from({ length: 12 }, (_, index) => {
     const orchestrator = index % 3 === 2;
+    // Child 4's merge waits for the person: a merge decision answered on the panel's card (#2206).
+    const humanMerge = index === 3;
     return {
       sessionId: `child-${index + 1}`,
       sessionTitle: `Child Session ${index + 1}`,
@@ -354,7 +356,7 @@ function descendantRequests(): DescendantRequestView[] {
           status: "pending",
           createdAt: Date.now() - 60_000,
         },
-      } : orchestrator ? {
+      } : orchestrator || humanMerge ? {
         requestId: `merge-${index + 1}`,
         occurrenceId: `occurrence-${index + 1}`,
         kind: "workflow_decision",
@@ -380,7 +382,7 @@ function descendantRequests(): DescendantRequestView[] {
           },
           resourceDigest: "c".repeat(64),
           policyRevision: 1,
-          authority: "orchestrator",
+          authority: humanMerge ? "human" : "orchestrator",
           status: "pending",
           createdAt: Date.now() - ((index + 1) * 60_000),
         },

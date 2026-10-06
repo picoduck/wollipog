@@ -418,6 +418,10 @@ export function RightPanel({
   };
 
   // The session's own requests are on its request dock (#2179); this panel lists its descendants'.
+  // A request's detail has its own "‹ All Requests" (#2206), so the head's back control leaves while
+  // one is shown; a selection the list no longer holds (unavailable, or still loading) shows none.
+  const requestDetailShown = state.mode === "requests" && selectedRequestKey !== null &&
+    descendantRequests.some((request) => sessionRequestPanelKey(request.sessionId, request.occurrenceId) === selectedRequestKey);
   const ownRequests = dockRequests(pendingRequests(session.pendingApproval));
   const ownRequestKey = (request: (typeof ownRequests)[number]) =>
     sessionRequestPanelKey(session.id, request.occurrenceId ?? request.requestId);
@@ -608,8 +612,7 @@ export function RightPanel({
         aria-label={MODE_TITLES[state.mode]}
       >
         <div className="rp-head">
-          {/* An open request has its own "‹ All Requests" (#2206), so one back control leads out of it. */}
-          {state.mode !== "launcher" && !(state.mode === "requests" && selectedRequestKey !== null) && (
+          {state.mode !== "launcher" && !requestDetailShown && (
             <button
               type="button"
               className="icon-btn rp-back"

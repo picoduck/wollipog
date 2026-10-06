@@ -185,16 +185,17 @@ export function SessionRequestPanel({
     : left.responseOwner === "human" ? -1 : 1), [descendants]);
   const settled = descendantStatus === "ready" || descendantStatus === "idle";
 
-  // The open request. One that was answered, here or elsewhere, gives way to the next in its group
-  // after the same place, so a run of requests is answered one after another; with none left in the
-  // group the list comes back.
-  const lastShown = useRef<{ key: string; index: number; owner: RequestPanelItem["responseOwner"] } | null>(null);
+  // The open request. One that was answered, here or elsewhere, gives way to the one now at its
+  // place in its group, so a run of requests is answered one after another; with none left there the
+  // list comes back. The place is counted within the group, so the other group changing in the same
+  // update moves nothing.
+  const lastShown = useRef<{ key: string; groupIndex: number; owner: RequestPanelItem["responseOwner"] } | null>(null);
   const selectedIndex = selectedKey === null ? -1 : items.findIndex((item) => item.key === selectedKey);
   let detail = selectedIndex >= 0 ? items[selectedIndex]! : null;
   let replaced = false;
   if (!detail && selectedKey !== null && settled && lastShown.current?.key === selectedKey) {
-    const { index, owner } = lastShown.current;
-    detail = items.slice(index).find((item) => item.responseOwner === owner) ?? null;
+    const { groupIndex, owner } = lastShown.current;
+    detail = items.filter((item) => item.responseOwner === owner)[groupIndex] ?? null;
     replaced = detail !== null;
   }
   const detailKey = detail?.key ?? null;
@@ -205,7 +206,12 @@ export function SessionRequestPanel({
   useLayoutEffect(() => {
     // A replacement keeps the answered request's place until the selection follows it.
     if (!detail || replaced) return;
-    lastShown.current = { key: detail.key, index: items.indexOf(detail), owner: detail.responseOwner };
+    const owner = detail.responseOwner;
+    lastShown.current = {
+      key: detail.key,
+      groupIndex: items.filter((item) => item.responseOwner === owner).indexOf(detail),
+      owner,
+    };
   });
 
   const panelRef = useRef<HTMLDivElement>(null);
@@ -217,6 +223,18 @@ export function SessionRequestPanel({
   // The row that takes Tab into the list: the last one opened, else the first.
   const [rovingKey, setRovingKey] = useState<string | null>(null);
   const tabStop = items.some((item) => item.key === rovingKey) ? rovingKey : items[0]?.key ?? null;
+
+  // The list keeps its place across a visit to a request (§6.2); a detail starts at its top (§6). The
+  // place is recorded as the list scrolls (by the time a cleanup could read it, the list is gone), and
+  // both run before focus moves, so focusing a row never scrolls the list away from its place.
+  const listShown = !detail && items.length > 0;
+  useLayoutEffect(() => {
+    const list = listRef.current;
+    if (listShown && list) list.scrollTop = listScrollPositions.get(session.id) ?? 0;
+  }, [listShown, session.id]);
+  useLayoutEffect(() => {
+    if (detailRef.current) detailRef.current.scrollTop = 0;
+  }, [detailKey]);
 
   // Focus moves with the view: into a request's heading as it opens, back to its row on the list.
   // An answered request's buttons leave with it, and focus that was on them goes to the next
@@ -232,18 +250,6 @@ export function SessionRequestPanel({
       else if (tabStop) rowRefs.current.get(tabStop)?.focus();
     }
   });
-
-  // The list keeps its place across a visit to a request (§6.2); a detail starts at its top (§6).
-  const listShown = settled && !detail && items.length > 0;
-  useLayoutEffect(() => {
-    const list = listRef.current;
-    if (!listShown || !list) return;
-    list.scrollTop = listScrollPositions.get(session.id) ?? 0;
-    return () => { listScrollPositions.set(session.id, list.scrollTop); };
-  }, [listShown, session.id]);
-  useLayoutEffect(() => {
-    if (detailRef.current) detailRef.current.scrollTop = 0;
-  }, [detailKey]);
 
   // A descendant's view may not have reached the store yet. For a person the answer route applies
   // only the organization role gate, so this session's own verdict stands in for it (#1857).
@@ -429,6 +435,7 @@ export function SessionRequestPanel({
         role="region"
         aria-label={REQUEST_PANEL_COPY.pendingRequests}
         onKeyDown={onListKeyDown}
+        onScroll={(event) => listScrollPositions.set(session.id, event.currentTarget.scrollTop)}
       >
         {groups.map((group) => {
           const headingId = `${groupHeadingId}-${group.owner}`;
