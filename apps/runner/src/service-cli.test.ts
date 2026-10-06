@@ -584,6 +584,47 @@ test("service install defaults to the installer's sibling control plane and web 
   assert.ok(!existsSync(join(bare.layout.unitDir, CONTROL_PLANE_UNIT)), "no unit is written");
 });
 
+test("service install discovers public sibling before legacy web and preserves an existing legacy environment", async (t) => {
+  for (const sibling of [false, true]) for (const preserved of [false, true]) {
+    await t.test((sibling ? "sibling" : "legacy") + "/" + (preserved ? "preserved-env" : "fresh-env"), async (t) => {
+      const f = fake(t);
+      const bin = join(f.home, ".local", "bin");
+      mkdirSync(bin, { recursive: true, mode: 0o755 });
+      for (const name of ["wollipog", "wollipog-runner", "wollipog-control-plane"]) writeFileSync(join(bin, name), "inert installed bytes");
+      const legacy = join(f.home, ".local", "share", "wollipog", "web");
+      mkdirSync(legacy, { recursive: true, mode: 0o755 });
+      writeFileSync(join(legacy, "index.html"), "legacy dashboard");
+      const publicWeb = join(bin, "web");
+      if (sibling) {
+        mkdirSync(publicWeb, { mode: 0o755 });
+        writeFileSync(join(publicWeb, "index.html"), "public dashboard");
+      }
+      const paths = [f.home, f.layout.dataDir];
+      if (preserved) {
+        mkdirSync(f.layout.configDir, { recursive: true, mode: 0o750 });
+        writeFileSync(f.layout.controlPlaneEnvFile, 'WOLLIPOG_WEB_DIST="' + legacy + '"\n', { mode: 0o640 });
+        writeFileSync(f.layout.runnerConfigFile, '{"runnerId":"preserved"}\n', { mode: 0o640 });
+        writeFileSync(f.layout.runnerTokenFile, "inert preserved credential", { mode: 0o640 });
+        paths.push(f.layout.configDir, f.layout.controlPlaneEnvFile, f.layout.runnerConfigFile, f.layout.runnerTokenFile);
+      }
+      const identities = () => paths.map((path) => {
+        const { dev, ino, uid, gid, mode } = statSync(path);
+        return { dev, ino, uid, gid, mode };
+      });
+      const before = identities();
+      const config = preserved ? [f.layout.controlPlaneEnvFile, f.layout.runnerConfigFile, f.layout.runnerTokenFile].map((path) => readFileSync(path)) : [];
+      const host = { ...f.host, isSea: true, execPath: join(bin, "wollipog") };
+      assert.equal(await runServiceCli(["service", "install", "--control-plane", "--no-start", "--no-linger", "--json"], host, f.io),
+        0, f.stderr() + f.stdout());
+      assert.deepEqual(identities(), before);
+      const env = readFileSync(f.layout.controlPlaneEnvFile, "utf8");
+      assert.ok(env.includes('WOLLIPOG_WEB_DIST="' + (preserved || !sibling ? legacy : publicWeb) + '"'), env);
+      if (preserved) assert.deepEqual([f.layout.controlPlaneEnvFile, f.layout.runnerConfigFile, f.layout.runnerTokenFile].map((path) => readFileSync(path)), config);
+      assert.deepEqual(JSON.parse(f.stdout()).started, []);
+    });
+  }
+});
+
 function releaseFixture(f: Fake, options: { version?: string; webBundle?: boolean; badVersion?: boolean; manifest?: boolean } = {}) {
   const version = options.version ?? "9.9.9";
   const triple = "x86_64-unknown-linux-gnu";

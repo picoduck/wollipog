@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { ReleaseStaging, stagingFilesystem } from "../apps/runner/src/release-staging.ts";
+import { defaultServiceHost, runServiceCli } from "../apps/runner/src/service-cli.ts";
+import { CONTROL_PLANE_UNIT, parseEnvFile, serviceLayout } from "../apps/runner/src/systemd-service.ts";
+import { resolveWebDist } from "../apps/control-plane/src/web-dist.ts";
 
 const triple = "x86_64-unknown-linux-gnu";
 const runnerAsset = `wollipog-runner-${triple}`;
@@ -77,6 +80,40 @@ esac
 `);
   // Even a missing release must not fall through to ambient gh credentials or network.
   executable(join(fakeBin, "gh"), 'echo "unexpected fixture gh invocation" >&2\nexit 22\n');
+  executable(join(fakeBin, "tar"), `
+case "$1" in
+  --version) ;;
+  -xzf) case "$2:$3:$4" in "$TEST_ROOT/"*:-C:"$TEST_ROOT/"*) ;; *) exit 94 ;; esac ;;
+  *) exit 94 ;;
+esac
+if [ "$TEST_FAULT" = extract ] && [ "$1" = -xzf ]; then exit 85; fi
+PATH="$TEST_ORIGINAL_PATH"; export PATH
+exec tar "$@"
+`);
+  executable(join(fakeBin, "mv"), `
+for arg in "$@"; do case "$arg" in -f) ;; "$TEST_ROOT/"*) ;; *) exit 94 ;; esac; done
+if [ "$#" -eq 2 ] && [ "$2" = "$TEST_WEB_DIR" ]; then
+  case "$1" in
+    */.wollipog-web.stage.*/web) case "$TEST_FAULT" in promote|rollback) exit 86 ;; esac ;;
+    "$TEST_WEB_DIR.previous") [ "$TEST_FAULT" != rollback ] || exit 87 ;;
+  esac
+fi
+if [ "$#" -eq 2 ] && [ "$TEST_FAULT" = save-previous ] && [ "$1" = "$TEST_WEB_DIR.previous" ]; then
+  case "$2" in */.wollipog-web.stage.*/previous) exit 89 ;; esac
+fi
+if [ "$#" -eq 2 ] && [ "$TEST_FAULT" = save-current ] && [ "$1" = "$TEST_WEB_DIR" ] && [ "$2" = "$TEST_WEB_DIR.previous" ]; then exit 89; fi
+PATH="$TEST_ORIGINAL_PATH"; export PATH
+exec mv "$@"
+`);
+  executable(join(fakeBin, "ln"), `
+if [ "$#" -eq 2 ] && [ "$2" = "$TEST_WEB_MARKER" ] && [ "$TEST_FAULT" = marker ]; then exit 88; fi
+if [ "$#" -eq 2 ] && [ "$2" = "$TEST_WEB_MARKER" ] && [ "$TEST_FAULT" = marker-collision ]; then
+  printf 'concurrent unrelated marker\n' > "$TEST_WEB_MARKER"
+fi
+PATH="$TEST_ORIGINAL_PATH"; export PATH
+exec ln "$@"
+`);
+  let fault = "";
   const run = (...args) => spawnSync("sh", ["-c", 'umask 022\nexec sh "$@"', "installer-test", installer, ...args], {
     encoding: "utf8",
     env: {
@@ -86,9 +123,14 @@ esac
       TEST_RELEASE_JSON: join(root, "release.json"),
       TEST_ASSETS_DIR: assetsDir,
       TEST_RELEASE_TAG: releaseTag,
+      TEST_ROOT: root,
+      TEST_ORIGINAL_PATH: process.env.PATH ?? "",
+      TEST_WEB_DIR: join(home, ".local", "bin", "web"),
+      TEST_WEB_MARKER: join(home, ".local", "bin", ".wollipog-web-layout-v1"),
+      TEST_FAULT: fault,
     },
   });
-  return { root, home, run };
+  return { root, home, run, setFault: (value) => { fault = value; } };
 }
 
 const admissionAsset = {
@@ -119,6 +161,267 @@ function admissionFilesystem(root) {
 const admit = (data, root, fs = admissionFilesystem(root)) =>
   ReleaseStaging.create(data, { mode: "user", serviceUid: null }, releaseTag, [admissionAsset], fs);
 
+const siblingWeb = (h) => join(h.home, ".local", "bin", "web");
+const layoutMarker = (h) => join(h.home, ".local", "bin", ".wollipog-web-layout-v1");
+const markerBytes = "wollipog-sibling-web-v1\n";
+function snapshot(path) {
+  let stat;
+  try { stat = lstatSync(path); } catch (error) { if (error.code === "ENOENT") return null; throw error; }
+  const id = identity(path);
+  if (stat.isSymbolicLink()) return { ...id, link: readlinkSync(path) };
+  if (stat.isDirectory()) return { ...id, entries: readdirSync(path).sort().map((name) => [name, snapshot(join(path, name))]) };
+  return { ...id, bytes: readFileSync(path).toString("hex") };
+}
+function namespace(h) {
+  return [siblingWeb(h), siblingWeb(h) + ".previous", layoutMarker(h)].map(snapshot);
+}
+
+posixTest("fresh headless root creates supported missing share ancestors without changing the existing home", (t) => {
+  const h = harness();
+  t.after(() => rmSync(h.root, { recursive: true, force: true }));
+  mkdirSync(h.home, { recursive: true, mode: 0o755 });
+  const home = identity(h.home);
+  const result = h.run("--control-plane");
+  assert.equal(result.status, 0, result.stderr + result.stdout);
+  assert.deepEqual(identity(h.home), home);
+  for (const path of [join(h.home, ".local"), join(h.home, ".local", "share")]) {
+    assert.equal(statSync(path).mode & 0o7777, 0o755, path);
+  }
+  const data = join(h.home, ".local", "share", "wollipog");
+  assert.equal(statSync(data).mode & 0o7777, 0o700, "fresh headless root must satisfy exact 0700 admission");
+  assert.equal(statSync(siblingWeb(h)).mode & 0o7777, 0o755);
+  if (process.platform === "linux") assert.equal(admit(data, h.root).finish(), null);
+});
+
+// Evaluate only real fixture home/descendant POSIX DAC bits. The private mkdtemp wrapper
+// and external sandbox ancestry are a declared supported-host boundary, not normalized paths.
+function accountExists(home, uid, gid) {
+  const allowed = (stat, bits) => {
+    const shift = stat.uid === uid ? 6 : stat.gid === gid ? 3 : 0;
+    return ((stat.mode >> shift) & bits) === bits;
+  };
+  return (path) => {
+    const local = relative(home, path);
+    if (local === ".." || local.startsWith(".." + sep)) return false;
+    let current = home;
+    try {
+      const parts = local ? local.split(sep) : [];
+      for (let i = 0; i <= parts.length; i++) {
+        const stat = lstatSync(current);
+        if (stat.isSymbolicLink()) return false;
+        if (i < parts.length) {
+          if (!stat.isDirectory() || !allowed(stat, 0o1)) return false;
+          current = join(current, parts[i]);
+        } else return allowed(stat, stat.isDirectory() ? 0o1 : 0o4);
+      }
+    } catch (error) { if (error.code === "ENOENT") return false; throw error; }
+    return false;
+  };
+}
+
+posixTest("headless system dashboard remains readable independently of the private user data root through an inert selected-account host", async (t) => {
+  const h = harness();
+  t.after(() => rmSync(h.root, { recursive: true, force: true }));
+  mkdirSync(h.home, { recursive: true, mode: 0o755 });
+  const result = h.run("--control-plane");
+  assert.equal(result.status, 0, result.stderr + result.stdout);
+  const selectedUid = statSync(h.home).uid + 1;
+  const selectedGid = statSync(h.home).gid + 1;
+  const env = { WOLLIPOG_SYSTEM_PREFIX: join(h.root, "system") };
+  const layout = serviceLayout("system", { home: h.home, user: "operator", account: "headless_svc", env });
+  const effects = [];
+  const refuse = async () => { throw new Error("unexpected live effect in inert selected-account host"); };
+  const host = {
+    ...defaultServiceHost(),
+    platform: "linux", uid: 0, user: "operator", home: h.home, isSea: true,
+    execPath: join(h.home, ".local", "bin", "wollipog"), env, cwd: () => h.root,
+    exec: async (command, args) => {
+      effects.push([command, ...args]);
+      if (command === "id" && args.join(" ") === "-u headless_svc") return { code: 0, stdout: String(selectedUid) + "\n", stderr: "" };
+      if (command === "chown" && args[0] === "-R" && args[1] === "headless_svc:headless_svc" &&
+        args.slice(2).every((path) => path.startsWith(env.WOLLIPOG_SYSTEM_PREFIX + sep))) return { code: 0, stdout: "", stderr: "" };
+      if (command === "systemctl" && (args.join(" ") === "--version" || args.join(" ") === "daemon-reload" ||
+        args.join(" ") === "enable " + CONTROL_PLANE_UNIT)) return { code: 0, stdout: "systemd 255\n", stderr: "" };
+      throw new Error("unexpected injected command: " + command + " " + args.join(" "));
+    },
+    spawnInherit: refuse, fetch: refuse, fetchJson: refuse, download: refuse, sleep: refuse,
+  };
+  let out = "", err = "";
+  const io = { stdout: (value) => { out += value; }, stderr: (value) => { err += value; }, stdinIsTTY: false, confirm: async () => false };
+  const data = join(h.home, ".local", "share", "wollipog");
+  const before = identity(data);
+  assert.equal(await runServiceCli(["service", "install", "--system", "--account", "headless_svc", "--control-plane",
+    "--no-start", "--no-linger", "--json"], host, io), 0, err + out);
+  assert.deepEqual(JSON.parse(out).started, []);
+  assert.ok(readFileSync(join(layout.unitDir, CONTROL_PLANE_UNIT), "utf8").includes("User=headless_svc\n"));
+  const settings = parseEnvFile(readFileSync(layout.controlPlaneEnvFile, "utf8"));
+  const exists = accountExists(h.home, selectedUid, selectedGid);
+  assert.equal(resolveWebDist(settings, h.root, join(h.home, ".local", "bin", "wollipog-control-plane"), exists),
+    settings.WOLLIPOG_WEB_DIST, "selected system account must resolve the installed public dashboard");
+  assert.ok(settings.WOLLIPOG_WEB_DIST, "fresh generated env must name its public dashboard");
+  assert.equal(exists(data), false, "the selected account cannot traverse the private user data root");
+  assert.deepEqual(identity(data), before);
+  assert.equal(effects.some(([command, ...args]) => command !== "id" && command !== "chown" && command !== "systemctl" ||
+    args.some((arg) => arg === "start" || arg === "restart" || arg === "--version" && command !== "systemctl")), false);
+  chmodSync(join(h.home, ".local"), 0o700);
+  const unsupported = identity(join(h.home, ".local"));
+  assert.equal(resolveWebDist(settings, h.root, join(h.home, ".local", "bin", "wollipog-control-plane"), exists), null);
+  assert.deepEqual(identity(join(h.home, ".local")), unsupported, "account model does not normalize private ancestors");
+});
+
+posixTest("headless sibling bundle durable provenance survives two modeled release generations, rollback and installer reinstall", (t) => {
+  const h = harness();
+  t.after(() => rmSync(h.root, { recursive: true, force: true }));
+  assert.equal(h.run("--control-plane").status, 0);
+  const marker = snapshot(layoutMarker(h));
+  assert.equal(readFileSync(layoutMarker(h), "utf8"), markerBytes);
+  const web = siblingWeb(h), previous = web + ".previous";
+  const generation = (number) => {
+    const stage = join(h.root, "generation-" + number);
+    mkdirSync(stage, { mode: 0o755 });
+    writeFileSync(join(stage, "index.html"), "generation " + number);
+    rmSync(previous, { recursive: true, force: true }); // Model unchanged generic asset-generation promotion only.
+    renameSync(web, previous);
+    renameSync(stage, web);
+    assert.equal(existsSync(join(web, ".wollipog-installer-layout-v1")), false);
+    assert.deepEqual(snapshot(layoutMarker(h)), marker);
+  };
+  generation(1);
+  const first = h.run("--control-plane");
+  assert.equal(first.status, 0, first.stderr + first.stdout);
+  assert.deepEqual(snapshot(layoutMarker(h)), marker);
+  generation(2);
+  generation(3); // Two normal swaps before a rollback; no source code, asset executable or service is run.
+  rmSync(web, { recursive: true });
+  renameSync(previous, web);
+  assert.equal(readFileSync(join(web, "index.html"), "utf8"), "generation 2");
+  const second = h.run("--control-plane");
+  assert.equal(second.status, 0, second.stderr + second.stdout);
+  assert.deepEqual(snapshot(layoutMarker(h)), marker);
+  assert.equal(readFileSync(join(web, "index.html"), "utf8"), "<html>dashboard</html>");
+  assert.equal(readFileSync(join(previous, "index.html"), "utf8"), "generation 2");
+});
+
+posixTest("headless sibling bundle refuses arbitrary namespace, provenance and lock collisions without adoption or cleanup", async (t) => {
+  const cases = ["current", "previous", "current-link", "previous-link", "marker-link", "malformed-marker",
+    "extra-newline-marker", "owned-current-file", "owned-previous-no-index", "owned-current-link", "owned-previous-link",
+    "current-dangling-link", "previous-dangling-link", "marker-dangling-link", "lock"];
+  for (const kind of cases) await t.test(kind, (t) => {
+    if (process.platform === "win32" && kind.includes("link")) { t.skip("fixture symlinks require native POSIX permissions"); return; }
+    const h = harness();
+    t.after(() => rmSync(h.root, { recursive: true, force: true }));
+    const bin = join(h.home, ".local", "bin");
+    mkdirSync(bin, { recursive: true, mode: 0o755 });
+    const target = join(h.root, "unrelated");
+    mkdirSync(target);
+    writeFileSync(join(target, "index.html"), "unrelated stored bytes");
+    if (kind.startsWith("owned-")) writeFileSync(layoutMarker(h), markerBytes);
+    if (kind === "current" || kind === "previous" || kind === "owned-previous-no-index") {
+      const path = kind === "current" ? siblingWeb(h) : siblingWeb(h) + ".previous";
+      mkdirSync(path); writeFileSync(join(path, "sentinel"), "arbitrary content");
+    } else if (kind === "owned-current-file") writeFileSync(siblingWeb(h), "arbitrary file");
+    else if (kind.includes("link")) {
+      const path = kind.startsWith("marker-") ? layoutMarker(h) : siblingWeb(h) + (kind.includes("previous") ? ".previous" : "");
+      symlinkSync(kind.includes("dangling") ? join(target, "absent") : target, path, "dir");
+    } else if (kind.includes("marker")) writeFileSync(layoutMarker(h), kind === "extra-newline-marker" ? markerBytes + "\n" : "foreign marker\n");
+    else mkdirSync(join(bin, ".wollipog-web-install.lock"));
+    const before = snapshot(h.home), targetBefore = snapshot(target);
+    const result = h.run("--control-plane");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Refusing/u);
+    assert.deepEqual(snapshot(h.home), before);
+    assert.deepEqual(snapshot(target), targetBefore);
+  });
+});
+
+posixTest("headless sibling bundle extraction, marker and first-publication failures leave no claimed namespace or owned scratch", async (t) => {
+  for (const fault of ["extract", "marker", "promote"]) await t.test(fault, (t) => {
+    const h = harness();
+    t.after(() => rmSync(h.root, { recursive: true, force: true }));
+    h.setFault(fault);
+    const result = h.run("--control-plane");
+    assert.notEqual(result.status, 0);
+    assert.deepEqual(namespace(h), [null, null, null]);
+    assert.equal(readdirSync(join(h.home, ".local", "bin")).some((name) => name.startsWith(".wollipog-web")), false);
+    assert.equal(statSync(join(h.home, ".local", "share", "wollipog")).mode & 0o7777, 0o700);
+  });
+});
+
+posixTest("headless sibling bundle exclusive marker publication preserves a concurrent unrelated marker", (t) => {
+  const h = harness();
+  t.after(() => rmSync(h.root, { recursive: true, force: true }));
+  h.setFault("marker-collision");
+  const result = h.run("--control-plane");
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Could not exclusively publish dashboard layout marker/u);
+  assert.equal(readFileSync(layoutMarker(h), "utf8"), "concurrent unrelated marker\n");
+  assert.equal(existsSync(siblingWeb(h)), false);
+  assert.equal(existsSync(siblingWeb(h) + ".previous"), false);
+  assert.equal(readdirSync(join(h.home, ".local", "bin")).filter((name) => name.startsWith(".wollipog-web") && name !== ".wollipog-web-layout-v1").length, 0);
+});
+
+posixTest("headless sibling bundle restores both owned generations after publication failure and preserves failed-rollback evidence", async (t) => {
+  for (const fault of ["extract", "save-previous", "save-current", "promote", "rollback"]) await t.test(fault, (t) => {
+    const h = harness();
+    t.after(() => rmSync(h.root, { recursive: true, force: true }));
+    const initial = h.run("--control-plane");
+    assert.equal(initial.status, 0, initial.stderr + initial.stdout);
+    const previous = siblingWeb(h) + ".previous";
+    mkdirSync(previous); writeFileSync(join(previous, "index.html"), "older owned generation");
+    const before = namespace(h);
+    const data = join(h.home, ".local", "share", "wollipog"), dataBefore = snapshot(data);
+    h.setFault(fault);
+    const result = h.run("--control-plane");
+    assert.notEqual(result.status, 0);
+    assert.deepEqual(snapshot(data), dataBefore);
+    assert.deepEqual(snapshot(layoutMarker(h)), before[2]);
+    const stages = readdirSync(join(h.home, ".local", "bin")).filter((name) => name.startsWith(".wollipog-web.stage."));
+    assert.equal(existsSync(join(h.home, ".local", "bin", ".wollipog-web-install.lock")), false);
+    if (fault === "rollback") {
+      assert.match(result.stderr, /rollback failed; retained owned evidence/u);
+      assert.equal(stages.length, 1);
+      const stage = join(h.home, ".local", "bin", stages[0]);
+      assert.deepEqual(snapshot(previous), before[0], "original current generation remains retained as previous");
+      assert.deepEqual(snapshot(join(stage, "previous")), before[1], "older previous retains its original inode and bytes");
+      assert.equal(readFileSync(join(stage, "web", "index.html"), "utf8"), "<html>dashboard</html>");
+    } else {
+      assert.deepEqual(namespace(h), before);
+      assert.deepEqual(stages, []);
+      if (fault !== "extract") assert.match(result.stderr, /previous dashboard generations were restored/u);
+    }
+  });
+});
+
+posixTest("headless sibling bundle preserves legacy refresh and explicitly discloses mixed-layout env boundaries", (t) => {
+  const h = harness();
+  t.after(() => rmSync(h.root, { recursive: true, force: true }));
+  const legacy = join(h.home, ".local", "share", "wollipog", "web");
+  mkdirSync(legacy, { recursive: true, mode: 0o755 });
+  writeFileSync(join(legacy, "index.html"), "old legacy bundle");
+  const root = dirname(legacy), rootBefore = identity(root);
+  const first = h.run("--control-plane");
+  assert.equal(first.status, 0, first.stderr + first.stdout);
+  assert.equal(existsSync(siblingWeb(h)), false);
+  assert.equal(existsSync(layoutMarker(h)), false);
+  assert.deepEqual(identity(root), rootBefore);
+  assert.equal(readFileSync(join(legacy, "index.html"), "utf8"), "<html>dashboard</html>");
+  assert.equal(readFileSync(join(legacy + ".previous", "index.html"), "utf8"), "old legacy bundle");
+  // Explicitly construct an independently installer-owned sibling namespace for the mixed case.
+  mkdirSync(siblingWeb(h), { mode: 0o755 });
+  writeFileSync(join(siblingWeb(h), "index.html"), "previous public bundle");
+  writeFileSync(layoutMarker(h), markerBytes);
+  const config = join(h.home, ".config", "wollipog", "control-plane.env");
+  writeFileSync(config, 'WOLLIPOG_WEB_DIST="' + legacy + '"\n', { mode: 0o600 });
+  const legacyBefore = snapshot(legacy), configBefore = snapshot(config);
+  const mixed = h.run("--control-plane");
+  assert.equal(mixed.status, 0, mixed.stderr + mixed.stdout);
+  assert.match(mixed.stderr, /both dashboard layouts exist.*Existing service environment files/u);
+  assert.deepEqual(snapshot(legacy), legacyBefore);
+  assert.deepEqual(snapshot(config), configBefore);
+  assert.deepEqual(identity(root), rootBefore);
+  assert.equal(readFileSync(join(siblingWeb(h), "index.html"), "utf8"), "<html>dashboard</html>");
+});
+
 posixTest("fresh headless root is private under umask 022 and admits generic staging without executing assets", (t) => {
   const h = harness();
   t.after(() => rmSync(h.root, { recursive: true, force: true }));
@@ -138,7 +441,7 @@ posixTest("fresh headless root is private under umask 022 and admits generic sta
   assert.deepEqual([h.home, join(h.home, ".local"), share].map(identity), ancestors);
   assert.equal(statSync(join(h.home, ".config", "wollipog")).mode & 0o7777, 0o700);
   // The scoped umask must not affect the existing public dashboard archive semantics.
-  assert.equal(statSync(join(data, "web")).mode & 0o777, 0o755);
+  assert.equal(statSync(join(h.home, ".local", "bin", "web")).mode & 0o777, 0o755);
   if (process.platform === "linux") {
     const before = identity(data);
     const staging = admit(data, h.root);
@@ -214,7 +517,7 @@ posixTest("install-runner.sh --control-plane installs the verified control plane
   assert.equal(readFileSync(join(bin, "wollipog-runner"), "utf8"), "runner bytes\n");
   assert.equal(readFileSync(join(bin, "wollipog-control-plane"), "utf8"), "control plane bytes\n");
   assert.ok(existsSync(join(bin, "wollipog")), "the CLI alias is published");
-  assert.equal(readFileSync(join(h.home, ".local", "share", "wollipog", "web", "index.html"), "utf8"), "<html>dashboard</html>");
+  assert.equal(readFileSync(join(h.home, ".local", "bin", "web", "index.html"), "utf8"), "<html>dashboard</html>");
   assert.ok(!existsSync(join(h.home, ".config", "wollipog", "runner.config.json")), "no starter config: service install writes it");
   assert.match(result.stdout, /Control plane:\s+.*wollipog-control-plane/u);
   assert.match(result.stdout, /Next:\s+.*service install/u);

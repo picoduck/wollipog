@@ -72,10 +72,35 @@ sudo wollipog service install --system --public-origin https://wollipog.example.
 ```
 
 The installer places `wollipog`, `wollipog-runner`, and `wollipog-control-plane` in `~/.local/bin`
-and the dashboard bundle in `~/.local/share/wollipog/web`, each verified against GitHub's publisher
-digest and the release's `SHA256SUMS`. `service install` then finds the control plane and the
-bundle beside the CLI on its own; `--control-plane-bin`, `--runner-bin`, and `--web-dist` remain
-available for other layouts (for example an executable launched through a wrapper script).
+and a fresh dashboard bundle in `~/.local/bin/web`, each verified against GitHub's publisher
+digest and the release's `SHA256SUMS`. Public dashboard assets live separately from the private
+`~/.local/share/wollipog` data root, which a fresh install creates with mode `0700`. Missing shared
+ancestors are created with mode `0755`; existing home, shared-directory and data-root modes and
+owners are preserved. Generic upgrade admission remains strict and refuses an existing root
+with an unsupported owner, mode or ancestor; installation does not repair it.
+
+`service install` finds the control plane and the public bundle beside the CLI on its own;
+`--control-plane-bin`, `--runner-bin`, and `--web-dist` remain available for other layouts.
+For system services, the selected account must be able to traverse the executable and dashboard
+paths and read the public assets. A private home or binary ancestor still blocks that account.
+Use operator-managed executable and dashboard locations accessible to the selected account and
+pass the corresponding options; keep private data and credentials private.
+
+An existing legacy bundle at `~/.local/share/wollipog/web` retains its installer asset-refresh
+behavior when no installer-owned sibling bundle exists. Existing service environments are never
+migrated or rewritten. If both layouts exist, the installer updates its owned sibling bundle
+and reports that the legacy bundle and service environment remain unchanged; a preserved
+`WOLLIPOG_WEB_DIST` may still select the legacy bundle. Generic upgrades continue to update the
+configured bundle. A legacy bundle behind a private data root is not made accessible to a
+different account automatically.
+
+The sibling layout has a durable `.wollipog-web-layout-v1` provenance file beside the bundle,
+outside both `web` and `web.previous`, so normal asset-generation swaps and rollbacks preserve
+it. An unrelated pre-existing sibling path, invalid provenance or existing installer lock causes
+a refusal rather than adoption or cleanup. Installer publication failures restore the owned
+dashboard generations where possible; if restoration fails, the diagnostic names retained
+evidence for manual inspection before retrying. Do not run installer publication and a generic
+upgrade concurrently.
 
 Other options: `--control-plane` / `--runner` to install one component only; `--host <bind>` and
 `--port <n>` (default `127.0.0.1:4317`); `--tailnet-only`; `--runner-id <id>` (default hostname);

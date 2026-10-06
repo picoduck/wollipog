@@ -229,21 +229,66 @@ if [ "$with_control_plane" -eq 1 ]; then
   for headless_asset in "$control_plane_asset" "$web_asset"; do
     [ -n "$(headless_record "$headless_asset")" ] || { echo "Release $release_tag has no $headless_asset; update to a release that publishes headless assets." >&2; exit 1; }
   done
+  sibling_web="$bindir/web"
+  web_marker="$bindir/.wollipog-web-layout-v1"
+  web_lock_candidate="$bindir/.wollipog-web-install.lock"
+  path_present() { [ -e "$1" ] || [ -L "$1" ]; }
+  check_sibling_layout() {
+    if path_present "$web_marker"; then
+      if [ -L "$web_marker" ] || [ ! -f "$web_marker" ] ||
+        ! printf '%s\n' wollipog-sibling-web-v1 | cmp -s - "$web_marker"; then
+        echo "Refusing an invalid dashboard layout marker: $web_marker; nothing was adopted or repaired." >&2
+        return 1
+      fi
+      for entry in "$sibling_web" "$sibling_web.previous"; do
+        if path_present "$entry" && { [ -L "$entry" ] || [ ! -d "$entry" ] || [ -L "$entry/index.html" ] || [ ! -f "$entry/index.html" ]; }; then
+          echo "Refusing an invalid owned dashboard directory: $entry; inspect it without changing private data permissions." >&2
+          return 1
+        fi
+      done
+    elif path_present "$sibling_web" || path_present "$sibling_web.previous"; then
+      echo "Refusing a pre-existing dashboard path without installer provenance: $sibling_web or $sibling_web.previous; nothing was adopted or removed." >&2
+      return 1
+    fi
+  }
+  check_sibling_layout
+  if path_present "$web_lock_candidate"; then
+    echo "Refusing an existing dashboard installer lock: $web_lock_candidate; inspect it manually." >&2
+    exit 1
+  fi
+  legacy_web="$HOME/.local/share/wollipog/web"
+  if path_present "$web_marker"; then
+    web_dir="$sibling_web"
+    if path_present "$legacy_web"; then
+      echo "Warning: both dashboard layouts exist; updating $web_dir only. Existing service environment files and $legacy_web are preserved; generic upgrades follow the configured dashboard path." >&2
+    fi
+  elif path_present "$legacy_web"; then
+    web_dir="$legacy_web"
+  else
+    web_dir="$sibling_web"
+  fi
 fi
 echo "Downloading $asset_name from $release_tag..."
 partial="${bin}.download.$$"
 legacy_partial="${legacy_bin}.alias.$$"
 cli_partial="${cli_bin}.alias.$$"
 checksum_partial="${bin}.SHA256SUMS.$$"
+web_lock_owned=""
 cleanup() {
   [ -z "${partial:-}" ] || rm -f "$partial"
   [ -z "${legacy_partial:-}" ] || rm -f "$legacy_partial"
   [ -z "${cli_partial:-}" ] || rm -f "$cli_partial"
   [ -z "${checksum_partial:-}" ] || rm -f "$checksum_partial"
+  [ -z "${web_lock_owned:-}" ] || rmdir "$web_lock_owned"
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 cleanup
+if [ "$with_control_plane" -eq 1 ] && [ "$web_dir" = "$sibling_web" ]; then
+  (umask 077; mkdir "$web_lock_candidate") || { echo "Could not exclusively acquire dashboard installer lock: $web_lock_candidate" >&2; exit 1; }
+  web_lock_owned="$web_lock_candidate"
+  check_sibling_layout
+fi
 if [ "$use_gh" -eq 1 ]; then
   if ! gh release download "$release_tag" --repo "$repo" --pattern "$asset_name" --output "$partial"; then
     exit 1
@@ -325,31 +370,77 @@ cli_partial=""
 if [ "$with_control_plane" -eq 1 ]; then
   cp_bin="$bindir/wollipog-control-plane"
   cp_partial="${cp_bin}.download.$$"
-  web_dir="$HOME/.local/share/wollipog/web"
-  web_partial="$HOME/.local/share/wollipog/.web.download.$$"
-  web_stage="$HOME/.local/share/wollipog/.web.stage.$$"
-  cleanup_headless() { rm -f "$cp_partial" "$web_partial"; rm -rf "$web_stage"; }
+  web_partial=""
+  web_stage=""
+  marker_partial=""
+  new_web_marker=0
+  web_committed=0
+  keep_web_evidence=0
+  cleanup_headless() {
+    [ -z "$cp_partial" ] || rm -f "$cp_partial"
+    [ -z "$web_partial" ] || rm -f "$web_partial"
+    [ -z "$marker_partial" ] || rm -f "$marker_partial"
+    if [ "$new_web_marker" -eq 1 ] && [ "$web_committed" -eq 0 ] && ! path_present "$web_dir"; then
+      rm -f "$web_marker"
+    fi
+    if [ -n "$web_stage" ] && [ "$keep_web_evidence" -eq 0 ]; then rm -rf "$web_stage"; fi
+  }
   trap 'cleanup_headless; cleanup' EXIT
   echo "Downloading $control_plane_asset from $release_tag..."
   fetch_verified_asset "$control_plane_asset" "$cp_partial"
   chmod +x "$cp_partial"
   mv -f "$cp_partial" "$cp_bin"
   cp_partial=""
-  # Generic upgrades require a private data root. Set the mode only when creating it;
-  # mkdir preserves existing directories, and the subshell keeps the caller's umask.
+  # Shared ancestors are public only when newly created. The data leaf is private;
+  # neither mkdir changes existing directories, and both restore the caller's umask.
+  (umask 022; mkdir -p "$HOME/.local/share")
   (
     umask 077
     mkdir -p "$HOME/.local/share/wollipog"
   )
+  web_parent=$(dirname "$web_dir")
+  web_partial=$(mktemp "$web_parent/.wollipog-web.download.XXXXXX")
+  web_stage=$(mktemp -d "$web_parent/.wollipog-web.stage.XXXXXX")
   echo "Downloading $web_asset from $release_tag..."
   fetch_verified_asset "$web_asset" "$web_partial"
-  rm -rf "$web_stage"; mkdir -p "$web_stage"
   tar -xzf "$web_partial" -C "$web_stage"
-  [ -f "$web_stage/web/index.html" ] || { echo "$web_asset did not contain web/index.html." >&2; exit 1; }
-  rm -rf "${web_dir}.previous"
-  [ ! -d "$web_dir" ] || mv "$web_dir" "${web_dir}.previous"
-  mv "$web_stage/web" "$web_dir"
-  rm -rf "${web_dir}.previous" "$web_stage" "$web_partial"
+  [ -d "$web_stage/web" ] && [ ! -L "$web_stage/web" ] && [ -f "$web_stage/web/index.html" ] && [ ! -L "$web_stage/web/index.html" ] ||
+    { echo "$web_asset did not contain a regular web/index.html." >&2; exit 1; }
+  if [ "$web_dir" = "$sibling_web" ] && ! path_present "$web_marker"; then
+    marker_partial=$(mktemp "$bindir/.wollipog-web-layout.XXXXXX")
+    printf '%s\n' wollipog-sibling-web-v1 > "$marker_partial"
+    ln "$marker_partial" "$web_marker" || { echo "Could not exclusively publish dashboard layout marker: $web_marker" >&2; exit 1; }
+    new_web_marker=1
+  fi
+  previous_saved=0
+  current_saved=0
+  rollback_web() {
+    rollback_failed=0
+    if [ "$current_saved" -eq 1 ]; then
+      if path_present "$web_dir" || ! mv "${web_dir}.previous" "$web_dir"; then rollback_failed=1; fi
+    fi
+    if [ "$previous_saved" -eq 1 ]; then
+      if path_present "${web_dir}.previous" || ! mv "$web_stage/previous" "${web_dir}.previous"; then rollback_failed=1; fi
+    fi
+    if [ "$rollback_failed" -eq 1 ]; then
+      keep_web_evidence=1
+      echo "Dashboard publication and rollback failed; retained owned evidence at $web_stage. Inspect it before retrying; no data permissions were repaired." >&2
+    else
+      echo "Dashboard publication failed; the previous dashboard generations were restored." >&2
+    fi
+  }
+  if path_present "${web_dir}.previous"; then
+    mv "${web_dir}.previous" "$web_stage/previous" || { rollback_web; exit 1; }
+    previous_saved=1
+  fi
+  if path_present "$web_dir"; then
+    mv "$web_dir" "${web_dir}.previous" || { rollback_web; exit 1; }
+    current_saved=1
+  fi
+  mv "$web_stage/web" "$web_dir" || { rollback_web; exit 1; }
+  web_committed=1
+  rm -rf "$web_stage"
+  rm -f "$web_partial" "$marker_partial"
   web_partial=""; web_stage=""
 fi
 rm -f "$checksum_partial"
@@ -415,7 +506,7 @@ echo "Runner installed: $bin"
 echo "CLI installed:    $cli_bin"
 if [ "$with_control_plane" -eq 1 ]; then
   echo "Control plane:    $bindir/wollipog-control-plane"
-  echo "Dashboard bundle: $HOME/.local/share/wollipog/web"
+  echo "Dashboard bundle: $web_dir"
   echo "Next:  $cli_bin service install    (installs systemd units for the control plane and a colocated runner)"
 else
   echo "Start it:  $bin --config $cfg"
