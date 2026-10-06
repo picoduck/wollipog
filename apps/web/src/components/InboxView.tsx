@@ -1355,7 +1355,7 @@ export function InboxView({
               if (node) tabRefs.current.set(key ?? "all", node);
               else tabRefs.current.delete(key ?? "all");
             }}
-            tabMenu={(split, active) => {
+            tabMenu={(split, { active, request, closeRequest }) => {
               if (split.project === null) return null;
               const durableProjectId = split.project.kind === "durable" ? split.project.project.id : undefined;
               const pinned = split.key !== null && (pinnedProjects.has(split.key) ||
@@ -1365,6 +1365,8 @@ export function InboxView({
                   split={split}
                   unfilteredSplit={baseSplits.find((candidate) => candidate.key === split.key)}
                   active={active}
+                  tabMenu={request}
+                  onTabMenuClose={closeRequest}
                   runner={runners.get(sessionGroupRunnerId(split) ?? "")}
                   stopBeforeArchiveSupported={stopBeforeArchiveSupported}
                   pinned={pinned}

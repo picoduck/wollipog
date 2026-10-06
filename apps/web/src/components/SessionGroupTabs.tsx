@@ -77,6 +77,24 @@ export function SessionGroupMenuItem({
   );
 }
 
+/** A group's menu opened from its tab (#2199): a right-click, Shift+F10 or the context-menu key. */
+export interface GroupTabMenuRequest {
+  /** The tab, where the menu anchors without a pointer and where focus returns. */
+  tab: HTMLElement;
+  /** A right-click's pointer, where the menu opens instead. */
+  point?: { x: number; y: number };
+}
+
+/** What a group's actions are drawn with, beside its tab. */
+export interface GroupTabMenuState {
+  /** Whether the tab is the selected one. */
+  active: boolean;
+  /** The menu the tab asked for, or null. */
+  request: GroupTabMenuRequest | null;
+  /** Clears the request once the menu closes. */
+  closeRequest: () => void;
+}
+
 /** Every group in tab order, for when the tab row overflows (§9.1). */
 export function AllGroupsMenu({
   splits,
@@ -159,11 +177,14 @@ export function SessionGroupTabs({
   onSelect: (key: InboxSplitKey) => void;
   onTabKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>, key: InboxSplitKey) => void;
   tabRef: (key: InboxSplitKey, node: HTMLButtonElement | null) => void;
-  /** A group's actions, drawn beside its tab. */
-  tabMenu?: (split: InboxSplit, active: boolean) => ReactNode;
+  /** A project group's actions, drawn beside its tab. A right-click on the tab, or Shift+F10 or the
+   * context-menu key while it has focus, asks for them without selecting the tab. */
+  tabMenu?: (split: InboxSplit, state: GroupTabMenuState) => ReactNode;
   /** The row's trailing tools (search, filters). */
   tools?: ReactNode;
 }) {
+  const [menuRequest, setMenuRequest] = useState<{ key: InboxSplitKey; request: GroupTabMenuRequest } | null>(null);
+  const closeRequest = () => setMenuRequest(null);
   return (
     <div className="tabs-bar">
       <TabList label="Session Groups">
@@ -171,7 +192,13 @@ export function SessionGroupTabs({
           const active = split.key === activeKey;
           const label = labelFor(labels, split);
           const attention = snoozed ? "" : sessionGroupAttentionWords(split);
-          const menu = tabMenu?.(split, active);
+          // Only a project group has actions; the All and No Project tabs keep the browser's menu.
+          const hasMenu = !!tabMenu && split.project !== null;
+          const menu = tabMenu?.(split, {
+            active,
+            request: menuRequest?.key === split.key ? menuRequest.request : null,
+            closeRequest,
+          });
           return (
             <div className="inbox-tab-group" role="presentation" key={split.key ?? "all"}>
               <button
@@ -182,7 +209,24 @@ export function SessionGroupTabs({
                 tabIndex={active ? 0 : -1}
                 className="tab"
                 onClick={() => onSelect(split.key)}
-                onKeyDown={(event) => onTabKeyDown(event, split.key)}
+                onKeyDown={(event) => {
+                  if (hasMenu && (event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey))) {
+                    event.preventDefault();
+                    setMenuRequest({ key: split.key, request: { tab: event.currentTarget } });
+                    return;
+                  }
+                  onTabKeyDown(event, split.key);
+                }}
+                onContextMenu={(event) => {
+                  if (!hasMenu) return;
+                  event.preventDefault();
+                  const tab = event.currentTarget;
+                  // A keyboard's context menu event reports no pointer button: open at the tab.
+                  setMenuRequest({
+                    key: split.key,
+                    request: event.button === 2 ? { tab, point: { x: event.clientX, y: event.clientY } } : { tab },
+                  });
+                }}
                 // The full name (the label may be cut short), the counts, then the shortcut.
                 title={[sessionGroupFullName(label), sessionGroupSummary(split, snoozed), SESSION_GROUP_TAB_HINT].join("\n")}
               >

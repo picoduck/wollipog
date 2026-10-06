@@ -126,7 +126,7 @@ test("a toast over a dialog clears the dialog's footer where they share a column
   await page.goto(SHELL);
   await page.waitForFunction(() => Boolean(window.__WOLLIPOG_TOASTS_E2E__));
   await page.getByRole("tab", { name: /Alpha/ }).click();
-  await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
+  await page.getByRole("button", { name: "Alpha Actions" }).click();
   await page.getByRole("menuitem", { name: "New Session Here" }).click();
   await expect(page.getByRole("dialog", { name: "New Session" })).toBeVisible();
   await show(page, "Copied link to clipboard.", { durationMs: 0 });
@@ -146,7 +146,7 @@ test("an expanded stack above a dialog footer stays on screen and scrolls its ol
   await page.goto(SHELL);
   await page.waitForFunction(() => Boolean(window.__WOLLIPOG_TOASTS_E2E__));
   await page.getByRole("tab", { name: /Alpha/ }).click();
-  await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
+  await page.getByRole("button", { name: "Alpha Actions" }).click();
   await page.getByRole("menuitem", { name: "New Session Here" }).click();
   await expect(page.getByRole("dialog", { name: "New Session" })).toBeVisible();
   for (const index of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]) {

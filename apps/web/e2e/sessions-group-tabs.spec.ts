@@ -115,7 +115,7 @@ test.describe("with a touch pointer", () => {
     await openGroups(page);
     await page.getByRole("button", { name: "All Groups" }).click();
     await page.getByRole("menuitemradio", { name: /^Mobile App, / }).click();
-    const trigger = page.getByRole("button", { name: / Actions for Mobile App$/ });
+    const trigger = page.getByRole("button", { name: "Mobile App Actions" });
     await expect(trigger).toBeVisible();
     await expect.poll(() => trigger.evaluate((element) => {
       const target = element.getBoundingClientRect();
@@ -123,7 +123,7 @@ test.describe("with a touch pointer", () => {
       // The row fades its last 24px when clipped, so the target must clear the fade too.
       const visibleRight = row.right - (element.closest(".tabs")!.hasAttribute("data-clip-end") ? 24 : 0);
       return Math.min(target.right, visibleRight) - Math.max(target.left, row.left);
-    }), "the 44px target, less sub-pixel scroll rounding").toBeGreaterThanOrEqual(43.5);
+    }), "the whole 36px button, less sub-pixel scroll rounding").toBeGreaterThanOrEqual(35.5);
   });
 });
 
@@ -137,4 +137,102 @@ test("Tab and Shift+Tab still move between groups", async ({ page }) => {
   await expect(selected).toHaveText(/^Billing/);
   await page.keyboard.press("Shift+Tab");
   await expect(selected).toHaveText(/^All/);
+});
+
+for (const width of [1440, 940]) {
+  test(`at ${width}px only the selected project tab has ⋯, after the tab and clear of its blocked count (#2199)`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await openGroups(page);
+    const billing = tablist(page).getByRole("tab", { name: /^Billing/ });
+    await billing.click();
+    const trigger = page.getByRole("button", { name: "Billing Actions" });
+    await expect(trigger).toBeVisible();
+    await expect(page.locator(".inbox-project-actions"), "no other tab draws ⋯").toHaveCount(1);
+    // Hovering another tab draws nothing over it.
+    await tablist(page).getByRole("tab", { name: /^Design System/ }).hover();
+    await expect(page.locator(".inbox-project-actions")).toHaveCount(1);
+    await trigger.hover();
+    const geometry = await trigger.evaluate((element) => {
+      const tab = element.parentElement!.querySelector<HTMLElement>('[role="tab"]')!;
+      const box = element.getBoundingClientRect();
+      const marks = [...tab.querySelectorAll(".count, .count-badge")].map((mark) => mark.getBoundingClientRect());
+      const centre = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+      return {
+        badges: tab.querySelectorAll(".count-badge").length,
+        tabRight: tab.getBoundingClientRect().right,
+        marksRight: Math.max(...marks.map((mark) => mark.right)),
+        overlaps: marks.some((mark) => mark.right > box.left && mark.left < box.right && mark.bottom > box.top && mark.top < box.bottom),
+        left: box.left,
+        width: box.width,
+        hit: centre === element || element.contains(centre),
+      };
+    });
+    expect(geometry.badges, "the selected tab carries its blocked count").toBeGreaterThan(0);
+    expect(geometry.overlaps).toBe(false);
+    expect(geometry.left, "⋯ starts after the tab").toBeGreaterThanOrEqual(geometry.tabRight);
+    expect(geometry.left).toBeGreaterThan(geometry.marksRight);
+    expect(geometry.width).toBe(28);
+    expect(geometry.hit, "nothing covers ⋯").toBe(true);
+  });
+}
+
+test("right-clicking an unselected project tab opens its menu without selecting it, and Escape returns to the tab (#2199)", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openGroups(page);
+  const all = tablist(page).getByRole("tab", { name: /^All/ });
+  const design = tablist(page).getByRole("tab", { name: /^Design System/ });
+  const before = harnessPath(page);
+  const box = (await design.boundingBox())!;
+  await design.click({ button: "right", position: { x: box.width / 2, y: box.height / 2 } });
+  const menu = page.getByRole("menu", { name: "Design System Actions" });
+  await expect(menu).toBeVisible();
+  await expect(design).toHaveAttribute("aria-selected", "false");
+  await expect(all).toHaveAttribute("aria-selected", "true");
+  expect(harnessPath(page)).toBe(before);
+  await expect(menu.locator('[role="menuitem"] .menu-text').first()).toHaveText("New Session Here");
+  // The harness's runner advertises no workspaces, so New Session Here says why and focus starts on
+  // the first available item.
+  await expect(menu.getByRole("menuitem").first()).toContainText("The runner has not advertised this workspace.");
+  await expect(menu.getByRole("menuitem", { name: "Rename Workspace…" })).toBeFocused();
+  // It opens at the pointer.
+  const menuBox = (await menu.boundingBox())!;
+  expect(Math.abs(menuBox.x - (box.x + box.width / 2))).toBeLessThanOrEqual(8);
+  await page.keyboard.press("Escape");
+  await expect(menu).toBeHidden();
+  await expect(design).toBeFocused();
+
+  // Shift+F10 on the focused tab opens the same menu at the tab.
+  await page.keyboard.press("Shift+F10");
+  await expect(menu).toBeVisible();
+  const anchored = (await menu.boundingBox())!;
+  expect(anchored.y).toBeGreaterThanOrEqual(box.y + box.height);
+  await page.keyboard.press("Escape");
+  await expect(design).toBeFocused();
+  await expect(all).toHaveAttribute("aria-selected", "true");
+});
+
+test.describe("on a phone", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  test("the project menu is a bottom sheet titled with the project, with 44px items and no Reveal in File Manager (#2199)", async ({ page }) => {
+    await openGroups(page);
+    await tablist(page).getByRole("tab", { name: /^Billing/ }).tap();
+    await page.getByRole("button", { name: "Billing Actions" }).tap();
+    const sheet = page.getByRole("menu", { name: "Billing Actions" });
+    await expect(sheet).toBeVisible();
+    await expect(sheet.locator(".menu-head")).toHaveText("Billing");
+    await expect(sheet.locator(".menu-head")).toBeVisible();
+    // Docked to the bottom once it has slid in (§7.5).
+    await expect.poll(async () => {
+      const box = (await sheet.boundingBox())!;
+      return [box.x, box.width, Math.round(box.y + box.height)];
+    }).toEqual([0, 390, 844]);
+    const items = sheet.getByRole("menuitem");
+    await expect(items.locator(".menu-text")).toHaveText([
+      "New Session Here", "Rename Workspace…", "Pin Workspace", "Create Permanent Worktree…", "Archive All Sessions…",
+    ]);
+    for (const height of await items.evaluateAll((rows) => rows.map((row) => row.getBoundingClientRect().height))) {
+      expect(height).toBeGreaterThanOrEqual(44);
+    }
+  });
 });

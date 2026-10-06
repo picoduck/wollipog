@@ -1,1 +1,0 @@
-|.inbox-project-menu-trigger|border-radius|6

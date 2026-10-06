@@ -290,7 +290,7 @@ test("Inbox project tabs stay balanced, hide overflow chrome, and reveal context
     "focus returns to the Inbox once the list it should land on is the one that is mounted");
   assert.match(inbox, /onKeyDown=\{\(event\) => \{[\s\S]*event\.key !== "Escape"[\s\S]*exitSearch\(\)/,
     "Escape exits the search field even when the query is already empty");
-  assert.match(groupTabs, /<div className="inbox-tab-group" role="presentation"[\s\S]{0,1200}\{menu\}\s*<\/div>/,
+  assert.match(groupTabs, /<div className="inbox-tab-group" role="presentation"[\s\S]{0,2400}\{menu\}\s*<\/div>/,
     "project actions are owned by their tab instead of a separate layout item");
   // The shared menu surface (#1803) is the portal: ProjectSplitMenu renders it.
   assert.match(projectSplitMenu, /<MenuSurface/,
@@ -306,27 +306,17 @@ test("Inbox project tabs stay balanced, hide overflow chrome, and reveal context
   assert.match(groupTabs, /<TabList label="Session Groups">/, "the group tabs are the shared tab row");
   assert.match(css, /\.tabs\s*\{[^}]*overflow-x:\s*auto;[^}]*overflow-y:\s*hidden;[^}]*scrollbar-width:\s*none;/);
   assert.match(css, /\.tabs::-webkit-scrollbar\s*\{\s*display:\s*none;/);
-  assert.match(css, /@media \(hover: none\), \(pointer: coarse\)[\s\S]*\.inbox-project-menu\s*\{[^}]*position:\s*static;[^}]*width:\s*var\(--control-h\);[\s\S]*\.inbox-project-menu-trigger\s*\{[^}]*flex:\s*0 0 var\(--control-h\);[^}]*min-width:\s*var\(--control-h\);[^}]*height:\s*var\(--control-h\);/,
-    "on touch the active Project tab's action target is a full control beside the tab");
-  assert.match(css, /\.inbox-tab-group:not\(:has\(> \.tab\[aria-selected="true"\]\)\) > \.inbox-project-menu \{ display: none; \}/,
-    "only the active Project tab shows its action target on touch");
+  // ⋯ follows the selected Project tab in the row, never over it (#2199): no overlay, no fade over a
+  // label, and no tab reserves room for it.
+  assert.match(projectSplitMenu, /\{active && \(\s*<button[\s\S]{0,120}className="icon-btn sm inbox-project-actions"/,
+    "only the selected Project tab draws ⋯, as a small icon button");
+  assert.match(css, /\.inbox-tab-group > \.inbox-project-actions \{ margin-inline-start: var\(--space-1\); \}/,
+    "⋯ sits in the row after its tab");
+  assert.doesNotMatch(css, /\.inbox-project-menu/, "the overlay, its transform and its touch padding are gone");
   assert.doesNotMatch(css, /\.inbox-tab-group[^{]*> \.tab\s*\{\s*padding-right/,
     "no tab reserves room for the action target (#2180)");
-  // A §10.1 tab has no side padding, so an overlay would cover a short tab's middle and take its
-  // click. On fine pointers ⋯ appears in the 24px gap after the tab, so the tabs stay evenly spaced.
-  assert.match(css, /\.inbox-project-menu\s*\{[^}]*left:\s*100%;[^}]*width:\s*var\(--space-6\);/,
-    "the hover action sits in the gap after its tab, never over the label");
-  assert.doesNotMatch(css, /\.inbox-project-menu\s*\{[^}]*linear-gradient/, "so it needs no fade over the label");
-  assert.match(css, /\.inbox-tab-group:hover :is\(\.inbox-project-menu, \.inbox-project-menu-trigger\)/,
-    "on hover the gap belongs to the tab's group, so the pointer can reach ⋯ without losing it");
-  assert.match(css, /\.inbox-tab-group:hover \.inbox-project-menu,[\s\S]*opacity:\s*1;/,
-    "project actions appear on hover and keyboard focus");
-  assert.match(css, /\.inbox-project-menu\s*\{[^}]*pointer-events:\s*none;/,
-    "a hidden Project action never takes a click");
-  assert.match(css, /\.inbox-project-menu-trigger:hover,[\s\S]*color:\s*var\(--accent\);[\s\S]*background:\s*transparent;/,
-    "the project action highlights only its icon");
-  assert.match(css, /@media \(hover: none\), \(pointer: coarse\)[\s\S]*\.inbox-project-menu\s*\{[^}]*opacity:\s*1;[\s\S]*\.inbox-project-menu-trigger\s*\{[^}]*pointer-events:\s*auto;/,
-    "touch users can reach project actions without first establishing hover");
+  assert.match(css, /\.inbox-tab-group:has\(> \.inbox-project-actions\) > \.tab \{\s*scroll-margin-inline-end:/,
+    "scrolling the selected tab into view brings its ⋯ with it");
   assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.rail-item\.active::before\s*\{\s*content:\s*none;\s*\}[\s\S]*\.rail-item\.active \.rail-tab-pill\s*\{\s*background:\s*var\(--surface-selected\);/,
     "the current phone tab is a tinted pill behind its icon, with nothing drawn below it (§15.1)");
   assert.match(css, /--bottom-bar-h:\s*calc\(56px \+ env\(safe-area-inset-bottom, 0px\)\);/,

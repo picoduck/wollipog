@@ -12,7 +12,7 @@ async function openSessions(page: Page) {
 
 async function openProjectMenu(page: Page) {
   const tab = page.getByRole("tab", { name: /Alpha/ });
-  const trigger = page.getByRole("button", { name: "Project Actions for Alpha" });
+  const trigger = page.getByRole("button", { name: "Alpha Actions" });
   await tab.hover();
   // Without hover only the active Project tab shows its actions (#2180), so select it first.
   if (!await trigger.isVisible()) await tab.click();
@@ -136,7 +136,7 @@ test.describe("phone", () => {
     await expect(page.locator(".modal .sheet-grabber")).toHaveAttribute("aria-hidden", "true");
     const buttons = await dialog.locator(".modal-foot .btn").evaluateAll((elements) =>
       elements.map((element) => [element.textContent, Math.round(element.getBoundingClientRect().width), element.getBoundingClientRect().height]));
-    expect(buttons.map(([label]) => label)).toEqual(["Cancel", "Save"]);
+    expect(buttons.map(([label]) => label)).toEqual(["Cancel", "Rename Project"]);
     expect(buttons[0]![1]).toBe(buttons[1]![1]);
     expect(buttons.map(([, , height]) => height)).toEqual([48, 48]);
     const close = await dialog.getByRole("button", { name: "Close" }).evaluate((button) => {

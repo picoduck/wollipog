@@ -1462,7 +1462,10 @@ compact widths, detail sub-views.
   the trailing check on the current one), then `.tabs-tools` at the far end for the row's tools
   (search, filters). A tab's label is at most 200px and ends in an ellipsis, with the full name in
   its tooltip; the count and badges never truncate. Two tabs with the same name add what tells them
-  apart as quiet text ("Docs Site on Build Server 02").
+  apart as quiet text ("Docs Site on Build Server 02"). Only the selected project tab is followed by
+  a `.icon-btn.sm` ⋯ ("Docs Site Actions"), outside the tab; a right-click, Shift+F10 or the
+  context-menu key on any project tab opens the same menu without selecting it, and Escape returns
+  focus to that tab (#2199).
 
 ### 10.2 Segmented Control (Switch the Mode or Filter of the Same Content)
 

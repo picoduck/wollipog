@@ -13,8 +13,8 @@ for (const width of [390, 1280]) for (const theme of ["light", "dark"]) {
       document.documentElement.dataset.theme = value;
       window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateProject("alpha", { childSessionDefaults: { costBudgetUsd: 5, maxToolCalls: 100 } });
     }, theme);
-    await page.getByRole("tab", { name: /Alpha/ }).hover();
-    await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
+    await page.getByRole("tab", { name: /Alpha/ }).click();
+    await page.getByRole("button", { name: "Alpha Actions" }).click();
     await page.getByRole("menuitem", { name: /Manage Project/ }).click();
     const section = page.getByRole("region", { name: "Child Session Defaults" });
     const cost = section.getByLabel("Child Cost Limit (USD)");
@@ -69,8 +69,8 @@ for (const width of [390, 1280]) for (const theme of ["light", "dark"]) {
       document.documentElement.dataset.theme = value;
       window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateProject("alpha", { childSessionDefaults: null });
     }, theme);
-    await page.getByRole("tab", { name: /Alpha/ }).hover();
-    await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
+    await page.getByRole("tab", { name: /Alpha/ }).click();
+    await page.getByRole("button", { name: "Alpha Actions" }).click();
     await page.getByRole("menuitem", { name: /Manage Project/ }).click();
     const section = page.getByRole("region", { name: "Child Session Defaults" });
     await expect(section).toBeVisible();
@@ -85,8 +85,8 @@ for (const width of [390, 1280]) for (const theme of ["light", "dark"]) {
     await expect(section.getByRole("button", { name: "Remove Child Defaults" })).toBeEnabled();
     await section.screenshot({ path: testInfo.outputPath("after.png") });
     await page.reload();
-    await page.getByRole("tab", { name: /Alpha/ }).hover();
-    await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
+    await page.getByRole("tab", { name: /Alpha/ }).click();
+    await page.getByRole("button", { name: "Alpha Actions" }).click();
     await page.getByRole("menuitem", { name: /Manage Project/ }).click();
     await expect(section.getByLabel("Child Cost Limit (USD)")).toHaveValue("2.5");
     await expect(section.getByLabel("Child Tool-Call Limit")).toHaveValue("30");

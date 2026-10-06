@@ -11,6 +11,7 @@ import type { InboxSplit } from "../inbox.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
 import { archiveRowStatus, ProjectSplitMenu } from "./ProjectSplitMenu.js";
 import type { NewSessionPreset } from "./NewSessionDialog.js";
+import type { GroupTabMenuRequest } from "./SessionGroupTabs.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/inbox" });
@@ -77,19 +78,27 @@ function runner(overrides: Partial<RunnerView> = {}): RunnerView {
 
 function button(container: HTMLElement, label: string): HTMLButtonElement {
   const find = (scope: HTMLElement) => [...scope.querySelectorAll<HTMLButtonElement>("button")]
-    .find((candidate) => candidate.textContent?.trim() === label || candidate.getAttribute("aria-label") === label);
+    .find((candidate) => (candidate.querySelector(".menu-text") ?? candidate).textContent?.trim() === label ||
+      candidate.getAttribute("aria-label") === label);
   const match = find(container) ?? find(domWindow.document.body as unknown as HTMLElement);
   assert.ok(match, `missing button: ${label}`);
   return match;
 }
 
+/** A menu item's second line: why it is unavailable (§9.1), or null. */
+function reason(container: HTMLElement, label: string): string | null {
+  const item = button(container, label);
+  const description = item.querySelector(".menu-desc");
+  if (!description) return null;
+  assert.ok((item.getAttribute("aria-describedby") ?? "").split(" ").includes(description.id), `${label} is described by its reason`);
+  return description.textContent;
+}
+
 async function openMenu(container: HTMLElement): Promise<void> {
   await act(async () => {
     const trigger = [...container.querySelectorAll<HTMLButtonElement>("button")]
-      .find((candidate) => /^(?:Project|Workspace) Actions for Project One$/u.test(
-        candidate.getAttribute("aria-label") ?? "",
-      ));
-    assert.ok(trigger, "missing Project or Workspace action trigger");
+      .find((candidate) => candidate.getAttribute("aria-label") === "Project One Actions");
+    assert.ok(trigger, "missing the Project One Actions trigger");
     trigger.click();
     await tick();
   });
@@ -111,7 +120,9 @@ test("project split menu is fixed, keyboard-managed, and restores trigger focus"
     );
   });
 
-  const trigger = button(container, "Workspace Actions for Project One");
+  const trigger = button(container, "Project One Actions");
+  assert.ok(trigger.classList.contains("icon-btn") && trigger.classList.contains("sm"), "a small icon button (§3.1)");
+  assert.equal(trigger.title, "Project One Actions", "its tooltip matches its name");
   trigger.focus();
   await act(async () => {
     trigger.dispatchEvent(
@@ -127,14 +138,16 @@ test("project split menu is fixed, keyboard-managed, and restores trigger focus"
   // against its trigger before paint, so focusing its first item never scrolls the page.
   assert.ok(menu.classList.contains("menu"), "the shared menu surface");
   assert.notEqual(menu.style.left, "", "placed against its trigger");
-  assert.equal(domWindow.document.activeElement?.textContent?.trim(), "Pin Workspace");
+  assert.equal(domWindow.document.activeElement?.textContent?.trim(), "New Session Here");
+  assert.equal(menu.getAttribute("aria-label"), "Project One Actions");
+  assert.equal(menu.querySelector(".menu-head")?.textContent, "Project One", "a phone sheet is titled with the name");
 
   await act(async () => {
     domWindow.document.activeElement?.dispatchEvent(
       new domWindow.KeyboardEvent("keydown", { key: "End", bubbles: true }),
     );
   });
-  assert.equal(domWindow.document.activeElement?.textContent?.trim(), "Archive and Stop All Sessions");
+  assert.equal(domWindow.document.activeElement?.textContent?.trim(), "Archive and Stop All Sessions…");
   await act(async () => {
     domWindow.document.activeElement?.dispatchEvent(
       new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
@@ -202,25 +215,25 @@ test("project actions preserve presets, pin state, rename, reveal, and compensat
   await openMenu(container);
   await act(async () => { button(container, "New Session Here").click(); await tick(); });
   await openMenu(container);
-  await act(async () => { button(container, "Create Permanent Worktree").click(); await tick(); });
+  await act(async () => { button(container, "Create Permanent Worktree…").click(); await tick(); });
   assert.deepEqual(presets, [
     { runnerId: "runner-1", workspaceId: "workspace-1", projectName: "Project One" },
     { runnerId: "runner-1", workspaceId: "workspace-1", worktree: true },
   ]);
 
   await openMenu(container);
-  await act(async () => { button(container, "Rename Workspace").click(); await tick(); });
-  const renameInput = container.querySelector<HTMLInputElement>('#rename-project-split-name')!;
+  await act(async () => { button(container, "Rename Workspace…").click(); await tick(); });
+  const renameInput = container.querySelector<HTMLInputElement>("#rename-project-name")!;
   await act(async () => {
     renameInput.value = "Renamed Project";
     fireDomEvent.change(renameInput);
   });
-  await act(async () => { button(container, "Save").click(); await tick(); });
+  await act(async () => { button(container, "Rename Workspace").click(); await tick(); });
   assert.deepEqual(renamed, [["runner-1", "workspace-1", "Renamed Project"]]);
 
   await openMenu(container);
-  await act(async () => { button(container, "Archive and Stop All Sessions").click(); await tick(); });
-  assert.match(container.textContent ?? "", /Archive and Stop Sessions.*All 2 sessions in/);
+  await act(async () => { button(container, "Archive and Stop All Sessions…").click(); await tick(); });
+  assert.match(container.textContent ?? "", /Archive and Stop 2 Sessions.*All 2 sessions in/);
   assert.match(
     container.textContent ?? "",
     /All 2 sessions in “Project One” stop, their queued messages are canceled, and they move to Archived Sessions\. You can restore them later\./,
@@ -305,7 +318,7 @@ test("durable Project launch actions carry stable Project and Location identity"
   await openMenu(container);
   await act(async () => { button(container, "New Session Here").click(); await tick(); });
   await openMenu(container);
-  await act(async () => { button(container, "Create Permanent Worktree").click(); await tick(); });
+  await act(async () => { button(container, "Create Permanent Worktree…").click(); await tick(); });
 
   assert.deepEqual(presets, [
     {
@@ -399,14 +412,14 @@ test("multi-Location Projects without a default defer Location choice to New Ses
   await openMenu(container);
   assert.equal(button(container, "Reveal in File Manager").disabled, true);
   assert.equal(button(container, "New Session").disabled, false);
-  assert.equal(button(container, "Create Permanent Worktree").disabled, false);
-  assert.equal(button(container, "Reveal in File Manager").title, "Choose a default Location to use location actions.");
-  const status = domWindow.document.querySelector('[role="note"]') as unknown as HTMLElement;
-  assert.match(status.textContent ?? "", /Location Actions:.*Choose a default Location/);
+  assert.equal(button(container, "Create Permanent Worktree…").disabled, false);
+  assert.equal(reason(container, "Reveal in File Manager"), "Choose a default Location to use location actions.");
+  assert.equal(button(container, "Reveal in File Manager").title, "", "the reason is never only a tooltip");
+  assertNoDomNode(domWindow.document.querySelector(".menu-note"));
   await act(async () => { button(container, "New Session").click(); await tick(); });
 
   await openMenu(container);
-  await act(async () => { button(container, "Create Permanent Worktree").click(); await tick(); });
+  await act(async () => { button(container, "Create Permanent Worktree…").click(); await tick(); });
   assert.deepEqual(presets, [
     { projectId: "project-1" },
     { projectId: "project-1", worktree: true },
@@ -436,27 +449,30 @@ test("project action guards fail closed for offline, stale, and native-Windows W
   await render(runner({ status: "offline" }));
   assert.equal(button(container, "Reveal in File Manager").disabled, true);
   assert.equal(button(container, "New Session Here").disabled, true);
-  assert.equal(button(container, "Create Permanent Worktree").disabled, true);
-  assert.match((domWindow.document.querySelector('[role="note"]') as unknown as HTMLElement).textContent ?? "", /Location Actions:.*offline/);
-  await act(async () => { button(container, "Workspace Actions for Project One").click(); await tick(); });
+  assert.equal(button(container, "Create Permanent Worktree…").disabled, true);
+  for (const label of ["Reveal in File Manager", "New Session Here", "Create Permanent Worktree…"]) {
+    assert.equal(reason(container, label), "The runner for this Location is offline.");
+  }
+  await act(async () => { button(container, "Project One Actions").click(); await tick(); });
 
   await render(runner({ workspaces: [] }));
   assert.equal(button(container, "Reveal in File Manager").disabled, true);
   assert.equal(button(container, "New Session Here").disabled, true);
-  assert.match((domWindow.document.querySelector('[role="note"]') as unknown as HTMLElement).textContent ?? "", /Location Actions:.*not advertised/);
-  await act(async () => { button(container, "Workspace Actions for Project One").click(); await tick(); });
+  assert.match(reason(container, "New Session Here") ?? "", /not advertised/);
+  await act(async () => { button(container, "Project One Actions").click(); await tick(); });
 
   await render(runner({ os: "windows", workspaces: [{ id: "workspace-1", name: "Project One", path: "/mnt/c/project-one" }] }));
   assert.equal(button(container, "Reveal in File Manager").disabled, true);
   assert.equal(button(container, "New Session Here").disabled, false);
-  assert.equal(button(container, "Create Permanent Worktree").disabled, false);
-  assert.match((domWindow.document.querySelector('[role="note"]') as unknown as HTMLElement).textContent ?? "", /Reveal:.*WSL workspace paths/);
-  await act(async () => { button(container, "Workspace Actions for Project One").click(); await tick(); });
+  assert.equal(button(container, "Create Permanent Worktree…").disabled, false);
+  assert.match(reason(container, "Reveal in File Manager") ?? "", /^WSL workspace paths/);
+  assert.equal(reason(container, "New Session Here"), null, "an available item has no second line");
+  await act(async () => { button(container, "Project One Actions").click(); await tick(); });
 
   await render(runner({ protocolVersion: 1 }));
   assert.equal(button(container, "Reveal in File Manager").disabled, true);
   assert.equal(button(container, "New Session Here").disabled, false);
-  assert.match((domWindow.document.querySelector('[role="note"]') as unknown as HTMLElement).textContent ?? "", /Reveal:/);
+  assert.ok(reason(container, "Reveal in File Manager"), "an old runner says why it cannot reveal");
 
   await act(async () => { root.unmount(); });
   mountPoint.remove();
@@ -526,22 +542,21 @@ test("durable zero-session Projects keep Project actions without inferring ident
   await openMenu(container);
   assert.equal(button(container, "Reveal in File Manager").disabled, true);
   assert.equal(button(container, "New Session Here").disabled, true);
-  assert.equal(button(container, "Create Permanent Worktree").disabled, true);
-  assert.equal(button(container, "Archive All Sessions").disabled, true);
-  const noLocationStatus = domWindow.document.querySelector('[role="note"]') as unknown as HTMLElement;
-  assert.match(noLocationStatus.textContent ?? "", /Location Actions:.*Add a Project Location/);
-  assert.match(noLocationStatus.textContent ?? "", /Archive:.*no unarchived sessions/);
+  assert.equal(button(container, "Create Permanent Worktree…").disabled, true);
+  assert.equal(button(container, "Archive All Sessions…").disabled, true);
+  assert.equal(reason(container, "New Session Here"), "Add a Project Location to use location actions.");
+  assert.equal(reason(container, "Archive All Sessions…"), "This Project has no unarchived sessions.");
   await act(async () => { button(container, "Pin Project").click(); await tick(); });
   assert.deepEqual(pinned, [true]);
 
   await openMenu(container);
-  await act(async () => { button(container, "Rename Project").click(); await tick(); });
-  const renameInput = container.querySelector<HTMLInputElement>("#rename-project-split-name")!;
+  await act(async () => { button(container, "Rename Project…").click(); await tick(); });
+  const renameInput = container.querySelector<HTMLInputElement>("#rename-project-name")!;
   await act(async () => {
     renameInput.value = "Renamed Durable Project";
     fireDomEvent.change(renameInput);
   });
-  await act(async () => { button(container, "Save").click(); await tick(); });
+  await act(async () => { button(container, "Rename Project").click(); await tick(); });
   assert.deepEqual(renamed, [["project-1", "Renamed Durable Project"]]);
 
   await act(async () => { root.unmount(); });
@@ -631,17 +646,18 @@ test("durable Project archive is atomic, restores only changed sessions, and hon
 
   await render(false);
   await openMenu(container);
-  assert.equal(button(container, "Rename Project").disabled, true);
-  assert.equal(button(container, "Archive and Stop All Sessions").disabled, true);
-  const permissionStatus = domWindow.document.querySelector('[role="note"]') as unknown as HTMLElement;
-  assert.match(permissionStatus.textContent ?? "", /Project Management: Project management permission is required\./);
-  assert.equal(domWindow.document.querySelector('[role="menu"]')?.getAttribute("aria-describedby"), permissionStatus.id);
-  await act(async () => { button(container, "Project Actions for Project One").click(); await tick(); });
+  assert.equal(button(container, "Rename Project…").disabled, true);
+  assert.equal(button(container, "Archive and Stop All Sessions…").disabled, true);
+  for (const label of ["Rename Project…", "Archive and Stop All Sessions…"]) {
+    assert.equal(reason(container, label), "Project management permission is required.");
+  }
+  assert.equal(domWindow.document.querySelector('[role="menu"]')?.hasAttribute("aria-describedby"), false, "no shared note describes the menu");
+  await act(async () => { button(container, "Project One Actions").click(); await tick(); });
 
   await render(true);
   await openMenu(container);
-  await act(async () => { button(container, "Archive and Stop All Sessions").click(); await tick(); });
-  assert.match(container.textContent ?? "", /Archive and Stop Sessions.*All 2 sessions in/);
+  await act(async () => { button(container, "Archive and Stop All Sessions…").click(); await tick(); });
+  assert.match(container.textContent ?? "", /Archive and Stop 2 Sessions.*All 2 sessions in/);
   // The count covers the Project sessions that are not loaded here, which the server also stops.
   assert.match(container.textContent ?? "", /All 2 sessions in “Project One” stop, their queued messages are canceled/);
   assert.doesNotMatch(container.textContent ?? "", /Snooze/);
@@ -660,7 +676,7 @@ test("durable Project archive is atomic, restores only changed sessions, and hon
     return { project, sessions: [] };
   };
   await openMenu(container);
-  await act(async () => { button(container, "Archive and Stop All Sessions").click(); await tick(); });
+  await act(async () => { button(container, "Archive and Stop All Sessions…").click(); await tick(); });
   await act(async () => { button(container, "Archive and Stop").click(); await tick(); await tick(); });
   assert.deepEqual(archivedProjects, ["project-1", "project-1"]);
   assert.match(container.textContent ?? "", /Sessions archived from Project One\. Undo isn't available for this archive\./);
@@ -743,7 +759,7 @@ test("a Project archive toast is a success only when every stop finished: still 
         );
       });
       await openMenu(container);
-      await act(async () => { button(container, "Archive and Stop All Sessions").click(); await tick(); });
+      await act(async () => { button(container, "Archive and Stop All Sessions…").click(); await tick(); });
       await act(async () => { button(container, "Archive and Stop").click(); await tick(); await tick(); });
       const label = `${group} ${outcome.archiveStatus ?? "archived"}`;
       const toasts = [...container.querySelectorAll<HTMLElement>(".toast")];
@@ -827,15 +843,15 @@ test("the archive confirmation lists the split's sessions with their status, the
 
   await render(true);
   await openMenu(container);
-  await act(async () => { button(container, "Archive and Stop All Sessions").click(); await tick(); });
-  expectRows("Archive and Stop Sessions");
+  await act(async () => { button(container, "Archive and Stop All Sessions…").click(); await tick(); });
+  expectRows("Archive and Stop 7 Sessions");
   await act(async () => { button(container, "Cancel").click(); await tick(); });
 
-  // Without Stop-before-archive support the action is plain "Archive Sessions" with the same rows.
+  // Without Stop-before-archive support the action is plain "Archive 7 Sessions" with the same rows.
   await render(false);
   await openMenu(container);
-  await act(async () => { button(container, "Archive All Sessions").click(); await tick(); });
-  expectRows("Archive Sessions");
+  await act(async () => { button(container, "Archive All Sessions…").click(); await tick(); });
+  expectRows("Archive 7 Sessions");
   await act(async () => { button(container, "Cancel").click(); await tick(); });
 
   await act(async () => { root.unmount(); });
@@ -860,4 +876,291 @@ test("an archive row's badge follows the shared human-owned attention projection
   }), "Needs Your Input");
   // A bare input status with nothing behind it keeps its lifecycle wording.
   assert.equal(label({ status: "input_required" }), "Awaiting Input");
+});
+
+/** A durable Project with one available default Location, which every action can use. */
+function durableProjectSplit(): InboxSplit {
+  const location = {
+    id: "location-1",
+    projectId: "project-1",
+    runnerId: "runner-1",
+    workspaceId: "workspace-1",
+    name: "Project One",
+    path: "/repos/project-one",
+    source: "managed" as const,
+    availability: "available" as const,
+    isDefault: true,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  return {
+    ...split,
+    key: "project:project-1",
+    project: {
+      kind: "durable",
+      project: {
+        id: "project-1",
+        name: "Project One",
+        hidden: false,
+        canManage: true,
+        locations: [location],
+        activeSessionCount: 0,
+        unarchivedSessionCount: 2,
+        totalSessionCount: 2,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+      primaryLocation: location,
+      legacyKeys: [split.key!],
+    },
+  };
+}
+
+/** The open menu's rows in order, a separator as "—". */
+function menuRows(): string[] {
+  const menu = domWindow.document.querySelector('[role="menu"]') as unknown as HTMLElement;
+  return [...menu.querySelectorAll<HTMLElement>('[role="menuitem"], [role="separator"]')]
+    .map((row) => row.getAttribute("role") === "separator" ? "—" : row.querySelector(".menu-text")!.textContent!);
+}
+
+function stubViewport(phone: boolean): () => void {
+  const prior = domWindow.matchMedia;
+  domWindow.matchMedia = ((query: string) => ({
+    matches: phone && query.includes("max-width"),
+    media: query,
+    onchange: null,
+    addEventListener() {},
+    removeEventListener() {},
+    addListener() {},
+    removeListener() {},
+    dispatchEvent: () => false,
+  })) as never;
+  return () => { domWindow.matchMedia = prior; };
+}
+
+async function mountMenu(element: React.ReactElement) {
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  const root = createRoot(mountPoint);
+  await act(async () => { root.render(element); });
+  return {
+    container: domWindow.document.body as unknown as HTMLDivElement,
+    async unmount() {
+      await act(async () => { root.unmount(); });
+      mountPoint.remove();
+    },
+  };
+}
+
+test("the menu groups its items in order, New Session Here first and the archive last in danger (#2199)", async () => {
+  const view = await mountMenu(
+    <FeedbackProvider>
+      <ProjectSplitMenu split={durableProjectSplit()} runner={runner()} pinned={false}
+        onPinnedChange={() => undefined} onNewSession={() => undefined} onManageProject={() => undefined} />
+    </FeedbackProvider>,
+  );
+  await openMenu(view.container);
+  assert.deepEqual(menuRows(), [
+    "New Session Here",
+    "—",
+    "Rename Project…",
+    "Pin Project",
+    "Create Permanent Worktree…",
+    "Reveal in File Manager",
+    "—",
+    "Manage Project",
+    "—",
+    "Archive and Stop All Sessions…",
+  ]);
+  assert.ok(button(view.container, "Archive and Stop All Sessions…").classList.contains("danger"));
+  assertNoDomNode(domWindow.document.querySelector(".menu-note"));
+  await view.unmount();
+});
+
+test("on a phone the menu leaves out Reveal in File Manager (#2199)", async () => {
+  const restore = stubViewport(true);
+  try {
+    const view = await mountMenu(
+      <FeedbackProvider>
+        <ProjectSplitMenu split={durableProjectSplit()} runner={runner()} pinned
+          onPinnedChange={() => undefined} onNewSession={() => undefined} onManageProject={() => undefined} />
+      </FeedbackProvider>,
+    );
+    await openMenu(view.container);
+    assert.deepEqual(menuRows(), [
+      "New Session Here", "—", "Rename Project…", "Unpin Project", "Create Permanent Worktree…", "—",
+      "Manage Project", "—", "Archive and Stop All Sessions…",
+    ]);
+    await view.unmount();
+  } finally {
+    restore();
+  }
+});
+
+test("Rename Project refuses an empty or unchanged name on the field, then renames with a busy primary (#2199)", async () => {
+  const renames: string[] = [];
+  let finish: (() => void) | null = null;
+  let fail: ((error: Error) => void) | null = null;
+  const client = {
+    ...api,
+    updateProject: (_projectId: string, body: { name?: string }) => new Promise((resolve, reject) => {
+      renames.push(body.name ?? "");
+      finish = () => resolve({ project: {} } as never);
+      fail = reject;
+    }),
+  } as unknown as ApiClient;
+  const view = await mountMenu(
+    <ApiProvider client={client}>
+      <FeedbackProvider>
+        <ProjectSplitMenu split={durableProjectSplit()} runner={runner()} pinned={false}
+          onPinnedChange={() => undefined} onNewSession={() => undefined} />
+      </FeedbackProvider>
+    </ApiProvider>,
+  );
+  const { container } = view;
+  await openMenu(container);
+  await act(async () => { button(container, "Rename Project…").click(); await tick(); });
+  const dialog = domWindow.document.querySelector('[role="dialog"]') as unknown as HTMLElement;
+  assert.equal(dialog.querySelector(".modal-title")?.textContent, "Rename Project");
+  const input = dialog.querySelector<HTMLInputElement>("#rename-project-name")!;
+  assert.equal(dialog.querySelector(`label[for="${input.id}"]`)?.textContent, "Name");
+  assert.equal(domWindow.document.getElementById(input.getAttribute("aria-describedby")!)?.textContent,
+    "Changes the name everywhere this project appears.");
+  assert.equal(button(container, "Cancel").className, "btn");
+
+  const submit = button(container, "Rename Project");
+  const expectRefused = (why: string) => {
+    assert.equal(input.getAttribute("aria-invalid"), "true", why);
+    const error = domWindow.document.getElementById(input.getAttribute("aria-describedby")!) as unknown as HTMLElement;
+    assert.ok(error.classList.contains("field-error"), `${why}: the shared field error (#2150)`);
+    assert.equal(error.textContent, "Enter a name for the project.");
+    assertNoDomNode(dialog.querySelector(".field-helper"), "the error replaces the helper");
+    assert.ok(dialog.isConnected, `${why}: the dialog stays open`);
+  };
+  // Unchanged.
+  await act(async () => { submit.click(); await tick(); });
+  expectRefused("an unchanged name");
+  // Empty.
+  await act(async () => { input.value = "   "; fireDomEvent.change(input); });
+  await act(async () => { submit.click(); await tick(); });
+  expectRefused("an empty name");
+  assert.deepEqual(renames, []);
+
+  // A valid name clears the error as it is typed.
+  await act(async () => { input.value = "Project Two"; fireDomEvent.change(input); });
+  assert.equal(input.hasAttribute("aria-invalid"), false);
+
+  // A failed request says why in the same place.
+  await act(async () => { submit.click(); await tick(); });
+  await act(async () => { fail!(new Error("A project named Project Two already exists.")); await tick(); });
+  assert.equal(input.getAttribute("aria-invalid"), "true");
+  assert.equal(dialog.querySelector(".field-error")?.textContent, "A project named Project Two already exists.");
+
+  // The primary keeps its label and shows the spinner while the rename runs, then the dialog closes.
+  await act(async () => { submit.click(); await tick(); });
+  assert.equal(submit.getAttribute("aria-busy"), "true");
+  assert.equal(submit.textContent, "Rename Project");
+  assert.ok(submit.querySelector(".spinner, svg"), "a spinner is prepended");
+  assert.doesNotMatch(container.textContent ?? "", /Saving…/);
+  await act(async () => { finish!(); await tick(); });
+  assert.deepEqual(renames, ["Project Two", "Project Two"]);
+  assertNoDomNode(domWindow.document.querySelector('[role="dialog"]'));
+  await view.unmount();
+});
+
+test("a menu the tab asks for opens at the pointer for that project and returns focus to the tab (#2199)", async () => {
+  const tab = domWindow.document.createElement("button") as unknown as HTMLButtonElement;
+  tab.textContent = "Project One";
+  domWindow.document.body.append(tab as never);
+  let closed = 0;
+  const render = (request: GroupTabMenuRequest | null) => (
+    <FeedbackProvider>
+      <ProjectSplitMenu split={split} runner={runner()} pinned={false} active={false}
+        tabMenu={request} onTabMenuClose={() => { closed += 1; }}
+        onPinnedChange={() => undefined} onNewSession={() => undefined} />
+    </FeedbackProvider>
+  );
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  const root = createRoot(mountPoint);
+  await act(async () => { root.render(render(null)); });
+  assert.equal(mountPoint.querySelectorAll("button").length, 0, "an unselected tab draws no ⋯");
+  assertNoDomNode(domWindow.document.querySelector('[role="menu"]'));
+
+  await act(async () => { root.render(render({ tab, point: { x: 120, y: 30 } })); await tick(); });
+  const menu = domWindow.document.querySelector('[role="menu"]') as unknown as HTMLElement;
+  assert.equal(menu.getAttribute("aria-label"), "Project One Actions");
+  assert.equal(domWindow.document.activeElement?.textContent?.trim(), "New Session Here");
+  await act(async () => {
+    domWindow.document.activeElement?.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await tick();
+  });
+  assert.equal(closed, 1);
+  assert.equal(domWindow.document.activeElement, tab, "Escape returns focus to the tab");
+  await act(async () => { root.unmount(); });
+  mountPoint.remove();
+  tab.remove();
+});
+
+test("the archive confirmation names how many sessions it archives and keeps its button (#2199)", async () => {
+  const eight: InboxSplit = {
+    ...split,
+    sessions: Array.from({ length: 8 }, (_, index) => ({ ...session(`session-${index + 1}`), status: "running" as const })),
+    count: 8,
+  };
+  const view = await mountMenu(
+    <FeedbackProvider>
+      <ProjectSplitMenu split={eight} runner={runner()} pinned={false}
+        onPinnedChange={() => undefined} onNewSession={() => undefined} />
+    </FeedbackProvider>,
+  );
+  await openMenu(view.container);
+  await act(async () => { button(view.container, "Archive and Stop All Sessions…").click(); await tick(); });
+  const dialog = domWindow.document.querySelector('[role="dialog"]') as unknown as HTMLElement;
+  assert.equal(domWindow.document.getElementById(dialog.getAttribute("aria-labelledby")!)?.textContent, "Archive and Stop 8 Sessions");
+  assert.ok(button(view.container, "Archive and Stop").classList.contains("danger"));
+  await act(async () => { button(view.container, "Cancel").click(); await tick(); });
+  await view.unmount();
+});
+
+test("a legacy Workspace keeps its one reset: an empty name clears the display override (#2199)", async () => {
+  const renamed: Array<[string, string, string]> = [];
+  const client = {
+    ...api,
+    renameWorkspace: async (runnerId: string, workspaceId: string, name: string) => {
+      renamed.push([runnerId, workspaceId, name]);
+      return { ok: true as const };
+    },
+  } as ApiClient;
+  const view = await mountMenu(
+    <ApiProvider client={client}>
+      <FeedbackProvider>
+        <ProjectSplitMenu split={split} runner={runner()} pinned={false}
+          onPinnedChange={() => undefined} onNewSession={() => undefined} />
+      </FeedbackProvider>
+    </ApiProvider>,
+  );
+  const { container } = view;
+  await openMenu(container);
+  await act(async () => { button(container, "Rename Workspace…").click(); await tick(); });
+  const dialog = domWindow.document.querySelector('[role="dialog"]') as unknown as HTMLElement;
+  assert.equal(dialog.querySelector(".modal-title")?.textContent, "Rename Workspace");
+  const input = dialog.querySelector<HTMLInputElement>("#rename-project-name")!;
+  assert.equal(domWindow.document.getElementById(input.getAttribute("aria-describedby")!)?.textContent,
+    "Leave empty to use the folder name.");
+  const submit = button(container, "Rename Workspace");
+
+  // Unchanged is still refused.
+  await act(async () => { submit.click(); await tick(); });
+  assert.equal(input.getAttribute("aria-invalid"), "true");
+  assert.equal(dialog.querySelector(".field-error")?.textContent, "Enter a name for the workspace.");
+  assert.deepEqual(renamed, []);
+
+  // Empty is the reset, sent as an empty name.
+  await act(async () => { input.value = "  "; fireDomEvent.change(input); });
+  assert.equal(input.hasAttribute("aria-invalid"), false, "an empty name is valid here");
+  await act(async () => { submit.click(); await tick(); await tick(); });
+  assert.deepEqual(renamed, [["runner-1", "workspace-1", ""]]);
+  assertNoDomNode(domWindow.document.querySelector('[role="dialog"]'));
+  await view.unmount();
 });

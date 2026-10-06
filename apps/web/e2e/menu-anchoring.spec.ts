@@ -77,10 +77,9 @@ for (const viewport of [
     test("opening the Project split menu does not scroll or jump the page", async ({ page }) => {
       const before = await recordScroll(page);
       expect(Object.keys(before).length, "the list is scrolled before the menu opens").toBeGreaterThan(1);
-      const tab = page.getByRole("tab", { name: /Alpha/ });
-      await tab.hover();
-      await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
-      await expectFixedAndFocused(page.getByRole("menu", { name: "Project Actions for Alpha" }));
+      // A right-click opens the menu of a tab that is not selected (#2199), leaving the list as it is.
+      await page.getByRole("tab", { name: /Alpha/ }).click({ button: "right" });
+      await expectFixedAndFocused(page.getByRole("menu", { name: "Alpha Actions" }));
       expect(await readScroll(page)).toEqual(before);
       await page.keyboard.press("Escape");
       await expect(page.getByRole("menu")).toHaveCount(0);

@@ -1,6 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { viewPath } from "../src/navigation.js";
-import { dialogMotionSettled } from "./dialog-motion.js";
 
 /**
  * #2366: two forms stack labels over their controls outside a `.field`, and their labels are the
@@ -8,10 +7,9 @@ import { dialogMotionSettled } from "./dialog-motion.js";
  * above the control. Archived Sessions: the search label and the filters' `.field-label`s. The
  * Automations editor (and the Outbound Events form on its grid): each grid label's own text, each
  * `.automation-field`'s `.field-label`, and its fieldset legends; a grid label's helper stays dim,
- * 4px under the control. The label an open redesign owns (Rename Project #2199) keeps the older
- * dim rule until it lands and drops its case below. Snooze's went with #2181, whose Snooze Until is
- * a §8.1 field, and the message-action form with #2185, which loads Edit as a New Turn straight
- * into the composer.
+ * 4px under the control. The labels that open redesigns owned went with them: Snooze's with #2181,
+ * whose Snooze Until is a §8.1 field, Rename Project's with #2199, which made it one `.field`, and
+ * the message-action form with #2185, which loads Edit as a New Turn straight into the composer.
  */
 
 type Theme = "dark" | "light";
@@ -144,32 +142,4 @@ for (const theme of ["dark", "light"] as const) {
       });
     });
   }
-
-
-  test.describe(`${theme}: labels other redesigns own`, () => {
-    test.use({ viewport: { width: 1440, height: 900 } });
-
-    /** The older rule these labels keep: --text-sm, weight 500, in --text-dim, on the body's line. */
-    async function expectUnchanged(page: Page, label: Locator, margin: string) {
-      const dim = await token(page, "--text-dim");
-      const look = await label.evaluate((element) => {
-        const style = getComputedStyle(element);
-        return { color: style.color, size: style.fontSize, lineHeight: style.lineHeight, weight: style.fontWeight, margin: style.margin };
-      });
-      expect(look).toEqual({ color: dim, size: "12px", lineHeight: "20px", weight: "500", margin });
-    }
-
-    test("Rename Project (#2199) keeps its label", async ({ page }) => {
-      await page.goto("/command-inbox-projects-e2e.html");
-      await page.evaluate(() => localStorage.clear());
-      await page.goto("/command-inbox-projects-e2e.html");
-      await setTheme(page, theme);
-      await page.getByRole("tab", { name: /Alpha/ }).hover();
-      await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
-      await page.getByRole("menuitem", { name: /^Rename Project/ }).click();
-      const dialog = page.getByRole("dialog", { name: "Rename Project" });
-      await dialogMotionSettled(page);
-      await expectUnchanged(page, dialog.locator(".field-label"), "0px 0px 6px");
-    });
-  });
 }

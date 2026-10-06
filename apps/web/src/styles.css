@@ -11897,74 +11897,12 @@ body.shell-dock-dragging * {
   flex: none;
   align-items: center;
 }
-/* A Project tab's actions appear in the 24px gap after the tab, never over it: a §10.1 tab has no
-   side padding, so an overlay would cover a short tab's middle, where a click on the tab lands.
-   The gap keeps the tabs evenly spaced; on hover the gap belongs to the tab's group, so the
-   pointer can cross from the tab to ⋯ without losing it. */
-.inbox-project-menu {
-  position: absolute;
-  z-index: 2;
-  top: 50%;
-  left: 100%;
-  display: flex;
-  width: var(--space-6);
-  align-items: center;
-  justify-content: flex-start;
-  opacity: 0;
-  pointer-events: none;
-  transform: translateY(-50%);
-  transition: opacity var(--dur-fast) var(--ease-out);
-}
-.inbox-project-menu-trigger {
-  display: inline-flex;
-  width: 22px;
-  height: 28px;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: 0;
-  border-radius: 6px;
-  color: var(--text-faint);
-  background: transparent;
-  cursor: pointer;
-  pointer-events: none;
-  transition: color var(--dur-fast) var(--ease-out);
-}
-.inbox-tab-group:hover .inbox-project-menu,
-.inbox-tab-group:focus-within .inbox-project-menu,
-.inbox-project-menu:has(.inbox-project-menu-trigger[aria-expanded="true"]) {
-  opacity: 1;
-}
-.inbox-tab-group:hover :is(.inbox-project-menu, .inbox-project-menu-trigger),
-.inbox-tab-group:focus-within :is(.inbox-project-menu, .inbox-project-menu-trigger),
-.inbox-project-menu-trigger[aria-expanded="true"] {
-  pointer-events: auto;
-}
-.inbox-project-menu-trigger:hover,
-.inbox-project-menu-trigger:focus-visible,
-.inbox-project-menu-trigger[aria-expanded="true"] {
-  color: var(--accent);
-  background: transparent;
-}
-/* Without hover, only the active Project tab shows ⋯, beside the tab rather than over it, so no
-   tab reserves room for it (#2180). It moves out of the tab row in #2199. */
-@media (hover: none), (pointer: coarse) {
-  .inbox-tab-group:not(:has(> .tab[aria-selected="true"])) > .inbox-project-menu { display: none; }
-  /* Scrolling the active tab into view brings its ⋯ with it. */
-  .inbox-tab-group:has(> .inbox-project-menu) > .tab { scroll-margin-inline-end: var(--control-h); }
-  .inbox-project-menu {
-    position: static;
-    width: var(--control-h);
-    opacity: 1;
-    transform: none;
-  }
-  .inbox-project-menu-trigger {
-    flex: 0 0 var(--control-h);
-    width: var(--control-h);
-    min-width: var(--control-h);
-    height: var(--control-h);
-    pointer-events: auto;
-  }
+/* The selected Project tab's actions: ⋯ after the tab, never over it, so it cannot cover a count or
+   badge and no other tab reserves room for it (#2199). Scrolling the tab into view brings ⋯ with it,
+   clear of the row's 24px edge fade. */
+.inbox-tab-group > .inbox-project-actions { margin-inline-start: var(--space-1); }
+.inbox-tab-group:has(> .inbox-project-actions) > .tab {
+  scroll-margin-inline-end: calc(var(--space-1) + var(--control-h-sm) + var(--space-6));
 }
 .inbox-search {
   display: flex;

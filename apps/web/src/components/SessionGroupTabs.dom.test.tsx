@@ -6,7 +6,7 @@ import { Window } from "happy-dom";
 import type { SessionView } from "@wollipog/protocol";
 import type { InboxSplit, InboxSplitKey } from "../inbox.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
-import { SessionGroupTabs } from "./SessionGroupTabs.js";
+import { SessionGroupTabs, type GroupTabMenuRequest } from "./SessionGroupTabs.js";
 
 const domWindow = new Window();
 const globals = ["window", "document", "navigator", "HTMLElement", "HTMLButtonElement", "IS_REACT_ACT_ENVIRONMENT"] as const;
@@ -109,4 +109,72 @@ test("All Groups follows the tab row, opens from the keyboard and lists every gr
   await act(async () => { rows[2]!.click(); });
   assert.deepEqual(selected, ["beta"]);
   await view.unmount();
+});
+
+test("a project tab asks for its menu on a right-click or Shift+F10 without being selected; All keeps the browser's (#2199)", async () => {
+  const projectSplits = [
+    split(null, "All", 5),
+    { ...split("alpha", "Alpha", 3), project: { kind: "legacy" as const, runnerId: "runner-1", workspaceId: "alpha" } },
+    { ...split("beta", "Beta", 2), project: { kind: "legacy" as const, runnerId: "runner-1", workspaceId: "beta" } },
+  ];
+  const selected: InboxSplitKey[] = [];
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const describe = (request: GroupTabMenuRequest | null) => {
+    if (!request) return "";
+    const where = request.point ? `${request.point.x},${request.point.y}` : "tab";
+    return `${request.tab.textContent?.slice(0, 4)}@${where}`;
+  };
+  await act(async () => root.render(
+    <SessionGroupTabs
+      splits={projectSplits}
+      labels={new Map()}
+      activeKey="alpha"
+      snoozed={false}
+      onSelect={(key) => selected.push(key)}
+      onTabKeyDown={() => undefined}
+      tabRef={() => undefined}
+      tabMenu={(group, { active, request, closeRequest }) => (
+        <span className="probe" data-key={group.key} data-active={String(active)} data-request={describe(request)}
+          onClick={closeRequest} />
+      )}
+    />,
+  ));
+  const tab = (name: string) => [...container.querySelectorAll<HTMLElement>(".tab")].find((candidate) => candidate.textContent?.startsWith(name))!;
+  const probe = (key: string) => container.querySelector<HTMLElement>(`.probe[data-key="${key}"]`)!;
+  const contextMenu = (target: HTMLElement, button: number) => {
+    const event = new domWindow.MouseEvent("contextmenu", { bubbles: true, cancelable: true, button, clientX: 40, clientY: 20 });
+    target.dispatchEvent(event as unknown as Event);
+    return event;
+  };
+  const press = (target: HTMLElement, init: { key: string; shiftKey?: boolean }) => {
+    target.dispatchEvent(new domWindow.KeyboardEvent("keydown", { ...init, bubbles: true, cancelable: true }) as unknown as Event);
+  };
+
+  let event: { defaultPrevented: boolean } | undefined;
+  await act(async () => { event = contextMenu(tab("Beta"), 2); });
+  assert.equal(event!.defaultPrevented, true, "the browser's menu gives way to the project's");
+  assert.equal(probe("beta").dataset.request, "Beta@40,20", "a right-click opens at the pointer");
+  assert.equal(probe("beta").dataset.active, "false");
+  assert.equal(probe("alpha").dataset.request, "");
+  assert.deepEqual(selected, [], "the selected tab does not change");
+
+  await act(async () => { probe("beta").click(); });
+  assert.equal(probe("beta").dataset.request, "", "closing clears the request");
+
+  await act(async () => { press(tab("Beta"), { key: "F10", shiftKey: true }); });
+  assert.equal(probe("beta").dataset.request, "Beta@tab", "Shift+F10 opens at the tab");
+  await act(async () => { probe("beta").click(); });
+  await act(async () => { press(tab("Alpha"), { key: "ContextMenu" }); });
+  assert.equal(probe("alpha").dataset.request, "Alph@tab", "so does the context-menu key");
+  // A keyboard's own contextmenu event reports no pointer button, so it also opens at the tab.
+  await act(async () => { contextMenu(tab("Alpha"), 0); });
+  assert.equal(probe("alpha").dataset.request, "Alph@tab");
+
+  await act(async () => { event = contextMenu(tab("All"), 2); });
+  assert.equal(event!.defaultPrevented, false, "All has no project menu");
+  assert.deepEqual(selected, []);
+  await act(async () => root.unmount());
+  container.remove();
 });

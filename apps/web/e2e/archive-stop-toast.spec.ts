@@ -12,9 +12,9 @@ async function archiveFromSessions(page: Page, archiveStop: "failed" | "pending"
   await page.evaluate(() => localStorage.clear());
   await page.goto(`/command-inbox-projects-e2e.html?archiveStop=${archiveStop}`);
   await page.getByRole("tab", { name: /Alpha/ }).click();
-  await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
+  await page.getByRole("button", { name: "Alpha Actions" }).click();
   await page.getByRole("menuitem", { name: "Archive and Stop All Sessions" }).click();
-  await page.getByRole("dialog", { name: "Archive and Stop Sessions" }).getByRole("button", { name: "Archive and Stop" }).click();
+  await page.getByRole("dialog", { name: /^Archive and Stop \d+ Sessions?$/ }).getByRole("button", { name: "Archive and Stop" }).click();
 }
 
 async function archiveFromProjects(page: Page, archiveStop: "failed" | "pending") {

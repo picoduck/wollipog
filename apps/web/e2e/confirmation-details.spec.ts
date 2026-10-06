@@ -10,11 +10,11 @@ import { expectGeometry } from "./geometry-margins.js";
 /** Opens a project split's archive confirmation from its actions menu, as the Command Inbox does. */
 async function openProjectArchive(page: Page, variant: "stop" | "archive"): Promise<Locator> {
   await page.goto(`/confirmation-details-e2e.html?surface=project-archive${variant === "archive" ? "&variant=archive" : ""}`);
-  // The trigger shows on the tab group's hover or focus, as in the Command Inbox tab strip.
-  await page.getByRole("button", { name: "Workspace Actions for Invoicing" }).focus();
+  // ⋯ follows the selected tab, as in the Sessions tab row (#2199).
+  await page.getByRole("button", { name: "Invoicing Actions" }).focus();
   await page.keyboard.press("Enter");
   await page.getByRole("menuitem", { name: variant === "archive" ? "Archive All Sessions" : "Archive and Stop All Sessions" }).click();
-  const dialog = page.getByRole("dialog", { name: variant === "archive" ? "Archive Sessions" : "Archive and Stop Sessions" });
+  const dialog = page.getByRole("dialog", { name: variant === "archive" ? /^Archive \d+ Sessions?$/ : /^Archive and Stop \d+ Sessions?$/ });
   await expect(dialog).toBeVisible();
   await dialogMotionSettled(page);
   return dialog;

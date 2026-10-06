@@ -37,7 +37,7 @@ async function controlGeometry(control: Locator) {
 
 async function openProjectManager(page: Page, projectName = "Alpha") {
   const tab = page.getByRole("tab", { name: new RegExp(projectName) });
-  const trigger = page.getByRole("button", { name: `Project Actions for ${projectName}` });
+  const trigger = page.getByRole("button", { name: `${projectName} Actions` });
   await tab.hover();
   // Without hover only the active Project tab shows its actions (#2180), so select it first.
   if (!await trigger.isVisible()) await tab.click();
@@ -1096,9 +1096,9 @@ test("Inbox titles keep one reading axis across row signals, widths, and densiti
 test("archiving the final session keeps its Project selected live and after reload", async ({ page }) => {
   const alpha = page.getByRole("tab", { name: /Alpha/ });
   await alpha.click();
-  await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
+  await page.getByRole("button", { name: "Alpha Actions" }).click();
   await page.getByRole("menuitem", { name: "Archive and Stop All Sessions" }).click();
-  const confirmation = page.getByRole("dialog", { name: "Archive and Stop Sessions" });
+  const confirmation = page.getByRole("dialog", { name: /^Archive and Stop \d+ Sessions?$/ });
   await confirmation.getByRole("button", { name: "Archive and Stop" }).click();
 
   await expect(alpha).toHaveAttribute("aria-selected", "true");
@@ -1114,7 +1114,7 @@ test("archiving the final session keeps its Project selected live and after relo
 
 test("Project launch actions submit stable Project and Location identity", async ({ page }) => {
   await page.getByRole("tab", { name: /Alpha/ }).click();
-  await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
+  await page.getByRole("button", { name: "Alpha Actions" }).click();
   await page.getByRole("menuitem", { name: "New Session Here" }).click();
 
   const dialog = page.getByRole("dialog", { name: "New Session" });
@@ -1134,7 +1134,7 @@ test("Project launch actions submit stable Project and Location identity", async
 
   await page.goto("/command-inbox-projects-e2e.html");
   await page.getByRole("tab", { name: /Alpha/ }).click();
-  await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
+  await page.getByRole("button", { name: "Alpha Actions" }).click();
   await page.getByRole("menuitem", { name: "Create Permanent Worktree" }).click();
   const worktreeDialog = page.getByRole("dialog", { name: "New Session" });
   await expect(worktreeDialog.getByRole("combobox", { name: "Project" })).toHaveValue("Alpha");
@@ -1149,7 +1149,7 @@ test("Project launch actions submit stable Project and Location identity", async
 
 test("Native TUI launch sends the harness intent and opens Terminal only after creation", async ({ page }, testInfo) => {
   await page.getByRole("tab", { name: /Alpha/ }).click();
-  await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
+  await page.getByRole("button", { name: "Alpha Actions" }).click();
   await page.getByRole("menuitem", { name: "New Session Here" }).click();
 
   const dialog = page.getByRole("dialog", { name: "New Session" });
@@ -1334,7 +1334,7 @@ test("multi-Location Projects without a default require an explicit Location", a
   });
 
   await page.getByRole("tab", { name: /Alpha/ }).click();
-  await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
+  await page.getByRole("button", { name: "Alpha Actions" }).click();
   await expect(page.getByRole("menuitem", { name: "Reveal in File Manager" })).toBeDisabled();
   await page.getByRole("menuitem", { name: "New Session", exact: true }).click();
 
@@ -1359,7 +1359,7 @@ test("multi-Location Projects without a default require an explicit Location", a
 
 test("New Session creates a durable Project and links its first Location inline", async ({ page }) => {
   await page.getByRole("tab", { name: /Alpha/ }).click();
-  await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
+  await page.getByRole("button", { name: "Alpha Actions" }).click();
   await page.getByRole("menuitem", { name: "New Session Here" }).click();
   const newSession = page.getByRole("dialog", { name: "New Session" });
   const createProjectButton = newSession.getByRole("button", { name: /Create Project/ });
@@ -1398,7 +1398,7 @@ test("New Session creates a durable Project and links its first Location inline"
 
 test("an inline Project fallback cannot revive the Project after a later live deletion", async ({ page }) => {
   await page.getByRole("tab", { name: /Alpha/ }).click();
-  await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
+  await page.getByRole("button", { name: "Alpha Actions" }).click();
   await page.getByRole("menuitem", { name: "New Session Here" }).click();
   const newSession = page.getByRole("dialog", { name: "New Session" });
   await newSession.getByRole("button", { name: /Create Project/ }).click();
@@ -1484,7 +1484,7 @@ test("Project-first creation distinguishes same names and explains multi-locatio
   });
 
   await page.getByRole("tab", { name: /^Alpha/ }).click();
-  await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
+  await page.getByRole("button", { name: "Alpha Actions" }).click();
   await page.getByRole("menuitem", { name: "New Session Here" }).click();
   const dialog = page.getByRole("dialog", { name: "New Session" });
   const projectCombobox = dialog.getByRole("combobox", { name: "Project" });
@@ -1749,13 +1749,14 @@ test("Project tabs use roving focus without adding every tab to the page tab ord
   await all.press("ArrowRight");
   await expect(alpha).toBeFocused();
   await expect(alpha).toHaveAttribute("aria-selected", "true");
-  await expect(page.getByRole("button", { name: "Project Actions for Alpha" })).toHaveAttribute("tabindex", "0");
-  await expect(page.getByRole("button", { name: "Project Actions for Gamma" })).toHaveAttribute("tabindex", "-1");
-  const alphaActions = page.getByRole("button", { name: "Project Actions for Alpha" });
+  // Only the selected Project tab is followed by ⋯ (#2199), the next stop after the tab row.
+  await expect(page.getByRole("button", { name: "Alpha Actions" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Gamma Actions" })).toHaveCount(0);
+  const alphaActions = page.getByRole("button", { name: "Alpha Actions" });
   await page.keyboard.press("Tab");
   await expect(alphaActions).toBeFocused();
   await alphaActions.press("Enter");
-  const actionsMenu = page.getByRole("menu", { name: "Project Actions for Alpha" });
+  const actionsMenu = page.getByRole("menu", { name: "Alpha Actions" });
   await expect(actionsMenu).toBeVisible();
   await expect(actionsMenu.getByRole("menuitem").first()).toBeFocused();
   await page.keyboard.press("Escape");
@@ -1771,38 +1772,42 @@ test.describe("coarse pointer Project actions", () => {
   test.use({ hasTouch: true });
 
   test("Project action targets are 44px and support a tap action without hover", async ({ page }) => {
-    const trigger = page.getByRole("button", { name: "Project Actions for Alpha" });
-    // On touch only the active Project tab shows its action target (#2180), beside the tab.
-    await expect(trigger).toBeHidden();
+    const trigger = page.getByRole("button", { name: "Alpha Actions" });
+    // Only the selected Project tab is followed by its action target (#2199).
+    await expect(trigger).toHaveCount(0);
     await page.getByRole("tab", { name: /^Alpha/ }).tap();
     await expect(trigger).toBeVisible();
     const alphaTab = await page.getByRole("tab", { name: /^Alpha/ }).boundingBox();
     expect((await trigger.boundingBox())!.x, "the target sits after the tab, not over it")
       .toBeGreaterThanOrEqual(alphaTab!.x + alphaTab!.width);
-    const box = await trigger.boundingBox();
-    expect(box).not.toBeNull();
-    const visibleTarget = await trigger.evaluate((element) => {
+    const box = (await trigger.boundingBox())!;
+    // A small icon button borrows 4px on every side for a 44px target on touch (§2.8), inside the row.
+    const reach = await trigger.evaluate((element) => {
       const target = element.getBoundingClientRect();
-      const clippingRow = element.closest(".tabs")!.getBoundingClientRect();
+      const hits = (x: number, y: number) => {
+        const found = document.elementFromPoint(x, y);
+        return found === element || element.contains(found);
+      };
+      const cx = target.left + target.width / 2;
+      const cy = target.top + target.height / 2;
       return {
-        width: Math.max(0, Math.min(target.right, clippingRow.right) - Math.max(target.left, clippingRow.left)),
-        height: Math.max(0, Math.min(target.bottom, clippingRow.bottom) - Math.max(target.top, clippingRow.top)),
+        size: [target.width, target.height],
+        edges: [hits(target.left - 3.5, cy), hits(target.right + 3.5, cy), hits(cx, target.top - 3.5), hits(cx, target.bottom + 3.5)],
       };
     });
-    expect(visibleTarget.width).toBeGreaterThanOrEqual(44);
-    expect(visibleTarget.height).toBeGreaterThanOrEqual(44);
-    await page.touchscreen.tap(box!.x + box!.width / 2, box!.y + box!.height / 2);
+    expect(reach.size).toEqual([36, 36]);
+    expect(reach.edges, "the borrowed 4px answers on every side").toEqual([true, true, true, true]);
+    await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
     const newSessionHere = page.getByRole("menuitem", { name: "New Session Here" });
     await expect(newSessionHere).toBeVisible();
     const actionBox = await newSessionHere.boundingBox();
     expect(actionBox).not.toBeNull();
+    expect(actionBox!.height).toBeGreaterThanOrEqual(44);
     await page.touchscreen.tap(
       actionBox!.x + actionBox!.width / 2,
       actionBox!.y + actionBox!.height / 2,
     );
     await expect(page.getByRole("dialog", { name: "New Session" })).toBeVisible();
-    expect(box!.width).toBeGreaterThanOrEqual(44);
-    expect(box!.height).toBeGreaterThanOrEqual(44);
   });
 });
 

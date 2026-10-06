@@ -39,7 +39,7 @@ for (const scenario of [
       });
     }, scenario.theme);
     await page.getByRole("tab", { name: /Alpha/ }).click();
-    await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
+    await page.getByRole("button", { name: "Alpha Actions" }).click();
     await page.getByRole("menuitem", { name: "New Session Here" }).click();
     const dialog = page.getByRole("dialog", { name: "New Session" });
     const orchestratorCard = presetCard(dialog, /^Orchestrator/);
@@ -62,7 +62,7 @@ for (const theme of ["light", "dark"] as const) {
         window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([], ["default", "orchestrator"]);
       }, { selectedTheme: theme, protocolVersion: PROTOCOL_VERSION });
       await page.getByRole("tab", { name: /Alpha/ }).click();
-      await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
+      await page.getByRole("button", { name: "Alpha Actions" }).click();
       await page.getByRole("menuitem", { name: "New Session Here" }).click();
       const dialog = page.getByRole("dialog", { name: "New Session" });
       // A saved Orchestrator harness default selects the role on the user's behalf and names
@@ -90,7 +90,7 @@ for (const theme of ["light", "dark"] as const) {
         window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([], ["default", "orchestrator"]);
       }, theme);
       await page.getByRole("tab", { name: /Alpha/ }).click();
-      await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
+      await page.getByRole("button", { name: "Alpha Actions" }).click();
       await page.getByRole("menuitem", { name: "New Session Here" }).click();
       const dialog = page.getByRole("dialog", { name: "New Session" });
       const orchestratorCard = presetCard(dialog, /^Orchestrator/);
@@ -159,7 +159,7 @@ for (const scenario of [
       });
     }, { theme: scenario.theme, protocolVersion: PROTOCOL_VERSION, driver: harness.driver });
     await page.getByRole("tab", { name: /Alpha/ }).click();
-    await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
+    await page.getByRole("button", { name: "Alpha Actions" }).click();
     await page.getByRole("menuitem", { name: "New Session Here" }).click();
     const dialog = page.getByRole("dialog", { name: "New Session" });
     const providerPermissions = dialog.getByRole("group", { name: "Provider Permissions" });
@@ -218,7 +218,7 @@ for (const scenario of [
       });
     }, { theme: scenario.theme, protocolVersion: PROTOCOL_VERSION });
     await page.getByRole("tab", { name: /Alpha/ }).click();
-    await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
+    await page.getByRole("button", { name: "Alpha Actions" }).click();
     await page.getByRole("menuitem", { name: "New Session Here" }).click();
     const dialog = page.getByRole("dialog", { name: "New Session" });
     const providerPermissions = dialog.getByRole("group", { name: "Provider Permissions" });
@@ -273,7 +273,7 @@ for (const scenario of [
       });
     }, { theme: scenario.theme, protocolVersion: PROTOCOL_VERSION });
     await page.getByRole("tab", { name: /Alpha/ }).click();
-    await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
+    await page.getByRole("button", { name: "Alpha Actions" }).click();
     await page.getByRole("menuitem", { name: "New Session Here" }).click();
     const dialog = page.getByRole("dialog", { name: "New Session" });
     const providerPermissions = dialog.getByRole("group", { name: "Provider Permissions" });
@@ -326,7 +326,7 @@ for (const scenario of [
       });
     }, { theme: scenario.theme, protocolVersion: PROTOCOL_VERSION });
     await page.getByRole("tab", { name: /Alpha/ }).click();
-    await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
+    await page.getByRole("button", { name: "Alpha Actions" }).click();
     await page.getByRole("menuitem", { name: "New Session Here" }).click();
     const dialog = page.getByRole("dialog", { name: "New Session" });
     await presetCard(dialog, /^Orchestrator/).click();
