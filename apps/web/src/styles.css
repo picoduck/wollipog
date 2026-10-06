@@ -1402,6 +1402,17 @@ kbd {
   height: 100%;
 }
 
+/* The view switch (`controls`) leads the actions and never folds into ⋯ (§3.3). */
+.page-controls { display: flex; flex: none; }
+/* A toggle secondary's plain count sits 4px after its label (§11.4). */
+.page-action:has(> .count) { gap: var(--space-1); }
+/* A toggle secondary is a ghost button, whose transparent rest outranks the shared on state, so
+   its on state is restated here (§3.1). */
+.btn.ghost.page-action[aria-pressed="true"] {
+  background: var(--bg-elev-3);
+  border-color: var(--control-outline);
+}
+
 /* Priority+ overflow (§3.3). Slot 1 is the secondary beside the primary. The widest header shows
    slots 1 and 2; the compact tier and a header narrower than 600px show slot 1; phones and a
    header narrower than 440px show none. ⋯ lists exactly the secondaries whose buttons are hidden
@@ -1521,6 +1532,10 @@ kbd {
     padding: 0;
     justify-content: center;
   }
+  .page-primary-key { display: none; }
+  /* Until the phone Sessions bar (#2211), its List / Board switch is icons alone; each option's
+     accessible name stays its label. */
+  .sessions-view .sessions-view-label { display: none; }
   .page-primary-label {
     position: absolute;
     width: 1px;
@@ -11860,37 +11875,7 @@ body.shell-dock-dragging * {
   flex: 1;
   align-self: stretch;
 }
-.inbox-toolbar-actions {
-  display: flex;
-  flex: none;
-  align-items: center;
-  gap: 8px;
-}
 .inbox-order-update { white-space: nowrap; }
-.inbox-create-menu {
-  position: relative;
-  display: flex;
-}
-.inbox-create-control {
-  display: inline-flex;
-  width: var(--control-h);
-  height: var(--control-h);
-  flex: none;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  color: var(--text-dim);
-  background: var(--bg);
-  cursor: pointer;
-}
-.inbox-create-control:hover,
-.inbox-create-control:focus-visible,
-.inbox-create-control[aria-expanded="true"] {
-  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
-  color: var(--accent);
-}
 .inbox-tab-group {
   position: relative;
   display: inline-flex;
@@ -12596,11 +12581,9 @@ body.shell-dock-dragging * {
 
 @media (max-width: 760px) {
   .inbox-list-pane > .toolbar { align-items: stretch; flex-direction: column-reverse; padding: var(--space-2) var(--space-2) 0; }
-  /* List / Board, Active / Snoozed and + already fill most of a phone's width, so a search field
-     sharing their row got what was left: 97px at 390px, its placeholder cut to "Sear" (#2082). The
-     field wraps onto a full-width row of its own below them instead (§6). */
-  .inbox-toolbar-actions { width: 100%; flex-wrap: wrap; }
-  .inbox-search { width: 100%; min-width: 0; flex: 1 0 100%; margin-bottom: 0; }
+  /* The search field takes a full-width row of its own above the tabs (#2082). The tab row is a
+     column here, so the field keeps its own height. */
+  .inbox-search { width: 100%; min-width: 0; flex: none; margin-bottom: 0; }
   .inbox-search input { width: auto; flex: 1; opacity: 1; pointer-events: auto; }
   .inbox-search-key { display: inline-flex; }
   /* A phone drops what a tablet can still afford: the base ref off the Git line, and a few cells
@@ -16630,18 +16613,7 @@ body.shell-dock-dragging * {
   align-self: flex-start;
   max-width: 100%;
 }
-/* The Sessions toolbar's List / Board and Active / Snoozed options: an icon on a phone, a label
-   elsewhere. */
-.sessions-toolbar-option {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  white-space: nowrap;
-}
-.sessions-toolbar-option-icon { display: none; }
 @media (max-width: 760px) {
-  .sessions-toolbar-option-text { display: none; }
-  .sessions-toolbar-option-icon { display: inline-flex; }
   .seg.usage-range {
     display: grid;
     width: 100%;

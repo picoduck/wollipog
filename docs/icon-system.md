@@ -43,7 +43,6 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `ProjectsIcon` | Lucide | `FolderKanban` | Project collection navigation. |
 | `BoardIcon` | Lucide | `Columns3` | Generic board columns. |
 | `ListIcon` | Lucide | `List` | Generic list layout. |
-| `SnoozedIcon` | Lucide | `Clock3` | Snoozed reminder view. |
 | `ConnectionsIcon` | Lucide | `MonitorCog` | Runner connection management. |
 | `RunsIcon` | Lucide | `Workflow` | Generic workflow runs. |
 | `PodsIcon` | Lucide | `UsersRound` | Collaboration group. |

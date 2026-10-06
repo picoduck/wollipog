@@ -21,13 +21,12 @@ function harnessPath(page: Page): string | null {
   return new URL(page.url()).searchParams.get("path");
 }
 
-/** The Sessions toolbar's search field against its segmented controls, measured in the page. */
+/** The Sessions tab row's search field against its tabs, measured in the page. */
 function toolbarGeometry(page: Page) {
-  return page.locator(".inbox-toolbar-actions").evaluate((actions) => {
-    const input = actions.querySelector<HTMLInputElement>(".inbox-search input")!;
+  return page.locator(".inbox-list-pane > .toolbar").evaluate((toolbar) => {
+    const input = toolbar.querySelector<HTMLInputElement>(".inbox-search input")!;
     const search = input.closest(".inbox-search")!.getBoundingClientRect();
-    const options = [...actions.querySelectorAll<HTMLElement>(".seg-option")]
-      .map((option) => option.getBoundingClientRect());
+    const tabs = toolbar.querySelector(".inbox-tabs")!.getBoundingClientRect();
     // An input's scrollWidth ignores its placeholder, so the placeholder is measured in the input's font.
     const style = getComputedStyle(input);
     const context = document.createElement("canvas").getContext("2d")!;
@@ -36,9 +35,8 @@ function toolbarGeometry(page: Page) {
       // The content box: the placeholder cannot draw into the input's own padding.
       inputWidth: input.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
       placeholderWidth: context.measureText(input.placeholder).width,
-      optionsOneLine: options.every((option) => Math.abs(option.top - options[0]!.top) < 1),
-      searchBelowControls: options.every((option) => search.top >= option.bottom),
-      contained: actions.scrollWidth <= actions.clientWidth,
+      searchOwnRow: search.bottom <= tabs.top || search.top >= tabs.bottom,
+      contained: toolbar.scrollWidth <= toolbar.clientWidth,
     };
   });
 }
@@ -61,20 +59,20 @@ test.describe("with a touch pointer", () => {
   // The 44px option height at phone width is a touch size, keyed to the pointer (#1799).
   test.use({ hasTouch: true });
 
-  test("the reminder and mode controls use scoped badges and compact mobile icons", async ({ page }) => {
+  test("the header's view switch and Snoozed are touch-sized, and a phone draws List / Board as icons", async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 800 });
     await openHarness(page);
     await expect(page.getByRole("radio", { name: "List" })).toBeVisible();
-    await expect(page.getByRole("radio", { name: "Active, 4 Sessions" })).toBeVisible();
-    await expect(page.getByRole("radio", { name: "Snoozed, 1 Session" })).toBeVisible();
-    await expect(page.locator(".sessions-toolbar-option-text").first()).toBeVisible();
-    await expect(page.locator(".sessions-toolbar-option-icon").first()).toBeHidden();
+    await expect(page.locator(".sessions-view-label").first()).toBeVisible();
+    const snoozed = page.getByRole("button", { name: "Snoozed, 1", exact: true });
+    await expect(snoozed).toHaveAttribute("aria-pressed", "false");
+    expect((await snoozed.boundingBox())!.height).toBeGreaterThanOrEqual(44);
 
     await page.setViewportSize({ width: 390, height: 844 });
     // The shared segmented control (§10.2) draws a 38px option inside a 44px track and gives each
     // option the track's inset as its hit area, so the TARGET is 44px: a tap 2.5px above or below
     // the visible option still lands on it.
-    for (const name of ["List", "Board", "Active, 4 Sessions", "Snoozed, 1 Session"]) {
+    for (const name of ["List", "Board"]) {
       const option = page.getByRole("radio", { name });
       await expect(option).toBeVisible();
       const track = option.locator("xpath=ancestor::*[@role='radiogroup'][1]");
@@ -85,33 +83,36 @@ test.describe("with a touch pointer", () => {
         return [box.top - 2.5, box.bottom + 2.5].every((y) => element.contains(document.elementFromPoint(x, y)));
       }), `${name} is a 44px target`).toBe(true);
     }
-    await expect(page.locator(".sessions-toolbar-option-text").first()).toBeHidden();
-    await expect(page.locator(".sessions-toolbar-option-icon").first()).toBeVisible();
-    await expect(page.locator(".sessions-toolbar-option .count")).toHaveText(["4", "1"]);
+    // Until the phone Sessions bar (#2211) the app bar draws List / Board as icons, and Snoozed is
+    // in ⋯ as a checked item with its count.
+    await expect(page.locator(".sessions-view-label").first()).toBeHidden();
+    await expect(snoozed).toBeHidden();
+    await page.locator(".page-header").getByRole("button", { name: "More Actions" }).click();
+    const showSnoozed = page.getByRole("menuitemcheckbox", { name: "Show Snoozed Sessions, 1" });
+    await expect(showSnoozed).toHaveAttribute("aria-checked", "false");
+    expect((await showSnoozed.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    await page.keyboard.press("Escape");
 
-    // With Active / Snoozed present, a search field sharing the controls' row was left 97px and cut
-    // its placeholder to "Sear" (#2082). It takes a full-width row of its own below them instead.
+    // A search field sharing a row of controls was left 97px and cut its placeholder to "Sear"
+    // (#2082). It takes a full-width row of its own instead.
     const geometry = await toolbarGeometry(page);
     expect(geometry.inputWidth).toBeGreaterThanOrEqual(160);
     expect(geometry.inputWidth, "the whole placeholder shows").toBeGreaterThanOrEqual(geometry.placeholderWidth);
-    expect(geometry.optionsOneLine).toBe(true);
-    expect(geometry.searchBelowControls).toBe(true);
+    expect(geometry.searchOwnRow).toBe(true);
     expect(geometry.contained).toBe(true);
-    const create = (await page.getByRole("button", { name: "Create", exact: true }).boundingBox())!;
+    const create = (await page.locator(".page-header").getByRole("button", { name: "New Session", exact: true }).boundingBox())!;
     expect(create.width).toBeGreaterThanOrEqual(44);
     expect(create.height).toBeGreaterThanOrEqual(44);
 
-    // One pixel past the phone breakpoint the toolbar is the desktop row again, search beside the
-    // controls.
+    // One pixel past the phone breakpoint the tab row is the desktop row again, search beside the tabs.
     await page.setViewportSize({ width: 761, height: 844 });
-    expect((await toolbarGeometry(page)).searchBelowControls).toBe(false);
+    expect((await toolbarGeometry(page)).searchOwnRow).toBe(false);
   });
 });
 
 test("pending snooze excludes attention from Active across list, board, search, and counts", async ({ page }) => {
   await openHarness(page);
-  const active = page.getByRole("radio", { name: "Active, 4 Sessions" });
-  const snoozed = page.getByRole("radio", { name: "Snoozed, 1 Session" });
+  const snoozed = page.getByRole("button", { name: "Snoozed, 1", exact: true });
   await expect(page.locator(".inbox-row-shell", { hasText: "Snoozed Session" })).toHaveCount(0);
 
   const search = page.locator(".inbox-search input");
@@ -123,7 +124,7 @@ test("pending snooze excludes attention from Active across list, board, search, 
   await expect(row).toBeVisible();
   await expect(row.locator('[aria-label="Attention: Approval Required"]')).toBeVisible();
   await expect(row.locator('[aria-label="Reminder: Snoozed"]')).toBeVisible();
-  await expect(active).toHaveAttribute("aria-checked", "false");
+  await expect(snoozed).toHaveAttribute("aria-pressed", "true");
 
   await page.getByRole("radio", { name: "Board" }).click();
   const card = page.locator(".board .card", { hasText: "Snoozed Session" });

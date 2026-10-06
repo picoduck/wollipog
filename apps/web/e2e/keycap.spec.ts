@@ -67,12 +67,12 @@ async function openShortcutReference(page: Page): Promise<Locator> {
   return reference;
 }
 
-async function openCreateMenu(page: Page): Promise<Locator> {
+/** The Sessions page header's New Session, which carries its C keycap (#2159). */
+async function openNewSession(page: Page): Promise<Locator> {
   await page.goto(SHELL);
-  await page.getByRole("button", { name: "Create", exact: true }).click();
-  const item = page.getByRole("menuitem", { name: "New Session" });
-  await expect(item).toBeVisible();
-  return item;
+  const button = page.locator(".page-header .page-primary");
+  await expect(button).toBeVisible();
+  return button;
 }
 
 test.describe("with a fine pointer at 1440px", () => {
@@ -133,10 +133,11 @@ test.describe("with a fine pointer at 1440px", () => {
     await expectKeycap(page, key, "Sessions search key");
   });
 
-  test("a menu item with a binding carries the keycap in its trailing slot", async ({ page }) => {
-    const item = await openCreateMenu(page);
-    await expectKeycap(page, item.locator(".menu-trail kbd"), "New Session menu item");
-    await expect(item).toHaveAccessibleName("New Session");
+  test("the page header's New Session carries its keycap after the label", async ({ page }) => {
+    const button = await openNewSession(page);
+    await expectKeycap(page, button.locator("kbd"), "New Session keycap");
+    await expect(button).toHaveAccessibleName("New Session");
+    await expect(button).toHaveAttribute("aria-keyshortcuts", "C");
   });
 });
 
@@ -144,10 +145,12 @@ test.describe("with a fine pointer at 760px", () => {
   test.use({ viewport: { width: 760, height: 900 } });
 
   test("keycaps stay visible, because a narrow window with a mouse still has a keyboard", async ({ page }) => {
-    const item = await openCreateMenu(page);
+    const button = await openNewSession(page);
     expect(await page.evaluate(() => matchMedia("(max-width: 760px)").matches), "this is the phone layout").toBe(true);
-    await expectKeycap(page, item.locator(".menu-trail kbd"), "New Session sheet item");
-    await page.keyboard.press("Escape");
+    // The app bar's New Session is a 44px + whose label is clipped (§15.1); its keycap goes with the
+    // label, and the key stays announced.
+    await expect(button.locator("kbd")).toBeHidden();
+    await expect(button).toHaveAttribute("aria-keyshortcuts", "C");
     // The phone layout keeps the search field open, so its / keycap shows without focus.
     await expectKeycap(page, page.locator(".inbox-search kbd.inbox-search-key"), "Sessions search key");
   });
@@ -158,10 +161,9 @@ for (const width of [390, 1440]) {
     test.use({ viewport: { width, height: 900 }, hasTouch: true });
 
     test("inline keycaps and hints are hidden", async ({ page }) => {
-      const item = await openCreateMenu(page);
+      const button = await openNewSession(page);
       expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
-      await expect(item.locator("kbd")).toBeHidden();
-      await page.keyboard.press("Escape");
+      await expect(button.locator("kbd")).toBeHidden();
       // Even with the search field open and focused, a touch screen shows no / keycap.
       await page.getByRole("textbox", { name: "Search Sessions" }).focus();
       await expect(page.locator(".inbox-search:focus-within")).toHaveCount(1);

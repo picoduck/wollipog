@@ -288,14 +288,17 @@ function SessionsSurface() {
     <div className="app">
       <main className="main">
         <div className="main-body inbox-main-body">
-          <InboxView
-            viewMode="list"
-            expandedSessionId={view.name === "session" ? view.id : null}
-            rightPanel={rightPanel}
-            onOpenTerminal={() => {}}
-            onCollapse={() => navigate({ name: "inbox" })}
-            onNewSession={() => {}}
-          />
+          {/* The app's Sessions page container, so InboxView's page header lays out as it does there. */}
+          <div className="page full fill">
+            <InboxView
+              viewMode="list"
+              expandedSessionId={view.name === "session" ? view.id : null}
+              rightPanel={rightPanel}
+              onOpenTerminal={() => {}}
+              onCollapse={() => navigate({ name: "inbox" })}
+              onNewSession={() => {}}
+            />
+          </div>
         </div>
       </main>
     </div>

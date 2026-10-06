@@ -96,7 +96,7 @@ import { handleSettingsNavigationKey } from "./settings-navigation.js";
 import { ProjectsView } from "./components/ProjectsView.js";
 import { InstanceSelector } from "./components/InstanceSelector.js";
 import { RemoteInstanceBanner } from "./components/RemoteInstanceBanner.js";
-import { AppBarSearchProvider, PageHeader } from "./components/PageHeader.js";
+import { AppBarSearchProvider } from "./components/PageHeader.js";
 import { Rail, RailDragStrip } from "./components/Rail.js";
 import { InstancesPanel } from "./components/InstancesPanel.js";
 import { useNewSessionShortcut } from "./useNewSessionShortcut.js";
@@ -798,11 +798,8 @@ export function Shell() {
             pageTitle={view.name === "session" ? undefined : viewTitle(view, entityTitle)}
           >
           {(view.name === "inbox" || view.name === "session" || view.name === "board") && (
-            /* Sessions takes the page header's title only. Its tab row, list, preview and splitter
-               belong to the Sessions work, so the header sits above an unchanged InboxView, which
-               keeps its place in the tree when a session opens and the header goes. */
+            /* InboxView draws the Sessions page header, whose controls are its state (#2159). */
             <div className="page full fill">
-            {view.name !== "session" && <PageHeader title={viewTitle(view)} />}
             <InboxView
               viewMode={view.name === "board" ? "board" : "list"}
               routeSplit={view.name === "inbox" || view.name === "board" ? view.split : undefined}
@@ -821,6 +818,7 @@ export function Shell() {
               onCollapse={() => navigate(sessionsDestination(instanceScope))}
               onNewSession={(preset) => setDialog({ kind: "session", preset })}
               onShortcutNewSessionPresetChange={setInboxNewSessionPreset}
+              onOpenShortcuts={openShortcutReference}
             />
             </div>
           )}

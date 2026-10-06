@@ -223,6 +223,21 @@ function reminder(sessionId: string, revision = 1): SessionReminderView {
   };
 }
 
+/** The page header's Snoozed toggle (#2159). */
+function snoozedToggle(container: HTMLDivElement): HTMLButtonElement {
+  return container.querySelector<HTMLButtonElement>(".page-header .page-action[aria-pressed]")!;
+}
+
+/** The Snoozed toggle's plain count, or null when it shows none (at zero). */
+function snoozedCount(container: HTMLDivElement): string | null {
+  return snoozedToggle(container).querySelector(".count")?.textContent ?? null;
+}
+
+/** The selected tab's count: active sessions with Snoozed off, snoozed ones with it on. */
+function selectedTabCount(container: HTMLDivElement): string | undefined {
+  return container.querySelector('.inbox-tabs .tab[aria-selected="true"] > .count')?.textContent ?? undefined;
+}
+
 function rowTitles(container: HTMLDivElement): string[] {
   return [...container.querySelectorAll(".inbox-row-title")].map((row) => row.textContent ?? "");
 }
@@ -390,8 +405,8 @@ test("InboxView preserves the server-authoritative Project count when reminders 
     .find((tab) => tab.textContent?.includes("Project One"));
   assert.equal(projectTab?.querySelector(".count")?.textContent, "7");
   await act(async () => { projectTab!.click(); });
-  assert.equal(container.querySelector('[title="Active"]')?.getAttribute("aria-label"), "Active, 7 Sessions");
-  assert.equal(container.querySelector('[title="Snoozed"]')?.getAttribute("aria-label"), "Snoozed, 0 Sessions");
+  assert.equal(selectedTabCount(container), "7");
+  assert.equal(snoozedCount(container), null, "Snoozed shows no count at zero");
 
 });
 
@@ -449,15 +464,14 @@ test("Active and Snoozed badges follow the selected Project split and live remin
       pods: [],
     });
   });
-  const countLabel = (title: string) => container.querySelector(`[title="${title}"]`)?.getAttribute("aria-label");
-  assert.equal(countLabel("Active"), "Active, 3 Sessions");
-  assert.equal(countLabel("Snoozed"), "Snoozed, 2 Sessions");
+  assert.equal(selectedTabCount(container), "3");
+  assert.equal(snoozedCount(container), "2");
 
   const alphaTab = [...container.querySelectorAll<HTMLButtonElement>(".inbox-tabs .tab")]
     .find((tab) => tab.textContent?.includes("Alpha"))!;
   await act(async () => { alphaTab.click(); });
-  assert.equal(countLabel("Active"), "Active, 1 Session");
-  assert.equal(countLabel("Snoozed"), "Snoozed, 1 Session");
+  assert.equal(selectedTabCount(container), "1");
+  assert.equal(snoozedCount(container), "1");
 
   await act(async () => {
     socket.push({
@@ -466,14 +480,18 @@ test("Active and Snoozed badges follow the selected Project split and live remin
       reminder: reminder(alphaActive.id),
     });
   });
-  assert.equal(countLabel("Active"), "Active, 0 Sessions");
-  assert.equal(countLabel("Snoozed"), "Snoozed, 2 Sessions");
+  assert.equal(selectedTabCount(container), "0");
+  assert.equal(snoozedCount(container), "2");
 
   const betaTab = [...container.querySelectorAll<HTMLButtonElement>(".inbox-tabs .tab")]
     .find((tab) => tab.textContent?.includes("Beta"))!;
   await act(async () => { betaTab.click(); });
-  assert.equal(countLabel("Active"), "Active, 2 Sessions");
-  assert.equal(countLabel("Snoozed"), "Snoozed, 1 Session");
+  assert.equal(selectedTabCount(container), "2");
+  assert.equal(snoozedCount(container), "1");
+  // With Snoozed on, the tab counts are snoozed counts.
+  await act(async () => { snoozedToggle(container).click(); });
+  assert.equal(snoozedToggle(container).getAttribute("aria-pressed"), "true");
+  assert.equal(selectedTabCount(container), "1");
 
 });
 
@@ -483,6 +501,76 @@ function accessibleText(node: Node): string {
   if ((node as Element).getAttribute?.("aria-hidden") === "true") return "";
   return [...node.childNodes].map(accessibleText).join("");
 }
+
+test("the Sessions header's New Session uses the active tab's preset, and ⋯ explains an unavailable New Project…", async () => {
+  const { container, root } = mountTestRoot();
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "inbox-page-header-test",
+    runtimeKey: "inbox-page-header-test:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  const presets: unknown[] = [];
+  let shortcutsOpened = 0;
+  await act(async () => {
+    root.render(
+      <StoreProvider connection={connection} navigation={navigation}>
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined}
+          onNewSession={(preset) => presets.push(preset)} onOpenShortcuts={() => { shortcutsOpened += 1; }} />
+      </StoreProvider>,
+    );
+  });
+  const project: ProjectView = {
+    id: "project-1",
+    name: "Project One",
+    hidden: false,
+    locations: [],
+    activeSessionCount: 1,
+    unarchivedSessionCount: 1,
+    totalSessionCount: 1,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  await act(async () => {
+    socket.push({ ...snapshot([session("project-session", 10, { projectId: project.id })]), projects: [project],
+      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true } });
+  });
+
+  const header = container.querySelector(".page-header")!;
+  assert.equal(header.querySelector("h1")?.textContent, "Sessions");
+  assertNoDomNode(header.querySelector(".page-action[aria-pressed]"), "no Snoozed toggle without reminder support");
+  const newSession = header.querySelector<HTMLButtonElement>(".page-primary")!;
+  assert.equal(accessibleText(newSession), "New Session", "the keycap is not part of the name");
+  await act(async () => { newSession.click(); });
+  assert.deepEqual(presets, [undefined], "All has no preset");
+  const projectTab = [...container.querySelectorAll<HTMLButtonElement>(".inbox-tabs .tab")]
+    .find((tab) => tab.textContent?.includes("Project One"))!;
+  await act(async () => { projectTab.click(); });
+  await act(async () => { newSession.click(); });
+  assert.deepEqual(presets.at(-1), { projectId: "project-1" }, "a Project tab presets its Project");
+
+  const openMenu = async () => {
+    await act(async () => { header.querySelector<HTMLButtonElement>('[aria-label="More Actions"]')!.click(); });
+    return container.querySelector('[role="menu"][aria-label="More Actions"]')!;
+  };
+  let menu = await openMenu();
+  const items = () => [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
+  assert.deepEqual(items().map((item) => item.querySelector(".menu-text")?.textContent), ["New Project…", "Keyboard Shortcuts"]);
+  assert.equal(items()[0]!.disabled, false);
+  await act(async () => { items()[1]!.click(); });
+  assert.equal(shortcutsOpened, 1);
+
+  // Projects unavailable: New Project… stays in the menu, disabled, with its reason as its second line.
+  await act(async () => { socket.push(snapshot([session("project-session", 10)])); });
+  menu = await openMenu();
+  const newProject = items()[0]!;
+  assert.equal(newProject.disabled, true);
+  const reason = newProject.querySelector(".menu-desc")!;
+  assert.equal(reason.textContent, "New Project is unavailable on this connection.");
+  assert.equal(newProject.getAttribute("aria-describedby"), reason.id, "the reason describes the item");
+  assert.equal(newProject.getAttribute("title"), null, "the reason is not a tooltip");
+});
 
 test("group tabs draw blocked and stalled counts as aria-hidden badges and name them in words (#2031)", async () => {
   const { container, root } = mountTestRoot();
@@ -638,8 +726,7 @@ test("a Project's archive confirmation lists its sessions from Active and Snooze
   assert.match(fromActive.message, /^All 2 sessions in “Alpha”/);
   assert.deepEqual(fromActive.rows, ["Session alpha-active", "Session alpha-snoozed"]);
 
-  const snoozedFilter = container.querySelector<HTMLElement>('[title="Snoozed"]')!;
-  await act(async () => { snoozedFilter.click(); });
+  await act(async () => { snoozedToggle(container).click(); });
   const fromSnoozed = await confirmation();
   assert.match(fromSnoozed.message, /^All 2 sessions in “Alpha”/);
   assert.deepEqual(fromSnoozed.rows, ["Session alpha-active", "Session alpha-snoozed"]);
@@ -770,11 +857,11 @@ test("reminder membership stays exclusive while scoped attention reconciles in S
   });
 
   assert.deepEqual(rowTitles(container), ["Session unsnoozed"]);
-  assert.equal(container.querySelector('[title="Active"]')?.getAttribute("aria-label"), "Active, 1 Session");
-  assert.equal(container.querySelector('[title="Snoozed"]')?.getAttribute("aria-label"), "Snoozed, 6 Sessions");
+  assert.equal(selectedTabCount(container), "1");
+  assert.equal(snoozedCount(container), "6");
   assert.doesNotMatch(container.textContent ?? "", /Background Work Lost|Result Pending/);
 
-  await act(async () => { (container.querySelector('[title="Snoozed"]') as HTMLButtonElement).click(); });
+  await act(async () => { snoozedToggle(container).click(); });
   assert.deepEqual(rowTitles(container), [
     "Session input", "Session watchdog", "Session orphaned", "Session omitted", "Session ordinary", "Session failed",
   ]);
@@ -787,12 +874,12 @@ test("reminder membership stays exclusive while scoped attention reconciles in S
   assert.ok(watchdogPill.classList.contains("t-info"));
   assert.equal(watchdogPill.classList.contains("t-warning"), false);
 
-  await act(async () => { (container.querySelector('[title="Active"]') as HTMLButtonElement).click(); });
+  await act(async () => { snoozedToggle(container).click(); });
   await renderView("board");
   assert.deepEqual([...container.querySelectorAll(".card")].map((card) => card.textContent?.includes("Session unsnoozed")), [true]);
   assertNoDomNode(container.querySelector('.card [aria-label="Reminder: Snoozed"]'));
 
-  await act(async () => { (container.querySelector('[title="Snoozed"]') as HTMLButtonElement).click(); });
+  await act(async () => { snoozedToggle(container).click(); });
   assert.ok([...container.querySelectorAll(".card")].some((card) => card.textContent?.includes("Session orphaned")));
   assert.ok(container.querySelector('.card [aria-label="Attention: Background Work Lost"]'));
   const boardWatchdogPill = container.querySelector('.card [aria-label^="Background Work: Result Pending."]');
@@ -807,23 +894,23 @@ test("reminder membership stays exclusive while scoped attention reconciles in S
   assert.ok([...container.querySelectorAll(".card")].some((card) => card.textContent?.includes("Session orphaned")),
     "clearing attention must leave the pending reminder in Snoozed");
   assertNoDomNode(container.querySelector('.card [aria-label="Attention: Background Work Lost"]'));
-  assert.equal(container.querySelector('[title="Active"]')?.getAttribute("aria-label"), "Active, 1 Session");
+  assert.equal(snoozedCount(container), "6");
 
   await act(async () => {
     socket.push({ type: "session_reminder_removed", userId: "user", sessionId: ordinary.id });
   });
   assert.equal([...container.querySelectorAll(".card")].some((card) => card.textContent?.includes("Session ordinary")), false,
     "removing a reminder immediately removes the session from Snoozed");
-  assert.equal(container.querySelector('[title="Active"]')?.getAttribute("aria-label"), "Active, 2 Sessions");
-  assert.equal(container.querySelector('[title="Snoozed"]')?.getAttribute("aria-label"), "Snoozed, 5 Sessions");
+  assert.equal(selectedTabCount(container), "5");
+  assert.equal(snoozedCount(container), "5");
 
-  await act(async () => { (container.querySelector('[title="Active"]') as HTMLButtonElement).click(); });
+  await act(async () => { snoozedToggle(container).click(); });
   assert.ok([...container.querySelectorAll(".card")].some((card) => card.textContent?.includes("Session ordinary")),
     "removing the reminder returns the idle session without navigation");
   assert.equal([...container.querySelectorAll(".card")].some((card) => card.textContent?.includes("Session orphaned")), false,
     "an attention update must not leak a pending reminder back into Active");
-  assert.equal(container.querySelector('[title="Active"]')?.getAttribute("aria-label"), "Active, 2 Sessions");
-  assert.equal(container.querySelector('[title="Snoozed"]')?.getAttribute("aria-label"), "Snoozed, 5 Sessions");
+  assert.equal(selectedTabCount(container), "2");
+  assert.equal(snoozedCount(container), "5");
 
 });
 
@@ -977,8 +1064,8 @@ test("InboxView holds desktop browsing order until the user leaves the window", 
   const applyOrder = [...container.querySelectorAll<HTMLButtonElement>("button")]
     .find((button) => button.textContent?.trim() === "Apply New Order");
   assert.ok(applyOrder, "sustained desktop activity exposes a deliberate reorder boundary");
-  assert.equal(applyOrder.nextElementSibling, container.querySelector('[role="radiogroup"][aria-label="Sessions View"]'),
-    "the conditional button leads List / Board so showing it cannot move the toggle (#1675)");
+  assert.equal(applyOrder.nextElementSibling, container.querySelector(".inbox-search"),
+    "the conditional button leads Search so showing it cannot move the field (#1675)");
   assert.match(container.textContent ?? "", /A newer Sessions order is available/);
   await act(async () => { applyOrder.click(); });
   assert.deepEqual(rowTitles(container), ["Session B", "Session C", "Session A"]);
@@ -1183,7 +1270,7 @@ test("a two-client reminder upsert preserves the open Inbox Snooze draft and foc
     });
   });
 
-  await act(async () => { container.querySelector<HTMLButtonElement>('[title="Snoozed"]')!.click(); });
+  await act(async () => { snoozedToggle(container).click(); });
   await act(async () => { container.querySelector<HTMLButtonElement>(".inbox-row")!.click(); });
   const snooze = [...container.querySelectorAll<HTMLButtonElement>('button[aria-label="Snooze"]')]
     .at(0)!;
@@ -1307,7 +1394,7 @@ test("a 409 reconciles the open Snooze dialog without WebSocket delivery", async
       pods: [],
     });
   });
-  await act(async () => { container.querySelector<HTMLButtonElement>('[title="Snoozed"]')!.click(); });
+  await act(async () => { snoozedToggle(container).click(); });
   await act(async () => { container.querySelector<HTMLButtonElement>(".inbox-row")!.click(); });
   const snooze = [...container.querySelectorAll<HTMLButtonElement>('button[aria-label="Snooze"]')].at(0)!;
   await act(async () => { snooze.click(); });
@@ -1525,7 +1612,7 @@ test("board mode shares the Sessions toolbar scope and toggles back to the list"
     "Enter does not invent a selected-row focus model for the board");
 
   const toggle = container.querySelector('[role="radiogroup"][aria-label="Sessions View"]');
-  assert.ok(toggle, "the List / Board toggle lives in the shared toolbar");
+  assert.ok(toggle?.closest(".page-header .page-controls"), "the List / Board toggle lives in the page header's controls slot");
   const listOption = [...toggle!.querySelectorAll("button")]
     .find((option) => option.textContent === "List") as unknown as HTMLButtonElement;
   await act(async () => { listOption.click(); });

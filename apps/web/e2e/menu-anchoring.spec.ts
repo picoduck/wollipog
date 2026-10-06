@@ -62,7 +62,8 @@ async function expectFixedAndFocused(menu: Locator): Promise<void> {
 }
 
 for (const viewport of [
-  { name: "desktop", width: 1280, height: 760 },
+  // Tall enough that the list under the Sessions page header holds a whole row clear of its edges.
+  { name: "desktop", width: 1280, height: 900 },
   { name: "phone", width: 390, height: 720 },
 ] as const) {
   test.describe(`on a scrolled ${viewport.name} page`, () => {

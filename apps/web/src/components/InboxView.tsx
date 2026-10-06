@@ -38,7 +38,6 @@ import { useFeedback } from "./FeedbackProvider.js";
 import { InboxList, type InboxListEntry } from "./InboxList.js";
 import { InboxShortcutRail } from "./InboxShortcutRail.js";
 import { CreateProjectDialog } from "./CreateProjectDialog.js";
-import { InboxCreateMenu } from "./InboxCreateMenu.js";
 import { ProjectSplitMenu } from "./ProjectSplitMenu.js";
 import { SessionDetail, type PreviewForkControls } from "./SessionDetail.js";
 import type { RightPanelState } from "./RightPanel.js";
@@ -54,7 +53,9 @@ import { SnoozeDialog } from "./SnoozeDialog.js";
 import { SessionContextMenu, type SessionContextMenuState } from "./SessionContextMenu.js";
 import { RenameSessionDialog } from "./RenameSessionDialog.js";
 import type { NewSessionPreset } from "./NewSessionDialog.js";
-import { BoardIcon, DialIcon, ListIcon, SearchIcon, SnoozedIcon } from "./Icons.js";
+import { BoardIcon, ListIcon, SearchIcon } from "./Icons.js";
+import { PageHeader } from "./PageHeader.js";
+import { shortcutDisplay } from "../shortcuts.js";
 import { Board } from "./Board.js";
 import type { SessionsViewMode } from "../sessions-view-mode.js";
 import { sessionAgentLabel } from "./agent-options.js";
@@ -71,22 +72,6 @@ import { CountBadge } from "./CountBadge.js";
 const PROJECT_PIN_KEY = "wollipog.projects.pinned";
 const SEEN_DWELL_MS = 1_500;
 const inboxScrollPositions = new Map<string, number>();
-
-function SessionsToolbarOption({ icon, label, count }: {
-  icon: ReactNode;
-  label: string;
-  count?: number;
-}) {
-  return (
-    <span className="sessions-toolbar-option">
-      <span className="sessions-toolbar-option-icon" aria-hidden="true">{icon}</span>
-      <span className="sessions-toolbar-option-text">{label}</span>
-      {count !== undefined && (
-        <span className="count" aria-hidden="true">{count}</span>
-      )}
-    </span>
-  );
-}
 
 /** A tab's attention counts in words ("2 Blocked, 1 Stalled"), naming only the nonzero ones. */
 function attentionWords({ blockedCount, stalledCount }: Pick<InboxSplit, "blockedCount" | "stalledCount">): string {
@@ -185,6 +170,8 @@ export interface InboxViewProps {
   onCollapse?: () => void;
   onNewSession?: (preset?: NewSessionPreset) => void;
   onShortcutNewSessionPresetChange?: (preset?: NewSessionPreset) => void;
+  /** Opens the Keyboard Shortcuts reference from the page ⋯ menu. */
+  onOpenShortcuts?: () => void;
 }
 
 export function InboxView({
@@ -203,6 +190,7 @@ export function InboxView({
   onCollapse,
   onNewSession,
   onShortcutNewSessionPresetChange,
+  onOpenShortcuts,
 }: InboxViewProps) {
   const api = useApi();
   const { confirm, showToast, showUndo } = useFeedback();
@@ -445,9 +433,7 @@ export function InboxView({
   }), [baseSplits, reminders, stalledSessionIds]);
   const splits = reminderSplits[reminderMode];
   const activeSplit = inboxSplitByKey(splits, inbox.splitKey);
-  const ordinaryActiveSplit = inboxSplitByKey(reminderSplits.ordinary, inbox.splitKey);
   const snoozedActiveSplit = inboxSplitByKey(reminderSplits.snoozed, inbox.splitKey);
-  const activeCount = ordinaryActiveSplit?.count ?? 0;
   const snoozedCount = snoozedActiveSplit?.count ?? 0;
   const activityCounts = useMemo(() => (activeSplit?.sessions ?? []).reduce(
     (counts, session) => {
@@ -1310,7 +1296,50 @@ export function InboxView({
     setDragRatio(null);
   };
 
+  const newSession = () => onNewSession?.(activeNewSessionPreset);
   return (
+    <>
+    {/* The Sessions page header (§4.2): the view switch, the Snoozed filter, ⋯ and New Session. It
+        goes when a session opens, and the view below keeps its place in the tree. */}
+    {!expanded && (
+      <PageHeader
+        title={destination("inbox").name}
+        controls={(
+          <SegmentedControl<SessionsViewMode>
+            label="Sessions View"
+            className="sessions-view"
+            value={viewMode}
+            options={[
+              { value: "list", label: <><ListIcon size={16} /><span className="sessions-view-label">List</span></>, ariaLabel: "List", title: "List" },
+              { value: "board", label: <><BoardIcon size={16} /><span className="sessions-view-label">Board</span></>, ariaLabel: "Board", title: "Board" },
+            ]}
+            onChange={(mode) => {
+              if (mode === viewMode) return;
+              // The route IS the mode; the App-level view effect persists it as last-used.
+              // A tab the URL names stays named across the mode switch.
+              navigate({ name: mode === "board" ? "board" : "inbox", ...(routeSplit === undefined ? {} : { split: routeSplit }) });
+            }}
+          />
+        )}
+        secondary={sessionRemindersSupported ? [{
+          label: "Snoozed",
+          menuLabel: "Show Snoozed Sessions",
+          pressed: reminderMode === "snoozed",
+          count: snoozedCount,
+          onClick: () => setReminderMode((mode) => mode === "snoozed" ? "ordinary" : "snoozed"),
+        }] : []}
+        menu={[
+          {
+            label: "New Project…",
+            disabled: !projectsSupported,
+            description: projectsSupported ? undefined : "New Project is unavailable on this connection.",
+            onClick: () => setCreatingProject(true),
+          },
+          ...(onOpenShortcuts ? [{ label: "Keyboard Shortcuts", onClick: onOpenShortcuts }] : []),
+        ]}
+        primary={{ label: "New Session", shortcut: shortcutDisplay("new-session"), onClick: newSession }}
+      />
+    )}
     <div className={`inbox-view${expanded ? " expanded" : ""}${boardMode ? " board-mode" : ""}`} ref={viewRef} data-focus-zone={expanded ? "main" : "list"}>
       <section
         className="inbox-list-pane"
@@ -1374,96 +1403,42 @@ export function InboxView({
               );
             })}
           </TabList>
-          <div className="inbox-toolbar-actions">
-            <span className="sr-only" aria-live="polite" aria-atomic="true">
-              {orderUpdateAvailable ? "A newer Sessions order is available." : ""}
-            </span>
-            {/* Leading, not beside the Reminder View: this group is pinned to the toolbar's right edge,
-                so a conditional control must grow it leftward or it moves List / Board under the
-                pointer each time it appears (#1675). */}
-            {orderUpdateAvailable && (
-              <button
-                type="button"
-                className="btn sm inbox-order-update"
-                title="Apply the latest session order."
-                onClick={applyCanonicalOrder}
-              >
-                Apply New Order
-              </button>
-            )}
-            <SegmentedControl<SessionsViewMode>
-              label="Sessions View"
-              value={viewMode}
-              options={[
-                {
-                  value: "list",
-                  label: <SessionsToolbarOption icon={<ListIcon size={16} />} label="List" />,
-                  ariaLabel: "List",
-                  title: "List",
-                },
-                {
-                  value: "board",
-                  label: <SessionsToolbarOption icon={<BoardIcon size={16} />} label="Board" />,
-                  ariaLabel: "Board",
-                  title: "Board",
-                },
-              ]}
-              onChange={(mode) => {
-                if (mode === viewMode) return;
-                // The route IS the mode; the App-level view effect persists it as last-used.
-                // A tab the URL names stays named across the mode switch.
-                navigate({ name: mode === "board" ? "board" : "inbox", ...(routeSplit === undefined ? {} : { split: routeSplit }) });
-              }}
-            />
-            {sessionRemindersSupported && (
-              <SegmentedControl<ReminderInboxMode>
-                label="Reminder View"
-                value={reminderMode}
-                options={[
-                  {
-                    value: "ordinary",
-                    label: <SessionsToolbarOption icon={<DialIcon size={16} />} label="Active" count={activeCount} />,
-                    ariaLabel: `Active, ${activeCount} ${activeCount === 1 ? "Session" : "Sessions"}`,
-                    title: "Active",
-                  },
-                  {
-                    value: "snoozed",
-                    label: <SessionsToolbarOption icon={<SnoozedIcon size={16} />} label="Snoozed" count={snoozedCount} />,
-                    ariaLabel: `Snoozed, ${snoozedCount} ${snoozedCount === 1 ? "Session" : "Sessions"}`,
-                    title: "Snoozed",
-                  },
-                ]}
-                onChange={setReminderMode}
-              />
-            )}
-            <InboxCreateMenu
-              onNewSession={() => onNewSession?.(activeNewSessionPreset)}
-              onNewProject={projectsSupported ? () => setCreatingProject(true) : undefined}
-            />
-            <label className={`inbox-search${query ? " has-query" : ""}`}>
-              <span className="sr-only">Search Sessions</span>
-              <SearchIcon size={16} />
-              <input
-                value={query}
-                onChange={(event) => changeQuery(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey &&
-                      !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229 && !isMobile && !boardMode) {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    setSearchFocusPending(true);
-                    return;
-                  }
-                  if (event.key !== "Escape") return;
+          <span className="sr-only" aria-live="polite" aria-atomic="true">
+            {orderUpdateAvailable ? "A newer Sessions order is available." : ""}
+          </span>
+          {orderUpdateAvailable && (
+            <button
+              type="button"
+              className="btn sm inbox-order-update"
+              title="Apply the latest session order."
+              onClick={applyCanonicalOrder}
+            >
+              Apply New Order
+            </button>
+          )}
+          <label className={`inbox-search${query ? " has-query" : ""}`}>
+            <span className="sr-only">Search Sessions</span>
+            <SearchIcon size={16} />
+            <input
+              value={query}
+              onChange={(event) => changeQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey &&
+                    !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229 && !isMobile && !boardMode) {
                   event.preventDefault();
                   event.stopPropagation();
-                  exitSearch();
-                }}
-                placeholder="Search sessions"
-              />
-              <kbd className="inbox-search-key" aria-hidden="true">/</kbd>
-            </label>
-          </div>
+                  setSearchFocusPending(true);
+                  return;
+                }
+                if (event.key !== "Escape") return;
+                event.preventDefault();
+                event.stopPropagation();
+                exitSearch();
+              }}
+              placeholder="Search sessions"
+            />
+            <kbd className="inbox-search-key" aria-hidden="true">/</kbd>
+          </label>
         </div>
         {machineProviderLogins.length > 0 && (
           <section className="inbox-provider-logins" aria-label="Machine Provider Sign-Ins">
@@ -1489,7 +1464,7 @@ export function InboxView({
               selectSplit(null);
               setReminderMode("ordinary");
             }}
-            onNewSession={() => onNewSession?.(activeNewSessionPreset)}
+            onNewSession={newSession}
             onSessionMenu={openSessionMenuAt}
           />
         ) : (
@@ -1544,7 +1519,7 @@ export function InboxView({
                 showNewSession: false,
               }
               : undefined}
-          onNewSession={() => onNewSession?.(activeNewSessionPreset)}
+          onNewSession={newSession}
           onSelect={handleSelect}
           onExpand={expand}
           onToggleThread={toggleThread}
@@ -1730,6 +1705,7 @@ export function InboxView({
         />
       )}
     </div>
+    </>
   );
 }
 

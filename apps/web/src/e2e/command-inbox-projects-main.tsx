@@ -3082,14 +3082,17 @@ function FixtureSurface() {
   return (
     <>
       {mobileSessionShell}
-      <InboxView
-        expandedSessionId={view.name === "session" ? view.id : null}
-        rightPanel={rightPanel}
-        onOpenTerminal={openTerminal}
-        pinnedSummary={staticPinnedSummary(STATIC_SUMMARY_OPEN)}
-        onNewSession={openNewSession}
-        onShortcutNewSessionPresetChange={setShortcutPreset}
-      />
+      {/* The app's Sessions page container, so InboxView's page header lays out as it does there. */}
+      <div className="page full fill">
+        <InboxView
+          expandedSessionId={view.name === "session" ? view.id : null}
+          rightPanel={rightPanel}
+          onOpenTerminal={openTerminal}
+          pinnedSummary={staticPinnedSummary(STATIC_SUMMARY_OPEN)}
+          onNewSession={openNewSession}
+          onShortcutNewSessionPresetChange={setShortcutPreset}
+        />
+      </div>
       {view.name === "session" && terminalSessionId === view.id && (
         <ShellDock
           sessionId={view.id}

@@ -106,6 +106,9 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   // Instructions' file chips (#1980): §11.3 meta chips (`button.chip` with `aria-pressed`, as the
   // issue specifies) that choose which file the one view shows. A view switch, not a form choice.
   ["components/SkillInstructions.tsx", "aria-pressed", 1],
+  // A page-header toggle secondary (§3.1), Sessions' Snoozed (#2159): one on/off filter, never one
+  // of N options. The view switch beside it is the SegmentedControl.
+  ["components/PageHeader.tsx", "aria-pressed", 1],
   /* Raw choice markup, found only once the inventory started counting semantics rather than
      class names. These are bespoke controls phase 6 has not reached yet.
      SettingsView used to be the one exception — a hand-rolled radiogroup wrapping RadioRow
@@ -132,6 +135,9 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   // An assignment rule's Invocation (#1982) is §9.1's radio-like menu: two MenuItem rows with
   // descriptions and the trailing check, applied at once like the row's Enabled switch.
   ["components/SkillAssignments.tsx", "raw-radiogroup", 1],
+  // That toggle folded into ⋯ (#2159): a §9.1 MenuItem with the trailing check, as the checkbox
+  // item it is. One on/off item, not a choice among options.
+  ["components/PageHeader.tsx", "raw-radiogroup", 1],
   ["components/EditorSelect.tsx", "raw-radiogroup", 1],
   ["components/InstanceSelector.tsx", "raw-radiogroup", 1],
   ["components/PodsView.tsx", "raw-radiogroup", 1],

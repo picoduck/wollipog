@@ -106,8 +106,7 @@ for (const banner of [false, true]) {
   test(`the combobox list stays on its field in a contained main column, ${variant}`, async ({ page }) => {
     await openShell(page, "/inbox", "Sessions", banner);
     await forceFloorEngine(page);
-    await page.getByRole("button", { name: "Create", exact: true }).click();
-    await page.getByRole("menuitem", { name: /^New Session/ }).click();
+    await page.locator(".page-header .page-primary").click();
     const dialog = page.getByRole("dialog", { name: /New Session/ });
     const input = dialog.getByRole("combobox", { name: "Project" });
     await dialogMotionSettled(page);

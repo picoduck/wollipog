@@ -24,6 +24,8 @@ export interface PageAction {
 
 export interface PagePrimaryAction extends PageAction {
   buttonRef?: Ref<HTMLButtonElement>;
+  /** The bare key that also runs it, shown as a keycap on fine pointers (§11.5). */
+  shortcut?: string;
 }
 
 export interface PageMenuAction extends PageAction {
@@ -31,11 +33,29 @@ export interface PageMenuAction extends PageAction {
   danger?: boolean;
   /** The item's second line: a folded menu button's description, or why a disabled item is unavailable (§9.1). */
   description?: string;
+  /** A checkbox item: its state is a trailing check (§9.1). */
+  checked?: boolean;
+  /** A plain count in the trailing slot. */
+  count?: number;
 }
 
 /** One item of a menu-button secondary: a label and an optional one-line description (§9.1). */
 export interface PageMenuButtonItem extends PageAction {
   description?: string;
+}
+
+/**
+ * A page-header secondary that is on or off (§3.1): a ghost button with `aria-pressed` and a plain
+ * count when there is one, which folds into ⋯ as a checked item under its own `menuLabel`.
+ */
+export interface PageToggleAction extends PageAction {
+  pressed: boolean;
+  /** Shown after the label only when above zero. */
+  count?: number;
+  /** The item's label in ⋯, where it has no pressed state to explain it ("Show Snoozed Sessions"). */
+  menuLabel?: string;
+  variant?: undefined;
+  items?: undefined;
 }
 
 /**
@@ -45,8 +65,9 @@ export interface PageMenuButtonItem extends PageAction {
  * appear there individually, in order, instead of as a nested menu.
  */
 export type PageSecondaryAction =
-  | (PageAction & { variant?: "ghost"; items?: undefined })
-  | (Omit<PageAction, "onClick"> & { variant?: "ghost"; items: PageMenuButtonItem[]; onClick?: undefined });
+  | (PageAction & { variant?: "ghost"; items?: undefined; pressed?: undefined })
+  | (Omit<PageAction, "onClick"> & { variant?: "ghost"; items: PageMenuButtonItem[]; onClick?: undefined; pressed?: undefined })
+  | PageToggleAction;
 
 /**
  * On phones the page header and the detail bar are the app bar, and it carries a Search icon that
@@ -85,6 +106,7 @@ export const PAGE_HEADER_VISIBLE_SECONDARIES = 2;
 export function PageHeader({
   title,
   description,
+  controls,
   primary,
   secondary = [],
   menu = [],
@@ -93,6 +115,11 @@ export function PageHeader({
   title: string;
   /** One line, at most 80 characters, in user terms (§4.2, §17.2). Hidden on phones. */
   description?: string;
+  /**
+   * A view switch (a segmented control) drawn before the secondaries. It never folds into ⋯, and
+   * it takes one of the secondaries' visible slots, so one fewer secondary shows beside it.
+   */
+  controls?: ReactNode;
   /** The one create or import action the destination exists for. A 44px `+` icon on phones. */
   primary?: PagePrimaryAction;
   /**
@@ -107,9 +134,12 @@ export function PageHeader({
 }) {
   const onSearch = useContext(AppBarSearchContext);
   // Slot 1 is the secondary beside the primary. Visibility by slot lives in the stylesheet, where
-  // the width tiers and the header's own @container width both apply (§3.3, §15.2).
-  const slots = secondary.map((action, index) => ({ action, slot: secondary.length - index }));
-  const overflow = secondary.length > PAGE_HEADER_VISIBLE_SECONDARIES || menu.length > 0;
+  // the width tiers and the header's own @container width both apply (§3.3, §15.2). A view switch
+  // takes slot 1's budget, the one every desktop width keeps, so the secondaries number from 2 and
+  // fold first.
+  const lastSlot = secondary.length + (controls ? 1 : 0);
+  const slots = secondary.map((action, index) => ({ action, slot: lastSlot - index }));
+  const overflow = lastSlot > PAGE_HEADER_VISIBLE_SECONDARIES || menu.length > 0;
   return (
     <header className="page-header" {...windowDragRegion()}>
       <div className="page-header-row">
@@ -117,32 +147,47 @@ export function PageHeader({
           <h1 id="page-title" className="page-title" tabIndex={-1}>{title}</h1>
           {description && <p className="page-desc" title={description}>{description}</p>}
         </div>
-        {(onSearch || primary || secondary.length > 0 || menu.length > 0) && (
+        {(onSearch || controls || primary || secondary.length > 0 || menu.length > 0) && (
           <div className="page-actions">
             {onSearch && <AppBarSearch onSearch={onSearch} />}
+            {controls && <div className="page-controls">{controls}</div>}
             {slots.filter(({ slot }) => slot <= PAGE_HEADER_VISIBLE_SECONDARIES).map(({ action, slot }) => action.items ? (
               <PageMenuButton key={action.label} action={action} items={action.items} slot={slot} />
             ) : (
               <button
                 key={action.label}
                 type="button"
-                className={`btn${action.variant === "ghost" ? " ghost" : ""} page-action`}
+                className={`btn${action.variant === "ghost" || action.pressed !== undefined ? " ghost" : ""} page-action`}
                 data-slot={slot}
                 disabled={action.disabled}
                 title={action.title}
+                aria-pressed={action.pressed}
+                // Inline text runs together in a name ("Snoozed2"), so a count joins it in words.
+                aria-label={action.pressed !== undefined && (action.count ?? 0) > 0 ? `${action.label}, ${action.count}` : undefined}
                 onClick={action.onClick}
               >
                 {action.label}
+                {action.pressed !== undefined && (action.count ?? 0) > 0 && <span className="count">{action.count}</span>}
               </button>
             ))}
             {(slots.length > 0 || menu.length > 0) && (
               <ActionsMenu
                 className="page-more"
-                overflow={overflow ? "always" : String(secondary.length)}
+                overflow={overflow ? "always" : String(lastSlot)}
                 items={[
                   // A menu button folds into ⋯ as its own items, in order: ⋯ never nests a menu.
                   ...slots.flatMap(({ action, slot }): ActionsMenuItem[] => action.items
                     ? action.items.map((item) => ({ ...item, disabled: action.disabled || item.disabled, slot }))
+                    : action.pressed !== undefined
+                    ? [{
+                      label: action.menuLabel ?? action.label,
+                      onClick: action.onClick,
+                      disabled: action.disabled,
+                      title: action.title,
+                      checked: action.pressed,
+                      count: action.count,
+                      slot,
+                    }]
                     : [{ label: action.label, onClick: action.onClick, disabled: action.disabled, title: action.title, slot }]),
                   ...menu,
                 ]}
@@ -155,10 +200,12 @@ export function PageHeader({
                 className="btn primary page-primary"
                 disabled={primary.disabled}
                 title={primary.title}
+                aria-keyshortcuts={primary.shortcut}
                 onClick={primary.onClick}
               >
                 <PlusIcon />
                 <span className="page-primary-label">{primary.label}</span>
+                {primary.shortcut && <kbd className="page-primary-key" aria-hidden="true">{primary.shortcut}</kbd>}
               </button>
             )}
           </div>
@@ -384,7 +431,7 @@ export function ActionsMenu({ className, overflow = "always", items }: { classNa
     }
     const pop = menuRef.current;
     if (focusInMenu.current && pop && !pop.contains(pop.ownerDocument.activeElement)) {
-      pop.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)')?.focus();
+      pop.querySelector<HTMLElement>(':is([role="menuitem"], [role="menuitemcheckbox"]):not(:disabled)')?.focus();
     }
   });
   // A width change can show the buttons ⋯ was standing in for, or hide ⋯ itself: re-read the list,
@@ -468,11 +515,16 @@ export function ActionsMenu({ className, overflow = "always", items }: { classNa
             <Fragment key={item.label}>
               {index === firstDanger && index > 0 && <MenuSeparator />}
               <MenuItem
+                role={item.checked === undefined ? "menuitem" : "menuitemcheckbox"}
+                checked={item.checked}
                 danger={item.danger}
                 data-slot={item.slot}
                 disabled={item.disabled}
                 title={item.title}
                 description={item.description}
+                // The trailing slot is decorative, so a count joins the name in words as it shows.
+                aria-label={(item.count ?? 0) > 0 ? `${item.label}, ${item.count}` : undefined}
+                trail={(item.count ?? 0) > 0 ? <span className="count">{item.count}</span> : undefined}
                 onClick={() => choose(item.onClick)}
               >
                 {item.label}

@@ -483,17 +483,16 @@ test("desktop can apply a pending Inbox order without losing selection or scroll
   const selectedKey = await list.locator('.inbox-row-shell[aria-selected="true"]').evaluate((row) =>
     row.closest<HTMLElement>("[data-virtual-row]")?.dataset.virtualKey ?? null);
   expect(selectedKey).not.toBeNull();
-  // List / Board and everything to its right, in toolbar order. The pending-order button is
+  // The page header's controls and the tab row's search field. The pending-order button is
   // conditional, so none of these may move when it appears or leaves (#1675).
-  const stationaryToolbar = () => page.locator(".inbox-toolbar-actions > :not(.sr-only, .inbox-order-update)")
+  const stationaryToolbar = () => page.locator(".page-header .page-actions > *, .inbox-list-pane > .toolbar > .inbox-search")
     .evaluateAll((elements) => elements.map((element) => {
       const rect = element.getBoundingClientRect();
-      // The segmented controls by their group name: both are the shared `.seg` (§10.2).
-      return { name: element.getAttribute("aria-label") ?? element.className, left: rect.left, right: rect.right };
+      return { name: element.className, left: rect.left, right: rect.right };
     }));
   const toolbarWithoutButton = await stationaryToolbar();
   expect(toolbarWithoutButton.map(({ name }) => name)).toEqual([
-    "Sessions View", "Reminder View", "inbox-create-menu", "inbox-search",
+    "page-controls", "btn ghost page-action", "overflow-menu page-more", "btn primary page-primary", "inbox-search",
   ]);
 
   await page.evaluate(() => {
@@ -507,8 +506,8 @@ test("desktop can apply a pending Inbox order without losing selection or scroll
   await expect(applyOrder).toBeVisible();
   expect(await stationaryToolbar()).toEqual(toolbarWithoutButton);
   const applyOrderBox = await applyOrder.boundingBox();
-  const toggleBox = await page.getByRole("radiogroup", { name: "Sessions View" }).boundingBox();
-  expect(applyOrderBox && toggleBox && applyOrderBox.x + applyOrderBox.width <= toggleBox.x).toBe(true);
+  const searchBox = await page.locator(".inbox-list-pane > .toolbar > .inbox-search").boundingBox();
+  expect(applyOrderBox && searchBox && applyOrderBox.x + applyOrderBox.width <= searchBox.x).toBe(true);
   // The toolbar gives the button its width from the Project tabs, not by clipping the button.
   expect(await applyOrder.evaluate((button) => button.scrollWidth <= button.clientWidth)).toBe(true);
   const before = await inboxViewportAnchor(page);
@@ -1165,16 +1164,14 @@ test("Native TUI launch sends the harness intent and opens Terminal only after c
   });
 });
 
-test("unified Inbox creation opens both existing workflows with the active Project context", async ({ page }) => {
+test("the Sessions header opens both existing workflows with the active Project context", async ({ page }) => {
   await page.getByRole("tab", { name: /Alpha/ }).click();
-  const create = page.getByRole("button", { name: "Create", exact: true });
+  // New Session is the header's labeled primary, with its global binding as the shared keycap (§11.5).
+  const create = page.locator(".page-header").getByRole("button", { name: "New Session", exact: true });
+  await expect(create.locator("kbd")).toHaveText("C");
+  const more = page.locator(".page-header").getByRole("button", { name: "More Actions" });
 
   await create.click();
-  const choices = page.getByRole("menu", { name: "Create" });
-  await expect(choices.getByRole("menuitem").locator(".menu-text").allTextContents()).resolves.toEqual(["New Session", "New Project"]);
-  // New Session's global binding rides in the trailing slot as the shared keycap (§11.5).
-  await expect(choices.getByRole("menuitem", { name: "New Session", exact: true }).locator(".menu-trail kbd")).toHaveText("C");
-  await choices.getByRole("menuitem", { name: "New Session", exact: true }).click();
   const sessionDialog = page.getByRole("dialog", { name: "New Session" });
   const project = sessionDialog.getByRole("combobox", { name: "Project" });
   await expect(project).toHaveValue("Alpha");
@@ -1186,33 +1183,34 @@ test("unified Inbox creation opens both existing workflows with the active Proje
   await expect(sessionDialog).toBeHidden();
   await expect(create).toBeFocused();
 
-  await create.click();
-  await page.getByRole("menuitem", { name: "New Project", exact: true }).click();
+  await more.click();
+  await page.getByRole("menuitem", { name: "New Project…", exact: true }).click();
   const projectDialog = page.getByRole("dialog", { name: "Create Project" });
   await expect(projectDialog).toBeVisible();
   await projectDialog.getByRole("button", { name: "Cancel" }).click();
-  await expect(create).toBeFocused();
+  await expect(more).toBeFocused();
 });
 
-test("unified Inbox creation choices remain usable at a mobile viewport", async ({ page }) => {
+test("the Sessions header's creation actions remain usable at a mobile viewport", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  const create = page.getByRole("button", { name: "Create", exact: true });
+  // The app bar's New Session is the 44px + whose name stays its label (§15.1).
+  const create = page.locator(".page-header").getByRole("button", { name: "New Session", exact: true });
+  const more = page.locator(".page-header").getByRole("button", { name: "More Actions" });
   await expect(create).toBeVisible();
 
   await create.click();
-  await page.getByRole("menuitem", { name: "New Session", exact: true }).click();
   const sessionDialog = page.getByRole("dialog", { name: "New Session" });
   await expect(sessionDialog).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(sessionDialog).toBeHidden();
   await expect(create).toBeFocused();
 
-  await create.click();
-  await page.getByRole("menuitem", { name: "New Project", exact: true }).click();
+  await more.click();
+  await page.getByRole("menuitem", { name: "New Project…", exact: true }).click();
   const projectDialog = page.getByRole("dialog", { name: "Create Project" });
   await expect(projectDialog).toBeVisible();
   await projectDialog.getByRole("button", { name: "Cancel" }).click();
-  await expect(create).toBeFocused();
+  await expect(more).toBeFocused();
 });
 
 test("C defaults New Session to the active single-Project Inbox tab", async ({ page }) => {
@@ -1785,8 +1783,8 @@ test.describe("coarse pointer Project actions", () => {
 });
 
 test("Project management creates, hides, reloads, and reveals durable empty Projects", async ({ page }) => {
-  await page.getByRole("button", { name: "Create", exact: true }).click();
-  await page.getByRole("menuitem", { name: "New Project", exact: true }).click();
+  await page.locator(".page-header").getByRole("button", { name: "More Actions" }).click();
+  await page.getByRole("menuitem", { name: "New Project…", exact: true }).click();
   const createDialog = page.getByRole("dialog", { name: "Create Project" });
   await createDialog.getByLabel("Project Name").fill("Durable Empty");
   await createDialog.getByRole("button", { name: "Create Project" }).click();

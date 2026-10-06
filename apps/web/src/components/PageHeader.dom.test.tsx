@@ -261,6 +261,72 @@ test("a menu-button secondary opens its own menu, and folds into ⋯ as its item
   }
 });
 
+test("a view switch leads the actions, and a toggle secondary folds into ⋯ as a checked item", async () => {
+  const calls: string[] = [];
+  const header = (pressed: boolean, count: number) => (
+    <PageHeader
+      title="Sessions"
+      controls={<div role="radiogroup" aria-label="Sessions View" />}
+      secondary={[{ label: "Snoozed", menuLabel: "Show Snoozed Sessions", pressed, count, onClick: () => calls.push("snoozed") }]}
+      menu={[{ label: "Keyboard Shortcuts", onClick: () => calls.push("shortcuts") }]}
+      primary={{ label: "New Session", shortcut: "C", onClick: () => calls.push("new") }}
+    />
+  );
+  const view = await mount(header(false, 0));
+  try {
+    const { container } = view;
+    // §3.2 with the view switch first: [controls] [secondary] [⋯] [primary].
+    assert.deepEqual([...container.querySelector(".page-actions")!.children].map((element) => element.className), [
+      "page-controls",
+      "btn ghost page-action",
+      "overflow-menu page-more",
+      "btn primary page-primary",
+    ]);
+    const snoozed = container.querySelector<HTMLButtonElement>(".page-action")!;
+    // The view switch takes slot 1's budget, so the toggle is slot 2: the compact tier folds it.
+    assert.equal(snoozed.getAttribute("data-slot"), "2");
+    assert.equal(snoozed.getAttribute("aria-pressed"), "false");
+    assert.equal(snoozed.textContent, "Snoozed", "no count at zero");
+    await act(async () => snoozed.click());
+    assert.deepEqual(calls, ["snoozed"]);
+
+    await view.rerender(header(true, 2));
+    assert.equal(snoozed.getAttribute("aria-pressed"), "true");
+    assert.equal(snoozed.querySelector(".count")?.textContent, "2");
+    assert.equal(snoozed.getAttribute("aria-label"), "Snoozed, 2", "the count is in the name, in words");
+
+    const primary = container.querySelector<HTMLButtonElement>(".page-primary")!;
+    assert.equal(primary.querySelector(".page-primary-label")?.textContent, "New Session");
+    assert.equal(primary.querySelector("kbd")?.getAttribute("aria-hidden"), "true", "the keycap is not part of the name");
+    assert.equal(primary.getAttribute("aria-keyshortcuts"), "C");
+  } finally {
+    await view.unmount();
+  }
+
+  // The compact tier hides slot 2: ⋯ lists Show Snoozed Sessions as a checked item with its count.
+  const style = domWindow.document.createElement("style");
+  style.textContent = '.page-actions > .page-action[data-slot="2"] { display: none; }';
+  domWindow.document.head.append(style);
+  const compact = await mount(header(true, 2));
+  try {
+    const more = compact.container.querySelector<HTMLButtonElement>('[aria-label="More Actions"]')!;
+    await act(async () => more.click());
+    const menu = domWindow.document.querySelector('[role="menu"][aria-label="More Actions"]') as unknown as Element;
+    const toggle = menu.querySelector<HTMLButtonElement>('[role="menuitemcheckbox"]')!;
+    assert.equal(toggle.querySelector(".menu-text")?.textContent, "Show Snoozed Sessions");
+    assert.equal(toggle.getAttribute("aria-checked"), "true");
+    assert.equal(toggle.querySelector(".menu-trail .count")?.textContent, "2");
+    assert.equal(toggle.getAttribute("aria-label"), "Show Snoozed Sessions, 2", "the count is in the name, in words");
+    assert.ok(domWindow.document.activeElement === (toggle as never), "a checkbox item takes the menu's first focus");
+    assert.deepEqual([...menu.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent), ["Keyboard Shortcuts"]);
+    await act(async () => toggle.click());
+    assert.deepEqual(calls, ["snoozed", "snoozed"]);
+  } finally {
+    await compact.unmount();
+    style.remove();
+  }
+});
+
 test("the detail bar names Back for its destination and keeps destructive actions last in ⋯", async () => {
   const calls: string[] = [];
   const view = await mount(

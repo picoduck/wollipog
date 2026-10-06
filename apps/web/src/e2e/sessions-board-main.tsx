@@ -420,14 +420,18 @@ function HarnessShell() {
       <main className="main">
         <div className={`main-body${view.name !== "projects" ? " inbox-main-body" : ""}`}>
           {(view.name === "inbox" || view.name === "session" || view.name === "board") && (
-            <InboxView
-              viewMode={view.name === "board" ? "board" : "list"}
-              expandedSessionId={view.name === "session" ? view.id : null}
-              rightPanel={rightPanel}
-              onOpenTerminal={() => {}}
-              onCollapse={() => navigate(sessionsDestination(SCOPE))}
-              onNewSession={() => {}}
-            />
+            // The app's Sessions page container, so InboxView's page header lays out as it does there.
+            <div className="page full fill">
+              <InboxView
+                viewMode={view.name === "board" ? "board" : "list"}
+                expandedSessionId={view.name === "session" ? view.id : null}
+                rightPanel={rightPanel}
+                onOpenTerminal={() => {}}
+                onCollapse={() => navigate(sessionsDestination(SCOPE))}
+                onNewSession={() => {}}
+                onOpenShortcuts={() => {}}
+              />
+            </div>
           )}
           {view.name === "projects" && <div className="fixture-projects">Projects Fixture</div>}
         </div>

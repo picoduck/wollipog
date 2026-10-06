@@ -23,7 +23,6 @@ import {
   CircleDot as LucideCircleDot,
   CircleGauge as LucideCircleGauge,
   CirclePause as LucideCirclePause,
-  Clock3 as LucideClock3,
   Code as LucideCode,
   Columns3 as LucideColumns3,
   Copy as LucideCopy,
@@ -213,10 +212,6 @@ export function BoardIcon(props: IconProps) {
 
 export function ListIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideList} {...props} />;
-}
-
-export function SnoozedIcon(props: IconProps) {
-  return <LibraryIcon glyph={LucideClock3} {...props} />;
 }
 
 export function ConnectionsIcon(props: IconProps) {

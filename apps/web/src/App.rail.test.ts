@@ -12,7 +12,6 @@ const rail = readFileSync(new URL("./components/Rail.tsx", import.meta.url), "ut
 const railTooltip = readFileSync(new URL("./components/RailTooltip.tsx", import.meta.url), "utf8");
 const settingsTrigger = readFileSync(new URL("./components/SettingsTrigger.tsx", import.meta.url), "utf8");
 const inbox = readFileSync(new URL("./components/InboxView.tsx", import.meta.url), "utf8");
-const inboxCreateMenu = readFileSync(new URL("./components/InboxCreateMenu.tsx", import.meta.url), "utf8");
 const inboxList = readFileSync(new URL("./components/InboxList.tsx", import.meta.url), "utf8");
 const inboxRow = readFileSync(new URL("./components/InboxRow.tsx", import.meta.url), "utf8");
 const inboxShortcutRail = readFileSync(new URL("./components/InboxShortcutRail.tsx", import.meta.url), "utf8");
@@ -335,23 +334,23 @@ test("Inbox unifies Session and Project creation while the shell exposes no dupl
     "the desktop rail has no creation action");
   assert.doesNotMatch(app, /title="New Session"[\s\S]*aria-label="New Session"/,
     "the mobile top bar has no creation action");
-  assert.match(inbox, /<InboxCreateMenu[\s\S]*onNewSession=\{\(\) => onNewSession\?\.\(activeNewSessionPreset\)\}[\s\S]*onNewProject=\{projectsSupported \? \(\) => setCreatingProject\(true\) : undefined\}/,
-    "the Inbox menu routes each choice into its existing context-aware workflow");
-  assert.match(inboxCreateMenu, /aria-label="Create"[\s\S]*New Session[\s\S]*New Project/,
-    "the control and both visible choices use accessible Title Case names");
-  assert.match(inboxCreateMenu, /useAccessibleMenu[\s\S]*<MenuSurface/,
-    "the same focus-managed, viewport-anchored menu works for desktop and touch layouts");
+  // #2159: New Session is the Sessions page header's labeled primary, and New Project… is in its ⋯.
+  assert.match(inbox, /const newSession = \(\) => onNewSession\?\.\(activeNewSessionPreset\);/,
+    "New Session opens with the active tab's preset");
+  assert.match(inbox, /label: "New Project…",[\s\S]*disabled: !projectsSupported,[\s\S]*onClick: \(\) => setCreatingProject\(true\)/,
+    "New Project… routes into its existing workflow, and says why when it is unavailable");
+  assert.match(inbox, /primary=\{\{ label: "New Session", shortcut: shortcutDisplay\("new-session"\), onClick: newSession \}\}/,
+    "the primary is labeled New Session and shows its keycap");
   assert.match(inbox, /creatingProject && \([\s\S]*<CreateProjectDialog/,
     "New Project opens the existing Project creation workflow");
   assert.doesNotMatch(inbox, /inbox-manage-projects|Manage Projects/,
     "Project management lives in the rail instead of the Project bar");
   assert.doesNotMatch(commandPalette, /views\.splice\([^;]*Manage Projects/,
     "the command palette derives its single Projects destination from the global rail vocabulary");
-  // #183's touch target now comes from the one coarse-pointer block (#1799): the control is sized
-  // by --control-h, which that block resizes to 44px on a touch screen at any width.
-  assert.match(css, /\.inbox-create-control\s*\{[^}]*width:\s*var\(--control-h\);[^}]*height:\s*var\(--control-h\);/);
+  // #183's touch target now comes from the one coarse-pointer block (#1799): the header's controls
+  // and its ⋯ menu items are sized by --control-h, which that block resizes to 44px.
   assert.match(css, /@media \(pointer: coarse\) \{\s*:root \{[^}]*--control-h:\s*44px;/,
-    "the shared creation control keeps a touch-sized target");
+    "the header's controls keep a touch-sized target");
   // The intro paragraph became the page header's one-line description (#1801, §4.2: 80 characters).
   // The registry holds it now, beside the destination name (#1945).
   assert.match(projectsView, /const PROJECTS = destination\("projects"\);/);
@@ -413,8 +412,8 @@ test("Inbox Search is compact by default and expands for keyboard or populated u
   assert.match(css, /\.inbox-search:focus-within,\s*\.inbox-search\.has-query\s*\{[^}]*width:\s*min\(250px, 28vw\);[^}]*min-width:\s*150px;/,
     "focus and a retained query both keep Search expanded");
   assert.match(css, /\.inbox-search:focus-within input,\s*\.inbox-search\.has-query input\s*\{[^}]*opacity:\s*1;[^}]*pointer-events:\s*auto;/);
-  assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.inbox-toolbar-actions\s*\{[^}]*flex-wrap:\s*wrap;[^}]*\}\s*\.inbox-search\s*\{[^}]*width:\s*100%;[^}]*flex:\s*1 0 100%;/,
-    "small screens give Search a full-width row of its own below the toolbar controls (#2082)");
+  assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.inbox-search\s*\{[^}]*width:\s*100%;[^}]*flex:\s*none;/,
+    "small screens give Search a full-width row of its own (#2082)");
 });
 
 /**
@@ -645,10 +644,13 @@ test("Shortcut Reference restores focus after a breakpoint change", () => {
     "a fallback chain that can still resolve to nothing is not a fallback");
 });
 
-test("the Inbox reminder filter and the Sessions view toggle are the shared segmented control", () => {
-  // Both used to opt into a joined-border treatment of their own. §10.2 has one segmented control:
-  // a track with a 2px inset and a neutral selected knob, so neither carries a scoping class now.
-  assert.match(inbox, /<SegmentedControl<ReminderInboxMode>/, "the reminder filter is a segmented control");
+test("the Sessions view toggle is the shared segmented control, and Snoozed is a toggle", () => {
+  // It used to opt into a joined-border treatment of its own. §10.2 has one segmented control: a
+  // track with a 2px inset and a neutral selected knob. Snoozed filters rather than switches the
+  // view, so it is a pressed toggle beside it, not a second segmented control (#2159).
+  assert.doesNotMatch(inbox, /<SegmentedControl<ReminderInboxMode>|Reminder View/, "no reminder segmented control remains");
+  assert.match(inbox, /label: "Snoozed",[\s\S]*menuLabel: "Show Snoozed Sessions",[\s\S]*pressed: reminderMode === "snoozed"/,
+    "Snoozed is a pressed toggle that folds into ⋯ as Show Snoozed Sessions");
   assert.match(inbox, /<SegmentedControl<SessionsViewMode>/, "the Sessions List/Board toggle is a segmented control");
   assert.doesNotMatch(inbox, /inbox-reminder-view|sessions-view-toggle/, "neither opts out of the shared recipe");
   assert.doesNotMatch(css, /inbox-reminder-view|sessions-view-toggle/, "no joined-border override remains");
