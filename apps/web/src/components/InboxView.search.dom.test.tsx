@@ -389,6 +389,22 @@ test("when a live update takes the last match away, the state that replaces the 
   assert.equal(domWindow.document.activeElement, state, "focus moved to No Matches, not <body>");
 });
 
+test("when a live update takes the previewed session out of the results, the next result's reader keeps focus", async () => {
+  const { container, type, socket } = await mount();
+  await type("terraform");
+  assert.equal(previewTitle(container), "Apply terraform");
+  const reader = container.querySelector<HTMLElement>(".inbox-preview-pane .detail-scroll")!;
+  assert.ok(reader, "the preview has a reader to focus");
+  reader.focus();
+  assert.equal(domWindow.document.activeElement, reader);
+  await act(async () => {
+    socket.push({ type: "session_upsert", session: { ...SESSIONS[1]!, title: "Ship it", preview: "Shipped" } });
+  });
+  assert.equal(previewTitle(container), "Plan terraform", "the preview follows the remaining result");
+  const replacement = container.querySelector<HTMLElement>(".inbox-preview-pane .detail-scroll")!;
+  assert.equal(domWindow.document.activeElement, replacement, "focus stays in the reader, not <body>");
+});
+
 test("Search Transcripts takes focus before it opens the palette, so the palette can return it there", async () => {
   let focusedAtOpen: unknown = null;
   const { container, type } = await mount({ openSearchPalette: () => { focusedAtOpen = domWindow.document.activeElement; } });

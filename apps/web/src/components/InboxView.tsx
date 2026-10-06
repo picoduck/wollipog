@@ -525,12 +525,19 @@ export function InboxView({
   const snapshot = useSnapshotState();
   const noMatches = normalizedQuery !== "" && liveEntries.length === 0 && expandedSessionId === null &&
     !snapshot.offline && !snapshot.loading;
-  // A live update can take the last match away while the list or preview holds focus; the state that
-  // replaces them takes it rather than <body>.
+  // A live update can take the selected session out of the results, or the last match away, while
+  // the list or preview holds focus. What replaces the focused pane takes focus rather than <body>:
+  // No Matches, the reader of the result the preview moved to, or the list.
   const noMatchesRef = useRef<HTMLDivElement>(null);
+  const previewPaneRef = useRef<HTMLDivElement>(null);
   const removedFocus = useRemovedFocus(viewRef);
+  const removedPreviewFocus = useRemovedFocus(previewPaneRef);
   useLayoutEffect(() => {
-    if (removedFocus() && noMatches) noMatchesRef.current?.focus();
+    const fromPreview = removedPreviewFocus();
+    if (!removedFocus() || normalizedQuery === "" || expandedSessionId !== null) return;
+    if (noMatches) noMatchesRef.current?.focus();
+    else if (fromPreview) (previewPaneRef.current?.querySelector<HTMLElement>(".detail-scroll") ?? listRef.current)?.focus();
+    else listRef.current?.focus();
   });
   const liveIds = useMemo(() => liveEntries.map((entry) => entry.session.id), [liveEntries]);
   const pinnedAncestorSessionIds = useMemo(
@@ -1664,7 +1671,7 @@ export function InboxView({
               event.preventDefault();
             }}
           />
-          <div className="inbox-preview-pane" style={{ height: expanded ? "100%" : `${(1 - ratio) * 100}%` }} data-focus-zone="main">
+          <div className="inbox-preview-pane" ref={previewPaneRef} style={{ height: expanded ? "100%" : `${(1 - ratio) * 100}%` }} data-focus-zone="main">
             {surfaceSessionId ? (
               <SessionDetail
                 key={surfaceSessionId}
