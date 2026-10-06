@@ -8,6 +8,7 @@ import type { ControlPlaneToUi, SessionView, UiSnapshotMessage } from "@wollipog
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
+import { FeedbackProvider } from "./FeedbackProvider.js";
 import { InboxView } from "./InboxView.js";
 import { SearchPaletteContext } from "./search-palette-context.js";
 import type { RightPanelState } from "./RightPanel.js";
@@ -163,7 +164,7 @@ const SESSIONS = [
   session("Docs", NOW - 3_000, { title: "Write the guide", workspaceId: "workspace-docs", workspaceName: "Docs Site" }),
 ];
 
-async function mount(options: { openSearchPalette?: (query?: string) => void } = {}) {
+async function mount(options: { openSearchPalette?: (query?: string) => void; viewMode?: "list" | "board"; feedback?: boolean } = {}) {
   const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(mountPoint as never);
   const container = domWindow.document.body as unknown as HTMLDivElement;
@@ -179,7 +180,8 @@ async function mount(options: { openSearchPalette?: (query?: string) => void } =
     createSocket: () => socket,
     close() {},
   };
-  const view = <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />;
+  const inbox = <InboxView viewMode={options.viewMode ?? "list"} rightPanel={rightPanel} onOpenTerminal={() => undefined} />;
+  const view = options.feedback ? <FeedbackProvider>{inbox}</FeedbackProvider> : inbox;
   await act(async () => {
     root.render(
       <StoreProvider connection={connection} navigation={navigation}>
@@ -330,4 +332,45 @@ test("Search Transcripts opens the command palette with the query", async () => 
   await act(async () => { transcripts.click(); });
   assert.deepEqual(opened, ["kubernetes"]);
   assert.equal(search.value, "  kubernetes ", "the field keeps its query behind the palette");
+});
+
+test("No Matches is the list zone's focus target while it replaces the list", async () => {
+  const { container, type } = await mount();
+  await type("kubernetes");
+  const state = container.querySelector<HTMLElement>(".inbox-no-matches")!;
+  assert.equal(state.getAttribute("tabindex"), "-1", "programmatically focusable, out of the Tab order");
+  assert.equal(state.closest('[data-focus-zone="list"]') !== null, true, "inside the list zone F6 enters");
+});
+
+test("on the board, Clear Search hands focus to the restored board instead of dropping it", async () => {
+  const { container, search, type } = await mount({ viewMode: "board" });
+  await type("kubernetes");
+  assert.ok(container.querySelector(".inbox-no-matches"), "the board shows No Matches too");
+  assertNoDomNode(container.querySelector(".board-wrap"));
+  const clear = [...container.querySelectorAll<HTMLButtonElement>(".inbox-no-matches .actions button")]
+    .find((button) => button.textContent === "Clear Search")!;
+  clear.focus();
+  await act(async () => { clear.click(); });
+  await act(async () => { await Promise.resolve(); });
+  assert.equal(search.value, "");
+  const board = container.querySelector<HTMLElement>(".board-wrap")!;
+  assert.ok(board, "the board is back");
+  assert.equal(domWindow.document.activeElement, board, "focus lands on the board, not <body>");
+});
+
+test("a group's Archive All Sessions still covers the whole group during a search", async () => {
+  const { container, type } = await mount({ feedback: true });
+  const infraTab = [...container.querySelectorAll<HTMLButtonElement>(".tabs-bar .tab")]
+    .find((tab) => tab.textContent?.includes("Infra"))!;
+  await act(async () => { infraTab.click(); });
+  await type("plan");
+  assert.deepEqual(rowTitles(container), ["Plan terraform"]);
+  const trigger = container.querySelector<HTMLButtonElement>('button[aria-label="Workspace Actions for Infra"]')!;
+  await act(async () => { trigger.click(); });
+  const archiveAll = [...container.querySelectorAll<HTMLElement>('[role="menuitem"]')]
+    .find((item) => /All Sessions$/.test(item.textContent ?? ""))!;
+  await act(async () => { archiveAll.click(); });
+  await act(async () => { await Promise.resolve(); });
+  const dialog = container.querySelector<HTMLElement>('[role="alertdialog"], [role="dialog"]')!;
+  assert.match(dialog.textContent ?? "", /All 2 sessions in “Infra”/, "both Infra sessions, not just the match");
 });

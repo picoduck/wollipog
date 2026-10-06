@@ -279,6 +279,13 @@ test("direct zone focus uses the list, empty-state, and board target chain", () 
   empty.replaceWith(board);
   assert.equal(focusZone(window.document, "list"), "list");
   assert.equal(window.document.activeElement, board);
+
+  const noMatches = window.document.createElement("div");
+  noMatches.className = "inbox-no-matches";
+  noMatches.tabIndex = -1;
+  board.replaceWith(noMatches);
+  assert.equal(focusZone(window.document, "list"), "list");
+  assert.equal(window.document.activeElement, noMatches, "No Matches stands in for the list (#2200)");
 });
 
 test("Escape ownership follows one ordered rung and preserves the terminal boundary", () => {

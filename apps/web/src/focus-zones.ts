@@ -28,8 +28,9 @@ export function focusZoneForElement(element: Element | null): FocusZone | null {
 export const ZONE_TARGETS: Readonly<Record<FocusZone, readonly string[]>> = {
   // The current destination (the Settings control while in Settings), then the first destination.
   rail: ['[aria-current="page"]', ".rail-item"],
-  // Board mode replaces the Sessions list with the kanban canvas; F6 still needs a landing spot there.
-  list: [".inbox-list", ".inbox-zero", ".board-wrap"],
+  // Board mode replaces the Sessions list with the kanban canvas, and No Matches replaces both
+  // (#2200); F6 still needs a landing spot there.
+  list: [".inbox-list", ".inbox-zero", ".board-wrap", ".inbox-no-matches"],
   // The Sessions reading pane lands on its transcript scroller, as opening a session does.
   main: [".detail-scroll", ".inbox-preview-empty"],
 };

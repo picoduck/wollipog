@@ -366,7 +366,12 @@ export function InboxView({
   useEffect(() => {
     if (!exitPending || query !== "" || deferredQuery !== "") return;
     setExitPending(false);
-    (listRef.current ?? viewRef.current?.querySelector<HTMLElement>(".inbox-zero"))?.focus();
+    // The board has no grid to hand focus to, so it takes it only when No Matches' Clear Search
+    // left with it (#2200); Escape in the field keeps it there, as before.
+    const active = document.activeElement;
+    const focusLost = !active || active === document.body || !active.isConnected;
+    (listRef.current ?? viewRef.current?.querySelector<HTMLElement>(".inbox-zero") ??
+      (focusLost ? viewRef.current?.querySelector<HTMLElement>(".board-wrap") : null))?.focus();
   }, [exitPending, query, deferredQuery]);
 
   const exitSearch = useCallback(() => {
@@ -1455,7 +1460,9 @@ export function InboxView({
                 (split.project.kind === "durable" && split.project.legacyKeys.some((key) => pinnedProjects.has(key))));
               return (
                 <ProjectSplitMenu
-                  split={split}
+                  // The tab counts a search's matches; the group's actions (Archive All Sessions)
+                  // still act on the whole group.
+                  split={splits.find((candidate) => candidate.key === split.key) ?? split}
                   unfilteredSplit={baseSplits.find((candidate) => candidate.key === split.key)}
                   active={active}
                   tabMenu={request}
@@ -1528,7 +1535,8 @@ export function InboxView({
             projectName={activeDurableProject.name} onGenerated={openGeneratedWorktreeSetup} />
         )}
         {noMatches ? (
-          <div className="inbox-no-matches">
+          // The list zone's landing spot while the list is replaced (F6, §16.1).
+          <div className="inbox-no-matches" tabIndex={-1}>
             <SessionsNoMatches
               query={deferredQuery}
               group={{

@@ -90,6 +90,10 @@ test("/ focuses the field from the list, its keycap shows at rest, and Escape cl
   await expect(page.locator(".inbox-row").nth(2), "the whole list is back").toBeVisible();
 
   await field(page).fill("kubernetes");
+  // F6 still enters the list zone while No Matches stands in for the list (§16.1).
+  await page.locator('.rail-item[aria-current="page"]').first().focus();
+  await page.keyboard.press("F6");
+  await expect(page.locator(".inbox-no-matches")).toBeFocused();
   const clear = page.locator(".inbox-no-matches").getByRole("button", { name: "Clear Search" });
   await clear.focus();
   await page.keyboard.press("Escape");
@@ -161,6 +165,7 @@ test("when the selected session leaves the results, the first result is selected
   await expect(page.locator(".session-preview-bar .detail-bar-title")).toHaveText("Mobile App Session");
   await field(page).fill("terraform");
   const selected = page.locator('.inbox-row-shell[aria-selected="true"] .inbox-row-title');
+  await expect(page.locator(".inbox-row")).toHaveCount(2);
   const first = await page.locator(".inbox-row-title").first().textContent();
   await expect(selected).toHaveText(first!);
   await expect(page.locator(".session-preview-bar .detail-bar-title")).toHaveText(first!);

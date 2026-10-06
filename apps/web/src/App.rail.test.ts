@@ -280,7 +280,8 @@ test("Inbox project tabs stay balanced, hide overflow chrome, and reveal context
   // both the immediate and deferred values have converged.
   assert.match(inbox, /const exitSearch = useCallback\([\s\S]{0,200}setQuery\(""\)/,
     "exiting search clears the query");
-  assert.match(inbox, /query !== "" \|\| deferredQuery !== ""[\s\S]{0,240}\.inbox-zero[\s\S]{0,80}\.focus\(\)/,
+  // The board, which has no grid, follows `.inbox-zero` once Clear Search took focus with it (#2200).
+  assert.match(inbox, /query !== "" \|\| deferredQuery !== ""[\s\S]{0,480}\.inbox-zero[\s\S]{0,160}\.board-wrap[\s\S]{0,40}\.focus\(\)/,
     "focus returns to the Inbox once the list it should land on is the one that is mounted");
   assert.match(inbox, /onKeyDown=\{\(event\) => \{[\s\S]*event\.key !== "Escape"[\s\S]*exitSearch\(\)/,
     "Escape exits the search field even when the query is already empty");
