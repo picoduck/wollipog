@@ -50,9 +50,9 @@ test("a family sorts as one unit with the parent first, children indent under it
     "Queued Session",
     "Running Session",
   ]);
-  // The two-row desktop shape is untouched by #934: its time stays in the signals column.
-  await expect(page.locator(".inbox-row-signals > time")).toHaveCount(9);
-  await expect(page.locator(".inbox-row-meta > time")).toHaveCount(0);
+  // The two-line desktop row (#2209): its time trails the status line, after the badge and flags.
+  await expect(page.locator(".inbox-row-trail > time:last-child")).toHaveCount(9);
+  await expect(page.locator(".inbox-row-shell.stacked")).toHaveCount(0);
   const parent = parentRow(page);
   await expect(parent.locator(".inbox-thread-toggle")).toHaveAttribute("aria-label", "Collapse Thread");
   await expect(parent.locator(".inbox-thread-family-text")).toHaveText("4 Children · 2 Awaiting Input");
@@ -60,13 +60,13 @@ test("a family sorts as one unit with the parent first, children indent under it
   await expect(parent.locator(".inbox-thread-dot")).toHaveCount(4);
   await expect(page.locator(".inbox-row-shell.thread-child")).toHaveCount(4);
   await expect(page.locator(".inbox-row-shell.thread-child.thread-last")).toHaveCount(1);
-  // The three-request session: one pill per kind, the question first, the permissions counted.
+  // The three-request session (#2209): one badge, the question first, and "+1" for the permissions,
+  // which its tooltip names with their count.
   const approval = page.locator(".inbox-row-shell", { hasText: "Approval Session" });
-  await expect(approval.locator(".status.t-warning")).toHaveText(["Answer Required", "Approval Required2"]);
-  await expect(approval.locator(".status.t-warning").nth(1))
-    .toHaveAttribute("aria-label", "Attention: Approval Required, 2 Requests");
-  await expect(approval.locator(".status.t-warning").nth(1))
-    .toHaveAttribute("title", "Main Agent: Run npm test\nVerifier · Tester: Run pnpm test");
+  await expect(approval.locator(".status")).toHaveText(["Answer Required"]);
+  await expect(approval.locator(".status")).toHaveAttribute("aria-label", "Status: Answer Required");
+  await expect(approval.locator(".row-status-more > [aria-hidden='true']")).toHaveText("+1");
+  await expect(approval.locator(".row-status-more")).toHaveAttribute("title", "Approval Required, 2 Requests");
   await expect(page.locator(".attention-requests")).toHaveCount(0);
 
   const geometry = await page.locator(".inbox-row-shell").evaluateAll((shells) => shells.map((shell) => {
@@ -159,7 +159,8 @@ const measureLineOne = (shells: Element[]) => shells.map((shell) => {
     const row = shell.querySelector<HTMLElement>(".inbox-row")!;
     const box = row.getBoundingClientRect();
     const style = getComputedStyle(row);
-    const signals = row.querySelector<HTMLElement>(".inbox-row-signals")!.getBoundingClientRect();
+    // A phone card's line one (#2209): the sender and, trailing, the flags.
+    const signals = row.querySelector<HTMLElement>(".inbox-row-sender-line")!.getBoundingClientRect();
     const time = row.querySelector<HTMLElement>("time")!;
     const sender = row.querySelector<HTMLElement>(".inbox-row-sender")!.getBoundingClientRect();
     // The label is its own clip box: `.inbox-row-sender > span` carries the overflow and ellipsis.
@@ -178,9 +179,11 @@ const measureLineOne = (shells: Element[]) => shells.map((shell) => {
       left: Math.round(box.left),
       height: Math.round(box.height),
       child: shell.classList.contains("thread-child"),
-      pills: row.querySelectorAll(".inbox-row-signals .status").length,
+      pills: row.querySelectorAll(".status").length,
+      pillsOnLineOne: row.querySelectorAll(".inbox-row-sender-line .status").length,
       timeCount: row.querySelectorAll("time").length,
-      timeOnLineThree: time.parentElement!.classList.contains("inbox-row-meta"),
+      timeOnLineThree: time.parentElement!.classList.contains("inbox-row-status-line") &&
+        time.parentElement === row.lastElementChild,
       timeText: time.textContent,
       timeHeight: time.getBoundingClientRect().height,
       timeOverflowRight: time.getBoundingClientRect().right - (box.right - parseFloat(style.paddingRight)),
@@ -201,11 +204,11 @@ test("a phone narrows the spine and keeps the family chip's dots", async ({ page
   await expect(page.locator(".inbox-row-shell.thread-child")).toHaveCount(4);
   await expect(parentRow(page).locator(".inbox-thread-dot")).toHaveCount(4);
   await expect(parentRow(page).locator(".inbox-thread-family-text")).toBeHidden();
-  // One compact attention pill on a phone: the top-priority kind and how many more requests.
+  // One status on a phone as on a desktop (#2209): the top-priority kind and "+1" for the other kind.
   const approval = page.locator(".inbox-row-shell", { hasText: "Approval Session" });
-  await expect(approval.locator(".status.t-warning")).toHaveCount(1);
-  await expect(approval.locator(".status.t-warning")).toHaveAttribute("aria-label", "Attention: Answer Required, 3 Requests");
-  await expect(approval.locator(".status-count")).toHaveText("+2");
+  await expect(approval.locator(".status")).toHaveCount(1);
+  await expect(approval.locator(".status")).toHaveAttribute("aria-label", "Status: Answer Required");
+  await expect(approval.locator(".row-status-more > [aria-hidden='true']")).toHaveText("+1");
   const geometry = await page.locator(".inbox-row-shell").evaluateAll(measureLineOne);
   // Every phone card measures the same, whatever its pills (#917), and indenting changes nothing.
   expect(new Set(geometry.map((row) => row.height)).size, JSON.stringify(geometry)).toBe(1);
@@ -218,13 +221,13 @@ test("a phone narrows the spine and keeps the family chip's dots", async ({ page
     expect(row.timeHeight, "the time is on one line").toBeLessThanOrEqual(20);
     expect(row.timeOverflowRight).toBeLessThanOrEqual(0.5);
   }
-  // With line one carrying only the sender and its pills, the crowded card (#603: Approval
-  // Required and Stalled; its Awaiting Input is not repeated beside the attention pill, §11.1)
-  // shows the agent's whole first word beside the icon — the criterion #916 could not meet while the
-  // time sat on that line. Asserted against the word's own rendered width, so CI's wider fallback
-  // face cannot make it a pixel argument.
+  // Line one carries only the sender and its flags (#2209), so even the crowded card (#603: Approval
+  // Required, stalled, so the one badge is in the danger tone rather than a second Stalled badge) shows
+  // the agent's whole first word beside the icon. Asserted against the word's own rendered width, so
+  // CI's wider fallback face cannot make it a pixel argument.
   const three = geometry.find((row) => row.title?.startsWith("#603"))!;
-  expect(three.pills).toBe(2);
+  expect(three.pills).toBe(1);
+  expect(three.pillsOnLineOne).toBe(0);
   expect(three.firstWord).toBe("Claude");
   expect(three.firstWordWidth).toBeGreaterThan(0);
   expect(three.firstWordClipped, `"${three.firstWord}" is clipped by ${three.firstWordClipped}px`)

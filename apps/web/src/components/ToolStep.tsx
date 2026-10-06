@@ -201,7 +201,7 @@ export function WorkLedgerLine({ ledger, live, open, onToggle }: {
     meta.push(<span key="approved">{plural(ledger.autoApproved, "Tool Call")} Auto-Approved{risk}</span>);
   }
   return (
-    <div className={`tl-work${open ? " open" : ""}`}>
+    <div className="tl-work">
       <button type="button" className="disclosure-trigger" aria-expanded={open} onClick={onToggle}>
         <ChevronRightIcon size={14} className="disclosure-chevron" />
         <span className="tl-work-title">{title}</span>

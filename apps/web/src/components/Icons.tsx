@@ -1,5 +1,6 @@
 import React, { type SVGProps, useId } from "react";
 import {
+  AlarmClock as LucideAlarmClock,
   Archive as LucideArchive,
   ArrowDown as LucideArrowDown,
   ArrowRightLeft as LucideArrowRightLeft,
@@ -212,6 +213,11 @@ export function BoardIcon(props: IconProps) {
 
 export function ListIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideList} {...props} />;
+}
+
+/** A snoozed row's return time (#2209). */
+export function AlarmClockIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideAlarmClock} {...props} />;
 }
 
 export function ConnectionsIcon(props: IconProps) {

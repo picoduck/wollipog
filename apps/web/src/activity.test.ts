@@ -7,11 +7,13 @@ import {
   STALL_THRESHOLD_MS,
   activitySeries,
   emptySessionActivity,
+  hasRecentActivity,
   isHeartbeatBusy,
   isSessionStalled,
   rebuildSessionActivity,
   reconcileSessionActivity,
   recordSessionActivity,
+  showsActivityStrip,
 } from "./activity.js";
 
 const event = (seq: number, ts: number): SessionEvent => ({
@@ -112,4 +114,23 @@ test("heartbeat busy status taxonomy is explicit", () => {
   for (const status of ["idle", "completed", "failed", "stopped"] as const) {
     assert.equal(isHeartbeatBusy(status), false);
   }
+});
+
+test("the activity strip shows while Running or Starting, or for ten minutes after tool activity (#2209)", () => {
+  const now = 1_000 * ACTIVITY_BUCKET_MS + 30_000;
+  const minutesAgo = (minutes: number) => recordSessionActivity(undefined, now - minutes * ACTIVITY_BUCKET_MS);
+  for (const status of ["running", "starting"] as const) {
+    assert.equal(showsActivityStrip(status, undefined, now), true, `${status} always shows the strip`);
+  }
+  for (const status of ["queued", "input_required", "idle", "completed", "failed", "stopped"] as const) {
+    assert.equal(showsActivityStrip(status, undefined, now), false, `${status} with no activity shows none`);
+    assert.equal(showsActivityStrip(status, minutesAgo(11), now), false, `${status} 11 minutes after activity shows none`);
+    assert.equal(showsActivityStrip(status, minutesAgo(9), now), true, `${status} 9 minutes after activity shows it`);
+  }
+  // The newest ten one-minute buckets: the current minute counts, ten whole minutes back does not.
+  assert.equal(hasRecentActivity(minutesAgo(0), now), true);
+  assert.equal(hasRecentActivity(minutesAgo(9), now), true);
+  assert.equal(hasRecentActivity(minutesAgo(9), now + ACTIVITY_BUCKET_MS), false, "it lapses once ten minutes pass");
+  assert.equal(hasRecentActivity(minutesAgo(10), now), false);
+  assert.equal(hasRecentActivity(undefined, now), false);
 });

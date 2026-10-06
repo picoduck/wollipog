@@ -4,7 +4,8 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { SessionReminderView, SessionView } from "@wollipog/protocol";
-import { InboxRow } from "./InboxRow.js";
+import { ACTIVITY_BUCKET_MS, recordSessionActivity, type SessionActivity } from "../activity.js";
+import { InboxRow, type InboxRowProps } from "./InboxRow.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
@@ -20,45 +21,319 @@ for (const [name, value] of Object.entries({
   IS_REACT_ACT_ENVIRONMENT: true,
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
 
-test("a multi-request row shows one attention pill per kind with its count and no disclosure", async () => {
-  const session = { id: "session", eventEpoch: 7, runnerId: "runner", title: "Session",
-    status: "input_required", driver: "codex-app-server", pendingApproval: {
-      requestId: "a", options: [], title: "First", additionalRequests: [
-        { requestId: "b / %", options: [], title: "Second", ownerToolUseId: "child" },
-        { requestId: "q", options: [], title: "Which one?", kind: "question" },
-      ],
-    }, attentionOwners: [{ requestId: "b / %", toolCallId: "child", resolved: true, name: "Audit Child", role: "reviewer" }],
-  } as unknown as SessionView;
+/** A fixed row clock, on a minute boundary plus thirty seconds. */
+const NOW = 1_000_000 * ACTIVITY_BUCKET_MS + 30_000;
+
+const baseSession = (extra: Partial<SessionView> = {}): SessionView => ({
+  id: "session", runnerId: "runner-1", title: "Session", status: "idle", column: "inbox", archived: false,
+  pendingApproval: null, lastEventAt: null, updatedAt: NOW - 60_000, createdAt: NOW - 120_000, preview: null,
+  agentId: "codex", agentName: "Codex", driver: "codex-app-server", ...extra,
+} as unknown as SessionView);
+
+type RowOptions = Partial<Omit<InboxRowProps, "session">>;
+
+/** Renders one row (desktop shape unless asked), runs the assertions, and can re-render with new props. */
+async function withRow(
+  session: SessionView,
+  assertions: (container: HTMLDivElement, rerender: (options: RowOptions) => Promise<void>) => void | Promise<void>,
+  options: RowOptions = {},
+): Promise<void> {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
+  const render = (extra: RowOptions) => act(async () => root.render(<InboxRow
+    optionId="session-option" session={session} projectName="Project One"
+    selected={false} unread={false} pinned={false} rowIndex={1}
+    stalled={false} activityNow={NOW} threeRow={false}
+    onSelect={() => undefined} onExpand={() => undefined} onSessionMenu={() => undefined}
+    {...options} {...extra}
+  />));
+  await render({});
   try {
-    await act(async () => root.render(<InboxRow optionId="row" session={session} projectName="Project"
-      selected={false} unread={false} pinned={false} rowIndex={1} stalled={false} activityNow={0}
-      threeRow={false} onSelect={() => {}} onExpand={() => {}} onSessionMenu={() => {}} />));
-    assertNoDomNode(container.querySelector(".attention-requests"), "the request disclosure is gone (#896)");
-    assertNoDomNode(container.querySelector("button button"));
-    const pills = [...container.querySelectorAll<HTMLElement>(".inbox-row-signals .status.t-warning")];
-    assert.deepEqual(pills.map((pill) => pill.getAttribute("aria-label")),
-      ["Attention: Answer Required", "Attention: Approval Required, 2 Requests"],
-      "priority order: the question outranks the permissions, and the count rides the pill");
-    assert.equal(pills[1]!.querySelector(".status-count")?.textContent, "2");
-    assert.equal(pills[1]!.getAttribute("title"), "Main Agent: First\nAudit Child · Reviewer: Second");
-    assert.doesNotMatch(container.textContent ?? "", /Actions Required|View All Requests|Request 1/);
-
-    // The phone shape has one line for the sender and the signals, so it shows the top kind and +N.
-    await act(async () => root.render(<InboxRow optionId="row" session={session} projectName="Project"
-      selected={false} unread={false} pinned={false} rowIndex={1} stalled={false} activityNow={0}
-      threeRow onSelect={() => {}} onExpand={() => {}} onSessionMenu={() => {}} />));
-    const compact = [...container.querySelectorAll<HTMLElement>(".inbox-row-signals .status.t-warning")];
-    assert.equal(compact.length, 1);
-    assert.equal(compact[0]!.getAttribute("aria-label"), "Attention: Answer Required, 3 Requests");
-    assert.equal(compact[0]!.querySelector(".status-count")?.textContent, "+2");
-    assert.equal(compact[0]!.getAttribute("title"), "Main Agent: Which one?\nMain Agent: First\nAudit Child · Reviewer: Second");
+    await assertions(container, render);
   } finally {
     await act(async () => root.unmount());
     container.remove();
   }
+}
+
+const badges = (container: Element) => [...container.querySelectorAll<HTMLElement>(".status")];
+const minutesAgo = (minutes: number): SessionActivity => recordSessionActivity(undefined, NOW - minutes * ACTIVITY_BUCKET_MS);
+
+test("a blocked row with an approval and two questions shows one badge plus \"+1\" and no lifecycle badge", async () => {
+  const session = baseSession({
+    status: "input_required",
+    pendingApproval: {
+      requestId: "a", options: [], title: "Run the migration?", additionalRequests: [
+        { requestId: "q1", options: [], title: "Which database?", kind: "question" },
+        { requestId: "q2", options: [], title: "Which region?", kind: "question" },
+      ],
+    },
+  } as unknown as Partial<SessionView>);
+  for (const threeRow of [false, true]) {
+    await withRow(session, (container) => {
+      const shown = badges(container);
+      assert.equal(shown.length, 1, "one status badge per row");
+      assert.equal(shown[0]!.textContent, "Answer Required2");
+      assert.equal(shown[0]!.getAttribute("aria-label"), "Status: Answer Required, 2 Requests");
+      assert.ok(shown[0]!.classList.contains("t-warning"));
+      const more = container.querySelector<HTMLElement>(".row-status-more")!;
+      assert.equal(more.querySelector('[aria-hidden="true"]')?.textContent, "+1");
+      assert.equal(more.getAttribute("title"), "Approval Required");
+      assert.match(more.textContent ?? "", /1 More: Approval Required/);
+      assert.doesNotMatch(container.textContent ?? "", /Awaiting Input/, "the lifecycle is not said as well");
+    }, { threeRow });
+  }
+});
+
+test("an idle row shows no status badge, no strip and no Git words", async () => {
+  await withRow(baseSession(), (container) => {
+    assert.deepEqual(badges(container), []);
+    assertNoDomNode(container.querySelector(".row-status"));
+    assertNoDomNode(container.querySelector(".activity-strip"));
+    assertNoDomNode(container.querySelector(".inbox-row-git"), "the branch shows only when there is one");
+    assert.doesNotMatch(container.textContent ?? "", /Awaiting Prompt|No Branch|Branch Unavailable/);
+  });
+});
+
+test("a stalled running row shows one badge, in the danger tone, saying how long it has been silent", async () => {
+  const session = baseSession({ status: "running", lastEventAt: NOW - 14 * 60_000 });
+  await withRow(session, (container) => {
+    const shown = badges(container);
+    assert.equal(shown.length, 1, "Stalled is not a second badge");
+    assert.equal(shown[0]!.textContent, "Running");
+    assert.ok(shown[0]!.classList.contains("t-danger"));
+    assert.ok(!shown[0]!.classList.contains("pulse"), "a stalled badge does not pulse");
+    assert.equal(shown[0]!.getAttribute("aria-label"), "Status: Running, Stalled");
+    assert.match(shown[0]!.getAttribute("title") ?? "", /Stalled: no activity for 14 minutes\.$/);
+  }, { stalled: true });
+});
+
+test("a running row with background work shows Running and the strip", async () => {
+  await withRow(baseSession({ status: "running", backgroundWorkState: "running" }), (container) => {
+    const shown = badges(container);
+    assert.equal(shown.length, 1);
+    assert.equal(shown[0]!.textContent, "Running");
+    assert.ok(shown[0]!.classList.contains("pulse"));
+    assert.notEqual(container.querySelector(".inbox-row-activity"), null);
+    assertNoDomNode(container.querySelector('[data-group="background-work"]'), "no separate background-work badge");
+  });
+});
+
+test("an idle row with running background work shows Waiting on External Job", async () => {
+  for (const [state, label] of [
+    ["running", "Waiting on External Job"],
+    ["continuation_pending", "Continuation Pending"],
+    ["orphaned", "Background Work Lost"],
+  ] as const) {
+    await withRow(baseSession({ backgroundWorkState: state }), (container) => {
+      const shown = badges(container);
+      assert.equal(shown.length, 1, label);
+      assert.equal(shown[0]!.textContent, label);
+      assert.equal(shown[0]!.getAttribute("aria-label"), `Status: ${label}`);
+    });
+  }
+  // Attention outranks background work, which then shows nowhere on the row (#2182's ranking).
+  await withRow(baseSession({
+    backgroundWorkState: "running",
+    pendingApproval: { kind: "permission", requestId: "approval", title: "Review external work", options: [] },
+  } as unknown as Partial<SessionView>), (container) => {
+    assert.deepEqual(badges(container).map((badge) => badge.textContent), ["Approval Required"]);
+  });
+});
+
+test("the strip shows while Running or Starting and for ten minutes after tool activity, and on no other row", async () => {
+  for (const status of ["running", "starting"] as const) {
+    await withRow(baseSession({ status }), (container) => {
+      assert.notEqual(container.querySelector(".inbox-row-activity"), null, status);
+    });
+  }
+  // An Awaiting Prompt row active 9 minutes ago shows it, and loses it once ten minutes have passed.
+  await withRow(baseSession(), async (container, rerender) => {
+    assert.notEqual(container.querySelector(".inbox-row-activity"), null, "9 minutes after activity");
+    await rerender({ activityNow: NOW + ACTIVITY_BUCKET_MS });
+    assertNoDomNode(container.querySelector(".inbox-row-activity"), "10 minutes after activity");
+  }, { activity: minutesAgo(9) });
+  await withRow(baseSession(), (container) => {
+    assertNoDomNode(container.querySelector(".inbox-row-activity"), "11 minutes after activity");
+  }, { activity: minutesAgo(11) });
+  for (const status of ["queued", "input_required"] as const) {
+    await withRow(baseSession({ status }), (container) => {
+      assertNoDomNode(container.querySelector(".inbox-row-activity"), `${status} with no recent activity`);
+    }, { activity: minutesAgo(25) });
+  }
+});
+
+test("the strip is a named image on the status line after the badge, never in the title line", async () => {
+  for (const threeRow of [false, true]) {
+    await withRow(baseSession({ status: "running" }), (container) => {
+      const strip = container.querySelector<HTMLElement>(".inbox-row-activity")!;
+      assert.equal(strip.getAttribute("role"), "img");
+      assert.equal(strip.getAttribute("aria-label"), "Tool activity in the last 30 minutes");
+      assert.equal(strip.getAttribute("title"), "Tool activity in the last 30 minutes");
+      const statusLine = strip.closest(".inbox-row-status-line")!;
+      assert.notEqual(statusLine, null, "on the status line");
+      assertNoDomNode(strip.closest(".inbox-row-copy"), "never in the title line's box");
+      const lines = [...container.querySelector(".inbox-row")!.children].map((line) => line.classList[0]);
+      // Desktop: status line, then title line. Phone: sender, title, then the status line (line 3).
+      assert.deepEqual(lines, threeRow
+        ? ["inbox-row-line", "inbox-row-copy", "inbox-row-line"]
+        : ["inbox-row-line", "inbox-row-copy"]);
+      assert.equal(container.querySelector(".inbox-row")!.lastElementChild === statusLine, threeRow);
+      const badge = statusLine.querySelector(".row-status")!;
+      assert.ok(badge.compareDocumentPosition(strip as never) & 4, "the strip follows the badge");
+    }, { threeRow });
+  }
+});
+
+test("the title line holds the one-line title and the family chip, and nothing else", async () => {
+  const session = baseSession({ status: "running", title: "Fix the parser\n\nRequirements: - one", backgroundWorkState: "running" });
+  for (const threeRow of [false, true]) {
+    await withRow(session, (container) => {
+      const copy = container.querySelector<HTMLElement>(".inbox-row-copy")!;
+      assert.deepEqual([...copy.children].map((child) => child.className), ["inbox-row-title"]);
+      assert.equal(copy.textContent, "Fix the parser", "sessionDisplayTitle(): the first line names the session");
+      assert.equal(container.querySelector(".inbox-row")!.getAttribute("title"), "Select Fix the parser");
+    }, { threeRow });
+  }
+});
+
+test("the branch shows with its icon, its base as \"from\", and its pull request as a neutral state word", async () => {
+  const session = baseSession({
+    status: "running", useWorktree: true, worktreePath: "/repos/alpha/wt",
+    worktrees: [{
+      id: "wt", path: "/repos/alpha/wt", branch: "fix/issue-2209", baseRef: "fix/issue-2146", defaultBranch: "main",
+      source: "created", pullRequest: { url: "https://example.test/pull/1", state: "merged" },
+    }],
+  } as unknown as Partial<SessionView>);
+  for (const threeRow of [false, true]) {
+    await withRow(session, (container) => {
+      const git = container.querySelector<HTMLElement>(".inbox-row-status-line .inbox-row-git")!;
+      assert.notEqual(git, null, "on the status line");
+      const branch = git.querySelector<HTMLElement>(".inbox-row-branch")!;
+      assert.notEqual(branch.querySelector("svg"), null, "BranchIcon");
+      assert.equal(branch.textContent, "Branch: fix/issue-2209");
+      assert.equal(git.querySelector(".inbox-row-base")?.textContent, "from fix/issue-2146");
+      assert.doesNotMatch(git.textContent ?? "", /←/);
+      const pr = git.querySelector<HTMLElement>(".inbox-row-pr")!;
+      assert.notEqual(pr.querySelector("svg"), null, "PullRequestIcon");
+      assert.equal(pr.textContent, "Pull Request: Merged");
+      assertNoDomNode(container.querySelector(".inbox-row-pr-pill"));
+    }, { threeRow });
+  }
+  // A default base is what every reader assumes, so it is left off.
+  await withRow(baseSession({
+    useWorktree: true, worktreePath: "/repos/alpha/wt",
+    worktrees: [{ id: "wt", path: "/repos/alpha/wt", branch: "fix/a", baseRef: "origin/main", source: "created" }],
+  } as unknown as Partial<SessionView>), (container) => {
+    assertNoDomNode(container.querySelector(".inbox-row-base"));
+  });
+});
+
+test("a stop-failed row shows Stop Failed and its time", async () => {
+  const session = baseSession({
+    status: "stopped", lastEventAt: null, updatedAt: NOW - 3 * 60_000,
+    stopOperation: {
+      operationId: "stop-operation-1", status: "stop_failed", requestedAt: 1, lastAttemptAt: 2, attemptCount: 1,
+      capacityReleased: false, failure: { code: "runner_rejected", message: "Stop failed.", failedAt: 3 },
+    },
+  } as unknown as Partial<SessionView>);
+  await withRow(session, (container) => {
+    assert.deepEqual(badges(container).map((badge) => badge.textContent), ["Stop Failed"]);
+    const time = container.querySelector("time")!;
+    assert.notEqual(time.textContent, "—");
+    assert.equal(time.getAttribute("datetime"), new Date(NOW - 3 * 60_000).toISOString());
+  });
+});
+
+test("a fired reminder's row says Returned; a snoozed row shows its return time behind an alarm clock", async () => {
+  const scheduledFor = Date.now() - 60_000;
+  const fired: SessionReminderView = {
+    reminderId: "reminder-returned", sessionId: "session", scheduledFor, timeZone: "UTC",
+    originalExpression: "one minute ago", wakePolicy: "regardless", state: "fired",
+    revision: 2, createdAt: scheduledFor - 1_000, updatedAt: scheduledFor, firedAt: scheduledFor, wakeReason: "scheduled",
+  };
+  await withRow(baseSession(), (container) => {
+    const shown = badges(container);
+    assert.equal(shown.length, 1);
+    assert.equal(shown[0]!.textContent, "Returned from Snooze");
+    assert.equal(shown[0]!.getAttribute("aria-label"), "Status: Returned from Snooze");
+    assert.match(shown[0]!.getAttribute("title") ?? "", /Snooze ended/);
+    assert.doesNotMatch(container.textContent ?? "", /Overdue/);
+  }, { reminder: fired });
+
+  const pending: SessionReminderView = { ...fired, state: "pending", scheduledFor: Date.now() + 3_600_000, firedAt: undefined };
+  for (const threeRow of [false, true]) {
+    await withRow(baseSession(), (container) => {
+      assert.deepEqual(badges(container), [], "the reminder is the time cell, not a badge");
+      const cell = container.querySelector<HTMLElement>(".inbox-row-time.snoozed")!;
+      assert.notEqual(cell.querySelector("svg"), null, "AlarmClockIcon");
+      assert.match(cell.textContent ?? "", /^Snoozed Until \d/);
+      assert.match(cell.getAttribute("title") ?? "", /^Snoozed until /);
+      assertNoDomNode(container.querySelector("time"), "instead of the relative time");
+    }, { reminder: pending, threeRow });
+  }
+  const someday = { ...pending, scheduleKind: "someday", scheduledFor: undefined, timeZone: undefined } as unknown as SessionReminderView;
+  await withRow(baseSession(), (container) => {
+    assert.equal(container.querySelector(".inbox-row-time.snoozed")?.textContent, "Snoozed: Someday");
+  }, { reminder: someday });
+});
+
+test("a snoozed row's lost or missing background result counts toward its one status", async () => {
+  const pending = {
+    reminderId: "r", sessionId: "session", scheduledFor: Date.now() + 3_600_000, timeZone: "UTC",
+    originalExpression: "in an hour", wakePolicy: "regardless", state: "pending", revision: 1,
+    createdAt: 1, updatedAt: 1,
+  } as SessionReminderView;
+  await withRow(baseSession({ backgroundWorkState: "orphaned" }), (container) => {
+    assert.deepEqual(badges(container).map((badge) => badge.textContent), ["Background Work Lost"]);
+  }, { reminder: pending });
+});
+
+test("selected, unread, and selected-and-unread rows each show their own treatment; phones show no selection", async () => {
+  for (const [selected, unread] of [[true, false], [false, true], [true, true]] as const) {
+    await withRow(baseSession(), (container) => {
+      const shell = container.querySelector<HTMLElement>(".inbox-row-shell")!;
+      assert.equal(shell.getAttribute("aria-selected"), String(selected));
+      assert.equal(shell.classList.contains("selected"), selected);
+      assert.equal(shell.classList.contains("unread"), unread);
+      const dot = container.querySelector<HTMLElement>(".inbox-row-flags .inbox-unread-dot");
+      if (unread) {
+        assert.equal(dot?.getAttribute("role"), "img");
+        assert.equal(dot?.getAttribute("aria-label"), "Unread Activity");
+        assert.equal(dot?.textContent, "", "a dot, not a count");
+      } else {
+        assertNoDomNode(dot);
+      }
+      assertNoDomNode(container.querySelector(".inbox-unread-badge"));
+    }, { selected, unread });
+  }
+  await withRow(baseSession(), (container) => {
+    const shell = container.querySelector<HTMLElement>(".inbox-row-shell")!;
+    assert.equal(shell.getAttribute("aria-selected"), "true", "the grid still knows the active row");
+    assert.ok(!shell.classList.contains("selected"), "but a phone never draws it selected");
+    assert.ok(shell.classList.contains("stacked"));
+  }, { selected: true, threeRow: true });
+});
+
+test("the relative time renders once, trailing the status line on both shapes", async () => {
+  const session = baseSession({ status: "running", lastEventAt: Date.now() - 15 * 60_000 });
+  for (const threeRow of [true, false]) {
+    await withRow(session, (container) => {
+      const times = container.querySelectorAll("time");
+      assert.equal(times.length, 1, "one element, so the instant is never said twice");
+      assert.equal(times[0]!.textContent, "15m ago");
+      assert.notEqual(times[0]!.closest(".inbox-row-status-line"), null);
+      assert.equal(times[0]!.parentElement?.lastElementChild, times[0], "trailing");
+    }, { threeRow });
+  }
+});
+
+test("Inbox rows never render the message preview", async () => {
+  await withRow(baseSession({ preview: "The first line of the last message." }), (container) => {
+    assert.doesNotMatch(container.textContent ?? "", /first line of the last message/);
+    assertNoDomNode(container.querySelector(".inbox-row-snippet"));
+  });
 });
 
 test("a parent row carries the chevron and family chip, and a child row its thread position", async () => {
@@ -117,314 +392,5 @@ test("a parent row carries the chevron and family chip, and a child row its thre
   } finally {
     await act(async () => root.unmount());
     container.remove();
-  }
-});
-
-test("Inbox rows expose plain Stop Failed instead of Diff Ready", async () => {
-  const session = {
-    id: "session-stop-failed", runnerId: "runner-1", title: "Failed Stop",
-    status: "stopped", column: "review", archived: false,
-    stopOperation: {
-      operationId: "stop-operation-1",
-      status: "stop_failed",
-      requestedAt: 1,
-      lastAttemptAt: 2,
-      attemptCount: 1,
-      capacityReleased: false,
-      failure: { code: "runner_rejected", message: "Stop failed.", failedAt: 3 },
-    },
-    pendingApproval: null, lastEventAt: null, preview: null,
-    agentId: "codex", agentName: "Codex", driver: "codex-app-server",
-  } as unknown as SessionView;
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
-  await act(async () => root.render(<InboxRow
-    optionId="session-option" session={session} projectName="Project One"
-    selected={false} unread={false} pinned={false} rowIndex={1}
-    stalled={false} activityNow={2} threeRow
-    onSelect={() => undefined} onExpand={() => undefined}
-      onSessionMenu={() => undefined}
-  />));
-  assert.match(container.textContent ?? "", /Stop Failed/);
-  assert.doesNotMatch(container.textContent ?? "", /Diff Ready/);
-  await act(async () => root.unmount());
-  container.remove();
-});
-
-test("returned-from-snooze rows expose the ended instant without overdue copy", async () => {
-  const session = {
-    id: "session-returned", runnerId: "runner-1", title: "Returned Session",
-    status: "idle", column: "inbox", archived: false, pendingApproval: null,
-    lastEventAt: null, preview: null, agentId: "codex", agentName: "Codex",
-    driver: "codex-app-server",
-  } as unknown as SessionView;
-  const scheduledFor = Date.now() - 60_000;
-  const reminder: SessionReminderView = {
-    reminderId: "reminder-returned", sessionId: session.id, scheduledFor, timeZone: "UTC",
-    originalExpression: "one minute ago", wakePolicy: "regardless", state: "fired",
-    revision: 2, createdAt: scheduledFor - 1_000, updatedAt: scheduledFor,
-    firedAt: scheduledFor, wakeReason: "scheduled",
-  };
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
-  await act(async () => root.render(<InboxRow
-    optionId="session-option" session={session} projectName="Project One"
-    selected={false} unread={false} pinned={false} rowIndex={1}
-    stalled={false} activityNow={Date.now()} reminder={reminder} threeRow
-    onSelect={() => undefined} onExpand={() => undefined} onSessionMenu={() => undefined}
-  />));
-  const pill = container.querySelector<HTMLElement>('.status[aria-label^="Reminder:"]')!;
-  assert.equal(pill.textContent, "Returned from Snooze");
-  assert.match(pill.getAttribute("aria-label") ?? "", /Snooze ended/);
-  assert.doesNotMatch(pill.textContent, /Overdue/);
-  await act(async () => root.unmount());
-  container.remove();
-});
-
-/** Defaults to the phone's three-row card; #877's desktop shape is asked for explicitly. */
-async function withRow(
-  session: SessionView,
-  assertions: (container: HTMLDivElement) => void,
-  { threeRow = true }: { threeRow?: boolean } = {},
-): Promise<void> {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
-  await act(async () => root.render(<InboxRow
-    optionId="session-option" session={session} projectName="Project One"
-    selected={false} unread={false} pinned={false} rowIndex={1}
-    stalled={false} activityNow={2} threeRow={threeRow}
-    onSelect={() => undefined} onExpand={() => undefined} onSessionMenu={() => undefined}
-  />));
-  try {
-    assertions(container);
-  } finally {
-    await act(async () => root.unmount());
-    container.remove();
-  }
-}
-
-const worktreeSession = (worktree: Record<string, unknown> | null): SessionView => ({
-  id: "session-worktree", runnerId: "runner-1", title: "Worktree Session",
-  status: "running", column: "review", archived: false, pendingApproval: null,
-  lastEventAt: null, preview: "The first line of the last message.",
-  agentId: "codex", agentName: "Codex", driver: "codex-app-server",
-  worktreePath: worktree ? "/repos/alpha/wt" : null,
-  worktrees: worktree ? [worktree] : undefined,
-} as unknown as SessionView);
-
-test("idle Inbox rows retain authoritative background work alongside attention", async () => {
-  for (const [state, visible, accessible] of [
-    ["running", "Waiting on External Job", "Waiting on External Job"],
-    ["continuation_pending", "Continuation Pending", "Continuation Pending"],
-    ["orphaned", "Background Work Lost", "Lost"],
-    ["resumed", null, null],
-    [undefined, null, null],
-  ] as const) {
-    await withRow({
-      ...worktreeSession(null), status: "idle", backgroundWorkState: state,
-      pendingApproval: { kind: "permission", requestId: "background-approval", title: "Review external work", options: [] },
-    }, (container) => {
-      assert.ok(container.querySelector('[aria-label="Activity: Awaiting Prompt"]'));
-      assert.ok(container.querySelector('[aria-label="Attention: Approval Required"]'));
-      const badge = container.querySelector('.inbox-row-background-work .status[data-group="background-work"]');
-      if (visible) {
-        assert.equal(badge?.getAttribute("aria-label"), `Background Work: ${accessible}`);
-        assert.equal(badge?.querySelector('span[aria-hidden="true"]:last-child')?.textContent, visible);
-        assert.equal(badge?.getAttribute("role"), null, "rows must not create hundreds of live regions");
-      } else {
-        assertNoDomNode(badge);
-        assertNoDomNode(container.querySelector(".inbox-row-background-work"));
-      }
-    });
-  }
-});
-
-test("a session with a worktree gets a third line, and a default base ref is left off it", async () => {
-  await withRow(
-    worktreeSession({
-      id: "wt", path: "/repos/alpha/wt", branch: "fix/issue-664", baseRef: "origin/main",
-      source: "created", pullRequest: { url: "https://example.test/pull/1", state: "open" },
-    }),
-    (container) => {
-      const line = container.querySelector<HTMLElement>(".inbox-row-git")!;
-      assert.equal(line.querySelector(".inbox-row-branch")?.textContent, "fix/issue-664");
-      assertNoDomNode(line.querySelector(".inbox-row-base"), "origin/main is what every reader assumes");
-      assert.equal(line.querySelector(".inbox-row-pr-pill")?.textContent, "Open PR");
-      assert.equal(line.querySelector(".inbox-row-pr-pill")?.getAttribute("aria-label"), "Pull Request: Open");
-    },
-  );
-});
-
-test("a base ref that is not the default is spelled out on the worktree line", async () => {
-  await withRow(
-    worktreeSession({
-      id: "wt", path: "/repos/alpha/wt", branch: "fix/issue-664-follow-up",
-      baseRef: "fix/issue-664", source: "created",
-      pullRequest: { url: "https://example.test/pull/2", state: "merged" },
-    }),
-    (container) => {
-      const line = container.querySelector<HTMLElement>(".inbox-row-git")!;
-      // The arrow is hidden from assistive technology; the word it stands for is not.
-      assert.equal(line.querySelector(".inbox-row-base")?.textContent, "Base: ← fix/issue-664");
-      assert.equal(line.querySelector(".inbox-row-pr-pill")?.textContent, "Merged PR");
-    },
-  );
-});
-
-test("Inbox rows no longer render the message preview, and every row keeps its Git line", async () => {
-  await withRow(worktreeSession(null), (container) => {
-    assert.doesNotMatch(container.textContent ?? "", /first line of the last message/);
-    assertNoDomNode(container.querySelector(".inbox-row-snippet"));
-    // #782: line three is unconditional, so a session with no worktree says so instead of vanishing.
-    assert.notEqual(container.querySelector(".inbox-row-meta"), null);
-    assert.equal(container.querySelector(".inbox-row-branch-state")?.textContent, "No Branch");
-    // The strip is still there for a busy session; it is the line's only fixed-width item.
-    assert.notEqual(container.querySelector(".inbox-row-activity"), null);
-  });
-});
-
-// #782: three states, and the distinction between the last two is the whole point. A session that
-// holds a worktree the client cannot name must not be described as having no branch at all.
-test("a session's Git line names its branch, admits to none, or admits to not knowing", async () => {
-  const cases: Array<[Partial<SessionView>, string, string | null]> = [
-    [{ useWorktree: false, worktreePath: null }, "No Branch", "none"],
-    [{ useWorktree: true, worktreePath: null }, "Branch Unavailable", "unknown"],
-    [{ useWorktree: true, worktreePath: "/repos/alpha/wt", worktrees: undefined }, "Branch Unavailable", "unknown"],
-    [{
-      useWorktree: true,
-      worktreePath: "/repos/alpha/wt",
-      // An inventory that names a DIFFERENT worktree still leaves the active one unnamed.
-      worktrees: [{ id: "other", path: "/repos/alpha/other", branch: "fix/other", source: "created" }],
-    } as Partial<SessionView>, "Branch Unavailable", "unknown"],
-    [{
-      useWorktree: true,
-      worktreePath: "/repos/alpha/wt",
-      worktrees: [{ id: "wt", path: "/repos/alpha/wt", branch: "fix/issue-782", source: "created" }],
-    } as Partial<SessionView>, "fix/issue-782", null],
-  ];
-  for (const [extra, label, stateClass] of cases) {
-    await withRow({ ...worktreeSession(null), ...extra } as SessionView, (container) => {
-      const line = container.querySelector<HTMLElement>(".inbox-row-git")!;
-      assert.notEqual(line, null, `${label}: line three is always present`);
-      const state = line.querySelector<HTMLElement>(".inbox-row-branch-state");
-      if (stateClass) {
-        assert.equal(state?.textContent, label);
-        assert.ok(state!.classList.contains(stateClass), `${label} carries its own state class`);
-        assertNoDomNode(line.querySelector(".inbox-row-branch"));
-      } else {
-        assertNoDomNode(state);
-        assert.equal(line.querySelector(".inbox-row-branch")?.textContent, label);
-      }
-      // The accessible name says which of the three it is, not just what the text happens to read.
-      assert.match(container.querySelector<HTMLElement>(".inbox-row")!.textContent ?? "", new RegExp(`Branch: ${label}`));
-    });
-  }
-});
-
-// #782: the badge shares line three with the Git state instead of taking a fourth line.
-test("background work sits on the Git line of a phone card, whatever the session's branch state", async () => {
-  for (const extra of [
-    { useWorktree: false, worktreePath: null },
-    {
-      useWorktree: true,
-      worktreePath: "/repos/alpha/wt",
-      worktrees: [{ id: "wt", path: "/repos/alpha/wt", branch: "fix/issue-782", source: "created" }],
-    },
-  ] as Partial<SessionView>[]) {
-    await withRow({ ...worktreeSession(null), ...extra, backgroundWorkState: "running" } as SessionView, (container) => {
-      const meta = container.querySelector<HTMLElement>(".inbox-row-meta")!;
-      assert.notEqual(meta.querySelector(".inbox-row-git"), null);
-      const badge = meta.querySelector('.inbox-row-background-work .status[data-group="background-work"]');
-      assert.equal(badge?.getAttribute("aria-label"), "Background Work: Waiting on External Job");
-      // Nothing outside line three carries it, which is what a fourth row would look like.
-      assert.equal(container.querySelectorAll(".inbox-row-background-work").length, 1);
-    });
-  }
-});
-
-/**
- * What the title line holds, left to right. The strip's own class list carries its variant classes
- * too, so match on the row's marker class rather than comparing whole `className` strings.
- */
-const titleLineOrder = (copy: Element): string[] => [...copy.children].map((child) => {
-  const marker = [...child.classList].find((name) => name.startsWith("inbox-row-"));
-  return marker?.slice("inbox-row-".length) ?? child.className;
-});
-
-// #877: the desktop card has no third line to put the badge on, so it moves to the title line —
-// immediately left of the strip, which is the only other thing on that line that does not shrink.
-test("a desktop card carries background work on the title line, left of the activity strip", async () => {
-  for (const extra of [
-    { useWorktree: false, worktreePath: null },
-    {
-      useWorktree: true,
-      worktreePath: "/repos/alpha/wt",
-      worktrees: [{ id: "wt", path: "/repos/alpha/wt", branch: "fix/issue-877", source: "created" }],
-    },
-  ] as Partial<SessionView>[]) {
-    await withRow(
-      { ...worktreeSession(null), ...extra, backgroundWorkState: "running" } as SessionView,
-      (container) => {
-        const copy = container.querySelector<HTMLElement>(".inbox-row-copy")!;
-        const badge = copy.querySelector<HTMLElement>(".inbox-row-background-work")!;
-        assert.notEqual(badge, null, "the badge rides the title line on a desktop card");
-        assert.equal(
-          badge.querySelector('.status[data-group="background-work"]')?.getAttribute("aria-label"),
-          "Background Work: Waiting on External Job",
-        );
-        // Document ORDER is the layout here: title, badge, strip. `flex-direction` never reverses,
-        // so the badge sitting between them in the DOM is the badge sitting between them on screen.
-        assert.deepEqual(titleLineOrder(copy), ["title", "background-work", "activity"]);
-        // Still exactly one badge: it MOVED between lines, it was not duplicated and hidden.
-        assert.equal(container.querySelectorAll(".inbox-row-background-work").length, 1);
-        assertNoDomNode(container.querySelector(".inbox-row-meta .inbox-row-background-work"));
-        // The Git state itself does not move out of its own element; only its line does, in CSS.
-        assert.notEqual(container.querySelector(".inbox-row-meta .inbox-row-git"), null);
-      },
-      { threeRow: false },
-    );
-  }
-});
-
-// A badge with no strip beside it must not be treated as a special case: it is the same one item at
-// the trailing edge of the same line, and the card is the same height either way.
-test("a desktop card with background work but no activity strip keeps the badge on the title line", async () => {
-  await withRow(
-    { ...worktreeSession(null), status: "idle", backgroundWorkState: "continuation_pending" } as SessionView,
-    (container) => {
-      const copy = container.querySelector<HTMLElement>(".inbox-row-copy")!;
-      assertNoDomNode(copy.querySelector(".inbox-row-activity"), "an idle session draws no strip");
-      assert.deepEqual(titleLineOrder(copy), ["title", "background-work"]);
-      assert.equal(
-        copy.querySelector('.status[data-group="background-work"]')?.getAttribute("aria-label"),
-        "Background Work: Continuation Pending",
-      );
-    },
-    { threeRow: false },
-  );
-});
-
-test("the relative time renders once, on line three when stacked and in the signals column otherwise (#934)", async () => {
-  const session = {
-    id: "session-time", runnerId: "runner-1", title: "Timed Session", status: "running",
-    column: "review", archived: false, pendingApproval: null, lastEventAt: Date.now() - 15 * 60_000,
-    preview: null, agentId: "codex", agentName: "Codex", driver: "codex-app-server",
-  } as unknown as SessionView;
-  for (const threeRow of [true, false]) {
-    await withRow(session, (container) => {
-      const times = container.querySelectorAll("time");
-      assert.equal(times.length, 1, "one element, so the instant is never said twice");
-      const time = times[0]!;
-      assert.equal(time.textContent, "15m ago", "the suffix survives on both shapes (#934)");
-      assert.equal(time.getAttribute("title"), null, "no tooltip: the visible text is already whole");
-      assert.equal(
-        time.parentElement?.className,
-        threeRow ? "inbox-row-meta" : "inbox-row-signals",
-        threeRow ? "stacked: line three, beside the Git state" : "two-row: the signals column",
-      );
-    }, { threeRow });
   }
 });

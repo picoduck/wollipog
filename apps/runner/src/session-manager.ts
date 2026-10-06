@@ -2,7 +2,7 @@ import { artifactGuidance } from "./artifact-guidance.js";
 import { effectiveProjectMemoryKey, prepareProjectMemory, prepareProjectMemoryArgs, projectMemoryKey, projectMemoryUnavailable } from "./project-memory.js";
 import { isTerminal } from "@wollipog/protocol";
 import { inspectCampaignIssueScope } from "./campaign-issue-scope.js";
-import { boundedIssueNumbers } from "@wollipog/protocol";
+import { boundedIssueNumbers, titleFromPrompt } from "@wollipog/protocol";
 import { executeGithubIssueClosure, inspectGithubIssueClosure, issueClosureRun, IssueClosureInspectionError } from "./github-issue-closure.js";
 import type { GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
 import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage } from "@wollipog/protocol";
@@ -796,12 +796,6 @@ function withHookElicitation(capabilities?: AgentCapabilities): AgentCapabilitie
   return changed ? { ...capabilities, elicitation } : capabilities;
 }
 
-/** Derive a short session title from a prompt: first non-empty line, whitespace-collapsed, truncated. */
-function titleFromPrompt(text: string): string {
-  const firstLine = text.split("\n").find((l) => l.trim()) ?? "";
-  const clean = firstLine.replace(/\s+/g, " ").trim();
-  return clean.length > 80 ? clean.slice(0, 79).trimEnd() + "…" : clean;
-}
 
 /** Refresh a held lock well within its stale window so a long turn never looks abandoned. */
 const LOCK_REFRESH_MS = 20_000;

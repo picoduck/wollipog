@@ -259,6 +259,23 @@ export function storedReminderSchedule(reminder: SessionReminderView): ParsedRem
   };
 }
 
+/**
+ * A snoozed row's return time, short enough for its time cell (#2209), in the reminder's time zone:
+ * the time alone today ("3:00 PM"), the weekday and time within the week ("Thu 9:00 AM"), and the
+ * date beyond that ("Oct 12"). `formatReminderInstant()` gives the full instant for the tooltip.
+ */
+export function formatReminderReturn(scheduledFor: number, timeZone: string, now = Date.now()): string {
+  const day = (instant: number) => new Intl.DateTimeFormat("en-CA", { year: "numeric", month: "2-digit", day: "2-digit", timeZone })
+    .format(new Date(instant));
+  const days = Math.round((Date.parse(day(scheduledFor)) - Date.parse(day(now))) / 86_400_000);
+  const time = { hour: "numeric", minute: "2-digit", timeZone } as const;
+  if (days === 0) return new Intl.DateTimeFormat(undefined, time).format(new Date(scheduledFor));
+  if (days > 0 && days < 7) {
+    return new Intl.DateTimeFormat(undefined, { weekday: "short", ...time }).format(new Date(scheduledFor));
+  }
+  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", timeZone }).format(new Date(scheduledFor));
+}
+
 export function formatReminderInstant(scheduledFor: number, timeZone: string): string {
   return new Intl.DateTimeFormat(undefined, {
     weekday: "long",

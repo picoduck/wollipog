@@ -1,25 +1,19 @@
-import { sessionAttentionStatus, type SessionReminderView, type SessionView } from "@wollipog/protocol";
+import type { SessionReminderView, SessionView } from "@wollipog/protocol";
 import { memo } from "react";
 import { useLongPress } from "./interactions.js";
-import { isHeartbeatBusy, type SessionActivity } from "../activity.js";
+import { STALL_THRESHOLD_MS, showsActivityStrip, type SessionActivity } from "../activity.js";
 import { relativeTime } from "../format.js";
-import { snoozedSessionAttentionReason } from "../session-reminders.js";
-import { statusMeta } from "../status-meta.js";
+import { formatReminderReturn } from "../reminder-schedule.js";
+import { reminderBadgeDescription } from "../session-reminders.js";
+import { sessionRowStatus } from "../session-row-status.js";
+import { sessionDisplayTitle } from "../session-title.js";
 import { useOptionalStoreSelector } from "../store.js";
-import { branchStateLabel, displayBaseRef, pullRequestStateLabel, sessionBranchState } from "../worktree-identity.js";
+import { displayBaseRef, pullRequestStateLabel, sessionBranchState } from "../worktree-identity.js";
 import { AgentIcon } from "./AgentIcon.js";
 import { ActivityStrip } from "./ActivityStrip.js";
-import {
-  AttentionPills,
-  BackgroundWorkBadge,
-  ReminderBadge,
-  SessionPinIndicator,
-  SnoozedAttentionBadge,
-  ThreadDot,
-  lifecycleRepeatsAttention,
-  sessionLifecycleMeta,
-} from "./common.js";
-import { StatusBadge } from "./StatusBadge.js";
+import { SessionPinIndicator, ThreadDot } from "./common.js";
+import { AlarmClockIcon, BranchIcon, PullRequestIcon } from "./Icons.js";
+import { SessionRowStatusBadge } from "./SessionRowStatusBadge.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { inboxThreadChildrenLabel, type InboxThreadChildren } from "../inbox.js";
 
@@ -41,9 +35,9 @@ export interface InboxRowProps {
    */
   rowIndex: number;
   /**
-   * The card's responsive shape. `true` is #782's three-row phone card; `false` is #877's two-row
-   * desktop card, which lifts the Git state onto line one and moves the background-work badge onto
-   * the title line, immediately left of the activity strip.
+   * The row's responsive shape (#2209). `true` is the phone's three-line card: the sender, the
+   * title, then the status line. `false` is the two-line row of desktops and tablets, exactly
+   * `--row-h-2` tall: the status line, then the title line.
    *
    * A PROP, not a `useIsMobile()` call in this component. The list already has to know the breakpoint
    * to pick its virtualization estimate, and reading it here as well would put one media
@@ -52,6 +46,7 @@ export interface InboxRowProps {
   threeRow: boolean;
   activity?: SessionActivity;
   stalled: boolean;
+  /** The row clock. Rows that cannot change with time get 0, so they do not re-render every minute. */
   activityNow: number;
   reminder?: SessionReminderView;
   /**
@@ -70,6 +65,12 @@ export interface InboxRowProps {
   onToggleThread?: (sessionId: string) => void;
   /** Right-click, long-press, or keyboard context menu for this row's session (#154). */
   onSessionMenu: (sessionId: string, anchor: { x: number; y: number }) => void;
+}
+
+/** When a row last did something: its newest event, else its last update, so no row shows "—". */
+function inboxRowTimestamp(session: Pick<SessionView, "lastEventAt" | "updatedAt" | "createdAt">,
+  activity?: Pick<SessionActivity, "lastEventAt">): number | null {
+  return Math.max(session.lastEventAt ?? 0, activity?.lastEventAt ?? 0) || session.updatedAt || session.createdAt || null;
 }
 
 function InboxRowInner({
@@ -99,51 +100,20 @@ function InboxRowInner({
   // A surface without a store (a harness page) cannot see the runner, so it keeps the conservative
   // delivery wording rather than claiming the runner is offline.
   const runnerOnline = useOptionalStoreSelector((state) => state.runners.get(session.runnerId)?.status !== "offline") ?? true;
-  const status = sessionLifecycleMeta(session.status, {
-    archiveStatus: session.archiveStatus,
-    stopOperation: session.stopOperation,
-    historyQuarantine: session.historyQuarantine,
+  const lastActivityAt = inboxRowTimestamp(session, activity);
+  const status = sessionRowStatus(session, {
     runnerOnline,
+    reminder,
+    stalledForMs: stalled
+      ? activityNow > 0 && lastActivityAt !== null ? Math.max(STALL_THRESHOLD_MS, activityNow - lastActivityAt) : STALL_THRESHOLD_MS
+      : undefined,
   });
-  const snoozedAttention = reminder?.state === "pending" ? snoozedSessionAttentionReason(session) : null;
-  const extraSnoozedAttention = snoozedAttention?.kind === "orphaned_background_work" ||
-      snoozedAttention?.kind === "background_delivery_watchdog"
-    ? snoozedAttention
-    : null;
-  const active = isHeartbeatBusy(session.status);
+  const strip = showsActivityStrip(session.status, activity, activityNow);
   const agent = sessionAgentLabel(session.agentName, session.driver, session.agentId);
-  const lastActivityAt = Math.max(session.lastEventAt ?? 0, activity?.lastEventAt ?? 0) || null;
-  // #782: the card's third line is unconditional. Deriving the state up front is what makes it so —
-  // the row no longer asks "is there a worktree?" but "what can this card honestly say about Git?".
+  const title = sessionDisplayTitle(session.title);
   const branchState = sessionBranchState(session);
-  const activeWorktree = branchState.kind === "branch" ? branchState.worktree : null;
-  const worktreeBaseRef = activeWorktree ? displayBaseRef(activeWorktree) : null;
-  const backgroundWork = session.backgroundWorkState && session.backgroundWorkState !== "resumed"
-    ? session.backgroundWorkState
-    : null;
-  // ONE badge, rendered into whichever line the current shape puts it on (#877). Two copies hidden
-  // by media query would put the same words in the row's accessible name twice on any engine that
-  // walks a `display: none` subtree, and would make the badge's own count a lie to every test.
-  const backgroundWorkBadge = backgroundWork
-    ? (
-      <span className="inbox-row-background-work">
-        <BackgroundWorkBadge state={backgroundWork} compact announce={false} />
-      </span>
-    )
-    : null;
-
-  /* ONE time element, rendered into whichever line the current shape puts it on (#934), for the
-     same reason the background badge is built this way (#877): two copies hidden by a media query
-     would say the instant twice in the row's accessible name.
-     The stacked shape puts it at the trailing edge of line three, where the branch has room to
-     give way, so line one is the sender and its pills alone and the agent's name survives beside
-     the icon. That is also why the compact "15m" form #916 needed is gone: line three can afford
-     the suffix. The two-row desktop shape keeps it in the signals column, where it always was. */
-  const timeLabel = (
-    <time dateTime={lastActivityAt ? new Date(lastActivityAt).toISOString() : undefined}>
-      {relativeTime(lastActivityAt)}
-    </time>
-  );
+  const worktree = branchState.kind === "branch" ? branchState.worktree : null;
+  const baseRef = worktree ? displayBaseRef(worktree) : null;
 
   const children: InboxThreadChildren | null = threadChildren ? JSON.parse(threadChildren) as InboxThreadChildren : null;
   const childrenLabel = children ? inboxThreadChildrenLabel(children) : null;
@@ -169,82 +139,83 @@ function InboxRowInner({
     </span>
   ) : null;
 
-  // The sender and the Git line are named rather than written inline because the two card shapes
-  // place them differently: a desktop card puts both inside the lead on line one, and a phone keeps
-  // the sender on line one and the Git line on line three, with the title between them.
-  const senderLine = (
+  const sender = (
     <span className="inbox-row-sender" title={`${agent} · ${projectName}`}>
       <AgentIcon driver={session.driver} agentName={session.agentName} size={16} />
       <span>{agent} · {projectName}</span>
     </span>
   );
-  /*
-   * The Git line, on EVERY card (#782): a branch name, "No Branch", or "Branch Unavailable", never
-   * an absence. Before that it appeared only for a session with an active worktree and the
-   * background badge wrapped onto a line of its own, so the list stepped between two, three, and
-   * four rows and never said whether a card without a Git line had no branch or merely an
-   * unreported one.
-   *
-   * A phone keeps it as line three, sharing that line with the background badge and, since #934,
-   * the relative time. A desktop card
-   * puts it on line one, after the agent and project (#877): three rows of Git state, title, and
-   * sender spend about 94px per card saying what two say in 73, and horizontal space is the one
-   * thing a desktop has and a phone does not.
-   */
-  const gitLine = (
-    <span className="inbox-row-meta">
-      <span className="inbox-row-git">
-        {/* The word the line stands for, so the row's accessible name carries the Git state. */}
+  /* The branch, only when there is one (#2209): a session without a branch says nothing rather than
+     "No Branch" on every row. Meta items each lead with their 14px icon (§11.3); the base reads
+     "from <ref>" and the pull request is its state word, both neutral. */
+  const branch = worktree ? (
+    <span className="inbox-row-git">
+      <span className="inbox-row-branch" title={`Branch: ${worktree.branch}`}>
+        <BranchIcon size={14} />
         <span className="sr-only">Branch: </span>
-        {activeWorktree ? (
-          <>
-            <span className="inbox-row-branch" title={`Branch: ${activeWorktree.branch}`}>
-              {activeWorktree.branch}
-            </span>
-            {worktreeBaseRef && (
-              <span className="inbox-row-base">
-                {/* The arrow is decoration; assistive technology gets the word it stands for. */}
-                <span className="sr-only">Base: </span>
-                <span aria-hidden="true">← </span>
-                {worktreeBaseRef}
-              </span>
-            )}
-            {activeWorktree.pullRequest && (
-              <span
-                className={"inbox-row-pr-pill " + (activeWorktree.pullRequest.state === "open"
-                  ? "open"
-                  : activeWorktree.pullRequest.state === "merged" ? "merged" : "closed")}
-                aria-label={`Pull Request: ${pullRequestStateLabel(activeWorktree.pullRequest.state)}`}
-              >
-                {pullRequestStateLabel(activeWorktree.pullRequest.state)} PR
-              </span>
-            )}
-          </>
-        ) : (
-          /* Words, not an absence and not a colour: the label itself is the whole signal, and
-             the subdued italic only reinforces what it already says in text. */
-          <span
-            className={`inbox-row-branch-state ${branchState.kind}`}
-            title={branchState.kind === "none"
-              ? "This session is not working on a Git branch."
-              : "This session's branch state has not been reported by its runner."}
-          >
-            {branchStateLabel(branchState)}
-          </span>
-        )}
+        <span className="inbox-row-branch-name">{worktree.branch}</span>
       </span>
-      {threeRow && backgroundWorkBadge}
-      {threeRow && timeLabel}
+      {baseRef && <span className="inbox-row-base" title={`Based on ${baseRef}`}>from {baseRef}</span>}
+      {worktree.pullRequest && (
+        <span className="inbox-row-pr" title={`Pull request: ${pullRequestStateLabel(worktree.pullRequest.state).toLowerCase()}`}>
+          <PullRequestIcon size={14} />
+          <span className="sr-only">Pull Request: </span>
+          {pullRequestStateLabel(worktree.pullRequest.state)}
+        </span>
+      )}
+    </span>
+  ) : null;
+  const badge = <SessionRowStatusBadge status={status} />;
+  const activityStrip = strip
+    ? <ActivityStrip activity={activity} now={activityNow} compact className="inbox-row-activity" />
+    : null;
+  const flags = pinned || containsPinned || unread ? (
+    <span className="inbox-row-flags">
+      {pinned ? <SessionPinIndicator /> : containsPinned ? <SessionPinIndicator contains /> : null}
+      {unread && <span className="inbox-unread-dot" role="img" aria-label="Unread Activity" title="Unread activity" />}
+    </span>
+  ) : null;
+  /* A snoozed row's time cell says when it returns, behind an alarm clock, instead of how long ago
+     it last did something (#2209). */
+  const pendingReminder = reminder?.state === "pending" ? reminder : null;
+  const time = pendingReminder ? (
+    <span className="inbox-row-time snoozed" title={reminderBadgeDescription(pendingReminder)}>
+      <AlarmClockIcon size={14} />
+      {pendingReminder.scheduleKind === "someday" ? (
+        <>
+          <span className="sr-only">Snoozed: </span>
+          Someday
+        </>
+      ) : (
+        <>
+          <span className="sr-only">Snoozed Until </span>
+          {formatReminderReturn(pendingReminder.scheduledFor, pendingReminder.timeZone)}
+        </>
+      )}
+    </span>
+  ) : (
+    <time className="inbox-row-time" dateTime={lastActivityAt ? new Date(lastActivityAt).toISOString() : undefined}>
+      {relativeTime(lastActivityAt)}
+    </time>
+  );
+  const titleLine = (
+    <span className="inbox-row-copy">
+      <span className="inbox-row-title">{title}</span>
+      {familyChip}
     </span>
   );
+
   return (
     <div
       id={optionId}
       role="row"
       aria-rowindex={rowIndex}
       aria-selected={selected}
-      className={`inbox-row-shell${selected ? " selected" : ""}${unread ? " unread" : ""}${stalled ? " stalled" : ""}${
-        children ? " thread-parent" : ""}${threadDepth > 0 ? " thread-child" : ""}${threadLast ? " thread-last" : ""}`}
+      // Phones never show a selected row (§5.2): opening one pushes a route, so on return the last
+      // opened row is not highlighted. The grid still knows which row is active.
+      className={`inbox-row-shell${threeRow ? " stacked" : ""}${selected && !threeRow ? " selected" : ""}${
+        unread ? " unread" : ""}${stalled ? " stalled" : ""}${children ? " thread-parent" : ""}${
+        threadDepth > 0 ? " thread-child" : ""}${threadLast ? " thread-last" : ""}`}
       onContextMenu={(event) => {
         event.preventDefault();
         onSessionMenu(session.id, { x: event.clientX, y: event.clientY });
@@ -276,47 +247,30 @@ function InboxRowInner({
           {...longPress.handlers}
           onClick={() => { if (!longPress.consumeSuppressedClick()) onSelect(session.id); }}
           onDoubleClick={() => { if (!longPress.consumeSuppressedClick()) onExpand(session.id); }}
-          title={`Select ${session.title}`}
+          title={`Select ${title}`}
         >
-          {/* Line one's LEAD, on a desktop card only: a flex line holding the sender and the Git
-              state, which is what lets the sender be the first to give up width when the signals
-              column is wide — the priority the card had before #877, when the Git state owned a
-              whole row. As three grid columns instead, the FLEXIBLE one starved, and a card with
-              several attention pills lost its branch name outright.
-              A phone renders no wrapper at all, so its children keep #782's order: sender, then
-              title, then Git state. Wrapping them on a phone too and dissolving the box with
-              `display: contents` laid out identically to the pixel, but `display: contents` does
-              not reorder the accessibility tree: the row then ANNOUNCED sender, branch, title
-              while SHOWING sender, title, branch. */}
-          {threeRow ? senderLine : <span className="inbox-row-lead">{senderLine}{gitLine}</span>}
-          {/* The title line, and nothing else on it that can grow. The title box takes ALL the
-              free width and fades at its own right edge, so whatever follows it is laid out at a
-              fixed size against a fixed trailing position and can never be pushed past the row
-              (#664). The message preview used to live here; it repeated the transcript's first line
-              and was the reason the line ran out of room. It stays in `SessionView` for search.
-              On a desktop card this is the LAST line, so the background badge rides here, directly
-              left of the strip (#877); a phone keeps it on line three with the Git state. */}
-          <span className="inbox-row-copy">
-            <span className="inbox-row-title">{session.title}</span>
-            {familyChip}
-            {!threeRow && backgroundWorkBadge}
-            {active && <ActivityStrip activity={activity} now={activityNow} compact className="inbox-row-activity" />}
-          </span>
-          {threeRow && gitLine}
-          <span className="inbox-row-signals">
-            {!lifecycleRepeatsAttention(status, sessionAttentionStatus(session)) && (
-              <StatusBadge meta={status} title={"Activity: " + status.label} ariaLabel={"Activity: " + status.label} />
-            )}
-            <AttentionPills session={session} compact={threeRow} />
-            {extraSnoozedAttention && <SnoozedAttentionBadge reason={extraSnoozedAttention} />}
-            {reminder && <ReminderBadge reminder={reminder} />}
-            {stalled && (
-              <StatusBadge meta={statusMeta("session", "stalled")} ariaLabel="Stalled: No Activity for at Least 10 Minutes" />
-            )}
-            {pinned ? <SessionPinIndicator /> : containsPinned ? <SessionPinIndicator contains /> : null}
-            {unread && <span className="inbox-unread-badge" aria-label="Unread Activity">1</span>}
-            {!threeRow && timeLabel}
-          </span>
+          {/* Two shapes (#2209), each in reading order. Desktop and tablet: the status line (the
+              sender, which gives up width first, the branch, then the badge, the strip, the flags
+              and the time), then the title line, which holds the title and the family chip and
+              nothing else. A phone keeps its three-line card: the sender with the flags, the title,
+              then the status line with the badge, the strip, the branch and the time. The strip is
+              on the status line in both, never on the title line. */}
+          {threeRow ? (
+            <>
+              <span className="inbox-row-line inbox-row-sender-line">{sender}{flags}</span>
+              {titleLine}
+              <span className="inbox-row-line inbox-row-status-line">{badge}{activityStrip}{branch}{time}</span>
+            </>
+          ) : (
+            <>
+              <span className="inbox-row-line inbox-row-status-line">
+                {sender}
+                {branch}
+                <span className="inbox-row-trail">{badge}{activityStrip}{flags}{time}</span>
+              </span>
+              {titleLine}
+            </>
+          )}
         </button>
       </div>
     </div>

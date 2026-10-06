@@ -137,27 +137,18 @@ test("every phone-designated media query uses the shared breakpoint", () => {
 });
 
 /**
- * The Sessions list card's shape is chosen in TWO places — a media query here and
- * `useIsTabletOrSmaller()` in the list — and the two must agree. When they disagree the card renders
- * one shape while the virtualizer positions unmeasured rows with the other shape's estimate, which
- * is a scroll that lands in the wrong place rather than anything visible in a screenshot (#901).
+ * A Sessions row's shape is chosen in ONE place (#2209): the list reads `useIsMobile()` once, marks a
+ * phone's three-line card `.stacked`, and picks the matching virtualization estimate. A media query
+ * that reshaped rows as well could disagree with that answer for a frame, and the virtualizer would
+ * position unmeasured rows with the other shape's estimate (#901). Tablets draw two-line rows.
  */
-test("the stacked-card media query uses the shared tablet breakpoint", () => {
-  // `.inbox-row-lead` is the wrapper the stacked shape dissolves, so the block that dissolves it is
-  // the block that owns the shape.
-  const owning = mediaBlocks(css).filter((block) => block.containsSelector(".inbox-row-lead"));
-  assert.equal(owning.length, 1, "expected exactly one media block to dissolve the card's lead wrapper");
-  assert.deepEqual(owning[0]!.maxWidths, [TABLET_BREAKPOINT_PX],
-    "the stacked card must start at the shared tablet breakpoint, or CSS and " +
-    "useIsTabletOrSmaller() disagree about which shape the list is rendering");
-});
-
-test("the phone breakpoint is not what chooses the card's shape", () => {
-  // #901 moved the stack from the phone breakpoint to the tablet one. If they are ever set to the
-  // same number the distinction is gone and the regression is silent, so assert they differ.
-  assert.notEqual(MOBILE_BREAKPOINT_PX, TABLET_BREAKPOINT_PX,
-    "the card's density threshold and the phone threshold are different decisions");
-  assert.ok(TABLET_BREAKPOINT_PX > MOBILE_BREAKPOINT_PX, "a tablet is wider than a phone");
+test("no media query reshapes a Sessions row; the phone card is the list's .stacked class", () => {
+  const reshaping = mediaBlocks(css).filter((block) =>
+    block.containsSelector(".inbox-row-lead") || block.containsSelector(".inbox-row-copy") ||
+    block.containsSelector(".inbox-row-meta"));
+  assert.deepEqual(reshaping.map((block) => block.maxWidths), []);
+  assert.ok(TABLET_BREAKPOINT_PX > MOBILE_BREAKPOINT_PX, "a tablet is wider than a phone, and draws two-line rows");
+  assert.match(css, /\.inbox-row-shell\.stacked \.inbox-row \{/);
 });
 
 /**

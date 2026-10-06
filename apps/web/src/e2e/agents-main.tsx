@@ -5,7 +5,7 @@ import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { StoreProvider, useStoreActions, useStoreSelector } from "../store.js";
 import { InboxRow } from "../components/InboxRow.js";
-import { useIsTabletOrSmaller } from "../components/useIsMobile.js";
+import { useIsMobile } from "../components/useIsMobile.js";
 import { Board } from "../components/Board.js";
 import { viewPath } from "../navigation.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime } from "../ui-transport.js";
@@ -131,10 +131,10 @@ function NavigationFixture({ session, onSession, online }: {
   const [selected, setSelected] = useState<string | null>(null);
   const primaryRef = useRef<HTMLHeadingElement>(null);
   // This fixture renders one row directly instead of going through InboxList, so it reads the
-  // breakpoint itself — the TABLET one, which is what chooses the card's shape (#901). agents.spec.ts
+  // breakpoint itself — the phone one, which is what chooses the card's shape (#2209). agents.spec.ts
   // runs this page at 390px as well as at 1280px, and a hard-coded shape would draw the wide card on
   // a narrow viewport and quietly stop matching the product.
-  const threeRow = useIsTabletOrSmaller();
+  const threeRow = useIsMobile();
   return <main style={{ padding: 16, maxWidth: 900, margin: "0 auto" }}>
     <h1 ref={primaryRef} tabIndex={-1}>Attention Navigation</h1>
     <output aria-label="Current Route" style={{ display: "block", overflowWrap: "anywhere" }}>{viewPath(view)}</output>

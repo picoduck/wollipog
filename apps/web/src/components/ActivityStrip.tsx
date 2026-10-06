@@ -2,6 +2,9 @@ import type { SessionActivity } from "../activity.js";
 import { memo } from "react";
 import { activitySeries } from "../activity.js";
 
+/** The compact strip's accessible name and tooltip (#2209). */
+export const ACTIVITY_STRIP_LABEL = "Tool activity in the last 30 minutes";
+
 function ActivityStripInner({
   activity,
   now,
@@ -10,6 +13,7 @@ function ActivityStripInner({
 }: {
   activity?: SessionActivity;
   now: number;
+  /** The 48×12px strip on a Sessions row's status line (#2209): a named image with a tooltip. */
   compact?: boolean;
   className?: string;
 }) {
@@ -20,7 +24,10 @@ function ActivityStripInner({
   return (
     <span
       className={`activity-strip${compact ? " compact" : ""}${latestActive ? " live" : ""}${className ? ` ${className}` : ""}`}
-      aria-hidden="true"
+      role={compact ? "img" : undefined}
+      aria-label={compact ? ACTIVITY_STRIP_LABEL : undefined}
+      title={compact ? ACTIVITY_STRIP_LABEL : undefined}
+      aria-hidden={compact ? undefined : "true"}
     >
       {series.map((count, index) => {
         const level = count > 0 ? Math.max(0.2, count / peak) : 0;

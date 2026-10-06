@@ -1282,7 +1282,7 @@ test("comfortable density gives every row more room than compact", async ({ page
 
   // Each of the three, not the total: a scale that grew one dimension and shrank another could
   // still add up, and "more room" has to mean more room everywhere it is claimed.
-  for (const family of ["row", "inbox", "card", "agent", "finding", "ext", "artifact", "boxRunner", "nativeRunner", "workspace"] as const) {
+  for (const family of ["row", "card", "agent", "finding", "ext", "artifact", "boxRunner", "nativeRunner", "workspace"] as const) {
     // A MEANINGFUL step, not "greater than": a subpixel increase satisfied the first version, and
     // a density setting nobody can see is a setting that does not work.
     expect(comfortable[family].height, `a ${family} row must be meaningfully taller`)
@@ -1300,6 +1300,11 @@ test("comfortable density gives every row more room than compact", async ({ page
     expect(comfortable[family].padX, `a ${family} keeps its padding`).toBe(compact[family].padX);
     expect(comfortable[family].padY, `a ${family} keeps its padding`).toBe(compact[family].padY);
   }
+  // A Sessions row is exactly --row-h-2 (#2209), so density moves its height by the token's 4px step,
+  // and it keeps no vertical padding of its own; its sides still gain room from --inbox-row-pad-x.
+  expect(comfortable.inbox.height - compact.inbox.height, "a Sessions row grows by one 4px row step").toBe(4);
+  expect(comfortable.inbox.padX, "a Sessions row must gain horizontal room").toBeGreaterThan(compact.inbox.padX);
+  expect([compact.inbox.padY, comfortable.inbox.padY]).toEqual([0, 0]);
   expect(comfortable.gap, "and the rows must sit further apart").toBeGreaterThan(compact.gap);
   expect(comfortable.gap, "without the list becoming a stack of cards").toBeLessThan(compact.gap * 2.5);
 });
@@ -1335,9 +1340,10 @@ test("compact renders exactly what the merge base rendered", async ({ page }) =>
     // mouse, 44px on touch). A compact row's padding and text are taller than that, so it still
     // renders as the merge base did; only the computed floor moved from `auto`. The Sessions row
     // declares none, and Chromium computes `0px` for it by its box type — read from the browser
-    // rather than chosen, after an earlier version of this expectation guessed and failed.
+    // rather than chosen, after an earlier version of this expectation guessed and failed. Its
+    // height is --row-h-2 since #2209, so it pads only its sides.
     rowMinHeight: "32px",
-    inboxPadding: "9px 11px",
+    inboxPadding: "0px 11px",
     inboxMinHeight: "0px",
     listGap: "6px",
     boxRunnerPadding: "16px 18px",

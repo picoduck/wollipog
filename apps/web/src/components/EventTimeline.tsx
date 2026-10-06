@@ -2042,7 +2042,7 @@ function SubagentSummary({ tool, open, onToggle, onOpen }: {
   const status = subagentStatusMeta(tool);
   const span = useStepSpan(tool.startedAt, tool.lastActivityAt, tool.completedAt, status.pulse === true);
   return (
-    <div className={`tl-agent${open ? " open" : ""}`}>
+    <div className="tl-agent">
       <button
         type="button"
         className="disclosure-trigger tl-agent-toggle"

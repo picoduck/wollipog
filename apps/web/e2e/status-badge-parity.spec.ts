@@ -182,39 +182,41 @@ for (const width of MOBILE_WIDTHS) {
 }
 
 for (const width of [390, 1280] as const) {
-  test(`a Sessions list card sizes background work like its Running pill at ${width}px`, async ({ page }) => {
+  test(`a Sessions list row shows one status whatever its background work, at one height, at ${width}px`, async ({ page }) => {
     await loadInbox(page, width);
-    await applyStatuses(page, { status: "running", backgroundWorkState: "running" });
     const row = page.locator(".inbox-row").filter({ hasText: "Alpha Session" });
-    await expect(row.locator('[aria-label="Activity: Running"]')).toBeVisible();
-    await expect(row.locator(".status[data-group='background-work']")).toBeVisible();
-
-    const card = await row.evaluate((element) => {
-      const read = (node: HTMLElement) => {
-        const style = getComputedStyle(node);
-        return {
-          height: node.getBoundingClientRect().height,
-          fontSize: style.fontSize,
-          fontWeight: style.fontWeight,
-        };
-      };
+    const read = () => row.evaluate((element) => {
+      const badges = [...element.querySelectorAll<HTMLElement>(".status")];
+      const style = badges[0] ? getComputedStyle(badges[0]) : null;
       return {
-        pill: read(element.querySelector<HTMLElement>('[aria-label="Activity: Running"]')!),
-        badge: read(element.querySelector<HTMLElement>(".status[data-group='background-work']")!),
-        cardHeight: element.getBoundingClientRect().height,
+        names: badges.map((badge) => badge.getAttribute("aria-label")),
+        height: badges[0]?.getBoundingClientRect().height ?? 0,
+        fontSize: style?.fontSize,
+        fontWeight: style?.fontWeight,
+        rowHeight: element.getBoundingClientRect().height,
       };
     });
-
-    expect(card.badge.fontSize).toBe(card.pill.fontSize);
-    expect(card.badge.fontWeight).toBe(card.pill.fontWeight);
-    expect(Math.abs(card.badge.height - card.pill.height)).toBeLessThanOrEqual(0.5);
-
-    // #782's contract still holds: sizing the badge did not grow the card.
-    await applyStatuses(page, { status: "running", backgroundWorkState: "resumed" });
-    await expect(row.locator(".status[data-group='background-work']")).toHaveCount(0);
-    const withoutBackgroundWork = await row.evaluate((element) =>
-      element.getBoundingClientRect().height);
-    expect(Math.abs(card.cardHeight - withoutBackgroundWork)).toBeLessThanOrEqual(0.5);
+    // #2209: a running session's background work is not a second badge; the bar's popover lists it.
+    await applyStatuses(page, { status: "running", backgroundWorkState: "running", approval: false });
+    await expect(row.locator(".status")).toHaveCount(1);
+    const running = await read();
+    // The fixture's session has been silent for a while, so its one badge may also say it is stalled.
+    expect(running.names).toHaveLength(1);
+    expect(running.names[0]).toMatch(/^Status: Running(, Stalled)?$/);
+    // While the session awaits its next prompt, the work is the one status, drawn like Running.
+    await applyStatuses(page, { status: "idle", backgroundWorkState: "running", approval: false });
+    await expect(row.getByLabel("Status: Waiting on External Job")).toBeVisible();
+    const waiting = await read();
+    expect(waiting.names).toEqual(["Status: Waiting on External Job"]);
+    expect(waiting.fontSize).toBe(running.fontSize);
+    expect(waiting.fontWeight).toBe(running.fontWeight);
+    expect(Math.abs(waiting.height - running.height)).toBeLessThanOrEqual(0.5);
+    // And the row is the same height either way, or with no status at all.
+    await applyStatuses(page, { status: "idle", backgroundWorkState: "resumed", approval: false });
+    await expect(row.locator(".status")).toHaveCount(0);
+    const idle = await read();
+    expect(Math.abs(waiting.rowHeight - running.rowHeight)).toBeLessThanOrEqual(0.5);
+    expect(Math.abs(idle.rowHeight - running.rowHeight)).toBeLessThanOrEqual(0.5);
   });
 }
 

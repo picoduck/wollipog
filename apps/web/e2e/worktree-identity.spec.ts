@@ -27,9 +27,11 @@ for (const viewport of [
       // The row's own line for this (#664). `origin/main` is the conventional default base, so the
       // row omits it and spends the width on the branch.
       const rowWorktree = row.locator(".inbox-row-git");
-      await expect(rowWorktree.locator(".inbox-row-branch")).toHaveText("fix/session-worktree-identity");
+      await expect(rowWorktree.locator(".inbox-row-branch-name")).toHaveText("fix/session-worktree-identity");
       await expect(rowWorktree.locator(".inbox-row-base")).toHaveCount(0);
-      await expect(rowWorktree.locator(".inbox-row-pr-pill")).toHaveText("Open PR");
+      // #2209: a neutral meta item, its icon and its state word.
+      await expect(rowWorktree.locator(".inbox-row-pr")).toHaveText("Pull Request: Open");
+      await expect(rowWorktree.locator(".inbox-row-pr svg")).toHaveCount(1);
       if (capture) {
         await mkdir(evidenceDir, { recursive: true });
         await page.screenshot({ path: `${evidenceDir}/after-inbox-${viewport.name}-${theme}.png`, fullPage: true });
@@ -53,10 +55,9 @@ for (const viewport of [
       await page.goto("/command-inbox-projects-e2e.html");
       await setTheme(page, theme);
       const row = page.getByRole("row", { name: /Alpha Session/ });
-      // #782: the line stays; it says what it can. A session with no worktree has no branch, and
-      // the card states that instead of dropping to two rows.
-      await expect(row.locator(".inbox-row-git .inbox-row-branch")).toHaveCount(0);
-      await expect(row.locator(".inbox-row-git .inbox-row-branch-state")).toHaveText("No Branch");
+      // #2209: the branch shows only when there is one; no row says "No Branch".
+      await expect(row.locator(".inbox-row-git")).toHaveCount(0);
+      await expect(row).not.toContainText("No Branch");
       if (capture) {
         await mkdir(evidenceDir, { recursive: true });
         await page.screenshot({ path: `${evidenceDir}/before-inbox-${viewport.name}-${theme}.png`, fullPage: true });

@@ -5,7 +5,7 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { SessionView } from "@wollipog/protocol";
 import { recordSessionActivity } from "../activity.js";
-import { InboxList } from "./InboxList.js";
+import { InboxList, inboxRowReadsClock } from "./InboxList.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/inbox" });
@@ -123,7 +123,7 @@ test("inbox list exposes selection semantics and mouse select/expand paths", asy
   assert.equal(rows[0]!.getAttribute("aria-selected"), "true");
   assert.equal(rows[1]!.getAttribute("aria-selected"), "false");
   assert.equal(rows[0]!.classList.contains("unread"), true);
-  assert.equal(rows[0]!.querySelector('[aria-label="Unread Activity"]')?.textContent, "1");
+  assert.equal(rows[0]!.querySelector('[aria-label="Unread Activity"]')?.getAttribute("role"), "img", "unread is a dot (#2076)");
   const pinned = rows[0]!.querySelector('[aria-label="Pinned Session"]');
   assert.ok(pinned);
   assert.ok(pinned.querySelector("svg"), "the pin is a recognizable shape, not the old status dot");
@@ -351,25 +351,42 @@ test("busy rows show activity while stalled approval remains distinct and access
   });
 
   const rows = [...container.querySelectorAll<HTMLElement>('[role="row"]')];
-  assert.equal(container.querySelectorAll(".activity-strip").length, 3, "idle sessions have no activity strip");
+  // #2209: only the running row draws a strip. The stalled row's last activity was 11 minutes ago,
+  // and Awaiting Input alone no longer counts.
+  assert.equal(container.querySelectorAll(".activity-strip").length, 1, "idle and quiet sessions have no activity strip");
+  assert.notEqual(rows[0]!.querySelector(".activity-strip"), null);
   assert.equal(rows[1]!.classList.contains("stalled"), true);
   assert.match(rows[0]!.textContent ?? "", /Running/);
   // One status per entity, and attention outranks lifecycle (docs/design-system.md §11.1): the
-  // approval pill already says the session needs the user, so "Awaiting Input" is not said again.
+  // approval badge already says the session needs the user, so "Awaiting Input" is not said again.
   assert.doesNotMatch(rows[1]!.textContent ?? "", /Awaiting Input/);
-  assert.match(rows[1]!.textContent ?? "", /Approval Required/);
-  assert.match(rows[2]!.textContent ?? "", /Awaiting Prompt/);
-  assert.doesNotMatch(rows[2]!.textContent ?? "", /Diff Ready|Ready for Review/);
-  assert.match(rows[1]!.textContent ?? "", /Approval/);
-  assert.match(rows[1]!.textContent ?? "", /Stalled/);
-  assert.equal(
-    rows[1]!.querySelector('[aria-label="Stalled: No Activity for at Least 10 Minutes"]')?.textContent?.trim(),
-    "Stalled",
-  );
-  assert.match(rows[3]!.textContent ?? "", /Authentication Required/);
-  assert.equal(rows[3]!.querySelector("[aria-label=\"Attention: Authentication Required\"]")?.textContent?.trim(),
+  // Stalled is not a second badge: the one badge turns danger and says so in its name.
+  const stalledBadges = [...rows[1]!.querySelectorAll<HTMLElement>(".status")];
+  assert.equal(stalledBadges.length, 1);
+  assert.equal(stalledBadges[0]!.textContent, "Approval Required");
+  assert.ok(stalledBadges[0]!.classList.contains("t-danger"));
+  assert.equal(stalledBadges[0]!.getAttribute("aria-label"), "Status: Approval Required, Stalled");
+  // An idle row shows no badge at all.
+  assert.equal(rows[2]!.querySelectorAll(".status").length, 0);
+  assert.doesNotMatch(rows[2]!.textContent ?? "", /Awaiting Prompt|Diff Ready|Ready for Review/);
+  assert.equal(rows[3]!.querySelector("[aria-label=\"Status: Authentication Required\"]")?.textContent?.trim(),
     "Authentication Required");
 
   await act(async () => { root.unmount(); });
   container.remove();
+});
+
+test("a row reads the minute clock only while time can change what it shows (#2209)", () => {
+  const now = 1_000 * 60_000 + 30_000;
+  const active = recordSessionActivity(undefined, now - 9 * 60_000);
+  for (const status of ["running", "starting"] as const) {
+    assert.equal(inboxRowReadsClock({ status }, undefined, false, now), true, status);
+  }
+  assert.equal(inboxRowReadsClock({ status: "idle" }, active, false, now), true, "its strip must lapse on time");
+  assert.equal(inboxRowReadsClock({ status: "idle" }, active, false, now + 60_000), false,
+    "the tick on which it lapses flips the reading to 0, which re-renders the row without its strip");
+  assert.equal(inboxRowReadsClock({ status: "input_required" }, undefined, true, now), true, "a stalled row counts its silence");
+  for (const status of ["idle", "queued", "input_required", "completed"] as const) {
+    assert.equal(inboxRowReadsClock({ status }, undefined, false, now), false, `${status} with nothing recent`);
+  }
 });

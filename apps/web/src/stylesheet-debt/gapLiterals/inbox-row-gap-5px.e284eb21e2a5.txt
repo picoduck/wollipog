@@ -1,1 +1,0 @@
-|.inbox-row|gap|5px

@@ -123,8 +123,13 @@ test("the rhythm is driven by tokens, not by literals", () => {
   // broken rather than like that row opted out.
   const row = css.slice(css.indexOf(".ui-row {"), css.indexOf(".ui-row:hover"));
   assert.match(row, /padding: var\(--row-pad-y\) var\(--row-pad-x\)/);
-  const inbox = css.slice(css.indexOf(".inbox-row {"), css.indexOf(".inbox-row:hover"));
-  assert.match(inbox, /padding: var\(--inbox-row-pad-y\) var\(--inbox-row-pad-x\)/);
+  // A two-line Sessions row is --row-h-2 tall, which density moves, and pads only its sides; the
+  // phone's three-line card adds --inbox-row-pad-y above and below (#2209).
+  const inbox = css.slice(css.indexOf("\n.inbox-row {"), css.indexOf(".inbox-row:hover"));
+  assert.match(inbox, /height: var\(--row-h-2\)/);
+  assert.match(inbox, /padding: 0 var\(--inbox-row-pad-x\)/);
+  const card = css.slice(css.indexOf(".inbox-row-shell.stacked .inbox-row {"));
+  assert.match(card.slice(0, card.indexOf("}")), /padding-block: var\(--inbox-row-pad-y\)/);
   // And the families review found the first version bypassed, so the setting is application-wide
   // rather than "works on the two screens I happened to wire".
   for (const [selector, token] of [

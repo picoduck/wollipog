@@ -54,8 +54,8 @@ const REVIEWED: ReadonlyMap<string, string> = new Map([
   [".agent-session-agent-step:focus, .agent-session-results-step:focus { outline: none }", "tabIndex={-1} programmatic focus targets, never a keyboard stop"],
   [":where([tabindex=\"-1\"]:not( a[href], button, input, select, textarea, summary, [role=\"button\"], [role=\"checkbox\"], [role=\"link\"], [role=\"menuitem\"], [role=\"menuitemcheckbox\"], [role=\"menuitemradio\"], [role=\"option\"], [role=\"radio\"], [role=\"switch\"], [role=\"tab\"], [role=\"treeitem\"], [role=\"combobox\"], [role=\"grid\"], [role=\"listbox\"], [role=\"menu\"], [role=\"menubar\"], [role=\"radiogroup\"], [role=\"searchbox\"], [role=\"slider\"], [role=\"spinbutton\"], [role=\"tablist\"], [role=\"textbox\"], [role=\"tree\"], [role=\"treegrid\"] )):focus { outline: none }",
     "tabIndex={-1} programmatic targets only (page title, dialog card, panel headings, scrollers): controls, widget roles and F6 landing targets are excluded or restored after it"],
-  [".inbox-list { outline: none }", "the focused grid is marked on its active row, and forced colors redraws that row's ring as a transparent outline"],
-  [".inbox-list:focus-visible, .detail-scroll:focus-visible { outline: none }", "the grid is marked on its active row (redrawn in forced colors); the transcript scroller is a programmatic focus target, and F6 marks its pane with the zone line"],
+  [".inbox-list { outline: none }", "the focused grid is marked on its active row by an inset --focus outline, which forced colors repaints"],
+  [".inbox-list:focus-visible, .detail-scroll:focus-visible { outline: none }", "the grid is marked on its active row by an inset outline (repainted in forced colors); the transcript scroller is a programmatic focus target, and F6 marks its pane with the zone line"],
   ["@media (pointer: coarse) .inbox-thread-toggle:focus-visible { outline: none }", "the same @media block rings the toggle's inner span with the known-good ring instead"],
   [".usage-chart-hit:focus-visible { outline: none; stroke: var(--accent); stroke-width: 2 }", "an SVG <rect>: the 2px stroke marks focus, and forced colors repaints strokes rather than dropping them"],
   // Not focus indicators.
@@ -67,8 +67,8 @@ const REVIEWED: ReadonlyMap<string, string> = new Map([
 ]);
 
 const ACTIVE_ROW_RING =
-  "@media (forced-colors: active) .inbox-list:focus-visible .inbox-row-shell.selected .inbox-row " +
-  "{ outline: 2px solid transparent; outline-offset: 1px }";
+  ".inbox-list:focus-visible .inbox-row-shell[aria-selected=\"true\"] .inbox-row " +
+  "{ outline: var(--focus-width) solid var(--focus); outline-offset: calc(-1 * var(--focus-width)) }";
 
 /**
  * The rules some REVIEWED reasons point to instead of the entry's own block. They set no outline of

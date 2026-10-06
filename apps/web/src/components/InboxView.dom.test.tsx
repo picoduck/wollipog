@@ -867,8 +867,8 @@ test("reminder membership stays exclusive while scoped attention reconciles in S
   ]);
   assert.match(container.textContent ?? "", /Background Work Lost/);
   assert.match(container.textContent ?? "", /Result Pending/);
-  assert.ok(container.querySelector('[aria-label="Attention: Background Work Lost"]'));
-  const watchdogPill = container.querySelector('[aria-label^="Background Work: Result Pending."]');
+  assert.ok(container.querySelector('.inbox-row [aria-label="Status: Background Work Lost"]'));
+  const watchdogPill = container.querySelector('.inbox-row [aria-label="Status: Result Pending"]');
   assert.ok(watchdogPill);
   // A result on its way back reads as working, not as something that needs the user.
   assert.ok(watchdogPill.classList.contains("t-info"));
@@ -936,7 +936,8 @@ test("InboxView keeps mobile browsing order stable before and through a touch", 
   });
   await act(async () => { socket.push(snapshot([session("A", 30), session("B", 20)])); });
   assert.deepEqual(rowTitles(container), ["Session A", "Session B"]);
-  assert.match(container.textContent ?? "", /Awaiting Prompt/);
+  // An idle row shows no badge (#2209), and never the retired Diff Ready words.
+  assert.doesNotMatch(container.textContent ?? "", /Awaiting Prompt/);
   assert.doesNotMatch(container.textContent ?? "", /Diff Ready|Ready for Review/);
 
   const grid = container.querySelector<HTMLElement>(".inbox-list")!;

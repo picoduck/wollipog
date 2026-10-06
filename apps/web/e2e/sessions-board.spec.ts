@@ -46,7 +46,7 @@ test("Inbox rows name their pending request and F2 opens the session on it witho
   const row = page.locator(".inbox-row-shell", { hasText: "Approval Session" });
   // No disclosure under the card (#896): the pill says what is pending, and F2 goes to it.
   await expect(row.locator(".attention-requests")).toHaveCount(0);
-  await expect(row.locator(".status.t-warning")).toHaveAttribute("aria-label", "Attention: Approval Required");
+  await expect(row.locator(".status.t-warning")).toHaveAttribute("aria-label", "Status: Approval Required");
   await row.locator(".inbox-row").click();
   const grid = page.getByRole("grid", { name: "Sessions", exact: true });
   await grid.focus();
@@ -122,8 +122,9 @@ test("pending snooze excludes attention from Active across list, board, search, 
   await snoozed.click();
   const row = page.locator(".inbox-row-shell", { hasText: "Snoozed Session" });
   await expect(row).toBeVisible();
-  await expect(row.locator('[aria-label="Attention: Approval Required"]')).toBeVisible();
-  await expect(row.locator('[aria-label="Reminder: Snoozed"]')).toBeVisible();
+  await expect(row.locator('[aria-label^="Status: Approval Required"]')).toBeVisible();
+  // #2209: a snoozed row says when it returns in its time cell, behind an alarm clock.
+  await expect(row.locator(".inbox-row-time.snoozed svg")).toBeVisible();
   await expect(snoozed).toHaveAttribute("aria-pressed", "true");
 
   await page.getByRole("radio", { name: "Board" }).click();
@@ -232,9 +233,10 @@ test("the Inbox footer centers readable counts on phones and keeps shortcuts tra
 test("a returned session explains its snooze and offers state-aware actions", async ({ page }) => {
   await openHarness(page);
   const row = page.locator(".inbox-row-shell", { hasText: "Review Session" });
-  const reminder = row.locator(".status[aria-label^=\"Reminder:\"]");
+  // A fired reminder is the row's one status when nothing outranks it (#2209), its instant in the tooltip.
+  const reminder = row.locator(".status[aria-label=\"Status: Returned from Snooze\"]");
   await expect(reminder).toHaveText("Returned from Snooze");
-  await expect(reminder).toHaveAttribute("aria-label", /Snooze ended/);
+  await expect(reminder).toHaveAttribute("title", /Snooze ended/);
   await expect(reminder).not.toContainText("Overdue");
 
   await row.click({ button: "right" });

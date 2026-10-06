@@ -1,6 +1,6 @@
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, campaignNeedsEpicScope } from "./campaign-issue-scope.js";
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
-import { normalizeCampaignIssueScopeSnapshot, type CampaignIssueScopeRequest, type CampaignIssueScopeView } from "@wollipog/protocol";
+import { normalizeCampaignIssueScopeSnapshot, titleFromPrompt, type CampaignIssueScopeRequest, type CampaignIssueScopeView } from "@wollipog/protocol";
 import { normalizeIssueClosureSnapshot, issueClosureActiveChildren } from "./github-issue-closure.js";
 import { observeReconciliationRevision, normalizeReconciledSnapshot, reconciliationDeltaUsd, reconciliationRevision } from "./claude-cost-reconciliation.js";
 import type { GithubIssueClosureRequest, GithubIssueClosureResult } from "@wollipog/protocol";
@@ -1245,13 +1245,6 @@ export function launchForRestart(db: ControlPlaneDb, session: SessionView): Agen
 
 /** Placeholder title for a session created without a first prompt (named by its first message). */
 const UNTITLED = "Untitled session";
-
-/** Derive a short session title from a prompt: first line, whitespace-collapsed, truncated. */
-function titleFromPrompt(text: string): string {
-  const firstLine = text.split("\n").find((l) => l.trim()) ?? "";
-  const clean = firstLine.replace(/\s+/g, " ").trim();
-  return clean.length > 80 ? clean.slice(0, 79).trimEnd() + "…" : clean;
-}
 
 /** Persist capability-dependent harness defaults at creation time so the selector, stored
  * session, and launch argv all describe the same mode. Older sessions with no stored mode keep
@@ -4167,7 +4160,7 @@ export class SessionsService {
       const campaign = this.db.campaignProjection(campaignController.id);
       if (campaign) text = this.campaignAssignment(campaignController, campaign, text);
     }
-    const title = snapshotSpec?.title ?? (req.title?.trim() || requestedText.slice(0, 60) || UNTITLED).slice(0, 120);
+    const title = snapshotSpec?.title ?? (req.title?.trim() || titleFromPrompt(requestedText) || UNTITLED).slice(0, 120);
     const titleSource = snapshotSpec?.titleSource ?? (req.title?.trim() ? "user" as const : "generated" as const);
     // Cloned so the clamp below never mutates the caller's request object.
     const config = { ...requestedConfig };
@@ -10976,7 +10969,7 @@ export class SessionsService {
 
     const now = Date.now();
     const runId = shortId("r_");
-    const title = (req.title?.trim() || req.task.trim().slice(0, 60) || definition.name).slice(0, 120);
+    const title = (req.title?.trim() || titleFromPrompt(req.task) || definition.name).slice(0, 120);
     const titleSource = req.title?.trim() ? "user" as const : "generated" as const;
     this.db.createRun({
       id: runId,
@@ -11146,7 +11139,7 @@ export class SessionsService {
     }
 
     const now = Date.now();
-    const title = (req.title?.trim() || req.task.trim().slice(0, 60) || definition.name).slice(0, 120);
+    const title = (req.title?.trim() || titleFromPrompt(req.task) || definition.name).slice(0, 120);
     const titleSource = req.title?.trim() ? "user" as const : "generated" as const;
     const runMaxCalls = req.maxToolCalls != null ? Math.floor(req.maxToolCalls) : 0;
     const runCheckpoints = normalizeCostCheckpoints(req.config?.costCheckpointsUsd);
@@ -12023,7 +12016,7 @@ export class SessionsService {
 
     const now = Date.now();
     const runId = shortId("r_");
-    const title = (req.title?.trim() || req.task.trim().slice(0, 60) || "Multi-agent run").slice(0, 120);
+    const title = (req.title?.trim() || titleFromPrompt(req.task) || "Multi-agent run").slice(0, 120);
     const titleSource = req.title?.trim() ? "user" as const : "generated" as const;
     this.db.createRun({
       id: runId,

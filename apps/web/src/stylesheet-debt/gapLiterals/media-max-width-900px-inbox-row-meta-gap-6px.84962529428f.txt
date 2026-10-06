@@ -1,1 +1,0 @@
-@media (max-width: 900px)|.inbox-row-meta|gap|6px

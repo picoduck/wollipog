@@ -1,1 +1,0 @@
-|.activity-strip.compact|gap|.5px

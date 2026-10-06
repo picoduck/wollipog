@@ -33,7 +33,6 @@ export const TEXT_GLYPHS = ["×", "✕", "✓", "▸", "▾", "↻", "←", "→
 // named by area and gain a number when filed.
 const COMPOSER = "Composer epic (not yet filed)";
 const SESSION_FRAME = "Session Page Frame and Header epic (not yet filed)";
-const SESSIONS_LIST = "Sessions List and Board epic (not yet filed)";
 const REVIEW = "Review Panel epic (not yet filed)";
 const SIDE_PANEL = "Side Panel epic (not yet filed)";
 const APPROVALS = "Approvals, Questions and Governance epic (#2226)";
@@ -52,7 +51,6 @@ const RECORDED: readonly (readonly [string, string, string, string])[] = [
   ["components/GitDiffViewer.tsx", "▸", "▸", REVIEW],
   ["components/GitDiffViewer.tsx", "→", "→", REVIEW],
   ["components/GitDiffViewer.tsx", "✓", "Staged ✓", REVIEW],
-  ["components/InboxRow.tsx", "←", "←", SESSIONS_LIST],
   ["components/OnboardRunnerDialog.tsx", "✓", "✓", CONNECTIONS],
   ["components/OnboardRunnerDialog.tsx", "△", "△", CONNECTIONS],
   ["components/OnboardRunnerDialog.tsx", "✓", "✓", CONNECTIONS],

@@ -1,1 +1,0 @@
-|.inbox-row-sender|gap|7px

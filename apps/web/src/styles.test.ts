@@ -204,15 +204,39 @@ test("the global focus ring is neutral, zero-specificity and absent on programma
 test("no focus ring anywhere is drawn in the accent colour", () => {
   // Teal marks selection. A component that restates the ring restates it neutral; the components
   // that draw focus another way (a field's border, the composer card) are not outlines.
-  // One exception, until selection moves to the accent bar (§5.2): the selected Sessions row is a
-  // --text ring today, so a neutral focus ring on that row would be indistinguishable from it.
-  const SELECTION_IS_NEUTRAL = new Set([".inbox-row:focus-visible"]);
   const accentRings = allDeclarations(css).filter((declaration) =>
-    /:focus/.test(declaration.selector) && /^outline/.test(declaration.prop) && /--accent\b/.test(declaration.value)
-    && !SELECTION_IS_NEUTRAL.has(declaration.selector));
+    /:focus/.test(declaration.selector) && /^outline/.test(declaration.prop) && /--accent\b/.test(declaration.value));
   assert.deepEqual(accentRings.map((declaration) => `${declaration.line}: ${declaration.selector}`), []);
-  assert.match(soleRuleBody(".inbox-row-shell.selected .inbox-row"), /border-color: var\(--text\);/,
-    "the exception exists only while the selected row is drawn in --text; remove it when that changes");
+});
+
+/**
+ * Selected, unread and focused Sessions rows (#2076, #2209, docs/design-system.md §5.2): selection is
+ * the selected fill and a leading accent bar, unread is a dot and a heavier title with no accent fill,
+ * border or bar, and the focused grid draws one inset neutral ring on its active row.
+ */
+test("a Sessions row's selection, unread state and focus are three different treatments", () => {
+  assert.match(soleRuleBody(".inbox-row-shell.selected .inbox-row"), /^background: var\(--surface-selected\);$/);
+  const bar = soleRuleBody(".inbox-row-shell.selected .inbox-row-primary-cell::after");
+  assert.match(bar, /background: var\(--accent\);/);
+  assert.match(bar, /width: var\(--space-0-5\);/, "a 2px bar");
+  assert.match(bar, /left: 0;/, "on the leading edge");
+  const ring = soleRuleBody('.inbox-list:focus-visible .inbox-row-shell[aria-selected="true"] .inbox-row');
+  assert.match(ring, /outline: var\(--focus-width\) solid var\(--focus\);/);
+  assert.match(ring, /outline-offset: calc\(-1 \* var\(--focus-width\)\);/, "inset");
+  assert.match(soleRuleBody(".inbox-row-shell.unread .inbox-row-title"), /^font-weight: 600;$/);
+  assert.match(soleRuleBody(".inbox-unread-dot"), /background: var\(--blue\);/);
+  // Nothing about unread touches the row's box, and nothing draws the old --text selection ring.
+  for (const declaration of allDeclarations(css)) {
+    if (/\.inbox-row-shell\.unread/.test(declaration.selector)) {
+      assert.doesNotMatch(declaration.prop, /^(background|border|box-shadow|outline)/, declaration.selector);
+    }
+    if (/\.inbox-row/.test(declaration.selector)) {
+      assert.doesNotMatch(declaration.value, /--accent\b.*inset|inset.*--accent\b|linear-gradient/, declaration.selector);
+      assert.doesNotMatch(`${declaration.prop}: ${declaration.value}`, /^(box-shadow|border-color): .*var\(--text\)/,
+        declaration.selector);
+    }
+  }
+  assert.doesNotMatch(css, /\.inbox-unread-badge\b/);
 });
 
 /**

@@ -1,1 +1,0 @@
-|.inbox-row-pr-pill|padding|6px

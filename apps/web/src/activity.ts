@@ -146,6 +146,23 @@ export function activitySeries(activity: SessionActivity | undefined, now: numbe
   });
 }
 
+/** How many of the newest one-minute buckets count as recent tool activity (#2209). */
+export const RECENT_ACTIVITY_BUCKETS = 10;
+
+/** Tool activity in the last ten minutes: a non-zero count in the newest ten buckets of `activitySeries()`. */
+export function hasRecentActivity(activity: SessionActivity | undefined, now: number): boolean {
+  return activitySeries(activity, now).slice(-RECENT_ACTIVITY_BUCKETS).some((count) => count > 0);
+}
+
+/**
+ * Whether a Sessions row or Board card draws the activity strip (#2209): while the session is Running
+ * or Starting, or had tool activity in the last ten minutes. Every other session is idle and draws
+ * none. Unlike `isHeartbeatBusy()`, Queued and Awaiting Input do not count on their own.
+ */
+export function showsActivityStrip(status: SessionStatus, activity: SessionActivity | undefined, now: number): boolean {
+  return status === "running" || status === "starting" || hasRecentActivity(activity, now);
+}
+
 export function isSessionStalled(
   session: Pick<SessionView, "status" | "lastEventAt" | "updatedAt">,
   activity: SessionActivity | undefined,

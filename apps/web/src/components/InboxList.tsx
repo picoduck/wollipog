@@ -1,38 +1,53 @@
-import { forwardRef, useCallback, useRef, type MutableRefObject } from "react";
+import { forwardRef, useCallback, useMemo, useRef, type MutableRefObject } from "react";
 import type { SessionReminderView, SessionView } from "@wollipog/protocol";
-import { isHeartbeatBusy, type SessionActivity } from "../activity.js";
+import { hasRecentActivity, type SessionActivity } from "../activity.js";
 import { encodeResourceId } from "../navigation.js";
 import type { InboxThreadPosition } from "../inbox.js";
 import { useStoreSelector } from "../store.js";
 import { State, useSnapshotState } from "./State.js";
 import { InboxRow, type InboxRowProps } from "./InboxRow.js";
 import { MeasuredVirtualList } from "./MeasuredVirtualList.js";
-import { useIsTabletOrSmaller } from "./useIsMobile.js";
+import { useIsMobile } from "./useIsMobile.js";
 
 /**
- * A collapsed inbox row, measured. TanStack corrects from the real height on first paint, so this
- * only has to be close enough that the initial scrollbar is not absurd — and, since InboxView
- * restores an absolute `scrollTop`, close enough that a restore against unmeasured rows lands in
- * the same reading neighbourhood.
- *
- * ONE number PER SHAPE, not per row. #782 made every card the same height at a given width, and
- * #877 gave the desktop a second, shorter shape; within either, every card measures the same, so
- * nothing here has to guess from a session's contents the way #664's per-row predicate did.
- * Both numbers are the midpoint of the two densities, re-measured on the virtualizer's own row
- * wrapper — margins included, which is what it positions from. A three-row card is 94px compact and
- * 100px comfortable; a two-row desktop card is 73px and 79px. The 85 that stood here was a stale
- * figure from an earlier card, low enough that a long inbox's scrollbar and any restore against
- * unmeasured rows sat a row or so short of the truth.
+ * One virtualization estimate per row shape (#2209), each that shape's whole height, so a restored
+ * scroll position lands where it was even against rows that have not been measured yet. The two-line
+ * desktop and tablet row is exactly `--row-h-2`, read from the stylesheet because density and a coarse
+ * pointer change it. The phone's three-line card is the midpoint of its two densities, measured on the
+ * virtualizer's own row wrapper, margins included, which is what it positions from: 96px compact and
+ * 102px comfortable.
  *
  * The breakpoint change itself is safe for the cached measurements: a viewport width change opens a
  * new measurement epoch in MeasuredVirtualList, which invalidates offscreen sizes and re-seeds the
  * mounted rows from the DOM while holding the reader's logical anchor.
  */
-const INBOX_ROW_ESTIMATE_THREE_ROW = 97;
-const INBOX_ROW_ESTIMATE_TWO_ROW = 76;
+const INBOX_ROW_ESTIMATE_THREE_ROW = 99;
+/** `--row-h-2` at the default density on a fine pointer (docs/design-system.md §2.8). */
+const ROW_H_2_FALLBACK = 56;
 
 const estimateThreeRowInboxRow = () => INBOX_ROW_ESTIMATE_THREE_ROW;
-const estimateTwoRowInboxRow = () => INBOX_ROW_ESTIMATE_TWO_ROW;
+
+/** The current `--row-h-2`, in pixels. */
+function twoLineRowHeight(): number {
+  if (typeof window === "undefined" || typeof window.getComputedStyle !== "function") return ROW_H_2_FALLBACK;
+  const value = Number.parseFloat(window.getComputedStyle(document.documentElement).getPropertyValue("--row-h-2"));
+  return Number.isFinite(value) && value > 0 ? value : ROW_H_2_FALLBACK;
+}
+
+/**
+ * Whether a row reads the row clock (#2209). Running and Starting rows draw the strip; a row that
+ * shows it only for recent activity must notice when its ten minutes pass; a stalled row says how long
+ * it has been silent. Every other row reads 0, so the minute tick does not re-render it; the tick on
+ * which recent activity lapses flips the reading to 0, and that re-render is what drops the strip.
+ */
+export function inboxRowReadsClock(
+  session: Pick<SessionView, "status">,
+  activity: SessionActivity | undefined,
+  stalled: boolean,
+  now: number,
+): boolean {
+  return session.status === "running" || session.status === "starting" || stalled || hasRecentActivity(activity, now);
+}
 
 export interface InboxListEntry {
   session: SessionView;
@@ -53,7 +68,10 @@ export interface InboxEmptyState {
 
 function ConnectedInboxRow(props: Omit<InboxRowProps, "activity" | "activityNow">) {
   const activity = useStoreSelector((state) => state.activity.get(props.session.id));
-  const activityNow = useStoreSelector((state) => isHeartbeatBusy(props.session.status) ? state.activityNow : 0);
+  const activityNow = useStoreSelector((state) =>
+    inboxRowReadsClock(props.session, state.activity.get(props.session.id), props.stalled, state.activityNow)
+      ? state.activityNow
+      : 0);
   return <InboxRow {...props} activity={activity} activityNow={activityNow} />;
 }
 
@@ -104,10 +122,15 @@ export const InboxList = forwardRef<HTMLDivElement, {
   onSessionMenu,
 }, ref) {
   // The breakpoint, read ONCE for the whole list rather than once per mounted card. The same answer
-  // decides the cards' shape and the estimate the virtualizer positions unmeasured rows with, and
-  // those two must never disagree: a list estimating 97px for rows that render at 73px puts a
-  // restored scroll position most of a card out per row it has not measured yet.
-  const threeRow = useIsTabletOrSmaller();
+  // decides the rows' shape and the estimate the virtualizer positions unmeasured rows with, and
+  // those two must never disagree: a list estimating 97px for rows that render at 56px puts a
+  // restored scroll position most of a card out per row it has not measured yet. Only a phone keeps
+  // the three-line card; desktops and tablets draw two-line rows (#2209).
+  const threeRow = useIsMobile();
+  const estimateTwoRowInboxRow = useMemo(() => {
+    const height = twoLineRowHeight();
+    return () => height;
+  }, [threeRow]);
   // The scroll container is BOTH the forwarded ref (InboxView restores scrollTop through it) and
   // the virtualizer's viewport.
   //

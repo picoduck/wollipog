@@ -11687,8 +11687,26 @@ test("onSessionEvent truncates a long first message into a title", () => {
 
   svc.onSessionEvent(id, { kind: "user_message", text: "x".repeat(200) });
   const title = db.getSession(id)!.title;
-  assert.ok(title.length <= 80, `title should be truncated, got length ${title.length}`);
+  assert.ok(title.length <= 120, `title should be truncated, got length ${title.length}`);
   assert.ok(title.endsWith("…"));
+});
+
+test("createSession titles a long multi-line first prompt with its first line, cut at a word (#2209)", () => {
+  const { hub, svc, db } = makeHarness();
+  const firstLine = "Investigate why the deploy pipeline stalls after the staging smoke tests pass and the " +
+    "canary rollout waits on a health check that never reports";
+  const prompt = `\n${firstLine}\nRequirements:\n- keep the existing retry budget`;
+  assert.ok(prompt.length >= 180 && prompt.length <= 200 && prompt.trim().split("\n").length === 3);
+
+  const res = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, prompt });
+  assert.ok(res.ok, res.error);
+  const title = db.getSession(res.data!.id)!.title;
+  assert.equal(title, "Investigate why the deploy pipeline stalls after the staging smoke tests pass and the " +
+    "canary rollout waits on a health…");
+  assert.ok(title.length <= 120 && !title.includes("\n"));
+  assert.equal(db.getSession(res.data!.id)!.titleSource, "generated");
+  assert.equal(hub.sentOfType("start_session").at(-1)?.spec.title, title);
+  assert.equal(hub.sentOfType("start_session").at(-1)?.initialPrompt, prompt.trim(), "the prompt keeps every line");
 });
 
 /* -------------------------------------------------------------------------- */

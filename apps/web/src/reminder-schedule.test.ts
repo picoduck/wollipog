@@ -3,10 +3,33 @@ import test from "node:test";
 import type { SessionReminderView } from "@wollipog/protocol";
 import {
   exactReminderSchedule,
+  formatReminderReturn,
   parseReminderExpression,
   storedReminderSchedule,
   suggestReminderExpressions,
 } from "./reminder-schedule.js";
+
+test("a snoozed row's return time is the time today, the weekday this week, and the date after (#2209)", () => {
+  // Tuesday 6 October 2026, 10:00 in New York.
+  const now = Date.UTC(2026, 9, 6, 14, 0);
+  const timeZone = "America/New_York";
+  // The host's locale writes the words; the test checks which form each instant gets.
+  const format = (instant: number, options: Intl.DateTimeFormatOptions) =>
+    new Intl.DateTimeFormat(undefined, { ...options, timeZone }).format(new Date(instant));
+  const time = { hour: "numeric", minute: "2-digit" } as const;
+  const today = Date.UTC(2026, 9, 6, 19, 0);
+  const thursday = Date.UTC(2026, 9, 8, 13, 0);
+  const later = Date.UTC(2026, 9, 20, 13, 0);
+  assert.equal(formatReminderReturn(today, timeZone, now), format(today, time));
+  assert.equal(formatReminderReturn(thursday, timeZone, now), format(thursday, { weekday: "short", ...time }));
+  assert.equal(formatReminderReturn(later, timeZone, now), format(later, { month: "short", day: "numeric" }));
+  // The day is the reminder's own: 23:30 in New York on the 6th is already the 7th in UTC.
+  const lateToday = Date.UTC(2026, 9, 7, 3, 30);
+  assert.equal(formatReminderReturn(lateToday, timeZone, now), format(lateToday, time));
+  if (new Intl.DateTimeFormat().resolvedOptions().locale === "en-US") {
+    assert.equal(formatReminderReturn(thursday, timeZone, now).replace(/ /g, " "), "Thu 9:00 AM");
+  }
+});
 
 function withTimeZone<T>(timeZone: string, run: () => T): T {
   const previous = process.env.TZ;

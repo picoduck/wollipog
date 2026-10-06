@@ -1054,7 +1054,8 @@ test("Inbox titles keep one reading axis across row signals, widths, and densiti
       const geometry = await page.locator(".inbox-row").evaluateAll((rows) => rows.map((row) => {
         const title = row.querySelector<HTMLElement>(".inbox-row-title")!;
         const sender = row.querySelector<HTMLElement>(".inbox-row-sender")!;
-        const signals = row.querySelector<HTMLElement>(".inbox-row-signals")!;
+        // The status line's trailing cluster: the one badge, the strip, the flags and the time (#2209).
+        const signals = row.querySelector<HTMLElement>(".inbox-row-trail")!;
         return {
           titleX: title.getBoundingClientRect().left,
           senderRight: sender.getBoundingClientRect().right,

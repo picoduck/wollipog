@@ -862,7 +862,7 @@ may contain rows, never another Surface. Inside dialogs, Surfaces are allowed on
 | Single-line | `--row-h` 40 | `[16 icon] Title ........ [meta] [badge] [action]` |
 | Two-line | `--row-h-2` 56 | Line 1: title (`--type-body-strong`, 1 line, ellipsis) + trailing status badge or time. Line 2: meta or description (`--type-small`, `--text-dim`, **1 line, ellipsis**). |
 | Dense (trees, file lists) | `--row-h-dense` 32 | `.row.dense`: `[16 icon] Name ........ [meta]`, one line, `--type-body`. **Fine pointers only**: on coarse pointers the token is 44px, so a touch tree is never denser than a menu. Only for trees and file lists, where 40px rows would show too few items (the Files tree shows 16 at 40px). Never for lists of entities, except a confirmation's read-only list of what it affects (§7.4). |
-| Card row (sessions list) | per the settled sessions list design (#882) | Two rows on desktop (exactly `--row-h-2`), three on phone. Unchanged by this spec except tokens. In the stacked layout, when the list is 880px or wider, the same two lines add a snippet after the title and move status, time, activity and flags into fixed trailing columns (§6.3). |
+| Card row (sessions list) | `--row-h-2` on desktop and tablet; the three-line card on phone | **Desktop and tablet (#2209):** two lines, exactly `--row-h-2` whatever the row carries, with no gap between rows. Line 1, the status line: agent icon and "Agent · Project" (gives up width first), the branch only when there is one and the list is 600px or wider (`BranchIcon`, its base as "from <ref>", a pull request as `PullRequestIcon` and its state word), then trailing: the one status badge with a neutral "+N" (§11.1), the activity strip, the flags (pin, unread dot) and the time (tabular, `--text-faint`; a snoozed row shows its return time after an alarm clock instead). Line 2, the title line: the title (`--type-body-strong`, one line, ellipsis, `sessionDisplayTitle()`) and the family chip, nothing else. **Phone:** the three-line card (#882, #934): the sender with the flags, the title, then the status line with the badge, the strip, the branch and the time. **Activity strip:** 48×12px, bars in `--blue`, `role="img"` named "Tool activity in the last 30 minutes", only while the session is Running or Starting or had tool activity in the last 10 minutes; always on the status line after the badge, never on the title line, and idle rows reserve no space for it. **Selected:** `--surface-selected` and the 2px `--accent` leading bar. **Unread:** an 8px `--blue` dot in the flags and a 600-weight title, never a fill, border or bar; a row that is both shows both. **Focus:** while the list has keyboard focus, its active row shows one inset `--focus` ring. Phones show no selected row. In the stacked layout, when the list is 880px or wider, the same two lines add a snippet after the title and move status, time, activity and flags into fixed trailing columns (§6.3). |
 
 Rules
 
@@ -1488,8 +1488,11 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 - Inline variant `.status.inline`: dot + label with no pill, for dense rows and tables.
 - Label is Title Case from one vocabulary (§11.2), never raw enum text, never uppercased by CSS.
 - **One status badge per entity per surface.** Attention outranks lifecycle: if the session needs the
-  user, show only the attention badge(s) (one pill per attention kind, as in the settled sessions
-  list design), not "Awaiting Input" as well.
+  user, show only the attention badge, not "Awaiting Input" as well. A Sessions row (#2209) shows the
+  top attention kind with a neutral "+N" for the others (listed in its tooltip), on the session bar's
+  ranking (`sessionRowStatus()` over `sessionStatusSummary()`), and no badge for Awaiting Prompt.
+  Stalled is not a second badge: the row's badge takes the danger tone and its tooltip says how long
+  the session has been silent.
 
 ### 11.2 One Vocabulary and Tone Table
 

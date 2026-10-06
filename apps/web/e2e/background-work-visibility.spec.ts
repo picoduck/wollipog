@@ -17,16 +17,12 @@ async function expectButtonUnclipped(control: Locator) {
   })).toBe(true);
 }
 
-async function expectUnclipped(badge: Locator) {
+/** A Sessions row's one status badge (#2209): its whole label shows, inside every clipping ancestor. */
+async function expectRowBadgeWhole(badge: Locator) {
   await expect(badge).toBeVisible();
   expect(await badge.evaluate((element) => {
     const box = element.getBoundingClientRect();
-    const range = document.createRange();
-    const visibleLabels = [...element.querySelectorAll<HTMLElement>('span[aria-hidden="true"]')]
-      .filter((candidate) => candidate.getClientRects().length > 0);
-    range.selectNodeContents(visibleLabels[visibleLabels.length - 1]!);
-    const text = range.getBoundingClientRect();
-    let contained = text.left >= box.left && text.right <= box.right + 0.5;
+    let contained = element.scrollWidth <= element.clientWidth + 0.5;
     for (let parent = element.parentElement; parent; parent = parent.parentElement) {
       if (/hidden|clip|auto|scroll/.test(getComputedStyle(parent).overflowX)) {
         const bounds = parent.getBoundingClientRect();
@@ -60,17 +56,32 @@ for (const width of [320, 390, 700, 1280]) {
       });
     });
     const row = page.locator(".inbox-row").filter({ hasText: "Alpha Session" });
-    await expect(row.getByLabel("Activity: Awaiting Prompt")).toBeVisible();
-    await expect(row.getByLabel("Attention: Approval Required")).toBeVisible();
-    await expectUnclipped(row.locator(".status[data-group='background-work']"));
-    await expect(row).toHaveAccessibleName(/Waiting on External Job/);
-    for (const state of ["continuation_pending", "orphaned", "resumed", "running"] as const) {
+    // #2209: a row shows one status on the bar's ranking. The approval needs the person, so it is the
+    // badge, and the background work is left to the Session Status popover.
+    await expect(row.locator(".status")).toHaveCount(1);
+    await expectRowBadgeWhole(row.getByLabel("Status: Approval Required"));
+    // Without the request, the background work is the row's one status, whole at every width.
+    await page.evaluate(() => {
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", { pendingApproval: null });
+    });
+    for (const [state, label] of [
+      ["continuation_pending", "Continuation Pending"],
+      ["orphaned", "Background Work Lost"],
+      ["resumed", null],
+      ["running", "Waiting on External Job"],
+    ] as const) {
       await page.evaluate((backgroundWorkState) => {
         window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", { backgroundWorkState });
       }, state);
-      if (state === "resumed") await expect(row.locator(".status[data-group='background-work']")).toHaveCount(0);
-      else await expectUnclipped(row.locator(".status[data-group='background-work']"));
+      if (label === null) await expect(row.locator(".status")).toHaveCount(0);
+      else await expectRowBadgeWhole(row.getByLabel(`Status: ${label}`));
     }
+    await expect(row).toHaveAccessibleName(/Waiting on External Job/);
+    await page.evaluate(() => {
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
+        pendingApproval: { kind: "permission", requestId: "background-approval", title: "Review external work", options: [] },
+      });
+    });
     await row.click();
     const expand = page.getByRole("button", { name: "Expand Session" });
     if (await expand.isVisible()) await expand.click();

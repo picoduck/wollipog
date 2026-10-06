@@ -18,14 +18,9 @@ export const COMPACT_BREAKPOINT_PX = 1100;
 export const WIDE_BREAKPOINT_PX = 1440;
 
 /**
- * The Sessions list card's density threshold (#901). The card stacks into three rows at or
- * below this width (#901): above the phone breakpoint but below this one there is not enough line to
- * hold the agent, the project, the Git identity, and the signals column at once, and the Git
- * identity is what gives way.
- *
- * Distinct from MOBILE_BREAKPOINT_PX on purpose. This is a layout-density threshold, not a claim
- * about the device — everything keyed on "this is a phone" still uses 760px. It is not a tier
- * either: it stays at 900px inside the compact tier until the Sessions row redesign replaces it.
+ * A layout-density threshold inside the compact tier, not a claim about the device: everything keyed
+ * on "this is a phone" uses 760px. The Shortcut Reference drops to one column at or below it. Sessions
+ * rows no longer use it: tablets draw the two-line row and only phones the three-line card (#2209).
  */
 export const TABLET_BREAKPOINT_PX = 900;
 
@@ -72,11 +67,7 @@ export function useIsCompact(): boolean {
   return useMediaQuery(COMPACT_QUERY);
 }
 
-/**
- * Live flag for "at or below the tablet breakpoint" — inclusive, matching `max-width: 900px` in the
- * stylesheet. The Sessions list reads this to choose its card shape and the matching virtualization
- * estimate; the two must never disagree, so both come from this one answer.
- */
+/** Live flag for "at or below the tablet breakpoint" — inclusive, matching `max-width: 900px`. */
 export function useIsTabletOrSmaller(): boolean {
   return useMediaQuery(TABLET_QUERY);
 }
