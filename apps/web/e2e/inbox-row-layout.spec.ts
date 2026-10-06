@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import { MOBILE_BREAKPOINT_PX } from "../src/components/useIsMobile.js";
+import { pinWidestFace } from "./font-geometry.js";
 import { expectGeometry, expectGeometryPoll } from "./geometry-margins.js";
 
 /**
@@ -392,6 +393,8 @@ test.describe("with a row in every status", () => {
       await page.setViewportSize({ width, height: 844 });
       await page.goto(ROWS);
       await expect(page.locator(".inbox-row")).toHaveCount(15);
+      // In the widest face CI renders, so a line that only just fits on one machine cannot clip on another.
+      await pinWidestFace(page, page.locator(".inbox-row"));
       const lines = await page.locator(".inbox-row-status-line").evaluateAll((nodes) => nodes.map((line) => {
         const box = line.getBoundingClientRect();
         const inside = (selector: string) => {

@@ -57,7 +57,7 @@ for (const unusedCatalogMarkers of [
   ["AArrowDown", "a-arrow-down"],
   ["Accessibility", "accessibility"],
   ["AirVent", "air-vent"],
-  ["AlarmClock", "alarm-clock"],
+  ["Album", "album"],
 ]) {
   for (const unusedCatalogMarker of unusedCatalogMarkers) {
     assert.equal(code.includes(unusedCatalogMarker), false,

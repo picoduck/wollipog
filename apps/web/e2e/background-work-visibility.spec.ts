@@ -1,5 +1,6 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { PROTOCOL_VERSION } from "@wollipog/protocol";
+import { pinWidestFace } from "./font-geometry.js";
 
 /** The Session Status control is whole on screen: inside the viewport and every clipping ancestor. */
 async function expectButtonUnclipped(control: Locator) {
@@ -56,6 +57,8 @@ for (const width of [320, 390, 700, 1280]) {
       });
     });
     const row = page.locator(".inbox-row").filter({ hasText: "Alpha Session" });
+    // Measured in the widest face CI renders, so a line that only just fits here cannot clip there.
+    await pinWidestFace(page, row);
     // #2209: a row shows one status on the bar's ranking. The approval needs the person, so it is the
     // badge, and the background work is left to the Session Status popover.
     await expect(row.locator(".status")).toHaveCount(1);
