@@ -1259,3 +1259,55 @@ test("a reopened menu starts a fresh type-ahead search (#2199)", async () => {
   await press("Escape");
   await view.unmount();
 });
+
+test("a menu reopened after the selection or the tab's request went away also starts a fresh search (#2199)", async () => {
+  const tab = domWindow.document.createElement("button") as unknown as HTMLButtonElement;
+  domWindow.document.body.append(tab as never);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  const root = createRoot(mountPoint);
+  const render = async (active: boolean, request: GroupTabMenuRequest | null) => {
+    await act(async () => {
+      root.render(
+        <FeedbackProvider>
+          <ProjectSplitMenu split={split} runner={runner()} pinned={false} active={active} tabMenu={request}
+            onPinnedChange={() => undefined} onNewSession={() => undefined} />
+        </FeedbackProvider>,
+      );
+      await tick();
+    });
+  };
+  const press = async (key: string) => {
+    await act(async () => {
+      domWindow.document.activeElement?.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+      await tick();
+    });
+  };
+  const focused = () => domWindow.document.activeElement?.textContent?.trim();
+
+  // The tab's request goes away and comes back.
+  await render(false, { tab });
+  await press("p");
+  assert.equal(focused(), "Pin Workspace");
+  await render(false, null);
+  assertNoDomNode(domWindow.document.querySelector('[role="menu"]'));
+  await render(false, { tab });
+  await press("r");
+  assert.equal(focused(), "Rename Workspace…", "a request that went away leaves no letters behind");
+
+  // ⋯'s menu closes with the selection, and the tab is selected again.
+  await render(true, null);
+  await act(async () => { button(mountPoint, "Project One Actions").click(); await tick(); });
+  await press("p");
+  assert.equal(focused(), "Pin Workspace");
+  await render(false, null);
+  assertNoDomNode(domWindow.document.querySelector('[role="menu"]'));
+  await render(true, null);
+  await act(async () => { button(mountPoint, "Project One Actions").click(); await tick(); });
+  await press("r");
+  assert.equal(focused(), "Rename Workspace…", "a selection that went away leaves no letters behind");
+
+  await act(async () => { root.unmount(); });
+  mountPoint.remove();
+  tab.remove();
+});

@@ -402,6 +402,9 @@ export function ProjectSplitMenu({ active = true, tabMenu = null, onTabMenuClose
 
   useEffect(() => {
     if (!open) return;
+    // Every opening starts a fresh type-ahead search, however the last one ended: a dismissal, a
+    // choice, or the selection or the tab's request going away.
+    typeahead.current = { text: "", at: 0 };
     const items = [...menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)') ?? []];
     // A menu whose every item is unavailable takes focus itself, so Escape and the arrows still reach it.
     ((openFocus === "last" ? items.at(-1) : items[0]) ?? menuRef.current)?.focus();
@@ -413,8 +416,6 @@ export function ProjectSplitMenu({ active = true, tabMenu = null, onTabMenuClose
     const opener = tabMenu ? tabMenu.tab : triggerRef.current;
     if (tabMenu) onTabMenuClose?.();
     setTriggerOpen(false);
-    // The next opening starts a fresh search.
-    typeahead.current = { text: "", at: 0 };
     if (restoreFocus) opener?.focus();
   };
   const choose = (action: ProjectAction) => {
