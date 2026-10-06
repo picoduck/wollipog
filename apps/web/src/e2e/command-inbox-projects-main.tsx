@@ -72,7 +72,9 @@ import { staticPinnedSummary } from "../components/pinned-summary-state.js";
 const FIXTURE_QUERY = new URLSearchParams(window.location.search);
 const SCENARIO = FIXTURE_QUERY.get("scenario");
 // Reader restoration exercises the current protocol; unrelated fixtures retain legacy delivery.
-const TARGETED_READER_STREAMS = SCENARIO === "scroll-restore";
+const SYNTHETIC_HISTORY_GAP = SCENARIO === "paused-history-gap";
+const READER_RECOVERY_SCENARIO = SCENARIO === "scroll-restore" || SYNTHETIC_HISTORY_GAP;
+const TARGETED_READER_STREAMS = READER_RECOVERY_SCENARIO;
 /** Scenarios that show the Pinned Summary open without the app shell's toggle. */
 const STATIC_SUMMARY_OPEN = SCENARIO === "git-visibility" || SCENARIO === "worktree-identity" ||
   SCENARIO === "unsafe-worktree-pr";
@@ -802,9 +804,32 @@ if (SCENARIO === "pinned-summary") {
   ]);
 }
 const sessionEventPageRequests: Array<{ sessionId: string; after: number; direction?: "backward" }> = [];
-if (SCENARIO === "preview-follow" || SCENARIO === "scroll-restore" ||
+// Large gaps are an indexed synthetic log, not an array held in either the fixture or the browser.
+const syntheticSessionTails = new Map<string, number>();
+let syntheticHistoryHold: {
+  direction: "forward" | "tail"; after?: number; waiting: Promise<void>; release: () => void;
+} | null = null;
+function syntheticEventRange(sessionId: string, first: number, last: number): SessionEvent[] {
+  return Array.from({ length: Math.max(0, last - first + 1) }, (_, index) => {
+    const seq = first + index;
+    const original = sessionEvents.get(sessionId)?.find((event) => event.seq === seq);
+    return original ?? {
+      id: seq, sessionId, seq, ts: seq,
+      payload: seq % 2 === 1
+        ? { kind: "user_message", text: `Synthetic question ${seq}.`, turnId: `synthetic-turn-${seq}` }
+        : { kind: "agent_message", text: `Synthetic response ${seq}. ${"Public fixture history stays ordered. ".repeat(8)}`,
+            final: true, messageId: `synthetic-message-${seq}` },
+    };
+  });
+}
+async function waitSyntheticHistoryRead(direction: "forward" | "tail", after: number): Promise<void> {
+  const hold = syntheticHistoryHold;
+  if (hold?.direction === direction && (hold.after === undefined || hold.after === after)) await hold.waiting;
+  await new Promise((resolve) => window.setTimeout(resolve, HISTORY_PAGE_DELAY_MS));
+}
+if (SCENARIO === "preview-follow" || READER_RECOVERY_SCENARIO ||
     SCENARIO === "preview-opening-fill") {
-  const sessionIds = SCENARIO === "scroll-restore"
+  const sessionIds = READER_RECOVERY_SCENARIO
     ? ["session-alpha", "session-no-project"]
     : ["session-alpha"];
   for (const sessionId of sessionIds) {
@@ -1124,6 +1149,7 @@ const navigation: ViewNavigation = {
 };
 
 function pushSession(value: SessionView): void {
+  if (syntheticSessionTails.has(value.id)) syntheticSessionTails.set(value.id, value.messageCount);
   saveModel();
   socket?.push({ type: "session_upsert", session: structuredClone(value) });
 }
@@ -2238,13 +2264,23 @@ const client = {
   shellInput: async () => undefined,
   getSessionEventPage: async (sessionId: string, after = 0) => {
     sessionEventPageRequests.push({ sessionId, after });
+    const syntheticTail = syntheticSessionTails.get(sessionId);
+    if (SYNTHETIC_HISTORY_GAP && syntheticTail !== undefined) {
+      const events = syntheticEventRange(sessionId, after + 1, Math.min(syntheticTail, after + 200));
+      const nextAfter = events.at(-1)?.seq ?? after;
+      const page = { events: structuredClone(events),
+        eventEpoch: model.sessions.find((candidate) => candidate.id === sessionId)?.eventEpoch ?? 0,
+        nextAfter, hasMoreCached: nextAfter < syntheticTail, cacheComplete: true };
+      await waitSyntheticHistoryRead("forward", after);
+      return page;
+    }
     const available = (sessionEvents.get(sessionId) ?? []).filter((event) => event.seq > after);
     // R1.2 deliberately exposes several incomplete renders. A restored logical row can be absent
     // from the first cache page but reappear later in this same authoritative recovery chain.
-    if (SCENARIO === "scroll-restore" && after > 0) {
+    if (READER_RECOVERY_SCENARIO && after > 0) {
       await new Promise((resolve) => window.setTimeout(resolve, HISTORY_PAGE_DELAY_MS));
     }
-    const events = SCENARIO === "scroll-restore" ? available.slice(0, 12) : available;
+    const events = READER_RECOVERY_SCENARIO ? available.slice(0, 12) : available;
     const hasMoreCached = events.length < available.length;
     return {
       events: structuredClone(events),
@@ -2256,16 +2292,27 @@ const client = {
   },
   getSessionEventTailPage: async (sessionId: string, before?: number) => {
     sessionEventPageRequests.push({ sessionId, after: before ?? 0, direction: "backward" });
+    const syntheticTail = syntheticSessionTails.get(sessionId);
+    if (SYNTHETIC_HISTORY_GAP && syntheticTail !== undefined) {
+      const last = before === undefined ? syntheticTail : Math.min(syntheticTail, before - 1);
+      const events = syntheticEventRange(sessionId, Math.max(1, last - 23), last);
+      const page = { events: structuredClone(events),
+        eventEpoch: model.sessions.find((candidate) => candidate.id === sessionId)?.eventEpoch ?? 0,
+        ...(events[0] ? { nextBefore: events[0].seq } : {}),
+        hasMoreOlder: (events[0]?.seq ?? 1) > 1, cacheComplete: true };
+      await waitSyntheticHistoryRead("tail", before ?? 0);
+      return page;
+    }
     const all = sessionEvents.get(sessionId) ?? [];
     const available = before === undefined ? all : all.filter((event) => event.seq < before);
     // A bounded opening window over a much longer log: tall enough to scroll and pause inside,
     // with older turns still only reachable by paging below it.
-    const windowed = SCENARIO === "scroll-restore"
+    const windowed = READER_RECOVERY_SCENARIO
       ? available.slice(before === undefined ? -24 : -12)
       : SCENARIO === "preview-opening-fill"
         ? available.slice(before === undefined ? -221 : -24)
         : available;
-    if (SCENARIO === "scroll-restore" && before !== undefined) {
+    if (READER_RECOVERY_SCENARIO && before !== undefined) {
       await new Promise((resolve) => window.setTimeout(resolve, HISTORY_PAGE_DELAY_MS));
     }
     return {
@@ -2575,6 +2622,10 @@ declare global {
       emitSessionEvent(id: string, payload: SessionEvent["payload"]): void;
       emitActiveSubagent(id: string, toolCallId: string): void;
       sessionEventPageRequests(): Array<{ sessionId: string; after: number; direction?: "backward" }>;
+      setSyntheticSessionGap(id: string, lastSeq: number): void;
+      holdSyntheticHistoryRead(direction: "forward" | "tail", after?: number): void;
+      releaseSyntheticHistoryRead(): void;
+      reconnectSyntheticHistory(): void;
       emitCanonicalSteeredMessage(id: string, text: string, turnId: string, submissionId: string): void;
       emitSteeringReceipt(id: string, attempt: SteeringAttemptView): void;
       setNextSteeringResult(result: SteeringFixtureResult): void;
@@ -2797,6 +2848,29 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
     pushSession(value);
   },
   sessionEventPageRequests: () => structuredClone(sessionEventPageRequests),
+  setSyntheticSessionGap(id, lastSeq) {
+    if (!SYNTHETIC_HISTORY_GAP) throw new Error("Synthetic gaps require the paused-history-gap scenario");
+    const value = model.sessions.find((candidate) => candidate.id === id);
+    if (!value || !Number.isSafeInteger(lastSeq) || lastSeq < value.messageCount) throw new Error("Invalid synthetic tail");
+    syntheticSessionTails.set(id, lastSeq);
+    value.messageCount = lastSeq;
+    value.updatedAt += 1;
+    pushSession(value);
+  },
+  holdSyntheticHistoryRead(direction, after) {
+    syntheticHistoryHold?.release();
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => { release = resolve; });
+    syntheticHistoryHold = { direction, after, waiting, release };
+  },
+  releaseSyntheticHistoryRead() {
+    syntheticHistoryHold?.release();
+    syntheticHistoryHold = null;
+  },
+  reconnectSyntheticHistory() {
+    if (!SYNTHETIC_HISTORY_GAP) throw new Error("Synthetic reconnects require the paused-history-gap scenario");
+    socket?.onclose?.({ code: 1006 });
+  },
   emitCanonicalSteeredMessage(id, text, turnId, submissionId) {
     const value = model.sessions.find((candidate) => candidate.id === id);
     if (!value) throw new Error(`unknown session: ${id}`);
@@ -3006,6 +3080,7 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
     value.eventEpoch = (value.eventEpoch ?? 0) + 1;
     value.messageCount = payloads.length;
     value.updatedAt += 1;
+    syntheticSessionTails.delete(id);
     sessionEvents.set(id, payloads.map((payload, index) => ({
       id: index + 1, sessionId: id, seq: index + 1, ts: value.updatedAt,
       payload: structuredClone(payload),

@@ -300,8 +300,9 @@ export async function recoverSessionHistoryWindow(
 /** Fill a small reconnect gap without discarding previously loaded reading rows. A long outage
  * must not replay the whole log into a following reader: after a fixed page budget, replace it
  * with the current tail window and leave omitted rows reachable through older-page navigation.
- * Paused readers retain their forward chain, including someone who pauses during the budgeted
- * requests. Older control planes resume that chain at its applied cursor if backward reads are
+ * Callers with a deferred-window owner stage the tail while paused within the same request budget.
+ * Callers without one retain their forward chain. Older control planes resume the forward chain
+ * at its applied cursor if backward reads are
  * unavailable. An obsolete epoch or cancelled recovery never triggers a replacement window. */
 export async function recoverSessionHistoryGap(
   request: SessionHistoryRecoveryRequest,
@@ -309,29 +310,34 @@ export async function recoverSessionHistoryGap(
     history: SessionHistoryRecoveryOptions;
     window: SessionHistoryWindowOptions;
     canReplaceWithWindow: () => boolean;
+    /** A paused reader can retain a separately staged current window instead of draining the gap.
+     * Returning false declines unsafe staging without restarting an unlimited forward walk. */
+    deferWindow?: (...args: Parameters<SessionHistoryWindowOptions["applyWindow"]>) => boolean | void;
   },
 ): Promise<boolean> {
   const result = await recoverSessionHistoryTurn(request, {
     ...options.history,
-    maxPagesPerTurn: options.canReplaceWithWindow() ? SESSION_HISTORY_RECONNECT_PAGE_BUDGET : undefined,
+    maxPagesPerTurn: (options.deferWindow !== undefined || options.canReplaceWithWindow()) ? SESSION_HISTORY_RECONNECT_PAGE_BUDGET : undefined,
   });
   if (result.complete) return true;
   if (!result.yielded || !options.history.isCurrent()) return false;
-  if (options.canReplaceWithWindow()) {
+  if (options.deferWindow || options.canReplaceWithWindow()) {
     let readerPaused = false;
+    let deferred = false;
     const window = await recoverSessionHistoryWindow(request, {
       ...options.window,
       applyWindow: (...args) => {
         // The reader can detach while the tail request is in flight, after the budget boundary.
-        // Do not discard the row they just chose; finish the contiguous forward chain instead.
+        // Keep the row they just chose; an owner can retain the current tail separately.
         if (!options.canReplaceWithWindow()) {
           readerPaused = true;
+          deferred = options.deferWindow?.(...args) !== false && options.deferWindow !== undefined;
           return;
         }
         options.window.applyWindow(...args);
       },
     });
-    if (window.supported && !readerPaused) return window.complete;
+    if (window.supported && (!readerPaused || options.deferWindow)) return window.complete && (!readerPaused || deferred);
     if (!options.history.isCurrent()) return false;
   }
   return recoverSessionHistory(

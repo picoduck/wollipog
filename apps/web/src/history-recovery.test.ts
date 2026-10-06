@@ -926,3 +926,85 @@ test("reconnect tail replacement merges newer live rows and keeps omitted histor
     [139_878, 139_879, 139_880, 139_881, 139_882]);
   assert.equal(store.recoveryAfter("s1"), 139_882, "older reads cannot rewind the recovered cursor");
 });
+
+for (const tailSeq of [10_000, 1_000_000]) for (const pauseAt of [0, 2, 5]) {
+  test(`supported paused recovery stages one tail after four pages (gap ${tailSeq}, pause boundary ${pauseAt})`, async () => {
+    let paused = pauseAt === 0;
+    const afters: number[] = [];
+    let tails = 0, staged = 0;
+    const applied: number[] = [];
+    const result = await recoverSessionHistoryGap({ sessionId: "s1", after: 10, eventEpoch: 3, recoveryRevision: 7 }, {
+      history: {
+        fetchPage: async (_id, after) => {
+          afters.push(after);
+          if (afters.length === pauseAt) paused = true;
+          assert.ok(afters.length <= 4, "a paused reader must not drain the entire missing interval");
+          return { events: [event(after + 1)], eventEpoch: 3, nextAfter: after + 1,
+            hasMoreCached: true, cacheComplete: true };
+        },
+        applyPage: (_id, rows) => applied.push(...rows.map(row => row.seq)), isCurrent: () => true,
+      },
+      window: {
+        fetchTailPage: async () => {
+          tails++;
+          if (pauseAt === 5) paused = true;
+          return { events: [event(tailSeq)], eventEpoch: 3, hasMoreOlder: true, cacheComplete: true };
+        },
+        applyWindow: () => { throw new Error("paused reading rows must not be replaced"); }, isCurrent: () => true,
+      },
+      canReplaceWithWindow: () => !paused,
+      deferWindow: (_id, rows, epoch, revision, complete, hasOlder) => {
+        assert.deepEqual(rows.map(row => row.seq), [tailSeq]);
+        assert.equal(epoch, 3); assert.equal(revision, 7); assert.equal(complete, true); assert.equal(hasOlder, true);
+        staged++; return true;
+      },
+    });
+    assert.equal(result, true);
+    assert.deepEqual(afters, [10, 11, 12, 13]);
+    assert.deepEqual(applied, [11, 12, 13, 14]);
+    assert.equal(tails, 1); assert.equal(staged, 1);
+  });
+}
+
+test("refused deferred staging stays incomplete without an unlimited paused fallback", async () => {
+  let calls = 0;
+  assert.equal(await recoverSessionHistoryGap({ sessionId: "s1", after: 10, eventEpoch: 3, recoveryRevision: 7 }, {
+    history: { fetchPage: async (_id, after) => {
+      assert.ok(++calls <= 4);
+      return { events: [event(after + 1)], eventEpoch: 3, nextAfter: after + 1, hasMoreCached: true, cacheComplete: true };
+    }, applyPage: () => {}, isCurrent: () => true },
+    window: { fetchTailPage: async () => ({ events: [event(1000)], eventEpoch: 3, hasMoreOlder: true, cacheComplete: true }),
+      applyWindow: () => { throw new Error("not following"); }, isCurrent: () => true },
+    canReplaceWithWindow: () => false, deferWindow: () => false,
+  }), false);
+  assert.equal(calls, 4);
+});
+
+test("a deferred paused reader retains the explicit forward fallback on older control planes", async () => {
+  const afters: number[] = [];
+  let tails = 0;
+  assert.equal(await recoverSessionHistoryGap({ sessionId: "s1", after: 10, eventEpoch: 3, recoveryRevision: 7 }, {
+    history: { fetchPage: async (_id, after) => {
+      afters.push(after);
+      return { events: [event(after + 1)], eventEpoch: 3, nextAfter: after + 1,
+        hasMoreCached: after < 15, cacheComplete: true };
+    }, applyPage: () => {}, isCurrent: () => true },
+    window: { fetchTailPage: async () => { tails++; return { events: [event(1)] }; },
+      applyWindow: () => { throw new Error("legacy prefix must not replace a paused window"); }, isCurrent: () => true },
+    canReplaceWithWindow: () => false, deferWindow: () => { throw new Error("unsupported tail must not stage"); },
+  }), true);
+  assert.deepEqual(afters, [10, 11, 12, 13, 14, 15]);
+  assert.equal(tails, 1);
+});
+
+test("a cancelled deferred tail never calls its owner", async () => {
+  let current = true;
+  assert.equal(await recoverSessionHistoryGap({ sessionId: "s1", after: 10, eventEpoch: 3, recoveryRevision: 7 }, {
+    history: { fetchPage: async (_id, after) => ({ events: [event(after + 1)], eventEpoch: 3,
+      nextAfter: after + 1, hasMoreCached: true, cacheComplete: true }), applyPage: () => {}, isCurrent: () => current },
+    window: { fetchTailPage: async () => {
+      current = false; return { events: [event(1_000_000)], eventEpoch: 3, hasMoreOlder: true, cacheComplete: true };
+    }, applyWindow: () => { throw new Error("cancelled replacement"); }, isCurrent: () => current },
+    canReplaceWithWindow: () => false, deferWindow: () => { throw new Error("cancelled stage"); },
+  }), false);
+});

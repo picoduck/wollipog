@@ -62,15 +62,23 @@ message sits in an unloaded turn no longer resurrects a recovery receipt in the 
 against a bounded window that absence proves nothing.
 
 Reconnect recovery starts at the forward cursor frozen at subscription time, so live delivery
-cannot skip an outage gap. A following reader fetches at most four forward pages (800 events); a
-larger gap replaces the loaded slice with the bounded current tail window. Omitted rows remain
-reachable through **Load Earlier Activity**. A reader who pauses during those requests keeps the
-forward chain from the last applied cursor instead of losing their reading position. An arbitrarily
-large gap for a paused reader still drains forward: replacing its slice with the tail would lose
-the viewport it deliberately kept. Navigation
+cannot skip an outage gap. Each current recovery owner fetches at most four forward pages (800
+events), then one bounded current tail window. A following reader adopts that window; omitted rows
+remain reachable through **Load Earlier Activity**. A reader who pauses before or during those
+requests keeps the loaded reading slice and its row and offset. The separately retained tail does
+not enter timeline derivation or advance the frozen cursor across the unloaded interval.
+**Load Later Activity** loads one ordinary forward page on demand; **Jump to Latest** adopts the
+retained tail without replaying the middle. The control remains outside the scroll region so
+reaching it cannot accidentally resume following. Incomplete, invalid, or obsolete pages cannot
+claim the interval recovered. Staged tails retain at most 2,000 events per session and eight MiB
+of UTF-8 payloads in total. A sparse visible slice or a staged tail that loses its contiguous proof
+requires a fresh bounded read when the reader explicitly returns to live.
+
+Navigation
 retains up to eight inactive reader windows per instance, with at most 2,000 events per window and
 eight MiB of UTF-8 event payloads in total. Returning restores the contiguous loaded slice and
-paused position immediately, then recovers from its cursor. Inactive windows stay unsubscribed.
+paused position immediately, then recovers from its cursor. Navigation drops separately staged
+tails; inactive windows stay unsubscribed.
 Eviction, an oversized or gapped slice, a replaced event epoch, and a legacy-server reconnect expire
 the corresponding saved position, so reopening reads the bounded tail rather than walking from the
 start for an anchor whose rows are no longer retained. Fleet comparison views still discard partial
@@ -82,8 +90,11 @@ Loading the Conversation or leave a superseded Starting status on screen. Their 
 by the session's event epoch and reconnect generation; they do not advance its frozen recovery
 cursor. If initial metadata still reports Starting, only that row is rechecked every two seconds,
 up to five additional reads. A newer live status, acknowledgement, navigation, epoch change, failed
-request, or connection-phase change stops the retries. The transcript is not re-fetched, and
-exhaustion retains the latest server-reported state.
+request, or connection-phase change stops the retries. Metadata polling does not re-fetch the
+transcript, and exhaustion retains the latest server-reported state. If a provisional tail response
+is skipped because the reader paused, returning to live retries that owner's bounded history read
+without restarting metadata polling. At most one history request is in flight for that owner;
+navigation, acknowledgement, epoch change, and reconnect cancel its retry rights.
 
 Once a mounted conversation has been acknowledged and its current history refresh has settled
 successfully, unrelated fleet

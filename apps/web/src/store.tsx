@@ -16,6 +16,7 @@ import type {
   RunnerView,
   RunView,
   SessionEvent,
+  SessionEventsResponse,
   SessionReminderView,
   SessionView,
   ShellOutputChunk,
@@ -227,6 +228,47 @@ function saveInboxState(inbox: InboxState, instanceScope: string, storage?: KeyV
   saveInstanceStorageValue(INBOX_SPLIT_RATIO_KEY, String(inbox.splitRatio), instanceScope, storage);
 }
 
+/** Identity belongs to one API/view operation, not just a reusable revision tuple. */
+export interface EventGapFence {
+  sessionId: string;
+  eventEpoch: number;
+  recoveryGeneration: number;
+  recoveryRevision: number;
+  operationId: number;
+  baseSeq: number;
+}
+
+export interface LaterEventGap {
+  /** Last contiguous reading seq. The interval after this and before beforeSeq is omitted. */
+  afterSeq: number;
+  beforeSeq: number;
+  /** Latest observed seq is a navigation boundary, never proof of contiguous recovery. */
+  tailSeq: number;
+  loading: boolean;
+  error: string | null;
+  fence: EventGapFence;
+}
+
+export interface LaterEventsRequest {
+  fence: EventGapFence;
+  after: number;
+  requestId: number;
+}
+
+const DEFERRED_TAIL_EVENT_LIMIT = 2_000;
+const DEFERRED_TAIL_BYTE_LIMIT = 8 * 1024 * 1024;
+interface DeferredEventTail {
+  fence: EventGapFence;
+  events: SessionEvent[];
+  bytes: number;
+  byteSizes: Map<number, { event: SessionEvent; bytes: number }>;
+  /** The HTTP response proved completeness through this seq, not any later gapped live frame. */
+  httpTailSeq: number;
+  hasOlder: boolean;
+  turnAligned?: boolean;
+  pageRequest?: LaterEventsRequest;
+}
+
 export interface EventHistoryState {
   eventEpoch: number;
   /** Snapshot/socket generation plus subscription revision fence stale async completions. */
@@ -249,6 +291,8 @@ export interface EventWindowState {
   /** A completed provisional REST window's contiguous tail, excluding later live delivery.
    * Kept while this slice stays visible; cache restoration clears its current-view attribution. */
   provisionalRestTail?: { seq: number; recoveryGeneration: number };
+  /** Current activity is staged separately; visible events remain the contiguous reading slice. */
+  laterGap?: LaterEventGap;
   hasOlder: boolean;
   /** The read that produced this window reached the runner's tail. A budget-expired window reports
    * no older rows while still being a prefix, so completeness is tracked separately. */
@@ -264,7 +308,7 @@ export interface EventWindowState {
 /** Whether the loaded events are known NOT to be the session's whole history. Consumers that treat
  * absence as evidence — receipts, whole-session inventories — must ask this, not `hasOlder`. */
 export function isPartialHistory(window: EventWindowState | undefined): boolean {
-  return window !== undefined && (window.hasOlder || !window.complete);
+  return window !== undefined && (window.hasOlder || !window.complete || window.laterGap !== undefined);
 }
 
 export interface State {
@@ -345,6 +389,8 @@ export interface State {
 }
 
 type Action =
+  | { type: "event_gap_state"; fence: EventGapFence; events: SessionEvent[]; window: EventWindowState;
+      settled: boolean; complete?: boolean; advanceCursor?: boolean }
   | { type: "conn"; conn: ConnState; authRequired?: boolean }
   | { type: "msg"; msg: ControlPlaneToUi; now?: number }
   | {
@@ -362,6 +408,8 @@ type Action =
       /** Present only for an aligned opening-window read. False means the server kept its bounded
        * count boundary because the turn start was beyond the supported extension. */
       windowTurnAligned?: boolean;
+      /** The acknowledged owner may intentionally replace its own reading window. */
+      gapWindowFence?: EventGapFence;
     }
   | { type: "events_older_loading"; sessionId: string; eventEpoch: number; requestedBase: number }
   | { type: "events_older_failed"; sessionId: string; eventEpoch: number; requestedBase: number; error: string }
@@ -539,7 +587,11 @@ function scanSessionStalls(state: State, now = state.activityNow): State {
 }
 
 function captureRecoveryCursors(state: State, sessionIds: Iterable<string>): Map<string, number> {
-  return new Map([...sessionIds].map((sessionId) => [sessionId, eventHighWater(state.events.get(sessionId))]));
+  return new Map([...sessionIds].map((sessionId) => {
+    const events = state.events.get(sessionId);
+    const base = state.eventWindows.get(sessionId)?.baseSeq ?? events?.[0]?.seq ?? 1;
+    return [sessionId, events?.length ? contiguousEventHighWater(events, Math.max(0, base - 1)) : 0];
+  }));
 }
 
 /** Drop a session's frozen recovery cursor when its event log is replaced under a new epoch. The
@@ -693,6 +745,27 @@ function pruneViewStreams(state: State): State {
 
 function reducer(state: State, action: Action): State {
   switch (action.type) {
+    case "event_gap_state": {
+      const fence = action.fence;
+      const history = state.eventHistory.get(fence.sessionId);
+      if (!relevantSessions(state).has(fence.sessionId) || state.snapshotRevision !== fence.recoveryGeneration ||
+          sessionEventEpoch(state.sessions.get(fence.sessionId)) !== fence.eventEpoch ||
+          history?.recoveryGeneration !== fence.recoveryGeneration || history.recoveryRevision !== fence.recoveryRevision) return state;
+      const events = new Map(state.events).set(fence.sessionId, action.events);
+      const eventWindows = new Map(state.eventWindows).set(fence.sessionId, action.window);
+      const eventHistory = action.settled ? new Map(state.eventHistory).set(fence.sessionId, {
+        ...history, refreshing: false, error: null, everComplete: history.everComplete || action.complete === true,
+      }) : state.eventHistory;
+      let streamRecoveryCursors = state.streamRecoveryCursors;
+      if (action.advanceCursor && state.streamSubscriptions.mode === "targeted" &&
+          state.streamSubscriptions.appliedRevision === fence.recoveryRevision &&
+          state.streamSubscriptions.requestedRevision === fence.recoveryRevision &&
+          streamRecoveryCursors.has(fence.sessionId)) {
+        streamRecoveryCursors = new Map(streamRecoveryCursors).set(fence.sessionId,
+          contiguousEventHighWater(action.events, Math.max(0, action.window.baseSeq - 1)));
+      }
+      return { ...state, events, eventWindows, eventHistory, streamRecoveryCursors };
+    }
     case "conn": {
       let next: State = {
         ...state,
@@ -1563,6 +1636,15 @@ interface StoreValue extends State {
     recoveryGeneration?: number,
   ) => void;
   failEventHistoryLoad: (sessionId: string, error: string, eventEpoch?: number, recoveryRevision?: number, recoveryGeneration?: number) => void;
+  isEventGapRecoveryCurrent: Store["isEventGapRecoveryCurrent"];
+  beginEventGapRecovery: Store["beginEventGapRecovery"];
+  cancelEventGapRecovery: Store["cancelEventGapRecovery"];
+  loadEventGapWindow: Store["loadEventGapWindow"];
+  deferEventTail: Store["deferEventTail"];
+  beginLaterEventsLoad: Store["beginLaterEventsLoad"];
+  loadLaterEvents: Store["loadLaterEvents"];
+  failLaterEventsLoad: Store["failLaterEventsLoad"];
+  promoteDeferredEventTail: Store["promoteDeferredEventTail"];
   loadPodContext: (podId: string, entries: PodContextEntry[]) => void;
   eventHighWater: (sessionId: string) => number;
   recoveryAfter: (sessionId: string) => number;
@@ -1603,6 +1685,10 @@ export class Store {
     bytes: number;
   }>();
   private readerCacheBytes = 0;
+  private gapRequestSequence = 0;
+  private readonly gapOperations = new Map<string, EventGapFence>();
+  /** These arrays never enter timeline derivation or the inactive-reader cache. */
+  private readonly deferredTails = new Map<string, DeferredEventTail>();
 
   constructor(
     initialView: View = { name: "inbox" },
@@ -1639,7 +1725,21 @@ export class Store {
       this.dropReaderCache(action.msg.sessionId);
       expireFollowTailAnchor(this.instanceScope, action.msg.sessionId);
     }
+    if (action.type === "msg" && action.msg.type === "session_event") {
+      next = this.reconcileDeferredLive(this.state, next, action.msg.event);
+    }
+    // Any authoritative replacement invalidates the prior reading-window owner, even if its
+    // numerical base happens to match. Ordinary older prepends extend that same window instead.
+    if (action.type === "events_loaded" && action.windowHasOlder !== undefined) {
+      const owner = this.gapOperations.get(action.sessionId);
+      if (owner && action.gapWindowFence === owner) {
+        // The same bounded operation still owns its completion/error after this replacement.
+        // Its old staged arrays and page tickets are dropped below, not promoted implicitly.
+        owner.baseSeq = next.eventWindows.get(action.sessionId)?.baseSeq ?? 0;
+      } else this.gapOperations.delete(action.sessionId);
+    }
     next = this.reconcileReaderCache(this.state, next);
+    next = this.pruneDeferredTails(next);
     const inboxChanged = next.inbox !== this.state.inbox;
     const filtersChanged = next.filters !== this.state.filters;
     this.state = next;
@@ -1649,6 +1749,97 @@ export class Store {
     if (filtersChanged) saveSessionFilters(next.filters, this.instanceScope, this.inboxStorage);
     for (const l of [...this.listeners]) l();
   };
+
+  /** Prepending older history extends the same window and keeps its forward boundary valid.
+   * Any authoritative window replacement explicitly revokes ownership, including equal bases. */
+  private currentGapFence(fence: EventGapFence): boolean {
+    const history = this.state.eventHistory.get(fence.sessionId);
+    const window = this.state.eventWindows.get(fence.sessionId);
+    return this.gapOperations.get(fence.sessionId) === fence && relevantSessions(this.state).has(fence.sessionId) &&
+      this.state.snapshotRevision === fence.recoveryGeneration && this.eventEpoch(fence.sessionId) === fence.eventEpoch &&
+      this.state.eventEpochs.get(fence.sessionId) === fence.eventEpoch &&
+      (window?.baseSeq ?? this.state.events.get(fence.sessionId)?.[0]?.seq ?? Infinity) <= fence.baseSeq &&
+      history?.recoveryGeneration === fence.recoveryGeneration && history.recoveryRevision === fence.recoveryRevision;
+  }
+
+  private boundedDeferredEvents(events: SessionEvent[], sessionId: string): {
+    events: SessionEvent[]; bytes: number; truncated: boolean;
+    byteSizes: Map<number, { event: SessionEvent; bytes: number }>;
+  } | null {
+    const otherBytes = [...this.deferredTails].reduce((bytes, [id, tail]) => bytes + (id === sessionId ? 0 : tail.bytes), 0);
+    const byteLimit = DEFERRED_TAIL_BYTE_LIMIT - otherBytes;
+    // Callers supply sorted, deduplicated arrays. Reuse byte counts for unchanged events so live
+    // traffic does not serialize an entire megabyte-scale tail on every incoming frame.
+    const ordered = events;
+    const retained: SessionEvent[] = [];
+    const cachedSizes = this.deferredTails.get(sessionId)?.byteSizes;
+    const byteSizes = new Map<number, { event: SessionEvent; bytes: number }>();
+    const encoder = new TextEncoder();
+    let bytes = 0;
+    for (let i = ordered.length - 1; i >= 0 && retained.length < DEFERRED_TAIL_EVENT_LIMIT; i--) {
+      const event = ordered[i]!;
+      const cached = cachedSizes?.get(event.seq);
+      const size = cached?.event === event ? cached.bytes : encoder.encode(JSON.stringify(event)).byteLength;
+      if (bytes + size > byteLimit) break;
+      bytes += size;
+      byteSizes.set(event.seq, { event, bytes: size });
+      retained.push(event);
+    }
+    if (!retained.length) return null;
+    retained.reverse();
+    return { events: retained, bytes, truncated: retained.length !== ordered.length, byteSizes };
+  }
+
+  private pruneDeferredTails(next: State): State {
+    const relevant = relevantSessions(next);
+    for (const [id, fence] of this.gapOperations) {
+      const window = next.eventWindows.get(id);
+      const history = next.eventHistory.get(id);
+      if (!relevant.has(id) || next.snapshotRevision !== fence.recoveryGeneration ||
+          sessionEventEpoch(next.sessions.get(id)) !== fence.eventEpoch || next.eventEpochs.get(id) !== fence.eventEpoch ||
+          (window?.baseSeq ?? next.events.get(id)?.[0]?.seq ?? Infinity) > fence.baseSeq ||
+          history?.recoveryGeneration !== fence.recoveryGeneration || history.recoveryRevision !== fence.recoveryRevision) {
+        this.gapOperations.delete(id);
+      }
+    }
+    let eventWindows = next.eventWindows;
+    for (const [id, tail] of this.deferredTails) {
+      if (this.gapOperations.get(id) !== tail.fence || next.eventWindows.get(id)?.laterGap?.fence !== tail.fence) {
+        this.deferredTails.delete(id);
+        const window = eventWindows.get(id);
+        if (window?.laterGap?.fence === tail.fence) {
+          const { laterGap: _gap, ...reading } = window;
+          if (eventWindows === next.eventWindows) eventWindows = new Map(eventWindows);
+          eventWindows.set(id, reading);
+        }
+      }
+    }
+    return eventWindows === next.eventWindows ? next : { ...next, eventWindows };
+  }
+
+  private reconcileDeferredLive(previous: State, next: State, event: SessionEvent): State {
+    const tail = this.deferredTails.get(event.sessionId);
+    const window = previous.eventWindows.get(event.sessionId);
+    const gap = window?.laterGap;
+    if (!tail || !gap || !this.currentGapFence(tail.fence) || next.eventEpochs.get(event.sessionId) !== tail.fence.eventEpoch) return next;
+    // Cache hydration below the staged tail is not a user request for the intervening rows.
+    // Observe its heartbeat but keep it out of both the reading slice and the bounded tail.
+    const events = event.seq > gap.afterSeq
+      ? new Map(next.events).set(event.sessionId, previous.events.get(event.sessionId) ?? [])
+      : next.events;
+    if (event.seq < gap.beforeSeq) return events === next.events ? next : { ...next, events };
+    const bounded = this.boundedDeferredEvents(mergeEvents(tail.events, [event]), event.sessionId);
+    if (bounded) {
+      tail.events = bounded.events;
+      tail.bytes = bounded.bytes;
+      tail.byteSizes = bounded.byteSizes;
+      if (bounded.truncated) { tail.hasOlder = true; tail.turnAligned = false; }
+    }
+    const eventWindows = new Map(next.eventWindows).set(event.sessionId, {
+      ...window!, laterGap: { ...gap, beforeSeq: tail.events[0]!.seq, tailSeq: Math.max(gap.tailSeq, event.seq) },
+    });
+    return { ...next, events, eventWindows };
+  }
 
   private dropReaderCache(sessionId: string): void {
     const cached = this.readerCache.get(sessionId);
@@ -1734,7 +1925,7 @@ export class Store {
       });
       const eventWindows = new Map(next.eventWindows);
       if (cached.window) {
-        const { provisionalRestTail: _receipt, ...retained } = cached.window;
+        const { provisionalRestTail: _receipt, laterGap: _gap, ...retained } = cached.window;
         eventWindows.set(sessionId, { ...retained, loadingOlder: false, error: null });
       }
       next = { ...next, events, eventEpochs, eventHistory, eventWindows };
@@ -1867,6 +2058,164 @@ export class Store {
     recoveryRevision = -1,
     recoveryGeneration = this.state.snapshotRevision,
   ): void => this.dispatch({ type: "event_history_failed", sessionId, eventEpoch, recoveryRevision, recoveryGeneration, error });
+  isEventGapRecoveryCurrent = (fence: EventGapFence): boolean => this.currentGapFence(fence);
+
+  beginEventGapRecovery = (
+    sessionId: string, eventEpoch: number, recoveryRevision: number, recoveryGeneration: number,
+  ): EventGapFence | null => {
+    const window = this.state.eventWindows.get(sessionId);
+    const fence: EventGapFence = { sessionId, eventEpoch, recoveryRevision, recoveryGeneration,
+      operationId: ++this.gapRequestSequence, baseSeq: window?.baseSeq ?? this.state.events.get(sessionId)?.[0]?.seq ?? 0 };
+    const prior = this.gapOperations.get(sessionId);
+    this.gapOperations.set(sessionId, fence);
+    if (fence.baseSeq <= 0 || !this.currentGapFence(fence)) {
+      if (prior) this.gapOperations.set(sessionId, prior); else this.gapOperations.delete(sessionId);
+      return null;
+    }
+    this.deferredTails.delete(sessionId);
+    if (window?.laterGap) {
+      const { laterGap: _gap, ...reading } = window;
+      this.dispatch({ type: "event_gap_state", fence, events: this.state.events.get(sessionId) ?? [], window: reading, settled: false });
+    }
+    return fence;
+  };
+
+  cancelEventGapRecovery = (fence: EventGapFence): void => {
+    if (this.gapOperations.get(fence.sessionId) !== fence) return;
+    const window = this.state.eventWindows.get(fence.sessionId);
+    this.deferredTails.delete(fence.sessionId);
+    if (window?.laterGap?.fence === fence && this.currentGapFence(fence)) {
+      const { laterGap: _gap, ...reading } = window;
+      this.dispatch({ type: "event_gap_state", fence, events: this.state.events.get(fence.sessionId) ?? [], window: reading, settled: true });
+    }
+    this.gapOperations.delete(fence.sessionId);
+  };
+
+  loadEventGapWindow = (
+    fence: EventGapFence, events: SessionEvent[], complete: boolean, hasOlder: boolean, turnAligned?: boolean,
+  ): boolean => {
+    if (!this.currentGapFence(fence)) return false;
+    const before = this.state;
+    this.dispatch({ type: "events_loaded", sessionId: fence.sessionId, events,
+      eventEpoch: fence.eventEpoch, recoveryRevision: fence.recoveryRevision,
+      recoveryGeneration: fence.recoveryGeneration, recoveryComplete: complete,
+      windowHasOlder: hasOlder, gapWindowFence: fence,
+      ...(turnAligned === undefined ? {} : { windowTurnAligned: turnAligned }),
+    });
+    return this.state !== before;
+  };
+
+  deferEventTail = (
+    fence: EventGapFence, incoming: SessionEvent[], complete: boolean, hasOlder: boolean, turnAligned?: boolean,
+  ): boolean => {
+    if (!complete || !this.currentGapFence(fence) || !incoming.length ||
+        incoming.some(event => event.sessionId !== fence.sessionId)) return false;
+    const reading = this.state.events.get(fence.sessionId) ?? [];
+    const after = contiguousEventHighWater(reading, fence.baseSeq - 1);
+    // A distant frame might already be the reader's chosen anchor. Without that anchor's identity
+    // we cannot clip it safely, or describe the visible sparse array as one contiguous window.
+    if (!reading.length || after !== reading.at(-1)!.seq) return false;
+    const ordered = mergeEvents(undefined, incoming);
+    if (contiguousEventHighWater(ordered, ordered[0]!.seq - 1) !== ordered.at(-1)!.seq) return false;
+    const bounded = this.boundedDeferredEvents(ordered, fence.sessionId);
+    if (!bounded) return false;
+    const window = this.state.eventWindows.get(fence.sessionId) ?? {
+      eventEpoch: fence.eventEpoch, baseSeq: fence.baseSeq, hasOlder: fence.baseSeq > 1,
+      complete: this.state.eventHistory.get(fence.sessionId)?.everComplete === true, loadingOlder: false, error: null,
+    };
+    if (bounded.events[0]!.seq <= after + 1) {
+      const merged = mergeEvents(reading, bounded.events);
+      if (contiguousEventHighWater(merged, fence.baseSeq - 1) !== merged.at(-1)!.seq) return false;
+      this.dispatch({ type: "event_gap_state", fence, events: merged, window, settled: true, complete: true, advanceCursor: true });
+      return true;
+    }
+    const tail: DeferredEventTail = { fence, events: bounded.events, bytes: bounded.bytes, byteSizes: bounded.byteSizes,
+      httpTailSeq: ordered.at(-1)!.seq, hasOlder: hasOlder || bounded.truncated,
+      ...(turnAligned === undefined ? {} : { turnAligned: bounded.truncated ? false : turnAligned }) };
+    this.deferredTails.set(fence.sessionId, tail);
+    this.dispatch({ type: "event_gap_state", fence, events: reading, window: {
+      ...window, laterGap: { afterSeq: after, beforeSeq: bounded.events[0]!.seq,
+        tailSeq: ordered.at(-1)!.seq, loading: false, error: null, fence },
+    }, settled: true });
+    return true;
+  };
+
+  beginLaterEventsLoad = (sessionId: string): LaterEventsRequest | null => {
+    const tail = this.deferredTails.get(sessionId);
+    const window = this.state.eventWindows.get(sessionId);
+    const gap = window?.laterGap;
+    if (!tail || !gap || gap.loading || !this.currentGapFence(tail.fence)) return null;
+    const request: LaterEventsRequest = { fence: tail.fence, after: gap.afterSeq, requestId: ++this.gapRequestSequence };
+    tail.pageRequest = request;
+    this.dispatch({ type: "event_gap_state", fence: tail.fence, events: this.state.events.get(sessionId) ?? [],
+      window: { ...window!, laterGap: { ...gap, loading: true, error: null } }, settled: false });
+    return request;
+  };
+
+  failLaterEventsLoad = (request: LaterEventsRequest, error: string): void => {
+    const tail = this.deferredTails.get(request.fence.sessionId);
+    const window = this.state.eventWindows.get(request.fence.sessionId);
+    const gap = window?.laterGap;
+    if (!tail || tail.pageRequest !== request || !gap || gap.afterSeq !== request.after || !this.currentGapFence(request.fence)) return;
+    delete tail.pageRequest;
+    this.dispatch({ type: "event_gap_state", fence: request.fence, events: this.state.events.get(request.fence.sessionId) ?? [],
+      window: { ...window!, laterGap: { ...gap, loading: false, error } }, settled: false });
+  };
+
+  loadLaterEvents = (request: LaterEventsRequest, page: SessionEventsResponse): boolean => {
+    const id = request.fence.sessionId;
+    const tail = this.deferredTails.get(id);
+    const window = this.state.eventWindows.get(id);
+    const gap = window?.laterGap;
+    if (!tail || tail.pageRequest !== request || !gap || gap.afterSeq !== request.after ||
+        !this.currentGapFence(request.fence) || (page.eventEpoch ?? request.fence.eventEpoch) !== request.fence.eventEpoch ||
+        page.events.length > 200 || page.events.some(event => event.sessionId !== id)) return false;
+    const ordered = mergeEvents(undefined, page.events);
+    const after = contiguousEventHighWater(ordered, request.after);
+    if (!ordered.length || ordered[0]!.seq !== request.after + 1 || after !== ordered.at(-1)!.seq ||
+        (page.nextAfter !== undefined && page.nextAfter !== after)) return false;
+    delete tail.pageRequest;
+    let reading = mergeEvents(this.state.events.get(id), ordered);
+    let end = after;
+    if (tail.events[0]!.seq <= end + 1) {
+      const connected = contiguousEventHighWater(tail.events, end);
+      reading = mergeEvents(reading, tail.events.filter(event => event.seq <= connected));
+      end = connected;
+    }
+    const done = end >= gap.tailSeq && end >= tail.httpTailSeq;
+    const { laterGap: _gap, ...baseWindow } = window!;
+    if (done) this.deferredTails.delete(id);
+    else {
+      const remaining = tail.events.filter(event => event.seq > end);
+      if (remaining.length) {
+        tail.events = remaining;
+        tail.bytes = remaining.reduce((bytes, event) => bytes + (tail.byteSizes.get(event.seq)?.bytes ?? 0), 0);
+        tail.byteSizes = new Map(remaining.map(event => [event.seq, tail.byteSizes.get(event.seq)!]));
+      }
+    }
+    this.dispatch({ type: "event_gap_state", fence: request.fence, events: reading,
+      window: done ? baseWindow : { ...baseWindow, laterGap: { ...gap, afterSeq: end,
+        beforeSeq: Math.max(end + 1, tail.events[0]!.seq), loading: false, error: null } },
+      settled: true, complete: done, advanceCursor: done });
+    return true;
+  };
+
+  promoteDeferredEventTail = (fence: EventGapFence): boolean => {
+    const tail = this.deferredTails.get(fence.sessionId);
+    const gap = this.state.eventWindows.get(fence.sessionId)?.laterGap;
+    if (!tail || tail.fence !== fence || !gap || !this.currentGapFence(fence) ||
+        tail.events[0]!.seq > tail.httpTailSeq ||
+        contiguousEventHighWater(tail.events, tail.events[0]!.seq - 1) < gap.tailSeq) return false;
+    // This is an explicit change of reading window: the omitted prefix becomes ordinary older
+    // history, and only this contiguous current slice supplies the acknowledged cursor.
+    const { provisionalRestTail: _receipt, laterGap: _gap, ...priorWindow } = this.state.eventWindows.get(fence.sessionId)!;
+    this.dispatch({ type: "event_gap_state", fence, events: tail.events,
+      window: { ...priorWindow, baseSeq: tail.events[0]!.seq, hasOlder: tail.hasOlder || tail.events[0]!.seq > 1,
+        complete: true, turnAligned: tail.turnAligned, loadingOlder: false, error: null },
+      settled: true, complete: true, advanceCursor: true });
+    return true;
+  };
+
   loadPodContext = (podId: string, entries: PodContextEntry[]): void =>
     this.dispatch({ type: "pod_context_loaded", podId, entries });
   eventHighWater = (sessionId: string): number => eventHighWater(this.state.events.get(sessionId));
@@ -2189,7 +2538,7 @@ export function useHasStore(): boolean {
 }
 
 /** Stable action handles (never cause re-renders). */
-export function useStoreActions(): Pick<Store, "dispatch" | "navigate" | "setInboxPersistenceEnabled" | "setInboxSelection" | "setInboxSplit" | "setInboxRatio" | "setFilters" | "loadEvents" | "loadOlderEvents" | "beginOlderEventsLoad" | "failOlderEventsLoad" | "eventWindowBase" | "loadSession" | "getSession" | "beginEventHistoryLoad" | "failEventHistoryLoad" | "loadPodContext" | "eventHighWater" | "recoveryAfter" | "recoveryReadAfter" | "eventEpoch" | "reconcileShellOutputs" | "loadShellHistory" | "removeShellOutput" | "reconnectNow"> {
+export function useStoreActions(): Pick<Store, "dispatch" | "navigate" | "setInboxPersistenceEnabled" | "setInboxSelection" | "setInboxSplit" | "setInboxRatio" | "setFilters" | "loadEvents" | "loadOlderEvents" | "beginOlderEventsLoad" | "failOlderEventsLoad" | "eventWindowBase" | "loadSession" | "getSession" | "beginEventHistoryLoad" | "failEventHistoryLoad" | "isEventGapRecoveryCurrent" | "beginEventGapRecovery" | "cancelEventGapRecovery" | "loadEventGapWindow" | "deferEventTail" | "beginLaterEventsLoad" | "loadLaterEvents" | "failLaterEventsLoad" | "promoteDeferredEventTail" | "loadPodContext" | "eventHighWater" | "recoveryAfter" | "recoveryReadAfter" | "eventEpoch" | "reconcileShellOutputs" | "loadShellHistory" | "removeShellOutput" | "reconnectNow"> {
   return useStoreHandle();
 }
 
@@ -2258,6 +2607,15 @@ export function useStore(): StoreValue {
     getSession: store.getSession,
     beginEventHistoryLoad: store.beginEventHistoryLoad,
     failEventHistoryLoad: store.failEventHistoryLoad,
+    isEventGapRecoveryCurrent: store.isEventGapRecoveryCurrent,
+    beginEventGapRecovery: store.beginEventGapRecovery,
+    cancelEventGapRecovery: store.cancelEventGapRecovery,
+    loadEventGapWindow: store.loadEventGapWindow,
+    deferEventTail: store.deferEventTail,
+    beginLaterEventsLoad: store.beginLaterEventsLoad,
+    loadLaterEvents: store.loadLaterEvents,
+    failLaterEventsLoad: store.failLaterEventsLoad,
+    promoteDeferredEventTail: store.promoteDeferredEventTail,
     loadPodContext: store.loadPodContext,
     eventHighWater: store.eventHighWater,
     recoveryAfter: store.recoveryAfter,

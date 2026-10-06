@@ -84,6 +84,7 @@ import {
 } from "./common.js";
 import { SessionPreviewBar, type PreviewSessionMenuOpener } from "./SessionPreviewBar.js";
 import { Notice } from "./Notice.js";
+import { LaterActivityControl } from "./LaterActivityControl.js";
 import { QueuedMessages, queuedMessageExcerpt } from "./QueuedMessages.js";
 import { sessionArchivedAtRest } from "../status-meta.js";
 import {
@@ -143,6 +144,7 @@ import {
 } from "../composer-drafts.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import {
+  SESSION_EVENT_PAGE_LIMIT,
   loadOlderSessionEvents,
   recoverSessionHistory,
   recoverSessionHistoryGap,
@@ -996,6 +998,15 @@ function SessionDetailLoaded({
     recoveryReadAfter,
     beginEventHistoryLoad,
     failEventHistoryLoad,
+    isEventGapRecoveryCurrent,
+    beginEventGapRecovery,
+    cancelEventGapRecovery,
+    loadEventGapWindow,
+    deferEventTail,
+    beginLaterEventsLoad,
+    loadLaterEvents,
+    failLaterEventsLoad,
+    promoteDeferredEventTail,
   } = useStoreActions();
   const openSourceLocation = useCallback((location: SourceLocation) => {
     navigate({ name: "session", id: sessionId, location });
@@ -1112,7 +1123,7 @@ function SessionDetailLoaded({
     if (rightPanel.open) rightPanel.close();
   }, [descendantRequests.length, descendantRequestStatus, requestPanelModeActive, rightPanel]);
   const anchorRecoveryPending = eventHistory?.refreshing === true ||
-    (conn === "online" && eventHistory?.everComplete !== true && eventHistory?.error == null);
+    (conn === "online" && eventHistory?.everComplete !== true && eventHistory?.error == null && !eventWindow?.laterGap);
   const recoveryRevision = useStoreSelector((s) =>
     subscriptionRecoveryRevision(s.streamSubscriptions, [sessionId]));
   const activity = useStoreSelector((s) => s.activity.get(sessionId));
@@ -2419,6 +2430,7 @@ function SessionDetailLoaded({
   const acknowledgedOpeningRef = useRef<{
     api: typeof api; instanceScope: string; sessionId: string; eventEpoch: number; generation: number;
   } | null>(null);
+  const provisionalFollowStateRef = useRef<((state: FollowTailState) => void) | null>(null);
   useEffect(() => {
     // Busy sessions elsewhere replace the fleet subscription while this detail remains live.
     // Once this mounted opening has settled successfully after acknowledgement, wait for its
@@ -2466,7 +2478,25 @@ function SessionDetailLoaded({
       }).catch(() => { /* Preserve the latest row; the transcript reports its REST failure below. */ });
     };
     refreshMetadata();
-    if (!hasSavedFollowTailAnchor(instanceScope, sessionId)) {
+    // Follow transitions only retry this owner's history read; they cannot restart metadata.
+    // Keep one live read even if pause/resume happens before its HTTP response has settled.
+    let historyInFlight = false;
+    let historyRetryNeeded = true;
+    let following = !hasSavedFollowTailAnchor(instanceScope, sessionId);
+    const readHistory = () => {
+      if (cancelled || historyInFlight || !historyRetryNeeded || !following ||
+          hasSavedFollowTailAnchor(instanceScope, sessionId)) return;
+      historyInFlight = true;
+      historyRetryNeeded = false;
+      let skippedForPause = false;
+      const canApply = () => {
+        if (cancelled) return false;
+        if (hasSavedFollowTailAnchor(instanceScope, sessionId)) {
+          skippedForPause = true;
+          return false;
+        }
+        return true;
+      };
       beginEventHistoryLoad(sessionId, epoch, revision, generation);
       void recoverSessionHistoryWindow(
         { sessionId, eventEpoch: epoch, recoveryRevision: revision },
@@ -2475,26 +2505,49 @@ function SessionDetailLoaded({
           applyWindow: (id, events, pageEpoch, pageRevision, complete, hasOlder, turnAligned) => {
             // A warm reader can pause while this GET is pending. Its saved row and offset own
             // the window at the response boundary, just as they do during acknowledged recovery.
-            if (!cancelled && !hasSavedFollowTailAnchor(instanceScope, sessionId)) {
+            if (canApply()) {
               loadEvents(id, events, pageEpoch, pageRevision, complete, generation, hasOlder, turnAligned);
             }
           },
-          isCurrent: () => !cancelled && !hasSavedFollowTailAnchor(instanceScope, sessionId),
+          isCurrent: canApply,
         },
       ).then((result) => {
-        if (!cancelled && !hasSavedFollowTailAnchor(instanceScope, sessionId) && !result.complete) {
+        if (cancelled) return;
+        if (skippedForPause) {
+          historyRetryNeeded = true;
+          return;
+        }
+        if (!result.complete) {
+          if (!canApply()) {
+            historyRetryNeeded = true;
+            return;
+          }
           // Unsupported backward reads wait for ordinary acknowledged recovery. Do not start an
           // unbounded forward walk here and recreate the slow opening path.
           failEventHistoryLoad(sessionId, "Could not load session activity before the live connection was ready.", epoch, revision, generation);
         }
       }).catch(() => {
-        if (!cancelled && !hasSavedFollowTailAnchor(instanceScope, sessionId)) {
-          failEventHistoryLoad(sessionId, "Could not load session activity.", epoch, revision, generation);
+        if (cancelled) return;
+        if (skippedForPause || !canApply()) {
+          historyRetryNeeded = true;
+          return;
         }
+        failEventHistoryLoad(sessionId, "Could not load session activity.", epoch, revision, generation);
+      }).finally(() => {
+        historyInFlight = false;
+        // Resume may have happened between the response fence and its promise continuation.
+        readHistory();
       });
-    }
+    };
+    const onFollowState = (state: FollowTailState) => {
+      following = state === "following";
+      readHistory();
+    };
+    provisionalFollowStateRef.current = onFollowState;
+    readHistory();
     return () => {
       cancelled = true;
+      if (provisionalFollowStateRef.current === onFollowState) provisionalFollowStateRef.current = null;
       if (metadataRetryTimer !== undefined) window.clearTimeout(metadataRetryTimer);
     };
   }, [api, instanceScope, sessionId, conn, recoveryRevision, recoveryEventEpoch, recoveryGeneration,
@@ -2518,7 +2571,7 @@ function SessionDetailLoaded({
     const epoch = recoveryEventEpoch;
     const generation = recoveryGeneration;
     const after = recoveryReadAfter(sessionId, epoch, generation);
-    const isCurrent = () => !cancelled;
+    const isCurrent = () => !cancelled && (gapFence === null || isEventGapRecoveryCurrent(gapFence));
     const historyOptions: SessionHistoryRecoveryOptions = {
       fetchPage: api.getSessionEventPage,
       applyPage: (id, events, pageEpoch, revision, complete) =>
@@ -2529,7 +2582,9 @@ function SessionDetailLoaded({
     const windowOptions: SessionHistoryWindowOptions = {
       fetchTailPage: api.getSessionEventTailPage,
       applyWindow: (id, events, pageEpoch, revision, complete, hasOlder, turnAligned) =>
-        loadEvents(id, events, pageEpoch, revision, complete, generation, hasOlder, turnAligned),
+        gapFence
+          ? loadEventGapWindow(gapFence, events, complete, hasOlder, turnAligned)
+          : loadEvents(id, events, pageEpoch, revision, complete, generation, hasOlder, turnAligned),
       isCurrent,
     };
     const request = { sessionId, after, eventEpoch: epoch, recoveryRevision };
@@ -2540,13 +2595,14 @@ function SessionDetailLoaded({
     // prefix from the old frozen cursor. Small reconnect gaps retain their rows; long gaps use a fixed
     // forward-page budget before replacing the tail. Check paused state again at that boundary so
     // a reader who starts reading during recovery keeps the rows their saved position depends on.
-    // Paused positions keep contiguous forward recovery so tail replacement cannot remove the
-    // row restored from the retained reader window.
+    // After the budget, a paused reader keeps its slice while a separately retained current tail
+    // makes returning to live independent of the gap's size. Missing middle rows are reader-driven.
     const openWindow = shouldReadOpeningWindow({
       recoveryAfter: after,
       hasSavedReadingPosition: !canReplaceWithWindow(),
     });
     beginEventHistoryLoad(sessionId, epoch, recoveryRevision, generation);
+    const gapFence = beginEventGapRecovery(sessionId, epoch, recoveryRevision, generation);
     const load = openWindow
       ? recoverSessionHistoryWindow(request, windowOptions)
         .then((result) => (result.supported ? result.complete : forwardRecovery()))
@@ -2554,21 +2610,38 @@ function SessionDetailLoaded({
         history: historyOptions,
         window: windowOptions,
         canReplaceWithWindow,
+        deferWindow: (_id, events, pageEpoch, _revision, complete, hasOlder, turnAligned) =>
+          !cancelled && gapFence !== null && pageEpoch === gapFence.eventEpoch &&
+          deferEventTail(gapFence, events, complete, hasOlder, turnAligned),
       });
     void load.then((complete) => {
-      if (!cancelled && !complete) {
-        failEventHistoryLoad(sessionId, "Timeline recovery ended before the complete history was available.", epoch, recoveryRevision, generation);
+      if (isCurrent() && !complete) {
+        failEventHistoryLoad(sessionId, "Some later activity could not be loaded. Retry or jump to latest.", epoch, recoveryRevision, generation);
       }
     }).catch(() => {
-      if (!cancelled) {
+      if (isCurrent()) {
         failEventHistoryLoad(sessionId, "Could not load complete session activity.", epoch, recoveryRevision, generation);
       }
     });
     return () => {
       cancelled = true;
+      if (gapFence) cancelEventGapRecovery(gapFence);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api, sessionId, loadEvents, conn, recoveryRevision, recoveryReadAfter, recoveryEventEpoch, recoveryGeneration, historyRetry, beginEventHistoryLoad, failEventHistoryLoad]);
+  }, [api, sessionId, loadEvents, conn, recoveryRevision, recoveryReadAfter, recoveryEventEpoch, recoveryGeneration, historyRetry, beginEventHistoryLoad, failEventHistoryLoad, isEventGapRecoveryCurrent, beginEventGapRecovery, cancelEventGapRecovery, loadEventGapWindow, deferEventTail]);
+
+  const loadLater = useCallback(() => {
+    const request = beginLaterEventsLoad(sessionId);
+    if (!request) return false;
+    void api.getSessionEventPage(sessionId, request.after, request.fence.eventEpoch, SESSION_EVENT_PAGE_LIMIT)
+      .then((page) => {
+        if (!loadLaterEvents(request, page)) {
+          failLaterEventsLoad(request, "Some later activity is not available yet. Retry to continue reading.");
+        }
+      })
+      .catch(() => failLaterEventsLoad(request, "Could not load later activity. Retry to continue reading."));
+    return true;
+  }, [api, sessionId, beginLaterEventsLoad, loadLaterEvents, failLaterEventsLoad]);
 
   // Older pages have one serialized fetch path. Opening recovery may use it briefly to complete an
   // underfilled first viewport; afterward only explicit controls and reader navigation call it.
@@ -3525,6 +3598,27 @@ function SessionDetailLoaded({
     rows: items,
     rowGeneration: session.eventEpoch ?? 0,
   });
+  useEffect(() => {
+    provisionalFollowStateRef.current?.(followTail.state);
+  }, [followTail.state]);
+  const acknowledgedFollowRef = useRef({ key: timelineHistoryKey, state: followTail.state });
+  useEffect(() => {
+    const previous = acknowledgedFollowRef.current;
+    acknowledgedFollowRef.current = { key: timelineHistoryKey, state: followTail.state };
+    if (followTail.state !== "following") return;
+    const gap = eventWindow?.laterGap;
+    if (gap) {
+      // Promotion cancels a pending reader-driven page before adopting the separately fetched tail.
+      // Its operation fence also rejects a tail retained by an obsolete API or recovery owner.
+      if (!promoteDeferredEventTail(gap.fence)) setHistoryRetry((value) => value + 1);
+    } else if (previous.key === timelineHistoryKey && previous.state !== "following" &&
+        recoveryRevision != null && eventHistory?.error != null) {
+      // A sparse live slice can deliberately refuse staging to preserve a chosen reading row.
+      // Explicitly returning to live may now replace it with a bounded current window.
+      setHistoryRetry((value) => value + 1);
+    }
+  }, [followTail.state, timelineHistoryKey, eventWindow?.laterGap, eventHistory?.error,
+    recoveryRevision, promoteDeferredEventTail]);
 
   // A 200-event opening window is a transport budget, not a visual one: hundreds of streamed
   // chunks can collapse into a single short timeline row. While a freshly opened reader is still
@@ -4586,7 +4680,7 @@ function SessionDetailLoaded({
       .map((invocation) => receiptRowId.command(invocation.invocationId)),
   ];
   const offscreenUndeliveredIds = useOffscreenReceipts(scrollRef, undeliveredReceiptIds, transcriptHasTail);
-  const recoveryAnnouncement = useRecoveryAnnouncement(transcript.notice, sessionId);
+  const recoveryAnnouncement = useRecoveryAnnouncement(eventWindow?.laterGap ? "stale" : transcript.notice, sessionId);
   const tailView = transcriptTailView({
     hasTail: transcriptHasTail,
     offscreenNotSent: offscreenUndeliveredIds.length,
@@ -6579,7 +6673,7 @@ function SessionDetailLoaded({
                 activity is (#56: a top-only recovery notice read as "frozen"). Its anchor takes no
                 height, so the control can come and go without moving the reader. */}
             <TranscriptTailControl
-              view={tailView}
+              view={eventWindow?.laterGap && tailView?.kind === "jump" ? null : tailView}
               shortcut={isMobile
                 ? null
                 : shortcutDisplay(mode === "preview" ? "inbox-follow-latest-end" : "session-reading-latest-end")}
@@ -6588,6 +6682,8 @@ function SessionDetailLoaded({
               onShowNotSent={showFirstUndelivered}
               onFocusLost={keepFocusInReader}
             />
+            <LaterActivityControl gap={eventWindow?.laterGap} onLoad={loadLater}
+              onJump={followTail.follow} onFocusLost={keepFocusInReader} />
             {/* The one polite live region for recovery, whatever the control is showing. */}
             <span className="sr-only" role="status" data-transcript-recovery-status>{recoveryAnnouncement}</span>
           </div>

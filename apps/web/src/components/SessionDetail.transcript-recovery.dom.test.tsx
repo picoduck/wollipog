@@ -2910,3 +2910,249 @@ test("a temporary API source change cannot reuse an older acknowledged opening w
     assert.equal(recoveryActive(fixture), false);
   } finally { await unmountFixture(fixture); }
 });
+
+
+test("resuming a pause-skipped provisional tail settles history without an acknowledgement or metadata reread", async () => {
+  const pages = pageController();
+  let metadataCalls = 0;
+  const fixture = await mountFixture(pages, 0, {
+    acknowledgeSubscription: false,
+    client: { session: async (id) => { metadataCalls++; return { session: session(id) }; } },
+  });
+  try {
+    const oldWindow = cachedTranscriptEvents(fixture.sessionId, 12).map((event) => ({
+      ...event, id: event.id + 1_000, seq: event.seq + 1_000,
+    }));
+    Object.defineProperties(fixture.scroller, {
+      offsetHeight: { configurable: true, value: 500 },
+      offsetWidth: { configurable: true, value: 800 },
+      clientWidth: { configurable: true, value: 800 },
+    });
+    setScrollerMetrics(fixture.scroller, { clientHeight: 500, scrollHeight: 2_500, scrollTop: 900 });
+    await act(async () => pages.releaseTail({
+      events: oldWindow, eventEpoch: 0, hasMoreOlder: false, cacheComplete: true,
+    }));
+    await flushAsyncWork(30);
+    await act(async () => fixture.setConnection("connecting"));
+    await act(async () => fixture.setConnection("online"));
+    // Connecting's read is cancelled by the next phase; keep the online read pending.
+    await act(async () => pages.releaseTail({
+      events: oldWindow, eventEpoch: 0, hasMoreOlder: false, cacheComplete: true,
+    }));
+    await flushAsyncWork();
+    assert.ok(fixture.container.querySelector("[data-virtual-row]"), "the warm reader has a real visible anchor");
+    assert.equal(pages.tailCalls.length, 3, "a fresh online tail is pending over the cached reader");
+    await act(async () => fireDomEvent.wheel(fixture.scroller, { deltaY: -40 }));
+    await scrollReader(fixture.scroller, 860, false);
+    assert.equal(followState(fixture), "paused");
+    const anchorTop = fixture.scroller.scrollTop;
+    const currentMetadataCalls = metadataCalls;
+    const freshWindow = oldWindow.map((event) => ({ ...event, id: event.id + 1_000, seq: event.seq + 1_000 }));
+    await act(async () => pages.releaseTail({
+      events: freshWindow, eventEpoch: 0, hasMoreOlder: true, cacheComplete: true,
+    }));
+    await flushAsyncWork();
+    assert.deepEqual(fixture.readLoadedEvents()?.map((event) => event.id), oldWindow.map((event) => event.id));
+    assert.equal(fixture.scroller.scrollTop, anchorTop);
+    assert.equal(fixture.scroller.getAttribute("aria-busy"), "true", "the skipped read still needs recovery");
+    await act(async () => {
+      fixture.scroller.focus();
+      fireDomEvent.keyDown(fixture.scroller, { key: "End" });
+    });
+    await flushAsyncWork();
+    assert.equal(followState(fixture), "following");
+    assert.equal(pages.tailCalls.length, 4, "resume alone retries the skipped bounded tail");
+    assert.equal(metadataCalls, currentMetadataCalls, "resume does not restart metadata or its Starting timer");
+    await act(async () => pages.releaseTail({
+      events: freshWindow, eventEpoch: 0, hasMoreOlder: true, cacheComplete: true,
+    }));
+    await flushAsyncWork(30);
+    assert.equal(fixture.readLoadedEvents()?.at(-1)?.seq, 2_024);
+    assert.equal(fixture.scroller.getAttribute("aria-busy"), "false", "REST settles recovery while the acknowledgement remains withheld");
+    assertNoDomNode(fixture.container.querySelector(".transcript-history-notice[data-state='error']"));
+    assert.equal(pages.forwardCalls(), 0);
+    assert.equal(pages.tailCalls.length, 4, "a completed resume cannot form a polling loop");
+  } finally { await unmountFixture(fixture); }
+});
+
+
+async function measuredUnacknowledgedRefresh(strictMode = false) {
+  const pages = pageController();
+  let metadataCalls = 0;
+  const fixture = await mountFixture(pages, 0, {
+    acknowledgeSubscription: false, strictMode,
+    client: { session: async (id) => { metadataCalls++; return { session: session(id) }; } },
+  });
+  const oldWindow = cachedTranscriptEvents(fixture.sessionId, 12).map((event) => ({
+    ...event, id: event.id + 1_000, seq: event.seq + 1_000,
+  }));
+  const freshWindow = oldWindow.map((event) => ({ ...event, id: event.id + 1_000, seq: event.seq + 1_000 }));
+  Object.defineProperties(fixture.scroller, {
+    offsetHeight: { configurable: true, value: 500 },
+    offsetWidth: { configurable: true, value: 800 },
+    clientWidth: { configurable: true, value: 800 },
+  });
+  setScrollerMetrics(fixture.scroller, { clientHeight: 500, scrollHeight: 2_500, scrollTop: 900 });
+  await act(async () => {
+    for (let index = 0; index < pages.tailCalls.length; index++) pages.releaseTail({
+      events: oldWindow, eventEpoch: 0, hasMoreOlder: false, cacheComplete: true,
+    });
+  });
+  await flushAsyncWork(30);
+  assert.ok(fixture.container.querySelector("[data-virtual-row]"));
+  // A new API capture rechecks the same online warm reader without acknowledging its stream.
+  await fixture.setApiClient({ ...fixture.readApiClient() });
+  await flushAsyncWork();
+  return { fixture, pages, oldWindow, freshWindow, metadataCalls: () => metadataCalls };
+}
+
+async function pauseMeasuredReader(fixture: Fixture) {
+  await act(async () => fireDomEvent.wheel(fixture.scroller, { deltaY: -40 }));
+  await scrollReader(fixture.scroller, 860, false);
+  assert.equal(followState(fixture), "paused");
+}
+
+async function resumeMeasuredReader(fixture: Fixture) {
+  await act(async () => {
+    fixture.scroller.focus();
+    fireDomEvent.keyDown(fixture.scroller, { key: "End" });
+  });
+  await flushAsyncWork();
+  assert.equal(followState(fixture), "following");
+}
+
+test("quick and repeated provisional pause-resume transitions reuse one pending history read", async () => {
+  const { fixture, pages, oldWindow, freshWindow, metadataCalls } = await measuredUnacknowledgedRefresh();
+  try {
+    const initialReads = pages.tailCalls.length;
+    const initialMetadataCalls = metadataCalls();
+    await pauseMeasuredReader(fixture);
+    await resumeMeasuredReader(fixture);
+    assert.equal(pages.tailCalls.length, initialReads, "resume before the response reuses the still-valid read");
+    await pauseMeasuredReader(fixture);
+    const anchorTop = fixture.scroller.scrollTop;
+    await act(async () => pages.releaseTail({
+      events: freshWindow, eventEpoch: 0, hasMoreOlder: true, cacheComplete: true,
+    }));
+    await flushAsyncWork();
+    assert.equal(fixture.scroller.scrollTop, anchorTop);
+    assert.deepEqual(fixture.readLoadedEvents()?.map((event) => event.id), oldWindow.map((event) => event.id));
+    await resumeMeasuredReader(fixture);
+    assert.equal(pages.tailCalls.length, initialReads + 1, "the skipped result gets one replacement");
+    await pauseMeasuredReader(fixture);
+    await resumeMeasuredReader(fixture);
+    await resumeMeasuredReader(fixture);
+    assert.equal(pages.tailCalls.length, initialReads + 1, "repeated resume cannot compete with the current replacement");
+    await act(async () => pages.releaseTail({
+      events: freshWindow, eventEpoch: 0, hasMoreOlder: true, cacheComplete: true,
+    }));
+    await flushAsyncWork(30);
+    assert.equal(fixture.scroller.getAttribute("aria-busy"), "false");
+    await pauseMeasuredReader(fixture);
+    await resumeMeasuredReader(fixture);
+    assert.equal(pages.tailCalls.length, initialReads + 1, "a settled read needs no later pause-resume refresh");
+    assert.equal(metadataCalls(), initialMetadataCalls);
+  } finally { await unmountFixture(fixture); }
+});
+
+test("a late resumed provisional response cannot replace acknowledged recovery", async () => {
+  const { fixture, pages, oldWindow, freshWindow, metadataCalls } = await measuredUnacknowledgedRefresh();
+  try {
+    await pauseMeasuredReader(fixture);
+    await act(async () => pages.releaseTail({
+      events: freshWindow, eventEpoch: 0, hasMoreOlder: true, cacheComplete: true,
+    }));
+    await flushAsyncWork();
+    await resumeMeasuredReader(fixture);
+    const reads = pages.tailCalls.length;
+    const metadata = metadataCalls();
+    const revision = fixture.socket.sent.filter((message) => message.type === "session_subscriptions").at(-1)?.revision;
+    assert.ok(revision != null);
+    await act(async () => fixture.socket.push({
+      type: "session_subscriptions_applied", revision, sessionIds: [fixture.sessionId], podIds: [],
+    }));
+    await flushAsyncWork();
+    assert.deepEqual(pages.forwardAfters, [1_024]);
+    await act(async () => pages.releaseTail({
+      events: freshWindow, eventEpoch: 0, hasMoreOlder: true, cacheComplete: true,
+    }));
+    await flushAsyncWork();
+    assert.deepEqual(fixture.readLoadedEvents()?.map((event) => event.id), oldWindow.map((event) => event.id),
+      "the superseded provisional response cannot evict the acknowledged window");
+    await act(async () => pages.releaseForward({
+      events: [], eventEpoch: 0, nextAfter: 1_024, hasMoreCached: false, cacheComplete: true,
+    }));
+    await flushAsyncWork();
+    assert.equal(fixture.scroller.getAttribute("aria-busy"), "false");
+    assert.equal(pages.tailCalls.length, reads);
+    assert.equal(metadataCalls(), metadata);
+  } finally { await unmountFixture(fixture); }
+});
+
+test("StrictMode and a source switch revoke a resumed provisional owner without a retry loop", async () => {
+  const { fixture, pages, oldWindow, freshWindow, metadataCalls } = await measuredUnacknowledgedRefresh(true);
+  try {
+    await pauseMeasuredReader(fixture);
+    await act(async () => pages.releaseTail({
+      events: freshWindow, eventEpoch: 0, hasMoreOlder: true, cacheComplete: true,
+    }));
+    await flushAsyncWork();
+    const reads = pages.tailCalls.length;
+    const metadata = metadataCalls();
+    await resumeMeasuredReader(fixture);
+    assert.equal(pages.tailCalls.length, reads + 1, "only the active StrictMode owner resumes history");
+    assert.equal(metadataCalls(), metadata);
+    const nextPages = pageController();
+    await fixture.setApiClient({ ...fixture.readApiClient(),
+      getSessionEventPage: nextPages.fetchPage,
+      getSessionEventTailPage: nextPages.fetchTailPage,
+    });
+    assert.equal(nextPages.tailCalls.length, 1);
+    await act(async () => pages.releaseTail({
+      events: freshWindow, eventEpoch: 0, hasMoreOlder: true, cacheComplete: true,
+    }));
+    await flushAsyncWork();
+    assert.deepEqual(fixture.readLoadedEvents()?.map((event) => event.id), oldWindow.map((event) => event.id));
+    assert.equal(fixture.scroller.getAttribute("aria-busy"), "true");
+    await act(async () => nextPages.releaseTail({
+      events: oldWindow, eventEpoch: 0, nextAfter: 1_024, hasMoreCached: false, cacheComplete: true,
+    }));
+    await flushAsyncWork();
+    assert.ok(fixture.container.querySelector(".transcript-history-notice[data-state='error']"),
+      "the active source's unsupported backward read remains an honest retryable failure");
+    await pauseMeasuredReader(fixture);
+    await resumeMeasuredReader(fixture);
+    assert.equal(nextPages.tailCalls.length, 1, "unsupported reads do not retry merely because following resumed");
+    assert.equal(nextPages.forwardCalls(), 0, "the provisional owner never starts a legacy forward walk");
+  } finally { await unmountFixture(fixture); }
+});
+
+
+test("resume between a provisional response fence and its continuation retries once without a false failure", async () => {
+  const { fixture, pages, freshWindow, metadataCalls } = await measuredUnacknowledgedRefresh();
+  try {
+    const reads = pages.tailCalls.length;
+    const metadata = metadataCalls();
+    await pauseMeasuredReader(fixture);
+    await act(async () => {
+      pages.releaseTail({ events: freshWindow, eventEpoch: 0, hasMoreOlder: true, cacheComplete: true });
+      // The recovery helper resumes first and fences the paused response. Resume following
+      // before its caller's .then/finally continuations run.
+      await Promise.resolve();
+      fixture.scroller.focus();
+      fireDomEvent.keyDown(fixture.scroller, { key: "End" });
+    });
+    await flushAsyncWork();
+    assert.equal(followState(fixture), "following");
+    assert.equal(pages.tailCalls.length, reads + 1);
+    assertNoDomNode(fixture.container.querySelector(".transcript-history-notice[data-state='error']"),
+      "the pause fence keeps its cancellation reason after the reader resumes");
+    assert.equal(metadataCalls(), metadata);
+    await act(async () => pages.releaseTail({
+      events: freshWindow, eventEpoch: 0, hasMoreOlder: true, cacheComplete: true,
+    }));
+    await flushAsyncWork(30);
+    assert.equal(fixture.scroller.getAttribute("aria-busy"), "false");
+    assert.equal(pages.tailCalls.length, reads + 1);
+  } finally { await unmountFixture(fixture); }
+});
