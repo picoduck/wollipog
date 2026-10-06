@@ -200,7 +200,11 @@ test("bare b toggles the mode and stays inert while typing in the shared search"
   await search.focus();
   await page.keyboard.press("b");
   await expect(search).toHaveValue("b");
-  await expect(page.locator(".board-wrap")).toBeVisible();
+  // Nothing here matches "b", so No Matches stands in for the board (#2200); the mode is unchanged.
+  await expect(page.getByRole("radiogroup", { name: "Sessions View" }).getByRole("radio", { name: /Board/ }))
+    .toHaveAttribute("aria-checked", "true");
+  expect(harnessPath(page)).toBe("/board");
+  await expect(page.locator(".inbox-list")).toHaveCount(0);
 });
 
 test("a reload keeps board mode and activating the Sessions rail item reopens it", async ({ page }) => {
