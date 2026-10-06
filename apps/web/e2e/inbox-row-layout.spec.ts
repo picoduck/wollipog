@@ -400,11 +400,17 @@ test.describe("with a row in every status", () => {
           const itemBox = item.getBoundingClientRect();
           return itemBox.left >= box.left - 0.5 && itemBox.right <= box.right + 0.5 && itemBox.width > 0;
         };
+        // The badge ITSELF, not its wrapper: a wrapper can shrink while the badge paints past it.
+        const badge = line.querySelector<HTMLElement>(".row-status .status");
+        const strip = line.querySelector<HTMLElement>(".inbox-row-activity");
+        const next = strip ?? line.querySelector<HTMLElement>(".inbox-row-time")!;
         return {
           title: line.closest(".inbox-row")!.querySelector(".inbox-row-title")!.textContent,
           time: inside(".inbox-row-time"),
           strip: inside(".inbox-row-activity"),
-          badge: inside(".row-status"),
+          badge: badge ? inside(".row-status .status")
+            && badge.getBoundingClientRect().right <= next.getBoundingClientRect().left + 0.5 : null,
+          badgeWhole: badge ? badge.scrollWidth <= badge.clientWidth + 0.5 : null,
         };
       }));
       const dense = lines.find((line) => line.title?.startsWith("Snoozed and Blocked"))!;
@@ -413,6 +419,10 @@ test.describe("with a row in every status", () => {
         expect(line.time, `${line.title}: the time stays whole`).toBe(true);
         if (line.strip !== null) expect(line.strip, `${line.title}: the strip stays whole`).toBe(true);
         if (line.badge !== null) expect(line.badge, `${line.title}: the badge stays inside the line`).toBe(true);
+        // The branch gives way before the status does; only the densest card clips its badge.
+        if (line.badgeWhole !== null && !line.title?.startsWith("Snoozed and Blocked")) {
+          expect(line.badgeWhole, `${line.title}: the badge is whole`).toBe(true);
+        }
       }
     });
   }

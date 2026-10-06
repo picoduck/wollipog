@@ -12285,7 +12285,9 @@ body.shell-dock-dragging * {
 /* The densest phone line (a long badge, the strip and a weekday return time) does not fit 320px, so
    the badge is what gives way: its label is clipped, and its accessible name and tooltip stay whole. */
 .inbox-row-shell.stacked .inbox-row-status-line > .row-status { flex: 0 1 auto; min-width: 0; }
-.inbox-row-shell.stacked .row-status > .status { min-width: 0; overflow: hidden; }
+.inbox-row-shell.stacked .row-status > .status { min-width: 0; flex: 0 1 auto; overflow: hidden; }
+/* The branch gives way long before the status does, as the sender does on the desktop status line. */
+.inbox-row-shell.stacked .inbox-row-status-line > .inbox-row-git { flex-shrink: 100000; }
 /* Meta (§11.3): plain text, each item after its 14px icon, 12px apart. */
 .inbox-row-git {
   display: flex;
