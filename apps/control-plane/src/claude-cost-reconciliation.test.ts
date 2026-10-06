@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ControlPlaneDb } from "./db.js";
 import type { HumanPrincipal } from "./identity.js";
-import { previewClaudeReconciliation, applyClaudeReconciliation, normalizeReconciledSnapshot } from "./claude-cost-reconciliation.js";
+import { previewClaudeReconciliation, applyClaudeReconciliation, normalizeReconciledSnapshot, correctionFrame, reconciliationCoordinate } from "./claude-cost-reconciliation.js";
 import type { SessionSnapshot } from "@wollipog/protocol";
 import Fastify from "fastify";
 import { registerUsageRoutes } from "./usage-routes.js";
@@ -18,7 +18,7 @@ const principal: HumanPrincipal = {
 
 function fixture(path = ":memory:") {
   const db = ControlPlaneDb.open(path);
-  db.registerRunner({ runnerId: "runner", hostname: "host", os: "linux", version: "test", agents: [], workspaces: [] }, Date.now(), 199);
+  db.registerRunner({ runnerId: "runner", hostname: "host", os: "linux", version: "test", agents: [], workspaces: [] }, Date.now(), 210);
   const now = Date.now();
   db.createSession({ id: "session", runnerId: "runner", workspaceId: null, agentId: "claude",
     driver: "claude-code", title: "Fixture", useWorktree: false, config: { model: "claude-test" }, now });
@@ -168,7 +168,7 @@ test("old and acknowledged snapshots reconcile without resurrecting or subtracti
     assert.equal(normalizeReconciledSnapshot(db, snapshot).costUsd, 0.02);
     db.updateSessionFromSnapshot("session", snapshot, now + 1);
     assert.equal(db.sessionCostUsd("session"), 0.02);
-    db.updateSessionFromSnapshot("session", { ...snapshot, costUsd: 0.02, costReconciliationRevision: 1 }, now + 2);
+    db.updateSessionFromSnapshot("session", { ...snapshot, costUsd: 0.02, costReconciliationRevision: 1, costReconciliationIdentity: reconciliationCoordinate(db, "session").identity, costReconciliationDeltaUsd: -0.01 }, now + 2);
     assert.equal(db.sessionCostUsd("session"), 0.02);
     assert.equal(db.raw().prepare("SELECT covered_through_seq AS seq FROM usage_session_state").get()?.seq, 2);
     db.raw().exec("UPDATE runners SET protocol_version=198");
@@ -219,7 +219,7 @@ test("reconciliation endpoints enforce human administration and exact explicit a
     const applied = await app.inject({ method: "POST", url: applyUrl, headers: { authorization: "owner" }, payload: { evidence, approvedDigest, approved: true } });
     assert.equal(applied.statusCode, 200);
     assert.equal(applied.json().costUsd, 0.02);
-    assert.deepEqual(sent, [{ type: "priced_session_cost", sessionId: "session", costUsd: 0.02, costReconciliationRevision: 1, costReconciliationDeltaUsd: -0.01 }]);
+    assert.deepEqual(sent, [correctionFrame(db, "session")]);
     const auditUrl = "/api/usage/claude-reconciliation/audit?sessionId=session";
     assert.equal((await app.inject({ url: auditUrl, headers: { authorization: "viewer" } })).statusCode, 403);
     assert.equal((await app.inject({ url: auditUrl, headers: { authorization: "foreign" } })).statusCode, 404);
@@ -253,7 +253,7 @@ test("a committed correction remains successful when synchronization throws and 
     assert.equal(retry.statusCode, 200);
     assert.equal(retry.json().applied, false);
     assert.equal(retry.json().synchronized, true);
-    assert.deepEqual(frames, [{ type: "priced_session_cost", sessionId: "session", costUsd: 0.02, costReconciliationRevision: 1, costReconciliationDeltaUsd: -0.01 }]);
+    assert.deepEqual(frames, [correctionFrame(db, "session")]);
     assert.equal(db.sessionCostUsd("session"), 0.02);
   } finally { await app.close(); db.close(); }
 });

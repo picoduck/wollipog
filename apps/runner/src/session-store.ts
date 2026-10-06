@@ -125,6 +125,8 @@ export interface SessionMeta {
   claudeUsageCheckpointSeq?: number;
   costReconciliationRevision?: number;
   costReconciliationDeltaUsd?: number;
+  costReconciliationIdentity?: string;
+  costReconciliationRepairId?: string;
   /** Discovery-verified optional CLI flags/modes, retained for restart and runner-side defense. */
   capabilities?: AgentCapabilities;
   /** Session-root command catalog. Undefined preserves the live agent catalog; [] explicitly clears it. */
@@ -3079,6 +3081,9 @@ export function metaToSnapshot(
     contextWindow: m.contextWindow,
     costUsd: m.costUsd,
     ...(m.costReconciliationRevision ? { costReconciliationRevision: m.costReconciliationRevision } : {}),
+    ...(m.costReconciliationIdentity ? { costReconciliationIdentity: m.costReconciliationIdentity } : {}),
+    ...(m.costReconciliationDeltaUsd !== undefined ? { costReconciliationDeltaUsd: m.costReconciliationDeltaUsd } : {}),
+    ...(m.costReconciliationRepairId ? { costReconciliationRepairId: m.costReconciliationRepairId } : {}),
     ...(m.driver === "claude-code" && m.claudeUsageCheckpoint?.accountingScope ? { costIsEstimate: true as const } : {}),
     adopted: isAdoptedSession(m),
     seq: m.seq,

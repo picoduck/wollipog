@@ -142,7 +142,7 @@ in one SQLite transaction. A retry with the exact evidence and approved digest i
 Unresolved records remain unchanged; tokens, cache savings, unrelated costs, replay watermarks,
 provider baselines, checkpoint approvals, and existing approval cards remain intact.
 
-The session's runner must support protocol 199 before a correction can apply. Its durable
+The session's runner must support protocol 210 before a correction can apply. Its durable
 `costReconciliationRevision` and cumulative correction delta let a newer acknowledged amount decrease once without allowing an
 old snapshot to resurrect the overcount or apply the same subtraction twice. Applying the delta
 relative to the runner's acknowledged correction preserves usage accrued before delivery. A disconnected runner
@@ -204,7 +204,8 @@ runner synchronization once every observed acknowledgement is covered. Do not re
 bypass the fence, or automatically resume paused work/clear approvals.
 
 The additive accounting tables preserve older history and whole micro-USD reconciliation. Runners
-supporting protocol 199 already accept fractional USD deltas; no new runner capability is needed.
+supporting protocol 199 already accept fractional USD deltas, but protocol 210 is now required
+for content-bound correction acknowledgements and metadata repair.
 Do not downgrade the control plane after fractional corrections: older code does not read the new
 precision receipts. Observation/recovery/precision metadata follows session deletion.
 
@@ -214,3 +215,69 @@ by `requestId`. Applied events include `revision`, `applied`, and `synchronized`
 they exclude imported evidence and actor details. Existing runner fencing emits
 `cost_reconciliation_revision_unavailable`. Use preview reasons and scoped audit for diagnosis;
 no metrics backend or new external dependency is introduced.
+
+## Content-bound acknowledgements and upgrades
+
+Protocol 210 binds each correction prefix to a SHA-256 identity of its session/history scope,
+ordered original audit digests, and exact micro/pico-USD deltas. A revision number is not proof
+of correction content. Snapshots report the identity and cumulative applied adjustment; synchronization
+also names the runner's expected prior coordinate. A matching number with different content,
+missing identity, unknown repair generation, or missing prefix stays fenced. A skipped revision is
+applied only from the runner's matching prefix, preserving usage accrued since the correction.
+Equal/stale observations stay read-only unless they establish a new durable conflict.
+
+Upgrade both peers before new corrections. Previously reconciled runner metadata has numeric
+coordinates without identities; it must use the verified repair procedure below before synchronizing.
+Never automatically adopt the server's identity for an old number. Forks start with fresh accounting
+metadata; continuation/restart retain the existing coordinate and repair generation. Control-plane
+or runner downgrade after content-bound corrections or repairs is unsupported. After restore, recover
+the verified original chain before ordinary corrections; a same-number conflicting chain cannot be
+resolved by guessing which total is newer.
+
+## Repair invalid acknowledgement metadata
+
+This procedure repairs metadata only. It neither reconstructs missing costs nor edits valid usage,
+correction audits, tokens, budget floors, replay coverage, or approval cards. It is suitable, for
+example, when a verified owning-runner baseline matches the complete authoritative accounting
+checkpoint but its correction revision was corrupted to 9007199254740991. A lower snapshot alone
+never clears that observation. Genuine missing corrections must use restore recovery first.
+
+1. Independently verify the complete authoritative accounting state and the owning runner's current
+   accounting-only metadata. A current database export or a runner scalar alone cannot establish
+   that a newer correction is missing. Verify the trusted source before authorizing its import.
+2. `GET /api/usage/claude-reconciliation/repair/export?sessionId=<id>` returns the current session,
+   event/history scope, correction coordinate, and ledger checkpoint. Compare these to your trusted
+   accounting source. Its checkpoint must match the retained ledger exactly, including tokens,
+   rounding carry, coverage, and sequence. The runner baseline must match at pico-USD precision and
+   retain the same cumulative adjustment. Changed monetary baselines remain unresolved.
+3. Submit the verified checkpoint to `POST /api/usage/claude-reconciliation/repair/preview`, adding
+   `importAuthorized: true`, the verified source's `sourceSha256`, and `runner` containing its
+   expected `revision`, optional `identity`/`repairId`, `deltaUsd`, `costUsd`, `tokensIn`, `tokensOut`,
+   `seq`, and `historyEpoch`. Unknown fields and content-bearing imports are rejected. The preview
+   is read-only and explains the target coordinate, remaining evidence, and runner effects.
+4. Approve the exact preview and post `{ evidence, approvedDigest, approved: true }` to
+   `/api/usage/claude-reconciliation/repair/apply`. Approval commits a durable audited intent,
+   not clearance of the fence. `synchronized` means a frame was sent, not that repair completed.
+5. The owning runner compares its full expected state before atomically changing only correction
+   metadata and recording the approved repair digest. Concurrent usage or metadata changes refuse
+   that command. It publishes the new coordinate and repair generation; the control plane then
+   atomically confirms the audit and replaces its corrupt observation. Unconfirmed sessions stay
+   fenced, while unrelated sessions and Stop/archive enforcement remain available.
+6. Read `GET /api/usage/claude-reconciliation/audit?sessionId=<id>`: `repairs` records the approving
+   actor, provenance, intent and `confirmed` status. Exact retries resend the latest still-valid
+   intent; reconnect/restart also retries it. Superseded intents cannot be replayed. Metadata or
+   accepted accounting changes require a fresh preview. Repair never automatically resumes work.
+
+The repair digest remains a durable generation on both peers, including revision zero. Old
+snapshots cannot re-create the cleared high-water mark; old pricing frames cannot undo the repair.
+Missing or conflicting generations remain fenced. If a failure occurs after one side commits,
+reconnect or retry completes the handshake without subtracting a correction again. All local
+multi-row database writes are transactional. No cross-process transaction is assumed.
+
+Repair uses existing human owner/admin session authorization and explicit source verification.
+The source SHA-256 is an attestation reference, not a signature. This API is not permission to
+clear arbitrary observations: insufficient or conflicting proof remains unresolved. Existing
+20-revision/1,000-record restore limits remain unchanged. No live accounting is modified by an
+upgrade alone, and no provider directories, prompts, transcripts, credentials, or current settings
+are scanned. Structured HTTP events report `claude_cost_acknowledgement_repair_approved` or
+`claude_cost_acknowledgement_repair_rejected` without importing evidence into logs.

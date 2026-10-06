@@ -220,8 +220,8 @@ test("machine skill adoption is capability-gated per platform", () => {
   assert.equal(machineSkillAdoptionRecoveryRequirement(undefined), null);
 });
 
-test("PROTOCOL_VERSION is 209", () => {
-  assert.equal(PROTOCOL_VERSION, 209);
+test("PROTOCOL_VERSION is 210", () => {
+  assert.equal(PROTOCOL_VERSION, 210);
   assert.equal(runnerSupportsProtocol(208, "skillRequestResumption"), false);
   assert.equal(runnerSupportsProtocol(209, "skillRequestResumption"), true);
   assert.equal(runnerSupportsProtocol(207, "campaignIssueScopeChanges"), false);
@@ -233,6 +233,8 @@ test("PROTOCOL_VERSION is 209", () => {
   assert.equal(runnerSupportsProtocol(198, "campaignForgeStatus"), true);
   assert.equal(runnerSupportsProtocol(198, "costReconciliation"), false);
   assert.equal(runnerSupportsProtocol(199, "costReconciliation"), true);
+  assert.equal(runnerSupportsProtocol(209, "costReconciliationIdentity"), false);
+  assert.equal(runnerSupportsProtocol(210, "costReconciliationIdentity"), true);
   for (const version of [undefined, 197, 198, 199, 200, 201, 202]) {
     assert.equal(runnerSupportsProtocol(version, "sessionRoleConversion"), false);
   }

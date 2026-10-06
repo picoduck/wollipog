@@ -654,7 +654,8 @@
 // 208: human-approved, revisioned campaign issue scope and bounded epic member proposals.
 // 209: replacement connections resume bounded manual skill correlations from current-server
 //      pending authority and retained runner-local admission; old peers retain timeout fallback.
-export const PROTOCOL_VERSION = 209;
+// 210: content-bound cost correction coordinates and explicitly approved metadata repair.
+export const PROTOCOL_VERSION = 210;
 export const SKILL_REPORT_REQUEST_LIFETIME_MS = 30_000;
 export const MAX_SKILL_REPORT_REQUESTS = 64;
 export { boundedIssueNumbers, epicChecklistMembers, normalizeCampaignIssueScopeSnapshot } from "./campaign-issue-scope.js";
@@ -1004,6 +1005,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v106 runners enforce the control-plane-priced cumulative cost during the active turn. */
   pricedSessionCost: 106,
   costReconciliation: 199,
+  costReconciliationIdentity: 210,
   /** v129 runners report the exact threshold that cancelled a turn. */
   governanceTripReporting: 129,
   /** v107 runners durably resume non-secret structured-question answers after process loss. */
@@ -6953,8 +6955,13 @@ export interface SessionSnapshot {
   costUsd: number;
   /** Protocol 197: SDK-computed cost retains estimate provenance during snapshot catch-up. */
   costIsEstimate?: true;
+  /** Protocol 210: acknowledged cumulative adjustment, never inferred from scalar cost. */
+  costReconciliationDeltaUsd?: number;
   /** Protocol 199: last acknowledged historical cost correction. */
   costReconciliationRevision?: number;
+  /** Protocol 210: scoped correction-chain identity; absent is never an identity match. */
+  costReconciliationIdentity?: string;
+  costReconciliationRepairId?: string;
   /** True for sessions adopted from an external CLI transcript (gates the reprocess action). */
   adopted?: boolean;
   /** Highest event seq the runner holds for this session (its own monotonic counter). */
@@ -8975,14 +8982,34 @@ export interface RearmGovernanceMessage {
 
 /** Acknowledge the authoritative, control-plane-priced cumulative session cost after one
  * parentless usage event. Content-free and additive; sent only to v106+ runners. */
+export interface CostCorrectionCoordinate {
+  revision: number;
+  identity?: string;
+  deltaUsd: number;
+}
+export interface CostCorrectionRunnerState extends CostCorrectionCoordinate {
+  repairId?: string;
+  costUsd: number;
+  tokensIn: number;
+  tokensOut: number;
+  seq: number;
+  historyEpoch: number;
+}
 export interface PricedSessionCostMessage {
   type: "priced_session_cost";
   sessionId: string;
   costUsd: number;
   /** Protocol 199: durable correction coordinate; older acknowledgements cannot undo it. */
   costReconciliationRevision?: number;
+  /** Protocol 210: scoped correction-chain identity; absent is never an identity match. */
+  costReconciliationIdentity?: string;
+  costReconciliationRepairId?: string;
   /** Cumulative correction from revision zero, applied relative to the runner's acknowledged delta. */
   costReconciliationDeltaUsd?: number;
+  /** Match the runner's actual prefix before applying an incremental cumulative adjustment. */
+  costReconciliationBase?: CostCorrectionCoordinate;
+  /** Human-approved compare-and-swap of metadata only; never a generic revision reset. */
+  costReconciliationRepair?: { id: string; expected: CostCorrectionRunnerState };
 }
 
 export interface ResolvePermissionMessage {

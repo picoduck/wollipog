@@ -5740,6 +5740,8 @@ export class SessionManager {
       costUsd: priorResumeId ? (prior?.costUsd ?? 0) : 0,
       costReconciliationRevision: priorResumeId ? prior?.costReconciliationRevision : undefined,
       costReconciliationDeltaUsd: priorResumeId ? prior?.costReconciliationDeltaUsd : undefined,
+      costReconciliationIdentity: priorResumeId ? prior?.costReconciliationIdentity : undefined,
+      costReconciliationRepairId: priorResumeId ? prior?.costReconciliationRepairId : undefined,
       preview: priorResumeId ? (prior?.preview ?? null) : null,
       pendingApproval: null,
       // Manager-driven: a continued session is no longer a pristine transcript, so it isn't
@@ -13829,6 +13831,8 @@ export class SessionManager {
         costUsd: 0,
         costReconciliationRevision: undefined,
         costReconciliationDeltaUsd: undefined,
+        costReconciliationIdentity: undefined,
+        costReconciliationRepairId: undefined,
         preview: null,
         pendingApproval: null,
         providerCredentialScopeId: undefined,
@@ -14043,12 +14047,35 @@ export class SessionManager {
   /** Persist the control plane's cumulative priced cost and apply the existing hard budget to the
    * active turn. Codex reports token usage without USD, so this acknowledgement is the first
    * authoritative cost the runner can enforce. */
-  syncPricedSessionCost(sessionId: string, costUsd: number, revision?: number, correctionDeltaUsd?: number): void {
+  syncPricedSessionCost(sessionId: string, costUsd: number, revision?: number, correctionDeltaUsd?: number, coordinate?: import("@wollipog/protocol").PricedSessionCostMessage): void {
     if (!Number.isFinite(costUsd) || costUsd < 0) return;
     const current = this.store.readMeta(sessionId);
-    if (!current || !Number.isSafeInteger(revision ?? 0) || (revision ?? 0) < (current.costReconciliationRevision ?? 0)) return;
+    if (!current || !Number.isSafeInteger(revision ?? 0) || (revision ?? 0) < 0) return;
     const priorRevision = current.costReconciliationRevision ?? 0;
-    if ((revision ?? 0) > 0) {
+    const identity = coordinate?.costReconciliationIdentity;
+    const repair = coordinate?.costReconciliationRepair;
+    if ((revision ?? 0) > 0 && (!identity || !/^[a-f0-9]{64}$/.test(identity))) return;
+    if (repair) {
+      const expected = repair.expected;
+      if (!/^[a-f0-9]{64}$/.test(repair.id) || expected.revision !== priorRevision ||
+          expected.identity !== current.costReconciliationIdentity || expected.repairId !== current.costReconciliationRepairId ||
+          expected.deltaUsd !== (current.costReconciliationDeltaUsd ?? 0) ||
+          expected.costUsd !== current.costUsd || expected.tokensIn !== current.tokensIn || expected.tokensOut !== current.tokensOut ||
+          expected.seq !== current.seq || expected.historyEpoch !== (current.logEpoch ?? 0) ||
+          correctionDeltaUsd !== expected.deltaUsd || costUsd !== current.costUsd) {
+        this.log(JSON.stringify({ event: "claude_cost_acknowledgement_repair_refused", entryPoint: "control_plane", correlationId: repair.id, sessionId, reason: "expected_state_changed" }));
+        return;
+      }
+    } else {
+      if ((revision ?? 0) < priorRevision || coordinate?.costReconciliationRepairId !== current.costReconciliationRepairId) return;
+      if (priorRevision > 0 && revision === priorRevision && identity !== current.costReconciliationIdentity) return;
+      if ((revision ?? 0) > priorRevision) {
+        const base = coordinate?.costReconciliationBase;
+        if (!base || base.revision !== priorRevision || base.identity !== current.costReconciliationIdentity ||
+            base.deltaUsd !== (current.costReconciliationDeltaUsd ?? 0)) return;
+      }
+    }
+    if (!repair && (revision ?? 0) > 0) {
       if (!Number.isFinite(correctionDeltaUsd) || correctionDeltaUsd! > 0) return;
       if (revision === priorRevision && correctionDeltaUsd !== current.costReconciliationDeltaUsd) return;
       // Preserve provider usage accrued after the preview/commit but before this frame arrived.
@@ -14057,8 +14084,11 @@ export class SessionManager {
     }
     const updated = this.store.patchMeta(sessionId, { costUsd,
       ...(revision !== undefined ? { costReconciliationRevision: revision } : {}),
-      ...(correctionDeltaUsd !== undefined ? { costReconciliationDeltaUsd: correctionDeltaUsd } : {}) });
+      ...(correctionDeltaUsd !== undefined ? { costReconciliationDeltaUsd: correctionDeltaUsd } : {}),
+      ...(identity !== undefined ? { costReconciliationIdentity: identity } : {}),
+      ...(repair ? { costReconciliationRepairId: repair.id, costReconciliationIdentity: identity } : {}) });
     if (!updated) return;
+    if (repair) this.log(JSON.stringify({ event: "claude_cost_acknowledgement_repair_committed", entryPoint: "control_plane", correlationId: repair.id, sessionId }));
     this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
 
     const entry = this.active.get(sessionId);

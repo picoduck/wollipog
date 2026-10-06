@@ -33,6 +33,24 @@ CREATE TABLE IF NOT EXISTS usage_cost_reconciliation_observations (
   acknowledged_revision INTEGER NOT NULL,
   FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS usage_cost_reconciliation_identity_observations (
+  session_id TEXT PRIMARY KEY,
+  coordinate_json TEXT NOT NULL,
+  FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS usage_cost_reconciliation_repairs (
+  digest TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  organization_id TEXT NOT NULL,
+  actor_id TEXT NOT NULL,
+  source_sha256 TEXT NOT NULL,
+  evidence_json TEXT NOT NULL,
+  result_json TEXT NOT NULL,
+  confirmed INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_usage_cost_reconciliation_repairs_session ON usage_cost_reconciliation_repairs(session_id);
 CREATE TABLE IF NOT EXISTS usage_cost_reconciliation_precision (
   digest TEXT PRIMARY KEY,
   delta_remainder_picousd INTEGER NOT NULL,
@@ -124,6 +142,9 @@ function picoUsd(amount: number): bigint {
   const scaled = amount * 1_000_000;
   const whole = Math.floor(scaled);
   return BigInt(whole) * PICO_PER_MICRO + BigInt(Math.round((scaled - whole) * 1_000_000));
+}
+export function sameAccountingUsd(left: number, right: number): boolean {
+  return Number.isFinite(left) && Number.isFinite(right) && left >= 0 && right >= 0 && picoUsd(left) === picoUsd(right);
 }
 function roundMicro(pico: bigint): number {
   const shifted = pico + 500_000n;
@@ -288,8 +309,8 @@ function plan(db: ControlPlaneDb, principal: HumanPrincipal, evidence: Evidence,
         if (Number(bucket.cost_microusd) < originalMicro || Number(bucket.provider_reported_records) < 1) unresolved("retained bucket lacks the original priced contribution");
       } else unresolved("original aggregate contribution is no longer retained");
     }
-    if (!recovering && observedReconciliationRevision(db, evidence.sessionId) > reconciliationRevision(db, evidence.sessionId)) unresolved("missing correction revision requires verified restore recovery");
-    if ((db.getRunner(String(session.runner_id))?.protocolVersion ?? 0) < 199) unresolved("runner upgrade is required for revision-aware cost synchronization");
+    if (!recovering && !reconciliationSnapshotAvailable(db, { id: evidence.sessionId, costReconciliationRevision: 0, costReconciliationRepairId: latestReconciliationRepair(db, evidence.sessionId)?.digest } as SessionSnapshot)) unresolved("missing correction revision requires verified restore recovery");
+    if ((db.getRunner(String(session.runner_id))?.protocolVersion ?? 0) < 210) unresolved("runner upgrade is required for revision-aware cost synchronization");
     const model = sql.prepare("SELECT cost_microusd, provider_reported_records FROM usage_session_models WHERE session_id=? AND model=?").get(evidence.sessionId, record.model);
     if (!model || Number(model.cost_microusd) < originalMicro || Number(model.provider_reported_records) < 1) unresolved("per-model ledger lacks the original priced contribution");
     dependencies.push(event, receipt ?? null, model ?? null);
@@ -331,7 +352,7 @@ function plan(db: ControlPlaneDb, principal: HumanPrincipal, evidence: Evidence,
   }
   const originalUsd = rows.reduce((sum, r) => sum + r.originalUsd, 0);
   const proposedUsd = rows.reduce((sum, r) => sum + (r.status === "correctable" ? r.proposedUsd : r.originalUsd), 0);
-  const digest = createHash("sha256").update(JSON.stringify({ evidence, rows, dependencies })).digest("hex");
+  const digest = createHash("sha256").update(JSON.stringify({ evidence, rows, dependencies, observation: reconciliationObservation(db, evidence.sessionId), repair: latestReconciliationRepair(db, evidence.sessionId) })).digest("hex");
   const remaining = Number(sql.prepare("SELECT COUNT(*) AS n FROM session_events e WHERE session_id=? AND kind='token_usage' AND json_type(payload,'$.costUsd') IN ('real','integer') AND json_extract(payload,'$.costIsEstimate') IS NULL AND json_extract(payload,'$.parentToolUseId') IS NULL AND NOT EXISTS (SELECT 1 FROM usage_cost_reconciled_events r WHERE r.event_id=e.id)").get(evidence.sessionId)?.n ?? 0);
   return { digest, sessionId: evidence.sessionId, originalUsd, proposedUsd,
     sessionOriginalUsd: Number(session.cost_usd), sessionProposedUsd: Number(session.cost_usd) + Number(deltaPico) / 1e12,
@@ -441,14 +462,115 @@ export function observeReconciliationRevision(db: ControlPlaneDb, sessionId: str
   return observedReconciliationRevision(db, sessionId);
 }
 
+/** Bind every prefix to its scoped immutable audit identities and exact adjustment. */
+export function reconciliationCoordinate(db: ControlPlaneDb, sessionId: string, revision = reconciliationRevision(db, sessionId)) {
+  if (!Number.isSafeInteger(revision) || revision < 0) throw new Error("invalid cost reconciliation revision");
+  if (!revision) return { revision: 0, identity: undefined, deltaUsd: 0 };
+  const rows = db.raw().prepare(`SELECT r.revision, r.digest, r.delta_microusd, COALESCE(p.delta_remainder_picousd,0) AS remainder
+    FROM usage_cost_reconciliations r LEFT JOIN usage_cost_reconciliation_precision p ON p.digest=r.digest
+    WHERE r.session_id=? AND r.revision<=? ORDER BY r.revision`).all(sessionId, revision);
+  if (rows.length !== revision || rows.some((row, index) => row.revision !== index + 1)) throw new Error("unavailable correction identity chain");
+  const session = db.getSession(sessionId)!;
+  const state = db.raw().prepare("SELECT runner_history_epoch FROM usage_session_state WHERE session_id=?").get(sessionId);
+  const identity = createHash("sha256").update(JSON.stringify({ sessionId, eventEpoch: session.eventEpoch,
+    historyEpoch: state?.runner_history_epoch, rows })).digest("hex");
+  const delta = rows.reduce((sum, row) => sum + BigInt(Number(row.delta_microusd)) * PICO_PER_MICRO + BigInt(Number(row.remainder)), 0n);
+  return { revision, identity, deltaUsd: Number(delta) / 1e12 };
+}
+
+export function reconciliationObservation(db: ControlPlaneDb, sessionId: string) {
+  return { revision: observedReconciliationRevision(db, sessionId),
+    coordinate: db.raw().prepare("SELECT coordinate_json FROM usage_cost_reconciliation_identity_observations WHERE session_id=?").get(sessionId)?.coordinate_json ?? null };
+}
+
+export function latestReconciliationRepair(db: ControlPlaneDb, sessionId: string) {
+  return db.raw().prepare("SELECT * FROM usage_cost_reconciliation_repairs WHERE session_id=? ORDER BY rowid DESC LIMIT 1").get(sessionId);
+}
+
+export function correctionFrame(db: ControlPlaneDb, sessionId: string, baseRevision = observedReconciliationRevision(db, sessionId)): import("@wollipog/protocol").PricedSessionCostMessage {
+  const target = reconciliationCoordinate(db, sessionId);
+  const repair = latestReconciliationRepair(db, sessionId);
+  return { type: "priced_session_cost", sessionId, costUsd: db.sessionCostUsd(sessionId),
+    costReconciliationRevision: target.revision, costReconciliationIdentity: target.identity,
+    costReconciliationDeltaUsd: target.deltaUsd,
+    costReconciliationBase: reconciliationCoordinate(db, sessionId, baseRevision),
+    ...(repair ? { costReconciliationRepairId: String(repair.digest) } : {}) };
+}
+
+/** Snapshot identity is checked against its actual prefix, including durable conflicts. */
+export function reconciliationSnapshotAvailable(db: ControlPlaneDb, snapshot: SessionSnapshot): boolean {
+  const revision = reconciliationRevision(db, snapshot.id), ack = snapshot.costReconciliationRevision ?? 0;
+  if (!Number.isSafeInteger(ack) || ack < 0 || Math.max(ack, observedReconciliationRevision(db, snapshot.id)) > revision) return false;
+  const repair = latestReconciliationRepair(db, snapshot.id);
+  if ((!repair && snapshot.costReconciliationRepairId) || (repair && (!repair.confirmed || snapshot.costReconciliationRepairId !== repair.digest))) return false;
+  try {
+    const coordinate = reconciliationCoordinate(db, snapshot.id, ack);
+    if (snapshot.costReconciliationIdentity !== coordinate.identity || (snapshot.costReconciliationDeltaUsd ?? 0) !== coordinate.deltaUsd) return false;
+    const observed = reconciliationObservation(db, snapshot.id).coordinate;
+    if (observed) {
+      const prior = JSON.parse(String(observed));
+      const expected = reconciliationCoordinate(db, snapshot.id, prior.revision);
+      if (prior.identity !== expected.identity || prior.deltaUsd !== expected.deltaUsd) return false;
+    }
+    return true;
+  } catch { return false; }
+}
+
+/** Only the authenticated owning runner calls this. Old repair generations remain read-only. */
+export function observeReconciliationSnapshot(db: ControlPlaneDb, snapshot: SessionSnapshot): void {
+  const sql = db.raw();
+  sql.exec("SAVEPOINT correction_identity_observation");
+  try { observeReconciliationSnapshotInTransaction(db, snapshot); sql.exec("RELEASE correction_identity_observation"); }
+  catch (error) { sql.exec("ROLLBACK TO correction_identity_observation; RELEASE correction_identity_observation"); throw error; }
+}
+
+function observeReconciliationSnapshotInTransaction(db: ControlPlaneDb, snapshot: SessionSnapshot): void {
+  const sql = db.raw(), repair = latestReconciliationRepair(db, snapshot.id);
+  if (repair) {
+    if (snapshot.costReconciliationRepairId !== repair.digest) return;
+    if (!repair.confirmed) {
+      const intent = JSON.parse(String(repair.result_json));
+      if (JSON.stringify(reconciliationObservation(db, snapshot.id)) !== JSON.stringify(intent.observation)) return;
+      const target = reconciliationCoordinate(db, snapshot.id);
+      if ((snapshot.costReconciliationRevision ?? 0) !== target.revision || snapshot.costReconciliationIdentity !== target.identity ||
+          (snapshot.costReconciliationDeltaUsd ?? 0) !== target.deltaUsd || snapshot.historyEpoch !== intent.historyEpoch) return;
+      // Two local writes and the confirmation receipt commit together; a crash cannot clear only one fence.
+      sql.exec("SAVEPOINT correction_repair_ack");
+      try {
+        sql.prepare("INSERT INTO usage_cost_reconciliation_observations VALUES (?, ?) ON CONFLICT(session_id) DO UPDATE SET acknowledged_revision=excluded.acknowledged_revision").run(snapshot.id, target.revision);
+        sql.prepare("DELETE FROM usage_cost_reconciliation_identity_observations WHERE session_id=?").run(snapshot.id);
+        sql.prepare("UPDATE usage_cost_reconciliation_repairs SET confirmed=1 WHERE digest=?").run(repair.digest!);
+        sql.exec("RELEASE correction_repair_ack");
+      } catch (error) { sql.exec("ROLLBACK TO correction_repair_ack; RELEASE correction_repair_ack"); throw error; }
+    }
+  }
+  const revision = snapshot.costReconciliationRevision ?? 0;
+  if (!Number.isSafeInteger(revision) || revision < 0) return;
+  const prior = observedReconciliationRevision(db, snapshot.id);
+  observeReconciliationRevision(db, snapshot.id, revision);
+  if ((revision > 0 || snapshot.costReconciliationIdentity || (snapshot.costReconciliationDeltaUsd ?? 0) !== 0) && revision >= prior) {
+    const coordinate = JSON.stringify({ revision, identity: snapshot.costReconciliationIdentity, deltaUsd: snapshot.costReconciliationDeltaUsd ?? 0 });
+    const old = reconciliationObservation(db, snapshot.id).coordinate;
+    // Once a coordinate conflicts, a lower/equal snapshot cannot quietly clear it.
+    if (old && revision === prior && old !== coordinate) {
+      try {
+        const recorded = JSON.parse(String(old)), expected = reconciliationCoordinate(db, snapshot.id, recorded.revision);
+        if (recorded.identity !== expected.identity || recorded.deltaUsd !== expected.deltaUsd) return;
+      } catch { return; }
+    }
+    if (old !== coordinate) sql.prepare(`INSERT INTO usage_cost_reconciliation_identity_observations VALUES (?, ?)
+      ON CONFLICT(session_id) DO UPDATE SET coordinate_json=excluded.coordinate_json`).run(snapshot.id, coordinate);
+  }
+}
+
 /** Old snapshots retain their raw baseline until the runner acknowledges a correction revision. */
 export function normalizeReconciledSnapshot(db: ControlPlaneDb, snapshot: SessionSnapshot): SessionSnapshot {
   const revision = reconciliationRevision(db, snapshot.id);
   const acknowledged = snapshot.costReconciliationRevision ?? 0;
-  if (!Number.isSafeInteger(acknowledged) || acknowledged < 0 || Math.max(acknowledged, observedReconciliationRevision(db, snapshot.id)) > revision) throw new Error("invalid cost reconciliation revision");
+  if (!reconciliationSnapshotAvailable(db, snapshot)) throw new Error("invalid cost reconciliation revision or identity");
   if (!revision) return snapshot;
   const session = db.getSession(snapshot.id);
-  if (session && (db.getRunner(session.runnerId)?.protocolVersion ?? 0) < 199) {
+  if (session && (db.getRunner(session.runnerId)?.protocolVersion ?? 0) < 210) {
     throw new Error("reconciled costs require a revision-aware runner; upgrade before synchronizing this session");
   }
 
@@ -456,7 +578,9 @@ export function normalizeReconciledSnapshot(db: ControlPlaneDb, snapshot: Sessio
     FROM usage_cost_reconciliations r LEFT JOIN usage_cost_reconciliation_precision p ON p.digest=r.digest
     WHERE r.session_id=? AND r.revision>?`).get(snapshot.id, acknowledged);
   const adjusted = picoUsd(snapshot.costUsd) + BigInt(Number(sum?.delta ?? 0)) * PICO_PER_MICRO + BigInt(Number(sum?.remainder ?? 0));
-  return { ...snapshot, costUsd: Number(adjusted > 0n ? adjusted : 0n) / 1e12, costReconciliationRevision: revision };
+  const target = reconciliationCoordinate(db, snapshot.id);
+  return { ...snapshot, costUsd: Number(adjusted > 0n ? adjusted : 0n) / 1e12, costReconciliationRevision: revision,
+    costReconciliationIdentity: target.identity, costReconciliationDeltaUsd: target.deltaUsd };
 }
 
 interface LedgerCheckpoint {
@@ -589,7 +713,7 @@ function recoverPlan(db: ControlPlaneDb, principal: HumanPrincipal, input: Recov
     catch (error) { return error instanceof Error ? error.message : "unavailable accounting evidence"; }
   });
   const runnerAcknowledgedRevision = observedReconciliationRevision(db, input.sessionId);
-  const digest = createHash("sha256").update(JSON.stringify({ input, session, state, stored, fingerprints, runnerAcknowledgedRevision })).digest("hex");
+  const digest = createHash("sha256").update(JSON.stringify({ input, session, state, stored, fingerprints, runnerAcknowledgedRevision, observation: reconciliationObservation(db, input.sessionId), repair: latestReconciliationRepair(db, input.sessionId) })).digest("hex");
   const unresolved: Array<{ revision: number; reason: string }> = [];
   const recoveredRevisions: number[] = [];
   if (runnerAcknowledgedRevision > input.targetRevision) unresolved.push({ revision: runnerAcknowledgedRevision, reason: "verified export does not cover the runner's acknowledged revision" });

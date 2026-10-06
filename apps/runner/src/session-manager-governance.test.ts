@@ -54,7 +54,8 @@ function harness(config: SessionConfig, appServer = false) {
     agentSessionId: () => appServer ? "thread-exact" : null,
     agentTurnId: () => appServer ? "provider-turn-exact" : null,
   };
-  const sm = new SessionManager((message) => sent.push(message), () => {}, store, "test-runner");
+  const logs: string[] = [];
+  const sm = new SessionManager((message) => sent.push(message), (message) => logs.push(message), store, "test-runner");
   const entry: any = {
     sessionId: "s_governance",
     client,
@@ -74,6 +75,7 @@ function harness(config: SessionConfig, appServer = false) {
   (sm as any).active.set("s_governance", entry);
   return {
     root,
+    logs,
     sm,
     store,
     sent,
@@ -958,14 +960,14 @@ test("revision-aware cost correction persists and stale acknowledgements cannot 
   const h = harness({ costBudgetUsd: 5 });
   try {
     h.sm.syncPricedSessionCost("s_governance", 3);
-    h.sm.syncPricedSessionCost("s_governance", 2, 1, -1);
+    syncCorrection(h, 2, 1, -1);
     assert.equal(h.store.readMeta("s_governance")!.costUsd, 2);
     assert.equal(h.store.readMeta("s_governance")!.costReconciliationRevision, 1);
     h.sm.syncPricedSessionCost("s_governance", 3);
     h.sm.syncPricedSessionCost("s_governance", 3, 0);
     assert.equal(h.store.readMeta("s_governance")!.costUsd, 2);
-    h.sm.syncPricedSessionCost("s_governance", 2.5, 1, -1);
-    h.sm.syncPricedSessionCost("s_governance", 2, 1, -1);
+    syncCorrection(h, 2.5, 1, -1);
+    syncCorrection(h, 2, 1, -1);
     assert.equal(h.store.readMeta("s_governance")!.costUsd, 2.5);
     assert.equal(h.cancels(), 0);
     const runtime = h.sent.filter((m) => m.type === "session_runtime_updated").at(-1);
@@ -987,15 +989,15 @@ test("a correction preserves usage accrued before acknowledgement and applies sk
   const h = harness({ costBudgetUsd: 10 });
   try {
     h.store.patchMeta("s_governance", { costUsd: 4 });
-    h.sm.syncPricedSessionCost("s_governance", 2, 1, -1);
+    syncCorrection(h, 2, 1, -1);
     assert.equal(h.store.readMeta("s_governance")!.costUsd, 3);
-    h.sm.syncPricedSessionCost("s_governance", 2, 1, -1);
+    syncCorrection(h, 2, 1, -1);
     assert.equal(h.store.readMeta("s_governance")!.costUsd, 3);
     h.store.patchMeta("s_governance", { costUsd: 4 });
-    h.sm.syncPricedSessionCost("s_governance", 1, 3, -2);
+    syncCorrection(h, 1, 3, -2);
     assert.equal(h.store.readMeta("s_governance")!.costUsd, 3);
     assert.equal(h.store.readMeta("s_governance")!.costReconciliationDeltaUsd, -2);
-    h.sm.syncPricedSessionCost("s_governance", 1, 3, -3);
+    syncCorrection(h, 1, 3, -3);
     assert.equal(h.store.readMeta("s_governance")!.costUsd, 3, "conflicting delta for an acknowledged revision is refused");
   } finally { h.cleanup(); }
 });
@@ -1004,16 +1006,16 @@ test("fractional correction acknowledges once and retains accrued usage and revi
   const h = harness({});
   try {
     h.store.patchMeta("s_governance", { costUsd: 0.0330025 });
-    h.sm.syncPricedSessionCost("s_governance", 0.0200012, 1, -0.0100006);
+    syncCorrection(h, 0.0200012, 1, -0.0100006);
     assert.ok(Math.abs(h.store.readMeta("s_governance")!.costUsd - 0.0230019) < 1e-12);
-    h.sm.syncPricedSessionCost("s_governance", 0.0200012, 1, -0.0100006);
+    syncCorrection(h, 0.0200012, 1, -0.0100006);
     assert.ok(Math.abs(h.store.readMeta("s_governance")!.costUsd - 0.0230019) < 1e-12);
     h.store.patchMeta("s_governance", { costUsd: 0.0240019 });
-    h.sm.syncPricedSessionCost("s_governance", 0.0200012, 1, -0.0100006);
+    syncCorrection(h, 0.0200012, 1, -0.0100006);
     assert.ok(Math.abs(h.store.readMeta("s_governance")!.costUsd - 0.0240019) < 1e-12);
     assert.equal(h.store.readMeta("s_governance")!.costReconciliationRevision, 1);
     assert.equal(h.store.readMeta("s_governance")!.costReconciliationDeltaUsd, -0.0100006);
-    h.sm.syncPricedSessionCost("s_governance", 0.0200012, 1, -0.011);
+    syncCorrection(h, 0.0200012, 1, -0.011);
     assert.ok(Math.abs(h.store.readMeta("s_governance")!.costUsd - 0.0240019) < 1e-12);
   } finally { h.cleanup(); }
 });
@@ -1201,4 +1203,87 @@ test("serialized policy re-arm updates held queue configs without resuming the n
   } finally {
     h.cleanup();
   }
+});
+
+function syncCorrection(h: ReturnType<typeof harness>, costUsd: number, revision: number, deltaUsd: number) {
+  const current = h.store.readMeta("s_governance")!;
+  h.sm.syncPricedSessionCost("s_governance", costUsd, revision, deltaUsd, {
+    type: "priced_session_cost", sessionId: "s_governance", costUsd, costReconciliationIdentity: String(revision).repeat(64),
+    costReconciliationBase: { revision: current.costReconciliationRevision ?? 0, identity: current.costReconciliationIdentity, deltaUsd: current.costReconciliationDeltaUsd ?? 0 },
+  });
+}
+
+test("same-number different-content and unproven skipped prefixes cannot alter runner cost", () => {
+  const h = harness({});
+  try {
+    h.store.patchMeta("s_governance", { costUsd: 0.04 });
+    const frame = { type: "priced_session_cost" as const, sessionId: "s_governance", costUsd: 0.036,
+      costReconciliationRevision: 1, costReconciliationDeltaUsd: -0.004, costReconciliationIdentity: "a".repeat(64),
+      costReconciliationBase: { revision: 0, deltaUsd: 0 } };
+    h.sm.syncPricedSessionCost(frame.sessionId, frame.costUsd, 1, -0.004, frame);
+    assert.ok(Math.abs(h.store.readMeta(frame.sessionId)!.costUsd - 0.036) < 1e-12);
+    const before = h.store.readMeta(frame.sessionId)!;
+    h.sm.syncPricedSessionCost(frame.sessionId, 0.03, 1, -0.01, { ...frame, costReconciliationIdentity: "b".repeat(64) });
+    h.sm.syncPricedSessionCost(frame.sessionId, 0.03, 2, -0.01, { ...frame, costReconciliationIdentity: "b".repeat(64), costReconciliationBase: { revision: 1, identity: "b".repeat(64), deltaUsd: -0.004 } });
+    h.sm.syncPricedSessionCost(frame.sessionId, 0.03, 2, -0.01);
+    assert.deepEqual(h.store.readMeta(frame.sessionId), before);
+    const reopened = new SessionStore(h.root);
+    assert.equal(reopened.readMeta(frame.sessionId)!.costReconciliationIdentity, frame.costReconciliationIdentity);
+  } finally { h.cleanup(); }
+});
+
+test("metadata repair compares exact current state and preserves usage, checkpoints and approvals", () => {
+  const h = harness({ costBudgetUsd: 1 });
+  try {
+    h.store.patchMeta("s_governance", { costUsd: 0.036, costReconciliationRevision: Number.MAX_SAFE_INTEGER,
+      costReconciliationDeltaUsd: -0.004, costReconciliationIdentity: "a".repeat(64) });
+    const meta = h.store.readMeta("s_governance")!;
+    const expected = { revision: Number.MAX_SAFE_INTEGER, identity: meta.costReconciliationIdentity, deltaUsd: -0.004,
+      costUsd: meta.costUsd, tokensIn: meta.tokensIn, tokensOut: meta.tokensOut, seq: meta.seq, historyEpoch: meta.logEpoch ?? 0 };
+    const frame = { type: "priced_session_cost" as const, sessionId: "s_governance", costUsd: 0.036,
+      costReconciliationRevision: 1, costReconciliationDeltaUsd: -0.004, costReconciliationIdentity: "a".repeat(64),
+      costReconciliationRepair: { id: "f".repeat(64), expected } };
+    h.store.patchMeta(frame.sessionId, { costUsd: 0.037, tokensIn: meta.tokensIn + 1 });
+    const newer = h.store.readMeta(frame.sessionId)!;
+    h.sm.syncPricedSessionCost(frame.sessionId, frame.costUsd, 1, -0.004, frame);
+    assert.deepEqual(h.store.readMeta(frame.sessionId), newer, "concurrent usage invalidates the repair command");
+    // Restore a synthetic stable fixture; production repair never rolls usage back.
+    h.store.patchMeta(frame.sessionId, { costUsd: meta.costUsd, tokensIn: meta.tokensIn });
+    h.sm.syncPricedSessionCost(frame.sessionId, frame.costUsd, 1, -0.004, frame);
+    const repaired = h.store.readMeta(frame.sessionId)!;
+    assert.equal(repaired.costUsd, meta.costUsd);
+    assert.equal(repaired.costReconciliationRevision, 1);
+    assert.equal(repaired.costReconciliationRepairId, frame.costReconciliationRepair.id);
+    assert.deepEqual(repaired.config, meta.config); assert.equal(repaired.pendingApproval, meta.pendingApproval);
+    const runtime = h.sent.filter((message) => message.type === "session_runtime_updated").at(-1);
+    assert.ok(runtime?.type === "session_runtime_updated");
+    assert.equal(runtime.snapshot.costReconciliationRepairId, frame.costReconciliationRepair.id);
+    assert.equal(runtime.snapshot.costReconciliationDeltaUsd, -0.004);
+    assert.equal(runtime.snapshot.costReconciliationIdentity, frame.costReconciliationIdentity);
+    const events = h.logs.map((line) => { try { return JSON.parse(line); } catch { return {}; } }).filter((event) => event.event?.startsWith("claude_cost_acknowledgement_repair_"));
+    assert.deepEqual(events.map((event) => event.event), ["claude_cost_acknowledgement_repair_refused", "claude_cost_acknowledgement_repair_committed"]);
+    assert.ok(events.every((event) => event.correlationId === frame.costReconciliationRepair.id && event.entryPoint === "control_plane" && event.sessionId === frame.sessionId));
+    h.sm.syncPricedSessionCost(frame.sessionId, 0.04, Number.MAX_SAFE_INTEGER, -0.004, { ...frame, costReconciliationRepair: undefined });
+    h.sm.syncPricedSessionCost(frame.sessionId, frame.costUsd, 1, -0.004, frame);
+    assert.equal(h.store.readMeta(frame.sessionId)!.costReconciliationRevision, 1);
+    assert.equal(h.store.readMeta(frame.sessionId)!.costUsd, meta.costUsd);
+  } finally { h.cleanup(); }
+});
+
+test("revision-zero repair generation remains attached to subsequent authoritative prices", () => {
+  const h = harness({});
+  try {
+    h.store.patchMeta("s_governance", { costUsd: 0.04, costReconciliationRevision: Number.MAX_SAFE_INTEGER });
+    const current = h.store.readMeta("s_governance")!;
+    const frame = { type: "priced_session_cost" as const, sessionId: "s_governance", costUsd: 0.04,
+      costReconciliationRevision: 0, costReconciliationDeltaUsd: 0, costReconciliationRepairId: "f".repeat(64),
+      costReconciliationRepair: { id: "f".repeat(64), expected: { revision: Number.MAX_SAFE_INTEGER, deltaUsd: 0,
+        costUsd: current.costUsd, tokensIn: current.tokensIn, tokensOut: current.tokensOut, seq: current.seq, historyEpoch: current.logEpoch ?? 0 } } };
+    h.sm.syncPricedSessionCost(frame.sessionId, frame.costUsd, 0, 0, frame);
+    assert.equal(h.store.readMeta(frame.sessionId)!.costReconciliationRevision, 0);
+    h.sm.syncPricedSessionCost(frame.sessionId, 0.045, 0, 0, { ...frame, costReconciliationRepair: undefined });
+    assert.equal(h.store.readMeta(frame.sessionId)!.costUsd, 0.045);
+    h.sm.syncPricedSessionCost(frame.sessionId, 0.01);
+    assert.equal(h.store.readMeta(frame.sessionId)!.costUsd, 0.045, "a pre-repair price cannot drop the generation");
+  } finally { h.cleanup(); }
 });

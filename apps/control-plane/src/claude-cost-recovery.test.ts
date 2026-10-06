@@ -11,7 +11,7 @@ import type { SessionSnapshot } from "@wollipog/protocol";
 import { registerUsageRoutes } from "./usage-routes.js";
 import { applyClaudeReconciliation, previewClaudeReconciliation, exportClaudeReconciliations,
   applyClaudeReconciliationRecovery, previewClaudeReconciliationRecovery, reconciliationDeltaUsd,
-  normalizeReconciledSnapshot, observeReconciliationRevision } from "./claude-cost-reconciliation.js";
+  normalizeReconciledSnapshot, observeReconciliationRevision, observeReconciliationSnapshot, reconciliationCoordinate } from "./claude-cost-reconciliation.js";
 
 const principal: HumanPrincipal = { kind: "human", actorId: "owner", userId: "owner", userName: "Owner",
   organizationId: "org_personal", organizationName: "Personal", role: "owner", deviceId: "device", localBootstrap: false };
@@ -19,7 +19,7 @@ const principal: HumanPrincipal = { kind: "human", actorId: "owner", userId: "ow
 function fixture(firstPico = 10_000_600_000, endPico = 20_001_200_000) {
   const db = ControlPlaneDb.open(":memory:");
   const now = Math.floor(Date.now() / 3_600_000) * 3_600_000;
-  db.registerRunner({ runnerId: "runner", hostname: "host", os: "linux", version: "test", agents: [], workspaces: [] }, now, 199);
+  db.registerRunner({ runnerId: "runner", hostname: "host", os: "linux", version: "test", agents: [], workspaces: [] }, now, 210);
   db.createSession({ id: "session", runnerId: "runner", workspaceId: null, agentId: "claude", driver: "claude-code",
     title: "Fixture", useWorktree: false, config: { model: "claude-test" }, now });
   const first = db.appendEvent("session", { kind: "token_usage", model: "claude-test", inputTokens: 100, costUsd: firstPico / 1e12 }, now,
@@ -72,7 +72,7 @@ test("fractional carry correction preserves unrelated contributions, rollups, ex
     assert.equal(db.raw().prepare("SELECT cost_microusd FROM usage_cost_receipts WHERE event_id=?").get(extra.id)?.cost_microusd, 3_001);
     assert.equal(reconciliationDeltaUsd(db, "session"), -0.0100006);
     assert.equal(normalizeReconciledSnapshot(db, snapshot(now, 0.0330025)).costUsd, 0.0230019);
-    assert.equal(normalizeReconciledSnapshot(db, snapshot(now, 0.0230019, 1)).costUsd, 0.0230019);
+    assert.equal(normalizeReconciledSnapshot(db, { ...snapshot(now, 0.0230019, 1), costReconciliationIdentity: reconciliationCoordinate(db, "session").identity, costReconciliationDeltaUsd: reconciliationCoordinate(db, "session").deltaUsd }).costUsd, 0.0230019);
     assert.equal(applyClaudeReconciliation(db, principal, evidence, preview.digest).applied, false);
     assert.ok(Math.abs(Number(db.raw().prepare("SELECT parent_charged_cost_usd AS charge FROM sessions WHERE id='session'").get()?.charge) - Math.max(priorCharge - 0.0100006, 0.0230019)) < 1e-12);
     db.appendEvent("session", { kind: "token_usage", model: "other-model", costUsd: 0.0000006 }, now + 3 * 3_600_000, { accrueUsage: true, runnerSeq: 4, historyEpoch: 1 });
@@ -153,7 +153,8 @@ test("verified restore recovery preserves later usage, is read-only in preview a
     applyClaudeReconciliation(db, principal, evidence, previewClaudeReconciliation(db, principal, evidence).digest);
     const input = recovery(db);
     restored = ControlPlaneDb.open(path);
-    observeReconciliationRevision(restored, "session", 1);
+    const originalCoordinate = reconciliationCoordinate(db, "session");
+    observeReconciliationSnapshot(restored, { ...snapshot(now, 0.0200012, 1), costReconciliationIdentity: originalCoordinate.identity, costReconciliationDeltaUsd: originalCoordinate.deltaUsd });
     const changes = restored.raw().prepare("SELECT total_changes() AS n").get()?.n;
     observeReconciliationRevision(restored, "session", 1);
     observeReconciliationRevision(restored, "session", 0);
@@ -177,9 +178,9 @@ test("verified restore recovery preserves later usage, is read-only in preview a
     assert.equal(audit.delta_microusd, -10001, "the original correction identity/delta is retained");
     assert.equal(JSON.parse(String(audit.result_json)).correction.deltaMicrousd, -10000, "new usage can change the integer allocation without changing the exact correction");
     assert.equal(ledgerPico(restored), 23_001_500_000);
-    const acknowledged = snapshot(now, 0.0230015, 1);
+    const acknowledged = { ...snapshot(now, 0.0230015, 1), costReconciliationIdentity: reconciliationCoordinate(restored, "session").identity, costReconciliationDeltaUsd: reconciliationCoordinate(restored, "session").deltaUsd };
     assert.equal(normalizeReconciledSnapshot(restored, acknowledged).costUsd, acknowledged.costUsd);
-    assert.equal(normalizeReconciledSnapshot(restored, { ...acknowledged, costUsd: 0.0330021, costReconciliationRevision: 0 }).costUsd, 0.0230015);
+    assert.equal(normalizeReconciledSnapshot(restored, { ...acknowledged, costUsd: 0.0330021, costReconciliationRevision: 0, costReconciliationIdentity: undefined, costReconciliationDeltaUsd: undefined }).costUsd, 0.0230015);
     restored.close(); restored = ControlPlaneDb.open(path);
     assert.equal(applyClaudeReconciliationRecovery(restored, principal, input, preview.digest).applied, false);
     assert.equal(ledgerPico(restored), 23_001_500_000);

@@ -1,5 +1,6 @@
+import { acknowledgementRepairFrame, exportClaudeRepairCheckpoint, previewClaudeAcknowledgementRepair, applyClaudeAcknowledgementRepair } from "./claude-cost-repair.js";
 import { randomUUID } from "node:crypto";
-import { applyClaudeReconciliation, previewClaudeReconciliation, reconciliationDeltaUsd, reconciliationRevision, exportClaudeReconciliations, previewClaudeReconciliationRecovery, applyClaudeReconciliationRecovery } from "./claude-cost-reconciliation.js";
+import { applyClaudeReconciliation, previewClaudeReconciliation, correctionFrame, reconciliationRevision, exportClaudeReconciliations, previewClaudeReconciliationRecovery, applyClaudeReconciliationRecovery } from "./claude-cost-reconciliation.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { runnerSupportsProtocol } from "@wollipog/protocol";
 import { HourlyUsageUnavailableError, type ControlPlaneDb } from "./db.js";
@@ -22,6 +23,39 @@ export function registerUsageRoutes(
   hub?: Pick<Hub, "requestFromRunner"> & Partial<Pick<Hub, "sendToRunner" | "sessionChangedById">>,
   pricing?: Pick<UsageRateTableService, "ensure" | "status">,
 ): void {
+  app.get("/api/usage/claude-reconciliation/repair/export", async (request, reply) => {
+    const principal = requestPrincipal(request);
+    if (!principal || principal.kind !== "human" || !canAdministerIdentity(principal.role)) return reply.code(403).send({ error: "organization owner or admin permission is required" });
+    const { sessionId } = request.query as { sessionId?: unknown };
+    if (typeof sessionId !== "string" || !db.canAccessSession(principal, sessionId)) return reply.code(404).send({ error: "accounting repair checkpoint is unavailable" });
+    try { return exportClaudeRepairCheckpoint(db, principal, sessionId); }
+    catch { return reply.code(409).send({ error: "accounting repair checkpoint is unavailable" }); }
+  });
+  app.post("/api/usage/claude-reconciliation/repair/preview", async (request, reply) => {
+    const principal = requestPrincipal(request);
+    if (!principal || principal.kind !== "human" || !canAdministerIdentity(principal.role)) return reply.code(403).send({ error: "organization owner or admin permission is required" });
+    try { return previewClaudeAcknowledgementRepair(db, principal, request.body); }
+    catch { return reply.code(400).send({ error: "invalid or unavailable accounting repair evidence" }); }
+  });
+  app.post("/api/usage/claude-reconciliation/repair/apply", async (request, reply) => {
+    const principal = requestPrincipal(request);
+    if (!principal || principal.kind !== "human" || !canAdministerIdentity(principal.role)) return reply.code(403).send({ error: "organization owner or admin permission is required" });
+    const body = request.body as { evidence?: unknown; approved?: unknown; approvedDigest?: unknown } | undefined;
+    if (!body || body.approved !== true || typeof body.approvedDigest !== "string" || Object.keys(body).some((key) => !["evidence", "approvedDigest", "approved"].includes(key))) return reply.code(400).send({ error: "explicit approval of an exact repair preview is required" });
+    if (!hub?.sendToRunner) return reply.code(503).send({ error: "identity-aware cost synchronization is unavailable" });
+    try {
+      const result = applyClaudeAcknowledgementRepair(db, principal, body.evidence, body.approvedDigest);
+      const session = db.getSession(result.sessionId)!;
+      const frame = acknowledgementRepairFrame(db, session.id);
+      let synchronized = false;
+      try { synchronized = frame ? hub.sendToRunner(session.runnerId, frame) : false; } catch { /* Committed intent is retried on reconnect. */ }
+      request.log.info({ event: "claude_cost_acknowledgement_repair_approved", entryPoint: "http", requestId: request.id, sessionId: session.id, digest: result.digest, applied: result.applied, synchronized, confirmed: result.confirmed });
+      return { ...result, synchronized };
+    } catch {
+      request.log.warn({ event: "claude_cost_acknowledgement_repair_rejected", entryPoint: "http", requestId: request.id });
+      return reply.code(409).send({ error: "repair is unavailable or changed; review a fresh preview" });
+    }
+  });
   // Accounting-only imports are explicit, human-admin scoped, bounded and preview-bound.
   // They never read a provider directory, prompt, transcript, credential, or current rate table.
   app.post("/api/usage/claude-reconciliation/preview", async (request, reply) => {
@@ -46,6 +80,9 @@ export function registerUsageRoutes(
       result_json AS resultJson, created_at AS createdAt FROM usage_cost_reconciliations r
       LEFT JOIN usage_cost_reconciliation_precision p ON p.digest=r.digest
       WHERE session_id=? AND organization_id=? ORDER BY revision DESC LIMIT 20`).all(query.sessionId, principal.organizationId),
+      repairs: db.raw().prepare(`SELECT digest, actor_id AS actorId, source_sha256 AS sourceSha256,
+        result_json AS resultJson, confirmed, created_at AS createdAt FROM usage_cost_reconciliation_repairs
+        WHERE session_id=? AND organization_id=? ORDER BY rowid DESC LIMIT 20`).all(query.sessionId, principal.organizationId),
       recoveries: db.raw().prepare(`SELECT digest, actor_id AS actorId, source_sha256 AS sourceSha256,
         result_json AS resultJson, created_at AS createdAt FROM usage_cost_reconciliation_recoveries
         WHERE session_id=? AND organization_id=? ORDER BY created_at DESC LIMIT 20`).all(query.sessionId, principal.organizationId) };
@@ -71,10 +108,7 @@ export function registerUsageRoutes(
     const session = db.getSession(result.sessionId)!;
     let synchronized = false;
     try {
-      synchronized = hub?.sendToRunner?.(session.runnerId, {
-        type: "priced_session_cost", sessionId: session.id, costUsd: db.sessionCostUsd(session.id),
-        costReconciliationRevision: reconciliationRevision(db, session.id), costReconciliationDeltaUsd: reconciliationDeltaUsd(db, session.id),
-      }) ?? false;
+      synchronized = hub?.sendToRunner?.(session.runnerId, correctionFrame(db, session.id)) ?? false;
     } catch { /* Already committed; reconnect or exact retry resends the latest correction. */ }
     try { hub?.sessionChangedById?.(session.id); } catch { /* Publication cannot roll back accounting. */ }
     request.log.info({ event, entryPoint: "http", requestId: request.id, sessionId: session.id,

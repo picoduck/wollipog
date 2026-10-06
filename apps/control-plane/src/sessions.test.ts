@@ -76,7 +76,7 @@ import {
   type PreStagedDeliveryPlan,
 } from "./sessions.js";
 
-for (const scenario of ["downgrade", "revision-ahead", "stopped", "archived"]) test(`unsupported reconciled snapshot isolates its session and preserves enforcement: ${scenario}`, async () => {
+for (const scenario of ["downgrade", "revision-ahead", "identity-conflict", "stopped", "archived"]) test(`unsupported reconciled snapshot isolates its session and preserves enforcement: ${scenario}`, async () => {
   const { db, hub, svc } = makeHarness();
   const now = Date.now();
   try {
@@ -96,10 +96,10 @@ for (const scenario of ["downgrade", "revision-ahead", "stopped", "archived"]) t
     applyClaudeReconciliation(db, principal, evidence, previewClaudeReconciliation(db, principal, evidence).digest);
     db.updateSessionStatus("corrected", "completed", now + 2);
     db.updateSessionStatus("ordinary", "completed", now + 2);
-    db.registerRunner(runnerMeta(), now + 3, scenario === "revision-ahead" ? 199 : 198);
+    db.registerRunner(runnerMeta(), now + 3, scenario === "revision-ahead" || scenario === "identity-conflict" ? PROTOCOL_VERSION : 209);
     const snapshots = [
       snapshot({ id: "corrected", status: scenario === "stopped" || scenario === "archived" ? "running" : "completed",
-        costUsd: 0.03, seq: 2, historyEpoch: 1, ...(scenario === "revision-ahead" ? { costReconciliationRevision: 2 } : {}) }),
+        costUsd: 0.03, seq: 2, historyEpoch: 1, ...(scenario === "revision-ahead" ? { costReconciliationRevision: 2 } : scenario === "identity-conflict" ? { costReconciliationRevision: 1, costReconciliationIdentity: "f".repeat(64), costReconciliationDeltaUsd: -0.01 } : {}) }),
       snapshot({ id: "ordinary", title: "Updated Ordinary", status: "completed", costUsd: 0.004, seq: 0 }),
     ];
     if (scenario === "stopped") { db.updateSessionStatus("corrected", "running", now + 4); assert.ok(svc.stop("corrected").ok); }
