@@ -266,8 +266,11 @@ test("Inbox focus, unread state, and shortcuts use non-overlapping visual treatm
     "the panes are never framed on focus; F6 marks a zone with a brief top-edge line instead");
   assert.match(css, /\.inbox-list:focus-visible,[\s\S]*?\.detail-scroll:focus-visible \{ outline: none; \}/,
     "scrolling contents must not own the focus boundary");
-  assert.match(css, /\.inbox-row-shell\.unread \.inbox-row\s*\{[\s\S]*?linear-gradient[\s\S]*?inset 3px 0 0/,
-    "unread sessions need a distinct surface and leading accent");
+  // #2076, #2209: unread is a dot and a heavier title, never a fill or the accent bar selection uses.
+  assert.match(css, /\.inbox-row-shell\.unread \.inbox-row-title \{ font-weight: 600; \}/,
+    "unread sessions read heavier");
+  assert.doesNotMatch(css, /\.inbox-row-shell\.unread \.inbox-row\s*\{/,
+    "unread never restyles the row's box, which selection owns");
 });
 
 test("Inbox project tabs stay balanced, hide overflow chrome, and reveal contextual actions", () => {

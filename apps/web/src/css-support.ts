@@ -181,7 +181,7 @@ export const CSS_SURFACE = {
   "container", "font-face", "keyframes", "layer", "media",
   ],
   properties: [
-  "-webkit-box-orient", "-webkit-font-smoothing", "-webkit-line-clamp", "-webkit-mask-image",
+  "-webkit-box-orient", "-webkit-font-smoothing", "-webkit-line-clamp",
   "-webkit-overflow-scrolling", "-webkit-tap-highlight-color", "accent-color", "align-content",
   "align-items", "align-self",
   "animation", "animation-delay", "animation-duration", "animation-iteration-count",

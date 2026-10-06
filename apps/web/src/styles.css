@@ -12232,8 +12232,6 @@ body.shell-dock-dragging * {
   bottom: var(--space-2);
   left: 0;
   width: var(--space-0-5);
-  border-start-end-radius: var(--radius-xs);
-  border-end-end-radius: var(--radius-xs);
   background: var(--accent);
   content: "";
   pointer-events: none;
@@ -12355,8 +12353,8 @@ body.shell-dock-dragging * {
 /* Forced colors drops fills, so the selected bar (wider, with no fill beside it) and the unread dot
    are painted in system colours. After the rules they override, which they tie with. */
 @media (forced-colors: active) {
-  .inbox-row-shell.selected .inbox-row-primary-cell::after { width: var(--space-1); background: Highlight; forced-color-adjust: none; }
-  .inbox-unread-dot { background: CanvasText; forced-color-adjust: none; }
+  .inbox-row-shell.selected .inbox-row-primary-cell::after { width: var(--space-1); background: Highlight; }
+  .inbox-unread-dot { background: CanvasText; }
 }
 
 .inbox-pin-indicator {
@@ -12411,7 +12409,7 @@ body.shell-dock-dragging * {
 .activity-strip.compact .activity-strip-bar.active { background: var(--blue); }
 /* The row's strip is an image with a name, so forced colors keeps its bars, in system colours. */
 @media (forced-colors: active) {
-  .activity-strip.compact .activity-strip-bar { background: GrayText; forced-color-adjust: none; }
+  .activity-strip.compact .activity-strip-bar { background: GrayText; }
   .activity-strip.compact .activity-strip-bar.active { background: CanvasText; }
 }
 .activity-strip.live .activity-strip-bar:last-child { animation: activity-strip-pulse 1.6s ease-in-out infinite; }
