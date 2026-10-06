@@ -186,8 +186,9 @@ export function SessionContextMenu({
           disabled={forkReason !== null}
           description={forkReason ?? undefined}
           {...key("inbox-fork")}
-          // The fork's confirmation takes focus and returns it to the list.
-          onClick={forkReason === null ? act(onFork!, false) : undefined}
+          // Focus goes back to what opened the menu first: the fork's confirmation returns focus to
+          // whatever held it when it opened, and the item itself unmounts as the menu closes.
+          onClick={forkReason === null ? act(onFork!, true) : undefined}
         >
           Fork Conversation…
         </MenuItem>

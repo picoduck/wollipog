@@ -35,6 +35,8 @@ interface Log {
   replied: string[];
   setUnread: Array<[string, boolean]>;
   forked: string[];
+  /** Whether what opened the menu held focus when Fork ran, so its confirmation returns there. */
+  forkFocus: boolean[];
 }
 
 type MenuSession = Pick<SessionView, "title" | "archiveStatus" | "archived" | "status">;
@@ -64,7 +66,7 @@ async function mount(overrides: {
 } = {}): Promise<{ root: Root; log: Log; menu: HTMLElement }> {
   const log: Log = {
     closed: 0, restored: 0, renamed: [], toggledPin: [], snoozed: [], dismissed: [], archived: [], replied: [],
-    setUnread: [], forked: [],
+    setUnread: [], forked: [], forkFocus: [],
   };
   const restoreHost = domWindow.document.createElement("button") as unknown as HTMLElement;
   domWindow.document.body.append(restoreHost as never);
@@ -92,7 +94,10 @@ async function mount(overrides: {
         onClose={() => { log.closed += 1; }}
         onReply={(id) => log.replied.push(id)}
         onSetUnread={(id, unread) => log.setUnread.push([id, unread])}
-        onFork={(id) => log.forked.push(id)}
+        onFork={(id) => {
+          log.forked.push(id);
+          log.forkFocus.push(domWindow.document.activeElement === restoreHost);
+        }}
         onRename={(id) => log.renamed.push(id)}
         onTogglePin={(id) => log.toggledPin.push(id)}
         onSnooze={(id) => log.snoozed.push(id)}
@@ -323,7 +328,8 @@ test("every item of a forkable session, in order, with its icon and one separato
     assert.equal(children[children.indexOf(separators[0]!) + 1], item(menu, "Archive"), "it comes right before Archive");
     await act(async () => { item(menu, "Fork Conversation…").click(); });
     assert.deepEqual(log.forked, ["s-1"]);
-    assert.equal(log.restored, 0, "the fork's confirmation takes focus");
+    assert.deepEqual(log.forkFocus, [true],
+      "focus is back on what opened the menu before Fork's confirmation captures its return target");
   } finally {
     await unmount(root);
   }
