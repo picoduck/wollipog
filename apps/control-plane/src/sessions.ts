@@ -12699,14 +12699,17 @@ export class SessionsService {
         "pricedSessionCost",
       )) {
         let frame: import("@wollipog/protocol").PricedSessionCostMessage | undefined;
-        if (runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "costReconciliationIdentity") &&
-            (reconciliationRevision(this.db, sessionId) > 0 || latestReconciliationRepair(this.db, sessionId))) {
-          try { frame = correctionFrame(this.db, sessionId); }
-          catch {
+        if (reconciliationRevision(this.db, sessionId) > 0 || latestReconciliationRepair(this.db, sessionId)) {
+          const supportsIdentity = runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "costReconciliationIdentity");
+          if (supportsIdentity) {
+            try { frame = correctionFrame(this.db, sessionId); }
+            catch { /* Missing correction provenance defers price synchronization. */ }
+          }
+          if (!frame) {
             // Retain accepted usage and budget enforcement while missing provenance fences price sync.
             // Never strip the coordinate and fall back to an unbound cumulative price.
             this.log.warn(JSON.stringify({ event: "cost_reconciliation_price_deferred", entryPoint: "runner",
-              runnerId: session.runnerId, sessionId, reason: "correction_prefix_unavailable" }));
+              runnerId: session.runnerId, sessionId, reason: supportsIdentity ? "correction_prefix_unavailable" : "runner_upgrade_required" }));
           }
         } else {
           frame = { type: "priced_session_cost", sessionId, costUsd: this.db.sessionCostUsd(sessionId) };

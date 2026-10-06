@@ -25403,7 +25403,7 @@ test("human-only campaigns can confirm scope and separately approve closure with
   } finally {db.close();}
 });
 
-test("fenced Claude usage ingestion retains live budget enforcement when its correction prefix is unavailable", () => {
+for (const protocol of [199, 209, PROTOCOL_VERSION]) test(`fenced Claude usage ingestion retains budget enforcement without an unbound price: protocol=${protocol}`, () => {
   const { db, hub } = makeHarness();
   const logs: string[] = [];
   const svc = new SessionsService(db, hub as unknown as Hub, { info() {}, error() {}, warn(message: string) { logs.push(message); } });
@@ -25421,6 +25421,7 @@ test("fenced Claude usage ingestion retains live budget enforcement when its cor
     const principal = { kind: "human" as const, actorId: "owner", userId: "owner", userName: "Owner", organizationId: "org_personal", organizationName: "Personal", role: "owner" as const, deviceId: "device", localBootstrap: false };
     applyClaudeReconciliation(db, principal, evidence, previewClaudeReconciliation(db, principal, evidence).digest);
     observeReconciliationRevision(db, id, Number.MAX_SAFE_INTEGER);
+    db.registerRunner(runnerMeta(), now + 2, protocol);
     db.updateSessionCostBudget(id, 0.025, now + 2);
     db.updateSessionStatus(id, "running", now + 2);
     hub.sentToRunner.length = 0;

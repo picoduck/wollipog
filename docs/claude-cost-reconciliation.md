@@ -255,7 +255,9 @@ use restore recovery first.
 3. Submit the verified checkpoint to `POST /api/usage/claude-reconciliation/repair/preview`, adding
    `importAuthorized: true`, the verified source's `sourceSha256`, and `runner` containing its
    expected `revision`, optional `identity`/`repairId`, `deltaUsd`, `costUsd`, `tokensIn`, `tokensOut`,
-   `seq`, and `historyEpoch`. Unknown fields and content-bearing imports are rejected. The preview
+   `seq`, and `historyEpoch`. These two fields use the negotiated wire history coordinates from the
+   owning runner's projected snapshot, not the raw local event sequence or `logEpoch`. The runner
+   compares the same projection when applying the repair. Unknown fields and content-bearing imports are rejected. The preview
    is read-only and explains the target coordinate, remaining evidence, and runner effects.
 4. Approve the exact preview and post `{ evidence, approvedDigest, approved: true }` to
    `/api/usage/claude-reconciliation/repair/apply`. Approval commits a durable audited intent,

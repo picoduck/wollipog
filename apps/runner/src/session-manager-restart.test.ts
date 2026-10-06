@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
-import type { RunnerToControlPlane, SessionLaunchSpec, SessionQueueMessage } from "@wollipog/protocol";
+import { PROTOCOL_VERSION, type RunnerToControlPlane, type SessionLaunchSpec, type SessionQueueMessage } from "@wollipog/protocol";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -828,5 +828,42 @@ for (const revision of [0, 1, Number.MAX_SAFE_INTEGER]) test(`Claude Restart ret
     assert.equal(runtime.costReconciliationRepairId, prior.costReconciliationRepairId);
     assert.equal(runtime.costReconciliationIdentity, prior.costReconciliationIdentity);
     assert.equal(runtime.historyEpoch, prior.logEpoch);
+  } finally { manager?.shutdownAll(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("a repair committed while Restart waits for its row transition retains the latest generation", { skip: !haveGit() }, async () => {
+  const f = fixture("concurrent-repair");
+  let manager: SessionManager | undefined;
+  try {
+    const spec = claudeSpec("s_restart_concurrent_repair", f.repo);
+    f.store.create(storedClaudeSession(spec.sessionId, f.repo, { costUsd: 0.036, tokensIn: 40, tokensOut: 4,
+      seq: 4, logEpoch: 1, costReconciliationRevision: 1, costReconciliationDeltaUsd: -0.004,
+      costReconciliationIdentity: "a".repeat(64), costReconciliationRepairId: "b".repeat(64) }));
+    const fake = fakeProvider();
+    manager = new SessionManager((message) => f.sent.push(message), () => {}, f.store, "runner", undefined,
+      fake.factory as never, f.dataDir, 1);
+    const sm = manager;
+    const serialized = (sm as any).runWorktreeOperation.bind(sm);
+    let operations = 0;
+    (sm as any).runWorktreeOperation = (id: string, action: () => Promise<unknown>) => serialized(id, async () => {
+      // Release a queued mutation between start's prior read and its serialized row replacement.
+      if (++operations === 2) {
+        const current = f.store.readMeta(id)!;
+        const wire = f.store.projectSnapshotForProtocol(sm.snapshotForControlPlane(current), PROTOCOL_VERSION);
+        const frame = { type: "priced_session_cost" as const, sessionId: id, costUsd: current.costUsd,
+          costReconciliationRevision: 1, costReconciliationIdentity: current.costReconciliationIdentity,
+          costReconciliationDeltaUsd: -0.004, costReconciliationRepair: { id: "c".repeat(64), expected: {
+            revision: 1, identity: current.costReconciliationIdentity, repairId: current.costReconciliationRepairId,
+            deltaUsd: -0.004, costUsd: current.costUsd, tokensIn: current.tokensIn, tokensOut: current.tokensOut,
+            seq: wire.seq, historyEpoch: wire.historyEpoch! } } };
+        sm.syncPricedSessionCost(id, frame.costUsd, 1, -0.004, frame);
+        assert.equal(f.store.readMeta(id)!.costReconciliationRepairId, frame.costReconciliationRepair.id);
+      }
+      return action();
+    });
+    assert.equal(await sm.start(spec), true);
+    assert.ok(operations >= 2);
+    assert.equal(f.store.readMeta(spec.sessionId)!.costReconciliationRepairId, "c".repeat(64));
+    assert.equal(f.store.readMeta(spec.sessionId)!.costUsd, 0.036);
   } finally { manager?.shutdownAll(); rmSync(f.root, { recursive: true, force: true }); }
 });

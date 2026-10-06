@@ -1239,7 +1239,7 @@ test("metadata repair compares exact current state and preserves usage, checkpoi
       costReconciliationDeltaUsd: -0.004, costReconciliationIdentity: "a".repeat(64) });
     const meta = h.store.readMeta("s_governance")!;
     const expected = { revision: Number.MAX_SAFE_INTEGER, identity: meta.costReconciliationIdentity, deltaUsd: -0.004,
-      costUsd: meta.costUsd, tokensIn: meta.tokensIn, tokensOut: meta.tokensOut, seq: meta.seq, historyEpoch: meta.logEpoch ?? 0 };
+      costUsd: meta.costUsd, tokensIn: meta.tokensIn, tokensOut: meta.tokensOut, seq: h.store.projectedEventSeq(meta.sessionId, meta.seq, PROTOCOL_VERSION), historyEpoch: h.store.projectedHistoryEpoch(meta.logEpoch ?? 0, PROTOCOL_VERSION) };
     const frame = { type: "priced_session_cost" as const, sessionId: "s_governance", costUsd: 0.036,
       costReconciliationRevision: 1, costReconciliationDeltaUsd: -0.004, costReconciliationIdentity: "a".repeat(64),
       costReconciliationRepair: { id: "f".repeat(64), expected } };
@@ -1278,7 +1278,7 @@ test("revision-zero repair generation remains attached to subsequent authoritati
     const frame = { type: "priced_session_cost" as const, sessionId: "s_governance", costUsd: 0.04,
       costReconciliationRevision: 0, costReconciliationDeltaUsd: 0, costReconciliationRepairId: "f".repeat(64),
       costReconciliationRepair: { id: "f".repeat(64), expected: { revision: Number.MAX_SAFE_INTEGER, deltaUsd: 0,
-        costUsd: current.costUsd, tokensIn: current.tokensIn, tokensOut: current.tokensOut, seq: current.seq, historyEpoch: current.logEpoch ?? 0 } } };
+        costUsd: current.costUsd, tokensIn: current.tokensIn, tokensOut: current.tokensOut, seq: h.store.projectedEventSeq(current.sessionId, current.seq, PROTOCOL_VERSION), historyEpoch: h.store.projectedHistoryEpoch(current.logEpoch ?? 0, PROTOCOL_VERSION) } } };
     h.sm.syncPricedSessionCost(frame.sessionId, frame.costUsd, 0, 0, frame);
     assert.equal(h.store.readMeta(frame.sessionId)!.costReconciliationRevision, 0);
     h.sm.syncPricedSessionCost(frame.sessionId, 0.045, 0, 0, { ...frame, costReconciliationRepair: undefined });

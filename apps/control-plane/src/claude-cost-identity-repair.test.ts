@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ControlPlaneDb } from "./db.js";
 import type { HumanPrincipal } from "./identity.js";
-import type { SessionSnapshot } from "@wollipog/protocol";
+import { PROTOCOL_VERSION, type SessionSnapshot } from "@wollipog/protocol";
 import { registerUsageRoutes } from "./usage-routes.js";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import { SessionManager } from "../../runner/src/session-manager.js";
@@ -17,18 +17,18 @@ import { applyClaudeReconciliation, previewClaudeReconciliation, reconciliationC
 import { exportClaudeRepairCheckpoint, previewClaudeAcknowledgementRepair, applyClaudeAcknowledgementRepair, acknowledgementRepairFrame } from "./claude-cost-repair.js";
 
 const principal: HumanPrincipal = { kind: "human", actorId: "owner", userId: "owner", userName: "Owner", organizationId: "org_personal", organizationName: "Personal", role: "owner", deviceId: "device", localBootstrap: false };
-function fixture(path = ":memory:") {
+function fixture(path = ":memory:", historyEpoch = 1) {
   const db = ControlPlaneDb.open(path), now = Date.now();
   db.registerRunner({ runnerId: "runner", hostname: "host", os: "linux", version: "test", agents: [], workspaces: [] }, now, 210);
   db.createSession({ id: "session", runnerId: "runner", workspaceId: null, agentId: "claude", driver: "claude-code", title: "Fixture", useWorktree: false, config: {}, now });
-  const events = [0.004, 0.006, 0.01, 0.02].map((costUsd, i) => db.appendEvent("session", { kind: "token_usage", model: "claude-test", costUsd, inputTokens: 10, outputTokens: 1 }, now + i, { accrueUsage: true, runnerSeq: i + 1, historyEpoch: 1 }));
+  const events = [0.004, 0.006, 0.01, 0.02].map((costUsd, i) => db.appendEvent("session", { kind: "token_usage", model: "claude-test", costUsd, inputTokens: 10, outputTokens: 1 }, now + i, { accrueUsage: true, runnerSeq: i + 1, historyEpoch }));
   function evidence(offset: number) {
     const start = offset === 0 ? 0.004 : 0.01, end = offset === 0 ? 0.006 : 0.02;
-    return { sessionId: "session", eventEpoch: 0, historyEpoch: 1, importAuthorized: true, sourceSha256: "a".repeat(64), records: [
+    return { sessionId: "session", eventEpoch: 0, historyEpoch, importAuthorized: true, sourceSha256: "a".repeat(64), records: [
       { eventId: events[offset]!.id, conversation: (offset ? "e" : "b").repeat(64), process: "c".repeat(64), boundary: "origin", startUsd: 0, endUsd: start, model: "claude-test", scope: "query-tree" },
       { eventId: events[offset + 1]!.id, conversation: (offset ? "e" : "b").repeat(64), process: "d".repeat(64), boundary: "resume", startUsd: start, endUsd: end, model: "claude-test", scope: "query-tree" } ] };
   }
-  const snapshot: SessionSnapshot = { id: "session", agentId: "claude", workspaceId: null, driver: "claude-code", title: "Fixture", status: "idle", config: {}, useWorktree: false, worktreePath: null, preview: null, pendingApproval: null, costUsd: 0.04, tokensIn: 40, tokensOut: 4, seq: 4, historyEpoch: 1, createdAt: now, updatedAt: now };
+  const snapshot: SessionSnapshot = { id: "session", agentId: "claude", workspaceId: null, driver: "claude-code", title: "Fixture", status: "idle", config: {}, useWorktree: false, worktreePath: null, preview: null, pendingApproval: null, costUsd: 0.04, tokensIn: 40, tokensOut: 4, seq: 4, historyEpoch, createdAt: now, updatedAt: now };
   const correct = (offset: number) => { const input = evidence(offset); return applyClaudeReconciliation(db, principal, input, previewClaudeReconciliation(db, principal, input).digest); };
   return { db, now, snapshot, evidence, correct };
 }
@@ -39,7 +39,9 @@ function repairEvidence(db: ControlPlaneDb, snapshot: SessionSnapshot) {
 }
 
 for (const corrected of [false, true]) for (const confirmed of [false, true]) test(`Claude Restart preserves cross-peer repair acknowledgement: corrected=${corrected}, confirmed=${confirmed}`, async () => {
-  const f = fixture(), root = mkdtempSync(join(tmpdir(), "repair-restart-"));
+  const root = mkdtempSync(join(tmpdir(), "repair-restart-"));
+  const store = new SessionStore(join(root, "runner-sessions"));
+  const f = fixture(":memory:", store.projectedHistoryEpoch(1, PROTOCOL_VERSION));
   let manager: SessionManager | undefined;
   try {
     execFileSync("git", ["init", root]);
@@ -50,7 +52,6 @@ for (const corrected of [false, true]) for (const confirmed of [false, true]) te
     observeReconciliationSnapshot(f.db, corrupt);
     const input = repairEvidence(f.db, corrupt), preview = previewClaudeAcknowledgementRepair(f.db, principal, input);
     applyClaudeAcknowledgementRepair(f.db, principal, input, preview.digest);
-    const store = new SessionStore(join(root, "runner-sessions"));
     store.create({ sessionId: "session", agentId: "claude", workspaceId: "repo", repoPath: root,
       worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {}, context: { kind: "native" },
       agentSessionId: "old-conversation", status: "idle", title: "Fixture", config: {},
@@ -64,10 +65,11 @@ for (const corrected of [false, true]) for (const confirmed of [false, true]) te
     // Use the actual runner CAS and snapshot projection, including a crash before CP confirmation.
     const frame = acknowledgementRepairFrame(f.db, "session")!;
     manager.syncPricedSessionCost("session", frame.costUsd, frame.costReconciliationRevision, frame.costReconciliationDeltaUsd, frame);
-    if (confirmed) observeReconciliationSnapshot(f.db, manager.snapshotForControlPlane(store.readMeta("session")!));
+    assert.equal(store.readMeta("session")!.costReconciliationRepairId, preview.digest, "wire-epoch CAS commits the approved repair");
+    if (confirmed) observeReconciliationSnapshot(f.db, store.projectSnapshotForProtocol(manager.snapshotForControlPlane(store.readMeta("session")!), PROTOCOL_VERSION));
     assert.equal(await manager.start({ sessionId: "session", agentId: "claude", workspaceId: "repo", workspacePath: root,
       driver: "claude-code", command: "claude", args: [], env: {}, context: { kind: "native" }, useWorktree: false }), true);
-    const restarted = manager.snapshotForControlPlane(store.readMeta("session")!);
+    const restarted = store.projectSnapshotForProtocol(manager.snapshotForControlPlane(store.readMeta("session")!), PROTOCOL_VERSION);
     assert.notEqual(store.readMeta("session")!.agentSessionId, "old-conversation");
     observeReconciliationSnapshot(f.db, restarted);
     assert.equal(reconciliationSnapshotAvailable(f.db, restarted), true);

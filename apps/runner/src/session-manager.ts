@@ -5798,6 +5798,20 @@ export class SessionManager {
           return;
         }
         prior = latest;
+        // Price/repair frames can commit while Restart waits for this serialized transition.
+        // Bind the replacement row to the latest lifetime baseline and generation, not its preview.
+        if (!!priorResumeId || latest.driver === driver && driver === "claude-code" &&
+            (latest.costReconciliationRevision !== undefined || latest.costReconciliationRepairId !== undefined)) {
+          meta.costUsd = latest.costUsd;
+          meta.tokensIn = latest.tokensIn;
+          meta.tokensOut = latest.tokensOut;
+          meta.costReconciliationRevision = latest.costReconciliationRevision;
+          meta.costReconciliationDeltaUsd = latest.costReconciliationDeltaUsd;
+          meta.costReconciliationIdentity = latest.costReconciliationIdentity;
+          meta.costReconciliationRepairId = latest.costReconciliationRepairId;
+        }
+        meta.seq = latest.seq;
+        meta.logEpoch = latest.logEpoch;
         const latestMatchesWorkspace = latest.repoPath === repoPath &&
           agentContextKey(latest.context) === agentContextKey(context);
         shouldUseWorktree = spec.useWorktree || latestMatchesWorkspace && !!latest.worktreePath &&
@@ -14062,11 +14076,13 @@ export class SessionManager {
     if ((revision ?? 0) > 0 && (!identity || !/^[a-f0-9]{64}$/.test(identity))) return;
     if (repair) {
       const expected = repair.expected;
+      // Evidence names the negotiated wire history, including dense sequence projection.
+      const wire = this.store.projectSnapshotForProtocol(this.snapshot(current), this.controlPlaneProtocolVersion());
       if (!/^[a-f0-9]{64}$/.test(repair.id) || expected.revision !== priorRevision ||
           expected.identity !== current.costReconciliationIdentity || expected.repairId !== current.costReconciliationRepairId ||
           expected.deltaUsd !== (current.costReconciliationDeltaUsd ?? 0) ||
           expected.costUsd !== current.costUsd || expected.tokensIn !== current.tokensIn || expected.tokensOut !== current.tokensOut ||
-          expected.seq !== current.seq || expected.historyEpoch !== (current.logEpoch ?? 0) ||
+          expected.seq !== wire.seq || expected.historyEpoch !== wire.historyEpoch ||
           correctionDeltaUsd !== expected.deltaUsd || costUsd !== current.costUsd) {
         this.log(JSON.stringify({ event: "claude_cost_acknowledgement_repair_refused", entryPoint: "control_plane", correlationId: repair.id, sessionId, reason: "expected_state_changed" }));
         return;
