@@ -63,7 +63,18 @@ export function SessionsNoMatches({
         <>
           <button type="button" className="btn" onClick={onClearSearch}>Clear Search</button>
           {onSearchTranscripts && (
-            <button type="button" className="btn ghost" onClick={onSearchTranscripts}>Search Transcripts</button>
+            <button
+              type="button"
+              className="btn ghost"
+              onClick={(event) => {
+                // Safari does not focus a clicked button, and the palette returns focus to whatever
+                // held it when it opened (§16.2).
+                event.currentTarget.focus();
+                onSearchTranscripts();
+              }}
+            >
+              Search Transcripts
+            </button>
           )}
         </>
       )}

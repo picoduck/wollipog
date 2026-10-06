@@ -206,7 +206,7 @@ async function mount(options: { openSearchPalette?: (query?: string) => void; vi
     });
     await act(async () => { await Promise.resolve(); });
   };
-  return { container, search, type, pressEscape };
+  return { container, search, type, pressEscape, socket };
 }
 
 /** Each tab as [name, count, badges]. */
@@ -373,4 +373,29 @@ test("a group's Archive All Sessions still covers the whole group during a searc
   await act(async () => { await Promise.resolve(); });
   const dialog = container.querySelector<HTMLElement>('[role="alertdialog"], [role="dialog"]')!;
   assert.match(dialog.textContent ?? "", /All 2 sessions in “Infra”/, "both Infra sessions, not just the match");
+});
+
+test("when a live update takes the last match away, the state that replaces the list takes its focus", async () => {
+  const { container, type, socket } = await mount();
+  await type("apply");
+  const grid = container.querySelector<HTMLElement>(".inbox-list")!;
+  grid.focus();
+  assert.equal(domWindow.document.activeElement, grid);
+  await act(async () => {
+    socket.push({ type: "session_upsert", session: { ...SESSIONS[1]!, title: "Ship it", preview: "Shipped" } });
+  });
+  const state = container.querySelector<HTMLElement>(".inbox-no-matches")!;
+  assert.ok(state, "No Matches replaced the list");
+  assert.equal(domWindow.document.activeElement, state, "focus moved to No Matches, not <body>");
+});
+
+test("Search Transcripts takes focus before it opens the palette, so the palette can return it there", async () => {
+  let focusedAtOpen: unknown = null;
+  const { container, type } = await mount({ openSearchPalette: () => { focusedAtOpen = domWindow.document.activeElement; } });
+  await type("kubernetes");
+  const transcripts = [...container.querySelectorAll<HTMLButtonElement>(".inbox-no-matches .actions button")]
+    .find((button) => button.textContent === "Search Transcripts")!;
+  // A pointer click in Safari does not focus the button it lands on; .click() does not either.
+  await act(async () => { transcripts.click(); });
+  assert.equal(focusedAtOpen, transcripts);
 });

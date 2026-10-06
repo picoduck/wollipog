@@ -80,6 +80,7 @@ import { normalizeSessionsQuery, searchInboxSplits, sessionMatchesQuery } from "
 import { SessionsNoMatches, SessionsSearchField } from "./SessionsSearch.js";
 import { useOpenSearchPalette } from "./search-palette-context.js";
 import { useSnapshotState } from "./State.js";
+import { useRemovedFocus } from "./useRemovedFocus.js";
 
 const PROJECT_PIN_KEY = "wollipog.projects.pinned";
 const SEEN_DWELL_MS = 1_500;
@@ -524,6 +525,13 @@ export function InboxView({
   const snapshot = useSnapshotState();
   const noMatches = normalizedQuery !== "" && liveEntries.length === 0 && expandedSessionId === null &&
     !snapshot.offline && !snapshot.loading;
+  // A live update can take the last match away while the list or preview holds focus; the state that
+  // replaces them takes it rather than <body>.
+  const noMatchesRef = useRef<HTMLDivElement>(null);
+  const removedFocus = useRemovedFocus(viewRef);
+  useLayoutEffect(() => {
+    if (removedFocus() && noMatches) noMatchesRef.current?.focus();
+  });
   const liveIds = useMemo(() => liveEntries.map((entry) => entry.session.id), [liveEntries]);
   const pinnedAncestorSessionIds = useMemo(
     () => inboxPinnedAncestorIds(liveEntries.map((entry) => entry.session), pinnedSessions),
@@ -1536,7 +1544,7 @@ export function InboxView({
         )}
         {noMatches ? (
           // The list zone's landing spot while the list is replaced (F6, §16.1).
-          <div className="inbox-no-matches" tabIndex={-1}>
+          <div className="inbox-no-matches" tabIndex={-1} ref={noMatchesRef}>
             <SessionsNoMatches
               query={deferredQuery}
               group={{
