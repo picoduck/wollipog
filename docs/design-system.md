@@ -823,9 +823,10 @@ A row of tools above the content they act on: search, filters, view switches and
 
 - `.toolbar`: one row, `display: flex; align-items: center; gap: var(--space-2); min-width: 0`.
   Every control in it uses one control height (§3.2).
-- The toolbar is only the row. Where it sits (the Sessions tab bar, the Archive filter card, the
+- The toolbar is only the row. Where it sits (the Board's filters, the Archive filter card, the
   space above a machine list) is the region's decision, written as that region's rule on
-  `.toolbar` (`.inbox-list-pane > .toolbar`). Regions do not define their own toolbar class.
+  `.toolbar` (`.board-wrap > .toolbar`). Regions do not define their own toolbar class. The
+  Sessions tab row's tools sit in its tab bar's `.tabs-tools` (§10.1).
 - `.filter-btn` (`FilterButton`) is the phone "Filters" button that opens the filter sheet (§15.1):
   a `.btn` that says "Filters", with `aria-haspopup="dialog"`. While any filter is applied it is
   `.is-set`, which gives it the `--control-outline` edge of a chosen control (§3.1), and it shows
