@@ -35,6 +35,8 @@ import {
 import { revealDockedRequest } from "./requests/request-reveal.js";
 
 const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
+/** Below this much room for its body, a docked question card scrolls as a whole (#2683): about a row. */
+const CRAMPED_BODY_PX = 72;
 
 export interface QuestionSelectionState {
   requestId: string;
@@ -281,6 +283,10 @@ type CardFocus =
  * keyboard is open the card keeps only the question and its answer: no head line, a one-line title,
  * and Back and Next or Submit Answers in the footer. A field that takes focus is scrolled into view
  * within the card's body, never the page.
+ *
+ * A question longer than the card's few clamped lines ends on a whole line and offers Show Full
+ * Question (#2683); expanded, the question is shown whole and, on the dock, the card scrolls under
+ * its footer within the dock's cap.
  */
 export function SessionQuestionBanner({
   sessionId,
@@ -370,6 +376,12 @@ export function SessionQuestionBanner({
     if (headingRef) headingRef.current = node;
   }, [headingRef]);
   const stepRef = useRef<HTMLDivElement>(null);
+  // The question whose whole text is shown (#2683); each question starts clamped.
+  const [expandedQuestion, setExpandedQuestion] = useState<string | null>(null);
+  const [titleTruncates, setTitleTruncates] = useState(false);
+  const titleToggleRef = useRef<HTMLButtonElement>(null);
+  const cardRef = useRef<HTMLElement>(null);
+  const [cardCramped, setCardCramped] = useState(false);
   const previousDraftRequestRef = useRef({ sessionId, requestId: answerKey });
   // React's opaque useId contains colons. They are valid in HTML ids but break the selector-based
   // HTMLInputElement.list lookup used by some DOM implementations, so keep this idref family plain.
@@ -434,6 +446,54 @@ export function SessionQuestionBanner({
   const step = Math.min(Math.max(ownDrafts ? drafts.step : 0, 0), Math.max(stepCount - 1, 0));
   const question = questions[step];
   const lastStep = step >= stepCount - 1;
+  const titleExpanded = question !== undefined && expandedQuestion === question.id;
+
+  // Whether the clamp hides any of the question is measured, never guessed from its length: against
+  // the clamp every time, expanded or not, and again whenever the title or the card is resized. The
+  // clamp is put on for the measurement and taken off inside the same layout pass, so nothing paints
+  // between. Where no clamp applies (the Requests panel, styles.css) nothing is hidden and no toggle
+  // shows.
+  //
+  // On the dock the title keeps whole lines and the body scrolls in what is left. Where that would
+  // leave the body less than about a row (a phone with "+N More", a long question on a short window),
+  // the card scrolls as a whole under its footer instead, as it does expanded. The room is read the
+  // same way in either layout: the card's height less everything in it but the body.
+  useIsomorphicLayoutEffect(() => {
+    const title = titleRef.current;
+    const card = cardRef.current;
+    const body = stepRef.current;
+    if (!title || !card || !body) return;
+    const measure = () => {
+      title.classList.add("is-clamped");
+      const hidden = title.scrollHeight > title.clientHeight + 1;
+      if (titleExpanded) title.classList.remove("is-clamped");
+      // A toggle that is about to disappear hands its focus to the question it controlled (§16.1).
+      const toggle = titleToggleRef.current;
+      if (!hidden && toggle && toggle === toggle.ownerDocument.activeElement) title.focus({ preventScroll: true });
+      setTitleTruncates(hidden);
+      const room = card.clientHeight - (card.scrollHeight - body.offsetHeight);
+      setCardCramped(card.closest(".request-dock") !== null && room < Math.min(body.scrollHeight, CRAMPED_BODY_PX));
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    // Either layout gives the card the dock's height, so switching between them does not resize what
+    // is observed again.
+    const observer = new ResizeObserver(measure);
+    observer.observe(title);
+    observer.observe(card);
+    return () => observer.disconnect();
+  }, [question?.question, titleExpanded, step]);
+  const cardScrolls = (titleExpanded && titleTruncates) || cardCramped;
+  // The whole question is read from its first line: a card scrolled down to reach Show Full Question
+  // brings the question's start back into view, within the card alone.
+  useIsomorphicLayoutEffect(() => {
+    const title = titleRef.current;
+    const card = cardRef.current;
+    if (!titleExpanded || !title || !card) return;
+    const padding = parseFloat(card.ownerDocument.defaultView?.getComputedStyle(card).paddingTop ?? "") || 0;
+    const above = card.getBoundingClientRect().top + padding - title.getBoundingClientRect().top;
+    if (above > 0) card.scrollTop -= above;
+  }, [titleExpanded]);
 
   const updateDraft = (target: AgentQuestion, value: QuestionResponseDraft) => {
     setDrafts((current) => {
@@ -737,6 +797,8 @@ export function SessionQuestionBanner({
       aria-label={QUESTION_CARD_COPY.agentQuestions}
       aria-busy={busy !== null}
       data-keyboard-open={keyboardOpen ? "" : undefined}
+      data-card-scrolls={cardScrolls ? "" : undefined}
+      ref={cardRef}
       onKeyDown={onKeyDown}
       onMouseDown={holdFieldFocus}
     >
@@ -771,7 +833,7 @@ export function SessionQuestionBanner({
       )}
       <div
         ref={setTitle}
-        className="request-card-title question-text"
+        className={`request-card-title question-text${titleExpanded ? "" : " is-clamped"}`}
         role="heading"
         aria-level={3}
         id={titleId}
@@ -783,6 +845,18 @@ export function SessionQuestionBanner({
       >
         {question ? <StructuredQuestionText>{question.question}</StructuredQuestionText> : QUESTION_CARD_COPY.noDetails}
       </div>
+      {question && titleTruncates && (
+        <button
+          ref={titleToggleRef}
+          type="button"
+          className="link question-text-toggle"
+          aria-expanded={titleExpanded}
+          aria-controls={titleId}
+          onClick={() => setExpandedQuestion(titleExpanded ? null : question.id)}
+        >
+          {titleExpanded ? QUESTION_CARD_COPY.showLess : QUESTION_CARD_COPY.showFullQuestion}
+        </button>
+      )}
       <div className="request-card-body" ref={stepRef} onFocus={(event) => revealField(event.target)}>
         {recoveryRequired && (
           <p className="question-recovery" id={recoveryId}>

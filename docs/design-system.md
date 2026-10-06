@@ -2086,7 +2086,8 @@ follows these rules so it never crowds out the conversation it asks about:
 
 - **The transcript keeps at least half.** The dock caps at 40% of the chat column (the space between
   the session bar and the composer) on desktop and 50% on phones, and at 40% while the software
-  keyboard is open. The card's head, title and footer stay fixed; only its body scrolls.
+  keyboard is open. The card's head, title and footer stay fixed; only its body scrolls (a question
+  card may scroll as a whole under its footer instead, below).
 - **Only the top request is expanded.** The others wait behind one "+N More Requests" row that opens
   into one-line rows (kind icon, title, owner, time; owner hidden on phones). Choosing a row brings
   that request to the top for this view; the priority order is unchanged. A and D act on the
@@ -2118,7 +2119,13 @@ follows these rules so it never crowds out the conversation it asks about:
   kept with the request's draft, so a card that remounts returns to the same question. While focus
   is in the card, 1–9 pick rows, Enter moves on, Ctrl/Cmd+Enter submits from any step and D
   dismisses; their keycaps show on fine pointers only. In Composer Response the card lists the
-  options and is answered in the composer.
+  options and is answered in the composer. A long question never scrolls on its own (#2683): it
+  ends on a whole line with an ellipsis, five lines or three on a phone, and a `.link` **Show Full
+  Question** under it (`aria-expanded`, controlling the title) shows it whole; **Show Less** clamps
+  it again, and neither touches the answers or the step. The toggle shows only when the clamp hides
+  something, and gives way with the head line while the software keyboard is open. On the dock, an
+  expanded question, or a card that would leave its body less than about a row, scrolls as a whole
+  under a footer that stays at its bottom edge, inside the dock's cap.
 - **UI evidence is a grid of named tiles** (`components/requests/EvidenceReview.tsx`, #2197). The
   card's title says what to do ("Review 4 screenshots before approving") unless the request has a
   title of its own. The body is, top to bottom: the HTTPS or Localhost Required notice (warning,

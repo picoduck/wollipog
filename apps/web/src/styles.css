@@ -5682,8 +5682,6 @@ textarea {
     overflow-y: auto;
     overscroll-behavior: contain;
   }
-  /* The card scrolls, so its title keeps its own height rather than shrinking away. */
-  .request-dock .question-card > .question-text { flex: none; }
   /* The card's top padding stays its edge: what scrolls passes under it, not through it. */
   .request-dock .question-card::before {
     content: "";
@@ -13574,18 +13572,56 @@ body.shell-dock-dragging * {
     order: -1;
   }
 }
-/* A long question scrolls on its own, so the answers and the footer keep their room; in the
-   Requests panel the card is not capped. */
-.question-bar > .question-text {
-  flex: 0 1 auto;
-  min-height: 0;
-  max-height: min(240px, 30dvh);
+/* A long question ends on a whole line, the fifth or on a phone the third, with Show Full Question
+   under it (#2683), so the answers and the footer keep their room. It never scrolls on its own: a
+   scroller as short as a line showed one at a time, cut through. In the Requests panel the card is
+   not capped and the question is always whole, so no toggle shows there. */
+.question-bar > .question-text.is-clamped {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 5;
+}
+@media (max-width: 760px) {
+  .question-bar > .question-text.is-clamped { -webkit-line-clamp: 3; }
+}
+.request-panel-detail > .question-bar > .question-text.is-clamped {
+  display: block;
+  overflow: visible;
+}
+/* A `.link`, so on a coarse pointer it borrows a 44px band without growing (§15.3). */
+.question-text-toggle {
+  align-self: flex-start;
+  margin-top: calc(-1 * var(--space-1));
+  font: var(--type-small);
+}
+/* Expanded on the dock, or where the body would keep less than about a row (SessionApproval.tsx),
+   the card scrolls its question and body under a footer that stays at its bottom edge, as in a
+   short column (above): the dock keeps its cap, and Dismiss and Next or Submit Answers stay in
+   reach. */
+.request-dock .question-card[data-card-scrolls] {
   overflow-y: auto;
   overscroll-behavior: contain;
 }
-.request-panel-detail > .question-bar > .question-text {
-  max-height: none;
+.request-dock .question-card[data-card-scrolls] > .request-card-body {
+  flex: none;
   overflow: visible;
+}
+.request-dock .question-card[data-card-scrolls]::before {
+  content: "";
+  position: sticky;
+  top: calc(-1 * var(--space-3));
+  flex: none;
+  height: var(--space-3);
+  margin: calc(-1 * var(--space-3)) 0 calc(-1 * var(--space-2));
+  background: inherit;
+}
+.request-dock .question-card[data-card-scrolls] > .request-card-foot {
+  position: sticky;
+  bottom: calc(-1 * var(--space-3));
+  margin-bottom: calc(-1 * var(--space-3));
+  padding: var(--space-2) 0 var(--space-3);
+  background: inherit;
 }
 /* On the request dock (#2205) the dock places and caps the card. */
 .request-dock .question-bar {
@@ -13604,13 +13640,13 @@ body.shell-dock-dragging * {
   .question-where-asked-label { display: none; }
 }
 /* With the software keyboard open the card keeps the question and its answer: no head line, a
-   one-line title, and Back and Next or Submit Answers (§13.2). */
+   one-line title without Show Full Question, and Back and Next or Submit Answers (§13.2). */
 .question-card[data-keyboard-open] > .request-card-head,
 .question-card[data-keyboard-open] .question-dismiss,
-.question-card[data-keyboard-open] .question-step-note { display: none; }
+.question-card[data-keyboard-open] .question-step-note,
+.question-card[data-keyboard-open] .question-text-toggle { display: none; }
 .question-card[data-keyboard-open] > .question-text {
   display: -webkit-box;
-  max-height: none;
   overflow: hidden;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 1;
@@ -14042,7 +14078,8 @@ body.shell-dock-dragging * {
       max-height: 40cqh;
     }
     /* And compacts a docked question card as the visual-viewport signal does (#2205), for the same
-       browsers: the head line, Dismiss and the step count give way, and the title takes one line. */
+       browsers: the head line, Dismiss, the step count and Show Full Question give way, and the title
+       takes one line. */
     .detail-chat:has(
       textarea:focus:not([readonly]),
       [contenteditable=""]:focus,
@@ -14050,7 +14087,8 @@ body.shell-dock-dragging * {
       input:focus:not([readonly], [type="button"], [type="checkbox"], [type="color"],
         [type="file"], [type="image"], [type="radio"], [type="range"], [type="reset"],
         [type="submit"])
-    ) .request-dock :is(.question-card > .request-card-head, .question-dismiss, .question-step-note) {
+    ) .request-dock :is(.question-card > .request-card-head, .question-dismiss, .question-step-note,
+      .question-text-toggle) {
       display: none;
     }
     .detail-chat:has(
@@ -14062,7 +14100,6 @@ body.shell-dock-dragging * {
         [type="submit"])
     ) .request-dock .question-card > .question-text {
       display: -webkit-box;
-      max-height: none;
       overflow: hidden;
       -webkit-box-orient: vertical;
       -webkit-line-clamp: 1;

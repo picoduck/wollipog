@@ -393,30 +393,113 @@ for (const viewport of [
   });
 }
 
-test("a question taller than the capped card scrolls on its own and keeps its answers and footer in reach", async ({ page }) => {
+/**
+ * The question's visible text: whether any line of it is cut by the title's bottom edge, and whether
+ * the title scrolls on its own. A clamped question ends on a whole line (#2683).
+ */
+const questionText = (card: Locator) => card.locator(".question-text").evaluate((title) => {
+  const edge = title.getBoundingClientRect().bottom;
+  const walker = title.ownerDocument.createTreeWalker(title, NodeFilter.SHOW_TEXT);
+  let cut = false;
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const range = title.ownerDocument.createRange();
+    range.selectNodeContents(node);
+    for (const rect of range.getClientRects()) {
+      if (rect.height > 0 && rect.top < edge - 0.5 && rect.bottom > edge + 0.5) cut = true;
+    }
+  }
+  return { cut, overflowY: getComputedStyle(title).overflowY, hidden: title.scrollHeight > title.clientHeight + 1 };
+});
+const showFullQuestion = (card: Locator) => card.getByRole("button", { name: "Show Full Question" });
+
+test("a question taller than the capped card ends on a whole line, and Show Full Question shows it whole with its answers and footer in reach (#2683)", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/agent-questions-e2e.html?set=long-text");
   const bar = page.getByRole("region", { name: "Agent Questions" });
   await expectInsideViewport(bar, page);
-  const title = bar.locator(".question-text");
-  const scroll = await title.evaluate((element) => ({
-    clientHeight: element.clientHeight,
-    scrollHeight: element.scrollHeight,
-    overflowY: getComputedStyle(element).overflowY,
-  }));
-  expect(scroll.overflowY).toBe("auto");
-  expect(scroll.scrollHeight).toBeGreaterThan(scroll.clientHeight);
+  // Clamped, the question never scrolls on its own and no line is cut through.
+  expect(await questionText(bar)).toEqual({ cut: false, overflowY: "hidden", hidden: true });
+  await showFullQuestion(bar).click();
+  const showLess = bar.getByRole("button", { name: "Show Less" });
+  await expect(showLess).toHaveAttribute("aria-expanded", "true");
+  expect(await questionText(bar)).toEqual({ cut: false, overflowY: "visible", hidden: false });
+  // The card scrolls the whole question under its footer, inside the dock's cap.
+  const submit = bar.getByRole("button", { name: "Submit Answers" });
+  const dismiss = bar.getByRole("button", { name: "Dismiss", exact: true });
+  for (const control of [submit, dismiss]) {
+    await expectInsideViewport(control, page);
+    expect((await geometry(control)).bottom).toBeLessThanOrEqual((await geometry(bar)).bottom);
+  }
+  const [slot, reading] = [await geometry(page.locator(".chat-reading > .session-notice-slot")), await geometry(page.locator(".chat-reading"))];
+  expect(slot.height).toBeLessThanOrEqual(reading.height * 0.5 + 1);
   const proceed = page.getByRole("radio", { name: "Proceed" });
   await proceed.scrollIntoViewIfNeeded();
   await expectInsideViewport(proceed, page);
   await proceed.click();
-  const submit = page.getByRole("button", { name: "Submit Answers" });
   await expectInsideViewport(submit, page);
-  const [barBox, submitBox] = [await geometry(bar), await geometry(submit)];
-  expect(submitBox.bottom).toBeLessThanOrEqual(barBox.bottom);
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
   await submit.click();
   await expect(page.getByRole("status").filter({ hasText: "Question Answered" })).toHaveCount(1);
   expect(await page.evaluate(() => window.agentQuestionCalls[0]?.answers)).toEqual({ plan: "Proceed" });
+});
+
+test("at 390×844 a paragraph question behind +1 More Request expands and collapses without losing its choice (#2683)", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/agent-questions-e2e.html?set=paragraph&more=1");
+  const card = dockedCard(page);
+  await expect(page.locator(".request-dock-more")).toContainText("+1 More Request");
+  expect(await questionText(card)).toEqual({ cut: false, overflowY: "hidden", hidden: true });
+  const toggle = showFullQuestion(card);
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect(toggle).toHaveAttribute("aria-controls", await card.locator(".question-text").getAttribute("id") ?? "");
+  // The answers keep room under the clamped question: the first is in view without scrolling.
+  await expectInsideViewport(card.getByRole("radio", { name: /I Approved It/ }), page);
+  await card.getByRole("radio", { name: /Hold It/ }).click();
+
+  await toggle.click();
+  expect(await questionText(card)).toEqual({ cut: false, overflowY: "visible", hidden: false });
+  await expect(card.locator(".question-text")).toContainText("Did you approve it, or should it wait?");
+  for (const name of ["Submit Answers", "Dismiss"]) await expectInsideViewport(card.getByRole("button", { name, exact: true }), page);
+
+  await card.getByRole("button", { name: "Show Less" }).click();
+  await expect(showFullQuestion(card)).toHaveAttribute("aria-expanded", "false");
+  expect(await questionText(card)).toEqual({ cut: false, overflowY: "hidden", hidden: true });
+  await expect(card.getByRole("radio", { name: /Hold It/ })).toBeChecked();
+  await card.getByRole("button", { name: "Submit Answers" }).click();
+  expect(await page.evaluate(() => window.agentQuestionCalls[0]?.answers)).toEqual({ scope: "Hold It" });
+});
+
+test("in a short phone column the card scrolls as a whole rather than leaving its answers no room (#2683)", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 640 });
+  await page.goto("/agent-questions-e2e.html?set=paragraph&more=1");
+  const card = dockedCard(page);
+  expect(await questionText(card)).toEqual({ cut: false, overflowY: "hidden", hidden: true });
+  await expect(showFullQuestion(card)).toBeVisible();
+  // Every answer is reachable, and the footer stays at the card's bottom edge.
+  const body = await geometry(card.locator(".request-card-body"));
+  expect(body.height).toBeGreaterThan(100);
+  const change = card.getByRole("radio", { name: /Change the Scope/ });
+  await change.scrollIntoViewIfNeeded();
+  await expectInsideViewport(change, page);
+  await change.click();
+  const submit = card.getByRole("button", { name: "Submit Answers" });
+  await expectInsideViewport(submit, page);
+  expect((await geometry(submit)).bottom).toBeLessThanOrEqual((await geometry(card)).bottom);
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
+  await submit.click();
+  expect(await page.evaluate(() => window.agentQuestionCalls[0]?.answers)).toEqual({ scope: "Change the Scope" });
+});
+
+test("on a 1440px desktop a question that fits has no toggle, and a paragraph fits whole (#2683)", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  for (const set of ["short", "paragraph"]) {
+    await page.goto(`/agent-questions-e2e.html?set=${set}`);
+    const card = dockedCard(page);
+    await expect(card).toBeVisible();
+    expect(await questionText(card)).toEqual({ cut: false, overflowY: "hidden", hidden: false });
+    await expect(card.locator(".question-text-toggle")).toHaveCount(0);
+    expect(await card.evaluate((element) => element.hasAttribute("data-card-scrolls"))).toBe(false);
+  }
 });
 
 test("an option label with a long unbroken identifier wraps inside the card at 320px", async ({ page }) => {
@@ -844,6 +927,16 @@ test("Show Where Asked is disabled with its reason when the question's place isn
 
 test.describe("on a phone with the software keyboard open", () => {
   test.use({ hasTouch: true, isMobile: true, viewport: { width: 390, height: 844 } });
+
+  test("a long question keeps its one-line title and Show Full Question gives way (#2683)", async ({ page }) => {
+    await page.goto("/agent-questions-e2e.html?set=paragraph&keyboard=1");
+    const card = dockedCard(page);
+    await expect(card).toBeVisible();
+    const title = card.locator(".question-text");
+    const lineHeight = await title.evaluate((element) => parseFloat(getComputedStyle(element).lineHeight));
+    expect((await geometry(title)).height).toBeLessThanOrEqual(lineHeight + 1);
+    await expect(card.locator(".question-text-toggle")).toBeHidden();
+  });
 
   test("the dock is at most 40% and the card keeps only the question, its answer, Back and the primary (#2205)", async ({ page }) => {
     await page.goto("/agent-questions-e2e.html?set=notes&keyboard=1");

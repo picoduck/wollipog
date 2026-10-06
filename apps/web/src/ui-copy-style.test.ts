@@ -768,7 +768,8 @@ test("the Request Card's labels and names are Title Case, and its foot-notes are
 
 test("the question card's labels and buttons are Title Case, and its hints and errors are sentences (#2196)", () => {
   const titles = ["agentQuestions", "question", "asyncQuestion", "recoveryRequired", "dismiss", "dismissAndContinue",
-    "back", "next", "submitAnswers", "tryAgain", "somethingElse", "somethingElseField", "showWhereAsked"] as const;
+    "back", "next", "submitAnswers", "tryAgain", "somethingElse", "somethingElseField", "showWhereAsked",
+    "showFullQuestion", "showLess"] as const;
   // "Choose one", "Choose any" and "Optional" are the dim line above a question: sentence fragments.
   const fragments = ["chooseOne", "chooseAny", "optional"] as const;
   const sentences = ["noDetails", "required", "chooseOption", "chooseOptions", "optionalSentence", "notSent",

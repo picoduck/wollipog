@@ -49,6 +49,14 @@ const keyboardOpen = params.get("keyboard") === "1";
 const questionUnloaded = params.get("unloaded") === "1";
 const recoveryRequired = params.get("recovery") === "1";
 const recoveryCanResume = recoveryRequired && params.get("resume") === "1";
+// `more=1` puts a second request behind the question, so the dock leads with "+1 More Request".
+const waitingRequests: PendingApproval[] = params.get("more") === "1" ? [{
+  kind: "question",
+  requestId: "ask-waiting",
+  title: "Workflow Decision",
+  options: [],
+  questions: [{ id: "next", question: "Which wave lands next?", options: [{ label: "First" }, { label: "Second" }] }],
+}] : [];
 // Keycaps are a fine pointer's hints; the session shows them where a keyboard is likely (#2196).
 const showKeyHints = params.get("keys") === "1";
 let shouldHold = params.get("hold") === "1";
@@ -131,6 +139,22 @@ const longTextQuestions: AgentQuestion[] = [{
   header: "Plan",
   question: Array.from({ length: 30 }, (_, index) => `Paragraph ${index + 1} explains one more part of the plan.`).join("\n\n"),
   options: [{ label: "Proceed" }, { label: "Hold" }],
+}];
+
+// A paragraph-long question with a header and an inline code span: a few lines more than the docked
+// card shows before Show Full Question (#2683).
+const paragraphQuestions: AgentQuestion[] = [{
+  id: "scope",
+  header: "Scope",
+  question: "Campaign scope request `epic-initial-scope` (occurrence 2) is still pending, and dispatch waits on it. " +
+    "It names every child issue of the epic, the repositories they touch and the order they land in. " +
+    "Approving it lets the first wave of children start now; holding it keeps every child queued until the scope is settled. " +
+    "Did you approve it, or should it wait?",
+  options: [
+    { label: "I Approved It", description: "Dispatch the first wave now." },
+    { label: "Hold It", description: "Keep every child queued." },
+    { label: "Change the Scope", description: "Say what to change first." },
+  ],
 }];
 
 // Provider labels can hold one long identifier with nowhere to break (#2196).
@@ -227,6 +251,8 @@ function Fixture() {
         ? longTextQuestions
         : params.get("set") === "long-label"
           ? longLabelQuestions
+        : params.get("set") === "paragraph"
+          ? paragraphQuestions
       : params.get("set") === "forms"
         ? formQuestions
         : params.get("set") === "notes"
@@ -402,13 +428,13 @@ function Fixture() {
                 {request && (
                   <SessionNoticeSlot sessionId={SESSION_ID} entries={[]} lead={{
                     key: "request-dock",
-                    title: pendingRequestsTitle(1),
+                    title: pendingRequestsTitle(1 + waitingRequests.length),
                     icon: <RequestKindIcon request={request} />,
-                    requestIds: [request.requestId],
+                    requestIds: [request.requestId, ...waitingRequests.map((waiting) => waiting.requestId)],
                     render: ({ trailing, revealRequestId, concealTrailing }) => (
                       <RequestDock
                         session={session}
-                        requests={[request]}
+                        requests={[request, ...waitingRequests]}
                         runnerOnline={runnerOnline}
                         owner="Claude Code"
                         createdAt={() => askedAt}
