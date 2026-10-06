@@ -476,6 +476,56 @@ function stubQuestionLayout(lines: Record<string, number>) {
   };
 }
 
+test("a capped card whose body is squeezed below a row scrolls as a whole, though nothing else resized (#2683)", async () => {
+  // happy-dom has no layout: a 300px card whose content fits, and a body given `room` of its 200px.
+  const proto = domWindow.HTMLElement.prototype as unknown as Record<string, unknown>;
+  const names = ["scrollHeight", "clientHeight", "offsetHeight"] as const;
+  const prior = Object.fromEntries(names.map((name) => [name, Object.getOwnPropertyDescriptor(proto, name)]));
+  const layout = { room: 120 };
+  const size = (element: HTMLElement, name: (typeof names)[number]) => {
+    if (element.classList?.contains("request-card-body")) return name === "scrollHeight" ? 200 : layout.room;
+    if (element.classList?.contains("question-card")) return 300;
+    return element.classList?.contains("question-text") ? 20 : 0;
+  };
+  for (const name of names) {
+    Object.defineProperty(proto, name, { configurable: true, get(this: HTMLElement) { return size(this, name); } });
+  }
+  // Resize delivery per observed element, as the browser does.
+  const observed: Array<{ target: Element; callback: () => void }> = [];
+  const priorObserver = (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
+  (globalThis as { ResizeObserver?: unknown }).ResizeObserver = class {
+    constructor(private readonly callback: () => void) {}
+    observe(target: Element) { observed.push({ target, callback: this.callback }); }
+    unobserve() {}
+    disconnect() {
+      for (let index = observed.length - 1; index >= 0; index -= 1) {
+        if (observed[index]!.callback === this.callback) observed.splice(index, 1);
+      }
+    }
+  };
+  const { container, root } = mount();
+  try {
+    await renderBanner(root, [{ id: "plan", question: "Proceed?", options: [{ label: "Yes" }, { label: "No" }] }], true,
+      api, "question-cramped");
+    const card = container.querySelector<HTMLElement>(".question-card")!;
+    assert.equal(card.hasAttribute("data-card-scrolls"), false, "a body with a row's room scrolls on its own");
+    // A notice above the footer squeezes only the body: the card and the title keep their size.
+    layout.room = 30;
+    const body = container.querySelector(".request-card-body")!;
+    await act(async () => { for (const entry of observed.filter((candidate) => candidate.target === body)) entry.callback(); });
+    assert.equal(card.hasAttribute("data-card-scrolls"), true, "the card scrolls as a whole instead");
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+    for (const [name, descriptor] of Object.entries(prior)) {
+      if (descriptor) Object.defineProperty(proto, name, descriptor);
+      else delete proto[name];
+    }
+    (globalThis as { ResizeObserver?: unknown }).ResizeObserver = priorObserver;
+    clearQuestionDrafts("session-1", "question-cramped");
+  }
+});
+
 test("a long question shows Show Full Question, expands whole and collapses, keeping the choice and step (#2683)", async () => {
   const long = "Campaign scope request epic-initial-scope is still pending, and dispatch waits on it.";
   const questions: AgentQuestion[] = [

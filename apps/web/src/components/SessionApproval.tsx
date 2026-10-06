@@ -477,11 +477,13 @@ export function SessionQuestionBanner({
     };
     measure();
     if (typeof ResizeObserver === "undefined") return;
-    // Either layout gives the card its cap's height, so switching between them does not resize what
-    // is observed again.
+    // The body is observed too: a notice or a reason that appears above the footer squeezes it without
+    // resizing the title or a capped card. Switching layouts resizes the body once, and the room it
+    // then reads is the same less the scrolling footer's padding, so the choice holds.
     const observer = new ResizeObserver(measure);
     observer.observe(title);
     observer.observe(card);
+    observer.observe(body);
     return () => observer.disconnect();
   }, [question?.question, titleExpanded, step]);
   const cardScrolls = (titleExpanded && titleTruncates) || cardCramped;
