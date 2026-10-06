@@ -107,6 +107,26 @@ test("on a phone search takes its own full-width row above the tabs, and All Gro
   expect(allGroups.x + allGroups.width).toBeLessThanOrEqual(bar.x + bar.width);
 });
 
+test.describe("with a touch pointer", () => {
+  test.use({ hasTouch: true });
+
+  test("a project chosen from All Groups is scrolled into view with its whole ⋯ target", async ({ page }) => {
+    await page.setViewportSize({ width: 940, height: 700 });
+    await openGroups(page);
+    await page.getByRole("button", { name: "All Groups" }).click();
+    await page.getByRole("menuitemradio", { name: /^Mobile App, / }).click();
+    const trigger = page.getByRole("button", { name: / Actions for Mobile App$/ });
+    await expect(trigger).toBeVisible();
+    await expect.poll(() => trigger.evaluate((element) => {
+      const target = element.getBoundingClientRect();
+      const row = element.closest(".tabs")!.getBoundingClientRect();
+      // The row fades its last 24px when clipped, so the target must clear the fade too.
+      const visibleRight = row.right - (element.closest(".tabs")!.hasAttribute("data-clip-end") ? 24 : 0);
+      return Math.min(target.right, visibleRight) - Math.max(target.left, row.left);
+    }), "the 44px target, less sub-pixel scroll rounding").toBeGreaterThanOrEqual(43.5);
+  });
+});
+
 test("Tab and Shift+Tab still move between groups", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await openGroups(page);

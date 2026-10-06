@@ -11928,6 +11928,8 @@ body.shell-dock-dragging * {
    tab reserves room for it (#2180). It moves out of the tab row in #2199. */
 @media (hover: none), (pointer: coarse) {
   .inbox-tab-group:not(:has(> .tab[aria-selected="true"])) > .inbox-project-menu { display: none; }
+  /* Scrolling the active tab into view brings its ⋯ with it. */
+  .inbox-tab-group:has(> .inbox-project-menu) > .tab { scroll-margin-inline-end: var(--control-h); }
   .inbox-project-menu {
     position: static;
     width: var(--control-h);

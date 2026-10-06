@@ -206,7 +206,7 @@ export const CSS_SURFACE = {
   "overscroll-behavior", "padding", "padding-block", "padding-bottom", "padding-inline",
   "padding-inline-end", "padding-inline-start", "padding-left", "padding-right", "padding-top",
   "place-content", "place-items", "pointer-events", "position", "resize", "right", "row-gap",
-  "scroll-behavior", "scroll-padding-inline", "scroll-snap-align", "scroll-snap-type", "scrollbar-color",
+  "scroll-behavior", "scroll-margin-inline-end", "scroll-padding-inline", "scroll-snap-align", "scroll-snap-type", "scrollbar-color",
   "scrollbar-width", "src", "stroke", "stroke-linecap", "stroke-width", "table-layout", "text-align",
   "text-decoration", "text-overflow", "text-transform", "top",
   "touch-action", "transform", "transform-origin", "transition", "transition-duration", "transition-property",
