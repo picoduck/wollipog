@@ -12698,13 +12698,20 @@ export class SessionsService {
         this.db.getRunner(session.runnerId)?.protocolVersion,
         "pricedSessionCost",
       )) {
-        this.hub.sendToRunner(session.runnerId, {
-          type: "priced_session_cost",
-          sessionId,
-          costUsd: this.db.sessionCostUsd(sessionId),
-          ...(runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "costReconciliationIdentity") && (reconciliationRevision(this.db, sessionId) > 0 || latestReconciliationRepair(this.db, sessionId))
-            ? correctionFrame(this.db, sessionId) : {}),
-        });
+        let frame: import("@wollipog/protocol").PricedSessionCostMessage | undefined;
+        if (runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "costReconciliationIdentity") &&
+            (reconciliationRevision(this.db, sessionId) > 0 || latestReconciliationRepair(this.db, sessionId))) {
+          try { frame = correctionFrame(this.db, sessionId); }
+          catch {
+            // Retain accepted usage and budget enforcement while missing provenance fences price sync.
+            // Never strip the coordinate and fall back to an unbound cumulative price.
+            this.log.warn(JSON.stringify({ event: "cost_reconciliation_price_deferred", entryPoint: "runner",
+              runnerId: session.runnerId, sessionId, reason: "correction_prefix_unavailable" }));
+          }
+        } else {
+          frame = { type: "priced_session_cost", sessionId, costUsd: this.db.sessionCostUsd(sessionId) };
+        }
+        if (frame) this.hub.sendToRunner(session.runnerId, frame);
       }
       // Guardrail card gate: pause + ask once a policy rule trips. A v47 runner independently
       // cancels the active turn at the normalized usage threshold; v106 also applies that gate to

@@ -797,3 +797,36 @@ test("a reused task id does not cost the replaced conversation's result that is 
     rmSync(f.root, { recursive: true, force: true });
   }
 });
+
+for (const revision of [0, 1, Number.MAX_SAFE_INTEGER]) test(`Claude Restart retains corrected lifetime accounting and repair generation: revision=${revision}`, { skip: !haveGit() }, async () => {
+  const f = fixture("accounting");
+  let manager: SessionManager | undefined;
+  try {
+    const spec = claudeSpec("s_restart_accounting", f.repo);
+    const prior = storedClaudeSession(spec.sessionId, f.repo, {
+      costUsd: 0.036, tokensIn: 40, tokensOut: 4, seq: 4, logEpoch: 1,
+      costReconciliationRevision: revision,
+      costReconciliationDeltaUsd: revision ? -0.004 : 0,
+      costReconciliationIdentity: revision ? "a".repeat(64) : undefined,
+      costReconciliationRepairId: revision === Number.MAX_SAFE_INTEGER ? undefined : "b".repeat(64),
+    });
+    f.store.create(prior);
+    const fake = fakeProvider();
+    manager = new SessionManager((message) => f.sent.push(message), () => {}, f.store, "runner", undefined,
+      fake.factory as never, f.dataDir, 1);
+    assert.equal(await manager.start(spec), true);
+    const restarted = f.store.readMeta(spec.sessionId)!;
+    for (const key of ["costUsd", "tokensIn", "tokensOut", "costReconciliationRevision", "costReconciliationDeltaUsd", "costReconciliationIdentity", "costReconciliationRepairId", "logEpoch"] as const) {
+      assert.equal(restarted[key], prior[key], `${key} survives a fresh provider conversation`);
+    }
+    assert.notEqual(restarted.agentSessionId, prior.agentSessionId, "Restart still starts a fresh Claude conversation");
+    fake.providers[0]!.cb.onEvent({ kind: "token_usage", costUsd: 0.001, inputTokens: 10, outputTokens: 1 });
+    const afterUsage = f.store.readMeta(spec.sessionId)!;
+    assert.ok(Math.abs(afterUsage.costUsd - 0.037) < 1e-12);
+    assert.equal(afterUsage.tokensIn, 50); assert.equal(afterUsage.tokensOut, 5);
+    const runtime = manager.snapshotForControlPlane(afterUsage);
+    assert.equal(runtime.costReconciliationRepairId, prior.costReconciliationRepairId);
+    assert.equal(runtime.costReconciliationIdentity, prior.costReconciliationIdentity);
+    assert.equal(runtime.historyEpoch, prior.logEpoch);
+  } finally { manager?.shutdownAll(); rmSync(f.root, { recursive: true, force: true }); }
+});

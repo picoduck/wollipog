@@ -5649,6 +5649,10 @@ export class SessionManager {
     const priorResumeId = prior?.driver === driver && (driver === "codex-app-server" || driver === "pi")
       ? prior.agentSessionId
       : null;
+    // A fresh Claude conversation keeps this Wollipog session's corrected lifetime baseline.
+    // Clearing it would lose the repair generation and make every subsequent snapshot stale.
+    const retainAccounting = !!priorResumeId || prior?.driver === driver && driver === "claude-code" &&
+      (prior.costReconciliationRevision !== undefined || prior.costReconciliationRepairId !== undefined);
     const priorManagedPiState = prior?.adoptedProviderState?.driver === "pi"
       ? prior.adoptedProviderState
       : undefined;
@@ -5733,15 +5737,15 @@ export class SessionManager {
       orchestrator: (prior?.orchestrator?.issueScope?.revision ?? 0) > (spec.orchestrator?.issueScope?.revision ?? 0) ? prior?.orchestrator : spec.orchestrator ?? prior?.orchestrator,
       acpSessionContext,
       acpSessionOverrides,
-      tokensIn: priorResumeId ? (prior?.tokensIn ?? 0) : 0,
-      tokensOut: priorResumeId ? (prior?.tokensOut ?? 0) : 0,
+      tokensIn: retainAccounting ? (prior?.tokensIn ?? 0) : 0,
+      tokensOut: retainAccounting ? (prior?.tokensOut ?? 0) : 0,
       contextTokensUsed: priorResumeId ? prior?.contextTokensUsed : undefined,
       contextWindow: priorResumeId ? prior?.contextWindow : undefined,
-      costUsd: priorResumeId ? (prior?.costUsd ?? 0) : 0,
-      costReconciliationRevision: priorResumeId ? prior?.costReconciliationRevision : undefined,
-      costReconciliationDeltaUsd: priorResumeId ? prior?.costReconciliationDeltaUsd : undefined,
-      costReconciliationIdentity: priorResumeId ? prior?.costReconciliationIdentity : undefined,
-      costReconciliationRepairId: priorResumeId ? prior?.costReconciliationRepairId : undefined,
+      costUsd: retainAccounting ? (prior?.costUsd ?? 0) : 0,
+      costReconciliationRevision: retainAccounting ? prior?.costReconciliationRevision : undefined,
+      costReconciliationDeltaUsd: retainAccounting ? prior?.costReconciliationDeltaUsd : undefined,
+      costReconciliationIdentity: retainAccounting ? prior?.costReconciliationIdentity : undefined,
+      costReconciliationRepairId: retainAccounting ? prior?.costReconciliationRepairId : undefined,
       preview: priorResumeId ? (prior?.preview ?? null) : null,
       pendingApproval: null,
       // Manager-driven: a continued session is no longer a pristine transcript, so it isn't
@@ -5755,6 +5759,7 @@ export class SessionManager {
         ? prior.checkpointRefVersion
         : (this.runnerOwnerHash ? 2 : undefined),
       seq: prior?.seq ?? 0,
+      logEpoch: prior?.logEpoch,
       createdAt: prior?.createdAt ?? now,
       updatedAt: now,
       // Carry the last-turn snapshot + turn counter across restarts (like seq/createdAt) —

@@ -9,6 +9,9 @@ import { ControlPlaneDb } from "./db.js";
 import type { HumanPrincipal } from "./identity.js";
 import type { SessionSnapshot } from "@wollipog/protocol";
 import { registerUsageRoutes } from "./usage-routes.js";
+import { execFileSync } from "@wollipog/test-support/bounded-child-process";
+import { SessionManager } from "../../runner/src/session-manager.js";
+import { SessionStore } from "../../runner/src/session-store.js";
 import { applyClaudeReconciliation, previewClaudeReconciliation, reconciliationCoordinate, observeReconciliationSnapshot,
   observedReconciliationRevision, normalizeReconciledSnapshot, reconciliationSnapshotAvailable } from "./claude-cost-reconciliation.js";
 import { exportClaudeRepairCheckpoint, previewClaudeAcknowledgementRepair, applyClaudeAcknowledgementRepair, acknowledgementRepairFrame } from "./claude-cost-repair.js";
@@ -34,6 +37,48 @@ function repairEvidence(db: ControlPlaneDb, snapshot: SessionSnapshot) {
     revision: snapshot.costReconciliationRevision ?? 0, identity: snapshot.costReconciliationIdentity, deltaUsd: snapshot.costReconciliationDeltaUsd ?? 0,
     repairId: snapshot.costReconciliationRepairId, costUsd: snapshot.costUsd, tokensIn: snapshot.tokensIn, tokensOut: snapshot.tokensOut, seq: snapshot.seq, historyEpoch: snapshot.historyEpoch! } };
 }
+
+for (const corrected of [false, true]) for (const confirmed of [false, true]) test(`Claude Restart preserves cross-peer repair acknowledgement: corrected=${corrected}, confirmed=${confirmed}`, async () => {
+  const f = fixture(), root = mkdtempSync(join(tmpdir(), "repair-restart-"));
+  let manager: SessionManager | undefined;
+  try {
+    execFileSync("git", ["init", root]);
+    if (corrected) f.correct(0);
+    const target = reconciliationCoordinate(f.db, "session");
+    const corrupt = { ...f.snapshot, costUsd: f.db.sessionCostUsd("session"), costReconciliationRevision: Number.MAX_SAFE_INTEGER,
+      costReconciliationIdentity: target.identity, costReconciliationDeltaUsd: target.deltaUsd };
+    observeReconciliationSnapshot(f.db, corrupt);
+    const input = repairEvidence(f.db, corrupt), preview = previewClaudeAcknowledgementRepair(f.db, principal, input);
+    applyClaudeAcknowledgementRepair(f.db, principal, input, preview.digest);
+    const store = new SessionStore(join(root, "runner-sessions"));
+    store.create({ sessionId: "session", agentId: "claude", workspaceId: "repo", repoPath: root,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {}, context: { kind: "native" },
+      agentSessionId: "old-conversation", status: "idle", title: "Fixture", config: {},
+      costUsd: corrupt.costUsd, tokensIn: corrupt.tokensIn, tokensOut: corrupt.tokensOut, seq: corrupt.seq, logEpoch: 1,
+      costReconciliationRevision: corrupt.costReconciliationRevision, costReconciliationIdentity: corrupt.costReconciliationIdentity,
+      costReconciliationDeltaUsd: corrupt.costReconciliationDeltaUsd, preview: null, pendingApproval: null, createdAt: f.now, updatedAt: f.now });
+    const factory = () => ({ initialize: async () => {}, newSession: async () => {}, close: async () => {},
+      prompt: async () => "end_turn", cancel() {}, dispose() {}, setConfig() {}, resolvePermission: () => false,
+      agentSessionId: () => "fresh-conversation" });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, factory as never, root, 1);
+    // Use the actual runner CAS and snapshot projection, including a crash before CP confirmation.
+    const frame = acknowledgementRepairFrame(f.db, "session")!;
+    manager.syncPricedSessionCost("session", frame.costUsd, frame.costReconciliationRevision, frame.costReconciliationDeltaUsd, frame);
+    if (confirmed) observeReconciliationSnapshot(f.db, manager.snapshotForControlPlane(store.readMeta("session")!));
+    assert.equal(await manager.start({ sessionId: "session", agentId: "claude", workspaceId: "repo", workspacePath: root,
+      driver: "claude-code", command: "claude", args: [], env: {}, context: { kind: "native" }, useWorktree: false }), true);
+    const restarted = manager.snapshotForControlPlane(store.readMeta("session")!);
+    assert.notEqual(store.readMeta("session")!.agentSessionId, "old-conversation");
+    observeReconciliationSnapshot(f.db, restarted);
+    assert.equal(reconciliationSnapshotAvailable(f.db, restarted), true);
+    assert.equal(normalizeReconciledSnapshot(f.db, restarted).costUsd, corrupt.costUsd);
+    assert.equal(acknowledgementRepairFrame(f.db, "session"), null, "pending repair confirms after Restart");
+    const stale = { ...restarted, costReconciliationRepairId: undefined, costReconciliationRevision: Number.MAX_SAFE_INTEGER };
+    observeReconciliationSnapshot(f.db, stale);
+    assert.equal(reconciliationSnapshotAvailable(f.db, stale), false);
+    assert.equal(observedReconciliationRevision(f.db, "session"), target.revision, "Restart does not weaken stale-generation fencing");
+  } finally { manager?.shutdownAll(); f.db.close(); rmSync(root, { recursive: true, force: true }); }
+});
 
 test("different revision-1 identities after restore cannot resurrect the old total or clear their fence", () => {
   const original = fixture(), restored = fixture();
