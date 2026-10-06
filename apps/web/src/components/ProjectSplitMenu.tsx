@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import {
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
@@ -108,6 +108,9 @@ export function archiveDetailRows(
   const rows = sessions.map((session) => ({ label: session.title || "Untitled Session", status: archiveRowStatus(session) }));
   return { rows, overflow: Math.max(0, sessionCount - rows.length) };
 }
+
+/** How long type-ahead keeps gathering letters, as the shared menu hook does. */
+const TYPEAHEAD_MS = 500;
 
 const sessionsWord = (count: number) => `${count} Session${count === 1 ? "" : "s"}`;
 
@@ -383,6 +386,7 @@ export function ProjectSplitMenu({ active = true, tabMenu = null, onTabMenuClose
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const menuId = `project-menu-${useId().replace(/:/g, "")}`;
+  const typeahead = useRef({ text: "", at: 0 });
   const tab = tabMenu?.tab ?? null;
   const anchor = useMemo<MenuAnchor>(() => {
     if (tabMenu?.point) return { point: tabMenu.point };
@@ -415,6 +419,28 @@ export function ProjectSplitMenu({ active = true, tabMenu = null, onTabMenuClose
     close(!action.navigates);
     action.run();
   };
+  // Type-ahead gathers the letters typed within half a second ("pin" stays on Pin Project), as the
+  // shared menu hook does; Escape, Tab and the arrows are the shared menu keys.
+  const onMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key.length !== 1 || event.key === " " || event.ctrlKey || event.metaKey || event.altKey) {
+      handleMenuKeyDown(event, close);
+      return;
+    }
+    const now = Date.now();
+    const buffer = typeahead.current;
+    buffer.text = (now - buffer.at > TYPEAHEAD_MS ? "" : buffer.text) + event.key.toLocaleLowerCase();
+    buffer.at = now;
+    const items = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')];
+    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+    for (let offset = 1; offset <= items.length; offset += 1) {
+      const item = items[(Math.max(current, -1) + offset) % items.length]!;
+      if (item.dataset.menuLabel?.toLocaleLowerCase().startsWith(buffer.text)) {
+        event.preventDefault();
+        item.focus();
+        return;
+      }
+    }
+  };
 
   return (
     <>
@@ -426,8 +452,8 @@ export function ProjectSplitMenu({ active = true, tabMenu = null, onTabMenuClose
           title={actions.label}
           aria-label={actions.label}
           aria-haspopup="menu"
-          aria-expanded={triggerOpen}
-          aria-controls={triggerOpen ? menuId : undefined}
+          aria-expanded={open}
+          aria-controls={open ? menuId : undefined}
           onClick={() => {
             setOpenFocus("first");
             setTriggerOpen((value) => !value);
@@ -452,7 +478,7 @@ export function ProjectSplitMenu({ active = true, tabMenu = null, onTabMenuClose
           aria-label={actions.label}
           tabIndex={-1}
           onDismiss={() => close(true)}
-          onKeyDown={(event) => handleMenuKeyDown(event, close)}
+          onKeyDown={onMenuKeyDown}
           onContextMenu={(event) => event.preventDefault()}
         >
           <ProjectMenuItems groups={actions.groups} onChoose={choose} />
@@ -486,7 +512,11 @@ function RenameProjectDialog({ entityLabel, currentName, rename, onClose }: {
   const resettable = entityLabel === "Workspace";
   const [draft, setDraft] = useState(currentName);
   const [edited, setEdited] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // What is wrong with the name as typed, and why the last request failed. A failure stays until the
+  // name is edited or submitted again; leaving the field does not answer it.
+  const [invalid, setInvalid] = useState<string | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
+  const error = invalid ?? failure;
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   const fieldRef = useRef<HTMLInputElement>(null);
@@ -504,7 +534,8 @@ function RenameProjectDialog({ entityLabel, currentName, rename, onClose }: {
   const submit = async () => {
     if (busyRef.current) return;
     const problem = nameError(draft);
-    setError(problem);
+    setInvalid(problem);
+    setFailure(null);
     setEdited(true);
     if (problem) {
       fieldRef.current?.focus();
@@ -518,7 +549,7 @@ function RenameProjectDialog({ entityLabel, currentName, rename, onClose }: {
       onClose();
     } catch (cause) {
       busyRef.current = false;
-      setError((cause as Error).message);
+      setFailure((cause as Error).message);
       fieldRef.current?.focus();
     } finally {
       setBusy(false);
@@ -564,10 +595,11 @@ function RenameProjectDialog({ entityLabel, currentName, rename, onClose }: {
               const next = event.target.value;
               setDraft(next);
               setEdited(true);
+              setFailure(null);
               // An error showing clears as soon as the value is valid (§8.5).
-              if (error) setError(nameError(next));
+              if (invalid) setInvalid(nameError(next));
             }}
-            onBlur={() => { if (edited && !busyRef.current) setError(nameError(draft)); }}
+            onBlur={() => { if (edited && !busyRef.current) setInvalid(nameError(draft)); }}
           />
           {error
             ? <FieldError id={RENAME_ERROR_ID}>{error}</FieldError>

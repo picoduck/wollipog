@@ -1164,3 +1164,73 @@ test("a legacy Workspace keeps its one reset: an empty name clears the display o
   assertNoDomNode(domWindow.document.querySelector('[role="dialog"]'));
   await view.unmount();
 });
+
+test("type-ahead gathers letters, so typing pin stays on Pin rather than moving on (#2199)", async () => {
+  const view = await mountMenu(
+    <FeedbackProvider>
+      <ProjectSplitMenu split={split} runner={runner()} pinned={false}
+        onPinnedChange={() => undefined} onNewSession={() => undefined} />
+    </FeedbackProvider>,
+  );
+  await openMenu(view.container);
+  for (const key of ["p", "i", "n"]) {
+    await act(async () => {
+      domWindow.document.activeElement?.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+    });
+  }
+  assert.equal(domWindow.document.activeElement?.textContent?.trim(), "Pin Workspace");
+  await act(async () => {
+    domWindow.document.activeElement?.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await tick();
+  });
+  await view.unmount();
+});
+
+test("⋯ reports the menu open when the selected tab opened it (#2199)", async () => {
+  const tab = domWindow.document.createElement("button") as unknown as HTMLButtonElement;
+  domWindow.document.body.append(tab as never);
+  const view = await mountMenu(
+    <FeedbackProvider>
+      <ProjectSplitMenu split={split} runner={runner()} pinned={false} active tabMenu={{ tab }}
+        onPinnedChange={() => undefined} onNewSession={() => undefined} />
+    </FeedbackProvider>,
+  );
+  const trigger = button(view.container, "Project One Actions");
+  const menu = domWindow.document.querySelector('[role="menu"]') as unknown as HTMLElement;
+  assert.equal(trigger.getAttribute("aria-expanded"), "true");
+  assert.equal(trigger.getAttribute("aria-controls"), menu.id);
+  await view.unmount();
+  tab.remove();
+});
+
+test("a failed rename keeps its reason when focus leaves the field, until the name is edited (#2199)", async () => {
+  const client = {
+    ...api,
+    updateProject: async () => { throw new Error("A project named Project Two already exists."); },
+  } as unknown as ApiClient;
+  const view = await mountMenu(
+    <ApiProvider client={client}>
+      <FeedbackProvider>
+        <ProjectSplitMenu split={durableProjectSplit()} runner={runner()} pinned={false}
+          onPinnedChange={() => undefined} onNewSession={() => undefined} />
+      </FeedbackProvider>
+    </ApiProvider>,
+  );
+  const { container } = view;
+  await openMenu(container);
+  await act(async () => { button(container, "Rename Project…").click(); await tick(); });
+  const dialog = domWindow.document.querySelector('[role="dialog"]') as unknown as HTMLElement;
+  const input = dialog.querySelector<HTMLInputElement>("#rename-project-name")!;
+  await act(async () => { input.value = "Project Two"; fireDomEvent.change(input); });
+  await act(async () => { button(container, "Rename Project").click(); await tick(); await tick(); });
+  assert.equal(dialog.querySelector(".field-error")?.textContent, "A project named Project Two already exists.");
+  await act(async () => { input.focus(); button(container, "Cancel").focus(); });
+  assert.notEqual(domWindow.document.activeElement, input, "focus left the field");
+  assert.equal(dialog.querySelector(".field-error")?.textContent, "A project named Project Two already exists.",
+    "leaving the field does not answer the failure");
+  assert.equal(input.getAttribute("aria-invalid"), "true");
+  await act(async () => { input.value = "Project Three"; fireDomEvent.change(input); });
+  assertNoDomNode(dialog.querySelector(".field-error"), "editing the name clears it");
+  await act(async () => { button(container, "Cancel").click(); await tick(); });
+  await view.unmount();
+});
