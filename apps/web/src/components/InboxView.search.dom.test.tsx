@@ -365,10 +365,10 @@ test("a group's Archive All Sessions still covers the whole group during a searc
   await act(async () => { infraTab.click(); });
   await type("plan");
   assert.deepEqual(rowTitles(container), ["Plan terraform"]);
-  const trigger = container.querySelector<HTMLButtonElement>('button[aria-label="Workspace Actions for Infra"]')!;
+  const trigger = container.querySelector<HTMLButtonElement>('button[aria-label="Infra Actions"]')!;
   await act(async () => { trigger.click(); });
   const archiveAll = [...container.querySelectorAll<HTMLElement>('[role="menuitem"]')]
-    .find((item) => /All Sessions$/.test(item.textContent ?? ""))!;
+    .find((item) => /All Sessions…?$/.test(item.textContent ?? ""))!;
   await act(async () => { archiveAll.click(); });
   await act(async () => { await Promise.resolve(); });
   const dialog = container.querySelector<HTMLElement>('[role="alertdialog"], [role="dialog"]')!;
