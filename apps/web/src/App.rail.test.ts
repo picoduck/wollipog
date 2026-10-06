@@ -148,7 +148,7 @@ test("the desktop rail is grouped, searchable and has one current-page treatment
 
 test("heartbeat activity feeds cards, preview, split counts, and independent rail badges", () => {
   // #2214: the counts live on the tabs and the rail; the Sessions footer that restated them is gone.
-  assert.match(inbox, /<CountBadge count=\{split\.stalledCount\} tone="danger" \/>/);
+  assert.match(groupTabs, /<CountBadge count=\{split\.stalledCount\} tone="danger" \/>/);
   assert.doesNotMatch(inbox, /inbox-activity-footer/);
   assert.match(inboxList, /state\.activity\.get\(props\.session\.id\)/);
   // #2210: the Sessions preview shows one status and no activity strip; the rows carry it.
