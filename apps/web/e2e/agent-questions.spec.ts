@@ -524,6 +524,25 @@ for (const theme of ["dark", "light"] as const) {
   });
 }
 
+test("a failure notice's Show Details growing at the end of a scrolling card brings the line below back (#2698 review)", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 640 });
+  await page.goto("/agent-questions-e2e.html?set=paragraph&more=1&failure=1");
+  const card = dockedCard(page);
+  const hold = card.getByRole("radio", { name: /Hold It/ });
+  await hold.scrollIntoViewIfNeeded();
+  await hold.click();
+  await card.getByRole("button", { name: "Submit Answers" }).click();
+  const showDetails = card.getByRole("button", { name: "Show Details" });
+  await expect(showDetails).toBeVisible();
+  await card.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  await expect.poll(async () => (await cardEdges(card)).below).toBe(false);
+  // Opening the details is the notice's own state: the card does not render again, but it grows.
+  const before = (await cardEdges(card)).range;
+  await showDetails.evaluate((element) => (element as HTMLElement).click());
+  await expect.poll(async () => (await cardEdges(card)).range).toBeGreaterThan(before);
+  await expect.poll(async () => (await cardEdges(card)).below).toBe(true);
+});
+
 test("a card whose body scrolls on its own, or that is not capped, draws no edge lines (#2698)", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/agent-questions-e2e.html?set=paragraph&more=1");

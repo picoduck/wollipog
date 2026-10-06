@@ -499,8 +499,10 @@ export function SessionQuestionBanner({
   }, [titleExpanded]);
 
   // While the card itself scrolls (expanded, cramped, or a short column's container rule), the edges
-  // it can still scroll past fade (#2698), as a tab row's do. The marks follow the scroll position,
-  // the card's size and its content's; a render that switches the layout re-marks after it commits.
+  // it can still scroll past show a line (#2698), marked as a tab row's clipped edges are. The marks
+  // follow the scroll position and the size of the card and of everything in it, including what
+  // grows on its own (a notice's Show Details); after each render the card's current children are
+  // observed and the marks re-read, so a new notice or a layout switch is seen too.
   const updateClip = useRef<() => void>(() => undefined);
   useIsomorphicLayoutEffect(() => {
     const card = cardRef.current;
@@ -511,12 +513,15 @@ export function SessionQuestionBanner({
       card.toggleAttribute("data-clip-start", scrolls && card.scrollTop > 1);
       card.toggleAttribute("data-clip-end", scrolls && card.scrollTop + card.clientHeight < card.scrollHeight - 1);
     };
-    updateClip.current = update;
-    update();
     card.addEventListener("scroll", update, { passive: true });
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(update);
-    observer?.observe(card);
-    for (const child of [titleRef.current, stepRef.current]) if (child) observer?.observe(child);
+    updateClip.current = () => {
+      observer?.observe(card);
+      // Observing an element twice is a no-op; children that left are released on disconnect.
+      for (const child of card.children) observer?.observe(child);
+      update();
+    };
+    updateClip.current();
     return () => {
       card.removeEventListener("scroll", update);
       observer?.disconnect();
