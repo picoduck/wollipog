@@ -1001,6 +1001,7 @@ function SessionDetailLoaded({
     isEventGapRecoveryCurrent,
     beginEventGapRecovery,
     cancelEventGapRecovery,
+    finishEventGapRecovery,
     loadEventGapWindow,
     deferEventTail,
     beginLaterEventsLoad,
@@ -2602,7 +2603,8 @@ function SessionDetailLoaded({
       hasSavedReadingPosition: !canReplaceWithWindow(),
     });
     beginEventHistoryLoad(sessionId, epoch, recoveryRevision, generation);
-    const gapFence = beginEventGapRecovery(sessionId, epoch, recoveryRevision, generation);
+    const gapFence = beginEventGapRecovery(sessionId, epoch, recoveryRevision, generation,
+      () => hasSavedFollowTailAnchor(instanceScope, sessionId));
     const load = openWindow
       ? recoverSessionHistoryWindow(request, windowOptions)
         .then((result) => (result.supported ? result.complete : forwardRecovery()))
@@ -2622,13 +2624,15 @@ function SessionDetailLoaded({
       if (isCurrent()) {
         failEventHistoryLoad(sessionId, "Could not load complete session activity.", epoch, recoveryRevision, generation);
       }
+    }).finally(() => {
+      if (gapFence) finishEventGapRecovery(gapFence);
     });
     return () => {
       cancelled = true;
       if (gapFence) cancelEventGapRecovery(gapFence);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api, sessionId, loadEvents, conn, recoveryRevision, recoveryReadAfter, recoveryEventEpoch, recoveryGeneration, historyRetry, beginEventHistoryLoad, failEventHistoryLoad, isEventGapRecoveryCurrent, beginEventGapRecovery, cancelEventGapRecovery, loadEventGapWindow, deferEventTail]);
+  }, [api, sessionId, loadEvents, conn, recoveryRevision, recoveryReadAfter, recoveryEventEpoch, recoveryGeneration, historyRetry, beginEventHistoryLoad, failEventHistoryLoad, isEventGapRecoveryCurrent, beginEventGapRecovery, cancelEventGapRecovery, finishEventGapRecovery, loadEventGapWindow, deferEventTail]);
 
   const loadLater = useCallback(() => {
     const request = beginLaterEventsLoad(sessionId);

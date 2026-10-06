@@ -205,6 +205,34 @@ test("live activity after a staged tail stays available once without skipping th
   expect(await reads(page, start)).toEqual(before);
 });
 
+for (const hold of ["forward", "tail"] as const) {
+  test(`live activity received while the ${hold} page is held preserves the paused gap and appears once on resume`, async ({ page }) => {
+    await open(page);
+    const anchor = await pause(page);
+    await page.evaluate((hold) => window.__WOLLIPOG_PROJECT_INBOX_E2E__.holdSyntheticHistoryRead(hold), hold);
+    const start = await reconnectWithGap(page, 10_000);
+    await expect.poll(async () => (await reads(page, start)).some((request) =>
+      hold === "tail" ? request.direction === "backward" : request.direction !== "backward",
+    )).toBe(true);
+    const liveText = `Public live response received during the held ${hold} page.`;
+    await page.evaluate((text) => window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitAgentMessage("session-alpha", text), liveText);
+    await settle(page);
+    await expectAnchor(page, anchor);
+    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.releaseSyntheticHistoryRead());
+    await boundedRecovery(page, start);
+    await expectAnchor(page, anchor);
+    await expect(page.getByRole("button", { name: "Retry", exact: true })).toHaveCount(0);
+    const before = await reads(page, start);
+    await reader(page).focus();
+    await page.keyboard.press("End");
+    await expect(follow(page)).toHaveAttribute("data-follow-tail-state", "following");
+    await expect(reader(page).getByText(liveText, { exact: true })).toBeVisible();
+    await expect(reader(page).getByText(liveText, { exact: true })).toHaveCount(1);
+    await settle(page);
+    expect(await reads(page, start)).toEqual(before);
+  });
+}
+
 test("a mobile paused reader keeps its row while the reachable later-history control loads one page", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const path = `/sessions/~${Buffer.from("session-alpha", "utf16le").toString("base64url")}`;

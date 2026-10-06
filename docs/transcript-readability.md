@@ -67,6 +67,9 @@ events), then one bounded current tail window. A following reader adopts that wi
 remain reachable through **Load Earlier Activity**. A reader who pauses before or during those
 requests keeps the loaded reading slice and its row and offset. The separately retained tail does
 not enter timeline derivation or advance the frozen cursor across the unloaded interval.
+While a saved paused position exists, live frames arriving beyond the reading boundary during
+recovery join the same bounded private retention before the tail response arrives. Already-visible
+rows are preserved, and following readers continue normal live delivery.
 **Load Later Activity** loads one ordinary forward page on demand; **Jump to Latest** adopts the
 retained tail without replaying the middle. The control remains outside the scroll region so
 reaching it cannot accidentally resume following. Incomplete, invalid, or obsolete pages cannot
