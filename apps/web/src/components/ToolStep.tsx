@@ -128,11 +128,21 @@ export function ToolStep({
     <details
       className="tl-step disclosure"
       open={open}
-      onToggle={(event) => {
-        if (event.nativeEvent.isTrusted && event.currentTarget.open !== open) onToggle?.();
-      }}
     >
-      <summary className="tl-step-head" aria-label={label} aria-describedby={timing ? timingId : undefined}>
+      <summary
+        className="tl-step-head"
+        aria-label={label}
+        aria-describedby={timing ? timingId : undefined}
+        onClick={(event) => {
+          if (!onToggle || event.defaultPrevented) return;
+          const target = event.target as Element;
+          if (target.closest("a[href], button, input, select, textarea, [contenteditable='true']")) return;
+          // A native toggle event is queued and can arrive after virtualization unmounts this row.
+          // Save the controlled choice during activation instead; Enter and Space also click summary.
+          event.preventDefault();
+          onToggle();
+        }}
+      >
         {head(true)}
       </summary>
       <div className="tl-step-body">{children}</div>

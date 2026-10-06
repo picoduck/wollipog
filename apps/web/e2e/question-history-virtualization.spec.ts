@@ -7,7 +7,8 @@ test("resolved question disclosure survives virtual recycling and transcript rep
   const second = page.locator('[data-virtual-key="item:question:302"] .tl-question > details');
   await expect(first).not.toHaveAttribute("open");
   await expect(second).not.toHaveAttribute("open");
-  await first.locator("summary").click();
+  await first.locator("summary").focus();
+  await page.keyboard.press("Enter");
   await expect(first).toHaveAttribute("open");
   await expect(second).not.toHaveAttribute("open");
 
@@ -31,7 +32,8 @@ test("resolved question disclosure survives virtual recycling and transcript rep
   await expect(first).toHaveAttribute("open");
   await second.locator("summary").click();
   await expect(second).toHaveAttribute("open");
-  await first.locator("summary").click();
+  await first.locator("summary").focus();
+  await page.keyboard.press("Space");
   await expect(first).not.toHaveAttribute("open");
   await reader.focus();
   await reader.evaluate((element) => { element.scrollTop = element.scrollHeight; });
@@ -42,6 +44,47 @@ test("resolved question disclosure survives virtual recycling and transcript rep
   await expect(first).not.toHaveAttribute("open");
   await expect(second).toHaveAttribute("open");
 });
+
+// Native details toggle events are queued. Process a real virtual-row recycle in the same task as
+// summary activation so the browser cannot deliver that event to a mounted React handler first.
+for (const nextOpen of [true, false]) {
+  test(`question ${nextOpen ? "expansion" : "collapse"} survives recycling before a queued native toggle (#719)`, async ({ page }) => {
+    await page.goto("/timeline-reflow-e2e.html?question-history=1");
+    const reader = page.getByTestId("reader");
+    const first = page.locator('[data-virtual-key="item:question:301"] .tl-question > details');
+    const second = page.locator('[data-virtual-key="item:question:302"] .tl-question > details');
+    await second.locator("summary").click();
+    await expect(second).toHaveAttribute("open");
+    if (!nextOpen) await first.locator("summary").click();
+
+    // Establish the saved starting choices through a completed unmount/remount.
+    await reader.focus();
+    await reader.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    await expect(first).toHaveCount(0);
+    await expect(second).toHaveCount(0);
+    await reader.evaluate((element) => { element.scrollTop = 0; });
+    if (nextOpen) await expect(first).not.toHaveAttribute("open");
+    else await expect(first).toHaveAttribute("open");
+    await expect(second).toHaveAttribute("open");
+
+    await first.evaluate((details) => {
+      details.querySelector("summary")!.click();
+      const scroll = document.querySelector<HTMLElement>('[data-testid="reader"]')!;
+      scroll.focus();
+      scroll.scrollTop = scroll.scrollHeight;
+      scroll.dispatchEvent(new Event("scroll"));
+    });
+    // A synchronous saved-state update can also correct the old reading anchor in this task.
+    // Scroll to the tail again if needed, then prove both rows actually leave the DOM.
+    await reader.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    await expect(first).toHaveCount(0);
+    await expect(second).toHaveCount(0);
+    await reader.evaluate((element) => { element.scrollTop = 0; });
+    if (nextOpen) await expect(first).toHaveAttribute("open");
+    else await expect(first).not.toHaveAttribute("open");
+    await expect(second).toHaveAttribute("open");
+  });
+}
 
 // #502's reproduction, docked (#2205): a question asked far above the reader, with 80 and more rows
 // after it, used to render its form at the transcript row and hand it to a fallback above the

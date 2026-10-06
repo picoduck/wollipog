@@ -11,6 +11,7 @@ import type { TimelineItem } from "../timeline.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { EventTimeline } from "./EventTimeline.js";
+import { ToolStep } from "./ToolStep.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 for (const [name, value] of Object.entries({
@@ -365,4 +366,35 @@ test("open work and nested agent steps sit on rules, never on inline margins", a
   assert.equal(depth(container.querySelector(".tl-agent")), 1, "the agent's row sits on its group's rule");
   assert.equal(container.querySelectorAll("[style*='margin']").length, 0, "no inline margin anywhere");
   assert.ok(container.querySelector(".tl-agent svg.disclosure-chevron"), "the agent row uses the §5.5 chevron");
+});
+
+test("controls inside a step summary keep their own actions without changing its disclosure", async () => {
+  const { container, root } = await mount();
+  let actions = 0;
+  let toggles = 0;
+  function Fixture() {
+    const [open, setOpen] = React.useState(false);
+    return <ToolStep
+      icon={null}
+      verb={<>
+        <span className="step-title">Inspect Step</span>
+        <button type="button" onClick={() => { actions += 1; }}><span>Inspect</span></button>
+        <a href="/details" onClick={(event) => { event.preventDefault(); actions += 1; }}>Open Details</a>
+      </>}
+      open={open}
+      onToggle={() => { toggles += 1; setOpen((previous) => !previous); }}
+    >Step content</ToolStep>;
+  }
+  await act(async () => root.render(<Fixture />));
+  const details = container.querySelector<HTMLDetailsElement>("details")!;
+  await act(async () => container.querySelector<HTMLElement>("button > span")!.click());
+  await act(async () => container.querySelector<HTMLAnchorElement>("a")!.click());
+  assert.equal(actions, 2);
+  assert.equal(toggles, 0);
+  assert.equal(details.open, false);
+  await act(async () => container.querySelector<HTMLElement>(".step-title")!.click());
+  assert.equal(details.open, true);
+  await act(async () => container.querySelector<HTMLElement>(".step-title")!.click());
+  assert.equal(details.open, false);
+  assert.equal(toggles, 2);
 });
