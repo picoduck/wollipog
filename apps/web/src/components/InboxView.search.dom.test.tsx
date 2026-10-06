@@ -405,6 +405,30 @@ test("when a live update takes the previewed session out of the results, the nex
   assert.equal(domWindow.document.activeElement, replacement, "focus stays in the reader, not <body>");
 });
 
+test("when No Matches holds focus and a live match brings the board back, the board takes it", async () => {
+  const { container, type, socket } = await mount({ viewMode: "board" });
+  await type("deploy");
+  const state = container.querySelector<HTMLElement>(".inbox-no-matches")!;
+  state.focus();
+  await act(async () => {
+    socket.push({ type: "session_upsert", session: { ...SESSIONS[2]!, title: "Deploy the guide" } });
+  });
+  const board = container.querySelector<HTMLElement>(".board-wrap")!;
+  assert.ok(board, "the board is back with the match");
+  assert.equal(domWindow.document.activeElement, board);
+});
+
+test("when No Matches holds focus and the connection drops, the offline state takes it", async () => {
+  const { container, type, socket } = await mount();
+  await type("kubernetes");
+  container.querySelector<HTMLElement>(".inbox-no-matches")!.focus();
+  await act(async () => { socket.onclose?.({ code: 1006 }); });
+  const offline = container.querySelector<HTMLElement>(".inbox-zero")!;
+  assert.ok(offline, "the list shows its offline state, which outranks No Matches (§12)");
+  assertNoDomNode(container.querySelector(".inbox-no-matches"));
+  assert.equal(domWindow.document.activeElement, offline);
+});
+
 test("Search Transcripts takes focus before it opens the palette, so the palette can return it there", async () => {
   let focusedAtOpen: unknown = null;
   const { container, type } = await mount({ openSearchPalette: () => { focusedAtOpen = domWindow.document.activeElement; } });

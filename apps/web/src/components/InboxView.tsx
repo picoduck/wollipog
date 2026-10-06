@@ -535,9 +535,13 @@ export function InboxView({
   useLayoutEffect(() => {
     const fromPreview = removedPreviewFocus();
     if (!removedFocus() || normalizedQuery === "" || expandedSessionId !== null) return;
+    // The list zone's own chain (§16.1): the grid, the state in its place, or the board.
+    const listZone = () => listRef.current ??
+      viewRef.current?.querySelector<HTMLElement>(".inbox-zero") ??
+      viewRef.current?.querySelector<HTMLElement>(".board-wrap");
     if (noMatches) noMatchesRef.current?.focus();
-    else if (fromPreview) (previewPaneRef.current?.querySelector<HTMLElement>(".detail-scroll") ?? listRef.current)?.focus();
-    else listRef.current?.focus();
+    else if (fromPreview) (previewPaneRef.current?.querySelector<HTMLElement>(".detail-scroll") ?? listZone())?.focus();
+    else listZone()?.focus();
   });
   const liveIds = useMemo(() => liveEntries.map((entry) => entry.session.id), [liveEntries]);
   const pinnedAncestorSessionIds = useMemo(
