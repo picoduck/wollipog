@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { ReleaseStaging, stagingFilesystem } from "../apps/runner/src/release-staging.ts";
 
 const triple = "x86_64-unknown-linux-gnu";
 const runnerAsset = `wollipog-runner-${triple}`;
@@ -15,7 +16,7 @@ const releaseTag = "v1.2.3";
 const havePosixShell = process.platform !== "win32" && spawnSync("sh", ["-c", ":"], { stdio: "ignore" }).status === 0
   && spawnSync("tar", ["--version"], { stdio: "ignore" }).status === 0;
 const posixTest = havePosixShell ? test : test.skip;
-const installer = fileURLToPath(new URL("./install-runner.sh", import.meta.url));
+const installer = process.env.HEADLESS_INSTALLER_TEST_PATH ?? fileURLToPath(new URL("./install-runner.sh", import.meta.url));
 
 function executable(path, body) {
   writeFileSync(path, `#!/bin/sh\nset -eu\n${body}`, { encoding: "utf8" });
@@ -33,7 +34,7 @@ function harness(options = {}) {
   const fakeBin = join(root, "fake-bin");
   const assetsDir = join(root, "assets");
   mkdirSync(fakeBin, { recursive: true });
-  mkdirSync(join(assetsDir, "web"), { recursive: true });
+  mkdirSync(join(assetsDir, "web"), { recursive: true, mode: 0o755 });
   writeFileSync(join(assetsDir, runnerAsset), "runner bytes\n");
   writeFileSync(join(assetsDir, controlPlaneAsset), "control plane bytes\n");
   writeFileSync(join(assetsDir, "web", "index.html"), "<html>dashboard</html>");
@@ -59,21 +60,150 @@ url=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -o) out="$2"; shift 2 ;;
-    *) url="$1"; shift ;;
+    -fsSL | -fL) shift ;;
+    https://*) url="$1"; shift ;;
+    *) echo "unexpected fixture curl argument" >&2; exit 91 ;;
   esac
 done
-if echo "$url" | grep -q '/releases/latest$'; then cat "$TEST_RELEASE_JSON"; exit 0; fi
-if echo "$url" | grep -q '/releases/tags/'; then
-  tag=$(basename "$url"); [ "$tag" = "$TEST_RELEASE_TAG" ] || exit 22
-  cat "$TEST_RELEASE_JSON"; exit 0
-fi
-name=$(basename "$url")
-cp "$TEST_ASSETS_DIR/$name" "$out"
+case "$url" in
+  https://api.github.com/repos/picoduck/wollipog/releases/latest | https://api.github.com/repos/picoduck/wollipog/releases/tags/"$TEST_RELEASE_TAG")
+    cat "$TEST_RELEASE_JSON"; exit 0 ;;
+  https://api.github.com/repos/picoduck/wollipog/releases/tags/*) exit 22 ;;
+  https://download.test/"$TEST_RELEASE_TAG"/wollipog-runner-x86_64-unknown-linux-gnu | https://download.test/"$TEST_RELEASE_TAG"/wollipog-control-plane-x86_64-unknown-linux-gnu | https://download.test/"$TEST_RELEASE_TAG"/wollipog-web.tar.gz | https://download.test/"$TEST_RELEASE_TAG"/SHA256SUMS)
+    [ -n "$out" ] || exit 92
+    cp "$TEST_ASSETS_DIR/$(basename "$url")" "$out" ;;
+  *) echo "unexpected fixture curl URL" >&2; exit 93 ;;
+esac
 `);
-  const run = (...args) => spawnSync("sh", ["-c", 'PATH="$1:$PATH"; HOME="$2"; TEST_RELEASE_JSON="$3"; TEST_ASSETS_DIR="$4"; TEST_RELEASE_TAG="$5"; export PATH HOME TEST_RELEASE_JSON TEST_ASSETS_DIR TEST_RELEASE_TAG; shift 5; exec sh "$@"',
-    "installer-test", fakeBin, home, join(root, "release.json"), assetsDir, releaseTag, installer, ...args], { encoding: "utf8" });
+  // Even a missing release must not fall through to ambient gh credentials or network.
+  executable(join(fakeBin, "gh"), 'echo "unexpected fixture gh invocation" >&2\nexit 22\n');
+  const run = (...args) => spawnSync("sh", ["-c", 'umask 022\nexec sh "$@"', "installer-test", installer, ...args], {
+    encoding: "utf8",
+    env: {
+      PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+      HOME: home,
+      LC_ALL: "C",
+      TEST_RELEASE_JSON: join(root, "release.json"),
+      TEST_ASSETS_DIR: assetsDir,
+      TEST_RELEASE_TAG: releaseTag,
+    },
+  });
   return { root, home, run };
 }
+
+const admissionAsset = {
+  name: runnerAsset, size: 1, digest: `sha256:${sha256(Buffer.from("x"))}`, url: "https://fixture.invalid/runner",
+};
+const identity = (path) => {
+  const { dev, ino, uid, gid, mode } = lstatSync(path);
+  return { dev, ino, uid, gid, mode };
+};
+// Model supported host ancestry only outside the private fixture. Some managed sandboxes
+// present / and /tmp as UID 65534. Every fixture-owned identity, mode and syscall stays real.
+function admissionFilesystem(root) {
+  const externalAncestors = new Set();
+  for (let path = dirname(root);; path = dirname(path)) {
+    externalAncestors.add(path);
+    if (path === dirname(path)) break;
+  }
+  return {
+    ...stagingFilesystem,
+    lstat: (path) => {
+      const stat = stagingFilesystem.lstat(path);
+      return externalAncestors.has(path)
+        ? Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { uid: 0n })
+        : stat;
+    },
+  };
+}
+const admit = (data, root, fs = admissionFilesystem(root)) =>
+  ReleaseStaging.create(data, { mode: "user", serviceUid: null }, releaseTag, [admissionAsset], fs);
+
+posixTest("fresh headless root is private under umask 022 and admits generic staging without executing assets", (t) => {
+  const h = harness();
+  t.after(() => rmSync(h.root, { recursive: true, force: true }));
+  // Arbitrary existing ancestors must retain their modes while the new leaf becomes private.
+  const share = join(h.home, ".local", "share");
+  mkdirSync(share, { recursive: true, mode: 0o755 });
+  chmodSync(h.home, 0o750);
+  chmodSync(share, 0o750);
+  const ancestors = [h.home, join(h.home, ".local"), share].map(identity);
+  const result = h.run("--control-plane");
+  assert.equal(result.status, 0, result.stderr + result.stdout);
+  const data = join(share, "wollipog");
+  const stat = statSync(data);
+  assert.equal(stat.mode & 0o7777, 0o700, "fresh headless root must satisfy exact 0700 admission");
+  assert.equal(stat.uid, statSync(h.home).uid);
+  assert.equal(stat.gid, statSync(share).gid);
+  assert.deepEqual([h.home, join(h.home, ".local"), share].map(identity), ancestors);
+  assert.equal(statSync(join(h.home, ".config", "wollipog")).mode & 0o7777, 0o700);
+  // The scoped umask must not affect the existing public dashboard archive semantics.
+  assert.equal(statSync(join(data, "web")).mode & 0o777, 0o755);
+  if (process.platform === "linux") {
+    const before = identity(data);
+    const staging = admit(data, h.root);
+    assert.equal(staging.finish(), null);
+    assert.deepEqual(identity(data), before);
+    assert.ok(!existsSync(join(data, "upgrades")));
+    // The explicit ancestor view cannot make a wrong data-root or ancestor owner admissible.
+    const fs = admissionFilesystem(h.root);
+    const foreignUid = BigInt(process.geteuid()) + 1n;
+    for (const path of [data, "/"]) {
+      const wrongOwner = { ...fs, lstat: (name) => {
+        const stat = fs.lstat(name);
+        return name === path ? Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { uid: foreignUid }) : stat;
+      } };
+      assert.throws(() => admit(data, h.root, wrongOwner), /expected owner|unsafe ancestor ownership/u);
+      assert.ok(!existsSync(join(data, "upgrades")));
+    }
+    const local = join(h.home, ".local");
+    chmodSync(local, 0o775); // Deliberately unsupported, fixture-owned ancestor only.
+    const unsupported = identity(local);
+    assert.throws(() => admit(data, h.root), /unsafe ancestor ownership or writable permissions/u);
+    assert.deepEqual(identity(local), unsupported, "admission never repairs the unsupported ancestor");
+    assert.ok(!existsSync(join(data, "upgrades")));
+  }
+});
+
+posixTest("headless installer preserves pre-existing root identities and stored content while admission stays strict", (t) => {
+  for (const mode of [0o700, 0o755, 0o2700]) {
+    const h = harness();
+    t.after(() => rmSync(h.root, { recursive: true, force: true }));
+    const data = join(h.home, ".local", "share", "wollipog");
+    const config = join(h.home, ".config", "wollipog");
+    mkdirSync(join(data, "control-plane"), { recursive: true, mode: 0o755 });
+    mkdirSync(join(data, "runner"), { recursive: true, mode: 0o755 });
+    mkdirSync(config, { recursive: true, mode: 0o755 });
+    const contents = [
+      [join(data, "control-plane", "control-plane.db"), "stored database"],
+      [join(data, "control-plane", "artifact"), "stored artifact"],
+      [join(data, "runner", "state"), "stored runner state"],
+      [join(config, "control-plane.env"), "existing config"],
+      [join(config, "runner.config.json"), '{"runnerId":"existing","token":"inert-sentinel"}'],
+      [join(config, "runner.token"), "inert credential sentinel"],
+    ];
+    for (const [path, content] of contents) {
+      writeFileSync(path, content);
+      chmodSync(path, 0o640);
+    }
+    chmodSync(data, mode);
+    chmodSync(config, 0o750);
+    const roots = [data, config, join(data, "control-plane"), join(data, "runner")];
+    const rootIdentities = roots.map(identity);
+    const fileIdentities = contents.map(([path]) => identity(path));
+    const result = h.run("--control-plane");
+    assert.equal(result.status, 0, result.stderr + result.stdout);
+    assert.deepEqual(roots.map(identity), rootIdentities, `existing root identities for ${mode.toString(8)}`);
+    assert.deepEqual(contents.map(([path]) => identity(path)), fileIdentities);
+    for (const [path, content] of contents) assert.equal(readFileSync(path, "utf8"), content);
+    if (process.platform === "linux") {
+      if (mode === 0o700) assert.equal(admit(data, h.root).finish(), null);
+      else assert.throws(() => admit(data, h.root), /data directory must have its expected owner and private 0700 permissions/u);
+      assert.ok(!existsSync(join(data, "upgrades")), "no suspect-root recovery or staging left behind");
+      assert.deepEqual(roots.map(identity), rootIdentities);
+    }
+  }
+});
 
 posixTest("install-runner.sh --control-plane installs the verified control plane and dashboard bundle and leaves the runner config to service install", (t) => {
   const h = harness();
@@ -104,7 +234,7 @@ posixTest("install-runner.sh --release installs an exact tag and rejects malform
   assert.notEqual(malformed.status, 0);
   assert.match(malformed.stderr, /--release must look like v1\.2\.3/u);
 
-  // An unknown tag fails the tags endpoint; without gh there is nothing else to try.
+  // An unknown tag fails the tags endpoint and the fake gh refuses fallback.
   const unknown = h.run("--release", "v9.9.9");
   assert.notEqual(unknown.status, 0);
   assert.match(unknown.stderr, /GitHub release lookup failed for v9\.9\.9/u);

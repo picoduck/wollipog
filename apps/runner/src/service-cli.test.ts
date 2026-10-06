@@ -35,6 +35,8 @@ function fake(t: { after(fn: () => void): void }, options: {
   accountUid?: number | null; tokenPathFromEnv?: boolean;
   /** Model a system-mode host: the FHS layout is relocated under the temp root via WOLLIPOG_SYSTEM_PREFIX. */
   system?: boolean;
+  /** Relocate user data/config to custom XDG roots, within the inert fixture. */
+  xdg?: boolean;
 } = {}): Fake {
   const root = mkdtempSync(join(tmpdir(), "wollipog-svc-cli-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -43,7 +45,8 @@ function fake(t: { after(fn: () => void): void }, options: {
   const execs: string[] = [];
   const out: string[] = [];
   const err: string[] = [];
-  const env: NodeJS.ProcessEnv = options.system ? { WOLLIPOG_SYSTEM_PREFIX: join(root, "sysroot") } : {};
+  const env: NodeJS.ProcessEnv = options.system ? { WOLLIPOG_SYSTEM_PREFIX: join(root, "sysroot") }
+    : options.xdg ? { XDG_DATA_HOME: join(root, "xdg-data"), XDG_CONFIG_HOME: join(root, "xdg-config") } : {};
   const layout = serviceLayout(options.system ? "system" : "user", { home, user: "op", env });
   // Synthetic system-mode identities cover the real staging helper without root/chown. Every
   // path and descriptor is mapped consistently; the syscall behavior remains real and private.
@@ -398,6 +401,61 @@ test("service install never changes the permissions of an existing workspace or 
   assert.equal(statSync(f.home).mode & 0o777, 0o700, "the home used as the default workspace keeps its private mode");
   assert.equal(statSync(f.layout.dataDir).mode & 0o777, 0o700);
   assert.equal(statSync(f.layout.configDir).mode & 0o777, 0o700);
+});
+
+test("fresh user, XDG and system component layouts keep private roots through inert no-start hosts", async (t) => {
+  for (const location of ["user", "xdg", "system"] as const) {
+    for (const component of ["control-plane", "runner", "both"] as const) {
+      await t.test(`${location}/${component}`, async (t) => {
+        const f = fake(t, { system: location === "system", xdg: location === "xdg", uid: location === "system" ? 0 : MY_UID });
+        if (component === "runner") {
+          // Runner-only install requires an existing credential; never mint one here.
+          mkdirSync(f.layout.configDir, { recursive: true, mode: 0o700 });
+          writeFileSync(f.layout.runnerTokenFile, "inert existing token", { mode: 0o600 });
+        }
+        const flags = [...(location === "system" ? ["--system"] : []), ...(component === "both" ? [] : [`--${component}`])];
+        assert.equal(await runServiceCli(["service", "install", ...flags, ...bins(f), "--no-start", "--no-linger", "--json"], f.host, f.io), 0, f.stderr() + f.stdout());
+        const report = JSON.parse(f.stdout());
+        assert.deepEqual(report.started, []);
+        assert.deepEqual(report.components, component === "both" ? ["control-plane", "runner"] : [component]);
+        for (const path of [f.layout.dataDir, f.layout.configDir,
+          ...(component !== "runner" ? [f.layout.controlPlaneDataDir] : []),
+          ...(component !== "control-plane" ? [f.layout.runnerDataDir] : [])]) {
+          assert.equal(statSync(path).mode & 0o7777, 0o700, path);
+        }
+        if (component === "control-plane") assert.equal(existsSync(f.layout.runnerDataDir), false);
+        if (component === "runner") assert.equal(existsSync(f.layout.controlPlaneDataDir), false);
+        assert.equal(f.execs.some((line) => /systemctl .*\b(?:start|restart)\b/u.test(line)), false, "no service start, even through the fake host");
+        if (component === "runner") assert.equal(readFileSync(f.layout.runnerTokenFile, "utf8"), "inert existing token");
+      });
+    }
+  }
+});
+
+test("user service installation preserves arbitrary existing data and config root modes, owners and stored bytes", async (t) => {
+  for (const mode of [0o700, 0o755, 0o2700]) {
+    const f = fake(t, { xdg: true });
+    mkdirSync(f.layout.dataDir, { recursive: true });
+    mkdirSync(f.layout.configDir, { recursive: true });
+    chmodSync(f.layout.dataDir, mode);
+    chmodSync(f.layout.configDir, 0o750);
+    const data = join(f.layout.dataDir, "stored-data");
+    writeFileSync(data, "inert stored data", { mode: 0o640 });
+    writeFileSync(f.layout.controlPlaneEnvFile, 'CONTROL_PLANE_PORT=4317\n', { mode: 0o640 });
+    writeFileSync(f.layout.runnerConfigFile, '{"runnerId":"preserved"}\n', { mode: 0o640 });
+    writeFileSync(f.layout.runnerTokenFile, "inert preserved token", { mode: 0o640 });
+    const paths = [f.home, f.layout.dataDir, f.layout.configDir, data, f.layout.controlPlaneEnvFile, f.layout.runnerConfigFile, f.layout.runnerTokenFile];
+    const identities = () => paths.map((path) => {
+      const { dev, ino, uid, gid, mode } = statSync(path);
+      return { dev, ino, uid, gid, mode };
+    });
+    const before = identities();
+    const files = paths.slice(3).map((path) => readFileSync(path));
+    assert.equal(await runServiceCli(["service", "install", ...bins(f), "--no-start", "--no-linger", "--json"], f.host, f.io), 0, f.stderr() + f.stdout());
+    assert.deepEqual(identities(), before);
+    assert.deepEqual(paths.slice(3).map((path) => readFileSync(path)), files);
+    assert.equal(f.execs.some((line) => line.startsWith("chown ")), false);
+  }
 });
 
 test("service install --system uses the service account's uid for the credential file and owns a new workspace", async (t) => {

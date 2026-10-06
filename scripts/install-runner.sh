@@ -335,7 +335,12 @@ if [ "$with_control_plane" -eq 1 ]; then
   chmod +x "$cp_partial"
   mv -f "$cp_partial" "$cp_bin"
   cp_partial=""
-  mkdir -p "$HOME/.local/share/wollipog"
+  # Generic upgrades require a private data root. Set the mode only when creating it;
+  # mkdir preserves existing directories, and the subshell keeps the caller's umask.
+  (
+    umask 077
+    mkdir -p "$HOME/.local/share/wollipog"
+  )
   echo "Downloading $web_asset from $release_tag..."
   fetch_verified_asset "$web_asset" "$web_partial"
   rm -rf "$web_stage"; mkdir -p "$web_stage"
