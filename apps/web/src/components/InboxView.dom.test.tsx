@@ -3001,6 +3001,24 @@ test("U and the menu's Mark Unread and Mark Read toggle a session's unread dot (
       });
       assert.deepEqual(unreadTitles(), expected);
     }
+
+    // The menu selects its row, and the seen dwell then marks it read under the open menu. The item
+    // keeps the label it opened with and does what that label says.
+    await act(async () => {
+      domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "u", bubbles: true, cancelable: true }));
+    });
+    assert.deepEqual(unreadTitles(), ["Session B"]);
+    await act(async () => {
+      [...container.querySelectorAll<HTMLElement>(".inbox-row")].find((row) => row.textContent?.includes("Session A"))!.click();
+    });
+    await act(async () => {
+      shellB().dispatchEvent(new domWindow.MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 5, clientY: 5 }) as never);
+    });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1_700)); });
+    assert.deepEqual(unreadTitles(), [], "the dwell marked the selected row read");
+    assert.ok(menuItem("Mark Read"), "the item keeps the label it opened with");
+    await act(async () => { menuItem("Mark Read").click(); });
+    assert.deepEqual(unreadTitles(), [], "and Mark Read never marks it unread");
   } finally {
     mobileViewport = true;
   }

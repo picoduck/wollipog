@@ -33,7 +33,7 @@ interface Log {
   dismissed: string[];
   archived: string[];
   replied: string[];
-  toggledUnread: string[];
+  setUnread: Array<[string, boolean]>;
   forked: string[];
 }
 
@@ -64,7 +64,7 @@ async function mount(overrides: {
 } = {}): Promise<{ root: Root; log: Log; menu: HTMLElement }> {
   const log: Log = {
     closed: 0, restored: 0, renamed: [], toggledPin: [], snoozed: [], dismissed: [], archived: [], replied: [],
-    toggledUnread: [], forked: [],
+    setUnread: [], forked: [],
   };
   const restoreHost = domWindow.document.createElement("button") as unknown as HTMLElement;
   domWindow.document.body.append(restoreHost as never);
@@ -91,7 +91,7 @@ async function mount(overrides: {
         {...(overrides.reminder ? { reminder: overrides.reminder } : {})}
         onClose={() => { log.closed += 1; }}
         onReply={(id) => log.replied.push(id)}
-        onToggleUnread={(id) => log.toggledUnread.push(id)}
+        onSetUnread={(id, unread) => log.setUnread.push([id, unread])}
         onFork={(id) => log.forked.push(id)}
         onRename={(id) => log.renamed.push(id)}
         onTogglePin={(id) => log.toggledPin.push(id)}
@@ -386,7 +386,7 @@ test("Mark Unread becomes Mark Read for an unread session, and Pin becomes Unpin
   try {
     assert.deepEqual(labels(menu).slice(2, 4), ["Unpin Session", "Mark Read"]);
     await act(async () => { item(menu, "Mark Read").click(); });
-    assert.deepEqual(log.toggledUnread, ["s-1"]);
+    assert.deepEqual(log.setUnread, [["s-1", false]], "Mark Read marks the session read");
     assert.equal(log.restored, 1, "marking opens no dialog, so keyboard position returns");
   } finally {
     await unmount(root);

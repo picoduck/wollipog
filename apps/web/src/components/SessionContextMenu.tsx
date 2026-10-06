@@ -61,7 +61,7 @@ export function SessionContextMenu({
   onReply,
   onRename,
   onTogglePin,
-  onToggleUnread,
+  onSetUnread,
   onFork,
   onSnooze,
   onDismissReminder,
@@ -85,7 +85,8 @@ export function SessionContextMenu({
   onReply: (sessionId: string) => void;
   onRename: (sessionId: string) => void;
   onTogglePin: (sessionId: string) => void;
-  onToggleUnread: (sessionId: string) => void;
+  /** Mark Unread (true) or Mark Read (false), as the item's label says. */
+  onSetUnread: (sessionId: string, unread: boolean) => void;
   onFork?: (sessionId: string) => void;
   onSnooze: (sessionId: string) => void;
   onDismissReminder?: (sessionId: string) => void;
@@ -176,7 +177,7 @@ export function SessionContextMenu({
       <MenuItem icon={pinned ? <UnpinIcon /> : <PinIcon />} {...key("inbox-pin")} onClick={act(onTogglePin, true)}>
         {pinned ? "Unpin Session" : "Pin Session"}
       </MenuItem>
-      <MenuItem icon={unread ? <MarkReadIcon /> : <MarkUnreadIcon />} {...key("inbox-unread")} onClick={act(onToggleUnread, true)}>
+      <MenuItem icon={unread ? <MarkReadIcon /> : <MarkUnreadIcon />} {...key("inbox-unread")} onClick={act((sessionId) => onSetUnread(sessionId, !unread), true)}>
         {unread ? "Mark Read" : "Mark Unread"}
       </MenuItem>
       {forkOffered && (

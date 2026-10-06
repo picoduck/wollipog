@@ -247,6 +247,8 @@ export function InboxView({
   const browsingOrderLeaseRef = useRef(browsingOrderLease);
   browsingOrderLeaseRef.current = browsingOrderLease;
   const [seen, setSeen] = useState(() => loadSeen(instanceScope));
+  const seenRef = useRef(seen);
+  seenRef.current = seen;
   const [pinnedProjects, setPinnedProjects] = useState(() => loadKeySet(PROJECT_PIN_KEY, instanceScope));
   const [pinnedSessions, setPinnedSessions] = useState(() => loadKeySet(SESSION_PIN_KEY, instanceScope));
   // Parents whose thread the user collapsed (#896), remembered per instance like pins.
@@ -262,7 +264,9 @@ export function InboxView({
   const [creatingProject, setCreatingProject] = useState(false);
   const [reminderMode, setReminderMode] = useState<ReminderInboxMode>("ordinary");
   const [snoozeSessionId, setSnoozeSessionId] = useState<string | null>(null);
-  const [sessionMenu, setSessionMenu] = useState<SessionContextMenuState | null>(null);
+  // `unread` is read when the menu opens, so Mark Unread / Mark Read keeps its label while the menu
+  // is open even when the seen dwell marks the newly selected row read under it (#2214).
+  const [sessionMenu, setSessionMenu] = useState<(SessionContextMenuState & { unread: boolean }) | null>(null);
   const [renameSession, setRenameSession] = useState<{
     sessionId: string;
     returnFocusRef?: { current: HTMLElement | null };
@@ -299,6 +303,8 @@ export function InboxView({
   const expandedSessionIdRef = useRef(expandedSessionId);
   expandedSessionIdRef.current = expandedSessionId;
   const mountedRef = useRef(true);
+  const sessionsRef = useRef(sessions);
+  sessionsRef.current = sessions;
   const selectedSessionIdRef = useRef(inbox.selectedSessionId);
   selectedSessionIdRef.current = inbox.selectedSessionId;
 
@@ -847,9 +853,11 @@ export function InboxView({
       viewRef.current?.querySelector<HTMLElement>(".inbox-zero") ??
       document.getElementById("page-title");
     // A supplied target that is gone by then (a preview's ⋯ whose session left) falls back the same way.
+    const target = sessionsRef.current.get(sessionId);
     setSessionMenu({
       sessionId,
       anchor,
+      unread: target ? isUnread(seenRef.current, target.id, target.lastEventAt) : false,
       restoreTarget: restoreTarget ? () => restoreTarget() ?? listRestore() : listRestore,
     });
   }, []);
@@ -1031,19 +1039,23 @@ export function InboxView({
     saveSeen(next, instanceScope);
     setSeen(next);
   }, [instanceScope, sessions]);
-  /** U and the menu's Mark Unread / Mark Read (#2214): an unread session is marked read, any other
-   * unread. */
-  const toggleUnread = useCallback((sessionId: string) => {
+  /** The menu's Mark Unread and Mark Read (#2214): each does what its label says. */
+  const setSessionUnread = useCallback((sessionId: string, unread: boolean) => {
     const session = sessions.get(sessionId);
     if (!session) return;
-    if (!isUnread(seen, session.id, session.lastEventAt)) {
+    if (unread) {
       setUnread(sessionId);
       return;
     }
     const next = markSeen(loadSeen(instanceScope), sessionId, session.lastEventAt ?? session.updatedAt);
     saveSeen(next, instanceScope);
     setSeen(next);
-  }, [instanceScope, seen, sessions, setUnread]);
+  }, [instanceScope, sessions, setUnread]);
+  /** U: an unread session is marked read, any other unread. */
+  const toggleUnread = useCallback((sessionId: string) => {
+    const session = sessions.get(sessionId);
+    if (session) setSessionUnread(sessionId, !isUnread(seen, session.id, session.lastEventAt));
+  }, [seen, sessions, setSessionUnread]);
 
   const saveReminder = useCallback(async (
     sessionId: string,
@@ -1682,7 +1694,7 @@ export function InboxView({
           state={sessionMenu}
           session={menuSession}
           pinned={pinnedSessions.has(sessionMenu.sessionId)}
-          unread={isUnread(seen, menuSession.id, menuSession.lastEventAt)}
+          unread={sessionMenu.unread}
           snoozeAvailable={sessionRemindersSupported}
           reminder={reminders.get(sessionMenu.sessionId)}
           stopBeforeArchiveSupported={stopBeforeArchiveSupported}
@@ -1691,7 +1703,7 @@ export function InboxView({
           showKeys={!isMobile && !boardMode && !expanded && sessionMenu.sessionId === displayedSelection}
           onClose={() => setSessionMenu(null)}
           onReply={(sessionId) => expand(sessionId, true)}
-          onToggleUnread={toggleUnread}
+          onSetUnread={setSessionUnread}
           onFork={forkFromMenu}
           onRename={(sessionId) => {
             // The dialog snapshots focus AFTER the menu item unmounts, so it needs a durable
