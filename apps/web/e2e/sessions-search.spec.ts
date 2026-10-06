@@ -141,7 +141,7 @@ test("No Matches replaces both panes; Clear Search restores the list and Search 
   await expect(state.getByText("No Matches", { exact: true })).toBeVisible();
   await expect(state).toContainText("No sessions match “kubernetes” in any group.");
   await expect(page.locator(".inbox-preview-pane")).toHaveCount(0);
-  await expect(page.locator(".inbox-splitter")).toHaveCount(0);
+  await expect(page.locator(".master-detail-resize")).toHaveCount(0);
 
   await state.getByRole("button", { name: "Search Transcripts" }).click();
   const palette = page.getByRole("dialog", { name: "Search" });

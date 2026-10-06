@@ -1,4 +1,4 @@
-import { type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { prioritizedPendingRequests, providerSupportsConversationFork, type SessionReminderView, type SessionView, type SetSessionReminderRequest, type SnoozeScheduleInput, type SourceLocation } from "@wollipog/protocol";
 import { archiveAndStopMessage, archiveResultMessage, archiveResultTone, sessionArchiveRequiresStop } from "../archive-actions.js";
 import { sessionArchiveActionRefusal, sessionCommandRefusal } from "../session-command-permissions.js";
@@ -57,6 +57,8 @@ import {
 } from "../session-reminders.js";
 import { SnoozeDialog } from "./SnoozeDialog.js";
 import { SessionContextMenu, type SessionContextMenuState } from "./SessionContextMenu.js";
+import { SessionsSplitDivider } from "./SessionsSplitDivider.js";
+import { readSessionsSplitGeometry, sessionsListRowsForRatio, type SessionsSplitGeometry } from "../sessions-split.js";
 import { RenameSessionDialog } from "./RenameSessionDialog.js";
 import type { NewSessionPreset } from "./NewSessionDialog.js";
 import { BoardIcon, ListIcon } from "./Icons.js";
@@ -84,6 +86,8 @@ import { useRemovedFocus } from "./useRemovedFocus.js";
 
 const PROJECT_PIN_KEY = "wollipog.projects.pinned";
 const SEEN_DWELL_MS = 1_500;
+/** Before the split area is measured, the list keeps its minimum rows (sessions-split.ts). */
+const UNMEASURED_SPLIT: SessionsSplitGeometry = { area: 0, rowHeight: 0, pad: 0 };
 const inboxScrollPositions = new Map<string, number>();
 /** Why the context menu cannot fork a session no preview has loaded: only its transcript knows the
  * checkpoint a fork starts from. */
@@ -262,7 +266,7 @@ export function InboxView({
     returnFocusRef?: { current: HTMLElement | null };
   } | null>(null);
   const [snoozeReturnFocusRef, setSnoozeReturnFocusRef] = useState<{ current: HTMLElement | null } | undefined>(undefined);
-  const [dragRatio, setDragRatio] = useState<number | null>(null);
+  const [splitGeometry, setSplitGeometry] = useState<SessionsSplitGeometry>(UNMEASURED_SPLIT);
   const machineProviderLogins = useMemo(() => [...runners.values()].flatMap((runner) =>
     (runner.providerLogins ?? [])
       .filter((login) => !login.sessionId && login.status !== "succeeded" && login.status !== "cancelled")
@@ -277,8 +281,6 @@ export function InboxView({
     previewNavigationRef.current = controls;
   }, []);
   const listRef = useRef<HTMLDivElement | null>(null);
-  const dragPointerRef = useRef<number | null>(null);
-  const dragRatioRef = useRef<number | null>(null);
   const seenTimerRef = useRef<number | null>(null);
   const settleTimerRef = useRef<number | null>(null);
   const targetPointerIdsRef = useRef(new Set<number>());
@@ -1310,8 +1312,6 @@ export function InboxView({
         previewForkControls.fork();
       }
     },
-    nextSplit: () => selectSplit(nextInboxSplitKey(splits.map((split) => split.key), activeSplit?.key ?? null, "next")),
-    previousSplit: () => selectSplit(nextInboxSplitKey(splits.map((split) => split.key), activeSplit?.key ?? null, "previous")),
     approve: () => { if (displayedSelection) void decide(displayedSelection, "approve").catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" })); },
     deny: () => { if (displayedSelection) void decide(displayedSelection, "deny").catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" })); },
     archive: () => { if (displayedSelection) void archive(displayedSelection); },
@@ -1383,7 +1383,24 @@ export function InboxView({
     navigate({ name: "session", id: sessionId, location: { path: ".wollipog.json" } });
   }, [activeSplit?.key, navigate, selectSession]);
 
-  const ratio = dragRatio ?? inbox.splitRatio;
+  // The stacked list and preview (§6.3): whole rows of the stored ratio, on desktop and tablet only.
+  // No search match (#2200) gives the list the whole page, with no preview to divide from.
+  const stacked = !boardMode && !isMobile && !expanded && !noMatches;
+  const listRows = sessionsListRowsForRatio(inbox.splitRatio, splitGeometry);
+  useLayoutEffect(() => {
+    const view = viewRef.current;
+    if (!stacked || !view) return;
+    const measure = () => {
+      const next = readSessionsSplitGeometry(view);
+      setSplitGeometry((current) => current.area === next.area && current.rowHeight === next.rowHeight &&
+        current.pad === next.pad ? current : next);
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(view);
+    return () => observer.disconnect();
+  }, [stacked]);
   const activeProjectId = activeSplit?.project?.kind === "durable" ? activeSplit.project.project.id : undefined;
   const activeDurableProject = activeSplit?.project?.kind === "durable" ? activeSplit.project.project : null;
   // The setup suggestion is per Project (#1977): one notice above the list on that Project's tab,
@@ -1397,27 +1414,6 @@ export function InboxView({
     return undefined;
   }, [activeProjectId, sessions, setupNoticeSessionIds]);
   const activeAvailableLocations = activeDurableProject?.locations.filter((location) => location.availability === "available") ?? [];
-  const updateDragRatio = (clientY: number) => {
-    const rect = viewRef.current?.getBoundingClientRect();
-    if (!rect || rect.height <= 0) return;
-    const next = Math.min(0.75, Math.max(0.25, (clientY - rect.top) / rect.height));
-    dragRatioRef.current = next;
-    setDragRatio(next);
-  };
-  const onSplitterPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (isMobile || event.button !== 0) return;
-    dragPointerRef.current = event.pointerId;
-    event.currentTarget.setPointerCapture?.(event.pointerId);
-    updateDragRatio(event.clientY);
-  };
-  const finishSplitterDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (dragPointerRef.current !== event.pointerId) return;
-    dragPointerRef.current = null;
-    if (dragRatioRef.current !== null) setInboxRatio(dragRatioRef.current);
-    dragRatioRef.current = null;
-    setDragRatio(null);
-  };
-
   const newSession = () => onNewSession?.(activeNewSessionPreset);
   return (
     <>
@@ -1533,10 +1529,14 @@ export function InboxView({
         )}
       />
     )}
-    <div className={`inbox-view${expanded ? " expanded" : ""}${boardMode ? " board-mode" : ""}`} ref={viewRef} data-focus-zone={expanded ? "main" : "list"}>
+    <div
+      className={`inbox-view${stacked ? " master-detail sessions-md" : ""}${expanded ? " expanded" : ""}${boardMode ? " board-mode" : ""}`}
+      ref={viewRef}
+      style={stacked ? { "--sessions-list-rows": listRows } as CSSProperties : undefined}
+      data-focus-zone={expanded ? "main" : "list"}
+    >
       <section
         className="inbox-list-pane"
-        style={{ height: isMobile || boardMode || noMatches ? "100%" : `${ratio * 100}%` }}
         aria-label="Sessions"
         aria-hidden={expanded || undefined}
         inert={expanded || undefined}
@@ -1650,32 +1650,10 @@ export function InboxView({
 
       {!boardMode && !noMatches && (!isMobile || expanded) && (
         <>
-          <div
-            className="inbox-splitter"
-            role="separator"
-            aria-label="Resize Sessions Preview"
-            aria-orientation="horizontal"
-            aria-valuemin={25}
-            aria-valuemax={75}
-            aria-valuenow={Math.round(ratio * 100)}
-            tabIndex={0}
-            onPointerDown={onSplitterPointerDown}
-            onPointerMove={(event) => {
-              if (dragPointerRef.current === event.pointerId) updateDragRatio(event.clientY);
-            }}
-            onPointerUp={finishSplitterDrag}
-            onLostPointerCapture={finishSplitterDrag}
-            onDoubleClick={() => setInboxRatio(0.4)}
-            onKeyDown={(event) => {
-              if (event.key === "ArrowUp") setInboxRatio(ratio - 0.05);
-              else if (event.key === "ArrowDown") setInboxRatio(ratio + 0.05);
-              else if (event.key === "Home") setInboxRatio(0.25);
-              else if (event.key === "End") setInboxRatio(0.75);
-              else return;
-              event.preventDefault();
-            }}
-          />
-          <div className="inbox-preview-pane" ref={previewPaneRef} style={{ height: expanded ? "100%" : `${(1 - ratio) * 100}%` }} data-focus-zone="main">
+          {stacked && (
+            <SessionsSplitDivider grid={viewRef} geometry={splitGeometry} rows={listRows} onRatioChange={setInboxRatio} />
+          )}
+          <div className="inbox-preview-pane" ref={previewPaneRef} data-focus-zone="main">
             {surfaceSessionId ? (
               <SessionDetail
                 key={surfaceSessionId}

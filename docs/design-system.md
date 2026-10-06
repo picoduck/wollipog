@@ -991,7 +991,7 @@ variant by default and offers side by side as a user preference (§6.3).
   (§6.2). `.master-detail-state` takes both panes' place for an empty collection or a load error
   (§6.1, §12). `DetailSkeleton` (`common.tsx`) is the detail's loading state. The page resets the
   detail's `scrollTop` on each route, and on a phone it restores the list's position on Back. The
-  resize handle is not built yet.
+  side-by-side resize handle is not built yet; Sessions' stacked divider is (§6.3).
 
 ### 6.1 The Default Detail State (No Selection)
 
@@ -1073,6 +1073,20 @@ master-detail pages stay side by side.
   is always stacked and the control is hidden, which also keeps the compact header to its budget
   (§15.2). Phones have no preview (§6.2), whatever the preference.
 - **Empty.** An empty list replaces both panes with one state (§6.1); no divider is drawn.
+- **Built (#2217), Preview Below.** `.inbox-view` takes `.master-detail.sessions-md` on desktop and
+  tablet, and stays a flex column on a phone, on the board and in an open session. InboxView measures
+  the split area and `--row-h-2` and sets `--sessions-list-rows` (the stored ratio's whole rows, in
+  `sessions-split.ts`); the grid derives `--sessions-list-h` from it, so a density change keeps whole
+  rows. A drag sets `--sessions-list-h` on the grid until the release snaps it, and only a release or
+  a key stores a ratio: the middle of the chosen row, so a reload rounds back to the same count. The
+  panes and `.master-detail-resize` are placed by grid row, so Preview Right (#2219) can place them by
+  column. The divider draws the hairline itself, on the preview's first pixel, so the list's last row
+  keeps its full height; its keyboard focus draws the 2px `--focus` line over a transparent outline,
+  which forced colors paints. The stored range stays 25–75%, so where the split area is taller than
+  about 930px (56px rows) Home stops at the 25% floor rather than three rows. Tab is a plain focus
+  move on Sessions: the bare Tab and Shift+Tab that used to switch tabs from the list are retired,
+  and the tab row keeps ←/→. The docked request card at the top of the preview draws `--elev-1` over
+  an opaque slot, so the transcript visibly scrolls beneath it.
 
 ---
 

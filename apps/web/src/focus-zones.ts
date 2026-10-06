@@ -167,6 +167,7 @@ export type EscapeOwner =
   | "terminal-exit"
   | "composer"
   | "session-reading"
+  | "inbox-preview"
   | "inbox-filter"
   | "settings-input"
   | "settings"
@@ -204,6 +205,8 @@ export function escapeOwner(
   if (active instanceof Element && active.closest(".composer")) return "composer";
   if (viewName === "settings" && inTypingContext(targetDocument)) return "settings-input";
   if (viewName === "session") return "session-reading";
+  // Escape in the Sessions preview returns to the selected row (§6.3), before it clears a search.
+  if (viewName === "inbox" && active instanceof Element && active.closest(".inbox-preview-pane")) return "inbox-preview";
   // Board mode shares the Sessions search box, so Escape clears its query the same way.
   if ((viewName === "inbox" || viewName === "board") && inboxFilterActive) return "inbox-filter";
   if (viewName === "settings") return "settings";

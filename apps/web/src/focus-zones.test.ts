@@ -317,6 +317,19 @@ test("Escape ownership follows one ordered rung and preserves the terminal bound
   assert.equal(escapeOwner(escape(), { document: window.document, viewName: "inbox" }), null);
   assert.equal(escapeOwner(escape(), { document: window.document, viewName: "board" }), null);
 
+  // #2217: Escape in the Sessions preview returns to the selected row, even with a search open.
+  const preview = window.document.createElement("div");
+  preview.className = "inbox-preview-pane";
+  const previewScroll = window.document.createElement("div");
+  previewScroll.tabIndex = -1;
+  preview.append(previewScroll);
+  window.document.body.append(preview);
+  previewScroll.focus();
+  assert.equal(escapeOwner(escape(), { document: window.document, viewName: "inbox" }), "inbox-preview");
+  assert.equal(escapeOwner(escape(), { document: window.document, viewName: "inbox", inboxFilterActive: true }), "inbox-preview");
+  assert.equal(escapeOwner(escape({ shiftKey: true }), { document: window.document, viewName: "inbox" }), null);
+  previewScroll.blur();
+
   const settingsInput = window.document.createElement("input");
   const settingsButton = window.document.createElement("button");
   window.document.body.append(settingsInput, settingsButton);

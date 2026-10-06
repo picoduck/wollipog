@@ -294,7 +294,7 @@ test("a query with no matches replaces both panes with No Matches, and Clear Sea
   assert.equal(state.querySelector(".state-body")?.textContent, "No sessions match “kubernetes” in any group.");
   assertNoDomNode(container.querySelector(".inbox-list"), "no list");
   assertNoDomNode(container.querySelector(".inbox-preview-pane"), "no preview beside it");
-  assertNoDomNode(container.querySelector(".inbox-splitter"), "and no divider");
+  assertNoDomNode(container.querySelector(".master-detail-resize"), "and no divider");
   assert.deepEqual(tabs(container).map(([, count]) => count), ["0", "0", "0"]);
 
   const actions = [...state.querySelectorAll<HTMLButtonElement>(".actions button")];

@@ -11890,8 +11890,7 @@ body.shell-dock-dragging * {
   background: var(--bg-elev);
 }
 .inbox-view.expanded { background: var(--bg); }
-.inbox-view.expanded > .inbox-list-pane,
-.inbox-view.expanded > .inbox-splitter { display: none; }
+.inbox-view.expanded > .inbox-list-pane { display: none; }
 .inbox-view.expanded > .inbox-preview-pane { height: 100%; }
 /* Sessions board mode: the board canvas fills the pane below the shared toolbar, restoring the
    inset the standalone /board route used to receive from .main-body's padding. */
@@ -11905,9 +11904,80 @@ body.shell-dock-dragging * {
 .inbox-list-pane {
   position: relative;
   display: flex;
+  flex: 1;
   min-height: 0;
   flex-direction: column;
   container: list / inline-size;
+}
+/* The stacked Sessions list and preview (#2217, docs/design-system.md §6.3), on desktop and tablet.
+   The list track is whole --row-h-2 rows plus the list's 8px top pad; InboxView sets the row count
+   from the stored ratio and the measured area, and a drag sets --sessions-list-h itself until it
+   snaps. A notice above the list takes the list's height and never moves the divider. The panes are
+   placed by row, so #2219's side-by-side variant can place them by column instead. */
+.master-detail.sessions-md {
+  --sessions-list-h: calc(var(--space-2) + var(--sessions-list-rows, 3) * var(--row-h-2));
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: var(--sessions-list-h) minmax(0, 1fr);
+  margin-left: 0;
+}
+.sessions-md > .inbox-list-pane {
+  grid-row: 1;
+  grid-column: 1;
+  overflow: hidden;
+}
+.sessions-md > .inbox-preview-pane {
+  grid-row: 2;
+  grid-column: 1;
+}
+.sessions-md .inbox-list { padding-top: var(--space-2); }
+/* The divider (§6.3): the hairline under the list's last row, a hit band centred on it, and a grip
+   that is always visible, since a rule between two full-width panes does not read as movable. Hover
+   and drag draw the line at 2px --border-strong, keyboard focus at 2px --focus; no ring, no band. */
+.master-detail-resize {
+  position: relative;
+  z-index: var(--z-sticky);
+  grid-row: 2;
+  grid-column: 1;
+  align-self: start;
+  height: 9px;
+  margin-top: -4px;
+  cursor: row-resize;
+  touch-action: none;
+}
+.master-detail-resize::before,
+.master-detail-resize::after {
+  position: absolute;
+  content: "";
+  pointer-events: none;
+}
+/* The line sits on the band's centre pixel; the grip is centred on the line. */
+.master-detail-resize::before {
+  top: 4px;
+  right: 0;
+  left: 0;
+  height: 1px;
+  background: var(--border);
+}
+.master-detail-resize::after {
+  top: 2.5px;
+  left: calc(50% - 16px);
+  width: 32px;
+  height: 4px;
+  border-radius: var(--radius-pill);
+  background: var(--border-strong);
+}
+.master-detail-resize[data-dragging]::before { height: 2px; background: var(--border-strong); }
+@media (hover: hover) {
+  .master-detail-resize:hover::before { height: 2px; background: var(--border-strong); }
+}
+/* Transparent, so forced colors still draws a ring where the line's background is discarded. */
+.master-detail-resize:focus-visible { outline: 2px solid transparent; outline-offset: -2px; }
+.master-detail-resize:focus-visible::before { height: 2px; background: var(--focus); }
+@media (pointer: coarse) {
+  .master-detail-resize { height: 17px; margin-top: -8px; }
+  .master-detail-resize::before { top: 8px; }
+  .master-detail-resize::after { top: 5.5px; left: calc(50% - 20px); width: 40px; height: 6px; }
 }
 .inbox-order-update { white-space: nowrap; }
 .inbox-tab-group {
@@ -12353,30 +12423,6 @@ body.shell-dock-dragging * {
   display: grid;
   padding-top: var(--space-12);
 }
-.inbox-splitter {
-  position: relative;
-  z-index: 2;
-  height: 10px;
-  flex: none;
-  border: 0;
-  border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
-  background: var(--bg);
-  cursor: row-resize;
-  touch-action: none;
-}
-.inbox-splitter::after {
-  position: absolute;
-  top: 3px;
-  left: calc(50% - 20px);
-  width: 40px;
-  height: 2px;
-  border-radius: 999px;
-  background: var(--border-strong);
-  content: "";
-}
-.inbox-splitter:hover::after,
-.inbox-splitter:focus-visible::after { background: var(--accent); }
 .inbox-preview-pane {
   position: relative;
   min-height: 0;
@@ -12459,6 +12505,11 @@ body.shell-dock-dragging * {
   overscroll-behavior: contain;
   margin: 0;
   padding: var(--space-2) max(var(--page-gutter), calc(100% - var(--page-gutter) - var(--chat-max))) var(--space-2) var(--page-gutter);
+  /* The transcript scrolls beneath the dock, so the dock draws an edge over it (#2217). */
+  position: relative;
+  z-index: var(--z-sticky);
+  background: var(--bg);
+  box-shadow: var(--elev-1);
 }
 
 @media (max-width: 760px) {

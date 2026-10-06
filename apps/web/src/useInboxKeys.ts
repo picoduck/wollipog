@@ -16,8 +16,6 @@ export interface InboxKeyActions {
   expandThread: () => void;
   collapseThread: () => void;
   fork: () => void;
-  nextSplit: () => void;
-  previousSplit: () => void;
   approve: () => void;
   deny: () => void;
   archive: () => void;
@@ -42,8 +40,6 @@ const BINDINGS: ReadonlyArray<[ShortcutId, keyof InboxKeyActions]> = [
   ["inbox-expand-thread", "expandThread"],
   ["inbox-collapse-thread", "collapseThread"],
   ["inbox-fork", "fork"],
-  ["inbox-next-split", "nextSplit"],
-  ["inbox-previous-split", "previousSplit"],
   ["inbox-approve", "approve"],
   ["inbox-deny", "deny"],
   ["inbox-archive", "archive"],

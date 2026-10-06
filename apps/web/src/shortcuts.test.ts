@@ -78,8 +78,6 @@ test("bare Inbox bindings match exact shifted and unshifted keys", () => {
   assert.equal(matchesShortcut(key(" "), "inbox-page-down", window.document), true);
   assert.equal(matchesShortcut(key(" ", { shiftKey: true }), "inbox-page-down", window.document), false);
   assert.equal(matchesShortcut(key(" ", { shiftKey: true }), "inbox-page-up", window.document), true);
-  assert.equal(matchesShortcut(key("Tab"), "inbox-next-split", window.document), true);
-  assert.equal(matchesShortcut(key("Tab", { shiftKey: true }), "inbox-previous-split", window.document), true);
 });
 
 test("shortcut labels follow the current platform without changing definitions", () => {
@@ -180,7 +178,7 @@ test("PR2 Inbox shortcuts are registered under the Inbox scope", () => {
     "inbox-next", "inbox-previous", "inbox-grid-next", "inbox-grid-previous", "inbox-grid-first",
     "inbox-expand", "inbox-open-top-request", "inbox-toggle-thread",
     "inbox-toggle-all-threads", "inbox-go-to-parent", "inbox-expand-thread", "inbox-collapse-thread",
-    "inbox-fork", "inbox-next-split", "inbox-previous-split",
+    "inbox-fork",
     "inbox-approve", "inbox-deny", "inbox-archive", "inbox-snooze", "inbox-pin", "inbox-unread",
     "inbox-reply", "inbox-page-down", "inbox-page-up", "inbox-follow-latest", "inbox-follow-latest-end",
   ];

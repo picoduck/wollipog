@@ -1667,7 +1667,8 @@ test("board mode shares the Sessions toolbar scope and toggles back to the list"
   assert.equal(container.querySelector(".board-wrap")?.getAttribute("tabindex"), "-1",
     "the canvas is programmatically focusable so the F6 list zone still has a landing spot");
   assertNoDomNode(container.querySelector(".inbox-list"), "and not the list");
-  assertNoDomNode(container.querySelector(".inbox-splitter"), "the preview split belongs to list mode");
+  assertNoDomNode(container.querySelector(".master-detail-resize"), "the preview split belongs to list mode");
+  assert.equal(container.querySelector(".inbox-view")?.classList.contains("sessions-md"), false, "the board is not the stacked grid");
   assert.ok(container.querySelector(".tabs-bar"), "the shared split tabs stay above the board");
   assert.equal(container.querySelectorAll(".board .card").length, 2,
     "archived sessions never reach the board columns");

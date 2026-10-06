@@ -592,6 +592,9 @@ export function Shell() {
         e.preventDefault();
         // Escaping a session returns to the Sessions mode it was opened from (list or board).
         navigate(sessionsDestination(instanceScope));
+      } else if (owner === "inbox-preview") {
+        e.preventDefault();
+        focusZone(document, "list");
       } else if (owner === "inbox-filter") {
         e.preventDefault();
         window.dispatchEvent(new Event("wollipog:clear-inbox-query"));

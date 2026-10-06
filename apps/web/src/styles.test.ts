@@ -109,6 +109,8 @@ test("every referenced custom property is defined in the shared root scope", () 
     "--zone-line-top",
     "--zone-line-left",
     "--zone-line-width",
+    // InboxView's stacked list row count (#2217); absent means the three-row minimum.
+    "--sessions-list-rows",
   ]);
 
   // Component-local by design (docs/design-system.md §19.4 rejects promoting them): each is
@@ -117,6 +119,8 @@ test("every referenced custom property is defined in the shared root scope", () 
     ["--summary-w", ".detail-body"], // the Pinned Summary's width, read by the body grid and `.ps`
     ["--composer-ctl", ".composer-box"], // the composer bar's control height (#2174), read by `.composer-btn`
     ["--tl-diff-digits", ".tl-diff"], // a transcript diff's widest line number, set per diff (#2187)
+    // The stacked Sessions list track (§6.3, #2217), whole rows of the stored ratio; a drag sets it.
+    ["--sessions-list-h", ".master-detail.sessions-md"],
   ]);
   for (const [name, owner] of COMPONENT_LOCAL) {
     assert.ok(soleRuleProps(owner).has(name), `${name} is declared on ${owner}`);

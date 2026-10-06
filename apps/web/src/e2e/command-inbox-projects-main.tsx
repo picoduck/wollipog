@@ -406,6 +406,11 @@ function initialModel(): FixtureModel {
         activeTurnId: "turn-session-offline",
       }],
     ];
+    // `?fill=<n>` appends n idle sessions, so the stacked list has more rows than it shows (#2217).
+    const fill = Math.max(0, Math.min(40, Number(FIXTURE_QUERY.get("fill") ?? 0) || 0));
+    for (let index = 0; index < fill; index += 1) {
+      rows.push([`session-fill-${index + 1}`, `Review Pull Request ${index + 1}`, {}]);
+    }
     initial.sessions = rows.map(([id, title, extra], index) => {
       const value = session(id, title, "alpha", "alpha-workspace");
       // Recent, so no session reads as Stalled and the times are believable.
