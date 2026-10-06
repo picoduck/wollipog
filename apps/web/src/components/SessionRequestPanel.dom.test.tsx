@@ -593,6 +593,21 @@ test("an answered request gives way to the next in its group, and the last one t
   }
 });
 
+test("focus on the last request's controls goes to Nothing Waiting when it is answered (#2206)", async () => {
+  const view = await mountNavigator({ descendants: [childRequest(1, "human")] });
+  try {
+    await act(async () => view.rows()[0]!.click());
+    const submit = view.container.querySelector<HTMLButtonElement>('[data-session-request-control="submit"]')!;
+    await act(async () => submit.focus());
+    assert.equal(active(), submit);
+    await act(async () => setNavigatorDescendants([]));
+    assert.equal(view.container.querySelector(".state-title")?.textContent, "Nothing Waiting");
+    assert.equal(active(), view.container.querySelector(".state-title"), "focus stays in the panel, on what it now says");
+  } finally {
+    await view.cleanUp();
+  }
+});
+
 test("the replacement keeps the request's place in its own group when the other group changes too (#2206)", async () => {
   const [h1, h2, o1, o2] = [childRequest(1, "human"), childRequest(2, "human"), childRequest(3, "orchestrator"),
     childRequest(6, "orchestrator")];

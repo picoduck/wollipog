@@ -238,7 +238,9 @@ export function SessionRequestPanel({
 
   // Focus moves with the view: into a request's heading as it opens, back to its row on the list.
   // An answered request's buttons leave with it, and focus that was on them goes to the next
-  // request's heading, or to the list.
+  // request's heading, to the list, or with nothing left to the state that says so.
+  const groupHeadingId = useId();
+  const stateTitleId = `${groupHeadingId}-state`;
   const removedFocus = useRemovedFocus(panelRef, "[data-request-card-menu]");
   useLayoutEffect(() => {
     const target = pendingFocus.current;
@@ -248,6 +250,7 @@ export function SessionRequestPanel({
     else if (removedFocus()) {
       if (detail) headingRef.current?.focus();
       else if (tabStop) rowRefs.current.get(tabStop)?.focus();
+      else panelRef.current?.ownerDocument.getElementById(stateTitleId)?.focus();
     }
   });
 
@@ -257,7 +260,6 @@ export function SessionRequestPanel({
     detail?.sessionId ?? session.id,
     sessionCommandRefusal(session, "respond"),
   );
-  const groupHeadingId = useId();
   const showSkeleton = useDelayedFlag(descendantStatus === "loading" && items.length === 0, REQUEST_PANEL_SKELETON_DELAY_MS);
 
   const open = (key: string) => {
@@ -295,6 +297,7 @@ export function SessionRequestPanel({
           variant="error"
           compact
           title={REQUEST_PANEL_COPY.unavailable}
+          titleId={stateTitleId}
           actions={onRetry && <button type="button" className="btn sm" onClick={onRetry}>{REQUEST_PANEL_COPY.retry}</button>}
         >
           {REQUEST_PANEL_COPY.unavailableBody}
@@ -309,6 +312,7 @@ export function SessionRequestPanel({
           compact
           icon={<InboxIcon size={24} />}
           title={REQUEST_PANEL_COPY.nothingWaiting}
+          titleId={stateTitleId}
           actions={onOpenDecisionHistory && (
             <button type="button" className="btn sm" onClick={onOpenDecisionHistory}>
               {REQUEST_PANEL_COPY.decisionHistory}
