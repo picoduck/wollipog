@@ -1,1 +1,0 @@
-|.composer-answer-heading>div|gap|2px

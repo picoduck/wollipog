@@ -412,7 +412,11 @@ for (const style of ["interactive", "composer"] as const) test(`Claude AskUserQu
     }, style);
     await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
 
-    await expect(page.getByRole("region", { name: "Agent Questions" })).toBeVisible();
+    // Composer Response shows the question once: Answer Mode opens on its own, and the card leaves
+    // the dock (#2212).
+    await expect(style === "interactive" ? page.getByRole("region", { name: "Agent Questions" })
+      : page.locator(".composer-answer")).toBeVisible();
+    if (style === "composer") await expect(page.getByRole("region", { name: "Agent Questions" })).toHaveCount(0);
     if (style === "interactive") {
       await page.getByRole("radio", { name: /Canary/ }).click();
       await page.getByRole("button", { name: "Next", exact: true }).click();
@@ -479,7 +483,11 @@ for (const style of ["interactive", "composer"] as const) test(`Codex structured
     }, style);
     await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
 
-    await expect(page.getByRole("region", { name: "Agent Questions" })).toBeVisible();
+    // Composer Response shows the question once: Answer Mode opens on its own, and the card leaves
+    // the dock (#2212).
+    await expect(style === "interactive" ? page.getByRole("region", { name: "Agent Questions" })
+      : page.locator(".composer-answer")).toBeVisible();
+    if (style === "composer") await expect(page.getByRole("region", { name: "Agent Questions" })).toHaveCount(0);
     if (style === "interactive") {
       await page.getByRole("radio", { name: /Staging/ }).click();
       await page.getByRole("button", { name: "Next", exact: true }).click();
@@ -779,10 +787,17 @@ for (const provider of ["claude", "codex"] as const) {
           }, style);
           await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
 
+          // The card, or in Composer Response the composer alone (#2212), says the question was
+          // recovered and that answering resumes the conversation once.
           const card = page.getByRole("region", { name: "Agent Questions" });
-          await expect(card).toBeVisible();
-          await expect(card).toHaveCount(1);
-          await expect(card.locator(".request-card-kind")).toHaveText("Recovery Required");
+          if (style === "interactive") {
+            await expect(card).toBeVisible();
+            await expect(card).toHaveCount(1);
+            await expect(card.locator(".request-card-kind")).toHaveText("Recovery Required");
+          } else {
+            await expect(page.locator(".composer-answer .answer-kind")).toHaveText("Recovery Required");
+            await expect(card).toHaveCount(0);
+          }
           await expect(page.getByText(/resume the existing agent conversation and deliver these answers once/)).toBeVisible();
           if (style === "interactive") {
             const submit = page.getByRole("button", { name: "Submit Answers" });
@@ -1034,10 +1049,10 @@ for (const provider of ["claude", "codex"] as const) {
           await page.getByRole("button", { name: "Submit Answers", exact: true }).click();
         } else {
           const input = page.locator('.composer-answer-input');
-          await page.getByRole("button", { name: "Other Response", exact: true }).click();
+          await page.getByRole("radio", { name: "Something Else…" }).click();
           await input.fill(answers[0]!);
           await input.press("Enter");
-          if (provider === "claude") await page.getByRole("button", { name: "Other Response", exact: true }).click();
+          if (provider === "claude") await page.getByRole("checkbox", { name: "Something Else…" }).click();
           await input.fill(answers[1]!);
           await input.press("Enter");
         }

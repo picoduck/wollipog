@@ -364,17 +364,20 @@ function Fixture() {
     selectedRequestId,
   }), [pendingRequestIds, selectedRequestId]);
 
-  const composerContent = !resolved && responseStyle === "composer" && (!recoveryRequired || recoveryCanResume) ? (
-    <div className={`composer-box${answerActive ? " answer-mode" : ""}`}>
+  // Composer Response answers in the composer (#2212): the dock's card is compact, and while Answer
+  // Mode is open the question is shown there alone.
+  const composerAnswers = !resolved && responseStyle === "composer" && (!recoveryRequired || recoveryCanResume);
+  const answering = composerAnswers && answerActive;
+  const composerContent = answering ? (
+    <div className="composer-box answer-mode">
       <ComposerQuestionResponse
         sessionId={SESSION_ID}
         requestId={requestId}
         questions={questions}
         runnerOnline={runnerOnline}
-        active={answerActive}
-        showWaiting
+        active
+        recovery={recoveryRequired}
         inputRef={answerInputRef}
-        onEnter={() => setAnswerActive(true)}
         onExit={() => setAnswerActive(false)}
         onSessionUpdate={() => setResolved(true)}
       />
@@ -425,7 +428,7 @@ function Fixture() {
                     </div>
                   </div>
                 </div>
-                {request && (
+                {request && !answering && (
                   <SessionNoticeSlot sessionId={SESSION_ID} entries={[]} lead={{
                     key: "request-dock",
                     title: pendingRequestsTitle(1 + waitingRequests.length),
@@ -447,6 +450,7 @@ function Fixture() {
                         readerRef={scrollRef}
                         onConceal={concealTrailing}
                         whereAsked={whereAsked}
+                        composerAnswer={composerAnswers ? { requestId, onAnswer: () => setAnswerActive(true) } : undefined}
                       />
                     ),
                   }} />

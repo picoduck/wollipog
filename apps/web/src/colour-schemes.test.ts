@@ -247,7 +247,9 @@ test("a field error reads at 4.5:1 and the invalid edge at 3:1 in every scheme (
   // `.field-error` paints no fill, so the surface loop never measures it. Its words sit on the
   // dialog body (`--bg-elev`) and the page (`--bg`); the red edge is a state indicator on the field.
   assert.match(topLevelRule(css, ".field-error").toString(), /color:\s*var\(--danger-text\)/);
-  assert.match(topLevelRule(css, '.field [aria-invalid="true"],\n.field [aria-invalid="true"]:hover,\n.composer-answer-input[aria-invalid="true"]').toString(),
+  assert.match(topLevelRule(css, '.field [aria-invalid="true"],\n.field [aria-invalid="true"]:hover').toString(),
+    /border-color:\s*var\(--red\)/);
+  assert.match(topLevelRule(css, '.composer-box.answer-mode:has(.composer-answer-input[aria-invalid="true"])').toString(),
     /border-color:\s*var\(--red\)/);
   const failures: string[] = [];
   let checks = 0;

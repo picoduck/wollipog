@@ -405,7 +405,7 @@ test("offline Composer Response owns the immediate digit after R from the split 
   await expect(response).toBeFocused();
   await expect(response).toHaveValue("");
   await page.keyboard.press("Escape");
-  await expect(page.getByText("Answer Mode", { exact: true })).toHaveCount(0);
+  await expect(page.locator(".composer-answer")).toHaveCount(0);
   await expect(composer).toHaveValue("offline preserved draft");
 });
 

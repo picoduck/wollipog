@@ -351,12 +351,17 @@ test("one field error rule, and invalid controls in a field draw a red edge unde
   assert.doesNotMatch(soleRuleBody(".field-error-icon"), /(^|\n)color:/,
     "the icon inherits the words' colour, so forced colors repaints it with them");
 
-  const invalid = '.field [aria-invalid="true"],\n.field [aria-invalid="true"]:hover,\n.composer-answer-input[aria-invalid="true"]';
+  const invalid = '.field [aria-invalid="true"],\n.field [aria-invalid="true"]:hover';
+  // Answer Mode's field is the composer's own: the composer card is its edge, so the card turns red
+  // and the field draws no edge or ring of its own (#2212).
+  const answerInvalid = '.composer-box.answer-mode:has(.composer-answer-input[aria-invalid="true"])';
   assert.equal(soleRuleBody(invalid), "border-color: var(--red);", "the edge only: the focus ring stays --focus");
-  assert.deepEqual(owners(/\[aria-invalid/), [invalid.replace(/\s+/g, " ")],
-    "every invalid edge is this one rule; a control does not draw its own");
-  assert.ok(css.indexOf(invalid) > css.indexOf(".composer-answer-input:focus {"),
-    "the composer answer keeps its red edge while focused: equal specificity, so the later rule wins");
+  assert.equal(soleRuleBody(answerInvalid), "border-color: var(--red);", "the composer card's edge only");
+  assert.deepEqual(owners(/\[aria-invalid/), [answerInvalid, invalid.replace(/\s+/g, " ")],
+    "every invalid edge is one of these rules; a control does not draw its own");
+  assert.match(soleRuleBody(".composer-answer-input"), /border: none;/);
+  assert.match(soleRuleBody(".composer-answer-input"), /outline: none;/,
+    "one indicator: the composer card's edge, never a second ring on the field inside it");
 });
 
 test("focus never frames a pane, and the F6 zone line is a brief neutral top edge", () => {

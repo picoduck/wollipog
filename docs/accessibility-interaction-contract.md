@@ -76,7 +76,10 @@ git-status reader. Presentation leaves are split at stable boundaries:
   row. While focus is in the card, 1–9 pick the current question's rows, Enter
   moves on, Ctrl/Cmd+Enter submits from any step and D dismisses; a field being typed in keeps its
   keys, and Session Reading's shortcuts stand aside while focus is in the card, its heading included, except
-  R, which still opens Answer Mode. `SessionApprovalRegion` keeps the one focus and live-announcement owner for both.
+  R, which still opens Answer Mode. In Composer Response the docked card is compact and its Answer
+  opens Answer Mode (#2212); while it is open the composer's answer panel is the request's region, so
+  Answer hands focus to its field and Jump to Question opens a panel shrunk by Show Context and
+  focuses that field. `SessionApprovalRegion` keeps the one focus and live-announcement owner for both.
 - `EventTimeline` and `RightPanel` remain their existing independently testable seams.
 
 The detail coordinator subscribes only to its owning runner and box. The shared git-status result is

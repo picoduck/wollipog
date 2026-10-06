@@ -793,11 +793,13 @@ test("the Requests panel's labels are Title Case, and its notice and state sente
 test("the question card's labels and buttons are Title Case, and its hints and errors are sentences (#2196)", () => {
   const titles = ["agentQuestions", "question", "asyncQuestion", "recoveryRequired", "dismiss", "dismissAndContinue",
     "back", "next", "submitAnswers", "tryAgain", "somethingElse", "somethingElseField", "showWhereAsked",
-    "showFullQuestion", "showLess"] as const;
-  // "Choose one", "Choose any" and "Optional" are the dim line above a question: sentence fragments.
-  const fragments = ["chooseOne", "chooseAny", "optional"] as const;
+    "showFullQuestion", "showLess", "answer", "exitAnswerMode", "showContext", "showAnswer"] as const;
+  // "Choose one", "Choose any" and "Optional" are the dim line above a question, Answer Mode's summary
+  // ("Nothing chosen yet") and placeholders say what to type: sentence fragments (#2212).
+  const fragments = ["chooseOne", "chooseAny", "optional", "nothingChosen", "answerEntered", "typeAnswer", "typeChoice",
+    "typeChoiceOrAnswer", "typeChoices"] as const;
   const sentences = ["noDetails", "required", "chooseOption", "chooseOptions", "optionalSentence", "notSent",
-    "notDismissed", "alreadySending", "sending", "dismissing", "runnerOffline", "unsupported", "answerInComposer",
+    "notDismissed", "alreadySending", "sending", "dismissing", "runnerOffline", "unsupported", "draftKept",
     "recoveryResume", "recoveryDismiss", "findingWhereAsked", "whereAskedNotLoaded"] as const;
   assert.deepEqual([...titles, ...fragments, ...sentences].sort(), Object.keys(QUESTION_CARD_COPY).sort(),
     "every string is classified");
@@ -811,9 +813,12 @@ test("the question card's labels and buttons are Title Case, and its hints and e
   }
   for (const key of sentences) {
     const value = QUESTION_CARD_COPY[key];
-    // "Answer Mode" is the feature's name and "Press R" names the key.
-    const parts = value.replace("Answer Mode", "answer mode").replace(/Press R\b/, "Press r").split(/(?<=[.…])\s+/);
+    const parts = value.split(/(?<=[.…])\s+/);
     assert.ok(/[.…]$/.test(value) && parts.every(isSentenceCase), `${key}: ${value}`);
+  }
+  // No sentence names a key: a keycap does, on a fine pointer only (#2212).
+  for (const value of Object.values(QUESTION_CARD_COPY)) {
+    assert.doesNotMatch(value, /\bPress\b|\bEnter\b|\bEscape\b|\/respond/, value);
   }
   // The step count is a foot-note, written as the issue words it.
   assert.equal(questionStepLabel(1, 3), "Question 2 of 3");

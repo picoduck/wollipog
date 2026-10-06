@@ -1,1 +1,0 @@
-|.composer-answer-heading,.composer-answer-actions|gap|8px

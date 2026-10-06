@@ -2175,8 +2175,14 @@ follows these rules so it never crowds out the conversation it asks about:
   danger notice above the footer, the answers stay and the primary reads **Try Again**. The step is
   kept with the request's draft, so a card that remounts returns to the same question. While focus
   is in the card, 1–9 pick rows, Enter moves on, Ctrl/Cmd+Enter submits from any step and D
-  dismisses; their keycaps show on fine pointers only. In Composer Response the card lists the
-  options and is answered in the composer. A long question never scrolls on its own (#2683): it
+  dismisses; their keycaps show on fine pointers only. In Composer Response (#2212) the question
+  is shown once: while it waits the docked card is compact (head line, title, the foot-note "Your
+  message draft is kept while you answer." and a footer of Dismiss and **Answer**, the primary, with
+  an R keycap on fine pointers), and while it is answered the dock leaves it out and the composer
+  holds it (Answer Mode, below). A person who may not answer reads the refusal as the foot-note and
+  Answer is disabled with it as its description. Where no composer can answer the question (a
+  worker's or a child's, in a panel) the card is the form in either style, and the Sessions preview
+  keeps its own question card (#2210). A long question never scrolls on its own (#2683): it
   ends on a whole line with an ellipsis, five lines or three on a phone, and a `.link` **Show Full
   Question** under it (`aria-expanded`, controlling the title) shows it whole; **Show Less** clamps
   it again, and neither touches the answers or the step. The toggle shows only when the clamp hides
@@ -2270,10 +2276,23 @@ follows these rules so it never crowds out the conversation it asks about:
 - **The software keyboard leaves the question and its answer.** While it is open the question card
   drops its head line, its title takes one line, and its footer keeps only Back and Next or Submit
   Answers; a field that takes focus is scrolled into view within the card's body, never the page.
-- **Answer Mode has Show Context.** When a question is answered in the composer, the answer panel's
-  header has Show Context, which shrinks the panel to its header (the question, a summary of the
-  selections so far, Show Answer). Nothing resets: selections, draft and step are kept. Below 760px
-  Show Context, Show Where Asked and Jump to Question are icon buttons with the same accessible names.
+- **Answer Mode is the composer answering a question** (`ComposerQuestionResponse`, #2212). The
+  `.answer-head` holds the kind ("Question"), "Question 2 of 3" only when there are several, a
+  ghost `.btn.sm` Show Context (Lucide `ChevronsDown`) and an `.icon-btn.sm` × named "Exit Answer
+  Mode" (28px, a 44px target on touch); there is no mode eyebrow and no exit bar. Then the question,
+  its context, its options as the card's ChoiceRows in `.answer-options` numbered 1–9 (capped at
+  288px, 188px below 760px, scrolling past that), and the answer field: the composer's own, in
+  `--type-reading` with a placeholder that says what to type and no edge or ring of its own. The
+  composer card's edge is its focus, and an invalid answer turns that edge `--red` with one field
+  error under the field (§8.5); a failed submission is a compact danger notice above it. The footer
+  is Back from question 2 and Next or **Submit Answers** as a BusyButton. Escape exits; no sentence
+  names a key.
+- **Answer Mode has Show Context.** Show Context shrinks the panel to its head: the question on one
+  line, a summary of the answer so far ("Nothing chosen yet" when empty, a polite live line) and
+  Show Answer (`ChevronsUp`). Nothing resets: selections, draft and step are kept in the
+  request-keyed draft the card shares. A number key opens the panel before it chooses, and Jump to
+  Question opens it and focuses its field. Below 760px Show Context, Show Where Asked and Jump to
+  Question are icon buttons with the same accessible names.
 
 ### 13.3 Page Banner
 

@@ -453,6 +453,8 @@ function DockedRegion({ session, runnerOnline, fallbackFocusRef, alternateFallba
   alternateFallbackFocusRef?: React.RefObject<HTMLElement | null>;
 }) {
   const requests = dockRequests(prioritizedPendingRequests(session.pendingApproval));
+  // As SessionDetail: the session's own question can be answered in the composer (#2212).
+  const top = requests[0];
   return (
     <>
       <SessionApprovalRegion
@@ -461,7 +463,8 @@ function DockedRegion({ session, runnerOnline, fallbackFocusRef, alternateFallba
         fallbackFocusRef={fallbackFocusRef}
         alternateFallbackFocusRef={alternateFallbackFocusRef}
       />
-      {requests.length > 0 && <RequestDock session={session} requests={requests} runnerOnline={runnerOnline} />}
+      {requests.length > 0 && <RequestDock session={session} requests={requests} runnerOnline={runnerOnline}
+        composerAnswer={top?.kind === "question" ? { requestId: top.requestId, onAnswer: () => {} } : undefined} />}
     </>
   );
 }

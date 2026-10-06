@@ -60,6 +60,8 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `ChevronRightIcon` | Lucide | `ChevronRight` | Directional disclosure. |
 | `ChevronLeftIcon` | Lucide | `ChevronLeft` | Directional disclosure. |
 | `ChevronUpIcon` | Lucide | `ChevronUp` | Expand on the request dock's reading-back strip. |
+| `ChevronsDownIcon` | Lucide | `ChevronsDown` | Show Context: Answer Mode shrinks to its head so the transcript shows. |
+| `ChevronsUpIcon` | Lucide | `ChevronsUp` | Show Answer: Answer Mode's panel opens again. |
 | `PlusIcon` | Lucide | `Plus` | Generic add action. |
 | `PinIcon` | Lucide | `Pin` | Pinned session state. |
 | `UnpinIcon` | Lucide | `PinOff` | Unpin Session in the Sessions context menu (#2214). |

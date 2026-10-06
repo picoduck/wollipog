@@ -57,7 +57,6 @@ test("no other rule sizes a keycap or sets its font, border or colours", () => {
  * that draws a bordered monospace box fails here until it is a `<kbd>` or is listed with a reason.
  */
 const MONO_BOXES_THAT_ARE_NOT_KEYCAPS = new Map([
-  [".composer-answer-input", "a text field for a typed answer"],
   [".dir-path-input", "a path text field"],
   [".onboard-recommended-skill-names > li", "skill identifiers in a list"],
   [".tl-step-output", "a transcript step's command output in a neutral well"],

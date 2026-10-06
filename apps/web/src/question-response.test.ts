@@ -106,7 +106,7 @@ test("free text is accepted only when declared and retains provider validation",
   };
   assert.deepEqual(resolveQuestionResponse(form, "2"), { answer: "2" });
   assert.match(resolveQuestionResponse(form, "4").error ?? "", /above its maximum/);
-  assert.match(resolveQuestionResponse(single, "arbitrary prose").error ?? "", /Other Response/);
+  assert.match(resolveQuestionResponse(single, "arbitrary prose").error ?? "", /Something Else/);
 });
 
 test("answer maps omit blank optional fields and report every invalid response", () => {
@@ -205,7 +205,7 @@ test("Other intents are independent for every question and preserve numeric and 
 
 test("typed choice mistakes retain validation while explicit Other preserves arbitrary punctuation", () => {
   const multi = { ...single, multiSelect: true };
-  assert.match(resolveQuestionResponse(single, "4").error!, /Other Response/);
+  assert.match(resolveQuestionResponse(single, "4").error!, /Something Else/);
   assert.match(resolveQuestionResponse(multi, "1, 4").error!, /not a displayed number/);
   assert.match(resolveQuestionResponse(multi, "TypeScript, Pythno").error!, /not a displayed number/);
   assert.deepEqual(questionDraftAnswers([multi], { language: { kind: "other", value: "1, 4" } }),

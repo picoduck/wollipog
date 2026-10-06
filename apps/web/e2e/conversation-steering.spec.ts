@@ -872,10 +872,10 @@ test.describe("on a coarse pointer", () => {
     }
   }
 
-  // The tray docks on the card above the strip, and a pending question's Respond can sit just below
-  // it. A tap meant for either must never cancel the edit (§2.8).
+  // The tray docks on the card above the strip, and a pending question's card waits on the dock with
+  // its Answer. A tap meant for any of them must never cancel the edit (§2.8).
   for (const width of [1000, 390]) {
-    test(`at ${width}px the strip's touch areas stay clear of the queued row above and Respond below (#2194)`, async ({ page }) => {
+    test(`at ${width}px the strip's touch areas stay clear of the queued row above and a waiting question (#2194)`, async ({ page }) => {
       await page.setViewportSize({ width, height: 900 });
       await seedEditableQueue(page);
       if (width <= 760) {
@@ -905,7 +905,7 @@ test.describe("on a coarse pointer", () => {
           },
         });
       });
-      await expect(page.getByRole("button", { name: "Respond", exact: true })).toBeVisible();
+      await expect(page.locator(".request-dock").getByRole("button", { name: "Answer", exact: true })).toBeVisible();
       await expect(page.locator(".composer-box > .composer-mode")).toBeVisible();
       await expectStripTouchAreasOwnTheirTaps(page);
     });

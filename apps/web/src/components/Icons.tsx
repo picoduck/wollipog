@@ -19,6 +19,8 @@ import {
   ChevronLeft as LucideChevronLeft,
   ChevronRight as LucideChevronRight,
   ChevronUp as LucideChevronUp,
+  ChevronsDown as LucideChevronsDown,
+  ChevronsUp as LucideChevronsUp,
   Circle as LucideCircle,
   CircleUserRound as LucideCircleUserRound,
   CircleX as LucideCircleX,
@@ -292,6 +294,16 @@ export function ChevronLeftIcon(props: IconProps) {
 
 export function ChevronUpIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideChevronUp} {...props} />;
+}
+
+/** Show Context: Answer Mode shrinks to its head so the transcript shows (#2212). */
+export function ChevronsDownIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideChevronsDown} {...props} />;
+}
+
+/** Show Answer: Answer Mode's panel opens again (#2212). */
+export function ChevronsUpIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideChevronsUp} {...props} />;
 }
 
 export function PlusIcon(props: IconProps) {

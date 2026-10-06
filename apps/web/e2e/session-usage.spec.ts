@@ -44,7 +44,7 @@ const readBar = (page: Page) =>
 /** Every visible control in the composer card, checked pairwise for overlap. */
 const composerOverlaps = (page: Page) =>
   page.locator(".composer-box").evaluate((card) => {
-    const rects = [...card.querySelectorAll(".composer-bar > * > *, .composer-usage-row > *, .composer-answer-actions > :not(.composer-answer-usage), .composer-answer-usage > *")]
+    const rects = [...card.querySelectorAll(".composer-bar > * > *, .composer-usage-row > *, .answer-foot > :not(.composer-answer-usage), .composer-answer-usage > *")]
       .map((element) => ({ name: element.className, rect: element.getBoundingClientRect() }))
       .filter(({ rect }) => rect.width > 0 && rect.height > 0);
     const overlaps: string[] = [];
@@ -284,12 +284,188 @@ test("a cost checkpoint parks the session with its Budget card docked above the 
   await page.screenshot({ path: `${SHOT}/desktop-checkpoint-card.png` });
 });
 
+/**
+ * Composer Response (#2212): the question shows once, as the dock's compact card while it waits and
+ * in the composer while it is answered. Show Context shrinks the answer to its head.
+ */
+test.describe("Composer Response shows a question once", () => {
+  const answerUrl = (width: number, height: number, extra = "") =>
+    `/session-usage-e2e.html?width=${width}&height=${height}&approval=question${extra}`;
+
+  test("waiting is the compact card, answering is the composer, and never both", async ({ page }) => {
+    await page.setViewportSize({ width: 1200, height: 820 });
+    // A kept message draft holds the question on the dock instead of opening Answer Mode.
+    await page.goto(answerUrl(1180, 780, "&draft=Kept%20draft"));
+    const card = page.locator(".request-dock .question-card");
+    await expect(card).toBeVisible();
+    await expect(card).toContainText("Your message draft is kept while you answer.");
+    await expect(page.locator(".composer-answer")).toHaveCount(0);
+    await expect(page.locator(".composer-input")).toHaveValue("Kept draft");
+
+    await card.getByRole("button", { name: "Answer", exact: true }).click();
+    await expect(page.locator(".composer-answer")).toBeVisible();
+    await expect(page.locator(".question-card")).toHaveCount(0);
+    await expect(page.locator(".composer-answer-input")).toBeFocused();
+    // The head: the kind, then Show Context and a 28px × named Exit Answer Mode.
+    await expect(page.locator(".answer-kind")).toHaveText("Question");
+    const exit = page.getByRole("button", { name: "Exit Answer Mode", exact: true });
+    const exitBox = (await exit.boundingBox())!;
+    expect(Math.round(exitBox.width)).toBe(28);
+    expect(Math.round(exitBox.height)).toBe(28);
+
+    await page.keyboard.press("Escape");
+    await expect(card).toBeVisible();
+    await expect(page.locator(".composer-answer")).toHaveCount(0);
+    await expect(page.locator(".composer-input")).toHaveValue("Kept draft");
+  });
+
+  test("the R keycap shows on a fine pointer, and no sentence names a key", async ({ page }) => {
+    await page.setViewportSize({ width: 1200, height: 820 });
+    await page.goto(answerUrl(1180, 780, "&draft=Kept%20draft"));
+    const answer = page.locator(".request-dock").getByRole("button", { name: "Answer", exact: true });
+    await expect(answer.locator("kbd")).toHaveText("R");
+    await expect(answer.locator("kbd")).toBeVisible();
+    await expect(page.locator(".request-dock .question-card")).not.toContainText(/Press|\/respond/);
+  });
+
+  test("at 1440px a four-option question shows whole, and the answer field reads in the reading font", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(answerUrl(1400, 860, "&questions=four"));
+    const options = page.locator(".answer-options");
+    await expect(options.getByRole("radio")).toHaveCount(5);
+    const fits = await options.evaluate((element) => element.scrollHeight <= element.clientHeight + 1);
+    expect(fits, "four options and Something Else fit under the 288px cap").toBe(true);
+
+    const input = page.locator(".composer-answer-input");
+    const fonts = await input.evaluate((element) => {
+      const probe = document.createElement("span");
+      probe.style.font = "var(--type-reading)";
+      document.body.append(probe);
+      const reading = getComputedStyle(probe);
+      const field = getComputedStyle(element);
+      const result = { field: field.fontFamily, reading: reading.fontFamily, fieldSize: field.fontSize, readingSize: reading.fontSize };
+      probe.remove();
+      return result;
+    });
+    expect(fonts.field).toBe(fonts.reading);
+    expect(fonts.fieldSize).toBe(fonts.readingSize);
+    expect(fonts.field).not.toMatch(/mono/i);
+    await expect(input).toHaveAttribute("placeholder", "Type a number or an option");
+  });
+
+  test("an invalid answer turns the composer's edge red with one error and no ring on the field", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(answerUrl(1400, 860, "&questions=four"));
+    const input = page.locator(".composer-answer-input");
+    await input.focus();
+    await input.press("Enter");
+    await expect(page.locator(".field-error")).toHaveCount(1);
+    await expect(page.locator(".field-error")).toHaveText("Choose an option.");
+    await expect(input).toBeFocused();
+    const styles = await input.evaluate((element) => {
+      const probe = document.createElement("span");
+      probe.style.color = "var(--red)";
+      document.body.append(probe);
+      const red = getComputedStyle(probe).color;
+      probe.remove();
+      const field = getComputedStyle(element);
+      const card = getComputedStyle(element.closest(".composer-box")!);
+      return {
+        red,
+        card: [card.borderTopColor, card.borderRightColor, card.borderBottomColor, card.borderLeftColor],
+        outline: field.outlineStyle === "none" || field.outlineWidth === "0px",
+        fieldBorder: field.borderTopStyle,
+        shadow: field.boxShadow,
+      };
+    });
+    expect(styles.card).toEqual([styles.red, styles.red, styles.red, styles.red]);
+    expect(styles.outline, "no focus ring on the field inside the composer").toBe(true);
+    expect(styles.fieldBorder).toBe("none");
+    expect(styles.shadow).toBe("none");
+  });
+
+  test("at 390x844 Show Context leaves the transcript at least half of the chat column", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(answerUrl(390, 804, "&questions=four"));
+    const options = page.locator(".answer-options");
+    await expect(options).toBeVisible();
+    expect((await options.boundingBox())!.height).toBeLessThanOrEqual(188.5);
+    const toggle = page.getByRole("button", { name: "Show Context", exact: true });
+    await expect(toggle.locator(".answer-context-label"), "icon-only below 760px, under the same name").toBeHidden();
+    await toggle.click();
+    await expect(page.getByRole("button", { name: "Show Answer", exact: true })).toHaveAttribute("aria-expanded", "false");
+    await expect(page.locator(".answer-summary")).toHaveText("Nothing chosen yet");
+    const share = await page.evaluate(() => {
+      const column = document.querySelector(".chat-reading")!.getBoundingClientRect();
+      const reader = document.querySelector(".detail-scroll")!.getBoundingClientRect();
+      return reader.height / column.height;
+    });
+    expect(share).toBeGreaterThanOrEqual(0.5);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  });
+});
+
+test.describe("Composer Response placeholders at 390px", () => {
+  // The placeholder says what to type (#2212), so it must be readable whole in a phone composer.
+  for (const step of [
+    { name: "a single choice", extra: "&questions=four", next: 0 },
+    { name: "a single choice that takes the person's own answer", extra: "&questions=four&other=1", next: 0 },
+    { name: "several choices", extra: "&questions=several", next: 1 },
+    { name: "a free-text answer", extra: "&questions=several", next: 2 },
+  ]) {
+    test(`the placeholder for ${step.name} fits the field`, async ({ page }) => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.goto(`/session-usage-e2e.html?width=390&height=804&approval=question${step.extra}`);
+      const input = page.locator(".composer-answer-input");
+      for (let index = 0; index < step.next; index += 1) {
+        await input.fill(index === 0 ? "1" : "1, 2");
+        await input.press("Enter");
+      }
+      await expect(input).toHaveValue("");
+      // Measured in the widest verified face, so a machine with a narrower one cannot pass copy that
+      // another would cut off.
+      const face = await pinWidestFace(page, page.locator(".composer-box"));
+      const fit = await input.evaluate((element: HTMLInputElement) => {
+        const style = getComputedStyle(element);
+        const context = document.createElement("canvas").getContext("2d")!;
+        context.font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+        const room = element.clientWidth - Number.parseFloat(style.paddingLeft) - Number.parseFloat(style.paddingRight);
+        return { text: element.placeholder, width: context.measureText(element.placeholder).width, room };
+      });
+      expect(fit.width, `"${fit.text}" fits in ${fit.room}px in ${face}`).toBeLessThanOrEqual(fit.room);
+    });
+  }
+});
+
+test.describe("Composer Response on a touch phone", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  test("the R keycap is absent on a coarse pointer and the × keeps a 44px hit area", async ({ page }) => {
+    await page.goto("/session-usage-e2e.html?width=390&height=804&approval=question&draft=Kept%20draft");
+    const answer = page.locator(".request-dock").getByRole("button", { name: "Answer", exact: true });
+    await expect(answer).toBeVisible();
+    await expect(answer.locator("kbd")).toBeHidden();
+    await answer.click();
+    const exit = page.getByRole("button", { name: "Exit Answer Mode", exact: true });
+    await expect(exit).toBeVisible();
+    const hit = await exit.evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      const after = getComputedStyle(element, "::after");
+      const width = Number.parseFloat(after.width) || box.width;
+      const height = Number.parseFloat(after.height) || box.height;
+      return { width: Math.max(width, box.width), height: Math.max(height, box.height), visible: box.height };
+    });
+    expect(hit.width).toBeGreaterThanOrEqual(44);
+    expect(hit.height).toBeGreaterThanOrEqual(44);
+  });
+});
+
 test.describe("Answer Mode ownership", () => {
   test("Edit as a New Turn reveals the copied message and external resolution restores region focus", async ({ page }) => {
     await page.setViewportSize({ width: 1200, height: 820 });
     await page.goto("/session-usage-e2e.html?width=1180&height=780&approval=question");
 
-    await expect(page.getByText("Answer Mode", { exact: true })).toBeVisible();
+    await expect(page.locator(".composer-answer")).toBeVisible();
     await page.screenshot({ path: `${SHOT}/answer-mode-before.png` });
     const copied = (await page.locator(".tl-row.user .bubble-text").last().textContent()) ?? "";
     expect(copied).not.toBe("");
@@ -300,10 +476,12 @@ test.describe("Answer Mode ownership", () => {
     const composer = page.locator(".composer-input");
     await expect(composer).toHaveValue(copied);
     await expect(composer).toBeFocused();
-    await expect(page.getByText("Question Waiting", { exact: true })).toBeVisible();
+    // The question waits on the dock's compact card again (#2212).
+    const answer = page.locator(".request-dock").getByRole("button", { name: "Answer", exact: true });
+    await expect(answer).toBeVisible();
     await page.screenshot({ path: `${SHOT}/answer-mode-after-load.png` });
 
-    await page.getByRole("button", { name: "Respond", exact: true }).click();
+    await answer.click();
     const choice = page.getByRole("radio", { name: /Staging/ });
     await choice.focus();
     await page.evaluate(() => window.resolveSessionUsageQuestion());
@@ -322,7 +500,7 @@ test.describe("Answer Mode ownership", () => {
       await page.setViewportSize({ width: viewport.width, height: viewport.height });
       await page.goto(`/session-usage-e2e.html?width=${viewport.frame}&height=${viewport.height - 40}&approval=question&driver=claude-code`);
       if (viewport.root !== 16) await page.addStyleTag({ content: `html { font-size: ${viewport.root}px; }` });
-      await expect(page.getByText("Answer Mode", { exact: true })).toBeVisible();
+      await expect(page.locator(".composer-answer")).toBeVisible();
       await expect(page.locator(".composer-bar")).toHaveCount(0);
 
       const usage = page.locator(".composer-answer-usage");
@@ -332,7 +510,7 @@ test.describe("Answer Mode ownership", () => {
       await expect(cost).toBeVisible();
       const [usageBox, actionsBox, submitBox] = await Promise.all([
         usage.boundingBox(),
-        page.locator(".composer-answer-actions").boundingBox(),
+        page.locator(".answer-foot").boundingBox(),
         page.getByRole("button", { name: "Submit Answers" }).boundingBox(),
       ]);
       if (viewport.ownRow) {
@@ -349,7 +527,7 @@ test.describe("Answer Mode ownership", () => {
       await expect(page.locator(".session-usage-popover")).toBeVisible();
       await page.keyboard.press("Escape");
       await expect(page.locator(".session-usage-popover")).toHaveCount(0);
-      await expect(page.getByText("Answer Mode", { exact: true })).toBeVisible();
+      await expect(page.locator(".composer-answer")).toBeVisible();
     });
   }
 });

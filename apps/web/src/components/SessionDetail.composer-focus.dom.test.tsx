@@ -20,6 +20,7 @@ import { ENTER_KEY_STORAGE_KEY } from "../enter-key.js";
 import { LOCAL_INSTANCE_SCOPE } from "../instance-storage.js";
 import { KEYBOARD_DISMISS_BLUR_EVENT, TOUCH_PHONE_MEDIA } from "../mobile-viewport.js";
 import { setQuestionResponseStyle } from "../question-response-style.js";
+import { focusSessionRequest } from "./SessionApproval.js";
 import {
   deleteComposerDraftIfMatches,
   loadComposerDraft,
@@ -221,6 +222,8 @@ interface FixtureOptions {
   strictMode?: boolean;
   composerFocusIntent?: "message" | "reply" | null;
   onComposerFocusConsumed?: () => void;
+  onApprove?: () => void;
+  onDeny?: () => void;
 }
 
 function EventSeeder({ sessionId, payloads }: { sessionId: string; payloads: SessionEvent["payload"][] }) {
@@ -346,6 +349,8 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
                 onOpenTerminal={() => {}}
                 composerFocusIntent={options.composerFocusIntent ?? "message"}
                 onComposerFocusConsumed={options.onComposerFocusConsumed}
+                onApprove={options.onApprove}
+                onDeny={options.onDeny}
                 composerDraftLoader={loader}
                 composerDraftCleanup={options.composerDraftCleanup}
               />
@@ -4783,7 +4788,8 @@ test("inserting a side-chat response exits Answer Mode and reveals the ordinary 
     const ordinary = fixture.container.querySelector<HTMLTextAreaElement>(".composer-input");
     assert.equal(ordinary?.value, "side-chat answer");
     assert.equal(ordinary?.ownerDocument.activeElement, ordinary);
-    assert.match(fixture.container.querySelector(".composer-question-waiting")?.textContent ?? "", /Question Waiting/);
+    // The question waits on the dock again, as its compact card (#2212).
+    assert.ok(fixture.container.querySelector('.request-dock .question-style-composer [data-session-request-control="answer"]'));
   } finally {
     await unmountFixture(fixture);
     setQuestionResponseStyle("interactive", domWindow as never);
@@ -5380,7 +5386,11 @@ test("a pending Composer Response preserves an ordinary draft and R enters and e
     const ordinary = fixture.container.querySelector<HTMLTextAreaElement>(".composer-input");
     assert.ok(ordinary);
     assert.equal(ordinary.value, "ordinary message draft");
-    assert.match(fixture.container.querySelector(".composer-question-waiting")?.textContent ?? "", /Question Waiting/);
+    // The question waits once, as the dock's compact card; the composer has no strip of its own (#2212).
+    const card = fixture.container.querySelector<HTMLElement>(".request-dock .question-style-composer");
+    assert.ok(card);
+    assert.match(card.textContent ?? "", /Your message draft is kept while you answer\./);
+    assertNoDomNode(fixture.container.querySelector(".composer-question-waiting"));
     assertNoDomNode(fixture.container.querySelector(".composer-answer-input"));
 
     const reader = fixture.container.querySelector<HTMLElement>(".detail-scroll");
@@ -5393,8 +5403,9 @@ test("a pending Composer Response preserves an ordinary draft and R enters and e
     const answer = fixture.container.querySelector<HTMLInputElement>(".composer-answer-input");
     assert.ok(answer);
     assert.equal(answer.ownerDocument.activeElement, answer);
-    assert.match(fixture.container.querySelector(".composer-answer")?.textContent ?? "", /Answering Question 1 of 1/);
+    assert.equal(fixture.container.querySelector(".composer-answer .answer-kind")?.textContent, "Question");
     assertNoDomNode(fixture.container.querySelector(".composer-input"));
+    assertNoDomNode(fixture.container.querySelector(".question-card"), "while it is answered the question is in the composer alone");
 
     await act(async () => {
       answer.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as never);
@@ -5404,6 +5415,156 @@ test("a pending Composer Response preserves an ordinary draft and R enters and e
     assert.ok(restored);
     assert.equal(restored.value, "ordinary message draft");
     assert.equal(restored.ownerDocument.activeElement, restored);
+  } finally {
+    await unmountFixture(fixture);
+    setQuestionResponseStyle("interactive", domWindow as never);
+  }
+});
+
+test("a Composer Response question is shown once: the compact card while it waits, the composer while it is answered (#2212)", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  const questionCount = () => ({
+    cards: fixture.container.querySelectorAll(".request-dock .question-card").length,
+    answers: fixture.container.querySelectorAll(".composer-answer").length,
+  });
+  try {
+    await resolveDraft(draft, "kept message draft");
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      flushFrames();
+    });
+    await fixture.pushEvent({
+      kind: "question_request",
+      requestId: "ask-once",
+      questions: [{ id: "target", question: "Choose a target", options: [{ label: "Staging" }, { label: "Production" }] }],
+    });
+    await fixture.pushSession({
+      pendingApproval: {
+        requestId: "ask-once",
+        title: "Choose a target",
+        options: [],
+        kind: "question",
+        questions: [{ id: "target", question: "Choose a target", options: [{ label: "Staging" }, { label: "Production" }] }],
+      },
+    });
+    await act(async () => { flushFrames(); });
+    assert.deepEqual(questionCount(), { cards: 1, answers: 0 }, "waiting: the compact card alone");
+
+    const answerButton = fixture.container.querySelector<HTMLButtonElement>('.request-dock [data-session-request-control="answer"]');
+    assert.ok(answerButton);
+    await act(async () => {
+      answerButton.focus();
+      answerButton.click();
+      flushFrames();
+    });
+    assert.deepEqual(questionCount(), { cards: 0, answers: 1 }, "answering: the composer alone");
+    const input = fixture.container.querySelector<HTMLInputElement>(".composer-answer-input");
+    assert.ok(input);
+    assert.equal(input.ownerDocument.activeElement, input, "Answer hands focus to the answer field");
+
+    // Show Context, then Jump to Question on the transcript's marker opens the panel and focuses its field.
+    const toggle = fixture.container.querySelector<HTMLButtonElement>(".answer-context-toggle");
+    assert.ok(toggle);
+    await act(async () => { toggle.click(); });
+    assert.equal(fixture.container.querySelector<HTMLElement>(".answer-body")?.hidden, true);
+    const jump = fixture.container.querySelector<HTMLButtonElement>(".ask-marker-jump");
+    assert.ok(jump, "the transcript marker offers Jump to Question");
+    await act(async () => {
+      jump.click();
+      flushFrames();
+    });
+    assert.equal(fixture.container.querySelector<HTMLElement>(".answer-body")?.hidden, false);
+    assert.equal(input.ownerDocument.activeElement, input);
+    assert.deepEqual(questionCount(), { cards: 0, answers: 1 });
+
+    await act(async () => {
+      fixture.container.querySelector<HTMLButtonElement>('.answer-head .icon-btn[aria-label="Exit Answer Mode"]')!.click();
+      flushFrames();
+    });
+    assert.deepEqual(questionCount(), { cards: 1, answers: 0 }, "Exit Answer Mode puts the card back");
+    assert.equal(fixture.container.querySelector<HTMLTextAreaElement>(".composer-input")?.value, "kept message draft");
+  } finally {
+    await unmountFixture(fixture);
+    setQuestionResponseStyle("interactive", domWindow as never);
+  }
+});
+
+const answerModeQuestion = (requestId: string, extra: Record<string, unknown> = {}) => ({
+  requestId,
+  title: `Choose for ${requestId}`,
+  options: [],
+  kind: "question" as const,
+  questions: [{ id: "target", question: `Choose for ${requestId}`, options: [{ label: "Staging" }, { label: "Production" }] }],
+  ...extra,
+});
+
+test("while the top question is answered in the composer, D never dismisses another docked question and A brings the answer up (#2212)", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  const draft = deferred<ComposerDraft | null>();
+  const answered: unknown[] = [];
+  let denied = 0;
+  let approved = 0;
+  const fixture = await mountFixture(draft, {
+    client: { answerQuestion: async (_id: string, body: unknown) => { answered.push(body); return session("unused"); } },
+    onDeny: () => { denied += 1; },
+    onApprove: () => { approved += 1; },
+  });
+  try {
+    await resolveDraft(draft, "");
+    await fixture.pushSession({
+      pendingApproval: {
+        ...answerModeQuestion("ask-top"),
+        additionalRequests: [answerModeQuestion("ask-async", { async: true, occurrenceId: "occurrence-1" })],
+      } as SessionView["pendingApproval"],
+    });
+    await act(async () => { flushFrames(); });
+    assert.ok(fixture.container.querySelector(".composer-answer-input"), "the top question is in the composer");
+    assert.equal(fixture.container.querySelectorAll(".request-dock .question-card").length, 1, "the other question waits on the dock");
+
+    // Show Context, then read the transcript.
+    await act(async () => { fixture.container.querySelector<HTMLButtonElement>(".answer-context-toggle")!.click(); });
+    const reader = fixture.container.querySelector<HTMLElement>(".detail-scroll")!;
+    await act(async () => { reader.focus(); });
+    await act(async () => {
+      reader.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "d", bubbles: true }) as never);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.deepEqual(answered, [], "D dismissed nothing");
+    assert.equal(denied, 0, "and did not fall through to the session's other requests");
+
+    await act(async () => {
+      reader.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "a", bubbles: true }) as never);
+      flushFrames();
+    });
+    assert.equal(approved, 0);
+    assert.equal(fixture.container.querySelector<HTMLElement>(".answer-body")?.hidden, false, "A opens the answer again");
+    const input = fixture.container.querySelector<HTMLInputElement>(".composer-answer-input")!;
+    assert.equal(input.ownerDocument.activeElement, input);
+  } finally {
+    await unmountFixture(fixture);
+    setQuestionResponseStyle("interactive", domWindow as never);
+  }
+});
+
+test("a control elsewhere brings a collapsed answer up through the shared request revealer (#2212)", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await resolveDraft(draft, "");
+    await fixture.pushSession({ pendingApproval: answerModeQuestion("ask-reveal") });
+    await act(async () => { flushFrames(); });
+    await act(async () => { fixture.container.querySelector<HTMLButtonElement>(".answer-context-toggle")!.click(); });
+    assert.equal(fixture.container.querySelector<HTMLElement>(".answer-body")?.hidden, true);
+    // As the Agents panel's Open Request in Session and the campaign panel do.
+    let revealed = false;
+    await act(async () => { revealed = focusSessionRequest(fixture.sessionId, "ask-reveal"); });
+    assert.equal(revealed, true);
+    assert.equal(fixture.container.querySelector<HTMLElement>(".answer-body")?.hidden, false);
+    const input = fixture.container.querySelector<HTMLInputElement>(".composer-answer-input")!;
+    assert.equal(input.ownerDocument.activeElement, input);
   } finally {
     await unmountFixture(fixture);
     setQuestionResponseStyle("interactive", domWindow as never);
@@ -5648,7 +5809,7 @@ test("external question resolution returns focus from every Answer Mode control"
   const fixture = await mountFixture(draft);
   try {
     await resolveDraft(draft, "");
-    const focusSelectors = [".composer-answer-choice", ".composer-answer-heading button"];
+    const focusSelectors = [".answer-options input", ".answer-head .answer-context-toggle", ".answer-head .icon-btn"];
     for (const [index, selector] of focusSelectors.entries()) {
       await fixture.pushSession({
         pendingApproval: {

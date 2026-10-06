@@ -113,8 +113,8 @@ test("390 px Composer Answer Mode formats multi-question text and discloses the 
   await page.goto("/agent-questions-e2e.html?set=rich&style=composer");
 
   const composer = page.locator(".composer-answer");
-  await expect(composer.locator(".composer-answer-question strong")).toHaveText("one");
-  await expect(composer.locator(".composer-answer-question li")).toHaveCount(2);
+  await expect(composer.locator(".answer-title strong")).toHaveText("one");
+  await expect(composer.locator(".answer-title li")).toHaveCount(2);
   await expect(composer.getByRole("link", { name: "evidence.example/mobile-capture.png" })).toHaveAttribute("href", signedEvidenceUrl);
   expect(await composer.innerText()).not.toContain("X-Amz-Signature");
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
@@ -122,7 +122,7 @@ test("390 px Composer Answer Mode formats multi-question text and discloses the 
   const input = page.locator(".composer-answer-input");
   await input.fill("1");
   await input.press("Enter");
-  await expect(page.getByText("Answering Question 2 of 2")).toBeVisible();
+  await expect(composer.locator(".answer-step")).toHaveText("Question 2 of 2");
   await input.fill("1, 2");
   await input.press("Enter");
   await expect(page.getByRole("status")).toHaveText("Question Answered");
@@ -220,7 +220,7 @@ test("desktop Composer Response submits a multi-question flow using only the key
   await page.goto("/agent-questions-e2e.html?set=forms&style=composer");
 
   const response = page.locator(".composer-answer-input");
-  await expect(page.getByText("Answering Question 1 of 5")).toBeVisible();
+  await expect(page.locator(".answer-step")).toHaveText("Question 1 of 5");
   await response.fill("2");
   await response.press("Enter");
   await response.fill("1, Browser Tests");
@@ -304,7 +304,8 @@ test("mobile Composer Response preserves invalid input, focus, and replacement b
   const response = page.locator(".composer-answer-input");
   await response.fill(" ");
   await response.press("Enter");
-  await expect(page.getByRole("alert")).toContainText("Enter a response");
+  // One field error under the field (§8.5; #2212), worded as the card words it.
+  await expect(page.locator(".field-error")).toHaveText("Choose an option.");
   await expect(response).toHaveValue(" ");
   await expect(response).toBeFocused();
 
@@ -323,7 +324,8 @@ test("Composer Response keeps its draft and focus after a submission error", asy
   const response = page.locator(".composer-answer-input");
   await response.fill("2");
   await response.press("Enter");
-  await expect(page.getByRole("alert")).toContainText("runner rejected this answer");
+  // A compact danger notice above the field, as on the card; the runner's words are its details.
+  await expect(page.getByRole("alert")).toContainText("Couldn't send your answers. Try again.");
   await expect(response).toHaveValue("2");
   await expect(response).toBeFocused();
   expect(await page.evaluate(() => window.agentQuestionCalls[0])).toEqual({
@@ -340,7 +342,7 @@ test("offline Composer Response preserves its draft boundary and recovers after 
   const response = page.locator(".composer-answer-input");
   await expect(response).toHaveAttribute("aria-disabled", "true");
   await expect(response).toHaveAttribute("readonly", "");
-  await expect(page.locator(".composer-answer-help")).toContainText("Responses are unavailable until the runner reconnects");
+  await expect(page.locator(".answer-help")).toContainText("Responses are unavailable until the runner reconnects");
   await page.evaluate(() => window.setAgentQuestionOnline(true));
   await expect(response).not.toHaveAttribute("aria-disabled", "true");
   await expect(response).not.toHaveAttribute("readonly", "");
@@ -813,12 +815,12 @@ for (const width of [1280, 390]) {
         await page.getByRole("button", { name: "Submit Answers", exact: true }).click();
       } else {
         const input = page.locator('.composer-answer-input');
-        await page.getByRole("button", { name: "Other Response", exact: true }).click();
+        // Something Else asks for the person's own answer in the composer's field (#2212).
+        await page.getByRole("radio", { name: "Something Else…" }).click();
         await expect(input).toBeFocused();
-        await expect(page.getByRole("textbox", { name: "Other Response to Question 1", exact: true })).toBeFocused();
         await input.fill("Canary");
         await input.press("Enter");
-        await page.getByRole("button", { name: "Other Response", exact: true }).click();
+        await page.getByRole("checkbox", { name: "Something Else…" }).click();
         await input.fill("Unit Tests");
         await input.press("Enter");
         await input.press("Enter");

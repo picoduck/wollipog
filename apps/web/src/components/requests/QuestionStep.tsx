@@ -1,4 +1,4 @@
-import React from "react";
+import React, { type ReactNode } from "react";
 import { DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH, type AgentQuestion } from "@wollipog/protocol";
 import {
   isAnswerableAgentQuestion,
@@ -42,7 +42,18 @@ export const QUESTION_CARD_COPY = {
   dismissing: "Dismissing the question…",
   runnerOffline: "Responses are unavailable until the runner reconnects.",
   unsupported: "This question format is unsupported. Dismiss the question to continue.",
-  answerInComposer: "Respond through Answer Mode in the composer. Press R or use /respond.",
+  // Composer Response (#2212): the docked card while the question waits, then Answer Mode.
+  answer: "Answer",
+  draftKept: "Your message draft is kept while you answer.",
+  exitAnswerMode: "Exit Answer Mode",
+  showContext: "Show Context",
+  showAnswer: "Show Answer",
+  nothingChosen: "Nothing chosen yet",
+  answerEntered: "Answer entered",
+  typeAnswer: "Type your answer",
+  typeChoice: "Type a number or an option",
+  typeChoiceOrAnswer: "Type a number, option or your answer",
+  typeChoices: "Type numbers or options, with commas",
   recoveryResume: "The runner restarted after this question was asked. Submit the preserved form to resume the existing agent conversation and deliver these answers once. Prior tool calls will not be replayed.",
   showWhereAsked: "Show Where Asked",
   showFullQuestion: "Show Full Question",
@@ -92,18 +103,87 @@ export interface QuestionStepIds {
 }
 
 /**
+ * A choice question's options as a ChoiceRows group (§8.4), on the card and in Answer Mode alike
+ * (#2196, #2212): the offered options, then Something Else…, which asks for the person's own text.
+ * `marker` fills each row's trailing slot: the card's 1–9 keycaps, or Answer Mode's numbers, which
+ * name what to type.
+ */
+export function QuestionChoiceRows({
+  question,
+  draft,
+  disabled,
+  labelledBy,
+  describedBy,
+  invalid,
+  marker,
+  onChoose,
+}: {
+  question: AgentQuestion;
+  draft: QuestionResponseDraft | undefined;
+  /** Rows refuse a choice but stay reachable, so their reason is announced. */
+  disabled: boolean;
+  labelledBy: string;
+  describedBy?: string;
+  invalid?: boolean;
+  marker?: (index: number) => ReactNode;
+  onChoose: (choice: QuestionChoice) => void;
+}) {
+  const otherChosen = questionOtherChosen(question, draft);
+  const selected = questionDraftSelections(question, draft);
+  const options: ChoiceRowOption<string>[] = [
+    ...question.options.map((option, index) => ({
+      value: String(index),
+      title: option.label,
+      description: option.description,
+      meta: marker?.(index),
+      disabled,
+      inputData: { "data-session-request-control": `question:${question.id}:option:${index}` },
+    })),
+    ...(isAnswerableAgentQuestion(question) ? [{
+      value: "other",
+      title: QUESTION_CARD_COPY.somethingElse,
+      meta: marker?.(question.options.length),
+      disabled,
+      inputData: { "data-session-request-control": `question:${question.id}:other` },
+    }] : []),
+  ];
+  const optionIndex = (label: string) => String(question.options.findIndex((option) => option.label === label));
+  const choose = (value: string) => onChoose(value === "other" ? "other" : Number(value));
+  return question.multiSelect ? (
+    <ChoiceRows
+      multiple
+      label={QUESTION_CARD_COPY.question}
+      labelledBy={labelledBy}
+      describedBy={describedBy}
+      options={options}
+      value={otherChosen ? ["other"] : selected.map(optionIndex)}
+      onChange={choose}
+    />
+  ) : (
+    <ChoiceRows
+      label={QUESTION_CARD_COPY.question}
+      labelledBy={labelledBy}
+      describedBy={describedBy}
+      invalid={invalid}
+      options={options}
+      value={otherChosen ? "other" : selected[0] !== undefined ? optionIndex(selected[0]) : null}
+      onChange={choose}
+    />
+  );
+}
+
+/**
  * One question's body on the Request Card (#2196): its context, then its answer. A choice question
  * is a ChoiceRows group (§8.4) whose last row is Something Else…, which reveals a text field in the
  * step; a free-text question is the text field alone. A field error (§8.5) shows only once the
  * person tried to move past the question with it unanswered or invalid.
  *
- * In Composer Response the card is the question's context: the offered options are listed, and the
- * answer is given in the composer.
+ * In Composer Response the docked card is compact and the question is answered in the composer
+ * (#2212), so this body is the Interactive Form's alone.
  */
 export function QuestionStep({
   question,
   ids,
-  responseStyle,
   draft,
   error,
   disabled,
@@ -115,7 +195,6 @@ export function QuestionStep({
 }: {
   question: AgentQuestion;
   ids: QuestionStepIds;
-  responseStyle: "interactive" | "composer";
   draft: QuestionResponseDraft | undefined;
   /** The field error to show, or nothing before the person tried to continue. */
   error?: string;
@@ -130,7 +209,6 @@ export function QuestionStep({
   onText: (value: string) => void;
 }) {
   const otherChosen = questionOtherChosen(question, draft);
-  const selected = questionDraftSelections(question, draft);
   const choices = question.options.length > 0;
   const answerable = isAnswerableAgentQuestion(question);
   const textField = answerable && (!choices || otherChosen);
@@ -139,26 +217,6 @@ export function QuestionStep({
     [question.context ? ids.context : null, ids.requirement, ...describedBy, ...extra]
       .filter((id): id is string => Boolean(id)).join(" ");
   const keycap = (index: number) => showKeyHints && index < 9 ? <kbd aria-hidden="true">{index + 1}</kbd> : undefined;
-
-  const options: ChoiceRowOption<string>[] = [
-    ...question.options.map((option, index) => ({
-      value: String(index),
-      title: option.label,
-      description: option.description,
-      meta: keycap(index),
-      disabled,
-      inputData: { "data-session-request-control": `question:${question.id}:option:${index}` },
-    })),
-    ...(answerable ? [{
-      value: "other",
-      title: QUESTION_CARD_COPY.somethingElse,
-      meta: keycap(question.options.length),
-      disabled,
-      inputData: { "data-session-request-control": `question:${question.id}:other` },
-    }] : []),
-  ];
-  const optionIndex = (label: string) => String(question.options.findIndex((option) => option.label === label));
-  const choose = (value: string) => onChoose(value === "other" ? "other" : Number(value));
   const choiceError = error && !textField ? ids.error : null;
   const textValue = draft?.kind === "other" || (draft?.kind === "entry" && (!choices || otherChosen))
     ? questionDraftText(draft) : "";
@@ -173,73 +231,49 @@ export function QuestionStep({
       <span className="sr-only" id={ids.requirement}>
         {question.required === false ? QUESTION_CARD_COPY.optionalSentence : QUESTION_CARD_COPY.required}
       </span>
-      {responseStyle === "composer" ? (
-        choices && (
-          <ol className="question-text-options" aria-label="Offered Choices">
-            {question.options.map((option) => (
-              <li key={option.label}>
-                <span className="question-label">{option.label}</span>
-                {option.description && <span className="question-desc">{option.description}</span>}
-              </li>
-            ))}
-          </ol>
-        )
-      ) : (
-        <div className="field question-answer">
-          {choices && (
-            question.multiSelect ? (
-              <ChoiceRows
-                multiple
-                label={QUESTION_CARD_COPY.question}
-                labelledBy={names}
-                describedBy={descriptions(choiceError)}
-                options={options}
-                value={otherChosen ? ["other"] : selected.map(optionIndex)}
-                onChange={choose}
-              />
-            ) : (
-              <ChoiceRows
-                label={QUESTION_CARD_COPY.question}
-                labelledBy={names}
-                describedBy={descriptions(choiceError)}
-                invalid={Boolean(choiceError)}
-                options={options}
-                value={otherChosen ? "other" : selected[0] !== undefined ? optionIndex(selected[0]) : null}
-                onChange={choose}
-              />
-            )
-          )}
-          {textField && (
-            <input
-              className="input question-input"
-              data-session-request-control={`question:${question.id}:input`}
-              aria-labelledby={choices ? `${names} ${ids.somethingElse}` : names}
-              aria-describedby={descriptions(error ? ids.error : null)}
-              aria-invalid={error ? true : undefined}
-              aria-required={choices ? undefined : question.required !== false}
-              disabled={inputDisabled}
-              type={question.secret
-                ? "password"
-                : question.inputFormat === "date-time"
-                  ? "datetime-local"
-                  : question.inputFormat === "integer" || question.inputFormat === "number"
-                    ? "number"
-                    : question.inputFormat ?? "text"}
-              inputMode={question.inputFormat === "integer" ? "numeric" : question.inputFormat === "number" ? "decimal" : undefined}
-              step={question.inputFormat === "integer" ? 1 : question.inputFormat === "number" ? "any" : undefined}
-              min={question.minimum}
-              max={question.maximum}
-              minLength={question.minLength}
-              maxLength={question.maxLength ?? DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH}
-              value={textValue}
-              autoComplete="off"
-              onChange={(event) => onText(event.target.value)}
-            />
-          )}
-          {choices && <span hidden id={ids.somethingElse}>{QUESTION_CARD_COPY.somethingElseField}</span>}
-          {error && <FieldError id={ids.error}>{error}</FieldError>}
-        </div>
-      )}
+      <div className="field question-answer">
+        {choices && (
+          <QuestionChoiceRows
+            question={question}
+            draft={draft}
+            disabled={disabled}
+            labelledBy={names}
+            describedBy={descriptions(choiceError)}
+            invalid={Boolean(choiceError)}
+            marker={keycap}
+            onChoose={onChoose}
+          />
+        )}
+        {textField && (
+          <input
+            className="input question-input"
+            data-session-request-control={`question:${question.id}:input`}
+            aria-labelledby={choices ? `${names} ${ids.somethingElse}` : names}
+            aria-describedby={descriptions(error ? ids.error : null)}
+            aria-invalid={error ? true : undefined}
+            aria-required={choices ? undefined : question.required !== false}
+            disabled={inputDisabled}
+            type={question.secret
+              ? "password"
+              : question.inputFormat === "date-time"
+                ? "datetime-local"
+                : question.inputFormat === "integer" || question.inputFormat === "number"
+                  ? "number"
+                  : question.inputFormat ?? "text"}
+            inputMode={question.inputFormat === "integer" ? "numeric" : question.inputFormat === "number" ? "decimal" : undefined}
+            step={question.inputFormat === "integer" ? 1 : question.inputFormat === "number" ? "any" : undefined}
+            min={question.minimum}
+            max={question.maximum}
+            minLength={question.minLength}
+            maxLength={question.maxLength ?? DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH}
+            value={textValue}
+            autoComplete="off"
+            onChange={(event) => onText(event.target.value)}
+          />
+        )}
+        {choices && <span hidden id={ids.somethingElse}>{QUESTION_CARD_COPY.somethingElseField}</span>}
+        {error && <FieldError id={ids.error}>{error}</FieldError>}
+      </div>
     </div>
   );
 }

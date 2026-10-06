@@ -153,9 +153,10 @@ function enabledRequestControl(
     'button:not(:disabled):not([aria-disabled="true"]), input:not(:disabled):not([aria-disabled="true"])',
   ) ?? []];
   // Composer Response owns entry outside this request region. On replacement, do not turn the
-  // card's destructive Dismiss action into the implicit focus target for the user's next Enter.
+  // card's destructive Dismiss action, or Answer, into the implicit focus target for the user's next
+  // Enter: focus falls back to the composer.
   const eligible = region?.querySelector(".question-style-composer")
-    ? controls.filter((control) => control.dataset.sessionRequestControl !== "dismiss")
+    ? controls.filter((control) => !["dismiss", "answer"].includes(control.dataset.sessionRequestControl ?? ""))
     : controls;
   // A Request Card names its heading as the landing place: a new request is read before it is
   // answered, and its first button is not the one to press by default.
@@ -276,8 +277,13 @@ type CardFocus =
  * left, the step count, Back, then Next or Submit Answers as the one primary, last.
  *
  * Keys, while focus is in the card: 1–9 pick the current question's rows, Enter moves on (Next,
- * then Submit Answers), Ctrl/Cmd+Enter submits from any step and D dismisses. In Composer Response
- * the card is the question's context only, answered in the composer.
+ * then Submit Answers), Ctrl/Cmd+Enter submits from any step and D dismisses.
+ *
+ * In Composer Response, where the composer can answer the question (`onAnswer`), the card is
+ * compact (#2212): the head line, the question as the title, "Your message draft is kept while you
+ * answer." and a footer of Dismiss and Answer, which opens Answer Mode (R, too). The question is then
+ * shown in the composer alone. A person who may not answer reads why instead, and Answer is off.
+ * Without a composer to answer in (a worker's or a child's question in a panel) the card is the form.
  *
  * On the request dock (#2205) the head line ends with Show Where Asked, and while the software
  * keyboard is open the card keeps only the question and its answer: no head line, a one-line title,
@@ -309,6 +315,7 @@ export function SessionQuestionBanner({
   intentRef,
   topRequest = true,
   presentation,
+  onAnswer,
 }: {
   sessionId: string;
   requestId: string;
@@ -339,6 +346,9 @@ export function SessionQuestionBanner({
   topRequest?: boolean;
   /** As the Request Card's: the Requests panel's detail draws it flush with a sticky footer (#2206). */
   presentation?: "dock" | "panel";
+  /** Opens Answer Mode for this question, where the composer can answer it (#2212). In Composer
+   * Response the card is then compact; without it the card is always the form. */
+  onAnswer?: () => void;
 }) {
   const api = useApi();
   const storedRefusal = useSessionResponseRefusal(sessionId);
@@ -440,7 +450,11 @@ export function SessionQuestionBanner({
       : question.multiSelect ? QUESTION_CARD_COPY.chooseOptions : QUESTION_CARD_COPY.chooseOption;
   };
   const unsupportedQuestionFormat = questions.some((question) => !isAnswerableAgentQuestion(question));
-  const interactive = responseStyle === "interactive";
+  // Composer Response answers in the composer, so the card is compact there; where no composer can
+  // answer this question, the card is the form whatever the style.
+  const compact = responseStyle === "composer" && onAnswer !== undefined;
+  const interactive = !compact;
+  const cardStyle: typeof responseStyle = compact ? "composer" : "interactive";
   const controlsDisabled = busy !== null || !responsesAvailable || unsupportedQuestionFormat || recoveryRequiresDismiss;
   // The form can be answered here: Next checks the step and the last step submits.
   const answerable = interactive && questions.length > 0 && responsesAvailable && !unsupportedQuestionFormat &&
@@ -824,11 +838,12 @@ export function SessionQuestionBanner({
   const failureText = failure?.action === "dismiss" ? QUESTION_CARD_COPY.notDismissed : QUESTION_CARD_COPY.notSent;
   const submitLabel = retrying ? QUESTION_CARD_COPY.tryAgain : QUESTION_CARD_COPY.submitAnswers;
   const navigateOnly = !answerable;
-  const composerHint = !interactive && questions.length > 0 && !recoveryRequiresDismiss;
+  // The compact card's foot-note; a person who may not answer reads the refusal in its place.
+  const draftKept = compact && questions.length > 0 && !recoveryRequiresDismiss && responseRefusal === null;
 
   return (
     <section
-      className={`request-card question-card question-bar question-style-${responseStyle}`}
+      className={`request-card question-card question-bar question-style-${cardStyle}`}
       data-request-kind="question"
       data-presentation={presentation}
       data-tone={recoveryRequired ? "danger" : undefined}
@@ -863,7 +878,7 @@ export function SessionQuestionBanner({
           {headTrailing}
         </> : undefined}
       />
-      {(eyebrow.header || eyebrow.hint) && (
+      {!compact && (eyebrow.header || eyebrow.hint) && (
         <p className="question-eyebrow">
           {eyebrow.header && <span id={headerId}>{eyebrow.header}</span>}
           {eyebrow.hint && <span>{eyebrow.hint}</span>}
@@ -895,13 +910,13 @@ export function SessionQuestionBanner({
           {titleExpanded ? QUESTION_CARD_COPY.showLess : QUESTION_CARD_COPY.showFullQuestion}
         </button>
       )}
-      <div className="request-card-body" ref={stepRef} onFocus={(event) => revealField(event.target)}>
+      {(!compact || recoveryRequired) && <div className="request-card-body" ref={stepRef} onFocus={(event) => revealField(event.target)}>
         {recoveryRequired && (
           <p className="question-recovery" id={recoveryId}>
             {recoveryCanResume ? QUESTION_CARD_COPY.recoveryResume : QUESTION_CARD_COPY.recoveryDismiss}
           </p>
         )}
-        {question && (
+        {question && !compact && (
           <QuestionStep
             key={`${answerKey}:${question.id}`}
             question={question}
@@ -913,7 +928,6 @@ export function SessionQuestionBanner({
               error: `${labelPrefix}-error-${step}`,
               somethingElse: `${labelPrefix}-something-else-${step}`,
             }}
-            responseStyle={responseStyle}
             draft={draftValue(question.id)}
             error={attempted.has(question.id) ? errorFor(question) : undefined}
             disabled={controlsDisabled}
@@ -924,17 +938,17 @@ export function SessionQuestionBanner({
             onText={(value) => updateDraft(question, { kind: "other", value })}
           />
         )}
-      </div>
+      </div>}
       {failure && (
         <Notice tone="danger" compact role="alert"
           details={failure.detail !== QUESTION_CARD_COPY.alreadySending ? failure.detail : undefined}>
           {failure.detail === QUESTION_CARD_COPY.alreadySending ? failure.detail : failureText}
         </Notice>
       )}
-      {(unsupportedQuestionFormat || composerHint || whereAsked?.unavailableReason) && (
+      {(unsupportedQuestionFormat || draftKept || whereAsked?.unavailableReason) && (
         <div className="request-card-reasons">
           {unsupportedQuestionFormat && <p id={unsupportedId}>{QUESTION_CARD_COPY.unsupported}</p>}
-          {composerHint && <p>{QUESTION_CARD_COPY.answerInComposer}</p>}
+          {draftKept && <p>{QUESTION_CARD_COPY.draftKept}</p>}
           {whereAsked?.unavailableReason && <p id={whereAskedId}>{whereAsked.unavailableReason}</p>}
         </div>
       )}
@@ -958,7 +972,7 @@ export function SessionQuestionBanner({
             {showKeyHints && <kbd aria-hidden="true">D</kbd>}
           </BusyButton>
         )}
-        {stepCount > 1 && (
+        {!compact && stepCount > 1 && (
           <span className="question-step-note">
             {questionStepLabel(step, stepCount)}
             <span className="question-step-dots" aria-hidden="true">
@@ -968,12 +982,12 @@ export function SessionQuestionBanner({
             </span>
           </span>
         )}
-        {step > 0 && (
+        {!compact && step > 0 && (
           <button type="button" className="btn" data-session-request-control="back" disabled={busy !== null} onClick={back}>
             {QUESTION_CARD_COPY.back}
           </button>
         )}
-        {!lastStep && (
+        {!compact && !lastStep && (
           <button
             type="button"
             className={navigateOnly ? "btn" : "btn primary"}
@@ -998,6 +1012,20 @@ export function SessionQuestionBanner({
             {submitLabel}
             {keyHints && answerable && <kbd aria-hidden="true">Enter</kbd>}
           </BusyButton>
+        )}
+        {compact && questions.length > 0 && !recoveryRequiresDismiss && (
+          // R opens Answer Mode too (the session's Reply key); its keycap shows on fine pointers only.
+          <button
+            type="button"
+            className="btn primary"
+            data-session-request-control="answer"
+            aria-describedby={responseRefusal !== null ? availabilityId : undefined}
+            disabled={busy !== null || responseRefusal !== null}
+            onClick={onAnswer}
+          >
+            {QUESTION_CARD_COPY.answer}
+            {showKeyHints && <kbd aria-hidden="true">R</kbd>}
+          </button>
         )}
         {recoveryRequiresDismiss && (
           <BusyButton

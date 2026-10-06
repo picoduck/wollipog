@@ -76,6 +76,7 @@ export function RequestDock({
   questionsFor,
   whereAsked,
   onAnswerInSession,
+  composerAnswer,
 }: {
   session: SessionView;
   /** In priority order (`prioritizedPendingRequests`), already limited by `dockRequests`. */
@@ -105,6 +106,10 @@ export function RequestDock({
   /** The Sessions preview's dock (#2210): a question is not answered here but in its session, which
    * this opens with the question docked. */
   onAnswerInSession?: (requestId: string) => void;
+  /** The question the composer answers in Composer Response, and how to open Answer Mode for it
+   * (#2212): its card is then compact. While Answer Mode is open the caller leaves it out of
+   * `requests`, so the question shows once. */
+  composerAnswer?: { requestId: string; onAnswer: () => void };
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(() => revealRequestId ?? null);
   const [moreOpen, setMoreOpen] = useState(false);
@@ -361,6 +366,7 @@ export function RequestDock({
             keyboardOpen={keyboardOpen}
             intentRef={intentRef}
             topRequest={expanded === requests[0]}
+            onAnswer={composerAnswer?.requestId === expanded.requestId ? composerAnswer.onAnswer : undefined}
             whereAsked={whereAsked && {
               // As reading back does: the dock shrinks to its strip once the reader is far enough
               // from the tail, even if the person expanded it since leaving.
