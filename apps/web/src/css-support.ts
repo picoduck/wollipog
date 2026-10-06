@@ -210,7 +210,7 @@ export const CSS_SURFACE = {
   "scrollbar-width", "src", "stroke", "stroke-linecap", "stroke-width", "table-layout", "text-align",
   "text-decoration", "text-overflow", "text-transform", "top",
   "touch-action", "transform", "transform-origin", "transition", "transition-duration", "transition-property",
-  "user-select", "vertical-align", "visibility", "white-space", "width", "word-break", "z-index",
+  "user-select", "vertical-align", "visibility", "white-space", "width", "word-break", "writing-mode", "z-index",
   ],
   /** Pseudo-classes and pseudo-elements, without their leading colons. */
   pseudos: [

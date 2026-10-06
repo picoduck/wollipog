@@ -3313,6 +3313,16 @@ textarea {
   align-self: center;
 }
 .board:not(.is-dragging) .column.is-empty > .column-body { display: none; }
+@media (max-width: 760px) {
+  /* A phone's columns are swipeable pages, but an empty one is still a strip, and opens to a page
+     while a card is dragged. */
+  .board .column.is-empty { flex: 0 0 var(--space-10); }
+  .board.is-dragging .column.is-empty { flex: 0 0 84vw; }
+  /* The tools row is the search's own row on a phone (#2082); in Board mode it shares it with
+     Filters and the count, so it takes what they leave instead of the full width. */
+  .tabs-tools:has(> .board-filter) { min-width: 0; }
+  .tabs-tools:has(> .board-filter) > .inbox-search { flex: 1 1 0; width: auto; }
+}
 .column-body {
   flex: 1;
   overflow-y: auto;

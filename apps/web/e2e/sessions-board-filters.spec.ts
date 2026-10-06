@@ -143,3 +143,29 @@ test.describe("at 940×700", () => {
     expect(fit.clear).toBe(true);
   });
 });
+
+test.describe("on a 390×844 phone", () => {
+  test.use({ viewport: { width: 390, height: 844 } });
+
+  test("search shares the tools row with Filters, and an empty column is still a strip", async ({ page }) => {
+    await openBoard(page);
+    const inside = () => page.locator(".tabs-tools").evaluate((tools) => {
+      const row = tools.getBoundingClientRect();
+      // The visible controls; the row's polite live region is visually hidden.
+      return [...tools.children].filter((child) => !child.classList.contains("sr-only")).every((child) => {
+        const box = child.getBoundingClientRect();
+        return box.left >= row.left - 0.5 && box.right <= Math.min(row.right, innerWidth) + 0.5;
+      });
+    });
+    expect(await inside(), "Filters and search fit the row unfiltered").toBe(true);
+    expect((await page.locator(".inbox-search").boundingBox())!.width).toBeGreaterThanOrEqual(160);
+    expect((await page.locator(".column.col-done").boundingBox())!.width).toBe(40);
+
+    await page.locator(".tabs-tools").getByRole("button", { name: "Filters", exact: true }).click();
+    await page.getByRole("menu", { name: "Filters" }).getByRole("group", { name: "Studio Mac" })
+      .getByRole("menuitemradio", { name: "Claude Code" }).click();
+    await expect(page.locator(".tabs-tools .board-filter-note")).toHaveText("10 of 29");
+    expect(await inside(), "and with a filter and its count").toBe(true);
+    expect((await page.locator(".column.col-queued").boundingBox())!.width).toBe(40);
+  });
+});

@@ -13,6 +13,7 @@ import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-t
 import { Board } from "./Board.js";
 import { BoardFilterTools, boardFiltersButtonName, filterBoardSessions } from "./BoardFilters.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
 /**
@@ -164,8 +165,8 @@ test("the Agent menu groups agents by machine and disables an unavailable one wi
   await setViewport(1440, 900);
   const { unmount } = await mount();
   // No native select anywhere, and no toolbar above the columns.
-  assert.equal(body().querySelector("select"), null);
-  assert.equal(body().querySelector(".board-wrap > .toolbar"), null);
+  assertNoDomNode(body().querySelector("select"));
+  assertNoDomNode(body().querySelector(".board-wrap > .toolbar"));
   assert.equal(trigger("machine")?.textContent, "All Machines");
   assert.equal(trigger("agent")?.textContent, "All Agents");
   assert.equal(trigger("agent")?.getAttribute("aria-pressed"), "false");
@@ -199,12 +200,12 @@ test("the Agent menu groups agents by machine and disables an unavailable one wi
 test("a set Agent names itself on its button, shows the count and Clear, and Clear resets both", async () => {
   await setViewport(1440, 900);
   const { unmount } = await mount();
-  assert.equal(tools().querySelector(".board-filter-note"), null, "no note while nothing is filtered");
+  assertNoDomNode(tools().querySelector(".board-filter-note"), "no note while nothing is filtered");
   assert.equal(rowNamed(tools(), "Clear"), undefined);
 
   await click(trigger("agent"));
   await click(rowNamed(menu()!, "Claude Code"));
-  assert.equal(menu(), null, "choosing closes the menu");
+  assertNoDomNode(menu(), "choosing closes the menu");
   assert.equal(trigger("agent")?.textContent, "Claude Code");
   assert.equal(trigger("agent")?.getAttribute("aria-pressed"), "true");
   assert.equal(tools().querySelector(".board-filter-note")?.textContent, "1 of 3");
@@ -226,7 +227,7 @@ test("a set Agent names itself on its button, shows the count and Clear, and Cle
   assert.equal(trigger("machine")?.getAttribute("aria-pressed"), "false");
   assert.equal(trigger("agent")?.getAttribute("aria-pressed"), "false");
   assert.equal(trigger("agent")?.textContent, "All Agents");
-  assert.equal(tools().querySelector(".board-filter-note"), null);
+  assertNoDomNode(tools().querySelector(".board-filter-note"));
   assert.equal(body().querySelector(".column.col-running .count")?.textContent, "3");
   await unmount();
 });
@@ -234,8 +235,8 @@ test("a set Agent names itself on its button, shows the count and Clear, and Cle
 test("the compact tier folds both filters into one Filters menu named by its count", async () => {
   await setViewport(940, 700);
   const { unmount } = await mount();
-  assert.equal(trigger("machine"), null);
-  assert.equal(trigger("agent"), null);
+  assertNoDomNode(trigger("machine"));
+  assertNoDomNode(trigger("agent"));
   const filters = trigger("both")!;
   assert.equal(filters.getAttribute("aria-label"), "Filters");
   assert.equal(filters.getAttribute("aria-pressed"), "false");
@@ -261,7 +262,7 @@ test("the compact tier folds both filters into one Filters menu named by its cou
   await setViewport(1100, 800);
   assert.ok(trigger("machine"));
   assert.ok(trigger("agent"));
-  assert.equal(trigger("both"), null);
+  assertNoDomNode(trigger("both"));
   await unmount();
 });
 
