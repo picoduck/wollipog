@@ -113,11 +113,34 @@ fi
 PATH="$TEST_ORIGINAL_PATH"; export PATH
 exec ln "$@"
 `);
+  if (!options.omitCmp) executable(join(fakeBin, "cmp"), `
+case "$TEST_FAULT" in compare-error) exit 2 ;; compare-unavailable) exit 127 ;; esac
+PATH="$TEST_ORIGINAL_PATH"; export PATH
+exec cmp "$@"
+`);
+  // A restricted PATH models an actually absent cmp, not a failing replacement.
+  // Keep curl/gh fixture-owned so the installer cannot reach ambient credentials or network.
+  if (options.omitCmp) {
+    for (const command of ["awk", "basename", "cat", "chmod", "cp", "cut", "dirname", "grep", "head", "mkdir",
+      "mktemp", "rm", "rmdir", "sed", "sh"]) {
+      const found = spawnSync("sh", ["-c", 'command -v "$1"', "fixture-tool", command], { encoding: "utf8" });
+      assert.equal(found.status, 0, `required fixture utility: ${command}`);
+      symlinkSync(found.stdout.trim(), join(fakeBin, command));
+    }
+    const hashTool = spawnSync("sh", ["-c", "command -v sha256sum || command -v shasum"], { encoding: "utf8" });
+    assert.equal(hashTool.status, 0, "required fixture SHA-256 utility");
+    const hashPath = hashTool.stdout.trim();
+    symlinkSync(hashPath, join(fakeBin, hashPath.endsWith("sha256sum") ? "sha256sum" : "shasum"));
+    const cmpLookup = spawnSync("sh", ["-c", "command -v cmp"], { env: { PATH: fakeBin }, encoding: "utf8" });
+    assert.equal(cmpLookup.error, undefined);
+    assert.ok(cmpLookup.status === 1 || cmpLookup.status === 127, "cmp is absent from the fixture PATH");
+    assert.equal(cmpLookup.stdout, "");
+  }
   let fault = "";
   const run = (...args) => spawnSync("sh", ["-c", 'umask 022\nexec sh "$@"', "installer-test", installer, ...args], {
     encoding: "utf8",
     env: {
-      PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+      PATH: options.omitCmp ? fakeBin : `${fakeBin}:${process.env.PATH ?? ""}`,
       HOME: home,
       LC_ALL: "C",
       TEST_RELEASE_JSON: join(root, "release.json"),
@@ -175,6 +198,71 @@ function snapshot(path) {
 function namespace(h) {
   return [siblingWeb(h), siblingWeb(h) + ".previous", layoutMarker(h)].map(snapshot);
 }
+
+posixTest("headless installer diagnoses missing cmp before publication and preserves installed state", async (t) => {
+  for (const layout of ["fresh", "owned"]) await t.test(layout, (t) => {
+    const h = harness({ omitCmp: true });
+    t.after(() => rmSync(h.root, { recursive: true, force: true }));
+    const bin = join(h.home, ".local", "bin");
+    mkdirSync(bin, { recursive: true });
+    if (layout === "owned") {
+      for (const name of ["wollipog-runner", "agent-manager-runner", "wollipog", "wollipog-control-plane"]) {
+        writeFileSync(join(bin, name), `existing ${name} bytes`);
+        chmodSync(join(bin, name), 0o755); // Inert bytes, never executed.
+      }
+      for (const name of ["web", "web.previous"]) {
+        mkdirSync(join(bin, name));
+        writeFileSync(join(bin, name, "index.html"), `existing ${name} bytes`);
+      }
+      writeFileSync(layoutMarker(h), markerBytes);
+      const data = join(h.home, ".local", "share", "wollipog");
+      const config = join(h.home, ".config", "wollipog");
+      mkdirSync(join(data, "control-plane"), { recursive: true, mode: 0o700 });
+      mkdirSync(join(data, "runner"));
+      mkdirSync(config, { recursive: true, mode: 0o700 });
+      for (const [path, bytes] of [
+        [join(data, "control-plane", "control-plane.db"), "inert database sentinel"],
+        [join(data, "control-plane", "artifact"), "inert artifact sentinel"],
+        [join(data, "runner", "state"), "inert runner state sentinel"],
+        [join(config, "control-plane.env"), "inert existing environment sentinel"],
+        [join(config, "runner.config.json"), "inert existing config sentinel"],
+        [join(config, "runner.token"), "inert credential sentinel"],
+      ]) writeFileSync(path, bytes, { mode: 0o600 });
+    }
+    const before = snapshot(h.home);
+    const result = h.run("--control-plane");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Missing required tool: cmp; cannot validate dashboard layout markers/u);
+    assert.doesNotMatch(result.stderr, /invalid dashboard layout marker|not found/u);
+    assert.doesNotMatch(result.stdout, /Downloading/u);
+    assert.deepEqual(snapshot(h.home), before, "no publication, scratch, adoption or installed-state changes");
+  });
+});
+
+posixTest("runner-only installation does not require cmp", (t) => {
+  const h = harness({ omitCmp: true });
+  t.after(() => rmSync(h.root, { recursive: true, force: true }));
+  const result = h.run();
+  assert.equal(result.status, 0, result.stderr + result.stdout);
+  assert.equal(readFileSync(join(h.home, ".local", "bin", "wollipog-runner"), "utf8"), "runner bytes\n");
+  assert.ok(existsSync(join(h.home, ".config", "wollipog", "runner.config.json")));
+  assert.equal(existsSync(layoutMarker(h)), false);
+});
+
+posixTest("headless marker comparison errors refuse without publication or installed-state changes", async (t) => {
+  for (const fault of ["compare-error", "compare-unavailable"]) await t.test(fault, (t) => {
+    const h = harness();
+    t.after(() => rmSync(h.root, { recursive: true, force: true }));
+    assert.equal(h.run("--control-plane").status, 0);
+    const before = snapshot(h.home);
+    h.setFault(fault);
+    const result = h.run("--control-plane");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Refusing an invalid dashboard layout marker/u);
+    assert.doesNotMatch(result.stdout, /Downloading/u);
+    assert.deepEqual(snapshot(h.home), before);
+  });
+});
 
 posixTest("fresh headless root creates supported missing share ancestors without changing the existing home", (t) => {
   const h = harness();
@@ -304,7 +392,7 @@ posixTest("headless sibling bundle durable provenance survives two modeled relea
 
 posixTest("headless sibling bundle refuses arbitrary namespace, provenance and lock collisions without adoption or cleanup", async (t) => {
   const cases = ["current", "previous", "current-link", "previous-link", "marker-link", "malformed-marker",
-    "extra-newline-marker", "owned-current-file", "owned-previous-no-index", "owned-current-link", "owned-previous-link",
+    "extra-newline-marker", "missing-newline-marker", "marker-directory", "owned-current-file", "owned-previous-no-index", "owned-current-link", "owned-previous-link",
     "current-dangling-link", "previous-dangling-link", "marker-dangling-link", "lock"];
   for (const kind of cases) await t.test(kind, (t) => {
     if (process.platform === "win32" && kind.includes("link")) { t.skip("fixture symlinks require native POSIX permissions"); return; }
@@ -323,7 +411,9 @@ posixTest("headless sibling bundle refuses arbitrary namespace, provenance and l
     else if (kind.includes("link")) {
       const path = kind.startsWith("marker-") ? layoutMarker(h) : siblingWeb(h) + (kind.includes("previous") ? ".previous" : "");
       symlinkSync(kind.includes("dangling") ? join(target, "absent") : target, path, "dir");
-    } else if (kind.includes("marker")) writeFileSync(layoutMarker(h), kind === "extra-newline-marker" ? markerBytes + "\n" : "foreign marker\n");
+    } else if (kind === "marker-directory") mkdirSync(layoutMarker(h));
+    else if (kind.includes("marker")) writeFileSync(layoutMarker(h), kind === "extra-newline-marker" ? markerBytes + "\n"
+      : kind === "missing-newline-marker" ? markerBytes.trimEnd() : "foreign marker\n");
     else mkdirSync(join(bin, ".wollipog-web-install.lock"));
     const before = snapshot(h.home), targetBefore = snapshot(target);
     const result = h.run("--control-plane");

@@ -229,6 +229,10 @@ if [ "$with_control_plane" -eq 1 ]; then
   for headless_asset in "$control_plane_asset" "$web_asset"; do
     [ -n "$(headless_record "$headless_asset")" ] || { echo "Release $release_tag has no $headless_asset; update to a release that publishes headless assets." >&2; exit 1; }
   done
+  command -v cmp >/dev/null 2>&1 || {
+    echo "Missing required tool: cmp; cannot validate dashboard layout markers. Install cmp and rerun this installer; nothing was adopted or repaired." >&2
+    exit 1
+  }
   sibling_web="$bindir/web"
   web_marker="$bindir/.wollipog-web-layout-v1"
   web_lock_candidate="$bindir/.wollipog-web-install.lock"
