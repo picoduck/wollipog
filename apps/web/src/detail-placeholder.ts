@@ -31,13 +31,6 @@ export interface RoutedSessionLookup {
   error: string | null;
 }
 
-export function shouldLookupRoutedSession(hasSession: boolean, conn: ConnState): boolean {
-  // A fail-closed 404 intentionally does not distinguish missing from unauthorized. Wait until
-  // the authenticated UI socket proves this device is paired before treating that reply as an
-  // authoritative routed-resource miss.
-  return !hasSession && conn === "online";
-}
-
 export function shouldHydrateRoutedSession(
   session: { archived?: boolean } | undefined,
   snapshotRevision: number,

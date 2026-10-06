@@ -55,12 +55,6 @@ export function bufferSourceToUrlBase64(buf: ArrayBuffer | ArrayBufferView): str
   return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-/** The `#open=<sessionId>` deep-link fragment a notification click lands on. Pure — tested. */
-export function parseOpenFragment(hash: string): string | null {
-  const m = /^#open=([A-Za-z0-9_-]{1,64})$/.exec(hash);
-  return m ? m[1]! : null;
-}
-
 async function registration(): Promise<ServiceWorkerRegistration | null> {
   // getRegistration (not .ready): where pwa.ts deliberately never registered (Tauri shell),
   // .ready would await forever and wedge the toggle.

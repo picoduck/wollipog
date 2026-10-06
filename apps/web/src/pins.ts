@@ -29,13 +29,6 @@ export function saveKeySet(key: string, set: ReadonlySet<string>, instanceScope 
   }
 }
 
-/** Drop ids from a persisted set (no-op when none are present). Sessions are pinned by id, so a
- * DELETED session's pin must be cleaned here — archive intentionally keeps the pin, so a later
- * unarchive restores the session to the top of its group. */
-export function removeFromKeySet(key: string, ...ids: string[]): void {
-  removeFromInstanceKeySet(key, LOCAL_INSTANCE_SCOPE, ...ids);
-}
-
 export function removeFromInstanceKeySet(key: string, instanceScope: string, ...ids: string[]): void {
   const set = loadKeySet(key, instanceScope);
   let changed = false;

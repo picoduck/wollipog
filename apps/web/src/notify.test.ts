@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { SessionView } from "@wollipog/protocol";
 import {
-  backgroundDeliveryNotifyDecision,
   backgroundDeliveryNotifyDecisions,
   Notifier,
   notifyDecision,
@@ -143,17 +142,17 @@ test("unobserved background delivery notifies on first snapshot and deduplicates
       watchdogState: "dashboard_observation_pending",
     }],
   });
-  assert.deepEqual(backgroundDeliveryNotifyDecision(undefined, next), {
+  assert.deepEqual(backgroundDeliveryNotifyDecisions(undefined, next), [{
     title: "Research resumed background work",
     body: "The parent workflow delivered its result.",
     sessionId: next.id,
     notificationId: "bgcont-1",
-  });
-  assert.equal(backgroundDeliveryNotifyDecision(next, next), null);
-  assert.equal(backgroundDeliveryNotifyDecision(undefined, {
+  }]);
+  assert.deepEqual(backgroundDeliveryNotifyDecisions(next, next), []);
+  assert.deepEqual(backgroundDeliveryNotifyDecisions(undefined, {
     ...next,
     backgroundDeliveries: [{ ...next.backgroundDeliveries![0]!, dashboardObservedAt: 101 }],
-  }), null);
+  }), []);
 
   const second = {
     ...next.backgroundDeliveries![0]!,

@@ -3,12 +3,10 @@ import { test } from "node:test";
 import type { SessionStatus, SessionView } from "@wollipog/protocol";
 import { statusMeta } from "./status-meta.js";
 import {
-  ARCHIVE_PAGE_SIZE,
   canonicalLifecycleLabel,
   lifecycleSearchLabels,
   filterArchiveSessions,
   mergeArchiveSessionCatalog,
-  pageArchiveSessions,
   SESSION_LIFECYCLE_STATES,
   sessionArchiveSearchDetail,
   type ArchiveBrowserFilters,
@@ -198,7 +196,7 @@ test("transcript matches extend metadata search without bypassing the other filt
   }).map((item) => item.id), ["archived"]);
 });
 
-test("large archives have deterministic ordering and complete pagination", () => {
+test("large archives have deterministic ordering", () => {
   const sessions = Array.from({ length: 125 }, (_, index) => session({
     id: `session-${String(index).padStart(3, "0")}`,
     updatedAt: index < 2 ? 999 : index,
@@ -206,12 +204,6 @@ test("large archives have deterministic ordering and complete pagination", () =>
   const filtered = filterArchiveSessions({ sessions, filters: defaults });
   assert.deepEqual(filtered.slice(0, 2).map((item) => item.id), ["session-000", "session-001"],
     "stable id ordering breaks equal-time ties");
-  const first = pageArchiveSessions(filtered, 1);
-  const last = pageArchiveSessions(filtered, 99);
-  assert.equal(first.sessions.length, ARCHIVE_PAGE_SIZE);
-  assert.equal(last.page, 3, "out-of-range deep state clamps to the last real page");
-  assert.equal(last.sessions.length, 25);
-  assert.equal(new Set([...first.sessions, ...pageArchiveSessions(filtered, 2).sessions, ...last.sessions]).size, 125);
 });
 
 test("multi-client upserts replace catalog rows without duplicating them", () => {

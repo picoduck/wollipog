@@ -38,15 +38,6 @@ export function supportsAgentTui(
   );
 }
 
-export function supportsInitialNativeTui(
-  driver: AgentDriverKind | undefined,
-  protocolVersion: number | null | undefined,
-  os: OS | undefined,
-): boolean {
-  return supportsAgentTui(driver, protocolVersion, os) &&
-    runnerSupportsProtocol(protocolVersion, "sessionStartFencedShells");
-}
-
 /** Current catalog context is the narrowest available truth for an existing session. Ordinary WSL
  * TUI remains supported, but Orchestrator TUI must be hidden unless its agent is provably native;
  * the runner remains authoritative if catalog state changes between render and open. */
@@ -199,16 +190,4 @@ export function exitedShellsWithoutTabs(
     .filter(([shellId, scrollback]) =>
       scrollback.sessionId === sessionId && scrollback.exited && !tabIds.has(shellId))
     .map(([shellId]) => shellId);
-}
-
-/** Append a raw chunk, trimming the FRONT to the cap on a line boundary when possible so a
- * replayed buffer rarely starts mid-line (a mid-escape start after a trim is harmless — xterm
- * skates over malformed sequences). */
-export function appendScrollback(existing: string, chunk: string, cap = SHELL_SCROLLBACK_CAP): string {
-  let next = existing + chunk;
-  if (next.length <= cap) return next;
-  next = next.slice(next.length - cap);
-  const nl = next.indexOf("\n");
-  // Drop the partial first line unless the whole buffer is one line.
-  return nl >= 0 && nl < next.length - 1 ? next.slice(nl + 1) : next;
 }

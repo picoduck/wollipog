@@ -1,13 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { requestTranscriptDownload, transcriptExportRequest, type TranscriptDownloadDependencies } from "./transcript-download.js";
-
-test("transcript export request keeps the paired token in Authorization, never the URL", () => {
-  const request = transcriptExportRequest("http://manager", "session/id", "markdown", "paired-secret");
-  assert.equal(request.url, "http://manager/api/sessions/session%2Fid/export?format=markdown");
-  assert.equal(request.url.includes("paired-secret"), false);
-  assert.deepEqual(request.init.headers, { authorization: "Bearer paired-secret" });
-});
+import { requestTranscriptDownload, type TranscriptDownloadDependencies } from "./transcript-download.js";
 
 test("transcript download uses a temporary Blob URL and delayed revocation", () => {
   const calls: string[] = [];

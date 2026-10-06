@@ -11,7 +11,6 @@ import {
   composerCommandsInPickerOrder,
   composerCommandsIncludeSkills,
   findComposerCommandTrigger,
-  groupComposerCommands,
   groupRankedComposerCommands,
   mapProviderComposerCommands,
   rankComposerCommands,
@@ -543,29 +542,12 @@ test("available commands rank ahead of unavailable commands at the same match sc
   assert.equal(ranked.find(({ command: candidate }) => candidate.id === "app:plan")?.command.available, false);
 });
 
-test("grouping and active-id retention preserve stable ranked selection", () => {
+test("active-id retention preserves stable ranked selection", () => {
   const commands = registry([
     { name: "review", providerSource: "builtin" },
     { name: "deploy", providerSource: "plugin", available: false },
   ], { planSupported: false, canStopTurn: false });
   const ranked = rankComposerCommands(commands, "").map(({ command: candidate }) => candidate);
-  assert.deepEqual(
-    groupComposerCommands(ranked).map(({ id, label, order, commands: grouped }) => ({
-      id,
-      label,
-      order,
-      commands: grouped.map((candidate) => candidate.id),
-    })),
-    [
-      { id: "app", label: "Wollipog", order: 0, commands: ["app:rename-session", "app:plan", "app:respond", "app:stop"] },
-      {
-        id: "provider",
-        label: "Agent",
-        order: 1,
-        commands: ["provider:builtin:review", "provider:plugin:deploy"],
-      },
-    ],
-  );
   assert.equal(retainActiveComposerCommandId("provider:builtin:review", ranked), "provider:builtin:review");
   assert.equal(retainActiveComposerCommandId("provider:plugin:deploy", ranked), "app:rename-session",
     "an unavailable row is never active: its reason is already visible on its row");

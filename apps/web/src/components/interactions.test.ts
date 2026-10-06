@@ -5,7 +5,6 @@ import {
   isRovingChoiceTarget,
   rovingChoiceIndex,
   rovingChoiceTabIndex,
-  shouldHandleGlobalEscape,
 } from "./interactions.js";
 
 test("anchored menus remain usable in short scaled browser panes", () => {
@@ -77,10 +76,4 @@ test("a roving group keeps a first tab stop when its selected value is external"
   assert.equal(rovingChoiceTabIndex(false, false, 0), 0);
   assert.equal(rovingChoiceTabIndex(false, false, 1), -1);
   assert.equal(rovingChoiceTabIndex(true, true, 1), 0);
-});
-
-test("nested controls can claim Escape before the global layer dismisses", () => {
-  assert.equal(shouldHandleGlobalEscape("Escape", false), true);
-  assert.equal(shouldHandleGlobalEscape("Escape", true), false);
-  assert.equal(shouldHandleGlobalEscape("Enter", false), false);
 });

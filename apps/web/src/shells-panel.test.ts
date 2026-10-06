@@ -3,7 +3,6 @@ import { test } from "node:test";
 import {
   SHELL_INPUT_CHUNK_UNITS,
   appendOrderedShellChunk,
-  appendScrollback,
   exitedShellsWithoutTabs,
   markShellScrollbacksIncomplete,
   mergeShellChunks,
@@ -12,7 +11,6 @@ import {
   shellsVisibleAfterClose,
   splitShellInput,
   supportsAgentTui,
-  supportsInitialNativeTui,
   supportsSessionAgentTui,
   sessionHasHookGovernance,
   type ShellScrollback,
@@ -46,13 +44,6 @@ test("agent TUI affordance requires a supported provider and v58 runner", () => 
   assert.equal(supportsAgentTui(undefined, 58, "windows"), false);
 });
 
-test("initial Native TUI launch requires the v67 session-start fence", () => {
-  assert.equal(supportsInitialNativeTui("claude-code", 67, "windows"), true);
-  assert.equal(supportsInitialNativeTui("codex-app-server", 67, "linux"), true);
-  assert.equal(supportsInitialNativeTui("claude-code", 66, "windows"), false);
-  assert.equal(supportsAgentTui("claude-code", 66, "windows"), true, "manual attach remains on v58");
-});
-
 test("Native TUI governance copy uses session-scoped post-create hook truth", () => {
   assert.equal(sessionHasHookGovernance(undefined), false);
   assert.equal(sessionHasHookGovernance({ elicitation: { acceptEdits: ["hook"] } }), true);
@@ -70,17 +61,6 @@ test("splitShellInput never splits a surrogate pair", () => {
     assert.ok(!(first >= 0xdc00 && first <= 0xdfff), "no chunk starts with a lone low surrogate");
     assert.ok(!(last >= 0xd800 && last <= 0xdbff), "no chunk ends with a lone high surrogate");
   }
-});
-
-test("appendScrollback grows freely under the cap and front-trims on line boundaries over it", () => {
-  assert.equal(appendScrollback("a\n", "b\n", 100), "a\nb\n");
-  const big = appendScrollback("x".repeat(90) + "\n", "y".repeat(20) + "\n", 100);
-  assert.ok(big.length <= 100);
-  assert.ok(big.endsWith("y".repeat(20) + "\n"), "newest output kept");
-  assert.ok(!big.startsWith("x") || big.indexOf("\n") === big.length - 1, "front partial line dropped");
-  // single giant line: cap still enforced even without a newline to trim at
-  const oneLine = appendScrollback("", "z".repeat(500), 100);
-  assert.equal(oneLine.length, 100);
 });
 
 test("slow-client recovery marks retained ephemeral shell tails as incomplete without mutating them", () => {

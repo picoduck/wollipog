@@ -1,16 +1,17 @@
 import assert from "node:assert/strict";
 import { beforeEach, test } from "node:test";
-import { loadKeySet, removeFromInstanceKeySet, removeFromKeySet, saveKeySet } from "./pins.js";
+import { loadKeySet, removeFromInstanceKeySet, saveKeySet } from "./pins.js";
 
 // node has no localStorage — shim the three methods the helpers use.
 const backing = new Map<string, string>();
+let writes = 0;
 (globalThis as { localStorage?: unknown }).localStorage = {
   getItem: (k: string) => backing.get(k) ?? null,
-  setItem: (k: string, v: string) => void backing.set(k, v),
+  setItem: (k: string, v: string) => void (writes++, backing.set(k, v)),
   removeItem: (k: string) => void backing.delete(k),
 };
 
-beforeEach(() => backing.clear());
+beforeEach(() => { backing.clear(); writes = 0; });
 
 test("loadKeySet/saveKeySet round-trip a set", () => {
   saveKeySet("k", new Set(["a", "b"]));
@@ -23,17 +24,17 @@ test("loadKeySet: missing key and corrupt JSON both degrade to an empty set", ()
   assert.equal(loadKeySet("bad").size, 0);
 });
 
-test("removeFromKeySet drops only the named ids and persists", () => {
+test("removeFromInstanceKeySet drops only the named ids and persists", () => {
   saveKeySet("k", new Set(["a", "b", "c"]));
-  removeFromKeySet("k", "b", "nope");
+  removeFromInstanceKeySet("k", "local", "b", "nope");
   assert.deepEqual([...loadKeySet("k")].sort(), ["a", "c"]);
 });
 
-test("removeFromKeySet is a no-op write when nothing matched", () => {
+test("removeFromInstanceKeySet is a no-op write when nothing matched", () => {
   saveKeySet("k", new Set(["a"]));
-  const before = backing.get("k");
-  removeFromKeySet("k", "zzz");
-  assert.equal(backing.get("k"), before);
+  const before = writes;
+  removeFromInstanceKeySet("k", "local", "zzz");
+  assert.equal(writes, before, "no storage write when no id matched");
 });
 
 test("identical pins remain isolated and removable within one instance", () => {

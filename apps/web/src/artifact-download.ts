@@ -1,20 +1,5 @@
 import type { WorkflowArtifactKind } from "@wollipog/protocol";
 
-export function artifactExportRequest(
-  baseUrl: string,
-  artifactId: string,
-  token: string | null,
-): { url: string; init: RequestInit } {
-  return {
-    url: `${baseUrl}/api/artifacts/${encodeURIComponent(artifactId)}/export`,
-    init: {
-      method: "GET",
-      cache: "no-store",
-      headers: token ? { authorization: `Bearer ${token}` } : undefined,
-    },
-  };
-}
-
 /** Never let an agent-authored display name choose an executable download extension. */
 export function artifactDownloadFilename(kind: WorkflowArtifactKind, mimeType: string): string {
   const extension = kind === "screenshot"

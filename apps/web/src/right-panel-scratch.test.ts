@@ -11,7 +11,6 @@ import {
   panelScratchScopeCount,
   panelScratchScopeKey,
   readPanelScratch,
-  restorePanelScratch,
   writePanelScratch,
 } from "./right-panel-scratch.js";
 
@@ -135,24 +134,6 @@ test("a consumed draft is cleared only while it is still the one that was consum
   // Clearing what was never stored is the ordinary case for a body holding its default.
   clearPanelScratchIf(scope, "sidechat.draft", "", panelScratchRevision(scope, "sidechat.draft"));
   assert.equal(readPanelScratch(scope, "sidechat.draft"), undefined);
-});
-
-test("restore falls back when the stored value is missing or refused", () => {
-  const scope = panelScratchScopeKey("session-1");
-  const known = (raw: string) => raw === "unified" || raw === "split";
-  assert.equal(restorePanelScratch(scope, "review.diffLayout", "unified", known), "unified");
-
-  writePanelScratch(scope, "review.diffLayout", "split");
-  assert.equal(restorePanelScratch(scope, "review.diffLayout", "unified", known), "split");
-
-  // A choice this build (or this session) can no longer honour degrades to the default instead of
-  // wedging the panel on something it cannot render.
-  writePanelScratch(scope, "review.diffLayout", "three-way");
-  assert.equal(restorePanelScratch(scope, "review.diffLayout", "unified", known), "unified");
-
-  // Free text has no closed set: whatever was typed comes back verbatim.
-  writePanelScratch(scope, "review.requestBody", "  half a sentence");
-  assert.equal(restorePanelScratch(scope, "review.requestBody", ""), "  half a sentence");
 });
 
 test("the oldest session's recreatable scratch is evicted rather than growing without bound", () => {
@@ -288,8 +269,7 @@ test("what the panel was holding comes back after a reload", () => {
 
   assert.equal(readPanelScratch(scope, "review.requestBody"), "half a pull request description");
   assert.equal(readPanelScratch(scope, "files.directory"), "apps/web");
-  assert.equal(restorePanelScratch(scope, "browser.mode", "artifacts",
-    (raw) => raw === "artifacts" || raw === "web"), "web");
+  assert.equal(readPanelScratch(scope, "browser.mode"), "web");
   // Another session is still another session: the record is flat, but its entries are not shared.
   assert.equal(readPanelScratch(panelScratchScopeKey("session-2"), "files.directory"), undefined);
   assert.equal(readPanelScratch(panelScratchScopeKey("session-1", "remote-alpha"), "files.directory"),

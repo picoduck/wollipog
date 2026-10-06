@@ -691,10 +691,6 @@ export function parseInboxSplitRatio(raw: string | null | undefined): number {
   return clampInboxSplitRatio(Number(raw));
 }
 
-export function serializeInboxSplitRatio(ratio: number): string {
-  return String(clampInboxSplitRatio(ratio));
-}
-
 /**
  * Whether the Inbox list should restore its saved scroll position for a surface change.
  *

@@ -85,16 +85,6 @@ export function notifyDecision(prev: SessionView | undefined, next: SessionView)
   }
 }
 
-/** A durable background continuation can complete without changing the session status. Unlike
- * ordinary status notifications, an unobserved delivery from the initial snapshot is intentional:
- * reconnect/restart is how a dashboard recovers a notification that was never acknowledged. */
-export function backgroundDeliveryNotifyDecision(
-  prev: SessionView | undefined,
-  next: SessionView,
-): NotifyPayload | null {
-  return backgroundDeliveryNotifyDecisions(prev, next)[0] ?? null;
-}
-
 /** Return one payload per newly visible durable delivery so a reconnect cannot collapse several
  * completed parent continuations into one notification while acknowledging all of them. */
 export function backgroundDeliveryNotifyDecisions(

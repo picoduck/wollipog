@@ -9,7 +9,6 @@ import {
   currentAgentSelectionIssue,
   defaultRunAgentIds,
   firstEnabledAgentId,
-  isAdvancedAgentId,
   primaryAgentOptions,
   runnableAgentIds,
   savedAgentSelection,
@@ -101,8 +100,6 @@ test("ordinary and advanced disclosures separate interactive Codex from exec", (
   ]);
   assert.deepEqual(primaryAgentOptions(opts).map((option) => option.agent.id), ["claude", "codex"]);
   assert.deepEqual(advancedAgentOptions(opts).map((option) => option.agent.id), ["codex-exec"]);
-  assert.equal(isAdvancedAgentId(opts, "codex-exec"), true);
-  assert.equal(isAdvancedAgentId(opts, "codex"), false);
 });
 
 test("fresh selection preserves family order while preferring app-server within Codex", () => {
@@ -124,8 +121,6 @@ test("a disabled primary does not belong to the Advanced disclosure", () => {
     agent({ id: "codex-exec", name: "Codex exec", driver: "codex" }),
   ]);
   assert.equal(savedAgentSelection(opts, "claude").issue, "unavailable");
-  assert.equal(isAdvancedAgentId(opts, "claude"), false);
-  assert.equal(isAdvancedAgentId(opts, "codex-exec"), true);
   assert.equal(currentAgentSelectionIssue(opts, "claude", undefined), "unavailable");
 });
 

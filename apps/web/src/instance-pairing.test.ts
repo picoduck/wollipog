@@ -1,14 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  findRemoteInstanceIdentityDuplicate,
-  findRemoteInstanceOriginDuplicate,
   normalizeRemoteInstanceOrigin,
   parseRemoteInstanceAdvanced,
   parseRemoteInstancePairingLink,
   type InstancePairingErrorCode,
   type InstancePairingResult,
-  type RemoteInstanceReference,
 } from "./instance-pairing.js";
 
 const TOKEN = "k".repeat(20) + "-DEF_" + "x".repeat(18);
@@ -132,21 +129,4 @@ test("IPv4, IPv6, HTTPS, and default ports canonicalize consistently", () => {
     ok: true,
     value: { httpOrigin: "https://[2001:db8::1]", wsOrigin: "wss://[2001:db8::1]", transportSecurity: "tls" },
   });
-});
-
-test("duplicate helpers compare canonical origins and discovered control-plane identity", () => {
-  const instances: RemoteInstanceReference[] = [
-    { id: "local", httpOrigin: "http://localhost:4317", controlPlaneId: "cp-local" },
-    { id: "alpha", httpOrigin: "https://alpha.example", controlPlaneId: "cp-alpha" },
-  ];
-
-  assert.equal(findRemoteInstanceOriginDuplicate("https://ALPHA.example:443/index.html", instances)?.id, "alpha");
-  assert.equal(findRemoteInstanceOriginDuplicate("https://alpha.example", instances, "alpha"), null);
-  assert.equal(findRemoteInstanceOriginDuplicate("https://new.example", instances), null);
-  assert.equal(findRemoteInstanceOriginDuplicate("not a URL", instances), null);
-
-  assert.equal(findRemoteInstanceIdentityDuplicate("cp-alpha", instances)?.id, "alpha");
-  assert.equal(findRemoteInstanceIdentityDuplicate("cp-alpha", instances, "alpha"), null);
-  assert.equal(findRemoteInstanceIdentityDuplicate("cp-new", instances), null);
-  assert.equal(findRemoteInstanceIdentityDuplicate("", instances), null);
 });

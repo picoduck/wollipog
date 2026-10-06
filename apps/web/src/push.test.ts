@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { bufferSourceToUrlBase64, parseOpenFragment, urlBase64ToUint8Array } from "./push.js";
+import { bufferSourceToUrlBase64, urlBase64ToUint8Array } from "./push.js";
 
 test("urlBase64ToUint8Array round-trips base64url of every byte value", () => {
   const bytes = new Uint8Array(256).map((_, i) => i);
@@ -24,13 +24,4 @@ test("bufferSourceToUrlBase64 inverts urlBase64ToUint8Array (VAPID key compariso
   const padded = new Uint8Array(100);
   padded.set(key, 10);
   assert.equal(bufferSourceToUrlBase64(new Uint8Array(padded.buffer, 10, 65)), b64);
-});
-
-test("parseOpenFragment accepts only a clean #open=<sessionId> fragment", () => {
-  assert.equal(parseOpenFragment("#open=s_abc123"), "s_abc123");
-  assert.equal(parseOpenFragment(""), null);
-  assert.equal(parseOpenFragment("#open="), null);
-  assert.equal(parseOpenFragment("#pair=tok"), null);
-  assert.equal(parseOpenFragment("#open=s_1&x=2"), null);
-  assert.equal(parseOpenFragment(`#open=${"a".repeat(80)}`), null);
 });

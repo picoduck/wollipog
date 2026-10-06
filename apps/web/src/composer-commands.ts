@@ -94,10 +94,6 @@ export interface ComposerCommandGroupMetadata {
   order: number;
 }
 
-export interface ComposerCommandGroup extends ComposerCommandGroupMetadata {
-  commands: ComposerCommand[];
-}
-
 export interface ComposerCommandTrigger {
   /** Inclusive start of the slash token. */
   start: number;
@@ -742,13 +738,6 @@ export function rankComposerCommands(
     || groupOrder(left.command) - groupOrder(right.command)
     || left.command.name.localeCompare(right.command.name)
     || left.command.id.localeCompare(right.command.id));
-}
-
-export function groupComposerCommands(commands: readonly ComposerCommand[]): ComposerCommandGroup[] {
-  return COMPOSER_COMMAND_GROUPS.flatMap((metadata) => {
-    const grouped = commands.filter((command) => command.groupId === metadata.id);
-    return grouped.length ? [{ ...metadata, commands: grouped }] : [];
-  });
 }
 
 /**

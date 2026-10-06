@@ -200,10 +200,6 @@ export function rovingChoiceStop(
   return enabled >= 0 ? enabled : 0;
 }
 
-export function shouldHandleGlobalEscape(key: string, defaultPrevented: boolean): boolean {
-  return key === "Escape" && !defaultPrevented;
-}
-
 /** Resolve a wrapped roving-focus move while skipping unavailable choices. */
 export function rovingChoiceIndex(
   current: number,

@@ -5,7 +5,6 @@ import {
   listPlaceholder,
   routedSessionPlaceholder,
   shouldHydrateRoutedSession,
-  shouldLookupRoutedSession,
 } from "./detail-placeholder.js";
 
 const RESOURCES = ["Session", "Run", "Pod"] as const;
@@ -103,14 +102,6 @@ test("after the first snapshot, a reconnect attempt is Waiting to Reconnect, not
   assert.equal(routedSessionPlaceholder("session-a", missed, "connecting", true).title, "Waiting to Reconnect",
     "a retry never vouches for Not Found");
   assert.equal(routedSessionPlaceholder("session-a", missed, "online", true).title, "Session Not Found");
-});
-
-test("archived lookup retries as connection state recovers", () => {
-  assert.equal(shouldLookupRoutedSession(false, "unauthorized"), false);
-  assert.equal(shouldLookupRoutedSession(false, "offline"), false);
-  assert.equal(shouldLookupRoutedSession(false, "connecting"), false);
-  assert.equal(shouldLookupRoutedSession(false, "online"), true);
-  assert.equal(shouldLookupRoutedSession(true, "online"), false);
 });
 
 test("archived revalidation waits for an authenticated online connection", () => {

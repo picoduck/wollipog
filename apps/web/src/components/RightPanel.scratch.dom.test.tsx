@@ -29,6 +29,7 @@ import {
   panelScratchScopeKey,
   readPanelScratch,
   writePanelScratch,
+  usePanelScratchText,
 } from "../right-panel-scratch.js";
 import { ReviewPanel } from "./ReviewPanel.js";
 import { RightPanel, useRightPanelState, type RightPanelState } from "./RightPanel.js";
@@ -947,5 +948,38 @@ test("a commit message consumed before the remounted body's effects run stays sh
   } finally {
     await act(async () => root.unmount());
     container.remove();
+  }
+});
+
+
+test("live scratch text restores valid values and falls back for missing or refused values", async () => {
+  const scope = panelScratchScopeKey("session-1");
+  const accept = (raw: string) => raw === "unified" || raw === "split";
+  const host = domWindow.document.createElement("div");
+  domWindow.document.body.append(host);
+  const root = createRoot(host as unknown as Element);
+  function Scratch({ fallback }: { fallback: string }) {
+    const [choice] = usePanelScratchText(scope, "review.diffLayout", fallback, accept);
+    const [text] = usePanelScratchText(scope, "review.requestBody");
+    return <output>{JSON.stringify({ choice, text })}</output>;
+  }
+  try {
+    for (const stored of [undefined, "split", "three-way"]) {
+      await act(async () => root.render(null));
+      clearPanelScratch();
+      if (stored !== undefined) writePanelScratch(scope, "review.diffLayout", stored);
+      writePanelScratch(scope, "review.requestBody", "  half a sentence");
+      await act(async () => root.render(<Scratch fallback="unified" />));
+      assert.deepEqual(JSON.parse(host.textContent!), {
+        choice: stored === "split" ? "split" : "unified",
+        text: "  half a sentence",
+      });
+      await act(async () => root.render(<Scratch fallback="split" />));
+      assert.equal(JSON.parse(host.textContent!).choice, "split",
+        "missing or refused scratch stays unowned and follows a new fallback");
+    }
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
   }
 });

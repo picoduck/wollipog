@@ -132,10 +132,6 @@ export function advancedAgentOptions(options: AgentOption[]): AgentOption[] {
   return options.filter((option) => option.advanced);
 }
 
-export function isAdvancedAgentId(options: AgentOption[], agentId: string): boolean {
-  return options.some((option) => option.agent.id === agentId && option.advanced);
-}
-
 export type SavedAgentDefaultIssue = "legacy" | "unavailable" | "missing" | "unbound";
 
 function sameContext(a: AgentDefinition, b: AgentDefinition): boolean {

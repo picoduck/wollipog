@@ -911,18 +911,6 @@ export function writePanelScratch(
   persistScope(scope, { key, removed: false });
 }
 
-/** Restore a value, falling back whenever the stored one is missing or the caller rejects it. */
-export function restorePanelScratch<T extends string>(
-  scope: string,
-  key: string,
-  fallback: T,
-  accept?: (raw: string) => boolean,
-): T {
-  const stored = readPanelScratch(scope, key);
-  if (stored === undefined) return fallback;
-  return accept === undefined || accept(stored) ? (stored as T) : fallback;
-}
-
 /**
  * Forget one value only if it is still untouched since `revision` and still reads as `expected`.
  *

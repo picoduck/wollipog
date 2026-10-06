@@ -35,7 +35,6 @@ import {
   repairInboxSelectionForHeldOrder,
   reconcileInboxItems,
   reconcileInboxOrder,
-  serializeInboxSplitRatio,
   shouldRestoreInboxScroll,
   sortInboxSessions,
 } from "./inbox.js";
@@ -621,7 +620,6 @@ test("split ratio parsing clamps values and fails closed to 40 percent", () => {
   assert.equal(parseInboxSplitRatio("0.1"), INBOX_SPLIT_RATIO_MIN);
   assert.equal(parseInboxSplitRatio("0.9"), INBOX_SPLIT_RATIO_MAX);
   assert.equal(clampInboxSplitRatio(0.575), 0.575);
-  assert.equal(serializeInboxSplitRatio(1), String(INBOX_SPLIT_RATIO_MAX));
 });
 
 test("shouldRestoreInboxScroll only restores when collapsing out of the expanded view", () => {

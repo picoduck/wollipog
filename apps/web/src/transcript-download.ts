@@ -6,18 +6,6 @@ export interface TranscriptDownloadDependencies {
   schedule(callback: () => void, delayMs: number): void;
 }
 
-export function transcriptExportRequest(
-  baseUrl: string,
-  sessionId: string,
-  format: "json" | "markdown",
-  token: string | null,
-): { url: string; init: RequestInit } {
-  return {
-    url: `${baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/export?format=${format}`,
-    init: { headers: token ? { authorization: `Bearer ${token}` } : undefined },
-  };
-}
-
 const browserDependencies: TranscriptDownloadDependencies = {
   createObjectUrl: (blob) => URL.createObjectURL(blob),
   revokeObjectUrl: (url) => URL.revokeObjectURL(url),

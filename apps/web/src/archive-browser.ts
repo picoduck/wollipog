@@ -103,18 +103,6 @@ export function filterArchiveSessions(input: {
   }).sort(stableArchiveOrder);
 }
 
-export function pageArchiveSessions(
-  sessions: readonly SessionView[],
-  requestedPage: number,
-  pageSize = ARCHIVE_PAGE_SIZE,
-): { sessions: SessionView[]; page: number; pageCount: number; total: number } {
-  const total = sessions.length;
-  const pageCount = Math.max(1, Math.ceil(total / pageSize));
-  const page = Math.max(1, Math.min(Math.trunc(requestedPage) || 1, pageCount));
-  const start = (page - 1) * pageSize;
-  return { sessions: sessions.slice(start, start + pageSize), page, pageCount, total };
-}
-
 /** Merge websocket upserts into the REST catalog without making ordering depend on arrival order.
  * A mutation's response carries no command permissions, so a row keeps the last verdict it had,
  * as the store does. */

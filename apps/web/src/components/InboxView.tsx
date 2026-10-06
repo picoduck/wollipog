@@ -28,7 +28,7 @@ import {
 } from "../inbox.js";
 import { decideDockedRequest } from "./requests/request-reveal.js";
 import { loadKeySet, saveKeySet, SESSION_PIN_KEY } from "../pins.js";
-import { loadSeen, markSeen, markUnread, saveSeen } from "../sessions-seen.js";
+import { isUnread, loadSeen, markSeen, markUnread, saveSeen } from "../sessions-seen.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { destination, encodeResourceId, type AttentionTarget, type SessionsTab } from "../navigation.js";
@@ -498,7 +498,7 @@ export function InboxView({
     .map((session) => ({
       session,
       projectName: inboxProjectName(session, projectsSupported ? projects : undefined),
-      unread: seen[session.id] != null && session.lastEventAt != null && session.lastEventAt > seen[session.id]!,
+      unread: isUnread(seen, session.id, session.lastEventAt),
       reminder: reminders.get(session.id),
     })), [activeSplit?.sessions, normalizedQuery, projects, projectsSupported, reminders, seen]);
   const liveIds = useMemo(() => liveEntries.map((entry) => entry.session.id), [liveEntries]);

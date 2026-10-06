@@ -212,36 +212,3 @@ export function normalizeRemoteInstanceOrigin(origin: string): InstancePairingRe
   }
   return { ok: true, value: parsed.value.endpoint };
 }
-
-export interface RemoteInstanceReference {
-  id: string;
-  httpOrigin: string;
-  controlPlaneId?: string | null;
-}
-
-/** Find an existing profile for the same canonical endpoint, optionally excluding an edited profile. */
-export function findRemoteInstanceOriginDuplicate(
-  httpOrigin: string,
-  instances: readonly RemoteInstanceReference[],
-  excludeId?: string,
-): RemoteInstanceReference | null {
-  const candidate = normalizeRemoteInstanceOrigin(httpOrigin);
-  if (!candidate.ok) return null;
-  return instances.find((instance) => {
-    if (instance.id === excludeId) return false;
-    const existing = normalizeRemoteInstanceOrigin(instance.httpOrigin);
-    return existing.ok && existing.value.httpOrigin === candidate.value.httpOrigin;
-  }) ?? null;
-}
-
-/** Find an existing profile after discovery proves two endpoints are the same control plane. */
-export function findRemoteInstanceIdentityDuplicate(
-  controlPlaneId: string,
-  instances: readonly RemoteInstanceReference[],
-  excludeId?: string,
-): RemoteInstanceReference | null {
-  if (!controlPlaneId) return null;
-  return instances.find((instance) =>
-    instance.id !== excludeId && instance.controlPlaneId === controlPlaneId
-  ) ?? null;
-}

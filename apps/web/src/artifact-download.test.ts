@@ -1,15 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { artifactDownloadFilename, artifactExportRequest } from "./artifact-download.js";
-
-test("artifact export request keeps the paired token in Authorization and out of the URL", () => {
-  const request = artifactExportRequest("https://manager.example", "artifact/id", "paired-secret");
-  assert.equal(request.url, "https://manager.example/api/artifacts/artifact%2Fid/export");
-  assert.equal(request.url.includes("paired-secret"), false);
-  assert.equal(request.init.method, "GET");
-  assert.equal(request.init.cache, "no-store");
-  assert.deepEqual(request.init.headers, { authorization: "Bearer paired-secret" });
-});
+import { artifactDownloadFilename } from "./artifact-download.js";
 
 test("artifact download filenames are fixed by content kind and never by an agent-authored name", () => {
   assert.equal(artifactDownloadFilename("html_preview", "text/html"), "workflow-artifact-html_preview.html");
