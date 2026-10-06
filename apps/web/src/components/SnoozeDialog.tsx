@@ -168,7 +168,9 @@ export function SnoozeDialog({
     ...REMINDER_PRESETS
       .filter((preset) => supportsSomeday || preset.expression !== "someday")
       .map((preset) => {
-        const schedule = parseReminderExpression(preset.expression, now);
+        // The chosen tile shows the draft's own instant, which is what saving sends, not a fresh
+        // resolution that moves on with the clock.
+        const schedule = choice === preset.expression && parsed ? parsed : parseReminderExpression(preset.expression, now);
         return {
           value: preset.expression,
           label: preset.label,

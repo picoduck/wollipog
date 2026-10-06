@@ -1137,6 +1137,37 @@ test("a typed relative time keeps its instant through a live change and draft re
   }
 });
 
+test("a chosen preset's tile, summary and saved instant agree after the clock moves on", async () => {
+  // Local noon, so Later Today (three hours on) stays today in any zone.
+  mock.timers.enable({ apis: ["Date"], now: new Date(2026, 9, 6, 12, 0).getTime() });
+  let accepted: SetSessionReminderRequest | undefined;
+  const view = await mount(<SnoozeDialog
+    sessionTitle={TITLE}
+    onClose={() => undefined}
+    onSave={async (request) => { accepted = request; }}
+  />);
+  try {
+    await chooseTile("Later Today");
+    const chosen = new Date(2026, 9, 6, 15, 0).getTime();
+    const expected = formatReminderTileTime(parseReminderExpression("later today")!);
+    const detail = () => ariaReferencedText(tileNamed("Later Today")!, "aria-describedby");
+    assert.equal(detail(), expected, "the tile shows the chosen instant");
+    const firstSummary = summary();
+
+    mock.timers.tick(10 * 60_000);
+    await act(async () => { returnEarly().click(); });
+    assert.equal(detail(), expected, "the chosen tile keeps the draft's instant");
+    assert.notEqual(formatReminderTileTime(parseReminderExpression("later today")!), expected,
+      "a fresh resolution would have moved on");
+    assert.equal(summary(), firstSummary);
+    await press(primary());
+    assert.equal(accepted?.scheduledFor, chosen);
+  } finally {
+    await view.unmount();
+    mock.timers.reset();
+  }
+});
+
 test("a pointer on an already chosen Custom… goes to its field at once and leaves later focus alone", async () => {
   const stored = pendingReminder();
   const dialog = (reminder: SessionReminderView) => <SnoozeDialog
