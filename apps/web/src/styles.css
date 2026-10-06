@@ -12322,12 +12322,17 @@ body.shell-dock-dragging * {
   overflow: auto;
   padding: 0 var(--space-4);
 }
-/* No Matches takes both panes' place (#2200, §6.1), on the page grid like any state that spans them. */
+/* No Matches takes both panes' place (#2200, §6.1), on the page grid like any state that spans them,
+   so it is stacked at the page state's drop (§12.1) rather than the inline row of a list's own. */
 .inbox-no-matches {
   min-height: 0;
   flex: 1;
   overflow: auto;
   padding: 0 var(--page-gutter) var(--space-12);
+}
+.inbox-no-matches > .state.no-results {
+  display: grid;
+  padding-top: var(--space-12);
 }
 .inbox-splitter {
   position: relative;
