@@ -2618,7 +2618,7 @@ function SessionDetailLoaded({
       });
     void load.then((complete) => {
       if (isCurrent() && !complete) {
-        failEventHistoryLoad(sessionId, "Some later activity could not be loaded. Retry or jump to latest.", epoch, recoveryRevision, generation);
+        failEventHistoryLoad(sessionId, "Some session activity could not be loaded.", epoch, recoveryRevision, generation);
       }
     }).catch(() => {
       if (isCurrent()) {

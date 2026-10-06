@@ -415,3 +415,35 @@ test("finishing a small gap reports an observed live frame that exceeded the pay
   assert.equal(store.recoveryAfter("s1"), cursor);
   assert.equal(store.isEventGapRecoveryCurrent(fence), false);
 });
+
+test("bridging a staged gap retires its paused-live owner", () => {
+  const { store, fence } = fixture(() => true);
+  assert.equal(store.deferEventTail(fence, events(115, 119), true, true), true);
+  const request = store.beginLaterEventsLoad("s1")!;
+  assert.equal(store.loadLaterEvents(request, { events: events(111, 116), eventEpoch: 0,
+    nextAfter: 116, hasMoreCached: true, cacheComplete: true }), true);
+  assert.equal(store.getState().eventWindows.get("s1")!.laterGap, undefined);
+  store.dispatch({ type: "msg", msg: { type: "session_event", event: event(120) } });
+  assert.equal(store.getState().events.get("s1")!.at(-1)!.seq, 120);
+  assert.equal(store.isEventGapRecoveryCurrent(fence), false);
+});
+
+test("count-trimmed pre-stage rows cannot hide a gap behind their highest retained seq", () => {
+  const { store, fence, generation } = fixture(() => true);
+  for (let seq = 111; seq <= 2_120; seq++)
+    store.dispatch({ type: "msg", msg: { type: "session_event", event: event(seq) } });
+  store.loadEvents("s1", events(111, 112), 0, 2, true, generation);
+  const cursor = store.recoveryAfter("s1");
+  store.finishEventGapRecovery(fence);
+  assert.equal(store.getState().events.get("s1")!.at(-1)!.seq, 2_120);
+  assert.ok(store.getState().eventHistory.get("s1")!.error, "retained maximum is not contiguous recovery proof");
+  assert.equal(store.recoveryAfter("s1"), cursor);
+});
+
+test("finishing dropped live preserves an existing recovery error", () => {
+  const { store, fence, generation } = fixture(() => true);
+  store.dispatch({ type: "msg", msg: { type: "session_event", event: event(115, "x".repeat(8 * 1024 * 1024)) } });
+  store.failEventHistoryLoad("s1", "Existing recovery failure", 0, 2, generation);
+  store.finishEventGapRecovery(fence);
+  assert.equal(store.getState().eventHistory.get("s1")!.error, "Existing recovery failure");
+});

@@ -2140,7 +2140,10 @@ export class Store {
       this.dispatch({ type: "event_gap_state", fence,
         events: mergeEvents(this.state.events.get(fence.sessionId), pending.events), window, settled: false });
     }
-    if (pending?.fence === fence && pending.observedTailSeq > eventHighWater(this.state.events.get(fence.sessionId))) {
+    const reading = this.state.events.get(fence.sessionId) ?? [];
+    const contiguousTail = contiguousEventHighWater(reading, (window?.baseSeq ?? reading[0]?.seq ?? fence.baseSeq) - 1);
+    if (pending?.fence === fence && pending.observedTailSeq > contiguousTail &&
+        !this.state.eventHistory.get(fence.sessionId)?.error) {
       this.failEventHistoryLoad(fence.sessionId,
         "Newer activity could not be retained. Jump to latest to refresh.",
         fence.eventEpoch, fence.recoveryRevision, fence.recoveryGeneration);
@@ -2282,6 +2285,7 @@ export class Store {
       window: done ? baseWindow : { ...baseWindow, laterGap: { ...gap, afterSeq: end,
         beforeSeq: Math.max(end + 1, tail.events[0]!.seq), loading: false, error: null } },
       settled: true, complete: done, advanceCursor: done });
+    if (done) this.finishEventGapRecovery(request.fence);
     return true;
   };
 

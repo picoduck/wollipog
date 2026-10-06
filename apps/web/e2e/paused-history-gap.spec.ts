@@ -272,4 +272,16 @@ test("finishing later paging returns focus to the reader without moving its paus
   await expect(reader(page)).toBeFocused();
   await expectAnchor(page, anchor);
   expect((await reads(page, start)).filter((request) => request.direction !== "backward").at(-1)?.after).toBe(856);
+  const beforeLive = await reads(page, start);
+  const liveText = "Public live response after later paging completely bridged the gap.";
+  await page.evaluate((text) => window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitAgentMessage("session-alpha", text), liveText);
+  await settle(page);
+  await expectAnchor(page, anchor);
+  await reader(page).focus();
+  await page.keyboard.press("End");
+  await expect(follow(page)).toHaveAttribute("data-follow-tail-state", "following");
+  await expect(reader(page).getByText(liveText, { exact: true })).toBeVisible();
+  await expect(reader(page).getByText(liveText, { exact: true })).toHaveCount(1);
+  await settle(page);
+  expect(await reads(page, start)).toEqual(beforeLive);
 });
