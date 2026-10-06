@@ -180,12 +180,118 @@ runner, the control plane is restarted and must become
 healthy and report the new version through the loopback admin API, and the runner is restarted and
 must re-register as online (on a runner-only host, whose control plane is elsewhere, the runner unit
 must become active instead). A control plane that serves the dashboard is only upgraded to a
-release that also carries the web bundle. If any of that fails, the previous executables and bundle
-are moved back (anything the upgrade introduced without a previous generation is removed), the
-services are restarted again, and the command exits 1 naming the failure and any step of the
-rollback that did not succeed. Configuration, credentials, and data are never touched, and
-`--force` reinstalls the current release. A private repository needs `GH_TOKEN` (Contents: read)
-in the environment.
+release that also carries the web bundle. A staging or verification failure before the swap leaves
+the installation unchanged. If the swap, service restart, or readiness checks fail, the previous
+executables and bundle are moved back (anything the upgrade introduced without a previous
+generation is removed), the services are restarted again, and the command exits 1 naming the
+failure and any step of the rollback that did not succeed. A cleanup error after a healthy upgrade
+is reported separately, as described below. Configuration, credentials, and stored application
+data are unchanged; temporary upgrade staging follows the ownership rules below. `--force`
+reinstalls the current release. A private repository needs `GH_TOKEN` (Contents: read) in the
+environment.
+
+### Generic Upgrade Staging Prerequisites
+
+The staging contract below was introduced by PR #2656 and hardened by PR #2659
+(commit `9ca5a3387b8a69539343608409badd15c42011d3`). Older updater binaries may behave
+differently. It applies to `wollipog service upgrade` and `wollipog update`, separately from
+standalone installer downloads, SSH runner caches, and native helper or lease caches.
+
+Admission requires Linux with an available effective UID, no-follow directory opens, and usable
+filesystem identities. The data directory, `upgrades/` parent, and attempt directory must report
+an accepted filesystem type: the ext2/3/4 family, XFS, Btrfs, tmpfs, or overlayfs. Other types,
+including network filesystems, are refused. This allowlist is an identity profile, not a
+durability guarantee or protection against a hostile process running under the same UID.
+
+The data directory must already exist at a canonical absolute path without symlink components,
+with exactly mode 0700. In user mode it must belong to the invoking effective UID. System mode
+requires root and the installed service account's UID; the data directory may belong to root
+or that service account. Staging directories must belong to the updater's effective UID
+(root in system mode) with exactly mode 0700; newly created staging files start at mode 0600.
+Existing directories are checked, never automatically repaired.
+
+Every ancestor must have a usable nonsymlink directory identity and a trusted owner: root or the
+invoking effective UID, plus the installed service UID in system mode. Setuid/setgid ancestors
+are refused. A group- or other-writable ancestor is accepted only when it is sticky and its
+immediate child has a trusted owner. Unavailable identity, unexpected ownership or permissions,
+or substitution of a checked path causes refusal.
+
+### One Staging Slot and Download Bounds
+
+The updater exclusively reserves `<data-dir>/upgrades/download-attempt-v1`; release tags do not
+get separate slots. Before reservation, the `upgrades/` parent must have a complete empty
+inventory. An existing slot blocks both same-tag and different-tag attempts, including when
+initialization was interrupted before a complete `owner.json` was written. A live attempt,
+legacy release-tag directory, foreign entry, or unknown inventory also blocks admission.
+Repeated retries, a different release tag, and `--force` do not clear it. These admission
+refusals happen before any selected asset body is downloaded or installed.
+
+One attempt admits one to four distinct selected assets: `SHA256SUMS`, the installed components'
+host-target executables, and the web archive when needed. Each must have a valid publisher
+SHA-256 digest and a positive safe-integer declared byte size; their sum must also be a safe
+integer. Each asset can start only once in that attempt. The download sink refuses bytes beyond
+that asset's declared size, and requires the final length to match. Publication at the final
+staged name happens without replacement only after publisher digest verification and, for
+executables and the web archive, agreement with `SHA256SUMS`. Stream, length, or digest failure
+cannot promote the partial download.
+
+This bounds downloaded asset bytes by the validated selected-release sizes. It is not a fixed
+practical disk quota: declared sizes can be large. It does not bound extracted web archive bytes
+or preexisting legacy/foreign staging. Unknown contents are preserved rather than traversed and
+deleted to make space.
+
+### Refusals, Preservation, and Cleanup Outcomes
+
+Only the current process's ownership receipts, pinned identities, unchanged owner record, and
+complete known-entry inventories authorize its staging cleanup. An `owner.json` left by a
+previous process is evidence for inspection, not authority for a later process to delete or
+take over that slot. Names, partial suffixes, timestamps, and PIDs alone prove neither ownership
+nor inactivity.
+
+Catchable failures remove only proven current-attempt objects. Foreign or unknown entries,
+incomplete inventory, changed owner bytes, unexpected symlinks or hardlinks, substituted paths,
+and unavailable identity stop cleanup and preserve uncertain evidence. Extracted web staging
+that has not been moved into the installation is retained; the updater does not recursively
+delete that tree. Abrupt process death may leave the exclusive reservation occupied. Safety
+across attempts comes from refusing another reservation, not from assuming normal-exit cleanup
+ran or reclaiming an apparently old slot.
+
+The original download writer is closed before final staged publication and executable probing,
+with the same inode pinned through a checked read-only handoff. Numeric descriptor authority
+is retired before each Linux close attempt, even if close reports an error. The updater does
+not retry that number, which may already have been reused. A writer-close error prevents
+publication; uncertain cleanup reports an error. A final close error can occur after staging
+names have already been removed, so a diagnostic does not prove that every staging object remains.
+
+Read the outcome before deciding what to recover. A pre-swap staging refusal leaves installed
+executables and rollback generations unchanged. An error stating that the upgrade
+`completed and is healthy, but ...` means installation and health checks succeeded and cleanup
+reported a problem; the command exits nonzero without rolling back that healthy generation.
+Inspect service status and the reported version rather than treating this as proof that the
+old version is still installed. Retained staging can block the next upgrade even while the new
+services are healthy.
+
+### Operator Inspection and Separately Authorized Recovery
+
+1. Record the exact refusal and use the existing read-only `service status` and service-log
+   commands to establish the installed version and health. Confirm the selected user/system
+   layout and data directory; protect credentials and private paths when sharing diagnostics.
+2. Inspect directory metadata and a bounded inventory without following symlinks, executing
+   staged files, or extracting archives. Check the canonical path, owners, modes, filesystem
+   types, slot contents, and any owner record. Do not mistake an interrupted or complete marker
+   for proof that cleanup is safe. If inspection is partial or identities cannot be established,
+   leave the evidence intact.
+3. Independently establish whether an updater still owns or uses the slot. An old timestamp,
+   a missing PID, or service health alone does not establish that no upgrade is in flight.
+   Coordinate with the operator responsible for the host; preserve live attempts.
+4. If recovery is needed, obtain separate operator authorization for the exact inspected
+   objects and proposed intervention. Any manual retirement or filesystem/layout correction is
+   outside automatic updater authority and must follow the operator's reviewed recovery plan.
+   Preserve installed and previous generations, configuration, credentials, databases, artifacts,
+   and uncertain evidence. This guide supplies no deletion, takeover, or permission repair recipe.
+5. Retry only after the operator confirms the staging prerequisites and empty parent inventory
+   are restored safely. An agent hosted by the target stack must not upgrade or restart that
+   stack; an independent operator must perform and verify such work.
 
 ## Uninstall
 

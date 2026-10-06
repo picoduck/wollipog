@@ -206,6 +206,11 @@ protocol numbers; each such 409 also returns `requiredRunnerProtocolVersion` and
 
 ## Native runners are externally managed
 
+For Linux systemd installations managed with `wollipog service upgrade` or `wollipog update`,
+see [Generic Upgrade Staging Prerequisites](./headless-deployment.md#generic-upgrade-staging-prerequisites)
+for the private ownership/filesystem profile, interrupted-slot refusals, download bounds, and
+operator inspection before separately authorized manual recovery.
+
 A native runner started from a shell or service is not a child of the dashboard. The dashboard must
 not kill or replace a process it does not own, especially while it may hold active sessions. When a
 native runner is outdated or does not report a protocol version, its card now explains the safe
