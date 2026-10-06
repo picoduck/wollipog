@@ -128,6 +128,10 @@ export function ToolStep({
     <details
       className="tl-step disclosure"
       open={open}
+      onToggle={(event) => {
+        // Browser text-fragment navigation can expand details without activating its summary.
+        if (event.nativeEvent.isTrusted && event.currentTarget.open !== open) onToggle?.();
+      }}
     >
       <summary
         className="tl-step-head"

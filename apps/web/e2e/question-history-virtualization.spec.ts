@@ -86,6 +86,24 @@ for (const nextOpen of [true, false]) {
   });
 }
 
+test("browser text-fragment expansion stays synchronized with question disclosure choices (#719)", async ({ page }) => {
+  await page.goto("/timeline-reflow-e2e.html?question-history=1#:~:text=release%20checklist");
+  const reader = page.getByTestId("reader");
+  const first = page.locator('[data-virtual-key="item:question:301"] .tl-question > details');
+  const second = page.locator('[data-virtual-key="item:question:302"] .tl-question > details');
+  await expect(first).toHaveAttribute("open");
+  await expect(second).not.toHaveAttribute("open");
+  await first.locator("summary").click();
+  await expect(first).not.toHaveAttribute("open");
+  await reader.focus();
+  await reader.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  await expect(first).toHaveCount(0);
+  await expect(second).toHaveCount(0);
+  await reader.evaluate((element) => { element.scrollTop = 0; });
+  await expect(first).not.toHaveAttribute("open");
+  await expect(second).not.toHaveAttribute("open");
+});
+
 // #502's reproduction, docked (#2205): a question asked far above the reader, with 80 and more rows
 // after it, used to render its form at the transcript row and hand it to a fallback above the
 // transcript, so it appeared and then seemed to vanish. It now lives only in the dock above the
