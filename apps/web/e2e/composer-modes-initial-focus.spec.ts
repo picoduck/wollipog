@@ -26,7 +26,7 @@ async function openSession(page: Page, { images, plan }: { images: boolean; plan
     { images, plan },
   );
   await page.getByRole("button", { name: /Alpha Session/ }).click();
-  const expand = page.getByRole("button", { name: "Expand Session" });
+  const expand = page.getByRole("button", { name: "Open Session", exact: true });
   if (await expand.isVisible()) await expand.click();
   await expect(page.locator(".composer-input")).toBeEnabled();
 }

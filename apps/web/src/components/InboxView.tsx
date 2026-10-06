@@ -836,7 +836,12 @@ export function InboxView({
       listRef.current ??
       viewRef.current?.querySelector<HTMLElement>(".inbox-zero") ??
       document.getElementById("page-title");
-    setSessionMenu({ sessionId, anchor, restoreTarget: restoreTarget ?? listRestore });
+    // A supplied target that is gone by then (a preview's ⋯ whose session left) falls back the same way.
+    setSessionMenu({
+      sessionId,
+      anchor,
+      restoreTarget: restoreTarget ? () => restoreTarget() ?? listRestore() : listRestore,
+    });
   }, []);
   const openRowSessionMenu = useCallback(
     (sessionId: string, anchor: { x: number; y: number }) => openSessionMenuAt(sessionId, anchor),
@@ -1626,6 +1631,14 @@ export function InboxView({
                       .catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" }));
                   },
                 } : {})}
+                {...(expanded ? {} : {
+                  onSessionMenu: (anchor: { x: number; y: number }, restoreTarget: () => HTMLElement | null) =>
+                    openSessionMenuAt(surfaceSessionId, anchor, restoreTarget),
+                  onOpenRequest: (requestId: string) => {
+                    const target = sessions.get(surfaceSessionId);
+                    if (target) openRequest(target, requestId);
+                  },
+                })}
                 onPreviewNavigationReady={expanded ? undefined : registerPreviewNavigation}
                 onPreviewForkReady={expanded ? undefined : setPreviewForkControls}
               />

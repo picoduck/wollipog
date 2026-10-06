@@ -23,7 +23,7 @@ async function openSession(page: Page, scenario = "preview-follow", params: Reco
   }, evidenceTheme);
   await page.reload();
   await page.getByRole("button", { name: /Alpha Session/ }).click();
-  const expand = page.getByRole("button", { name: "Expand Session" });
+  const expand = page.getByRole("button", { name: "Open Session", exact: true });
   if (await expand.isVisible()) await expand.click();
   await expect(page.locator(".session-bar")).toBeVisible();
   if (evidenceTheme === "dark" || evidenceTheme === "light") {
@@ -114,7 +114,7 @@ for (const viewport of [
     });
     await page.reload();
     await page.getByRole("button", { name: /Alpha Session/ }).click();
-    const expand = page.getByRole("button", { name: "Expand Session" });
+    const expand = page.getByRole("button", { name: "Open Session", exact: true });
     if (await expand.isVisible()) await expand.click();
     const toggle = page.getByRole("button", { name: "Side Panel", exact: true, pressed: false });
     await expect(toggle).toBeVisible();
@@ -164,7 +164,7 @@ test("the Requests panel stays open until descendant polling authoritatively set
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.deferNextDescendantRequests();
   });
   await page.getByRole("button", { name: /Alpha Session/ }).click();
-  const expand = page.getByRole("button", { name: "Expand Session" });
+  const expand = page.getByRole("button", { name: "Open Session", exact: true });
   if (await expand.isVisible()) await expand.click();
   await expect.poll(() => page.evaluate(() =>
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.descendantRequestCallCount())).toBe(1);
@@ -205,7 +205,7 @@ test("a request answered on the dock never opens the Requests panel, and the gen
   await page.evaluate(() => localStorage.clear());
   await page.reload();
   await page.getByRole("button", { name: /Alpha Session/ }).click();
-  await page.getByRole("button", { name: "Expand Session" }).click();
+  await page.getByRole("button", { name: "Open Session", exact: true }).click();
   await page.evaluate(() => {
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
       status: "input_required",
@@ -242,7 +242,7 @@ test("a request answered on the dock never opens the Requests panel, and the gen
 
   await page.getByRole("button", { name: "Back to Sessions" }).click();
   await page.getByRole("button", { name: /No Project Session/ }).click();
-  await page.getByRole("button", { name: "Expand Session" }).click();
+  await page.getByRole("button", { name: "Open Session", exact: true }).click();
   const toggle = page.getByRole("button", { name: "Side Panel", exact: true, pressed: false });
   await toggle.click();
   await expect(page.locator("#right-panel")).toHaveAccessibleName("Panel");

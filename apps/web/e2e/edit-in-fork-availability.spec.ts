@@ -5,7 +5,7 @@ test("an Edit in a Fork that is temporarily blocked stays listed and says why (#
   const url = "/command-inbox-projects-e2e.html?scenario=edit-in-fork";
   await page.goto(url); await page.evaluate(() => localStorage.clear()); await page.goto(url);
   await page.getByRole("button", { name: /Alpha Session/ }).click();
-  const expand = page.getByRole("button", { name: "Expand Session" });
+  const expand = page.getByRole("button", { name: "Open Session", exact: true });
   if (await expand.isVisible()) await expand.click();
 
   // Only the second message has an earlier checkpoint to fork from.

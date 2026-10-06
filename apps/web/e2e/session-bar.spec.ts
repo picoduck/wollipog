@@ -31,7 +31,7 @@ async function openBar(
     } as never);
   });
   await page.getByRole("button", { name: options.session ?? /Alpha Session/ }).click();
-  const expand = page.getByRole("button", { name: "Expand Session" });
+  const expand = page.getByRole("button", { name: "Open Session", exact: true });
   if (await expand.isVisible()) await expand.click();
   await expect(page.locator("header.session-bar")).toBeVisible();
 }

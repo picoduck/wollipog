@@ -7,7 +7,7 @@ async function openSwitchAccount(page: Page, accounts: "default" | "removed" | "
   const url = `/command-inbox-projects-e2e.html?scenario=switch-account&accounts=${accounts}`;
   await page.goto(url); await page.evaluate(() => { localStorage.clear(); localStorage.setItem("wollipog.hide-account-emails", "true"); }); await page.goto(url);
   await page.getByRole("button", { name: /Alpha Session/ }).click();
-  const expand = page.getByRole("button", { name: "Expand Session" });
+  const expand = page.getByRole("button", { name: "Open Session", exact: true });
   if (await expand.isVisible()) await expand.click();
   await page.getByRole("button", { name: "More Actions", exact: true }).first().click();
   await page.getByRole("menuitem", { name: /Switch Account…/ }).click();

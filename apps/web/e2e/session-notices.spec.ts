@@ -21,7 +21,7 @@ async function openSession(page: Page, width: number, height: number, hideAccoun
   }, hideAccountEmails);
   await page.goto(url);
   await page.getByRole("button", { name: /Alpha Session/ }).click();
-  const expand = page.getByRole("button", { name: "Expand Session" });
+  const expand = page.getByRole("button", { name: "Open Session", exact: true });
   if (await expand.isVisible()) await expand.click();
   await expect(page.locator(".session-notice-slot")).toBeVisible();
 }
@@ -94,7 +94,7 @@ for (const [width, height] of [[1440, 900], [390, 844]] as const) {
     const url = "/command-inbox-projects-e2e.html?scenario=invalid-setup-config";
     await page.goto(url); await page.evaluate(() => localStorage.clear()); await page.goto(url);
     await page.getByRole("button", { name: /Alpha Session/ }).click();
-    const expand = page.getByRole("button", { name: "Expand Session" });
+    const expand = page.getByRole("button", { name: "Open Session", exact: true });
     if (await expand.isVisible()) await expand.click();
     const slot = page.locator(".session-notice-slot");
     await expect(slot.locator('[aria-label="Invalid Worktree Setup Configuration"]')).toBeVisible();
@@ -115,7 +115,7 @@ async function failSendThenDropBmp(page: Page, width: number, height: number) {
   await page.reload();
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([], [], { supportsImages: true }));
   await page.getByRole("button", { name: /Alpha Session/ }).click();
-  const expand = page.getByRole("button", { name: "Expand Session" });
+  const expand = page.getByRole("button", { name: "Open Session", exact: true });
   if (await expand.isVisible()) await expand.click();
   const edit = page.locator(".composer-idle-preview");
   if (await edit.isVisible()) await edit.click();

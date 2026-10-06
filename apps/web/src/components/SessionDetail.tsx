@@ -50,7 +50,7 @@ import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { SkillsUnavailableNotice, skillsUnavailableSentence, useSessionSkillsUnavailable, useSkillsNoticeDismissal } from "./SkillsUnavailableNotice.js";
 import { isPartialHistory, isRebuiltEventsArray, useStoreActions, useStoreSelector } from "../store.js";
-import { relativeTime, shortenPath, titleCaseLabel } from "../format.js";
+import { shortenPath, titleCaseLabel } from "../format.js";
 import { COMPOSER_USAGE_MIN_COLUMN_REM, composerUsagePlacement, useNarrowerThanRem } from "../composer-usage-placement.js";
 import { accountLabelText, isPersonalIdentifier, redactPersonalIdentifiers } from "../personal-identifiers.js";
 import { AccountLabel } from "./AccountIdentifier.js";
@@ -65,7 +65,7 @@ import {
 import { sessionAccountSwitchApplicable, SwitchAccountDialog } from "./SwitchAccountDialog.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { SessionPlaceholder } from "./SessionPlaceholder.js";
-import { sessionUnarchiveRestarts } from "../archive-actions.js";
+import { sessionArchiveActionLabel, sessionUnarchiveRestarts } from "../archive-actions.js";
 import { unarchiveSession } from "../session-unarchive.js";
 import { TranscriptSkeleton, transcriptLoadingSentence } from "./TranscriptSkeleton.js";
 import { TranscriptEmptyState, TranscriptHistoryNotice, transcriptEmptyKind } from "./TranscriptReadingStates.js";
@@ -79,19 +79,13 @@ import {
 } from "../timeline.js";
 import { useTimeline } from "./useTimeline.js";
 import {
-  BackgroundDeliveryBadge,
-  BackgroundNotificationBadge,
-  BackgroundWorkBadge,
-  UntrackedBackgroundWorkBadge,
   Modal,
   Spinner,
-  SessionStatusIndicators,
 } from "./common.js";
-import { StatusBadge } from "./StatusBadge.js";
+import { SessionPreviewBar, type PreviewSessionMenuOpener } from "./SessionPreviewBar.js";
 import { Notice } from "./Notice.js";
 import { QueuedMessages, queuedMessageExcerpt } from "./QueuedMessages.js";
-import { sessionArchivedAtRest, statusMeta } from "../status-meta.js";
-import { shownWatchdogDelivery } from "../background-delivery-status.js";
+import { sessionArchivedAtRest } from "../status-meta.js";
 import {
   EventTimeline,
   TranscriptErrorAlert,
@@ -135,8 +129,6 @@ import { DictationStrip } from "./DictationStrip.js";
 import { appendTranscript } from "../dictation.js";
 import { loadSeen, markSeen, saveSeen } from "../sessions-seen.js";
 import { subscriptionRecoveryRevision } from "../ui-subscriptions.js";
-import { isHeartbeatBusy } from "../activity.js";
-import { ActivityStrip } from "./ActivityStrip.js";
 import {
   composerDraftMatches,
   deleteComposerDraftIfMatches,
@@ -569,6 +561,10 @@ export type SessionDetailProps = {
   onSnooze?: () => void;
   reminder?: SessionReminderView;
   onDismissReminder?: () => void;
+  /** The preview's ⋯: opens the Sessions list's context menu for this session (#2210). */
+  onSessionMenu?: PreviewSessionMenuOpener;
+  /** The preview's Answer in Session: opens the session with this request docked (#2210). */
+  onOpenRequest?: (requestId: string) => void;
   /** App-shell control cluster (editor, pinned/terminal/panel toggles) rendered in the unified
    * session bar when it replaces the app-level top bar on desktop. */
   topbarControls?: ReactNode;
@@ -957,6 +953,8 @@ function SessionDetailLoaded({
   onSnooze,
   reminder,
   onDismissReminder,
+  onSessionMenu,
+  onOpenRequest,
   topbarControls,
   providerCommandAttachmentPolicy = "send",
   onPreviewNavigationReady,
@@ -1103,6 +1101,7 @@ function SessionDetailLoaded({
   const topRequestDocked = prioritizedRequests[0] !== undefined && dockedRequests.includes(prioritizedRequests[0]);
   useEvidenceDraftRetirement(session.id, dockedRequests);
   const chatReadingRef = useRef<HTMLDivElement>(null);
+  const detailChatRef = useRef<HTMLDivElement>(null);
   const softwareKeyboardOpen = useSoftwareKeyboardOpen();
   const [selectedRequestKey, setSelectedRequestKey] = useState<string | null>(null);
   const requestPanelModeActive = mode === "expanded" && rightPanel.mode === "requests";
@@ -1117,9 +1116,6 @@ function SessionDetailLoaded({
   const recoveryRevision = useStoreSelector((s) =>
     subscriptionRecoveryRevision(s.streamSubscriptions, [sessionId]));
   const activity = useStoreSelector((s) => s.activity.get(sessionId));
-  const activityNow = useStoreSelector((s) => s.activityNow);
-  const stalled = useStoreSelector((s) => s.stalledSessionIds.has(sessionId));
-  const lastActivityAt = Math.max(session.lastEventAt ?? 0, activity?.lastEventAt ?? 0) || session.updatedAt;
   const [text, setText] = useState("");
   const [composerExpanded, setComposerExpanded] = useState(false);
   const composerExpansionSessionRef = useRef(sessionId);
@@ -3064,10 +3060,6 @@ function SessionDetailLoaded({
       return member ? [member] : [];
     }), (id) => rosterRunners.get(id)?.status === "online").filter(isCurrentWorker).length,
   [session, activeSubagents, rosterSessions, rosterRuns, rosterRunners]);
-  const visibleBackgroundWorkState = session.backgroundWorkState === "resumed"
-    ? undefined
-    : session.backgroundWorkState;
-  const shownDelivery = shownWatchdogDelivery(session.backgroundDeliveries);
   const backgroundParentTurnEventIds = useMemo(() => new Map(items
     .filter((item): item is Extract<TimelineItem, { kind: "user_message" }> =>
       item.kind === "user_message" && Boolean(item.turnId))
@@ -6030,8 +6022,9 @@ function SessionDetailLoaded({
   // The last docked request can resolve while the coordinator tracks a different primary request (a
   // worker's), so it never sees the dock's focused control go. The dock's own hand-off (to the next
   // request's heading) needs a dock; with none left, focus returns to the composer or the reader.
+  // A preview docks its requests above the reading column rather than in it (#2210).
   const dockHadRequestsRef = useRef(false);
-  const dockFocusRemoved = useRemovedFocus(chatReadingRef, "[data-request-card-menu]");
+  const dockFocusRemoved = useRemovedFocus(mode === "expanded" ? chatReadingRef : detailChatRef, "[data-request-card-menu]");
   useLayoutEffect(() => {
     const had = dockHadRequestsRef.current;
     dockHadRequestsRef.current = dockedRequests.length > 0;
@@ -6056,14 +6049,18 @@ function SessionDetailLoaded({
         createdAt={requestCreatedAt}
         headTrailing={trailing}
         onSessionUpdate={loadSession}
-        showKeyHints={sessionReadingKeys}
+        // A and D reach the card from the session's reader and, in a preview, from the Sessions list.
+        showKeyHints={!isMobile}
         keyboardOpen={softwareKeyboardOpen}
         revealRequestId={revealRequestId}
-        followTailState={followTail.state}
+        // Above a preview's reader, reading back has no rows under the card to give height back to,
+        // so the card never shrinks to its strip there.
+        followTailState={mode === "expanded" ? followTail.state : undefined}
         readerRef={scrollRef}
         onConceal={concealTrailing}
         questionsFor={dockQuestions}
-        whereAsked={dockWhereAsked}
+        whereAsked={mode === "expanded" ? dockWhereAsked : undefined}
+        onAnswerInSession={mode === "preview" ? onOpenRequest : undefined}
       />
     ),
   } : undefined;
@@ -6276,56 +6273,17 @@ function SessionDetailLoaded({
         </>
       ) : (
         <>
-        <header className="session-preview-head">
-          <div className="session-preview-heading">
-            <h2 className="session-preview-title">{session.title}</h2>
-            <div className="session-preview-meta">
-              <SessionStatusIndicators session={session} disconnected={!runnerOnline} />
-              {visibleBackgroundWorkState && <BackgroundWorkBadge state={visibleBackgroundWorkState} onOpen={() => {
-                rightPanel.show("background");
-                onExpand?.();
-              }} />}
-              {!visibleBackgroundWorkState && session.backgroundWorkTracking === "untracked" && (
-                <UntrackedBackgroundWorkBadge onOpen={() => {
-                  rightPanel.show("background");
-                  onExpand?.();
-                }} />
-              )}
-              {shownDelivery && (
-                <BackgroundDeliveryBadge
-                  state={shownDelivery.watchdogState}
-                  onOpen={() => {
-                    rightPanel.show("background");
-                    onExpand?.();
-                  }}
-                />
-              )}
-              {session.backgroundDeliveries?.flatMap((delivery) => delivery.notifications ?? []).slice(-2).map((receipt) => (
-                <BackgroundNotificationBadge key={receipt.deliveryId} state={receipt.state} onOpen={() => {
-                  rightPanel.show("background");
-                  onExpand?.();
-                }} />
-              ))}
-              <span className="tag tag-machine" title={session.runnerId}>{runnerDisp.name}</span>
-              {session.agentName && (
-                <span className="tag tag-agent">{sessionAgentLabel(session.agentName, session.driver, session.agentId)}</span>
-              )}
-              {session.workspaceName && <span className="tag tag-workspace">{session.workspaceName}</span>}
-              <ContextWindowMeter session={session} resolution={contextWindow} />
-              <SessionUsageControl session={session} />
-              {isHeartbeatBusy(session.status) && (
-                <ActivityStrip activity={activity} now={activityNow} />
-              )}
-              {stalled && (
-                <StatusBadge meta={statusMeta("session", "stalled")} ariaLabel="Stalled: No Activity for at Least 10 Minutes" />
-              )}
-              <span className="muted">Updated {relativeTime(lastActivityAt)}</span>
-            </div>
-          </div>
-          <button type="button" className="btn ghost sm" onClick={onExpand} aria-label="Expand Session" title="Expand Session (Enter)">
-            Expand <kbd>Enter</kbd>
-          </button>
-        </header>
+        <SessionPreviewBar
+          session={session}
+          runnerOnline={runnerOnline}
+          machineName={runnerDisp.name}
+          agentLabel={sessionAgentLabel(session.agentName, session.driver, session.agentId)}
+          archiveLabel={sessionArchiveActionLabel(session, stopBeforeArchiveSupported)}
+          onSnooze={onSnooze}
+          onArchive={onArchive}
+          onSessionMenu={onSessionMenu}
+          onOpen={onExpand}
+        />
         </>
       )}
 
@@ -6336,7 +6294,17 @@ function SessionDetailLoaded({
         {/* The session body: the reader column, then the docked Pinned Summary (#2147). It is the
             `session-body` container, so docking follows the room the right panel leaves. */}
         <div className="detail-body" ref={setDetailBody}>
-        <div className="detail-chat">
+        <div className="detail-chat" ref={detailChatRef}>
+          {/* A preview has no composer to dock above, so its requests head the preview, right under
+              the meta line, where Approve and Deny sit under the cursor that selected the row (#2210). */}
+          {mode === "preview" && requestDockLead && (
+            <SessionNoticeSlot
+              sessionId={session.id}
+              entries={[]}
+              lead={requestDockLead}
+              onFocusLost={() => scrollRef.current?.focus({ preventScroll: true })}
+            />
+          )}
           {/* Campaign notices, not session notices (§13.2; #2036): they describe the campaign, not
               whether this session can take its next turn, so they head the chat column directly
               under the session bar, in this order, on its edges (#2157), rather than in the notice
@@ -6625,10 +6593,10 @@ function SessionDetailLoaded({
           </div>
           {/* While a request is pending it takes the notice slot ahead of every notice, which wait
               behind the "+N More" in its card's head line (§13.2). */}
-          {requestDockLead && (
+          {mode === "expanded" && requestDockLead && (
             <SessionNoticeSlot
               sessionId={session.id}
-              entries={mode === "expanded" ? sessionNotices : []}
+              entries={sessionNotices}
               lead={requestDockLead}
               onFocusLost={focusComposerOrTitle}
             />

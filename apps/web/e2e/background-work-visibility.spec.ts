@@ -86,7 +86,7 @@ for (const width of [320, 390, 700, 1280]) {
       });
     });
     await row.click();
-    const expand = page.getByRole("button", { name: "Expand Session" });
+    const expand = page.getByRole("button", { name: "Open Session", exact: true });
     if (await expand.isVisible()) await expand.click();
     const header = page.locator(".session-bar");
     const status = header.locator(".session-status-button");
@@ -145,7 +145,7 @@ for (const width of [320, 1280]) {
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/command-inbox-projects-e2e.html?scenario=git-visibility&sessionShell=1");
     await page.getByRole("button", { name: /Alpha Session/ }).click();
-    const expand = page.getByRole("button", { name: "Expand Session" });
+    const expand = page.getByRole("button", { name: "Open Session", exact: true });
     if (await expand.isVisible()) await expand.click();
     const header = page.locator(".session-bar");
     const cases = [
@@ -264,7 +264,7 @@ for (const width of [320, 1280]) {
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/command-inbox-projects-e2e.html?scenario=git-visibility&sessionShell=1");
     await page.getByRole("button", { name: /Alpha Session/ }).click();
-    const expand = page.getByRole("button", { name: "Expand Session" });
+    const expand = page.getByRole("button", { name: "Open Session", exact: true });
     if (await expand.isVisible()) await expand.click();
     const resultBlocked = () => page.evaluate(() => {
       const now = Date.now();
@@ -372,7 +372,7 @@ for (const width of [390, 1440]) {
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/command-inbox-projects-e2e.html?scenario=git-visibility&sessionShell=1");
     await page.getByRole("button", { name: /Alpha Session/ }).click();
-    const expand = page.getByRole("button", { name: "Expand Session" });
+    const expand = page.getByRole("button", { name: "Open Session", exact: true });
     if (await expand.isVisible()) await expand.click();
     await page.evaluate((version) => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(version), PROTOCOL_VERSION);
     await page.evaluate(() => {

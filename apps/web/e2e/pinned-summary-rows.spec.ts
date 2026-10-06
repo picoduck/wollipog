@@ -25,7 +25,7 @@ async function openSession(page: Page, width: number, storage: Record<string, st
   }, storage);
   await page.goto(fixture);
   await page.getByRole("button", { name: /Alpha Session/ }).first().click();
-  const expand = page.getByRole("button", { name: "Expand Session" });
+  const expand = page.getByRole("button", { name: "Open Session", exact: true });
   if (await expand.isVisible()) await expand.click();
   await expect(page.locator(".md table")).toBeVisible();
 }

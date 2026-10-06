@@ -5,7 +5,7 @@ const fixtureUrl = "/command-inbox-projects-e2e.html?scenario=pending-prompt-rec
 
 async function openAlphaSession(page: Page) {
   await page.getByRole("button", { name: /Alpha Session/ }).click();
-  const expand = page.getByRole("button", { name: "Expand Session" });
+  const expand = page.getByRole("button", { name: "Open Session", exact: true });
   if (await expand.isVisible()) await expand.click();
   await expect(page.locator(".session-detail")).toBeVisible();
 }

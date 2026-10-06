@@ -10,7 +10,7 @@ async function openNewSnoozeDialog(page: Page) {
   await expect(page.locator(".inbox-list-pane > .toolbar")).toBeVisible();
   const row = page.locator(".inbox-row-shell", { hasText: "Running Session" });
   await row.getByRole("button").first().click();
-  const directSnooze = page.getByRole("button", { name: "Snooze", exact: true });
+  const directSnooze = page.getByRole("button", { name: "Snooze", exact: true }).first();
   if (await directSnooze.isVisible()) {
     await directSnooze.click();
   } else {

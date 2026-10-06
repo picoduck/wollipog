@@ -2095,6 +2095,12 @@ follows these rules so it never crowds out the conversation it asks about:
   into one-line rows (kind icon, title, owner, time; owner hidden on phones). Choosing a row brings
   that request to the top for this view; the priority order is unchanged. A and D act on the
   expanded request; a decision brings up the next one.
+- **In the Sessions preview** (#2210), which has no composer, the dock heads the preview directly
+  under the meta line, so Approve and Deny are under the cursor that selected the row, and A and D
+  act on it while focus stays in the list. It caps at half the preview with its body scrolling, and
+  never shrinks to the reading-back strip: there are no rows under it to give height back to. A
+  question is not answered in the preview: its card shows the question and **Answer in Session**
+  (Enter keycap), which opens the session with the question docked.
 - **The Request Card** (`components/requests/RequestCard.tsx`, #2179) is the dock's card and the
   Requests and Agents panels' card for a child's or a worker's request. Head line: the kind's 16px
   icon and label (`requestKindMeta()`: Permission, Budget, Tool Calls, Workflow Decision, UI Evidence,

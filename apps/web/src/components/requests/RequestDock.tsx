@@ -15,6 +15,7 @@ import { SessionQuestionBanner } from "../SessionApproval.js";
 import { useRemovedFocus } from "../useRemovedFocus.js";
 import { registerRequestIntent, registerRequestRevealer } from "./request-reveal.js";
 import { RequestCard, type RequestIntentHandler } from "./RequestCard.js";
+import { PreviewQuestionCard } from "./PreviewQuestionCard.js";
 import {
   REQUEST_CARD_COPY,
   RequestKindIcon,
@@ -46,7 +47,9 @@ export interface DockWhereAsked {
  * Only the first is expanded. The rest wait behind one "+N More Requests" disclosure whose rows are
  * one-line buttons; choosing one expands it for this view without changing the order, and a decision
  * brings up the next. The cap that keeps the transcript at least half of the reading column is the
- * stylesheet's (`.request-dock`), measured against `.chat-reading`.
+ * stylesheet's (`.request-dock`), measured against `.chat-reading`. The Sessions preview (#2210)
+ * docks it above its reader instead, capped at half the preview, and its question card offers
+ * Answer in Session rather than the answer form.
  *
  * While the reader scrolls back away from the live tail (`followTailState` is "paused"), the dock
  * shrinks to one 44px strip (#2195): the expanded request's icon, title and position, and Expand.
@@ -72,6 +75,7 @@ export function RequestDock({
   onConceal,
   questionsFor,
   whereAsked,
+  onAnswerInSession,
 }: {
   session: SessionView;
   /** In priority order (`prioritizedPendingRequests`), already limited by `dockRequests`. */
@@ -98,6 +102,9 @@ export function RequestDock({
   questionsFor?: (request: PendingApproval) => AgentQuestion[];
   /** Absent where the dock has no transcript to show a question's place in. */
   whereAsked?: DockWhereAsked;
+  /** The Sessions preview's dock (#2210): a question is not answered here but in its session, which
+   * this opens with the question docked. */
+  onAnswerInSession?: (requestId: string) => void;
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(() => revealRequestId ?? null);
   const [moreOpen, setMoreOpen] = useState(false);
@@ -318,7 +325,23 @@ export function RequestDock({
         data-session-request-id={collapsed ? undefined : expanded.requestId}
         data-session-request-session={collapsed ? undefined : session.id}
       >
-        {expanded.kind === "question" ? (
+        {expanded.kind === "question" && onAnswerInSession ? (
+          <PreviewQuestionCard
+            key={`${expanded.requestId}:${expanded.occurrenceId ?? ""}`}
+            sessionId={session.id}
+            request={expanded}
+            runnerOnline={runnerOnline}
+            questions={questionsFor?.(expanded) ?? expanded.questions ?? []}
+            owner={owner}
+            createdAt={createdAt?.(expanded)}
+            headTrailing={headTrailing}
+            headingRef={headingRef}
+            showKeyHints={showKeyHints}
+            intentRef={intentRef}
+            onSessionUpdate={onSessionUpdate}
+            onAnswerInSession={onAnswerInSession}
+          />
+        ) : expanded.kind === "question" ? (
           <SessionQuestionBanner
             key={`${expanded.requestId}:${expanded.occurrenceId ?? ""}`}
             sessionId={session.id}

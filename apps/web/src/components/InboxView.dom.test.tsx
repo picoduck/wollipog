@@ -2164,6 +2164,46 @@ test("a quick tap after a dismissed long-press still selects, and an archived ta
   }
 });
 
+test("the preview's More Actions menu hands focus to the empty list when its only session is archived elsewhere (#2210)", async () => {
+  mobileViewport = false;
+  setWindowFocused(true);
+  setVisibility("visible");
+  const { container, root } = mountTestRoot();
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "preview-menu-archived",
+    runtimeKey: "preview-menu-archived:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  try {
+    await act(async () => {
+      root.render(
+        <StoreProvider connection={connection} navigation={navigation}>
+          <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
+        </StoreProvider>,
+      );
+    });
+    await act(async () => { socket.push(snapshot([session("Only", 30)])); });
+    const row = [...container.querySelectorAll<HTMLElement>(".inbox-row")]
+      .find((candidate) => candidate.textContent?.includes("Session Only"))!;
+    await act(async () => { row.click(); });
+    const more = container.querySelector<HTMLButtonElement>('.session-preview-bar [aria-label="More Actions"]');
+    assert.ok(more, "the preview bar has ⋯");
+    await act(async () => { more!.click(); });
+    assert.ok(domWindow.document.querySelector('[role="menu"]'), "⋯ opens the session's menu");
+    await act(async () => {
+      socket.push({ type: "session_upsert", session: { ...session("Only", 30), archived: true } });
+    });
+    assertNoDomNode(domWindow.document.querySelector('[role="menu"]'), "the archived session's menu closes");
+    assert.ok(container.querySelector(".inbox-zero"), "the list is empty");
+    assert.notEqual(domWindow.document.activeElement, domWindow.document.body,
+      "focus goes to a durable surface, not <body>, though ⋯ went with the preview");
+  } finally {
+    mobileViewport = true;
+  }
+});
+
 test("a cancelled press and a source-landed release click both leave the next backdrop tap live", async () => {
   // #543 round-1 P2: pointercancel synthesizes no click, and a release click landing on the
   // pressed element is consumed there — in both cases the FIRST real backdrop dismissal must
@@ -2378,7 +2418,7 @@ test("InboxView keeps a hidden selection on its nearest visible ancestor and Shi
   assert.deepEqual(rowTitles(container), ["Session Parent", "Session Lone"]);
   await press("j");
   assert.equal(selectedTitle(), "Session Lone");
-  const previewTitle = () => container.querySelector<HTMLElement>(".session-preview-title")?.textContent ?? null;
+  const previewTitle = () => container.querySelector<HTMLElement>(".session-preview-bar .detail-bar-title")?.textContent ?? null;
   assert.equal(previewTitle(), "Session Lone");
   await act(async () => { socket.push({ type: "session_upsert", session: session("Lone", 5, { parentSessionId: "Parent" }) }); });
   assert.deepEqual(rowTitles(container), ["Session Parent"]);
@@ -2419,7 +2459,7 @@ test("an expanded child inside a collapsed thread is the session marked seen, no
       session("Lone", 20, { status: "running", parentSessionId: "Parent" }),
     ]));
   });
-  assert.equal(container.querySelector(".session-preview-title")?.textContent ?? container.textContent?.includes("Session Lone"), true);
+  assert.equal(container.querySelector(".session-preview-bar .detail-bar-title")?.textContent ?? container.textContent?.includes("Session Lone"), true);
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1_700)); });
   const seen = loadSeen();
   assert.ok("Lone" in seen, "the opened child is marked seen");

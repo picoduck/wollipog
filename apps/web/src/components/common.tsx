@@ -448,19 +448,6 @@ export function ReminderBadge({ reminder }: { reminder: SessionReminderView }) {
   );
 }
 
-/** Untracked detached work is a fact about the provider, not a state (§11.2), so it is a flag. */
-export function UntrackedBackgroundWorkBadge({ onOpen }: { onOpen?: () => void } = {}) {
-  return (
-    <StatusBadge tone="neutral" noDot label="Detached Work: Untracked" dataGroup="background-work"
-      ariaLabel="Detached Work: Untracked"
-      ariaControls={onOpen ? "right-panel" : undefined}
-      title={onOpen
-        ? "Open Background Work details"
-        : "This provider does not expose a durable detached-work lifecycle. Wollipog cannot promise automatic completion, cancellation, or recovery."}
-      onClick={onOpen} />
-  );
-}
-
 export function BackgroundDeliveryBadge({ state, onOpen }: { state: BackgroundDeliveryWatchdogState; onOpen?: () => void }) {
   const status = BACKGROUND_DELIVERY_STATUS[state];
   // Only a state that progresses on its own reads as working; a blocked or missing result asks

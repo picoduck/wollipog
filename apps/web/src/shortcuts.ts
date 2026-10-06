@@ -252,7 +252,7 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
   {
     id: "inbox-expand",
     group: "Sessions List",
-    label: "Expand Session",
+    label: "Open Session",
     scope: "Sessions List",
     binding: { key: "Enter", bare: true },
   },

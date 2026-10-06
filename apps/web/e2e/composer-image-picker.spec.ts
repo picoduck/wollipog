@@ -33,7 +33,7 @@ async function openSession(page: Page, supportsImages = true) {
     supportsImages,
   );
   await page.getByRole("button", { name: /Alpha Session/ }).click();
-  const expand = page.getByRole("button", { name: "Expand Session" });
+  const expand = page.getByRole("button", { name: "Open Session", exact: true });
   if (await expand.isVisible()) await expand.click();
   await expect(page.locator(".composer-input")).toBeEnabled();
 }
@@ -219,7 +219,7 @@ test("picked images survive navigation and remount, then send through the prompt
 
   await page.getByRole("button", { name: "Back to Sessions" }).click();
   await page.getByRole("button", { name: /Alpha Session/ }).click();
-  const expand = page.getByRole("button", { name: "Expand Session" });
+  const expand = page.getByRole("button", { name: "Open Session", exact: true });
   if (await expand.isVisible()) await expand.click();
   await expect(thumbnails(page)).toHaveCount(1);
 

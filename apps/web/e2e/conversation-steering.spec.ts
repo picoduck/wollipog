@@ -8,7 +8,7 @@ async function openSteeringSession(page: Page) {
   await page.evaluate(() => localStorage.clear());
   await page.goto(fixtureUrl);
   await page.getByRole("button", { name: /Alpha Session/ }).click();
-  const expand = page.getByRole("button", { name: "Expand Session" });
+  const expand = page.getByRole("button", { name: "Open Session", exact: true });
   if (await expand.isVisible()) await expand.click();
   await expect(page.locator(".session-bar")).toBeVisible();
   await page.evaluate(() => {
@@ -34,7 +34,7 @@ async function reopenSteeringSession(page: Page) {
   await page.getByRole("button", { name: /No Project Session/ }).click();
   await page.getByRole("tab", { name: /Alpha/ }).click();
   await page.getByRole("button", { name: /Alpha Session/ }).click();
-  const expand = page.getByRole("button", { name: "Expand Session" });
+  const expand = page.getByRole("button", { name: "Open Session", exact: true });
   if (await expand.isVisible()) await expand.click();
   await expect(page.locator(".session-bar")).toBeVisible();
   await expect(page.locator(".composer-input")).toBeEnabled();
@@ -398,7 +398,7 @@ test("an accepted steer settles cleanly across an in-place expanded-to-preview t
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringRequests().length)).toBe(1);
 
   await page.getByRole("button", { name: "Back to Sessions" }).click();
-  const expand = page.getByRole("button", { name: "Expand Session" });
+  const expand = page.getByRole("button", { name: "Open Session", exact: true });
   await expect(expand).toBeVisible();
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleDeferredSteeringResult({
     state: "accepted",

@@ -85,7 +85,7 @@ test.describe("with a fine pointer at 1440px", () => {
     await expect(page.locator(".detail-scroll[data-follow-tail-state]")).toHaveAttribute("data-follow-tail-state", "previewing");
     await expectKeycap(page, page.locator(".transcript-tail-control kbd"), "Jump to Latest control");
 
-    await page.getByRole("button", { name: "Expand Session" }).click();
+    await page.getByRole("button", { name: "Open Session", exact: true }).click();
     await page.getByRole("region", { name: "Session Activity" }).focus();
     // The Reply shortcut's keycap sits in the idle composer's placeholder row (#2166).
     const reply = page.locator(".composer-reply-hint kbd");
@@ -180,7 +180,7 @@ for (const width of [390, 1440]) {
         await expect(page.locator(".inbox-shortcut-rail button").first()).toBeVisible();
         await expect(page.locator(".inbox-shortcut-rail kbd").first()).toBeHidden();
         // An expanded session's idle composer offers no Reply keycap on a touch screen.
-        await page.getByRole("button", { name: "Expand Session" }).click();
+        await page.getByRole("button", { name: "Open Session", exact: true }).click();
         await expect(page.locator(".composer-box")).toBeVisible();
         await expect(page.locator(".composer-reply-hint kbd")).toBeHidden();
       }

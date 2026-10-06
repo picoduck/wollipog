@@ -19,7 +19,7 @@ async function openSession(page: Page, width: number, storage: Record<string, st
   }, storage);
   await page.goto(FIXTURE);
   await page.getByRole("button", { name: /Alpha Session/ }).first().click();
-  const expand = page.getByRole("button", { name: "Expand Session" });
+  const expand = page.getByRole("button", { name: "Open Session", exact: true });
   if (await expand.isVisible()) await expand.click();
   await expect(page.locator(".md table")).toBeVisible();
 }
@@ -127,7 +127,7 @@ test("a wide right panel turns the summary into a drawer, and the reader never d
   await page.evaluate(() => localStorage.setItem("wollipog.rightpanel.width", "380"));
   await page.reload();
   await page.getByRole("button", { name: /Alpha Session/ }).first().click();
-  const expand = page.getByRole("button", { name: "Expand Session" });
+  const expand = page.getByRole("button", { name: "Open Session", exact: true });
   if (await expand.isVisible()) await expand.click();
   let docked = 0;
   let drawers = 0;

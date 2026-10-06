@@ -5683,6 +5683,12 @@ textarea {
      under a body that no longer scrolls and painting it past its own edge (#2205). */
   .request-dock :is(.request-dock-card, .request-card) { flex: none; }
 }
+@container session-preview (max-height: 400px) {
+  /* The same for a short Sessions preview, whose dock heads the preview outside its reading column
+     (#2210): under about 200px of dock the card scrolls whole rather than losing its body. */
+  .request-dock .request-card-body { flex: none; overflow: visible; }
+  .request-dock :is(.request-dock-card, .request-card) { flex: none; }
+}
 @container chat-reading (min-height: 300px) and (max-height: 480px) {
   /* Where the dock still holds a line of the question with its footer (a phone with the keyboard
      open), a question keeps its frame and footer instead (§13.2): the card is the dock's height and
@@ -12478,15 +12484,13 @@ body.shell-dock-dragging * {
   color: var(--text-dim);
 }
 .inbox-preview-empty strong { color: var(--text); font-size: 16px; }
-.session-preview {
-  display: flex;
-  height: 100%;
-  min-height: 0;
-  flex-direction: column;
-  background: var(--bg);
-}
+/* The Sessions preview (#2210; §4.3, §6.3): a quick look, so it starts at the page gutter like the
+   page title and the rows above it, and its reading column is at most --chat-max wide, never
+   centered: its end padding is the gutter or whatever is left past the column. A size container,
+   so its request dock caps at half the preview. */
 .session-detail.preview {
   background: var(--bg);
+  container: session-preview / size;
 }
 .session-detail.preview .right-panel,
 .session-detail.preview .right-panel-resizer,
@@ -12494,38 +12498,59 @@ body.shell-dock-dragging * {
 .session-detail.preview .detail-columns,
 .session-detail.preview .detail-chat,
 .session-detail.preview .detail-main { min-height: 0; }
-.session-detail.preview .detail-scroll { padding-block: var(--space-3); }
-.session-detail.preview .question-bar { margin: var(--space-2) var(--space-3) 0; }
-.session-preview-head {
+.session-detail.preview .detail-scroll {
+  padding-block: var(--space-3);
+  padding-inline: var(--page-gutter) max(var(--page-gutter), calc(100% - var(--page-gutter) - var(--chat-max)));
+}
+.session-detail.preview .transcript-history-band { padding-inline: var(--page-gutter) max(var(--page-gutter), calc(100% - var(--page-gutter) - var(--chat-max))); }
+.session-detail.preview .transcript-tail-anchor > .btn.transcript-tail-control {
+  right: max(var(--page-gutter), calc(100% - var(--page-gutter) - var(--chat-max)));
+  left: var(--page-gutter);
+}
+/* The detail bar's one row, with the meta line under it as part of the same header. */
+.session-preview-bar { border-bottom: 0; }
+.session-preview-open { flex: none; }
+/* Neutral facts (§11.3): the machine, the branch and the agent, each after its 14px icon, 12px
+   apart on one line; the last fact gives way first. */
+.session-preview-facts {
   display: flex;
   flex: none;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 11px 16px 9px;
-  border-bottom: 1px solid var(--border);
-}
-.session-preview-heading { min-width: 0; flex: 1; }
-.session-preview-title {
-  overflow: hidden;
-  margin: 0;
-  color: var(--text);
-  font-size: 15px;
-  line-height: 22px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.session-preview-meta {
-  display: flex;
-  min-width: 0;
   align-items: center;
-  gap: 6px;
-  margin-top: 5px;
+  gap: var(--space-3);
+  min-width: 0;
+  margin: 0;
+  padding: 0 var(--page-gutter) var(--space-2);
   overflow: hidden;
-  color: var(--text-faint);
-  font-size: 11px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-dim);
+  font: var(--type-small);
+  list-style: none;
   white-space: nowrap;
 }
-.session-preview-meta .tag { flex: none; }
+.session-preview-facts > li {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.session-preview-facts > li > svg { flex: none; }
+.session-preview-fact {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* The request dock heads the preview (#2210): under the meta line, at most half the preview, its
+   card's body scrolling inside that cap (§13.2). */
+.session-detail.preview .detail-chat > .session-notice-slot {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  min-height: 0;
+  max-height: 50cqh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin: 0;
+  padding: var(--space-2) max(var(--page-gutter), calc(100% - var(--page-gutter) - var(--chat-max))) var(--space-2) var(--page-gutter);
+}
 
 @media (max-width: 760px) {
   .inbox-list-pane > .toolbar { align-items: stretch; flex-direction: column-reverse; padding: var(--space-2) var(--space-2) 0; }

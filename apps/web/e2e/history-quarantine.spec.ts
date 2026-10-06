@@ -11,7 +11,7 @@ for (const width of [1280, 390]) for (const theme of ["dark", "light"]) {
     await page.goto(url); await page.evaluate(() => localStorage.clear()); await page.goto(url);
     await page.evaluate((theme) => document.documentElement.dataset.theme = theme, theme);
     await page.getByRole("button", { name: /Alpha Session/ }).click();
-    const expand = page.getByRole("button", { name: "Expand Session" });
+    const expand = page.getByRole("button", { name: "Open Session", exact: true });
     if (await expand.isVisible()) await expand.click();
 
     const banner = page.locator('[aria-label="Conversation Quarantined"]');
@@ -56,7 +56,7 @@ test("a quarantine without a safe provider fork recovers through a fresh convers
   const url = "/command-inbox-projects-e2e.html?scenario=history-quarantine-handoff";
   await page.goto(url); await page.evaluate(() => localStorage.clear()); await page.goto(url);
   await page.getByRole("button", { name: /Alpha Session/ }).click();
-  const expand = page.getByRole("button", { name: "Expand Session" });
+  const expand = page.getByRole("button", { name: "Open Session", exact: true });
   if (await expand.isVisible()) await expand.click();
   await page.getByRole("button", { name: "Recover Session", exact: true }).click();
   // #2185: one turn is named as "Turn 1", not a range.

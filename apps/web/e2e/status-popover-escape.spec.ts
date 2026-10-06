@@ -17,7 +17,7 @@ for (const width of [390, 1440]) {
       await page.setViewportSize({ width, height: 1000 });
       await page.goto("/command-inbox-projects-e2e.html?scenario=session-usage-escape&fullShell=1");
       await page.getByRole("button", { name: /Alpha Session/ }).click();
-      const expand = page.getByRole("button", { name: "Expand Session" });
+      const expand = page.getByRole("button", { name: "Open Session", exact: true });
       if (await expand.isVisible()) await expand.click();
       const sessionHeading = page.getByRole("heading", { level: 1, name: "Alpha Session" });
       await expect(sessionHeading).toBeVisible();
@@ -56,7 +56,7 @@ test("a modal opened over a status popover takes the first Escape", async ({ pag
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.goto("/command-inbox-projects-e2e.html?scenario=session-usage-escape&fullShell=1");
   await page.getByRole("button", { name: /Alpha Session/ }).click();
-  const expand = page.getByRole("button", { name: "Expand Session" });
+  const expand = page.getByRole("button", { name: "Open Session", exact: true });
   if (await expand.isVisible()) await expand.click();
   const sessionHeading = page.getByRole("heading", { level: 1, name: "Alpha Session" });
   await expect(sessionHeading).toBeVisible();

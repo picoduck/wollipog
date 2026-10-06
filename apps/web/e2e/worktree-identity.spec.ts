@@ -37,7 +37,7 @@ for (const viewport of [
         await page.screenshot({ path: `${evidenceDir}/after-inbox-${viewport.name}-${theme}.png`, fullPage: true });
       }
       await row.click();
-      if (viewport.name === "desktop") await page.getByRole("button", { name: "Expand Session" }).click();
+      if (viewport.name === "desktop") await page.getByRole("button", { name: "Open Session", exact: true }).click();
       await expect(sessionBar(page)).toBeVisible();
       await expect(sessionBar(page).locator(".session-worktree-identity, .tag-wt")).toHaveCount(0);
       await expect(sessionBar(page).getByRole("link")).toHaveCount(0);
@@ -63,7 +63,7 @@ for (const viewport of [
         await page.screenshot({ path: `${evidenceDir}/before-inbox-${viewport.name}-${theme}.png`, fullPage: true });
       }
       await row.click();
-      if (viewport.name === "desktop") await page.getByRole("button", { name: "Expand Session" }).click();
+      if (viewport.name === "desktop") await page.getByRole("button", { name: "Open Session", exact: true }).click();
       await expect(sessionBar(page)).toBeVisible();
       await expect(sessionBar(page).locator(".session-worktree-identity, .tag-wt")).toHaveCount(0);
       if (capture) {
@@ -77,7 +77,7 @@ test("an unsafe worktree PR URL is shown as a fact without a link", async ({ pag
   await page.setViewportSize({ width: 1280, height: 760 });
   await page.goto("/command-inbox-projects-e2e.html?scenario=unsafe-worktree-pr");
   await page.getByRole("row", { name: /Alpha Session/ }).click();
-  await page.getByRole("button", { name: "Expand Session" }).click();
+  await page.getByRole("button", { name: "Open Session", exact: true }).click();
   const pullRequest = summary(page).locator(".ps-row", { hasText: "Pull Request" });
   await expect(pullRequest.locator(".v")).toHaveText("Open");
   await expect(summary(page).getByRole("link", { name: /Pull Request/ })).toHaveCount(0);

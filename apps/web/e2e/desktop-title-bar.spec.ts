@@ -113,7 +113,7 @@ test.describe("the browser build", () => {
     await expect(page).toHaveTitle("Sessions – Wollipog");
 
     await page.getByRole("button", { name: /Alpha Session/ }).click();
-    const expand = page.getByRole("button", { name: "Expand Session" });
+    const expand = page.getByRole("button", { name: "Open Session", exact: true });
     if (await expand.isVisible()) await expand.click();
     const title = (await page.locator(".session-bar h1").textContent())!.trim();
     expect(title).toContain("Alpha Session");

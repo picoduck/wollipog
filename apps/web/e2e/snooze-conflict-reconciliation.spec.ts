@@ -13,7 +13,7 @@ test("a stale Snooze save reconciles without live delivery and preserves the dra
   await expect(page.locator(".inbox-list-pane > .toolbar")).toBeVisible();
   await page.getByRole("button", { name: "Snoozed, 1", exact: true }).click();
   await page.locator(".inbox-row-shell", { hasText: "Snoozed Session" }).getByRole("button").first().click();
-  await page.getByRole("button", { name: "Snooze", exact: true }).click();
+  await page.getByRole("button", { name: "Snooze", exact: true }).first().click();
 
   const expression = page.getByLabel("Natural Language");
   const exact = page.getByLabel("Exact Date and Time");
@@ -59,7 +59,7 @@ test("a removed reminder can create a new reminder from its preserved draft", as
   await expect(page.locator(".inbox-list-pane > .toolbar")).toBeVisible();
   await page.getByRole("button", { name: "Snoozed, 1", exact: true }).click();
   await page.locator(".inbox-row-shell", { hasText: "Snoozed Session" }).getByRole("button").first().click();
-  await page.getByRole("button", { name: "Snooze", exact: true }).click();
+  await page.getByRole("button", { name: "Snooze", exact: true }).first().click();
 
   const expression = page.getByLabel("Natural Language");
   const exact = page.getByLabel("Exact Date and Time");

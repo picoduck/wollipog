@@ -4,6 +4,7 @@ import {
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   PROTOCOL_VERSION,
   buildConversationHandoff,
+  removePendingRequest,
   type AgentCapabilities,
   type AgentSlashCommand,
   type CreateSessionRequest,
@@ -356,6 +357,63 @@ function initialModel(): FixtureModel {
     initial.projects[0]!.unarchivedSessionCount = initial.sessions.length;
     initial.projects[0]!.totalSessionCount = initial.sessions.length;
   }
+  if (SCENARIO === "preview-bar") {
+    // The preview's detail bar (#2210): a blocked session with three permission requests and
+    // background work, a running one, an idle one and one whose machine is offline.
+    const permission = (requestId: string, title: string, input: string) => ({
+      requestId,
+      kind: "permission" as const,
+      title,
+      context: { toolName: "Bash", input },
+      options: [
+        { optionId: `${requestId}-allow`, name: "Allow Once", kind: "allow_once" as const },
+        { optionId: `${requestId}-deny`, name: "Deny", kind: "reject_once" as const },
+      ],
+    });
+    const longCommand = Array.from({ length: 60 }, (_, index) =>
+      `echo "step ${index + 1}: migrate table ${index + 1} and verify its row count"`).join("\n");
+    const rows: Array<[string, string, Partial<SessionView>]> = [
+      ["session-blocked", "Migrate the Billing Tables to the New Schema and Verify Every Row Count", {
+        status: "input_required",
+        backgroundWorkState: "running",
+        useWorktree: true,
+        worktreePath: "/repos/alpha/.agent-worktrees/billing",
+        worktrees: [{
+          id: "wt-billing",
+          path: "/repos/alpha/.agent-worktrees/billing",
+          branch: "fix/billing-schema-migration",
+          baseRef: "origin/main",
+          source: "created",
+        }],
+        pendingApproval: {
+          ...permission("request-migrate", "Run the Migration Script", longCommand),
+          additionalRequests: [
+            permission("request-vacuum", "Vacuum the Billing Database", "psql billing -c 'VACUUM FULL'"),
+            permission("request-restart", "Restart the Billing Service", "systemctl restart billing"),
+          ],
+        },
+      }],
+      ["session-running", "Summarize the Release Notes", {
+        status: "running",
+        activeTurnId: "turn-session-running",
+      }],
+      ["session-idle", "Draft the Quarterly Report", {}],
+      ["session-offline", "Profile the Nightly Build", {
+        runnerId: "runner-2",
+        status: "running",
+        activeTurnId: "turn-session-offline",
+      }],
+    ];
+    initial.sessions = rows.map(([id, title, extra], index) => {
+      const value = session(id, title, "alpha", "alpha-workspace");
+      // Recent, so no session reads as Stalled and the times are believable.
+      const at = Date.now() - (index + 1) * 60_000;
+      Object.assign(value, { createdAt: at - 3_600_000, updatedAt: at, lastEventAt: at, ...extra });
+      return value;
+    });
+    initial.projects[0]!.unarchivedSessionCount = initial.sessions.length;
+    initial.projects[0]!.totalSessionCount = initial.sessions.length;
+  }
   if (SCENARIO === "imported-location") {
     Object.assign(initial.projects.find((candidate) => candidate.id === "gamma")!, { canManage: true });
     Object.assign(initial.sessions.find((candidate) => candidate.id === "session-no-project")!, {
@@ -638,6 +696,7 @@ const handoffRequests: Array<{ id: string; turn: number; agentId: string; config
  * safe checkpoint and never submitted a prompt into the quarantined conversation. */
 const recoveryRequests: Array<{ id: string; turn: number; handoff?: { agentId: string; config: SessionConfig } }> = [];
 const restartRequests: string[] = [];
+const approvalRequests: Array<{ sessionId: string; requestId: string; optionId: string | null }> = [];
 const sessionCommandRequests: SessionCommandFixtureRequest[] = [];
 let failNextSessionCommandResponse = false;
 let deferNextSessionCommandResponse = false;
@@ -672,6 +731,23 @@ if (SCENARIO === "history-quarantine" || SCENARIO === "history-quarantine-handof
     { id: 4, sessionId: "session-alpha", seq: 4, ts: 4, payload: { kind: "user_message", text: "Now scan every changed file.", final: true } },
     { id: 5, sessionId: "session-alpha", seq: 5, ts: 5, payload: { kind: "error", message: "The agent provider rejected this conversation's stored history: the recorded tool call at history position 675 cannot be resent. Its arguments field is 1,426,210 characters, over the provider's limit of 1,048,576." } },
   ]);
+}
+if (SCENARIO === "preview-bar") {
+  // A few turns each, so the preview's first turn and its reading column can be measured.
+  for (const sessionId of ["session-blocked", "session-running", "session-idle", "session-offline"]) {
+    sessionEvents.set(sessionId, Array.from({ length: 6 }, (_, index): SessionEvent => {
+      const seq = index + 1;
+      return {
+        id: seq,
+        sessionId,
+        seq,
+        ts: Date.now() - (7 - seq) * 120_000,
+        payload: index % 2 === 0
+          ? { kind: "user_message", text: `Question ${seq / 2 + 0.5} about this work.`, final: true }
+          : { kind: "agent_message", text: `Answer ${seq / 2}. ${"The work is progressing as planned. ".repeat(10)}`, final: true },
+      };
+    }));
+  }
 }
 if (SCENARIO === "conversation-handoff") {
   sessionEvents.set("session-alpha", [
@@ -1281,7 +1357,7 @@ const shellOverviewMachine = () => {
   };
 };
 /** The overview's offline second machine. */
-const shellOfflineRunner: RunnerView | null = SHELL_OVERVIEW
+const shellOfflineRunner: RunnerView | null = SHELL_OVERVIEW || SCENARIO === "preview-bar"
   ? { ...structuredClone(runner), runnerId: "runner-2", hostname: "studio-workstation", displayName: "Studio Workstation", status: "offline" }
   : null;
 if (SHELL_OVERVIEW) runner.displayName = "Build Machine";
@@ -1616,6 +1692,17 @@ function unavailableSwitchAccount(
 const client = {
   ...api,
   ...shellSkillsApi,
+  // Deciding a request removes it, so the session's next request comes up (#2210).
+  ...(SCENARIO === "preview-bar" ? { approve: async (id: string, body: { requestId: string; optionId: string | null }) => {
+    const value = model.sessions.find((candidate) => candidate.id === id);
+    if (!value) throw new Error("session not found");
+    approvalRequests.push({ sessionId: id, ...body });
+    value.pendingApproval = removePendingRequest(value.pendingApproval, body.requestId);
+    if (!value.pendingApproval && value.status === "input_required") value.status = "running";
+    value.updatedAt += 1;
+    pushSession(value);
+    return structuredClone(value);
+  } } : {}),
   ...(SWITCH_ACCOUNTS ? {
     sessionProviderAccounts: async () => {
       const unavailable = switchAccountUnavailable();
@@ -2498,6 +2585,7 @@ declare global {
       recoveryRequests(): Array<{ id: string; turn: number; handoff?: { agentId: string; config: SessionConfig } }>;
       handoffRequests(): Array<{ id: string; turn: number; agentId: string; config: SessionConfig }>;
       restartRequests(): string[];
+      approvalRequests(): Array<{ sessionId: string; requestId: string; optionId: string | null }>;
       sessionCommandRequests(): SessionCommandFixtureRequest[];
       retitleRequests(): string[];
       deferNextRetitle(): void;
@@ -2739,6 +2827,7 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
   recoveryRequests: () => structuredClone(recoveryRequests),
   handoffRequests: () => structuredClone(handoffRequests),
   restartRequests: () => structuredClone(restartRequests),
+  approvalRequests: () => structuredClone(approvalRequests),
   sessionCommandRequests: () => structuredClone(sessionCommandRequests),
   composerDraft: (id) => loadComposerDraft(id, "project-inbox-e2e"),
   seedComposerDraft: (id, text, images) => saveComposerDraft(id, text, images, "project-inbox-e2e"),

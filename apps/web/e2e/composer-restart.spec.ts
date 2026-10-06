@@ -7,7 +7,7 @@ test("a stopped Session restarts from the composer action slot", async ({ page }
   await page.evaluate(() => localStorage.clear());
   await page.goto(fixtureUrl);
   await page.getByRole("button", { name: /Alpha Session/ }).click();
-  await page.getByRole("button", { name: "Expand Session" }).click();
+  await page.getByRole("button", { name: "Open Session", exact: true }).click();
 
   const restart = page.getByRole("button", { name: "Restart Session" });
   await expect(restart).toBeVisible();

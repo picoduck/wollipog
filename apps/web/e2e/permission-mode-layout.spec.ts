@@ -8,7 +8,7 @@ async function openApprovals(page: Page, theme: string) {
   await page.evaluate(() => localStorage.clear());
   await page.reload();
   await page.getByRole("button", { name: /Alpha Session/ }).click();
-  const expand = page.getByRole("button", { name: "Expand Session" });
+  const expand = page.getByRole("button", { name: "Open Session", exact: true });
   if (await expand.isVisible()) await expand.click();
   await page.evaluate(({ theme, longLabel }) => {
     document.documentElement.dataset.theme = theme;

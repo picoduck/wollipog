@@ -96,7 +96,7 @@ test("at 390px one toast shows, above the tab bar, with the rest behind +N More"
 test("at 390px in a session, a toast sits above the composer", async ({ page }) => {
   await open(page, 390);
   await page.getByRole("button", { name: /Alpha Session/ }).first().click();
-  const expand = page.getByRole("button", { name: "Expand Session" });
+  const expand = page.getByRole("button", { name: "Open Session", exact: true });
   if (await expand.isVisible()) await expand.click();
   await expect(page.locator(".composer")).toBeVisible();
   await show(page, "Session renamed.", { durationMs: 0 });

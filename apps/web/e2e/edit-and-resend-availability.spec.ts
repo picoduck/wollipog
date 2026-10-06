@@ -5,7 +5,7 @@ test("an Edit as a New Turn that is temporarily blocked stays listed and says wh
   const url = "/command-inbox-projects-e2e.html?scenario=edit-in-fork";
   await page.goto(url); await page.evaluate(() => localStorage.clear()); await page.goto(url);
   await page.getByRole("button", { name: /Alpha Session/ }).click();
-  const expand = page.getByRole("button", { name: "Expand Session" });
+  const expand = page.getByRole("button", { name: "Open Session", exact: true });
   if (await expand.isVisible()) await expand.click();
 
   const edit = page.getByRole("button", { name: "Edit as a New Turn" });

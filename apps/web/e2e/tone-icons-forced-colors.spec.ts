@@ -41,7 +41,7 @@ async function openPinnedSummary(page: Page, theme: "dark" | "light"): Promise<L
   await page.goto(PINNED);
   await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
   await page.getByRole("button", { name: /Alpha Session/ }).first().click();
-  const expand = page.getByRole("button", { name: "Expand Session" });
+  const expand = page.getByRole("button", { name: "Open Session", exact: true });
   if (await expand.isVisible()) await expand.click();
   await expect(page.locator(".md table")).toBeVisible();
   const aside = page.locator('aside.ps[aria-label="Pinned Summary"]');

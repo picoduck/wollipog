@@ -12,7 +12,6 @@ import {
   COPY_RESULT_MS,
   CopyButton,
   SessionStatusIndicators,
-  UntrackedBackgroundWorkBadge,
 } from "./common.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -280,12 +279,11 @@ test("background-work indicators become keyboard-native panel controls when acti
   try {
     await act(async () => root.render(<>
       <BackgroundWorkBadge state="running" onOpen={() => { opens += 1; }} />
-      <UntrackedBackgroundWorkBadge onOpen={() => { opens += 1; }} />
       <BackgroundDeliveryBadge state="accepted_without_result" onOpen={() => { opens += 1; }} />
       <BackgroundNotificationBadge state="retry" onOpen={() => { opens += 1; }} />
     </>));
     const buttons = [...container.querySelectorAll<HTMLButtonElement>("button")];
-    assert.equal(buttons.length, 4);
+    assert.equal(buttons.length, 3);
     assert.ok(buttons.every((button) => button.getAttribute("aria-controls") === "right-panel"));
     assert.deepEqual(
       [...container.querySelectorAll('[role="status"]')].map((status) => ({
@@ -299,7 +297,7 @@ test("background-work indicators become keyboard-native panel controls when acti
       "an actionable current-state badge keeps one live announcement without changing button semantics",
     );
     for (const button of buttons) await act(async () => button.click());
-    assert.equal(opens, 4);
+    assert.equal(opens, 3);
   } finally {
     await act(async () => root.unmount());
     container.remove();
@@ -372,7 +370,7 @@ test("background-delivery watchdog badges use compact visible labels and explana
   }
 });
 
-test("Untracked capability and push receipt badges expose honest Title Case boundaries", async () => {
+test("push receipt badges expose honest Title Case boundaries", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
   const container = happyContainer as unknown as HTMLDivElement;
@@ -380,7 +378,6 @@ test("Untracked capability and push receipt badges expose honest Title Case boun
   try {
     await act(async () => {
       root.render(<>
-        <UntrackedBackgroundWorkBadge />
         <BackgroundNotificationBadge state="service_accepted" />
         <BackgroundNotificationBadge state="shown" />
         <BackgroundNotificationBadge state="clicked" />
@@ -388,17 +385,14 @@ test("Untracked capability and push receipt badges expose honest Title Case boun
     });
     assert.deepEqual(
       [...container.querySelectorAll('.status[data-group="background-work"]')].map((badge) => badge.textContent),
-      ["Detached Work: Untracked", "Push Service Accepted", "Notification Displayed", "Notification Clicked"],
+      ["Push Service Accepted", "Notification Displayed", "Notification Clicked"],
     );
     assert.deepEqual(
-      [...container.querySelectorAll('.status[data-group="background-work"]')].slice(1)
+      [...container.querySelectorAll('.status[data-group="background-work"]')]
         .map((badge) => badge.classList.contains("t-success")),
       [true, true, true],
       "settled notification history reads as done, not as attention",
     );
-    const untracked = container.querySelector('.status[data-group="background-work"]');
-    assert.ok(untracked?.classList.contains("no-dot"), "untracked detached work is a fact, so it is a flag with no dot");
-    assert.match(untracked?.getAttribute("title") ?? "", /cannot promise/i);
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();

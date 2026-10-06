@@ -264,6 +264,11 @@ async function openComposerResponseFixture(page: Page) {
   await expect(page.getByRole("tab", { name: /Alpha/ })).toBeVisible();
 }
 
+/** The Sessions preview shows a question with Answer in Session, not its answer form (#2210). */
+function previewQuestion(page: Page) {
+  return page.locator('.session-detail.preview .request-card[data-presentation="preview"] .request-card-title');
+}
+
 async function focusZoneWithKeyboard(page: Page, zone: "list" | "main") {
   const presses = zone === "list" ? 2 : 3;
   for (let index = 0; index < presses; index += 1) await page.keyboard.press("F6");
@@ -281,7 +286,7 @@ test("one R from the Sessions list focuses an already-active Composer Response b
       pendingApproval,
     });
   }, composerQuestion);
-  await expect(page.locator(".question-bar").getByText("Choose a target", { exact: true })).toBeVisible();
+  await expect(previewQuestion(page)).toHaveText("Choose a target");
 
   await focusZoneWithKeyboard(page, "list");
   await page.keyboard.press("r");
@@ -304,7 +309,7 @@ test("offline Composer Response owns the immediate digit after R from the Sessio
     });
     fixture.setRunnerStatus("offline");
   }, composerQuestion);
-  await expect(page.getByText("Responses are unavailable until the runner reconnects.", { exact: true })).toBeVisible();
+  await expect(previewQuestion(page)).toHaveText("Choose a target");
 
   await focusZoneWithKeyboard(page, "list");
   await page.keyboard.press("r");
@@ -344,7 +349,7 @@ test("one R from the split preview enters Composer Response without losing the o
       pendingApproval,
     });
   }, composerQuestion);
-  await expect(page.locator(".question-bar").getByText("Choose a target", { exact: true })).toBeVisible();
+  await expect(previewQuestion(page)).toHaveText("Choose a target");
 
   await page.keyboard.press("F6");
   await expect.poll(() => page.evaluate(() =>
@@ -382,7 +387,7 @@ test("offline Composer Response owns the immediate digit after R from the split 
     });
     fixture.setRunnerStatus("offline");
   }, composerQuestion);
-  await expect(page.locator(".question-bar").getByText("Choose a target", { exact: true })).toBeVisible();
+  await expect(previewQuestion(page)).toHaveText("Choose a target");
 
   await page.keyboard.press("F6");
   await expect.poll(() => page.evaluate(() =>
@@ -576,7 +581,7 @@ for (const scenario of [
   expect(selectedKey).not.toBeNull();
   const before = await list.evaluate((element) => element.scrollTop);
 
-  await page.getByRole("button", { name: "Expand Session" }).click();
+  await page.getByRole("button", { name: "Open Session", exact: true }).click();
   await expect(page.getByRole("region", { name: "Session Activity" })).toBeVisible();
   await settlePreviewLayout(page, 2);
   if (scenario.patch) {
@@ -686,7 +691,7 @@ test("an event-heavy Inbox preview fills its opening viewport before expansion",
       .filter((request) => request.sessionId === "session-alpha" && request.direction === "backward").length,
   );
 
-  await page.getByRole("button", { name: "Expand Session" }).click();
+  await page.getByRole("button", { name: "Open Session", exact: true }).click();
   const expandedReader = page.getByRole("region", { name: "Session Activity" });
   await expect(expandedReader).toBeVisible();
   await expect.poll(() => page.evaluate(() =>
@@ -742,7 +747,7 @@ for (const reducedMotion of ["reduce", "no-preference"] as const) {
     await expect(follow).toHaveAttribute("data-follow-tail-state", "previewing");
 
     // Page Up from the Session Reading keys, in the expanded session.
-    await page.getByRole("button", { name: "Expand Session" }).click();
+    await page.getByRole("button", { name: "Open Session", exact: true }).click();
     const reader = page.getByRole("region", { name: "Session Activity" });
     await expect(reader.locator("[data-virtual-row]").first()).toBeVisible();
     await reader.focus();
@@ -831,9 +836,12 @@ test("real Inbox reading hints and resume keys match preview and expanded follow
   await expect(jump).toHaveAccessibleName("Jump to Latest");
   await expect(jump.locator("kbd")).toHaveText("End");
   await expect(jump).toHaveAttribute("title", "Jump to Latest (End)");
-  // Centered on the reading column, floating --space-3 above the reader's lower edge.
-  const [readerBox, jumpBox] = await Promise.all([reader.boundingBox(), jump.boundingBox()]);
-  expect(Math.abs((jumpBox!.x + jumpBox!.width / 2) - (readerBox!.x + readerBox!.width / 2))).toBeLessThan(10);
+  // Centered on the reading column, which a preview starts at the page gutter (#2210), floating
+  // --space-3 above the reader's lower edge. A transcript row spans the reading column.
+  const [readerBox, jumpBox, columnBox] = await Promise.all([
+    reader.boundingBox(), jump.boundingBox(), reader.locator(".tl-row").first().boundingBox(),
+  ]);
+  expect(Math.abs((jumpBox!.x + jumpBox!.width / 2) - (columnBox!.x + columnBox!.width / 2))).toBeLessThan(10);
   expect(readerBox!.y + readerBox!.height - (jumpBox!.y + jumpBox!.height)).toBeCloseTo(12, 0);
 
   await page.keyboard.press("Shift+G");
@@ -847,7 +855,7 @@ test("real Inbox reading hints and resume keys match preview and expanded follow
   await expect(follow).toHaveAttribute("data-follow-tail-state", "following");
   await expect.poll(async () => (await previewScrollMetrics(page)).distanceFromTail).toBeLessThanOrEqual(2);
 
-  await page.getByRole("button", { name: "Expand Session" }).click();
+  await page.getByRole("button", { name: "Open Session", exact: true }).click();
   await expect(page.locator(".inbox-view.expanded")).toBeVisible();
   await expect(page.locator(".inbox-list-pane")).toHaveAttribute("inert", "");
   reader = page.getByRole("region", { name: "Session Activity" });
@@ -958,7 +966,7 @@ test("Session Reading movement owns an incomplete Inbox restore across an immedi
   });
   await page.getByRole("row", { name: /Alpha Session/ }).click();
   await expect(page.locator("[data-session-surface-id='session-alpha']")).toBeVisible();
-  await page.getByRole("button", { name: "Expand Session" }).click();
+  await page.getByRole("button", { name: "Open Session", exact: true }).click();
   const expandedReader = page.getByRole("region", { name: "Session Activity" });
   // The saved window is immediately readable while the same-epoch forward gap is still loading.
   await expect(expandedReader.locator("[data-virtual-total='24']")).toBeVisible();
@@ -1507,7 +1515,7 @@ test("the project menu button opens the project's actions and returns focus to i
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateProject("alpha", { name: "Alpha Project" }));
   await page.getByRole("tab", { name: /^All \d/ }).click();
   await page.getByRole("row", { name: /Alpha Session/ }).click();
-  await page.getByRole("button", { name: "Expand Session" }).click();
+  await page.getByRole("button", { name: "Open Session", exact: true }).click();
   // One control for the project: the name and its caret open a menu; nothing navigates on its own.
   const projectButton = page.locator(".session-bar .session-project-button");
   await expect(projectButton).toHaveText("Alpha Project");
@@ -1542,7 +1550,7 @@ test("the project menu button opens the project's actions and returns focus to i
 test("session Project assignment changes organization without changing execution Location", async ({ page }) => {
   await page.getByRole("tab", { name: /Alpha/ }).click();
   await page.getByRole("row", { name: /Alpha Session/ }).click();
-  await page.getByRole("button", { name: "Expand Session" }).click();
+  await page.getByRole("button", { name: "Open Session", exact: true }).click();
   const projectChip = page.locator(".session-bar .session-project-button").filter({ hasText: "Alpha" });
   await expect(projectChip).toBeVisible();
   let dialog = await openMoveToProjectDialog(page);
@@ -1587,7 +1595,7 @@ test("an imported session can link its verified Location while moving to a manag
 
   await page.getByRole("tab", { name: /No Project/ }).click();
   await page.getByRole("row", { name: /No Project Session/ }).click();
-  await page.getByRole("button", { name: "Expand Session" }).click();
+  await page.getByRole("button", { name: "Open Session", exact: true }).click();
   const moveDialog = await openMoveToProjectDialog(page);
   const gammaChoice = moveDialog.getByRole("radio", { name: /Gamma/ });
   await expect(gammaChoice).toHaveAccessibleDescription(/Adds this folder to the project\./);
@@ -1636,7 +1644,7 @@ test("personal sessions join a team Project only through Move and Share, beside 
 
   await page.getByRole("tab", { name: /No Project/ }).click();
   await page.getByRole("row", { name: /Alpha Session/ }).click();
-  await page.getByRole("button", { name: "Expand Session" }).click();
+  await page.getByRole("button", { name: "Open Session", exact: true }).click();
   const moveDialog = await openMoveToProjectDialog(page);
   const alphaChoice = moveDialog.getByRole("radio", { name: /Alpha/ });
   await expect(alphaChoice).toHaveAccessibleDescription("Includes this folder. Shared with the Platform team.");
@@ -1672,7 +1680,7 @@ test("older control planes with missing audience metadata fail closed before Pro
 
   await page.getByRole("tab", { name: /No Project/ }).click();
   await page.getByRole("row", { name: /Alpha Session/ }).click();
-  await page.getByRole("button", { name: "Expand Session" }).click();
+  await page.getByRole("button", { name: "Open Session", exact: true }).click();
   const moveDialog = await openMoveToProjectDialog(page);
   await moveDialog.getByRole("radio", { name: /Alpha/ }).click();
 

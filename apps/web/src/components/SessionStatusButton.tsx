@@ -86,7 +86,7 @@ function conditionKey(condition: SessionCondition): string {
 
 /** The count is drawn as a hidden numeral and said in words, so a row's badge reads "Approval
  * Required, 2 Requests" to a screen reader as it does to the eye. */
-function ConditionBadge({ condition }: { condition: SessionCondition }) {
+export function ConditionBadge({ condition }: { condition: SessionCondition }) {
   return (
     <StatusBadge meta={condition.meta}>
       {condition.count !== undefined && (

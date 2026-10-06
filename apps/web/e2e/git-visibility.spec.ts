@@ -12,7 +12,7 @@ async function openSession(page: Page, name: string): Promise<void> {
   const back = page.getByRole("button", { name: "Back to Sessions" });
   if (await back.isVisible()) await back.click();
   await page.getByRole("button", { name: new RegExp(name) }).click();
-  const expand = page.getByRole("button", { name: "Expand Session" });
+  const expand = page.getByRole("button", { name: "Open Session", exact: true });
   if (await expand.isVisible()) await expand.click();
   await expect(page.locator(".session-bar")).toBeVisible();
 }
@@ -33,7 +33,7 @@ test("Inbox preview selection does not issue unconsumed Git or forge-summary rea
   await page.setViewportSize({ width: 1280, height: 820 });
   await resetFixture(page);
   await page.getByRole("button", { name: /Alpha Session/ }).click();
-  await expect(page.getByRole("button", { name: "Expand Session" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open Session", exact: true })).toBeVisible();
   expect(await page.evaluate(() =>
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.gitRequestCounts("session-alpha"))).toEqual({
     status: 0,
@@ -42,7 +42,7 @@ test("Inbox preview selection does not issue unconsumed Git or forge-summary rea
 
   await page.evaluate(() =>
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", { status: "running" }));
-  await page.getByRole("button", { name: "Expand Session" }).click();
+  await page.getByRole("button", { name: "Open Session", exact: true }).click();
   await expect(page.locator(".session-bar")).toBeVisible();
   await expect.poll(() => page.evaluate(() => {
     const counts = window.__WOLLIPOG_PROJECT_INBOX_E2E__.gitRequestCounts("session-alpha");

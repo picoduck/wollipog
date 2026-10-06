@@ -18,7 +18,7 @@ import { staticPinnedSummary } from "./pinned-summary-state.js";
  * #2329: a session with several background deliveries names the same one on every surface. The
  * control plane lists retained deliveries before Result Blocked ones, so a Notification Pending
  * delivery can come first; the session bar, the Pinned Summary's badge and the Sessions preview
- * header's badge all name the blocked one.
+ * bar's status all name the blocked one.
  */
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -97,7 +97,8 @@ interface Observed {
   sessionBar: string | null;
   /** Every delivery badge, by where it sits. */
   pinnedSummary: string[];
-  previewHeader: string[];
+  /** The Sessions preview bar's one status (#2210), or null in the expanded session. */
+  previewBar: string | null;
   /** The panels the Pinned Summary's delivery badge asked the right panel to show. */
   opened: string[];
 }
@@ -161,7 +162,7 @@ async function observe(mode: SessionDetailMode, backgroundDeliveries: Background
     return {
       sessionBar: container.querySelector("header.session-bar .session-status-button .status")?.textContent ?? null,
       pinnedSummary: deliveryLabels(summary),
-      previewHeader: deliveryLabels(container.querySelector(".session-preview-head")),
+      previewBar: container.querySelector("header.session-preview-bar .status")?.textContent ?? null,
       opened,
     };
   } finally {
@@ -175,22 +176,23 @@ test("a pending delivery listed before a blocked one: the bar and the Pinned Sum
   assert.deepEqual(observed, {
     sessionBar: "Result Blocked",
     pinnedSummary: ["Result Blocked"],
-    previewHeader: [],
+    previewBar: null,
     opened: ["background"],
   });
 });
 
-test("a pending delivery listed before a blocked one: the Sessions preview header names Result Blocked", async () => {
+test("a pending delivery listed before a blocked one: the Sessions preview bar names Result Blocked", async () => {
   const observed = await observe("preview", [pending, blocked]);
-  assert.deepEqual(observed.previewHeader, ["Result Blocked"]);
+  assert.equal(observed.previewBar, "Result Blocked");
   assert.equal(observed.sessionBar, null, "the preview has no session bar");
 });
 
-test("with only pending deliveries every surface names the first one, as before", async () => {
+test("with only pending deliveries the Pinned Summary names the first one and both bars keep the lifecycle", async () => {
   const expanded = await observe("expanded", [pending, delayed]);
   // A passive delivery never outranks the lifecycle on the bar (#2275); it is listed in its popover.
   assert.equal(expanded.sessionBar, "Awaiting Prompt");
   assert.deepEqual(expanded.pinnedSummary, ["Notification Pending"]);
+  // The preview bar ranks the same way (#2210): the passive delivery leaves the lifecycle showing.
   const preview = await observe("preview", [pending, delayed]);
-  assert.deepEqual(preview.previewHeader, ["Notification Pending"]);
+  assert.equal(preview.previewBar, "Awaiting Prompt");
 });
