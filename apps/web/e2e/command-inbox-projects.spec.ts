@@ -36,8 +36,12 @@ async function controlGeometry(control: Locator) {
 }
 
 async function openProjectManager(page: Page, projectName = "Alpha") {
-  await page.getByRole("tab", { name: new RegExp(projectName) }).hover();
-  await page.getByRole("button", { name: `Project Actions for ${projectName}` }).click();
+  const tab = page.getByRole("tab", { name: new RegExp(projectName) });
+  const trigger = page.getByRole("button", { name: `Project Actions for ${projectName}` });
+  await tab.hover();
+  // Without hover only the active Project tab shows its actions (#2180), so select it first.
+  if (!await trigger.isVisible()) await tab.click();
+  await trigger.click();
   await page.getByRole("menuitem", { name: /Manage Project/ }).click();
 }
 
