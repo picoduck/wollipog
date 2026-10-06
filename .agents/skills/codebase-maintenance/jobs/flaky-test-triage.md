@@ -17,10 +17,18 @@ three times: `pnpm test:e2e`, from the repository root (the config and baseURL l
 historical flake in this repository has been e2e/browser, so a unit-only pass is structurally
 blind to the layer that actually flakes. Before each e2e run, check that port 4174 is free —
 concurrent worktree sessions run their own e2e servers; if the port is held, wait and retry
-rather than killing the other server, and stagger subsequent runs. Budget roughly ninety minutes
-of wall clock for the three e2e passes (about 1,100 browser tests at 26–31 minutes a pass on
-2026-09-29); they are cheap in tokens. A window that long is also why HEAD moves under the sweep,
-so the baseline-pinning rule above matters most for the e2e passes.
+rather than killing the other server, and stagger subsequent runs. Budget about 3.5 hours of wall
+clock for the unit runs and three e2e passes: the 2026-10-06 suite collected 2,153 browser cases
+and each complete pass took 55–56 minutes. Record current collection counts and actual durations
+rather than treating this estimate as fixed. A window that long is also why HEAD moves under the
+sweep, so the baseline-pinning rule below matters most for the e2e passes.
+
+Launch each full-suite pass as its own command and await its completion before starting the next.
+Do not chain the three passes into one background command: a per-command lifetime limit can end
+the batch partway through a later pass (the 2026-10-06 batch was cut off after two hours). Use
+separate run logs and completion records, and resume from those records if the session yields.
+A killed, interrupted, or partial pass does not count toward the three comparable complete runs;
+report incomplete coverage explicitly if replacements cannot be completed.
 
 Pin the baseline across the whole set of runs. Record `git rev-parse HEAD` before the first run
 and re-check it before and after every run, unit and e2e alike. Another session can fast-forward
@@ -59,6 +67,14 @@ because `playwright.config.ts` sets `failOnFlakyTests` under CI. A 20-run window
   finding is a bug in the implementation.
 - Report a resource-contention failure as environmental only when you can show it — for example a
   port already bound by another process on this machine.
+- If a browser pass suddenly produces a cascade of fast connection/navigation failures, check
+  whether that pass's own configured web server is still listening and responding. In the
+  2026-10-06 sweep, hundreds of roughly 300ms failures followed the disappearance of its Vite
+  server on port 4174. Establish server loss from listener/process/readiness evidence; fast
+  failures alone do not prove it. Record the failure, discount the incomplete pass when comparing
+  test failure sets, and replace it on the same verified baseline. Preserve the logs and any
+  genuine failures before server loss. Stop only processes verified to belong to this pass,
+  never another session's server. Do not declare a server-exit cause without evidence.
 - A hung or failing run observed in the process table may belong to another session's sandbox or
   to an agent-modified copy of a test file — this machine runs concurrent agent worktrees
   constantly. Before reporting one, verify the file is byte-identical to `main` and check the

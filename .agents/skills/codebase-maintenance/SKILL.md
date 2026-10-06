@@ -98,22 +98,25 @@ reported. One sweep ran two commits behind and produced three findings in a file
 twelve files that had merely moved on. The primary checkout is not fast-forwarded on a schedule,
 and Phase 1 forbids this run from pulling it.
 
-Check install freshness the same way, before any job that executes code (tests, coverage, knip,
-type checks): compare the install stamp to the lockfile's last change —
-`stat -c %Y node_modules/.modules.yaml` against `git log -1 --format=%ct -- pnpm-lock.yaml`. If
-the install is older than the lockfile, run `pnpm install --frozen-lockfile --prefer-offline`
-right then, as part of preflight, and record it in the Tree State section with the packages it
-linked. This is the only install Phase 1 permits, and only at this point: never after a test or
-analysis run has started, and never in response to HEAD moving mid-sweep (that case is handled
-by re-running at the new baseline, not by reinstalling under a running suite). Two jobs share
-the primary checkout an hour apart; the first to find the install stale fixes it in seconds and
-the second finds it fresh, so a preflight install does not race a sibling's suite. If the
-install fails, or if `ERR_MODULE_NOT_FOUND` / "Cannot find package" failures still appear, treat
-them as environmental: they are not broken tests and not findings, and they go in Recommended
-Actions as one `environment` item naming the missing package and the install error. One
-flaky-test sweep ran the unit suite six times before establishing that its 29 identical failures
-were a workspace package added to the lockfile after the checkout's last install; the freshness
-check is one command and the install is one more.
+Check install freshness before any job that executes code (tests, coverage, knip, type checks):
+compare the installed lockfile with the checkout's wanted lockfile using
+`cmp -s node_modules/.pnpm/lock.yaml pnpm-lock.yaml`. A missing installed lockfile or a content
+mismatch requires `pnpm install --frozen-lockfile --prefer-offline` as preflight, before the first
+test or analysis command. Do not use an install timestamp versus a lockfile commit timestamp:
+a checkout can receive an older-dated lockfile commit after its last install, so that comparison
+can call a stale install fresh. Record the content/version mismatch and packages linked in Tree
+State. Recheck the lockfile comparison after installation; an unexplained remaining mismatch or
+an unreadable lockfile is an `environment` item, not evidence that the install is fresh.
+
+This is the only install Phase 1 permits, and only at this point: never after a test or analysis
+run has started, and never in response to HEAD moving mid-sweep (that case is handled by re-running
+at the new baseline, not by reinstalling under a running suite). Do not change a shared install
+while another test or install command is using it. If the install fails, or if `ERR_MODULE_NOT_FOUND`
+/ "Cannot find package" failures still appear, treat them as environmental: they are not broken
+tests and not findings, and they go in Recommended Actions as one `environment` item naming the
+missing package and the install error. A stale installed package version or missing required patch
+is handled the same way. One flaky-test sweep ran the unit suite three times against shell-quote
+1.9.0 after the checkout required 1.11.0; content comparison catches that mismatch before testing.
 
 A finding that rests only on reading code is a guess. Each job file names the tool that proves its
 category — static analysis, coverage data, test runs, `git log`, `gh`. Run it, and cite what it
