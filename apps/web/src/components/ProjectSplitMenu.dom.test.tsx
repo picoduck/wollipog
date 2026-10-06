@@ -1234,3 +1234,28 @@ test("a failed rename keeps its reason when focus leaves the field, until the na
   await act(async () => { button(container, "Cancel").click(); await tick(); });
   await view.unmount();
 });
+
+test("a reopened menu starts a fresh type-ahead search (#2199)", async () => {
+  const view = await mountMenu(
+    <FeedbackProvider>
+      <ProjectSplitMenu split={split} runner={runner()} pinned={false}
+        onPinnedChange={() => undefined} onNewSession={() => undefined} />
+    </FeedbackProvider>,
+  );
+  const press = async (key: string) => {
+    await act(async () => {
+      domWindow.document.activeElement?.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+      await tick();
+    });
+  };
+  await openMenu(view.container);
+  await press("p");
+  assert.equal(domWindow.document.activeElement?.textContent?.trim(), "Pin Workspace");
+  await press("Escape");
+  await openMenu(view.container);
+  await press("r");
+  assert.equal(domWindow.document.activeElement?.textContent?.trim(), "Rename Workspace…",
+    "the earlier opening's p is forgotten, so r alone matches");
+  await press("Escape");
+  await view.unmount();
+});

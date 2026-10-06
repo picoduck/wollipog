@@ -413,6 +413,8 @@ export function ProjectSplitMenu({ active = true, tabMenu = null, onTabMenuClose
     const opener = tabMenu ? tabMenu.tab : triggerRef.current;
     if (tabMenu) onTabMenuClose?.();
     setTriggerOpen(false);
+    // The next opening starts a fresh search.
+    typeahead.current = { text: "", at: 0 };
     if (restoreFocus) opener?.focus();
   };
   const choose = (action: ProjectAction) => {
