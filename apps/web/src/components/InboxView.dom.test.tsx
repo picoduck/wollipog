@@ -793,7 +793,7 @@ test("a Project's archive confirmation lists its sessions from Active and Snooze
   await act(async () => { alphaTab.click(); });
   const body = domWindow.document.body as unknown as HTMLElement;
   const confirmation = async () => {
-    const trigger = container.querySelector<HTMLButtonElement>('[aria-label="Project Actions for Alpha"]')!;
+    const trigger = container.querySelector<HTMLButtonElement>('[aria-label="Alpha Actions"]')!;
     await act(async () => { trigger.click(); });
     const archive = [...body.querySelectorAll<HTMLElement>('[role="menuitem"]')]
       .find((item) => /^Archive/u.test(item.textContent ?? ""))!;
