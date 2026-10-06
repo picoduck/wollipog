@@ -145,6 +145,13 @@ export function SnoozeDialog({
   });
 
   const now = new Date();
+  // Every time in the dialog reads in the zone its helper names, this browser's. A stored instant
+  // is absolute, so showing it here reinterprets nothing, and saving still sends its own zone.
+  const displayZone = browserTimeZone();
+  const tileTime = (schedule: ParsedReminderSchedule) => formatReminderTileTime(
+    schedule.scheduleKind === "timed" ? { ...schedule, timeZone: displayZone } : schedule,
+    now.getTime(),
+  );
   // Resolved when its inputs change, not on every render: a draft such as "in 2 hours" keeps the
   // instant it was given through a live update, a reconciliation or a Return Early toggle.
   const parsed = useMemo((): ParsedReminderSchedule | null => {
@@ -175,14 +182,14 @@ export function SnoozeDialog({
         return {
           value: preset.expression,
           label: preset.label,
-          detail: schedule ? formatReminderTileTime(schedule, now.getTime()) : "Too late today",
+          detail: schedule ? tileTime(schedule) : "Too late today",
           disabled: !schedule,
         };
       }),
     {
       value: "custom",
       label: "Custom…",
-      detail: custom && parsed ? formatReminderTileTime(parsed, now.getTime()) : "Type a time",
+      detail: custom && parsed ? tileTime(parsed) : "Type a time",
       disabled: false,
     },
   ];
@@ -192,7 +199,7 @@ export function SnoozeDialog({
       ? wakePolicy === "until_activity"
         ? "Stays snoozed until it needs you or you wake it."
         : "Stays snoozed until you wake it."
-      : `Returns ${formatReminderReturnDay(parsed.scheduledFor, parsed.timeZone, now.getTime())}.`;
+      : `Returns ${formatReminderReturnDay(parsed.scheduledFor, displayZone, now.getTime())}.`;
   const primaryLabel = creatingFromDraft
     ? "Create New Reminder"
     : reschedulingFiredReminder
@@ -537,7 +544,7 @@ export function SnoozeDialog({
               ? <FieldError id={EXPRESSION_ERROR_ID}>{fieldError}</FieldError>
               : (
                 <p className="field-helper" id={EXPRESSION_HELPER_ID}>
-                  Try “in 2 hours”, “tomorrow 3pm” or “dec 10 9am”. Times use {timeZoneDisplayName(browserTimeZone())}.
+                  Try “in 2 hours”, “tomorrow 3pm” or “dec 10 9am”. Times use {timeZoneDisplayName(displayZone)}.
                 </p>
               )}
           </div>

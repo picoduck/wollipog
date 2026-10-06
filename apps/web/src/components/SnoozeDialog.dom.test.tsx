@@ -7,9 +7,13 @@ import { Window } from "happy-dom";
 import type { SessionReminderView, SetSessionReminderRequest } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import {
+  browserTimeZone,
   formatReminderReturnDay,
   formatReminderTileTime,
   parseReminderExpression,
+  storedReminderSchedule,
+  timeZoneDisplayName,
+  type ParsedReminderSchedule,
 } from "../reminder-schedule.js";
 import { SnoozeDialog } from "./SnoozeDialog.js";
 import { ariaReferencedText, assertNoDomNode } from "../dom-test-assertions.js";
@@ -357,7 +361,12 @@ test("Edit Reminder starts on Custom… with the stored words and saves the stor
     assert.equal(field()?.value, "2099-05-06T21:45");
     assert.equal(domWindow.document.activeElement, field(), "a fine pointer opens on the field");
     assert.equal(returnEarly().checked, false);
-    assert.match(summary(), /^Returns Wednesday, May 6, 2099 at 9:45 PM GMT\+9\.$/, "a stored zone is named");
+    // The stored Tokyo instant reads in the zone the helper names, like every time in the dialog.
+    assert.equal(summary(), `Returns ${formatReminderReturnDay(stored.scheduledFor!, browserTimeZone())}.`);
+    assert.equal(ariaReferencedText(tileNamed("Custom…")!, "aria-describedby"),
+      formatReminderTileTime({ ...storedReminderSchedule(stored), timeZone: browserTimeZone() } as ParsedReminderSchedule));
+    assert.match(ariaReferencedText(field()!, "aria-describedby") ?? "",
+      new RegExp(`Times use ${timeZoneDisplayName(browserTimeZone())}\\.$`));
     assert.equal(primary().textContent, "Update Reminder");
     assert.ok(buttonNamed("Remove Reminder"), "Remove Reminder stays the tertiary");
     await press(primary());
@@ -495,7 +504,7 @@ test("a live change keeps the whole draft, refuses the primary with a reason, an
     assert.equal(domWindow.document.activeElement, field(), "reloading keeps focus in the dialog");
     assert.equal(field()?.value, "2099-05-06T07:45");
     assert.equal(returnEarly().checked, true);
-    assert.match(summary(), /GMT\+9\.$/);
+    assert.equal(summary(), `Returns ${formatReminderReturnDay(updated.scheduledFor!, browserTimeZone())}.`);
 
     await press(primary());
     assert.equal(saved[0]?.expectedRevision, 2);

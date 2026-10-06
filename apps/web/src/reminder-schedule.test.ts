@@ -211,7 +211,7 @@ test("a preset tile's time is today's clock, the weekday within the week, and th
   assert.equal(tile(Date.UTC(2026, 9, 2, 13, 0)), "Oct 2, 9:00 AM");
 });
 
-test("the summary's day names the year only when it is not this one, and a foreign zone (#2181)", () => {
+test("the summary's day names the year only when it is not this one (#2181)", () => {
   withTimeZone("America/New_York", () => {
     if (new Intl.DateTimeFormat().resolvedOptions().locale !== "en-US") return;
     const now = Date.UTC(2026, 8, 25, 18, 0);
@@ -219,7 +219,7 @@ test("the summary's day names the year only when it is not this one, and a forei
       formatReminderReturnDay(scheduledFor, timeZone, now).replace(/ /g, " ");
     assert.equal(day(Date.UTC(2026, 8, 26, 13, 0)), "Saturday, Sep 26 at 9:00 AM");
     assert.equal(day(Date.UTC(2027, 0, 4, 14, 0)), "Monday, Jan 4, 2027 at 9:00 AM");
-    assert.equal(day(Date.UTC(2026, 8, 26, 0, 0), "Asia/Tokyo"), "Saturday, Sep 26 at 9:00 AM GMT+9");
+    assert.equal(day(Date.UTC(2026, 8, 26, 0, 0), "Asia/Tokyo"), "Saturday, Sep 26 at 9:00 AM", "in the zone it is given");
     assert.equal(timeZoneDisplayName("America/New_York", now), "Eastern Time");
     assert.equal(timeZoneDisplayName("UTC", now), "UTC");
   });

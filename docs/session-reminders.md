@@ -16,8 +16,9 @@ pause, restart, archive, or otherwise change the runtime or lifecycle state of a
   and input-required states remain visible and actionable.
 - Each stored schedule includes an absolute instant, the IANA time zone shown when it was created,
   and the original expression. `in N days` means exactly N elapsed 24-hour periods. Editing a
-  reminder keeps its stored instant until the schedule is changed, so a browser in another time
-  zone never reinterprets it; its summary names the stored zone.
+  reminder keeps its stored instant and zone until the schedule is changed, so a browser in another
+  time zone never reinterprets it. The dialog shows every time, stored or typed, in the zone its
+  helper names (the browser's); the instant is absolute, so only its wall-clock reading changes.
 - A machine that is offline at the scheduled instant fires the reminder during the next control-plane
   due sweep. Scheduled wakes return to the Inbox as **Returned from Snooze** with their snooze-end
   context; qualifying activity wakes return as **Activity Reminder** with the instant they were

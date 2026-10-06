@@ -417,19 +417,14 @@ export function formatReminderTileTime(schedule: ParsedReminderSchedule, now = D
 
 /**
  * The day and time a snooze returns, for the Snooze summary (#2181): "Saturday, Sep 26 at 9:00 AM",
- * with the year only when it is not this year's. A schedule kept in a zone other than this
- * browser's names that zone, so the time is never read as local.
+ * in `timeZone`, with the year only when it is not this year's.
  */
 export function formatReminderReturnDay(scheduledFor: number, timeZone: string, now = Date.now()): string {
   const format = (options: Intl.DateTimeFormatOptions) =>
     new Intl.DateTimeFormat(undefined, { ...options, timeZone }).format(new Date(scheduledFor));
   const year = (instant: number) => new Intl.DateTimeFormat("en-CA", { year: "numeric", timeZone }).format(new Date(instant));
   const date = format({ month: "short", day: "numeric", ...(year(scheduledFor) !== year(now) ? { year: "numeric" } : {}) });
-  const time = format({
-    hour: "numeric",
-    minute: "2-digit",
-    ...(timeZone !== browserTimeZone() ? { timeZoneName: "short" } : {}),
-  });
+  const time = format({ hour: "numeric", minute: "2-digit" });
   return `${format({ weekday: "long" })}, ${date} at ${time}`;
 }
 
