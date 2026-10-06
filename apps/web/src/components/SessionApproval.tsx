@@ -35,7 +35,7 @@ import {
 import { revealDockedRequest } from "./requests/request-reveal.js";
 
 const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
-/** Below this much room for its body, a docked question card scrolls as a whole (#2683): about a row. */
+/** Below this much room for its body, a capped question card scrolls as a whole (#2683): about a row. */
 const CRAMPED_BODY_PX = 72;
 
 export interface QuestionSelectionState {
@@ -454,10 +454,11 @@ export function SessionQuestionBanner({
   // between. Where no clamp applies (the Requests panel, styles.css) nothing is hidden and no toggle
   // shows.
   //
-  // On the dock the title keeps whole lines and the body scrolls in what is left. Where that would
-  // leave the body less than about a row (a phone with "+N More", a long question on a short window),
-  // the card scrolls as a whole under its footer instead, as it does expanded. The room is read the
-  // same way in either layout: the card's height less everything in it but the body.
+  // In a capped card (the dock, the Agents panel) the title keeps whole lines and the body scrolls in
+  // what is left. Where that would leave the body less than about a row (a phone with "+N More", a
+  // long question on a short window), the card scrolls as a whole under its footer instead, as it
+  // does expanded. The room is read the same way in either layout: the card's height less everything
+  // in it but the body. An uncapped card (the Requests panel) always has room.
   useIsomorphicLayoutEffect(() => {
     const title = titleRef.current;
     const card = cardRef.current;
@@ -472,11 +473,11 @@ export function SessionQuestionBanner({
       if (!hidden && toggle && toggle === toggle.ownerDocument.activeElement) title.focus({ preventScroll: true });
       setTitleTruncates(hidden);
       const room = card.clientHeight - (card.scrollHeight - body.offsetHeight);
-      setCardCramped(card.closest(".request-dock") !== null && room < Math.min(body.scrollHeight, CRAMPED_BODY_PX));
+      setCardCramped(room < Math.min(body.scrollHeight, CRAMPED_BODY_PX));
     };
     measure();
     if (typeof ResizeObserver === "undefined") return;
-    // Either layout gives the card the dock's height, so switching between them does not resize what
+    // Either layout gives the card its cap's height, so switching between them does not resize what
     // is observed again.
     const observer = new ResizeObserver(measure);
     observer.observe(title);

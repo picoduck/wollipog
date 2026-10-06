@@ -43,7 +43,11 @@ const initial: SessionView = {
 };
 if (params.has("primary-question")) {
   initial.pendingApproval = { ...initial.pendingApproval!, kind: "question", options: [],
-    title: "Choose Audit Scope", questions: [{ id: "scope", question: "Choose Audit Scope",
+    title: "Choose Audit Scope", questions: [{ id: "scope",
+      // `long-question=1`: a question taller than the card's cap, so Show Full Question scrolls the card (#2683).
+      question: params.has("long-question")
+        ? Array.from({ length: 30 }, (_, index) => `Paragraph ${index + 1} explains one more part of the audit.`).join("\n\n")
+        : "Choose Audit Scope",
       options: [{ label: "Parser", description: "Inspect the parser." }] }] };
 }
 const items: TimelineItem[] = [

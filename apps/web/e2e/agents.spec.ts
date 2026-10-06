@@ -85,6 +85,24 @@ test("a worker's question is answered on its Agents panel card, never on the doc
   await expect(page.getByRole("radio", { name: /Parser/ })).toBeChecked();
 });
 
+test("a worker's long question expanded on its Agents panel card keeps its answers and footer in reach (#2683)", async ({ page }) => {
+  await page.goto("/agents-e2e.html?primary-question=1&long-question=1");
+  await page.getByRole("button", { name: "Audit Storage · Answer Required", exact: true }).click();
+  const card = page.getByRole("region", { name: "Selected Worker Request", exact: true }).getByRole("region", { name: "Agent Questions" });
+  await card.getByRole("button", { name: "Show Full Question" }).click();
+  await expect(card.getByRole("button", { name: "Show Less" })).toHaveAttribute("aria-expanded", "true");
+  const bounds = (locator: typeof card) => locator.evaluate((element) => element.getBoundingClientRect().toJSON() as DOMRect);
+  // The capped card scrolls the whole question and its body under its footer; nothing is squeezed away.
+  expect((await bounds(card.locator(".request-card-body"))).height).toBeGreaterThan(20);
+  const parser = card.getByRole("radio", { name: /Parser/ });
+  await parser.scrollIntoViewIfNeeded();
+  await parser.click();
+  await expect(parser).toBeChecked();
+  const [cardBox, submitBox] = [await bounds(card), await bounds(card.getByRole("button", { name: "Submit Answers", exact: true }))];
+  expect(submitBox.bottom).toBeLessThanOrEqual(cardBox.bottom + 0.5);
+  expect(submitBox.top).toBeGreaterThanOrEqual(cardBox.top);
+});
+
 test("a selected child request promoted to primary moves focus to its canonical response form", async ({ page }) => {
   await page.goto("/agents-e2e.html?primary-question=1");
   await page.getByRole("button", { name: "Inspect Parser · Approval Required", exact: true }).click();
