@@ -7,7 +7,8 @@ import { expect, test, type Page } from "@playwright/test";
 const shell = (path: string) => `/command-inbox-projects-e2e.html?fullShell=1&path=${encodeURIComponent(path)}`;
 
 const DESTINATIONS = [
-  { path: "/inbox", title: "Sessions" },
+  // Sessions puts its group tabs in the header's tab slot (#2180).
+  { path: "/inbox", title: "Sessions", tabs: true },
   { path: "/automations", title: "Automations", description: true, max: 960 },
   { path: "/projects", title: "Projects", description: true },
   { path: "/runs", title: "Multi-Agent Runs", description: true, max: 960 },

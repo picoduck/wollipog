@@ -36,7 +36,13 @@ function toolbarGeometry(page: Page) {
       inputWidth: input.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
       placeholderWidth: context.measureText(input.placeholder).width,
       searchOwnRow: search.bottom <= tabs.top || search.top >= tabs.bottom,
-      contained: toolbar.scrollWidth <= toolbar.clientWidth,
+      // Every part of the bar is inside it. A touch target's hit area (`::after`) may reach into
+      // the page gutter, so the parts are measured rather than the bar's scrollWidth.
+      contained: [...toolbar.children].every((child) => {
+        const box = child.getBoundingClientRect();
+        const bar = toolbar.getBoundingClientRect();
+        return box.left >= bar.left - 0.5 && box.right <= bar.right + 0.5;
+      }),
     };
   });
 }

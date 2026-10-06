@@ -622,8 +622,13 @@ for (const scenario of [
       ? edges.rowTop - edges.viewportTop
       : edges.viewportBottom - edges.rowBottom;
     // Allow fractional virtual measurements and integer scrollTop rounding while still ruling out
-    // centering or any other movement substantially larger than the minimum reveal delta.
-    expect(Math.abs(nearestEdgeDelta)).toBeLessThanOrEqual(5);
+    // centering or any other movement substantially larger than the minimum reveal delta. A row
+    // revealed at the very end of the list cannot come closer than the list's bottom padding, so
+    // there the list must instead have scrolled as far as it goes.
+    const remaining = await list.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop);
+    expect(nearestEdgeDelta).toBeGreaterThanOrEqual(-5);
+    if (scenario.direction === "down" && remaining <= 5) expect(nearestEdgeDelta).toBeLessThanOrEqual(5 + 7 + remaining);
+    else expect(Math.abs(nearestEdgeDelta)).toBeLessThanOrEqual(5);
   }
 
   await list.press(scenario.direction === "down" ? "k" : "j");
