@@ -365,10 +365,13 @@ export function RightPanel({
   // Keyboard resizing past the chat's room removes the focused handle; focus stays in the panel, on
   // Close Panel, rather than falling to the page.
   useLayoutEffect(() => {
+    if (!state.open) resizerFocused.current = false;
     if (!overlay || !resizerFocused.current) return;
     resizerFocused.current = false;
-    closeRef.current?.focus();
-  }, [overlay]);
+    // Only focus that fell with the handle moves; focus somewhere else stays where it is.
+    const active = document.activeElement;
+    if (!active || active === document.body) closeRef.current?.focus();
+  }, [overlay, state.open]);
 
   // Guard against a mid-drag unmount: closing the panel (shortcut/header button)
   // unmounts the resizer mid-drag and the lostpointercapture never reaches React.

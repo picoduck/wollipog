@@ -496,6 +496,30 @@ test("keyboard resizing into an overlay moves focus from the removed handle to C
   }
 });
 
+test("a handle focused when the panel closed does not pull focus into a later overlay (#2725)", async () => {
+  let state!: RightPanelState;
+  const panel = await mountPanel(<PanelHarness onState={(next) => { state = next; }} />);
+  let rowWidth = 1200;
+  panel.container.getBoundingClientRect = () => ({
+    width: rowWidth, height: 600, top: 0, left: 0, right: rowWidth, bottom: 600, x: 0, y: 0, toJSON: () => ({}),
+  }) as DOMRect;
+  const opener = panel.container.querySelector<HTMLButtonElement>("#recorded")!;
+  try {
+    await act(async () => state.show("requests"));
+    panel.container.querySelector<HTMLElement>(".right-panel-resizer")!.focus();
+    // Closing removes the focused handle with the rest of the panel.
+    await act(async () => { state.close(); });
+    opener.focus();
+    rowWidth = 700;
+    await act(async () => state.show("files"));
+    assert.equal(panel.container.querySelector<HTMLElement>("#right-panel")?.dataset.presentation, "overlay");
+    assert.ok((domWindow.document.activeElement as unknown as Element | null) === (opener as unknown as Element),
+      "focus stays on the control that opened the panel");
+  } finally {
+    await panel.dispose();
+  }
+});
+
 test("a persisted terminal mode restores the launcher instead of an empty panel", async () => {
   // Older builds reserved a "terminal" panel mode that nothing could open; the value can still
   // sit in localStorage, and restoring it must land on the launcher (#1201).
