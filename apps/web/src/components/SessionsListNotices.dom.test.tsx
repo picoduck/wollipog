@@ -151,6 +151,69 @@ test("two pending sign-ins are one notice with +1 More, and choosing the other s
   assert.equal(view.title(), other);
 });
 
+const chooseFromMore = async (view: Awaited<ReturnType<typeof mount>>, title: string) => {
+  await act(async () => { view.more()!.click(); });
+  const item = [...(domWindow.document.body as unknown as HTMLElement).querySelectorAll<HTMLElement>('[role="menuitem"]')]
+    .find((candidate) => candidate.textContent?.trim() === title);
+  assert.ok(item, `"${title}" is in +N More`);
+  await act(async () => { item.click(); });
+};
+
+test("a code typed for one sign-in never carries to another shown in its place", async () => {
+  const submitted: unknown[] = [];
+  const view = await mount(client({
+    listSkills: async () => ({ skills: [] }),
+    submitProviderLoginCode: async (runnerId: string, operationId: string, code: string) => {
+      submitted.push([runnerId, operationId, code]);
+    },
+  }), {
+    signIns: [
+      { runnerId: "runner-1", login: login({ status: "awaiting_code", userCode: undefined, expectsCode: true }) },
+      { runnerId: "runner-2", login: login({ operationId: "op-2", status: "awaiting_code", userCode: undefined, expectsCode: true }) },
+    ],
+  });
+  const first = view.title()!;
+  await act(async () => {
+    fireDomEvent.change(view.container.querySelector<HTMLInputElement>("form input")!, { target: { value: "secret-for-first" } } as never);
+  });
+  const other = first === "Sign In to Codex on Build Box" ? "Sign In to Codex on Studio Mac" : "Sign In to Codex on Build Box";
+  await chooseFromMore(view, other);
+  assert.equal(view.title(), other);
+  assert.equal(view.container.querySelector<HTMLInputElement>("form input")!.value, "", "the other sign-in starts empty");
+  assert.equal(view.button("Submit Code")!.disabled, true);
+  assert.deepEqual(submitted, []);
+});
+
+test("a sign-in's request in flight still holds its buttons after another notice was shown in between", async () => {
+  let finishSubmit: () => void = () => {};
+  const calls: string[] = [];
+  const view = await mount(client({
+    submitProviderLoginCode: () => {
+      calls.push("submit");
+      return new Promise<void>((resolve) => { finishSubmit = resolve; });
+    },
+    cancelProviderLogin: async () => { calls.push("cancel"); },
+  }), { signIns: [{ runnerId: "runner-1", login: login({ status: "awaiting_code", userCode: undefined, expectsCode: true }) }] });
+  await act(async () => {
+    fireDomEvent.change(view.container.querySelector<HTMLInputElement>("form input")!, { target: { value: "auth-response" } } as never);
+  });
+  await act(async () => { view.button("Submit Code")!.click(); });
+  assert.equal(view.button("Cancel Sign-In")!.disabled, true, "Cancel waits for the submission");
+
+  await chooseFromMore(view, "Recommended Skills");
+  assert.equal(view.title(), "Recommended Skills");
+  await chooseFromMore(view, "Sign In to Codex on Build Box");
+  assert.equal(view.button("Submit Code")!.getAttribute("aria-busy"), "true", "the submission still shows as running");
+  const cancel = view.button("Cancel Sign-In")!;
+  assert.equal(cancel.disabled, true, "Cancel still waits for the submission");
+  await act(async () => { cancel.click(); });
+  assert.deepEqual(calls, ["submit"]);
+
+  await act(async () => { finishSubmit(); });
+  await act(settle);
+  assert.equal(view.button("Cancel Sign-In")!.disabled, false);
+});
+
 test("the sign-in notice shows the device code inline, Open Sign-In Page and Cancel Sign-In", async () => {
   let finishCancel: () => void = () => {};
   const cancels: unknown[] = [];

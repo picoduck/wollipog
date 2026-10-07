@@ -1,6 +1,11 @@
-import React from "react";
+import React, { useCallback, useState } from "react";
 import type { ProviderLoginView, SessionView } from "@wollipog/protocol";
-import { MachineSignInNotice, machineSignInPending, machineSignInTitle } from "./MachineSignInNotice.js";
+import {
+  MachineSignInNotice,
+  machineSignInPending,
+  machineSignInTitle,
+  type MachineSignInAction,
+} from "./MachineSignInNotice.js";
 import { RecommendedSkillsNotice, useSkillRecommendations } from "./RecommendedSkillsNotice.js";
 import { SessionNoticeSlot, type SessionNoticeEntry } from "./SessionNoticeSlot.js";
 import { ProjectSetupSuggestion } from "./WorktreeSetupNotice.js";
@@ -42,17 +47,34 @@ export function SessionsListNotices({ signIns, machineName, setup, hidden = fals
   onFocusLost?: () => void;
 }) {
   const recommendations = useSkillRecommendations();
+  // Each sign-in's action in flight, by entry key: choosing another notice unmounts the sign-in's, and
+  // its request still runs, so coming back must still refuse a second action until it settles.
+  const [runningSignIns, setRunningSignIns] = useState<ReadonlyMap<string, MachineSignInAction>>(() => new Map());
+  const setSignInRunning = useCallback((key: string, action: MachineSignInAction | null) => {
+    setRunningSignIns((current) => {
+      const next = new Map(current);
+      if (action) next.set(key, action);
+      else next.delete(key);
+      return next;
+    });
+  }, []);
   if (hidden) return null;
 
   const entries: SessionNoticeEntry[] = signIns.map(({ runnerId, login }) => {
     const machine = machineName(runnerId);
+    const key = `sign-in:${runnerId}:${login.operationId}`;
     return {
-      key: `sign-in:${runnerId}:${login.operationId}`,
+      key,
       severity: machineSignInPending(login) ? "warning" : "danger",
       rank: LIST_NOTICE_RANK.machineSignIn,
       title: machineSignInTitle(login, machine),
+      // Keyed, so the slot showing another sign-in in this place mounts a fresh notice: a code typed
+      // for one operation is never submitted to another.
       render: ({ trailing }) => (
-        <MachineSignInNotice runnerId={runnerId} machine={machine} login={login} trailing={trailing} />
+        <MachineSignInNotice key={key} runnerId={runnerId} machine={machine} login={login}
+          running={runningSignIns.get(key) ?? null}
+          onRunningChange={(action) => setSignInRunning(key, action)}
+          trailing={trailing} />
       ),
     };
   });

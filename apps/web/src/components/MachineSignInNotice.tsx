@@ -6,6 +6,10 @@ import { ExternalLinkIcon } from "./Icons.js";
 import { Notice } from "./Notice.js";
 import { BusyButton } from "./ui/BusyButton.js";
 
+/** What a sign-in notice is doing. Its owner keeps it per operation, so it survives the notice leaving
+ * the slot while another is shown, and a returning notice still refuses a second action. */
+export type MachineSignInAction = "submit" | "cancel" | "dismiss";
+
 /** A sign-in the runner is still running: the person has something to do. */
 export function machineSignInPending(login: Pick<ProviderLoginView, "status">): boolean {
   return login.status === "starting" || login.status === "awaiting_code" || login.status === "waiting_for_provider";
@@ -38,26 +42,31 @@ function sentence(login: ProviderLoginView): string {
  * which stays as it is for its other users. A pending sign-in is a warning with the device code inline,
  * Open Sign-In Page and Cancel Sign-In, plus the authorization code field when the provider expects
  * one; a failed or timed-out one is a danger with Dismiss. The code is never stored.
+ *
+ * Render it keyed by its operation: the typed code and any error belong to that operation alone, so a
+ * notice shown in its place never inherits them.
  */
-export function MachineSignInNotice({ runnerId, machine, login, trailing }: {
+export function MachineSignInNotice({ runnerId, machine, login, running, onRunningChange, trailing }: {
   runnerId: string;
   /** The machine's display name. */
   machine: string;
   login: ProviderLoginView;
+  /** The action in flight for this operation, kept by the owner. */
+  running: MachineSignInAction | null;
+  onRunningChange: (action: MachineSignInAction | null) => void;
   /** The slot's "+N More". */
   trailing?: ReactNode;
 }) {
   const api = useApi();
   const codeId = `machine-sign-in-code-${useId().replace(/:/gu, "")}`;
   const [code, setCode] = useState("");
-  const [running, setRunning] = useState<"submit" | "cancel" | "dismiss" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const pending = machineSignInPending(login);
   const title = machineSignInTitle(login, machine);
 
-  const run = async (action: "submit" | "cancel" | "dismiss", operation: () => Promise<unknown>) => {
+  const run = async (action: MachineSignInAction, operation: () => Promise<unknown>) => {
     if (running) return;
-    setRunning(action);
+    onRunningChange(action);
     setError(null);
     try {
       await operation();
@@ -65,7 +74,7 @@ export function MachineSignInNotice({ runnerId, machine, login, trailing }: {
     } catch (cause) {
       setError((cause as Error).message);
     } finally {
-      setRunning(null);
+      onRunningChange(null);
     }
   };
   const submit = () => {
