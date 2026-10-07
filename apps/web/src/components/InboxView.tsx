@@ -384,6 +384,7 @@ export function InboxView({
     const active = document.activeElement;
     const focusLost = !active || active === document.body || !active.isConnected;
     (listRef.current ?? viewRef.current?.querySelector<HTMLElement>(".inbox-state") ??
+      viewRef.current?.querySelector<HTMLElement>(".inbox-skeleton") ??
       (focusLost ? viewRef.current?.querySelector<HTMLElement>(".board-wrap") : null))?.focus();
   }, [exitPending, query, deferredQuery]);
 
@@ -602,19 +603,21 @@ export function InboxView({
   const pageState = noMatches || reconnectingEmpty || situation !== null;
   // While the state offers New Session, the header does not (§12.1).
   const stateOffersNewSession = situation !== null && sessionsSituationOffersNewSession(situation);
-  // A live update can take the selected session out of the results, or the last match away, while
-  // the list or preview holds focus. What replaces the focused pane takes focus rather than <body>:
-  // the state in the panes' place, the reader of the result the preview moved to, or the list.
+  // A live update can take the selected session out of the results, the last match or the last
+  // session away, or deliver the rows a skeleton stood in for, while the list or preview holds focus.
+  // What replaces the focused pane takes focus rather than <body> (§16.1): the state in the panes'
+  // place, the reader of the result the preview moved to, or the list zone.
   const stateRef = useRef<HTMLDivElement>(null);
   const previewPaneRef = useRef<HTMLDivElement>(null);
   const removedFocus = useRemovedFocus(viewRef);
   const removedPreviewFocus = useRemovedFocus(previewPaneRef);
   useLayoutEffect(() => {
     const fromPreview = removedPreviewFocus();
-    if (!removedFocus() || normalizedQuery === "" || expandedSessionId !== null) return;
-    // The list zone's own chain (§16.1): the grid, the state in its place, or the board.
+    if (!removedFocus() || expandedSessionId !== null) return;
+    // The list zone's own chain (§16.1): the grid, the state in its place, the skeleton, or the board.
     const listZone = () => listRef.current ??
       viewRef.current?.querySelector<HTMLElement>(".inbox-state") ??
+      viewRef.current?.querySelector<HTMLElement>(".inbox-skeleton") ??
       viewRef.current?.querySelector<HTMLElement>(".board-wrap");
     if (pageState) stateRef.current?.focus();
     else if (fromPreview) (previewPaneRef.current?.querySelector<HTMLElement>(".detail-scroll") ?? listZone())?.focus();
@@ -908,6 +911,7 @@ export function InboxView({
     const listRestore = () =>
       listRef.current ??
       viewRef.current?.querySelector<HTMLElement>(".inbox-state") ??
+      viewRef.current?.querySelector<HTMLElement>(".inbox-skeleton") ??
       document.getElementById("page-title");
     // A supplied target that is gone by then (a preview's ⋯ whose session left) falls back the same way.
     const target = sessionsRef.current.get(sessionId);

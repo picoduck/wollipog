@@ -1,3 +1,4 @@
+import { fireDomEvent } from "./test-dom-events.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import React, { act } from "react";
@@ -16,6 +17,7 @@ import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { durableInboxProjectKey, INBOX_NO_PROJECT_SPLIT_KEY } from "../inbox.js";
+import { focusZone } from "../focus-zones.js";
 import type { NewSessionPreset } from "./NewSessionDialog.js";
 import { InboxView } from "./InboxView.js";
 import type { RightPanelState } from "./RightPanel.js";
@@ -233,6 +235,8 @@ const pageState = (container: HTMLElement) => container.querySelector<HTMLElemen
 const actionLabels = (state: HTMLElement) => [...state.querySelectorAll<HTMLButtonElement>(".actions button")]
   .map((button) => button.textContent?.trim());
 const headerNewSession = (container: HTMLElement) => container.querySelector(".page-header .page-primary");
+/** The focused element, typed as the DOM the components render into. */
+const focused = () => domWindow.document.activeElement as unknown as Element | null;
 
 /** One state in both panes' place: no list, no divider, no preview, nothing to select (§6.1). */
 function assertOneState(container: HTMLElement, title: string): HTMLElement {
@@ -383,7 +387,7 @@ test("disconnecting keeps the last-known rows, dimmed under Reconnecting, and ne
   assert.ok(!grid.closest(".is-stale"), "a live list is not dimmed");
   assertNoDomNode(container.querySelector(".inbox-list-status"));
   await act(async () => { socket.onclose?.({ code: 1006 }); });
-  assert.equal(container.querySelector(".inbox-list"), grid, "the same grid stays, with its scroll and focus");
+  assert.ok(container.querySelector(".inbox-list") === grid, "the same grid stays, with its scroll and focus");
   assert.ok(grid.closest(".inbox-list-stale.is-stale"), "the rows are dimmed");
   assert.equal(container.querySelectorAll(".inbox-row").length, 2, "the rows stay");
   const line = container.querySelector<HTMLElement>(".inbox-list-pane > .inbox-list-status")!;
@@ -402,4 +406,58 @@ test("disconnecting with nothing loaded says Reconnecting in the panes' place", 
   assert.equal(state.querySelector(".state.offline")?.textContent, "Reconnecting…");
   assertNoDomNode(state.querySelector(".state-title"), "not No Sessions Yet: an empty map proves nothing offline");
   assert.ok(headerNewSession(container));
+});
+
+// Focus never falls to <body> when what holds it gives way (§16.1): the grid, the state in the
+// panes' place and the skeleton replace one another, with or without a search.
+test("removing the focused list's last session hands focus to the state that replaces it", async () => {
+  const { container, socket } = await mount();
+  await act(async () => { socket.push(snapshot({ sessions: [session("only")] })); });
+  const grid = container.querySelector<HTMLElement>(".inbox-list")!;
+  grid.focus();
+  assert.ok(focused() === grid);
+  await act(async () => { socket.push({ type: "session_removed", sessionId: "only" }); });
+  const state = container.querySelector<HTMLElement>(".inbox-state")!;
+  assert.ok(state, "No Sessions Yet replaces the list");
+  assert.ok(focused() === state, "the state takes focus, not <body>");
+});
+
+test("a focused skeleton hands focus to the grid when the sessions arrive", async () => {
+  const { container, socket } = await mount({ routeSplit: durableInboxProjectKey("project-docs") });
+  await act(async () => { socket.push(snapshot({ projects: [project([location("available")], 2)] })); });
+  const skeleton = container.querySelector<HTMLElement>(".inbox-skeleton")!;
+  skeleton.focus();
+  assert.ok(focused() === skeleton);
+  await act(async () => {
+    socket.push({ type: "session_upsert", session: session("arrived", { projectId: "project-docs" }) });
+  });
+  assert.ok(focused() === container.querySelector(".inbox-list"), "the grid takes focus, not <body>");
+});
+
+test("clearing a search over a syncing group hands focus to the skeleton", async () => {
+  const { container, socket } = await mount({ routeSplit: durableInboxProjectKey("project-docs") });
+  await act(async () => { socket.push(snapshot({ projects: [project([location("available")], 2)] })); });
+  const search = container.querySelector<HTMLInputElement>(".inbox-search input")!;
+  await act(async () => {
+    search.focus();
+    search.value = "docs";
+    fireDomEvent.change(search as never, { target: { value: "docs" } as never });
+  });
+  const state = container.querySelector<HTMLElement>(".inbox-state")!;
+  assert.ok(state.querySelector(".state.no-results"), "a search over nothing loaded is No Matches");
+  await act(async () => {
+    fireDomEvent.keyDown(search as never, { key: "Escape" });
+  });
+  await act(async () => { await new Promise((resolve) => domWindow.setTimeout(resolve, 0)); });
+  assert.ok(focused() === container.querySelector(".inbox-skeleton"), "the skeleton takes focus, not <body>");
+});
+
+test("F6 into a loading preview lands on a target the accessibility tree can see", async () => {
+  const { container } = await mount();
+  assert.ok(container.querySelector(".inbox-preview-skeleton"), "the preview shows its skeleton before the first snapshot");
+  assert.equal(focusZone(domWindow.document as unknown as Document, "main"), "main");
+  const active = domWindow.document.activeElement as unknown as HTMLElement;
+  assert.ok(active.classList.contains("inbox-preview-skeleton"));
+  assertNoDomNode(active.closest('[aria-hidden="true"]'), "the focused target is not hidden from assistive technology");
+  assert.ok(active.getAttribute("aria-label"), "and it has a name");
 });

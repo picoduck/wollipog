@@ -111,11 +111,15 @@ export function SessionsListSkeleton({ count, threeRow }: { count: number | null
   );
 }
 
-/** The preview's placeholder while the list loads (§12.3): a skeleton of its bar, and no sentence. */
+/**
+ * The preview's placeholder while the list loads (§12.3): a skeleton of its bar, and no sentence.
+ * It is the reading zone's F6 landing spot then, so it is named; only the bar is decorative, and the
+ * list's status line is what announces the load.
+ */
 export function SessionsPreviewSkeleton() {
   return (
-    <div className="inbox-preview-skeleton" tabIndex={-1} aria-hidden="true">
-      <span className="skeleton-bar title" />
+    <div className="inbox-preview-skeleton" role="group" aria-label="Session Preview" tabIndex={-1}>
+      <span className="skeleton-bar title" aria-hidden="true" />
     </div>
   );
 }

@@ -114,6 +114,8 @@ test("disconnecting keeps the rows visible and dimmed under Reconnecting…, and
   await grid.press("ArrowDown");
   await expect(grid).not.toHaveAttribute("aria-activedescendant", before!);
 
+  // The store retries on a new socket (1.5s after the drop); the restore answers that one.
+  await expect.poll(() => page.evaluate(() => window.__retryPending()), { timeout: 10_000 }).toBe(true);
   await page.evaluate(() => window.__restoreConnection());
   await expect(line).toHaveCount(0);
   await expect(title).toHaveCSS("color", colors.text);

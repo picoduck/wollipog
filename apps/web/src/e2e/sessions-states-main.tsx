@@ -30,8 +30,9 @@ import "../styles.css";
  * - `sessions` (the default): five sessions in Docs Site, for Snoozed, No Matches and Reconnecting.
  * - `syncing`: Docs Site counts 8 sessions and none has arrived; `__deliverSessions()` sends them.
  *
- * `__dropConnection()` loses the connection and holds every retry silent until
- * `__restoreConnection()` answers the pending one with a fresh snapshot.
+ * `__dropConnection()` loses the connection and holds every retry silent; once the store has
+ * opened a retry socket (`__retryPending()`), `__restoreConnection()` answers that one with a fresh
+ * snapshot, as a control plane coming back would.
  */
 const SCOPE = "sessions-states-e2e";
 const STATE = new URLSearchParams(location.search).get("state") ?? "sessions";
@@ -153,6 +154,8 @@ class FixtureSocket implements UiSocket {
 
 let socket: FixtureSocket | null = null;
 let dropped = false;
+/** The store's latest retry while the connection is dropped: the socket a restore answers. */
+let retry: FixtureSocket | null = null;
 const connection: UiConnectionRuntime = {
   instanceId: SCOPE,
   runtimeKey: `${SCOPE}:1`,
@@ -160,7 +163,8 @@ const connection: UiConnectionRuntime = {
     const opened = new FixtureSocket();
     socket = opened;
     // A dropped connection's retries stay connecting, which the store reads as offline (§12.5).
-    if (!dropped) window.setTimeout(() => opened.push(snapshot()), 0);
+    if (dropped) retry = opened;
+    else window.setTimeout(() => opened.push(snapshot()), 0);
     return opened;
   },
   close() {},
@@ -169,17 +173,22 @@ const connection: UiConnectionRuntime = {
 declare global {
   interface Window {
     __dropConnection: () => void;
+    __retryPending: () => boolean;
     __restoreConnection: () => void;
     __deliverSessions: () => void;
   }
 }
 window.__dropConnection = () => {
   dropped = true;
+  retry = null;
   socket?.onclose?.({ code: 1006 });
 };
+window.__retryPending = () => retry !== null;
 window.__restoreConnection = () => {
+  if (!retry) throw new Error("the store has not retried yet");
   dropped = false;
-  socket?.push(snapshot());
+  retry.push(snapshot());
+  retry = null;
 };
 window.__deliverSessions = () => {
   sessions = Array.from({ length: 8 }, (_, index) => session(index));
