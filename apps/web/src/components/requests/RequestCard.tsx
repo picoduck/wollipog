@@ -566,10 +566,10 @@ export function RequestCard({
   );
 }
 
-/** A notice that heads the scrolling body starts in view: the body returns to its top when it shows. */
+/** A notice that heads the body starts in view in whatever scrolls it: the dock's card body, or the
+ * Requests panel's detail, where the body itself does not scroll (#2206). */
 function revealAccountNotice(node: HTMLElement | null): void {
-  const body = node?.closest<HTMLElement>(".request-card-body");
-  if (body) body.scrollTop = 0;
+  node?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
 }
 
 /** The card's head line: the kind's icon and label, then who asks and when, then trailing controls.

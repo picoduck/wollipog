@@ -732,6 +732,36 @@ test("a not_resumable refusal closes the dialog, shows the can't-switch notice a
   }
 });
 
+test("a notice left by Choose Another Account is scrolled into view in a Requests panel, whose detail scrolls", async () => {
+  const request = recovery([AUTH.acceptCurrent, AUTH.revalidate, AUTH.dismiss]);
+  const revealed: string[] = [];
+  const original = domWindow.HTMLElement.prototype.scrollIntoView;
+  domWindow.HTMLElement.prototype.scrollIntoView = function (this: HTMLElement) {
+    revealed.push(this.className);
+  } as typeof original;
+  const view = await renderWithRunner(
+    <RequestCard session={signInSession(request)} request={request} runnerOnline presentation="panel" />, {},
+    {
+      authenticationAccounts: async () => ({ accounts: [...CHOICES] }),
+      selectAuthenticationAccount: async () => { throw new ApiError("runner words", 409, "operation_in_progress"); },
+    },
+  );
+  try {
+    const choose = [...view.container.querySelectorAll<HTMLButtonElement>(".request-card-foot button")]
+      .find((button) => button.textContent === "Choose Another Account…")!;
+    await act(async () => { choose.click(); await tick(); await tick(); });
+    await act(async () => { dialogButton("Use Account")!.click(); await tick(); await tick(); });
+    revealed.length = 0;
+    await act(async () => { dialogButton("Cancel")!.click(); await tick(); await tick(); });
+    assert.ok(view.container.querySelector(".request-card-body > .notice"));
+    assert.ok(revealed.some((name) => name.split(" ").includes("notice")),
+      "the notice asks its own scroller to show it, rather than resetting a body that does not scroll");
+  } finally {
+    domWindow.HTMLElement.prototype.scrollIntoView = original;
+    await view.unmount();
+  }
+});
+
 test("an account_changed refusal closes the dialog and the card reads its facts again; nothing switches", async () => {
   const { view, identity } = await openChooser("account_changed");
   try {
