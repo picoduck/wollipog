@@ -46,6 +46,15 @@ for (const { kind, url } of KINDS) {
     const start = await bodyEdges(body);
     expect(start).toEqual({ above: false, below: true, range: start.range, dimmed: false });
     expect(start.range).toBeGreaterThan(20);
+    // The line spans the card across its padding, wider than anything framed in the body (a code
+    // well's own border), so it reads as the edge it marks and never as that box closing.
+    const span = await body.evaluate((element) => ({
+      line: parseFloat(getComputedStyle(element, "::after").width),
+      card: element.closest<HTMLElement>(".request-card")!.clientWidth,
+      content: Math.max(...[...element.children].map((child) => child.getBoundingClientRect().width)),
+    }));
+    expect(Math.abs(span.line - span.card)).toBeLessThanOrEqual(1);
+    expect(span.line).toBeGreaterThan(span.content + 16);
     // Midway both edges have content past them; the lines take no room.
     await body.evaluate((element) => { element.scrollTop = 12; });
     await expect.poll(() => bodyEdges(body)).toEqual({ above: true, below: true, range: start.range, dimmed: false });
@@ -57,6 +66,22 @@ for (const { kind, url } of KINDS) {
     await expect.poll(() => bodyEdges(body)).toEqual({ above: false, below: true, range: start.range, dimmed: false });
   });
 }
+
+test("a question card scrolling whole draws its edge lines across the card too (#2698)", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 640 });
+  const { card } = await dockedBody(page, "/agent-questions-e2e.html?set=paragraph&more=1");
+  await expect(card).toHaveAttribute("data-card-scrolls", "");
+  await card.evaluate((element) => { element.scrollTop = 60; });
+  await expect(card).toHaveAttribute("data-clip-start", "");
+  await expect(card).toHaveAttribute("data-clip-end", "");
+  const spans = await card.evaluate((element) => ({
+    above: parseFloat(getComputedStyle(element, "::before").width),
+    below: parseFloat(getComputedStyle(element.querySelector(".request-card-foot")!, "::before").width),
+    card: element.clientWidth,
+  }));
+  expect(Math.abs(spans.above - spans.card)).toBeLessThanOrEqual(1);
+  expect(Math.abs(spans.below - spans.card)).toBeLessThanOrEqual(1);
+});
 
 test("a body that fits draws no edge lines", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });

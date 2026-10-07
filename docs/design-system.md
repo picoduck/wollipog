@@ -2264,8 +2264,10 @@ follows these rules so it never crowds out the conversation it asks about:
   still scroll past shows a `--border` hairline (`useClipEdges()`, `data-clip-start` and
   `data-clip-end`), the line a question card that scrolls whole draws at its own edges (#2698) and a
   sticky header draws once content scrolls under it (§2.6). It clears at the end it reaches. A line
-  the edge cuts then reads as more to scroll to, not a stray mark. A border, never a fade: nothing is
-  dimmed to look disabled, it stays drawn in forced colors, and it takes no room. Sign-in,
+  the edge cuts then reads as more to scroll to, not a stray mark. The line spans the card across its
+  padding, as a divider: drawn only across the content, it would sit exactly where a code well's or a
+  field's own frame ends and read as that box closing. A border, never a fade: nothing is dimmed to
+  look disabled, it stays drawn in forced colors, and it takes no room. Sign-in,
   permission, budget, workflow decision, evidence and question cards all use it; a body in a side
   panel's detail never scrolls on its own (the detail scrolls as one page), so it has none.
 - **Only the top request is expanded.** The others wait behind one "+N More Requests" row that opens

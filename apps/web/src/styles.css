@@ -477,6 +477,9 @@
      physical right safe area because the interface currently has a left-to-right layout. The gap
      keeps neighbours 8px apart, so each 36px button's borrowed 44px hit area stays its own (§2.8). */
   --mobile-session-action-gap: var(--space-2);
+  /* The Request Card's inline padding (§13.2), which the line at a clipped edge reaches across
+     (#2715); a card in a side panel's detail has none. */
+  --request-card-pad-x: var(--space-4);
   --mobile-session-trailing-inset: calc(12px + env(safe-area-inset-right, 0px));
 
   /* --- Radius by hierarchy (docs/design-system.md §2.5): inline 4, control 6, container 8,
@@ -5684,7 +5687,7 @@ textarea {
   gap: var(--space-2);
   min-width: 0;
   min-height: 0;
-  padding: var(--space-3) var(--space-4);
+  padding: var(--space-3) var(--request-card-pad-x);
   border: 1px solid color-mix(in srgb, var(--amber) 32%, transparent);
   border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--amber) 7%, var(--bg-elev));
@@ -5754,6 +5757,14 @@ textarea {
   overscroll-behavior: contain;
 }
 .request-card-body > * { flex: none; }
+/* The body reaches the card's inner edges, its content still inset by the card's padding, so the line
+   at a clipped edge (below) spans the card as a divider. Drawn only across the content, it would sit
+   exactly where a code well's or a field's own frame ends, and read as that box closing (#2715). */
+.request-card > .request-card-body {
+  margin-right: calc(-1 * var(--request-card-pad-x));
+  margin-left: calc(-1 * var(--request-card-pad-x));
+  padding-inline: var(--request-card-pad-x);
+}
 @container chat-reading (max-height: 480px) {
   /* A reading column too short to keep the card's head and footer still around a scrolling body (a
      phone in landscape, a short Sessions preview): the whole card scrolls inside the capped dock. */
@@ -5789,7 +5800,7 @@ textarea {
     top: calc(-1 * var(--space-3));
     flex: none;
     height: var(--space-3);
-    margin: calc(-1 * var(--space-3)) 0 calc(-1 * var(--space-2));
+    margin: calc(-1 * var(--space-3)) calc(-1 * var(--request-card-pad-x)) calc(-1 * var(--space-2));
     background: inherit;
   }
   .request-dock .question-card > .request-card-foot {
@@ -5813,6 +5824,8 @@ textarea {
   position: sticky;
   z-index: var(--z-sticky);
   flex: none;
+  margin-right: calc(-1 * var(--request-card-pad-x));
+  margin-left: calc(-1 * var(--request-card-pad-x));
   pointer-events: none;
 }
 .request-card-body[data-clip-start]::before {
@@ -5849,6 +5862,7 @@ textarea {
    heading, and its footer stuck to the panel's lower edge above a hairline. The detail scrolls as one
    page, so a short panel never squeezes the card's body away. */
 .request-card[data-presentation="panel"] {
+  --request-card-pad-x: 0px;
   flex: none;
   padding: var(--space-4) 0 0;
   border: 0;
@@ -13697,7 +13711,7 @@ body.shell-dock-dragging * {
   top: calc(-1 * var(--space-3));
   flex: none;
   height: var(--space-3);
-  margin: calc(-1 * var(--space-3)) 0 calc(-1 * var(--space-2));
+  margin: calc(-1 * var(--space-3)) calc(-1 * var(--request-card-pad-x)) calc(-1 * var(--space-2));
   background: inherit;
 }
 .question-card[data-card-scrolls] > .request-card-foot {
@@ -13711,13 +13725,14 @@ body.shell-dock-dragging * {
    (#2698), as a sticky header does once content scrolls under it (§2.6), so answers under the
    footer read as more to come rather than a card that ends there. SessionApproval.tsx marks the
    edges only while the card itself scrolls. A border, not a fade: nothing above it is dimmed to
-   look disabled, and it stays drawn in forced colors. Neither line takes room. */
+   look disabled, and it stays drawn in forced colors. Neither line takes room, and each spans the
+   card across its padding, as a scrolling body's lines do (#2715). */
 .question-card[data-clip-end] > .request-card-foot::before {
   content: "";
   position: absolute;
   top: 0;
-  right: 0;
-  left: 0;
+  right: calc(-1 * var(--request-card-pad-x));
+  left: calc(-1 * var(--request-card-pad-x));
   border-top: 1px solid var(--border);
   pointer-events: none;
 }
