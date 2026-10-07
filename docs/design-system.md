@@ -926,8 +926,11 @@ default (converge on the People & Devices anatomy).
   (only when there is more than one machine), the pin, the time and ⋯. ⋯ shows on hover and focus on
   fine pointers and is always there on touch. It opens the session's context menu (§5.2). Next comes the
   title, clamped to 2 lines, then a status line that is always present: the one status badge by
-  `sessionRowStatus()`, the activity strip under the row's rule, and on a parent the family chip
-  (an image named by the whole rollup; dots only below a 600px list). Last is either the request or a
+  `sessionRowStatus()`, then the activity strip under the row's rule. A parent shows its family chip
+  in place of the strip: an image named by the whole rollup, with that tooltip. It shows its words only
+  while they fit beside the badge in the card, measured on the card's own width rather than the list
+  pane's, and otherwise keeps just its dots. The status line is one 20px line and the badge never
+  clips: a strip that does not fit beside the badge drops out of sight. Last is either the request or a
   one-line `plainTextPreview()` of the latest message. The request is a warning inset notice (§13.2):
   the request in `--type-body` with a code line when it has one, then **Approve** and **Deny** as
   the equal pair (§3.1). Approve is the first one-time allow option and Deny the first one-time reject

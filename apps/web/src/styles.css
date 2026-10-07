@@ -3442,21 +3442,32 @@ textarea {
   outline: var(--focus-width) solid var(--focus);
   outline-offset: 2px;
 }
-/* The status line is always there, empty or not, so idle cards are as tall as busy ones. */
+/* The status line is always there, empty or not, so idle cards are as tall as busy ones. It is one
+   20px line: nothing on it shrinks, and what does not fit beside the badge (the activity strip in a
+   narrow column) wraps onto a second line that the line clips, so the badge always reads whole and
+   the card's height never changes. */
 .card-status {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-2);
+  gap: 0 var(--space-2);
   min-width: 0;
-  min-height: 20px;
+  height: 20px;
+  overflow: hidden;
 }
 .card-status > * { position: relative; flex: none; }
-/* In a 230px column the family chip gives way first (its rollup ellipsizes; its name stays whole),
-   then the badge, whose label clips while its accessible name and tooltip stay whole, as on the
-   phone row. The strip never shrinks. */
-.card-status > .inbox-thread-family { flex: 0 100000 auto; min-width: 0; max-width: 100%; }
-.card-status > .row-status { flex: 0 1 auto; min-width: 0; }
-.card-status .row-status > .status { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+/* A parent's chip (in place of the strip) shows its words while they fit beside the badge in this
+   card, and only its dots when they do not (`dots-only`, measured by the card, not the list pane), so
+   the list's 600px rule does not apply here. The words stay measurable but out of sight. */
+.card-status > .inbox-thread-family { max-width: 100%; }
+.card-status > .inbox-thread-family.dots-only { padding-inline: var(--space-1); }
+.card-status > .inbox-thread-family.dots-only .inbox-thread-family-text {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
 .card-preview {
   min-height: 16px;
   overflow: hidden;
@@ -12143,9 +12154,10 @@ body.shell-dock-dragging * {
 }
 .inbox-thread-family.waiting { border-color: transparent; color: var(--accent-2-on-tint); background: color-mix(in srgb, var(--accent-2) 12%, transparent); }
 .inbox-thread-family-text { overflow: hidden; text-overflow: ellipsis; }
+/* A Board card decides by its own width instead (`.card-status > .inbox-thread-family.dots-only`). */
 @container list (max-width: 599px) {
-  .inbox-thread-family { gap: 0; padding-inline: var(--space-1); }
-  .inbox-thread-family-text { display: none; }
+  :not(.card-status) > .inbox-thread-family { gap: 0; padding-inline: var(--space-1); }
+  :not(.card-status) > .inbox-thread-family > .inbox-thread-family-text { display: none; }
 }
 .inbox-thread-dots { display: inline-flex; flex: none; gap: 3px; }
 .inbox-thread-dot { display: inline-block; width: 7px; height: 7px; border-radius: var(--radius-pill); background: var(--border-strong); }

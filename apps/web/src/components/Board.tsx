@@ -1,6 +1,6 @@
 import { BoardIcon, ChevronDownIcon, ComputerIcon, MoreHorizontalIcon } from "./Icons.js";
 import { State, useSnapshotState } from "./State.js";
-import { type DragEvent, useEffect, useMemo, useRef, useState } from "react";
+import { type DragEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   BOARD_COLUMNS,
   plainTextPreview,
@@ -422,23 +422,6 @@ function SessionCard({
   const openMenu = (anchor: { x: number; y: number }) => onSessionMenu(session.id, anchor, restoreTarget);
   const longPress = useLongPress(openMenu);
 
-  const childrenLabel = threadChildren ? inboxThreadChildrenLabel(threadChildren) : null;
-  /* The family chip (#896, #2215) after the badge: one dot per child and the rollup. The Board sits in
-     the list pane, so below a 600px list it keeps only its dots, as a row's chip does; it is an image
-     named by the whole rollup at every width, and its visible words stay out of the accessible tree. */
-  const familyChip = threadChildren && childrenLabel ? (
-    <span
-      className={`inbox-thread-family${threadChildren.waiting > 0 ? " waiting" : ""}`}
-      role="img"
-      aria-label={childrenLabel}
-      title={childrenLabel}
-    >
-      <span className="inbox-thread-dots" aria-hidden="true">
-        {threadChildren.children.map((child) => <ThreadDot key={child.id} state={child.state} title={child.title} />)}
-      </span>
-      <span className="inbox-thread-family-text" aria-hidden="true">{childrenLabel}</span>
-    </span>
-  ) : null;
 
   return (
     <article
@@ -513,13 +496,69 @@ function SessionCard({
       </button>
       <div className="card-status">
         <SessionRowStatusBadge status={status} />
-        {strip && <ActivityStrip activity={activity} now={activityNow} compact />}
-        {familyChip}
+        {/* A parent shows its family chip where another card shows the strip (#2222). */}
+        {threadChildren
+          ? <CardFamilyChip family={threadChildren} besideKey={status.badge?.ariaLabel ?? ""} />
+          : strip && <ActivityStrip activity={activity} now={activityNow} compact />}
       </div>
       {request
         ? <CardRequest session={session} request={request} runnerOnline={runnerOnline} onOpen={onOpen} />
         : <div className="card-preview">{plainTextPreview(session.preview)}</div>}
     </article>
+  );
+}
+
+/**
+ * A parent card's family chip (#896, #2215, #2222): one dot per child, then the rollup ("4 Children ·
+ * 1 Awaiting Input"). It is an image named by the whole rollup, with the same tooltip, and its visible
+ * words stay out of the accessible tree. The words show only while the whole chip fits beside the
+ * badge in this card; otherwise it keeps its dots. The card measures that itself, because a Board
+ * column's width says nothing about the list pane's.
+ */
+function CardFamilyChip({ family, besideKey }: {
+  family: InboxThreadChildren;
+  /** What sits beside the chip (the badge), so a change to it measures again. */
+  besideKey: string;
+}) {
+  const label = inboxThreadChildrenLabel(family);
+  const chipRef = useRef<HTMLSpanElement>(null);
+  const [dotsOnly, setDotsOnly] = useState(false);
+  useLayoutEffect(() => {
+    const chip = chipRef.current;
+    const line = chip?.parentElement;
+    if (!chip || !line) return;
+    const measure = () => {
+      // The chip's width with its words, read synchronously with the class lifted, so no frame shows it.
+      const wasDotsOnly = chip.classList.contains("dots-only");
+      chip.classList.remove("dots-only");
+      const full = chip.getBoundingClientRect().width;
+      if (wasDotsOnly) chip.classList.add("dots-only");
+      const gap = parseFloat(line.ownerDocument.defaultView?.getComputedStyle(line).columnGap ?? "") || 0;
+      let room = line.clientWidth;
+      for (const sibling of line.children) {
+        if (sibling !== chip) room -= sibling.getBoundingClientRect().width + gap;
+      }
+      setDotsOnly(full > room + 0.5);
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(line);
+    return () => observer.disconnect();
+  }, [label, besideKey]);
+  return (
+    <span
+      ref={chipRef}
+      className={`inbox-thread-family${family.waiting > 0 ? " waiting" : ""}${dotsOnly ? " dots-only" : ""}`}
+      role="img"
+      aria-label={label}
+      title={label}
+    >
+      <span className="inbox-thread-dots" aria-hidden="true">
+        {family.children.map((child) => <ThreadDot key={child.id} state={child.state} title={child.title} />)}
+      </span>
+      <span className="inbox-thread-family-text" aria-hidden="true">{label}</span>
+    </span>
   );
 }
 

@@ -590,6 +590,48 @@ function cardGeometry(page: Page) {
   }));
 }
 
+/**
+ * Every card's status line, measured: the badge never clips; a parent shows its chip and no strip; the
+ * chip's words either fit whole or the chip is dots-only; and a strip that does not fit beside the
+ * badge is wrapped out of sight rather than squeezing it.
+ */
+async function expectWholeStatusLines(page: Page) {
+  const lines = await page.locator(".board").evaluate((board) => [...board.querySelectorAll<HTMLElement>(".card")].map((card) => {
+    const line = card.querySelector<HTMLElement>(".card-status")!.getBoundingClientRect();
+    const badge = card.querySelector<HTMLElement>(".card-status .status");
+    const strip = card.querySelector<HTMLElement>(".card-status .activity-strip");
+    const chip = card.querySelector<HTMLElement>(".card-status .inbox-thread-family");
+    const words = chip?.querySelector<HTMLElement>(".inbox-thread-family-text");
+    const stripBox = strip?.getBoundingClientRect();
+    const wordsBox = words?.getBoundingClientRect();
+    return {
+      id: card.dataset.sessionId!,
+      parent: card.dataset.sessionId === "s-parent",
+      badgeClipped: badge ? badge.scrollWidth > badge.clientWidth + 0.5 || badge.getBoundingClientRect().right > line.right + 0.5 : false,
+      hasStrip: Boolean(strip),
+      // On the line and whole, or wrapped below it, where the line clips it.
+      stripPlacement: !stripBox ? "none" : stripBox.top >= line.bottom - 0.5 ? "wrapped"
+        : stripBox.right <= line.right + 0.5 ? "whole" : "squeezed",
+      hasChip: Boolean(chip),
+      chipDotsOnly: chip?.classList.contains("dots-only") ?? false,
+      chipName: chip?.getAttribute("aria-label") ?? null,
+      chipWordsWhole: !words || !wordsBox ? null
+        : words.scrollWidth <= words.clientWidth + 0.5 && wordsBox.right <= line.right + 0.5 && wordsBox.top < line.bottom,
+    };
+  }));
+  for (const line of lines) {
+    expect(line.badgeClipped, `${line.id}'s badge reads whole`).toBe(false);
+    expect(line.stripPlacement, `${line.id}'s strip never squeezes the badge`).not.toBe("squeezed");
+    if (!line.hasChip) continue;
+    expect(line.chipName, `${line.id}'s chip is named by its whole rollup`).toBe("4 Children · 1 Awaiting Input");
+    if (!line.chipDotsOnly) expect(line.chipWordsWhole, `${line.id}'s chip words are whole when shown`).toBe(true);
+  }
+  const parent = lines.find((line) => line.parent)!;
+  expect({ chip: parent.hasChip, strip: parent.hasStrip }, "a parent card shows its chip in place of the strip")
+    .toEqual({ chip: true, strip: false });
+  return lines;
+}
+
 test.describe("Board cards at 1440×900 (#2222)", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
@@ -606,6 +648,7 @@ test.describe("Board cards at 1440×900 (#2222)", () => {
       expect(card.badgeClipped, `${card.id}'s badge reads whole beside the strip and the family chip`).toBe(false);
     }
     expect(before.find((card) => card.id === "s-idle")!.titleLines, "a long title clamps at two lines").toBe(2);
+    await expectWholeStatusLines(page);
 
     const idle = page.locator('.board .card[data-session-id="s-idle"]');
     // Line 1 is drawn first, and its time stacks above the stretched open button, so its tooltip shows.
@@ -649,6 +692,8 @@ test.describe("Board cards at 1440×900 (#2222)", () => {
     await page.addStyleTag({ content: ".board .column:not(.is-empty) { flex: 0 0 230px; min-width: 230px; max-width: 230px; }" });
     expect(await page.locator(".column.col-input_required").evaluate((column) => column.getBoundingClientRect().width)).toBe(230);
     for (const card of await cardGeometry(page)) expect(card.wrappedButtons, `${card.id}'s buttons`).toEqual([]);
+    const narrow = await expectWholeStatusLines(page);
+    expect(narrow.find((line) => line.parent)!.chipDotsOnly, "a 230px parent card keeps only the chip's dots").toBe(true);
     // Nothing on a card's status line crosses the card's edge.
     const overflowing = await page.locator(".board .card").evaluateAll((cards) => cards.filter((card) => {
       const edge = card.getBoundingClientRect().right;
@@ -670,6 +715,21 @@ test.describe("Board cards at 1440×900 (#2222)", () => {
     await page.keyboard.press("Escape");
     await expect(menu).toHaveCount(0);
     await expect(signIn).toBeFocused();
+  });
+});
+
+test.describe("Board cards in wide columns (#2222)", () => {
+  test.use({ viewport: { width: 1440, height: 900 } });
+
+  test("a parent card's chip shows its whole rollup when the card has room", async ({ page }) => {
+    await openCards(page);
+    await page.addStyleTag({ content: ".board .column:not(.is-empty) { flex: 0 0 480px; min-width: 480px; max-width: 480px; }" });
+    await expect(page.locator('.board .card[data-session-id="s-parent"] .inbox-thread-family')).not.toHaveClass(/dots-only/u);
+    const wide = await expectWholeStatusLines(page);
+    expect(wide.find((line) => line.parent)!.chipWordsWhole).toBe(true);
+    // And it falls back to its dots when the column narrows again.
+    await page.addStyleTag({ content: ".board .column:not(.is-empty) { flex: 0 0 230px; min-width: 230px; max-width: 230px; }" });
+    await expect(page.locator('.board .card[data-session-id="s-parent"] .inbox-thread-family')).toHaveClass(/dots-only/u);
   });
 });
 
@@ -696,6 +756,7 @@ test.describe("Board cards on an 834px touch tablet (#2222)", () => {
       expect(target.hitHeight).toBeGreaterThanOrEqual(44);
       expect(target.hitWidth).toBeGreaterThanOrEqual(44);
     }
+    await expectWholeStatusLines(page);
     for (const more of await page.locator(".board .card .card-more").all()) {
       expect(await more.evaluate((button) => getComputedStyle(button).opacity)).toBe("1");
     }

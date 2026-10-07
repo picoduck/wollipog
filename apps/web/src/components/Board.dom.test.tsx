@@ -357,6 +357,10 @@ test("the family chip after the badge is an image named by the whole rollup at e
     const order = [...status.children].map((child) => child.className);
     assert.ok(order.indexOf("row-status") < order.findIndex((name) => name.includes("inbox-thread-family")),
       "the chip follows the badge");
+    // A running parent shows the chip in place of the strip; a running card without children keeps its strip.
+    assertNoDomNode(status.querySelector(".activity-strip"), "a parent card shows the chip, not the strip");
+    assert.ok(board.card("running").querySelector(".card-status .activity-strip"), "a running card shows its strip");
+    assert.equal(chip.getAttribute("title"), "2 Children · 1 Awaiting Input", "and a tooltip with the whole rollup");
   } finally {
     await board.unmount();
   }
