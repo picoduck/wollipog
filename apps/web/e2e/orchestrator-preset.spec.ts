@@ -1,4 +1,5 @@
 import { expect, test, type Locator } from "@playwright/test";
+import { openProjectActions } from "./session-groups.js";
 import { PROTOCOL_VERSION } from "@wollipog/protocol";
 
 test.use({ video: "on" });
@@ -38,8 +39,7 @@ for (const scenario of [
         requirement: "Upgrade Codex to 0.154.0 or newer.",
       });
     }, scenario.theme);
-    await page.getByRole("tab", { name: /Alpha/ }).click();
-    await page.getByRole("button", { name: "Alpha Actions" }).click();
+    await openProjectActions(page, /Alpha/, "Alpha");
     await page.getByRole("menuitem", { name: "New Session Here" }).click();
     const dialog = page.getByRole("dialog", { name: "New Session" });
     const orchestratorCard = presetCard(dialog, /^Orchestrator/);
@@ -61,8 +61,7 @@ for (const theme of ["light", "dark"] as const) {
         window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(protocolVersion);
         window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([], ["default", "orchestrator"]);
       }, { selectedTheme: theme, protocolVersion: PROTOCOL_VERSION });
-      await page.getByRole("tab", { name: /Alpha/ }).click();
-      await page.getByRole("button", { name: "Alpha Actions" }).click();
+      await openProjectActions(page, /Alpha/, "Alpha");
       await page.getByRole("menuitem", { name: "New Session Here" }).click();
       const dialog = page.getByRole("dialog", { name: "New Session" });
       // A saved Orchestrator harness default selects the role on the user's behalf and names
@@ -89,8 +88,7 @@ for (const theme of ["light", "dark"] as const) {
         document.documentElement.dataset.theme = theme;
         window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([], ["default", "orchestrator"]);
       }, theme);
-      await page.getByRole("tab", { name: /Alpha/ }).click();
-      await page.getByRole("button", { name: "Alpha Actions" }).click();
+      await openProjectActions(page, /Alpha/, "Alpha");
       await page.getByRole("menuitem", { name: "New Session Here" }).click();
       const dialog = page.getByRole("dialog", { name: "New Session" });
       const orchestratorCard = presetCard(dialog, /^Orchestrator/);
@@ -158,8 +156,7 @@ for (const scenario of [
         controlPlaneRole: true,
       });
     }, { theme: scenario.theme, protocolVersion: PROTOCOL_VERSION, driver: harness.driver });
-    await page.getByRole("tab", { name: /Alpha/ }).click();
-    await page.getByRole("button", { name: "Alpha Actions" }).click();
+    await openProjectActions(page, /Alpha/, "Alpha");
     await page.getByRole("menuitem", { name: "New Session Here" }).click();
     const dialog = page.getByRole("dialog", { name: "New Session" });
     const providerPermissions = dialog.getByRole("group", { name: "Provider Permissions" });
@@ -217,8 +214,7 @@ for (const scenario of [
         controlPlaneRole: true,
       });
     }, { theme: scenario.theme, protocolVersion: PROTOCOL_VERSION });
-    await page.getByRole("tab", { name: /Alpha/ }).click();
-    await page.getByRole("button", { name: "Alpha Actions" }).click();
+    await openProjectActions(page, /Alpha/, "Alpha");
     await page.getByRole("menuitem", { name: "New Session Here" }).click();
     const dialog = page.getByRole("dialog", { name: "New Session" });
     const providerPermissions = dialog.getByRole("group", { name: "Provider Permissions" });
@@ -272,8 +268,7 @@ for (const scenario of [
         os: "windows",
       });
     }, { theme: scenario.theme, protocolVersion: PROTOCOL_VERSION });
-    await page.getByRole("tab", { name: /Alpha/ }).click();
-    await page.getByRole("button", { name: "Alpha Actions" }).click();
+    await openProjectActions(page, /Alpha/, "Alpha");
     await page.getByRole("menuitem", { name: "New Session Here" }).click();
     const dialog = page.getByRole("dialog", { name: "New Session" });
     const providerPermissions = dialog.getByRole("group", { name: "Provider Permissions" });
@@ -325,8 +320,7 @@ for (const scenario of [
         controlPlaneRole: true,
       });
     }, { theme: scenario.theme, protocolVersion: PROTOCOL_VERSION });
-    await page.getByRole("tab", { name: /Alpha/ }).click();
-    await page.getByRole("button", { name: "Alpha Actions" }).click();
+    await openProjectActions(page, /Alpha/, "Alpha");
     await page.getByRole("menuitem", { name: "New Session Here" }).click();
     const dialog = page.getByRole("dialog", { name: "New Session" });
     await presetCard(dialog, /^Orchestrator/).click();

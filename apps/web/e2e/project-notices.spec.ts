@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { chooseSessionGroup } from "./session-groups.js";
 import { expectGeometry } from "./geometry-margins.js";
 
 /**
@@ -16,7 +17,8 @@ async function openSessions(page: Page, query = "") {
 }
 
 async function openProjectTab(page: Page) {
-  await page.getByRole("tab", { name: /Payments Service/u }).click();
+  // A phone chooses the group in its app bar's picker (#2211).
+  await chooseSessionGroup(page, /Payments Service/u);
 }
 
 function row(page: Page, title: string) {
