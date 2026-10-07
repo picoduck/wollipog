@@ -498,7 +498,7 @@ function SessionCard({
         <SessionRowStatusBadge status={status} />
         {/* A parent shows its family chip where another card shows the strip (#2222). */}
         {threadChildren
-          ? <CardFamilyChip family={threadChildren} besideKey={status.badge?.ariaLabel ?? ""} />
+          ? <CardFamilyChip family={threadChildren} besideKey={[status.badge?.ariaLabel ?? "", ...status.others].join("\n")} />
           : strip && <ActivityStrip activity={activity} now={activityNow} compact />}
       </div>
       {request
@@ -517,7 +517,7 @@ function SessionCard({
  */
 function CardFamilyChip({ family, besideKey }: {
   family: InboxThreadChildren;
-  /** What sits beside the chip (the badge), so a change to it measures again. */
+  /** What sits beside the chip (the badge and its "+N"), so a change to it measures again. */
   besideKey: string;
 }) {
   const label = inboxThreadChildrenLabel(family);
@@ -528,10 +528,14 @@ function CardFamilyChip({ family, besideKey }: {
     const line = chip?.parentElement;
     if (!chip || !line) return;
     const measure = () => {
-      // The chip's width with its words, read synchronously with the class lifted, so no frame shows it.
+      // The chip's natural width with its words, read synchronously with the class and the line's
+      // width cap lifted (a capped chip would ellipsize its words and still "fit"), so no frame shows it.
       const wasDotsOnly = chip.classList.contains("dots-only");
+      const maxWidth = chip.style.maxWidth;
       chip.classList.remove("dots-only");
+      chip.style.maxWidth = "none";
       const full = chip.getBoundingClientRect().width;
+      chip.style.maxWidth = maxWidth;
       if (wasDotsOnly) chip.classList.add("dots-only");
       const gap = parseFloat(line.ownerDocument.defaultView?.getComputedStyle(line).columnGap ?? "") || 0;
       let room = line.clientWidth;
@@ -542,8 +546,11 @@ function CardFamilyChip({ family, besideKey }: {
     };
     measure();
     if (typeof ResizeObserver === "undefined") return;
+    // The line keeps its size when what sits beside the chip grows (a "+1" joining the badge), so the
+    // siblings are watched too; a sibling that appears or goes changes `besideKey` and re-runs this.
     const observer = new ResizeObserver(measure);
     observer.observe(line);
+    for (const sibling of line.children) if (sibling !== chip) observer.observe(sibling, { box: "border-box" });
     return () => observer.disconnect();
   }, [label, besideKey]);
   return (

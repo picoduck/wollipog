@@ -731,6 +731,28 @@ test.describe("Board cards in wide columns (#2222)", () => {
     await page.addStyleTag({ content: ".board .column:not(.is-empty) { flex: 0 0 230px; min-width: 230px; max-width: 230px; }" });
     await expect(page.locator('.board .card[data-session-id="s-parent"] .inbox-thread-family')).toHaveClass(/dots-only/u);
   });
+
+  test("the chip measures its whole words, even with the line to itself, and again when its neighbour grows", async ({ page }) => {
+    await openCards(page);
+    const chip = page.locator('.board .card[data-session-id="s-parent"] .inbox-thread-family');
+    const narrow = await page.addStyleTag({ content: ".board .column:not(.is-empty) { flex: 0 0 230px; min-width: 230px; max-width: 230px; }" });
+    // A parent without a badge (an idle one) has the whole line, which still cannot hold the rollup:
+    // the chip is measured uncapped, so it does not ellipsize its words and call that a fit.
+    const noBadge = await page.addStyleTag({ content: '.card[data-session-id="s-parent"] .card-status > .row-status { display: none; }' });
+    await expect(chip).toHaveClass(/dots-only/u);
+    await expectWholeStatusLines(page);
+    await noBadge.evaluate((style) => style.remove());
+    await narrow.evaluate((style) => style.remove());
+
+    await page.addStyleTag({ content: ".board .column:not(.is-empty) { flex: 0 0 480px; min-width: 480px; max-width: 480px; }" });
+    await expect(chip).not.toHaveClass(/dots-only/u);
+    // What sits beside the chip grows (a "+1" joining the badge) while the line keeps its size.
+    const wider = await page.addStyleTag({ content: '.card[data-session-id="s-parent"] .card-status > .row-status { padding-right: 300px; }' });
+    await expect(chip).toHaveClass(/dots-only/u);
+    await wider.evaluate((style) => style.remove());
+    await expect(chip).not.toHaveClass(/dots-only/u);
+    await expectWholeStatusLines(page);
+  });
 });
 
 test.describe("Board cards on an 834px touch tablet (#2222)", () => {
