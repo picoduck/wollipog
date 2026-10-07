@@ -234,7 +234,7 @@ import {
 import { useSessionReadingKeys, type SessionReadingKeyActions } from "../useSessionReadingKeys.js";
 import { VIRTUAL_VIEWPORT_INTENT_EVENT, virtualViewportIntentDirection } from "../viewport-intent.js";
 import { inTypingContext, isMacPlatform, matchesShortcut, shortcutDisplay, shortcutLayerActive } from "../shortcuts.js";
-import { useIsMobile, useIsTouchPhone } from "./useIsMobile.js";
+import { useIsCompact, useIsMobile, useIsTouchPhone } from "./useIsMobile.js";
 import {
   usePreviewNavigationRegistration,
   type PreviewNavigationControls,
@@ -972,6 +972,9 @@ function SessionDetailLoaded({
   const isMobile = useIsMobile();
   const isMobileRef = useRef(isMobile);
   isMobileRef.current = isMobile;
+  const isCompact = useIsCompact();
+  const isCompactRef = useRef(isCompact);
+  isCompactRef.current = isCompact;
   const projectsSupported = useStoreSelector((state) => state.projectsSupported);
   const projects = useStoreSelector((state) => state.projects);
   const instanceScope = useInstanceScope();
@@ -1372,6 +1375,12 @@ function SessionDetailLoaded({
   // transcript while hydration catches up; they never guess an Agents overview first.
   const handledAttentionRef = useRef<string | null>(null);
   const preparedAttentionRef = useRef<string | null>(null);
+  const closeRequestOverlay = useCallback(() => {
+    const panel = rightPanelRef.current;
+    // Requests also overlays the transcript in the compact desktop tier (#2206).
+    if (panel.open && (isMobileRef.current || panel.mode === "subagents" ||
+        (isCompactRef.current && panel.mode === "requests"))) panel.close();
+  }, []);
   const attentionRequest = attentionTarget && attentionTarget.eventEpoch === (session.eventEpoch ?? 0)
     ? attentionTarget.requestId === undefined ? prioritizedRequests[0]
       : prioritizedRequests.find((request) => request.requestId === attentionTarget.requestId)
@@ -1391,9 +1400,7 @@ function SessionDetailLoaded({
     // Close an obstructing panel before paint, then let the mounted dock reveal the exact card.
     if (preparedAttentionRef.current !== key) {
       preparedAttentionRef.current = key;
-      if (rightPanelRef.current.open && (isMobileRef.current || rightPanelRef.current.mode === "subagents")) {
-        rightPanelRef.current.close();
-      }
+      closeRequestOverlay();
     }
     // After the dock has mounted; a re-render before the frame reschedules it.
     const frame = window.requestAnimationFrame(() => {
@@ -1401,7 +1408,7 @@ function SessionDetailLoaded({
       handledAttentionRef.current = key;
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [mode, attentionTarget, attentionRequest, session.id]);
+  }, [mode, attentionTarget, attentionRequest, session.id, closeRequestOverlay]);
   const backgroundInventoryRequestRef = useRef<string | null>(null);
   const [backgroundInventoryError, setBackgroundInventoryError] = useState<string | null>(null);
   const [backgroundInventoryAttempt, setBackgroundInventoryAttempt] = useState(0);
@@ -4591,9 +4598,12 @@ function SessionDetailLoaded({
   // into view: on the request dock (or the notice slot holding its place), else in the Agents panel,
   // which lists every pending request (a worker's beside an async question).
   const reviewPendingRequest = useCallback((requestId: string) => {
-    if (focusSessionRequest(session.id, requestId)) return;
+    if (dockedRequests.some((request) => request.requestId === requestId)) {
+      if (mode === "expanded") closeRequestOverlay();
+      if (focusSessionRequest(session.id, requestId)) return;
+    }
     navigate({ name: "session", id: session.id, attention: { eventEpoch: session.eventEpoch ?? 0, requestId } });
-  }, [navigate, session.eventEpoch, session.id]);
+  }, [navigate, session.eventEpoch, session.id, dockedRequests, mode, closeRequestOverlay]);
 
   // The pending questions, whose transcript rows are markers (#2205): the dock's, and a worker's,
   // whose Jump to Question opens the Agents panel. Keyed by their ids, so heartbeats that replace the
@@ -6346,7 +6356,10 @@ function SessionDetailLoaded({
           onOpenAttention={() => {
             // The top request is answered on the dock when it is the session's own.
             const top = prioritizedRequests[0];
-            if (top && dockedRequests.includes(top) && focusSessionRequest(session.id, top.requestId)) return;
+            if (top && dockedRequests.includes(top)) {
+              reviewPendingRequest(top.requestId);
+              return;
+            }
             const requests = pendingRequests(session.pendingApproval);
             if (requests.length > 1) {
               navigate({ name: "session", id: session.id, attention: {

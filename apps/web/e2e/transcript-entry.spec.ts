@@ -191,11 +191,36 @@ for (const width of [390, 1440]) {
     await page.setViewportSize({ width, height: 900 });
     await page.goto(entryShell(sessionPath("s-approval")));
     await openPanelMode(page, "Requests");
-    await page.getByRole("button", { name: "Open Child Session", exact: true }).click();
+    await page.locator(".request-panel-row").first().click();
+    // #2206 moves the child-session control into the selected request's detail link.
+    const childLink = page.locator(".request-panel-child");
+    if (await childLink.count()) await childLink.click();
+    else await page.getByRole("button", { name: "Open Child Session", exact: true }).click();
     const heading = page.locator(".request-dock .request-card").getByRole("heading");
     await expect(heading).toHaveText("Primary Request");
     await expect(heading).toBeFocused();
     await expect(agents(page)).toHaveCount(0);
     expect(new URL(page.url()).searchParams.get("path")).toBe(attentionPath("s-queued", "primary-1"));
+  });
+}
+
+for (const width of [834, 940, 1099, 1100, 1440]) for (const entry of ["link", "status"]) {
+  test(`own request ${entry} dismisses an overlapping Requests panel only in compact layouts at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto(entryShell(sessionPath("s-approval")));
+    if (entry === "status") await page.evaluate(() => window.__updateEntrySession({ pendingApproval: {
+      requestId: "async-question", kind: "question", title: "Choose the Release Target", async: true,
+      options: [], questions: [{ id: "target", header: "Target", question: "Where should the release go?",
+        options: [{ label: "Staging" }, { label: "Production" }], allowOther: true }],
+    } }));
+    await openPanelMode(page, "Requests");
+    await expect(page.locator(".request-panel-row").first()).toBeVisible();
+    if (entry === "link") await navigateWithinShell(page, attentionPath("s-approval", "async-question"));
+    else {
+      await page.locator(".session-bar .session-status-button").click();
+      await page.getByRole("dialog", { name: "Session Status" }).getByRole("button", { name: "Answer", exact: true }).click();
+    }
+    await expect(page.locator(".request-dock").getByRole("heading").first()).toBeFocused();
+    await expect(page.locator("#right-panel")).toHaveCount(width < 1100 ? 0 : 1);
   });
 }
