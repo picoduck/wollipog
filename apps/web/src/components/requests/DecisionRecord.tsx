@@ -139,6 +139,15 @@ export function DecisionRecord({
         className="tl-decision-head"
         aria-label={decisionRecordText(record, names)}
         aria-describedby={at !== undefined ? timeId : undefined}
+        onClick={(event) => {
+          if (!onToggle || event.defaultPrevented) return;
+          const target = event.target as Element;
+          if (target.closest("a[href], button, input, select, textarea, [contenteditable='true']")) return;
+          // Persist activation before a queued native toggle can outlive the virtual row.
+          // Enter and Space activate the summary through this same click handler.
+          event.preventDefault();
+          onToggle();
+        }}
       >
         <ChevronRightIcon size={14} className="disclosure-chevron" />
         <span className={`tl-decision-icon t-${meta.tone}`}><OutcomeIcon tone={meta.tone} /></span>

@@ -2287,7 +2287,12 @@ const TimelineRow = memo(function TimelineRow({
                 if (event.nativeEvent.isTrusted && event.currentTarget.open !== disclosureOpen) onDisclosureToggle?.();
               }}
             >
-              <summary>What Was Requested</summary>
+              <summary onClick={(event) => {
+                if (!onDisclosureToggle || event.defaultPrevented) return;
+                // Native toggle is queued; save pointer and keyboard activation before recycling.
+                event.preventDefault();
+                onDisclosureToggle();
+              }}>What Was Requested</summary>
               <pre>{item.context.input}</pre>
             </details>
           )}

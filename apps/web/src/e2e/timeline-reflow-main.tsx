@@ -290,6 +290,7 @@ function Fixture() {
   const markdownFixtureEnabled = useMemo(() => new URLSearchParams(window.location.search).get("markdown") === "1", []);
   const ledgerFixtureEnabled = useMemo(() => new URLSearchParams(window.location.search).get("ledger") === "1", []);
   const questionHistoryFixtureEnabled = useMemo(() => new URLSearchParams(window.location.search).get("question-history") === "1", []);
+  const disclosureFixtureEnabled = useMemo(() => new URLSearchParams(window.location.search).get("request-disclosures") === "1", []);
   const historyFixtureEnabled = useMemo(() => new URLSearchParams(window.location.search).get("history") === "1", []);
   // `dock=1`: a pending request docked below the reader in a reading column, as in Session Detail (#2195).
   const dockFixtureEnabled = useMemo(() => new URLSearchParams(window.location.search).get("dock") === "1", []);
@@ -369,6 +370,21 @@ function Fixture() {
         options: [],
       }],
     })) : [];
+    const requestDisclosures: TimelineItem[] = disclosureFixtureEnabled ? [
+      {
+        kind: "review_decision", id: 321, reviewId: "disclosure-review",
+        reviewer: { kind: "agent", id: "fixture-reviewer" }, outcome: "escalated", riskLevel: "high",
+        rationale: "Review the bounded disclosure operation.",
+      },
+      {
+        kind: "permission", id: 322, requestId: "disclosure-pending", title: "Inspect the Release Manifest",
+        options: [], context: { input: "cat release-manifest.json" },
+      },
+      {
+        kind: "permission", id: 323, requestId: "disclosure-resolved", title: "Inspect the Release Checklist",
+        options: [], resolvedOptionId: "allow_once", context: { input: "cat release-checklist.md" },
+      },
+    ] : [];
     // A reply that starts streaming below the current tail: its row top stays inside the viewport
     // while it grows, so TanStack does not compensate scrollTop for its growth.
     const liveReply: TimelineItem[] = liveReplyTicks > 0 ? [{
@@ -377,9 +393,9 @@ function Fixture() {
       text: `Live reply. ${sentence.repeat(liveReplyTicks)}`,
       createdAt: Date.now(),
     }] : [];
-    const complete = [...prefix, ...historicalQuestions, ...current, ...liveReply, ...revealItems];
+    const complete = [...prefix, ...historicalQuestions, ...requestDisclosures, ...current, ...liveReply, ...revealItems];
     return currentHistoryLimit == null ? complete : complete.slice(0, currentHistoryLimit);
-  }, [currentHistoryLimit, currentHistoryPrepend, currentHistoryReplacement, headStreamTicks, historyFixtureEnabled, ledgerFixtureEnabled, liveReplyTicks, markdownFixtureEnabled, overflowFixtureEnabled, questionHistoryFixtureEnabled, revealFixtureEnabled, sessionId, tailStreamTicks]);
+  }, [disclosureFixtureEnabled, currentHistoryLimit, currentHistoryPrepend, currentHistoryReplacement, headStreamTicks, historyFixtureEnabled, ledgerFixtureEnabled, liveReplyTicks, markdownFixtureEnabled, overflowFixtureEnabled, questionHistoryFixtureEnabled, revealFixtureEnabled, sessionId, tailStreamTicks]);
   const followTail = useFollowTail({
     scrollRef: followTailEnabled ? scrollRef : disabledFollowScrollRef,
     contentRevision: `${sessionId}:${currentHistoryPrepend}:${currentHistoryReplacement}:${currentHistoryLimit ?? "all"}:${headStreamTicks}:${tailStreamTicks}:${liveReplyTicks}`,
@@ -532,7 +548,7 @@ function Fixture() {
           />
         )}
       </section>
-      <nav hidden={overflowFixtureEnabled} style={{ position: "fixed", zIndex: 2, top: questionHistoryFixtureEnabled ? undefined : 4, bottom: questionHistoryFixtureEnabled ? 4 : undefined, right: 4 }}>
+      <nav hidden={overflowFixtureEnabled} style={{ position: "fixed", zIndex: 2, top: questionHistoryFixtureEnabled || disclosureFixtureEnabled ? undefined : 4, bottom: questionHistoryFixtureEnabled || disclosureFixtureEnabled ? 4 : undefined, right: 4 }}>
         <button type="button" data-testid="close-panel" onClick={() => setPanelWidth(0)}>Close Panel</button>
         <button type="button" data-testid="medium-panel" onClick={() => setPanelWidth(460)}>Medium Panel</button>
         <button type="button" data-testid="wide-panel" onClick={() => setPanelWidth(540)}>Wide Panel</button>
