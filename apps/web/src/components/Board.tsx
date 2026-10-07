@@ -68,7 +68,7 @@ export function openingBoardColumn(byColumn: ReadonlyMap<BoardColumn, readonly u
  * menu buttons live in the Sessions tab row (`BoardFilterTools`, #2201), and on a phone in the app
  * bar's Filters sheet (#2216). A phone shows one column at a time under a strip of column tabs.
  */
-export function Board({ sessions: scoped, reminders = new Map(), stalledSessionIds = new Set(), pinnedSessionIds = new Set(), searchActive, onShowAll, onNewSession, onSessionMenu }: {
+export function Board({ sessions: scoped, reminders = new Map(), stalledSessionIds = new Set(), pinnedSessionIds = new Set(), searchActive, onShowAll, onNewSession, onSessionMenu, column, onColumnChange }: {
   /** Already scoped by the Sessions toolbar: unarchived, split, query, and reminder mode. */
   sessions: SessionView[];
   stalledSessionIds?: ReadonlySet<string>;
@@ -81,6 +81,13 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
   onNewSession: () => void;
   /** Right-click, long-press, or keyboard context menu on a card (#154). */
   onSessionMenu: (sessionId: string, anchor: { x: number; y: number }, restoreTarget: () => HTMLElement | null) => void;
+  /**
+   * The phone Board's column, held by an owner that outlives the Board (#2216): the Sessions page
+   * swaps the Board for No Matches while a search finds nothing, and the column must survive that.
+   * Null until the Board first has sessions. Without it the Board holds the column itself.
+   */
+  column?: BoardColumn | null;
+  onColumnChange?: (column: BoardColumn) => void;
 }) {
   const api = useApi();
   const { setFilters, navigate } = useStoreActions();
@@ -128,9 +135,15 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
   // its column, the opening one or the one chosen, while it stays open: a live update that empties
   // the column or fills an earlier one never moves the page under the person reading it.
   const phone = useIsMobile();
-  const [phoneColumn, setPhoneColumn] = useState<BoardColumn | null>(null);
-  if (phoneColumn === null && visible.length > 0) setPhoneColumn(openingBoardColumn(byColumn));
+  const [ownColumn, setOwnColumn] = useState<BoardColumn | null>(null);
+  const phoneColumn = column !== undefined ? column : ownColumn;
+  const setPhoneColumn = onColumnChange ?? setOwnColumn;
   const shownColumn = phoneColumn ?? openingBoardColumn(byColumn);
+  // The opening column is recorded before paint, so the first frame already shows it.
+  const hasSessions = visible.length > 0;
+  useLayoutEffect(() => {
+    if (phoneColumn === null && hasSessions) setPhoneColumn(shownColumn);
+  }, [phoneColumn, hasSessions, setPhoneColumn, shownColumn]);
   const tabIdPrefix = `board-column-${useId().replace(/:/g, "")}`;
   const columnTabId = (column: BoardColumn) => `${tabIdPrefix}-tab-${column}`;
   const columnPanelId = `${tabIdPrefix}-panel`;

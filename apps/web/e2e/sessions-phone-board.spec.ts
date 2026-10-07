@@ -119,7 +119,15 @@ test("each tab counts its column, Needs Input's as a warning badge, and choosing
   await page.keyboard.press("End");
   await expect(columnTab(page, "Queued")).toHaveAttribute("aria-selected", "true");
 
-  // The chosen column holds while the Board stays open, even when a filter empties it.
+  // The chosen column holds while the Board stays open: through a search that finds nothing, which
+  // replaces the Board with No Matches until it is cancelled,
+  await bar(page).getByRole("button", { name: "Search Sessions" }).tap();
+  await bar(page).locator(".inbox-search input").fill("no such session");
+  await expect(columnTabs(page)).toHaveCount(0);
+  await bar(page).getByRole("button", { name: "Cancel" }).tap();
+  await expect(columnTab(page, "Queued")).toHaveAttribute("aria-selected", "true");
+  await expect(panel(page).locator(".card .card-title")).toHaveText(["Queued Session"]);
+  // and when a filter empties it.
   await filtersButton(page).tap();
   await page.getByRole("menu", { name: "Filters" }).getByRole("group", { name: "Studio Mac" })
     .getByRole("menuitemradio", { name: "Claude Code" }).tap();
