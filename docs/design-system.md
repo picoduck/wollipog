@@ -1662,10 +1662,13 @@ while the session runs (the transcript's live clock), otherwise the clock time l
 transcript timestamp, with the absolute date and time as its tooltip. Who decided is "You" (relative to the viewer, #2527), a policy's
 display name from the organization's policies (never "Policy · <id>"; "Policy" until the names
 load; they reload once for a policy they lack and after a policy is saved), the parent session's title, the reviewer, or "Wollipog" for a fail-closed block. A permission
-event names who decided only when a parent session did; a person and a policy (which can
-auto-resolve a permission) both resolve one without naming themselves, and the audit cannot be tied
-to one occurrence of a reused provider request id, so any other permission row names nobody rather
-than guessing. The
+row names who decided from its own `permission_resolved` (#2628): the control plane sends
+`resolvedBy`, the member who submitted the decision or the policy that auto-resolved it, and the
+runner records it on that exact resolution (protocol 211), so each occurrence of a reused provider
+request id is named by its own decider. The member reads relative to the viewer by the #2527 rules,
+the policy by its name. A Parent Control decision names the parent session instead. A resolution
+from an older runner or control plane, or one Wollipog made itself, names nobody rather than
+guessing: the audit cannot be tied to one occurrence of a reused provider request id. The
 body is a §5.4 `.facts` list, each fact once: Decided By (a parent session's title links to it),
 Tool, Path, Branch, the command in a §11.7 code well, Risk for a review, and Recorded as one absolute
 time with seconds. Ids (request, audit, policy, session, review) are never shown; Copy Audit ID copies

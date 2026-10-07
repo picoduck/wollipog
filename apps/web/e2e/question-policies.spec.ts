@@ -319,7 +319,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     await expect(rows).toHaveCount(6);
     await expect.poll(() => rows.locator("summary").evaluateAll((summaries) =>
       summaries.map((summary) => summary.getAttribute("aria-label")))).toEqual([
-      "Allowed Run the Web Unit Tests",
+      "Allowed Run the Web Unit Tests by You",
       "Rejected Delete the Build Cache",
       "Allowed Push the Release Branch by Release Orchestrator",
       "Blocked Bash by No Shell in Production",

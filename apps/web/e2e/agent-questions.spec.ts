@@ -749,7 +749,7 @@ test("every question row reads its outcome and answer without arrows or emoji (#
 });
 
 for (const width of [1440, 390]) {
-  test(`question and governance rows name who answered relative to the viewer at ${width}px (#2527)`, async ({ page }) => {
+  test(`question, governance and permission rows name who decided relative to the viewer at ${width}px (#2527, #2628)`, async ({ page }) => {
     await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
     await page.goto("/agent-questions-e2e.html?set=resolvers");
     const timeline = page.getByRole("list", { name: "Resolver Rows" });
@@ -764,7 +764,8 @@ for (const width of [1440, 390]) {
 
     // Approvals are routine work and fold into the turn's work group; expand any such group.
     for (const group of await timeline.getByRole("button", { name: /^Worked/ }).all()) await group.click();
-    const decisions = timeline.locator("details.tl-decision");
+    // Governance rows carry their audit id; permission rows (#2628) are checked below.
+    const decisions = timeline.locator("details.tl-decision[data-audit-id]");
     await expect(decisions.locator(".tl-decision-outcome")).toHaveText(["Allowed", "Rejected", "Allowed"]);
     await expect(decisions.locator(".tl-decision-by")).toHaveText([
       "by You", "by Grace Hopper", "by Another Member",
@@ -774,12 +775,28 @@ for (const width of [1440, 390]) {
       "You", "Grace Hopper", "Another Member",
     ]);
 
-    expect(await page.locator("#question-frame").innerText()).not.toMatch(/user-|device-/);
+    // A permission names who resolved that exact occurrence (#2628); an older peer's names nobody.
+    const permissions = timeline.locator("details.tl-decision:not([data-audit-id])");
+    await expect.poll(() => permissions.locator("summary").evaluateAll((summaries) =>
+      summaries.map((summary) => summary.getAttribute("aria-label")))).toEqual([
+      "Allowed Run the Release Checks by You",
+      "Rejected Delete the Staging Database by Grace Hopper",
+      "Allowed Read the Deploy Config by Allow Reads",
+      "Allowed Restart the Preview Server",
+    ]);
+    await expect(permissions.locator(".tl-decision-by")).toHaveText(["by You", "by Grace Hopper", "by Allow Reads"]);
+    for (const permission of await permissions.all()) await permission.locator("summary").click();
+    await expect(permissions.nth(2).locator(".facts dd").first()).toHaveText("Allow Reads");
+    await expect(permissions.nth(0).locator(".facts dd").first()).toHaveText("You");
+    await expect(permissions.nth(1).locator(".facts dd").first()).toHaveText("Grace Hopper");
+    await expect(permissions.nth(3).locator("dt")).toHaveText(["Tool", "Path", "Branch", "Command", "Recorded"]);
+
+    expect(await page.locator("#question-frame").innerText()).not.toMatch(/user-|device-|allow-reads/);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
   });
 }
 
-test("a single-member installation keeps reading every answer and decision as its own (#2527)", async ({ page }) => {
+test("a single-member installation keeps reading every answer and decision as its own (#2527, #2628)", async ({ page }) => {
   await page.goto("/agent-questions-e2e.html?set=resolvers&viewer=solo");
   const timeline = page.getByRole("list", { name: "Resolver Rows" });
   const questions = timeline.locator(".tl-question");
@@ -788,7 +805,11 @@ test("a single-member installation keeps reading every answer and decision as it
     /^Answered by you at /, /^Answered by you at /, /^Answered by you at /,
   ]);
   for (const group of await timeline.getByRole("button", { name: /^Worked/ }).all()) await group.click();
-  await expect(timeline.locator(".tl-decision-by")).toHaveText(["by You", "by You", "by You"]);
+  await expect(timeline.locator("details.tl-decision[data-audit-id] .tl-decision-by")).toHaveText(["by You", "by You", "by You"]);
+  // A member's permission decision is the viewer's; a policy keeps its name; an older peer's names nobody (#2628).
+  await expect(timeline.locator("details.tl-decision:not([data-audit-id]) .tl-decision-by")).toHaveText([
+    "by You", "by You", "by Allow Reads",
+  ]);
 });
 
 for (const width of [1280, 390]) {

@@ -36,7 +36,7 @@ function permission(requestId: string, title: string, optionId: string, minute: 
   add({ kind: "permission_resolved", requestId, optionId, resolutionReason: "submitted", ...extra }, minute + 1);
 }
 
-permission("perm-allowed", "Run the Web Unit Tests", "approved", 0);
+permission("perm-allowed", "Run the Web Unit Tests", "approved", 0, { resolvedBy: { kind: "user", userId: "alice" } });
 permission("perm-rejected", "Delete the Build Cache", "abort", 2, {}, "rm -rf apps/web/dist node_modules/.vite");
 permission("perm-parent", "Push the Release Branch", "approved", 4, { resolvedByParentSessionId: PARENT }, "git push origin release/v0.31.0");
 

@@ -70,6 +70,20 @@ const soloViewer = viewerIdentity({
   teams: [],
 });
 
+/** Ada reads a session she shares with Grace Hopper (#2527). */
+const sharedViewer = viewerIdentity({
+  context: {
+    userId: "usr-ada-x7", userName: "Ada Lovelace", organizationId: "org", organizationName: "Release Team",
+    role: "operator", deviceId: "device-ada", localBootstrap: false,
+  },
+  organizations: [],
+  memberships: [
+    { organizationId: "org", organizationName: "Release Team", userId: "usr-ada-x7", userName: "Ada Lovelace", userStatus: "active", role: "operator", createdAt: 1 },
+    { organizationId: "org", organizationName: "Release Team", userId: "usr-grace-x7", userName: "Grace Hopper", userStatus: "active", role: "admin", createdAt: 1 },
+  ],
+  teams: [],
+});
+
 let seq = 0;
 function event(payload: SessionEventPayload, ts = RESOLVED_AT): SessionEvent {
   seq += 1;
@@ -170,6 +184,7 @@ async function mount(
   items: TimelineItem[],
   client: Partial<ApiClient> = {},
   onOpenSession?: (id: string) => void,
+  viewer = soloViewer,
 ) {
   const sockets: UiSocket[] = [];
   const connection: UiConnectionRuntime = {
@@ -191,7 +206,7 @@ async function mount(
     root.render(<ApiProvider client={client_}><StoreProvider connection={connection}>
       <GovernancePolicyNamesProvider>
         <PolicyNamesProbe />
-        <ViewerIdentityContext.Provider value={soloViewer}>
+        <ViewerIdentityContext.Provider value={viewer}>
           <EventTimeline ariaLabel="Decisions" items={shown} onOpenSession={onOpenSession} />
         </ViewerIdentityContext.Provider>
       </GovernancePolicyNamesProvider>
@@ -338,6 +353,97 @@ test("policy decisions load the policy names once, name the policy, and keep its
     const copy = [...blocked!.querySelectorAll("button")].find((button) => button.textContent?.includes("Copy Audit ID"))!;
     await act(async () => { copy.click(); });
     assert.equal(copied, "Audit ID: audit-block\nRequest ID: hook-block\nPolicy ID: deny-shell-x7");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a permission names who decided it from its own resolution: You, another member, or a policy (#2628)", async () => {
+  const governancePolicies: ApiClient["governancePolicies"] = async () => ({ policies: [
+    { policyId: "allow-reads-x7", name: "Allow Reads" },
+  ] as never });
+  const resolved = (requestId: string, title: string, optionId: string, extra: Partial<Extract<SessionEventPayload, { kind: "permission_resolved" }>>) => [
+    event({ kind: "permission_request", requestId, title, options: OPTION_SETS.codex!, context: { toolName: "Bash", input: "npm test" } }),
+    event({ kind: "permission_resolved", requestId, optionId, resolutionReason: "submitted", ...extra }),
+  ];
+  const items = deriveTimeline([
+    ...resolved("by-viewer", "Run the Tests", "accept", { resolvedBy: { kind: "user", userId: "usr-ada-x7" } }),
+    ...resolved("by-member", "Delete the Cache", "decline", { resolvedBy: { kind: "user", userId: "usr-grace-x7" } }),
+    ...resolved("by-departed", "Push the Branch", "accept", { resolvedBy: { kind: "user", userId: "usr-departed-x7" } }),
+    ...resolved("by-policy", "Read the Config", "accept", { resolvedBy: { kind: "policy", policyId: "allow-reads-x7" } }),
+    ...resolved("older-peer", "Run the Linter", "accept", {}),
+  ]);
+  const view = await mount(items, { governancePolicies }, undefined, sharedViewer);
+  try {
+    await view.online();
+    const rows = view.rows();
+    assert.deepEqual(rows.map((row) => row.querySelector("summary")?.getAttribute("aria-label")), [
+      "Allowed Run the Tests by You",
+      "Rejected Delete the Cache by Grace Hopper",
+      "Allowed Push the Branch by Another Member",
+      "Allowed Read the Config by Allow Reads",
+      "Allowed Run the Linter",
+    ]);
+    assertNoDomNode(rows[4]!.querySelector(".tl-decision-by"), "an older peer's resolution names nobody, as before");
+    for (const row of rows) row.open = true;
+    const decidedBy = rows.map((row) => {
+      const terms = [...row.querySelectorAll("dt")];
+      const index = terms.findIndex((term) => term.textContent === "Decided By");
+      return index < 0 ? null : row.querySelectorAll("dd")[index]?.textContent;
+    });
+    assert.deepEqual(decidedBy, ["You", "Grace Hopper", "Another Member", "Allow Reads", null]);
+    assert.doesNotMatch(view.container.textContent ?? "", /x7/, "neither a user id nor a policy id is ever shown");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("each occurrence of a reused provider request id names its own decider (#2628)", async () => {
+  const governancePolicies: ApiClient["governancePolicies"] = async () => ({ policies: [
+    { policyId: "deny-shell-x7", name: "No Shell in Production" },
+  ] as never });
+  const occurrence = (optionId: string, resolvedBy?: Extract<SessionEventPayload, { kind: "permission_resolved" }>["resolvedBy"]) => [
+    event({ kind: "permission_request", requestId: "0", title: "Run Command", options: OPTION_SETS.codex! }),
+    event({ kind: "permission_resolved", requestId: "0", optionId, resolutionReason: "submitted", ...(resolvedBy ? { resolvedBy } : {}) }),
+  ];
+  // Codex JSON-RPC ids restart with each app-server process, so one id is resolved again and again.
+  const items = deriveTimeline([
+    ...occurrence("accept", { kind: "user", userId: "usr-grace-x7" }),
+    ...occurrence("decline", { kind: "policy", policyId: "deny-shell-x7" }),
+    ...occurrence("accept", { kind: "user", userId: "usr-ada-x7" }),
+    ...occurrence("accept"),
+  ]);
+  const view = await mount(items, { governancePolicies }, undefined, sharedViewer);
+  try {
+    await view.online();
+    assert.deepEqual(view.rows().map((row) => row.querySelector("summary")?.getAttribute("aria-label")), [
+      "Allowed Run Command by Grace Hopper",
+      "Rejected Run Command by No Shell in Production",
+      "Allowed Run Command by You",
+      "Allowed Run Command",
+    ]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a policy's permission decision keeps its id behind Copy Audit ID (#2628)", async () => {
+  const items = deriveTimeline([
+    event({ kind: "permission_request", requestId: "policy-req", title: "Read the Config", options: OPTION_SETS.codex! }),
+    event({ kind: "permission_resolved", requestId: "policy-req", optionId: "accept", resolvedBy: { kind: "policy", policyId: "allow-reads-x7" } }),
+  ]);
+  const view = await mount(items);
+  try {
+    const row = view.rows()[0]!;
+    assert.equal(row.querySelector(".tl-decision-by")?.textContent, "by Policy", "neutral until the names load, never the id");
+    let copied = "";
+    Object.defineProperty(domWindow.navigator, "clipboard", {
+      configurable: true, value: { writeText: async (text: string) => { copied = text; } },
+    });
+    row.open = true;
+    const copy = [...row.querySelectorAll("button")].find((button) => button.textContent?.includes("Copy Audit ID"))!;
+    await act(async () => { copy.click(); });
+    assert.equal(copied, "Request ID: policy-req\nPolicy ID: allow-reads-x7");
   } finally {
     await view.unmount();
   }

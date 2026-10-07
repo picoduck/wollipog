@@ -7,6 +7,7 @@ import type {
   EventPayloadReference,
   GovernanceReviewer,
   PermissionOption,
+  PermissionResolver,
   PlanEntry,
   PromptImageInput,
   ReviewDecisionOutcome,
@@ -208,6 +209,9 @@ export type TimelineItem =
       resolvedOptionId?: string | null;
       resolutionReason?: StructuredRequestResolutionReason;
       resolvedByParentSessionId?: string;
+      /** The member or policy who settled it (#2628), recorded on the runner's resolution. Absent
+       * for a parent's or Wollipog's own resolution and from older peers. */
+      resolvedBy?: PermissionResolver;
       /** Runner-recorded time of the resolution, for the Decision Record (#2204). */
       resolvedAt?: number;
       context?: ApprovalContext;
@@ -1252,7 +1256,7 @@ export class TimelineBuilder {
         const i = indexed ?? authIndex;
         if (i != null && this.items[i]?.kind === "permission") {
           // A reopened request drops its earlier resolution's actor and time with its outcome.
-          const { resolvedByParentSessionId: _parent, resolvedAt: _at, ...prior } = this.items[i];
+          const { resolvedByParentSessionId: _parent, resolvedBy: _by, resolvedAt: _at, ...prior } = this.items[i];
           if (prior.requestId !== p.requestId) this.permIndex.delete(prior.requestId);
           this.items[i] = {
             ...prior,
@@ -1295,6 +1299,7 @@ export class TimelineBuilder {
             ...(p.resolvedByParentSessionId
               ? { resolvedByParentSessionId: p.resolvedByParentSessionId }
               : {}),
+            ...(p.resolvedBy ? { resolvedBy: p.resolvedBy } : {}),
             ...(Number.isFinite(ev.ts) ? { resolvedAt: ev.ts } : {}),
           };
           this.permIndex.delete(p.requestId);
