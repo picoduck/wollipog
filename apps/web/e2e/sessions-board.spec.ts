@@ -241,12 +241,30 @@ test("history back returns to the mode the session was opened from, in both dire
   await expect(page.locator(".board-wrap")).toHaveCount(0);
 });
 
+/**
+ * Drag a card onto a column the way a person does (#2201): press, start the drag, wait for the
+ * empty strips to open to full width, then aim at the column where it now is and release.
+ * `locator.dragTo` measures its target before the drag starts, so it aims at a 40px strip that
+ * opens under the pointer mid-gesture.
+ */
+async function dragCardToColumn(page: Page, card: Locator, column: Locator) {
+  const from = (await card.boundingBox())!;
+  await page.mouse.move(from.x + from.width / 2, from.y + 16);
+  await page.mouse.down();
+  await page.mouse.move(from.x + from.width / 2 + 12, from.y + 28, { steps: 2 });
+  await expect(page.locator(".board")).toHaveClass(/is-dragging/);
+  await column.scrollIntoViewIfNeeded();
+  const to = (await column.boundingBox())!;
+  await page.mouse.move(to.x + to.width / 2, to.y + Math.min(to.height / 2, 120), { steps: 4 });
+  await page.mouse.up();
+}
+
 test("dragging a card to another column persists the move", async ({ page }) => {
   await openHarness(page, "/board");
   const card = page.locator(".board .card", { hasText: "Running Session" });
   await expect(card).toBeVisible();
   // An empty column is a strip (#2201) and the whole column is the drop target.
-  await card.dragTo(page.locator(".column.col-done"));
+  await dragCardToColumn(page, card, page.locator(".column.col-done"));
 
   await expect
     .poll(() => page.evaluate(() => window.__setColumnCalls))

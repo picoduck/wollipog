@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 /**
  * The Board's unboxed columns and its Machine and Agent filters in the Sessions tab row (#2201),
@@ -13,6 +13,24 @@ async function openBoard(page: Page, scenario = "filters") {
 }
 
 const tabRow = (page: Page) => page.locator(".page-tabs .tabs-bar");
+
+/**
+ * Drag a card onto a column the way a person does (#2201): press, start the drag, wait for the
+ * empty strips to open to full width, then aim at the column where it now is and release.
+ * `locator.dragTo` measures its target before the drag starts, so it aims at a 40px strip that
+ * opens under the pointer mid-gesture.
+ */
+async function dragCardToColumn(page: Page, card: Locator, column: Locator) {
+  const from = (await card.boundingBox())!;
+  await page.mouse.move(from.x + from.width / 2, from.y + 16);
+  await page.mouse.down();
+  await page.mouse.move(from.x + from.width / 2 + 12, from.y + 28, { steps: 2 });
+  await expect(page.locator(".board")).toHaveClass(/is-dragging/);
+  await column.scrollIntoViewIfNeeded();
+  const to = (await column.boundingBox())!;
+  await page.mouse.move(to.x + to.width / 2, to.y + Math.min(to.height / 2, 120), { steps: 4 });
+  await page.mouse.up();
+}
 
 test.describe("at 1440×900", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
@@ -61,7 +79,7 @@ test.describe("at 1440×900", () => {
 
     const card = page.locator(".column.col-running .card").first();
     const sessionId = await card.getAttribute("data-session-id");
-    await card.dragTo(page.locator(".column.col-done"));
+    await dragCardToColumn(page, card, page.locator(".column.col-done"));
     await expect.poll(() => page.evaluate(() => window.__setColumnCalls))
       .toEqual([{ sessionId, column: "done" }]);
     await expect(page.locator(`.column.col-done .card[data-session-id="${sessionId}"]`)).toBeVisible();
