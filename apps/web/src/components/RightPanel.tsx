@@ -335,6 +335,10 @@ export function RightPanel({
   // panel never shows docked for a frame where it overlays (§15.2; #2725). Its width does not depend
   // on the panel's presentation, so overlaying cannot flip the answer back.
   const asideRef = useRef<HTMLElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
+  // Whether keyboard focus is on the resize handle, which an overlay removes (#2725). A blur that
+  // comes from the handle being removed leaves this set, so focus can move on to Close Panel.
+  const resizerFocused = useRef(false);
   const [columnsWidth, setColumnsWidth] = useState<number | null>(null);
   useLayoutEffect(() => {
     const columns = asideRef.current?.parentElement;
@@ -357,6 +361,13 @@ export function RightPanel({
     dragRef.current = null;
     state.setDragging(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [overlay]);
+  // Keyboard resizing past the chat's room removes the focused handle; focus stays in the panel, on
+  // Close Panel, rather than falling to the page.
+  useLayoutEffect(() => {
+    if (!overlay || !resizerFocused.current) return;
+    resizerFocused.current = false;
+    closeRef.current?.focus();
   }, [overlay]);
 
   // Guard against a mid-drag unmount: closing the panel (shortcut/header button)
@@ -644,6 +655,8 @@ export function RightPanel({
         onLostPointerCapture={onLostCapture}
         onKeyDown={onResizerKeyDown}
         onDoubleClick={() => state.setWidth(() => RIGHT_PANEL_DEFAULT_WIDTH)}
+        onFocus={() => { resizerFocused.current = true; }}
+        onBlur={(event) => { if (event.currentTarget.isConnected) resizerFocused.current = false; }}
       />}
       {/* Where docking would leave the chat column under 480px, every mode opens over the transcript
           from the right, over a scrim a press on which closes the panel as Close Panel does (§15.2;
@@ -678,7 +691,7 @@ export function RightPanel({
               </span>
             )}
           </span>
-          <button type="button" className="icon-btn rp-close" onClick={state.close} title="Close Panel" aria-label="Close Panel">
+          <button ref={closeRef} type="button" className="icon-btn rp-close" onClick={state.close} title="Close Panel" aria-label="Close Panel">
             <CloseIcon />
           </button>
         </div>
