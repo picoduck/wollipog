@@ -1844,6 +1844,16 @@ kbd {
 .btn.lg[data-spinner-room]:not([aria-busy="true"]) {
   padding-inline: calc(var(--space-4) + (var(--icon-sm) + var(--space-1)) / 2);
 }
+/* A dialog footer reserves nothing: a 400px confirmation's three buttons only just share one row,
+   and on a phone the footer is equal halves, already wider than their labels. Busy, the spinner
+   takes its room from the inline padding instead, so the footer neither wraps nor moves; a `.btn`
+   keeps 3px a side (12 + 12 = 14 + 4 + 6). A `.sm` has exactly the spinner's room in its padding
+   (8 + 8 = 14 + 2), so it reserves 2px a side, which it keeps when busy, and is never flush. */
+.modal-foot > .btn[data-spinner-room]:not([aria-busy="true"]) { padding-inline: var(--space-3); }
+.modal-foot > .btn.sm[data-spinner-room]:not([aria-busy="true"]) { padding-inline: calc(var(--space-2) + var(--space-0-5)); }
+.modal-foot > .btn.lg[data-spinner-room]:not([aria-busy="true"]) { padding-inline: var(--space-4); }
+.modal-foot > .btn[data-spinner-room][data-busy-spinner="prepended"] { padding-inline: 0; }
+.modal-foot > .btn.sm[data-spinner-room][data-busy-spinner="prepended"] { padding-inline: var(--space-0-5); }
 /* The spinner draws in the button's own text colour, so it reads on a primary or danger fill. */
 .btn[aria-busy="true"] .spinner {
   flex: none;
@@ -10539,9 +10549,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
     overflow-wrap: anywhere;
     text-align: center;
   }
-  /* Equal shares are wider than their labels, so a busy button's spinner already has room. Room
-     reserved at rest (#2645) would only make this button's share wider than Cancel's. */
-  .modal-foot > .btn[data-spinner-room]:not([aria-busy="true"]) { padding-inline: var(--space-3); }
   .modal-foot > .form-error { flex-basis: 100%; }
   /* The destructive tertiary becomes a full-width ghost danger row at the body's end. */
   .modal-body > .modal-tertiary { display: flex; }

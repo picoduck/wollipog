@@ -188,4 +188,10 @@ test("the stylesheet draws the spinner at 14px and keeps a busy button's variant
     const body = css.slice(css.indexOf(rule) + rule.length).split("}")[0] ?? "";
     assert.match(body, new RegExp(`padding-inline: calc\\(var\\(${padding}\\) \\+ \\(var\\(--icon-sm\\) \\+ var\\(${gap}\\)\\) / 2\\);`));
   }
+  // A dialog footer reserves nothing (its three-button row cannot spare the room) except 2px a side
+  // on a `.sm`, which a busy `.sm` keeps, so it is never flush.
+  assert.match(css, /\n\.modal-foot > \.btn\[data-spinner-room\]:not\(\[aria-busy="true"\]\) \{ padding-inline: var\(--space-3\); \}/);
+  assert.match(css, /\n\.modal-foot > \.btn\.sm\[data-spinner-room\]:not\(\[aria-busy="true"\]\) \{ padding-inline: calc\(var\(--space-2\) \+ var\(--space-0-5\)\); \}/);
+  assert.match(css, /\n\.modal-foot > \.btn\[data-spinner-room\]\[data-busy-spinner="prepended"\] \{ padding-inline: 0; \}/);
+  assert.match(css, /\n\.modal-foot > \.btn\.sm\[data-spinner-room\]\[data-busy-spinner="prepended"\] \{ padding-inline: var\(--space-0-5\); \}/);
 });

@@ -36,8 +36,10 @@ async function idleLayout(button: Locator) {
     const style = getComputedStyle(element);
     return {
       reserved: element.hasAttribute("data-spinner-room"),
-      // A container that shares its width out equally (a phone dialog footer) makes the button
-      // wider than its content, so it keeps the size's own padding there instead.
+      // A dialog footer reserves nothing: its spinner still takes its room from the padding.
+      inFooter: element.parentElement?.classList.contains("modal-foot") ?? false,
+      // A container that shares its width out equally makes the button wider than its content,
+      // so it keeps the size's own padding there instead.
       stretched: style.flexGrow !== "0",
       hasIcon: element.querySelector("svg") !== null,
       padding: [Number.parseFloat(style.paddingLeft), Number.parseFloat(style.paddingRight)],
@@ -55,8 +57,10 @@ async function expectSteadyWhenBusy(button: Locator, label: string, neighbour?: 
   // its own padding plus half the spinner and its busy gap a side, with the label centred.
   expect(rest.reserved, `${label}: only a button without a leading icon reserves the spinner's room`).toBe(!rest.hasIcon);
   if (rest.reserved) {
-    const room = rest.stretched ? 0 : (14 + (padding === 8 ? 2 : 4)) / 2;
-    expect(rest.padding, `${label}: the idle padding carries the spinner's room unless stretched`)
+    // A dialog footer reserves nothing, except 2px a side on a `.sm`, whose padding is exactly the
+    // spinner's room and would otherwise leave it flush.
+    const room = rest.inFooter ? (padding === 8 ? 2 : 0) : rest.stretched ? 0 : (14 + (padding === 8 ? 2 : 4)) / 2;
+    expect(rest.padding, `${label}: the idle padding carries the spinner's room unless stretched or in a dialog footer`)
       .toEqual([padding + room, padding + room]);
     expectGeometry(Math.abs(rest.offCentre), `${label}: the label is centred at rest`).toBeLessThanOrEqual(0.61);
   } else {
@@ -114,9 +118,16 @@ async function expectSteadyWhenBusy(button: Locator, label: string, neighbour?: 
   expect(inside.lines, `${label}: the label stays on one line`).toBe(1);
   expectGeometry(inside.overflowLeft, `${label}: the spinner stays inside the button`).toBeLessThanOrEqual(0.61);
   expectGeometry(inside.overflowRight, `${label}: the label stays inside the button`).toBeLessThanOrEqual(0.61);
-  // #2645: neither the spinner nor the label comes closer to an edge than the size's own padding.
-  expectGeometry(padding - inside.spinnerInset, `${label}: the spinner keeps the inline padding`).toBeLessThanOrEqual(0.61);
-  expectGeometry(padding - inside.labelInset, `${label}: the label keeps the inline padding`).toBeLessThanOrEqual(0.61);
+  // #2645: neither the spinner nor the label comes closer to an edge than the size's own padding,
+  // except in a desktop dialog footer, which reserves nothing and keeps the room it has.
+  if (!(rest.inFooter && !rest.stretched)) {
+    expectGeometry(padding - inside.spinnerInset, `${label}: the spinner keeps the inline padding`).toBeLessThanOrEqual(0.61);
+    expectGeometry(padding - inside.labelInset, `${label}: the label keeps the inline padding`).toBeLessThanOrEqual(0.61);
+  } else {
+    // Never flush: 3px a side on a `.btn`, the 2px it reserved on a `.sm`.
+    expectGeometry(inside.spinnerInset, `${label}: the spinner is clear of the edge`).toBeGreaterThanOrEqual(1);
+    expectGeometry(inside.labelInset, `${label}: the label is clear of the edge`).toBeGreaterThanOrEqual(1);
+  }
   if (rest.reserved) {
     // Centred, with the same room each side. A button sized by its content (the width check above)
     // is then filled exactly, padding to padding; one stretched by its container keeps more.
@@ -189,6 +200,13 @@ for (const pointer of ["fine", "coarse"] as const) {
       await expect(dialog.getByRole("status").filter({ hasText: "Stopping the session…" })).toHaveCount(1);
       await dialog.getByRole("button", { name: "Cancel" }).click();
       await expect(dialog).toHaveCount(0);
+    });
+
+    test("a small button in a dialog footer is never flush while busy (#2645)", async ({ page }) => {
+      await page.goto("/busy-button-e2e.html?surface=footer-sm");
+      const footer = page.locator('.modal-foot[data-fixture="footer-sm"]');
+      await expectSteadyWhenBusy(footer.getByRole("button", { name: "Install and Restart" }), "Install and Restart",
+        footer.getByRole("button", { name: "Cancel" }));
     });
   });
 }
