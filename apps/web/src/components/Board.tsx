@@ -496,14 +496,7 @@ function SessionCard({
           <SessionRowTime className="card-time" lastActivityAt={lastActivityAt} reminder={reminder} />
         </span>
       </div>
-      <div className="card-status">
-        <SessionRowStatusBadge status={status} />
-        {strip && <ActivityStrip activity={activity} now={activityNow} compact />}
-        {familyChip}
-      </div>
-      {request
-        ? <CardRequest session={session} request={request} runnerOnline={runnerOnline} onOpen={onOpen} />
-        : <div className="card-preview">{plainTextPreview(session.preview)}</div>}
+      {/* ⋯ ends line 1 on screen and follows it in focus order, before the request's buttons. */}
       <button
         type="button"
         className="icon-btn sm card-more"
@@ -518,6 +511,14 @@ function SessionCard({
       >
         <MoreHorizontalIcon />
       </button>
+      <div className="card-status">
+        <SessionRowStatusBadge status={status} />
+        {strip && <ActivityStrip activity={activity} now={activityNow} compact />}
+        {familyChip}
+      </div>
+      {request
+        ? <CardRequest session={session} request={request} runnerOnline={runnerOnline} onOpen={onOpen} />
+        : <div className="card-preview">{plainTextPreview(session.preview)}</div>}
     </article>
   );
 }

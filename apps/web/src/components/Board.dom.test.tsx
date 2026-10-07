@@ -290,6 +290,9 @@ test("a permission request shows exactly Approve and Deny, which send the first 
     assert.equal(card.querySelector(".card-request-code")?.textContent, "npm test -- --watch=false", "the code line");
     const buttons = [...card.querySelectorAll<HTMLButtonElement>(".card-request button")];
     assert.deepEqual(buttons.map((button) => button.textContent), ["Approve", "Deny"]);
+    // Focus follows what is on screen: the title, line 1's ⋯, then the request's buttons.
+    assert.deepEqual([...card.querySelectorAll("button")].map((button) => button.getAttribute("aria-label") ?? button.textContent),
+      ["Session approval", "More Actions", "Approve", "Deny"]);
     assert.ok(card.querySelector(".card-request-notice.decision-pair.t-warning"), "a warning inset notice holding the equal pair");
     await act(async () => { buttons[0]!.click(); });
     await act(async () => { buttons[1]!.click(); });
