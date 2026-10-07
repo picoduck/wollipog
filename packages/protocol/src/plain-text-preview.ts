@@ -1,19 +1,36 @@
+/**
+ * How much of the input is read. A snippet shows a line or two, and the patterns below are not all
+ * linear on hostile input, so a long request title never costs more than this much work.
+ */
+const MAX_INPUT_LENGTH = 2_000;
 /** Markdown's backslash-escapable punctuation. */
 const ESCAPED = /\\([\\`*_{}[\]()#+\-.!|>~<])/g;
-/** The HTML an agent's markdown actually carries; anything else in angle brackets is text ("Vec<T>"). */
-const HTML_TAG = /<\/?(?:a|b|i|u|s|em|strong|code|kbd|pre|sub|sup|br|hr|p|div|span|img|details|summary|ul|ol|li|table|thead|tbody|tr|td|th|h[1-6]|blockquote)\b[^>]*>/gi;
+const TAG_NAMES = "a|b|i|u|s|em|strong|code|kbd|pre|sub|sup|p|div|span|details|summary|ul|ol|li|table|thead|tbody|tr|td|th|h[1-6]|blockquote";
+/**
+ * The HTML an agent's markdown actually carries, in lowercase as agents write it. An opening tag
+ * never follows a letter, so a generic type in prose ("Box<U>", "Vec<T>") stays text; a closing tag
+ * and a line break or rule can sit anywhere.
+ */
+const HTML_TAG = new RegExp(`(?<!\\w)<(?:${TAG_NAMES})\\b[^>]*>|</(?:${TAG_NAMES})>|<(?:br|hr|img)\\b[^>]*>`, "g");
 const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: "\"", "#39": "'", apos: "'", nbsp: " " };
-const CODE_SPAN = /(`+)([\s\S]*?)\1(?!`)/;
+const CODE_SPAN = /(`+)([\s\S]*?)\1(?!`)/g;
 
 /**
- * Inline markdown outside code spans as text: links and images keep their text, emphasis and
- * strikethrough markers go (`_` only at a word's edge, so snake_case stays), a stray backtick goes,
- * and an escaped character is kept as itself.
+ * One line of inline markdown as text. Code keeps its contents exactly as written, including a span
+ * the 240-character cut left open; an escaped character is kept as itself. Both are set aside as
+ * placeholders first, so emphasis around them still pairs up. Links and images keep their text.
+ * Emphasis and strikethrough markers go only in pairs, so an identifier with a trailing underscore
+ * ("name_"), snake_case, `**kwargs` and arithmetic ("2 * 3") keep every character.
  */
-function stripInline(text: string): string {
-  const escapes: string[] = [];
+function plainLine(line: string): string {
+  const kept: string[] = [];
+  const keep = (text: string) => `${kept.push(text) - 1}`;
+  let text = line
+    .replace(CODE_SPAN, (_, _fence: string, code: string) => keep(code.trim()))
+    .replace(ESCAPED, (_, char: string) => keep(char));
+  const open = text.indexOf("`");
+  if (open >= 0) text = text.slice(0, open) + keep(text.slice(open).replace(/^`+/, ""));
   return text
-    .replace(ESCAPED, (_, char: string) => `${escapes.push(char) - 1}`)
     .replace(/!\[([^\]]*)\](?:\([^)]*\)?|\[[^\]]*\])?/g, "$1")
     .replace(/\[\^[^\]]*\]/g, "")
     .replace(/\[([^\]]*)\](?:\([^)]*\)?|\[[^\]]*\])/g, "$1")
@@ -21,23 +38,13 @@ function stripInline(text: string): string {
     .replace(/\[([^\]]*)\]\([^)]*$/g, "$1")
     .replace(/<((?:https?|mailto):[^>\s]+)>/gi, "$1")
     .replace(HTML_TAG, " ")
-    .replace(/\*\*|~~|`+/g, "")
-    .replace(/(^|[^\w])__(?=\S)|(?<=\S)__(?!\w)/g, "$1")
-    .replace(/(^|[^\w*])\*(?=[^\s*])|(?<=[^\s*])\*(?![\w*])/g, "$1")
-    .replace(/(^|[^\w])_(?=[^\s_])|(?<=[^\s_])_(?!\w)/g, "$1")
+    .replace(/(^|[^\w*])\*\*(?=\S)(.+?)(?<=\S)\*\*(?![\w*])/g, "$1$2")
+    .replace(/(^|[^\w])__(?=\S)(.+?)(?<=\S)__(?!\w)/g, "$1$2")
+    .replace(/~~(?=\S)(.+?)(?<=\S)~~/g, "$1")
+    .replace(/(^|[^\w*])\*(?=[^\s*])(.+?)(?<=[^\s*])\*(?![\w*])/g, "$1$2")
+    .replace(/(^|[^\w])_(?=[^\s_])(.+?)(?<=[^\s_])_(?!\w)/g, "$1$2")
     .replace(/&(amp|lt|gt|quot|#39|apos|nbsp);/g, (_, name: string) => ENTITIES[name]!)
-    .replace(/(\d+)/g, (_, index: string) => escapes[Number(index)]!);
-}
-
-/** One line of inline markdown as text. A code span keeps its contents exactly as written. */
-function plainLine(line: string): string {
-  let out = "";
-  let rest = line;
-  for (let match = CODE_SPAN.exec(rest); match; match = CODE_SPAN.exec(rest)) {
-    out += `${stripInline(rest.slice(0, match.index))}${match[2]!.trim()}`;
-    rest = rest.slice(match.index + match[0].length);
-  }
-  return out + stripInline(rest);
+    .replace(/(\d+)/g, (_, index: string) => kept[Number(index)]!);
 }
 
 /**
@@ -52,7 +59,7 @@ export function plainTextPreview(markdown: string | null | undefined): string {
   if (!markdown) return "";
   const lines: string[] = [];
   let fenced = false;
-  for (const raw of markdown.split(/\r\n|\r|\n/)) {
+  for (const raw of markdown.slice(0, MAX_INPUT_LENGTH).split(/\r\n|\r|\n/)) {
     // Fences, rules, setext underlines, table separators and link definitions carry no words. Code
     // inside a fence is kept as written.
     if (/^\s*(```|~~~)/.test(raw)) {

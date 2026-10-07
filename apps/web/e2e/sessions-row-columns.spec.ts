@@ -192,15 +192,37 @@ test("at 940px the list is under 880px, and rows keep the two-line anatomy with 
   await expect(page.locator(".inbox-row-snippet:visible")).toHaveCount(0);
 });
 
-test("at 1100px the stacked list is wide enough for the snippet and the columns", async ({ page }) => {
-  await open(page, 1100);
-  const listWidth = await page.locator(".inbox-list-pane").evaluate((pane) => pane.getBoundingClientRect().width);
-  expectGeometry(listWidth, "the list reaches the wide-row threshold").toBeGreaterThanOrEqual(880);
-  const rows = await visibleRows(page);
-  for (const row of rows) expect(row.trailDisplay, row.title).toBe("grid");
-  expect(same(rows.map((row) => row.time.right))).toBe(1);
-  expect(rows.some((row) => row.snippet?.visible)).toBe(true);
-});
+// 944px is the narrowest window whose list is 880px (beside the 64px rail); 1100px is the issue's.
+for (const width of [944, 1100] as const) {
+  test(`at ${width}px the columns fit beside the sender, and a long title still gets its 60% share`, async ({ page }) => {
+    await open(page, width);
+    const listWidth = await page.locator(".inbox-list-pane").evaluate((pane) => pane.getBoundingClientRect().width);
+    expect(listWidth, "the list reaches the wide-row threshold").toBeGreaterThanOrEqual(880);
+    const rows = await visibleRows(page);
+    const token = await rowToken(page);
+    for (const row of rows) {
+      expect(row.trailDisplay, row.title).toBe("grid");
+      expect(row.height, row.title).toBe(token);
+    }
+    expect(same(rows.map((row) => row.time.right)), "every time ends at one x").toBe(1);
+    expect(same(rows.filter((row) => row.badge).map((row) => row.badge!.left)), "every badge starts at one x").toBe(1);
+    expect(rows.some((row) => row.snippet?.visible)).toBe(true);
+
+    const fit = await page.locator(".inbox-row").evaluateAll((nodes) => nodes.map((row) => {
+      const sender = row.querySelector(".inbox-row-sender")!.getBoundingClientRect();
+      const trail = row.querySelector(".inbox-row-trail")!.getBoundingClientRect();
+      const box = row.getBoundingClientRect();
+      return { senderToTrail: trail.left - sender.right, trailOverflow: trail.right - (box.right - Number.parseFloat(getComputedStyle(row).paddingRight)) };
+    }));
+    for (const { senderToTrail, trailOverflow } of fit) {
+      expectGeometry(senderToTrail, "the sender ends before the trailing columns begin").toBeGreaterThanOrEqual(0);
+      expectGeometry(trailOverflow, "the trailing columns end before the actions column").toBeLessThanOrEqual(0.5);
+    }
+    const long = rows.find((row) => row.title.startsWith(LONG_TITLE))!;
+    expect(long.titleBox.clipped).toBe(true);
+    expect(Math.abs(long.titleBox.width - 0.6 * long.copyWidth), "the long title keeps its whole 60% share").toBeLessThan(1);
+  });
+}
 
 test("a snoozed row's return time reads in the browser's zone, as the Snooze dialog does, and fits its column", async ({ page }) => {
   await open(page, 1440);
