@@ -539,8 +539,11 @@ padding is the size's own plus half of the 14px spinner and its busy gap on each
 8 + 8px, `.btn` 12 + 9px, `.btn.lg` 16 + 9px), with the label centred, so it is 16px (`.sm`) or 18px
 wider than a plain button with the same label. Busy, the padding returns to the size's own and the
 spinner, gap and label fill exactly the reserved room: the same width, and neither the spinner nor
-the label closer to an edge than the normal padding (#2645). A button with a leading icon reserves
-nothing; the spinner takes the icon's place. It sets `aria-busy="true"` and
+the label closer to an edge than the normal padding (#2645). That applies to a button sized by its
+label. A button in an equal share (the phone dialog footer, the board's Approve and Deny pair) is
+already wider than its label, so it keeps the size's own padding at rest: reserved room there would
+only make its share wider than its neighbour's. A button with a leading icon reserves nothing; the
+spinner takes the icon's place. It sets `aria-busy="true"` and
 `aria-disabled="true"` (not `disabled`, which would drop the focus the person pressed it with) and
 refuses further presses, keeps its variant's fill, and announces a sentence-case `progress` line
 ("Installing the update…") through a polite live region. Toast actions (`ToastOptions.action.progress`)
