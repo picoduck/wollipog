@@ -1,4 +1,4 @@
-import React, { useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import React, { useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import type { InboxSplit, InboxSplitKey } from "../inbox.js";
 import type { ReminderInboxMode } from "../session-reminders.js";
@@ -17,6 +17,7 @@ import {
 } from "./ProjectSplitMenu.js";
 import { SessionGroupMenuItem, SessionGroupName } from "./SessionGroupTabs.js";
 import { SessionsSearchField } from "./SessionsSearch.js";
+import { useRemovedFocus } from "./useRemovedFocus.js";
 
 /**
  * The phone Sessions app bar (#2211, docs/design-system.md §15.1): one 48px bar in place of the
@@ -263,6 +264,16 @@ export function SessionsAppBar({
   const fieldRef = useRef<HTMLInputElement>(null);
   const searchButtonRef = useRef<HTMLButtonElement>(null);
   const headerRef = useRef<HTMLElement>(null);
+  // A live update can take away the focused `+` (the page's state now offers New Session) or the
+  // Snoozed strip (No Snoozed Sessions replaced the list). Focus stays in the bar rather than falling
+  // to <body> (§16.1): the group picker, the search field in Search mode, else the page title.
+  const removedFocus = useRemovedFocus(headerRef);
+  useLayoutEffect(() => {
+    if (!removedFocus()) return;
+    const header = headerRef.current;
+    (header?.querySelector<HTMLElement>(".sessions-group-picker, .inbox-search input") ??
+      header?.ownerDocument.getElementById("page-title"))?.focus();
+  });
   // Focus moves in the same task as the tap, so a phone raises its keyboard for the field.
   const openSearch = () => {
     flushSync(search.onOpen);

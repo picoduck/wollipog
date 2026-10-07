@@ -3177,7 +3177,7 @@ async function mountPhoneBar(name: string, options: {
     await act(async () => { bar().querySelector<HTMLButtonElement>('[aria-label="More Actions"]')!.click(); });
     return sheet("More Actions")!;
   };
-  return { container, root, body, bar, picker, sheet, chooseGroup, openMore, render };
+  return { container, root, body, bar, picker, sheet, chooseGroup, openMore, render, socket };
 }
 
 test("on a phone one 48px app bar replaces the page header, its action row and the group tabs (#2211)", async () => {
@@ -3390,6 +3390,50 @@ test("the phone bar's + steps aside while the page's state offers New Session, a
   // Beta has a snoozed session: its list shows, and the strip says Snoozed is on.
   await chooseGroup("Beta");
   assert.ok(bar().querySelector(".sessions-snoozed-strip"));
+});
+
+test("a live update that takes away the focused + or Snoozed strip keeps focus in the phone bar (#2211, #2220)", async () => {
+  const { container, bar, picker, chooseGroup, openMore, socket } = await mountPhoneBar("phone-bar-removed-focus-test");
+  // Beta's sessions are archived elsewhere: its empty state now offers New Session, so the + goes.
+  await chooseGroup("Beta");
+  const plus = bar().querySelector<HTMLButtonElement>(".page-primary")!;
+  await act(async () => { plus.focus(); });
+  assert.equal(domWindow.document.activeElement, plus);
+  await act(async () => {
+    socket.push({ type: "session_upsert", session: session("beta-idle", 10, { projectId: "beta", title: "Write the docs", archived: true }) });
+    socket.push({ type: "session_upsert", session: session("beta-snoozed", 9, { projectId: "beta", title: "Plan the offsite", archived: true }) });
+    // An available Location, so the empty project's state is the one that offers New Session.
+    socket.push({ type: "project_upsert", project: {
+      id: "beta", name: "Beta", hidden: false, activeSessionCount: 0, unarchivedSessionCount: 0,
+      totalSessionCount: 2, createdAt: 1, updatedAt: 2,
+      locations: [{
+        id: "beta-location", projectId: "beta", runnerId: "runner-1", workspaceId: "workspace-1", name: "Beta",
+        path: "/src/beta", source: "reported", availability: "available", isDefault: true, createdAt: 1, updatedAt: 1,
+      }],
+    } });
+  });
+  assert.match(container.querySelector(".inbox-state")?.textContent ?? "", /New Session/);
+  assertNoDomNode(bar().querySelector(".page-primary"), "the state took over New Session");
+  assert.equal(domWindow.document.activeElement, picker(), "focus stays in the bar, on the picker");
+
+  // Snoozed in All holds one session; its reminder is removed elsewhere, so No Snoozed Sessions
+  // replaces the list and the strip goes with the focused Show Active.
+  await act(async () => {
+    socket.push({ type: "session_reminder_upsert", userId: "user", reminder: reminder("alpha-blocked-1") });
+  });
+  await chooseGroup("All");
+  const more = await openMore();
+  const snoozedItem = [...more.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')]
+    .find((item) => item.textContent?.startsWith("Snoozed Sessions"))!;
+  await act(async () => { snoozedItem.click(); });
+  const showActive = [...bar().querySelectorAll<HTMLButtonElement>(".sessions-snoozed-strip button")]
+    .find((button) => button.textContent === "Show Active")!;
+  await act(async () => { showActive.focus(); });
+  await act(async () => {
+    socket.push({ type: "session_reminder_removed", userId: "user", sessionId: "alpha-blocked-1" });
+  });
+  assertNoDomNode(bar().querySelector(".sessions-snoozed-strip"), "No Snoozed Sessions takes no strip");
+  assert.equal(domWindow.document.activeElement, picker(), "focus stays in the bar, on the picker");
 });
 
 test("the phone app bar's Search swaps the bar for a focused full-width field, and Cancel restores it (#2211)", async () => {
