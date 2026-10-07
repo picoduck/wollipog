@@ -71,12 +71,21 @@ function States() {
   );
 }
 
-/** A small primary beside Cancel in a dialog footer, which reserves no room at rest (#2645). */
+/**
+ * Dialog footers, which reserve no room at rest (#2645): a small primary beside Cancel, and a
+ * primary that mounts busy, as a dialog reopened while its action still runs does.
+ */
 function FooterSm() {
   return (
-    <div className="modal-foot" data-fixture="footer-sm" style={{ width: 400 }}>
-      <button className="btn sm" type="button" data-neighbour="before">Cancel</button>
-      <PressToBusy className="btn primary sm" label="Install and Restart" />
+    <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 400px)", gap: 16, padding: 24 }}>
+      <div className="modal-foot" data-fixture="footer-sm" style={{ width: "100%" }}>
+        <button className="btn sm" type="button" data-neighbour="before">Cancel</button>
+        <PressToBusy className="btn primary sm" label="Install and Restart" />
+      </div>
+      <div className="modal-foot" data-fixture="footer-mounted-busy" style={{ width: "100%" }}>
+        <button className="btn" type="button">Cancel</button>
+        <BusyButton className="btn primary" busy progress="Creating the skill…">Create Skill</BusyButton>
+      </div>
     </div>
   );
 }

@@ -88,11 +88,13 @@ test("a busy button keeps its label and width, puts a spinner before the label a
   assert.equal(button.getAttribute("data-busy-spinner"), "prepended");
   assert.equal(button.getAttribute("data-spinner-room"), "", "a .btn without an icon keeps the spinner's room reserved");
   assert.equal(button.style.paddingInline, "", "busy, the stylesheet's own padding applies, not a zeroed one (#2645)");
+  assert.equal(button.getAttribute("data-width-locked"), "", "a press from idle locks the width");
   assert.equal(status().textContent, "Installing the update…");
 
   await act(async () => { reset().click(); });
   assert.equal(button.getAttribute("aria-busy"), null);
   assert.equal(button.style.width, "", "the lock is released once it is idle again");
+  assert.equal(button.hasAttribute("data-width-locked"), false);
   assertNoDomNode(button.querySelector(".spinner"));
   assert.equal(status().textContent, "");
   await cleanup();
@@ -150,6 +152,21 @@ test("a spinner takes a leading icon's place", async () => {
   container.remove();
 });
 
+test("a button that mounts busy has no idle width to lock, so it keeps its own padding", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  await act(async () => { root.render(<BusyButton className="btn primary" busy progress="Creating the skill…">Create Skill</BusyButton>); });
+  const button = container.querySelector("button")!;
+  assert.equal(button.getAttribute("data-busy-spinner"), "prepended");
+  assert.equal(button.style.width, "", "nothing to lock");
+  assert.equal(button.hasAttribute("data-width-locked"), false, "so a dialog footer's padding rule leaves it alone");
+  assert.equal(button.style.paddingInline, "");
+  await act(async () => root.unmount());
+  container.remove();
+});
+
 test("only a .btn reserves the spinner's room; any other button still takes it from its padding", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
@@ -192,6 +209,7 @@ test("the stylesheet draws the spinner at 14px and keeps a busy button's variant
   // on a `.sm`, which a busy `.sm` keeps, so it is never flush.
   assert.match(css, /\n\.modal-foot > \.btn\[data-spinner-room\]:not\(\[aria-busy="true"\]\) \{ padding-inline: var\(--space-3\); \}/);
   assert.match(css, /\n\.modal-foot > \.btn\.sm\[data-spinner-room\]:not\(\[aria-busy="true"\]\) \{ padding-inline: calc\(var\(--space-2\) \+ var\(--space-0-5\)\); \}/);
-  assert.match(css, /\n\.modal-foot > \.btn\[data-spinner-room\]\[data-busy-spinner="prepended"\] \{ padding-inline: 0; \}/);
-  assert.match(css, /\n\.modal-foot > \.btn\.sm\[data-spinner-room\]\[data-busy-spinner="prepended"\] \{ padding-inline: var\(--space-0-5\); \}/);
+  // Only a locked width gives its padding up: a button that mounts busy keeps its own.
+  assert.match(css, /\n\.modal-foot > \.btn\[data-spinner-room\]\[data-busy-spinner="prepended"\]\[data-width-locked\] \{ padding-inline: 0; \}/);
+  assert.match(css, /\n\.modal-foot > \.btn\.sm\[data-spinner-room\]\[data-busy-spinner="prepended"\]\[data-width-locked\] \{ padding-inline: var\(--space-0-5\); \}/);
 });

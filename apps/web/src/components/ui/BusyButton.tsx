@@ -88,6 +88,9 @@ export function BusyButton({ busy, progress, children, icon, ref, className, sty
         aria-disabled={busy ? true : rest["aria-disabled"]}
         data-busy-spinner={busy ? (prepended ? "prepended" : "replaced") : undefined}
         data-spinner-room={reservesRoom ? "" : undefined}
+        // Only a locked width can give up its padding: a button that mounts busy has no idle width
+        // to hold, so a dialog footer's padding rule (styles.css) leaves its padding alone.
+        data-width-locked={lockedWidth == null ? undefined : ""}
         onClick={handleClick}
       >
         {busy ? <Spinner decorative /> : icon}

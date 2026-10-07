@@ -546,7 +546,9 @@ only make its share wider than its neighbour's. And a dialog footer reserves not
 400px confirmation's three buttons (a secondary action, Cancel and the confirm) only just share one
 row and cannot spare the room; on a phone its buttons are equal halves anyway. There the spinner
 takes its room from the inline padding, as before: a `.btn` keeps about 3px a side when busy, and a
-`.btn.sm`, whose padding is exactly the spinner's room, reserves 2px a side so it is never flush.
+`.btn.sm`, whose padding is exactly the spinner's room, reserves 2px a side so it is never flush
+(except on a phone, where the halves are wide enough already). Only a locked width gives its padding
+up, so a footer button that mounts busy (a dialog reopened while its action still runs) keeps its own.
 A button with a leading icon reserves nothing; the spinner takes the icon's place. It sets
 `aria-busy="true"` and
 `aria-disabled="true"` (not `disabled`, which would drop the focus the person pressed it with) and

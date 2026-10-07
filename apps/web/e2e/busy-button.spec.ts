@@ -59,7 +59,7 @@ async function expectSteadyWhenBusy(button: Locator, label: string, neighbour?: 
   if (rest.reserved) {
     // A dialog footer reserves nothing, except 2px a side on a `.sm`, whose padding is exactly the
     // spinner's room and would otherwise leave it flush.
-    const room = rest.inFooter ? (padding === 8 ? 2 : 0) : rest.stretched ? 0 : (14 + (padding === 8 ? 2 : 4)) / 2;
+    const room = rest.stretched ? 0 : rest.inFooter ? (padding === 8 ? 2 : 0) : (14 + (padding === 8 ? 2 : 4)) / 2;
     expect(rest.padding, `${label}: the idle padding carries the spinner's room unless stretched or in a dialog footer`)
       .toEqual([padding + room, padding + room]);
     expectGeometry(Math.abs(rest.offCentre), `${label}: the label is centred at rest`).toBeLessThanOrEqual(0.61);
@@ -207,6 +207,31 @@ for (const pointer of ["fine", "coarse"] as const) {
       const footer = page.locator('.modal-foot[data-fixture="footer-sm"]');
       await expectSteadyWhenBusy(footer.getByRole("button", { name: "Install and Restart" }), "Install and Restart",
         footer.getByRole("button", { name: "Cancel" }));
+    });
+
+    test("a dialog-footer button that mounts busy keeps its own padding (#2645)", async ({ page }) => {
+      await page.goto("/busy-button-e2e.html?surface=footer-sm");
+      const create = page.locator('.modal-foot[data-fixture="footer-mounted-busy"]').getByRole("button", { name: "Create Skill" });
+      await expect(create).toHaveAttribute("aria-busy", "true");
+      // No idle width was ever measured, so nothing is locked and nothing gives its padding up.
+      const insets = await create.evaluate((element) => {
+        const own = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        const spinner = element.querySelector<HTMLElement>(".spinner")!;
+        const turning = spinner.getBoundingClientRect();
+        const spinLeft = turning.left + turning.width / 2 - spinner.offsetWidth / 2;
+        const text = document.createRange();
+        text.selectNodeContents([...element.childNodes].find((node) => node.nodeType === Node.TEXT_NODE)!);
+        return {
+          locked: element.hasAttribute("data-width-locked"),
+          spinner: spinLeft - (own.left + Number.parseFloat(style.borderLeftWidth)),
+          label: (own.right - Number.parseFloat(style.borderRightWidth)) - text.getBoundingClientRect().right,
+        };
+      });
+      expect(insets.locked).toBe(false);
+      const padding = await normalPadding(create);
+      expectGeometry(padding - insets.spinner, "the spinner keeps the inline padding").toBeLessThanOrEqual(0.61);
+      expectGeometry(padding - insets.label, "the label keeps the inline padding").toBeLessThanOrEqual(0.61);
     });
   });
 }
