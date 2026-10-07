@@ -9249,8 +9249,13 @@ textarea,
   min-width: 0;
 }
 .sign-in-body > * { margin: 0; }
-/* Its rows hold 28px controls (Show Email, Check Again), so they sit closer than text-only facts. */
+/* Its rows hold 28px controls (Show Email, Check Again), so they sit closer than text-only facts. On
+   touch those controls are 36px with a borrowed 44px hit area (§2.8): 8px apart, so Show Email's and
+   Check Again's hit areas meet rather than overlap and neither takes the other's taps (#2730). */
 .sign-in-facts { row-gap: var(--space-1); }
+@media (pointer: coarse) {
+  .sign-in-facts { row-gap: var(--space-2); }
+}
 .sign-in-facts dd {
   display: flex;
   flex-wrap: wrap;

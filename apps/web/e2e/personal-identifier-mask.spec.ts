@@ -11,8 +11,6 @@ const SURFACES: Array<{
   open: (page: Page) => Promise<Locator>;
   reveal: string;
   email: string;
-  /** False where a neighbouring control is known to sit inside the reveal's 44px touch target. */
-  touch?: boolean;
 }> = [
   {
     // The other accounts moved into Choose Another Account (#2208), whose rows are revealed together
@@ -25,9 +23,6 @@ const SURFACES: Array<{
     },
     reveal: "Show Email",
     email: "morgan.lee@example.com",
-    // On a touch phone Last Checked's Check Again starts inside Show Email's 44px target, a spacing
-    // defect of the card's facts (#2198) reported as a follow-up of #2208 rather than fixed here.
-    touch: false,
   },
   {
     name: "a Usage subscription row",
@@ -105,7 +100,7 @@ test.describe("touch", () => {
   // `isMobile` makes Chromium report `(pointer: coarse)`, which the touch-target rule targets.
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
-  for (const surface of SURFACES.filter((candidate) => candidate.touch !== false)) {
+  for (const surface of SURFACES) {
     test(`${surface.name}: the reveal keeps a 44px touch target`, async ({ page }) => {
       const scope = await surface.open(page);
       const reveal = scope.getByRole("button", { name: surface.reveal });

@@ -2366,7 +2366,9 @@ follows these rules so it never crowds out the conversation it asks about:
   `KeyRound`. The body is `.facts`: This Session Uses (the configured account, masked, or Machine
   Default Sign-In, with its help beside it), Signed In Now (the provider-reported account, masked,
   with Show Email) and Last Checked (a relative time with a `.btn.sm.ghost` Check Again that runs the
-  runner's recheck), then one sentence naming the situation and what the primary does, never claiming
+  runner's recheck); the facts' rows are 4px apart, 8px on a coarse pointer so Show Email's and Check
+  Again's 44px hit areas (§2.8) never overlap (#2730). Then one sentence naming the situation and what
+  the primary does, never claiming
   a mismatch Signed In Now cannot show; the runner's guidance waits behind Request Details, and a body
   cut by the dock's cap fades its lower edge. The primary is Use Current Account or Start Sign-In, and
   Recheck Authentication only when the runner offers neither (then Check Again is hidden). Dismiss

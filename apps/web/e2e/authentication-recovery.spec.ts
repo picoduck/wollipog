@@ -315,6 +315,38 @@ test.describe("touch phone", () => {
       await page.keyboard.press("Escape");
     }
   });
+
+  test("Show Email and Check Again each keep their own 44px touch target (#2730)", async ({ page }) => {
+    const card = await open(page, "scenario=email&width=390&height=844");
+    for (const [label, name, selector] of [
+      ["Signed In Now", "Show Email", ".pid-toggle"],
+      ["Last Checked", "Check Again", "button.btn"],
+    ] as const) {
+      const control = fact(card, label).getByRole("button", { name });
+      // The card's body scrolls on a phone (#2179): centre the control, away from the body's clipping
+      // edge, where any target would be cut.
+      await control.evaluate((element) => element.scrollIntoView({ block: "center" }));
+      const box = (await control.boundingBox())!;
+      const cx = box.x + box.width / 2;
+      const cy = box.y + box.height / 2;
+      // 21px from the centre on every side is inside a 44px target: each lands on this control, never
+      // on the other fact's.
+      const hits = await page.evaluate(([x, y, own, text]) => [[x, y - 21], [x, y + 21], [x - 21, y], [x + 21, y]]
+        .map(([px, py]) => {
+          const hit = document.elementFromPoint(px!, py!)?.closest<HTMLElement>(own!);
+          return hit?.textContent?.trim().startsWith(text!) || hit?.getAttribute("aria-label") === text;
+        }), [cx, cy, selector, name] as const);
+      expect(hits, name).toEqual([true, true, true, true]);
+    }
+  });
+});
+
+test("with a fine pointer at 1440×900 the facts keep their 4px rows: only touch spaces them out (#2730)", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  for (const scenario of ["email", "signed-out"] as const) {
+    const card = await open(page, `scenario=${scenario}`);
+    await expect(card.locator(".sign-in-facts"), scenario).toHaveCSS("row-gap", "4px");
+  }
 });
 
 for (const [width, height] of [[1440, 900], [390, 844]] as const) {
