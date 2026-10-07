@@ -17869,6 +17869,8 @@ test("indexed history hydration preserves runner-owned authentication recovery s
     sessionId: "s_box1",
     requestId,
     optionId: "auth:revalidate",
+    // The local owner chose this Recheck, so the runner names them on its outcome (#2742).
+    resolvedBy: { kind: "user", userId: "local" },
   });
 });
 
@@ -17916,6 +17918,8 @@ test("legacy history hydration preserves runner-owned authentication recovery se
     sessionId: "s_box1",
     requestId,
     optionId: "auth:revalidate",
+    // The local owner chose this Recheck, so the runner names them on its outcome (#2742).
+    resolvedBy: { kind: "user", userId: "local" },
   });
 });
 
