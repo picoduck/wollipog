@@ -8,7 +8,7 @@ import {
 } from "./MachineSignInNotice.js";
 import { RecommendedSkillsNotice, useSkillRecommendations } from "./RecommendedSkillsNotice.js";
 import { SessionNoticeSlot, type SessionNoticeEntry } from "./SessionNoticeSlot.js";
-import { ProjectSetupSuggestion } from "./WorktreeSetupNotice.js";
+import { useWorktreeSetupSuggestion, WorktreeSetupNotice } from "./WorktreeSetupNotice.js";
 
 /** The list slot's ranks, in one table (#2221). Severity orders first: a pending sign-in is a warning
  * and the other two are info. */
@@ -47,6 +47,9 @@ export function SessionsListNotices({ signIns, machineName, setup, hidden = fals
   onFocusLost?: () => void;
 }) {
   const recommendations = useSkillRecommendations();
+  // Kept here rather than in the notice, so a generation in flight stays guarded while another notice
+  // is shown in the suggestion's place.
+  const setupActions = useWorktreeSetupSuggestion(setup?.session, onSetupGenerated);
   // Each sign-in's action in flight, by entry key: choosing another notice unmounts the sign-in's, and
   // its request still runs, so coming back must still refuse a second action until it settles.
   const [runningSignIns, setRunningSignIns] = useState<ReadonlyMap<string, MachineSignInAction>>(() => new Map());
@@ -58,9 +61,7 @@ export function SessionsListNotices({ signIns, machineName, setup, hidden = fals
       return next;
     });
   }, []);
-  if (hidden) return null;
-
-  const entries: SessionNoticeEntry[] = signIns.map(({ runnerId, login }) => {
+  const entries: SessionNoticeEntry[] = hidden ? [] : signIns.map(({ runnerId, login }) => {
     const machine = machineName(runnerId);
     const key = `sign-in:${runnerId}:${login.operationId}`;
     return {
@@ -78,19 +79,21 @@ export function SessionsListNotices({ signIns, machineName, setup, hidden = fals
       ),
     };
   });
-  if (setup) {
+  if (setup && !hidden) {
     entries.push({
       key: `setup:${setup.session.projectId}`,
       severity: "info",
       rank: LIST_NOTICE_RANK.setupSuggestion,
       title: `Set Up ${setup.projectName}`,
       render: ({ trailing }) => (
-        <ProjectSetupSuggestion key={setup.session.id} session={setup.session} projectName={setup.projectName}
-          trailing={trailing} onGenerated={onSetupGenerated} />
+        <WorktreeSetupNotice key={setup.session.id} projectName={setup.projectName} trailing={trailing}
+          generating={setupActions.generating} dismissing={setupActions.dismissing} error={setupActions.error}
+          generateRefusal={setupActions.generateRefusal} onGenerate={setupActions.generate}
+          onDismiss={setupActions.dismiss} />
       ),
     });
   }
-  if (recommendations.skills.length > 0) {
+  if (recommendations.skills.length > 0 && !hidden) {
     entries.push({
       key: "recommended-skills",
       severity: "info",

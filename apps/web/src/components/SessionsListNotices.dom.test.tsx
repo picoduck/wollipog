@@ -214,6 +214,57 @@ test("a sign-in's request in flight still holds its buttons after another notice
   assert.equal(view.button("Cancel Sign-In")!.disabled, false);
 });
 
+test("a setup generation in flight stays guarded after another notice was shown in between", async () => {
+  let finish: () => void = () => {};
+  const calls: string[] = [];
+  const view = await mount(client({
+    generateWorktreeSetup: (id: string) => {
+      calls.push(`generate:${id}`);
+      return new Promise<void>((resolve) => { finish = resolve; });
+    },
+    dismissWorktreeSetupNotice: async () => { calls.push("dismiss"); },
+  }), { setup: true });
+  assert.equal(view.title(), "Set Up Payments Service");
+  await act(async () => { view.button("Generate Setup File")!.click(); });
+  await chooseFromMore(view, "Recommended Skills");
+  await chooseFromMore(view, "Set Up Payments Service");
+  const generate = view.button("Generate Setup File")!;
+  assert.equal(generate.getAttribute("aria-busy"), "true", "the generation still shows as running");
+  await act(async () => { generate.click(); });
+  assert.deepEqual(calls, ["generate:pay-1"], "a returning notice does not start a second generation");
+  await act(async () => { finish(); });
+  await act(settle);
+});
+
+test("going offline with focus in a notice leaves focus with the list, not the page body", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  cleanup(async () => {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  });
+  const lost: string[] = [];
+  const render = async (hidden: boolean) => {
+    await act(async () => {
+      root.render(
+        <ApiProvider client={client({ listSkills: async () => ({ skills: [] }) })}>
+          <SessionsListNotices signIns={[{ runnerId: "runner-1", login: login() }]} machineName={() => "Build Box"}
+            hidden={hidden} onOpenSkill={() => {}} onSetupGenerated={() => {}} onFocusLost={() => { lost.push("list"); }} />
+        </ApiProvider>,
+      );
+    });
+    await act(settle);
+  };
+  await render(false);
+  const cancel = [...container.querySelectorAll<HTMLButtonElement>("button")]
+    .find((button) => button.textContent?.trim() === "Cancel Sign-In")!;
+  await act(async () => { cancel.focus(); });
+  await render(true);
+  assertNoDomNode(container.querySelector(".notice"), "the slot is hidden while reconnecting");
+  assert.deepEqual(lost, ["list"], "focus goes to where the slot's owner sends it");
+});
+
 test("the sign-in notice shows the device code inline, Open Sign-In Page and Cancel Sign-In", async () => {
   let finishCancel: () => void = () => {};
   const cancels: unknown[] = [];
