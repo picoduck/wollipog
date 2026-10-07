@@ -545,13 +545,16 @@ test("a failure notice's Show Details growing at the end of a scrolling card bri
   await expect.poll(async () => (await cardEdges(card)).below).toBe(true);
 });
 
-test("a card whose body scrolls on its own, or that is not capped, draws no edge lines (#2698)", async ({ page }) => {
+test("a card whose body scrolls on its own draws the body's line, not the card's, and one not capped draws none (#2698, #2715)", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/agent-questions-e2e.html?set=paragraph&more=1");
   const card = dockedCard(page);
   await expect(card).toBeVisible();
   expect(await card.evaluate((element) => element.hasAttribute("data-card-scrolls"))).toBe(false);
   expect(await cardEdges(card)).toMatchObject({ above: false, below: false });
+  // The body scrolls instead, so its own lower edge carries the one line every Request Card draws.
+  expect(await card.locator(".request-card-body").evaluate((body) =>
+    body.hasAttribute("data-clip-end") && getComputedStyle(body, "::after").borderTopStyle === "solid")).toBe(true);
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/agent-questions-e2e.html?set=short");
   expect(await cardEdges(dockedCard(page))).toEqual({ above: false, below: false, range: 0 });

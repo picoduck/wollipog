@@ -284,17 +284,19 @@ test("while a sign-in runs, what the person must do is in view without scrolling
   }
 });
 
-test("a body cut by the dock's cap fades its lower edge, so a cut line never reads as a stray mark", async ({ page }) => {
+test("a body cut by the dock's cap draws a hairline at its lower edge, never a fade, so a cut line never reads as a stray mark (#2715)", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   for (const scenario of ["email", "older", "readonly", "methods"] as const) {
     const card = await open(page, `scenario=${scenario}`, scenario === "methods" ? "Sign in to OpenCode" : undefined);
     const state = await card.locator(".request-card-body").evaluate((body) => ({
       overflows: body.scrollTop + body.clientHeight < body.scrollHeight - 1,
-      marked: body.hasAttribute("data-more-below"),
+      marked: body.hasAttribute("data-clip-end"),
+      line: getComputedStyle(body, "::after").borderTopStyle === "solid",
       masked: getComputedStyle(body).maskImage !== "none",
     }));
     expect(state.marked, scenario).toBe(state.overflows);
-    expect(state.masked, scenario).toBe(state.overflows);
+    expect(state.line, scenario).toBe(state.overflows);
+    expect(state.masked, scenario).toBe(false);
   }
 });
 

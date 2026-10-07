@@ -2260,6 +2260,14 @@ follows these rules so it never crowds out the conversation it asks about:
   the session bar and the composer) on desktop and 50% on phones, and at 40% while the software
   keyboard is open. The card's head, title and footer stay fixed; only its body scrolls (a question
   card may scroll as a whole under its footer instead, below).
+- **One "more below" signal for every kind** (#2715). While a card's body scrolls, each edge it can
+  still scroll past shows a `--border` hairline (`useClipEdges()`, `data-clip-start` and
+  `data-clip-end`), the line a question card that scrolls whole draws at its own edges (#2698) and a
+  sticky header draws once content scrolls under it (§2.6). It clears at the end it reaches. A line
+  the edge cuts then reads as more to scroll to, not a stray mark. A border, never a fade: nothing is
+  dimmed to look disabled, it stays drawn in forced colors, and it takes no room. Sign-in,
+  permission, budget, workflow decision, evidence and question cards all use it; a body in a side
+  panel's detail never scrolls on its own (the detail scrolls as one page), so it has none.
 - **Only the top request is expanded.** The others wait behind one "+N More Requests" row that opens
   into one-line rows (kind icon, title, owner, time; owner hidden on phones). Choosing a row brings
   that request to the top for this view; the priority order is unchanged. A and D act on the
@@ -2283,9 +2291,9 @@ follows these rules so it never crowds out the conversation it asks about:
   so a request with an allow option always has a visible primary and whatever lets the work continue
   is never hidden (#2641); only a request with no allow at all has none. Options too wide for one row
   on a narrow phone (a trust request's two long labels) wrap, the primary still last, rather than run
-  off the card's edge. A and D act only where
-  exactly one `allow_once` or `reject_once` exists: a trust request's lasting grant takes a click,
-  while D still takes a worktree setup's one-time Create Without Setup. A reason nobody can act (the runner is offline, a Viewer's refusal, a
+  off the card's edge. A and D act only where exactly one `allow_once` or `reject_once` exists: a
+  trust request's lasting grant takes a click, while D still takes a worktree setup's one-time Create
+  Without Setup. A reason nobody can act (the runner is offline, a Viewer's refusal, a
   machine-owner-only sign-in) is a visible foot-note the disabled buttons reference; a failed
   decision is a compact danger notice above the footer. The dock is the notice slot's `lead`
   (`SessionNoticeSlot`), at the end of the `.chat-reading` column, a size container its caps are
@@ -2324,7 +2332,8 @@ follows these rules so it never crowds out the conversation it asks about:
   about a row, scrolls as a whole under a footer that stays at its bottom edge, inside the cap.
   While content is under the footer or above the top padding, that edge shows a `--border`
   hairline, as a sticky header does (§2.6), so answers under the footer read as more to come
-  (#2698); neither line takes room.
+  (#2698); neither line takes room. Where only the body scrolls, the body's edges carry the same
+  line (#2715).
 - **UI evidence is a grid of named tiles** (`components/requests/EvidenceReview.tsx`, #2197). The
   card's title says what to do ("Review 4 screenshots before approving") unless the request has a
   title of its own. The body is, top to bottom: the HTTPS or Localhost Required notice (warning,
@@ -2376,7 +2385,8 @@ follows these rules so it never crowds out the conversation it asks about:
   with Show Email) and Last Checked (a relative time with a `.btn.sm.ghost` Check Again that runs the
   runner's recheck), then one sentence naming the situation and what the primary does, never claiming
   a mismatch Signed In Now cannot show; the runner's guidance waits behind Request Details, and a body
-  cut by the dock's cap fades its lower edge. The primary is Use Current Account or Start Sign-In, and
+  cut by the dock's cap shows the one "more below" hairline at its lower edge (#2715; it replaced
+  #2198's fade). The primary is Use Current Account or Start Sign-In, and
   Recheck Authentication only when the runner offers neither (then Check Again is hidden). Dismiss
   Recovery is a ghost tertiary at the footer's far left, and Choose Another Account… is the
   secondary when the session can switch accounts; below 760px, where the two and the primary do not

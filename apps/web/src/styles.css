@@ -5801,10 +5801,29 @@ textarea {
   }
 }
 .request-card .request-card-body > * { margin: 0; }
-/* A sign-in's body fades its lower edge while more waits below (#2198), so a line the edge cuts reads
-   as more to scroll to rather than as a stray mark. */
-.request-card[data-request-kind="sign_in"] .request-card-body[data-more-below] {
-  mask-image: linear-gradient(to bottom, #000 calc(100% - var(--space-6)), transparent);
+/* Every Request Card's one "more below" signal (#2715, §13.2): while a body scrolls, each edge it can
+   still scroll past shows a `--border` hairline (clip-edges.ts marks them), as a question card that
+   scrolls whole marks its own edges (#2698) and a sticky header does once content scrolls under it
+   (§2.6). A line the edge cuts then reads as more to scroll to, not a stray mark. A border, not a
+   fade: nothing is dimmed to look disabled, and it stays drawn in forced colors. Each line is a
+   sticky edge of the scrolling body that cancels the body's gap, so neither takes room. */
+.request-card-body[data-clip-start]::before,
+.request-card-body[data-clip-end]::after {
+  content: "";
+  position: sticky;
+  z-index: var(--z-sticky);
+  flex: none;
+  pointer-events: none;
+}
+.request-card-body[data-clip-start]::before {
+  top: 0;
+  margin-bottom: calc(-1 * var(--space-3) - 1px);
+  border-bottom: 1px solid var(--border);
+}
+.request-card-body[data-clip-end]::after {
+  bottom: 0;
+  margin-top: calc(-1 * var(--space-3) - 1px);
+  border-top: 1px solid var(--border);
 }
 .request-card-body > .code-well > pre { max-height: none; }
 .request-card-reasons {
