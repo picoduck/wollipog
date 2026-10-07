@@ -182,7 +182,7 @@ export const CSS_SURFACE = {
   ],
   properties: [
   "-webkit-box-orient", "-webkit-font-smoothing", "-webkit-line-clamp",
-  "-webkit-overflow-scrolling", "-webkit-tap-highlight-color", "accent-color", "align-content",
+  "-webkit-tap-highlight-color", "accent-color", "align-content",
   "align-items", "align-self",
   "animation", "animation-delay", "animation-duration", "animation-iteration-count",
   "appearance", "background", "background-clip", "background-position",
@@ -206,7 +206,7 @@ export const CSS_SURFACE = {
   "overscroll-behavior", "padding", "padding-block", "padding-bottom", "padding-inline",
   "padding-inline-end", "padding-inline-start", "padding-left", "padding-right", "padding-top",
   "place-items", "pointer-events", "position", "resize", "right", "row-gap",
-  "scroll-behavior", "scroll-margin-inline-end", "scroll-padding-inline", "scroll-snap-align", "scroll-snap-type", "scrollbar-color",
+  "scroll-behavior", "scroll-margin-inline-end", "scroll-padding-inline", "scrollbar-color",
   "scrollbar-width", "src", "stroke", "stroke-linecap", "stroke-width", "table-layout", "text-align",
   "text-decoration", "text-overflow", "text-transform", "top",
   "touch-action", "transform", "transform-origin", "transition", "transition-duration", "transition-property",

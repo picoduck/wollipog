@@ -351,6 +351,12 @@ if (lifecycle) {
 }
 
 if (empty) sessions.splice(0);
+// Nothing waits for input, so the phone Board opens on the next column with a card (#2216).
+if (new URLSearchParams(location.search).has("no-input")) {
+  for (let index = sessions.length - 1; index >= 0; index -= 1) {
+    if (sessions[index]!.column === "input_required") sessions.splice(index, 1);
+  }
+}
 
 const reminders: SessionReminderView[] = [
   {

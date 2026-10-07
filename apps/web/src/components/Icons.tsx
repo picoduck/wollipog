@@ -75,6 +75,7 @@ import {
   Link as LucideLink,
   List as LucideList,
   ListChecks as LucideListChecks,
+  ListFilter as LucideListFilter,
   ListTodo as LucideListTodo,
   ChartGantt as LucideChartGantt,
   Network as LucideNetwork,
@@ -226,6 +227,10 @@ export function BoardIcon(props: IconProps) {
 
 export function ListIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideList} {...props} />;
+}
+
+export function FilterIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideListFilter} {...props} />;
 }
 
 /** Snooze: a snoozed row's return time (#2209) and the Sessions preview bar's Snooze button (#2210). */

@@ -66,7 +66,7 @@ import { PageHeader } from "./PageHeader.js";
 import { shortcutDisplay } from "../shortcuts.js";
 import { sessionDisplayTitle } from "../session-title.js";
 import { Board } from "./Board.js";
-import { BoardFilterTools } from "./BoardFilters.js";
+import { BoardFiltersSheet, BoardFilterStrip, BoardFilterTools } from "./BoardFilters.js";
 import type { SessionsViewMode } from "../sessions-view-mode.js";
 import { loadSessionsListWidth, saveSessionsListWidth, type SessionsPreviewLayout } from "../sessions-preview-layout.js";
 import { useSessionsPreviewLayout } from "../use-sessions-preview-layout.js";
@@ -1510,7 +1510,8 @@ export function InboxView({
         // While the page's state offers New Session, the bar does not (§12.1, #2220).
         onNewSession={stateOffersNewSession ? undefined : newSession}
         newSessionShortcut={shortcutDisplay("new-session")}
-        boardTools={boardMode ? <BoardFilterTools sessions={boardSessions} /> : undefined}
+        boardFilters={boardMode ? <BoardFiltersSheet sessions={boardSessions} /> : undefined}
+        boardFilterStrip={boardMode ? <BoardFilterStrip sessions={boardSessions} /> : undefined}
       />
     )}
     {!expanded && !isMobile && (

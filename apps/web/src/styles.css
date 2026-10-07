@@ -3316,12 +3316,33 @@ textarea {
   align-self: center;
 }
 .board:not(.is-dragging) .column.is-empty > .column-body { display: none; }
-@media (max-width: 760px) {
-  /* A phone's columns are swipeable pages, but an empty one is still a strip, and opens to a page
-     while a card is dragged. */
-  .board .column.is-empty { flex: 0 0 var(--space-10); }
-  .board.is-dragging .column.is-empty { flex: 0 0 84vw; }
+/* The phone Board (#2216, §15.1): one column at a time. The column tabs run the pane's width on a
+   hairline under the app bar, and the chosen column's cards fill the width below them, scrolling
+   on their own. The pane's inset gives way to the page gutter. */
+.inbox-view.board-mode > .inbox-list-pane > .board-wrap.is-phone {
+  padding: 0;
+  overflow: hidden;
 }
+.board.board-phone {
+  flex-direction: column;
+  gap: 0;
+  overflow: hidden;
+}
+.board-column-tabs {
+  flex: none;
+  padding-inline: var(--page-gutter);
+  border-bottom: 1px solid var(--border);
+}
+/* A short tab ("Done 0") still makes a full touch target. */
+.board-column-tab {
+  justify-content: center;
+  min-width: var(--control-h);
+}
+.board-phone > .column {
+  flex: 1;
+  min-width: 0;
+}
+.board-phone > .column > .column-body { padding: var(--space-2) var(--page-gutter); }
 .column-body {
   flex: 1;
   overflow-y: auto;
@@ -12089,14 +12110,11 @@ body.shell-dock-dragging * {
 .sessions-group-picker-caret { flex: none; }
 .sessions-app-bar-search { gap: var(--space-2); }
 .sessions-app-bar-search > .inbox-search { flex: 1; width: auto; min-width: 0; }
-/* The Board's Filters and count, on their own row under a phone's bar until #2216. */
-.sessions-app-bar-tools {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  border-top: 1px solid var(--border);
-}
-.sessions-snoozed-strip {
+/* The strips under the bar: Snoozed, and the Board's filters (#2216), each a line of text and one
+   action, which makes the strip 44px on touch. A long machine or agent name ends in an ellipsis;
+   the result count after it never does. */
+.sessions-snoozed-strip,
+.board-filter-strip {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -12104,6 +12122,26 @@ body.shell-dock-dragging * {
   border-top: 1px solid var(--border);
   color: var(--text-dim);
   font: var(--type-body);
+}
+.board-filter-strip-text {
+  display: flex;
+  gap: var(--space-1);
+  min-width: 0;
+  white-space: nowrap;
+}
+.board-filter-strip-what {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.board-filter-strip-result { flex: none; }
+:is(.sessions-snoozed-strip, .board-filter-strip) > .btn { flex: none; }
+/* The bar's Filters (#2216): the icon alone, then the plain count of filters applied beside it. */
+.icon-btn.board-filters-button:has(> .count) {
+  gap: var(--space-1);
+  width: auto;
+  min-width: var(--control-h);
+  padding: 0 var(--space-2);
 }
 .inbox-list {
   min-height: 0;
@@ -13458,7 +13496,8 @@ body.shell-dock-dragging * {
 .card[draggable="true"]:active {
   cursor: grabbing;
 }
-.column.drag-over {
+.column.drag-over,
+.board-column-tab.drag-over {
   outline: 1px dashed var(--accent);
   outline-offset: -1px;
   border-radius: var(--radius-sm);
@@ -14295,19 +14334,6 @@ body.shell-dock-dragging * {
   .pairing-controls {
     flex: 1;
     display: flex;
-  }
-
-
-  /* Board: columns become swipeable full-width pages instead of a 5-across grid. */
-  .board {
-    display: flex;
-    gap: 12px;
-    scroll-snap-type: x mandatory;
-    -webkit-overflow-scrolling: touch;
-  }
-  .board .column {
-    flex: 0 0 84vw;
-    scroll-snap-align: start;
   }
 
 

@@ -408,9 +408,12 @@ test("pin indicators keep their shape and card geometry across viewports, densit
   }
 
   await chooseView(page, "Board");
+  // A phone Board shows one column at a time (#2216).
+  await page.getByRole("tab", { name: /^Queued, / }).click();
   const card = page.locator(".board .card", { hasText: "Queued Session" });
   await expect(card.getByLabel("Pinned Session")).toBeVisible();
   const cardHeight = await card.evaluate((node) => node.getBoundingClientRect().height);
+  await page.getByRole("tab", { name: /^Running, / }).click();
   const peerCardHeight = await page.locator(".board .card", { hasText: "Running Session" })
     .evaluate((node) => node.getBoundingClientRect().height);
   expect(Math.abs(cardHeight - peerCardHeight), "the Board badge does not change card height").toBeLessThanOrEqual(0.5);
@@ -468,6 +471,8 @@ test("long-pressed rows and cards pin their target, persist the state, and expos
     "unpinning restores the existing Inbox ordering");
 
   await chooseView(page, "Board");
+  // The phone Board opens on Needs Input and shows one column at a time (#2216).
+  await page.getByRole("tab", { name: /^Running, / }).click();
   cdp = await touchSession(page);
   const running = page.locator(".board .card", { hasText: "Running Session" });
   await longPressUntilMenu(cdp, page, await centerOf(running));
@@ -480,6 +485,7 @@ test("long-pressed rows and cards pin their target, persist the state, and expos
 
   await page.reload();
   await expect(page.locator(".board-wrap")).toBeVisible();
+  await page.getByRole("tab", { name: /^Running, / }).click();
   const persistedRunning = page.locator(".board .card", { hasText: "Running Session" });
   await expect(persistedRunning.getByLabel("Pinned Session")).toBeVisible();
   await persistedRunning.click({ button: "right" });

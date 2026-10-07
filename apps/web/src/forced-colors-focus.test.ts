@@ -57,7 +57,7 @@ const REVIEWED: ReadonlyMap<string, string> = new Map([
   [".inbox-list:focus-visible, .detail-scroll:focus-visible { outline: none }", "the grid is marked on its active row by an inset outline (repainted in forced colors); the transcript scroller is a programmatic focus target, and F6 marks its pane with the zone line"],
   [".usage-chart-hit:focus-visible { outline: none; stroke: var(--accent); stroke-width: 2 }", "an SVG <rect>: the 2px stroke marks focus, and forced colors repaints strokes rather than dropping them"],
   // Not focus indicators.
-  [".column.drag-over { outline: 1px dashed var(--accent); outline-offset: -1px }", "a drop-target cue while dragging, not a focus indicator"],
+  [".column.drag-over, .board-column-tab.drag-over { outline: 1px dashed var(--accent); outline-offset: -1px }", "a drop-target cue while dragging, not a focus indicator"],
   ["@media (forced-colors: active) .count-badge.on-icon { outline: 2px solid Canvas }", "the on-icon count badge's ring (§11.4), redrawn because forced colors drops its box-shadow; the badge is not focusable"],
   ["@media (forced-colors: active) .rail-attention-dot.on-icon { outline: 2px solid Canvas }", "the on-icon attention dot's ring (#1967), redrawn as the count badge's is; the dot is not focusable"],
   ["@media (forced-colors: active) .ask-marker[data-selected] { outline: 2px solid Highlight }", "the question marker Show Where Asked selected (#2205), redrawn because forced colors drops its fill and accent bar; the marker is not focusable"],

@@ -864,7 +864,8 @@ The Sessions Board (#2201) is the model case: its columns have no border and no 
 are the only boxes. A column's header is its Title Case name after a 6px status dot (§11.1: Running
 info, Needs Input warning, Queued, Review and Done neutral) with a plain count (§11.4), never
 uppercased or tracked. An empty column folds to a 40px strip with its header on end and stays a
-drop target; while a card is dragged, every strip opens to full width.
+drop target; while a card is dragged, every strip opens to full width. A phone shows one column at a
+time under column tabs instead (§15.1, #2216).
 
 ### 5.2 Rows
 
@@ -1594,8 +1595,8 @@ compact widths, detail sub-views.
   All, then the machines by their disambiguated names, or each machine's agents in a group under
   its name as a `MenuLabel`. An agent its machine reports unavailable is an `aria-disabled` row with
   its `unavailableReason` (or "Not available on {machine}.") as the second line. A set filter adds a
-  quiet "10 of 29" (`--type-small`, `--text-faint`, tabular) and a ghost **Clear**. Below 1100px,
-  phones included until the phone Board (#2216), the two fold into one **Filters** menu button with
+  quiet "10 of 29" (`--type-small`, `--text-faint`, tabular) and a ghost **Clear**. In the compact
+  tier (761–1099px) the two fold into one **Filters** menu button with
   the plain count of active filters, `aria-pressed` while any is set and named "Filters, 1 Active";
   its menu holds a Machine group and an Agent group, then **Clear Filters** after a separator while
   any is set, so the row keeps room for the group tabs.
@@ -2493,7 +2494,8 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
 | Tables | Rows (§14). |
 | Toolbars and filters | One row: search field + a "Filters" button that opens a sheet with the filters and a result count. Native selects that size to their longest option are removed. |
 | Tabs | Scroll with fade and active-into-view; more than 4 become a view picker. |
-| Sessions app bar | One 48px bar (`SessionsAppBar`, #2211) replaces the page header, its action row and the group tabs, so the first row starts 56px down. The title is the group picker: the group's name, a caret and its attention count badges (none in Snoozed), named with the attention in words; it opens the Session Groups sheet of §10.1's All Groups rows. Then Search, which swaps the bar for the full-width search field (focused) and Cancel, which clears the query and restores the bar; it filters the list as §8.4's field does and never opens the palette. Then ⋯, a sheet with View (List, Board) and Show (Active Sessions, Snoozed Sessions with its count) as radio items, New Project…, and the current project's actions under a section label with its name; and the 44px `+` New Session. While Snoozed is on, a strip under the bar says "Showing snoozed sessions." with Show Active; in Board mode the Board's Filters sit on a row under the bar until the phone Board (#2216). A confirmation opened from a sheet replaces it with Back (§7.5). |
+| Sessions app bar | One 48px bar (`SessionsAppBar`, #2211) replaces the page header, its action row and the group tabs, so the first row starts 56px down. The title is the group picker: the group's name, a caret and its attention count badges (none in Snoozed), named with the attention in words; it opens the Session Groups sheet of §10.1's All Groups rows. Then Search, which swaps the bar for the full-width search field (focused) and Cancel, which clears the query and restores the bar; it filters the list as §8.4's field does and never opens the palette. Then ⋯, a sheet with View (List, Board) and Show (Active Sessions, Snoozed Sessions with its count) as radio items, New Project…, and the current project's actions under a section label with its name; and the 44px `+` New Session. In Board mode, Filters follows Search (see Board below). While Snoozed is on, a strip under the bar says "Showing snoozed sessions." with Show Active. A confirmation opened from a sheet replaces it with Back (§7.5). |
+| Board | One column at a time (#2216). Under the app bar, the column tabs (§10.1) in the order Needs Input, Running, Review, Done, Queued, each with its plain count, Needs Input's a warning count badge while above zero; each tab is named "Running, 13" and is at least 44px wide. The row scrolls with the edge fade when the tabs do not fit. Below it, the chosen column's cards run the width inside the gutter and scroll on their own; an empty column says "No sessions are in Done." The Board opens on the first column with a card in that order and keeps its column, the opening one or the one chosen, while it stays open: a live update never moves it. Each tab is also a drop target for a card dragged with a mouse. The app bar's **Filters** (`FilterIcon`, `.icon-btn`) follows Search: named "Filters" or "Filters, 1 Active", `aria-pressed` and showing the plain number applied while any filter is set. It opens the Filters sheet: the result count ("Showing 10 of 29", which also describes the sheet), the Machine group and the Agent group of §10.1's rows (44px on touch), then Clear Filters after a separator while any is set. A choice applies at once and the sheet stays open, so the count answers it; the scrim, Escape or Tab closes it. While a filter is set, a strip under the Snoozed strip says what is filtered and how many remain ("Machine: Studio Mac. Agent: Codex. Showing 3 of 29.", a long name ending in an ellipsis, the count never) with **Clear Filters**, which hands focus to Filters. |
 | Toasts | Bottom center above the tab bar or composer, inside the safe area; one visible (§13.1). |
 | Request dock | Caps at 50% of the chat column, 40% while the software keyboard is open; its body scrolls, and it shrinks to the 44px strip while reading back (§13.2). |
 | Keyboard hints | Hidden (`pointer: coarse`). |

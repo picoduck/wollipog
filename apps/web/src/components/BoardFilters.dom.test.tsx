@@ -10,8 +10,17 @@ import { ApiProvider } from "../api-context.js";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
-import { Board } from "./Board.js";
-import { BoardFilterTools, boardFiltersButtonName, filterBoardSessions } from "./BoardFilters.js";
+import { Board, openingBoardColumn, PHONE_BOARD_COLUMNS } from "./Board.js";
+import {
+  BoardFiltersSheet,
+  BoardFilterStrip,
+  BoardFilterTools,
+  boardFilterResult,
+  boardFilterSummary,
+  boardFiltersButtonName,
+  filterBoardSessions,
+} from "./BoardFilters.js";
+import { useIsMobile } from "./useIsMobile.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
@@ -19,7 +28,8 @@ import { installDomTestCleanup } from "../dom-test-cleanup.js";
 /**
  * The Board's Machine and Agent filters as menu buttons in the Sessions tab row (#2201): agents
  * grouped by machine, unavailable agents disabled with their reason, the "1 of 3" note and Clear,
- * and one Filters button in the compact tier.
+ * and one Filters button in the compact tier. On a phone (#2216): one column at a time under its
+ * tabs, the app bar's Filters sheet and the filter strip.
  */
 
 const domWindow = new Window({ url: "http://localhost/", width: 1440, height: 900 });
@@ -93,9 +103,18 @@ const navigation: ViewNavigation = { current: () => ({ name: "board" }), push() 
 function Harness() {
   const all = useStoreSelector((s) => s.sessions);
   const scoped = React.useMemo(() => [...all.values()], [all]);
+  // InboxView's split: the tab row's tools, or on a phone the app bar's Filters and strip.
+  const phone = useIsMobile();
   return (
     <>
-      <div className="tabs-tools"><BoardFilterTools sessions={scoped} /></div>
+      {phone ? (
+        <header className="sessions-app-bar">
+          <BoardFiltersSheet sessions={scoped} />
+          <BoardFilterStrip sessions={scoped} />
+        </header>
+      ) : (
+        <div className="tabs-tools"><BoardFilterTools sessions={scoped} /></div>
+      )}
       <Board sessions={scoped} searchActive={false} onShowAll={() => {}} onNewSession={() => {}} onSessionMenu={() => {}} />
     </>
   );
@@ -280,5 +299,104 @@ test("an empty column is a strip that keeps its title and count", async () => {
   for (const id of ["queued", "review", "done"]) {
     assert.ok(body().querySelector(`.column.col-${id} .column-dot.t-neutral`), `${id}'s dot is neutral`);
   }
+  await unmount();
+});
+
+test("the phone Board opens on the first column with a card, Needs Input first and Queued last", () => {
+  assert.deepEqual(PHONE_BOARD_COLUMNS, ["input_required", "running", "review", "done", "queued"]);
+  const columns = (filled: string[]) => new Map(PHONE_BOARD_COLUMNS.map((id) => [id, filled.includes(id) ? [1] : []]));
+  assert.equal(openingBoardColumn(columns(["queued", "running", "input_required"])), "input_required");
+  assert.equal(openingBoardColumn(columns(["queued", "done", "review"])), "review");
+  assert.equal(openingBoardColumn(columns(["queued", "done"])), "done");
+  assert.equal(openingBoardColumn(columns(["queued"])), "queued");
+  assert.equal(openingBoardColumn(columns([])), "input_required");
+});
+
+test("the filter strip names each filter set, then the result", () => {
+  const options = { machineLabel: (id: string) => `Machine ${id}`, agentLabel: (id: string) => `Agent ${id}` };
+  assert.equal(boardFilterSummary({ runnerId: null, agentId: "codex" }, options), "Agent: Agent codex.");
+  assert.equal(boardFilterSummary({ runnerId: "r-1", agentId: null }, options), "Machine: Machine r-1.");
+  assert.equal(boardFilterSummary({ runnerId: "r-1", agentId: "codex" }, options), "Machine: Machine r-1. Agent: Agent codex.");
+  assert.equal(boardFilterResult(10, 29), "Showing 10 of 29");
+});
+
+const focused = (element: Element | null | undefined) =>
+  element != null && domWindow.document.activeElement === (element as unknown as typeof domWindow.document.activeElement);
+
+test("a phone shows one column under its tabs, and a tab or an arrow key shows another", async () => {
+  await setViewport(390, 844);
+  const { unmount } = await mount();
+  assertNoDomNode(tools(), "no tab row tools on a phone");
+  const tablist = body().querySelector('[role="tablist"]')!;
+  assert.equal(tablist.getAttribute("aria-label"), "Board Columns");
+  const tabs = () => [...tablist.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+  assert.deepEqual(tabs().map((tab) => tab.getAttribute("aria-label")),
+    ["Needs Input, 0", "Running, 3", "Review, 0", "Done, 0", "Queued, 0"]);
+  // Zero is never shown in colour: an empty Needs Input reads a plain count.
+  assertNoDomNode(tablist.querySelector(".count-badge"));
+  // Nothing needs input, so the Board opens on Running, the next column with a card.
+  const selected = () => tabs().find((tab) => tab.getAttribute("aria-selected") === "true");
+  assert.equal(selected()?.getAttribute("aria-label"), "Running, 3");
+  assert.equal(selected()?.tabIndex, 0);
+  assert.equal(body().querySelectorAll(".board .column").length, 1);
+  const panel = () => body().querySelector('[role="tabpanel"]')!;
+  assert.equal(panel().getAttribute("aria-labelledby"), selected()?.id);
+  assert.ok(panel().classList.contains("col-running"));
+
+  await click(tabs()[4]);
+  assert.equal(selected()?.getAttribute("aria-label"), "Queued, 0");
+  assert.ok(panel().classList.contains("col-queued"));
+  assert.match(panel().textContent ?? "", /No sessions are in Queued\./);
+
+  await act(async () => { fireDomEvent.keyDown(selected()! as never, { key: "ArrowRight" }); });
+  assert.equal(selected()?.getAttribute("aria-label"), "Needs Input, 0", "the arrow wraps to the first tab");
+  assert.ok(focused(selected()), "the arrow moves focus with the selection");
+  await act(async () => { fireDomEvent.keyDown(selected()! as never, { key: "End" }); });
+  assert.equal(selected()?.getAttribute("aria-label"), "Queued, 0");
+  await unmount();
+});
+
+test("a phone's Filters sheet counts the result, presses Filters, and the strip's Clear Filters resets it", async () => {
+  await setViewport(390, 844);
+  const { unmount } = await mount();
+  const header = () => body().querySelector(".sessions-app-bar")!;
+  const filters = () => header().querySelector<HTMLButtonElement>(".board-filters-button")!;
+  assert.equal(filters().getAttribute("aria-label"), "Filters");
+  assert.equal(filters().getAttribute("aria-pressed"), "false");
+  assertNoDomNode(header().querySelector(".board-filter-strip"));
+
+  await click(filters());
+  const sheet = menu()!;
+  assert.equal(sheet.getAttribute("aria-label"), "Filters");
+  const note = () => menu()!.querySelector(".menu-note")!;
+  assert.equal(note().textContent, "Showing 3 of 3");
+  assert.equal(sheet.getAttribute("aria-describedby"), note().id);
+  assert.equal(rowNamed(sheet, "Clear Filters"), undefined);
+  const sections = [...sheet.querySelectorAll<HTMLElement>(':scope > [role="group"]')];
+  assert.deepEqual(sections.map((group) => group.getAttribute("aria-label")), ["Machine", "Agent"]);
+
+  await click(rowNamed(sections[1]!, "Codex"));
+  assert.ok(menu(), "the sheet stays open so its count answers the choice");
+  assert.equal(note().textContent, "Showing 2 of 3");
+  assert.equal(filters().getAttribute("aria-label"), "Filters, 1 Active");
+  assert.equal(filters().getAttribute("aria-pressed"), "true");
+  assert.equal(filters().querySelector(".count")?.textContent, "1");
+  assert.equal(header().querySelector(".board-filter-strip-text")?.textContent, "Agent: Codex. Showing 2 of 3.");
+
+  await click(rowNamed(menu()!, "Clear Filters"));
+  assert.equal(note().textContent, "Showing 3 of 3");
+  assertNoDomNode(header().querySelector(".board-filter-strip"));
+  assert.ok(focused(rowNamed(menu()!, "All Machines")), "focus lands on All Machines when Clear Filters leaves");
+
+  await click(rowNamed(menu()!, "Build Server 02"));
+  await act(async () => { fireDomEvent.keyDown(menu()! as never, { key: "Escape" }); });
+  assertNoDomNode(menu());
+  assert.equal(header().querySelector(".board-filter-strip-text")?.textContent, "Machine: Build Server 02. Showing 1 of 3.");
+  const clear = [...header().querySelectorAll<HTMLButtonElement>(".board-filter-strip button")]
+    .find((button) => button.textContent === "Clear Filters");
+  await click(clear);
+  assertNoDomNode(header().querySelector(".board-filter-strip"));
+  assert.equal(filters().getAttribute("aria-pressed"), "false");
+  assert.ok(focused(filters()), "focus moves to Filters when the strip leaves");
   await unmount();
 });
