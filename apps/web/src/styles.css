@@ -9727,12 +9727,13 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 }
 
 /* The Sessions list head (#2221, §13.2, §6.3): the one list notice, the quiet new-order line and
-   Reconnecting…, inset at the list's edges; the list below brings its own top padding. */
+   Reconnecting…, inset at the list's edges and 8px from the top as the rows are; the list below
+   brings its own top padding. A 104px notice and its pad are then exactly two 56px rows. */
 .inbox-list-head {
   display: grid;
   flex: none;
   gap: var(--space-2);
-  padding: var(--space-3) var(--space-3) 0;
+  padding: var(--space-2) var(--space-3) 0;
 }
 .inbox-list-head:empty { display: none; }
 .inbox-list-head > .list-notice-slot { margin: 0; }
