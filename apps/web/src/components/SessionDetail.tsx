@@ -1371,6 +1371,7 @@ function SessionDetailLoaded({
   // Resolve attention only against this generation's known requests. Cold links stay on the
   // transcript while hydration catches up; they never guess an Agents overview first.
   const handledAttentionRef = useRef<string | null>(null);
+  const preparedAttentionRef = useRef<string | null>(null);
   const attentionRequest = attentionTarget && attentionTarget.eventEpoch === (session.eventEpoch ?? 0)
     ? attentionTarget.requestId === undefined ? prioritizedRequests[0]
       : prioritizedRequests.find((request) => request.requestId === attentionTarget.requestId)
@@ -1388,7 +1389,12 @@ function SessionDetailLoaded({
       return;
     }
     // Close an obstructing panel before paint, then let the mounted dock reveal the exact card.
-    if (rightPanelRef.current.open) rightPanelRef.current.close();
+    if (preparedAttentionRef.current !== key) {
+      preparedAttentionRef.current = key;
+      if (rightPanelRef.current.open && (isMobileRef.current || rightPanelRef.current.mode === "subagents")) {
+        rightPanelRef.current.close();
+      }
+    }
     // After the dock has mounted; a re-render before the frame reschedules it.
     const frame = window.requestAnimationFrame(() => {
       if (!focusSessionRequest(session.id, requestId)) return;

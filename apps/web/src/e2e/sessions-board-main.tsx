@@ -47,7 +47,7 @@ const reminderConflict = new URLSearchParams(location.search).get("reminder-conf
 const lifecycle = new URLSearchParams(location.search).has("lifecycle");
 const entryRegressions = new URLSearchParams(location.search).has("entry-regressions");
 let entryHydrated = !new URLSearchParams(location.search).has("entry-cold");
-let resolveEntrySession: (() => void) | undefined;
+const entrySessionWaiters: Array<() => void> = [];
 
 const runner: RunnerView = {
   runnerId: "runner-1",
@@ -356,7 +356,7 @@ window.__replayProviderLoginSnapshot = () => socket?.push(snapshot());
 window.__hydrateEntrySession = () => {
   entryHydrated = true;
   socket?.push(snapshot());
-  resolveEntrySession?.();
+  for (const resolve of entrySessionWaiters.splice(0)) resolve();
 };
 window.__updateEntrySession = (change) => {
   const value = sessions.find((candidate) => candidate.id === "s-approval")!;
@@ -430,7 +430,7 @@ const client = {
     return { removed: true as const };
   },
   session: async (id: string) => {
-    if (id === "s-approval" && !entryHydrated) await new Promise<void>((resolve) => { resolveEntrySession = resolve; });
+    if (id === "s-approval" && !entryHydrated) await new Promise<void>((resolve) => { entrySessionWaiters.push(resolve); });
     const value = sessions.find((candidate) => candidate.id === id);
     if (!value) throw new Error("session not found");
     return { session: structuredClone(value) };

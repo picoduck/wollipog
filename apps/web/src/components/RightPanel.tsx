@@ -87,7 +87,7 @@ export interface RightPanelState {
   consumeSubagentFocusRequest: (sessionId: string, eventEpoch: number, request: number) => void;
 }
 
-export function useRightPanelState(navigationScope: string | null = null): RightPanelState {
+export function useRightPanelState(navigationScope: string | null = null, attentionNavigation = false): RightPanelState {
   const [open, setOpen] = useState(() => {
     try {
       return parseStoredRightPanelMode(loadBrowserStorageValue("wollipog.rightpanel.mode")) !== "subagents" &&
@@ -113,12 +113,14 @@ export function useRightPanelState(navigationScope: string | null = null): Right
   const [dragging, setDragging] = useState(false);
   const [subagentTarget, setSubagentTarget] = useState<RightPanelState["subagentTarget"]>(null);
   const nextSubagentFocusRequest = useRef(0);
-  const [previousScope, setPreviousScope] = useState(navigationScope);
+  const [previousNavigation, setPreviousNavigation] = useState({ scope: navigationScope, attention: attentionNavigation });
   // Adjust before children render, so navigation cannot commit an Agents panel for the new visit.
   // Other panel preferences and all session-scoped scratch stay intact.
-  if (previousScope !== navigationScope) {
-    setPreviousScope(navigationScope);
-    if (mode === "subagents") setOpen(false);
+  if (previousNavigation.scope !== navigationScope || previousNavigation.attention !== attentionNavigation) {
+    setPreviousNavigation({ scope: navigationScope, attention: attentionNavigation });
+    // Targeting another request in the same visit keeps deliberate panel state and focus intact.
+    // Returning from attention to the ordinary route starts a transcript-first visit.
+    if (mode === "subagents" && (previousNavigation.scope !== navigationScope || !attentionNavigation)) setOpen(false);
   }
 
   // Persist once a value settles — not on every pointermove during a drag.
@@ -309,6 +311,9 @@ export function RightPanel({
       // An overlay that replaced the panel (the phone's Pinned Summary sheet, #2147) owns focus by
       // now; pulling it back to the opener behind that dialog's scrim would escape its focus trap.
       if (document.activeElement?.closest('[aria-modal="true"]')) return;
+      // Attention navigation can dismiss a phone panel and focus the exact docked request in the
+      // same frame. That completed focus transfer takes precedence over returning to the opener.
+      if (document.activeElement?.closest("[data-session-request-focus]")) return;
       if (target?.isConnected) target.focus();
     });
   }, [session.id, state.open]);

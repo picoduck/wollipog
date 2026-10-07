@@ -395,7 +395,8 @@ export function Shell() {
   const notify = useNotifySetting();
   // Keep panel preferences and drafts in the shell, but Agents visibility belongs to this visit.
   // Leaving a session (including via the Sessions list) resets it before the next surface paints.
-  const rightPanel = useRightPanelState(view.name === "session" ? viewPath(view) : null);
+  const rightPanel = useRightPanelState(view.name === "session" ? view.id : null,
+    view.name === "session" && view.attention !== undefined);
   const sourceLocationKey = view.name === "session" && view.location
     ? `${view.id}\0${view.location.path}\0${view.location.line ?? ""}\0${view.location.column ?? ""}\0${view.location.symbol ?? ""}`
     : null;

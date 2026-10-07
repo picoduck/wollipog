@@ -6,6 +6,14 @@ const shell = (path: string) => `/sessions-board-e2e.html?full-shell=1&path=${en
 const entryShell = (path: string) => `${shell(path)}&entry-regressions=1`;
 const attentionPath = (id: string, requestId?: string) => `${sessionPath(id)}/attention${requestId ? `/~${opaque(requestId)}` : ""}?epoch=7`;
 const agents = (page: Page) => page.getByRole("complementary", { name: "Agents", exact: true });
+const navigateWithinShell = async (page: Page, path: string) => {
+  await page.evaluate((path) => {
+    const url = new URL(location.href);
+    url.searchParams.set("path", path);
+    history.pushState(null, "", url);
+    dispatchEvent(new PopStateEvent("popstate"));
+  }, path);
+};
 const openPanelMode = async (page: Page, mode: string) => {
   if (!await page.locator("#right-panel").count()) await page.getByRole("button", { name: "Side Panel", exact: true }).click();
   const back = page.getByRole("button", { name: "Back to Panel List", exact: true });
@@ -39,12 +47,45 @@ const observeAgents = async (page: Page) => {
 };
 
 for (const width of [390, 1440]) {
-  test(`ordinary entry with worker requests keeps the transcript visible at ${width}px`, async ({ page }) => {
+  test(`same-session worker attention preserves the deliberate Agents surface at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto(entryShell(sessionPath("s-approval")));
+    await page.evaluate(() => window.__updateEntrySession({ pendingApproval: {
+      requestId: "worker-question", ownerToolUseId: "fixture-child", kind: "question",
+      title: "Choose the Worker Check", options: [], questions: [{ id: "check", header: "Check",
+        question: "Which check should the worker run?", options: [{ label: "Unit Tests" }] }],
+    } }));
+    await openPanelMode(page, "Agents");
+    await agents(page).evaluate((panel) => panel.setAttribute("data-entry-mount", "original"));
+    if (width === 1440) {
+      await page.locator(".session-bar .session-status-button").click();
+      await page.getByRole("dialog", { name: "Session Status" }).getByRole("button", { name: "Answer", exact: true }).click();
+    } else {
+      await navigateWithinShell(page, attentionPath("s-approval", "worker-question"));
+    }
+    await expect(agents(page)).toHaveAttribute("data-entry-mount", "original");
+    await expect(agents(page).getByRole("region", { name: "Selected Worker Request" })).toBeFocused();
+    // Returning to this session's ordinary route is a new transcript entry.
+    await navigateWithinShell(page, sessionPath("s-approval"));
+    await expect(agents(page)).toHaveCount(0);
+  });
+
+  test(`own attention preserves desktop panels and dismisses phone overlays at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto(entryShell(sessionPath("s-approval")));
+    await openPanelMode(page, "Side Chat");
+    await page.getByRole("textbox", { name: "Side Chat Message", exact: true }).fill("Keep this draft");
+    await navigateWithinShell(page, attentionPath("s-approval", "async-question"));
+    await expect(page.locator(".request-dock").getByRole("heading").first()).toBeFocused();
+    await expect(page.locator("#right-panel")).toHaveCount(width === 1440 ? 1 : 0);
+    if (width === 1440) await expect(page.getByRole("textbox", { name: "Side Chat Message", exact: true })).toHaveValue("Keep this draft");
+  });
+
+  test(`ordinary entry keeps the transcript visible at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     await page.goto(shell(sessionPath("s-approval")));
     await expect(page.locator(".session-detail.expanded .composer-input")).toBeVisible();
     await expect(page.getByRole("complementary", { name: "Agents", exact: true })).toHaveCount(0);
-    await page.screenshot({ path: `/tmp/issue-2718-evidence/after-default-${width === 390 ? "mobile" : "desktop"}.png`, fullPage: true });
   });
 
   test(`Orchestrator-to-Standard and repeated entry discard Agents visibility at ${width}px`, async ({ page }) => {
@@ -69,7 +110,6 @@ for (const width of [390, 1440]) {
     });
     await expect(page.locator(".request-dock")).toContainText("Where should the release go?");
     await expect(agents(page)).toHaveCount(0);
-    await page.screenshot({ path: `/tmp/issue-2718-evidence/after-${width === 390 ? "mobile" : "desktop"}.png`, fullPage: true });
   });
 
   test(`persisted Agents-open state keeps ordinary entry on the transcript at ${width}px`, async ({ page }) => {
