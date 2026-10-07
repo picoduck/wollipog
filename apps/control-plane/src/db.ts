@@ -13096,8 +13096,8 @@ export class ControlPlaneDb {
         requestCreatedAtById,
         pendingApproval: parseJson<PendingApproval>(row.pending_approval),
         driver: (row.driver as AgentDriverKind) ?? "acp",
-        providerAccountId: row.provider_account_id ?? undefined,
-        providerAccountLabel: row.provider_account_label ?? undefined,
+        ...(row.provider_account_id ? { providerAccountId: row.provider_account_id } : {}),
+        ...(row.provider_account_label ? { providerAccountLabel: row.provider_account_label } : {}),
       };
     });
   }
