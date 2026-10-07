@@ -921,6 +921,19 @@ default (converge on the People & Devices anatomy).
   equal because content is bounded).
 - A card is an `<article>` with a stretched link or button for the primary click, never a
   `<button>` wrapping content.
+- **Board cards (#2222)** are cards in a column rather than a grid, with one anatomy. Line 1 has the agent
+  icon and "Agent · Project" (it gives up width first), then the machine as quiet meta after its 14px icon
+  (only when there is more than one machine), the pin, the time and ⋯. ⋯ shows on hover and focus on
+  fine pointers and is always there on touch. It opens the session's context menu (§5.2). Next comes the
+  title, clamped to 2 lines, then a status line that is always present: the one status badge by
+  `sessionRowStatus()`, the activity strip under the row's rule, and on a parent the family chip
+  (an image named by the whole rollup; dots only below a 600px list). Last is either the request or a
+  one-line `plainTextPreview()` of the latest message. The request is a warning inset notice (§13.2):
+  the request in `--type-body` with a code line when it has one, then **Approve** and **Deny** as
+  the equal pair (§3.1). Approve is the first one-time allow option and Deny the first one-time reject
+  or deny option. A persistent `*_always` option is never relabeled; it stays in the session. A question shows **Answer in Session**. A sign-in shows
+  one primary **Sign In** menu button: its methods are two-line items, and Cancel Sign-In is last, in
+  the danger style. Hover steps the fill up one surface; nothing moves.
 
 ### 5.4 Facts (Read-Only Labels and Values)
 

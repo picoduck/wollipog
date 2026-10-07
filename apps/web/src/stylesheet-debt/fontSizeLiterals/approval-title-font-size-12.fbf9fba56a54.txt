@@ -1,1 +1,0 @@
-|.approval-title|font-size|12

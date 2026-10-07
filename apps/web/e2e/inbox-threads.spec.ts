@@ -301,14 +301,18 @@ test("the mobile thread toggle confines paint beside both provider icons at both
   await page.screenshot({ path: `${EVIDENCE}/phone-toggle-clear.png`, fullPage: true });
 });
 
-test("Board cards carry the per-kind pills and the family chip without nesting", async ({ page }) => {
+test("Board cards carry the row's one status and the family chip without nesting", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await openList(page, "/board");
   const card = page.locator(".card", { hasText: "Ship the usage and cost overhaul" });
   await expect(card.locator(".inbox-thread-family-text")).toHaveText("4 Children · 2 Awaiting Input");
+  await expect(card.locator(".inbox-thread-family")).toHaveAttribute("aria-label", "4 Children · 2 Awaiting Input");
   await expect(card.locator(".inbox-thread-dot")).toHaveCount(4);
   const approval = page.locator(".card", { hasText: "Approval Session" });
-  await expect(approval.locator(".status.t-warning")).toHaveText(["Answer Required", "Approval Required2"]);
+  // One status, by the row's ranking (#2222), with the other kind in its "+1".
+  await expect(approval.locator(".status")).toHaveCount(1);
+  await expect(approval.locator(".status")).toHaveAttribute("aria-label", "Status: Answer Required");
+  await expect(approval.locator(".row-status-more > [aria-hidden='true']")).toHaveText("+1");
   await expect(page.locator(".attention-requests")).toHaveCount(0);
   await expect(page.locator(".card.thread-child")).toHaveCount(0);
   await page.screenshot({ path: `${EVIDENCE}/board.png`, fullPage: true });

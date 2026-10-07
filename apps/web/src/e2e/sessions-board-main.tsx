@@ -282,6 +282,66 @@ if (filtersScenario) {
   }
 }
 
+// One card of every kind the Board draws (#2222): idle and running cards whose previews are raw
+// markdown, a permission request whose agent names its options Always Allow, Allow and Reject, a
+// question, a sign-in with two methods and a cancel, and a parent with four children.
+const cardsScenario = new URLSearchParams(location.search).has("cards");
+if (cardsScenario) {
+  const now = Date.now();
+  const recent = (minutes: number) => ({ updatedAt: now - minutes * 60_000, lastEventAt: now - minutes * 60_000 });
+  const claude = { agentId: "claude", agentName: "Claude Code", driver: "claude-code" as const };
+  runner.agents.push({ id: "claude", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code", available: true });
+  sessions.splice(0, sessions.length,
+    session("s-idle", "Draft the release notes for v0.31 and link every merged pull request from the milestone", "review", {
+      ...recent(42),
+      preview: "(27/27)\n- [ ] Visual review… [design tokens doc](https://example.com/design-tokens)\n- [x] **Contrast** checks",
+    }),
+    session("s-busy", "Migrate the usage tables to the new schema", "running", {
+      ...claude, ...recent(1), status: "running",
+      preview: "## Summary\n\nRan `pnpm test` — **312 passed**, 3 files changed.",
+    }),
+    session("s-permission", "Fix the flaky reconnect test", "input_required", {
+      ...recent(3), status: "input_required",
+      pendingApproval: {
+        requestId: "req-permission",
+        kind: "permission",
+        title: "Run **pnpm test** in apps/web",
+        context: { toolName: "Bash", input: "pnpm --filter web test -- --reporter=dot" },
+        options: [
+          { optionId: "always", name: "Always Allow", kind: "allow_always" },
+          { optionId: "allow", name: "Allow", kind: "allow_once" },
+          { optionId: "reject", name: "Reject", kind: "reject_once" },
+        ],
+      },
+    }),
+    session("s-question", "Choose the cache eviction policy", "input_required", {
+      ...claude, ...recent(6), status: "input_required",
+      pendingApproval: { requestId: "req-question", kind: "question", title: "Keep the LRU cache or switch to TTL expiry?", options: [], questions: [] },
+    }),
+    session("s-sign-in", "Summarize the open design issues", "input_required", {
+      agentId: "opencode", agentName: "OpenCode", driver: "acp", ...recent(9), status: "input_required",
+      pendingApproval: {
+        requestId: "req-sign-in",
+        kind: "authentication",
+        title: "OpenCode needs you to sign in before it can continue.",
+        options: [
+          { optionId: "auth_1_method_1", name: "OpenCode Zen", description: "Sign in at opencode.ai in a browser, then return here.", kind: "allow_once" },
+          { optionId: "auth_1_method_2", name: "GitHub Copilot", description: "Use a GitHub Copilot subscription through a device code.", kind: "allow_once" },
+          { optionId: "auth_1_cancel", name: "Cancel sign-in", kind: "reject_once" },
+        ],
+      },
+    }),
+    session("s-parent", "Ship the usage and cost overhaul", "running", { ...claude, ...recent(2), status: "running", role: "orchestrator" }),
+    session("s-child-1", "#600: Add the usage table", "running", { ...claude, ...recent(2), status: "running", parentSessionId: "s-parent" }),
+    session("s-child-2", "#601: Link the cost source", "done", { ...claude, ...recent(30), status: "completed", parentSessionId: "s-parent" }),
+    session("s-child-3", "#602: Roll the daily budget over", "done", { ...claude, ...recent(40), status: "completed", parentSessionId: "s-parent" }),
+    session("s-child-4", "#603: Normalize the allowance window", "review", {
+      ...claude, ...recent(12), status: "input_required", parentSessionId: "s-parent",
+      pendingApproval: { requestId: "req-child-4", kind: "question", title: "Bump the protocol to 106?", options: [], questions: [] },
+    }),
+  );
+}
+
 if (lifecycle) {
   runner.protocolVersion = PROTOCOL_VERSION;
   for (const value of sessions) {

@@ -1,24 +1,42 @@
-import { BoardIcon } from "./Icons.js";
+import { BoardIcon, ChevronDownIcon, ComputerIcon, MoreHorizontalIcon } from "./Icons.js";
 import { State, useSnapshotState } from "./State.js";
-import { type DragEvent, type MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { BOARD_COLUMNS, type BoardColumn, type BoxView, type SessionReminderView, type SessionView } from "@wollipog/protocol";
+import { type DragEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  BOARD_COLUMNS,
+  plainTextPreview,
+  type BoardColumn,
+  type BoxView,
+  type PendingApproval,
+  type PermissionOption,
+  type SessionReminderView,
+  type SessionView,
+} from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
-import { relativeTime } from "../format.js";
 import { destination } from "../navigation.js";
 import { runnerDisplay } from "../runners.js";
-import { SessionStatusIndicators, ReminderBadge, SessionPinIndicator, SnoozedAttentionBadge, ThreadDot } from "./common.js";
-import { inboxThreadChildrenLabel, inboxThreadChildState, isInboxBlocked, type InboxThreadChildren } from "../inbox.js";
-import { useLongPress } from "./interactions.js";
+import { SessionPinIndicator, ThreadDot } from "./common.js";
+import { inboxProjectName, inboxThreadChildrenLabel, inboxThreadChildState, isInboxBlocked, type InboxThreadChildren } from "../inbox.js";
+import { useAccessibleMenu, useLongPress } from "./interactions.js";
 import { sessionCommandRefusal } from "../session-command-permissions.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { MeasuredVirtualList } from "./MeasuredVirtualList.js";
 import { useExperiments } from "../use-experiments.js";
-import { snoozedSessionAttentionReason } from "../session-reminders.js";
 import { activeBoardFilterCount, filterBoardSessions } from "./BoardFilters.js";
+import { showsActivityStrip } from "../activity.js";
+import { boardCardDecisions, boardCardRequestCode, boardCardSignInItems, type BoardCardSignInItem } from "../board-card.js";
+import { sessionRowStatus } from "../session-row-status.js";
+import { sessionDisplayTitle } from "../session-title.js";
+import { ActivityStrip } from "./ActivityStrip.js";
+import { AgentIcon } from "./AgentIcon.js";
+import { inboxRowReadsClock } from "./InboxList.js";
+import { inboxRowTimestamp, sessionStalledForMs, SessionRowTime } from "./InboxRow.js";
+import { MenuItem, MenuSeparator, MenuSurface } from "./Menu.js";
+import { Notice } from "./Notice.js";
+import { SessionRowStatusBadge } from "./SessionRowStatusBadge.js";
 
 const sessionCardKey = (session: SessionView) => session.id;
-const estimateSessionCard = (session: SessionView) => session.pendingApproval ? 230 : session.preview ? 155 : 120;
+const estimateSessionCard = (session: SessionView) => session.pendingApproval ? 196 : 118;
 
 /** A column header's status dot (§11.1): Running is info, Needs Input warning, the rest neutral. */
 const COLUMN_TONE: Record<BoardColumn, "neutral" | "info" | "warning"> = {
@@ -60,14 +78,22 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
   const runners = useStoreSelector((s) => s.runners);
   const boxes = useStoreSelector((s) => s.boxes);
   const filters = useStoreSelector((s) => s.filters);
+  const projects = useStoreSelector((s) => s.projects);
+  const projectsSupported = useStoreSelector((s) => s.projectsSupported);
 
   const boxByRunner = useMemo(() => {
     const m = new Map<string, BoxView>();
     for (const b of boxes.values()) m.set(b.runnerId, b);
     return m;
   }, [boxes]);
+  // The machine is quiet meta after the project, and only where there is more than one (#2222).
+  const multipleMachines = useMemo(
+    () => new Set([...runners.keys(), ...scoped.map((session) => session.runnerId)]).size > 1,
+    [runners, scoped],
+  );
   const machineName = (runnerId: string) =>
-    runnerDisplay(runners.get(runnerId), boxByRunner.get(runnerId), runnerId).name;
+    multipleMachines ? runnerDisplay(runners.get(runnerId), boxByRunner.get(runnerId), runnerId).name : null;
+  const projectName = (session: SessionView) => inboxProjectName(session, projectsSupported ? projects : undefined);
 
   const scopedCount = scoped.length;
   const filtered = activeBoardFilterCount(filters) > 0;
@@ -257,8 +283,10 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
                   sessions={list}
                   pinnedSessionIds={pinnedSessionIds}
                   reminders={reminders}
+                  stalledSessionIds={stalledSessionIds}
+                  projectName={projectName}
                   machineName={machineName}
-                  runnerOnline={(runnerId) => runners.get(runnerId)?.status === "online"}
+                  runnerStatus={(runnerId) => runners.get(runnerId)?.status}
                   onOpen={(sessionId) => navigate({ name: "session", id: sessionId })}
                   threadChildren={threadChildren}
                   onDragStart={startDrag}
@@ -278,8 +306,10 @@ function BoardColumnBody({
   sessions,
   pinnedSessionIds,
   reminders,
+  stalledSessionIds,
+  projectName,
   machineName,
-  runnerOnline,
+  runnerStatus,
   onOpen,
   threadChildren,
   onDragStart,
@@ -289,8 +319,10 @@ function BoardColumnBody({
   sessions: SessionView[];
   pinnedSessionIds: ReadonlySet<string>;
   reminders: ReadonlyMap<string, SessionReminderView>;
-  machineName: (runnerId: string) => string;
-  runnerOnline: (runnerId: string) => boolean;
+  stalledSessionIds: ReadonlySet<string>;
+  projectName: (session: SessionView) => string;
+  machineName: (runnerId: string) => string | null;
+  runnerStatus: (runnerId: string) => string | undefined;
   onOpen: (sessionId: string) => void;
   threadChildren: ReadonlyMap<string, InboxThreadChildren>;
   onDragStart: () => void;
@@ -309,8 +341,11 @@ function BoardColumnBody({
             session={session}
             pinned={pinnedSessionIds.has(session.id)}
             reminder={reminders.get(session.id)}
+            projectName={projectName(session)}
             machineName={machineName(session.runnerId)}
-            runnerOnline={runnerOnline(session.runnerId)}
+            runnerOnline={runnerStatus(session.runnerId) === "online"}
+            runnerConnected={runnerStatus(session.runnerId) !== "offline"}
+            stalled={stalledSessionIds.has(session.id)}
             onOpen={() => onOpen(session.id)}
             threadChildren={threadChildren.get(session.id) ?? null}
             onDragStart={onDragStart}
@@ -334,8 +369,11 @@ function SessionCard({
   session,
   pinned,
   reminder,
+  projectName,
   machineName,
   runnerOnline,
+  runnerConnected,
+  stalled,
   onOpen,
   threadChildren,
   onDragStart,
@@ -345,21 +383,33 @@ function SessionCard({
   session: SessionView;
   pinned: boolean;
   reminder?: SessionReminderView;
-  machineName: string;
+  projectName: string;
+  /** The machine, as quiet meta after the project, only where there is more than one machine. */
+  machineName: string | null;
+  /** The machine is online: a decision can reach it. */
   runnerOnline: boolean;
+  /** The machine is not known to be offline: the status reads as the row's does (#2209). */
+  runnerConnected: boolean;
+  stalled: boolean;
   onOpen: () => void;
   threadChildren: InboxThreadChildren | null;
   onDragStart: () => void;
   onDragEnd: () => void;
   onSessionMenu: (sessionId: string, anchor: { x: number; y: number }, restoreTarget: () => HTMLElement | null) => void;
 }) {
-  const api = useApi();
-  const [busy, setBusy] = useState(false);
-  const snoozedAttention = reminder?.state === "pending" ? snoozedSessionAttentionReason(session) : null;
-  const extraSnoozedAttention = snoozedAttention?.kind === "orphaned_background_work" ||
-      snoozedAttention?.kind === "background_delivery_watchdog"
-    ? snoozedAttention
-    : null;
+  // The card reads its own activity, as a list row does, so one session's tool calls re-render one card.
+  const activity = useStoreSelector((state) => state.activity.get(session.id));
+  const activityNow = useStoreSelector((state) =>
+    inboxRowReadsClock(session, state.activity.get(session.id), stalled, state.activityNow) ? state.activityNow : 0);
+  const lastActivityAt = inboxRowTimestamp(session, activity);
+  const status = sessionRowStatus(session, {
+    runnerOnline: runnerConnected,
+    reminder,
+    stalledForMs: sessionStalledForMs(stalled, activityNow, lastActivityAt),
+  });
+  const strip = showsActivityStrip(session.status, activity, activityNow);
+  const agent = sessionAgentLabel(session.agentName, session.driver, session.agentId);
+  const request = session.pendingApproval;
   // Resolved by session id AT RESTORE TIME, not by card instance: a live column move remounts
   // the virtualized card while its menu is open, and a ref to the old instance would strand
   // focus on <body>. The board canvas itself is the fallback (it is focusable for the F6 zone).
@@ -372,18 +422,23 @@ function SessionCard({
   const openMenu = (anchor: { x: number; y: number }) => onSessionMenu(session.id, anchor, restoreTarget);
   const longPress = useLongPress(openMenu);
 
-  // A person the server refuses a decision (a Viewer) sees the options disabled with the reason (#1857).
-  const respondRefusal = sessionCommandRefusal(session, "respond");
-  const approve = async (e: MouseEvent, optionId: string | null) => {
-    e.stopPropagation();
-    if (!session.pendingApproval || respondRefusal !== null) return;
-    setBusy(true);
-    try {
-      await api.approve(session.id, { requestId: session.pendingApproval.requestId, optionId });
-    } finally {
-      setBusy(false);
-    }
-  };
+  const childrenLabel = threadChildren ? inboxThreadChildrenLabel(threadChildren) : null;
+  /* The family chip (#896, #2215) after the badge: one dot per child and the rollup. The Board sits in
+     the list pane, so below a 600px list it keeps only its dots, as a row's chip does; it is an image
+     named by the whole rollup at every width, and its visible words stay out of the accessible tree. */
+  const familyChip = threadChildren && childrenLabel ? (
+    <span
+      className={`inbox-thread-family${threadChildren.waiting > 0 ? " waiting" : ""}`}
+      role="img"
+      aria-label={childrenLabel}
+      title={childrenLabel}
+    >
+      <span className="inbox-thread-dots" aria-hidden="true">
+        {threadChildren.children.map((child) => <ThreadDot key={child.id} state={child.state} title={child.title} />)}
+      </span>
+      <span className="inbox-thread-family-text" aria-hidden="true">{childrenLabel}</span>
+    </span>
+  ) : null;
 
   return (
     <article
@@ -412,74 +467,193 @@ function SessionCard({
       }}
       onDragEnd={onDragEnd}
     >
-      <div className="card-top">
-        <SessionStatusIndicators session={session} disconnected={!runnerOnline} attention="pills" />
-        <span className="card-top-trailing">
+      {/* Line 1 (#2222): who and where, which gives up width first, then the pin and the time. The
+          ⋯ that ends the line is written last, so it stacks above the stretched open button. */}
+      <div className="card-head">
+        <span className="card-sender">
+          <AgentIcon driver={session.driver} agentName={session.agentName} size={16} />
+          <span className="card-sender-text">{agent} · {projectName}</span>
+        </span>
+        {machineName && (
+          <span className="card-machine">
+            <ComputerIcon size={14} />
+            <span className="sr-only">Machine: </span>
+            <span className="card-machine-name">{machineName}</span>
+          </span>
+        )}
+        <span className="card-head-trail">
           {pinned && <SessionPinIndicator />}
-          <span className="card-time">{relativeTime(session.lastEventAt ?? session.updatedAt)}</span>
+          <SessionRowTime className="card-time" lastActivityAt={lastActivityAt} reminder={reminder} />
         </span>
       </div>
+      {/* The card's one primary click (§5.3): its box is stretched over the whole card. */}
       <button
         type="button"
         className="card-title card-open"
         onClick={(event) => { event.stopPropagation(); onOpen(); }}
       >
-        {session.title}
+        {sessionDisplayTitle(session.title)}
       </button>
-      {session.preview && <div className="card-preview">{session.preview}</div>}
-      {session.pendingApproval && session.pendingApproval.kind === "question" ? (
-        // Structured questions have no inline options (options[] is empty by design) — the
-        // card offers Open, which lands on the detail view's interactive question card.
-        <div className="card-approval" onClick={(e) => e.stopPropagation()}>
-          <div className="approval-title">❓ {session.pendingApproval.title}</div>
-          <div className="approval-actions">
-            <button className="btn sm primary" onClick={onOpen}>
-              Answer…
-            </button>
-          </div>
-        </div>
-      ) : session.pendingApproval ? (
-        <div className="card-approval" onClick={(e) => e.stopPropagation()}>
-          <div className="approval-title">{session.pendingApproval.title}</div>
-          {respondRefusal !== null && (
-            <div className="muted approval-refusal" id={`card-approval-refusal-${session.id}`}>{respondRefusal}</div>
-          )}
-          <div className="approval-actions">
-            {session.pendingApproval.options.map((o) => (
-              <button
-                key={o.optionId}
-                className={`btn sm ${o.kind?.startsWith("allow") ? "primary" : "ghost danger"}`}
-                disabled={busy || !runnerOnline || respondRefusal !== null}
-                aria-describedby={respondRefusal !== null ? `card-approval-refusal-${session.id}` : undefined}
-                onClick={(e) => approve(e, o.optionId)}
-              >
-                {o.name}
-              </button>
-            ))}
-          </div>
-        </div>
-      ) : null}
-
-      <div className="card-meta">
-        {threadChildren && (
-          <span className={`inbox-thread-family${threadChildren.waiting > 0 ? " waiting" : ""}`} title={inboxThreadChildrenLabel(threadChildren)}>
-            <span className="inbox-thread-dots" aria-hidden="true">
-              {threadChildren.children.map((child) => <ThreadDot key={child.id} state={child.state} title={child.title} />)}
-            </span>
-            <span className="inbox-thread-family-text">{inboxThreadChildrenLabel(threadChildren)}</span>
-          </span>
-        )}
-        {extraSnoozedAttention && <SnoozedAttentionBadge reason={extraSnoozedAttention} />}
-        {reminder && <ReminderBadge reminder={reminder} />}
-        <span className="tag tag-machine" title="Runner / machine">
-          {machineName}
-        </span>
-        {session.agentName && (
-          <span className="tag tag-agent">{sessionAgentLabel(session.agentName, session.driver, session.agentId)}</span>
-        )}
-        {session.useWorktree && <span className="tag tag-wt" title={session.worktreePath ?? "isolated worktree"}>Worktree</span>}
-        {session.runId && <span className="tag tag-run">Run</span>}
+      <div className="card-status">
+        <SessionRowStatusBadge status={status} />
+        {strip && <ActivityStrip activity={activity} now={activityNow} compact />}
+        {familyChip}
       </div>
+      {request
+        ? <CardRequest session={session} request={request} runnerOnline={runnerOnline} onOpen={onOpen} />
+        : <div className="card-preview">{plainTextPreview(session.preview)}</div>}
+      <button
+        type="button"
+        className="icon-btn sm card-more"
+        aria-label="More Actions"
+        title="More Actions (Shift+F10)"
+        aria-haspopup="menu"
+        onClick={(event) => {
+          event.stopPropagation();
+          const box = event.currentTarget.getBoundingClientRect();
+          openMenu({ x: box.left, y: box.bottom });
+        }}
+      >
+        <MoreHorizontalIcon />
+      </button>
     </article>
   );
 }
+
+/**
+ * A card's request (#2222): a warning inset notice with the request in plain words, a code line when
+ * the request has one, then Approve and Deny sharing the card's width (§3.1). A question offers Answer
+ * in Session; a sign-in, one Sign In menu button. Viewer refusals keep their visible reason line.
+ */
+function CardRequest({ session, request, runnerOnline, onOpen }: {
+  session: SessionView;
+  request: PendingApproval;
+  runnerOnline: boolean;
+  onOpen: () => void;
+}) {
+  const api = useApi();
+  const [busy, setBusy] = useState(false);
+  // A person the server refuses a decision (a Viewer) sees the options disabled with the reason (#1857).
+  const respondRefusal = sessionCommandRefusal(session, "respond");
+  const refusalId = `card-approval-refusal-${session.id}`;
+  const unavailable = busy || !runnerOnline || respondRefusal !== null;
+  const decide = async (optionId: string) => {
+    if (unavailable) return;
+    setBusy(true);
+    try {
+      await api.approve(session.id, { requestId: request.requestId, optionId });
+    } finally {
+      setBusy(false);
+    }
+  };
+  const optionButton = (option: PermissionOption, label: string, primary: boolean) => (
+    <button
+      key={option.optionId}
+      type="button"
+      className={`btn sm${primary ? " primary" : ""}`}
+      disabled={unavailable}
+      aria-describedby={respondRefusal !== null ? refusalId : undefined}
+      onClick={() => void decide(option.optionId)}
+    >
+      {label}
+    </button>
+  );
+
+  const question = request.kind === "question";
+  const signIn = request.kind === "authentication";
+  const decisions = question || signIn ? null : boardCardDecisions(request.options);
+  const code = question ? null : boardCardRequestCode(request);
+  const actions = question ? (
+    // Structured questions have no inline options (options[] is empty by design): the card opens the
+    // session, whose question card is interactive.
+    <button type="button" className="btn sm primary" onClick={onOpen}>Answer in Session</button>
+  ) : signIn ? (
+    <CardSignInMenu
+      items={boardCardSignInItems(request.options)}
+      unavailable={unavailable}
+      describedBy={respondRefusal !== null ? refusalId : undefined}
+      onChoose={(optionId) => void decide(optionId)}
+    />
+  ) : decisions && (decisions.approve || decisions.deny) ? (
+    <>
+      {decisions.approve && optionButton(decisions.approve, "Approve", true)}
+      {decisions.deny && optionButton(decisions.deny, "Deny", false)}
+    </>
+  ) : null;
+
+  return (
+    // Decisions stay on the card: a click inside, or in a menu portalled from here, never opens it.
+    <div className="card-request" onClick={(e) => e.stopPropagation()}>
+      <Notice tone="warning" className={`card-request-notice${decisions ? " decision-pair" : ""}`} actions={actions}>
+        <p className="card-request-text">{plainTextPreview(request.title)}</p>
+        {code && <code className="card-request-code">{code}</code>}
+        {respondRefusal !== null && !question && (
+          <p className="approval-refusal" id={refusalId}>{respondRefusal}</p>
+        )}
+      </Notice>
+    </div>
+  );
+}
+
+/** A sign-in card's one primary: Sign In, a menu of the methods with their descriptions, then the
+ * danger items, Cancel Sign-In last (#2222, §9.1). */
+function CardSignInMenu({ items, unavailable, describedBy, onChoose }: {
+  items: readonly BoardCardSignInItem[];
+  unavailable: boolean;
+  describedBy?: string;
+  onChoose: (optionId: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const menu = useAccessibleMenu(open, setOpen, "card-sign-in");
+  const methods = items.filter((item) => !item.danger);
+  const danger = items.filter((item) => item.danger);
+  const item = ({ option, label, danger: destructive }: BoardCardSignInItem) => (
+    <MenuItem
+      key={option.optionId}
+      danger={destructive}
+      description={destructive ? undefined : option.description}
+      onClick={() => {
+        menu.close(true);
+        onChoose(option.optionId);
+      }}
+    >
+      {label}
+    </MenuItem>
+  );
+  return (
+    <>
+      <button
+        ref={menu.triggerRef}
+        type="button"
+        className="btn sm primary"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? menu.menuId : undefined}
+        aria-describedby={describedBy}
+        disabled={unavailable || items.length === 0}
+        onClick={menu.toggle}
+        onKeyDown={menu.onTriggerKeyDown}
+      >
+        Sign In
+        <ChevronDownIcon size={14} />
+      </button>
+      {open && (
+        <MenuSurface
+          surfaceRef={menu.menuRef}
+          anchor={{ trigger: menu.triggerRef }}
+          id={menu.menuId}
+          label="Sign In"
+          onDismiss={() => menu.close(true)}
+          onKeyDown={menu.onMenuKeyDown}
+          // The card's long-press must not read a press held inside its own menu.
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          {methods.map(item)}
+          {methods.length > 0 && danger.length > 0 && <MenuSeparator />}
+          {danger.map(item)}
+        </MenuSurface>
+      )}
+    </>
+  );
+}
+

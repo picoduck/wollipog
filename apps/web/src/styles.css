@@ -3144,10 +3144,6 @@ button.status { cursor: pointer; }
   :is(.pid-mask, .pid-shown) > .app-icon { color: inherit; }
 }
 .pid-value { min-width: 0; overflow-wrap: anywhere; }
-/* Inside a compact tag the chip drops its frame and the control keeps the tag's height, borrowing
-   the rest of its hit area. */
-.tag :is(.pid-mask, .pid-shown) { padding: 0; border: 0; }
-.tag .pid-toggle { width: 16px; height: 16px; margin-top: -2px; margin-bottom: -2px; }
 /* A field label with the reveal control for the values the field hides (a picker's options). */
 .pid-field-head {
   display: flex;
@@ -3157,10 +3153,6 @@ button.status { cursor: pointer; }
   gap: var(--space-1) var(--space-2);
 }
 .pid-field-head > .pid-toggle { margin-inline-start: auto; }
-@media (pointer: coarse) {
-  /* Outranks the shared small-control rule, which would borrow only 4px around a 16px glyph. */
-  .tag .pid-toggle.icon-btn::after { inset: -14px; }
-}
 
 /* ---------------------------------- Stale ----------------------------------
    StaleContent.tsx: last-known content kept on screen while its source is unreachable (§12.5).
@@ -3350,39 +3342,81 @@ textarea {
    as ordinary flow and must not become a competing scrollTop owner. */
 .measured-virtual-scroll { overflow-anchor: none; }
 
-/* -------------------------------- Cards --------------------------------- */
+/* -------------------------------- Cards ---------------------------------
+   A Board card (#2222; docs/design-system.md §5.3): an `<article>` whose title button is stretched
+   over the whole card. Line 1 is the agent icon and "Agent · Project", the time and ⋯; then the title
+   (2 lines), one status line, and either the request or a one-line preview. Every card in a column
+   has this anatomy, so heights differ only by title lines and whether a request shows. Hover steps
+   the fill up as a row does; nothing moves (§2.9). */
 .card {
-  background: var(--bg-elev-2);
+  position: relative;
+  display: grid;
+  gap: var(--space-1);
+  width: 100%;
+  padding: var(--card-pad-y) var(--card-pad-x);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  padding: var(--card-pad-y) var(--card-pad-x);
+  background: var(--bg-elev-2);
   cursor: pointer;
-  transition: border-color var(--dur-fast) var(--ease-out), transform var(--dur-instant) var(--ease-out);
-  width: 100%;
+  transition: background var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
 }
-.card:hover {
-  border-color: var(--border-strong);
-  transform: translateY(-1px);
+@media (hover: hover) {
+  .card:hover { border-color: var(--border-strong); background: var(--bg-elev-3); }
 }
-.card-top {
+/* Line 1 keeps the trailing room ⋯ takes, so the time never moves under it. */
+.card-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  margin-bottom: 8px;
+  gap: var(--space-3);
+  min-width: 0;
+  min-height: 20px;
+  padding-right: var(--control-h-sm);
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.card-sender {
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.card-sender-text,
+.card-machine-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Quiet meta (§11.3): the machine after its 14px icon, giving way before the sender does. */
+.card-machine {
+  display: flex;
+  flex: 0 100000 auto;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.card-machine > svg { flex: none; }
+.card-head-trail {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
 }
 .card-time {
-  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
   color: var(--text-faint);
+  font: var(--type-small);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
-.card-top-trailing { display: inline-flex; flex: none; align-items: center; gap: 7px; }
 .card-title {
-  font-size: 13.5px;
-  font-weight: 600;
-  line-height: 1.35;
-  margin-bottom: 6px;
+  display: -webkit-box;
+  overflow: hidden;
+  font: var(--type-body-strong);
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 .card-open {
-  display: block;
   width: 100%;
   padding: 0;
   border: 0;
@@ -3391,65 +3425,82 @@ textarea {
   text-align: left;
   cursor: pointer;
 }
-.card-open:focus-visible {
+/* The stretched primary click (§5.3). Controls written after it are positioned, so they stack above. */
+.card-open::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+}
+/* The ring is the card's; the button's own stays transparent, so forced colors still draws one. */
+.card-open:focus-visible { outline: 2px solid transparent; }
+.card:has(> .card-open:focus-visible) {
   outline: var(--focus-width) solid var(--focus);
-  outline-offset: 3px;
-  border-radius: 2px;
+  outline-offset: 2px;
 }
-.card-preview {
-  font-size: 12px;
-  color: var(--text-dim);
-  line-height: 1.4;
-  max-height: 48px;
-  overflow: hidden;
-  margin-bottom: 8px;
-}
-.card-meta {
+/* The status line is always there, empty or not, so idle cards are as tall as busy ones. */
+.card-status {
   display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-  margin-top: 8px;
-}
-.tag {
-  font-size: 10.5px;
-  padding: 2px 7px;
-  border-radius: 5px;
-  background: var(--bg-elev-3);
-  border: 1px solid var(--border);
-  color: var(--text-dim);
-}
-.tag-machine {
-  color: var(--agent-claude);
-  border-color: color-mix(in srgb, var(--accent-2) 30%, transparent);
-}
-.tag-agent {
-  color: var(--code-accent);
-  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
-}
-.tag-wt {
-  color: var(--teal);
-}
-.tag-run {
-  color: var(--amber-on-tint);
-}
-.card-approval {
-  background: color-mix(in srgb, var(--amber) 8%, transparent);
-  border: 1px solid color-mix(in srgb, var(--amber) 30%, transparent);
-  border-radius: 6px;
-  padding: 8px;
-  margin: 4px 0;
-}
-.approval-title {
-  font-size: 12px;
-  color: var(--amber);
-  margin-bottom: 7px;
-}
-/* 8px apart: on touch each small button borrows 4px on every side for its 44px target (§2.8), and
-   closer neighbours would share a strip of each other's target. */
-.approval-actions {
-  display: flex;
+  align-items: center;
   gap: var(--space-2);
+  min-width: 0;
+  min-height: 20px;
 }
+.card-status > * { position: relative; flex: none; }
+/* In a 230px column the family chip gives way first (its rollup ellipsizes; its name stays whole),
+   then the badge, whose label clips while its accessible name and tooltip stay whole, as on the
+   phone row. The strip never shrinks. */
+.card-status > .inbox-thread-family { flex: 0 100000 auto; min-width: 0; max-width: 100%; }
+.card-status > .row-status { flex: 0 1 auto; min-width: 0; }
+.card-status .row-status > .status { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+.card-preview {
+  min-height: 16px;
+  overflow: hidden;
+  color: var(--text-dim);
+  font: var(--type-small);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* ⋯ ends line 1: on hover and focus on fine pointers, always on touch, where it is 36px with a
+   44px target. Hidden by opacity rather than display, so it stays in the tab order. */
+.card-more {
+  position: absolute;
+  top: calc(var(--card-pad-y) + 10px - var(--control-h-sm) / 2);
+  right: calc(var(--card-pad-x) - var(--space-1));
+}
+@media (pointer: fine) {
+  .card-more { opacity: 0; }
+  :is(.card:hover, .card:focus-within) > .card-more { opacity: 1; }
+}
+/* The request: a warning inset notice (§13.2) whose buttons stack above the stretched click. */
+.card-request { margin-top: var(--space-1); }
+.card-request-notice {
+  column-gap: var(--space-2);
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+}
+.card-request-notice .btn { position: relative; }
+.card-request-text {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  font: var(--type-body);
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+.card-request-code {
+  display: block;
+  overflow: hidden;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The narrow-card exception (§3.1): Approve and Deny share the row as an equal pair, never wrapping. */
+.decision-pair .notice-actions { flex-wrap: nowrap; }
+.decision-pair .notice-actions > .btn { flex: 1 1 0; min-width: 0; max-width: none; }
 
 /* ---------------------------- Session detail ---------------------------- */
 .session-detail,
@@ -12086,8 +12137,6 @@ body.shell-dock-dragging * {
   white-space: nowrap;
   cursor: pointer;
 }
-/* A Board card's meta line has the room the list's title line does not. */
-.card-meta .inbox-thread-family { max-width: 100%; }
 .inbox-thread-family.waiting { border-color: transparent; color: var(--accent-2-on-tint); background: color-mix(in srgb, var(--accent-2) 12%, transparent); }
 .inbox-thread-family-text { overflow: hidden; text-overflow: ellipsis; }
 @container list (max-width: 599px) {
@@ -13399,9 +13448,6 @@ body.shell-dock-dragging * {
   font-size: var(--text-sm);
   line-height: 1.4;
 }
-.card-approval .approval-refusal {
-  margin-bottom: 7px;
-}
 .approval-context {
   margin: 8px 0 0;
   padding: 8px 10px;
@@ -14290,9 +14336,6 @@ body.shell-dock-dragging * {
   }
   .background-work-group-head { align-items: center; }
 
-  .approval-actions {
-    flex-wrap: wrap;
-  }
   /* Composer: six lines at most, above the software keyboard. */
   .composer-input { max-height: calc(6 * 22px); }
   /* The idle capsule (#2174): the card's own 12px corners and side insets, so expanding it changes
@@ -16311,9 +16354,6 @@ body.shell-dock-dragging * {
    promotion has no job left — and it did active harm: it made `.slash-src` render identically to
    `.slash-desc`, which uses the dim tier, so the two lines of an active row became one weight. A
    promotion that outlives its reason is an inversion waiting to be reported. */
-.card-approval .approval-title {
-  color: var(--amber-on-tint);
-}
 
 .skeleton {
   display: flex;

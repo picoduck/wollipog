@@ -964,23 +964,24 @@ test("reminder membership stays exclusive while scoped attention reconciles in S
   await act(async () => { snoozedToggle(container).click(); });
   await renderView("board");
   assert.deepEqual([...container.querySelectorAll(".card")].map((card) => card.textContent?.includes("Session unsnoozed")), [true]);
-  assertNoDomNode(container.querySelector('.card [aria-label="Reminder: Snoozed"]'));
+  assertNoDomNode(container.querySelector(".card .card-time.snoozed"));
 
   await act(async () => { snoozedToggle(container).click(); });
   assert.ok([...container.querySelectorAll(".card")].some((card) => card.textContent?.includes("Session orphaned")));
-  assert.ok(container.querySelector('.card [aria-label="Attention: Background Work Lost"]'));
-  const boardWatchdogPill = container.querySelector('.card [aria-label^="Background Work: Result Pending."]');
+  // A card shows the row's one status (#2222), and a snoozed card's time says when it returns.
+  assert.ok(container.querySelector('.card [aria-label="Status: Background Work Lost"]'));
+  const boardWatchdogPill = container.querySelector('.card [aria-label="Status: Result Pending"]');
   assert.ok(boardWatchdogPill);
   assert.ok(boardWatchdogPill.classList.contains("t-info"));
   assert.equal(boardWatchdogPill.classList.contains("t-warning"), false);
-  assert.ok(container.querySelector('.card [aria-label="Reminder: Snoozed"]'));
+  assert.ok(container.querySelector(".card .card-time.snoozed"));
 
   await act(async () => {
     socket.push({ type: "session_upsert", session: { ...orphaned, backgroundWorkState: "resumed", updatedAt: 80 } });
   });
   assert.ok([...container.querySelectorAll(".card")].some((card) => card.textContent?.includes("Session orphaned")),
     "clearing attention must leave the pending reminder in Snoozed");
-  assertNoDomNode(container.querySelector('.card [aria-label="Attention: Background Work Lost"]'));
+  assertNoDomNode(container.querySelector('.card [aria-label="Status: Background Work Lost"]'));
   assert.equal(snoozedCount(container), "6");
 
   await act(async () => {
@@ -2021,7 +2022,7 @@ test("a Viewer's Inbox archive and decision shortcuts and row menu send nothing 
       </ApiProvider>,
     );
   });
-  const options = [...container.querySelectorAll<HTMLButtonElement>(".card-approval .approval-actions button")];
+  const options = [...container.querySelectorAll<HTMLButtonElement>(".card-request .notice-actions button")];
   assert.deepEqual(options.map((option) => option.textContent), ["Approve", "Deny"]);
   for (const option of options) {
     assert.equal(option.disabled, true, `the card's ${option.textContent} is disabled`);
@@ -2220,8 +2221,8 @@ test("a long-press over a card's approval button opens the menu without approvin
         } as never,
       })]));
     });
-    const approveButton = ([...domWindow.document.querySelectorAll(".card-approval button")] as unknown as HTMLElement[])
-      .find((button) => button.textContent === "Allow")!;
+    const approveButton = ([...domWindow.document.querySelectorAll(".card-request button")] as unknown as HTMLElement[])
+      .find((button) => button.textContent === "Approve")!;
     await act(async () => {
       approveButton.dispatchEvent(new domWindow.PointerEvent("pointerdown", {
         bubbles: true, pointerId: 9, pointerType: "touch", clientX: 300, clientY: 200,

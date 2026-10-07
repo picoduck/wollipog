@@ -77,9 +77,47 @@ export interface InboxRowProps {
 }
 
 /** When a row last did something: its newest event, else its last update, so no row shows "—". */
-function inboxRowTimestamp(session: Pick<SessionView, "lastEventAt" | "updatedAt" | "createdAt">,
+export function inboxRowTimestamp(session: Pick<SessionView, "lastEventAt" | "updatedAt" | "createdAt">,
   activity?: Pick<SessionActivity, "lastEventAt">): number | null {
   return Math.max(session.lastEventAt ?? 0, activity?.lastEventAt ?? 0) || session.updatedAt || session.createdAt || null;
+}
+
+/** How long a stalled row has been silent, for its badge's tooltip; undefined while it is not stalled. */
+export function sessionStalledForMs(stalled: boolean, now: number, lastActivityAt: number | null): number | undefined {
+  if (!stalled) return undefined;
+  return now > 0 && lastActivityAt !== null ? Math.max(STALL_THRESHOLD_MS, now - lastActivityAt) : STALL_THRESHOLD_MS;
+}
+
+/**
+ * A row's or Board card's time (#2209): how long ago it last did something, or, while snoozed, when
+ * it returns, behind an alarm clock. `className` is the surface's own cell class.
+ */
+export function SessionRowTime({ className, lastActivityAt, reminder }: {
+  className: string;
+  lastActivityAt: number | null;
+  reminder?: SessionReminderView;
+}) {
+  const pendingReminder = reminder?.state === "pending" ? reminder : null;
+  return pendingReminder ? (
+    <span className={`${className} snoozed`} title={reminderBadgeDescription(pendingReminder)}>
+      <AlarmClockIcon size={14} />
+      {pendingReminder.scheduleKind === "someday" ? (
+        <>
+          <span className="sr-only">Snoozed: </span>
+          Someday
+        </>
+      ) : (
+        <>
+          <span className="sr-only">Snoozed Until </span>
+          {formatReminderReturn(pendingReminder.scheduledFor, reminderDisplayZone())}
+        </>
+      )}
+    </span>
+  ) : (
+    <time className={className} dateTime={lastActivityAt ? new Date(lastActivityAt).toISOString() : undefined}>
+      {relativeTime(lastActivityAt)}
+    </time>
+  );
 }
 
 function InboxRowInner({
@@ -116,9 +154,7 @@ function InboxRowInner({
   const status = sessionRowStatus(session, {
     runnerOnline,
     reminder,
-    stalledForMs: stalled
-      ? activityNow > 0 && lastActivityAt !== null ? Math.max(STALL_THRESHOLD_MS, activityNow - lastActivityAt) : STALL_THRESHOLD_MS
-      : undefined,
+    stalledForMs: sessionStalledForMs(stalled, activityNow, lastActivityAt),
   });
   const strip = showsActivityStrip(session.status, activity, activityNow);
   const agent = sessionAgentLabel(session.agentName, session.driver, session.agentId);
@@ -193,27 +229,7 @@ function InboxRowInner({
   ) : null;
   /* A snoozed row's time cell says when it returns, behind an alarm clock, instead of how long ago
      it last did something (#2209). */
-  const pendingReminder = reminder?.state === "pending" ? reminder : null;
-  const time = pendingReminder ? (
-    <span className="inbox-row-time snoozed" title={reminderBadgeDescription(pendingReminder)}>
-      <AlarmClockIcon size={14} />
-      {pendingReminder.scheduleKind === "someday" ? (
-        <>
-          <span className="sr-only">Snoozed: </span>
-          Someday
-        </>
-      ) : (
-        <>
-          <span className="sr-only">Snoozed Until </span>
-          {formatReminderReturn(pendingReminder.scheduledFor, reminderDisplayZone())}
-        </>
-      )}
-    </span>
-  ) : (
-    <time className="inbox-row-time" dateTime={lastActivityAt ? new Date(lastActivityAt).toISOString() : undefined}>
-      {relativeTime(lastActivityAt)}
-    </time>
-  );
+  const time = <SessionRowTime className="inbox-row-time" lastActivityAt={lastActivityAt} reminder={reminder} />;
   /* The row's trailing actions (#2214, §3.3, §5.2): Snooze, Archive and ⋯, after the row button
      rather than in it, since a button cannot nest a button. A fine pointer sees them on hover or
      focus-within, over the row's own fill at the end of the title line, so the status and the time

@@ -132,7 +132,7 @@ test("every core control is one control height, never sized by its padding", () 
   assert.equal(ruleBody(".archive-search > div").get("height"), "var(--control-h)");
   assert.equal(ruleBody(".project-manager-search").get("height"), "var(--control-h)");
   // Small buttons borrow 4px a side on touch, so a row of them keeps them at least 8px apart.
-  assert.equal(ruleBody(".approval-actions").get("gap"), "var(--space-2)");
+  assert.equal(ruleBody(".notice-actions").get("gap"), "var(--space-2)");
 
   const track = ruleBody(".ui-switch");
   assert.equal(track.get("width"), "var(--switch-w)");
