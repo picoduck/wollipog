@@ -4,7 +4,6 @@ import { hasRecentActivity, type SessionActivity } from "../activity.js";
 import { encodeResourceId } from "../navigation.js";
 import type { InboxThreadPosition } from "../inbox.js";
 import { useStoreSelector } from "../store.js";
-import { State, useSnapshotState } from "./State.js";
 import { InboxRow, type InboxRowProps } from "./InboxRow.js";
 import { MeasuredVirtualList } from "./MeasuredVirtualList.js";
 import { useIsMobile } from "./useIsMobile.js";
@@ -58,14 +57,6 @@ export interface InboxListEntry {
   thread?: InboxThreadPosition;
 }
 
-export interface InboxEmptyState {
-  title: string;
-  description: string;
-  showNewSession: boolean;
-  actionLabel?: string;
-  onAction?: () => void;
-}
-
 function ConnectedInboxRow(props: Omit<InboxRowProps, "activity" | "activityNow">) {
   const activity = useStoreSelector((state) => state.activity.get(props.session.id));
   const activityNow = useStoreSelector((state) =>
@@ -85,12 +76,6 @@ export const InboxList = forwardRef<HTMLDivElement, {
   stalledSessionIds: ReadonlySet<string>;
   /** Test/story override paired with `activityBySession`. */
   activityNow?: number;
-  runningCount: number;
-  queuedCount: number;
-  startingCount: number;
-  filtered: boolean;
-  emptyState?: InboxEmptyState;
-  onNewSession: () => void;
   onSelect: (sessionId: string) => void;
   onExpand: (sessionId: string) => void;
   onToggleThread?: (sessionId: string) => void;
@@ -112,12 +97,6 @@ export const InboxList = forwardRef<HTMLDivElement, {
   activityBySession,
   stalledSessionIds,
   activityNow,
-  runningCount,
-  queuedCount,
-  startingCount,
-  filtered,
-  emptyState,
-  onNewSession,
   onSelect,
   onExpand,
   onToggleThread,
@@ -147,10 +126,9 @@ export const InboxList = forwardRef<HTMLDivElement, {
   // identical — and InboxView's callback ref reapplies the cached scrollTop when it fires. After a
   // filter or reorder the virtualizer has just corrected scrollTop to hold the logical anchor, and
   // the republished ref overwrote that correction, jumping to a different row. With a dependency
-  // array it was worse: `[]` froze the handle at the first render, which for the inbox is the empty
-  // state that returns before attaching anything, so the forwarded ref stayed null forever.
+  // array it was worse: `[]` froze the handle at the first render, which for the inbox was then an
+  // empty state that returned before attaching anything, so the forwarded ref stayed null forever.
   // A callback ref fires only when the NODE changes, which is the actual event both sides want.
-  const snapshot = useSnapshotState();
   const listRef = useRef<HTMLDivElement | null>(null);
   const attachList = useCallback((node: HTMLDivElement | null) => {
     listRef.current = node;
@@ -161,42 +139,6 @@ export const InboxList = forwardRef<HTMLDivElement, {
   // moveSelection() in InboxView scrolls the newly selected row. A generic effect keyed on
   // selectedSessionId would also fire for mouse selection and on mount, fighting the scroll
   // position InboxView restores when collapsing out of the expanded view.
-  if (entries.length === 0) {
-    return (
-      // The focus target for the list zone stays this container; what it says follows the §12 order,
-      // so a list that has not loaded, or has lost its connection, never claims to be empty. This
-      // container is the one live region, so the State inside it does not announce again.
-      <div className="inbox-zero" role="status" tabIndex={-1}>
-        {snapshot.offline ? (
-          <State variant="offline" compact live={false}>Reconnecting…</State>
-        ) : snapshot.loading ? (
-          <State variant="loading" compact live={false}>Loading sessions…</State>
-        ) : filtered ? (
-          <State variant="no-results" compact live={false} title="No Matching Sessions">Try a different search.</State>
-        ) : (
-          <State
-            compact
-            title={emptyState?.title ?? "All Agents Unblocked"}
-            actions={(
-              <>
-                {(emptyState?.showNewSession ?? true) && (
-                  <button type="button" className="btn primary" onClick={onNewSession}>
-                    New Session <kbd aria-hidden="true">C</kbd>
-                  </button>
-                )}
-                {emptyState?.actionLabel && emptyState.onAction && (
-                  <button type="button" className="btn" onClick={emptyState.onAction}>{emptyState.actionLabel}</button>
-                )}
-              </>
-            )}
-          >
-            {emptyState?.description ?? `Running: ${runningCount}. Queued: ${queuedCount}. Starting: ${startingCount}.`}
-          </State>
-        )}
-      </div>
-    );
-  }
-
   return (
     <div
       ref={attachList}

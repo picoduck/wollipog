@@ -287,7 +287,7 @@ test("when the selected session leaves the results, the first result is selected
 test("a query with no matches replaces both panes with No Matches, and Clear Search restores the list", async () => {
   const { container, search, type } = await mount();
   await type("kubernetes");
-  const state = container.querySelector<HTMLElement>(".inbox-no-matches .state")!;
+  const state = container.querySelector<HTMLElement>(".inbox-state .state")!;
   assert.ok(state, "No Matches shows");
   assert.equal(state.querySelector(".state-title")?.textContent, "No Matches");
   assert.ok(state.querySelector(".state-icon svg"), "with the search-off icon");
@@ -303,7 +303,7 @@ test("a query with no matches replaces both panes with No Matches, and Clear Sea
   await act(async () => { actions[0]!.click(); });
   await act(async () => { await Promise.resolve(); });
   assert.equal(search.value, "", "Clear Search empties the field");
-  assertNoDomNode(container.querySelector(".inbox-no-matches"));
+  assertNoDomNode(container.querySelector(".inbox-state"));
   assert.equal(rowTitles(container).length, 3, "and restores the list");
   assert.ok(container.querySelector(".inbox-preview-pane"), "and the preview");
 });
@@ -314,11 +314,11 @@ test("No Matches names the group, and Escape clears it like Clear Search", async
     .find((tab) => tab.textContent?.includes("Docs Site"))!;
   await act(async () => { docsTab.click(); });
   await type("terraform");
-  assert.equal(container.querySelector(".inbox-no-matches .state-body")?.textContent,
+  assert.equal(container.querySelector(".inbox-state .state-body")?.textContent,
     "No sessions match “terraform” in Docs Site.", "a match elsewhere still leaves this group empty");
   await pressEscape();
   assert.equal(search.value, "");
-  assertNoDomNode(container.querySelector(".inbox-no-matches"));
+  assertNoDomNode(container.querySelector(".inbox-state"));
   assert.deepEqual(rowTitles(container), ["Write the guide"]);
 });
 
@@ -326,7 +326,7 @@ test("Search Transcripts opens the command palette with the query", async () => 
   const opened: Array<string | undefined> = [];
   const { container, search, type } = await mount({ openSearchPalette: (query) => void opened.push(query) });
   await type("  kubernetes ");
-  const transcripts = [...container.querySelectorAll<HTMLButtonElement>(".inbox-no-matches .actions button")]
+  const transcripts = [...container.querySelectorAll<HTMLButtonElement>(".inbox-state .actions button")]
     .find((button) => button.textContent === "Search Transcripts")!;
   assert.equal(transcripts.className, "btn ghost");
   await act(async () => { transcripts.click(); });
@@ -337,7 +337,7 @@ test("Search Transcripts opens the command palette with the query", async () => 
 test("No Matches is the list zone's focus target while it replaces the list", async () => {
   const { container, type } = await mount();
   await type("kubernetes");
-  const state = container.querySelector<HTMLElement>(".inbox-no-matches")!;
+  const state = container.querySelector<HTMLElement>(".inbox-state")!;
   assert.equal(state.getAttribute("tabindex"), "-1", "programmatically focusable, out of the Tab order");
   assert.equal(state.closest('[data-focus-zone="list"]') !== null, true, "inside the list zone F6 enters");
 });
@@ -345,9 +345,9 @@ test("No Matches is the list zone's focus target while it replaces the list", as
 test("on the board, Clear Search hands focus to the restored board instead of dropping it", async () => {
   const { container, search, type } = await mount({ viewMode: "board" });
   await type("kubernetes");
-  assert.ok(container.querySelector(".inbox-no-matches"), "the board shows No Matches too");
+  assert.ok(container.querySelector(".inbox-state"), "the board shows No Matches too");
   assertNoDomNode(container.querySelector(".board-wrap"));
-  const clear = [...container.querySelectorAll<HTMLButtonElement>(".inbox-no-matches .actions button")]
+  const clear = [...container.querySelectorAll<HTMLButtonElement>(".inbox-state .actions button")]
     .find((button) => button.textContent === "Clear Search")!;
   clear.focus();
   await act(async () => { clear.click(); });
@@ -384,7 +384,7 @@ test("when a live update takes the last match away, the state that replaces the 
   await act(async () => {
     socket.push({ type: "session_upsert", session: { ...SESSIONS[1]!, title: "Ship it", preview: "Shipped" } });
   });
-  const state = container.querySelector<HTMLElement>(".inbox-no-matches")!;
+  const state = container.querySelector<HTMLElement>(".inbox-state")!;
   assert.ok(state, "No Matches replaced the list");
   assert.equal(domWindow.document.activeElement, state, "focus moved to No Matches, not <body>");
 });
@@ -408,7 +408,7 @@ test("when a live update takes the previewed session out of the results, the nex
 test("when No Matches holds focus and a live match brings the board back, the board takes it", async () => {
   const { container, type, socket } = await mount({ viewMode: "board" });
   await type("deploy");
-  const state = container.querySelector<HTMLElement>(".inbox-no-matches")!;
+  const state = container.querySelector<HTMLElement>(".inbox-state")!;
   state.focus();
   await act(async () => {
     socket.push({ type: "session_upsert", session: { ...SESSIONS[2]!, title: "Deploy the guide" } });
@@ -421,19 +421,21 @@ test("when No Matches holds focus and a live match brings the board back, the bo
 test("when No Matches holds focus and the connection drops, the offline state takes it", async () => {
   const { container, type, socket } = await mount();
   await type("kubernetes");
-  container.querySelector<HTMLElement>(".inbox-no-matches")!.focus();
+  const state = container.querySelector<HTMLElement>(".inbox-state")!;
+  state.focus();
   await act(async () => { socket.onclose?.({ code: 1006 }); });
-  const offline = container.querySelector<HTMLElement>(".inbox-zero")!;
-  assert.ok(offline, "the list shows its offline state, which outranks No Matches (§12)");
-  assertNoDomNode(container.querySelector(".inbox-no-matches"));
-  assert.equal(domWindow.document.activeElement, offline);
+  // One state holds the panes' place (#2220), so the same landing spot keeps focus while what it
+  // says changes.
+  assert.ok(state.querySelector(".state.offline"), "the page shows Reconnecting, which outranks No Matches (§12)");
+  assertNoDomNode(state.querySelector(".state.no-results"));
+  assert.equal(domWindow.document.activeElement, state);
 });
 
 test("Search Transcripts takes focus before it opens the palette, so the palette can return it there", async () => {
   let focusedAtOpen: unknown = null;
   const { container, type } = await mount({ openSearchPalette: () => { focusedAtOpen = domWindow.document.activeElement; } });
   await type("kubernetes");
-  const transcripts = [...container.querySelectorAll<HTMLButtonElement>(".inbox-no-matches .actions button")]
+  const transcripts = [...container.querySelectorAll<HTMLButtonElement>(".inbox-state .actions button")]
     .find((button) => button.textContent === "Search Transcripts")!;
   // A pointer click in Safari does not focus the button it lands on; .click() does not either.
   await act(async () => { transcripts.click(); });

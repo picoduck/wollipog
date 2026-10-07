@@ -27,6 +27,7 @@ import {
   CircleDot as LucideCircleDot,
   CircleGauge as LucideCircleGauge,
   CirclePause as LucideCirclePause,
+  CloudOff as LucideCloudOff,
   Code as LucideCode,
   Columns3 as LucideColumns3,
   Copy as LucideCopy,
@@ -81,6 +82,7 @@ import {
   Locate as LucideLocate,
   Lock as LucideLock,
   LockKeyhole as LucideLockKeyhole,
+  MapPinOff as LucideMapPinOff,
   Mail as LucideMail,
   MessageCircleQuestion as LucideMessageCircleQuestion,
   MessageSquareCheck as LucideMessageSquareCheck,
@@ -370,6 +372,16 @@ export function SearchIcon(props: IconProps) {
 
 export function SearchOffIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideSearchX} {...props} />;
+}
+
+/** A Project with no Location to start sessions in: the Sessions No Location Yet state (#2220). */
+export function MapPinOffIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideMapPinOff} {...props} />;
+}
+
+/** A Project whose only Locations are on offline machines: the Sessions Location Offline state (#2220). */
+export function CloudOffIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideCloudOff} {...props} />;
 }
 
 export function CloseIcon(props: IconProps) {

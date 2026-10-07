@@ -83,8 +83,11 @@ import { sessionGroupFullName, sessionGroupLabels, sessionGroupRunnerId } from "
 import { runnerDisplay } from "../runners.js";
 import { normalizeSessionsQuery, searchInboxSplits, sessionMatchesQuery } from "../sessions-search.js";
 import { SessionsNoMatches, SessionsSearchField } from "./SessionsSearch.js";
+import { SessionsListSkeleton, SessionsPreviewSkeleton, SessionsSituationState } from "./SessionsStates.js";
+import { sessionsSituation, sessionsSituationOffersNewSession, sessionsSyncingCount } from "../sessions-states.js";
 import { useOpenSearchPalette } from "./search-palette-context.js";
-import { useSnapshotState } from "./State.js";
+import { State, useSnapshotState } from "./State.js";
+import { StaleContent } from "./StaleContent.js";
 import { useRemovedFocus } from "./useRemovedFocus.js";
 
 const PROJECT_PIN_KEY = "wollipog.projects.pinned";
@@ -365,7 +368,7 @@ export function InboxView({
 
   // Escape's focus handoff has to wait for the DEFERRED query to catch up, not just the immediate
   // one. Clearing `query` re-renders urgently with the OLD deferredQuery, so the zero state is
-  // still mounted a frame later — the handoff focused `.inbox-zero`, and the deferred commit then
+  // still mounted a frame later — the handoff focused the state, and the deferred commit then
   // replaced that node with `.inbox-list`, dropping focus to <body>. Before deferral, clearing the
   // query remounted the list before the frame ran, which is why this is new.
   // STATE, not a ref. A ref mutation schedules nothing: pressing Escape in an ALREADY-empty search
@@ -380,7 +383,7 @@ export function InboxView({
     // left with it (#2200); Escape in the field keeps it there, as before.
     const active = document.activeElement;
     const focusLost = !active || active === document.body || !active.isConnected;
-    (listRef.current ?? viewRef.current?.querySelector<HTMLElement>(".inbox-zero") ??
+    (listRef.current ?? viewRef.current?.querySelector<HTMLElement>(".inbox-state") ??
       (focusLost ? viewRef.current?.querySelector<HTMLElement>(".board-wrap") : null))?.focus();
   }, [exitPending, query, deferredQuery]);
 
@@ -448,23 +451,15 @@ export function InboxView({
     snoozed: filterInboxSplitsForReminderMode(baseSplits, reminders, "snoozed", stalledSessionIds),
   }), [baseSplits, reminders, stalledSessionIds]);
   const splits = reminderSplits[reminderMode];
-  // Two groups with one name each add their machine (#2180).
-  const groupLabels = useMemo(() => {
+  const machineName = useMemo(() => {
     const boxByRunner = new Map([...boxes.values()].map((box) => [box.runnerId, box]));
-    return sessionGroupLabels(baseSplits, (runnerId) => runnerDisplay(runners.get(runnerId), boxByRunner.get(runnerId), runnerId).name);
-  }, [baseSplits, boxes, runners]);
+    return (runnerId: string) => runnerDisplay(runners.get(runnerId), boxByRunner.get(runnerId), runnerId).name;
+  }, [boxes, runners]);
+  // Two groups with one name each add their machine (#2180).
+  const groupLabels = useMemo(() => sessionGroupLabels(baseSplits, machineName), [baseSplits, machineName]);
   const activeSplit = inboxSplitByKey(splits, inbox.splitKey);
   const snoozedActiveSplit = inboxSplitByKey(reminderSplits.snoozed, inbox.splitKey);
   const snoozedCount = snoozedActiveSplit?.count ?? 0;
-  const activityCounts = useMemo(() => (activeSplit?.sessions ?? []).reduce(
-    (counts, session) => {
-      if (session.status === "running") counts.running += 1;
-      else if (session.status === "queued") counts.queued += 1;
-      else if (session.status === "starting") counts.starting += 1;
-      return counts;
-    },
-    { running: 0, queued: 0, starting: 0 },
-  ), [activeSplit?.sessions]);
   const activeNewSessionPreset = useMemo<NewSessionPreset | undefined>(
     () => newSessionPresetForInboxSplit(activeSplit),
     [activeSplit],
@@ -535,24 +530,6 @@ export function InboxView({
   const snapshot = useSnapshotState();
   const noMatches = normalizedQuery !== "" && liveEntries.length === 0 && expandedSessionId === null &&
     !snapshot.offline && !snapshot.loading;
-  // A live update can take the selected session out of the results, or the last match away, while
-  // the list or preview holds focus. What replaces the focused pane takes focus rather than <body>:
-  // No Matches, the reader of the result the preview moved to, or the list.
-  const noMatchesRef = useRef<HTMLDivElement>(null);
-  const previewPaneRef = useRef<HTMLDivElement>(null);
-  const removedFocus = useRemovedFocus(viewRef);
-  const removedPreviewFocus = useRemovedFocus(previewPaneRef);
-  useLayoutEffect(() => {
-    const fromPreview = removedPreviewFocus();
-    if (!removedFocus() || normalizedQuery === "" || expandedSessionId !== null) return;
-    // The list zone's own chain (§16.1): the grid, the state in its place, or the board.
-    const listZone = () => listRef.current ??
-      viewRef.current?.querySelector<HTMLElement>(".inbox-zero") ??
-      viewRef.current?.querySelector<HTMLElement>(".board-wrap");
-    if (noMatches) noMatchesRef.current?.focus();
-    else if (fromPreview) (previewPaneRef.current?.querySelector<HTMLElement>(".detail-scroll") ?? listZone())?.focus();
-    else listZone()?.focus();
-  });
   const liveIds = useMemo(() => liveEntries.map((entry) => entry.session.id), [liveEntries]);
   const pinnedAncestorSessionIds = useMemo(
     () => inboxPinnedAncestorIds(liveEntries.map((entry) => entry.session), pinnedSessions),
@@ -607,6 +584,42 @@ export function InboxView({
   ), [collapsedThreads, heldOrder, liveEntries, stalledSessionIds]);
   const displayedIds = useMemo(() => entries.map((entry) => entry.session.id), [entries]);
   displayedIdsRef.current = displayedIds;
+  // What the list pane shows (#2220), in the §12 order: offline, loading, no results, empty, rows.
+  // The board keeps its own states, and an open session shows none.
+  const listView = expandedSessionId === null && !boardMode;
+  const listOffline = listView && snapshot.offline;
+  const syncingCount = sessionsSyncingCount(activeSplit, reminderMode, normalizedQuery);
+  // A group whose sessions have not arrived shows skeleton rows, never a state card.
+  const listSkeleton = listView && !snapshot.offline && entries.length === 0 && !noMatches &&
+    (snapshot.loading || syncingCount !== null);
+  // Disconnected with nothing loaded: Reconnecting in the panes' place, never "No … Yet" (§12.5).
+  const reconnectingEmpty = listOffline && entries.length === 0;
+  const situation = listView && !snapshot.offline && !snapshot.loading && !noMatches && !listSkeleton &&
+    entries.length === 0
+    ? sessionsSituation({ split: activeSplit, mode: reminderMode, snoozedInGroup: snoozedCount, machineName })
+    : null;
+  // One state replaces both panes (§6.1): no divider and no preview.
+  const pageState = noMatches || reconnectingEmpty || situation !== null;
+  // While the state offers New Session, the header does not (§12.1).
+  const stateOffersNewSession = situation !== null && sessionsSituationOffersNewSession(situation);
+  // A live update can take the selected session out of the results, or the last match away, while
+  // the list or preview holds focus. What replaces the focused pane takes focus rather than <body>:
+  // the state in the panes' place, the reader of the result the preview moved to, or the list.
+  const stateRef = useRef<HTMLDivElement>(null);
+  const previewPaneRef = useRef<HTMLDivElement>(null);
+  const removedFocus = useRemovedFocus(viewRef);
+  const removedPreviewFocus = useRemovedFocus(previewPaneRef);
+  useLayoutEffect(() => {
+    const fromPreview = removedPreviewFocus();
+    if (!removedFocus() || normalizedQuery === "" || expandedSessionId !== null) return;
+    // The list zone's own chain (§16.1): the grid, the state in its place, or the board.
+    const listZone = () => listRef.current ??
+      viewRef.current?.querySelector<HTMLElement>(".inbox-state") ??
+      viewRef.current?.querySelector<HTMLElement>(".board-wrap");
+    if (pageState) stateRef.current?.focus();
+    else if (fromPreview) (previewPaneRef.current?.querySelector<HTMLElement>(".detail-scroll") ?? listZone())?.focus();
+    else listZone()?.focus();
+  });
   // The order the list WOULD show if nothing were held, threaded the same way, so a collapsed
   // thread's absent children never read as a pending reorder.
   const liveDisplayedIds = useMemo(() => heldOrder
@@ -648,8 +661,8 @@ export function InboxView({
     (repairedSelection ? sessions.get(repairedSelection) ?? null : null);
   // The dwell marks the session the reader is actually looking at: the expanded one when the view
   // is expanded (a deep link can open a child whose thread is collapsed, and the projection above
-  // would otherwise name its parent), else the selected preview, which No Matches hides.
-  const seenSession = expandedSessionId ? sessions.get(expandedSessionId) ?? null : noMatches ? null : selectedSession;
+  // would otherwise name its parent), else the selected preview, which a page state hides.
+  const seenSession = expandedSessionId ? sessions.get(expandedSessionId) ?? null : pageState ? null : selectedSession;
 
   useEffect(() => {
     if (seenTimerRef.current !== null) window.clearTimeout(seenTimerRef.current);
@@ -894,7 +907,7 @@ export function InboxView({
     // down with it.
     const listRestore = () =>
       listRef.current ??
-      viewRef.current?.querySelector<HTMLElement>(".inbox-zero") ??
+      viewRef.current?.querySelector<HTMLElement>(".inbox-state") ??
       document.getElementById("page-title");
     // A supplied target that is gone by then (a preview's ⋯ whose session left) falls back the same way.
     const target = sessionsRef.current.get(sessionId);
@@ -1393,10 +1406,11 @@ export function InboxView({
     navigate({ name: "session", id: sessionId, location: { path: ".wollipog.json" } });
   }, [activeSplit?.key, navigate, selectSession]);
 
-  // The list and preview (§6.3), on desktop and tablet only. No search match (#2200) gives the list
-  // the whole page, with no preview to divide from. Stacked is whole rows of the stored ratio; Preview
-  // Right (#2219) is the stored list width beside the preview, in windows 1100px and wider.
-  const split = !boardMode && !isMobile && !expanded && !noMatches;
+  // The list and preview (§6.3), on desktop and tablet only. A state in both panes' place (No
+  // Matches #2200, an empty group #2220) gives the list the whole page, with no preview to divide
+  // from. Stacked is whole rows of the stored ratio; Preview Right (#2219) is the stored list width
+  // beside the preview, in windows 1100px and wider.
+  const split = !boardMode && !isMobile && !expanded && !pageState;
   const layout: SessionsPreviewLayout = previewLayout === "right" && !isCompact ? "right" : "below";
   const stacked = split && layout === "below";
   const changeListWidth = useCallback((width: number) => {
@@ -1430,7 +1444,6 @@ export function InboxView({
     }
     return undefined;
   }, [activeProjectId, sessions, setupNoticeSessionIds]);
-  const activeAvailableLocations = activeDurableProject?.locations.filter((location) => location.availability === "available") ?? [];
   const newSession = () => onNewSession?.(activeNewSessionPreset);
   return (
     <>
@@ -1491,7 +1504,7 @@ export function InboxView({
           },
           ...(onOpenShortcuts ? [{ label: "Keyboard Shortcuts", onClick: onOpenShortcuts }] : []),
         ]}
-        primary={{ label: "New Session", shortcut: shortcutDisplay("new-session"), onClick: newSession }}
+        primary={stateOffersNewSession ? undefined : { label: "New Session", shortcut: shortcutDisplay("new-session"), onClick: newSession }}
         tabs={(
           <SessionGroupTabs
             splits={searchedSplits}
@@ -1593,18 +1606,33 @@ export function InboxView({
           <ProjectSetupSuggestion key={activeSetupSession.id} session={activeSetupSession}
             projectName={activeDurableProject.name} onGenerated={openGeneratedWorktreeSetup} />
         )}
-        {noMatches ? (
-          // The list zone's landing spot while the list is replaced (F6, §16.1).
-          <div className="inbox-no-matches" tabIndex={-1} ref={noMatchesRef}>
-            <SessionsNoMatches
-              query={deferredQuery}
-              group={{
-                kind: activeSplit?.kind ?? "all",
-                name: activeSplit ? sessionGroupFullName(groupLabels.get(activeSplit.key) ?? { name: activeSplit.name }) : "",
-              }}
-              onClearSearch={exitSearch}
-              {...(openSearchPalette ? { onSearchTranscripts: () => openSearchPalette(deferredQuery.trim()) } : {})}
-            />
+        {pageState ? (
+          // One state in both panes' place (§6.1), on the page grid. It is the list zone's landing
+          // spot while the list is replaced (F6, §16.1).
+          <div className="master-detail-state inbox-state" tabIndex={-1} ref={stateRef}>
+            {noMatches ? (
+              <SessionsNoMatches
+                query={deferredQuery}
+                group={{
+                  kind: activeSplit?.kind ?? "all",
+                  name: activeSplit ? sessionGroupFullName(groupLabels.get(activeSplit.key) ?? { name: activeSplit.name }) : "",
+                }}
+                onClearSearch={exitSearch}
+                {...(openSearchPalette ? { onSearchTranscripts: () => openSearchPalette(deferredQuery.trim()) } : {})}
+              />
+            ) : situation ? (
+              <SessionsSituationState
+                situation={situation}
+                newSessionShortcut={shortcutDisplay("new-session")}
+                onNewSession={newSession}
+                {...(projectsSupported ? { onNewProject: () => setCreatingProject(true) } : {})}
+                {...(activeProjectId ? { onManageProject: () => navigate({ name: "projects", id: activeProjectId }) } : {})}
+                onShowActive={() => setReminderMode("ordinary")}
+                onShowSnoozed={() => setReminderMode("snoozed")}
+              />
+            ) : (
+              <State variant="offline">Reconnecting…</State>
+            )}
           </div>
         ) : boardMode ? (
           <Board
@@ -1621,81 +1649,46 @@ export function InboxView({
             onNewSession={newSession}
             onSessionMenu={openSessionMenuAt}
           />
+        ) : listSkeleton ? (
+          <SessionsListSkeleton count={syncingCount} threeRow={isMobile} />
         ) : (
-        <InboxList
-          ref={captureListRef}
-          entries={entries}
-          selectedSessionId={displayedSelection}
-          pinnedSessionIds={pinnedSessions}
-          pinnedAncestorSessionIds={pinnedAncestorSessionIds}
-          stalledSessionIds={stalledSessionIds}
-          runningCount={activityCounts.running}
-          queuedCount={activityCounts.queued}
-          startingCount={activityCounts.starting}
-          filtered={normalizedQuery.length > 0}
-          emptyState={reminderMode === "snoozed"
-            ? {
-              title: "No Snoozed Sessions",
-              description: "Snoozed sessions and their pending reminder times appear here.",
-              showNewSession: false,
-            } : activeSplit?.kind === "project"
-            ? activeDurableProject && activeDurableProject.locations.length === 0
-              ? {
-                title: "No Project Locations",
-                description: "Add a Location to this Project before starting a session.",
-                showNewSession: false,
-                actionLabel: "Add Location",
-                onAction: () => navigate({ name: "projects", id: activeProjectId }),
-              }
-              : activeDurableProject && activeAvailableLocations.length === 0
-                ? {
-                  title: "No Available Locations",
-                  description: "Bring a linked machine online or update this Project’s Locations.",
-                  showNewSession: false,
-                  actionLabel: "Manage Locations",
-                  onAction: () => navigate({ name: "projects", id: activeProjectId }),
-                }
-                : activeSplit.count > 0
-                  ? {
-                    title: "Loading Sessions",
-                    description: `${activeSplit.count} ${activeSplit.count === 1 ? "session is" : "sessions are"} still syncing.`,
-                    showNewSession: false,
-                  }
-                  : {
-                    title: `No ${destination("inbox").name} Yet`,
-                    description: `Start a session in ${activeSplit.name}.`,
-                    showNewSession: true,
-                  }
-            : activeSplit?.kind === "no_project"
-              ? {
-                title: "No Sessions Without a Project",
-                description: "Sessions not assigned to a Project appear here.",
-                showNewSession: false,
-              }
-              : undefined}
-          onNewSession={newSession}
-          onSelect={handleSelect}
-          onExpand={expand}
-          onToggleThread={toggleThread}
-          onScrollPosition={(scrollTop) => inboxScrollPositions.set(instanceScope, scrollTop)}
-          onPointerTargetChange={handlePointerTargetChange}
-          onPointerPressChange={handlePointerPressChange}
-          onSessionMenu={openRowSessionMenu}
-          onArchive={archiveRow}
-          {...(sessionRemindersSupported ? { onSnooze: snoozeRow } : {})}
-          stopBeforeArchiveSupported={stopBeforeArchiveSupported}
-        />
+          <>
+            {/* The last-known list stays readable and operable while the connection is down, dimmed
+                under a neutral line (§12.5). The wrapper is always there, so reconnecting keeps the
+                grid, its scroll position and its focus. */}
+            {listOffline && <p className="inbox-list-status" role="status">Reconnecting…</p>}
+            <StaleContent stale={listOffline} className="inbox-list-stale">
+              <InboxList
+                ref={captureListRef}
+                entries={entries}
+                selectedSessionId={displayedSelection}
+                pinnedSessionIds={pinnedSessions}
+                pinnedAncestorSessionIds={pinnedAncestorSessionIds}
+                stalledSessionIds={stalledSessionIds}
+                onSelect={handleSelect}
+                onExpand={expand}
+                onToggleThread={toggleThread}
+                onScrollPosition={(scrollTop) => inboxScrollPositions.set(instanceScope, scrollTop)}
+                onPointerTargetChange={handlePointerTargetChange}
+                onPointerPressChange={handlePointerPressChange}
+                onSessionMenu={openRowSessionMenu}
+                onArchive={archiveRow}
+                {...(sessionRemindersSupported ? { onSnooze: snoozeRow } : {})}
+                stopBeforeArchiveSupported={stopBeforeArchiveSupported}
+              />
+            </StaleContent>
+          </>
         )}
       </section>
 
-      {!boardMode && !noMatches && (!isMobile || expanded) && (
+      {!boardMode && !pageState && (!isMobile || expanded) && (
         <>
           {stacked && (
             <SessionsSplitDivider grid={viewRef} geometry={splitGeometry} rows={listRows} onRatioChange={setInboxRatio} />
           )}
           {split && !stacked && <SessionsListWidthDivider grid={viewRef} width={listWidth} onWidthChange={changeListWidth} />}
           <div className="inbox-preview-pane" ref={previewPaneRef} data-focus-zone="main">
-            {surfaceSessionId ? (
+            {surfaceSessionId && !listSkeleton ? (
               <SessionDetail
                 key={surfaceSessionId}
                 sessionId={surfaceSessionId}
@@ -1735,10 +1728,9 @@ export function InboxView({
                 onPreviewForkReady={expanded ? undefined : setPreviewForkControls}
               />
             ) : (
-              <div className="inbox-preview-empty" tabIndex={-1}>
-                <strong>Select a Session</strong>
-                <span>Choose a card to preview live activity.</span>
-              </div>
+              // Rows always select their first (inbox.ts repairInboxSelection), so the preview is
+              // empty only while the list loads.
+              <SessionsPreviewSkeleton />
             )}
           </div>
         </>

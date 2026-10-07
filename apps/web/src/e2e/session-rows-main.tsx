@@ -182,11 +182,6 @@ function SessionRows() {
           activityBySession={ACTIVITY}
           stalledSessionIds={STALLED}
           activityNow={SESSION_ROWS_NOW}
-          runningCount={2}
-          queuedCount={1}
-          startingCount={1}
-          filtered={false}
-          onNewSession={() => undefined}
           onSelect={setSelected}
           onToggleThread={toggleThread}
           onExpand={() => undefined}

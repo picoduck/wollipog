@@ -259,8 +259,11 @@ test("Inbox focus, unread state, and shortcuts use non-overlapping visual treatm
     "a fine pointer sees the row's actions on hover or focus-within");
   assert.match(css, /@media \(pointer: coarse\) \{[^}]*\.inbox-row-actions \{[^}]*display: inline-flex;[^}]*\}\s*\.inbox-row-action:not\(\.inbox-row-more\) \{ display: none; \}/,
     "a coarse pointer sees only the row's ⋯, always");
-  assert.match(css, /\.inbox-zero\s*\{[^}]*min-height:\s*0;[^}]*flex:\s*1;[^}]*overflow:\s*auto;/,
-    "the empty state consumes the flexible list area");
+  // The state in both panes' place (#2220) is a `.master-detail-state`, which brings min-height 0
+  // and its own scroll; the list pane gives it the flexible area.
+  assert.match(css, /\.master-detail-state\s*\{[^}]*min-height:\s*0;[^}]*overflow-y:\s*auto;/,
+    "the page state scrolls on its own");
+  assert.match(css, /\.inbox-state \{ flex: 1; \}/, "the page state consumes the flexible list area");
   assert.doesNotMatch(css, /\.inbox-(list|preview)-pane:has\([^{]*focus-visible/,
     "the panes are never framed on focus; F6 marks a zone with a brief top-edge line instead");
   assert.match(css, /\.inbox-list:focus-visible,[\s\S]*?\.detail-scroll:focus-visible \{ outline: none; \}/,
@@ -275,13 +278,13 @@ test("Inbox focus, unread state, and shortcuts use non-overlapping visual treatm
 test("Inbox project tabs stay balanced, hide overflow chrome, and reveal contextual actions", () => {
   // The focus handoff no longer lives INSIDE exitSearch, and that is the fix rather than a
   // regression: clearing the query re-renders urgently with the previous deferred value, so
-  // focusing in the same tick landed on a `.inbox-zero` that the deferred commit then replaced.
+  // focusing in the same tick landed on a zero state that the deferred commit then replaced.
   // What must still hold is that exiting clears the query and that focus is restored — now once
   // both the immediate and deferred values have converged.
   assert.match(inbox, /const exitSearch = useCallback\([\s\S]{0,200}setQuery\(""\)/,
     "exiting search clears the query");
-  // The board, which has no grid, follows `.inbox-zero` once Clear Search took focus with it (#2200).
-  assert.match(inbox, /query !== "" \|\| deferredQuery !== ""[\s\S]{0,480}\.inbox-zero[\s\S]{0,160}\.board-wrap[\s\S]{0,40}\.focus\(\)/,
+  // The board, which has no grid, follows `.inbox-state` once Clear Search took focus with it (#2200).
+  assert.match(inbox, /query !== "" \|\| deferredQuery !== ""[\s\S]{0,480}\.inbox-state[\s\S]{0,160}\.board-wrap[\s\S]{0,40}\.focus\(\)/,
     "focus returns to the Inbox once the list it should land on is the one that is mounted");
   assert.match(inbox, /onKeyDown=\{\(event\) => \{[\s\S]*event\.key !== "Escape"[\s\S]*exitSearch\(\)/,
     "Escape exits the search field even when the query is already empty");
@@ -336,7 +339,8 @@ test("Inbox unifies Session and Project creation while the shell exposes no dupl
     "New Session opens with the active tab's preset");
   assert.match(inbox, /label: "New Project…",[\s\S]*disabled: !projectsSupported,[\s\S]*onClick: \(\) => setCreatingProject\(true\)/,
     "New Project… routes into its existing workflow, and says why when it is unavailable");
-  assert.match(inbox, /primary=\{\{ label: "New Session", shortcut: shortcutDisplay\("new-session"\), onClick: newSession \}\}/,
+  // #2220: the header hides it while the page's state offers New Session itself (§12.1).
+  assert.match(inbox, /primary=\{stateOffersNewSession \? undefined : \{ label: "New Session", shortcut: shortcutDisplay\("new-session"\), onClick: newSession \}\}/,
     "the primary is labeled New Session and shows its keycap");
   assert.match(inbox, /creatingProject && \([\s\S]*<CreateProjectDialog/,
     "New Project opens the existing Project creation workflow");
@@ -362,8 +366,12 @@ test("Inbox unifies Session and Project creation while the shell exposes no dupl
   }
   assert.match(projectsView, /its sessions move to No Project[\s\S]*Sessions and files are not deleted/,
     "Project deletion states its non-destructive consequences");
-  assert.match(inbox, /activeSplit\.count > 0[\s\S]*title: "Loading Sessions"[\s\S]*still syncing/,
+  // #2220: a group whose authoritative count says sessions are coming shows skeleton rows, never a
+  // state card in between (sessions-states.test.ts covers the count).
+  assert.match(inbox, /const listSkeleton = [\s\S]{0,200}syncingCount !== null/,
     "authoritative Project counts must not momentarily render a false empty state");
+  assert.match(inbox, /const situation = [\s\S]{0,80}!listSkeleton/,
+    "the empty state waits for the skeleton");
   assert.match(createProjectDialog, /const close = \(\) => \{\s*if \(!busy\) onClose\(\);/,
     "create cannot be dismissed while its mutation is in flight");
   assert.match(projectLocationDialog, /const close = \(\) => \{\s*if \(!busyKey\) onClose\(\);/,

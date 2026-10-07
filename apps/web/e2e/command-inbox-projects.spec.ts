@@ -1108,7 +1108,7 @@ test("archiving the final session keeps its Project selected live and after relo
   await expect(alpha).toHaveAttribute("aria-selected", "true");
   await expect(alpha).toContainText("0");
   await expect(page.getByText("No Sessions Yet", { exact: true })).toBeVisible();
-  await expect(page.getByText("Start a session in Alpha.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Start a session to put an agent to work in Alpha.", { exact: true })).toBeVisible();
 
   await page.reload();
   const reloadedAlpha = page.getByRole("tab", { name: /Alpha/ });

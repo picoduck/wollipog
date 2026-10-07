@@ -350,7 +350,7 @@ for (const viewport of ["mobile", "desktop"] as const) {
     await act(async () => { socket.push({ type: "session_removed", sessionId: "only" }); });
     assert.deepEqual(rowTitles(container), []);
     assert.equal(selectedRowTitle(container), null);
-    assert.ok(container.querySelector(".inbox-zero"));
+    assert.ok(container.querySelector(".inbox-state"));
 
   });
 }
@@ -1611,7 +1611,7 @@ test("desktop search Enter focuses the exact filtered result set without activat
   await pressSearchEnter();
   assert.equal(domWindow.document.activeElement, search);
   assertNoDomNode(container.querySelector(".inbox-list"));
-  assert.equal(container.querySelector(".inbox-no-matches .state-title")?.textContent, "No Matches");
+  assert.equal(container.querySelector(".inbox-state .state-title")?.textContent, "No Matches");
 
   // Modified and composing Enter remain input-owned even when results exist.
   await filter("Session");
@@ -2347,7 +2347,7 @@ test("the preview's More Actions menu hands focus to the empty list when its onl
       socket.push({ type: "session_upsert", session: { ...session("Only", 30), archived: true } });
     });
     assertNoDomNode(domWindow.document.querySelector('[role="menu"]'), "the archived session's menu closes");
-    assert.ok(container.querySelector(".inbox-zero"), "the list is empty");
+    assert.ok(container.querySelector(".inbox-state"), "the list is empty");
     assert.notEqual(domWindow.document.activeElement, domWindow.document.body,
       "focus goes to a durable surface, not <body>, though ⋯ went with the preview");
   } finally {

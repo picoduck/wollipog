@@ -188,7 +188,7 @@ test("the global focus ring is neutral, zero-specificity and absent on programma
   // A digit or a handoff also focuses these tabIndex -1 Sessions containers, where no zone line
   // appears, so the ring is their only cue and is restored after the suppression (equal
   // specificity, later wins). Zone roots stay ringless: the F6 zone line is their cue.
-  const zoneRing = ":where(.board-wrap, .inbox-zero):focus-visible";
+  const zoneRing = ":where(.board-wrap, .inbox-state, .inbox-skeleton):focus-visible";
   assert.equal(baseRule(zoneRing),
     "outline: var(--focus-width) solid var(--focus);\noutline-offset: calc(-1 * var(--focus-width));");
   assert.ok(css.indexOf(zoneRing) > css.indexOf(':where([tabindex="-1"]:not('),

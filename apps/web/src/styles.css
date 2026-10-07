@@ -670,11 +670,11 @@ kbd {
 )):focus {
   outline: none;
 }
-/* The Sessions list's board and empty state are tabIndex -1 containers that a digit or a handoff
-   also focuses, where no zone line appears, so they keep the ring, drawn inset because they fill
-   clipped panes. Equal specificity with the suppression above, so order wins. Zone roots and the
-   reading pane's targets take no ring: the zone line below is their F6 cue (§16.1). */
-:where(.board-wrap, .inbox-zero):focus-visible {
+/* The Sessions list's board, its state and its loading skeleton are tabIndex -1 containers that a
+   digit or a handoff also focuses, where no zone line appears, so they keep the ring, drawn inset
+   because they fill clipped panes. Equal specificity with the suppression above, so order wins. Zone
+   roots and the reading pane's targets take no ring: the zone line below is their F6 cue (§16.1). */
+:where(.board-wrap, .inbox-state, .inbox-skeleton):focus-visible {
   outline: var(--focus-width) solid var(--focus);
   outline-offset: calc(-1 * var(--focus-width));
 }
@@ -2242,19 +2242,21 @@ button.status { cursor: pointer; }
   padding: env(safe-area-inset-top, 0px) max(var(--page-gutter), env(safe-area-inset-right, 0px)) var(--space-16) max(var(--page-gutter), env(safe-area-inset-left, 0px));
   background: var(--bg);
 }
-/* A crashed page or a turned-off experiment is the whole page's next step, so on a phone its
-   actions stack at full width and are 44px tall even under a mouse, like a sheet's footer (§7.5).
+/* A crashed page, a turned-off experiment or an empty Sessions group (#2220) is the whole page's
+   next step, so on a phone its actions stack at full width and are 44px tall even under a mouse,
+   like a sheet's footer (§7.5).
    The height comes from the tokens, as in `.worktree-missing-sheet`, never a per-button patch. */
 @media (max-width: 760px) {
-  :is(.notice.view-error .notice-actions, .state.experiment-off .actions, .app-crash .state .actions) {
+  :is(.notice.view-error .notice-actions, .state.experiment-off .actions, .app-crash .state .actions, .inbox-state .state .actions) {
     --control-h: 44px;
     --control-h-sm: 44px;
+    --control-h-lg: 44px;
     flex-direction: column;
     align-items: stretch;
     justify-self: stretch;
   }
   /* The phone exception to "buttons never stretch" (§3.1), as in the session notice slot. */
-  :is(.notice.view-error .notice-actions, .state.experiment-off .actions, .app-crash .state .actions) > .btn {
+  :is(.notice.view-error .notice-actions, .state.experiment-off .actions, .app-crash .state .actions, .inbox-state .state .actions) > .btn {
     max-width: none;
   }
 }
@@ -12411,23 +12413,44 @@ body.shell-dock-dragging * {
   .detail-scroll { transition: none; }
 }
 /* The Sessions list's own state: the list zone's focus target, holding a top-left `State`. */
-.inbox-zero {
-  min-height: 0;
-  flex: 1;
-  overflow: auto;
-  padding: 0 var(--space-4);
-}
-/* No Matches takes both panes' place (#2200, §6.1), on the page grid like any state that spans them,
-   so it is stacked at the page state's drop (§12.1) rather than the inline row of a list's own. */
-.inbox-no-matches {
-  min-height: 0;
-  flex: 1;
-  overflow: auto;
-  padding: 0 var(--page-gutter) var(--space-12);
-}
-.inbox-no-matches > .state.no-results {
+/* One state takes both panes' place (§6.1): No Matches (#2200) and an empty group (#2220), on the
+   page grid like any state that spans them. No Matches is stacked at the page state's drop (§12.1)
+   rather than the inline row of a list's own. */
+.inbox-state { flex: 1; }
+.inbox-state > .state.no-results {
   display: grid;
   padding-top: var(--space-12);
+}
+/* A neutral line above the list (§12.3, §12.5): "Loading 8 sessions…" over the skeleton, or
+   "Reconnecting…" over the last-known rows. It takes list height, as a notice does. */
+.inbox-list-status {
+  flex: none;
+  margin: 0;
+  padding: var(--space-2) var(--space-3) 0;
+  color: var(--text-dim);
+  font: var(--type-body);
+}
+/* The last-known list's wrapper (StaleContent) is no box of its own: the grid stays the pane's
+   scroll container, and the dimming reaches it by inheritance. */
+.inbox-list-stale { display: contents; }
+/* Skeleton rows while a group's sessions arrive (§12.3): the real row's height and anatomy, flush
+   with the list's padding, and never a state card. */
+.inbox-skeleton {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+.inbox-skeleton-rows { padding: var(--space-2) var(--space-2) 0; }
+.inbox-skeleton-row > .row-body { gap: var(--space-2); }
+/* A phone's row is the three-line card (#2209), so its placeholder is one too. */
+.inbox-skeleton-row.stacked {
+  height: 88px;
+  margin: var(--space-1) 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elev-2);
 }
 .inbox-preview-pane {
   position: relative;
@@ -12436,15 +12459,17 @@ body.shell-dock-dragging * {
   overflow: hidden;
   background: var(--bg);
 }
-.inbox-preview-empty {
-  display: grid;
-  height: 100%;
-  place-content: center;
-  justify-items: center;
-  gap: 5px;
-  color: var(--text-dim);
+/* The preview while the list loads (§12.3): a skeleton of its bar, at the bar's height and gutter. */
+.inbox-preview-skeleton {
+  display: flex;
+  align-items: center;
+  height: var(--bar-h);
+  padding: 0 var(--page-gutter);
+  border-bottom: 1px solid var(--border);
 }
-.inbox-preview-empty strong { color: var(--text); font-size: 16px; }
+/* Preview Right (#2219) starts the preview's content --space-6 from the divider, as its bar does. */
+.sessions-md[data-layout="right"] .inbox-preview-skeleton { padding-left: var(--space-6); }
+.inbox-preview-skeleton > .skeleton-bar.title { max-width: 320px; }
 /* The Sessions preview (#2210; §4.3, §6.3): a quick look, so it starts at the page gutter like the
    page title and the rows above it, and its reading column is at most --chat-max wide, never
    centered: its end padding is the gutter or whatever is left past the column. A size container,

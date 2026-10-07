@@ -1104,6 +1104,24 @@ master-detail pages stay side by side.
   is always stacked and the control is hidden, which also keeps the compact header to its budget
   (§15.2). Phones have no preview (§6.2), whatever the preference.
 - **Empty.** An empty list replaces both panes with one state (§6.1); no divider is drawn.
+  **Built (#2220).** `.inbox-state.master-detail-state` takes the list pane's place on the page grid,
+  and the preview and divider are not rendered. The state follows the §12 order: Reconnecting… while
+  disconnected with nothing loaded, then skeleton rows while sessions arrive (§12.3), then No Matches
+  (§12.2), then one state for the group's situation (`sessions-states.ts`, `SessionsStates.tsx`):
+
+  | Situation | Icon | Title | Actions |
+  | --- | --- | --- | --- |
+  | No sessions anywhere | inbox | No Sessions Yet | **New Session** (primary), New Project… |
+  | A Project with none | inbox | No Sessions Yet | **New Session Here** (primary, in that Project) |
+  | A Project without a Location | map-pin-off | No Location Yet | Add Location (the Project's page) |
+  | Every Location's machine offline | cloud-off | Location Offline, naming the machines | Manage Locations |
+  | Locations missing or removed | map-pin-off | No Location Available | Manage Locations |
+  | No Project | folder | No Sessions Without a Project | **New Session** (primary, no Project) |
+  | Snoozed, none | alarm-clock | No Snoozed Sessions | Show Active Sessions |
+  | Every session snoozed | alarm-clock | No Active Sessions | Show Snoozed Sessions |
+
+  Actions are `.btn.lg`. While the state offers New Session the header's is hidden (§12.1); the
+  others are secondary beside it. Below 760px the actions stack at full width, 44px tall (§12.4).
 - **Built (#2217), Preview Below.** `.inbox-view` takes `.master-detail.sessions-md` on desktop and
   tablet, and stays a flex column on a phone, on the board and in an open session. InboxView measures
   the split area and `--row-h-2` and sets `--sessions-list-rows` (the stored ratio's whole rows, in
@@ -1961,6 +1979,10 @@ Transcripts** (`.btn.ghost`), which opens the command palette with the query. Bu
 - Detail: skeleton title plus two section blocks.
 - Buttons: inline spinner (§3.1 Busy). Spinners are never a page's only content for more than 1s.
 - Status text in sentence case: "Loading sessions…". No "Showing 0 Sessions" while loading.
+- **Sessions (#2220).** Before the first snapshot, and while a group's count says sessions exist and
+  none has arrived, the list is `SessionsListSkeleton`: a status line, "Loading 8 sessions…" when the
+  count is known, over `--row-h-2` skeleton rows (a phone's are three-line cards), as many as are
+  coming between 3 and 6. The preview shows a skeleton of its bar. Never a state card in between.
 
 ### 12.4 Error
 
@@ -1993,7 +2015,9 @@ the same notice with Reload and Copy Error Details, top-left in the content area
   the whole block, on the content and never on the Reconnecting line itself. It is done by token
   (primary text steps down to `--text-dim`), not by `opacity`: subtree opacity multiplies into every
   color beneath it and un-certifies the contrast checks. It stays readable, scrollable and operable
-  (no `aria-hidden`, no `inert`). No screen uses it yet.
+  (no `aria-hidden`, no `inert`). The Sessions list uses it (#2220): on disconnect the last-known
+  rows stay, wrapped in `StaleContent` under a neutral `.inbox-list-status` "Reconnecting…" line, and
+  the wrapper stays mounted, so reconnecting keeps the grid, its scroll and its focus.
 
 **An entity page before its entity loads** (Session, Run, Pod; `detailPlaceholder()`, #2202) shows one
 state with a next step, in the person's terms (never "control plane"):
