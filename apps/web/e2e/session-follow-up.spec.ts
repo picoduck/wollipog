@@ -79,7 +79,8 @@ test("opening and marking read do not review a result; accepted follow-up addres
   await page.setViewportSize({ width: 1440, height: 900 });
   await open(page);
   await row(page, result).click();
-  await page.getByRole("button", { name: "Reply", exact: true }).click();
+  await row(page, result).click({ button: "right" });
+  await page.getByRole("menuitem", { name: /^Reply/ }).click();
   const composer = page.locator(".composer-input");
   await expect(composer).toBeVisible();
   const acknowledgment = () => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.model().sessions
