@@ -117,13 +117,22 @@ test("phone family reasons use one badge while preserving warnings and stronger 
   const disconnected = sessionRowStatus(session({ status: "running" }), {
     runnerOnline: false, familyFollowUpLabel: "Ready for Review" });
   assert.equal(label(disconnected), "Ready for Review");
-  assert.deepEqual(disconnected.others, ["Disconnected"]);
+  assert.deepEqual(disconnected.others, [], "passive warnings never inflate the actionable +N count");
   assert.equal(disconnected.badge?.meta.tone, "danger");
   assert.match(disconnected.badge?.title ?? "", /disconnected|offline|not connected/i);
   const ownQuestion = sessionRowStatus(session({ status: "input_required",
     pendingApproval: { requestId: "q", kind: "question", title: "Choose", options: [] } }), {
     familyFollowUpLabel: "Ready for Review" });
   assert.equal(label(ownQuestion), "Answer Required");
+  const returned = sessionRowStatus(session({ status: "running" }), {
+    reminder: reminder({ state: "fired" }), familyFollowUpLabel: "Needs Your Input" });
+  assert.equal(label(returned), "Needs Your Input");
+  assert.deepEqual(returned.others, []);
+  assert.match(returned.badge?.title ?? "", /returned|reminder/i);
+  const ownResult = session({ status: "running", attention: { version: 1, meaningfulAt: 10, humanActions: [],
+    result: { revision: "own", at: 10, owner: "human" }, acknowledgedRevision: null } });
+  assert.equal(sessionRowStatus(ownResult, { familyFollowUpLabel: "Ready for Review" }).badge?.title,
+    sessionRowStatus(ownResult).badge?.title, "an identical family reason preserves the parent's own result description");
   assert.equal(label(sessionRowStatus(session({ status: "running" }))), "Running",
     "controller-owned descendants have no human family reason to promote");
 });

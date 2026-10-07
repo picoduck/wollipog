@@ -111,12 +111,12 @@ export function sessionRowStatus(session: SessionStatusSource, context: SessionR
   }
   const others = needs.slice(1).map(conditionName);
   const familyLabel = context.familyFollowUpLabel;
-  if (familyLabel && needs.length === 0 &&
+  if (familyLabel && primary?.meta.label !== familyLabel && needs.length === 0 &&
       (familyLabel === "Needs Your Input" ? 3 : 2) >= sessionFollowUp(session as SessionView).priority) {
     const previous = primary;
     const keepPrevious = previous && previous.meta.label !== familyLabel &&
-      (previous.kind !== "lifecycle" || previous.meta.tone === "danger" || previous.needsYou || session.stopOperation);
-    if (keepPrevious) others.unshift(conditionName(previous));
+      (previous.kind !== "lifecycle" || previous.meta.tone === "danger" || previous.needsYou || session.stopOperation ||
+        reminder?.state === "fired");
     const description = familyLabel === "Needs Your Input"
       ? "A session in this family is waiting for your input."
       : "A result in this family is waiting for your assessment or next instructions.";
