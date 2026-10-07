@@ -10,7 +10,7 @@ test("a stale Snooze save reconciles without live delivery and preserves the dra
 
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto("/sessions-board-e2e.html?reminder-conflict=1");
-  await expect(page.locator(".page-tabs .tabs-bar")).toBeVisible();
+  await expect(page.locator(".page-tabs .tabs-bar, .sessions-app-bar")).toBeVisible();
   await page.getByRole("button", { name: "Snoozed, 1", exact: true }).click();
   await page.locator(".inbox-row-shell", { hasText: "Snoozed Session" }).getByRole("button").first().click();
   await page.getByRole("button", { name: "Snooze", exact: true }).first().click();
@@ -59,7 +59,7 @@ test("a removed reminder can create a new reminder from its preserved draft", as
 
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto("/sessions-board-e2e.html?reminder-conflict=removed");
-  await expect(page.locator(".page-tabs .tabs-bar")).toBeVisible();
+  await expect(page.locator(".page-tabs .tabs-bar, .sessions-app-bar")).toBeVisible();
   await page.getByRole("button", { name: "Snoozed, 1", exact: true }).click();
   await page.locator(".inbox-row-shell", { hasText: "Snoozed Session" }).getByRole("button").first().click();
   await page.getByRole("button", { name: "Snooze", exact: true }).first().click();

@@ -35,6 +35,17 @@ async function controlGeometry(control: Locator) {
   return { ...geometry, height: layoutPx(geometry.height) };
 }
 
+/** Selects a group: its tab, or on a phone the app bar's group picker (#2211). */
+async function chooseGroup(page: Page, name: RegExp) {
+  const bar = page.locator(".sessions-app-bar");
+  if (await bar.count() > 0) {
+    await bar.locator(".sessions-group-picker").click();
+    await page.getByRole("menu", { name: "Session Groups" }).getByRole("menuitemradio", { name }).click();
+    return;
+  }
+  await page.getByRole("tab", { name }).click();
+}
+
 async function openProjectManager(page: Page, projectName = "Alpha") {
   const tab = page.getByRole("tab", { name: new RegExp(projectName) });
   const trigger = page.getByRole("button", { name: `${projectName} Actions` });
@@ -1260,7 +1271,7 @@ test.describe("with a touch pointer", () => {
         await page.setViewportSize(viewport);
         await page.goto("/command-inbox-projects-e2e.html");
         await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
-        await page.getByRole("tab", { name: /Alpha/ }).click();
+        await chooseGroup(page, /^Alpha/);
         await page.keyboard.press("c");
 
         const dialog = page.getByRole("dialog", { name: "New Session" });
@@ -1293,7 +1304,7 @@ test.describe("with a touch pointer", () => {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto("/command-inbox-projects-e2e.html?longAgent=1");
     await page.evaluate(() => document.documentElement.setAttribute("data-theme", "light"));
-    await page.getByRole("tab", { name: /Alpha/ }).click();
+    await chooseGroup(page, /^Alpha/);
     await page.keyboard.press("c");
 
     const dialog = page.getByRole("dialog", { name: "New Session" });

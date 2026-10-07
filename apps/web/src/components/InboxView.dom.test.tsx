@@ -885,9 +885,10 @@ test("the tab the URL names survives widening from a phone to a desktop that rem
     domWindow.dispatchEvent(new domWindow.Event("resize"));
   });
   await act(async () => { container.querySelector<HTMLButtonElement>(".sessions-group-picker")!.click(); });
-  const betaRow = [...domWindow.document.querySelectorAll<HTMLButtonElement>(
+  const groupRows = [...domWindow.document.querySelectorAll(
     '[role="menu"][aria-label="Session Groups"] [role="menuitemradio"]',
-  )].find((row) => row.textContent?.includes("Beta"))!;
+  )] as unknown as HTMLButtonElement[];
+  const betaRow = groupRows.find((row) => row.textContent?.includes("Beta"))!;
   await act(async () => { betaRow.click(); });
   const betaKey = pushed.at(-1)?.split;
   assert.ok(typeof betaKey === "string", "choosing a group writes it to the URL");

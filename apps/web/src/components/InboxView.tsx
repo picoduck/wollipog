@@ -1518,6 +1518,7 @@ export function InboxView({
         onNewProject={() => setCreatingProject(true)}
         projectActions={activeSplit && activeSplit.project !== null ? projectActionsFor(activeSplit) : null}
         onNewSession={newSession}
+        newSessionShortcut={shortcutDisplay("new-session")}
       />
     )}
     {!expanded && !isMobile && (

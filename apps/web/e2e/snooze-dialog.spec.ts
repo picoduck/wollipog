@@ -21,15 +21,15 @@ async function evidence(page: Page, name: string) {
 async function openSnooze(page: Page, theme: Theme, { row = "Running Session", query = "" } = {}): Promise<Locator> {
   await page.goto(`/sessions-board-e2e.html${query}`);
   await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
-  await expect(page.locator(".page-tabs .tabs-bar")).toBeVisible();
+  await expect(page.locator(".page-tabs .tabs-bar, .sessions-app-bar")).toBeVisible();
   if (row === "Snoozed Session") {
-    // A phone folds the Snoozed toggle into the page header's ⋯ menu.
+    // A phone's app bar has Snoozed in its ⋯ sheet's Show group (#2211).
     const snoozed = page.getByRole("button", { name: "Snoozed, 1", exact: true });
     if (await snoozed.isVisible()) {
       await snoozed.click();
     } else {
-      await page.locator(".page-header").getByRole("button", { name: "More Actions" }).click();
-      await page.getByRole("menuitemcheckbox", { name: "Show Snoozed Sessions, 1" }).click();
+      await page.locator(".sessions-app-bar").getByRole("button", { name: "More Actions" }).click();
+      await page.getByRole("menuitemradio", { name: "Snoozed Sessions, 1" }).click();
     }
   }
   await page.locator(".inbox-row-shell", { hasText: row }).getByRole("button").first().click();

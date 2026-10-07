@@ -46,6 +46,8 @@ export interface SessionsAppBarProps {
     /** Clears the query and restores the bar. */
     onCancel: () => void;
   };
+  /** New Session's key, announced though its keycap is not drawn on the 44px `+` (§11.5). */
+  newSessionShortcut?: string;
   viewMode: SessionsViewMode;
   onViewModeChange: (mode: SessionsViewMode) => void;
   /** The Show group; null where this connection has no reminders. */
@@ -76,7 +78,8 @@ function GroupPicker({ splits, labels, activeKey, snoozed, onSelectGroup }: Pick
         ref={menu.triggerRef}
         type="button"
         className="sessions-group-picker"
-        title="Session Groups"
+        // The name may be cut short in the bar.
+        title={sessionGroupFullName(label)}
         // The badges are aria-hidden, so the attention joins the name in words.
         aria-label={[sessionGroupFullName(label), attention].filter(Boolean).join(", ")}
         aria-haspopup="menu"
@@ -131,9 +134,11 @@ function MoreSheet({ open, setOpen, actions, viewMode, onViewModeChange, reminde
   actions: ProjectSplitActions | null;
 }) {
   const menu = useAccessibleMenu(open, setOpen, "sessions-more-sheet");
-  /** Choosing hands focus back to ⋯ first, so a dialog the item opens returns focus there. */
+  /** Choosing hands focus back to ⋯ before the action runs, so a dialog it opens snapshots ⋯ as
+   * where focus returns, not the menu item that is going away. */
   const choose = (run: () => void, restoreFocus = true) => {
-    menu.close(restoreFocus);
+    menu.close(false);
+    if (restoreFocus) menu.triggerRef.current?.focus();
     run();
   };
   const snoozedCount = reminders?.snoozedCount ?? 0;
@@ -239,6 +244,7 @@ export function SessionsAppBar({
   onNewProject,
   projectActions,
   onNewSession,
+  newSessionShortcut,
 }: SessionsAppBarProps) {
   const [moreOpen, setMoreOpen] = useState(false);
   const actions = useProjectSplitActions(projectActions && {
@@ -301,7 +307,7 @@ export function SessionsAppBar({
           <SearchIcon />
         </button>
         {more}
-        <button type="button" className="btn primary page-primary" onClick={onNewSession}>
+        <button type="button" className="btn primary page-primary" aria-keyshortcuts={newSessionShortcut} onClick={onNewSession}>
           <PlusIcon />
           <span className="page-primary-label">New Session</span>
         </button>

@@ -7,10 +7,18 @@ async function openSessions(page: Page) {
   await page.goto("/command-inbox-projects-e2e.html");
   await page.evaluate(() => localStorage.clear());
   await page.goto("/command-inbox-projects-e2e.html");
-  await expect(page.getByRole("tab", { name: /Alpha/ })).toBeVisible();
+  await expect(page.getByRole("tab", { name: /Alpha/ }).or(page.locator(".sessions-app-bar"))).toBeVisible();
 }
 
 async function openProjectMenu(page: Page) {
+  // A phone has no tabs: its app bar's picker chooses the group, and ⋯ holds its actions (#2211).
+  const bar = page.locator(".sessions-app-bar");
+  if (await bar.count() > 0) {
+    await bar.locator(".sessions-group-picker").click();
+    await page.getByRole("menu", { name: "Session Groups" }).getByRole("menuitemradio", { name: /^Alpha/ }).click();
+    await bar.getByRole("button", { name: "More Actions" }).click();
+    return;
+  }
   const tab = page.getByRole("tab", { name: /Alpha/ });
   const trigger = page.getByRole("button", { name: "Alpha Actions" });
   await tab.hover();
