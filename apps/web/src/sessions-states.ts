@@ -12,8 +12,9 @@ export type SessionsSituation =
   | { kind: "first-run" }
   | { kind: "project-empty"; project: string }
   | { kind: "no-location"; project: string }
-  /** Every Location is on a machine that is offline; `machines` are their display names. */
-  | { kind: "location-offline"; project: string; machines: string[] }
+  /** Every Location is on a machine that is offline; `machines` are their display names, once each,
+   * and `locations` counts the Locations, which can share a machine. */
+  | { kind: "location-offline"; project: string; machines: string[]; locations: number }
   /** Locations exist, but none can start a session and not every one is merely offline. */
   | { kind: "location-unavailable"; project: string }
   | { kind: "no-project" }
@@ -54,7 +55,7 @@ export function sessionsSituation({
   if (locations.some((location) => location.availability === "available")) return { kind: "project-empty", project };
   if (locations.every((location) => location.availability === "runner_offline")) {
     const machines = [...new Set(locations.map((location) => machineName(location.runnerId).trim() || location.runnerId))];
-    return { kind: "location-offline", project, machines };
+    return { kind: "location-offline", project, machines, locations: locations.length };
   }
   return { kind: "location-unavailable", project };
 }
@@ -78,7 +79,8 @@ export function sessionsSituationMessage(situation: SessionsSituation): string {
     case "location-offline": {
       const [only] = situation.machines;
       if (situation.machines.length === 1) {
-        return `This project's only location is on ${only}, which is offline. Sessions can start here when it reconnects.`;
+        const where = situation.locations === 1 ? "only location is" : "locations are all";
+        return `This project's ${where} on ${only}, which is offline. Sessions can start here when it reconnects.`;
       }
       return `This project's locations are on ${LIST.format(situation.machines)}, which are offline. Sessions can start here when one reconnects.`;
     }

@@ -1114,7 +1114,7 @@ master-detail pages stay side by side.
   | No sessions anywhere | inbox | No Sessions Yet | **New Session** (primary), New Project… |
   | A Project with none | inbox | No Sessions Yet | **New Session Here** (primary, in that Project) |
   | A Project without a Location | map-pin-off | No Location Yet | Add Location (the Project's page) |
-  | Every Location's machine offline | cloud-off | Location Offline, naming the machines | Manage Locations |
+  | Every Location's machine offline | cloud-off | Location Offline, naming each machine once | Manage Locations |
   | Locations missing or removed | map-pin-off | No Location Available | Manage Locations |
   | No Project | folder | No Sessions Without a Project | **New Session** (primary, no Project) |
   | Snoozed, none | alarm-clock | No Snoozed Sessions | Show Active Sessions |

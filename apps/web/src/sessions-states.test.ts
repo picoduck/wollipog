@@ -55,15 +55,23 @@ test("each empty group names its own situation (#2220)", () => {
 
 test("an offline Location names its machine, once per machine", () => {
   assert.deepEqual(situation(projectSplit([location("a", "runner-studio", "runner_offline")])),
-    { kind: "location-offline", project: "Docs Site", machines: ["Studio"] });
+    { kind: "location-offline", project: "Docs Site", machines: ["Studio"], locations: 1 });
   assert.deepEqual(situation(projectSplit([
     location("a", "runner-studio", "runner_offline"),
     location("b", "runner-studio", "runner_offline"),
     location("c", "runner-laptop", "runner_offline"),
-  ])), { kind: "location-offline", project: "Docs Site", machines: ["Studio", "Laptop"] });
+  ])), { kind: "location-offline", project: "Docs Site", machines: ["Studio", "Laptop"], locations: 3 });
+  // Two Locations on one machine are not "its only location" (CR-2.1).
+  const sameMachine = situation(projectSplit([
+    location("a", "runner-studio", "runner_offline"),
+    location("b", "runner-studio", "runner_offline"),
+  ]));
+  assert.deepEqual(sameMachine, { kind: "location-offline", project: "Docs Site", machines: ["Studio"], locations: 2 });
+  assert.equal(sessionsSituationMessage(sameMachine),
+    "This project's locations are all on Studio, which is offline. Sessions can start here when it reconnects.");
   // A machine the client cannot name falls back to its id rather than an empty name.
   assert.deepEqual(situation(projectSplit([location("a", "runner-gone", "runner_offline")])),
-    { kind: "location-offline", project: "Docs Site", machines: ["runner-gone"] });
+    { kind: "location-offline", project: "Docs Site", machines: ["runner-gone"], locations: 1 });
   // Any available Location means sessions can start here: the group is simply empty.
   assert.equal(situation(projectSplit([
     location("a", "runner-studio", "runner_offline"),
@@ -89,9 +97,9 @@ test("each situation has its issue copy, sentence case, and no success mark", ()
     [{ kind: "first-run" }, "No Sessions Yet", /^Pick a project and describe the task\. An agent starts on one of your machines and tells you when it needs a decision\.$/],
     [{ kind: "project-empty", project: "Docs Site" }, "No Sessions Yet", /^Start a session to put an agent to work in Docs Site\.$/],
     [{ kind: "no-location", project: "Docs Site" }, "No Location Yet", /^Sessions run in a folder on one of your machines\. Add one to Docs Site to start sessions here\.$/],
-    [{ kind: "location-offline", project: "Docs Site", machines: ["Studio"] }, "Location Offline",
+    [{ kind: "location-offline", project: "Docs Site", machines: ["Studio"], locations: 1 }, "Location Offline",
       /^This project's only location is on Studio, which is offline\. Sessions can start here when it reconnects\.$/],
-    [{ kind: "location-offline", project: "Docs Site", machines: ["Studio", "Laptop"] }, "Location Offline",
+    [{ kind: "location-offline", project: "Docs Site", machines: ["Studio", "Laptop"], locations: 2 }, "Location Offline",
       /^This project's locations are on Studio and Laptop, which are offline\./],
     [{ kind: "location-unavailable", project: "Docs Site" }, "No Location Available", /Manage its locations/],
     [{ kind: "no-project" }, "No Sessions Without a Project", /^Sessions you start without choosing a project collect here\.$/],
@@ -108,7 +116,7 @@ test("each situation has its issue copy, sentence case, and no success mark", ()
 
 test("only first run, an empty Project and No Project offer New Session", () => {
   const offering = (["first-run", "project-empty", "no-location", "location-offline", "location-unavailable", "no-project", "snoozed", "all-snoozed"] as const)
-    .filter((kind) => sessionsSituationOffersNewSession({ kind, project: "P", group: "G", machines: ["M"] } as SessionsSituation));
+    .filter((kind) => sessionsSituationOffersNewSession({ kind, project: "P", group: "G", machines: ["M"], locations: 1 } as SessionsSituation));
   assert.deepEqual(offering, ["first-run", "project-empty", "no-project"]);
 });
 
