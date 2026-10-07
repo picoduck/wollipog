@@ -3106,7 +3106,11 @@ test("U and the menu's Mark Unread and Mark Read toggle a session's unread dot (
 
 /** The phone Sessions app bar (#2211), mounted with two Projects: Alpha with two sessions waiting on
  * the user and one stalled, and Beta with one idle session and one snoozed. */
-async function mountPhoneBar(name: string, options: { pushed?: Array<{ name: string; split?: string | null }>; presets?: unknown[] } = {}) {
+async function mountPhoneBar(name: string, options: {
+  pushed?: Array<{ name: string; split?: string | null }>;
+  presets?: unknown[];
+  client?: ApiClient;
+} = {}) {
   mobileViewport = true;
   const { container, root } = mountTestRoot();
   const socket = new FakeSocket();
@@ -3129,12 +3133,14 @@ async function mountPhoneBar(name: string, options: { pushed?: Array<{ name: str
   /** Renders with the group the URL names, as Back and Forward do. */
   const render = (routeSplit?: string | null) => act(async () => {
     root.render(
-      <StoreProvider connection={connection} navigation={spyNavigation}>
-        <FeedbackProvider>
-          <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} routeSplit={routeSplit}
-            onNewSession={(preset) => options.presets?.push(preset)} onOpenShortcuts={() => undefined} />
-        </FeedbackProvider>
-      </StoreProvider>,
+      <ApiProvider client={options.client ?? api}>
+        <StoreProvider connection={connection} navigation={spyNavigation}>
+          <FeedbackProvider>
+            <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} routeSplit={routeSplit}
+              onNewSession={(preset) => options.presets?.push(preset)} onOpenShortcuts={() => undefined} />
+          </FeedbackProvider>
+        </StoreProvider>
+      </ApiProvider>,
     );
   });
   await render();
@@ -3289,6 +3295,55 @@ test("a phone Rename opened from ⋯ closes when Back changes the group under it
   // And returning to Alpha does not bring a stale dialog back.
   await render(alphaKey);
   assertNoDomNode(body.querySelector('[role="dialog"]'));
+});
+
+test("a slow phone Rename that finishes after Back never closes the newer group's Rename or its draft (#2211)", async () => {
+  const pushed: Array<{ name: string; split?: string | null }> = [];
+  const renames: Array<[string, string]> = [];
+  let finishAlpha: () => void = () => undefined;
+  const client = {
+    ...api,
+    updateProject: (projectId: string, { name }: { name: string }) => {
+      renames.push([projectId, name]);
+      return new Promise<void>((resolve) => { finishAlpha = resolve; });
+    },
+  } as unknown as ApiClient;
+  const { body, chooseGroup, openMore, render } = await mountPhoneBar("phone-rename-generation-test", { pushed, client });
+  const field = () => body.querySelector<HTMLInputElement>("#rename-project-name");
+  const type = (value: string) => act(async () => {
+    const input = field()!;
+    Object.getOwnPropertyDescriptor(domWindow.HTMLInputElement.prototype, "value")!.set!.call(input, value);
+    input.dispatchEvent(new domWindow.Event("input", { bubbles: true }) as unknown as Event);
+  });
+  const openRename = async () => {
+    const more = await openMore();
+    const rename = [...more.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+      .find((item) => item.textContent?.startsWith("Rename Project"))!;
+    await act(async () => { rename.click(); });
+  };
+  await chooseGroup("Beta");
+  const betaKey = pushed.at(-1)?.split;
+  await chooseGroup("Alpha");
+  const alphaKey = pushed.at(-1)?.split;
+  await render(alphaKey);
+
+  // Alpha's rename is sent and still running when Back goes to Beta.
+  await openRename();
+  await type("Alpha Two");
+  await act(async () => {
+    body.querySelector("#rename-project-form")!.dispatchEvent(
+      new domWindow.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event);
+  });
+  assert.deepEqual(renames, [["alpha", "Alpha Two"]]);
+  await render(betaKey);
+  assertNoDomNode(field(), "Alpha's dialog closes with its group");
+
+  // Beta's own Rename, with a draft, survives Alpha's request finishing.
+  await openRename();
+  await type("Beta draft");
+  await act(async () => { finishAlpha(); });
+  assert.equal(field()?.value, "Beta draft", "the newer dialog and its draft stay");
+  assert.deepEqual(renames, [["alpha", "Alpha Two"]], "nothing else was renamed");
 });
 
 test("Show Active in phone Search mode hands focus to the search field, not <body> (#2211)", async () => {

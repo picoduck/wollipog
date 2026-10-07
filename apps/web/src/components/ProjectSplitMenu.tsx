@@ -128,12 +128,15 @@ export function useProjectSplitActions(props: ProjectSplitActionsProps | null): 
   const api = useApi();
   const { confirm, showToast, showUndo } = useFeedback();
   const phone = useIsMobile();
-  // The group Rename was opened for. The dialog belongs to that group: a caller that follows the
-  // current group (the phone app bar) can change it under the open dialog (Back), and the dialog must
-  // then close rather than rename whichever project is current.
+  // The group Rename was opened for, and which opening. The dialog belongs to that group: a caller
+  // that follows the current group (the phone app bar) can change it under the open dialog (Back),
+  // and the dialog must then close rather than rename whichever project is current. Each opening has
+  // its own generation, so a slow rename that finishes after its dialog went away cannot close a
+  // newer one.
   const identity = props ? props.split.key : undefined;
-  const [renaming, setRenaming] = useState<InboxSplit["key"] | undefined>(undefined);
-  if (renaming !== undefined && renaming !== identity) setRenaming(undefined);
+  const [renaming, setRenaming] = useState<{ key: InboxSplit["key"]; generation: number } | undefined>(undefined);
+  const renameGeneration = useRef(0);
+  if (renaming !== undefined && renaming.key !== identity) setRenaming(undefined);
   // Null for a group with no project (All, No Project), so a caller that follows the current group
   // keeps one hook call as the group changes.
   if (!props) return null;
@@ -310,7 +313,10 @@ export function useProjectSplitActions(props: ProjectSplitActionsProps | null): 
         id: "rename",
         label: `Rename ${entityLabel}…`,
         unavailableReason: managementUnavailableReason,
-        run: () => setRenaming(split.key),
+        run: () => {
+          renameGeneration.current += 1;
+          setRenaming({ key: split.key, generation: renameGeneration.current });
+        },
       },
       {
         id: "pin",
@@ -352,12 +358,16 @@ export function useProjectSplitActions(props: ProjectSplitActionsProps | null): 
     name: split.name,
     label: `${split.name} Actions`,
     groups,
-    dialogs: renaming === split.key && (
+    dialogs: renaming?.key === split.key && (
       <RenameProjectDialog
+        key={renaming.generation}
         entityLabel={entityLabel}
         currentName={split.name}
         rename={rename}
-        onClose={() => setRenaming(undefined)}
+        onClose={() => {
+          const { generation } = renaming;
+          setRenaming((current) => current?.generation === generation ? undefined : current);
+        }}
       />
     ),
   };
