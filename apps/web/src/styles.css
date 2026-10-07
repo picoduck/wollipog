@@ -391,6 +391,13 @@
   --row-gap: 6px;
   --inbox-row-pad-y: 9px;
   --inbox-row-pad-x: 11px;
+  /* A wide Sessions list's fixed trailing columns (#2218, §6.3), the same in either density. The
+     time column holds a snoozed row's longest return time after its alarm clock ("Wed 12:34 PM"). */
+  --inbox-row-col-status: 184px;
+  --inbox-row-col-activity: 48px;
+  --inbox-row-col-flags: 32px;
+  --inbox-row-col-time: 96px;
+  --inbox-row-col-actions: 104px;
   /* How far the title's trailing fade reaches. #664 moved the title onto its own line, where it is
      the only thing allowed to shrink, so the reading axis it used to need a fixed sender track for
      is now the row's own left edge and the truncation is a gradient rather than an ellipsis. */
@@ -12280,6 +12287,47 @@ body.shell-dock-dragging * {
   .inbox-row-action:not(.inbox-row-more) { display: none; }
   .icon-btn.inbox-row-more { width: var(--control-h); height: var(--control-h); }
   .inbox-row-shell .inbox-row { padding-right: var(--control-h); }
+}
+/* What the session wants, after the title (#2218): only a list wide enough for it shows it. */
+.inbox-row-snippet { display: none; }
+/* A wide list's rows (#2218, docs/design-system.md §6.3 "Rows use the width"). At 880px and wider the
+   two lines keep their height. The title line adds the snippet, and the title keeps at most 60% of
+   it. The status line's trailing cluster becomes fixed columns, the same on every row, so the badges
+   start and the times end at one x down the list: status (the badge and "+N"), activity, flags and
+   time; an empty cell keeps its width. The actions get a column of their own after the time, so a
+   hover never covers the status or the time; a coarse pointer's ⋯ sits in the same column. */
+@container list (min-width: 880px) {
+  .inbox-row-shell:not(.stacked) .inbox-row { padding-right: var(--inbox-row-col-actions); }
+  .inbox-row-shell:not(.stacked) .inbox-row-trail {
+    display: grid;
+    grid-template-columns:
+      var(--inbox-row-col-status) var(--inbox-row-col-activity) var(--inbox-row-col-flags) var(--inbox-row-col-time);
+    align-items: center;
+    gap: var(--space-3);
+  }
+  .inbox-row-trail > .row-status { grid-column: 1; min-width: 0; overflow: hidden; }
+  .inbox-row-trail > .row-status > .status { min-width: 0; flex: 0 1 auto; overflow: hidden; }
+  .inbox-row-trail > .inbox-row-activity { grid-column: 2; }
+  .inbox-row-trail > .inbox-row-flags { grid-column: 3; }
+  .inbox-row-trail > .inbox-row-time { grid-column: 4; justify-self: end; }
+  .inbox-row-shell:not(.stacked) .inbox-row-copy:has(> .inbox-row-snippet) > .inbox-row-title { max-width: 60%; }
+  .inbox-row-shell:not(.stacked) .inbox-row-snippet {
+    display: block;
+    min-width: 0;
+    flex: 1 1 0;
+    overflow: hidden;
+    color: var(--text-dim);
+    font: var(--type-body);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .inbox-row-shell:not(.stacked) .inbox-row-actions {
+    top: 50%;
+    bottom: auto;
+    padding-left: 0;
+    background: transparent;
+    transform: translateY(-50%);
+  }
 }
 /* Forced colors drops fills, so the selected bar (wider, with no fill beside it) and the unread dot
    are painted in system colours. After the rules they override, which they tie with. */

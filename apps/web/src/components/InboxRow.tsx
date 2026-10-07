@@ -4,9 +4,10 @@ import { useLongPress } from "./interactions.js";
 import { sessionArchiveControlLabel } from "../archive-actions.js";
 import { STALL_THRESHOLD_MS, showsActivityStrip, type SessionActivity } from "../activity.js";
 import { relativeTime } from "../format.js";
-import { formatReminderReturn } from "../reminder-schedule.js";
+import { formatReminderReturn, reminderDisplayZone } from "../reminder-schedule.js";
 import { reminderBadgeDescription } from "../session-reminders.js";
 import { sessionArchiveActionRefusal } from "../session-command-permissions.js";
+import { sessionRowSnippet } from "../session-row-snippet.js";
 import { sessionRowStatus } from "../session-row-status.js";
 import { sessionDisplayTitle } from "../session-title.js";
 import { useOptionalStoreSelector } from "../store.js";
@@ -200,7 +201,7 @@ function InboxRowInner({
       ) : (
         <>
           <span className="sr-only">Snoozed Until </span>
-          {formatReminderReturn(pendingReminder.scheduledFor, pendingReminder.timeZone)}
+          {formatReminderReturn(pendingReminder.scheduledFor, reminderDisplayZone())}
         </>
       )}
     </span>
@@ -265,10 +266,14 @@ function InboxRowInner({
       </button>
     </span>
   );
+  /* What the session wants, after the title (#2218, §6.3). Only a list 880px or wider shows it, so a
+     narrow list keeps its title whole; a phone card never carries it. */
+  const snippet = threeRow ? "" : sessionRowSnippet(session);
   const titleLine = (
     <span className="inbox-row-copy">
       <span className="inbox-row-title">{title}</span>
       {familyChip}
+      {snippet && <span className="inbox-row-snippet">{snippet}</span>}
     </span>
   );
 

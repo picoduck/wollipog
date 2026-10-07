@@ -1085,8 +1085,12 @@ test("Inbox titles keep one reading axis across row signals, widths, and densiti
       // amount of status badges or sender text can shift where a title starts.
       expect(Math.max(...geometry.map(({ titleX }) => titleX)) - Math.min(...geometry.map(({ titleX }) => titleX)))
         .toBeLessThanOrEqual(1);
-      expect(Math.max(...geometry.map(({ signalsWidth }) => signalsWidth)) - Math.min(...geometry.map(({ signalsWidth }) => signalsWidth)))
-        .toBeGreaterThan(8);
+      // A narrow list sizes the cluster to what each row carries; a list 880px or wider gives every
+      // row the same fixed columns (#2218), so the badges and times line up down the list.
+      const listWidth = await page.locator(".inbox-list-pane").evaluate((pane) => pane.getBoundingClientRect().width);
+      const spread = Math.max(...geometry.map(({ signalsWidth }) => signalsWidth)) - Math.min(...geometry.map(({ signalsWidth }) => signalsWidth));
+      if (listWidth >= 880) expect(spread).toBeLessThanOrEqual(0.5);
+      else expect(spread).toBeGreaterThan(8);
       // A long agent-and-Project label yields to the signals column instead of colliding with it.
       for (const { senderRight, signalsLeft } of geometry) expect(senderRight).toBeLessThanOrEqual(signalsLeft + 1);
     }

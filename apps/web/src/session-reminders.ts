@@ -5,7 +5,7 @@ import {
   type SessionReminderView,
   type SessionView,
 } from "@wollipog/protocol";
-import { formatReminderInstant } from "./reminder-schedule.js";
+import { formatReminderInstant, reminderDisplayZone } from "./reminder-schedule.js";
 import {
   BACKGROUND_DELIVERY_STATUS,
   backgroundDeliveryAccessibleName,
@@ -125,7 +125,7 @@ export function reminderBadgeDescription(reminder: SessionReminderView): string 
     if (reminder.state === "pending") return "Snoozed Someday with no automatic return time.";
     return "Activity returned this session from a Someday snooze.";
   }
-  const instant = formatReminderInstant(reminder.scheduledFor, reminder.timeZone);
+  const instant = formatReminderInstant(reminder.scheduledFor, reminderDisplayZone());
   if (reminder.state === "pending") return `Snoozed until ${instant}.`;
   if (reminder.wakeReason === "scheduled") return `Returned from snooze. Snooze ended ${instant}.`;
   return `Activity reminder scheduled for ${instant}.`;

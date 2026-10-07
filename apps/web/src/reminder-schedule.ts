@@ -46,6 +46,15 @@ export function browserTimeZone(): string {
   return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 }
 
+/**
+ * The zone every reminder time is read in: the one the Snooze dialog's helper names, this browser's.
+ * A reminder saved from another zone keeps its absolute instant and its stored zone; only where it
+ * is read moves, so a row's time, its tooltip and the dialog name one wall-clock time for it.
+ */
+export function reminderDisplayZone(): string {
+  return browserTimeZone();
+}
+
 /** Why an expression does not resolve to a future schedule. */
 type ReminderProblem = "unknown" | "numeric" | "zero" | "later_today" | "clock" | "date" | "past";
 
@@ -378,8 +387,8 @@ export function storedReminderSchedule(reminder: SessionReminderView): ParsedRem
 }
 
 /**
- * A snoozed row's return time, short enough for its time cell (#2209), in the reminder's time zone:
- * the time alone today ("3:00 PM"), the weekday and time within the week ("Thu 9:00 AM"), and the
+ * A snoozed row's return time, short enough for its time cell (#2209), in `timeZone`, which a row
+ * passes as `reminderDisplayZone()` so it agrees with the Snooze dialog (#2218): the time alone today ("3:00 PM"), the weekday and time within the week ("Thu 9:00 AM"), and the
  * date beyond that ("Oct 12"). `formatReminderInstant()` gives the full instant for the tooltip.
  */
 export function formatReminderReturn(scheduledFor: number, timeZone: string, now = Date.now()): string {

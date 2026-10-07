@@ -731,6 +731,7 @@ export const SESSION_NAMING_TRANSPORT_MARGIN_MS = SESSION_NAMING_CLEANUP_BUDGET_
 export const SESSION_NAMING_SUPERVISION_MARGIN_MS = SESSION_NAMING_TRANSPORT_MARGIN_MS + 1_000;
 export { buildConversationHandoff, handoffDestinationError } from "./conversation-handoff.js";
 export { PROMPT_TITLE_MAX, titleFromPrompt } from "./session-title.js";
+export { plainTextPreview } from "./plain-text-preview.js";
 export * from "./campaign-work-ledger.js";
 export {
   SLASH_COMMAND_NAME_CHARACTERS,

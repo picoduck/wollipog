@@ -28,6 +28,7 @@ import {
   type SessionCommandInvocationView,
   type SessionCapabilityOverlay,
   type SessionEvent,
+  type SessionReminderView,
   type SessionView,
   type SteerDisposition,
   type SteerRequest,
@@ -83,7 +84,9 @@ const INCLUDE_SESSION_SHELL = FIXTURE_QUERY.get("sessionShell") === "1";
 const LEGACY_WORKSPACES = FIXTURE_QUERY.get("legacyWorkspaces") === "1";
 const UNFILED_WORKSPACE = FIXTURE_QUERY.get("unfiledWorkspace") === "1";
 const LONG_AGENT = FIXTURE_QUERY.get("longAgent") === "1";
-const SESSION_REMINDERS = FIXTURE_QUERY.get("reminders") === "1";
+/** A wide list's rows (#2218): one row per kind of status, a snoozed row and a markdown preview. */
+const ROW_COLUMNS = SCENARIO === "row-columns";
+const SESSION_REMINDERS = FIXTURE_QUERY.get("reminders") === "1" || ROW_COLUMNS;
 /** The runner's agent is an ACP agent that can sign out (Sign Out of Agent, #2162). */
 const ACP_LOGOUT = FIXTURE_QUERY.get("acpLogout") === "1";
 /** `?machineName=<name>` names the fixture runner; `?remoteMachine=1` reaches it over SSH (#2277). */
@@ -415,6 +418,65 @@ function initialModel(): FixtureModel {
       const value = session(id, title, "alpha", "alpha-workspace");
       // Recent, so no session reads as Stalled and the times are believable.
       const at = Date.now() - (index + 1) * 60_000;
+      Object.assign(value, { createdAt: at - 3_600_000, updatedAt: at, lastEventAt: at, ...extra });
+      return value;
+    });
+    initial.projects[0]!.unarchivedSessionCount = initial.sessions.length;
+    initial.projects[0]!.totalSessionCount = initial.sessions.length;
+  }
+  if (ROW_COLUMNS) {
+    const permission = (requestId: string, title: string) => ({
+      requestId,
+      kind: "permission" as const,
+      title,
+      context: { toolName: "Bash", input: "pnpm db:migrate" },
+      options: [
+        { optionId: `${requestId}-allow`, name: "Allow Once", kind: "allow_once" as const },
+        { optionId: `${requestId}-deny`, name: "Deny", kind: "reject_once" as const },
+      ],
+    });
+    const rows: Array<[string, string, Partial<SessionView>]> = [
+      ["session-blocked", "Migrate the Billing Tables to the New Schema", {
+        status: "input_required",
+        preview: "I need to run the migration before I can verify the row counts.",
+        pendingApproval: { ...permission("request-migrate", "Run the Migration Script"),
+          additionalRequests: [permission("request-vacuum", "Vacuum the Billing Database")] },
+      }],
+      ["session-running", "Summarize the Release Notes", {
+        status: "running",
+        activeTurnId: "turn-session-running",
+        preview: "Reading `CHANGELOG.md` and the merged pull requests since **v0.42**…",
+      }],
+      ["session-idle", "Draft the Quarterly Report", {
+        preview: "## Done\n**All 42 tests pass.** I updated [the changelog](https://example.com/changelog) and `README.md`.",
+      }],
+      ["session-snoozed", "Review the Accessibility Audit", {
+        preview: "The audit found three contrast issues; the fixes are in `styles.css`.",
+      }],
+      ["session-question", "Restructure the Sessions Rows So the Title, the Snippet and Every Trailing Column Line Up Down the List at Every Width the Layout Supports, From a Phone to a Wide Desktop Monitor", {
+        status: "input_required",
+        preview: "Two databases match the name.",
+        pendingApproval: {
+          requestId: "request-question", kind: "question", title: "Which Database Should the Migration Target?", options: [],
+        },
+      }],
+      ["session-starting", "Profile the Nightly Build", { status: "starting", preview: null }],
+      ["session-failed", "Upgrade the Build Toolchain", {
+        status: "failed",
+        preview: "The build failed: `tsc` reported 3 errors in `packages/protocol`.",
+      }],
+    ];
+    const fill = Math.max(0, Math.min(40, Number(FIXTURE_QUERY.get("fill") ?? 0) || 0));
+    for (let index = 0; index < fill; index += 1) {
+      rows.push([`session-fill-${index + 1}`, `Review Pull Request ${index + 1}`, {}]);
+    }
+    initial.sessions = rows.map(([id, title, extra], index) => {
+      const value = session(id, title, "alpha", "alpha-workspace");
+      // Busy rows are recent, so none reads as Stalled; idle ones are older than the strip's ten
+      // minutes of tool activity, so their activity cell is empty.
+      const minutes = { "session-running": 1, "session-starting": 1, "session-blocked": 3, "session-question": 6 }[id]
+        ?? 25 + index * 40;
+      const at = Date.now() - minutes * 60_000;
       Object.assign(value, { createdAt: at - 3_600_000, updatedAt: at, lastEventAt: at, ...extra });
       return value;
     });
@@ -1031,6 +1093,21 @@ const activeRun: RunView = {
   sessionIds: [],
 };
 
+/**
+ * The row-columns scenario's snooze: two days ahead at 2:30 PM here, saved from a browser in another
+ * zone, so its row must still read in this one (#2218).
+ */
+function rowColumnsReminder(): SessionReminderView {
+  const returns = new Date();
+  returns.setDate(returns.getDate() + 2);
+  returns.setHours(14, 30, 0, 0);
+  return {
+    reminderId: "reminder-snoozed", sessionId: "session-snoozed", scheduledFor: returns.getTime(),
+    timeZone: "Asia/Tokyo", originalExpression: "in 2 days", wakePolicy: "regardless", state: "pending",
+    revision: 1, createdAt: Date.now() - 60_000, updatedAt: Date.now() - 60_000,
+  };
+}
+
 function snapshot(): UiSnapshotMessage {
   return {
     type: "snapshot",
@@ -1055,6 +1132,7 @@ function snapshot(): UiSnapshotMessage {
     }] : [],
     ...(LEGACY_WORKSPACES ? {} : { projects: structuredClone(model.projects) }),
     sessions: structuredClone(model.sessions.filter((candidate) => !candidate.archived)),
+    ...(ROW_COLUMNS ? { reminders: [rowColumnsReminder()] } : {}),
     runs: [structuredClone(activeRun)],
     pods: [structuredClone(activePod)],
   };
