@@ -3126,16 +3126,18 @@ async function mountPhoneBar(name: string, options: { pushed?: Array<{ name: str
     totalSessionCount: count, createdAt: 1, updatedAt: 1,
   });
   const now = Date.now();
-  await act(async () => {
+  /** Renders with the group the URL names, as Back and Forward do. */
+  const render = (routeSplit?: string | null) => act(async () => {
     root.render(
       <StoreProvider connection={connection} navigation={spyNavigation}>
         <FeedbackProvider>
-          <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined}
+          <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} routeSplit={routeSplit}
             onNewSession={(preset) => options.presets?.push(preset)} onOpenShortcuts={() => undefined} />
         </FeedbackProvider>
       </StoreProvider>,
     );
   });
+  await render();
   await act(async () => {
     socket.push({
       type: "snapshot",
@@ -3169,7 +3171,7 @@ async function mountPhoneBar(name: string, options: { pushed?: Array<{ name: str
     await act(async () => { bar().querySelector<HTMLButtonElement>('[aria-label="More Actions"]')!.click(); });
     return sheet("More Actions")!;
   };
-  return { container, root, body, bar, picker, sheet, chooseGroup, openMore };
+  return { container, root, body, bar, picker, sheet, chooseGroup, openMore, render };
 }
 
 test("on a phone one 48px app bar replaces the page header, its action row and the group tabs (#2211)", async () => {
@@ -3264,6 +3266,43 @@ test("a confirmation opened from the phone ⋯ sheet replaces it, and Back bring
   await act(async () => { back.click(); });
   assertNoDomNode(body.querySelector('[role="dialog"]'), "Back closes the confirmation");
   assert.ok(sheet("More Actions"), "and brings the sheet back");
+});
+
+test("a phone Rename opened from ⋯ closes when Back changes the group under it, so it never renames another (#2211)", async () => {
+  const pushed: Array<{ name: string; split?: string | null }> = [];
+  const { body, chooseGroup, openMore, render } = await mountPhoneBar("phone-rename-identity-test", { pushed });
+  await chooseGroup("Beta");
+  const betaKey = pushed.at(-1)?.split;
+  assert.ok(typeof betaKey === "string");
+  await chooseGroup("Alpha");
+  const alphaKey = pushed.at(-1)?.split;
+  await render(alphaKey);
+  const more = await openMore();
+  const rename = [...more.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+    .find((item) => item.textContent?.startsWith("Rename Project"))!;
+  await act(async () => { rename.click(); });
+  assert.ok(body.querySelector('[role="dialog"]'), "Rename Project opens for Alpha");
+
+  // Back to Beta under the open dialog: the dialog belonged to Alpha, so it closes.
+  await render(betaKey);
+  assertNoDomNode(body.querySelector('[role="dialog"]'), "the dialog closes rather than renaming Beta");
+  // And returning to Alpha does not bring a stale dialog back.
+  await render(alphaKey);
+  assertNoDomNode(body.querySelector('[role="dialog"]'));
+});
+
+test("Show Active in phone Search mode hands focus to the search field, not <body> (#2211)", async () => {
+  const { bar, openMore } = await mountPhoneBar("phone-show-active-search-test");
+  const more = await openMore();
+  const snoozed = [...more.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')]
+    .find((item) => item.textContent?.startsWith("Snoozed Sessions"))!;
+  await act(async () => { snoozed.click(); });
+  await act(async () => { bar().querySelector<HTMLButtonElement>('[aria-label="Search Sessions"]')!.click(); });
+  const showActive = [...bar().querySelectorAll<HTMLButtonElement>(".sessions-snoozed-strip button")]
+    .find((button) => button.textContent === "Show Active")!;
+  await act(async () => { showActive.focus(); showActive.click(); });
+  assertNoDomNode(bar().querySelector(".sessions-snoozed-strip"));
+  assert.equal(domWindow.document.activeElement, bar().querySelector(".inbox-search input"));
 });
 
 test("the phone app bar's Search swaps the bar for a focused full-width field, and Cancel restores it (#2211)", async () => {

@@ -128,7 +128,12 @@ export function useProjectSplitActions(props: ProjectSplitActionsProps | null): 
   const api = useApi();
   const { confirm, showToast, showUndo } = useFeedback();
   const phone = useIsMobile();
-  const [renaming, setRenaming] = useState(false);
+  // The group Rename was opened for. The dialog belongs to that group: a caller that follows the
+  // current group (the phone app bar) can change it under the open dialog (Back), and the dialog must
+  // then close rather than rename whichever project is current.
+  const identity = props ? props.split.key : undefined;
+  const [renaming, setRenaming] = useState<InboxSplit["key"] | undefined>(undefined);
+  if (renaming !== undefined && renaming !== identity) setRenaming(undefined);
   // Null for a group with no project (All, No Project), so a caller that follows the current group
   // keeps one hook call as the group changes.
   if (!props) return null;
@@ -305,7 +310,7 @@ export function useProjectSplitActions(props: ProjectSplitActionsProps | null): 
         id: "rename",
         label: `Rename ${entityLabel}…`,
         unavailableReason: managementUnavailableReason,
-        run: () => setRenaming(true),
+        run: () => setRenaming(split.key),
       },
       {
         id: "pin",
@@ -347,12 +352,12 @@ export function useProjectSplitActions(props: ProjectSplitActionsProps | null): 
     name: split.name,
     label: `${split.name} Actions`,
     groups,
-    dialogs: renaming && (
+    dialogs: renaming === split.key && (
       <RenameProjectDialog
         entityLabel={entityLabel}
         currentName={split.name}
         rename={rename}
-        onClose={() => setRenaming(false)}
+        onClose={() => setRenaming(undefined)}
       />
     ),
   };

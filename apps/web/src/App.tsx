@@ -619,8 +619,6 @@ export function Shell() {
         event.preventDefault();
         navigate(sessionsDestination(instanceScope));
         window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
-          // A phone's Sessions app bar opens its Search mode to hold the field (#2211).
-          window.dispatchEvent(new Event("wollipog:open-inbox-search"));
           document.querySelector<HTMLInputElement>(".inbox-search input")?.focus();
         }));
       } else if (matchesShortcut(event, "focus-next-zone") || matchesShortcut(event, "focus-previous-zone")) {

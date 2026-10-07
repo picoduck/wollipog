@@ -1,4 +1,3 @@
-import { flushSync } from "react-dom";
 import { type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { prioritizedPendingRequests, providerSupportsConversationFork, type SessionReminderView, type SessionView, type SetSessionReminderRequest, type SnoozeScheduleInput, type SourceLocation } from "@wollipog/protocol";
 import { archiveAndStopMessage, archiveResultMessage, archiveResultTone, sessionArchiveRequiresStop } from "../archive-actions.js";
@@ -412,17 +411,6 @@ export function InboxView({
     window.addEventListener("wollipog:clear-inbox-query", exitSearch);
     return () => window.removeEventListener("wollipog:clear-inbox-query", exitSearch);
   }, [exitSearch]);
-
-  // `/` on a phone-width window: the app bar's Search mode holds the field the shortcut focuses.
-  useEffect(() => {
-    if (!isMobile) return;
-    const openSearch = () => {
-      flushSync(() => setPhoneSearchOpen(true));
-      viewRef.current?.ownerDocument.querySelector<HTMLInputElement>(".sessions-app-bar .inbox-search input")?.focus();
-    };
-    window.addEventListener("wollipog:open-inbox-search", openSearch);
-    return () => window.removeEventListener("wollipog:open-inbox-search", openSearch);
-  }, [isMobile]);
 
   useEffect(() => {
     setSeen(loadSeen(instanceScope));

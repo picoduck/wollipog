@@ -330,9 +330,10 @@ export function SessionsAppBar({
             type="button"
             className="btn ghost"
             onClick={() => {
-              // The strip leaves with Snoozed, so focus moves to the group picker rather than <body>.
+              // The strip leaves with Snoozed, so focus moves to the group picker, or to the search
+              // field while Search mode holds the bar, rather than <body>.
               flushSync(() => reminders?.onModeChange("ordinary"));
-              headerRef.current?.querySelector<HTMLElement>(".sessions-group-picker")?.focus();
+              headerRef.current?.querySelector<HTMLElement>(".sessions-group-picker, .inbox-search input")?.focus();
             }}
           >
             Show Active
