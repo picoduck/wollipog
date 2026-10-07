@@ -165,24 +165,25 @@ test.describe("at 940×700", () => {
 test.describe("on a 390×844 phone", () => {
   test.use({ viewport: { width: 390, height: 844 } });
 
-  test("search shares the tools row with Filters, and an empty column is still a strip", async ({ page }) => {
+  test("Filters sit on a row under the app bar, and an empty column is still a strip", async ({ page }) => {
     await openBoard(page);
-    const inside = () => page.locator(".tabs-tools").evaluate((tools) => {
-      const row = tools.getBoundingClientRect();
-      // The visible controls; the row's polite live region is visually hidden.
-      return [...tools.children].filter((child) => !child.classList.contains("sr-only")).every((child) => {
-        const box = child.getBoundingClientRect();
-        return box.left >= row.left - 0.5 && box.right <= Math.min(row.right, innerWidth) + 0.5;
+    // The phone app bar (#2211) has no tab row: Board mode's Filters and count get a row of their
+    // own under it, until the phone Board's Filters sheet (#2216).
+    const tools = page.locator(".sessions-app-bar-tools");
+    const inside = () => tools.evaluate((row) => {
+      const box = row.getBoundingClientRect();
+      return [...row.querySelectorAll(":scope > *")].every((child) => {
+        const rect = child.getBoundingClientRect();
+        return rect.left >= box.left - 0.5 && rect.right <= Math.min(box.right, innerWidth) + 0.5;
       });
     });
-    expect(await inside(), "Filters and search fit the row unfiltered").toBe(true);
-    expect((await page.locator(".inbox-search").boundingBox())!.width).toBeGreaterThanOrEqual(160);
+    expect(await inside(), "Filters fits the row unfiltered").toBe(true);
     expect((await page.locator(".column.col-done").boundingBox())!.width).toBe(40);
 
-    await page.locator(".tabs-tools").getByRole("button", { name: "Filters", exact: true }).click();
+    await tools.getByRole("button", { name: "Filters", exact: true }).click();
     await page.getByRole("menu", { name: "Filters" }).getByRole("group", { name: "Studio Mac" })
       .getByRole("menuitemradio", { name: "Claude Code" }).click();
-    await expect(page.locator(".tabs-tools .board-filter-note")).toHaveText("10 of 29");
+    await expect(tools.locator(".board-filter-note")).toHaveText("10 of 29");
     expect(await inside(), "and with a filter and its count").toBe(true);
     expect((await page.locator(".column.col-queued").boundingBox())!.width).toBe(40);
   });

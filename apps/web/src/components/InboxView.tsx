@@ -1519,6 +1519,7 @@ export function InboxView({
         projectActions={activeSplit && activeSplit.project !== null ? projectActionsFor(activeSplit) : null}
         onNewSession={newSession}
         newSessionShortcut={shortcutDisplay("new-session")}
+        boardTools={boardMode ? <BoardFilterTools sessions={boardSessions} /> : undefined}
       />
     )}
     {!expanded && !isMobile && (

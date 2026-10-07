@@ -3329,10 +3329,6 @@ textarea {
      while a card is dragged. */
   .board .column.is-empty { flex: 0 0 var(--space-10); }
   .board.is-dragging .column.is-empty { flex: 0 0 84vw; }
-  /* The tools row is the search's own row on a phone (#2082); in Board mode it shares it with
-     Filters and the count, so it takes what they leave instead of the full width. */
-  .tabs-tools:has(> .board-filter) { min-width: 0; }
-  .tabs-tools:has(> .board-filter) > .inbox-search { flex: 1 1 0; width: auto; }
 }
 .column-body {
   flex: 1;
@@ -12027,6 +12023,13 @@ body.shell-dock-dragging * {
 .sessions-group-picker-caret { flex: none; }
 .sessions-app-bar-search { gap: var(--space-2); }
 .sessions-app-bar-search > .inbox-search { flex: 1; width: auto; min-width: 0; }
+/* The Board's Filters and count, on their own row under a phone's bar until #2216. */
+.sessions-app-bar-tools {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  border-top: 1px solid var(--border);
+}
 .sessions-snoozed-strip {
   display: flex;
   align-items: center;

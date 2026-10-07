@@ -1,4 +1,4 @@
-import React, { useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import React, { useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import type { InboxSplit, InboxSplitKey } from "../inbox.js";
 import type { ReminderInboxMode } from "../session-reminders.js";
@@ -24,7 +24,7 @@ import { SessionsSearchField } from "./SessionsSearch.js";
  * Session Groups sheet (more than four tabs become a picker, §10.1); then Search, which swaps the
  * bar for a full-width search field and Cancel; ⋯, a sheet with View, Show, New Project… and the
  * current project's actions; and New Session as the 44px `+`. While Snoozed is on, a strip under the
- * bar says so and offers Show Active.
+ * bar says so and offers Show Active. In Board mode the Board's Filters sit on a row under the bar.
  */
 
 export interface SessionsAppBarProps {
@@ -48,6 +48,8 @@ export interface SessionsAppBarProps {
   };
   /** New Session's key, announced though its keycap is not drawn on the 44px `+` (§11.5). */
   newSessionShortcut?: string;
+  /** The Board's Filters (#2201), on a row under the bar until the phone Board has its own sheet (#2216). */
+  boardTools?: ReactNode;
   viewMode: SessionsViewMode;
   onViewModeChange: (mode: SessionsViewMode) => void;
   /** The Show group; null where this connection has no reminders. */
@@ -245,6 +247,7 @@ export function SessionsAppBar({
   projectActions,
   onNewSession,
   newSessionShortcut,
+  boardTools,
 }: SessionsAppBarProps) {
   const [moreOpen, setMoreOpen] = useState(false);
   const actions = useProjectSplitActions(projectActions && {
@@ -319,6 +322,7 @@ export function SessionsAppBar({
       <h1 id="page-title" className="sr-only" tabIndex={-1}>{title}</h1>
       {bar}
       {actions?.dialogs}
+      {boardTools && <div className="sessions-app-bar-tools">{boardTools}</div>}
       {snoozed && (
         <div className="sessions-snoozed-strip">
           <span>Showing snoozed sessions.</span>

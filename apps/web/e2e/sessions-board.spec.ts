@@ -23,7 +23,8 @@ async function openHarness(page: Page, path = "/") {
 /** Switches List / Board: the header's view switch, or on a phone the app bar's ⋯ (#2211). */
 async function chooseView(page: Page, view: "List" | "Board") {
   const bar = page.locator(".sessions-app-bar");
-  if (await bar.count() === 0) {
+  // Read the viewport, not the DOM: right after a resize the old header can still be mounted.
+  if (!await page.evaluate(() => matchMedia("(max-width: 760px)").matches)) {
     await page.getByRole("radiogroup", { name: "Sessions View" }).getByRole("radio", { name: view }).click();
     return;
   }
