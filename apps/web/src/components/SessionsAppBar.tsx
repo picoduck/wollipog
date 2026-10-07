@@ -36,6 +36,9 @@ export interface SessionsAppBarProps {
   activeKey: InboxSplitKey;
   /** The Snoozed view: counts are snoozed sessions and no attention badge is drawn. */
   snoozed: boolean;
+  /** Whether the Snoozed strip shows under the bar. Not while the page's own state already says the
+   * view is Snoozed and offers Show Active (#2220's No Snoozed Sessions). Defaults to `snoozed`. */
+  snoozedStrip?: boolean;
   onSelectGroup: (key: InboxSplitKey) => void;
   search: {
     /** Search mode: the bar is the field and Cancel. */
@@ -59,7 +62,8 @@ export interface SessionsAppBarProps {
   onNewProject: () => void;
   /** The current group's project actions (#2199), or null for All and No Project. */
   projectActions: ProjectSplitActionsProps | null;
-  onNewSession: () => void;
+  /** The `+`; absent while the page's state offers New Session instead (§12.1, #2220). */
+  onNewSession?: () => void;
 }
 
 const labelFor = (labels: ReadonlyMap<InboxSplitKey, SessionGroupLabel>, split: InboxSplit): SessionGroupLabel =>
@@ -237,6 +241,7 @@ export function SessionsAppBar({
   labels,
   activeKey,
   snoozed,
+  snoozedStrip = snoozed,
   onSelectGroup,
   search,
   viewMode,
@@ -310,10 +315,12 @@ export function SessionsAppBar({
           <SearchIcon />
         </button>
         {more}
-        <button type="button" className="btn primary page-primary" aria-keyshortcuts={newSessionShortcut} onClick={onNewSession}>
-          <PlusIcon />
-          <span className="page-primary-label">New Session</span>
-        </button>
+        {onNewSession && (
+          <button type="button" className="btn primary page-primary" aria-keyshortcuts={newSessionShortcut} onClick={onNewSession}>
+            <PlusIcon />
+            <span className="page-primary-label">New Session</span>
+          </button>
+        )}
       </div>
     </div>
   );
@@ -323,7 +330,7 @@ export function SessionsAppBar({
       {bar}
       {actions?.dialogs}
       {boardTools && <div className="sessions-app-bar-tools">{boardTools}</div>}
-      {snoozed && (
+      {snoozedStrip && (
         <div className="sessions-snoozed-strip">
           <span>Showing snoozed sessions.</span>
           <button

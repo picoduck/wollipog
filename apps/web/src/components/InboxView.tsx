@@ -1487,6 +1487,8 @@ export function InboxView({
         labels={groupLabels}
         activeKey={activeSplit?.key ?? null}
         snoozed={reminderMode === "snoozed"}
+        // No Snoozed Sessions (#2220) already says so and offers Show Active: no second strip.
+        snoozedStrip={reminderMode === "snoozed" && situation?.kind !== "snoozed"}
         onSelectGroup={selectSplit}
         search={{
           open: phoneSearchOpen || query !== "",
@@ -1505,7 +1507,8 @@ export function InboxView({
         newProjectUnavailableReason={projectsSupported ? null : "New Project is unavailable on this connection."}
         onNewProject={() => setCreatingProject(true)}
         projectActions={activeSplit && activeSplit.project !== null ? projectActionsFor(activeSplit) : null}
-        onNewSession={newSession}
+        // While the page's state offers New Session, the bar does not (§12.1, #2220).
+        onNewSession={stateOffersNewSession ? undefined : newSession}
         newSessionShortcut={shortcutDisplay("new-session")}
         boardTools={boardMode ? <BoardFilterTools sessions={boardSessions} /> : undefined}
       />

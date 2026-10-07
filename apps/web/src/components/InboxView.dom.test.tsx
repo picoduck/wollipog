@@ -3243,19 +3243,26 @@ test("the phone ⋯ sheet lists View, Show, New Project… and the current proje
     "Archive All Sessions…",
   ], "the project's actions follow under its name, without Reveal in File Manager on a phone");
 
-  // Snoozed: the strip says so under the bar, and Show Active returns, focusing the picker.
+  // Snoozed in All, which holds one: the strip says so under the bar, and Show Active returns,
+  // focusing the picker. (A group with none shows #2220's No Snoozed Sessions instead.)
+  await act(async () => {
+    more.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as unknown as Event);
+  });
+  await chooseGroup("All");
+  more = await openMore();
   const snoozedItem = [...more.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')]
     .find((item) => item.textContent?.startsWith("Snoozed Sessions"))!;
   await act(async () => { snoozedItem.click(); });
   const strip = bar().querySelector<HTMLElement>(".sessions-snoozed-strip")!;
   assert.equal(strip.querySelector("span")?.textContent, "Showing snoozed sessions.");
   assertNoDomNode(picker().querySelector(".count-badge"), "Snoozed draws no attention badge");
-  assert.equal(picker().getAttribute("aria-label"), "Alpha");
+  assert.equal(picker().getAttribute("aria-label"), "All");
+  assert.deepEqual(rowTitles(container), ["Plan the offsite"]);
   await act(async () => { [...strip.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Show Active")!.click(); });
   assertNoDomNode(bar().querySelector(".sessions-snoozed-strip"), "Show Active removes the strip");
-  assert.equal(picker().getAttribute("aria-label"), "Alpha, 2 Blocked, 1 Stalled");
+  assert.equal(picker().getAttribute("aria-label"), "All, 2 Blocked, 1 Stalled");
   assert.equal(domWindow.document.activeElement, picker());
-  assert.deepEqual(rowTitles(container), ["Fix the deploy", "Ship the release", "Migrate the database"]);
+  assert.equal(rowTitles(container).length, 4);
 });
 
 test("a confirmation opened from the phone ⋯ sheet replaces it, and Back brings the sheet back (§7.5, #2211)", async () => {
@@ -3358,6 +3365,31 @@ test("Show Active in phone Search mode hands focus to the search field, not <bod
   await act(async () => { showActive.focus(); showActive.click(); });
   assertNoDomNode(bar().querySelector(".sessions-snoozed-strip"));
   assert.equal(domWindow.document.activeElement, bar().querySelector(".inbox-search input"));
+});
+
+test("the phone bar's + steps aside while the page's state offers New Session, and No Snoozed Sessions takes no strip (#2211, #2220)", async () => {
+  const { container, bar, chooseGroup, openMore } = await mountPhoneBar("phone-bar-states-test");
+  const plus = () => bar().querySelector(".page-primary");
+  assert.ok(plus(), "a group with sessions keeps the +");
+
+  // No Project has none: its state offers New Session, so the bar does not (§12.1).
+  await chooseGroup("No Project");
+  assert.ok(container.querySelector(".inbox-state"), "the state fills the page under the bar");
+  assertNoDomNode(plus(), "the + steps aside for the state's own New Session");
+  await chooseGroup("Alpha");
+  assert.ok(plus());
+
+  // Snoozed in Alpha, which has none: No Snoozed Sessions already says so and offers Show Active.
+  const more = await openMore();
+  const snoozedItem = [...more.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')]
+    .find((item) => item.textContent?.startsWith("Snoozed Sessions"))!;
+  await act(async () => { snoozedItem.click(); });
+  assert.match(container.querySelector(".inbox-state")?.textContent ?? "", /No Snoozed Sessions/);
+  assertNoDomNode(bar().querySelector(".sessions-snoozed-strip"), "the state and the strip do not double up");
+
+  // Beta has a snoozed session: its list shows, and the strip says Snoozed is on.
+  await chooseGroup("Beta");
+  assert.ok(bar().querySelector(".sessions-snoozed-strip"));
 });
 
 test("the phone app bar's Search swaps the bar for a focused full-width field, and Cancel restores it (#2211)", async () => {
