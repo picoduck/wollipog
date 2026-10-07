@@ -156,7 +156,7 @@ function InboxRowInner({
   const status = sessionRowStatus(session, {
     runnerOnline,
     reminder,
-    familyFollowUpLabel: threeRow ? children?.followUpLabel : undefined,
+    familyFollowUpLabel: children?.followUpLabel,
     stalledForMs: sessionStalledForMs(stalled, activityNow, lastActivityAt),
   });
   const strip = showsActivityStrip(session.status, activity, activityNow);

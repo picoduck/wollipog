@@ -17,7 +17,7 @@ export interface SessionRowStatusContext {
   reminder?: SessionReminderView;
   /** How long a stalled session has been silent, in milliseconds; absent while it is not stalled. */
   stalledForMs?: number;
-  /** A phone parent's human-owned descendant reason, visible even when its family chip is dots. */
+  /** A parent's human-owned descendant reason, visible even when its family chip is dots. */
   familyFollowUpLabel?: "Needs Your Input" | "Ready for Review";
 }
 
@@ -80,6 +80,8 @@ function snoozedCondition(session: SessionStatusSource, needs: readonly SessionC
  * 4. Else an outstanding human result's Ready for Review.
  * 5. Else the lifecycle status, except Awaiting Prompt, which shows no badge.
  *
+ * A family's human-attention reason is visible on its parent's badge at every list width, including
+ * narrow desktop columns where the chip shows only dots. The parent's own higher-ranked request wins.
  * Stalled is not a second badge (#2215). A stalled session whose badge would be its busy lifecycle
  * (Queued, Starting, Running) reads Stalled instead; an attention badge keeps its own label.
  * Either way the badge takes the danger tone, stops pulsing, and its tooltip says how long the session

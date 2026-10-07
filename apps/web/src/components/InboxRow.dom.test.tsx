@@ -61,12 +61,12 @@ async function withRow(
 const badges = (container: Element) => [...container.querySelectorAll<HTMLElement>(".status")];
 const minutesAgo = (minutes: number): SessionActivity => recordSessionActivity(undefined, NOW - minutes * ACTIVITY_BUCKET_MS);
 
-test("a phone parent shows its human family reason in the single badge, with the desktop rollup preserved", async () => {
+test("a parent keeps its human family reason in the single badge across phone and desktop shapes", async () => {
   for (const reason of ["Needs Your Input", "Ready for Review"] as const) {
     await withRow(baseSession({ status: "running" }), async (container, rerender) => {
       assert.deepEqual(badges(container).map((badge) => badge.textContent), [reason]);
       await rerender({ threeRow: false });
-      assert.deepEqual(badges(container).map((badge) => badge.textContent), ["Running"]);
+      assert.deepEqual(badges(container).map((badge) => badge.textContent), [reason]);
       assert.match(container.querySelector(".inbox-thread-family-text")?.textContent ?? "", new RegExp(reason));
     }, { threeRow: true, threadChildren: JSON.stringify({ count: 1, waiting: reason === "Needs Your Input" ? 1 : 0,
       followUpLabel: reason, children: [{ id: "child", title: "Child", state: "running" }] }) });
