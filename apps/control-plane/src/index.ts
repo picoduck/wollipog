@@ -4606,9 +4606,9 @@ app.post("/api/sessions/:id/steer", async (req, reply) => {
   const body = req.body as SteerRequest;
   const result = await svc.steer(id, body);
   const human = requestHuman(req);
-  if (human && result.ok && result.data?.state !== "rejected" &&
-      typeof body.reviewedResultRevision === "string" &&
-      db.acknowledgeSessionResult(id, human.userId, body.reviewedResultRevision)) hub.sessionChangedById(id);
+  if (human && result.ok && typeof body.reviewedResultRevision === "string" && body.reviewedResultRevision &&
+      body.reviewedResultRevision.length <= 200 &&
+      db.reviewSessionResultAfterSteering(id, human.userId, body.submissionId, body.reviewedResultRevision)) hub.sessionChangedById(id);
   return respond(reply, result);
 });
 

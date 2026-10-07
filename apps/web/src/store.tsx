@@ -1272,9 +1272,16 @@ function reducer(state: State, action: Action): State {
             : msg.session;
           // Mutation responses have shared attention facts but no viewer identity. Preserve this
           // viewer's exact acknowledgment; a new result revision still remains outstanding.
-          if (session.attention && session.attention.acknowledgedRevision === undefined && previousSession?.attention) {
-            session = { ...session, attention: { ...session.attention,
-              acknowledgedRevision: previousSession.attention.acknowledgedRevision } };
+          if (session.attention && previousSession?.attention) {
+            const incoming = session.attention;
+            const previous = previousSession.attention;
+            if (incoming.revision !== undefined && previous.revision !== undefined && incoming.revision < previous.revision) {
+              session = { ...session, attention: previous };
+            } else if (incoming.acknowledgedRevision === undefined || (incoming.acknowledgmentRevision !== undefined &&
+                previous.acknowledgmentRevision !== undefined && incoming.acknowledgmentRevision < previous.acknowledgmentRevision)) {
+              session = { ...session, attention: { ...incoming, acknowledgedRevision: previous.acknowledgedRevision,
+                acknowledgmentRevision: previous.acknowledgmentRevision } };
+            }
           }
           sessions.set(msg.session.id, session);
           state.activity.set(msg.session.id, reconcileSessionActivity(

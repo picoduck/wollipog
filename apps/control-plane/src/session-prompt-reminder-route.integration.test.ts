@@ -9,12 +9,14 @@ import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import {
+  DEFAULT_ORCHESTRATOR_DEFAULTS,
   PROTOCOL_VERSION,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
   type RunnerMetadata,
 } from "@wollipog/protocol";
 import { hashToken } from "./auth.js";
 import { ControlPlaneDb } from "./db.js";
+import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 
 const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const RUNNER_ID = "runner-prompt-reminder-route";
@@ -238,6 +240,7 @@ function seed(database: string, runner: RunnerMetadata): { ownerUserId: string; 
     }).kind, "updated");
     assert.equal(db.fireDueSessionReminders(now).length, 2);
     db.appendEvent(SESSION_ID, { kind: "agent_message", text: "A finding to review", final: true }, now + 7);
+    db.appendEvent(SESSION_ID, { kind: "agent_response_completed" }, now + 7);
     return { ownerUserId: identity.userId, reminderIds,
       resultRevision: db.getSession(SESSION_ID)!.attention!.result!.revision };
   } finally {
@@ -491,7 +494,8 @@ test("prompt route acknowledges fired reminders only for accepted human principa
     "an ordinary parent is not an Orchestrator result controller");
   const roleDb = new DatabaseSync(database);
   roleDb.exec("PRAGMA busy_timeout=5000");
-  roleDb.prepare("UPDATE sessions SET session_role='orchestrator' WHERE id=?").run(PARENT_SESSION_ID);
+  roleDb.prepare("UPDATE sessions SET session_role='orchestrator',orchestrator_policy=? WHERE id=?")
+    .run(JSON.stringify(resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default")), PARENT_SESSION_ID);
   roleDb.close();
   assert.equal((await handoff(agentHeaders, "stale")).body.handedOff, false);
   const handedOff = await handoff(agentHeaders, seeded.resultRevision);

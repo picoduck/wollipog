@@ -1365,7 +1365,7 @@ export class Hub {
           const shared = projected === msg ? sessionDataByPermissions.get(key) : undefined;
           clientData = shared ?? JSON.stringify({ ...projected, session } satisfies ControlPlaneToUi);
           if (projected === msg && shared === undefined) sessionDataByPermissions.set(key, clientData);
-          (info.sentCommandPermissions ??= new Map()).set(session.id, key);
+          (info.sentCommandPermissions ??= new Map()).set(session.id, permissionsKey(session));
         }
         if (projected.type === "session_removed") info.sentCommandPermissions?.delete(projected.sessionId);
         if (projected.type === "session_upsert") info.visibleSessionIds?.add(projected.session.id);

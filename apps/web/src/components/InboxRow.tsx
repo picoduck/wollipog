@@ -111,7 +111,8 @@ function InboxRowInner({
   // A surface without a store (a harness page) cannot see the runner, so it keeps the conservative
   // delivery wording rather than claiming the runner is offline.
   const runnerOnline = useOptionalStoreSelector((state) => state.runners.get(session.runnerId)?.status !== "offline") ?? true;
-  const lastActivityAt = session.attention?.meaningfulAt ?? inboxRowTimestamp(session, activity);
+  const lastActivityAt = inboxRowTimestamp(session, activity);
+  const meaningfulAt = session.attention?.meaningfulAt ?? lastActivityAt;
   const status = sessionRowStatus(session, {
     runnerOnline,
     reminder,
@@ -205,8 +206,8 @@ function InboxRowInner({
       )}
     </span>
   ) : (
-    <time className="inbox-row-time" dateTime={lastActivityAt ? new Date(lastActivityAt).toISOString() : undefined}>
-      {relativeTime(lastActivityAt)}
+    <time className="inbox-row-time" dateTime={meaningfulAt ? new Date(meaningfulAt).toISOString() : undefined}>
+      {relativeTime(meaningfulAt)}
     </time>
   );
   /* The row's trailing actions (#2214, §3.3, §5.2): Snooze, Archive and ⋯, after the row button

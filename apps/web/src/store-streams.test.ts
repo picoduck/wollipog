@@ -101,6 +101,23 @@ test("unscoped mutations preserve viewer acknowledgments and fresh scoped reads 
   assert.equal(store.getState().sessions.get("s1")?.attention?.acknowledgedRevision, null);
 });
 
+test("late result and acknowledgment responses cannot replace newer live follow-up facts", () => {
+  const store = new Store();
+  const facts = { version: 1 as const, revision: 1, humanActions: [], meaningfulAt: 1,
+    result: { revision: "first", at: 1, owner: "human" as const }, acknowledgedRevision: "first", acknowledgmentRevision: 1 };
+  store.loadSession({ ...session("s1"), attention: facts });
+  store.loadSession({ ...session("s1"), attention: { ...facts, revision: 2,
+    result: { revision: "second", at: 1, owner: "human" } } });
+  store.loadSession({ ...session("s1"), attention: facts });
+  assert.equal(store.getSession("s1")?.attention?.result?.revision, "second", "equal timestamps and event cursors do not defeat the fence");
+  store.loadSession({ ...session("s1"), attention: { ...facts, revision: 2,
+    result: { revision: "second", at: 1, owner: "human" }, acknowledgedRevision: "second", acknowledgmentRevision: 2 } });
+  store.loadSession({ ...session("s1"), attention: { ...facts, revision: 3,
+    result: { revision: "second", at: 1, owner: "human" }, acknowledgedRevision: null, acknowledgmentRevision: 0 } });
+  assert.equal(store.getSession("s1")?.attention?.acknowledgedRevision, "second");
+  assert.equal(store.getSession("s1")?.attention?.revision, 3);
+});
+
 test("authoritative snapshots replace durable steering receipts and queue reservation state without duplication", () => {
   const store = new Store();
   const pending: SteeringAttemptView = {

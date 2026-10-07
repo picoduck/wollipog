@@ -86,6 +86,22 @@ test("Pi RPC normalizes one multi-stage run without duplicate or empty messages"
   assert.deepEqual(context, { contextTokensUsed: 16, contextWindow: 200000 });
 });
 
+test("Pi whole-message completion waits for a successful response; failed and cancelled turns stay quiet", async () => {
+  for (const reason of ["end_turn", "refusal", "cancelled", "max_tokens"]) {
+    const events: SessionEventPayload[] = [];
+    const driver = new PiRpcDriver(options(), callbacks(events));
+    const state = driver as any;
+    state.onMessageEnd({ role: "assistant", content: [{ type: "text", text: "Investigating" }] });
+    assert.equal(events.some((event) => event.kind === "agent_response_completed"), false);
+    state.turnStop = reason;
+    state.refreshSessionStats = async () => {};
+    state.refreshCompletedTurnId = async () => {};
+    await state.finishSettledTurn();
+    assert.equal(events.filter((event) => event.kind === "agent_response_completed").length, reason === "end_turn" ? 1 : 0);
+    driver.dispose();
+  }
+});
+
 test("Pi RPC clones the latest completed leaf into the target worktree without replacing the source", async (t) => {
   const driver = new PiRpcDriver(options(), callbacks([]));
   t.after(() => driver.dispose());

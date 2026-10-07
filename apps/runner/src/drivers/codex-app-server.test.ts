@@ -1631,6 +1631,21 @@ test("the first pre-response terminal notification wins for one provider turn", 
   assert.deepEqual(h.events, []);
 });
 
+test("completion-only messages wait for a successful root turn boundary", async () => {
+  for (const status of ["completed", "failed", "interrupted"]) {
+    const h = makeHarness();
+    const notifications = notificationHandlers(h.driver);
+    (h.driver as any).peer = { request: async () => ({ turn: { id: "whole-turn", status: "inProgress" } }), notify: () => {} };
+    const pending = h.driver.prompt("work");
+    await nextTask();
+    notifications.get("item/completed")!({ item: { id: "whole", type: "agentMessage", text: "Still investigating" } });
+    assert.equal(h.events.some((event) => event.kind === "agent_response_completed"), false);
+    notifications.get("turn/completed")!({ turn: { id: "whole-turn", status } });
+    await pending;
+    assert.equal(h.events.filter((event) => event.kind === "agent_response_completed").length, status === "completed" ? 1 : 0);
+  }
+});
+
 test("interrupted turn/completed maps to cancelled", async () => {
   const h = makeHarness();
   const notifications = new Map<string, (params: any) => void>();

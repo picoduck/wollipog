@@ -12,10 +12,11 @@ meaningful work time and session ID. Pins lead within a group. Families stay par
 their strongest human follow-up; due reminders surface below concrete human input. Existing snooze
 visibility, wake rules, and interaction-held ordering remain in force.
 
-Only live top-level final agent output, or a response-completed boundary following live streamed
-output, creates a result. Tool events, deltas, heartbeats, historical imports and transcript cache
+Only a successful response-completed boundary following live top-level output creates a result.
+An individually completed message can still be intermediate commentary; older peers without an
+unambiguous response boundary remain conservative. Tool events, deltas, heartbeats, historical imports and transcript cache
 hydration do not create review work. Live history-gap receipts use the same durable revision as
-subsequent projection, and replay cannot replace a newer result. Status transitions, final output,
+subsequent projection, and replay cannot replace a newer result. Status transitions, completed responses,
 user instructions and request occurrences advance meaningful time; repeated snapshots do not.
 
 `POST /api/sessions/:id/result/acknowledge` requires a visible session, an authenticated human and the
@@ -26,8 +27,18 @@ old revision. Opening a session or changing unread state does not acknowledge it
 responses omit the viewer's acknowledgment, so clients preserve their last scoped value until a
 fresh scoped read or live update replaces it.
 
-Descendant results belong to the outermost durable Orchestrator until an explicit exact-revision
-handoff. The controller's session credential or its human owner may invoke
+Shared projections carry a durable monotonic `attention.revision`; each receiving user also has an
+independent `acknowledgmentRevision`. A late HTTP response cannot replace a newer live result or
+erase a newer personal acknowledgment, even when timestamps tie or a history gap leaves the event
+cursor unchanged. Reprocessing clears result/acknowledgment values while advancing these fences.
+Unconfirmed steering keeps a durable exact personal review intent. Only provider acceptance,
+successful queue conversion/recovery, or canonical delivered user-message evidence settles it;
+pending, uncertain and rejected attempts never prematurely review a result. Replaying a submission
+cannot substitute a newer addressed result. Duplicate live output receipts never rearm a completed
+response or advance meaningful time.
+
+Descendant results belong to the outermost Orchestrator with a durable campaign policy until an explicit exact-revision
+handoff. Role-only legacy parents remain human-conservative, matching request ownership. The controller's session credential or its human owner may invoke
 `POST /api/sessions/:id/result/handoff`; the CLI exposes `session handoff-result ID --revision REV`
 and MCP exposes `handoff_session_result`. A newer report needs another handoff. Human-owned requests
 and escalations continue to follow existing durable request ownership. Recoverable child failures

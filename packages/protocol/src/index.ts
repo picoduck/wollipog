@@ -5201,8 +5201,8 @@ export type SessionEventPayload =
   | { kind: "agent_message"; text: string; final?: boolean; messageId?: string; parentToolUseId?: string }
   /** Control-plane-authored row for a file attachment. Bytes remain in the private artifact store. */
   | { kind: "artifact_attached"; artifact: WorkflowArtifactView }
-  /** Content-free evidence that a response delivered as message chunks reached a successful turn
-   * boundary. Completion-only responses continue to use `agent_message.final` instead. */
+  /** Content-free evidence that live top-level output reached a successful turn boundary.
+   * `agent_message.final` completes an individual message, which may occur mid-turn. */
   | { kind: "agent_response_completed" }
   | { kind: "agent_thought"; text: string; final?: boolean; messageId?: string; parentToolUseId?: string }
   | {
@@ -6659,6 +6659,8 @@ export interface SessionCommandPermissions {
 /** Compact CP-owned follow-up facts. No transcript fetch or lifecycle inference is required. */
 export interface SessionAttentionSummary {
   version: 1;
+  /** Durable CP ordering fence for shared attention facts, independent of event hydration. */
+  revision?: number;
   humanActions: Array<{ requestId: string; rank: number; requestedAt: number }>;
   meaningfulAt: number;
   result: {
@@ -6669,6 +6671,8 @@ export interface SessionAttentionSummary {
   /** The receiving user's acknowledgment. Omitted on unscoped mutation responses; null means
    * this viewer has none. Agent views never carry a human's acknowledgment. */
   acknowledgedRevision?: string | null;
+  /** Per-user ordering fence; omitted with the acknowledgment on unscoped responses. */
+  acknowledgmentRevision?: number;
 }
 
 /** Denormalised session record for the UI (board cards + lists). */

@@ -958,7 +958,9 @@ export class PiRpcDriver implements Driver {
     if (this.settling) return;
     this.settling = true;
     this.dismissQuestions("provider_resolved");
-    if (this.streamedAgentResponse) this.cb.onEvent({ kind: "agent_response_completed" });
+    if (!this.cancelled && this.turnStop === "end_turn" && this.streamedAgentResponse) {
+      this.cb.onEvent({ kind: "agent_response_completed" });
+    }
     await this.refreshSessionStats();
     await this.refreshCompletedTurnId();
     this.settleTurn(this.cancelled ? "cancelled" : this.turnStop);

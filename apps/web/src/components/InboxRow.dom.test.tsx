@@ -109,6 +109,15 @@ test("a stalled running row shows one badge, in the danger tone, saying how long
   }, { stalled: true });
 });
 
+test("meaningful work time labels the row while actual activity determines the stall duration", async () => {
+  const session = baseSession({ status: "running", lastEventAt: NOW - 14 * 60_000,
+    attention: { version: 1, humanActions: [], meaningfulAt: NOW - 40 * 60_000, result: null } });
+  await withRow(session, (container) => {
+    assert.match(badges(container)[0]!.getAttribute("title") ?? "", /no activity for 14 minutes/);
+    assert.equal(container.querySelector("time")?.getAttribute("dateTime"), new Date(NOW - 40 * 60_000).toISOString());
+  }, { stalled: true });
+});
+
 test("a running row with background work shows Running and the strip", async () => {
   await withRow(baseSession({ status: "running", backgroundWorkState: "running" }), (container) => {
     const shown = badges(container);

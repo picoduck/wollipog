@@ -27,6 +27,17 @@ test("outstanding human results use the single row badge without overriding huma
     attention: { ...attention, humanActions: [{ requestId: "q", rank: 3, requestedAt: 1 }] } }))), "Answer Required");
 });
 
+test("result readiness does not hide disconnection, failure, Stop, or a blocked delivery", () => {
+  const attention = { version: 1 as const, humanActions: [], meaningfulAt: 1,
+    result: { revision: "r1", at: 1, owner: "human" as const }, acknowledgedRevision: null };
+  assert.equal(label(sessionRowStatus(session({ status: "running", attention }), { runnerOnline: false })), "Disconnected");
+  assert.equal(label(sessionRowStatus(session({ status: "failed", attention }))), "Failed");
+  assert.equal(label(sessionRowStatus(session({ status: "running", attention, stopOperation: {
+    operationId: "stop", status: "stop_pending", requestedAt: 1, lastAttemptAt: 1, attemptCount: 1, capacityReleased: false } }))), "Stop Pending");
+  const delivery = { parentTurnId: "turn", watchdogState: "continuation_blocked", queuedAt: 1 } as NonNullable<SessionView["backgroundDeliveries"]>[number];
+  assert.equal(label(sessionRowStatus(session({ status: "running", attention, backgroundDeliveries: [delivery] }))), "Result Blocked");
+});
+
 test("Awaiting Prompt shows no badge; every other lifecycle shows its own", () => {
   assert.deepEqual(sessionRowStatus(session()), { badge: null, others: [] });
   for (const [status, expected] of [

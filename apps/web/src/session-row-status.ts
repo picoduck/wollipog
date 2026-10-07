@@ -75,7 +75,8 @@ function snoozedCondition(session: SessionStatusSource, needs: readonly SessionC
  *    attention reasons count among them.
  * 2. Else Background Work Lost, Disconnected, then Waiting on External Job (`sessionStatusSummary()`).
  * 3. Else a fired reminder's Returned.
- * 4. Else the lifecycle status, except Awaiting Prompt, which shows no badge.
+ * 4. Else an outstanding human result's Ready for Review.
+ * 5. Else the lifecycle status, except Awaiting Prompt, which shows no badge.
  *
  * Stalled is not a second badge: a stalled session's badge takes the danger tone, stops pulsing, and
  * its tooltip says how long the session has been silent.
@@ -100,7 +101,9 @@ export function sessionRowStatus(session: SessionStatusSource, context: SessionR
       primary = null;
     }
   }
-  if (session.attention && sessionFollowUp(session as SessionView).group === "ready_for_review") {
+  if ((!primary || (primary.kind === "lifecycle" && primary.meta.tone !== "danger" && !session.stopOperation)) &&
+      needs.length === 0 && reminder?.state !== "fired" &&
+      session.attention && sessionFollowUp(session as SessionView).group === "ready_for_review") {
     primary = { kind: "lifecycle", meta: { label: "Ready for Review", tone: "warning", pulse: false },
       description: "A new result is waiting for your assessment or next instructions.", needsYou: true };
   }

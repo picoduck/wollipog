@@ -134,6 +134,10 @@ if (process.env.WOLLIPOG_CAPTURE_EVIDENCE === "1") {
       await page.setViewportSize({ width, height: 900 });
       await open(page);
       await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
+      await page.evaluate(async () => {
+        await Promise.all(document.getAnimations().filter((animation) =>
+          animation.effect?.getComputedTiming().iterations !== Infinity).map((animation) => animation.finished.catch(() => {})));
+      });
       await page.screenshot({ path: `/tmp/2717-evidence/after-${width}-${theme}-order.png`, fullPage: true });
       await row(page, result).click({ button: "right" });
       await expect(page.getByRole("menuitem", { name: "Mark Reviewed", exact: true })).toBeVisible();
