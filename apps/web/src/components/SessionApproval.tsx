@@ -476,11 +476,14 @@ export function SessionQuestionBanner({
   // long question on a short window), the card scrolls as a whole under its footer instead, as it
   // does expanded. The room is read the same way in either layout: the card's height less everything
   // in it but the body. An uncapped card (the Requests panel) always has room.
+  // The compact Composer Response card (#2212) has no body: its title is still measured, and it is
+  // never cramped.
+  const hasBody = !compact || recoveryRequired;
   useIsomorphicLayoutEffect(() => {
     const title = titleRef.current;
     const card = cardRef.current;
     const body = stepRef.current;
-    if (!title || !card || !body) return;
+    if (!title || !card) return;
     const measure = () => {
       title.classList.add("is-clamped");
       const hidden = title.scrollHeight > title.clientHeight + 1;
@@ -489,6 +492,10 @@ export function SessionQuestionBanner({
       const toggle = titleToggleRef.current;
       if (!hidden && toggle && toggle === toggle.ownerDocument.activeElement) title.focus({ preventScroll: true });
       setTitleTruncates(hidden);
+      if (!body) {
+        setCardCramped(false);
+        return;
+      }
       const room = card.clientHeight - (card.scrollHeight - body.offsetHeight);
       setCardCramped(room < Math.min(body.scrollHeight, CRAMPED_BODY_PX));
     };
@@ -500,9 +507,9 @@ export function SessionQuestionBanner({
     const observer = new ResizeObserver(measure);
     observer.observe(title);
     observer.observe(card);
-    observer.observe(body);
+    if (body) observer.observe(body);
     return () => observer.disconnect();
-  }, [question?.question, titleExpanded, step]);
+  }, [question?.question, titleExpanded, step, hasBody]);
   const cardScrolls = (titleExpanded && titleTruncates) || cardCramped;
   // The whole question is read from its first line: a card scrolled down to reach Show Full Question
   // brings the question's start back into view, within the card alone.

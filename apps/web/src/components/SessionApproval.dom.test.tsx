@@ -526,6 +526,29 @@ test("a capped card whose body is squeezed below a row scrolls as a whole, thoug
   }
 });
 
+test("the compact Composer Response card measures a long question too, and offers Show Full Question (#2212, #2683)", async () => {
+  const long = "Campaign scope request epic-initial-scope is still pending, and dispatch waits on it.";
+  const layout = stubQuestionLayout({ [long]: 8 });
+  const { container, root } = mount();
+  try {
+    setQuestionResponseStyle("composer", domWindow as never);
+    await renderComposerCard(root, [{ id: "scope", question: long, options: [{ label: "Approve" }, { label: "Hold" }] }],
+      { requestId: "question-compact-long" });
+    assertNoDomNode(container.querySelector(".request-card-body"), "the compact card has no body");
+    const toggle = container.querySelector<HTMLButtonElement>(".question-text-toggle");
+    assert.equal(toggle?.textContent, "Show Full Question");
+    await act(async () => { toggle!.click(); });
+    assert.equal(container.querySelector(".question-text")!.classList.contains("is-clamped"), false);
+    assert.equal(container.querySelector(".question-text-toggle")?.textContent, "Show Less");
+  } finally {
+    await act(async () => { setQuestionResponseStyle("interactive", domWindow as never); });
+    await act(async () => { root.unmount(); });
+    container.remove();
+    layout.restore();
+    clearQuestionDrafts("session-1", "question-compact-long");
+  }
+});
+
 test("a long question shows Show Full Question, expands whole and collapses, keeping the choice and step (#2683)", async () => {
   const long = "Campaign scope request epic-initial-scope is still pending, and dispatch waits on it.";
   const questions: AgentQuestion[] = [
