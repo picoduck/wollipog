@@ -2166,9 +2166,14 @@ follows these rules so it never crowds out the conversation it asks about:
   Sign-In, Question), the owner and the time. Then the title in `--type-section`, a policy ask's
   "Asked by <policy>" and "Rejects automatically in 9:42", and the body: the command in a code well
   (§11.7) and the match context as facts (§5.4). The footer is `requestCardActions()`: `reject_*`
-  options as secondaries, `allow_always` and every other option in a ⋯ menu with its description as
-  the item's second line, and the first `allow_once` as the one primary, last; a request with no
-  `allow_once` has no primary. A reason nobody can act (the runner is offline, a Viewer's refusal, a
+  options as secondaries, every option without a kind in a ⋯ menu with its description as the item's
+  second line, and the first `allow_once` as the one primary, last, with any `allow_always` beside it
+  in the menu (Reject, ⋯ Always Allow in This Session, Allow). A request whose only allow is
+  `allow_always` (worktree setup trust, Pi project trust) makes the first `allow_always` its primary,
+  so a request with an allow option always has a visible primary and whatever lets the work continue
+  is never hidden (#2641); only a request with no allow at all has none. A and D act only where
+  exactly one `allow_once` or `reject_once` exists: a trust request's lasting grant takes a click,
+  while D still takes a worktree setup's one-time Create Without Setup. A reason nobody can act (the runner is offline, a Viewer's refusal, a
   machine-owner-only sign-in) is a visible foot-note the disabled buttons reference; a failed
   decision is a compact danger notice above the footer. The dock is the notice slot's `lead`
   (`SessionNoticeSlot`), at the end of the `.chat-reading` column, a size container its caps are
