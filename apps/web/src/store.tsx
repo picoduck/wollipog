@@ -2169,10 +2169,19 @@ export class Store {
     const base = events[0]?.seq ?? 0;
     const retainedLive = pending?.fence === fence ? pending.events.filter(event => event.seq >= base) : [];
     const merged = mergeEvents(events, retainedLive);
+    const liveBase = merged[0]?.seq ?? 0;
+    const priorWindow = before.eventWindows.get(fence.sessionId);
+    // An empty incomplete HTTP answer says nothing about history below a live-only replacement.
+    // Keep that history reachable when this epoch already observed it; authoritative HTTP tails
+    // still define their own earlier availability, and a live seq alone is not proof.
+    const retainKnownEarlier = events.length === 0 && !complete && liveBase > 1 && (
+      (priorWindow?.eventEpoch === fence.eventEpoch && priorWindow.hasOlder) ||
+      before.events.get(fence.sessionId)?.some(event => event.seq < liveBase) === true
+    );
     this.dispatch({ type: "events_loaded", sessionId: fence.sessionId, events: merged,
       eventEpoch: fence.eventEpoch, recoveryRevision: fence.recoveryRevision,
       recoveryGeneration: fence.recoveryGeneration, recoveryComplete: complete,
-      windowHasOlder: hasOlder, gapWindowFence: fence,
+      windowHasOlder: hasOlder || retainKnownEarlier, gapWindowFence: fence,
       ...(turnAligned === undefined ? {} : { windowTurnAligned: turnAligned }),
     });
     return this.state !== before;

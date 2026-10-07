@@ -246,37 +246,54 @@ test("a stop-failed row shows Stop Failed and its time", async () => {
   });
 });
 
-test("a fired reminder's row says Returned; a snoozed row shows its return time behind an alarm clock", async () => {
-  const scheduledFor = Date.now() - 60_000;
-  const fired: SessionReminderView = {
-    reminderId: "reminder-returned", sessionId: "session", scheduledFor, timeZone: "UTC",
-    originalExpression: "one minute ago", wakePolicy: "regardless", state: "fired",
-    revision: 2, createdAt: scheduledFor - 1_000, updatedAt: scheduledFor, firedAt: scheduledFor, wakeReason: "scheduled",
-  };
-  await withRow(baseSession(), (container) => {
-    const shown = badges(container);
-    assert.equal(shown.length, 1);
-    assert.equal(shown[0]!.textContent, "Returned from Snooze");
-    assert.equal(shown[0]!.getAttribute("aria-label"), "Status: Returned from Snooze");
-    assert.match(shown[0]!.getAttribute("title") ?? "", /Snooze ended/);
-    assert.doesNotMatch(container.textContent ?? "", /Overdue/);
-  }, { reminder: fired });
-
-  const pending: SessionReminderView = { ...fired, state: "pending", scheduledFor: Date.now() + 3_600_000, firedAt: undefined };
-  for (const threeRow of [false, true]) {
+test("a fired reminder's row says Returned; snoozed rows show the return time today or tomorrow", async (t) => {
+  let now = Date.UTC(2026, 9, 7, 0, 15);
+  const clock = t.mock.method(Date, "now", () => now);
+  try {
+    const scheduledFor = now - 60_000;
+    const fired: SessionReminderView = {
+      reminderId: "reminder-returned", sessionId: "session", scheduledFor, timeZone: "UTC",
+      originalExpression: "one minute ago", wakePolicy: "regardless", state: "fired",
+      revision: 2, createdAt: scheduledFor - 1_000, updatedAt: scheduledFor, firedAt: scheduledFor, wakeReason: "scheduled",
+    };
     await withRow(baseSession(), (container) => {
-      assert.deepEqual(badges(container), [], "the reminder is the time cell, not a badge");
-      const cell = container.querySelector<HTMLElement>(".inbox-row-time.snoozed")!;
-      assert.notEqual(cell.querySelector("svg"), null, "AlarmClockIcon");
-      assert.match(cell.textContent ?? "", /^Snoozed Until \d/);
-      assert.match(cell.getAttribute("title") ?? "", /^Snoozed until /);
-      assertNoDomNode(container.querySelector("time"), "instead of the relative time");
-    }, { reminder: pending, threeRow });
+      const shown = badges(container);
+      assert.equal(shown.length, 1);
+      assert.equal(shown[0]!.textContent, "Returned from Snooze");
+      assert.equal(shown[0]!.getAttribute("aria-label"), "Status: Returned from Snooze");
+      assert.match(shown[0]!.getAttribute("title") ?? "", /Snooze ended/);
+      assert.doesNotMatch(container.textContent ?? "", /Overdue/);
+    }, { reminder: fired });
+
+    const pending: SessionReminderView = { ...fired, state: "pending", scheduledFor: now + 3_600_000, firedAt: undefined };
+    // The reminder's UTC day decides the label; its words and time follow the host's locale.
+    for (const { currentTime, weekday } of [
+      { currentTime: Date.UTC(2026, 9, 7, 0, 15), weekday: undefined },
+      { currentTime: Date.UTC(2026, 9, 6, 23, 55), weekday: "short" as const },
+    ]) {
+      now = currentTime;
+      const reminder = { ...pending, scheduledFor: now + 3_600_000 };
+      const returnTime = new Intl.DateTimeFormat(undefined, {
+        weekday, hour: "numeric", minute: "2-digit", timeZone: "UTC",
+      }).format(new Date(reminder.scheduledFor));
+      for (const threeRow of [false, true]) {
+        await withRow(baseSession(), (container) => {
+          assert.deepEqual(badges(container), [], "the reminder is the time cell, not a badge");
+          const cell = container.querySelector<HTMLElement>(".inbox-row-time.snoozed")!;
+          assert.notEqual(cell.querySelector("svg"), null, "AlarmClockIcon");
+          assert.equal(cell.textContent, `Snoozed Until ${returnTime}`);
+          assert.match(cell.getAttribute("title") ?? "", /^Snoozed until /);
+          assertNoDomNode(container.querySelector("time"), "instead of the relative time");
+        }, { reminder, threeRow });
+      }
+    }
+    const someday = { ...pending, scheduleKind: "someday", scheduledFor: undefined, timeZone: undefined } as unknown as SessionReminderView;
+    await withRow(baseSession(), (container) => {
+      assert.equal(container.querySelector(".inbox-row-time.snoozed")?.textContent, "Snoozed: Someday");
+    }, { reminder: someday });
+  } finally {
+    clock.mock.restore();
   }
-  const someday = { ...pending, scheduleKind: "someday", scheduledFor: undefined, timeZone: undefined } as unknown as SessionReminderView;
-  await withRow(baseSession(), (container) => {
-    assert.equal(container.querySelector(".inbox-row-time.snoozed")?.textContent, "Snoozed: Someday");
-  }, { reminder: someday });
 });
 
 test("a snoozed row's lost or missing background result counts toward its one status", async () => {

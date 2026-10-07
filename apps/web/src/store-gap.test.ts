@@ -8,7 +8,10 @@ const event = (seq: number, text = String(seq)): SessionEvent => ({
   payload: { kind: "agent_message", text, final: true },
 });
 const events = (first: number, last: number) => Array.from({ length: last - first + 1 }, (_, i) => event(first + i));
-function fixture(shouldDeferLive?: () => boolean) {
+function fixture(
+  shouldDeferLive?: () => boolean,
+  initialWindow = { first: 101, last: 110, hasOlder: true },
+) {
   const store = new Store();
   store.dispatch({ type: "msg", msg: { type: "snapshot",
     capabilities: { sessionSubscriptions: true, boundedDelivery: true },
@@ -19,7 +22,7 @@ function fixture(shouldDeferLive?: () => boolean) {
   store.prepareSubscriptionRecovery(1, ["s1"]);
   store.dispatch({ type: "msg", msg: { type: "session_subscriptions_applied", revision: 1, sessionIds: ["s1"], podIds: [] } });
   store.beginEventHistoryLoad("s1", 0, 1, generation);
-  store.loadEvents("s1", events(101, 110), 0, 1, true, generation, true);
+  store.loadEvents("s1", events(initialWindow.first, initialWindow.last), 0, 1, true, generation, initialWindow.hasOlder);
   store.prepareSubscriptionRecovery(2, ["s1"]);
   store.dispatch({ type: "msg", msg: { type: "session_subscriptions_applied", revision: 2, sessionIds: ["s1"], podIds: [] } });
   store.beginEventHistoryLoad("s1", 0, 2, generation);
@@ -542,4 +545,112 @@ test("an owned empty replacement retains a valid populated zero-base operation",
   assert.equal(store.deferEventTail(fence, events(11, 20), true, false), true);
   assert.equal(store.getState().events.get("s1")!.at(-1)!.seq, 20);
   assert.equal(store.getState().eventWindows.get("s1")!.laterGap, undefined);
+});
+
+
+for (const initialWindow of [
+  { first: 101, last: 110, hasOlder: true },
+  { first: 1, last: 10, hasOlder: false },
+]) {
+  test(`an empty incomplete owned tail preserves known earlier activity below its live-only base ${initialWindow.first}`, () => {
+    const { store, fence, generation } = fixture(() => true, initialWindow);
+    const cursor = store.recoveryAfter("s1");
+    store.dispatch({ type: "msg", msg: { type: "session_event", event: event(10_010) } });
+    assert.equal(store.loadEventGapWindow(fence, [], false, false), true);
+    assert.deepEqual(store.getState().events.get("s1")!.map(row => row.seq), [10_010]);
+    assert.equal(store.getState().eventWindows.get("s1")!.baseSeq, 10_010);
+    assert.equal(store.getState().eventWindows.get("s1")!.hasOlder, true,
+      "an incomplete empty HTTP answer cannot erase observed history below buffered live activity");
+    assert.equal(store.getState().eventWindows.get("s1")!.laterGap, undefined);
+    assert.equal(store.isEventGapRecoveryCurrent(fence), true);
+    assert.equal(store.recoveryAfter("s1"), cursor);
+    assert.equal(store.getState().eventHistory.get("s1")!.refreshing, true);
+    store.failEventHistoryLoad("s1", "Incomplete bounded tail", 0, 2, generation);
+    store.finishEventGapRecovery(fence);
+    assert.equal(store.getState().eventHistory.get("s1")!.error, "Incomplete bounded tail");
+    assert.equal(store.beginOlderEventsLoad("s1", 10_010, 0), true);
+    store.loadOlderEvents("s1", events(9_990, 10_009), true, 10_010, 0);
+    assert.equal(store.getState().events.get("s1")![0]!.seq, 9_990, "earlier history remains reachable below the replacement");
+    assert.equal(store.recoveryAfter("s1"), cursor, "an older prepend cannot certify forward recovery progress");
+  });
+}
+
+test("an empty incomplete owned tail retains an existing earlier flag without inventing it for duplicate-only live", () => {
+  for (const hasOlder of [true, false]) {
+    const { store, fence } = fixture(() => true, { first: 101, last: 110, hasOlder });
+    store.dispatch({ type: "msg", msg: { type: "session_event", event: event(101) } });
+    assert.equal(store.loadEventGapWindow(fence, [], false, false), true);
+    assert.equal(store.getState().eventWindows.get("s1")!.baseSeq, 101);
+    assert.equal(store.getState().eventWindows.get("s1")!.hasOlder, hasOlder,
+      "a duplicate at the same base only carries availability that was already known");
+  }
+});
+
+test("an empty incomplete owned tail without buffered live preserves its existing window", () => {
+  const { store, fence } = fixture(() => true);
+  const window = store.getState().eventWindows.get("s1");
+  const reading = store.getState().events.get("s1");
+  assert.equal(store.loadEventGapWindow(fence, [], false, false), true);
+  assert.equal(store.getState().eventWindows.get("s1"), window);
+  assert.deepEqual(store.getState().events.get("s1"), reading);
+});
+
+test("a complete empty owned tail trusts its earlier-history answer despite buffered live and known old rows", () => {
+  const { store, fence } = fixture(() => true);
+  store.dispatch({ type: "msg", msg: { type: "session_event", event: event(10_010) } });
+  assert.equal(store.loadEventGapWindow(fence, [], true, false), true);
+  assert.equal(store.getState().eventWindows.get("s1")!.baseSeq, 10_010);
+  assert.equal(store.getState().eventWindows.get("s1")!.hasOlder, false);
+  assert.equal(store.getState().eventHistory.get("s1")!.refreshing, false);
+});
+
+for (const complete of [false, true]) {
+  test(`a nonempty owned tail keeps the supplied earlier-history flag when complete is ${complete}`, () => {
+    const { store, fence } = fixture(() => true);
+    store.dispatch({ type: "msg", msg: { type: "session_event", event: event(10_010) } });
+    assert.equal(store.loadEventGapWindow(fence, events(10_000, 10_009), complete, false), true);
+    assert.equal(store.getState().eventWindows.get("s1")!.baseSeq, 10_000);
+    assert.equal(store.getState().eventWindows.get("s1")!.hasOlder, false);
+    assert.equal(store.getState().events.get("s1")!.at(-1)!.seq, 10_010);
+    assert.equal(store.getState().eventHistory.get("s1")!.refreshing, !complete);
+  });
+}
+
+for (const obsolete of ["cancelled", "inactive", "epoch", "generation", "revision"] as const) {
+  test(`an empty incomplete owned tail cannot restore earlier availability for a ${obsolete} owner`, () => {
+    const { store, fence, generation } = fixture(() => true);
+    store.dispatch({ type: "msg", msg: { type: "session_event", event: event(10_010) } });
+    if (obsolete === "cancelled") store.cancelEventGapRecovery(fence);
+    else if (obsolete === "inactive") store.navigate({ name: "board" });
+    else if (obsolete === "epoch") store.dispatch({ type: "msg", msg: {
+      type: "session_events_reset", sessionId: "s1", eventEpoch: 1, events: [],
+    } });
+    else if (obsolete === "generation") store.dispatch({ type: "msg", msg: { type: "snapshot",
+      capabilities: { sessionSubscriptions: true, boundedDelivery: true }, runners: [], boxes: [],
+      sessions: [{ id: "s1", eventEpoch: 0 } as SessionView], runs: [], pods: [],
+    } });
+    else {
+      store.prepareSubscriptionRecovery(3, ["s1"]);
+      store.dispatch({ type: "msg", msg: { type: "session_subscriptions_applied", revision: 3, sessionIds: ["s1"], podIds: [] } });
+      store.beginEventHistoryLoad("s1", 0, 3, generation);
+    }
+    const before = store.getState();
+    assert.equal(store.loadEventGapWindow(fence, [], false, false), false);
+    assert.equal(store.getState(), before, "an obsolete answer cannot mutate rows, window, history or pending live ownership");
+  });
+}
+
+test("a replaced empty incomplete tail cannot consume the new owner's live buffer or earlier evidence", () => {
+  const { store, fence, generation } = fixture(() => true);
+  store.dispatch({ type: "msg", msg: { type: "session_event", event: event(10_010) } });
+  const current = store.beginEventGapRecovery("s1", 0, 2, generation, () => true);
+  assert.ok(current);
+  store.dispatch({ type: "msg", msg: { type: "session_event", event: event(20_010) } });
+  const before = store.getState();
+  assert.equal(store.loadEventGapWindow(fence, [], false, false), false);
+  assert.equal(store.getState(), before);
+  assert.equal(store.loadEventGapWindow(current, [], false, false), true);
+  assert.deepEqual(store.getState().events.get("s1")!.map(row => row.seq), [20_010]);
+  assert.equal(store.getState().eventWindows.get("s1")!.hasOlder, true);
+  assert.equal(store.isEventGapRecoveryCurrent(current), true);
 });

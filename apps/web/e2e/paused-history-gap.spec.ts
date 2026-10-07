@@ -315,3 +315,61 @@ test("finishing later paging returns focus to the reader without moving its paus
   await settle(page);
   expect(await reads(page, start)).toEqual(beforeLive);
 });
+
+for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }]) {
+  test(`an empty incomplete tail keeps earlier paging reachable after resume at ${viewport.width}px`, async ({ page }) => {
+    test.setTimeout(45_000);
+    await page.setViewportSize(viewport);
+    if (viewport.width < 600) {
+      const path = `/sessions/~${Buffer.from("session-alpha", "utf16le").toString("base64url")}`;
+      await page.goto(`/command-inbox-projects-e2e.html?scenario=paused-history-gap&sessionShell=1&path=${encodeURIComponent(path)}`);
+      await expect(reader(page).locator("[data-virtual-row]").first()).toBeVisible();
+      await expect(reader(page)).toHaveAttribute("aria-busy", "false");
+      await settle(page);
+    } else {
+      await open(page);
+    }
+    await pause(page);
+    await page.evaluate(() => {
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSyntheticTailIncomplete("session-alpha", true);
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.holdSyntheticHistoryRead("tail", 0);
+    });
+    const start = await reconnectWithGap(page, 1_000_000);
+    await expect.poll(async () => (await reads(page, start))
+      .some((request) => request.direction === "backward" && request.after === 0)).toBe(true);
+    await page.evaluate(() => {
+      for (let index = 1; index <= 16; index++) {
+        window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitSessionEvent("session-alpha", index % 2 === 1
+          ? { kind: "user_message", text: `Public live question after incomplete recovery ${index}.`,
+              turnId: `incomplete-tail-live-turn-${index}` }
+          : { kind: "agent_message", text: `Public live response after incomplete recovery ${index}. ${"Readable public context. ".repeat(24)}`,
+              final: true, messageId: `incomplete-tail-live-message-${index}` });
+      }
+    });
+    await reader(page).focus();
+    await page.keyboard.press("End");
+    await expect(follow(page)).toHaveAttribute("data-follow-tail-state", "following");
+    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.releaseSyntheticHistoryRead());
+    const error = page.locator(".transcript-history-notice[data-state='error']");
+    await expect(error).toContainText("Couldn't Load the Full Conversation", { timeout: 20_000 });
+    await expect(reader(page)).toHaveAttribute("aria-busy", "false");
+    await expect(reader(page).getByText(/^Public live response after incomplete recovery 16\./)).toBeVisible();
+    const earlier = page.getByRole("button", { name: /^Load Earlier Activity/ });
+    await expect(earlier).toBeVisible();
+    const settled = await reads(page, start);
+    expect(settled.filter((request) => request.direction !== "backward").length).toBeLessThanOrEqual(5);
+    expect(settled.filter((request) => request.direction === "backward" && request.after === 0).length).toBeLessThanOrEqual(162);
+    await page.waitForTimeout(350);
+    expect(await reads(page, start)).toEqual(settled);
+    await pause(page);
+    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.holdSyntheticHistoryRead("tail", 1_000_001));
+    await earlier.click();
+    await expect.poll(async () => (await reads(page, start))
+      .filter((request) => request.direction === "backward" && request.after === 1_000_001).length).toBe(1);
+    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.releaseSyntheticHistoryRead());
+    await expect(reader(page)).toHaveAttribute("aria-busy", "false");
+    await expect(follow(page)).toHaveAttribute("data-follow-tail-state", "paused");
+    await expect(reader(page).getByText(/Synthetic response 1000000\./)).toBeAttached();
+    await expect(error).toBeVisible();
+  });
+}

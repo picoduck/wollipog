@@ -804,6 +804,7 @@ if (SCENARIO === "pinned-summary") {
   ]);
 }
 const sessionEventPageRequests: Array<{ sessionId: string; after: number; direction?: "backward" }> = [];
+const syntheticIncompleteTails = new Set<string>();
 // Large gaps are an indexed synthetic log, not an array held in either the fixture or the browser.
 const syntheticSessionTails = new Map<string, number>();
 let syntheticHistoryHold: {
@@ -2302,10 +2303,11 @@ const client = {
     if (SYNTHETIC_HISTORY_GAP && syntheticTail !== undefined) {
       const last = before === undefined ? syntheticTail : Math.min(syntheticTail, before - 1);
       const events = syntheticEventRange(sessionId, Math.max(1, last - 23), last);
-      const page = { events: structuredClone(events),
+      const incomplete = before === undefined && syntheticIncompleteTails.has(sessionId);
+      const page = { events: incomplete ? [] : structuredClone(events),
         eventEpoch: model.sessions.find((candidate) => candidate.id === sessionId)?.eventEpoch ?? 0,
-        ...(events[0] ? { nextBefore: events[0].seq } : {}),
-        hasMoreOlder: (events[0]?.seq ?? 1) > 1, cacheComplete: true };
+        ...(!incomplete && events[0] ? { nextBefore: events[0].seq } : {}),
+        hasMoreOlder: !incomplete && (events[0]?.seq ?? 1) > 1, cacheComplete: !incomplete };
       await waitSyntheticHistoryRead("tail", before ?? 0);
       return page;
     }
@@ -2629,6 +2631,7 @@ declare global {
       emitActiveSubagent(id: string, toolCallId: string): void;
       sessionEventPageRequests(): Array<{ sessionId: string; after: number; direction?: "backward" }>;
       setSyntheticSessionGap(id: string, lastSeq: number): void;
+      setSyntheticTailIncomplete(id: string, incomplete: boolean): void;
       holdSyntheticHistoryRead(direction: "forward" | "tail", after?: number): void;
       releaseSyntheticHistoryRead(): void;
       reconnectSyntheticHistory(): void;
@@ -2862,6 +2865,11 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
     value.messageCount = lastSeq;
     value.updatedAt += 1;
     pushSession(value);
+  },
+  setSyntheticTailIncomplete(id, incomplete) {
+    if (!SYNTHETIC_HISTORY_GAP) throw new Error("Incomplete tails require the paused-history-gap scenario");
+    if (incomplete) syntheticIncompleteTails.add(id);
+    else syntheticIncompleteTails.delete(id);
   },
   holdSyntheticHistoryRead(direction, after) {
     syntheticHistoryHold?.release();
