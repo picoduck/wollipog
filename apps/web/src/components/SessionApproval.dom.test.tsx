@@ -526,6 +526,29 @@ test("a capped card whose body is squeezed below a row scrolls as a whole, thoug
   }
 });
 
+test("the compact Composer Response card measures a long question too, and offers Show Full Question (#2212, #2683)", async () => {
+  const long = "Campaign scope request epic-initial-scope is still pending, and dispatch waits on it.";
+  const layout = stubQuestionLayout({ [long]: 8 });
+  const { container, root } = mount();
+  try {
+    setQuestionResponseStyle("composer", domWindow as never);
+    await renderComposerCard(root, [{ id: "scope", question: long, options: [{ label: "Approve" }, { label: "Hold" }] }],
+      { requestId: "question-compact-long" });
+    assertNoDomNode(container.querySelector(".request-card-body"), "the compact card has no body");
+    const toggle = container.querySelector<HTMLButtonElement>(".question-text-toggle");
+    assert.equal(toggle?.textContent, "Show Full Question");
+    await act(async () => { toggle!.click(); });
+    assert.equal(container.querySelector(".question-text")!.classList.contains("is-clamped"), false);
+    assert.equal(container.querySelector(".question-text-toggle")?.textContent, "Show Less");
+  } finally {
+    await act(async () => { setQuestionResponseStyle("interactive", domWindow as never); });
+    await act(async () => { root.unmount(); });
+    container.remove();
+    layout.restore();
+    clearQuestionDrafts("session-1", "question-compact-long");
+  }
+});
+
 test("a long question shows Show Full Question, expands whole and collapses, keeping the choice and step (#2683)", async () => {
   const long = "Campaign scope request epic-initial-scope is still pending, and dispatch waits on it.";
   const questions: AgentQuestion[] = [
@@ -963,22 +986,63 @@ test("choosing an option clears a Something Else draft and submits the visible f
   }
 });
 
-test("Composer Response keeps the transcript card as context without card-owned response fields", async () => {
+/** The docked question card in Composer Response, where the composer can answer it (#2212). */
+async function renderComposerCard(root: ReturnType<typeof createRoot>, questions: AgentQuestion[], options: {
+  onAnswer?: () => void;
+  responseRefusal?: string | null;
+  showKeyHints?: boolean;
+  requestId?: string;
+} = {}) {
+  await act(async () => {
+    root.render(
+      <ApiProvider client={api}>
+        <SessionQuestionBanner
+          sessionId="session-1"
+          requestId={options.requestId ?? "question-1"}
+          questions={questions}
+          runnerOnline
+          responseRefusal={options.responseRefusal ?? null}
+          showKeyHints={options.showKeyHints ?? false}
+          onAnswer={options.onAnswer ?? (() => {})}
+        />
+      </ApiProvider>,
+    );
+  });
+}
+
+test("Composer Response docks a compact card: head, title, the kept-draft foot-note, Dismiss and Answer (#2212)", async () => {
   const { container, root } = mount();
+  let answers = 0;
   try {
     setQuestionResponseStyle("composer", domWindow as never);
-    await renderBanner(root, [{
+    await renderComposerCard(root, [{
       id: "language",
+      header: "Language",
       question: "Choose a language",
+      context: "The service is rewritten in it.",
       options: [{ label: "TypeScript" }, { label: "Python" }],
-    }], true);
-    assertNoDomNode(container.querySelector("input, .choice-rows"));
-    assert.deepEqual(footerOrder(container), ["dismiss"]);
-    assert.match(container.textContent ?? "", /Respond through Answer Mode in the composer/);
-    assert.deepEqual([...container.querySelectorAll(".question-text-options li")].map((item) => item.textContent?.trim()), [
-      "TypeScript",
-      "Python",
-    ]);
+    }, { id: "second", question: "Second question", options: [], allowOther: true }], { onAnswer: () => { answers += 1; } });
+    const card = container.querySelector<HTMLElement>(".question-card")!;
+    assert.ok(card.matches(".question-style-composer"));
+    assert.equal(card.querySelector(".request-card-kind")?.textContent, "Question");
+    assert.equal(card.querySelector(".question-text")?.textContent, "Choose a language");
+    // The question is answered in the composer: no options, field, context, header or step navigation here.
+    assertNoDomNode(card.querySelector("input, .choice-rows, .question-step, .question-eyebrow, .question-step-note"));
+    assert.equal(card.querySelector(".request-card-reasons:not(.question-reason)")?.textContent,
+      "Your message draft is kept while you answer.");
+    assert.deepEqual(footerOrder(container), ["dismiss", "answer"]);
+    const answer = control(container, "answer") as HTMLButtonElement;
+    assert.ok(answer.matches(".btn.primary"));
+    assert.equal(label(answer), "Answer");
+    assertNoDomNode(answer.querySelector("kbd"), "no keycap without a keyboard to press it on");
+    assert.doesNotMatch(container.textContent ?? "", /Press R|\/respond|Answer Mode/);
+    await act(async () => { answer.click(); });
+    assert.equal(answers, 1);
+
+    await renderComposerCard(root, [{ id: "language", question: "Choose a language", options: [{ label: "TypeScript" }] }],
+      { showKeyHints: true });
+    assert.equal(control(container, "answer")?.querySelector("kbd")?.textContent, "R",
+      "R opens Answer Mode; the stylesheet hides its keycap on a coarse pointer");
   } finally {
     await act(async () => { setQuestionResponseStyle("interactive", domWindow as never); });
     await act(async () => { root.unmount(); });
@@ -986,12 +1050,55 @@ test("Composer Response keeps the transcript card as context without card-owned 
   }
 });
 
-test("Composer Response does not advertise Answer Mode without a question schema", async () => {
+test("a Viewer's compact card says why instead of the kept-draft note, and Answer is off (#1857, #2212)", async () => {
+  const { container, root } = mount();
+  const reason = "Your Viewer role is read-only.";
+  let answers = 0;
+  try {
+    setQuestionResponseStyle("composer", domWindow as never);
+    await renderComposerCard(root, [{ id: "target", question: "Choose a target", options: [{ label: "Staging" }] }],
+      { responseRefusal: reason, onAnswer: () => { answers += 1; } });
+    const status = container.querySelector<HTMLElement>('[role="status"][aria-atomic="true"]')!;
+    assert.equal(status.textContent, reason);
+    assert.doesNotMatch(container.textContent ?? "", /Your message draft/);
+    const answer = control(container, "answer") as HTMLButtonElement;
+    assert.equal(answer.disabled, true);
+    assert.equal(answer.getAttribute("aria-describedby"), status.id, "the refusal is Answer's description");
+    await act(async () => { answer.click(); });
+    assert.equal(answers, 0);
+  } finally {
+    await act(async () => { setQuestionResponseStyle("interactive", domWindow as never); });
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
+test("Composer Response does not offer Answer without a question schema", async () => {
   const { container, root } = mount();
   try {
     setQuestionResponseStyle("composer", domWindow as never);
-    await renderBanner(root, [], true);
-    assert.doesNotMatch(container.textContent ?? "", /Press R|\/respond/);
+    await renderComposerCard(root, []);
+    assertNoDomNode(control(container, "answer"));
+    assert.doesNotMatch(container.textContent ?? "", /Press R|\/respond|Your message draft/);
+  } finally {
+    await act(async () => { setQuestionResponseStyle("interactive", domWindow as never); });
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
+test("without a composer to answer in, a Composer Response card is the form (a worker's or a child's question)", async () => {
+  const { container, root } = mount();
+  const calls: Array<Parameters<ApiClient["answerQuestion"]>[1]> = [];
+  try {
+    setQuestionResponseStyle("composer", domWindow as never);
+    await renderBanner(root, [{ id: "target", question: "Choose a target", options: [{ label: "Staging" }, { label: "Production" }] }],
+      true, recordingClient(calls));
+    assert.ok(container.querySelector(".question-card")!.matches(".question-style-interactive"));
+    assertNoDomNode(control(container, "answer"));
+    await act(async () => { row(container, "Production").click(); });
+    await act(async () => { submitButton(container).click(); await tick(); });
+    assert.deepEqual(calls, [{ requestId: "question-1", answers: { target: "Production" }, action: "submit" }]);
   } finally {
     await act(async () => { setQuestionResponseStyle("interactive", domWindow as never); });
     await act(async () => { root.unmount(); });
@@ -1089,19 +1196,19 @@ test("a numeric Something Else submits its text without applying hidden ordinal 
   }
 });
 
-test("Composer Response never renders secret entry controls in the transcript card", async () => {
+test("Composer Response never renders secret entry controls in the docked card", async () => {
   const { container, root } = mount();
   try {
     setQuestionResponseStyle("composer", domWindow as never);
-    await renderBanner(root, [{
+    await renderComposerCard(root, [{
       id: "token",
       question: "Enter the token",
       options: [],
       allowOther: true,
       secret: true,
-    }], true, api, "question-virtualized");
+    }], { requestId: "question-virtualized" });
     assertNoDomNode(container.querySelector("input"));
-    assert.match(container.textContent ?? "", /Respond through Answer Mode/);
+    assert.ok(control(container, "answer"));
   } finally {
     await act(async () => { setQuestionResponseStyle("interactive", domWindow as never); });
     await act(async () => { root.unmount(); });

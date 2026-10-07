@@ -19,13 +19,11 @@ for (const viewport of [
     await page.goto(`/agents-e2e.html?navigation=1&theme=${theme}`);
     const origin = surface === "inbox" ? page.getByRole("grid", { name: "Fixture Inbox" }) : page.locator(".board");
     // The list and the board say WHAT is pending on the card itself (#896), with its count, and no
-    // disclosure to open. The exact request is reached through the session. A list row shows its one
-    // status (#2209); the Board keeps its pill per kind.
+    // disclosure to open. The exact request is reached through the session. A list row and a Board
+    // card show the same one status (#2209, #2222).
     const pill = origin.locator(".status.t-warning").first();
     await pill.scrollIntoViewIfNeeded();
-    await expect(pill).toHaveAttribute("aria-label", surface === "inbox"
-      ? "Status: Approval Required, 2 Requests"
-      : "Attention: Approval Required, 2 Requests");
+    await expect(pill).toHaveAttribute("aria-label", "Status: Approval Required, 2 Requests");
     await expect(pill.locator(".status-count")).toHaveText("2");
     await expect(origin.getByText("2 Requests", { exact: true })).toHaveCount(0);
     await expect(origin.locator(".attention-requests")).toHaveCount(0);

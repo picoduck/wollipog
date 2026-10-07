@@ -50,6 +50,13 @@ zone wins, and a page without a list cycles rail and page.
 
 ## Session-detail ownership
 
+Ordinary session entry and expansion land on the transcript. Orchestrator role, worker requests,
+async questions, reconnects and stored Agents-open state do not open Agents. Leaving the session
+resets Agents visibility while preserving panel mode, width and session-scoped drafts. Deliberate
+panel controls still open it. Attention links wait for the exact request in the named session
+generation, then reveal and focus its dock card or selected worker request; they do not first open
+an unrelated Agents overview while the session loads.
+
 The Inbox grid retains its active-descendant selection and project-switching Tab shortcut. A row
 carries no tabbable controls of its own: F2 opens the selected session with its highest-priority
 pending request focused, and a parent row's thread chevron is a pointer target whose keyboard
@@ -76,7 +83,10 @@ git-status reader. Presentation leaves are split at stable boundaries:
   row. While focus is in the card, 1–9 pick the current question's rows, Enter
   moves on, Ctrl/Cmd+Enter submits from any step and D dismisses; a field being typed in keeps its
   keys, and Session Reading's shortcuts stand aside while focus is in the card, its heading included, except
-  R, which still opens Answer Mode. `SessionApprovalRegion` keeps the one focus and live-announcement owner for both.
+  R, which still opens Answer Mode. In Composer Response the docked card is compact and its Answer
+  opens Answer Mode (#2212); while it is open the composer's answer panel is the request's region, so
+  Answer hands focus to its field and Jump to Question opens a panel shrunk by Show Context and
+  focuses that field. `SessionApprovalRegion` keeps the one focus and live-announcement owner for both.
 - `EventTimeline` and `RightPanel` remain their existing independently testable seams.
 
 The detail coordinator subscribes only to its owning runner and box. The shared git-status result is

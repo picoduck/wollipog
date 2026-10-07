@@ -64,6 +64,13 @@ export interface ConfirmationOptions {
     label: string;
     run: () => void;
   };
+  /** A confirmation opened from a menu sheet replaces that sheet on a phone, so its header shows
+   * Back, named by `label` ("Back to More Actions"), instead of stacking a second sheet (§7.5).
+   * Back resolves false and runs `run`, which brings the sheet back. Desktop draws no Back. */
+  back?: {
+    label: string;
+    run: () => void;
+  };
   /** `danger` draws the danger confirm button and tone icon, and opens with focus on the cancel
    * button. Any other tone opens with focus on the confirm button (§7.4). */
   tone?: "default" | "danger";
@@ -625,6 +632,18 @@ function ConfirmationDialog({ request, onSettle }: {
     onSettle(false);
     run();
   };
+  const back = isPhone && request.back
+    ? {
+      label: request.back.label,
+      onBack: () => {
+        if (cancelLocked || !request.back) return;
+        inFlight.current?.abort();
+        inFlight.current = null;
+        onSettle(false);
+        request.back.run();
+      },
+    }
+    : undefined;
   // Crossing to a phone removes the secondary action (§7.5). A removed button takes focus with it
   // to the page behind the dialog, so if it was the last thing focused and focus has fallen to the
   // page, the safe choice takes it. Only a move to another element clears the flag: whether a
@@ -670,6 +689,7 @@ function ConfirmationDialog({ request, onSettle }: {
       title={request.title}
       tone={danger ? "danger" : undefined}
       closeButton={false}
+      back={back}
       onClose={cancel}
       describedBy={describedBy}
       returnFocusRef={request.returnFocus}

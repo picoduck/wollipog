@@ -253,7 +253,7 @@ test("the F6 zone line lights only the entered zone and goes out after 1.5s, a p
   assert.deepEqual([lit(), frames.size], [[], 0], "a zone unmounted by a route change puts the line out");
 });
 
-test("direct zone focus uses the list, empty-state, and board target chain", () => {
+test("direct zone focus uses the list, state, skeleton, and board target chain", () => {
   const window = setup();
   const listZone = window.document.createElement("section");
   listZone.dataset.focusZone = "list";
@@ -266,26 +266,27 @@ test("direct zone focus uses the list, empty-state, and board target chain", () 
   assert.equal(focusZone(window.document, "list"), "list");
   assert.equal(window.document.activeElement, list);
 
-  const empty = window.document.createElement("div");
-  empty.className = "inbox-zero";
-  empty.tabIndex = -1;
-  list.replaceWith(empty);
+  // One state replaces both panes: No Matches (#2200) or an empty group (#2220).
+  const state = window.document.createElement("div");
+  state.className = "master-detail-state inbox-state";
+  state.tabIndex = -1;
+  list.replaceWith(state);
   assert.equal(focusZone(window.document, "list"), "list");
-  assert.equal(window.document.activeElement, empty);
+  assert.equal(window.document.activeElement, state);
+
+  const skeleton = window.document.createElement("div");
+  skeleton.className = "inbox-skeleton";
+  skeleton.tabIndex = -1;
+  state.replaceWith(skeleton);
+  assert.equal(focusZone(window.document, "list"), "list");
+  assert.equal(window.document.activeElement, skeleton, "skeleton rows stand in while sessions arrive (#2220)");
 
   const board = window.document.createElement("div");
   board.className = "board-wrap";
   board.tabIndex = -1;
-  empty.replaceWith(board);
+  skeleton.replaceWith(board);
   assert.equal(focusZone(window.document, "list"), "list");
   assert.equal(window.document.activeElement, board);
-
-  const noMatches = window.document.createElement("div");
-  noMatches.className = "inbox-no-matches";
-  noMatches.tabIndex = -1;
-  board.replaceWith(noMatches);
-  assert.equal(focusZone(window.document, "list"), "list");
-  assert.equal(window.document.activeElement, noMatches, "No Matches stands in for the list (#2200)");
 });
 
 test("Escape ownership follows one ordered rung and preserves the terminal boundary", () => {
@@ -316,6 +317,19 @@ test("Escape ownership follows one ordered rung and preserves the terminal bound
     "board mode shares the Sessions search box, so Escape clears its query too");
   assert.equal(escapeOwner(escape(), { document: window.document, viewName: "inbox" }), null);
   assert.equal(escapeOwner(escape(), { document: window.document, viewName: "board" }), null);
+
+  // #2217: Escape in the Sessions preview returns to the selected row, even with a search open.
+  const preview = window.document.createElement("div");
+  preview.className = "inbox-preview-pane";
+  const previewScroll = window.document.createElement("div");
+  previewScroll.tabIndex = -1;
+  preview.append(previewScroll);
+  window.document.body.append(preview);
+  previewScroll.focus();
+  assert.equal(escapeOwner(escape(), { document: window.document, viewName: "inbox" }), "inbox-preview");
+  assert.equal(escapeOwner(escape(), { document: window.document, viewName: "inbox", inboxFilterActive: true }), "inbox-preview");
+  assert.equal(escapeOwner(escape({ shiftKey: true }), { document: window.document, viewName: "inbox" }), null);
+  previewScroll.blur();
 
   const settingsInput = window.document.createElement("input");
   const settingsButton = window.document.createElement("button");

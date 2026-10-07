@@ -90,6 +90,7 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   type SessionCommandInvocationUpdateMessage,
   type SessionCommandInvocationView,
   type PendingApproval,
+  type PermissionResolver,
   type ParentControlDecisionPolicy,
   type ParentControlMode,
   type ParentControlPolicy,
@@ -9996,6 +9997,11 @@ export class SessionsService {
     if (pending.kind !== "question" && optionId !== null && !pending.options.some((option) => option.optionId === optionId)) {
       return fail("approval option is not offered by this request", 409);
     }
+    // Who decided (#2628): the runner records it on this exact resolution, so the Decision Record
+    // names the member per occurrence. Parent Control decisions name their parent session instead.
+    const resolvedBy: PermissionResolver | undefined = actor.kind === "human" && actor.id && !resolvedByParentSessionId
+      ? { kind: "user", userId: actor.id }
+      : undefined;
     const sent = this.hub.sendToRunner(
       session.runnerId,
       pending.kind === "question"
@@ -10007,6 +10013,7 @@ export class SessionsService {
         : {
             type: "resolve_permission", sessionId, requestId, optionId,
             ...(resolvedByParentSessionId ? { resolvedByParentSessionId } : {}),
+            ...(resolvedBy ? { resolvedBy } : {}),
           },
     );
     if (!sent) {
@@ -12861,6 +12868,8 @@ export class SessionsService {
           sessionId,
           requestId: approval.requestId,
           optionId,
+          // The Decision Record names the policy that settled this occurrence (#2628).
+          resolvedBy: { kind: "policy", policyId: policyDecision.policy!.policyId },
         });
         if (sent) {
           const current = this.db.getSession(sessionId)?.pendingApproval;

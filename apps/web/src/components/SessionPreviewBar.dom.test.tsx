@@ -470,7 +470,8 @@ const firedReminder = {
 test("the selected row and the preview bar show the same status for every seeded status, but for the row's documented exceptions", async () => {
   // Both rank with sessionStatusSummary() (#2182). The row adds three rules of its own (#2209), which
   // the preview bar, holding exactly one badge, does not: Awaiting Prompt shows no row badge, a fired
-  // reminder shows Returned, and a stalled session's badge takes the danger tone.
+  // reminder shows Returned, and a stalled session's badge takes the danger tone, reading Stalled in
+  // place of a busy lifecycle (#2215).
   for (const seeded of SEEDED) {
     const shown = await renderRowAndBar(seeded.session, { runnerOnline: seeded.runnerOnline ?? true });
     try {
@@ -496,7 +497,7 @@ test("the selected row and the preview bar show the same status for every seeded
 
   const stalled = await renderRowAndBar(session({ status: "running", activeTurnId: "turn-1" }), { stalled: true });
   try {
-    assert.deepEqual(stalled.row, { label: "Running", tone: "t-danger" }, "a stalled row's badge turns danger");
+    assert.deepEqual(stalled.row, { label: "Stalled", tone: "t-danger" }, "a stalled row's badge says Stalled, in danger");
     assert.deepEqual(stalled.bar, { label: "Running", tone: "t-info" }, "the preview bar keeps the lifecycle's tone");
   } finally {
     await stalled.unmount();

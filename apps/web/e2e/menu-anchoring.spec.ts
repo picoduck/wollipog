@@ -77,9 +77,18 @@ for (const viewport of [
     test("opening the Project split menu does not scroll or jump the page", async ({ page }) => {
       const before = await recordScroll(page);
       expect(Object.keys(before).length, "the list is scrolled before the menu opens").toBeGreaterThan(1);
-      // A right-click opens the menu of a tab that is not selected (#2199), leaving the list as it is.
-      await page.getByRole("tab", { name: /Alpha/ }).click({ button: "right" });
-      await expectFixedAndFocused(page.getByRole("menu", { name: "Alpha Actions" }));
+      if (viewport.name === "phone") {
+        // A phone has no tabs: a project's actions are in the app bar's ⋯ sheet (#2211), which opens
+        // on its checked View.
+        await page.locator(".sessions-app-bar").getByRole("button", { name: "More Actions" }).click();
+        const sheet = page.getByRole("menu", { name: "More Actions" });
+        await expect(sheet).toHaveCSS("position", "fixed");
+        await expect(sheet.getByRole("menuitemradio", { name: "List", exact: true })).toBeFocused();
+      } else {
+        // A right-click opens the menu of a tab that is not selected (#2199), leaving the list as it is.
+        await page.getByRole("tab", { name: /Alpha/ }).click({ button: "right" });
+        await expectFixedAndFocused(page.getByRole("menu", { name: "Alpha Actions" }));
+      }
       expect(await readScroll(page)).toEqual(before);
       await page.keyboard.press("Escape");
       await expect(page.getByRole("menu")).toHaveCount(0);

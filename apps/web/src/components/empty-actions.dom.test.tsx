@@ -15,6 +15,7 @@ import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { AutomationsView } from "./AutomationsView.js";
 import { Board } from "./Board.js";
+import { BoardFilterTools } from "./BoardFilters.js";
 import { RunnersView } from "./RunnersView.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
@@ -59,7 +60,24 @@ for (const [name, value] of Object.entries({
 function BoardHarness({ onNewSession }: { onNewSession: () => void }) {
   const sessions = useStoreSelector((s) => s.sessions);
   const scoped = React.useMemo(() => [...sessions.values()].filter((s) => !s.archived), [sessions]);
-  return <Board sessions={scoped} searchActive={false} onShowAll={() => {}} onNewSession={onNewSession} onSessionMenu={() => {}} />;
+  // The filters live in the Sessions tab row since #2201; the harness renders them beside the Board.
+  return (
+    <>
+      <BoardFilterTools sessions={scoped} />
+      <Board sessions={scoped} searchActive={false} onShowAll={() => {}} onNewSession={onNewSession} onSessionMenu={() => {}} />
+    </>
+  );
+}
+
+/** Choose a Machine from the Board's filter menu: the Machine button, or the folded Filters one. */
+async function chooseMachine(container: HTMLElement, label: string) {
+  const trigger = container.querySelector('[data-board-filter="machine"], [data-board-filter="both"]');
+  assert.ok(trigger, "the Board's Machine filter button");
+  await act(async () => { fireDomEvent.click(trigger as never); });
+  const item = [...container.ownerDocument.querySelectorAll('[role="menuitemradio"]')]
+    .find((row) => row.querySelector(".menu-text")?.textContent === label);
+  assert.ok(item, `a ${label} row in the menu`);
+  await act(async () => { fireDomEvent.click(item as never); });
 }
 
 const runner: RunnerView = {
@@ -270,20 +288,12 @@ test("a board emptied by a filter offers to clear the filter, not to create", as
 
   assertNoDomNode(container.querySelector(".state"), "one unfiltered session is not an empty board");
 
-  const machine = container.querySelector("select") as unknown as HTMLSelectElement;
-  await act(async () => {
-    machine.value = "runner-1";
-    fireDomEvent.change(machine as never, { target: { value: "runner-1" } as never });
-  });
+  await chooseMachine(container, "runner-1");
   assertNoDomNode(container.querySelector(".state"), "the filter that matches is not empty either");
 
   // A Machine with no sessions on it.
   await act(async () => { socket.push(snapshot({ runners: [runner, { ...runner, runnerId: "runner-2", hostname: "other" }], sessions: [session] })); });
-  const machine2 = container.querySelector("select") as unknown as HTMLSelectElement;
-  await act(async () => {
-    machine2.value = "runner-2";
-    fireDomEvent.change(machine2 as never, { target: { value: "runner-2" } as never });
-  });
+  await chooseMachine(container, "runner-2");
 
   const title = container.querySelector(".state-title")?.textContent ?? "";
   assert.equal(title, "No Matching Sessions", `a filtered-out board said "${title}"`);
@@ -449,18 +459,14 @@ test("a board emptied by archiving still clears its filter on the way out", asyn
   const { container, socket, unmount } = await mount(
     {}, <BoardHarness onNewSession={() => { created += 1; }} />);
   await act(async () => { socket.push(snapshot({ sessions: [session] })); });
-  const machine = container.querySelector("select") as unknown as HTMLSelectElement;
-  await act(async () => {
-    machine.value = "runner-1";
-    fireDomEvent.change(machine as never, { target: { value: "runner-1" } as never });
-  });
+  await chooseMachine(container, "runner-1");
   // The only session is archived: nothing unarchived is left, and the filter is still Machine 1.
   await act(async () => { socket.push(snapshot({ sessions: [{ ...session, archived: true } as SessionView] })); });
 
   assert.equal(container.querySelector(".state-title")?.textContent, "No Sessions Yet");
   await act(async () => { fireDomEvent.click(container.querySelector(".state .actions button") as never); });
   assert.equal(created, 1, "the action still creates");
-  const after = container.querySelector("select") as unknown as HTMLSelectElement;
-  assert.equal(after.value, "", "and it must not leave a filter on that would hide what it creates");
+  assert.equal(container.querySelector("[data-board-filter]")?.getAttribute("aria-pressed"), "false",
+    "and it must not leave a filter on that would hide what it creates");
   await unmount();
 });

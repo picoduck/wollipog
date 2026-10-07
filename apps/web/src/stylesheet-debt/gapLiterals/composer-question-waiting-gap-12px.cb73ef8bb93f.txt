@@ -1,1 +1,0 @@
-|.composer-question-waiting|gap|12px

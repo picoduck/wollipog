@@ -35,6 +35,17 @@ async function controlGeometry(control: Locator) {
   return { ...geometry, height: layoutPx(geometry.height) };
 }
 
+/** Selects a group: its tab, or on a phone the app bar's group picker (#2211). */
+async function chooseGroup(page: Page, name: RegExp) {
+  const bar = page.locator(".sessions-app-bar");
+  if (await bar.count() > 0) {
+    await bar.locator(".sessions-group-picker").click();
+    await page.getByRole("menu", { name: "Session Groups" }).getByRole("menuitemradio", { name }).click();
+    return;
+  }
+  await page.getByRole("tab", { name }).click();
+}
+
 async function openProjectManager(page: Page, projectName = "Alpha") {
   const tab = page.getByRole("tab", { name: new RegExp(projectName) });
   const trigger = page.getByRole("button", { name: `${projectName} Actions` });
@@ -405,7 +416,7 @@ test("offline Composer Response owns the immediate digit after R from the split 
   await expect(response).toBeFocused();
   await expect(response).toHaveValue("");
   await page.keyboard.press("Escape");
-  await expect(page.getByText("Answer Mode", { exact: true })).toHaveCount(0);
+  await expect(page.locator(".composer-answer")).toHaveCount(0);
   await expect(composer).toHaveValue("offline preserved draft");
 });
 
@@ -1088,8 +1099,12 @@ test("Inbox titles keep one reading axis across row signals, widths, and densiti
       // amount of status badges or sender text can shift where a title starts.
       expect(Math.max(...geometry.map(({ titleX }) => titleX)) - Math.min(...geometry.map(({ titleX }) => titleX)))
         .toBeLessThanOrEqual(1);
-      expect(Math.max(...geometry.map(({ signalsWidth }) => signalsWidth)) - Math.min(...geometry.map(({ signalsWidth }) => signalsWidth)))
-        .toBeGreaterThan(8);
+      // A narrow list sizes the cluster to what each row carries; a list 880px or wider gives every
+      // row the same fixed columns (#2218), so the badges and times line up down the list.
+      const listWidth = await page.locator(".inbox-list-pane").evaluate((pane) => pane.getBoundingClientRect().width);
+      const spread = Math.max(...geometry.map(({ signalsWidth }) => signalsWidth)) - Math.min(...geometry.map(({ signalsWidth }) => signalsWidth));
+      if (listWidth >= 880) expect(spread).toBeLessThanOrEqual(0.5);
+      else expect(spread).toBeGreaterThan(8);
       // A long agent-and-Project label yields to the signals column instead of colliding with it.
       for (const { senderRight, signalsLeft } of geometry) expect(senderRight).toBeLessThanOrEqual(signalsLeft + 1);
     }
@@ -1107,7 +1122,7 @@ test("archiving the final session keeps its Project selected live and after relo
   await expect(alpha).toHaveAttribute("aria-selected", "true");
   await expect(alpha).toContainText("0");
   await expect(page.getByText("No Sessions Yet", { exact: true })).toBeVisible();
-  await expect(page.getByText("Start a session in Alpha.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Start a session to put an agent to work in Alpha.", { exact: true })).toBeVisible();
 
   await page.reload();
   const reloadedAlpha = page.getByRole("tab", { name: /Alpha/ });
@@ -1259,7 +1274,7 @@ test.describe("with a touch pointer", () => {
         await page.setViewportSize(viewport);
         await page.goto("/command-inbox-projects-e2e.html");
         await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
-        await page.getByRole("tab", { name: /Alpha/ }).click();
+        await chooseGroup(page, /^Alpha/);
         await page.keyboard.press("c");
 
         const dialog = page.getByRole("dialog", { name: "New Session" });
@@ -1292,7 +1307,7 @@ test.describe("with a touch pointer", () => {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto("/command-inbox-projects-e2e.html?longAgent=1");
     await page.evaluate(() => document.documentElement.setAttribute("data-theme", "light"));
-    await page.getByRole("tab", { name: /Alpha/ }).click();
+    await chooseGroup(page, /^Alpha/);
     await page.keyboard.press("c");
 
     const dialog = page.getByRole("dialog", { name: "New Session" });

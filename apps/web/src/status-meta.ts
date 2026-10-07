@@ -281,6 +281,8 @@ const VOCABULARY = {
     signed_in: success("Signed In"),
     sign_in_required: warning("Sign-In Required"),
     signed_out: neutral("Signed Out"),
+    /** The machine could not confirm the account's sign-in; using it rechecks first (#2208). */
+    status_unknown: neutral("Status Unknown"),
   },
   /** A transcript share link (Share Transcript, #2148). */
   share: {

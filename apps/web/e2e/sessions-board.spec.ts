@@ -12,9 +12,24 @@ import { dialogMotionSettled } from "./dialog-motion.js";
 
 const PAGE = "/sessions-board-e2e.html";
 
+/** The Sessions header: the tab row on desktop, the app bar on a phone (#2211). */
+const SESSIONS_HEADER = ".page-tabs .tabs-bar, .sessions-app-bar";
+
 async function openHarness(page: Page, path = "/") {
   await page.goto(`${PAGE}?path=${encodeURIComponent(path)}`);
-  await expect(page.locator(".page-tabs .tabs-bar")).toBeVisible();
+  await expect(page.locator(SESSIONS_HEADER)).toBeVisible();
+}
+
+/** Switches List / Board: the header's view switch, or on a phone the app bar's ⋯ (#2211). */
+async function chooseView(page: Page, view: "List" | "Board") {
+  const bar = page.locator(".sessions-app-bar");
+  // Read the viewport, not the DOM: right after a resize the old header can still be mounted.
+  if (!await page.evaluate(() => matchMedia("(max-width: 760px)").matches)) {
+    await page.getByRole("radiogroup", { name: "Sessions View" }).getByRole("radio", { name: view }).click();
+    return;
+  }
+  await bar.getByRole("button", { name: "More Actions" }).click();
+  await page.getByRole("menu", { name: "More Actions" }).getByRole("menuitemradio", { name: view, exact: true }).click();
 }
 
 function harnessPath(page: Page): string | null {
@@ -65,48 +80,57 @@ test.describe("with a touch pointer", () => {
   // The 44px option height at phone width is a touch size, keyed to the pointer (#1799).
   test.use({ hasTouch: true });
 
-  test("the header's view switch and Snoozed are touch-sized, and a phone draws List / Board as icons", async ({ page }) => {
+  test("the header's view switch and Snoozed are touch-sized, and a phone has them as 44px items in the app bar's ⋯", async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 800 });
     await openHarness(page);
-    await expect(page.getByRole("radio", { name: "List" })).toBeVisible();
-    await expect(page.locator(".sessions-view-label").first()).toBeVisible();
+    await expect(page.getByRole("radio", { name: "List" })).toHaveText("List");
     const snoozed = page.getByRole("button", { name: "Snoozed, 1", exact: true });
     await expect(snoozed).toHaveAttribute("aria-pressed", "false");
     expect((await snoozed.boundingBox())!.height).toBeGreaterThanOrEqual(44);
 
+    // On a phone the 48px app bar replaces the header and its tab row (#2211): View and Show are
+    // radio items in its ⋯ sheet, 44px tall, and Snoozed carries its count.
     await page.setViewportSize({ width: 390, height: 844 });
-    // The shared segmented control (§10.2) draws a 38px option inside a 44px track and gives each
-    // option the track's inset as its hit area, so the TARGET is 44px: a tap 2.5px above or below
-    // the visible option still lands on it.
-    for (const name of ["List", "Board"]) {
-      const option = page.getByRole("radio", { name });
-      await expect(option).toBeVisible();
-      const track = option.locator("xpath=ancestor::*[@role='radiogroup'][1]");
-      expect((await track.boundingBox())!.height).toBeGreaterThanOrEqual(44);
-      expect(await option.evaluate((element) => {
-        const box = element.getBoundingClientRect();
-        const x = box.left + box.width / 2;
-        return [box.top - 2.5, box.bottom + 2.5].every((y) => element.contains(document.elementFromPoint(x, y)));
-      }), `${name} is a 44px target`).toBe(true);
+    const bar = page.locator(".sessions-app-bar");
+    await expect(bar).toBeVisible();
+    await expect(page.locator(".page-tabs")).toHaveCount(0);
+    await expect(page.getByRole("radiogroup", { name: "Sessions View" })).toHaveCount(0);
+    await expect(snoozed).toHaveCount(0);
+    await bar.getByRole("button", { name: "More Actions" }).click();
+    const more = page.getByRole("menu", { name: "More Actions" });
+    for (const name of ["List", "Board", "Active Sessions", "Snoozed Sessions, 1"]) {
+      const item = more.getByRole("menuitemradio", { name, exact: true });
+      await expect(item).toBeVisible();
+      expect((await item.boundingBox())!.height, name).toBeGreaterThanOrEqual(44);
     }
-    // Until the phone Sessions bar (#2211) the app bar draws List / Board as icons, and Snoozed is
-    // in ⋯ as a checked item with its count.
-    await expect(page.locator(".sessions-view-label").first()).toBeHidden();
-    await expect(snoozed).toBeHidden();
-    await page.locator(".page-header").getByRole("button", { name: "More Actions" }).click();
-    const showSnoozed = page.getByRole("menuitemcheckbox", { name: "Show Snoozed Sessions, 1" });
-    await expect(showSnoozed).toHaveAttribute("aria-checked", "false");
-    expect((await showSnoozed.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    await expect(more.getByRole("menuitemradio", { name: "List", exact: true })).toHaveAttribute("aria-checked", "true");
     await page.keyboard.press("Escape");
+    await expect(more).toHaveCount(0);
 
     // A search field sharing a row of controls was left 97px and cut its placeholder to "Sear"
-    // (#2082). It takes a full-width row of its own instead.
-    const geometry = await toolbarGeometry(page);
+    // (#2082). Search mode gives it the bar's whole width beside Cancel.
+    await bar.getByRole("button", { name: "Search Sessions" }).click();
+    const geometry = await bar.evaluate((header) => {
+      const input = header.querySelector<HTMLInputElement>(".inbox-search input")!;
+      const style = getComputedStyle(input);
+      const context = document.createElement("canvas").getContext("2d")!;
+      context.font = style.font;
+      const row = header.querySelector(".page-header-row")!;
+      const rowBox = row.getBoundingClientRect();
+      return {
+        inputWidth: input.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
+        placeholderWidth: context.measureText(input.placeholder).width,
+        contained: [...row.children].every((child) => {
+          const box = child.getBoundingClientRect();
+          return box.left >= rowBox.left - 0.5 && box.right <= rowBox.right + 0.5;
+        }),
+      };
+    });
     expect(geometry.inputWidth).toBeGreaterThanOrEqual(160);
     expect(geometry.inputWidth, "the whole placeholder shows").toBeGreaterThanOrEqual(geometry.placeholderWidth);
-    expect(geometry.searchOwnRow).toBe(true);
     expect(geometry.contained).toBe(true);
-    const create = (await page.locator(".page-header").getByRole("button", { name: "New Session", exact: true }).boundingBox())!;
+    await bar.getByRole("button", { name: "Cancel" }).click();
+    const create = (await bar.getByRole("button", { name: "New Session", exact: true }).boundingBox())!;
     expect(create.width).toBeGreaterThanOrEqual(44);
     expect(create.height).toBeGreaterThanOrEqual(44);
 
@@ -136,8 +160,9 @@ test("pending snooze excludes attention from Active across list, board, search, 
   await page.getByRole("radio", { name: "Board" }).click();
   const card = page.locator(".board .card", { hasText: "Snoozed Session" });
   await expect(card).toBeVisible();
-  await expect(card.getByRole("button", { name: "Allow" })).toBeVisible();
-  await expect(card.locator('[aria-label="Reminder: Snoozed"]')).toBeVisible();
+  await expect(card.getByRole("button", { name: "Approve" })).toBeVisible();
+  // #2222: a card's time says when it returns, as the row's does.
+  await expect(card.locator(".card-time.snoozed svg")).toBeVisible();
 });
 
 test("the Sessions list runs to its pane's lower edge with no footer or shortcut rail at any width (#2214)", async ({ page }) => {
@@ -152,7 +177,7 @@ test("the Sessions list runs to its pane's lower edge with no footer or shortcut
     });
     expect(gap, `at ${width}px nothing sits under the list`).toBeLessThanOrEqual(1);
   }
-  await page.getByRole("radio", { name: "Board" }).click();
+  await chooseView(page, "Board");
   await expect(page.locator(".inbox-activity-footer, .inbox-shortcut-rail")).toHaveCount(0);
 });
 
@@ -241,11 +266,30 @@ test("history back returns to the mode the session was opened from, in both dire
   await expect(page.locator(".board-wrap")).toHaveCount(0);
 });
 
+/**
+ * Drag a card onto a column the way a person does (#2201): press, start the drag, wait for the
+ * empty strips to open to full width, then aim at the column where it now is and release.
+ * `locator.dragTo` measures its target before the drag starts, so it aims at a 40px strip that
+ * opens under the pointer mid-gesture.
+ */
+async function dragCardToColumn(page: Page, card: Locator, column: Locator) {
+  const from = (await card.boundingBox())!;
+  await page.mouse.move(from.x + from.width / 2, from.y + 16);
+  await page.mouse.down();
+  await page.mouse.move(from.x + from.width / 2 + 12, from.y + 28, { steps: 2 });
+  await expect(page.locator(".board")).toHaveClass(/is-dragging/);
+  await column.scrollIntoViewIfNeeded();
+  const to = (await column.boundingBox())!;
+  await page.mouse.move(to.x + to.width / 2, to.y + Math.min(to.height / 2, 120), { steps: 4 });
+  await page.mouse.up();
+}
+
 test("dragging a card to another column persists the move", async ({ page }) => {
   await openHarness(page, "/board");
   const card = page.locator(".board .card", { hasText: "Running Session" });
   await expect(card).toBeVisible();
-  await card.dragTo(page.locator(".column.col-done .column-body"));
+  // An empty column is a strip (#2201) and the whole column is the drop target.
+  await dragCardToColumn(page, card, page.locator(".column.col-done"));
 
   await expect
     .poll(() => page.evaluate(() => window.__setColumnCalls))
@@ -363,7 +407,7 @@ test("pin indicators keep their shape and card geometry across viewports, densit
     }
   }
 
-  await page.getByRole("radio", { name: "Board" }).click();
+  await chooseView(page, "Board");
   const card = page.locator(".board .card", { hasText: "Queued Session" });
   await expect(card.getByLabel("Pinned Session")).toBeVisible();
   const cardHeight = await card.evaluate((node) => node.getBoundingClientRect().height);
@@ -376,7 +420,7 @@ test("pin indicators keep their shape and card geometry across viewports, densit
 test("a held finger over a card's approval button opens the menu and never approves", async ({ page }) => {
   await openHarness(page, "/board");
   const cdp = await touchSession(page);
-  const allow = page.locator(".card-approval button", { hasText: "Allow" });
+  const allow = page.locator(".card-request button", { hasText: "Approve" });
   await expect(allow).toBeVisible();
 
   await longPressUntilMenu(cdp, page, await centerOf(allow));
@@ -414,7 +458,7 @@ test("long-pressed rows and cards pin their target, persist the state, and expos
   await expect(page.locator(".inbox-view.expanded")).toHaveCount(0);
 
   await page.reload();
-  await expect(page.locator(".page-tabs .tabs-bar")).toBeVisible();
+  await expect(page.locator(SESSIONS_HEADER)).toBeVisible();
   const persistedRunningRow = page.locator(".inbox-row-shell", { hasText: "Running Session" });
   await expect(persistedRunningRow.getByLabel("Pinned Session")).toBeVisible();
   await persistedRunningRow.click({ button: "right" });
@@ -425,7 +469,7 @@ test("long-pressed rows and cards pin their target, persist the state, and expos
   await expect(page.locator('.inbox-row-shell[aria-rowindex="3"] .inbox-row-title')).toHaveText("Queued Session",
     "unpinning restores the Working group's deterministic order without displacing input");
 
-  await page.getByRole("radiogroup", { name: "Sessions View" }).getByRole("radio", { name: /Board/ }).click();
+  await chooseView(page, "Board");
   cdp = await touchSession(page);
   const running = page.locator(".board .card", { hasText: "Running Session" });
   await longPressUntilMenu(cdp, page, await centerOf(running));
@@ -537,5 +581,233 @@ test.describe("with a mouse at 1440×900 (#2214)", () => {
       return { status: covered(".inbox-row-status-line .row-status"), time: covered(".inbox-row-time") };
     });
     expect(overlap).toEqual({ status: false, time: false });
+  });
+});
+
+/** The cards scenario (#2222): one card of every kind, on the Board. */
+async function openCards(page: Page) {
+  await page.goto(`${PAGE}?cards&path=${encodeURIComponent("/board")}`);
+  await expect(page.locator(".board .card")).toHaveCount(10);
+}
+
+/** Each card's measured anatomy: line counts, wrapping buttons, and its transform. */
+function cardGeometry(page: Page) {
+  return page.locator(".board").evaluate((board) => [...board.querySelectorAll<HTMLElement>(".card")].map((card) => {
+    const lines = (selector: string) => {
+      const element = card.querySelector<HTMLElement>(selector);
+      if (!element) return null;
+      return Math.round(element.getBoundingClientRect().height / parseFloat(getComputedStyle(element).lineHeight));
+    };
+    return {
+      id: card.dataset.sessionId!,
+      titleLines: lines(".card-title"),
+      previewLines: lines(".card-preview"),
+      previewClipped: (() => {
+        const preview = card.querySelector<HTMLElement>(".card-preview");
+        return preview ? getComputedStyle(preview).textOverflow === "ellipsis" && getComputedStyle(preview).whiteSpace === "nowrap" : null;
+      })(),
+      wrappedButtons: [...card.querySelectorAll<HTMLElement>(".card-request .btn")]
+        .filter((button) => button.scrollWidth > button.clientWidth + 0.5 || button.getBoundingClientRect().height > parseFloat(getComputedStyle(button).height) + 0.5)
+        .map((button) => button.textContent),
+      badgeClipped: [...card.querySelectorAll<HTMLElement>(".card-status .status")]
+        .some((badge) => badge.scrollWidth > badge.clientWidth + 0.5),
+      transform: getComputedStyle(card).transform,
+    };
+  }));
+}
+
+/**
+ * Every card's status line, measured: the badge never clips; a parent shows its chip and no strip; the
+ * chip's words either fit whole or the chip is dots-only; and a strip that does not fit beside the
+ * badge is wrapped out of sight rather than squeezing it.
+ */
+async function expectWholeStatusLines(page: Page) {
+  const lines = await page.locator(".board").evaluate((board) => [...board.querySelectorAll<HTMLElement>(".card")].map((card) => {
+    const line = card.querySelector<HTMLElement>(".card-status")!.getBoundingClientRect();
+    const badge = card.querySelector<HTMLElement>(".card-status .status");
+    const strip = card.querySelector<HTMLElement>(".card-status .activity-strip");
+    const chip = card.querySelector<HTMLElement>(".card-status .inbox-thread-family");
+    const words = chip?.querySelector<HTMLElement>(".inbox-thread-family-text");
+    const stripBox = strip?.getBoundingClientRect();
+    const wordsBox = words?.getBoundingClientRect();
+    return {
+      id: card.dataset.sessionId!,
+      parent: card.dataset.sessionId === "s-parent",
+      badgeClipped: badge ? badge.scrollWidth > badge.clientWidth + 0.5 || badge.getBoundingClientRect().right > line.right + 0.5 : false,
+      hasStrip: Boolean(strip),
+      // On the line and whole, or wrapped below it, where the line clips it.
+      stripPlacement: !stripBox ? "none" : stripBox.top >= line.bottom - 0.5 ? "wrapped"
+        : stripBox.right <= line.right + 0.5 ? "whole" : "squeezed",
+      hasChip: Boolean(chip),
+      chipDotsOnly: chip?.classList.contains("dots-only") ?? false,
+      chipName: chip?.getAttribute("aria-label") ?? null,
+      chipWordsWhole: !words || !wordsBox ? null
+        : words.scrollWidth <= words.clientWidth + 0.5 && wordsBox.right <= line.right + 0.5 && wordsBox.top < line.bottom,
+    };
+  }));
+  for (const line of lines) {
+    expect(line.badgeClipped, `${line.id}'s badge reads whole`).toBe(false);
+    expect(line.stripPlacement, `${line.id}'s strip never squeezes the badge`).not.toBe("squeezed");
+    if (!line.hasChip) continue;
+    expect(line.chipName, `${line.id}'s chip is named by its whole rollup`).toBe("4 Children · 1 Awaiting Input");
+    if (!line.chipDotsOnly) expect(line.chipWordsWhole, `${line.id}'s chip words are whole when shown`).toBe(true);
+  }
+  const parent = lines.find((line) => line.parent)!;
+  expect({ chip: parent.hasChip, strip: parent.hasStrip }, "a parent card shows its chip in place of the strip")
+    .toEqual({ chip: true, strip: false });
+  return lines;
+}
+
+test.describe("Board cards at 1440×900 (#2222)", () => {
+  test.use({ viewport: { width: 1440, height: 900 } });
+
+  test("every card has one anatomy: a two-line title, a one-line preview, and no lift on hover", async ({ page }) => {
+    await openCards(page);
+    const before = await cardGeometry(page);
+    for (const card of before) {
+      expect(card.titleLines, `${card.id}'s title`).toBeLessThanOrEqual(2);
+      if (card.previewLines !== null) {
+        expect(card.previewLines, `${card.id}'s preview`).toBe(1);
+        expect(card.previewClipped, `${card.id}'s preview ends in an ellipsis`).toBe(true);
+      }
+      expect(card.transform).toBe("none");
+      expect(card.badgeClipped, `${card.id}'s badge reads whole beside the strip and the family chip`).toBe(false);
+    }
+    expect(before.find((card) => card.id === "s-idle")!.titleLines, "a long title clamps at two lines").toBe(2);
+    await expectWholeStatusLines(page);
+
+    const idle = page.locator('.board .card[data-session-id="s-idle"]');
+    // Line 1 is drawn first, and its time stacks above the stretched open button, so its tooltip shows.
+    expect(await idle.evaluate((card) => {
+      const head = card.querySelector(".card-head")!.getBoundingClientRect();
+      const title = card.querySelector(".card-title")!.getBoundingClientRect();
+      const time = card.querySelector(".card-time")!;
+      const box = time.getBoundingClientRect();
+      const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+      return { headFirst: head.bottom <= title.top + 0.5, timeOnTop: hit !== null && time.contains(hit) };
+    })).toEqual({ headFirst: true, timeOnTop: true });
+    const box = await idle.boundingBox();
+    const more = idle.getByRole("button", { name: "More Actions" });
+    expect(await more.evaluate((button) => getComputedStyle(button).opacity)).toBe("0");
+    await idle.hover();
+    await expect.poll(() => more.evaluate((button) => getComputedStyle(button).opacity)).toBe("1");
+    expect(await idle.evaluate((card) => getComputedStyle(card).transform), "hovering moves nothing").toBe("none");
+    expect(await idle.boundingBox()).toEqual(box);
+
+    // Cards in one column without a request differ in height only by their title's lines, whatever
+    // their status: the rest of each card is the same height. (A title's wrap depends on the fonts.)
+    const heights = await page.locator(".column.col-running .card").evaluateAll((cards) => cards.map((card) =>
+      Math.round(card.getBoundingClientRect().height - card.querySelector(".card-title")!.getBoundingClientRect().height)));
+    expect(new Set(heights).size, `running column heights without titles ${heights.join(", ")}`).toBe(1);
+  });
+
+  test("a permission card shows exactly Approve and Deny at equal width, and Approve answers the request", async ({ page }) => {
+    await openCards(page);
+    const card = page.locator('.board .card[data-session-id="s-permission"]');
+    const buttons = card.locator(".card-request .btn");
+    await expect(buttons).toHaveText(["Approve", "Deny"]);
+    const widths = await buttons.evaluateAll((elements) => elements.map((element) => element.getBoundingClientRect().width));
+    expect(Math.abs(widths[0]! - widths[1]!)).toBeLessThanOrEqual(0.5);
+    expect(await buttons.first().evaluate((button) => button.getBoundingClientRect().height)).toBe(28);
+    await card.getByRole("button", { name: "Approve" }).click();
+    await expect.poll(() => page.evaluate(() => window.__approveCalls)).toEqual(["s-permission"]);
+    await expect(page.locator(".inbox-view.expanded")).toHaveCount(0, "deciding does not open the session");
+  });
+
+  test("at a 230px column no card button wraps, and Sign In lists each method then Cancel Sign-In", async ({ page }) => {
+    await openCards(page);
+    await page.addStyleTag({ content: ".board .column:not(.is-empty) { flex: 0 0 230px; min-width: 230px; max-width: 230px; }" });
+    expect(await page.locator(".column.col-input_required").evaluate((column) => column.getBoundingClientRect().width)).toBe(230);
+    for (const card of await cardGeometry(page)) expect(card.wrappedButtons, `${card.id}'s buttons`).toEqual([]);
+    const narrow = await expectWholeStatusLines(page);
+    expect(narrow.find((line) => line.parent)!.chipDotsOnly, "a 230px parent card keeps only the chip's dots").toBe(true);
+    // Nothing on a card's status line crosses the card's edge.
+    const overflowing = await page.locator(".board .card").evaluateAll((cards) => cards.filter((card) => {
+      const edge = card.getBoundingClientRect().right;
+      return [...card.querySelectorAll(".card-status > *")].some((part) => part.getBoundingClientRect().right > edge + 0.5);
+    }).map((card) => (card as HTMLElement).dataset.sessionId));
+    expect(overflowing).toEqual([]);
+
+    const signIn = page.locator('.board .card[data-session-id="s-sign-in"]').getByRole("button", { name: "Sign In" });
+    await expect(page.locator('.board .card[data-session-id="s-sign-in"] .card-request .btn')).toHaveCount(1);
+    await signIn.click();
+    const menu = page.getByRole("menu", { name: "Sign In" });
+    await expect(menu.getByRole("menuitem")).toHaveCount(3);
+    await expect(menu.locator(".menu-text")).toHaveText(["OpenCode Zen", "GitHub Copilot", "Cancel Sign-In"]);
+    await expect(menu.locator(".menu-desc")).toHaveText([
+      "Sign in at opencode.ai in a browser, then return here.",
+      "Use a GitHub Copilot subscription through a device code.",
+    ]);
+    await expect(menu.getByRole("menuitem").last()).toHaveClass(/danger/u);
+    await page.keyboard.press("Escape");
+    await expect(menu).toHaveCount(0);
+    await expect(signIn).toBeFocused();
+  });
+});
+
+test.describe("Board cards in wide columns (#2222)", () => {
+  test.use({ viewport: { width: 1440, height: 900 } });
+
+  test("a parent card's chip shows its whole rollup when the card has room", async ({ page }) => {
+    await openCards(page);
+    await page.addStyleTag({ content: ".board .column:not(.is-empty) { flex: 0 0 480px; min-width: 480px; max-width: 480px; }" });
+    await expect(page.locator('.board .card[data-session-id="s-parent"] .inbox-thread-family')).not.toHaveClass(/dots-only/u);
+    const wide = await expectWholeStatusLines(page);
+    expect(wide.find((line) => line.parent)!.chipWordsWhole).toBe(true);
+    // And it falls back to its dots when the column narrows again.
+    await page.addStyleTag({ content: ".board .column:not(.is-empty) { flex: 0 0 230px; min-width: 230px; max-width: 230px; }" });
+    await expect(page.locator('.board .card[data-session-id="s-parent"] .inbox-thread-family')).toHaveClass(/dots-only/u);
+  });
+
+  test("the chip measures its whole words, even with the line to itself, and again when its neighbour grows", async ({ page }) => {
+    await openCards(page);
+    const chip = page.locator('.board .card[data-session-id="s-parent"] .inbox-thread-family');
+    const narrow = await page.addStyleTag({ content: ".board .column:not(.is-empty) { flex: 0 0 230px; min-width: 230px; max-width: 230px; }" });
+    // A parent without a badge (an idle one) has the whole line, which still cannot hold the rollup:
+    // the chip is measured uncapped, so it does not ellipsize its words and call that a fit.
+    const noBadge = await page.addStyleTag({ content: '.card[data-session-id="s-parent"] .card-status > .row-status { display: none; }' });
+    await expect(chip).toHaveClass(/dots-only/u);
+    await expectWholeStatusLines(page);
+    await noBadge.evaluate((style) => style.remove());
+    await narrow.evaluate((style) => style.remove());
+
+    await page.addStyleTag({ content: ".board .column:not(.is-empty) { flex: 0 0 480px; min-width: 480px; max-width: 480px; }" });
+    await expect(chip).not.toHaveClass(/dots-only/u);
+    // What sits beside the chip grows (a "+1" joining the badge) while the line keeps its size.
+    const wider = await page.addStyleTag({ content: '.card[data-session-id="s-parent"] .card-status > .row-status { padding-right: 300px; }' });
+    await expect(chip).toHaveClass(/dots-only/u);
+    await wider.evaluate((style) => style.remove());
+    await expect(chip).not.toHaveClass(/dots-only/u);
+    await expectWholeStatusLines(page);
+  });
+});
+
+test.describe("Board cards on an 834px touch tablet (#2222)", () => {
+  test.use({ viewport: { width: 834, height: 1112 }, hasTouch: true, isMobile: true });
+
+  test("Approve and Deny have 44px hit areas and ⋯ is always visible", async ({ page }) => {
+    await openCards(page);
+    expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
+    const card = page.locator('.board .card[data-session-id="s-permission"]');
+    await card.scrollIntoViewIfNeeded();
+    const targets = await card.locator(".card-request .btn").evaluateAll((buttons) => buttons.map((button) => {
+      const box = button.getBoundingClientRect();
+      const hit = getComputedStyle(button, "::after");
+      return {
+        height: box.height,
+        hitHeight: box.height - parseFloat(hit.top) - parseFloat(hit.bottom),
+        hitWidth: box.width - parseFloat(hit.left) - parseFloat(hit.right),
+      };
+    }));
+    expect(targets).toHaveLength(2);
+    for (const target of targets) {
+      expect(target.height).toBe(36);
+      expect(target.hitHeight).toBeGreaterThanOrEqual(44);
+      expect(target.hitWidth).toBeGreaterThanOrEqual(44);
+    }
+    await expectWholeStatusLines(page);
+    for (const more of await page.locator(".board .card .card-more").all()) {
+      expect(await more.evaluate((button) => getComputedStyle(button).opacity)).toBe("1");
+    }
   });
 });

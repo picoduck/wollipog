@@ -116,7 +116,7 @@ test("Inbox state preserves one selection per split and clamps the persisted rat
   assert.equal(store.getState().inbox.splitRatio, 0.75);
   store.setInboxRatio(0.1);
   assert.equal(store.getState().inbox.splitRatio, 0.25);
-  assert.equal(parseInboxSplitRatio("not-a-number"), 0.4);
+  assert.equal(parseInboxSplitRatio("not-a-number"), 0.45);
 });
 
 test("Inbox removal preserves an active tombstone while explicit clearing remains distinct", () => {
@@ -158,7 +158,7 @@ test("Inbox selection persistence is defensive and isolated by control-plane ins
   assert.deepEqual(loadInboxState("remote-b", storage), {
     selectedSessionId: null,
     splitKey: null,
-    splitRatio: 0.4,
+    splitRatio: 0.45,
     selectedBySplit: new Map(),
   });
   assert.deepEqual(parseInboxSelection("{broken"), {

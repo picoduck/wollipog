@@ -3,8 +3,20 @@ import {
   type AgentQuestion,
   type SessionView,
 } from "@wollipog/protocol";
-import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
+import React, {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type MouseEvent,
+  type MutableRefObject,
+  type ReactNode,
+  type RefObject,
+} from "react";
 import { useApi } from "../api-context.js";
+import { KEYBOARD_EDITABLE, TOUCH_PHONE_MEDIA } from "../mobile-viewport.js";
 import {
   clearQuestionDrafts,
   claimQuestionResponseOperation,
@@ -13,11 +25,24 @@ import {
   questionDraftSelections,
   questionDraftText,
   storedQuestionDrafts,
+  storedQuestionStep,
   storeQuestionDrafts,
+  storeQuestionStep,
   type QuestionResponseDraft,
 } from "../question-response.js";
-import { Spinner } from "./common.js";
+import { FieldError } from "./FieldError.js";
+import { ChevronsDownIcon, ChevronsUpIcon, CloseIcon, QuestionIcon } from "./Icons.js";
+import { Notice } from "./Notice.js";
 import { StructuredQuestionText } from "./StructuredQuestionText.js";
+import { BusyButton } from "./ui/BusyButton.js";
+import {
+  QUESTION_CARD_COPY,
+  QuestionChoiceRows,
+  questionEyebrowParts,
+  questionOtherChosen,
+  questionStepLabel,
+  type QuestionChoice,
+} from "./requests/QuestionStep.js";
 
 export interface ComposerQuestionResponseProps {
   sessionId: string;
@@ -26,19 +51,24 @@ export interface ComposerQuestionResponseProps {
   isAsync?: boolean;
   questions: AgentQuestion[];
   runnerOnline: boolean;
+  /** Answer Mode is open. While it is closed the question waits on the request dock's compact card
+   * (#2212) and this renders nothing, keeping the answers given so far. */
   active: boolean;
-  showWaiting: boolean;
-  /** Why the signed-in person may not answer (#1857). Answer Mode then never opens, and the
-   * waiting card says why instead of offering Respond. */
-  responseRefusal?: string | null;
   inputRef: RefObject<HTMLInputElement | null>;
-  onEnter: () => void;
   onExit: () => void;
   onSessionUpdate?: (session: SessionView) => void;
   /** The session's context and cost triggers, which Answer Mode keeps in reach while it replaces
    * the composer bar (#2166). Beside Submit, or on their own row when the column is narrow. */
   usage?: ReactNode;
   usageOwnRow?: boolean;
+  /** Receives the way back to the answer while Answer Mode is open: given this question's request
+   * id it expands the panel, focuses the field and answers true. Jump to Question, an attention
+   * link and the Reply key use it. */
+  revealRef?: MutableRefObject<((requestId: string) => boolean) | null>;
+  /** The runner restarted after the question was asked and answering resumes the conversation once
+   * (`recoveryAction: "resume_answer"`): the head reads Recovery Required and the body says so, as
+   * the card does. */
+  recovery?: boolean;
 }
 
 function withDraft(
@@ -80,7 +110,44 @@ function focusSoon(ref: RefObject<HTMLInputElement | null>): void {
   window.requestAnimationFrame(() => ref.current?.focus());
 }
 
-/** A request-correlated answer flow inside the composer shell, kept separate from message drafts. */
+/** What the collapsed panel says has been answered so far: the chosen options, the typed answer, or
+ * "Nothing chosen yet". A secret is never repeated. */
+export function answerSelectionSummary(question: AgentQuestion, draft: QuestionResponseDraft | undefined): string {
+  const selected = questionDraftSelections(question, draft);
+  if (selected.length > 0) return selected.join(", ");
+  const text = draft?.kind === "choice" ? "" : draft?.value.trim() ?? "";
+  if (!text) return QUESTION_CARD_COPY.nothingChosen;
+  return question.secret ? QUESTION_CARD_COPY.answerEntered : text;
+}
+
+/** What to type into the answer field. */
+function answerPlaceholder(question: AgentQuestion, draft: QuestionResponseDraft | undefined): string {
+  if (question.options.length === 0 || questionOtherChosen(question, draft) || draft?.kind === "other") {
+    return QUESTION_CARD_COPY.typeAnswer;
+  }
+  if (question.multiSelect) return QUESTION_CARD_COPY.typeChoices;
+  return question.allowOther ? QUESTION_CARD_COPY.typeChoiceOrAnswer : QUESTION_CARD_COPY.typeChoice;
+}
+
+/** Where focus goes once the commit that renders it lands: the answer field, or one choice row. */
+type AnswerFocus = { kind: "input" } | { kind: "control"; name: string };
+
+/**
+ * Answer Mode (docs/design-system.md §13.2; #2212): a question answered in the composer, kept
+ * separate from the message draft. While it is open the request dock leaves the question out, so it
+ * is shown once.
+ *
+ * Top to bottom: the answer head (the kind, "Question 2 of 3" when there are several, Show Context
+ * and the × that exits), the question, its options as the card's ChoiceRows numbered 1–9, the answer
+ * field in the reading font, and a footer of Back (from question 2) and Next or Submit Answers.
+ * The field is the composer's own: it has no edge of its own, the composer card's edge shows focus,
+ * and an invalid answer turns that edge red with the error under the field (§8.5).
+ *
+ * Show Context shrinks the panel to its head (the question, a summary of the answer so far and
+ * Show Answer) so the conversation the question is about can be read. Nothing resets: the answers
+ * and the step stay in the request-keyed draft the card shares. Escape exits Answer Mode, and a
+ * number key opens the panel before it chooses.
+ */
 export function ComposerQuestionResponse({
   sessionId,
   requestId,
@@ -89,14 +156,13 @@ export function ComposerQuestionResponse({
   questions,
   runnerOnline,
   active,
-  showWaiting,
-  responseRefusal = null,
   inputRef,
-  onEnter,
   onExit,
   onSessionUpdate,
   usage = null,
   usageOwnRow = false,
+  revealRef,
+  recovery = false,
 }: ComposerQuestionResponseProps) {
   const api = useApi();
   const answerKey = isAsync && occurrenceId ? `${requestId}:${occurrenceId}` : requestId;
@@ -105,11 +171,13 @@ export function ComposerQuestionResponse({
     requestId: answerKey,
     values: storedQuestionDrafts(sessionId, answerKey),
   }));
-  const [questionIndex, setQuestionIndex] = useState(0);
-  const [paletteFocusIndex, setPaletteFocusIndex] = useState(0);
+  const [questionIndex, setQuestionIndex] = useState(() => storedQuestionStep(sessionId, answerKey));
+  const [collapsed, setCollapsed] = useState(false);
+  const [focusRequest, setFocusRequest] = useState<{ target: AnswerFocus; serial: number } | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [submissionError, setSubmissionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const sectionRef = useRef<HTMLElement>(null);
   const operationPendingRef = useRef<string | null>(null);
   const previousActiveRef = useRef(active);
   const liveRequestRef = useRef<object | null>(null);
@@ -122,8 +190,8 @@ export function ComposerQuestionResponse({
 
   useEffect(() => {
     setDraftState({ requestId: answerKey, values: storedQuestionDrafts(sessionId, answerKey) });
-    setQuestionIndex(0);
-    setPaletteFocusIndex(0);
+    setQuestionIndex(storedQuestionStep(sessionId, answerKey));
+    setCollapsed(false);
     setValidationError(null);
     setSubmissionError(null);
     setBusy(false);
@@ -135,10 +203,13 @@ export function ComposerQuestionResponse({
     previousActiveRef.current = active;
     if (!entering) return;
     const stored = storedQuestionDrafts(sessionId, answerKey);
+    // The panel opens whole, on the step the request's draft keeps.
+    setCollapsed(false);
+    setQuestionIndex(storedQuestionStep(sessionId, answerKey));
     setDraftState((current) => {
       const values = current.requestId === answerKey ? { ...current.values } : {};
-      // Interactive Form may have changed non-secret answers while this mounted composer surface
-      // was inactive. Merge those exact drafts without erasing a page-only secret kept here.
+      // The card may have changed non-secret answers while this mounted composer surface was
+      // inactive. Merge those exact drafts without erasing a page-only secret kept here.
       for (const question of questions) {
         if (question.secret || !Object.hasOwn(stored, question.id)) continue;
         Object.defineProperty(values, question.id, {
@@ -152,41 +223,80 @@ export function ComposerQuestionResponse({
     });
   }, [active, questions, answerKey, sessionId]);
 
-  if (questions.length === 0) return null;
-  if (!active) {
-    return showWaiting ? (
-      <div className="composer-question-waiting" role="status">
-        <div>
-          <strong>Question Waiting</strong>
-          <span id={`${ids}-composer-waiting`}>
-            {responseRefusal ?? "Your message draft is preserved. Press R to respond through the composer."}
-          </span>
-        </div>
-        <button
-          className="btn primary sm"
-          type="button"
-          disabled={responseRefusal !== null}
-          aria-describedby={responseRefusal !== null ? `${ids}-composer-waiting` : undefined}
-          onClick={onEnter}
-        >
-          Respond
-        </button>
-      </div>
-    ) : null;
-  }
+  // Focus moves in the commit that renders its target: a collapsed panel opening, or a step change.
+  useLayoutEffect(() => {
+    const target = focusRequest?.target;
+    if (!target) return;
+    if (target.kind === "input") {
+      inputRef.current?.focus();
+      return;
+    }
+    [...sectionRef.current?.querySelectorAll<HTMLElement>("[data-session-request-control]") ?? []]
+      .find((candidate) => candidate.dataset.sessionRequestControl === target.name)?.focus();
+  // Only a new request moves focus.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusRequest]);
+  const requestFocus = (target: AnswerFocus) =>
+    setFocusRequest((current) => ({ target, serial: (current?.serial ?? 0) + 1 }));
 
-  const currentIndex = Math.min(questionIndex, questions.length - 1);
+  const revealRefCurrent = useRef<() => void>(() => {});
+  revealRefCurrent.current = () => {
+    setCollapsed(false);
+    requestFocus({ kind: "input" });
+  };
+  useEffect(() => {
+    if (!revealRef || !active) return;
+    const reveal = (target: string) => {
+      if (target !== requestId) return false;
+      revealRefCurrent.current();
+      return true;
+    };
+    revealRef.current = reveal;
+    return () => {
+      if (revealRef.current === reveal) revealRef.current = null;
+    };
+  }, [active, requestId, revealRef]);
+
+  if (questions.length === 0 || !active) return null;
+
+  const currentIndex = Math.min(Math.max(questionIndex, 0), questions.length - 1);
   const question = questions[currentIndex]!;
   const values = draftState.requestId === answerKey ? draftState.values : {};
   const currentDraft = Object.hasOwn(values, question.id) ? values[question.id] : undefined;
   const rawValue = questionDraftText(currentDraft);
-  const questionLabelId = `${ids}-composer-question`;
-  const questionHelpId = `${ids}-composer-help`;
-  const questionErrorId = `${ids}-composer-error`;
-  const choicesId = `${ids}-composer-choices`;
+  const titleId = `${ids}-answer-title`;
+  const bodyId = `${ids}-answer-body`;
+  const headerId = `${ids}-answer-header`;
+  const helpId = `${ids}-answer-help`;
+  const errorId = `${ids}-answer-error`;
   const unsupported = !isAnswerableAgentQuestion(question);
   const responseUnavailable = !runnerOnline || unsupported;
   const controlsDisabled = busy || responseUnavailable;
+  const lastStep = currentIndex === questions.length - 1;
+  const otherChosen = questionOtherChosen(question, currentDraft);
+  const eyebrow = questionEyebrowParts(question);
+  const help = unsupported
+    ? QUESTION_CARD_COPY.unsupported
+    : !runnerOnline
+      ? QUESTION_CARD_COPY.runnerOffline
+      : question.required === false ? QUESTION_CARD_COPY.optionalSentence : null;
+  // The error takes the help line's place under the field (§8.5).
+  const helpShown = validationError === null && help !== null;
+  /** The step's error, worded as the card words it: nothing chosen names the choice. */
+  const stepError = (next: Record<string, QuestionResponseDraft>, target: AgentQuestion): string | undefined => {
+    const error = questionDraftAnswers([target], next).errors[target.id];
+    if (error === undefined || target.options.length === 0) return error;
+    const draft = Object.hasOwn(next, target.id) ? next[target.id] : undefined;
+    return questionOtherChosen(target, draft) || questionDraftSelections(target, draft).length > 0 || questionDraftText(draft).trim()
+      ? error : target.multiSelect ? QUESTION_CARD_COPY.chooseOptions : QUESTION_CARD_COPY.chooseOption;
+  };
+
+  const goToStep = (step: number) => {
+    setQuestionIndex(step);
+    storeQuestionStep(sessionId, answerKey, step);
+    setValidationError(null);
+    requestFocus({ kind: "input" });
+  };
 
   const updateDraft = (draft: QuestionResponseDraft): Record<string, QuestionResponseDraft> => {
     const next = withDraft(values, question.id, draft);
@@ -197,23 +307,13 @@ export function ComposerQuestionResponse({
     return next;
   };
 
-  const update = (raw: string): Record<string, QuestionResponseDraft> => {
-    const draft: QuestionResponseDraft = { kind: currentDraft?.kind === "other" ? "other" : "entry", value: raw };
-    const next = updateDraft(draft);
-    if (!question.multiSelect) {
-      const selected = questionDraftSelections(question, draft)[0];
-      const selectedIndex = question.options.findIndex((option) => option.label === selected);
-      if (selectedIndex >= 0) setPaletteFocusIndex(selectedIndex);
-    }
-    return next;
-  };
-
   const submitAnswers = async (next: Record<string, QuestionResponseDraft>) => {
     const resolved = questionDraftAnswers(questions, next);
     if (Object.keys(resolved.errors).length > 0) {
-      const firstInvalidIndex = questions.findIndex((candidate) => Object.hasOwn(resolved.errors, candidate.id));
-      setQuestionIndex(Math.max(0, firstInvalidIndex));
-      setValidationError(resolved.errors[questions[Math.max(0, firstInvalidIndex)]!.id] ?? "Correct the response.");
+      const firstInvalidIndex = Math.max(0, questions.findIndex((candidate) => Object.hasOwn(resolved.errors, candidate.id)));
+      setQuestionIndex(firstInvalidIndex);
+      storeQuestionStep(sessionId, answerKey, firstInvalidIndex);
+      setValidationError(stepError(next, questions[firstInvalidIndex]!) ?? QUESTION_CARD_COPY.required);
       focusSoon(inputRef);
       return;
     }
@@ -222,7 +322,7 @@ export function ComposerQuestionResponse({
     const submittedRequest = liveRequestRef.current;
     const releaseOperation = claimQuestionResponseOperation(sessionId, answerKey);
     if (!releaseOperation) {
-      setSubmissionError("Another response is already being submitted for this question.");
+      setSubmissionError(QUESTION_CARD_COPY.alreadySending);
       focusSoon(inputRef);
       return;
     }
@@ -252,188 +352,210 @@ export function ComposerQuestionResponse({
     }
   };
 
+  /** Next checks the step and moves on; on the last step it submits. */
   const accept = (next = values) => {
     if (controlsDisabled) return;
-    const resolved = questionDraftAnswers([question], next);
-    const error = resolved.errors[question.id];
+    const error = stepError(next, question);
     if (error) {
       setValidationError(error);
       focusSoon(inputRef);
       return;
     }
-    if (currentIndex < questions.length - 1) {
-      setQuestionIndex(currentIndex + 1);
-      setPaletteFocusIndex(0);
-      setValidationError(null);
-      focusSoon(inputRef);
+    if (!lastStep) {
+      goToStep(currentIndex + 1);
       return;
     }
     void submitAnswers(next);
   };
 
-  const setChoice = (label: string) => {
+  const choose = (choice: QuestionChoice) => {
+    if (controlsDisabled) return;
+    if (choice === "other") {
+      if (otherChosen && question.multiSelect) updateDraft({ kind: "choice", labels: [] });
+      else if (!otherChosen) updateDraft({ kind: "other", value: "" });
+      // Something Else is answered in the field.
+      requestFocus({ kind: "input" });
+      return;
+    }
+    const label = question.options[choice]?.label;
+    if (label === undefined) return;
     const selected = questionDraftSelections(question, currentDraft);
-    const labels = question.multiSelect
-      ? selected.includes(label) ? selected.filter((candidate) => candidate !== label) : [...selected, label]
-      : [label];
-    return updateDraft({ kind: "choice", labels });
+    updateDraft({
+      kind: "choice",
+      labels: question.multiSelect
+        ? selected.includes(label) ? selected.filter((candidate) => candidate !== label) : [...selected, label]
+        : [label],
+    });
   };
 
-  const onChoiceKeyDown = (event: KeyboardEvent<HTMLButtonElement>, label: string) => {
-    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
-    const plain = !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey;
-    if (!plain) return;
-    const choices = [...event.currentTarget.parentElement!.querySelectorAll<HTMLButtonElement>("button")];
-    const index = choices.indexOf(event.currentTarget);
-    if (["ArrowDown", "ArrowRight", "ArrowUp", "ArrowLeft", "Home", "End"].includes(event.key)) {
-      event.preventDefault();
-      const targetIndex = event.key === "Home"
-        ? 0
-        : event.key === "End"
-          ? choices.length - 1
-          : (index + (event.key === "ArrowDown" || event.key === "ArrowRight" ? 1 : -1) + choices.length) % choices.length;
-      const target = choices[targetIndex];
-      if (!question.multiSelect) setPaletteFocusIndex(targetIndex);
-      target?.focus();
-    } else if (event.key === " " || event.key.toLowerCase() === "x") {
-      event.preventDefault();
-      setChoice(label);
-    } else if (event.key === "Enter") {
-      event.preventDefault();
-      if (question.multiSelect) accept();
-      else accept(setChoice(label));
-    } else if (event.key === "Escape") {
+  const onKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    // A menu or popover opened from the panel (the usage triggers) is portalled: its keys are its own.
+    if (!event.currentTarget.contains(event.target as Node)) return;
+    if (event.defaultPrevented || event.nativeEvent.isComposing || event.keyCode === 229) return;
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    const target = event.target as HTMLElement;
+    if (event.key === "Escape") {
       event.preventDefault();
       onExit();
+      return;
     }
+    if (event.key === "Enter") {
+      // A button keeps its own Enter; the field and the choice rows move on.
+      if (target.closest("button, a[href]")) return;
+      event.preventDefault();
+      if (!event.repeat) accept();
+      return;
+    }
+    if (target === inputRef.current || event.repeat || !/^[1-9]$/.test(event.key)) return;
+    const index = Number(event.key) - 1;
+    const rows = question.options.length + (unsupported ? 0 : 1);
+    if (question.options.length === 0 || index >= rows) return;
+    event.preventDefault();
+    setCollapsed(false);
+    if (index === question.options.length) {
+      choose("other");
+      return;
+    }
+    choose(index);
+    requestFocus({ kind: "control", name: `question:${question.id}:option:${index}` });
   };
 
+  // On a touch phone a focused field is the software keyboard, and its blur changes the layout
+  // between a press and its click. Pressing a row or a button while typing keeps the field focused
+  // until the click lands, as the question card does (#2205).
+  const holdFieldFocus = (event: MouseEvent<HTMLElement>) => {
+    const focused = event.currentTarget.ownerDocument.activeElement;
+    const target = event.target as HTMLElement;
+    if (!(focused instanceof HTMLElement) || !event.currentTarget.contains(focused) || !focused.matches(KEYBOARD_EDITABLE) ||
+        target.closest(KEYBOARD_EDITABLE) || !target.closest("button, label, input") ||
+        !event.currentTarget.ownerDocument.defaultView?.matchMedia(TOUCH_PHONE_MEDIA).matches) return;
+    event.preventDefault();
+  };
+
+  const contextLabel = collapsed ? QUESTION_CARD_COPY.showAnswer : QUESTION_CARD_COPY.showContext;
+  const kindLabel = recovery ? QUESTION_CARD_COPY.recoveryRequired
+    : isAsync ? QUESTION_CARD_COPY.asyncQuestion : QUESTION_CARD_COPY.question;
+
   return (
-    <section className="composer-answer" aria-labelledby={questionLabelId} aria-busy={busy}>
-      <div className="composer-answer-heading">
-        <div>
-          <span className="composer-answer-mode">Answer Mode</span>
-          <strong>Answering Question {currentIndex + 1} of {questions.length}</strong>
-        </div>
-        <button className="btn ghost sm" type="button" disabled={busy} onClick={onExit}>Exit Answer Mode</button>
+    <section
+      ref={sectionRef}
+      className="composer-answer"
+      aria-labelledby={titleId}
+      aria-busy={busy}
+      data-collapsed={collapsed ? "" : undefined}
+      // The question's place while it is answered here, for the request coordinator's focus.
+      data-session-request-id={requestId}
+      data-session-request-session={sessionId}
+      onKeyDown={onKeyDown}
+      onMouseDown={holdFieldFocus}
+    >
+      <div className="answer-head">
+        <span className="answer-kind"><QuestionIcon size={16} />{kindLabel}</span>
+        {questions.length > 1 && <span className="answer-step">{questionStepLabel(currentIndex, questions.length)}</span>}
+        {/* Icon-only below 760px, under the same name (§15.1). */}
+        <button
+          type="button"
+          className="btn sm ghost answer-context-toggle"
+          aria-label={contextLabel}
+          aria-expanded={!collapsed}
+          aria-controls={bodyId}
+          onClick={() => setCollapsed((current) => !current)}
+        >
+          {collapsed ? <ChevronsUpIcon size={14} /> : <ChevronsDownIcon size={14} />}
+          <span className="answer-context-label">{contextLabel}</span>
+        </button>
+        <button
+          type="button"
+          className="icon-btn sm"
+          aria-label={QUESTION_CARD_COPY.exitAnswerMode}
+          title={QUESTION_CARD_COPY.exitAnswerMode}
+          disabled={busy}
+          onClick={onExit}
+        >
+          <CloseIcon size={16} />
+        </button>
       </div>
-      <div className="composer-answer-question" id={questionLabelId}>
-        {question.header && <span className="question-chip">{question.header}</span>}
+      {!collapsed && (eyebrow.header || eyebrow.hint) && (
+        <p className="answer-eyebrow">
+          {eyebrow.header && <span id={headerId}>{eyebrow.header}</span>}
+          {eyebrow.hint && <span>{eyebrow.hint}</span>}
+        </p>
+      )}
+      <div className="answer-title" id={titleId}>
         <StructuredQuestionText>{question.question}</StructuredQuestionText>
-        {question.multiSelect && <span className="muted sm"> (select all that apply)</span>}
       </div>
-      {question.context && (
-        <div className="composer-answer-context">
-          <StructuredQuestionText>{question.context}</StructuredQuestionText>
-        </div>
-      )}
-      {question.options.length > 0 && (
-        <div
-          className="composer-answer-choices"
-          id={choicesId}
-          role={question.multiSelect ? "group" : "radiogroup"}
-          aria-label="Offered Choices"
-        >
-          {question.options.map((option, optionIndex) => {
-            const selected = questionDraftSelections(question, currentDraft).includes(option.label);
-            return (
-              <button
-                type="button"
-                className={`composer-answer-choice${selected ? " on" : ""}`}
-                role={question.multiSelect ? "checkbox" : "radio"}
-                aria-checked={selected}
-                tabIndex={question.multiSelect ? 0 : optionIndex === paletteFocusIndex ? 0 : -1}
-                disabled={controlsDisabled}
-                key={option.label}
-                onClick={() => {
-                  setPaletteFocusIndex(optionIndex);
-                  setChoice(option.label);
-                }}
-                onFocus={() => setPaletteFocusIndex(optionIndex)}
-                onKeyDown={(event) => onChoiceKeyDown(event, option.label)}
-              >
-                <span className="composer-answer-choice-number">{optionIndex + 1}</span>
-                <span><strong>{option.label}</strong>{option.description && <small>{option.description}</small>}</span>
-              </button>
-            );
-          })}
-        </div>
-      )}
-      {question.options.length > 0 && (
-        <button
-          className="btn ghost sm"
-          type="button"
-          disabled={controlsDisabled}
-          onClick={() => {
-            updateDraft({ kind: "other", value: currentDraft?.kind === "other" ? rawValue : "" });
-            focusSoon(inputRef);
+      {collapsed && <p className="answer-summary" aria-live="polite">{answerSelectionSummary(question, currentDraft)}</p>}
+      {/* Hidden, not unmounted, behind Show Context: the field keeps its place for the composer's
+          focus, and nothing in it resets. */}
+      <div className="answer-body" id={bodyId} hidden={collapsed}>
+        {recovery && <p className="answer-recovery">{QUESTION_CARD_COPY.recoveryResume}</p>}
+        {question.context && (
+          <div className="answer-context">
+            <StructuredQuestionText>{question.context}</StructuredQuestionText>
+          </div>
+        )}
+        {question.options.length > 0 && (
+          <div className="answer-options">
+            <QuestionChoiceRows
+              question={question}
+              draft={currentDraft}
+              disabled={controlsDisabled}
+              labelledBy={eyebrow.header && !collapsed ? `${headerId} ${titleId}` : titleId}
+              describedBy={helpShown ? helpId : validationError ? errorId : undefined}
+              invalid={validationError !== null}
+              marker={(index) => index < 9 ? <span className="answer-option-number" aria-hidden="true">{index + 1}</span> : undefined}
+              onChoose={choose}
+            />
+          </div>
+        )}
+        {submissionError && (
+          <Notice tone="danger" compact role="alert"
+            details={submissionError !== QUESTION_CARD_COPY.alreadySending ? submissionError : undefined}>
+            {submissionError === QUESTION_CARD_COPY.alreadySending ? submissionError : QUESTION_CARD_COPY.notSent}
+          </Notice>
+        )}
+        <input
+          ref={inputRef}
+          className="composer-answer-input"
+          data-session-request-focus=""
+          type={question.secret ? "password" : "text"}
+          inputMode={question.inputFormat === "integer" ? "numeric" : question.inputFormat === "number" ? "decimal" : undefined}
+          autoComplete="off"
+          maxLength={question.maxLength ?? DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH}
+          value={rawValue}
+          aria-labelledby={titleId}
+          aria-describedby={helpShown ? helpId : validationError ? errorId : undefined}
+          aria-invalid={validationError ? true : undefined}
+          aria-disabled={responseUnavailable || undefined}
+          disabled={busy}
+          readOnly={responseUnavailable}
+          placeholder={answerPlaceholder(question, currentDraft)}
+          onChange={(event) => {
+            const raw = event.currentTarget.value;
+            updateDraft({ kind: currentDraft?.kind === "other" ? "other" : "entry", value: raw });
           }}
-        >Other Response</button>
-      )}
-      <label className="sr-only" htmlFor={`${ids}-composer-input`}>{currentDraft?.kind === "other" ? "Other Response" : "Response"} to Question {currentIndex + 1}</label>
-      <input
-        id={`${ids}-composer-input`}
-        ref={inputRef}
-        className="composer-answer-input"
-        type={question.secret ? "password" : "text"}
-        inputMode={question.inputFormat === "integer" ? "numeric" : question.inputFormat === "number" ? "decimal" : undefined}
-        autoComplete="off"
-        maxLength={question.maxLength ?? DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH}
-        value={rawValue}
-        aria-describedby={`${questionHelpId}${question.options.length > 0 ? ` ${choicesId}` : ""}${validationError ? ` ${questionErrorId}` : ""}`}
-        aria-invalid={validationError ? true : undefined}
-        aria-disabled={responseUnavailable || undefined}
-        disabled={busy}
-        readOnly={responseUnavailable}
-        placeholder={currentDraft?.kind === "other" ? "Type your custom response" : question.multiSelect
-          ? "Numbers or labels, separated by commas"
-          : question.options.length > 0 ? "Number or label" : "Type your response"}
-        onChange={(event) => update(event.currentTarget.value)}
-        onKeyDown={(event) => {
-          if (event.nativeEvent.isComposing || event.keyCode === 229) return;
-          if (event.key === "Escape" && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
-            event.preventDefault();
-            onExit();
-          } else if (event.key === "Enter" && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
-            event.preventDefault();
-            accept();
-          }
-        }}
-      />
-      <div className="composer-answer-help" id={questionHelpId}>
-        {unsupported
-          ? "This question format is unsupported. Use Interactive Form or dismiss the question."
-          : !runnerOnline
-            ? "Responses are unavailable until the runner reconnects. Your draft is preserved."
-            : question.required === false
-              ? "This response is optional. Press Enter to continue without an answer."
-              : question.options.length === 0 || currentDraft?.kind === "other"
-                ? "Type your response, then press Enter."
-                : question.multiSelect
-                  ? "Type displayed numbers or labels separated by commas, or choose Other Response for custom text, then press Enter."
-                  : "Type a displayed number or label, or choose Other Response for custom text, then press Enter."}
-      </div>
-      {validationError && <div className="form-error" id={questionErrorId} role="alert">{validationError}</div>}
-      {submissionError && <div className="form-error" role="alert">Could not answer the question: {submissionError}</div>}
-      {usage && usageOwnRow && <div className="composer-answer-usage own-row">{usage}</div>}
-      <div className="composer-answer-actions">
-        <button
-          className="btn ghost sm"
-          type="button"
-          disabled={busy || currentIndex === 0}
-          onClick={() => {
-            setQuestionIndex(currentIndex - 1);
-            setPaletteFocusIndex(0);
-            setValidationError(null);
-            focusSoon(inputRef);
-          }}
-        >
-          Previous Question
-        </button>
-        {usage && !usageOwnRow && <div className="composer-answer-usage">{usage}</div>}
-        <button className="btn primary sm" type="button" disabled={controlsDisabled} onClick={() => accept()}>
-          {busy ? <><Spinner /> Submitting…</> : currentIndex === questions.length - 1 ? "Submit Answers" : "Next Question"}
-        </button>
+        />
+        {validationError !== null && <FieldError id={errorId}>{validationError}</FieldError>}
+        {helpShown && <p className="answer-help" id={helpId}>{help}</p>}
+        {usage && usageOwnRow && <div className="composer-answer-usage own-row">{usage}</div>}
+        <div className="answer-foot">
+          {currentIndex > 0 && (
+            <button type="button" className="btn" disabled={busy} onClick={() => goToStep(currentIndex - 1)}>
+              {QUESTION_CARD_COPY.back}
+            </button>
+          )}
+          {usage && !usageOwnRow && <div className="composer-answer-usage">{usage}</div>}
+          <BusyButton
+            className="btn primary"
+            busy={busy}
+            progress={QUESTION_CARD_COPY.sending}
+            disabled={responseUnavailable}
+            aria-describedby={helpShown && responseUnavailable ? helpId : undefined}
+            onClick={() => accept()}
+          >
+            {lastStep ? QUESTION_CARD_COPY.submitAnswers : QUESTION_CARD_COPY.next}
+          </BusyButton>
+        </div>
       </div>
     </section>
   );

@@ -45,6 +45,9 @@ const reminderConflict = new URLSearchParams(location.search).get("reminder-conf
 /** Sessions in the lifecycle states the archive label and Fork Conversation tell apart (#2214): a
  * running turn in a worktree, a finished session, and a control plane that stops before archiving. */
 const lifecycle = new URLSearchParams(location.search).has("lifecycle");
+const entryRegressions = new URLSearchParams(location.search).has("entry-regressions");
+let entryHydrated = !new URLSearchParams(location.search).has("entry-cold");
+const entrySessionWaiters: Array<() => void> = [];
 
 const runner: RunnerView = {
   runnerId: "runner-1",
@@ -200,6 +203,24 @@ if (fullShell) {
   }
 }
 
+if (entryRegressions) {
+  const orchestrator = sessions.find((value) => value.id === "s-approval")!;
+  orchestrator.role = "orchestrator";
+  orchestrator.parentControl = "questions_and_approvals";
+  orchestrator.pendingApproval = {
+    requestId: "async-question", kind: "question", title: "Choose the Release Target", async: true,
+    options: [], questions: [{ id: "target", header: "Target", question: "Where should the release go?",
+      options: [{ label: "Staging" }, { label: "Production" }], allowOther: true }],
+    additionalRequests: [{ requestId: "worker-question", ownerToolUseId: "fixture-child", kind: "question",
+      title: "Choose the Worker Check", options: [], questions: [{ id: "check", header: "Check",
+        question: "Which check should the worker run?", options: [{ label: "Unit Tests" }, { label: "Browser Tests" }] }] }],
+  };
+  const standard = sessions.find((value) => value.id === "s-running")!;
+  standard.role = "normal";
+  const descendant = sessions.find((value) => value.id === "s-queued")!;
+  descendant.parentSessionId = orchestrator.id;
+}
+
 // More sessions waiting on the user, so the rail's Sessions badge reaches two and three digits
 // (#2110). Each is blocked the way a real one is: waiting on a pending request.
 const moreBlocked = Number(new URLSearchParams(location.search).get("more-blocked") ?? 0);
@@ -238,6 +259,101 @@ if (groups) {
       updatedAt: Date.now(), lastEventAt: Date.now() }),
     group(8, "Marketing Site"),
     group(9, "Mobile App", secondRunner.runnerId),
+  );
+}
+
+// The Board's Machine and Agent filters (#2201): two named machines whose agents include one each
+// machine reports unavailable and one with a 70-character name, and 29 active sessions of which 10
+// run Claude Code. Nothing is Done, so that column folds to a strip.
+const filtersScenario = new URLSearchParams(location.search).has("filters");
+if (filtersScenario) {
+  runner.displayName = "Studio Mac";
+  runner.agents = [
+    { id: "codex", name: "Codex", command: "codex", args: [], env: {}, driver: "codex-app-server", available: true },
+    { id: "claude", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code", available: true },
+    { id: "research", name: "Research Agent With Extended Repository Context and Staging Credentials",
+      command: "research", args: [], env: {}, driver: "acp", available: true },
+    { id: "gemini", name: "Gemini CLI", command: "gemini", args: [], env: {}, driver: "acp", available: false,
+      unavailableReason: "Gemini CLI is not installed on this machine." },
+  ];
+  secondRunner.displayName = "Build Server 02";
+  secondRunner.agents = [
+    { id: "codex", name: "Codex", command: "codex", args: [], env: {}, driver: "codex-app-server", available: true },
+    { id: "aider", name: "Aider", command: "aider", args: [], env: {}, driver: "acp", available: false },
+  ];
+  const columns: BoardColumn[] = ["running", "input_required", "review"];
+  for (let index = 0; index < 10; index += 1) {
+    sessions.push(session(`s-claude-${index}`, `Claude Code Session ${index + 1}`, columns[index % 3]!, {
+      agentId: "claude", agentName: "Claude Code", driver: "claude-code",
+      ...(columns[index % 3] === "input_required"
+        ? { status: "input_required", pendingApproval: { requestId: `claude-${index}`, title: "Approve Command", options: [] } as never }
+        : {}),
+    }));
+  }
+  for (let index = 0; index < 15; index += 1) {
+    sessions.push(session(`s-build-${index}`, `Build Session ${index + 1}`, index % 2 === 0 ? "running" : "review", {
+      runnerId: secondRunner.runnerId,
+    }));
+  }
+}
+
+// One card of every kind the Board draws (#2222): idle and running cards whose previews are raw
+// markdown, a permission request whose agent names its options Always Allow, Allow and Reject, a
+// question, a sign-in with two methods and a cancel, and a parent with four children.
+const cardsScenario = new URLSearchParams(location.search).has("cards");
+if (cardsScenario) {
+  const now = Date.now();
+  const recent = (minutes: number) => ({ updatedAt: now - minutes * 60_000, lastEventAt: now - minutes * 60_000 });
+  const claude = { agentId: "claude", agentName: "Claude Code", driver: "claude-code" as const };
+  runner.agents.push({ id: "claude", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code", available: true });
+  sessions.splice(0, sessions.length,
+    session("s-idle", "Draft the release notes for v0.31 and link every merged pull request from the milestone", "review", {
+      ...recent(42),
+      preview: "(27/27)\n- [ ] Visual review… [design tokens doc](https://example.com/design-tokens)\n- [x] **Contrast** checks",
+    }),
+    session("s-busy", "Migrate the usage tables to the new schema", "running", {
+      ...claude, ...recent(1), status: "running",
+      preview: "## Summary\n\nRan `pnpm test` — **312 passed**, 3 files changed.",
+    }),
+    session("s-permission", "Fix the flaky reconnect test", "input_required", {
+      ...recent(3), status: "input_required",
+      pendingApproval: {
+        requestId: "req-permission",
+        kind: "permission",
+        title: "Run **pnpm test** in apps/web",
+        context: { toolName: "Bash", input: "pnpm --filter web test -- --reporter=dot" },
+        options: [
+          { optionId: "always", name: "Always Allow", kind: "allow_always" },
+          { optionId: "allow", name: "Allow", kind: "allow_once" },
+          { optionId: "reject", name: "Reject", kind: "reject_once" },
+        ],
+      },
+    }),
+    session("s-question", "Choose the cache eviction policy", "input_required", {
+      ...claude, ...recent(6), status: "input_required",
+      pendingApproval: { requestId: "req-question", kind: "question", title: "Keep the LRU cache or switch to TTL expiry?", options: [], questions: [] },
+    }),
+    session("s-sign-in", "Summarize the open design issues", "input_required", {
+      agentId: "opencode", agentName: "OpenCode", driver: "acp", ...recent(9), status: "input_required",
+      pendingApproval: {
+        requestId: "req-sign-in",
+        kind: "authentication",
+        title: "OpenCode needs you to sign in before it can continue.",
+        options: [
+          { optionId: "auth_1_method_1", name: "OpenCode Zen", description: "Sign in at opencode.ai in a browser, then return here.", kind: "allow_once" },
+          { optionId: "auth_1_method_2", name: "GitHub Copilot", description: "Use a GitHub Copilot subscription through a device code.", kind: "allow_once" },
+          { optionId: "auth_1_cancel", name: "Cancel sign-in", kind: "reject_once" },
+        ],
+      },
+    }),
+    session("s-parent", "Ship the usage and cost overhaul", "running", { ...claude, ...recent(2), status: "running", role: "orchestrator" }),
+    session("s-child-1", "#600: Add the usage table", "running", { ...claude, ...recent(2), status: "running", parentSessionId: "s-parent" }),
+    session("s-child-2", "#601: Link the cost source", "done", { ...claude, ...recent(30), status: "completed", parentSessionId: "s-parent" }),
+    session("s-child-3", "#602: Roll the daily budget over", "done", { ...claude, ...recent(40), status: "completed", parentSessionId: "s-parent" }),
+    session("s-child-4", "#603: Normalize the allowance window", "review", {
+      ...claude, ...recent(12), status: "input_required", parentSessionId: "s-parent",
+      pendingApproval: { requestId: "req-child-4", kind: "question", title: "Bump the protocol to 106?", options: [], questions: [] },
+    }),
   );
 }
 
@@ -292,9 +408,9 @@ function snapshot(): UiSnapshotMessage {
       indefiniteSessionReminders: true,
       ...(lifecycle ? { stopBeforeArchive: true } : {}),
     },
-    runners: groups ? [structuredClone(runner), structuredClone(secondRunner)] : [structuredClone(runner)],
+    runners: groups || filtersScenario ? [structuredClone(runner), structuredClone(secondRunner)] : [structuredClone(runner)],
     boxes: [],
-    sessions: structuredClone(sessions),
+    sessions: structuredClone(entryHydrated ? sessions : sessions.filter((value) => value.id !== "s-approval")),
     reminders: structuredClone(reminders),
     runs: [],
     pods: [],
@@ -334,6 +450,8 @@ declare global {
     __providerLoginCalls: string[];
     __publishProviderLogins: (logins: ProviderLoginView[]) => void;
     __replayProviderLoginSnapshot: () => void;
+    __hydrateEntrySession: () => void;
+    __updateEntrySession: (change: Partial<SessionView>) => void;
   }
 }
 window.__setColumnCalls = [];
@@ -345,6 +463,16 @@ window.__publishProviderLogins = logins => {
   socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
 };
 window.__replayProviderLoginSnapshot = () => socket?.push(snapshot());
+window.__hydrateEntrySession = () => {
+  entryHydrated = true;
+  socket?.push(snapshot());
+  for (const resolve of entrySessionWaiters.splice(0)) resolve();
+};
+window.__updateEntrySession = (change) => {
+  const value = sessions.find((candidate) => candidate.id === "s-approval")!;
+  Object.assign(value, change);
+  socket?.push({ type: "session_upsert", session: structuredClone(value) });
+};
 
 const reconciledReminder: SessionReminderView = {
   ...reminders.find((candidate) => candidate.sessionId === "s-snoozed")!,
@@ -412,10 +540,25 @@ const client = {
     return { removed: true as const };
   },
   session: async (id: string) => {
+    if (id === "s-approval" && !entryHydrated) await new Promise<void>((resolve) => { entrySessionWaiters.push(resolve); });
     const value = sessions.find((candidate) => candidate.id === id);
     if (!value) throw new Error("session not found");
     return { session: structuredClone(value) };
   },
+  ...(entryRegressions ? {
+    sideChat: async (id: string) => ({ sideChat: {
+      parentSessionId: id, createdAt: 1,
+      session: session(`sidechat-${id}`, "Side Chat", "running", { status: "running" }),
+    } }),
+    descendantRequests: async () => ({ requests: [{
+      sessionId: "s-queued", sessionTitle: "Queued Session", runnerId: runner.runnerId, runnerOnline: true,
+      eventEpoch: 7, createdAt: 1, responseOwner: "human" as const, occurrenceId: "primary-1",
+      request: structuredClone(sessions.find((value) => value.id === "s-queued")!.pendingApproval!),
+    }] }),
+    childSessions: async (_id: string, eventEpoch: number) => ({
+      eventEpoch, children: [], attentionOwners: [], unidentifiedChildren: 0, nextAfter: null, truncated: false,
+    }),
+  } : {}),
   getSessionEventPage: async () => ({ events: [], hasOlder: false }) as never,
   getSessionEventTailPage: async () => ({ events: [], hasOlder: false }) as never,
   git: async () => ({}),

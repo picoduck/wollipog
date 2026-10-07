@@ -4,9 +4,10 @@ import { useLongPress } from "./interactions.js";
 import { sessionArchiveControlLabel } from "../archive-actions.js";
 import { STALL_THRESHOLD_MS, showsActivityStrip, type SessionActivity } from "../activity.js";
 import { relativeTime } from "../format.js";
-import { formatReminderReturn } from "../reminder-schedule.js";
+import { formatReminderReturn, reminderDisplayZone } from "../reminder-schedule.js";
 import { reminderBadgeDescription } from "../session-reminders.js";
 import { sessionArchiveActionRefusal } from "../session-command-permissions.js";
+import { sessionRowSnippet } from "../session-row-snippet.js";
 import { sessionRowStatus } from "../session-row-status.js";
 import { sessionDisplayTitle } from "../session-title.js";
 import { useOptionalStoreSelector } from "../store.js";
@@ -14,7 +15,7 @@ import { displayBaseRef, pullRequestStateLabel, sessionBranchState } from "../wo
 import { AgentIcon } from "./AgentIcon.js";
 import { ActivityStrip } from "./ActivityStrip.js";
 import { SessionPinIndicator, ThreadDot } from "./common.js";
-import { AlarmClockIcon, ArchiveIcon, BranchIcon, MoreHorizontalIcon, PullRequestIcon } from "./Icons.js";
+import { AlarmClockIcon, ArchiveIcon, BranchIcon, ChevronRightIcon, MoreHorizontalIcon, PullRequestIcon } from "./Icons.js";
 import { SessionRowStatusBadge } from "./SessionRowStatusBadge.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { inboxThreadChildrenLabel, type InboxThreadChildren } from "../inbox.js";
@@ -76,9 +77,47 @@ export interface InboxRowProps {
 }
 
 /** When a row last did something: its newest event, else its last update, so no row shows "—". */
-function inboxRowTimestamp(session: Pick<SessionView, "lastEventAt" | "updatedAt" | "createdAt">,
+export function inboxRowTimestamp(session: Pick<SessionView, "lastEventAt" | "updatedAt" | "createdAt">,
   activity?: Pick<SessionActivity, "lastEventAt">): number | null {
   return Math.max(session.lastEventAt ?? 0, activity?.lastEventAt ?? 0) || session.updatedAt || session.createdAt || null;
+}
+
+/** How long a stalled row has been silent, for its badge's tooltip; undefined while it is not stalled. */
+export function sessionStalledForMs(stalled: boolean, now: number, lastActivityAt: number | null): number | undefined {
+  if (!stalled) return undefined;
+  return now > 0 && lastActivityAt !== null ? Math.max(STALL_THRESHOLD_MS, now - lastActivityAt) : STALL_THRESHOLD_MS;
+}
+
+/**
+ * A row's or Board card's time (#2209): how long ago it last did something, or, while snoozed, when
+ * it returns, behind an alarm clock. `className` is the surface's own cell class.
+ */
+export function SessionRowTime({ className, lastActivityAt, reminder }: {
+  className: string;
+  lastActivityAt: number | null;
+  reminder?: SessionReminderView;
+}) {
+  const pendingReminder = reminder?.state === "pending" ? reminder : null;
+  return pendingReminder ? (
+    <span className={`${className} snoozed`} title={reminderBadgeDescription(pendingReminder)}>
+      <AlarmClockIcon size={14} />
+      {pendingReminder.scheduleKind === "someday" ? (
+        <>
+          <span className="sr-only">Snoozed: </span>
+          Someday
+        </>
+      ) : (
+        <>
+          <span className="sr-only">Snoozed Until </span>
+          {formatReminderReturn(pendingReminder.scheduledFor, reminderDisplayZone())}
+        </>
+      )}
+    </span>
+  ) : (
+    <time className={className} dateTime={lastActivityAt ? new Date(lastActivityAt).toISOString() : undefined}>
+      {relativeTime(lastActivityAt)}
+    </time>
+  );
 }
 
 function InboxRowInner({
@@ -118,9 +157,7 @@ function InboxRowInner({
     runnerOnline,
     reminder,
     familyFollowUpLabel: threeRow ? children?.followUpLabel : undefined,
-    stalledForMs: stalled
-      ? activityNow > 0 && lastActivityAt !== null ? Math.max(STALL_THRESHOLD_MS, activityNow - lastActivityAt) : STALL_THRESHOLD_MS
-      : undefined,
+    stalledForMs: sessionStalledForMs(stalled, activityNow, lastActivityAt),
   });
   const strip = showsActivityStrip(session.status, activity, activityNow);
   const agent = sessionAgentLabel(session.agentName, session.driver, session.agentId);
@@ -130,14 +167,18 @@ function InboxRowInner({
   const baseRef = worktree ? displayBaseRef(worktree) : null;
 
   const childrenLabel = children ? inboxThreadChildrenLabel(children) : null;
-  /* The family chip: one dot per child and the rollup, on the title line of a parent card. It reads
-     the same whether the thread is expanded or collapsed, which is the point of putting the rollup
-     on the parent — a collapsed thread can never hide a waiting child (#896). Its tint follows the
-     attention colour only while a child is waiting. A span, not a button: it lives inside the row
-     button, and the chevron beside the row is the control; clicking here merely forwards to it. */
+  /* The family chip: one dot per child and the rollup, directly after the parent's title (#2215). It
+     reads the same whether the thread is expanded or collapsed, which is the point of putting the
+     rollup on the parent — a collapsed thread can never hide a waiting child (#896). Its tint follows
+     the attention colour only while a child is waiting. Below a 600px list it shows only its dots,
+     so it is an image named by the whole rollup, which the row's name keeps at every width. A span,
+     not a button: it lives inside the row button, and the chevron beside the row is the control;
+     clicking here merely forwards to it. */
   const familyChip = children && childrenLabel ? (
     <span
       className={`inbox-thread-family${children.waiting > 0 ? " waiting" : ""}`}
+      role="img"
+      aria-label={childrenLabel}
       title={childrenLabel}
       onClick={(event) => {
         if (!onToggleThread) return;
@@ -148,7 +189,7 @@ function InboxRowInner({
       <span className="inbox-thread-dots" aria-hidden="true">
         {children.children.map((child) => <ThreadDot key={child.id} state={child.state} title={child.title} />)}
       </span>
-      <span className="inbox-thread-family-text">{childrenLabel}</span>
+      <span className="inbox-thread-family-text" aria-hidden="true">{childrenLabel}</span>
     </span>
   ) : null;
 
@@ -190,27 +231,7 @@ function InboxRowInner({
   ) : null;
   /* A snoozed row's time cell says when it returns, behind an alarm clock, instead of how long ago
      it last did something (#2209). */
-  const pendingReminder = reminder?.state === "pending" ? reminder : null;
-  const time = pendingReminder ? (
-    <span className="inbox-row-time snoozed" title={reminderBadgeDescription(pendingReminder)}>
-      <AlarmClockIcon size={14} />
-      {pendingReminder.scheduleKind === "someday" ? (
-        <>
-          <span className="sr-only">Snoozed: </span>
-          Someday
-        </>
-      ) : (
-        <>
-          <span className="sr-only">Snoozed Until </span>
-          {formatReminderReturn(pendingReminder.scheduledFor, pendingReminder.timeZone)}
-        </>
-      )}
-    </span>
-  ) : (
-    <time className="inbox-row-time" dateTime={meaningfulAt ? new Date(meaningfulAt).toISOString() : undefined}>
-      {relativeTime(meaningfulAt)}
-    </time>
-  );
+  const time = <SessionRowTime className="inbox-row-time" lastActivityAt={meaningfulAt} reminder={reminder} />;
   /* The row's trailing actions (#2214, §3.3, §5.2): Snooze, Archive and ⋯, after the row button
      rather than in it, since a button cannot nest a button. A fine pointer sees them on hover or
      focus-within, over the row's own fill at the end of the title line, so the status and the time
@@ -267,10 +288,14 @@ function InboxRowInner({
       </button>
     </span>
   );
+  /* What the session wants, after the title (#2218, §6.3). Only a list 880px or wider shows it, so a
+     narrow list keeps its title whole; a phone card never carries it. */
+  const snippet = threeRow ? "" : sessionRowSnippet(session);
   const titleLine = (
     <span className="inbox-row-copy">
       <span className="inbox-row-title">{title}</span>
       {familyChip}
+      {snippet && <span className="inbox-row-snippet">{snippet}</span>}
     </span>
   );
 
@@ -291,21 +316,21 @@ function InboxRowInner({
       }}
     >
       <div role="gridcell" className="inbox-row-primary-cell">
-        {/* The chevron is a SIBLING of the row button, absolutely positioned into the card's leading
-            padding: a button cannot nest a button, and the list owns the keyboard (t toggles), so
-            it is not a tab stop. */}
+        {/* The chevron (§5.5, #2215) is a SIBLING of the row button, absolutely positioned into the
+            card's leading padding: a button cannot nest a button, and the list owns the keyboard (t
+            toggles), so it is not a tab stop. */}
         {children && (
           <button
             type="button"
             tabIndex={-1}
-            className="inbox-thread-toggle"
+            className="icon-btn sm inbox-thread-toggle"
             aria-expanded={!threadCollapsed}
             aria-label={threadCollapsed ? "Expand Thread" : "Collapse Thread"}
             title={`${threadCollapsed ? "Expand" : "Collapse"} Thread (T)`}
             onMouseDown={(event) => event.preventDefault()}
             onClick={(event) => { event.stopPropagation(); onToggleThread?.(session.id); }}
           >
-            <span aria-hidden="true">▶</span>
+            <ChevronRightIcon size={14} className="disclosure-chevron" />
           </button>
         )}
         <button

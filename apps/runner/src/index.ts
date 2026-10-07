@@ -2506,7 +2506,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       void agentControlRelays.close(msg.sessionId);
       break;
     case "resolve_permission":
-      sessions.resolvePermission(msg.sessionId, msg.requestId, msg.optionId, msg.resolvedByParentSessionId);
+      sessions.resolvePermission(msg.sessionId, msg.requestId, msg.optionId, msg.resolvedByParentSessionId, msg.resolvedBy);
       break;
     case "answer_question":
       sessions.answerQuestion(msg.sessionId, msg.requestId, msg.answers, msg.action, msg.resolvedByParentSessionId,

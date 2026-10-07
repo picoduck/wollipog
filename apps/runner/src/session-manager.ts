@@ -45,6 +45,7 @@ import type {
   InvokeSessionCommandMessage,
   InterruptTurnResultReason,
   PendingApproval,
+  PermissionResolver,
   QuestionAnswerSummaryEntry,
   PromptImage,
   PromptImageInput,
@@ -339,6 +340,26 @@ export function sessionCommandDisplayText(
   // `$name` is Codex's spelling for a skill; Claude Code invokes its skills as `/name` (#1224).
   const sigil = source === "skill" && driver !== "claude-code" ? "$" : "/";
   return `${sigil}${commandName}${argumentText ? ` ${argumentText}` : ""}`;
+}
+
+const MAX_PERMISSION_RESOLVER_ID_LENGTH = 256;
+
+/** Who settled a permission (#2628), as the control plane delivered it: a user or a policy id and
+ * nothing else, so the recorded event never carries more than the identifier. */
+export function permissionResolver(value: unknown): PermissionResolver | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const id = (candidate: unknown) => typeof candidate === "string" && candidate.length > 0 &&
+    candidate.length <= MAX_PERMISSION_RESOLVER_ID_LENGTH ? candidate : undefined;
+  const resolver = value as { kind?: unknown; userId?: unknown; policyId?: unknown };
+  if (resolver.kind === "user") {
+    const userId = id(resolver.userId);
+    return userId ? { kind: "user", userId } : undefined;
+  }
+  if (resolver.kind === "policy") {
+    const policyId = id(resolver.policyId);
+    return policyId ? { kind: "policy", policyId } : undefined;
+  }
+  return undefined;
 }
 
 function sameUnsupportedSlashCommands(
@@ -1298,7 +1319,10 @@ export class SessionManager {
     worktreePath: string;
     environment: Record<string, string>;
   }>();
-  private readonly worktreeSetupApprovals = new Map<string, (decision: "trusted" | "declined" | "dismissed" | "cancelled") => void>();
+  private readonly worktreeSetupApprovals = new Map<string, (
+    decision: "trusted" | "declined" | "dismissed" | "cancelled",
+    resolvedBy?: PermissionResolver,
+  ) => void>();
   private readonly worktreeSetupRuns = new Map<string, { controller: AbortController; done: Promise<void> }>();
   private readonly providerStateCleanupJournal: ProviderStateCleanupJournal;
   private readonly providerStateMigrations = new Map<string, Promise<void>>();
@@ -2342,7 +2366,15 @@ export class SessionManager {
       };
       this.persistWorktreeSetupState(meta.sessionId, worktree, awaiting);
       const previousStatus = this.store.readMeta(approvalSessionId)?.status ?? meta.status;
-      const approved = new Promise<"trusted" | "declined" | "dismissed" | "cancelled">((resolveApproval) => {
+      let resolvedBy: PermissionResolver | undefined;
+      const approved = new Promise<"trusted" | "declined" | "dismissed" | "cancelled">((resolve) => {
+        const resolveApproval = (
+          decision: "trusted" | "declined" | "dismissed" | "cancelled",
+          decidedBy?: PermissionResolver,
+        ) => {
+          resolvedBy = decidedBy;
+          resolve(decision);
+        };
         this.worktreeSetupApprovals.set(`${approvalSessionId}:${requestId}`, resolveApproval);
         signal.addEventListener("abort", () => {
           const pending = this.worktreeSetupApprovals.get(`${approvalSessionId}:${requestId}`);
@@ -2386,6 +2418,7 @@ export class SessionManager {
         requestId,
         optionId: decision === "trusted" ? "trust" : decision === "declined" ? "skip" : null,
         resolutionReason: decision === "dismissed" ? "dismissed" : "submitted",
+        ...(resolvedBy ? { resolvedBy } : {}),
       });
       this.emitStatus(approvalSessionId, previousStatus);
       if (decision === "dismissed") {
@@ -15121,11 +15154,15 @@ export class SessionManager {
     requestId: string,
     optionId: string | null,
     resolvedByParentSessionId?: string,
+    resolvedBy?: unknown,
   ): void {
+    // Who decided (#2628), recorded on this exact resolution. A Parent Control decision names its
+    // parent session instead, and a malformed value is dropped rather than recorded.
+    const decidedBy = resolvedByParentSessionId ? undefined : permissionResolver(resolvedBy);
     const setupApproval = this.worktreeSetupApprovals.get(`${sessionId}:${requestId}`);
     if (setupApproval) {
       this.worktreeSetupApprovals.delete(`${sessionId}:${requestId}`);
-      setupApproval(optionId === "trust" ? "trusted" : optionId === "skip" ? "declined" : "dismissed");
+      setupApproval(optionId === "trust" ? "trusted" : optionId === "skip" ? "declined" : "dismissed", decidedBy);
       return;
     }
     if (requestId.startsWith("provider-auth:")) {
@@ -15173,6 +15210,7 @@ export class SessionManager {
         optionId,
         resolutionReason: optionId == null || optionKind === "cancel" ? "dismissed" : "submitted",
         ...(resolvedByParentSessionId ? { resolvedByParentSessionId } : {}),
+        ...(decidedBy ? { resolvedBy: decidedBy } : {}),
       });
       return;
     }

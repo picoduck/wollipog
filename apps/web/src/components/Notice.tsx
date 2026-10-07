@@ -15,7 +15,8 @@ export interface NoticeProps {
   tone?: NoticeTone;
   /** Replaces the tone icon where a subject icon says more, as the wrench does for a setup
    * suggestion. Only for a neutral or info notice: a warning or danger keeps its tone icon, except
-   * HTTPS or Localhost Required, whose lock is the subject the design names (#2197). */
+   * HTTPS or Localhost Required, whose lock is the subject the design names (#2197), and the sign-in
+   * card's can't-switch notice, whose `Ban` is (#2208). */
   icon?: ReactNode;
   /** Optional Title Case title, above a sentence-case body. */
   title?: ReactNode;

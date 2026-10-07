@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { openProjectActions } from "./session-groups.js";
 
 for (const width of [390, 1280]) for (const theme of ["light", "dark"]) {
   test(`project memory consent, persistence and unavailable runners ${width} ${theme}`, async ({ page }) => {
@@ -10,8 +11,7 @@ for (const width of [390, 1280]) for (const theme of ["light", "dark"]) {
       window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateProject("alpha", { memorySharing: "separate" });
       window.__WOLLIPOG_PROJECT_INBOX_E2E__.setProjectMemoryClaudeVersion("2.1.284");
     }, theme);
-    await page.getByRole("tab", { name: /Alpha/ }).click();
-    await page.getByRole("button", { name: "Alpha Actions" }).click();
+    await openProjectActions(page, /Alpha/, "Alpha");
     await page.getByRole("menuitem", { name: /Manage Project/ }).click();
     const section = page.getByRole("region", { name: "Memory Sharing" });
     const separate = section.getByRole("radio", { name: "Keep Account Memories Separate" });
@@ -31,8 +31,7 @@ for (const width of [390, 1280]) for (const theme of ["light", "dark"]) {
     await expect(section.getByRole("alert")).toHaveCount(0);
     await expect(section).toContainText("Saved Choice: Share Project Memory");
     await page.reload();
-    await page.getByRole("tab", { name: /Alpha/ }).click();
-    await page.getByRole("button", { name: "Alpha Actions" }).click();
+    await openProjectActions(page, /Alpha/, "Alpha");
     await page.getByRole("menuitem", { name: /Manage Project/ }).click();
     await expect(shared).toBeChecked();
     await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(194));

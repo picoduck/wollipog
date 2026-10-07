@@ -19,12 +19,15 @@ import {
   ChevronLeft as LucideChevronLeft,
   ChevronRight as LucideChevronRight,
   ChevronUp as LucideChevronUp,
+  ChevronsDown as LucideChevronsDown,
+  ChevronsUp as LucideChevronsUp,
   Circle as LucideCircle,
   CircleUserRound as LucideCircleUserRound,
   CircleX as LucideCircleX,
   CircleDot as LucideCircleDot,
   CircleGauge as LucideCircleGauge,
   CirclePause as LucideCirclePause,
+  CloudOff as LucideCloudOff,
   Code as LucideCode,
   Columns3 as LucideColumns3,
   Copy as LucideCopy,
@@ -79,6 +82,7 @@ import {
   Locate as LucideLocate,
   Lock as LucideLock,
   LockKeyhole as LucideLockKeyhole,
+  MapPinOff as LucideMapPinOff,
   Mail as LucideMail,
   MessageCircleQuestion as LucideMessageCircleQuestion,
   MessageSquareCheck as LucideMessageSquareCheck,
@@ -88,6 +92,7 @@ import {
   MonitorCog as LucideMonitorCog,
   NotebookText as LucideNotebookText,
   Package as LucidePackage,
+  PanelBottom as LucidePanelBottom,
   PanelLeftClose as LucidePanelLeftClose,
   PanelLeftOpen as LucidePanelLeftOpen,
   PanelRight as LucidePanelRight,
@@ -120,6 +125,7 @@ import {
   TriangleAlert as LucideTriangleAlert,
   Upload as LucideUpload,
   UserPlus as LucideUserPlus,
+  UserX as LucideUserX,
   Users as LucideUsers,
   UsersRound as LucideUsersRound,
   WandSparkles as LucideWandSparkles,
@@ -294,6 +300,16 @@ export function ChevronUpIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideChevronUp} {...props} />;
 }
 
+/** Show Context: Answer Mode shrinks to its head so the transcript shows (#2212). */
+export function ChevronsDownIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideChevronsDown} {...props} />;
+}
+
+/** Show Answer: Answer Mode's panel opens again (#2212). */
+export function ChevronsUpIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideChevronsUp} {...props} />;
+}
+
 export function PlusIcon(props: IconProps) {
   return <LibraryIcon glyph={LucidePlus} {...props} />;
 }
@@ -356,6 +372,16 @@ export function SearchIcon(props: IconProps) {
 
 export function SearchOffIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideSearchX} {...props} />;
+}
+
+/** A Project with no Location to start sessions in: the Sessions No Location Yet state (#2220). */
+export function MapPinOffIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideMapPinOff} {...props} />;
+}
+
+/** A Project whose only Locations are on offline machines: the Sessions Location Offline state (#2220). */
+export function CloudOffIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideCloudOff} {...props} />;
 }
 
 export function CloseIcon(props: IconProps) {
@@ -484,6 +510,11 @@ export function PanelRightIcon(props: IconProps) {
   return <LibraryIcon glyph={LucidePanelRight} {...props} />;
 }
 
+/** Preview Below: the Sessions preview under the list (#2219). */
+export function PanelBottomIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucidePanelBottom} {...props} />;
+}
+
 /** The rail's foot: Expand Navigation shows the labelled rail (#1968). */
 export function PanelLeftOpenIcon(props: IconProps) {
   return <LibraryIcon glyph={LucidePanelLeftOpen} {...props} />;
@@ -522,6 +553,11 @@ export function FolderOpenIcon(props: IconProps) {
 /** Why a choice can't be made: a disabled command's reason (#2155). */
 export function BanIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideBan} {...props} />;
+}
+
+/** An account removed from its machine while it was listed (#2208). */
+export function UserXIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideUserX} {...props} />;
 }
 
 export function FolderUpIcon(props: IconProps) {

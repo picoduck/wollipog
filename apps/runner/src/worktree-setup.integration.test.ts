@@ -77,7 +77,8 @@ test("requested worktree setup retains required failures, resumes, and re-prompt
       ]);
       assert.deepEqual(review.environmentKeys, ["PROJECT_ROOT"]);
       assert.equal(String(message.payload.context.input).includes("never-exported"), false);
-      setImmediate(() => manager.resolvePermission("s_setup", message.payload.requestId, "trust"));
+      setImmediate(() => manager.resolvePermission("s_setup", message.payload.requestId, "trust", undefined,
+        { kind: "user", userId: "usr_ada" }));
     }
   }, () => {}, store, "runner", undefined, undefined, dataDir);
   t.after(() => manager.shutdownAll());
@@ -100,6 +101,12 @@ test("requested worktree setup retains required failures, resumes, and re-prompt
   assert.equal(retried.worktree.setup?.status, "completed");
   assert.equal(readFileSync(join(retried.worktree.path, ".setup-done"), "utf8"), retried.worktree.path);
   assert.equal((await exec("git", ["-C", retried.worktree.path, "status", "--porcelain", "--", ".env.local"])).stdout, "");
+
+  const trustResolution = sent.find((message) => message.type === "session_event" &&
+    message.payload.kind === "permission_resolved" && message.payload.optionId === "trust");
+  assert.deepEqual(trustResolution?.type === "session_event" && trustResolution.payload.kind === "permission_resolved"
+    ? trustResolution.payload.resolvedBy : null, { kind: "user", userId: "usr_ada" },
+  "the setup trust decision names the member who trusted it (#2628)");
 
   await manager.requestWorktree("s_setup", { baseRef: "HEAD", branch: "fix/setup-trusted" });
   assert.equal(trustRequests, 1, "the same Project and config hash reuses durable trust");

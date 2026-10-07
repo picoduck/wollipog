@@ -91,7 +91,7 @@ test("the list ref is published when the NODE changes, not on every commit", () 
 test("leaving search waits for the deferred query before moving focus", () => {
   const view = src("./components/InboxView.tsx");
   // Clearing the query re-renders urgently with the OLD deferred value, so the zero state is still
-  // mounted a frame later. A requestAnimationFrame handoff focused `.inbox-zero`, and the deferred
+  // mounted a frame later. A requestAnimationFrame handoff focused the zero state, and the deferred
   // commit then replaced that node — dropping focus to <body>. Deferral is what made this possible.
   assert.doesNotMatch(view, /exitSearch[\s\S]{0,200}requestAnimationFrame/,
     "a frame is not long enough; the handoff must wait for the deferred value");

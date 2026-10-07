@@ -109,6 +109,8 @@ test("every referenced custom property is defined in the shared root scope", () 
     "--zone-line-top",
     "--zone-line-left",
     "--zone-line-width",
+    // InboxView's stacked list row count (#2217); absent means the three-row minimum.
+    "--sessions-list-rows",
   ]);
 
   // Component-local by design (docs/design-system.md §19.4 rejects promoting them): each is
@@ -117,6 +119,12 @@ test("every referenced custom property is defined in the shared root scope", () 
     ["--summary-w", ".detail-body"], // the Pinned Summary's width, read by the body grid and `.ps`
     ["--composer-ctl", ".composer-box"], // the composer bar's control height (#2174), read by `.composer-btn`
     ["--tl-diff-digits", ".tl-diff"], // a transcript diff's widest line number, set per diff (#2187)
+    // The stacked Sessions list track (§6.3, #2217), whole rows of the stored ratio; a drag sets it.
+    ["--sessions-list-h", ".master-detail.sessions-md"],
+    // Preview Right's list column (§6.3, #2219): InboxView sets the stored width; a drag sets it.
+    ["--sessions-list-w", '.sessions-md[data-layout="right"]'],
+    // Where the Sessions preview's bar, meta line, request dock and transcript start (#2219).
+    ["--preview-inset", ".session-detail.preview"],
   ]);
   for (const [name, owner] of COMPONENT_LOCAL) {
     assert.ok(soleRuleProps(owner).has(name), `${name} is declared on ${owner}`);
@@ -180,7 +188,7 @@ test("the global focus ring is neutral, zero-specificity and absent on programma
   // A digit or a handoff also focuses these tabIndex -1 Sessions containers, where no zone line
   // appears, so the ring is their only cue and is restored after the suppression (equal
   // specificity, later wins). Zone roots stay ringless: the F6 zone line is their cue.
-  const zoneRing = ":where(.board-wrap, .inbox-zero):focus-visible";
+  const zoneRing = ":where(.board-wrap, .inbox-state, .inbox-skeleton):focus-visible";
   assert.equal(baseRule(zoneRing),
     "outline: var(--focus-width) solid var(--focus);\noutline-offset: calc(-1 * var(--focus-width));");
   assert.ok(css.indexOf(zoneRing) > css.indexOf(':where([tabindex="-1"]:not('),
@@ -351,12 +359,17 @@ test("one field error rule, and invalid controls in a field draw a red edge unde
   assert.doesNotMatch(soleRuleBody(".field-error-icon"), /(^|\n)color:/,
     "the icon inherits the words' colour, so forced colors repaints it with them");
 
-  const invalid = '.field [aria-invalid="true"],\n.field [aria-invalid="true"]:hover,\n.composer-answer-input[aria-invalid="true"]';
+  const invalid = '.field [aria-invalid="true"],\n.field [aria-invalid="true"]:hover';
+  // Answer Mode's field is the composer's own: the composer card is its edge, so the card turns red
+  // and the field draws no edge or ring of its own (#2212).
+  const answerInvalid = '.composer-box.answer-mode:has(.composer-answer-input[aria-invalid="true"])';
   assert.equal(soleRuleBody(invalid), "border-color: var(--red);", "the edge only: the focus ring stays --focus");
-  assert.deepEqual(owners(/\[aria-invalid/), [invalid.replace(/\s+/g, " ")],
-    "every invalid edge is this one rule; a control does not draw its own");
-  assert.ok(css.indexOf(invalid) > css.indexOf(".composer-answer-input:focus {"),
-    "the composer answer keeps its red edge while focused: equal specificity, so the later rule wins");
+  assert.equal(soleRuleBody(answerInvalid), "border-color: var(--red);", "the composer card's edge only");
+  assert.deepEqual(owners(/\[aria-invalid/), [answerInvalid, invalid.replace(/\s+/g, " ")],
+    "every invalid edge is one of these rules; a control does not draw its own");
+  assert.match(soleRuleBody(".composer-answer-input"), /border: none;/);
+  assert.match(soleRuleBody(".composer-answer-input"), /outline: none;/,
+    "one indicator: the composer card's edge, never a second ring on the field inside it");
 });
 
 test("focus never frames a pane, and the F6 zone line is a brief neutral top edge", () => {

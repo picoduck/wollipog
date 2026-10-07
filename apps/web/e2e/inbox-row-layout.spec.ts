@@ -431,7 +431,8 @@ test.describe("with a row in every status", () => {
   }
 
   // Cross-model review of #2209: the stalled rail was painted over the selected row's accent bar.
-  test("a selected stalled row shows the selection bar, not the stalled rail", async ({ page }) => {
+  // #2215 retired the rail; the badge alone says Stalled, so the leading edge is only ever selection.
+  test("a selected stalled row shows the selection bar and no stalled rail", async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(`${ROWS}?selected=session-stalled`);
     const shell = page.locator(".inbox-row-shell", { hasText: "Stalled:" });

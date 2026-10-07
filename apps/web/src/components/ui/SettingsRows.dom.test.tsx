@@ -20,6 +20,7 @@ import {
   type ThemePreference,
 } from "../../theme.js";
 import { assertNoDomNode } from "../../dom-test-assertions.js";
+import { getSessionsPreviewLayout, resetSessionsPreviewLayoutForTest, setSessionsPreviewLayout } from "../../sessions-preview-layout.js";
 
 /** WCAG 2.1 relative luminance and contrast ratio, on hex colours. */
 function luminance(hex: string): number {
@@ -193,11 +194,11 @@ test("a settings panel is one row per setting, not one row per option", async ()
   );
   try {
     const rows = [...container.querySelectorAll(".ui-row")];
-    assert.equal(rows.length, 3, "Appearance is three settings, so it is three rows");
+    assert.equal(rows.length, 4, "Display is four settings, so it is four rows");
     assert.deepEqual(rows.map((row) => row.querySelector(".ui-row-title")?.textContent),
-      ["Theme", "Color Scheme", "Density"]);
+      ["Theme", "Color Scheme", "Density", "Sessions Layout"]);
     assert.ok(rows.every((row) => row.querySelector(":scope > .ui-row-choice-control")),
-      "all three controls occupy the same trailing alignment slot");
+      "all four controls occupy the same trailing alignment slot");
     assert.equal(container.querySelectorAll(".settings-group").length, 1,
       "and one group, since a heading per single-row setting restates the row beneath it");
 
@@ -211,6 +212,42 @@ test("a settings panel is one row per setting, not one row per option", async ()
     assert.ok(dots.every((dot) => /background/.test(dot.getAttribute("style") ?? "")),
       "each dot must actually paint a colour");
   } finally {
+    await cleanup();
+  }
+});
+
+test("Sessions Layout writes the Sessions preview layout and follows it live (#2219)", async () => {
+  resetSessionsPreviewLayoutForTest();
+  const { container, cleanup } = await render(
+    <AppearancePanel
+      options={THEME_OPTIONS}
+      value="system"
+      onChange={() => undefined}
+      schemes={COLOR_SCHEMES}
+      scheme="wollipog"
+      onSchemeChange={() => undefined}
+      onSchemePreview={() => undefined}
+      resolvedTheme="dark"
+      densities={DENSITY_OPTIONS}
+      density="compact"
+      onDensityChange={() => undefined}
+    />,
+  );
+  try {
+    const group = container.querySelector('[role="radiogroup"][aria-label="Sessions Layout"]')!;
+    const row = group.closest(".ui-row")!;
+    assert.equal(row.querySelector(".ui-row-desc")?.textContent, "Preview Right applies in windows 1100px and wider.");
+    const radios = () => [...group.querySelectorAll<HTMLButtonElement>('[role="radio"]')];
+    assert.deepEqual(radios().map((radio) => [radio.textContent, radio.getAttribute("aria-checked")]),
+      [["Preview Below", "true"], ["Preview Right", "false"]], "Preview Below is the default");
+
+    await act(async () => { radios()[1]!.click(); });
+    assert.equal(getSessionsPreviewLayout(), "right", "the row writes the one key the Sessions header reads");
+    // The Sessions header writes it too, and the row follows without a reload.
+    await act(async () => { setSessionsPreviewLayout("below"); });
+    assert.deepEqual(radios().map((radio) => radio.getAttribute("aria-checked")), ["true", "false"]);
+  } finally {
+    setSessionsPreviewLayout("below");
     await cleanup();
   }
 });

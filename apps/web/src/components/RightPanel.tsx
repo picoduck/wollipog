@@ -63,8 +63,8 @@ export function panelReturnFocusTarget(
 
 /**
  * The right side panel's app-level state. Lives in App.tsx (NOT inside the per-session-keyed
- * SessionDetail) so the open/mode/width prefs survive navigating between sessions; persisted
- * like every other wollipog.* pref (best-effort localStorage).
+ * SessionDetail) so mode/width preferences and panel drafts survive navigation. Agents visibility
+ * is limited to the current visit, even when old browser storage says it was open.
  */
 export interface RightPanelState {
   open: boolean;
@@ -87,10 +87,11 @@ export interface RightPanelState {
   consumeSubagentFocusRequest: (sessionId: string, eventEpoch: number, request: number) => void;
 }
 
-export function useRightPanelState(): RightPanelState {
+export function useRightPanelState(navigationScope: string | null = null, attentionNavigation = false): RightPanelState {
   const [open, setOpen] = useState(() => {
     try {
-      return loadBrowserStorageValue("wollipog.rightpanel.open") === "1";
+      return parseStoredRightPanelMode(loadBrowserStorageValue("wollipog.rightpanel.mode")) !== "subagents" &&
+        loadBrowserStorageValue("wollipog.rightpanel.open") === "1";
     } catch {
       return false;
     }
@@ -112,6 +113,15 @@ export function useRightPanelState(): RightPanelState {
   const [dragging, setDragging] = useState(false);
   const [subagentTarget, setSubagentTarget] = useState<RightPanelState["subagentTarget"]>(null);
   const nextSubagentFocusRequest = useRef(0);
+  const [previousNavigation, setPreviousNavigation] = useState({ scope: navigationScope, attention: attentionNavigation });
+  // Adjust before children render, so navigation cannot commit an Agents panel for the new visit.
+  // Other panel preferences and all session-scoped scratch stay intact.
+  if (previousNavigation.scope !== navigationScope || previousNavigation.attention !== attentionNavigation) {
+    setPreviousNavigation({ scope: navigationScope, attention: attentionNavigation });
+    // Targeting another request in the same visit keeps deliberate panel state and focus intact.
+    // Returning from attention to the ordinary route starts a transcript-first visit.
+    if (mode === "subagents" && (previousNavigation.scope !== navigationScope || !attentionNavigation)) setOpen(false);
+  }
 
   // Persist once a value settles — not on every pointermove during a drag.
   useEffect(() => {
@@ -302,6 +312,9 @@ export function RightPanel({
       // An overlay that replaced the panel (the phone's Pinned Summary sheet, #2147) owns focus by
       // now; pulling it back to the opener behind that dialog's scrim would escape its focus trap.
       if (document.activeElement?.closest('[aria-modal="true"]')) return;
+      // Attention navigation can dismiss a phone panel and focus the exact docked request in the
+      // same frame. That completed focus transfer takes precedence over returning to the opener.
+      if (document.activeElement?.closest("[data-session-request-focus]")) return;
       if (target?.isConnected) target.focus();
     });
   }, [session.id, state.open]);

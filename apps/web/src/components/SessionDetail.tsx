@@ -198,7 +198,7 @@ import { RequestDock, dockRequests } from "./requests/RequestDock.js";
 import { useQuestionWhereAsked, type PendingQuestionRef } from "./requests/where-asked.js";
 import { RequestKindIcon, pendingRequestsTitle } from "./requests/request-meta.js";
 import { useSoftwareKeyboardOpen } from "./requests/software-keyboard.js";
-import { decideDockedRequest } from "./requests/request-reveal.js";
+import { decideDockedRequest, registerRequestRevealer } from "./requests/request-reveal.js";
 import { useRemovedFocus } from "./useRemovedFocus.js";
 import { CampaignHeldChildren, type CampaignHeldChild } from "./CampaignHeldChildren.js";
 import { ComposerQuestionResponse } from "./ComposerQuestionResponse.js";
@@ -235,7 +235,7 @@ import {
 import { useSessionReadingKeys, type SessionReadingKeyActions } from "../useSessionReadingKeys.js";
 import { VIRTUAL_VIEWPORT_INTENT_EVENT, virtualViewportIntentDirection } from "../viewport-intent.js";
 import { inTypingContext, isMacPlatform, matchesShortcut, shortcutDisplay, shortcutLayerActive } from "../shortcuts.js";
-import { useIsMobile, useIsTouchPhone } from "./useIsMobile.js";
+import { useIsCompact, useIsMobile, useIsTouchPhone } from "./useIsMobile.js";
 import {
   usePreviewNavigationRegistration,
   type PreviewNavigationControls,
@@ -973,6 +973,9 @@ function SessionDetailLoaded({
   const isMobile = useIsMobile();
   const isMobileRef = useRef(isMobile);
   isMobileRef.current = isMobile;
+  const isCompact = useIsCompact();
+  const isCompactRef = useRef(isCompact);
+  isCompactRef.current = isCompact;
   const projectsSupported = useStoreSelector((state) => state.projectsSupported);
   const projects = useStoreSelector((state) => state.projects);
   const instanceScope = useInstanceScope();
@@ -1370,41 +1373,54 @@ function SessionDetailLoaded({
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const answerInputRef = useRef<HTMLInputElement>(null);
+  // While a question is answered in the composer it is shown there alone, not on the dock (#2212):
+  // bringing it up opens the answer panel and focuses its field. Registered with the shared request
+  // revealer, so every control that brings a request up (Jump to Question, an attention link, the
+  // Agents and campaign panels) reaches it as it reaches the dock.
+  const answerRevealRef = useRef<((requestId: string) => boolean) | null>(null);
+  useEffect(() => registerRequestRevealer(session.id, (requestId) => answerRevealRef.current?.(requestId) === true),
+    [session.id]);
   const retitleReceiptRef = useRef<HTMLDivElement>(null);
   const rightPanelRef = useRef(rightPanel);
   rightPanelRef.current = rightPanel;
-  // An attention link naming one of the dock's requests (the Sessions list's top request, an Inbox
-  // card) expands that request and moves focus to it; App leaves the Agents panel closed for it.
+  // Resolve attention only against this generation's known requests. Cold links stay on the
+  // transcript while hydration catches up; they never guess an Agents overview first.
   const handledAttentionRef = useRef<string | null>(null);
-  const dockedRequestIds = dockedRequests.map((request) => request.requestId).join("\n");
-  useEffect(() => {
-    const requestId = attentionTarget?.requestId;
-    if (!requestId || attentionTarget.eventEpoch !== (session.eventEpoch ?? 0) ||
-        !dockedRequestIds.split("\n").includes(requestId)) return;
-    const key = JSON.stringify([session.id, attentionTarget.eventEpoch, requestId, attentionTarget.activationId ?? 0]);
+  const preparedAttentionRef = useRef<string | null>(null);
+  const closeRequestOverlay = useCallback(() => {
+    const panel = rightPanelRef.current;
+    // Requests also overlays the transcript in the compact desktop tier (#2206).
+    if (panel.open && (isMobileRef.current || panel.mode === "subagents" ||
+        (isCompactRef.current && panel.mode === "requests"))) panel.close();
+  }, []);
+  const attentionRequest = attentionTarget && attentionTarget.eventEpoch === (session.eventEpoch ?? 0)
+    ? attentionTarget.requestId === undefined ? prioritizedRequests[0]
+      : prioritizedRequests.find((request) => request.requestId === attentionTarget.requestId)
+    : undefined;
+  const resolvedAttentionTarget = attentionTarget && attentionRequest
+    ? { ...attentionTarget, requestId: attentionRequest.requestId } : attentionTarget;
+  useLayoutEffect(() => {
+    if (mode !== "expanded" || !attentionTarget || !attentionRequest) return;
+    const requestId = attentionRequest.requestId;
+    const key = JSON.stringify([session.id, attentionTarget.eventEpoch, attentionTarget.requestId, attentionTarget.activationId ?? 0]);
     if (handledAttentionRef.current === key) return;
+    if (attentionRequest.ownerToolUseId) {
+      handledAttentionRef.current = key;
+      rightPanelRef.current.show("subagents");
+      return;
+    }
+    // Close an obstructing panel before paint, then let the mounted dock reveal the exact card.
+    if (preparedAttentionRef.current !== key) {
+      preparedAttentionRef.current = key;
+      closeRequestOverlay();
+    }
     // After the dock has mounted; a re-render before the frame reschedules it.
     const frame = window.requestAnimationFrame(() => {
       if (!focusSessionRequest(session.id, requestId)) return;
       handledAttentionRef.current = key;
-      // A cold deep link opens the Agents panel before the session has loaded; it is not needed for
-      // a docked request, and on a phone it would cover the card.
-      if (rightPanelRef.current.open && rightPanelRef.current.mode === "subagents") rightPanelRef.current.close();
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [attentionTarget, dockedRequestIds, session.eventEpoch, session.id]);
-  const attentionEntryScope = useRef<string | null>(null);
-  useEffect(() => {
-    if (mode !== "expanded") return;
-    const scope = `${session.id}:${session.eventEpoch ?? 0}`;
-    if (attentionEntryScope.current === scope) return;
-    attentionEntryScope.current = scope;
-    // The Agents panel answers a worker's request and lists an async question beside the others;
-    // the session's own requests are on the dock.
-    if (pendingRequests(session.pendingApproval).some((request) => request.ownerToolUseId || request.async)) {
-      rightPanelRef.current.show("subagents");
-    }
-  }, [mode, session.id, session.eventEpoch, session.pendingApproval]);
+  }, [mode, attentionTarget, attentionRequest, session.id, closeRequestOverlay]);
   const backgroundInventoryRequestRef = useRef<string | null>(null);
   const [backgroundInventoryError, setBackgroundInventoryError] = useState<string | null>(null);
   const [backgroundInventoryAttempt, setBackgroundInventoryAttempt] = useState(0);
@@ -3379,6 +3395,9 @@ function SessionDetailLoaded({
   const answerModeFocusRequestRef = useRef<"answer" | "message" | null>(null);
   const answerFocusRequestIdRef = useRef<string | null>(pendingQuestion?.requestId ?? null);
   const composerAnswerActive = canAnswerPendingQuestion && answerModeRequestId === pendingQuestion.requestId;
+  // The composer, and with it Answer Mode, shows only in the expanded session; a preview keeps the
+  // question on the dock even while Answer Mode is open for it (#2212).
+  const answeringInComposer = composerAnswerActive && mode === "expanded";
   const activeAnswerModeRequestRef = useRef<string | null>(composerAnswerActive ? answerModeRequestId : null);
   activeAnswerModeRequestRef.current = composerAnswerActive ? answerModeRequestId : null;
   const answerModeRegion = answerInputRef.current?.closest<HTMLElement>(".composer-answer") ?? null;
@@ -3410,7 +3429,8 @@ function SessionDetailLoaded({
     setActivePane("composer");
     if (composerAnswerActive) {
       answerModeFocusRequestRef.current = null;
-      answerInputRef.current?.focus();
+      // A panel shrunk by Show Context opens again to take the answer.
+      if (!answerRevealRef.current?.(pendingQuestion.requestId)) answerInputRef.current?.focus();
       return;
     }
     answerModeFocusRequestRef.current = "answer";
@@ -3797,17 +3817,26 @@ function SessionDetailLoaded({
   const archiveRefusal = sessionArchiveActionRefusal(session);
   // F runs More Actions' Fork Conversation…, which the header registers here only while enabled.
   const forkShortcutRef = useRef<(() => void) | null>(null);
+  // The top question being answered in the composer is off the dock (#2212). A brings its answer up;
+  // D does nothing, so it can never fall through to another request the dock or the Sessions list
+  // holds. The question is dismissed from its card once Answer Mode is closed.
+  const topQuestionInComposer = answeringInComposer && prioritizedRequests[0]?.requestId === pendingQuestion.requestId;
   const readingActions = useMemo<SessionReadingKeyActions>(() => ({
     nextSession: () => onNextSession?.(),
     previousSession: () => onPreviousSession?.(),
     // A and D act on the dock's expanded request when the session's top request is docked (#2179,
     // #2205); otherwise (a worker's request), or for A on a top question, they act on the top request.
     approve: () => {
+      if (topQuestionInComposer) {
+        enterAnswerMode();
+        return;
+      }
       if (topRequestDocked && decideDockedRequest(session.id, "approve")) return;
       if (responseRefusal === null) onApprove?.();
       else setError(responseRefusal);
     },
     deny: () => {
+      if (topQuestionInComposer) return;
       if (topRequestDocked && decideDockedRequest(session.id, "deny")) return;
       if (responseRefusal === null) onDeny?.();
       else setError(responseRefusal);
@@ -3822,7 +3851,7 @@ function SessionDetailLoaded({
     pauseFollow: followTail.pause,
     resumeFollow: followTail.follow,
   }), [archiveRefusal, canAnswerPendingQuestion, enterAnswerMode, focusComposerAtDraftEnd, followTail.follow, followTail.pause, onApprove, onArchive, onDeny, onNextSession, onPreviousSession, onSnooze, responseRefusal,
-    session.id, topRequestDocked]);
+    session.id, topQuestionInComposer, topRequestDocked]);
   const sessionReadingKeys = mode === "expanded" && !isMobile;
   useSessionReadingKeys({
     enabled: sessionReadingKeys,
@@ -4594,10 +4623,12 @@ function SessionDetailLoaded({
   // into view: on the request dock (or the notice slot holding its place), else in the Agents panel,
   // which lists every pending request (a worker's beside an async question).
   const reviewPendingRequest = useCallback((requestId: string) => {
-    if (focusSessionRequest(session.id, requestId)) return;
-    rightPanel.show("subagents");
+    if (dockedRequests.some((request) => request.requestId === requestId)) {
+      if (mode === "expanded") closeRequestOverlay();
+      if (focusSessionRequest(session.id, requestId)) return;
+    }
     navigate({ name: "session", id: session.id, attention: { eventEpoch: session.eventEpoch ?? 0, requestId } });
-  }, [navigate, rightPanel, session.eventEpoch, session.id]);
+  }, [navigate, session.eventEpoch, session.id, dockedRequests, mode, closeRequestOverlay]);
 
   // The pending questions, whose transcript rows are markers (#2205): the dock's, and a worker's,
   // whose Jump to Question opens the Agents panel. Keyed by their ids, so heartbeats that replace the
@@ -6133,25 +6164,34 @@ function SessionDetailLoaded({
   // A preview docks its requests above the reading column rather than in it (#2210).
   const dockHadRequestsRef = useRef(false);
   const dockFocusRemoved = useRemovedFocus(mode === "expanded" ? chatReadingRef : detailChatRef, '[data-request-card-menu="dock"]');
+  // A question answered in the composer is shown there alone (#2212).
+  const dockShownRequests = useMemo(() => answeringInComposer
+    ? dockedRequests.filter((request) => request.requestId !== pendingQuestion.requestId)
+    : dockedRequests, [answeringInComposer, dockedRequests, pendingQuestion?.requestId]);
+  // Composer Response answers the session's question in the composer, so its card is compact. A
+  // preview has no composer: its question is the preview's own card, answered in the session (#2210).
+  const dockComposerAnswer = useMemo(() => mode === "expanded" && questionResponseStyle === "composer" &&
+    pendingQuestion && composerQuestions.length > 0 ? { requestId: pendingQuestion.requestId, onAnswer: enterAnswerMode } : undefined,
+  [composerQuestions.length, enterAnswerMode, mode, pendingQuestion, questionResponseStyle]);
   useLayoutEffect(() => {
     const had = dockHadRequestsRef.current;
-    dockHadRequestsRef.current = dockedRequests.length > 0;
-    if (!dockFocusRemoved() || !had || dockedRequests.length > 0) return;
+    dockHadRequestsRef.current = dockShownRequests.length > 0;
+    if (!dockFocusRemoved() || !had || dockShownRequests.length > 0) return;
     if (mode === "expanded" && focusComposerAfterRequestResolution()) return;
     const composer = inputRef.current;
     (composer && !composer.disabled && mode === "expanded" ? composer : scrollRef.current)?.focus();
   });
 
   // The request dock (#2179), as the notice slot's lead while the session has a request of its own.
-  const requestDockLead: SessionNoticeLead | undefined = dockedRequests.length > 0 ? {
+  const requestDockLead: SessionNoticeLead | undefined = dockShownRequests.length > 0 ? {
     key: "request-dock",
-    title: pendingRequestsTitle(dockedRequests.length),
-    icon: <RequestKindIcon request={dockedRequests[0]!} />,
-    requestIds: dockedRequests.map((request) => request.requestId),
+    title: pendingRequestsTitle(dockShownRequests.length),
+    icon: <RequestKindIcon request={dockShownRequests[0]!} />,
+    requestIds: dockShownRequests.map((request) => request.requestId),
     render: ({ trailing, revealRequestId, concealTrailing }) => (
       <RequestDock
         session={session}
-        requests={dockedRequests}
+        requests={dockShownRequests}
         runnerOnline={runnerOnline}
         owner={sessionAgentLabel(session.agentName, session.driver, session.agentId)}
         createdAt={requestCreatedAt}
@@ -6169,6 +6209,7 @@ function SessionDetailLoaded({
         questionsFor={dockQuestions}
         whereAsked={mode === "expanded" ? dockWhereAsked : undefined}
         onAnswerInSession={mode === "preview" ? onOpenRequest : undefined}
+        composerAnswer={dockComposerAnswer}
       />
     ),
   } : undefined;
@@ -6348,10 +6389,12 @@ function SessionDetailLoaded({
           onOpenAttention={() => {
             // The top request is answered on the dock when it is the session's own.
             const top = prioritizedRequests[0];
-            if (top && dockedRequests.includes(top) && focusSessionRequest(session.id, top.requestId)) return;
+            if (top && dockedRequests.includes(top)) {
+              reviewPendingRequest(top.requestId);
+              return;
+            }
             const requests = pendingRequests(session.pendingApproval);
             if (requests.length > 1) {
-              rightPanel.show("subagents");
               navigate({ name: "session", id: session.id, attention: {
                 eventEpoch: session.eventEpoch ?? 0,
               } });
@@ -6361,9 +6404,7 @@ function SessionDetailLoaded({
               openChildRequests();
               return;
             }
-            // Navigation makes the target reload-safe; the direct state transition also makes a
-            // repeat press reopen a panel that was closed while the route stayed unchanged.
-            rightPanel.show("subagents");
+            // Each activation is handled against the known request, including a repeated press.
             navigate({ name: "session", id: session.id, attention: {
               eventEpoch: session.eventEpoch ?? 0,
               ...(requests.length === 1 ? { requestId: requests[0]!.requestId } : {}),
@@ -6858,10 +6899,9 @@ function SessionDetailLoaded({
                   questions={composerQuestions}
                   runnerOnline={runnerOnline}
                   active={composerAnswerActive}
-                  showWaiting={questionResponseStyle === "composer"}
-                  responseRefusal={responseRefusal}
                   inputRef={answerInputRef}
-                  onEnter={enterAnswerMode}
+                  revealRef={answerRevealRef}
+                  recovery={pendingQuestion.recoveryReason === "provider_restart"}
                   onExit={exitAnswerMode}
                   onSessionUpdate={loadSession}
                   // Answer Mode replaces the composer bar, Model Settings included, so the figures
@@ -7224,7 +7264,7 @@ function SessionDetailLoaded({
           session={session}
           earlierActivityUnloaded={isPartialHistory(eventWindow)}
           sourceLocation={sourceLocation}
-          attentionTarget={attentionTarget}
+          attentionTarget={resolvedAttentionTarget}
           onOpenSourceLocation={openSourceLocation}
           onClearSourceLocation={clearSourceLocation}
           runnerOnline={runnerOnline}

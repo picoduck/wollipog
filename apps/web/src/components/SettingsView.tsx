@@ -39,6 +39,8 @@ import { destination } from "../navigation.js";
 import { NavRow, SegmentedRow, SelectRow, StaticRow, SwitchRow } from "./ui/SettingsRows.js";
 import { Select } from "./ui/ChoiceControls.js";
 import { SCHEME_SWATCHES, type ColorScheme, type ResolvedTheme } from "../theme.js";
+import type { SessionsPreviewLayout } from "../sessions-preview-layout.js";
+import { useSessionsPreviewLayout } from "../use-sessions-preview-layout.js";
 import { setEnterKeyBehavior, useEnterKeyBehavior, type EnterKeyBehavior } from "../enter-key.js";
 import { setShowAgentLogs, useShowAgentLogs } from "../agent-logs.js";
 import { SETTINGS_SECTIONS, type SettingsSection, type View } from "../navigation.js";
@@ -245,7 +247,30 @@ export function AppearancePanel({
         disabledReason={disabledReason}
         onChange={onDensityChange}
       />
+      {/* Where the Sessions preview sits (§6.3, #2219). The Sessions header's Preview Layout control
+          writes the same per-device key, and each follows the other live. */}
+      <SessionsLayoutRow disabled={disabled} disabledReason={disabledReason} />
     </SettingsGroup>
+  );
+}
+
+const SESSIONS_LAYOUT_OPTIONS: ReadonlyArray<{ value: SessionsPreviewLayout; label: string }> = [
+  { value: "below", label: "Preview Below" },
+  { value: "right", label: "Preview Right" },
+];
+
+function SessionsLayoutRow({ disabled, disabledReason }: { disabled: boolean; disabledReason?: string }) {
+  const [layout, setLayout] = useSessionsPreviewLayout();
+  return (
+    <SegmentedRow
+      title="Sessions Layout"
+      description="Preview Right applies in windows 1100px and wider."
+      options={SESSIONS_LAYOUT_OPTIONS}
+      value={layout}
+      disabled={disabled}
+      disabledReason={disabledReason}
+      onChange={(value) => setLayout(value === "right" ? "right" : "below")}
+    />
   );
 }
 

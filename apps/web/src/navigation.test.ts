@@ -318,7 +318,7 @@ test("empty states that name a destination read its name", () => {
   const empties: ReadonlyArray<[string, RegExp]> = [
     ["./components/AutomationsView.tsx", /title=\{`No \$\{destination\("automations"\)\.name\} Yet`\}/],
     ["./components/SkillsView.tsx", /title=\{`No \$\{destination\("skills"\)\.name\} Yet`\}/],
-    ["./components/InboxView.tsx", /title: `No \$\{destination\("inbox"\)\.name\} Yet`/],
+    ["./sessions-states.ts", /return `No \$\{destination\("inbox"\)\.name\} Yet`;/],
     ["./components/Board.tsx", /title=\{`No \$\{destination\("inbox"\)\.name\} Yet`\}/],
     ["./components/ArchivedSessionsView.tsx", /`No \$\{destination\("archived"\)\.name\}`/],
     ["./components/ProjectsView.tsx", /`No \$\{PROJECTS\.name\} Found`/],

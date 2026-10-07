@@ -1,1 +1,0 @@
-|.inbox-row-shell.stalled::before|z-index|1

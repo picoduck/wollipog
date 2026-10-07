@@ -93,12 +93,12 @@ test("/ focuses the field from the list, its keycap shows at rest, and Escape cl
   // F6 still enters the list zone while No Matches stands in for the list (§16.1).
   await page.locator('.rail-item[aria-current="page"]').first().focus();
   await page.keyboard.press("F6");
-  await expect(page.locator(".inbox-no-matches")).toBeFocused();
-  const clear = page.locator(".inbox-no-matches").getByRole("button", { name: "Clear Search" });
+  await expect(page.locator(".inbox-state")).toBeFocused();
+  const clear = page.locator(".inbox-state").getByRole("button", { name: "Clear Search" });
   await clear.focus();
   await page.keyboard.press("Escape");
   await expect(field(page)).toHaveValue("");
-  await expect(page.locator(".inbox-no-matches")).toHaveCount(0);
+  await expect(page.locator(".inbox-state")).toHaveCount(0);
   await expect(page.getByRole("grid", { name: "Sessions", exact: true })).toBeFocused();
 });
 
@@ -137,11 +137,11 @@ test("No Matches replaces both panes; Clear Search restores the list and Search 
   await page.setViewportSize({ width: 1440, height: 900 });
   await openGroups(page);
   await field(page).fill("kubernetes");
-  const state = page.locator(".inbox-no-matches .state");
+  const state = page.locator(".inbox-state .state");
   await expect(state.getByText("No Matches", { exact: true })).toBeVisible();
   await expect(state).toContainText("No sessions match “kubernetes” in any group.");
   await expect(page.locator(".inbox-preview-pane")).toHaveCount(0);
-  await expect(page.locator(".inbox-splitter")).toHaveCount(0);
+  await expect(page.locator(".master-detail-resize")).toHaveCount(0);
 
   await state.getByRole("button", { name: "Search Transcripts" }).click();
   const palette = page.getByRole("dialog", { name: "Search" });
@@ -153,7 +153,7 @@ test("No Matches replaces both panes; Clear Search restores the list and Search 
 
   await state.getByRole("button", { name: "Clear Search" }).click();
   await expect(field(page)).toHaveValue("");
-  await expect(page.locator(".inbox-no-matches")).toHaveCount(0);
+  await expect(page.locator(".inbox-state")).toHaveCount(0);
   await expect(page.locator(".inbox-row").nth(2), "the whole list is back").toBeVisible();
   await expect(page.locator(".inbox-preview-pane")).toBeVisible();
 });

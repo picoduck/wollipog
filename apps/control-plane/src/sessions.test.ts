@@ -4153,6 +4153,8 @@ test("opt-in Parent Control resolves exact nested request occurrences with agent
       action: "approve", optionId: "once",
     }, () => true).ok);
     assert.equal(hub.sentOfType("resolve_permission").at(-1)?.resolvedByParentSessionId, parent.data.id);
+    assert.equal(hub.sentOfType("resolve_permission").at(-1)?.resolvedBy, undefined,
+      "a Parent Control decision names its parent session, not a member (#2628)");
 
     svc.onSessionEvent(child.id, {
       kind: "permission_request", requestId: "old-runner", occurrenceId: "request_old_runner",
@@ -12606,6 +12608,44 @@ test("approve delivers resolve_permission and clears the pending approval", () =
   assert.equal(hub.sessionEventCalls.filter((e) => e.payload.kind === "permission_resolved").length, 0);
 });
 
+test("a member's permission decision names them to the runner, and nothing else does (#2628)", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  const ask = (requestId: string) => {
+    db.setPendingApproval(id, { requestId, title: "Run tests?", options: [
+      { optionId: "allow", name: "Allow", kind: "allow_once" },
+      { optionId: "reject", name: "Reject", kind: "reject_once" },
+    ] });
+    db.updateSessionStatus(id, "input_required", Date.now());
+  };
+
+  ask("member-allow");
+  assert.ok(svc.approve(id, "member-allow", "allow", { kind: "human", id: "usr_grace" }).ok);
+  assert.deepEqual(hub.sentOfType("resolve_permission").at(-1), {
+    type: "resolve_permission", sessionId: id, requestId: "member-allow", optionId: "allow",
+    resolvedBy: { kind: "user", userId: "usr_grace" },
+  });
+
+  ask("member-dismiss");
+  assert.ok(svc.approve(id, "member-dismiss", null, { kind: "human", id: "usr_ada" }).ok);
+  assert.deepEqual(hub.sentOfType("resolve_permission").at(-1)?.resolvedBy, { kind: "user", userId: "usr_ada" },
+    "a member's dismissal is still their decision");
+
+  ask("agent-reject");
+  assert.ok(svc.approve(id, "agent-reject", "reject", { kind: "agent", id: "agent-1" }).ok);
+  assert.equal(hub.sentOfType("resolve_permission").at(-1)?.resolvedBy, undefined, "only a person is named");
+
+  ask("anonymous-reject");
+  assert.ok(svc.approve(id, "anonymous-reject", "reject", { kind: "human" }).ok);
+  assert.equal(hub.sentOfType("resolve_permission").at(-1)?.resolvedBy, undefined, "a person without an id is not guessed");
+
+  ask("parent-allow");
+  assert.ok(svc.approve(id, "parent-allow", "allow", { kind: "human", id: "usr_grace" }, "parent-session").ok);
+  const parent = hub.sentOfType("resolve_permission").at(-1)!;
+  assert.equal(parent.resolvedByParentSessionId, "parent-session");
+  assert.equal(parent.resolvedBy, undefined, "a Parent Control decision names its parent session instead");
+});
+
 test("authentication actions remain parked until the runner reports their outcome", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);
@@ -12973,6 +13013,7 @@ test("scoped allow policy auto-resolves a matching permission with durable polic
     sessionId: id,
     requestId: "scoped-allow",
     optionId: "allow-once",
+    resolvedBy: { kind: "policy", policyId: "allow-scoped-shell" },
   });
   assert.equal(db.getSession(id)!.pendingApproval, null);
   assert.equal(db.getSession(id)!.status, "running");
@@ -14256,6 +14297,8 @@ test("hard deny cancels when a provider offers only persistent or no reject opti
     context: { toolName: "Bash" },
   });
   assert.equal(hub.sentOfType("resolve_permission").at(-1)?.optionId, null);
+  assert.deepEqual(hub.sentOfType("resolve_permission").at(-1)?.resolvedBy, { kind: "policy", policyId: "deny-bash" },
+    "a policy's denial names the policy (#2628)");
   assert.equal(db.getSession(id)!.pendingApproval, null);
   const audit = svc.governanceAudit(id).filter((entry) => entry.requestId === "deny-no-once");
   assert.ok(audit.some((entry) => entry.stage === "policy_decision" && entry.outcome === "denied"));

@@ -113,8 +113,8 @@ test("390 px Composer Answer Mode formats multi-question text and discloses the 
   await page.goto("/agent-questions-e2e.html?set=rich&style=composer");
 
   const composer = page.locator(".composer-answer");
-  await expect(composer.locator(".composer-answer-question strong")).toHaveText("one");
-  await expect(composer.locator(".composer-answer-question li")).toHaveCount(2);
+  await expect(composer.locator(".answer-title strong")).toHaveText("one");
+  await expect(composer.locator(".answer-title li")).toHaveCount(2);
   await expect(composer.getByRole("link", { name: "evidence.example/mobile-capture.png" })).toHaveAttribute("href", signedEvidenceUrl);
   expect(await composer.innerText()).not.toContain("X-Amz-Signature");
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
@@ -122,7 +122,7 @@ test("390 px Composer Answer Mode formats multi-question text and discloses the 
   const input = page.locator(".composer-answer-input");
   await input.fill("1");
   await input.press("Enter");
-  await expect(page.getByText("Answering Question 2 of 2")).toBeVisible();
+  await expect(composer.locator(".answer-step")).toHaveText("Question 2 of 2");
   await input.fill("1, 2");
   await input.press("Enter");
   await expect(page.getByRole("status")).toHaveText("Question Answered");
@@ -220,7 +220,7 @@ test("desktop Composer Response submits a multi-question flow using only the key
   await page.goto("/agent-questions-e2e.html?set=forms&style=composer");
 
   const response = page.locator(".composer-answer-input");
-  await expect(page.getByText("Answering Question 1 of 5")).toBeVisible();
+  await expect(page.locator(".answer-step")).toHaveText("Question 1 of 5");
   await response.fill("2");
   await response.press("Enter");
   await response.fill("1, Browser Tests");
@@ -304,7 +304,8 @@ test("mobile Composer Response preserves invalid input, focus, and replacement b
   const response = page.locator(".composer-answer-input");
   await response.fill(" ");
   await response.press("Enter");
-  await expect(page.getByRole("alert")).toContainText("Enter a response");
+  // One field error under the field (§8.5; #2212), worded as the card words it.
+  await expect(page.locator(".field-error")).toHaveText("Choose an option.");
   await expect(response).toHaveValue(" ");
   await expect(response).toBeFocused();
 
@@ -323,7 +324,8 @@ test("Composer Response keeps its draft and focus after a submission error", asy
   const response = page.locator(".composer-answer-input");
   await response.fill("2");
   await response.press("Enter");
-  await expect(page.getByRole("alert")).toContainText("runner rejected this answer");
+  // A compact danger notice above the field, as on the card; the runner's words are its details.
+  await expect(page.getByRole("alert")).toContainText("Couldn't send your answers. Try again.");
   await expect(response).toHaveValue("2");
   await expect(response).toBeFocused();
   expect(await page.evaluate(() => window.agentQuestionCalls[0])).toEqual({
@@ -340,7 +342,7 @@ test("offline Composer Response preserves its draft boundary and recovers after 
   const response = page.locator(".composer-answer-input");
   await expect(response).toHaveAttribute("aria-disabled", "true");
   await expect(response).toHaveAttribute("readonly", "");
-  await expect(page.locator(".composer-answer-help")).toContainText("Responses are unavailable until the runner reconnects");
+  await expect(page.locator(".answer-help")).toContainText("Responses are unavailable until the runner reconnects");
   await page.evaluate(() => window.setAgentQuestionOnline(true));
   await expect(response).not.toHaveAttribute("aria-disabled", "true");
   await expect(response).not.toHaveAttribute("readonly", "");
@@ -749,7 +751,7 @@ test("every question row reads its outcome and answer without arrows or emoji (#
 });
 
 for (const width of [1440, 390]) {
-  test(`question and governance rows name who answered relative to the viewer at ${width}px (#2527)`, async ({ page }) => {
+  test(`question, governance and permission rows name who decided relative to the viewer at ${width}px (#2527, #2628)`, async ({ page }) => {
     await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
     await page.goto("/agent-questions-e2e.html?set=resolvers");
     const timeline = page.getByRole("list", { name: "Resolver Rows" });
@@ -764,7 +766,8 @@ for (const width of [1440, 390]) {
 
     // Approvals are routine work and fold into the turn's work group; expand any such group.
     for (const group of await timeline.getByRole("button", { name: /^Worked/ }).all()) await group.click();
-    const decisions = timeline.locator("details.tl-decision");
+    // Governance rows carry their audit id; permission rows (#2628) are checked below.
+    const decisions = timeline.locator("details.tl-decision[data-audit-id]");
     await expect(decisions.locator(".tl-decision-outcome")).toHaveText(["Allowed", "Rejected", "Allowed"]);
     await expect(decisions.locator(".tl-decision-by")).toHaveText([
       "by You", "by Grace Hopper", "by Another Member",
@@ -774,12 +777,28 @@ for (const width of [1440, 390]) {
       "You", "Grace Hopper", "Another Member",
     ]);
 
-    expect(await page.locator("#question-frame").innerText()).not.toMatch(/user-|device-/);
+    // A permission names who resolved that exact occurrence (#2628); an older peer's names nobody.
+    const permissions = timeline.locator("details.tl-decision:not([data-audit-id])");
+    await expect.poll(() => permissions.locator("summary").evaluateAll((summaries) =>
+      summaries.map((summary) => summary.getAttribute("aria-label")))).toEqual([
+      "Allowed Run the Release Checks by You",
+      "Rejected Delete the Staging Database by Grace Hopper",
+      "Allowed Read the Deploy Config by Allow Reads",
+      "Allowed Restart the Preview Server",
+    ]);
+    await expect(permissions.locator(".tl-decision-by")).toHaveText(["by You", "by Grace Hopper", "by Allow Reads"]);
+    for (const permission of await permissions.all()) await permission.locator("summary").click();
+    await expect(permissions.nth(2).locator(".facts dd").first()).toHaveText("Allow Reads");
+    await expect(permissions.nth(0).locator(".facts dd").first()).toHaveText("You");
+    await expect(permissions.nth(1).locator(".facts dd").first()).toHaveText("Grace Hopper");
+    await expect(permissions.nth(3).locator("dt")).toHaveText(["Tool", "Path", "Branch", "Command", "Recorded"]);
+
+    expect(await page.locator("#question-frame").innerText()).not.toMatch(/user-|device-|allow-reads/);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
   });
 }
 
-test("a single-member installation keeps reading every answer and decision as its own (#2527)", async ({ page }) => {
+test("a single-member installation keeps reading every answer and decision as its own (#2527, #2628)", async ({ page }) => {
   await page.goto("/agent-questions-e2e.html?set=resolvers&viewer=solo");
   const timeline = page.getByRole("list", { name: "Resolver Rows" });
   const questions = timeline.locator(".tl-question");
@@ -788,7 +807,11 @@ test("a single-member installation keeps reading every answer and decision as it
     /^Answered by you at /, /^Answered by you at /, /^Answered by you at /,
   ]);
   for (const group of await timeline.getByRole("button", { name: /^Worked/ }).all()) await group.click();
-  await expect(timeline.locator(".tl-decision-by")).toHaveText(["by You", "by You", "by You"]);
+  await expect(timeline.locator("details.tl-decision[data-audit-id] .tl-decision-by")).toHaveText(["by You", "by You", "by You"]);
+  // A member's permission decision is the viewer's; a policy keeps its name; an older peer's names nobody (#2628).
+  await expect(timeline.locator("details.tl-decision:not([data-audit-id]) .tl-decision-by")).toHaveText([
+    "by You", "by You", "by Allow Reads",
+  ]);
 });
 
 for (const width of [1280, 390]) {
@@ -813,12 +836,12 @@ for (const width of [1280, 390]) {
         await page.getByRole("button", { name: "Submit Answers", exact: true }).click();
       } else {
         const input = page.locator('.composer-answer-input');
-        await page.getByRole("button", { name: "Other Response", exact: true }).click();
+        // Something Else asks for the person's own answer in the composer's field (#2212).
+        await page.getByRole("radio", { name: "Something Else…" }).click();
         await expect(input).toBeFocused();
-        await expect(page.getByRole("textbox", { name: "Other Response to Question 1", exact: true })).toBeFocused();
         await input.fill("Canary");
         await input.press("Enter");
-        await page.getByRole("button", { name: "Other Response", exact: true }).click();
+        await page.getByRole("checkbox", { name: "Something Else…" }).click();
         await input.fill("Unit Tests");
         await input.press("Enter");
         await input.press("Enter");

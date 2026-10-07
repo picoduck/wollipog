@@ -14,7 +14,7 @@ export const INBOX_ALL_SPLIT_KEY = null;
 export const INBOX_NO_PROJECT_SPLIT_KEY = " no-project";
 export const INBOX_SPLIT_RATIO_STORAGE_KEY = "wollipog.inbox.split";
 export const INBOX_SELECTION_STORAGE_KEY = "wollipog.inbox.selection";
-export const INBOX_SPLIT_RATIO_DEFAULT = 0.4;
+export const INBOX_SPLIT_RATIO_DEFAULT = 0.45;
 export const INBOX_SPLIT_RATIO_MIN = 0.25;
 export const INBOX_SPLIT_RATIO_MAX = 0.75;
 
@@ -354,13 +354,6 @@ export function threadInboxRows<T extends { session: SessionView }>(
     emit(topOf(row), 0, null, false, new Set());
   }
   return out;
-}
-
-/** Parents in a threaded list, in list order. */
-export function inboxThreadParents<T extends { session: SessionView; thread: InboxThreadPosition }>(
-  rows: readonly T[],
-): T[] {
-  return rows.filter((row) => row.thread.children !== null);
 }
 
 function inboxSplit(

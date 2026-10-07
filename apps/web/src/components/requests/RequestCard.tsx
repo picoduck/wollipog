@@ -12,11 +12,12 @@ import type { GovernancePolicy, PendingApproval, PermissionOption, SessionView }
 import { useApi } from "../../api-context.js";
 import type { ApiClient } from "../../api.js";
 import { relativeTime, titleCaseLabel } from "../../format.js";
-import { useOptionalStoreSelector } from "../../store.js";
+import { runnerDisplay } from "../../runners.js";
+import { useOptionalNavigate, useOptionalStoreSelector } from "../../store.js";
 import { sessionCommandRefusal } from "../../session-command-permissions.js";
 import { useAccessibleMenu } from "../interactions.js";
 import { MenuItem, MenuSurface } from "../Menu.js";
-import { ChevronRightIcon, MoreHorizontalIcon } from "../Icons.js";
+import { BanIcon, ChevronRightIcon, MoreHorizontalIcon } from "../Icons.js";
 import { Notice } from "../Notice.js";
 import { BusyButton } from "../ui/BusyButton.js";
 import { ChoiceRows } from "../ui/ChoiceControls.js";
@@ -30,7 +31,9 @@ import {
   SIGN_IN_COPY,
   authenticationAccountChoiceApplies,
   authenticationRecoveryPanelApplies,
+  signInProviderName,
 } from "../AuthenticationRecoveryPanel.js";
+import { CHOOSE_ACCOUNT_COPY, ChooseAccountDialog, type ChooseAccountResult } from "./ChooseAccountDialog.js";
 import { EvidenceReviewBody, useEvidenceReview } from "./EvidenceReview.js";
 import { WorkflowDecisionSummary } from "./WorkflowDecisionSummary.js";
 import { claimDecision, decisionKey, useDecisionFailure, useDecisionInFlight } from "./request-reveal.js";
@@ -128,7 +131,6 @@ export function RequestCard({
   const reasonId = `${idPrefix}-reason`;
   const signInReasonId = `${idPrefix}-sign-in-reason`;
   const evidenceReasonId = `${idPrefix}-evidence-reason`;
-  const accountsId = `${idPrefix}-accounts`;
   const policyName = useGovernancePolicyName(api, request.governancePolicyId);
   const remaining = useCountdown(request.expiresAt);
 
@@ -193,8 +195,37 @@ export function RequestCard({
   // Check Again lives on the recovery body's Last Checked fact. Where that body is not shown (a child's
   // sign-in read under a parent of another driver) the recheck stays reachable as a secondary.
   const footerSecondary = recheck && !recovery ? [...secondary, recheck] : secondary;
-  const canChooseAccount = authenticationAccountChoiceApplies(session, request, runner);
-  const [choosingAccount, setChoosingAccount] = useState(false);
+  // What Choose Another Account… belongs to: this card and the account it was opened against. A
+  // change to either closes the dialog and drops its notice, so neither speaks for a newer card.
+  const accountCardKey = `${request.requestId}\u0000${session.providerAccountId ?? ""}`;
+  // A `not_resumable` refusal holds for every account, so the choice leaves this request's footer.
+  const [cantSwitch, setCantSwitch] = useState<string | null>(null);
+  const canChooseAccount = authenticationAccountChoiceApplies(session, request, runner) && cantSwitch !== request.requestId;
+  const [choosingAccount, setChoosingAccount] = useState<string | null>(null);
+  const [accountNotice, setAccountNotice] = useState<{ key: string; text: string; cantSwitch: boolean } | null>(null);
+  const [identityRefresh, setIdentityRefresh] = useState(0);
+  const box = useOptionalStoreSelector((state) => [...state.boxes.values()].find((candidate) => candidate.runnerId === session.runnerId));
+  const navigate = useOptionalNavigate();
+  const chooseAccount = () => {
+    setAccountNotice(null);
+    setChoosingAccount(accountCardKey);
+  };
+  const chosenAccount = (result: ChooseAccountResult) => {
+    setChoosingAccount(null);
+    if (result.kind === "selected") return;
+    if (result.kind === "cant_switch") {
+      setCantSwitch(request.requestId);
+      setAccountNotice({ key: request.requestId, text: CHOOSE_ACCOUNT_COPY.cantSwitch, cantSwitch: true });
+    } else {
+      const text = result.kind === "cancelled" ? result.refusal : result.notice;
+      if (text) setAccountNotice({ key: accountCardKey, text, cantSwitch: false });
+    }
+    // A refused choice may have rechecked a sign-in, so the facts read the account again.
+    if (result.kind !== "cancelled" || result.refusal) setIdentityRefresh((value) => value + 1);
+  };
+  const shownAccountNotice = accountNotice && (accountNotice.cantSwitch
+    ? accountNotice.key === request.requestId
+    : accountNotice.key === accountCardKey) ? accountNotice : null;
   // Dismiss Recovery, Choose Another Account… and a primary do not fit one phone row; there the first
   // two overflow into ⋯ (§3.1) rather than wrap the footer and squeeze the body under the dock's cap.
   // The layout comes from the phone query, so only one set of these controls exists at a time.
@@ -285,6 +316,20 @@ export function RequestCard({
       </dl>
     ) : null,
   ].filter(Boolean) : [
+    // What Choose Another Account ended with heads the body, inside the part that scrolls, so the
+    // facts under it keep their room rather than the card's frame taking it from the body (#2208).
+    shownAccountNotice ? (
+      <Notice
+        key="account-notice"
+        tone="danger"
+        compact
+        role="alert"
+        noticeRef={revealAccountNotice}
+        {...(shownAccountNotice.cantSwitch ? { icon: <BanIcon /> } : {})}
+      >
+        {shownAccountNotice.text}
+      </Notice>
+    ) : null,
     signIn && providerLogin && !recovery
       ? <ProviderLoginCard key="login" runnerId={session.runnerId} login={providerLogin} embedded /> : null,
     recovery ? (
@@ -300,8 +345,7 @@ export function RequestCard({
           disabled: (busy !== null && busy !== recheck.optionId) || unavailable(recheck),
           describedBy: describedBy(recheck),
         } : undefined}
-        choosingAccount={canChooseAccount && choosingAccount}
-        accountsId={accountsId}
+        refreshKey={identityRefresh}
       />
     ) : null,
     methods.length > 0 ? (
@@ -396,17 +440,14 @@ export function RequestCard({
         {tertiary && !phoneOverflow && optionButton(tertiary, "tertiary")}
         {footerSecondary.map((option) => optionButton(option, "secondary"))}
         {canChooseAccount && !phoneOverflow && (
-          // #2208 opens its Choose Another Account dialog from here; until then the card lists the
-          // Machine's other accounts in its body.
           <button
             type="button"
             ref={chooseRef}
             className="btn"
-            aria-expanded={choosingAccount}
-            aria-controls={choosingAccount ? accountsId : undefined}
+            aria-haspopup="dialog"
             disabled={busy !== null || reason !== null}
             aria-describedby={reason !== null ? reasonId : undefined}
-            onClick={() => setChoosingAccount((open) => !open)}
+            onClick={chooseAccount}
           >
             {SIGN_IN_COPY.chooseAnotherAccount}
           </button>
@@ -467,7 +508,7 @@ export function RequestCard({
                       // As the footer's button: not while a decision is sent, nor when nobody can act.
                       if (busy !== null || reason !== null) return;
                       menu.close(true);
-                      setChoosingAccount((open) => !open);
+                      chooseAccount();
                     }}
                   >
                     {SIGN_IN_COPY.chooseAnotherAccount}
@@ -507,8 +548,28 @@ export function RequestCard({
           </BusyButton>
         )}
       </div>}
+      {!readOnly && canChooseAccount && choosingAccount === accountCardKey && (
+        <ChooseAccountDialog
+          session={session}
+          approval={request}
+          runner={runner}
+          runnerOnline={runnerOnline}
+          provider={signInProviderName(session.driver)}
+          machineName={runnerDisplay(runner, box, session.runnerId).name}
+          onDone={chosenAccount}
+          {...(navigate ? { onOpenConnections: () => navigate({ name: "runners", section: "machines" }) } : {})}
+          // On a phone the opener was an item of the ⋯ menu, which closed as the dialog opened.
+          returnFocusRef={phoneOverflow ? menu.triggerRef : chooseRef}
+        />
+      )}
     </section>
   );
+}
+
+/** A notice that heads the body starts in view in whatever scrolls it: the dock's card body, or the
+ * Requests panel's detail, where the body itself does not scroll (#2206). */
+function revealAccountNotice(node: HTMLElement | null): void {
+  node?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
 }
 
 /** The card's head line: the kind's icon and label, then who asks and when, then trailing controls.

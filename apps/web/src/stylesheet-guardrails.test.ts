@@ -145,6 +145,8 @@ const RUNTIME_PROPERTIES = new Map([
   ["--zone-line-top", { why: "measured by indicateFocusZone while a zone is lit", fallback: "0px" }],
   ["--zone-line-left", { why: "measured by indicateFocusZone while a zone is lit", fallback: "0px" }],
   ["--zone-line-width", { why: "measured by indicateFocusZone while a zone is lit", fallback: "0px" }],
+  // InboxView sets the stacked Sessions list's row count (#2217); absent, the list keeps three rows.
+  ["--sessions-list-rows", { why: "set by InboxView from the stored split ratio", fallback: "3" }],
 ]);
 
 /** Every declaration value in the stylesheet. */

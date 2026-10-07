@@ -23,6 +23,7 @@ import { FeedbackProvider } from "./FeedbackProvider.js";
 import { INBOX_COLLAPSED_THREADS_KEY, type InboxSplit } from "../inbox.js";
 import { loadKeySet, saveKeySet, SESSION_PIN_KEY } from "../pins.js";
 import { loadSeen, saveSeen } from "../sessions-seen.js";
+import { loadSessionsPreviewLayout, resetSessionsPreviewLayoutForTest, setSessionsPreviewLayout } from "../sessions-preview-layout.js";
 import type { RightPanelState } from "./RightPanel.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
@@ -354,12 +355,14 @@ for (const viewport of ["mobile", "desktop"] as const) {
     await act(async () => { socket.push({ type: "session_removed", sessionId: "only" }); });
     assert.deepEqual(rowTitles(container), []);
     assert.equal(selectedRowTitle(container), null);
-    assert.ok(container.querySelector(".inbox-zero"));
+    assert.ok(container.querySelector(".inbox-state"));
 
   });
 }
 
 test("InboxView preserves the server-authoritative Project count when reminders hide no rows", async () => {
+  // The group tabs and the header's own buttons are desktop's; a phone has the app bar (#2211).
+  mobileViewport = false;
   const { container, root } = mountTestRoot();
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
@@ -416,6 +419,8 @@ test("InboxView preserves the server-authoritative Project count when reminders 
 });
 
 test("Active and Snoozed badges follow the selected Project split and live reminders", async () => {
+  // The group tabs and the header's own buttons are desktop's; a phone has the app bar (#2211).
+  mobileViewport = false;
   const { container, root } = mountTestRoot();
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
@@ -508,6 +513,8 @@ function accessibleText(node: Node): string {
 }
 
 test("the Sessions header's New Session uses the active tab's preset, and ⋯ explains an unavailable New Project…", async () => {
+  // The group tabs and the header's own buttons are desktop's; a phone has the app bar (#2211).
+  mobileViewport = false;
   const { container, root } = mountTestRoot();
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
@@ -578,6 +585,8 @@ test("the Sessions header's New Session uses the active tab's preset, and ⋯ ex
 });
 
 test("group tabs draw blocked and stalled counts as aria-hidden badges and name them in words (#2031)", async () => {
+  // The group tabs and the header's own buttons are desktop's; a phone has the app bar (#2211).
+  mobileViewport = false;
   const { container, root } = mountTestRoot();
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
@@ -661,6 +670,8 @@ test("group tabs draw blocked and stalled counts as aria-hidden badges and name 
 });
 
 test("two groups with one name each name their machine in the tab, All Groups and their accessible names (#2180)", async () => {
+  // The group tabs and the header's own buttons are desktop's; a phone has the app bar (#2211).
+  mobileViewport = false;
   const { container, root } = mountTestRoot();
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
@@ -743,6 +754,8 @@ test("two groups with one name each name their machine in the tab, All Groups an
 // #2051: a durable Project archive runs on the server over every unarchived session, so the
 // confirmation counts and lists the snoozed ones hidden from Active, and the Active ones from Snoozed.
 test("a Project's archive confirmation lists its sessions from Active and Snoozed alike", async () => {
+  // The group tabs and the header's own buttons are desktop's; a phone has the app bar (#2211).
+  mobileViewport = false;
   const { container, root } = mountTestRoot();
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
@@ -871,16 +884,21 @@ test("the tab the URL names survives widening from a phone to a desktop that rem
   await act(async () => { tab("Alpha").click(); });
   assert.match(selected(), /Alpha/);
 
-  // On a phone, Beta is chosen and the URL names it.
+  // On a phone, Beta is chosen from the app bar's group picker (#2211) and the URL names it.
   await act(async () => {
     mobileViewport = true;
     domWindow.dispatchEvent(new domWindow.Event("resize"));
   });
-  await act(async () => { tab("Beta").click(); });
+  await act(async () => { container.querySelector<HTMLButtonElement>(".sessions-group-picker")!.click(); });
+  const groupRows = [...domWindow.document.querySelectorAll(
+    '[role="menu"][aria-label="Session Groups"] [role="menuitemradio"]',
+  )] as unknown as HTMLButtonElement[];
+  const betaRow = groupRows.find((row) => row.textContent?.includes("Beta"))!;
+  await act(async () => { betaRow.click(); });
   const betaKey = pushed.at(-1)?.split;
-  assert.ok(typeof betaKey === "string", "choosing a tab writes it to the URL");
+  assert.ok(typeof betaKey === "string", "choosing a group writes it to the URL");
   await act(async () => { render(betaKey); });
-  assert.match(selected(), /Beta/);
+  assert.match(container.querySelector(".sessions-group-picker")?.textContent ?? "", /Beta/);
 
   // Widening restores the desktop's Alpha, and the URL's Beta wins.
   await act(async () => {
@@ -892,7 +910,8 @@ test("the tab the URL names survives widening from a phone to a desktop that rem
 });
 
 test("reminder membership stays exclusive while scoped attention reconciles in Snoozed list and board", async () => {
-  mobileViewport = true;
+  // The header's Snoozed toggle is desktop's; a phone has it in the app bar's ⋯ (#2211).
+  mobileViewport = false;
   const { container, root } = mountTestRoot();
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
@@ -968,23 +987,24 @@ test("reminder membership stays exclusive while scoped attention reconciles in S
   await act(async () => { snoozedToggle(container).click(); });
   await renderView("board");
   assert.deepEqual([...container.querySelectorAll(".card")].map((card) => card.textContent?.includes("Session unsnoozed")), [true]);
-  assertNoDomNode(container.querySelector('.card [aria-label="Reminder: Snoozed"]'));
+  assertNoDomNode(container.querySelector(".card .card-time.snoozed"));
 
   await act(async () => { snoozedToggle(container).click(); });
   assert.ok([...container.querySelectorAll(".card")].some((card) => card.textContent?.includes("Session orphaned")));
-  assert.ok(container.querySelector('.card [aria-label="Attention: Background Work Lost"]'));
-  const boardWatchdogPill = container.querySelector('.card [aria-label^="Background Work: Result Pending."]');
+  // A card shows the row's one status (#2222), and a snoozed card's time says when it returns.
+  assert.ok(container.querySelector('.card [aria-label="Status: Background Work Lost"]'));
+  const boardWatchdogPill = container.querySelector('.card [aria-label="Status: Result Pending"]');
   assert.ok(boardWatchdogPill);
   assert.ok(boardWatchdogPill.classList.contains("t-info"));
   assert.equal(boardWatchdogPill.classList.contains("t-warning"), false);
-  assert.ok(container.querySelector('.card [aria-label="Reminder: Snoozed"]'));
+  assert.ok(container.querySelector(".card .card-time.snoozed"));
 
   await act(async () => {
     socket.push({ type: "session_upsert", session: { ...orphaned, backgroundWorkState: "resumed", updatedAt: 80 } });
   });
   assert.ok([...container.querySelectorAll(".card")].some((card) => card.textContent?.includes("Session orphaned")),
     "clearing attention must leave the pending reminder in Snoozed");
-  assertNoDomNode(container.querySelector('.card [aria-label="Attention: Background Work Lost"]'));
+  assertNoDomNode(container.querySelector('.card [aria-label="Status: Background Work Lost"]'));
   assert.equal(snoozedCount(container), "6");
 
   await act(async () => {
@@ -1615,7 +1635,7 @@ test("desktop search Enter focuses the exact filtered result set without activat
   await pressSearchEnter();
   assert.equal(domWindow.document.activeElement, search);
   assertNoDomNode(container.querySelector(".inbox-list"));
-  assert.equal(container.querySelector(".inbox-no-matches .state-title")?.textContent, "No Matches");
+  assert.equal(container.querySelector(".inbox-state .state-title")?.textContent, "No Matches");
 
   // Modified and composing Enter remain input-owned even when results exist.
   await filter("Session");
@@ -1672,7 +1692,14 @@ test("board mode shares the Sessions toolbar scope and toggles back to the list"
   assert.equal(container.querySelector(".board-wrap")?.getAttribute("tabindex"), "-1",
     "the canvas is programmatically focusable so the F6 list zone still has a landing spot");
   assertNoDomNode(container.querySelector(".inbox-list"), "and not the list");
-  assertNoDomNode(container.querySelector(".inbox-splitter"), "the preview split belongs to list mode");
+  assertNoDomNode(container.querySelector(".master-detail-resize"), "the preview split belongs to list mode");
+  assert.equal(container.querySelector(".inbox-view")?.classList.contains("sessions-md"), false, "the board is not the stacked grid");
+  // The Board ignores the preview layout (#2219). Its control keeps its width so List / Board does
+  // not move, but it is out of sight, focus and the accessibility tree.
+  const reserved = container.querySelector<HTMLElement>(".sessions-preview-layout");
+  assert.equal(reserved?.getAttribute("aria-hidden"), "true");
+  assert.equal(reserved?.hasAttribute("inert"), true);
+  assert.equal(reserved?.hasAttribute("data-reserved"), true);
   assert.ok(container.querySelector(".tabs-bar"), "the shared split tabs stay above the board");
   assert.equal(container.querySelectorAll(".board .card").length, 2,
     "archived sessions never reach the board columns");
@@ -1703,6 +1730,60 @@ test("board mode shares the Sessions toolbar scope and toggles back to the list"
   assert.deepEqual(pushed.at(-1), { name: "inbox" },
     "switching modes navigates: the route is the mode");
 
+});
+
+test("the Preview Layout control after List / Board switches the list to Preview Right, and a phone has neither (#2219)", async () => {
+  mobileViewport = false;
+  resetSessionsPreviewLayoutForTest();
+  domWindow.localStorage.clear();
+  setWindowFocused(true);
+  setVisibility("visible");
+  const { container, root } = mountTestRoot();
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "sessions-preview-layout",
+    runtimeKey: "sessions-preview-layout:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  const navigation: ViewNavigation = { current: () => ({ name: "inbox" }), push: () => {}, listen: () => () => {} };
+  await act(async () => {
+    root.render(
+      <StoreProvider connection={connection} navigation={navigation}>
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
+      </StoreProvider>,
+    );
+  });
+  await act(async () => { socket.push(snapshot([session("A", 30), session("B", 20)])); });
+
+  const view = () => container.querySelector<HTMLElement>(".inbox-view")!;
+  const control = () => container.querySelector('[role="radiogroup"][aria-label="Preview Layout"]');
+  const groups = [...container.querySelectorAll(".page-header .page-controls [role=radiogroup]")];
+  assert.deepEqual(groups.map((group) => group.getAttribute("aria-label")), ["Sessions View", "Preview Layout"],
+    "right after List / Board, in the header's controls slot");
+  const radios = [...control()!.querySelectorAll<HTMLButtonElement>('[role="radio"]')];
+  assert.deepEqual(radios.map((radio) => [radio.getAttribute("aria-label"), radio.title, radio.getAttribute("aria-checked")]), [
+    ["Preview Below", "Preview below the list", "true"],
+    ["Preview Right", "Preview beside the list", "false"],
+  ]);
+  assert.equal(view().dataset["layout"], "below", "Preview Below is the default");
+  assert.equal(container.querySelector('[role="separator"]')?.getAttribute("aria-orientation"), "horizontal");
+
+  await act(async () => { radios[1]!.click(); });
+  assert.equal(view().dataset["layout"], "right");
+  assert.equal(view().style.getPropertyValue("--sessions-list-w"), "400px");
+  assert.equal(container.querySelector('[role="separator"]')?.getAttribute("aria-orientation"), "vertical");
+  assert.equal(loadSessionsPreviewLayout(), "right", "the choice is stored for this device");
+
+  // A phone has no preview, so it has no layout to choose, whatever is stored.
+  mobileViewport = true;
+  await act(async () => { domWindow.dispatchEvent(new domWindow.Event("resize")); });
+  assertNoDomNode(control(), "a phone has no Preview Layout control");
+  assert.equal(view().dataset["layout"], undefined);
+  assertNoDomNode(container.querySelector('[role="separator"]'));
+
+  setSessionsPreviewLayout("below");
+  await act(async () => root.unmount());
 });
 
 test("row and card context menus share one surface, act on their target, and never navigate", async () => {
@@ -1964,7 +2045,7 @@ test("a Viewer's Inbox archive and decision shortcuts and row menu send nothing 
       </ApiProvider>,
     );
   });
-  const options = [...container.querySelectorAll<HTMLButtonElement>(".card-approval .approval-actions button")];
+  const options = [...container.querySelectorAll<HTMLButtonElement>(".card-request .notice-actions button")];
   assert.deepEqual(options.map((option) => option.textContent), ["Approve", "Deny"]);
   for (const option of options) {
     assert.equal(option.disabled, true, `the card's ${option.textContent} is disabled`);
@@ -2163,8 +2244,8 @@ test("a long-press over a card's approval button opens the menu without approvin
         } as never,
       })]));
     });
-    const approveButton = ([...domWindow.document.querySelectorAll(".card-approval button")] as unknown as HTMLElement[])
-      .find((button) => button.textContent === "Allow")!;
+    const approveButton = ([...domWindow.document.querySelectorAll(".card-request button")] as unknown as HTMLElement[])
+      .find((button) => button.textContent === "Approve")!;
     await act(async () => {
       approveButton.dispatchEvent(new domWindow.PointerEvent("pointerdown", {
         bubbles: true, pointerId: 9, pointerType: "touch", clientX: 300, clientY: 200,
@@ -2290,7 +2371,7 @@ test("the preview's More Actions menu hands focus to the empty list when its onl
       socket.push({ type: "session_upsert", session: { ...session("Only", 30), archived: true } });
     });
     assertNoDomNode(domWindow.document.querySelector('[role="menu"]'), "the archived session's menu closes");
-    assert.ok(container.querySelector(".inbox-zero"), "the list is empty");
+    assert.ok(container.querySelector(".inbox-state"), "the list is empty");
     assert.notEqual(domWindow.document.activeElement, domWindow.document.body,
       "focus goes to a durable surface, not <body>, though ⋯ went with the preview");
   } finally {
@@ -3027,6 +3108,368 @@ test("U and the menu's Mark Unread and Mark Read toggle a session's unread dot (
   } finally {
     mobileViewport = true;
   }
+});
+
+/** The phone Sessions app bar (#2211), mounted with two Projects: Alpha with two sessions waiting on
+ * the user and one stalled, and Beta with one idle session and one snoozed. */
+async function mountPhoneBar(name: string, options: {
+  pushed?: Array<{ name: string; split?: string | null }>;
+  presets?: unknown[];
+  client?: ApiClient;
+} = {}) {
+  mobileViewport = true;
+  const { container, root } = mountTestRoot();
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: name,
+    runtimeKey: `${name}:1`,
+    createSocket: () => socket,
+    close() {},
+  };
+  const spyNavigation: ViewNavigation = {
+    current: () => ({ name: "inbox" }),
+    push: (view) => void options.pushed?.push(view as { name: string; split?: string | null }),
+    listen: () => () => {},
+  };
+  const project = (id: string, projectName: string, count: number): ProjectView => ({
+    id, name: projectName, hidden: false, locations: [], activeSessionCount: count, unarchivedSessionCount: count,
+    totalSessionCount: count, createdAt: 1, updatedAt: 1,
+  });
+  const now = Date.now();
+  /** Renders with the group the URL names, as Back and Forward do. */
+  const render = (routeSplit?: string | null) => act(async () => {
+    root.render(
+      <ApiProvider client={options.client ?? api}>
+        <StoreProvider connection={connection} navigation={spyNavigation}>
+          <FeedbackProvider>
+            <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} routeSplit={routeSplit}
+              onNewSession={(preset) => options.presets?.push(preset)} onOpenShortcuts={() => undefined} />
+          </FeedbackProvider>
+        </StoreProvider>
+      </ApiProvider>,
+    );
+  });
+  await render();
+  await act(async () => {
+    socket.push({
+      type: "snapshot",
+      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true, sessionReminders: true },
+      runners: [],
+      boxes: [],
+      sessions: [
+        session("alpha-blocked-1", now, { projectId: "alpha", status: "input_required", title: "Fix the deploy" }),
+        session("alpha-blocked-2", now - 1, { projectId: "alpha", status: "input_required", title: "Ship the release" }),
+        session("alpha-stalled", 1, { projectId: "alpha", status: "running", updatedAt: 1, title: "Migrate the database" }),
+        session("beta-idle", 10, { projectId: "beta", title: "Write the docs" }),
+        session("beta-snoozed", 9, { projectId: "beta", title: "Plan the offsite" }),
+      ],
+      projects: [project("alpha", "Alpha", 3), project("beta", "Beta", 2)],
+      reminders: [reminder("beta-snoozed")],
+      runs: [],
+      pods: [],
+    });
+  });
+  const body = domWindow.document.body as unknown as HTMLElement;
+  const bar = () => container.querySelector<HTMLElement>(".sessions-app-bar")!;
+  const picker = () => bar().querySelector<HTMLButtonElement>(".sessions-group-picker")!;
+  const sheet = (label: string) => body.querySelector<HTMLElement>(`[role="menu"][aria-label="${label}"]`);
+  const chooseGroup = async (groupName: string) => {
+    await act(async () => { picker().click(); });
+    const row = [...sheet("Session Groups")!.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')]
+      .find((candidate) => candidate.textContent?.startsWith(groupName))!;
+    await act(async () => { row.click(); });
+  };
+  const openMore = async () => {
+    await act(async () => { bar().querySelector<HTMLButtonElement>('[aria-label="More Actions"]')!.click(); });
+    return sheet("More Actions")!;
+  };
+  return { container, root, body, bar, picker, sheet, chooseGroup, openMore, render, socket };
+}
+
+test("on a phone one 48px app bar replaces the page header, its action row and the group tabs (#2211)", async () => {
+  const presets: unknown[] = [];
+  const { container, bar, picker, sheet, chooseGroup } = await mountPhoneBar("phone-app-bar-test", { presets });
+
+  assertNoDomNode(container.querySelector(".tabs-bar"), "the group tabs are a picker on a phone (§10.1)");
+  assertNoDomNode(container.querySelector(".page-tabs"), "no tab row under the bar");
+  assertNoDomNode(container.querySelector(".page-action"), "no secondary buttons in the bar");
+  assert.equal(container.querySelectorAll(".page-header").length, 1, "the bar is the page's only header");
+  const title = bar().querySelector("h1#page-title")!;
+  assert.equal(title.textContent, "Sessions", "the page keeps its h1 for the shell's focus rescue");
+  assert.equal(title.getAttribute("tabindex"), "-1");
+
+  // The picker is the bar's title: the group, a caret and the attention badges, said in words.
+  assert.equal(picker().getAttribute("aria-label"), "All, 2 Blocked, 1 Stalled");
+  assert.equal(picker().getAttribute("aria-haspopup"), "menu");
+  assert.deepEqual([...picker().querySelectorAll(".count-badge")].map((badge) => [badge.textContent, badge.getAttribute("aria-hidden")]),
+    [["2", "true"], ["1", "true"]]);
+
+  await act(async () => { picker().click(); });
+  const groups = sheet("Session Groups")!;
+  assert.equal(groups.querySelector(".menu-head")?.textContent, "Session Groups");
+  assert.deepEqual([...groups.querySelectorAll('[role="menuitemradio"]')].map((row) => row.getAttribute("aria-label")),
+    ["All, 4, 2 Blocked, 1 Stalled", "Alpha, 3, 2 Blocked, 1 Stalled", "Beta, 1", "No Project, 0"]);
+  await act(async () => { [...groups.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')][2]!.click(); });
+  assertNoDomNode(sheet("Session Groups"), "choosing a group closes the sheet");
+  assert.equal(picker().getAttribute("aria-label"), "Beta", "a group with nothing waiting adds no words");
+  assert.deepEqual(rowTitles(container), ["Write the docs"], "the list switches to the group");
+  assert.equal(domWindow.document.activeElement, picker(), "focus returns to the picker");
+
+  // New Session is the 44px `+`, named by its label, and presets the current Project.
+  const create = bar().querySelector<HTMLButtonElement>(".page-primary")!;
+  assert.equal(accessibleText(create), "New Session");
+  await act(async () => { create.click(); });
+  assert.deepEqual(presets.at(-1), { projectId: "beta" });
+  await chooseGroup("Alpha");
+  assert.equal(picker().getAttribute("aria-label"), "Alpha, 2 Blocked, 1 Stalled");
+});
+
+test("the phone ⋯ sheet lists View, Show, New Project… and the current project's actions in that order (#2211)", async () => {
+  const pushed: Array<{ name: string; split?: string | null }> = [];
+  const { container, bar, picker, sheet, chooseGroup, openMore } = await mountPhoneBar("phone-more-sheet-test", { pushed });
+
+  let more = await openMore();
+  const entries = () => [...more.querySelectorAll<HTMLElement>(".menu-label, [role^='menuitem']")]
+    .map((node) => node.classList.contains("menu-label") ? `# ${node.textContent}` : node.querySelector(".menu-text")?.textContent);
+  assert.deepEqual(entries(), ["# View", "List", "Board", "# Show", "Active Sessions", "Snoozed Sessions", "New Project…"],
+    "All has no project actions");
+  assert.deepEqual([...more.querySelectorAll('[role="menuitemradio"]')].map((item) => item.getAttribute("aria-checked")),
+    ["true", "false", "true", "false"]);
+  assert.equal(more.querySelector('[role="group"][aria-label="Show"] [role="menuitemradio"]:last-child')?.getAttribute("aria-label"),
+    "Snoozed Sessions, 1", "Snoozed carries its count, in words");
+  await act(async () => { [...more.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')][1]!.click(); });
+  assertNoDomNode(sheet("More Actions"), "choosing closes the sheet");
+  assert.equal(pushed.at(-1)?.name, "board", "Board switches to the Board route");
+
+  await chooseGroup("Alpha");
+  more = await openMore();
+  assert.deepEqual(entries(), [
+    "# View", "List", "Board", "# Show", "Active Sessions", "Snoozed Sessions", "New Project…",
+    "# Alpha", "New Session Here", "Rename Project…", "Pin Project", "Create Permanent Worktree…", "Manage Project",
+    "Archive All Sessions…",
+  ], "the project's actions follow under its name, without Reveal in File Manager on a phone");
+
+  // Snoozed in All, which holds one: the strip says so under the bar, and Show Active returns,
+  // focusing the picker. (A group with none shows #2220's No Snoozed Sessions instead.)
+  await act(async () => {
+    more.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as unknown as Event);
+  });
+  await chooseGroup("All");
+  more = await openMore();
+  const snoozedItem = [...more.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')]
+    .find((item) => item.textContent?.startsWith("Snoozed Sessions"))!;
+  await act(async () => { snoozedItem.click(); });
+  const strip = bar().querySelector<HTMLElement>(".sessions-snoozed-strip")!;
+  assert.equal(strip.querySelector("span")?.textContent, "Showing snoozed sessions.");
+  assertNoDomNode(picker().querySelector(".count-badge"), "Snoozed draws no attention badge");
+  assert.equal(picker().getAttribute("aria-label"), "All");
+  assert.deepEqual(rowTitles(container), ["Plan the offsite"]);
+  await act(async () => { [...strip.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Show Active")!.click(); });
+  assertNoDomNode(bar().querySelector(".sessions-snoozed-strip"), "Show Active removes the strip");
+  assert.equal(picker().getAttribute("aria-label"), "All, 2 Blocked, 1 Stalled");
+  assert.equal(domWindow.document.activeElement, picker());
+  assert.equal(rowTitles(container).length, 4);
+});
+
+test("a confirmation opened from the phone ⋯ sheet replaces it, and Back brings the sheet back (§7.5, #2211)", async () => {
+  const { body, sheet, chooseGroup, openMore } = await mountPhoneBar("phone-more-back-test");
+  await chooseGroup("Alpha");
+  const more = await openMore();
+  const archive = [...more.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+    .find((item) => item.textContent?.startsWith("Archive"))!;
+  await act(async () => { archive.click(); });
+  assertNoDomNode(sheet("More Actions"), "the confirmation does not stack on the sheet");
+  const dialog = body.querySelector<HTMLElement>('[role="dialog"]')!;
+  const back = dialog.querySelector<HTMLButtonElement>(".modal-back")!;
+  assert.equal(back.getAttribute("aria-label"), "Back to More Actions");
+  await act(async () => { back.click(); });
+  assertNoDomNode(body.querySelector('[role="dialog"]'), "Back closes the confirmation");
+  assert.ok(sheet("More Actions"), "and brings the sheet back");
+});
+
+test("a phone Rename opened from ⋯ closes when Back changes the group under it, so it never renames another (#2211)", async () => {
+  const pushed: Array<{ name: string; split?: string | null }> = [];
+  const { body, chooseGroup, openMore, render } = await mountPhoneBar("phone-rename-identity-test", { pushed });
+  await chooseGroup("Beta");
+  const betaKey = pushed.at(-1)?.split;
+  assert.ok(typeof betaKey === "string");
+  await chooseGroup("Alpha");
+  const alphaKey = pushed.at(-1)?.split;
+  await render(alphaKey);
+  const more = await openMore();
+  const rename = [...more.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+    .find((item) => item.textContent?.startsWith("Rename Project"))!;
+  await act(async () => { rename.click(); });
+  assert.ok(body.querySelector('[role="dialog"]'), "Rename Project opens for Alpha");
+
+  // Back to Beta under the open dialog: the dialog belonged to Alpha, so it closes.
+  await render(betaKey);
+  assertNoDomNode(body.querySelector('[role="dialog"]'), "the dialog closes rather than renaming Beta");
+  // And returning to Alpha does not bring a stale dialog back.
+  await render(alphaKey);
+  assertNoDomNode(body.querySelector('[role="dialog"]'));
+});
+
+test("a slow phone Rename that finishes after Back never closes the newer group's Rename or its draft (#2211)", async () => {
+  const pushed: Array<{ name: string; split?: string | null }> = [];
+  const renames: Array<[string, string]> = [];
+  let finishAlpha: () => void = () => undefined;
+  const client = {
+    ...api,
+    updateProject: (projectId: string, { name }: { name: string }) => {
+      renames.push([projectId, name]);
+      return new Promise<void>((resolve) => { finishAlpha = resolve; });
+    },
+  } as unknown as ApiClient;
+  const { body, chooseGroup, openMore, render } = await mountPhoneBar("phone-rename-generation-test", { pushed, client });
+  const field = () => body.querySelector<HTMLInputElement>("#rename-project-name");
+  const type = (value: string) => act(async () => {
+    const input = field()!;
+    Object.getOwnPropertyDescriptor(domWindow.HTMLInputElement.prototype, "value")!.set!.call(input, value);
+    input.dispatchEvent(new domWindow.Event("input", { bubbles: true }) as unknown as Event);
+  });
+  const openRename = async () => {
+    const more = await openMore();
+    const rename = [...more.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+      .find((item) => item.textContent?.startsWith("Rename Project"))!;
+    await act(async () => { rename.click(); });
+  };
+  await chooseGroup("Beta");
+  const betaKey = pushed.at(-1)?.split;
+  await chooseGroup("Alpha");
+  const alphaKey = pushed.at(-1)?.split;
+  await render(alphaKey);
+
+  // Alpha's rename is sent and still running when Back goes to Beta.
+  await openRename();
+  await type("Alpha Two");
+  await act(async () => {
+    body.querySelector("#rename-project-form")!.dispatchEvent(
+      new domWindow.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event);
+  });
+  assert.deepEqual(renames, [["alpha", "Alpha Two"]]);
+  await render(betaKey);
+  assertNoDomNode(field(), "Alpha's dialog closes with its group");
+
+  // Beta's own Rename, with a draft, survives Alpha's request finishing.
+  await openRename();
+  await type("Beta draft");
+  await act(async () => { finishAlpha(); });
+  assert.equal(field()?.value, "Beta draft", "the newer dialog and its draft stay");
+  assert.deepEqual(renames, [["alpha", "Alpha Two"]], "nothing else was renamed");
+});
+
+test("Show Active in phone Search mode hands focus to the search field, not <body> (#2211)", async () => {
+  const { bar, openMore } = await mountPhoneBar("phone-show-active-search-test");
+  const more = await openMore();
+  const snoozed = [...more.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')]
+    .find((item) => item.textContent?.startsWith("Snoozed Sessions"))!;
+  await act(async () => { snoozed.click(); });
+  await act(async () => { bar().querySelector<HTMLButtonElement>('[aria-label="Search Sessions"]')!.click(); });
+  const showActive = [...bar().querySelectorAll<HTMLButtonElement>(".sessions-snoozed-strip button")]
+    .find((button) => button.textContent === "Show Active")!;
+  await act(async () => { showActive.focus(); showActive.click(); });
+  assertNoDomNode(bar().querySelector(".sessions-snoozed-strip"));
+  assert.equal(domWindow.document.activeElement, bar().querySelector(".inbox-search input"));
+});
+
+test("the phone bar's + steps aside while the page's state offers New Session, and No Snoozed Sessions takes no strip (#2211, #2220)", async () => {
+  const { container, bar, chooseGroup, openMore } = await mountPhoneBar("phone-bar-states-test");
+  const plus = () => bar().querySelector(".page-primary");
+  assert.ok(plus(), "a group with sessions keeps the +");
+
+  // No Project has none: its state offers New Session, so the bar does not (§12.1).
+  await chooseGroup("No Project");
+  assert.ok(container.querySelector(".inbox-state"), "the state fills the page under the bar");
+  assertNoDomNode(plus(), "the + steps aside for the state's own New Session");
+  await chooseGroup("Alpha");
+  assert.ok(plus());
+
+  // Snoozed in Alpha, which has none: No Snoozed Sessions already says so and offers Show Active.
+  const more = await openMore();
+  const snoozedItem = [...more.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')]
+    .find((item) => item.textContent?.startsWith("Snoozed Sessions"))!;
+  await act(async () => { snoozedItem.click(); });
+  assert.match(container.querySelector(".inbox-state")?.textContent ?? "", /No Snoozed Sessions/);
+  assertNoDomNode(bar().querySelector(".sessions-snoozed-strip"), "the state and the strip do not double up");
+
+  // Beta has a snoozed session: its list shows, and the strip says Snoozed is on.
+  await chooseGroup("Beta");
+  assert.ok(bar().querySelector(".sessions-snoozed-strip"));
+});
+
+test("a live update that takes away the focused + or Snoozed strip keeps focus in the phone bar (#2211, #2220)", async () => {
+  const { container, bar, picker, chooseGroup, openMore, socket } = await mountPhoneBar("phone-bar-removed-focus-test");
+  // Beta's sessions are archived elsewhere: its empty state now offers New Session, so the + goes.
+  await chooseGroup("Beta");
+  const plus = bar().querySelector<HTMLButtonElement>(".page-primary")!;
+  await act(async () => { plus.focus(); });
+  assert.equal(domWindow.document.activeElement, plus);
+  await act(async () => {
+    socket.push({ type: "session_upsert", session: session("beta-idle", 10, { projectId: "beta", title: "Write the docs", archived: true }) });
+    socket.push({ type: "session_upsert", session: session("beta-snoozed", 9, { projectId: "beta", title: "Plan the offsite", archived: true }) });
+    // An available Location, so the empty project's state is the one that offers New Session.
+    socket.push({ type: "project_upsert", project: {
+      id: "beta", name: "Beta", hidden: false, activeSessionCount: 0, unarchivedSessionCount: 0,
+      totalSessionCount: 2, createdAt: 1, updatedAt: 2,
+      locations: [{
+        id: "beta-location", projectId: "beta", runnerId: "runner-1", workspaceId: "workspace-1", name: "Beta",
+        path: "/src/beta", source: "reported", availability: "available", isDefault: true, createdAt: 1, updatedAt: 1,
+      }],
+    } });
+  });
+  assert.match(container.querySelector(".inbox-state")?.textContent ?? "", /New Session/);
+  assertNoDomNode(bar().querySelector(".page-primary"), "the state took over New Session");
+  assert.equal(domWindow.document.activeElement, picker(), "focus stays in the bar, on the picker");
+
+  // Snoozed in All holds one session; its reminder is removed elsewhere, so No Snoozed Sessions
+  // replaces the list and the strip goes with the focused Show Active.
+  await act(async () => {
+    socket.push({ type: "session_reminder_upsert", userId: "user", reminder: reminder("alpha-blocked-1") });
+  });
+  await chooseGroup("All");
+  const more = await openMore();
+  const snoozedItem = [...more.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')]
+    .find((item) => item.textContent?.startsWith("Snoozed Sessions"))!;
+  await act(async () => { snoozedItem.click(); });
+  const showActive = [...bar().querySelectorAll<HTMLButtonElement>(".sessions-snoozed-strip button")]
+    .find((button) => button.textContent === "Show Active")!;
+  await act(async () => { showActive.focus(); });
+  await act(async () => {
+    socket.push({ type: "session_reminder_removed", userId: "user", sessionId: "alpha-blocked-1" });
+  });
+  assertNoDomNode(bar().querySelector(".sessions-snoozed-strip"), "No Snoozed Sessions takes no strip");
+  assert.equal(domWindow.document.activeElement, picker(), "focus stays in the bar, on the picker");
+});
+
+test("the phone app bar's Search swaps the bar for a focused full-width field, and Cancel restores it (#2211)", async () => {
+  const { container, bar, picker } = await mountPhoneBar("phone-search-mode-test");
+  const searchButton = () => bar().querySelector<HTMLButtonElement>('[aria-label="Search Sessions"]')!;
+  const field = () => bar().querySelector<HTMLInputElement>(".inbox-search input");
+  assertNoDomNode(field(), "the bar shows no field until Search is tapped");
+
+  await act(async () => { searchButton().click(); });
+  assert.equal(domWindow.document.activeElement, field(), "focus moves into the field");
+  assertNoDomNode(bar().querySelector(".sessions-group-picker"), "search mode replaces the bar's picker and icons");
+  await act(async () => {
+    const input = field()!;
+    Object.getOwnPropertyDescriptor(domWindow.HTMLInputElement.prototype, "value")!.set!.call(input, "deploy");
+    input.dispatchEvent(new domWindow.Event("input", { bubbles: true }) as unknown as Event);
+  });
+  assert.deepEqual(rowTitles(container), ["Fix the deploy"], "the list follows the query (#2200)");
+
+  const cancel = [...bar().querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Cancel")!;
+  await act(async () => { cancel.click(); });
+  assertNoDomNode(field(), "Cancel restores the bar");
+  assert.ok(picker());
+  assert.equal(domWindow.document.activeElement, searchButton(), "focus returns to Search");
+  assert.equal(rowTitles(container).length, 4, "and the query is cleared");
+
+  // Escape in the field does what Cancel does.
+  await act(async () => { searchButton().click(); });
+  await act(async () => { field()!.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as unknown as Event); });
+  assertNoDomNode(field());
+  assert.equal(domWindow.document.activeElement, searchButton());
 });
 
 test("every mounted root is torn down before the next test starts", () => {

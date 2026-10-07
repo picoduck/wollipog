@@ -1,1 +1,0 @@
-|.column-head|font-size|12

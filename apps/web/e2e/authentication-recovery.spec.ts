@@ -109,19 +109,46 @@ test("an agent's sign-in methods show their descriptions and start the chosen on
     .toEqual([{ requestId: "auth_1", optionId: "auth_1_method_2" }]);
 });
 
-test("Choose Another Account… lists the other accounts, and choosing one names this exact card", async ({ page }) => {
+/** Whether an element is wholly inside the card body's visible part, without scrolling it. */
+async function visibleInBody(card: Locator, target: Locator): Promise<boolean> {
+  const handle = await target.elementHandle();
+  return card.evaluate((element, node) => {
+    const body = element.querySelector<HTMLElement>(".request-card-body")!.getBoundingClientRect();
+    const rect = (node as HTMLElement).getBoundingClientRect();
+    return rect.height > 0 && rect.top >= body.top - 0.5 && rect.bottom <= body.bottom + 0.5;
+  }, handle);
+}
+
+/** Choose Another Account, opened from the card. */
+async function openChooser(page: Page, card: Locator): Promise<Locator> {
+  await chooseAnotherAccount(page, card);
+  const dialog = page.getByRole("dialog", { name: "Choose Another Account" });
+  await expect(dialog).toBeVisible();
+  return dialog;
+}
+
+function accountRow(dialog: Locator, name: string): Locator {
+  return dialog.locator(".choice-row").filter({ has: dialog.page().getByRole("radio", { name: new RegExp(`^${name}`) }) });
+}
+
+test("Choose Another Account… opens a dialog of radio rows, and Use Account names this exact card", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   const card = await open(page, "scenario=email");
-  await chooseAnotherAccount(page, card);
-  const accounts = card.getByRole("region", { name: "Other Accounts" });
-  await expect(accounts.locator(".auth-recovery-account")).toHaveCount(3);
-  await expect(accounts).toContainText("Personal Max");
-  await expect(accounts).toContainText("Sign-In Required");
-  await expect(accounts).toContainText("Status Unknown");
-  await expect(accounts).not.toContainText("Work Subscription", { useInnerText: true });
-  await expect(card.locator(".primary")).toHaveCount(1);
+  const dialog = await openChooser(page, card);
+  await expect(dialog).toContainText("Continue this session with another Claude Code account on runner-1.");
+  const rows = dialog.getByRole("radiogroup", { name: "Accounts" });
+  await expect(rows.getByRole("radio")).toHaveCount(3);
+  await expect(accountRow(dialog, "Personal Max")).toContainText("Signed In");
+  await expect(accountRow(dialog, "Team Pilot")).toContainText("Sign-In Required");
+  await expect(accountRow(dialog, "Lab Sandbox")).toContainText("Status Unknown");
+  await expect(rows).not.toContainText("Work Subscription", { useInnerText: true });
+  await expect(accountRow(dialog, "Team Pilot").getByRole("button", { name: "Sign In to Team Pilot" })).toBeVisible();
+  await expect(card.locator(".auth-recovery-accounts")).toHaveCount(0);
+  await expect(dialog.locator(".primary")).toHaveCount(1);
 
-  await accounts.getByRole("button", { name: "Use Personal Max" }).click();
+  await expect(dialog.getByRole("radio", { name: /^Personal Max/ })).toBeChecked();
+  await dialog.getByRole("button", { name: "Use Account" }).click();
+  await expect(dialog).toBeHidden();
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_AUTH_RECOVERY_E2E__.selections())).toEqual([{
     requestId: "provider-auth:recovery-e2e",
     providerAccountId: "claude-personal",
@@ -129,17 +156,94 @@ test("Choose Another Account… lists the other accounts, and choosing one names
   }]);
 });
 
-test("a refused selection keeps the card open and explains the next action", async ({ page }) => {
+test("email labels stay masked in the dialog until Show Emails", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const card = await open(page, "scenario=email&emailLabels=1");
+  const dialog = await openChooser(page, card);
+  await expect(dialog.getByRole("radio", { name: /^Hidden Account 1/ })).toBeVisible();
+  expect(await dialog.innerHTML()).not.toContain("jordan.personal@example.net");
+  await dialog.getByRole("button", { name: "Show Emails" }).click();
+  await expect(dialog.getByRole("radio", { name: /^jordan\.personal@example\.net/ })).toBeVisible();
+  await dialog.getByRole("button", { name: "Hide Emails" }).click();
+  expect(await dialog.innerHTML()).not.toContain("jordan.personal@example.net");
+});
+
+test("a refused choice is a field error in that row, which takes focus, and stays on the card after Cancel", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   const card = await open(page, "scenario=refused");
-  await chooseAnotherAccount(page, card);
-  await card.getByRole("button", { name: "Check and Use Team Pilot" }).click();
-  const row = card.locator('[data-availability="sign_in_required"]');
-  const refusal = row.getByRole("alert");
-  await expect(refusal).toContainText("signed out. Sign in to it, then choose it again.");
-  // The refusal appears beside the chosen account and is scrolled into view, not below the fold.
-  await expect(refusal).toBeInViewport();
-  await expect(row.getByRole("button", { name: "Sign In" })).toBeInViewport();
+  const dialog = await openChooser(page, card);
+  await dialog.getByRole("button", { name: "Use Account" }).click();
+  const row = accountRow(dialog, "Personal Max");
+  await expect(row.locator(".field-error")).toHaveText("This account is signed out. Sign in to it, then choose it again.");
+  // The Machine now reports it signed out: the row says so and offers Sign In, and Use Account waits.
+  await expect(row).toContainText("Sign-In Required");
+  await expect(row.getByRole("button", { name: "Sign In to Personal Max" })).toBeVisible();
+  const use = dialog.getByRole("button", { name: "Use Account" });
+  await expect(use).toBeDisabled();
+  await expect(use).toHaveAccessibleDescription("This account is signed out. Sign in to it first, then use it.");
+  await expect(dialog.getByRole("button", { name: "Check and Use" })).toHaveCount(0);
+  // The row was rebuilt around its new Sign In and kept the focus a refusal gives it.
+  const radio = dialog.getByRole("radio", { name: /^Personal Max/ });
+  await expect(radio).toBeFocused();
+  await expect(radio).toHaveAttribute("aria-invalid", "true");
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(dialog).toBeHidden();
+  await expect(card.locator(".notice")).toHaveText("This account is signed out. Sign in to it, then choose it again.");
+});
+
+test("an account removed while the dialog is open leaves the list with a masked notice and clears the choice", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const card = await open(page, "scenario=email&emailLabels=1");
+  const dialog = await openChooser(page, card);
+  await expect(dialog.getByRole("radio", { name: /^Hidden Account 1/ })).toBeChecked();
+  await page.evaluate(() => window.__WOLLIPOG_AUTH_RECOVERY_E2E__.removeAccount("claude-personal"));
+  await expect(dialog.locator(".notice")).toHaveText("Hidden Account 1 was removed from runner-1, so it's no longer listed.");
+  await expect(dialog.getByRole("radio")).toHaveCount(2);
+  // The row left keeps its number, so the sentence cannot be read as naming it.
+  await expect(dialog.getByRole("radio", { name: /^Hidden Account 2/ })).toBeVisible();
+  await expect(dialog.getByRole("radio", { checked: true })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "Use Account" })).toBeDisabled();
+  expect(await dialog.innerHTML()).not.toContain("jordan.personal@example.net");
+});
+
+test("an account_unavailable refusal for an account just removed reads as its removal, never 'is not configured'", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const card = await open(page, "scenario=removed");
+  const dialog = await openChooser(page, card);
+  await dialog.getByRole("button", { name: "Use Account" }).click();
+  await expect(dialog.locator(".notice")).toHaveText("Personal Max was removed from runner-1, so it's no longer listed.");
+  await expect(dialog.getByRole("radio", { name: /^Personal Max/ })).toHaveCount(0);
+  await expect(page.getByText(/not configured/)).toHaveCount(0);
+});
+
+test("a conversation that can't switch closes the dialog, says so on the card, and drops Choose Another Account…", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const card = await open(page, "scenario=not-resumable&width=1440&height=900");
+  const dialog = await openChooser(page, card);
+  await dialog.getByRole("button", { name: "Use Account" }).click();
+  await expect(dialog).toBeHidden();
+  const notice = card.locator(".notice");
+  await expect(notice).toHaveText("This conversation can't continue under another account. Sign in again " +
+    "with the current account, or start a new session.");
+  expect(await footer(card)).toEqual(["Dismiss Recovery", "Use Current Account (primary)"]);
+  // The notice heads the body that scrolls, and the facts keep their room under it.
+  await expect(card.locator(".request-card-body > .notice")).toHaveCount(1);
+  expect(await visibleInBody(card, notice), "the notice").toBe(true);
+  // A fact row has no box of its own (its term and value sit in the list's grid), so both are measured.
+  for (const label of ["This Session Uses", "Signed In Now", "Last Checked"]) {
+    expect(await visibleInBody(card, card.locator("dt", { hasText: label })), label).toBe(true);
+    expect(await visibleInBody(card, fact(card, label)), `${label}: its value`).toBe(true);
+  }
+});
+
+test("with no other account the dialog says who can add one and offers Open Connections", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const card = await open(page, "scenario=none");
+  const dialog = await openChooser(page, card);
+  await expect(dialog.getByText("No Other Accounts")).toBeVisible();
+  await expect(dialog).toContainText("A machine owner or organization admin can add one in the machine's Provider Accounts section.");
+  await expect(dialog.getByRole("button", { name: "Open Connections" })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Use Account" })).toHaveCount(0);
 });
 
 test("a provider without an email says so instead of guessing", async ({ page }) => {
@@ -161,16 +265,6 @@ test("an older runner keeps the card's actions with update guidance and no ident
   await expect(fact(card, "Last Checked").getByRole("button", { name: "Check Again" })).toBeVisible();
   expect(await page.evaluate(() => window.__WOLLIPOG_AUTH_RECOVERY_E2E__.identityRequests())).toBe(0);
 });
-
-/** Whether an element is wholly inside the card body's visible part, without scrolling it. */
-async function visibleInBody(card: Locator, target: Locator): Promise<boolean> {
-  const handle = await target.elementHandle();
-  return card.evaluate((element, node) => {
-    const body = element.querySelector<HTMLElement>(".request-card-body")!.getBoundingClientRect();
-    const rect = (node as HTMLElement).getBoundingClientRect();
-    return rect.height > 0 && rect.top >= body.top - 0.5 && rect.bottom <= body.bottom + 0.5;
-  }, handle);
-}
 
 test("while a sign-in runs, what the person must do is in view without scrolling", async ({ page }) => {
   for (const [width, height] of [[1440, 900], [390, 844]] as const) {
@@ -248,13 +342,14 @@ for (const [width, height] of [[1440, 900], [390, 844]] as const) {
       expect(layout.primaryClipped, scenario).toBe(false);
       expect(layout.bodyScrolls, scenario).toBe(true);
     }
-    // With the other accounts open the body grows past the dock's cap, and the body, not an inner
-    // region, scrolls to the last account.
+    // Choose Another Account opens over the card, a sheet on a phone, with every row and its footer
+    // in view and nothing past the viewport's edge.
     const card = await open(page, `scenario=email&width=${width}&height=${height}`);
-    await chooseAnotherAccount(page, card);
-    const last = card.getByRole("button", { name: "Check and Use Lab Sandbox" });
-    await last.scrollIntoViewIfNeeded();
-    await expect(last).toBeInViewport();
-    await expect(card.getByRole("button", { name: "Use Current Account" })).toBeInViewport();
+    const dialog = await openChooser(page, card);
+    await expect(dialog.getByRole("radio", { name: /^Lab Sandbox/ })).toBeInViewport();
+    await expect(dialog.getByRole("button", { name: "Use Account" })).toBeInViewport();
+    const right = await dialog.evaluate((element) => Math.max(...[element, ...element.querySelectorAll<HTMLElement>("*")]
+      .map((child) => child.getBoundingClientRect().right)));
+    expect(right).toBeLessThanOrEqual(width + 0.5);
   });
 }

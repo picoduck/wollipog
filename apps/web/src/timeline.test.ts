@@ -931,6 +931,28 @@ test("permission resolution reasons and Parent Control provenance survive timeli
   assert.equal(permission.resolvedByParentSessionId, "parent-session");
 });
 
+test("each permission occurrence keeps the decider its own resolution recorded (#2628)", () => {
+  const request = () => ev({
+    kind: "permission_request",
+    requestId: "0",
+    title: "Run Command",
+    options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+  });
+  const items = deriveTimeline([
+    request(),
+    ev({ kind: "permission_resolved", requestId: "0", optionId: "allow", resolvedBy: { kind: "user", userId: "usr_grace" } }),
+    request(),
+    ev({ kind: "permission_resolved", requestId: "0", optionId: "allow", resolvedBy: { kind: "policy", policyId: "allow-reads" } }),
+    request(),
+    ev({ kind: "permission_resolved", requestId: "0", optionId: "allow" }),
+  ]) as Array<Extract<import("./timeline.js").TimelineItem, { kind: "permission" }>>;
+  assert.deepEqual(items.map((item) => item.resolvedBy), [
+    { kind: "user", userId: "usr_grace" },
+    { kind: "policy", policyId: "allow-reads" },
+    undefined,
+  ]);
+});
+
 test("permission context rides into the timeline item", () => {
   const items = deriveTimeline([
     ev({

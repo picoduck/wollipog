@@ -1,28 +1,57 @@
-import { BoardIcon } from "./Icons.js";
+import { BoardIcon, ChevronDownIcon, ComputerIcon, MoreHorizontalIcon } from "./Icons.js";
 import { State, useSnapshotState } from "./State.js";
-import { type DragEvent, type MouseEvent, useMemo, useRef, useState } from "react";
-import { BOARD_COLUMNS, type BoardColumn, type BoxView, type SessionReminderView, type SessionView } from "@wollipog/protocol";
+import { type DragEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  BOARD_COLUMNS,
+  plainTextPreview,
+  type BoardColumn,
+  type BoxView,
+  type PendingApproval,
+  type PermissionOption,
+  type SessionReminderView,
+  type SessionView,
+} from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
-import { relativeTime } from "../format.js";
 import { destination } from "../navigation.js";
-import { machineOptionLabels, runnerDisplay } from "../runners.js";
-import { SessionStatusIndicators, ReminderBadge, SessionPinIndicator, SnoozedAttentionBadge, ThreadDot } from "./common.js";
-import { inboxThreadChildrenLabel, inboxThreadChildState, isInboxBlocked, type InboxThreadChildren } from "../inbox.js";
-import { useLongPress } from "./interactions.js";
+import { runnerDisplay } from "../runners.js";
+import { SessionPinIndicator, ThreadDot } from "./common.js";
+import { inboxProjectName, inboxThreadChildrenLabel, inboxThreadChildState, isInboxBlocked, type InboxThreadChildren } from "../inbox.js";
+import { useAccessibleMenu, useLongPress } from "./interactions.js";
 import { sessionCommandRefusal } from "../session-command-permissions.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { MeasuredVirtualList } from "./MeasuredVirtualList.js";
 import { useExperiments } from "../use-experiments.js";
-import { snoozedSessionAttentionReason } from "../session-reminders.js";
+import { activeBoardFilterCount, filterBoardSessions } from "./BoardFilters.js";
+import { showsActivityStrip } from "../activity.js";
+import { boardCardDecisions, boardCardRequestCode, boardCardSignInItems, type BoardCardSignInItem } from "../board-card.js";
+import { sessionRowStatus } from "../session-row-status.js";
+import { sessionDisplayTitle } from "../session-title.js";
+import { ActivityStrip } from "./ActivityStrip.js";
+import { AgentIcon } from "./AgentIcon.js";
+import { inboxRowReadsClock } from "./InboxList.js";
+import { inboxRowTimestamp, sessionStalledForMs, SessionRowTime } from "./InboxRow.js";
+import { MenuItem, MenuSeparator, MenuSurface } from "./Menu.js";
+import { Notice } from "./Notice.js";
+import { SessionRowStatusBadge } from "./SessionRowStatusBadge.js";
 
 const sessionCardKey = (session: SessionView) => session.id;
-const estimateSessionCard = (session: SessionView) => session.pendingApproval ? 230 : session.preview ? 155 : 120;
+const estimateSessionCard = (session: SessionView) => session.pendingApproval ? 196 : 118;
+
+/** A column header's status dot (§11.1): Running is info, Needs Input warning, the rest neutral. */
+const COLUMN_TONE: Record<BoardColumn, "neutral" | "info" | "warning"> = {
+  queued: "neutral",
+  running: "info",
+  input_required: "warning",
+  review: "neutral",
+  done: "neutral",
+};
 
 /**
  * The Sessions view's board mode: the same scoped session list the list mode renders (project
  * split, search, and reminder filtering applied by the parent), grouped into status columns.
- * The Machine and Agent filters below are board-local refinements on top of that shared scope.
+ * The Machine and Agent filters are board-local refinements on top of that shared scope; their
+ * menu buttons live in the Sessions tab row (`BoardFilterTools`, #2201).
  */
 export function Board({ sessions: scoped, reminders = new Map(), stalledSessionIds = new Set(), pinnedSessionIds = new Set(), searchActive, onShowAll, onNewSession, onSessionMenu }: {
   /** Already scoped by the Sessions toolbar: unarchived, split, query, and reminder mode. */
@@ -49,35 +78,26 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
   const runners = useStoreSelector((s) => s.runners);
   const boxes = useStoreSelector((s) => s.boxes);
   const filters = useStoreSelector((s) => s.filters);
-
-  const agentOptions = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const r of runners.values()) for (const a of r.agents) map.set(a.id, a.name);
-    return [...map.entries()];
-  }, [runners]);
+  const projects = useStoreSelector((s) => s.projects);
+  const projectsSupported = useStoreSelector((s) => s.projectsSupported);
 
   const boxByRunner = useMemo(() => {
     const m = new Map<string, BoxView>();
     for (const b of boxes.values()) m.set(b.runnerId, b);
     return m;
   }, [boxes]);
-  const machineName = (runnerId: string) =>
-    runnerDisplay(runners.get(runnerId), boxByRunner.get(runnerId), runnerId).name;
-  // Two Machines may share a name; filtering by the wrong one silently hides the sessions you want.
-  const machineLabels = useMemo(
-    () => machineOptionLabels([...runners.values()], (runnerId) => boxByRunner.get(runnerId)),
-    [boxByRunner, runners],
+  // The machine is quiet meta after the project, and only where there is more than one (#2222).
+  const multipleMachines = useMemo(
+    () => new Set([...runners.keys(), ...scoped.map((session) => session.runnerId)]).size > 1,
+    [runners, scoped],
   );
+  const machineName = (runnerId: string) =>
+    multipleMachines ? runnerDisplay(runners.get(runnerId), boxByRunner.get(runnerId), runnerId).name : null;
+  const projectName = (session: SessionView) => inboxProjectName(session, projectsSupported ? projects : undefined);
 
   const scopedCount = scoped.length;
-  const filtered = Boolean(filters.runnerId || filters.agentId);
-  const visible = useMemo(
-    () =>
-      scoped
-        .filter((s) => !filters.runnerId || s.runnerId === filters.runnerId)
-        .filter((s) => !filters.agentId || s.agentId === filters.agentId),
-    [scoped, filters],
-  );
+  const filtered = activeBoardFilterCount(filters) > 0;
+  const visible = useMemo(() => filterBoardSessions(scoped, filters), [scoped, filters]);
 
   const byColumn = useMemo(() => {
     const cols = new Map<string, SessionView[]>();
@@ -111,11 +131,41 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
   // into child elements, so a plain boolean would flicker off mid-hover.
   const [dragOverCol, setDragOverCol] = useState<BoardColumn | null>(null);
   const dragDepth = useRef(new Map<BoardColumn, number>());
+  // While a card is dragged, empty columns open from their 40px strips to full width so they are
+  // easy to aim at. The change waits a task: Chromium cancels a drag whose source reflows inside
+  // its own dragstart.
+  const [dragging, setDragging] = useState(false);
+  const dragTimer = useRef<number | null>(null);
+  const startDrag = () => {
+    if (dragTimer.current !== null) window.clearTimeout(dragTimer.current);
+    dragTimer.current = window.setTimeout(() => {
+      dragTimer.current = null;
+      setDragging(true);
+    }, 0);
+  };
+  useEffect(() => () => {
+    if (dragTimer.current !== null) window.clearTimeout(dragTimer.current);
+  }, []);
+  // A card that unmounts mid-drag (a live column move) never receives its dragend, so any drag that
+  // ends anywhere closes the strips again.
+  useEffect(() => {
+    if (!dragging) return;
+    const end = () => setDragging(false);
+    window.addEventListener("dragend", end, true);
+    window.addEventListener("drop", end, true);
+    return () => {
+      window.removeEventListener("dragend", end, true);
+      window.removeEventListener("drop", end, true);
+    };
+  }, [dragging]);
   // dragend fires on the SOURCE card for every outcome incl. Escape / drop-outside —
   // the only reliable place to clear highlight + depth state after an aborted drag.
   const clearDragState = () => {
+    if (dragTimer.current !== null) window.clearTimeout(dragTimer.current);
+    dragTimer.current = null;
     dragDepth.current.clear();
     setDragOverCol(null);
+    setDragging(false);
   };
   const colDragProps = (colId: BoardColumn) => ({
     onDragEnter: (e: DragEvent<HTMLDivElement>) => {
@@ -142,6 +192,7 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
       e.preventDefault();
       dragDepth.current.set(colId, 0);
       setDragOverCol(null);
+      setDragging(false);
       const id = e.dataTransfer.getData("text/wollipog-session");
       if (!id) return;
       if (allSessions.get(id)?.column === colId) return;
@@ -153,51 +204,6 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
 
   return (
     <div className="board-wrap" tabIndex={-1}>
-      <div className="toolbar">
-        <div className="filters">
-          <label className="filter">
-            <span>Machine</span>
-            <select
-              value={filters.runnerId ?? ""}
-              onChange={(e) => setFilters({ runnerId: e.target.value || null })}
-            >
-              <option value="">All Machines</option>
-              {[...runners.values()].map((r) => (
-                <option key={r.runnerId} value={r.runnerId}>
-                  {machineLabels.get(r.runnerId) ?? machineName(r.runnerId)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="filter">
-            <span>Agent</span>
-            <select
-              value={filters.agentId ?? ""}
-              onChange={(e) => setFilters({ agentId: e.target.value || null })}
-            >
-              <option value="">All Agents</option>
-              {agentOptions.map(([id, name]) => (
-                <option key={id} value={id}>
-                  {name}
-                </option>
-              ))}
-            </select>
-          </label>
-          {(filters.runnerId || filters.agentId) && (
-            <button
-              className="btn ghost sm"
-              onClick={() => setFilters({ runnerId: null, agentId: null })}
-            >
-              Clear
-            </button>
-          )}
-        </div>
-        <div className="board-count">
-          {visible.length} Session{visible.length === 1 ? "" : "s"}
-        </div>
-      </div>
-
-
       {visible.length === 0 && (snapshot.offline || snapshot.loading) ? (
         // No snapshot, or no connection: an empty map proves nothing yet (§12.5).
         <State variant={snapshot.offline ? "offline" : "loading"}>
@@ -211,6 +217,7 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
         filtered && scopedCount > 0 ? (
           <State
             variant="no-results"
+            compact
             icon={<BoardIcon />}
             title="No Matching Sessions"
             actions={
@@ -255,27 +262,34 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
           </State>
         )
       ) : (
-        <div className="board">
+        <div className={`board${dragging ? " is-dragging" : ""}`}>
           {BOARD_COLUMNS.map((col) => {
             const list = byColumn.get(col.id) ?? [];
+            // An empty column folds to a 40px strip with its header turned on end (#2201); it stays a
+            // drop target, and opens to full width while a card is dragged.
+            const empty = list.length === 0;
             return (
               <div
                 key={col.id}
-                className={`column col-${col.id}${dragOverCol === col.id ? " drag-over" : ""}`}
+                className={`column col-${col.id}${empty ? " is-empty" : ""}${dragOverCol === col.id ? " drag-over" : ""}`}
                 {...colDragProps(col.id)}
               >
                 <div className="column-head">
-                  <span>{col.title}</span>
-                  <span className="column-count">{list.length}</span>
+                  <span className={`column-dot t-${COLUMN_TONE[col.id]}`} aria-hidden="true" />
+                  <span className="column-title">{col.title}</span>
+                  <span className="count">{list.length}</span>
                 </div>
                 <BoardColumnBody
                   sessions={list}
                   pinnedSessionIds={pinnedSessionIds}
                   reminders={reminders}
+                  stalledSessionIds={stalledSessionIds}
+                  projectName={projectName}
                   machineName={machineName}
-                  runnerOnline={(runnerId) => runners.get(runnerId)?.status === "online"}
+                  runnerStatus={(runnerId) => runners.get(runnerId)?.status}
                   onOpen={(sessionId) => navigate({ name: "session", id: sessionId })}
                   threadChildren={threadChildren}
+                  onDragStart={startDrag}
                   onDragEnd={clearDragState}
                   onSessionMenu={onSessionMenu}
                 />
@@ -292,20 +306,26 @@ function BoardColumnBody({
   sessions,
   pinnedSessionIds,
   reminders,
+  stalledSessionIds,
+  projectName,
   machineName,
-  runnerOnline,
+  runnerStatus,
   onOpen,
   threadChildren,
+  onDragStart,
   onDragEnd,
   onSessionMenu,
 }: {
   sessions: SessionView[];
   pinnedSessionIds: ReadonlySet<string>;
   reminders: ReadonlyMap<string, SessionReminderView>;
-  machineName: (runnerId: string) => string;
-  runnerOnline: (runnerId: string) => boolean;
+  stalledSessionIds: ReadonlySet<string>;
+  projectName: (session: SessionView) => string;
+  machineName: (runnerId: string) => string | null;
+  runnerStatus: (runnerId: string) => string | undefined;
   onOpen: (sessionId: string) => void;
   threadChildren: ReadonlyMap<string, InboxThreadChildren>;
+  onDragStart: () => void;
   onDragEnd: () => void;
   onSessionMenu: (sessionId: string, anchor: { x: number; y: number }, restoreTarget: () => HTMLElement | null) => void;
 }) {
@@ -321,10 +341,14 @@ function BoardColumnBody({
             session={session}
             pinned={pinnedSessionIds.has(session.id)}
             reminder={reminders.get(session.id)}
+            projectName={projectName(session)}
             machineName={machineName(session.runnerId)}
-            runnerOnline={runnerOnline(session.runnerId)}
+            runnerOnline={runnerStatus(session.runnerId) === "online"}
+            runnerConnected={runnerStatus(session.runnerId) !== "offline"}
+            stalled={stalledSessionIds.has(session.id)}
             onOpen={() => onOpen(session.id)}
             threadChildren={threadChildren.get(session.id) ?? null}
+            onDragStart={onDragStart}
             onDragEnd={onDragEnd}
             onSessionMenu={onSessionMenu}
           />
@@ -345,30 +369,47 @@ function SessionCard({
   session,
   pinned,
   reminder,
+  projectName,
   machineName,
   runnerOnline,
+  runnerConnected,
+  stalled,
   onOpen,
   threadChildren,
+  onDragStart,
   onDragEnd,
   onSessionMenu,
 }: {
   session: SessionView;
   pinned: boolean;
   reminder?: SessionReminderView;
-  machineName: string;
+  projectName: string;
+  /** The machine, as quiet meta after the project, only where there is more than one machine. */
+  machineName: string | null;
+  /** The machine is online: a decision can reach it. */
   runnerOnline: boolean;
+  /** The machine is not known to be offline: the status reads as the row's does (#2209). */
+  runnerConnected: boolean;
+  stalled: boolean;
   onOpen: () => void;
   threadChildren: InboxThreadChildren | null;
+  onDragStart: () => void;
   onDragEnd: () => void;
   onSessionMenu: (sessionId: string, anchor: { x: number; y: number }, restoreTarget: () => HTMLElement | null) => void;
 }) {
-  const api = useApi();
-  const [busy, setBusy] = useState(false);
-  const snoozedAttention = reminder?.state === "pending" ? snoozedSessionAttentionReason(session) : null;
-  const extraSnoozedAttention = snoozedAttention?.kind === "orphaned_background_work" ||
-      snoozedAttention?.kind === "background_delivery_watchdog"
-    ? snoozedAttention
-    : null;
+  // The card reads its own activity, as a list row does, so one session's tool calls re-render one card.
+  const activity = useStoreSelector((state) => state.activity.get(session.id));
+  const activityNow = useStoreSelector((state) =>
+    inboxRowReadsClock(session, state.activity.get(session.id), stalled, state.activityNow) ? state.activityNow : 0);
+  const lastActivityAt = inboxRowTimestamp(session, activity);
+  const status = sessionRowStatus(session, {
+    runnerOnline: runnerConnected,
+    reminder,
+    stalledForMs: sessionStalledForMs(stalled, activityNow, lastActivityAt),
+  });
+  const strip = showsActivityStrip(session.status, activity, activityNow);
+  const agent = sessionAgentLabel(session.agentName, session.driver, session.agentId);
+  const request = session.pendingApproval;
   // Resolved by session id AT RESTORE TIME, not by card instance: a live column move remounts
   // the virtualized card while its menu is open, and a ref to the old instance would strand
   // focus on <body>. The board canvas itself is the fallback (it is focusable for the F6 zone).
@@ -381,18 +422,6 @@ function SessionCard({
   const openMenu = (anchor: { x: number; y: number }) => onSessionMenu(session.id, anchor, restoreTarget);
   const longPress = useLongPress(openMenu);
 
-  // A person the server refuses a decision (a Viewer) sees the options disabled with the reason (#1857).
-  const respondRefusal = sessionCommandRefusal(session, "respond");
-  const approve = async (e: MouseEvent, optionId: string | null) => {
-    e.stopPropagation();
-    if (!session.pendingApproval || respondRefusal !== null) return;
-    setBusy(true);
-    try {
-      await api.approve(session.id, { requestId: session.pendingApproval.requestId, optionId });
-    } finally {
-      setBusy(false);
-    }
-  };
 
   return (
     <article
@@ -417,77 +446,262 @@ function SessionCard({
         longPress.handlers.onDragStart();
         e.dataTransfer.setData("text/wollipog-session", session.id);
         e.dataTransfer.effectAllowed = "move";
+        onDragStart();
       }}
       onDragEnd={onDragEnd}
     >
-      <div className="card-top">
-        <SessionStatusIndicators session={session} disconnected={!runnerOnline} attention="pills" />
-        <span className="card-top-trailing">
-          {pinned && <SessionPinIndicator />}
-          <span className="card-time">{relativeTime(session.lastEventAt ?? session.updatedAt)}</span>
-        </span>
-      </div>
+      {/* The card's one primary click (§5.3): its box is stretched over the whole card. Screen readers
+          meet the title first. */}
       <button
         type="button"
         className="card-title card-open"
         onClick={(event) => { event.stopPropagation(); onOpen(); }}
       >
-        {session.title}
+        {sessionDisplayTitle(session.title)}
       </button>
-      {session.preview && <div className="card-preview">{session.preview}</div>}
-      {session.pendingApproval && session.pendingApproval.kind === "question" ? (
-        // Structured questions have no inline options (options[] is empty by design) — the
-        // card offers Open, which lands on the detail view's interactive question card.
-        <div className="card-approval" onClick={(e) => e.stopPropagation()}>
-          <div className="approval-title">❓ {session.pendingApproval.title}</div>
-          <div className="approval-actions">
-            <button className="btn sm primary" onClick={onOpen}>
-              Answer…
-            </button>
-          </div>
-        </div>
-      ) : session.pendingApproval ? (
-        <div className="card-approval" onClick={(e) => e.stopPropagation()}>
-          <div className="approval-title">{session.pendingApproval.title}</div>
-          {respondRefusal !== null && (
-            <div className="muted approval-refusal" id={`card-approval-refusal-${session.id}`}>{respondRefusal}</div>
-          )}
-          <div className="approval-actions">
-            {session.pendingApproval.options.map((o) => (
-              <button
-                key={o.optionId}
-                className={`btn sm ${o.kind?.startsWith("allow") ? "primary" : "ghost danger"}`}
-                disabled={busy || !runnerOnline || respondRefusal !== null}
-                aria-describedby={respondRefusal !== null ? `card-approval-refusal-${session.id}` : undefined}
-                onClick={(e) => approve(e, o.optionId)}
-              >
-                {o.name}
-              </button>
-            ))}
-          </div>
-        </div>
-      ) : null}
-
-      <div className="card-meta">
-        {threadChildren && (
-          <span className={`inbox-thread-family${threadChildren.waiting > 0 ? " waiting" : ""}`} title={inboxThreadChildrenLabel(threadChildren)}>
-            <span className="inbox-thread-dots" aria-hidden="true">
-              {threadChildren.children.map((child) => <ThreadDot key={child.id} state={child.state} title={child.title} />)}
-            </span>
-            <span className="inbox-thread-family-text">{inboxThreadChildrenLabel(threadChildren)}</span>
+      {/* Line 1 (#2222), drawn first by `order`: who and where, which gives up width first, then the
+          pin and the time. It is written after the stretched open button, as is the ⋯ that ends the
+          line, so their tooltips and controls stack above it. */}
+      <div className="card-head">
+        <span className="card-sender">
+          <AgentIcon driver={session.driver} agentName={session.agentName} size={16} />
+          <span className="card-sender-text">{agent} · {projectName}</span>
+        </span>
+        {machineName && (
+          <span className="card-machine">
+            <ComputerIcon size={14} />
+            <span className="sr-only">Machine: </span>
+            <span className="card-machine-name">{machineName}</span>
           </span>
         )}
-        {extraSnoozedAttention && <SnoozedAttentionBadge reason={extraSnoozedAttention} />}
-        {reminder && <ReminderBadge reminder={reminder} />}
-        <span className="tag tag-machine" title="Runner / machine">
-          {machineName}
+        <span className="card-head-trail">
+          {pinned && <SessionPinIndicator />}
+          <SessionRowTime className="card-time" lastActivityAt={session.attention?.meaningfulAt ?? lastActivityAt} reminder={reminder} />
         </span>
-        {session.agentName && (
-          <span className="tag tag-agent">{sessionAgentLabel(session.agentName, session.driver, session.agentId)}</span>
-        )}
-        {session.useWorktree && <span className="tag tag-wt" title={session.worktreePath ?? "isolated worktree"}>Worktree</span>}
-        {session.runId && <span className="tag tag-run">Run</span>}
       </div>
+      {/* ⋯ ends line 1 on screen and follows it in focus order, before the request's buttons. */}
+      <button
+        type="button"
+        className="icon-btn sm card-more"
+        aria-label="More Actions"
+        title="More Actions (Shift+F10)"
+        aria-haspopup="menu"
+        onClick={(event) => {
+          event.stopPropagation();
+          const box = event.currentTarget.getBoundingClientRect();
+          openMenu({ x: box.left, y: box.bottom });
+        }}
+      >
+        <MoreHorizontalIcon />
+      </button>
+      <div className="card-status">
+        <SessionRowStatusBadge status={status} />
+        {/* A parent shows its family chip where another card shows the strip (#2222). */}
+        {threadChildren
+          ? <CardFamilyChip family={threadChildren} besideKey={[status.badge?.ariaLabel ?? "", ...status.others].join("\n")} />
+          : strip && <ActivityStrip activity={activity} now={activityNow} compact />}
+      </div>
+      {request
+        ? <CardRequest session={session} request={request} runnerOnline={runnerOnline} onOpen={onOpen} />
+        : <div className="card-preview">{plainTextPreview(session.preview)}</div>}
     </article>
+  );
+}
+
+/**
+ * A parent card's family chip (#896, #2215, #2222): one dot per child, then the rollup ("4 Children ·
+ * 1 Awaiting Input"). It is an image named by the whole rollup, with the same tooltip, and its visible
+ * words stay out of the accessible tree. The words show only while the whole chip fits beside the
+ * badge in this card; otherwise it keeps its dots. The card measures that itself, because a Board
+ * column's width says nothing about the list pane's.
+ */
+function CardFamilyChip({ family, besideKey }: {
+  family: InboxThreadChildren;
+  /** What sits beside the chip (the badge and its "+N"), so a change to it measures again. */
+  besideKey: string;
+}) {
+  const label = inboxThreadChildrenLabel(family);
+  const chipRef = useRef<HTMLSpanElement>(null);
+  const [dotsOnly, setDotsOnly] = useState(false);
+  useLayoutEffect(() => {
+    const chip = chipRef.current;
+    const line = chip?.parentElement;
+    if (!chip || !line) return;
+    const measure = () => {
+      // The chip's natural width with its words, read synchronously with the class and the line's
+      // width cap lifted (a capped chip would ellipsize its words and still "fit"), so no frame shows it.
+      const wasDotsOnly = chip.classList.contains("dots-only");
+      const maxWidth = chip.style.maxWidth;
+      chip.classList.remove("dots-only");
+      chip.style.maxWidth = "none";
+      const full = chip.getBoundingClientRect().width;
+      chip.style.maxWidth = maxWidth;
+      if (wasDotsOnly) chip.classList.add("dots-only");
+      const gap = parseFloat(line.ownerDocument.defaultView?.getComputedStyle(line).columnGap ?? "") || 0;
+      let room = line.clientWidth;
+      for (const sibling of line.children) {
+        if (sibling !== chip) room -= sibling.getBoundingClientRect().width + gap;
+      }
+      setDotsOnly(full > room + 0.5);
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    // The line keeps its size when what sits beside the chip grows (a "+1" joining the badge), so the
+    // siblings are watched too; a sibling that appears or goes changes `besideKey` and re-runs this.
+    const observer = new ResizeObserver(measure);
+    observer.observe(line);
+    for (const sibling of line.children) if (sibling !== chip) observer.observe(sibling, { box: "border-box" });
+    return () => observer.disconnect();
+  }, [label, besideKey]);
+  return (
+    <span
+      ref={chipRef}
+      className={`inbox-thread-family${family.waiting > 0 ? " waiting" : ""}${dotsOnly ? " dots-only" : ""}`}
+      role="img"
+      aria-label={label}
+      title={label}
+    >
+      <span className="inbox-thread-dots" aria-hidden="true">
+        {family.children.map((child) => <ThreadDot key={child.id} state={child.state} title={child.title} />)}
+      </span>
+      <span className="inbox-thread-family-text" aria-hidden="true">{label}</span>
+    </span>
+  );
+}
+
+/**
+ * A card's request (#2222): a warning inset notice with the request in plain words, a code line when
+ * the request has one, then Approve and Deny sharing the card's width (§3.1). A question offers Answer
+ * in Session; a sign-in, one Sign In menu button. Viewer refusals keep their visible reason line.
+ */
+function CardRequest({ session, request, runnerOnline, onOpen }: {
+  session: SessionView;
+  request: PendingApproval;
+  runnerOnline: boolean;
+  onOpen: () => void;
+}) {
+  const api = useApi();
+  const [busy, setBusy] = useState(false);
+  // A person the server refuses a decision (a Viewer) sees the options disabled with the reason (#1857).
+  const respondRefusal = sessionCommandRefusal(session, "respond");
+  const refusalId = `card-approval-refusal-${session.id}`;
+  const unavailable = busy || !runnerOnline || respondRefusal !== null;
+  const decide = async (optionId: string) => {
+    if (unavailable) return;
+    setBusy(true);
+    try {
+      await api.approve(session.id, { requestId: request.requestId, optionId });
+    } finally {
+      setBusy(false);
+    }
+  };
+  const optionButton = (option: PermissionOption, label: string, primary: boolean) => (
+    <button
+      key={option.optionId}
+      type="button"
+      className={`btn sm${primary ? " primary" : ""}`}
+      disabled={unavailable}
+      aria-describedby={respondRefusal !== null ? refusalId : undefined}
+      onClick={() => void decide(option.optionId)}
+    >
+      {label}
+    </button>
+  );
+
+  const question = request.kind === "question";
+  const signIn = request.kind === "authentication";
+  const decisions = question || signIn ? null : boardCardDecisions(request.options);
+  const code = question ? null : boardCardRequestCode(request);
+  const actions = question ? (
+    // Structured questions have no inline options (options[] is empty by design): the card opens the
+    // session, whose question card is interactive.
+    <button type="button" className="btn sm primary" onClick={onOpen}>Answer in Session</button>
+  ) : signIn ? (
+    <CardSignInMenu
+      items={boardCardSignInItems(request.options)}
+      unavailable={unavailable}
+      describedBy={respondRefusal !== null ? refusalId : undefined}
+      onChoose={(optionId) => void decide(optionId)}
+    />
+  ) : decisions && (decisions.approve || decisions.deny) ? (
+    <>
+      {decisions.approve && optionButton(decisions.approve, "Approve", true)}
+      {decisions.deny && optionButton(decisions.deny, "Deny", false)}
+    </>
+  ) : null;
+
+  return (
+    // Decisions stay on the card: a click inside, or in a menu portalled from here, never opens it.
+    <div className="card-request" onClick={(e) => e.stopPropagation()}>
+      <Notice tone="warning" className={`card-request-notice${decisions ? " decision-pair" : ""}`} actions={actions}>
+        <p className="card-request-text">{plainTextPreview(request.title)}</p>
+        {code && <code className="card-request-code">{code}</code>}
+        {respondRefusal !== null && !question && (
+          <p className="approval-refusal" id={refusalId}>{respondRefusal}</p>
+        )}
+      </Notice>
+    </div>
+  );
+}
+
+/** A sign-in card's one primary: Sign In, a menu of the methods with their descriptions, then the
+ * danger items, Cancel Sign-In last (#2222, §9.1). */
+function CardSignInMenu({ items, unavailable, describedBy, onChoose }: {
+  items: readonly BoardCardSignInItem[];
+  unavailable: boolean;
+  describedBy?: string;
+  onChoose: (optionId: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const menu = useAccessibleMenu(open, setOpen, "card-sign-in");
+  const methods = items.filter((item) => !item.danger);
+  const danger = items.filter((item) => item.danger);
+  const item = ({ option, label, danger: destructive }: BoardCardSignInItem) => (
+    <MenuItem
+      key={option.optionId}
+      danger={destructive}
+      description={destructive ? undefined : option.description}
+      onClick={() => {
+        menu.close(true);
+        onChoose(option.optionId);
+      }}
+    >
+      {label}
+    </MenuItem>
+  );
+  return (
+    <>
+      <button
+        ref={menu.triggerRef}
+        type="button"
+        className="btn sm primary"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? menu.menuId : undefined}
+        aria-describedby={describedBy}
+        disabled={unavailable || items.length === 0}
+        onClick={menu.toggle}
+        onKeyDown={menu.onTriggerKeyDown}
+      >
+        Sign In
+        <ChevronDownIcon size={14} />
+      </button>
+      {open && (
+        <MenuSurface
+          surfaceRef={menu.menuRef}
+          anchor={{ trigger: menu.triggerRef }}
+          id={menu.menuId}
+          label="Sign In"
+          onDismiss={() => menu.close(true)}
+          onKeyDown={menu.onMenuKeyDown}
+          // The card's long-press must not read a press held inside its own menu.
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          {methods.map(item)}
+          {methods.length > 0 && danger.length > 0 && <MenuSeparator />}
+          {danger.map(item)}
+        </MenuSurface>
+      )}
+    </>
   );
 }

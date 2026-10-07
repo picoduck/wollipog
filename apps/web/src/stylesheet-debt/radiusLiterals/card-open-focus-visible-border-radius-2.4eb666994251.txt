@@ -1,1 +1,0 @@
-|.card-open:focus-visible|border-radius|2

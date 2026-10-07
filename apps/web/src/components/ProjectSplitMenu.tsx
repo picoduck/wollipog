@@ -42,6 +42,9 @@ export interface ProjectSplitActionsProps {
   onPinnedChange: (pinned: boolean) => void;
   onNewSession: (preset: NewSessionPreset) => void;
   onManageProject?: () => void;
+  /** Offered from a phone menu sheet: the archive confirmation replaces the sheet, and its Back
+   * brings the sheet back (§7.5). */
+  confirmBack?: { label: string; run: () => void };
 }
 
 export interface ProjectSplitMenuProps extends ProjectSplitActionsProps {
@@ -121,20 +124,33 @@ const sessionsWord = (count: number) => `${count} Session${count === 1 ? "" : "s
  * danger style (§9.1). Choosing an action runs it after the menu has handed focus back to where it
  * was opened, so a dialog it opens returns focus there.
  */
-export function useProjectSplitActions({
-  split,
-  unfilteredSplit,
-  runner,
-  stopBeforeArchiveSupported = true,
-  pinned,
-  onPinnedChange,
-  onNewSession,
-  onManageProject,
-}: ProjectSplitActionsProps): ProjectSplitActions | null {
+export function useProjectSplitActions(props: ProjectSplitActionsProps | null): ProjectSplitActions | null {
   const api = useApi();
   const { confirm, showToast, showUndo } = useFeedback();
   const phone = useIsMobile();
-  const [renaming, setRenaming] = useState(false);
+  // The group Rename was opened for, and which opening. The dialog belongs to that group: a caller
+  // that follows the current group (the phone app bar) can change it under the open dialog (Back),
+  // and the dialog must then close rather than rename whichever project is current. Each opening has
+  // its own generation, so a slow rename that finishes after its dialog went away cannot close a
+  // newer one.
+  const identity = props ? props.split.key : undefined;
+  const [renaming, setRenaming] = useState<{ key: InboxSplit["key"]; generation: number } | undefined>(undefined);
+  const renameGeneration = useRef(0);
+  if (renaming !== undefined && renaming.key !== identity) setRenaming(undefined);
+  // Null for a group with no project (All, No Project), so a caller that follows the current group
+  // keeps one hook call as the group changes.
+  if (!props) return null;
+  const {
+    split,
+    unfilteredSplit,
+    runner,
+    stopBeforeArchiveSupported = true,
+    pinned,
+    onPinnedChange,
+    onNewSession,
+    onManageProject,
+    confirmBack,
+  } = props;
 
   const durableProject = split.project?.kind === "durable" ? split.project.project : null;
   const durableLocation = split.project?.kind === "durable" ? split.project.primaryLocation : null;
@@ -240,6 +256,7 @@ export function useProjectSplitActions({
       detailRowsOverflow: detail.overflow,
       confirmLabel: archiveStopsRuntime ? "Archive and Stop" : "Archive Sessions",
       ...(archiveStopsRuntime ? { tone: "danger" as const } : {}),
+      ...(confirmBack ? { back: confirmBack } : {}),
     });
     if (!accepted) return;
     try {
@@ -296,7 +313,10 @@ export function useProjectSplitActions({
         id: "rename",
         label: `Rename ${entityLabel}…`,
         unavailableReason: managementUnavailableReason,
-        run: () => setRenaming(true),
+        run: () => {
+          renameGeneration.current += 1;
+          setRenaming({ key: split.key, generation: renameGeneration.current });
+        },
       },
       {
         id: "pin",
@@ -338,12 +358,16 @@ export function useProjectSplitActions({
     name: split.name,
     label: `${split.name} Actions`,
     groups,
-    dialogs: renaming && (
+    dialogs: renaming?.key === split.key && (
       <RenameProjectDialog
+        key={renaming.generation}
         entityLabel={entityLabel}
         currentName={split.name}
         rename={rename}
-        onClose={() => setRenaming(false)}
+        onClose={() => {
+          const { generation } = renaming;
+          setRenaming((current) => current?.generation === generation ? undefined : current);
+        }}
       />
     ),
   };

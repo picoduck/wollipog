@@ -125,6 +125,13 @@ test("the central Inbox layer handles bare keys but never steals typing or termi
   detail.focus();
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "End", bubbles: true }));
   assert.equal(calls.at(-1), "resumeFollow", "End keeps its preview-follow behavior in the reading pane");
+  // #2217: in the reading pane Tab and Shift+Tab move focus, so Shift+Tab walks back to the divider.
+  for (const shiftKey of [false, true]) {
+    const tab = new domWindow.KeyboardEvent("keydown", { key: "Tab", shiftKey, bubbles: true, cancelable: true });
+    domWindow.dispatchEvent(tab);
+    assert.equal(tab.defaultPrevented, false, `${shiftKey ? "Shift+" : ""}Tab in the preview keeps its native focus move`);
+  }
+  assert.equal(calls.at(-1), "resumeFollow", "no group switch from the reading pane");
 
   previewAvailable = false;
   detail.focus();

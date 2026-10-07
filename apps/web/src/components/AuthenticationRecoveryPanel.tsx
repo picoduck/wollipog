@@ -2,21 +2,15 @@ import React, { useEffect, useState, type ReactNode } from "react";
 import {
   runnerSupportsProtocol,
   type PendingApproval,
-  type ProviderAuthenticationAccountOption,
   type ProviderAuthenticationCurrentIdentity,
   type ProviderLoginView,
   type RunnerView,
   type SessionView,
 } from "@wollipog/protocol";
-import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { relativeTime } from "../format.js";
-import { maskedAccountTitles } from "../personal-identifiers.js";
-import type { StatusTone } from "../status-meta.js";
 import { AccountIdentifier } from "./AccountIdentifier.js";
-import { useAccountEmailPrivacy } from "../account-email-privacy.js";
 import { ProviderLoginCard } from "./ProviderLoginCard.js";
-import { StatusBadge } from "./StatusBadge.js";
 import { BusyButton } from "./ui/BusyButton.js";
 
 type Loadable<T> =
@@ -33,7 +27,8 @@ export function authenticationRecoveryPanelApplies(session: SessionView, approva
 }
 
 /** The session can recover with another account added to its Machine: it is bound to one, and the
- * runner can list and switch them. The card's Choose Another Account… appears only then. */
+ * runner can list and switch them. The card's Choose Another Account… appears only then; #1743
+ * widens it to sessions on the Machine's default sign-in without changing the dialog. */
 export function authenticationAccountChoiceApplies(
   session: SessionView,
   approval: PendingApproval,
@@ -44,7 +39,7 @@ export function authenticationAccountChoiceApplies(
     runnerSupportsProtocol(runner?.protocolVersion, "providerAuthenticationAccountRecovery");
 }
 
-function providerName(driver: SessionView["driver"]): string {
+export function signInProviderName(driver: SessionView["driver"]): string {
   return driver === "claude-code" ? "Claude Code" : "Codex";
 }
 
@@ -57,7 +52,6 @@ export const SIGN_IN_COPY = {
   checkAgain: "Check Again",
   machineDefault: "Machine Default Sign-In",
   chooseAnotherAccount: "Choose Another Account…",
-  otherAccounts: "Other Accounts",
   startSignIn: "Start Sign-In",
   signInMethods: "Sign-In Methods",
   rechecking: "Checking the sign-in again…",
@@ -132,13 +126,6 @@ export function signInSentence({ situation, provider, signingIn, loginStatus, ac
   }
 }
 
-const AVAILABILITY: Record<ProviderAuthenticationAccountOption["availability"], { label: string; tone: StatusTone }> = {
-  current: { label: "Current", tone: "neutral" },
-  available: { label: "Signed In", tone: "success" },
-  sign_in_required: { label: "Sign-In Required", tone: "warning" },
-  status_unknown: { label: "Status Unknown", tone: "neutral" },
-};
-
 /**
  * The Request Card's sign-in body (#2198, docs/design-system.md §5.4): the facts of the sign-in and
  * one sentence saying what the card's primary will do. The provider-reported email lives only in
@@ -146,10 +133,8 @@ const AVAILABILITY: Record<ProviderAuthenticationAccountOption["availability"], 
  *
  * Check Again on the Last Checked fact runs the runner's recheck (`onRecheck`); it is absent when
  * Recheck Authentication is the card's primary. While a sign-in runs only the session's account is
- * a fact, and the runner's sign-in renders below it.
- *
- * `choosingAccount` shows the other accounts on the session's Machine, opened by the card's Choose
- * Another Account…; #2208 replaces that list with its dialog.
+ * a fact, and the runner's sign-in renders below it. The Machine's other accounts are not on the
+ * card: Choose Another Account… opens them in a dialog (ChooseAccountDialog, #2208).
  */
 export function AuthenticationRecoveryPanel({
   session,
@@ -157,8 +142,7 @@ export function AuthenticationRecoveryPanel({
   runner,
   runnerOnline,
   recheck,
-  choosingAccount = false,
-  accountsId,
+  refreshKey = 0,
 }: {
   session: SessionView;
   approval: PendingApproval;
@@ -166,13 +150,13 @@ export function AuthenticationRecoveryPanel({
   runnerOnline: boolean;
   /** The Last Checked fact's Check Again, when Recheck Authentication is not the card's primary. */
   recheck?: { run: () => Promise<void>; busy: boolean; disabled: boolean; describedBy?: string };
-  choosingAccount?: boolean;
-  /** The id Choose Another Account… controls. */
-  accountsId?: string;
+  /** Changes when something else may have changed the signed-in account (a refused account choice),
+   * so the identity is read again. */
+  refreshKey?: number;
 }) {
   const api = useApi();
   const supported = runnerSupportsProtocol(runner?.protocolVersion, "providerAuthenticationAccountRecovery");
-  const provider = providerName(session.driver);
+  const provider = signInProviderName(session.driver);
   const providerLogin = runner?.providerLogins?.find((login) =>
     login.sessionId === session.id && login.status !== "succeeded" && login.status !== "cancelled");
   const signingIn = !!providerLogin || approval.options.some((option) => option.optionId === "auth:cancel");
@@ -193,7 +177,7 @@ export function AuthenticationRecoveryPanel({
       (cause) => { if (!cancelled) setIdentity({ key: cardKey, state: "failed", error: (cause as Error).message }); },
     );
     return () => { cancelled = true; };
-  }, [api, active, approval.requestId, cardKey, refreshes, session.id]);
+  }, [api, active, approval.requestId, cardKey, refreshes, refreshKey, session.id]);
 
   const currentIdentity = identity?.key === cardKey ? identity : null;
   const checkAgain = recheck && (
@@ -260,19 +244,6 @@ export function AuthenticationRecoveryPanel({
       </dl>
       {sentence && <p className="sign-in-sentence">{sentence}</p>}
       {providerLogin && <ProviderLoginCard runnerId={session.runnerId} login={providerLogin} embedded />}
-      {choosingAccount && (
-        <AccountChoice
-          id={accountsId}
-          session={session}
-          approval={approval}
-          runner={runner}
-          provider={provider}
-          active={active}
-          runnerOnline={runnerOnline}
-          cardKey={cardKey}
-          onRefused={() => setRefreshes((value) => value + 1)}
-        />
-      )}
     </div>
   );
 }
@@ -344,207 +315,4 @@ function SignedInNow({
       revealTooltip={false}
     />
   );
-}
-
-/**
- * The other accounts on the session's Machine, until #2208's Choose Another Account dialog replaces
- * this list. None is a primary: the card's footer holds its one.
- */
-function AccountChoice({
-  id,
-  session,
-  approval,
-  runner,
-  provider,
-  active,
-  runnerOnline,
-  cardKey,
-  onRefused,
-}: {
-  id?: string;
-  session: SessionView;
-  approval: PendingApproval;
-  runner: RunnerView | undefined;
-  provider: string;
-  active: boolean;
-  runnerOnline: boolean;
-  cardKey: string;
-  onRefused: () => void;
-}) {
-  const privacy = useAccountEmailPrivacy();
-  const api = useApi();
-  const accountInventoryKey = (runner?.providerAccounts ?? [])
-    .map((account) => `${account.id}:${account.authStatus}`)
-    .join("|");
-  const [refreshes, setRefreshes] = useState(0);
-  const [accounts, setAccounts] = useState<Loadable<ProviderAuthenticationAccountOption[]> | null>(null);
-  const [selecting, setSelecting] = useState<string | null>(null);
-  // A refusal belongs to the account that was chosen. It renders in that row, beside the control
-  // the person just used, so it cannot land below the fold of a scrolling card.
-  const [selectionError, setSelectionError] = useState<{ accountId: string; message: string } | null>(null);
-  const [startingSignIn, setStartingSignIn] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!active) {
-      setAccounts(null);
-      return;
-    }
-    let cancelled = false;
-    setAccounts((current) => current?.key === cardKey && current.state === "loaded"
-      ? current
-      : { key: cardKey, state: "loading" });
-    api.authenticationAccounts(session.id).then(
-      (result) => { if (!cancelled) setAccounts({ key: cardKey, state: "loaded", value: result.accounts }); },
-      (cause) => { if (!cancelled) setAccounts({ key: cardKey, state: "failed", error: (cause as Error).message }); },
-    );
-    return () => { cancelled = true; };
-  }, [api, active, accountInventoryKey, cardKey, refreshes, session.id]);
-
-  const accountList = accounts?.key === cardKey ? accounts : null;
-  const alternatives = accountList?.state === "loaded"
-    ? accountList.value.filter((account) => account.availability !== "current")
-    : [];
-  // Button names cannot carry a reveal control, so an email-shaped label is named by a distinct
-  // hidden ordinal instead of its value.
-  const labels = alternatives.map((account) => account.label);
-  const accountTitles = privacy.hide ? maskedAccountTitles(labels) : labels;
-  const canStartSignIn = runner?.canManage === true && runnerSupportsProtocol(runner.protocolVersion, "providerLogin");
-  const accountLogins = (runner?.providerLogins ?? []).filter((login) =>
-    !login.sessionId && login.status !== "succeeded" && login.status !== "cancelled" &&
-    alternatives.some((account) => account.id === login.accountId));
-
-  const select = async (account: ProviderAuthenticationAccountOption) => {
-    if (!session.providerAccountId) return;
-    setSelecting(account.id);
-    setSelectionError(null);
-    try {
-      await api.selectAuthenticationAccount(session.id, {
-        requestId: approval.requestId,
-        providerAccountId: account.id,
-        expectedProviderAccountId: session.providerAccountId,
-      });
-    } catch (cause) {
-      setSelectionError({ accountId: account.id, message: (cause as Error).message });
-      const code = cause instanceof ApiError ? cause.code : undefined;
-      if (code === "account_changed" || code === "recovery_changed" || code === "sign_in_required" ||
-          code === "status_unknown") {
-        setRefreshes((value) => value + 1);
-        onRefused();
-      }
-    } finally {
-      setSelecting(null);
-    }
-  };
-
-  const signIn = async (accountId: string) => {
-    setStartingSignIn(accountId);
-    setSelectionError(null);
-    try {
-      await api.startProviderLogin(session.runnerId, { accountId });
-    } catch (cause) {
-      setSelectionError({ accountId, message: (cause as Error).message });
-    } finally {
-      setStartingSignIn(null);
-    }
-  };
-
-  return (
-    <section id={id} className="auth-recovery-accounts" aria-label={SIGN_IN_COPY.otherAccounts} ref={revealList}>
-      <h4>{SIGN_IN_COPY.otherAccounts}</h4>
-      {!active ? (
-        <p className="facts-help">
-          {!runnerOnline
-            ? "The runner is offline. Accounts will load when it reconnects."
-            : "Finish or cancel the sign-in above before choosing another account."}
-        </p>
-      ) : !accountList || accountList.state === "loading" ? (
-        <p className="facts-help">Loading accounts…</p>
-      ) : accountList.state === "failed" ? (
-        <p className="facts-help" role="alert">Accounts could not be loaded: {accountList.error}</p>
-      ) : alternatives.length === 0 ? (
-        <p className="facts-help">
-          No other {provider} accounts are added to this machine. A machine owner or organization admin can add one
-          from the machine&apos;s Accounts section.
-        </p>
-      ) : (
-        <ul className="auth-recovery-account-list">
-          {alternatives.map((account, index) => (
-            <li key={account.id} className="auth-recovery-account" data-availability={account.availability}>
-              <div className="auth-recovery-account-head">
-                <AccountIdentifier
-                  identity={`${session.id}:${cardKey}:${account.id}`}
-                  className="auth-recovery-account-label"
-                  value={account.label}
-                  label="Account Email"
-                  lead="Account"
-                  revealTooltip={false}
-                />
-                <StatusBadge tone={AVAILABILITY[account.availability].tone} label={AVAILABILITY[account.availability].label} />
-              </div>
-              <p className="facts-help">{accountGuidance(account, canStartSignIn)}</p>
-              <div className="auth-recovery-account-actions">
-                {account.availability === "sign_in_required" && canStartSignIn && (
-                  <BusyButton
-                    className="btn sm"
-                    busy={startingSignIn === account.id}
-                    progress="Starting the sign-in…"
-                    disabled={(!!selecting || !!startingSignIn) && startingSignIn !== account.id}
-                    onClick={() => void signIn(account.id)}
-                  >
-                    Sign In
-                  </BusyButton>
-                )}
-                <BusyButton
-                  className="btn sm"
-                  busy={selecting === account.id}
-                  progress="Checking the account…"
-                  disabled={(!!selecting || !!startingSignIn) && selecting !== account.id}
-                  aria-label={`${account.availability === "available" ? "Use" : "Check and Use"} ${accountTitles[index]}`}
-                  onClick={() => void select(account)}
-                >
-                  {account.availability === "available" ? "Use Account" : "Check and Use"}
-                </BusyButton>
-              </div>
-              {selectionError?.accountId === account.id && (
-                <div className="form-error auth-recovery-account-error" role="alert" ref={revealNode}>
-                  {selectionError.message}
-                </div>
-              )}
-            </li>
-          ))}
-        </ul>
-      )}
-      {accountLogins.map((login) => (
-        <ProviderLoginCard key={login.operationId} runnerId={session.runnerId} login={login} />
-      ))}
-      {selectionError && !alternatives.some((account) => account.id === selectionError.accountId) && (
-        <div className="form-error" role="alert" ref={revealNode}>{selectionError.message}</div>
-      )}
-    </section>
-  );
-}
-
-/** Bring a newly shown refusal into view inside the card's scrolling body. */
-function revealNode(node: HTMLElement | null): void {
-  node?.scrollIntoView?.({ block: "nearest" });
-}
-
-/** Scroll the card's body, and only it, so the newly opened list starts at its top edge: the first
- * account is then whole, rather than cut by the body's lower edge as "nearest" would leave it. */
-function revealList(node: HTMLElement | null): void {
-  const body = node?.closest<HTMLElement>(".request-card-body");
-  if (!node || !body) return;
-  body.scrollTop += node.getBoundingClientRect().top - body.getBoundingClientRect().top;
-}
-
-function accountGuidance(account: ProviderAuthenticationAccountOption, canStartSignIn: boolean): string {
-  if (account.availability === "available") {
-    return "Wollipog rechecks this account's sign-in, then resumes the session with it.";
-  }
-  if (account.availability === "sign_in_required") {
-    return canStartSignIn
-      ? "This account is signed out. Sign in, then use it. Check and Use rechecks it first."
-      : "This account is signed out. Ask a machine owner or organization admin to sign in to it, then use it.";
-  }
-  return "Wollipog could not confirm this account's sign-in. Check and Use rechecks it before resuming.";
 }

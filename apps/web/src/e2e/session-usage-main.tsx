@@ -28,6 +28,7 @@ declare global {
  * `?event-heavy=1` makes 200 raw opening events collapse into one partial rendered response, and
  * `?live=1` adds a live tail event during the first prepend. */
 const params = new URLSearchParams(window.location.search);
+if (params.has("theme")) document.documentElement.dataset.theme = params.get("theme") === "light" ? "light" : "dark";
 const mode = params.get("mode") === "preview" ? ("preview" as const) : ("expanded" as const);
 const frameHeight = Number(params.get("height") ?? "600");
 const frameWidth = Number(params.get("width") ?? "900");
@@ -423,16 +424,40 @@ if (params.get("approval") === "checkpoint") {
 } else if (params.get("approval") === "question") {
   setQuestionResponseStyle("composer");
   session.status = "input_required";
+  // Composer Response's evidence (#2212): one two-option question by default, a four-option one, or
+  // several questions in one request.
+  const target = params.get("questions") === "four" || params.get("questions") === "several" ? {
+    id: "target",
+    header: "Release",
+    question: "Which environment should receive the release?",
+    allowOther: params.get("other") === "1",
+    options: [
+      { label: "Staging", description: "Runs the full smoke suite before anyone sees it." },
+      { label: "Production", description: "Ships to every customer at once." },
+      { label: "Canary", description: "Five percent of traffic for an hour, then everyone." },
+      { label: "Preview", description: "A throwaway deployment for this branch only." },
+    ],
+  } : {
+    id: "target",
+    question: "Which environment should receive the release?",
+    options: [{ label: "Staging" }, { label: "Production" }],
+  };
   session.pendingApproval = {
     requestId: "question:session-usage-e2e:1",
     kind: "question",
     title: "Choose a release target",
     options: [],
-    questions: [{
-      id: "target",
-      question: "Which environment should receive the release?",
-      options: [{ label: "Staging" }, { label: "Production" }],
-    }],
+    questions: params.get("questions") === "several" ? [target, {
+      id: "checks",
+      question: "Which checks should run before promotion?",
+      multiSelect: true,
+      options: [{ label: "Unit Tests" }, { label: "Browser Tests" }, { label: "Load Test" }],
+    }, {
+      id: "note",
+      question: "What should the release note say?",
+      options: [],
+      allowOther: true,
+    }] : [target],
   };
 }
 

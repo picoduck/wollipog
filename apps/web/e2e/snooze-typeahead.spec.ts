@@ -7,7 +7,7 @@ test.use({ video: EVIDENCE_CAPTURE ? "on" : "off" });
 
 async function openNewSnoozeDialog(page: Page) {
   await page.goto("/sessions-board-e2e.html");
-  await expect(page.locator(".page-tabs .tabs-bar")).toBeVisible();
+  await expect(page.locator(".page-tabs .tabs-bar, .sessions-app-bar")).toBeVisible();
   const row = page.locator(".inbox-row-shell", { hasText: "Running Session" });
   await row.getByRole("button").first().click();
   const directSnooze = page.getByRole("button", { name: "Snooze", exact: true }).first();

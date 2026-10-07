@@ -1,1 +1,0 @@
-|.question-text-options|padding-left|32px

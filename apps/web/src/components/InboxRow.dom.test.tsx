@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { SessionReminderView, SessionView } from "@wollipog/protocol";
 import { ACTIVITY_BUCKET_MS, recordSessionActivity, type SessionActivity } from "../activity.js";
+import { formatReminderTileTime, reminderDisplayZone } from "../reminder-schedule.js";
 import { InboxRow, type InboxRowProps } from "./InboxRow.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
@@ -113,11 +114,12 @@ test("a stalled running row shows one badge, in the danger tone, saying how long
   await withRow(session, (container) => {
     const shown = badges(container);
     assert.equal(shown.length, 1, "Stalled is not a second badge");
-    assert.equal(shown[0]!.textContent, "Running");
+    // In words, not only the tone (#2215): forced colors and colour-blind readers see Stalled.
+    assert.equal(shown[0]!.textContent, "Stalled");
     assert.ok(shown[0]!.classList.contains("t-danger"));
     assert.ok(!shown[0]!.classList.contains("pulse"), "a stalled badge does not pulse");
-    assert.equal(shown[0]!.getAttribute("aria-label"), "Status: Running, Stalled");
-    assert.match(shown[0]!.getAttribute("title") ?? "", /Stalled: no activity for 14 minutes\.$/);
+    assert.equal(shown[0]!.getAttribute("aria-label"), "Status: Stalled, Running");
+    assert.equal(shown[0]!.getAttribute("title"), "Running, but no activity for 14 minutes.");
   }, { stalled: true });
 });
 
@@ -267,7 +269,19 @@ test("a stop-failed row shows Stop Failed and its time", async () => {
   });
 });
 
-test("a fired reminder's row says Returned; snoozed rows show the return time today or tomorrow", async (t) => {
+/** Runs with the host in `timeZone`, which is the zone a browser reads reminder times in. */
+async function inTimeZone(timeZone: string, run: () => Promise<void>): Promise<void> {
+  const previous = process.env.TZ;
+  process.env.TZ = timeZone;
+  try {
+    await run();
+  } finally {
+    if (previous === undefined) delete process.env.TZ;
+    else process.env.TZ = previous;
+  }
+}
+
+test("a fired reminder's row says Returned; snoozed rows show the return time today or tomorrow", (t) => inTimeZone("UTC", async () => {
   let now = Date.UTC(2026, 9, 7, 0, 15);
   const clock = t.mock.method(Date, "now", () => now);
   try {
@@ -315,7 +329,34 @@ test("a fired reminder's row says Returned; snoozed rows show the return time to
   } finally {
     clock.mock.restore();
   }
-});
+}));
+
+test("a reminder stored in another zone reads in the Snooze dialog's zone on its row and tooltip (#2218)", (t) => inTimeZone("America/Chicago", async () => {
+  // Tuesday 3:34 PM in Chicago; the reminder was saved from a UTC browser for Wednesday 14:34 UTC.
+  const now = Date.UTC(2026, 9, 6, 20, 34);
+  const clock = t.mock.method(Date, "now", () => now);
+  try {
+    const scheduledFor = Date.UTC(2026, 9, 7, 14, 34);
+    const reminder: SessionReminderView = {
+      reminderId: "reminder-utc", sessionId: "session", scheduledFor, timeZone: "UTC",
+      originalExpression: "wed 2:34pm", wakePolicy: "regardless", state: "pending",
+      revision: 1, createdAt: now, updatedAt: now,
+    };
+    // What the Snooze dialog shows for the same reminder: its tiles and summary read in this zone.
+    const dialogTile = formatReminderTileTime({
+      scheduleKind: "timed", scheduledFor, timeZone: reminderDisplayZone(), originalExpression: reminder.originalExpression,
+    }, now);
+    assert.match(dialogTile.replace(/ /g, " "), /^Wed, 9:34 AM$/);
+    await withRow(baseSession(), (container) => {
+      const cell = container.querySelector<HTMLElement>(".inbox-row-time.snoozed")!;
+      assert.equal(cell.textContent!.replace(/ /g, " "), "Snoozed Until Wed 9:34 AM");
+      assert.equal(cell.textContent!.replace("Snoozed Until ", ""), dialogTile.replace(", ", " "));
+      assert.match(cell.getAttribute("title") ?? "", /9:34\sAM CDT\.$/);
+    }, { reminder });
+  } finally {
+    clock.mock.restore();
+  }
+}));
 
 test("a snoozed row's lost or missing background result counts toward its one status", async () => {
   const pending = {
@@ -368,11 +409,25 @@ test("the relative time renders once, trailing the status line on both shapes", 
   }
 });
 
-test("Inbox rows never render the message preview", async () => {
-  await withRow(baseSession({ preview: "The first line of the last message." }), (container) => {
+test("a two-line row carries its snippet after the title for a wide list; a phone card never does (#2218)", async () => {
+  const idle = baseSession({ preview: "**Done.** The first line of the `last` message." });
+  await withRow(idle, (container) => {
+    const copy = container.querySelector<HTMLElement>(".inbox-row-copy")!;
+    assert.deepEqual([...copy.children].map((child) => child.className), ["inbox-row-title", "inbox-row-snippet"]);
+    assert.equal(copy.querySelector(".inbox-row-snippet")!.textContent, "Done. The first line of the last message.");
+  });
+  const blocked = baseSession({
+    status: "input_required",
+    preview: "I need to run the migration.",
+    pendingApproval: { requestId: "a", options: [], title: "Run the Migration Script" },
+  } as unknown as Partial<SessionView>);
+  await withRow(blocked, (container) => {
+    assert.equal(container.querySelector(".inbox-row-snippet")!.textContent, "Run the Migration Script");
+  });
+  await withRow(idle, (container) => {
     assert.doesNotMatch(container.textContent ?? "", /first line of the last message/);
     assertNoDomNode(container.querySelector(".inbox-row-snippet"));
-  });
+  }, { threeRow: true });
 });
 
 test("a parent row carries the chevron and family chip, and a child row its thread position", async () => {
@@ -399,8 +454,17 @@ test("a parent row carries the chevron and family chip, and a child row its thre
     assert.equal(chevron.getAttribute("aria-expanded"), "true");
     assert.equal(chevron.getAttribute("tabindex"), "-1", "the grid owns the keyboard; T toggles");
     assertNoDomNode(container.querySelector("button button"), "the chevron is not nested in the row button");
+    // §5.5 (#2215): the 14px ChevronRight icon in a small icon button, never a text glyph.
+    assert.match(chevron.className, /\bicon-btn sm\b/);
+    assert.ok(chevron.querySelector("svg.disclosure-chevron"), "the chevron is the §5.5 icon");
+    assert.equal(chevron.textContent, "", "no text glyph in the chevron");
+    assert.doesNotMatch(shell.textContent ?? "", /[▶▸▾›]/, "no text glyph anywhere in the row");
     const chip = container.querySelector<HTMLElement>(".inbox-thread-family")!;
     assert.match(chip.className, /waiting/);
+    // Dots only below a 600px list, so the chip is an image named by the whole rollup.
+    assert.equal(chip.getAttribute("role"), "img");
+    assert.equal(chip.getAttribute("aria-label"), "2 Children · 1 Awaiting Input");
+    assert.equal(chip.previousElementSibling?.className, "inbox-row-title", "the chip follows the title directly");
     assert.equal(chip.querySelector(".inbox-thread-family-text")?.textContent, "2 Children · 1 Awaiting Input");
     assert.deepEqual([...chip.querySelectorAll(".inbox-thread-dot")].map((dot) => dot.className),
       ["inbox-thread-dot blocked", "inbox-thread-dot done"]);

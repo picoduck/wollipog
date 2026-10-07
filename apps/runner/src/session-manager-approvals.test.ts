@@ -137,6 +137,69 @@ test("delegated resolutions persist the controlling parent in runner history", (
   }
 });
 
+test("a permission's resolution records who settled that exact occurrence, and only that (#2628)", () => {
+  const { sm, sent, store, cleanup } = makeHarness(true);
+  try {
+    const ask = () => (sm as any).emitEvent("s_perm", {
+      kind: "permission_request", requestId: "reused", title: "Run Command",
+      options: [{ optionId: "allow", name: "Allow Once", kind: "allow_once" }, { optionId: "deny", name: "Reject", kind: "reject_once" }],
+    });
+    const resolvedBy = () => (eventsOf(sent, "permission_resolved").at(-1) as {
+      payload: { resolvedBy?: unknown; resolvedByParentSessionId?: string };
+    }).payload;
+
+    ask();
+    sm.resolvePermission("s_perm", "reused", "allow", undefined, { kind: "user", userId: "usr_grace" });
+    assert.deepEqual(resolvedBy().resolvedBy, { kind: "user", userId: "usr_grace" });
+    ask();
+    sm.resolvePermission("s_perm", "reused", "deny", undefined, { kind: "policy", policyId: "deny-shell" });
+    assert.deepEqual(resolvedBy().resolvedBy, { kind: "policy", policyId: "deny-shell" },
+      "a reused provider request id is named by its own resolution");
+    const recorded = store.readEvents("s_perm").flatMap((event) =>
+      event.payload.kind === "permission_resolved" ? [event.payload.resolvedBy] : []);
+    assert.deepEqual(recorded, [{ kind: "user", userId: "usr_grace" }, { kind: "policy", policyId: "deny-shell" }],
+      "each resolution is durable in the runner's own history");
+
+    ask();
+    sm.resolvePermission("s_perm", "reused", "allow", "parent-session", { kind: "user", userId: "usr_grace" });
+    assert.equal(resolvedBy().resolvedByParentSessionId, "parent-session");
+    assert.equal(resolvedBy().resolvedBy, undefined, "a Parent Control decision names its parent session instead");
+
+    for (const malformed of [
+      { kind: "user" },
+      { kind: "user", userId: "" },
+      { kind: "user", userId: "x".repeat(257) },
+      { kind: "policy", policyId: 7 },
+      { kind: "device", deviceId: "device-1" },
+      "usr_grace",
+    ]) {
+      ask();
+      sm.resolvePermission("s_perm", "reused", "allow", undefined, malformed);
+      assert.equal(resolvedBy().resolvedBy, undefined, JSON.stringify(malformed));
+    }
+
+    ask();
+    sm.resolvePermission("s_perm", "reused", "allow", undefined, { kind: "user", userId: "usr_ada", note: "extra" });
+    assert.deepEqual(resolvedBy().resolvedBy, { kind: "user", userId: "usr_ada" }, "only the identifier is recorded");
+
+    ask();
+    sm.resolvePermission("s_perm", "reused", "allow");
+    assert.equal(resolvedBy().resolvedBy, undefined, "an older control plane's resolution names nobody");
+  } finally {
+    cleanup();
+  }
+});
+
+test("an undelivered permission decision records no resolution and so names nobody (#2628)", () => {
+  const { sm, sent, cleanup } = makeHarness(false);
+  try {
+    sm.resolvePermission("s_perm", "gone", "allow", undefined, { kind: "user", userId: "usr_grace" });
+    assert.equal(eventsOf(sent, "permission_resolved").length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
 test("provider-initiated turn settlement restores idle after an answered approval", () => {
   const { sm, store, cleanup } = makeHarness(true);
   try {

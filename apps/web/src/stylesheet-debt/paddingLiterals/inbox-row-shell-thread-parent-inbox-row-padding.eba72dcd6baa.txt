@@ -1,1 +1,0 @@
-|.inbox-row-shell.thread-parent .inbox-row|padding-left|18px

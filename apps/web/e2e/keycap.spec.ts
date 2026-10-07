@@ -138,7 +138,8 @@ test.describe("with a fine pointer at 760px", () => {
     // label, and the key stays announced.
     await expect(button.locator("kbd")).toBeHidden();
     await expect(button).toHaveAttribute("aria-keyshortcuts", "C");
-    // The search field is always open, so its / keycap shows without focus.
+    // The app bar's Search mode holds the field (#2211); with a mouse its / keycap shows there too.
+    await page.locator(".sessions-app-bar").getByRole("button", { name: "Search Sessions" }).click();
     await expectKeycap(page, page.locator(".inbox-search kbd"), "Sessions search key");
   });
 });
@@ -151,7 +152,9 @@ for (const width of [390, 1440]) {
       const button = await openNewSession(page);
       expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
       await expect(button.locator("kbd")).toBeHidden();
-      // Even with the search field open and focused, a touch screen shows no / keycap.
+      // Even with the search field open and focused, a touch screen shows no / keycap. A phone's
+      // field is in its app bar's Search mode (#2211).
+      if (width === 390) await page.locator(".sessions-app-bar").getByRole("button", { name: "Search Sessions" }).click();
       await page.getByRole("textbox", { name: "Search Sessions" }).focus();
       await expect(page.locator(".inbox-search:focus-within")).toHaveCount(1);
       await expect(page.locator(".inbox-search kbd")).toBeHidden();

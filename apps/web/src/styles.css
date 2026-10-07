@@ -391,6 +391,13 @@
   --row-gap: 6px;
   --inbox-row-pad-y: 9px;
   --inbox-row-pad-x: 11px;
+  /* A wide Sessions list's fixed trailing columns (#2218, §6.3), the same in either density. The
+     time column holds a snoozed row's longest return time after its alarm clock ("Wed 12:34 PM"). */
+  --inbox-row-col-status: 184px;
+  --inbox-row-col-activity: 48px;
+  --inbox-row-col-flags: 32px;
+  --inbox-row-col-time: 96px;
+  --inbox-row-col-actions: 104px;
   /* How far the title's trailing fade reaches. #664 moved the title onto its own line, where it is
      the only thing allowed to shrink, so the reading axis it used to need a fixed sender track for
      is now the row's own left edge and the truncation is a gradient rather than an ellipsis. */
@@ -663,11 +670,11 @@ kbd {
 )):focus {
   outline: none;
 }
-/* The Sessions list's board and empty state are tabIndex -1 containers that a digit or a handoff
-   also focuses, where no zone line appears, so they keep the ring, drawn inset because they fill
-   clipped panes. Equal specificity with the suppression above, so order wins. Zone roots and the
-   reading pane's targets take no ring: the zone line below is their F6 cue (§16.1). */
-:where(.board-wrap, .inbox-zero):focus-visible {
+/* The Sessions list's board, its state and its loading skeleton are tabIndex -1 containers that a
+   digit or a handoff also focuses, where no zone line appears, so they keep the ring, drawn inset
+   because they fill clipped panes. Equal specificity with the suppression above, so order wins. Zone
+   roots and the reading pane's targets take no ring: the zone line below is their F6 cue (§16.1). */
+:where(.board-wrap, .inbox-state, .inbox-skeleton):focus-visible {
   outline: var(--focus-width) solid var(--focus);
   outline-offset: calc(-1 * var(--focus-width));
 }
@@ -1403,7 +1410,11 @@ kbd {
 }
 
 /* The view switch (`controls`) leads the actions and never folds into ⋯ (§3.3). */
-.page-controls { display: flex; flex: none; }
+.page-controls { display: flex; flex: none; gap: var(--space-2); }
+/* The Sessions Preview Layout control (#2219). The Board ignores the layout, so the control is hidden
+   there, but keeps its width so List / Board stays under the pointer when it is switched. */
+.sessions-preview-layout { display: flex; }
+.sessions-preview-layout[data-reserved] { visibility: hidden; }
 /* A toggle secondary's plain count sits 4px after its label (§11.4). */
 .page-action:has(> .count) { gap: var(--space-1); }
 /* A toggle secondary is a ghost button, whose transparent rest outranks the shared on state, so
@@ -1533,9 +1544,6 @@ kbd {
     justify-content: center;
   }
   .page-primary-key { display: none; }
-  /* Until the phone Sessions bar (#2211), its List / Board switch is icons alone; each option's
-     accessible name stays its label. */
-  .sessions-view .sessions-view-label { display: none; }
   .page-primary-label {
     position: absolute;
     width: 1px;
@@ -2231,19 +2239,21 @@ button.status { cursor: pointer; }
   padding: env(safe-area-inset-top, 0px) max(var(--page-gutter), env(safe-area-inset-right, 0px)) var(--space-16) max(var(--page-gutter), env(safe-area-inset-left, 0px));
   background: var(--bg);
 }
-/* A crashed page or a turned-off experiment is the whole page's next step, so on a phone its
-   actions stack at full width and are 44px tall even under a mouse, like a sheet's footer (§7.5).
+/* A crashed page, a turned-off experiment or an empty Sessions group (#2220) is the whole page's
+   next step, so on a phone its actions stack at full width and are 44px tall even under a mouse,
+   like a sheet's footer (§7.5).
    The height comes from the tokens, as in `.worktree-missing-sheet`, never a per-button patch. */
 @media (max-width: 760px) {
-  :is(.notice.view-error .notice-actions, .state.experiment-off .actions, .app-crash .state .actions) {
+  :is(.notice.view-error .notice-actions, .state.experiment-off .actions, .app-crash .state .actions, .inbox-state .state .actions) {
     --control-h: 44px;
     --control-h-sm: 44px;
+    --control-h-lg: 44px;
     flex-direction: column;
     align-items: stretch;
     justify-self: stretch;
   }
   /* The phone exception to "buttons never stretch" (§3.1), as in the session notice slot. */
-  :is(.notice.view-error .notice-actions, .state.experiment-off .actions, .app-crash .state .actions) > .btn {
+  :is(.notice.view-error .notice-actions, .state.experiment-off .actions, .app-crash .state .actions, .inbox-state .state .actions) > .btn {
     max-width: none;
   }
 }
@@ -2912,7 +2922,8 @@ button.status { cursor: pointer; }
   transition: transform var(--dur-base) var(--ease-out);
 }
 .disclosure[open] > summary > .disclosure-chevron,
-.disclosure-trigger[aria-expanded="true"] > .disclosure-chevron { transform: rotate(90deg); }
+.disclosure-trigger[aria-expanded="true"] > .disclosure-chevron,
+.inbox-thread-toggle[aria-expanded="true"] > .disclosure-chevron { transform: rotate(90deg); }
 .disclosure-body {
   display: flex;
   flex-direction: column;
@@ -3130,10 +3141,6 @@ button.status { cursor: pointer; }
   :is(.pid-mask, .pid-shown) > .app-icon { color: inherit; }
 }
 .pid-value { min-width: 0; overflow-wrap: anywhere; }
-/* Inside a compact tag the chip drops its frame and the control keeps the tag's height, borrowing
-   the rest of its hit area. */
-.tag :is(.pid-mask, .pid-shown) { padding: 0; border: 0; }
-.tag .pid-toggle { width: 16px; height: 16px; margin-top: -2px; margin-bottom: -2px; }
 /* A field label with the reveal control for the values the field hides (a picker's options). */
 .pid-field-head {
   display: flex;
@@ -3143,10 +3150,6 @@ button.status { cursor: pointer; }
   gap: var(--space-1) var(--space-2);
 }
 .pid-field-head > .pid-toggle { margin-inline-start: auto; }
-@media (pointer: coarse) {
-  /* Outranks the shared small-control rule, which would borrow only 4px around a 16px glyph. */
-  .tag .pid-toggle.icon-btn::after { inset: -14px; }
-}
 
 /* ---------------------------------- Stale ----------------------------------
    StaleContent.tsx: last-known content kept on screen while its source is unreachable (§12.5).
@@ -3164,31 +3167,23 @@ button.status { cursor: pointer; }
   display: flex;
   flex-direction: column;
 }
-.board-wrap > .toolbar {
-  justify-content: space-between;
-  margin-bottom: var(--space-3);
+/* The Board's tools in the Sessions tab row (#2201, §10.1): menu buttons that name their choice,
+   a quiet "10 of 29" and Clear. A long machine or agent name ends in an ellipsis rather than
+   widening the row; the menu shows it whole. */
+.board-filter { gap: var(--space-1); max-width: 200px; }
+.board-filter-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.board-filter > svg { flex: none; }
+/* A ghost button's transparent rest outranks the shared on state, so it is restated (§3.1). */
+.btn.ghost.board-filter[aria-pressed="true"] {
+  background: var(--bg-elev-3);
+  border-color: var(--control-outline);
 }
-.filters {
-  display: flex;
-  align-items: flex-end;
-  gap: 12px;
-}
-.filter {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 11px;
+.board-filter-note {
+  flex: none;
   color: var(--text-faint);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-.filter select {
-  text-transform: none;
-  letter-spacing: 0;
-}
-.board-count {
-  font-size: 12.5px;
-  color: var(--text-faint);
+  font: var(--type-small);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 /* Fields (docs/design-system.md §8.1): the sunken --field-bg, a 3:1 --control-outline edge and one
    control height. The height is zero-specificity so a component that embeds a borderless field
@@ -3276,57 +3271,61 @@ textarea {
   }
 }
 
+/* Columns are unboxed (#2201, §5.1): no border and no fill, so the cards are the only boxes. An
+   empty column folds to a 40px strip with its header on end; while a card is dragged, every strip
+   opens to full width so it is easy to drop on. */
 .board {
   flex: 1;
   min-height: 0;
-  display: grid;
-  grid-template-columns: repeat(5, minmax(230px, 1fr));
-  gap: 14px;
+  display: flex;
+  gap: var(--space-3);
   overflow-x: auto;
 }
 .column {
   display: flex;
+  flex: 1 1 0;
   flex-direction: column;
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+  min-width: 230px;
   min-height: 0;
 }
+.column.is-empty { flex: 0 0 var(--space-10); min-width: var(--space-10); }
+.board.is-dragging .column.is-empty { flex: 1 1 0; min-width: 230px; }
 .column-head {
   display: flex;
+  flex: none;
   align-items: center;
-  justify-content: space-between;
-  padding: 11px 13px;
-  font-size: 12px;
-  font-weight: 650;
-  text-transform: uppercase;
-  letter-spacing: 0.7px;
-  color: var(--text-dim);
-  border-bottom: 1px solid var(--border);
+  gap: var(--space-2);
+  height: var(--control-h);
+  padding: 0 var(--space-1);
+  font: var(--type-body-strong);
+  color: var(--text);
+  white-space: nowrap;
 }
-.col-running .column-head {
-  color: var(--blue);
+.column-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--tone);
 }
-.col-input_required .column-head {
-  color: var(--amber);
+.column-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.board:not(.is-dragging) .column.is-empty > .column-head {
+  writing-mode: vertical-rl;
+  height: auto;
+  padding: var(--space-1) 0;
+  align-self: center;
 }
-.col-review .column-head {
-  color: var(--teal);
-}
-.col-done .column-head {
-  color: var(--green);
-}
-.column-count {
-  background: var(--bg-elev-3);
-  border-radius: 999px;
-  padding: 0 8px;
-  font-size: 11px;
-  color: var(--text-dim);
+.board:not(.is-dragging) .column.is-empty > .column-body { display: none; }
+@media (max-width: 760px) {
+  /* A phone's columns are swipeable pages, but an empty one is still a strip, and opens to a page
+     while a card is dragged. */
+  .board .column.is-empty { flex: 0 0 var(--space-10); }
+  .board.is-dragging .column.is-empty { flex: 0 0 84vw; }
 }
 .column-body {
   flex: 1;
   overflow-y: auto;
-  padding: 10px;
+  padding: var(--space-1);
 }
 .column-virtual-list {
   width: 100%;
@@ -3336,39 +3335,85 @@ textarea {
    as ordinary flow and must not become a competing scrollTop owner. */
 .measured-virtual-scroll { overflow-anchor: none; }
 
-/* -------------------------------- Cards --------------------------------- */
+/* -------------------------------- Cards ---------------------------------
+   A Board card (#2222; docs/design-system.md §5.3): an `<article>` whose title button is stretched
+   over the whole card. Line 1 is the agent icon and "Agent · Project", the time and ⋯; then the title
+   (2 lines), one status line, and either the request or a one-line preview. Every card in a column
+   has this anatomy, so heights differ only by title lines and whether a request shows. Hover steps
+   the fill up as a row does; nothing moves (§2.9). */
 .card {
-  background: var(--bg-elev-2);
+  position: relative;
+  display: grid;
+  gap: var(--space-1);
+  width: 100%;
+  padding: var(--card-pad-y) var(--card-pad-x);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  padding: var(--card-pad-y) var(--card-pad-x);
+  background: var(--bg-elev-2);
   cursor: pointer;
-  transition: border-color var(--dur-fast) var(--ease-out), transform var(--dur-instant) var(--ease-out);
-  width: 100%;
+  transition: background var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
 }
-.card:hover {
-  border-color: var(--border-strong);
-  transform: translateY(-1px);
+@media (hover: hover) {
+  .card:hover { border-color: var(--border-strong); background: var(--bg-elev-3); }
 }
-.card-top {
+/* Line 1 keeps the trailing room ⋯ takes, so the time never moves under it. It is written after the
+   stretched title, so `order` draws it first. */
+.card-head {
+  order: -1;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  margin-bottom: 8px;
+  gap: var(--space-3);
+  min-width: 0;
+  min-height: 20px;
+  padding-right: var(--control-h-sm);
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.card-sender {
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.card-sender-text,
+.card-machine-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Quiet meta (§11.3): the machine after its 14px icon, giving way before the sender does. */
+.card-machine {
+  display: flex;
+  flex: 0 100000 auto;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.card-machine > svg { flex: none; }
+/* Positioned, so the pin's and the snoozed time's tooltips stack above the stretched click. */
+.card-head-trail {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
 }
 .card-time {
-  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
   color: var(--text-faint);
+  font: var(--type-small);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
-.card-top-trailing { display: inline-flex; flex: none; align-items: center; gap: 7px; }
 .card-title {
-  font-size: 13.5px;
-  font-weight: 600;
-  line-height: 1.35;
-  margin-bottom: 6px;
+  display: -webkit-box;
+  overflow: hidden;
+  font: var(--type-body-strong);
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 .card-open {
-  display: block;
   width: 100%;
   padding: 0;
   border: 0;
@@ -3377,65 +3422,93 @@ textarea {
   text-align: left;
   cursor: pointer;
 }
-.card-open:focus-visible {
+/* The stretched primary click (§5.3). Controls written after it are positioned, so they stack above. */
+.card-open::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+}
+/* The ring is the card's; the button's own stays transparent, so forced colors still draws one. */
+.card-open:focus-visible { outline: 2px solid transparent; }
+.card:has(> .card-open:focus-visible) {
   outline: var(--focus-width) solid var(--focus);
-  outline-offset: 3px;
-  border-radius: 2px;
+  outline-offset: 2px;
 }
-.card-preview {
-  font-size: 12px;
-  color: var(--text-dim);
-  line-height: 1.4;
-  max-height: 48px;
-  overflow: hidden;
-  margin-bottom: 8px;
-}
-.card-meta {
+/* The status line is always there, empty or not, so idle cards are as tall as busy ones. It is one
+   20px line: nothing on it shrinks, and what does not fit beside the badge (the activity strip in a
+   narrow column) wraps onto a second line that the line clips, so the badge always reads whole and
+   the card's height never changes. */
+.card-status {
   display: flex;
   flex-wrap: wrap;
-  gap: 5px;
-  margin-top: 8px;
+  align-items: center;
+  gap: 0 var(--space-2);
+  min-width: 0;
+  height: 20px;
+  overflow: hidden;
 }
-.tag {
-  font-size: 10.5px;
-  padding: 2px 7px;
-  border-radius: 5px;
-  background: var(--bg-elev-3);
-  border: 1px solid var(--border);
+.card-status > * { position: relative; flex: none; }
+/* A parent's chip (in place of the strip) shows its words while they fit beside the badge in this
+   card, and only its dots when they do not (`dots-only`, measured by the card, not the list pane), so
+   the list's 600px rule does not apply here. The words stay measurable but out of sight. */
+.card-status > .inbox-thread-family { max-width: 100%; }
+.card-status > .inbox-thread-family.dots-only { padding-inline: var(--space-1); }
+.card-status > .inbox-thread-family.dots-only .inbox-thread-family-text {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+.card-preview {
+  min-height: 16px;
+  overflow: hidden;
   color: var(--text-dim);
+  font: var(--type-small);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.tag-machine {
-  color: var(--agent-claude);
-  border-color: color-mix(in srgb, var(--accent-2) 30%, transparent);
+/* ⋯ ends line 1: on hover and focus on fine pointers, always on touch, where it is 36px with a
+   44px target. Hidden by opacity rather than display, so it stays in the tab order. */
+.card-more {
+  position: absolute;
+  top: calc(var(--card-pad-y) + 10px - var(--control-h-sm) / 2);
+  right: calc(var(--card-pad-x) - var(--space-1));
 }
-.tag-agent {
-  color: var(--code-accent);
-  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+@media (pointer: fine) {
+  .card-more { opacity: 0; }
+  :is(.card:hover, .card:focus-within) > .card-more { opacity: 1; }
 }
-.tag-wt {
-  color: var(--teal);
+/* The request: a warning inset notice (§13.2) whose buttons stack above the stretched click. */
+.card-request { margin-top: var(--space-1); }
+.card-request-notice {
+  column-gap: var(--space-2);
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
 }
-.tag-run {
-  color: var(--amber-on-tint);
+.card-request-notice .btn { position: relative; }
+.card-request-text {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  font: var(--type-body);
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
 }
-.card-approval {
-  background: color-mix(in srgb, var(--amber) 8%, transparent);
-  border: 1px solid color-mix(in srgb, var(--amber) 30%, transparent);
-  border-radius: 6px;
-  padding: 8px;
-  margin: 4px 0;
+.card-request-code {
+  display: block;
+  overflow: hidden;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.approval-title {
-  font-size: 12px;
-  color: var(--amber);
-  margin-bottom: 7px;
-}
-/* 8px apart: on touch each small button borrows 4px on every side for its 44px target (§2.8), and
-   closer neighbours would share a strip of each other's target. */
-.approval-actions {
-  display: flex;
-  gap: var(--space-2);
-}
+/* The narrow-card exception (§3.1): Approve and Deny share the row as an equal pair, never wrapping. */
+.decision-pair .notice-actions { flex-wrap: nowrap; }
+.decision-pair .notice-actions > .btn { flex: 1 1 0; min-width: 0; max-width: none; }
 
 /* ---------------------------- Session detail ---------------------------- */
 .session-detail,
@@ -5845,150 +5918,138 @@ textarea {
 .composer-box:focus-within {
   border-color: var(--focus);
 }
-.composer-box.answer-mode {
-  border-color: color-mix(in srgb, var(--accent) 72%, var(--border));
-  background: color-mix(in srgb, var(--accent) 7%, var(--bg-elev));
-  box-shadow: inset 3px 0 0 var(--accent);
-}
-.composer-question-waiting {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--border);
-}
-.composer-question-waiting > div {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-}
-.composer-question-waiting strong {
-  color: var(--accent);
-  font-size: var(--text-sm);
-}
-.composer-question-waiting span {
-  color: var(--text-dim);
-  font-size: var(--text-xs);
-  line-height: 1.4;
+/* Answer Mode (docs/design-system.md §13.2; #2212): the question answered in the composer. The
+   composer card is the answer's field, so its own edge shows focus (above) and turns --red while the
+   answer is invalid: one indicator, with the error under the field (§8.5). */
+.composer-box.answer-mode:has(.composer-answer-input[aria-invalid="true"]) {
+  border-color: var(--red);
 }
 .composer-answer {
-  display: grid;
-  gap: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
 }
-.composer-answer-heading,
-.composer-answer-actions {
+/* The kind, the step count, then Show Context and the × at the end. */
+.answer-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  gap: var(--space-2);
+  min-width: 0;
+  min-height: var(--control-h-sm);
+  color: var(--text-dim);
+  font: var(--type-small);
 }
-.composer-answer-heading > div {
-  display: grid;
-  gap: 2px;
-}
-.composer-answer-heading strong {
-  font-size: var(--text-sm);
-}
-.composer-answer-mode {
-  color: var(--accent);
-  font-size: var(--text-xs);
-  font-weight: 700;
-  letter-spacing: .04em;
-  text-transform: uppercase;
-}
-.composer-answer-question {
+.answer-kind {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
   color: var(--text);
-  font-size: var(--text-base);
-  font-weight: 650;
-  line-height: 1.4;
+  font: var(--type-label);
+}
+.answer-step {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.answer-context-toggle { margin-left: auto; }
+.answer-eyebrow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  min-width: 0;
+  margin: 0;
+  color: var(--text-dim);
+  font: var(--type-small);
   overflow-wrap: anywhere;
 }
-.composer-answer-question > .md {
-  margin-top: 4px;
+.answer-eyebrow > * + *::before {
+  content: "·";
+  margin-right: var(--space-1);
 }
-.composer-answer-question .md,
-.composer-answer-context .md,
+.answer-title {
+  min-width: 0;
+  color: var(--text);
+  font: var(--type-body-strong);
+  overflow-wrap: anywhere;
+}
+.answer-title .md,
+.answer-context .md,
 .question-text .md,
 .question-context .md {
   min-width: 0;
   max-width: 100%;
 }
-.composer-answer-question .md p,
-.composer-answer-context .md p {
-  margin-bottom: 6px;
+.answer-title .md p,
+.answer-context .md p {
+  margin-bottom: var(--space-1);
 }
-.composer-answer-context,
-.composer-answer-help {
+/* Shrunk by Show Context, the panel is its head: the question on one line, then the answer so far. */
+.composer-answer[data-collapsed] > .answer-title {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+}
+.composer-answer[data-collapsed] > .answer-title > * { display: inline; }
+.answer-summary {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
   color: var(--text-dim);
-  font-size: var(--text-xs);
-  line-height: 1.4;
+  font: var(--type-small);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.composer-answer-choices {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 5px;
-  max-height: 150px;
-  overflow-y: auto;
-}
-.composer-answer-choice {
+.answer-body {
   display: flex;
-  align-items: flex-start;
-  gap: 8px;
+  flex-direction: column;
+  gap: var(--space-2);
   min-width: 0;
-  padding: 6px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg);
-  color: var(--text);
-  text-align: left;
-  cursor: pointer;
 }
-.composer-answer-choice:hover,
-.composer-answer-choice:focus-visible,
-.composer-answer-choice.on {
-  border-color: var(--accent);
-}
-.composer-answer-choice.on {
-  background: color-mix(in srgb, var(--accent) 11%, var(--bg));
-}
-.composer-answer-choice-number {
-  display: inline-flex;
-  flex: none;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  border-radius: var(--radius-pill);
-  background: var(--bg-elev-3);
+.answer-body[hidden] { display: none; }
+.answer-context,
+.answer-help,
+.answer-recovery {
+  margin: 0;
   color: var(--text-dim);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-}
-.composer-answer-choice > span:last-child {
-  display: grid;
-  gap: 1px;
-  min-width: 0;
+  font: var(--type-small);
   overflow-wrap: anywhere;
 }
-.composer-answer-choice strong { font-size: var(--text-sm); }
-.composer-answer-choice small { color: var(--text-dim); line-height: 1.35; }
+/* The card's ChoiceRows (§8.4). A four-option question shows whole on a desktop; past the cap the
+   list scrolls on its own, so the field and the footer keep their place. */
+.answer-options {
+  max-height: 288px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.answer-options :is(.choice-row-title, .choice-row-desc) { overflow-wrap: anywhere; }
+.answer-option-number {
+  color: var(--text-dim);
+  font: var(--type-small);
+  font-variant-numeric: tabular-nums;
+}
+/* The composer's own field: no edge of its own, in the reading font the composer types in. */
 .composer-answer-input {
   width: 100%;
-  min-height: 42px;
-  padding: 8px 10px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
+  min-height: var(--control-h);
+  padding: 0;
+  border: none;
   outline: none;
-  background: var(--bg);
+  background: transparent;
   color: var(--text);
-  font-family: var(--font-mono);
-  font-size: var(--text-base);
+  font: var(--type-reading);
 }
-.composer-answer-input:focus { border-color: var(--focus); }
-.composer-answer-actions { margin-top: 2px; }
+.composer-answer-input::placeholder { color: var(--text-faint); }
+/* Back from question 2, the usage triggers, then Next or Submit Answers, last. */
+.answer-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
 /* Answer Mode keeps the context and cost triggers (#2166): beside Submit, or, in a narrow column,
-   on their own row above the two buttons so neither is crowded. */
+   on their own row above the buttons so neither is crowded. */
 .composer-answer-usage {
   display: flex;
   align-items: center;
@@ -5998,10 +6059,16 @@ textarea {
 .composer-answer-usage.own-row { justify-content: flex-end; }
 .composer-answer-usage:empty { display: none; }
 .composer-answer-usage > :is(.context-control, .session-usage) { flex: none; }
-@media (max-width: 600px) {
-  .composer-question-waiting,
-  .composer-answer-heading { align-items: stretch; flex-direction: column; }
-  .composer-answer-choices { grid-template-columns: 1fr; max-height: 128px; }
+@media (max-width: 760px) {
+  .answer-options { max-height: 188px; }
+  /* Show Context and Show Answer are icon-only under the same name (§15.1). Square: `.btn.sm`'s
+     padding and `.btn`'s max-content cap would size it by its label. */
+  .btn.answer-context-toggle {
+    width: var(--control-h-sm);
+    max-width: none;
+    padding: 0;
+  }
+  .answer-context-label { display: none; }
 }
 .composer-input {
   width: 100%;
@@ -6064,7 +6131,7 @@ textarea {
    Guardrails (#2175) puts its one footer line here too: what empty means, or a Viewer's refusal.
    Hand Off (#2186) says why Create Handoff is disabled: "Choose a supported service tier." Snooze
    (#2181) says why a reminder conflict refuses its primary: "Reload the reminder before saving." */
-.modal-foot > :is(.session-move-reason, .switch-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason) {
+.modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason) {
   flex: 0 1 auto;
   min-width: 0;
   margin: 0 auto 0 0;
@@ -6075,13 +6142,23 @@ textarea {
    buttons and wraps there, rather than pushing the primary onto a second row. */
 .modal-foot > .snooze-blocked-reason { flex: 1 1 0; }
 @media (max-width: 760px) {
-  .modal-foot > :is(.session-move-reason, .switch-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason) { flex-basis: 100%; }
+  .modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason) { flex-basis: 100%; }
 }
 /* Switch Account (#2149): one dim sentence about what moves, then the Accounts head and its rows. */
 .switch-account-rule {
   margin: 0;
   color: var(--text-dim);
   font: var(--type-body);
+}
+.choose-account-body {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+}
+.choose-account-accounts {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
 }
 .switch-account-accounts {
   display: grid;
@@ -9202,59 +9279,6 @@ textarea,
   background: none;
 }
 .provider-login-card[data-embedded] :is(p, form, .provider-login-device-code) { margin: 0; }
-/* The other accounts on the session's Machine, opened by Choose Another Account… until #2208's
-   dialog replaces the list. */
-.auth-recovery-accounts {
-  display: grid;
-  gap: var(--space-2);
-  min-width: 0;
-}
-.auth-recovery-accounts h4 {
-  margin: 0;
-  color: var(--text-dim-on-tint);
-  font: var(--type-label);
-}
-.auth-recovery-accounts .facts-help {
-  margin: 0;
-  color: var(--text-dim-on-tint);
-  font: var(--type-small);
-}
-.auth-recovery-account-list {
-  display: grid;
-  gap: 6px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.auth-recovery-account {
-  display: grid;
-  gap: 4px;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg-elev);
-}
-.auth-recovery-account-head,
-.auth-recovery-account-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
-.auth-recovery-account-error {
-  margin: 0;
-}
-/* Its natural width first, so a long revealed email moves the status tag to the next line rather
-   than breaking mid-word beside it. */
-.auth-recovery-account-label {
-  flex: 1 1 auto;
-  min-width: 0;
-  font-weight: 600;
-  overflow-wrap: anywhere;
-}
-.auth-recovery-account-actions {
-  justify-content: flex-end;
-}
 .inbox-provider-logins {
   display: grid;
   gap: 8px;
@@ -10808,14 +10832,12 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   margin-top: 1px;
 }
 /* The invalid field (§8.5): its 1px edge turns --red, focused or not. The focus ring is the
-   field's own outline (§16.1), which this leaves at --focus. The composer's answer field is not
-   inside a `.field` but is the same invalid control; it follows its own `:focus` rule above, so
-   this comes later to keep the red edge while it is focused. The `:hover` form outranks the
+   field's own outline (§16.1), which this leaves at --focus. The `:hover` form outranks the
    pickers' hover edge (.ui-select-trigger:hover, .ui-searchable-combobox-input:hover), which is
-   later in the file at the same specificity. */
+   later in the file at the same specificity. The composer's answer field has no edge of its own:
+   the composer card's turns red instead (Answer Mode, above). */
 .field [aria-invalid="true"],
-.field [aria-invalid="true"]:hover,
-.composer-answer-input[aria-invalid="true"] {
+.field [aria-invalid="true"]:hover {
   border-color: var(--red);
 }
 /* Read-only pick shown when a field has exactly one possible value (e.g. one online runner). */
@@ -11890,8 +11912,7 @@ body.shell-dock-dragging * {
   background: var(--bg-elev);
 }
 .inbox-view.expanded { background: var(--bg); }
-.inbox-view.expanded > .inbox-list-pane,
-.inbox-view.expanded > .inbox-splitter { display: none; }
+.inbox-view.expanded > .inbox-list-pane { display: none; }
 .inbox-view.expanded > .inbox-preview-pane { height: 100%; }
 /* Sessions board mode: the board canvas fills the pane below the shared toolbar, restoring the
    inset the standalone /board route used to receive from .main-body's padding. */
@@ -11905,9 +11926,120 @@ body.shell-dock-dragging * {
 .inbox-list-pane {
   position: relative;
   display: flex;
+  flex: 1;
   min-height: 0;
   flex-direction: column;
   container: list / inline-size;
+}
+/* The stacked Sessions list and preview (#2217, docs/design-system.md §6.3), on desktop and tablet.
+   The list track is whole --row-h-2 rows plus the list's 8px top pad; InboxView sets the row count
+   from the stored ratio and the measured area, and a drag sets --sessions-list-h itself until it
+   snaps. A notice above the list takes the list's height and never moves the divider. The panes are
+   placed by row, so #2219's side-by-side variant can place them by column instead. */
+.master-detail.sessions-md {
+  --sessions-list-h: calc(var(--space-2) + var(--sessions-list-rows, 3) * var(--row-h-2));
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: var(--sessions-list-h) minmax(0, 1fr);
+  margin-left: 0;
+}
+.sessions-md > .inbox-list-pane {
+  grid-row: 1;
+  grid-column: 1;
+  overflow: hidden;
+}
+.sessions-md > .inbox-preview-pane {
+  grid-row: 2;
+  grid-column: 1;
+}
+.sessions-md .inbox-list { padding-top: var(--space-2); }
+/* The divider (§6.3): the hairline under the list's last row, a hit band centred on it, and a grip
+   that is always visible, since a rule between two full-width panes does not read as movable. Hover
+   and drag draw the line at 2px --border-strong, keyboard focus at 2px --focus; no ring, no band. */
+.master-detail-resize {
+  position: relative;
+  z-index: var(--z-sticky);
+  grid-row: 2;
+  grid-column: 1;
+  align-self: start;
+  height: 9px;
+  margin-top: -4px;
+  cursor: row-resize;
+  touch-action: none;
+}
+.master-detail-resize::before,
+.master-detail-resize::after {
+  position: absolute;
+  content: "";
+  pointer-events: none;
+}
+/* The line sits on the band's centre pixel; the grip is centred on the line. */
+.master-detail-resize::before {
+  top: 4px;
+  right: 0;
+  left: 0;
+  height: 1px;
+  background: var(--border);
+}
+.master-detail-resize::after {
+  top: 2.5px;
+  left: calc(50% - 16px);
+  width: 32px;
+  height: 4px;
+  border-radius: var(--radius-pill);
+  background: var(--border-strong);
+}
+.master-detail-resize[data-dragging]::before { height: 2px; background: var(--border-strong); }
+@media (hover: hover) {
+  .master-detail-resize:hover::before { height: 2px; background: var(--border-strong); }
+}
+/* Transparent, so forced colors still draws a ring where the line's background is discarded. */
+.master-detail-resize:focus-visible { outline: 2px solid transparent; outline-offset: -2px; }
+.master-detail-resize:focus-visible::before { height: 2px; background: var(--focus); }
+@media (pointer: coarse) {
+  .master-detail-resize { height: 17px; margin-top: -8px; }
+  .master-detail-resize::before { top: 8px; }
+  .master-detail-resize::after { top: 5.5px; left: calc(50% - 20px); width: 40px; height: 6px; }
+}
+/* Preview Right (#2219, §6 and §6.3): the list column at its stored width beside the preview, each
+   scrolling on its own. The divider is the column's right hairline, drawn on the preview's first
+   pixel as the stacked one is, in a 4px hit band. Its grip is the line itself at 2px, on hover and
+   drag only, and --focus on keyboard focus; touch, which cannot hover, keeps the pill grip. */
+.sessions-md[data-layout="right"] {
+  /* InboxView sets the stored width inline, and a drag sets it until release. */
+  --sessions-list-w: 400px;
+  grid-template-columns: var(--sessions-list-w) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+}
+/* Isolated, so its docked request (--z-sticky) stays under the divider's band where they overlap; the
+   pane clips its overflow, so nothing inside it needs to rise above the list. */
+.sessions-md[data-layout="right"] > .inbox-preview-pane { grid-row: 1; grid-column: 2; isolation: isolate; }
+.sessions-md[data-layout="right"] > .master-detail-resize {
+  grid-row: 1;
+  grid-column: 2;
+  align-self: stretch;
+  justify-self: start;
+  width: 4px;
+  height: auto;
+  margin: 0 0 0 -2px;
+  cursor: col-resize;
+}
+.sessions-md[data-layout="right"] > .master-detail-resize::before { top: 0; bottom: 0; left: 2px; width: 1px; height: auto; }
+.sessions-md[data-layout="right"] > .master-detail-resize::after { display: none; }
+.sessions-md[data-layout="right"] > .master-detail-resize:is([data-dragging], :focus-visible)::before { width: 2px; }
+@media (hover: hover) {
+  .sessions-md[data-layout="right"] > .master-detail-resize:hover::before { width: 2px; }
+}
+@media (pointer: coarse) {
+  .sessions-md[data-layout="right"] > .master-detail-resize { width: 17px; margin-left: -8px; }
+  .sessions-md[data-layout="right"] > .master-detail-resize::before { left: 8px; }
+  .sessions-md[data-layout="right"] > .master-detail-resize::after {
+    display: block;
+    top: calc(50% - 20px);
+    left: 5.5px;
+    width: 6px;
+    height: 40px;
+  }
 }
 .inbox-order-update { white-space: nowrap; }
 .inbox-tab-group {
@@ -11933,6 +12065,46 @@ body.shell-dock-dragging * {
 @container app (max-width: 1099px) {
   .inbox-search { width: 200px; }
 }
+/* The phone Sessions app bar (#2211, §15.1): the page header's 48px bar alone, with no tab row and
+   no space under it, so the first row starts 8px below it (the list's own padding). Its title is
+   the group picker: the group's name truncating, a caret and the attention badges. Search mode
+   swaps the row for the full-width field and Cancel. While Snoozed is on, a strip under the bar
+   says so and offers Show Active, whose button makes it 44px on touch. */
+.page-header.sessions-app-bar { margin-bottom: 0; }
+.sessions-group-picker {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  height: var(--control-h);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: var(--type-title);
+  text-align: start;
+  cursor: pointer;
+}
+.sessions-group-picker-caret { flex: none; }
+.sessions-app-bar-search { gap: var(--space-2); }
+.sessions-app-bar-search > .inbox-search { flex: 1; width: auto; min-width: 0; }
+/* The Board's Filters and count, on their own row under a phone's bar until #2216. */
+.sessions-app-bar-tools {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  border-top: 1px solid var(--border);
+}
+.sessions-snoozed-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  border-top: 1px solid var(--border);
+  color: var(--text-dim);
+  font: var(--type-body);
+}
 .inbox-list {
   min-height: 0;
   flex: 1;
@@ -11955,70 +12127,27 @@ body.shell-dock-dragging * {
    (§6.3). A phone keeps its three-line card (`.stacked`), which keeps its gap. */
 .inbox-row-shell { position: relative; }
 .inbox-row-shell.stacked { margin: var(--space-1) 0; }
-.inbox-row-shell.stalled::before {
-  position: absolute;
-  z-index: 1;
-  top: 5px;
-  bottom: 5px;
-  left: 0;
-  width: 3px;
-  border-radius: 0 3px 3px 0;
-  background: var(--red);
-  content: "";
-  pointer-events: none;
-}
 .inbox-row-primary-cell { position: relative; display: block; min-width: 0; }
-/* A selected row's leading edge is its accent bar; its badge already says it is stalled (#2215 retires
-   the rail). */
-.inbox-row-shell.stalled.selected::before { content: none; }
 /* ---- Threads (#896): a parent and its children as one unit, the children indented under a spine.
    Every row is still ONE card: a collapsed parent's children leave the row list rather than hiding
    inside a taller row, so the virtualizer's per-shape estimate still holds for every row. ---- */
-/* The chevron sits in the row's leading padding, beside the sender's icon, and the parent row opens
-   up that much room for it. Vertically it is centred on line one: on a two-line row, half the 44px
-   of lines above the row's centre, less half the 18px glyph; on the phone card, the card's padding
-   and border plus half the 20px line, less half the glyph. */
-.inbox-row-shell.thread-parent .inbox-row { padding-left: calc(var(--inbox-row-pad-x) + 18px); }
-.inbox-thread-toggle {
+/* The chevron (§5.5, #2215) is a 28px `.icon-btn.sm` in the row's leading padding, its 14px icon at
+   the padding's inner edge, beside the sender's icon; the parent row opens up that much room for it.
+   Vertically it is centred on line one: on a two-line row, half the 44px of lines above the row's
+   centre, less half the button; on the phone card, the card's border and padding plus half the 20px
+   line, less half the button. Touch makes it 36px to look and 44px to hit, around the same icon. */
+.inbox-row-shell.thread-parent .inbox-row { padding-left: calc(var(--inbox-row-pad-x) + var(--space-6)); }
+.icon-btn.inbox-thread-toggle {
   position: absolute;
-  top: calc(50% - 21px);
-  left: calc(var(--inbox-row-pad-x) - 3px);
-  display: inline-flex;
-  width: 18px;
-  height: 18px;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: 0;
-  border-radius: var(--radius-xs);
-  color: var(--text-faint);
-  background: transparent;
-  font-size: var(--text-xs);
-  cursor: pointer;
+  top: calc(50% - 26px);
+  left: calc(var(--inbox-row-pad-x) - 7px);
 }
-.inbox-thread-toggle > span { display: inline-block; transition: transform var(--dur-fast) var(--ease-out); }
-.inbox-thread-toggle[aria-expanded="true"] > span { transform: rotate(90deg); }
-.inbox-thread-toggle:hover { color: var(--text); background: var(--bg-elev-3); }
-.inbox-thread-toggle:focus-visible { outline: var(--focus-width) solid var(--focus); outline-offset: 1px; }
-.inbox-row-shell.stacked .inbox-thread-toggle { top: calc(var(--inbox-row-pad-y) + 2px); }
-/* A phone gets a 32px hit area around the same 18px glyph. */
+.inbox-row-shell.stacked .inbox-thread-toggle { top: calc(var(--inbox-row-pad-y) - 3px); }
+/* The 36px button ends before the sender's icon, so its press fill never paints over the provider. */
 @media (pointer: coarse) {
-  .inbox-thread-toggle { top: calc(50% - 28px); left: calc(var(--inbox-row-pad-x) - 10px); width: 32px; height: 32px; }
-  .inbox-row-shell.stacked .inbox-thread-toggle { top: calc(var(--inbox-row-pad-y) - 5px); }
-  /* Keep the 32px target, but paint only the original glyph box. A tapped coarse-pointer control
-     may retain :hover; a transparent button cannot leave that desktop fill over the provider. */
-  .inbox-thread-toggle:hover { background: transparent; }
-  .inbox-thread-toggle > span {
-    display: inline-flex;
-    width: 18px;
-    height: 18px;
-    align-items: center;
-    justify-content: center;
-    border-radius: var(--radius-xs);
-  }
-  .inbox-thread-toggle:active > span { color: var(--text); background: var(--bg-elev-3); }
-  .inbox-thread-toggle:focus-visible { outline: none; }
-  .inbox-thread-toggle:focus-visible > span { outline: var(--focus-width) solid var(--focus); outline-offset: 0; }
+  .inbox-row-shell.thread-parent .inbox-row { padding-left: calc(var(--inbox-row-pad-x) + var(--space-6) + var(--space-0-5)); }
+  .icon-btn.inbox-thread-toggle { top: max(0px, calc(50% - 30px)); left: calc(var(--inbox-row-pad-x) - 11px); }
+  .inbox-row-shell.stacked .inbox-thread-toggle { top: calc(var(--inbox-row-pad-y) - 7px); }
 }
 /* Children indent under a 2px spine drawn per row: each child row carries the vertical segment for
    its own height (a phone card's margins included, so consecutive segments join) and a horizontal
@@ -12036,10 +12165,9 @@ body.shell-dock-dragging * {
 .inbox-row-shell.stacked.thread-child::after { top: calc(-1 * var(--space-1)); bottom: calc(-1 * var(--space-1)); }
 .inbox-row-shell.thread-child.thread-last::after { bottom: 50%; }
 .inbox-row-shell.thread-child .inbox-row-primary-cell::before { top: 50%; left: -15px; width: 11px; height: 2px; }
-/* The stalled rail keeps its place at the card's own left edge inside the indent. */
-.inbox-row-shell.thread-child.stalled::before { left: 0; }
-/* The family chip on a parent's title line: dots first, then the rollup. It is sized to the pills
-   it shares a card with, and it never grows the card. */
+/* The family chip, directly after a parent's title (#2215): dots first, then the rollup. It is sized
+   to the pills it shares a card with, and it never grows the card. Below a 600px list (a narrow
+   column, Preview Right, a phone) it keeps only its dots; its name and tooltip keep the rollup. */
 .inbox-thread-family {
   display: inline-flex;
   flex: none;
@@ -12057,10 +12185,13 @@ body.shell-dock-dragging * {
   white-space: nowrap;
   cursor: pointer;
 }
-/* A Board card's meta line has the room the list's title line does not. */
-.card-meta .inbox-thread-family { max-width: 100%; }
 .inbox-thread-family.waiting { border-color: transparent; color: var(--accent-2-on-tint); background: color-mix(in srgb, var(--accent-2) 12%, transparent); }
 .inbox-thread-family-text { overflow: hidden; text-overflow: ellipsis; }
+/* A Board card decides by its own width instead (`.card-status > .inbox-thread-family.dots-only`). */
+@container list (max-width: 599px) {
+  :not(.card-status) > .inbox-thread-family { gap: 0; padding-inline: var(--space-1); }
+  :not(.card-status) > .inbox-thread-family > .inbox-thread-family-text { display: none; }
+}
 .inbox-thread-dots { display: inline-flex; flex: none; gap: 3px; }
 .inbox-thread-dot { display: inline-block; width: 7px; height: 7px; border-radius: var(--radius-pill); background: var(--border-strong); }
 .inbox-thread-dot.running { background: var(--teal); }
@@ -12262,11 +12393,56 @@ body.shell-dock-dragging * {
   .icon-btn.inbox-row-more { width: var(--control-h); height: var(--control-h); }
   .inbox-row-shell .inbox-row { padding-right: var(--control-h); }
 }
+/* What the session wants, after the title (#2218): only a list wide enough for it shows it. */
+.inbox-row-snippet { display: none; }
+/* A wide list's rows (#2218, docs/design-system.md §6.3 "Rows use the width"). At 880px and wider the
+   two lines keep their height. The title line adds the snippet, and the title keeps at most 60% of
+   it. The status line's trailing cluster becomes fixed columns, the same on every row, so the badges
+   start and the times end at one x down the list: status (the badge and "+N"), activity, flags and
+   time; an empty cell keeps its width. The actions get a column of their own after the time, so a
+   hover never covers the status or the time; a coarse pointer's ⋯ sits in the same column. */
+@container list (min-width: 880px) {
+  .inbox-row-shell:not(.stacked) .inbox-row { padding-right: var(--inbox-row-col-actions); }
+  .inbox-row-shell:not(.stacked) .inbox-row-trail {
+    display: grid;
+    grid-template-columns:
+      var(--inbox-row-col-status) var(--inbox-row-col-activity) var(--inbox-row-col-flags) var(--inbox-row-col-time);
+    align-items: center;
+    gap: var(--space-3);
+  }
+  .inbox-row-trail > .row-status { grid-column: 1; min-width: 0; overflow: hidden; }
+  .inbox-row-trail > .row-status > .status { min-width: 0; flex: 0 1 auto; overflow: hidden; }
+  .inbox-row-trail > .inbox-row-activity { grid-column: 2; }
+  .inbox-row-trail > .inbox-row-flags { grid-column: 3; }
+  .inbox-row-trail > .inbox-row-time { grid-column: 4; justify-self: end; }
+  .inbox-row-shell:not(.stacked) .inbox-row-copy:has(> .inbox-row-snippet) > .inbox-row-title { max-width: 60%; }
+  .inbox-row-shell:not(.stacked) .inbox-row-snippet {
+    display: block;
+    min-width: 0;
+    flex: 1 1 0;
+    overflow: hidden;
+    color: var(--text-dim);
+    font: var(--type-body);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .inbox-row-shell:not(.stacked) .inbox-row-actions {
+    top: 50%;
+    bottom: auto;
+    padding-left: 0;
+    background: transparent;
+    transform: translateY(-50%);
+  }
+}
 /* Forced colors drops fills, so the selected bar (wider, with no fill beside it) and the unread dot
-   are painted in system colours. After the rules they override, which they tie with. */
+   are painted in system colours. After the rules they override, which they tie with. So are a
+   thread's spine and ticks, and the family chip's dots (#2215), which are all a dots-only chip shows. */
 @media (forced-colors: active) {
   .inbox-row-shell.selected .inbox-row-primary-cell::after { width: var(--space-1); background: Highlight; }
   .inbox-unread-dot { background: CanvasText; }
+  .inbox-row-shell.thread-child::after,
+  .inbox-row-shell.thread-child .inbox-row-primary-cell::before { background: GrayText; }
+  .inbox-thread-dots > .inbox-thread-dot { background: CanvasText; }
 }
 
 .inbox-pin-indicator {
@@ -12335,48 +12511,45 @@ body.shell-dock-dragging * {
   .detail-scroll { transition: none; }
 }
 /* The Sessions list's own state: the list zone's focus target, holding a top-left `State`. */
-.inbox-zero {
-  min-height: 0;
-  flex: 1;
-  overflow: auto;
-  padding: 0 var(--space-4);
-}
-/* No Matches takes both panes' place (#2200, §6.1), on the page grid like any state that spans them,
-   so it is stacked at the page state's drop (§12.1) rather than the inline row of a list's own. */
-.inbox-no-matches {
-  min-height: 0;
-  flex: 1;
-  overflow: auto;
-  padding: 0 var(--page-gutter) var(--space-12);
-}
-.inbox-no-matches > .state.no-results {
+/* One state takes both panes' place (§6.1): No Matches (#2200) and an empty group (#2220), on the
+   page grid like any state that spans them. No Matches is stacked at the page state's drop (§12.1)
+   rather than the inline row of a list's own. */
+.inbox-state { flex: 1; }
+.inbox-state > .state.no-results {
   display: grid;
   padding-top: var(--space-12);
 }
-.inbox-splitter {
-  position: relative;
-  z-index: 2;
-  height: 10px;
+/* A neutral line above the list (§12.3, §12.5): "Loading 8 sessions…" over the skeleton, or
+   "Reconnecting…" over the last-known rows. It takes list height, as a notice does. */
+.inbox-list-status {
   flex: none;
-  border: 0;
-  border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
-  background: var(--bg);
-  cursor: row-resize;
-  touch-action: none;
+  margin: 0;
+  padding: var(--space-2) var(--space-3) 0;
+  color: var(--text-dim);
+  font: var(--type-body);
 }
-.inbox-splitter::after {
-  position: absolute;
-  top: 3px;
-  left: calc(50% - 20px);
-  width: 40px;
-  height: 2px;
-  border-radius: 999px;
-  background: var(--border-strong);
-  content: "";
+/* The last-known list's wrapper (StaleContent) is no box of its own: the grid stays the pane's
+   scroll container, and the dimming reaches it by inheritance. */
+.inbox-list-stale { display: contents; }
+/* Skeleton rows while a group's sessions arrive (§12.3): the real row's height and anatomy, flush
+   with the list's padding, and never a state card. */
+.inbox-skeleton {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
 }
-.inbox-splitter:hover::after,
-.inbox-splitter:focus-visible::after { background: var(--accent); }
+.inbox-skeleton-rows { padding: var(--space-2) var(--space-2) 0; }
+.inbox-skeleton-row > .row-body { gap: var(--space-2); }
+/* A phone's row is the three-line card (#2209), so its placeholder is one too. */
+.inbox-skeleton-row.stacked {
+  height: 88px;
+  margin: var(--space-1) 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elev-2);
+}
 .inbox-preview-pane {
   position: relative;
   min-height: 0;
@@ -12384,23 +12557,29 @@ body.shell-dock-dragging * {
   overflow: hidden;
   background: var(--bg);
 }
-.inbox-preview-empty {
-  display: grid;
-  height: 100%;
-  place-content: center;
-  justify-items: center;
-  gap: 5px;
-  color: var(--text-dim);
+/* The preview while the list loads (§12.3): a skeleton of its bar, at the bar's height and gutter. */
+.inbox-preview-skeleton {
+  display: flex;
+  align-items: center;
+  height: var(--bar-h);
+  padding: 0 var(--page-gutter);
+  border-bottom: 1px solid var(--border);
 }
-.inbox-preview-empty strong { color: var(--text); font-size: 16px; }
+/* Preview Right (#2219) starts the preview's content --space-6 from the divider, as its bar does. */
+.sessions-md[data-layout="right"] .inbox-preview-skeleton { padding-left: var(--space-6); }
+.inbox-preview-skeleton > .skeleton-bar.title { max-width: 320px; }
 /* The Sessions preview (#2210; §4.3, §6.3): a quick look, so it starts at the page gutter like the
    page title and the rows above it, and its reading column is at most --chat-max wide, never
    centered: its end padding is the gutter or whatever is left past the column. A size container,
-   so its request dock caps at half the preview. */
+   so its request dock caps at half the preview. --preview-inset is where the bar, the meta line, the
+   request dock and the transcript start: the page gutter under the list, and --space-6 from the
+   divider in Preview Right (#2219). */
 .session-detail.preview {
+  --preview-inset: var(--page-gutter);
   background: var(--bg);
   container: session-preview / size;
 }
+.sessions-md[data-layout="right"] .session-detail.preview { --preview-inset: var(--space-6); }
 .session-detail.preview .right-panel,
 .session-detail.preview .right-panel-resizer,
 .session-detail.preview .composer { display: none; }
@@ -12409,15 +12588,15 @@ body.shell-dock-dragging * {
 .session-detail.preview .detail-main { min-height: 0; }
 .session-detail.preview .detail-scroll {
   padding-block: var(--space-3);
-  padding-inline: var(--page-gutter) max(var(--page-gutter), calc(100% - var(--page-gutter) - var(--chat-max)));
+  padding-inline: var(--preview-inset) max(var(--page-gutter), calc(100% - var(--preview-inset) - var(--chat-max)));
 }
-.session-detail.preview .transcript-history-band { padding-inline: var(--page-gutter) max(var(--page-gutter), calc(100% - var(--page-gutter) - var(--chat-max))); }
+.session-detail.preview .transcript-history-band { padding-inline: var(--preview-inset) max(var(--page-gutter), calc(100% - var(--preview-inset) - var(--chat-max))); }
 .session-detail.preview .transcript-tail-anchor > .btn.transcript-tail-control {
-  right: max(var(--page-gutter), calc(100% - var(--page-gutter) - var(--chat-max)));
-  left: var(--page-gutter);
+  right: max(var(--page-gutter), calc(100% - var(--preview-inset) - var(--chat-max)));
+  left: var(--preview-inset);
 }
 /* The detail bar's one row, with the meta line under it as part of the same header. */
-.session-preview-bar { border-bottom: 0; }
+.session-preview-bar { padding-left: var(--preview-inset); border-bottom: 0; }
 .session-preview-open { flex: none; }
 /* Neutral facts (§11.3): the machine, the branch and the agent, each after its 14px icon, 12px
    apart on one line; the last fact gives way first. */
@@ -12428,7 +12607,7 @@ body.shell-dock-dragging * {
   gap: var(--space-3);
   min-width: 0;
   margin: 0;
-  padding: 0 var(--page-gutter) var(--space-2);
+  padding: 0 var(--page-gutter) var(--space-2) var(--preview-inset);
   overflow: hidden;
   border-bottom: 1px solid var(--border);
   color: var(--text-dim);
@@ -12458,21 +12637,25 @@ body.shell-dock-dragging * {
   overflow-y: auto;
   overscroll-behavior: contain;
   margin: 0;
-  padding: var(--space-2) max(var(--page-gutter), calc(100% - var(--page-gutter) - var(--chat-max))) var(--space-2) var(--page-gutter);
+  padding: var(--space-2) max(var(--page-gutter), calc(100% - var(--preview-inset) - var(--chat-max))) var(--space-2) var(--preview-inset);
+  /* The transcript scrolls beneath the dock, so the dock draws an edge over it (#2217): a hairline,
+     which dark themes need because --elev-1 barely shows on their canvas, and the shadow. */
+  position: relative;
+  z-index: var(--z-sticky);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  box-shadow: var(--elev-1);
 }
 
 @media (max-width: 760px) {
-  /* The search field takes a full-width row of its own above the tabs (#2082); the tab bar's
-     phone rules, after its own, put it there. */
-  .inbox-search { width: 100%; }
-  /* A phone has no width for a 26px indent or the chip's words: the spine narrows and the family
-     chip keeps only its dots, which still say how many children and which of them wait (#896). */
+  /* Under the phone app bar the first card starts 8px down, its own 4px margin after this 4px, so
+     the first row is at most 56px below the top of the page (#2211). */
+  .inbox-list { padding-top: var(--space-1); }
+  /* A phone has no width for a 26px indent: the spine narrows (#896). */
   .inbox-row-shell.thread-child { margin-left: 14px; }
   .inbox-row-shell.thread-child::after,
   .inbox-row-shell.thread-child .inbox-row-primary-cell::before { left: -9px; }
   .inbox-row-shell.thread-child .inbox-row-primary-cell::before { width: 6px; }
-  .inbox-thread-family { gap: 0; padding-right: 5px; }
-  .inbox-thread-family-text { display: none; }
   /* A phone drops the base ref off the status line; the branch keeps what is left of the line. */
   .inbox-row-base { display: none; }
 }
@@ -13314,9 +13497,6 @@ body.shell-dock-dragging * {
   font-size: var(--text-sm);
   line-height: 1.4;
 }
-.card-approval .approval-refusal {
-  margin-bottom: 7px;
-}
 .approval-context {
   margin: 8px 0 0;
   padding: 8px 10px;
@@ -13519,34 +13699,6 @@ body.shell-dock-dragging * {
   -webkit-line-clamp: 1;
 }
 .question-card[data-keyboard-open] > .question-text > * { display: inline; }
-/* Composer Answer Mode still names a question's header this way, until #2212 replaces it. */
-.question-chip {
-  display: inline-block;
-  padding: 1px 8px;
-  margin-right: 8px;
-  border-radius: 999px;
-  background: var(--bg-elev-3);
-  color: var(--text-dim);
-  font-size: 11px;
-  font-weight: 500;
-}
-.question-text-options {
-  margin: 0;
-  padding-left: 32px;
-  color: var(--text);
-}
-.question-text-options li {
-  padding: 3px 6px;
-  overflow-wrap: anywhere;
-}
-.question-text-options .question-label {
-  font-weight: 500;
-}
-.question-text-options .question-desc {
-  display: block;
-  color: var(--text-dim);
-  font-size: var(--text-sm);
-}
 .tl-perm-head {
   display: flex;
   align-items: center;
@@ -14157,7 +14309,6 @@ body.shell-dock-dragging * {
     flex: 0 0 84vw;
     scroll-snap-align: start;
   }
-  .board-wrap > .toolbar { flex-wrap: wrap; }
 
 
   /* The app topbar owns mobile Session identity. This is the only second bar: statuses at the
@@ -14234,9 +14385,6 @@ body.shell-dock-dragging * {
   }
   .background-work-group-head { align-items: center; }
 
-  .approval-actions {
-    flex-wrap: wrap;
-  }
   /* Composer: six lines at most, above the software keyboard. */
   .composer-input { max-height: calc(6 * 22px); }
   /* The idle capsule (#2174): the card's own 12px corners and side insets, so expanding it changes
@@ -16255,9 +16403,6 @@ body.shell-dock-dragging * {
    promotion has no job left — and it did active harm: it made `.slash-src` render identically to
    `.slash-desc`, which uses the dim tier, so the two lines of an active row became one weight. A
    promotion that outlives its reason is an inversion waiting to be reported. */
-.card-approval .approval-title {
-  color: var(--amber-on-tint);
-}
 
 .skeleton {
   display: flex;
@@ -16418,14 +16563,6 @@ body.shell-dock-dragging * {
 }
 .tab > .group-name { max-width: 200px; }
 .group-name-machine { color: var(--text-faint); font-weight: var(--weight-normal); }
-/* Phones: the bar wraps and its tools come first, a full-width row above the tabs (#2082), while
-   the list button stays beside the scrolling tab row. */
-@media (max-width: 760px) {
-  .page-tabs:has(> .tabs-bar) { height: auto; }
-  .tabs-bar { flex-wrap: wrap; row-gap: var(--space-2); height: auto; }
-  .tabs-bar > .tabs { flex: 1 1 0; height: var(--control-h-lg); }
-  .tabs-tools { order: -1; flex: 1 0 100%; margin-left: 0; }
-}
 
 /* Counts (§11.4). A plain count sits 4px after its label; a count that needs the user is a 16px
    count badge, amber, or red for the danger tone. Zero is never shown in color. */
@@ -16601,7 +16738,10 @@ body.shell-dock-dragging * {
   .choice-row:hover:not(.is-disabled) { background: var(--bg-elev-2); }
 }
 .choice-row:has(> .radio-mark > input:checked),
-.choice-row:has(> .checkbox-mark > input:checked) { background: var(--surface-selected); }
+.choice-row:has(> .checkbox-mark > input:checked),
+.choice-row.has-action:has(> .choice-row-main > :is(.radio-mark, .checkbox-mark) > input:checked) {
+  background: var(--surface-selected);
+}
 .choice-row.is-disabled { cursor: not-allowed; }
 .choice-row.is-disabled :is(.choice-row-title, .choice-row-meta) { color: var(--text-faint); }
 /* The marker's box is one title line tall, so it centres on the first line and not the row. */
@@ -16628,6 +16768,31 @@ body.shell-dock-dragging * {
   white-space: nowrap;
 }
 .choice-row-reason { color: var(--text-faint); font: var(--type-small); }
+/* A refused choice's field error (§8.5) in the second line's place; it wraps rather than being cut. */
+.choice-row-error { overflow-wrap: anywhere; }
+/* A row with a control at its end (`action`, Choose Another Account's Sign In): the label holds the
+   marker and text, as a plain row's does, and the control sits beside it, outside the label. */
+.choice-row.has-action {
+  flex-wrap: nowrap;
+  align-items: center;
+  padding-block: 0;
+  padding-inline-start: 0;
+}
+.choice-row-main {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  align-content: center;
+  align-items: flex-start;
+  align-self: stretch;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: var(--space-2) 0 var(--space-2) var(--space-3);
+  cursor: pointer;
+}
+.choice-row.is-disabled > .choice-row-main { cursor: not-allowed; }
+.choice-row-main > :is(.radio-mark, .checkbox-mark) { height: 20px; }
+.choice-row-action { display: flex; flex: none; align-items: center; }
 .choice-row-meta {
   display: flex;
   flex: none;

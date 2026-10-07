@@ -39,11 +39,11 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | Export | Decision | Mapping or Exception | Rationale |
 | --- | --- | --- | --- |
 | `GridIcon` | Lucide | `Grid2X2` | Generic grid navigation. |
-| `InboxIcon` | Lucide | `Inbox` | Generic inbox navigation. |
+| `InboxIcon` | Lucide | `Inbox` | Generic inbox navigation, and the Sessions No Sessions Yet state (#2220). |
 | `ProjectsIcon` | Lucide | `FolderKanban` | Project collection navigation. |
 | `BoardIcon` | Lucide | `Columns3` | Generic board columns. |
 | `ListIcon` | Lucide | `List` | Generic list layout. |
-| `AlarmClockIcon` | Lucide | `AlarmClock` | Snooze: a snoozed Sessions row's return time (#2209) and the Sessions preview bar's Snooze button (#2210). |
+| `AlarmClockIcon` | Lucide | `AlarmClock` | Snooze: a snoozed Sessions row's return time (#2209) and the Sessions preview bar's Snooze button (#2210), and the Sessions No Snoozed Sessions and No Active Sessions states (#2220). |
 | `DismissReminderIcon` | Lucide | `AlarmClockOff` | Dismiss Reminder in the Sessions context menu (#2214). |
 | `ConnectionsIcon` | Lucide | `MonitorCog` | Runner connection management. |
 | `RunsIcon` | Lucide | `Workflow` | Generic workflow runs. |
@@ -60,6 +60,8 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `ChevronRightIcon` | Lucide | `ChevronRight` | Directional disclosure. |
 | `ChevronLeftIcon` | Lucide | `ChevronLeft` | Directional disclosure. |
 | `ChevronUpIcon` | Lucide | `ChevronUp` | Expand on the request dock's reading-back strip. |
+| `ChevronsDownIcon` | Lucide | `ChevronsDown` | Show Context: Answer Mode shrinks to its head so the transcript shows. |
+| `ChevronsUpIcon` | Lucide | `ChevronsUp` | Show Answer: Answer Mode's panel opens again. |
 | `PlusIcon` | Lucide | `Plus` | Generic add action. |
 | `PinIcon` | Lucide | `Pin` | Pinned session state. |
 | `UnpinIcon` | Lucide | `PinOff` | Unpin Session in the Sessions context menu (#2214). |
@@ -75,6 +77,8 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `UpdateIcon` | Lucide | `Upload` | Install or upload an update. |
 | `SearchIcon` | Lucide | `Search` | Generic search action. |
 | `SearchOffIcon` | Lucide | `SearchX` | A search with no matches: the Sessions No Matches state. |
+| `MapPinOffIcon` | Lucide | `MapPinOff` | A Project with no Location: the Sessions No Location Yet and No Location Available states (#2220). |
+| `CloudOffIcon` | Lucide | `CloudOff` | A Project whose only Locations are on offline machines: the Sessions Location Offline state (#2220). |
 | `CloseIcon` | Lucide | `X` | Generic close action. |
 | `SettingsIcon` | Lucide | `Settings` | Generic settings navigation. |
 | `UserPlusIcon` | Lucide | `UserPlus` | Add a collaborator. |
@@ -102,16 +106,18 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `MailIcon` | Lucide | `Mail` | A masked or revealed email address. |
 | `EyeIcon` | Lucide | `Eye` | Reveal a masked personal identifier. |
 | `EyeOffIcon` | Lucide | `EyeOff` | Hide a revealed personal identifier. |
-| `PanelRightIcon` | Lucide | `PanelRight` | Right panel placement. |
+| `PanelRightIcon` | Lucide | `PanelRight` | Right panel placement; Preview Right, the Sessions preview beside the list (#2219). |
+| `PanelBottomIcon` | Lucide | `PanelBottom` | Preview Below, the Sessions preview under the list (#2219). |
 | `PanelLeftOpenIcon` | Lucide | `PanelLeftOpen` | Expand Navigation: show names in the desktop rail. |
 | `PanelLeftCloseIcon` | Lucide | `PanelLeftClose` | Collapse Navigation: return the desktop rail to icons. |
 | `CommandLineIcon` | Lucide | `SquareTerminal` | Command-line destination; the session bar's Terminal toggle. |
 | `GlobeIcon` | Lucide | `Globe` | Remote host; a web fetch step in the transcript. |
-| `FolderIcon` | Lucide | `Folder` | Generic directory. |
+| `FolderIcon` | Lucide | `Folder` | Generic directory, and the Sessions No Sessions Without a Project state (#2220). |
 | `FileIcon` | Lucide | `File` | Generic file; a file row in the @ picker beside the folder row. |
 | `FileCodeIcon` | Lucide | `FileCode` | A file, line or diff reference attached to a message: the composer's reference chip and the transcript's. |
 | `FolderOpenIcon` | Lucide | `FolderOpen` | Open in Files: shows a referenced file in the Files panel. |
-| `BanIcon` | Lucide | `Ban` | Why a choice can't be made: a disabled command's reason in the / picker. |
+| `BanIcon` | Lucide | `Ban` | Why a choice can't be made: a disabled command's reason in the / picker; the sign-in card's notice that a conversation can't continue under another account. |
+| `UserXIcon` | Lucide | `UserX` | An account removed from its machine while Choose Another Account listed it. |
 | `FolderUpIcon` | Lucide | `CornerUpLeft` | Navigate to the parent directory. |
 | `QuestionIcon` | Lucide | `MessageCircleQuestion` | A question: an agent's question row and pending-question marker in the transcript; Side Chat's launcher; the Request Card's Question kind. |
 | `LocateIcon` | Lucide | `Locate` | Show Where Asked: scrolls the transcript to a docked question's marker. |

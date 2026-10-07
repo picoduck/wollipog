@@ -6,7 +6,6 @@ import { Window } from "happy-dom";
 import type { SessionView } from "@wollipog/protocol";
 import { recordSessionActivity } from "../activity.js";
 import { InboxList, inboxRowReadsClock } from "./InboxList.js";
-import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/inbox" });
 for (const [name, value] of Object.entries({
@@ -103,11 +102,6 @@ test("inbox list exposes selection semantics and mouse select/expand paths", asy
         activityBySession={new Map()}
         stalledSessionIds={new Set()}
         activityNow={60_000}
-        runningCount={0}
-        queuedCount={0}
-        startingCount={0}
-        filtered={false}
-        onNewSession={() => undefined}
         onSelect={(id) => selected.push(id)}
         onExpand={(id) => expanded.push(id)}
         onSessionMenu={() => undefined}
@@ -164,11 +158,6 @@ test("inbox list keeps live row content and the visible touch target while inter
       activityBySession={new Map()}
       stalledSessionIds={new Set()}
       activityNow={60_000}
-      runningCount={0}
-      queuedCount={0}
-      startingCount={0}
-      filtered={false}
-      onNewSession={() => undefined}
       onSelect={(sessionId) => selected.push(sessionId)}
       onExpand={() => undefined}
       onSessionMenu={() => undefined}
@@ -206,97 +195,6 @@ test("inbox list keeps live row content and the visible touch target while inter
   });
   assert.deepEqual(selected, ["target"]);
   assert.deepEqual(events, ["target:1:true:mouse", "press:7:true:touch", "press:7:false:touch", "target:1:false:mouse"]);
-
-  await act(async () => { root.unmount(); });
-  container.remove();
-});
-
-test("inbox zero reports running work and keeps a mouse path to New Session", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
-  let created = 0;
-  await act(async () => {
-    root.render(
-      <InboxList
-        entries={[]}
-        selectedSessionId={null}
-        pinnedSessionIds={new Set()}
-        activityBySession={new Map()}
-        stalledSessionIds={new Set()}
-        activityNow={60_000}
-        runningCount={2}
-        queuedCount={0}
-        startingCount={0}
-        filtered={false}
-        onNewSession={() => { created += 1; }}
-        onSelect={() => undefined}
-        onExpand={() => undefined}
-        onSessionMenu={() => undefined}
-      onScrollPosition={() => undefined}
-      />,
-    );
-  });
-  assert.match(container.textContent ?? "", /All Agents Unblocked/);
-  assert.match(container.textContent ?? "", /Running: 2. Queued: 0. Starting: 0./);
-  await act(async () => { container.querySelector<HTMLButtonElement>("button")!.click(); });
-  assert.equal(created, 1);
-  await act(async () => { root.unmount(); });
-  container.remove();
-});
-
-test("inbox zero uses contextual Project copy and lets search-empty copy take precedence", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
-  const props = {
-    entries: [],
-    selectedSessionId: null,
-    pinnedSessionIds: new Set<string>(),
-    activityBySession: new Map(),
-    stalledSessionIds: new Set<string>(),
-    activityNow: 60_000,
-    runningCount: 0,
-    queuedCount: 0,
-    startingCount: 0,
-    onNewSession: () => undefined,
-    onSelect: () => undefined,
-    onExpand: () => undefined,
-    onSessionMenu: () => undefined,
-    onScrollPosition: () => undefined,
-  };
-  await act(async () => {
-    root.render(<InboxList {...props} filtered={false} emptyState={{
-      title: "No Sessions Yet",
-      description: "Start a session in Empty Project.",
-      showNewSession: true,
-    }} />);
-  });
-  assert.match(container.textContent ?? "", /No Sessions Yet/);
-  assert.match(container.textContent ?? "", /Start a session in Empty Project/);
-  assert.ok(container.querySelector("button"));
-
-  await act(async () => {
-    root.render(<InboxList {...props} filtered={false} emptyState={{
-      title: "No Sessions Without a Project",
-      description: "Sessions not assigned to a Project appear here.",
-      showNewSession: false,
-    }} />);
-  });
-  assert.match(container.textContent ?? "", /No Sessions Without a Project/);
-  assertNoDomNode(container.querySelector("button"));
-
-  await act(async () => {
-    root.render(<InboxList {...props} filtered emptyState={{
-      title: "No Sessions Yet",
-      description: "Start a session in Empty Project.",
-      showNewSession: true,
-    }} />);
-  });
-  assert.match(container.textContent ?? "", /No Matching Sessions/);
-  assert.match(container.textContent ?? "", /Try a different search/);
-  assert.doesNotMatch(container.textContent ?? "", /No Sessions Yet/);
-  assertNoDomNode(container.querySelector("button"));
 
   await act(async () => { root.unmount(); });
   container.remove();
@@ -340,11 +238,6 @@ test("busy rows show activity while stalled approval remains distinct and access
         activityBySession={activityBySession}
         stalledSessionIds={new Set([stalled.id])}
         activityNow={now}
-        runningCount={1}
-        queuedCount={0}
-        startingCount={0}
-        filtered={false}
-        onNewSession={() => undefined}
         onSelect={() => undefined}
         onExpand={() => undefined}
         onSessionMenu={() => undefined}

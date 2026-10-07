@@ -1,1 +1,0 @@
-|.question-text-options li|padding|6px

@@ -28,11 +28,13 @@ export function focusZoneForElement(element: Element | null): FocusZone | null {
 export const ZONE_TARGETS: Readonly<Record<FocusZone, readonly string[]>> = {
   // The current destination (the Settings control while in Settings), then the first destination.
   rail: ['[aria-current="page"]', ".rail-item"],
-  // Board mode replaces the Sessions list with the kanban canvas, and No Matches replaces both
-  // (#2200); F6 still needs a landing spot there.
-  list: [".inbox-list", ".inbox-zero", ".board-wrap", ".inbox-no-matches"],
-  // The Sessions reading pane lands on its transcript scroller, as opening a session does.
-  main: [".detail-scroll", ".inbox-preview-empty"],
+  // Board mode replaces the Sessions list with the kanban canvas, a state replaces both panes
+  // (No Matches #2200, an empty group #2220), and skeleton rows stand in while sessions arrive; F6
+  // still needs a landing spot in each.
+  list: [".inbox-list", ".inbox-state", ".inbox-skeleton", ".board-wrap"],
+  // The Sessions reading pane lands on its transcript scroller, as opening a session does, or on its
+  // placeholder while the list loads.
+  main: [".detail-scroll", ".inbox-preview-skeleton"],
 };
 
 function zoneRoot(targetDocument: Document, zone: FocusZone): HTMLElement | null {
@@ -167,6 +169,7 @@ export type EscapeOwner =
   | "terminal-exit"
   | "composer"
   | "session-reading"
+  | "inbox-preview"
   | "inbox-filter"
   | "settings-input"
   | "settings"
@@ -204,6 +207,8 @@ export function escapeOwner(
   if (active instanceof Element && active.closest(".composer")) return "composer";
   if (viewName === "settings" && inTypingContext(targetDocument)) return "settings-input";
   if (viewName === "session") return "session-reading";
+  // Escape in the Sessions preview returns to the selected row (§6.3), before it clears a search.
+  if (viewName === "inbox" && active instanceof Element && active.closest(".inbox-preview-pane")) return "inbox-preview";
   // Board mode shares the Sessions search box, so Escape clears its query the same way.
   if ((viewName === "inbox" || viewName === "board") && inboxFilterActive) return "inbox-filter";
   if (viewName === "settings") return "settings";

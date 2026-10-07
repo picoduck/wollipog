@@ -669,13 +669,15 @@ test("authentication approval is selected only when exactly one method is availa
   }, "approve"), null);
 });
 
-test("split ratio parsing clamps values and fails closed to 40 percent", () => {
+test("split ratio parsing clamps values and fails closed to 45 percent", () => {
   assert.equal(parseInboxSplitRatio(null), INBOX_SPLIT_RATIO_DEFAULT);
   assert.equal(parseInboxSplitRatio(""), INBOX_SPLIT_RATIO_DEFAULT);
   assert.equal(parseInboxSplitRatio("garbage"), INBOX_SPLIT_RATIO_DEFAULT);
   assert.equal(parseInboxSplitRatio("0.1"), INBOX_SPLIT_RATIO_MIN);
   assert.equal(parseInboxSplitRatio("0.9"), INBOX_SPLIT_RATIO_MAX);
   assert.equal(clampInboxSplitRatio(0.575), 0.575);
+  // #2217 moved the default from 0.4; a ratio stored under the old default is still honored.
+  assert.equal(parseInboxSplitRatio("0.4"), 0.4);
 });
 
 test("shouldRestoreInboxScroll only restores when collapsing out of the expanded view", () => {

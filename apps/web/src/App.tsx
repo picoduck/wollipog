@@ -8,7 +8,6 @@ import {
   useState,
 } from "react";
 import { pendingRequests, runnerSupportsProtocol } from "@wollipog/protocol";
-import { dockRequests } from "./components/requests/RequestDock.js";
 import { useStoreActions, useStoreSelector, type View } from "./store.js";
 import { useApi } from "./api-context.js";
 import { notifier } from "./notify.js";
@@ -394,9 +393,10 @@ export function Shell() {
   // Same reason: an install started from Settings must still be reported after leaving About.
   const desktopUpdate = useDesktopUpdateSetting();
   const notify = useNotifySetting();
-  // Right side panel (Review/Terminal/Browser/Files/Side chat). State lives here — not in the
-  // per-session-keyed SessionDetail — so open/mode/width survive navigating between sessions.
-  const rightPanel = useRightPanelState();
+  // Keep panel preferences and drafts in the shell, but Agents visibility belongs to this visit.
+  // Leaving a session (including via the Sessions list) resets it before the next surface paints.
+  const rightPanel = useRightPanelState(view.name === "session" ? view.id : null,
+    view.name === "session" && view.attention !== undefined);
   const sourceLocationKey = view.name === "session" && view.location
     ? `${view.id}\0${view.location.path}\0${view.location.line ?? ""}\0${view.location.column ?? ""}\0${view.location.symbol ?? ""}`
     : null;
@@ -405,20 +405,6 @@ export function Shell() {
     // The scalar route key is the trigger; panel callbacks are intentionally app-state methods.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourceLocationKey]);
-  const attentionKey = view.name === "session" && view.attention
-    ? `${viewPath(view)}\0${view.attention.activationId ?? 0}` : null;
-  useEffect(() => {
-    if (!attentionKey) return;
-    // The session's own request (not a worker's) is answered on its request dock (#2179), which
-    // brings the named one up itself; the Agents panel would only cover it on a phone.
-    const target = view.name === "session" ? view.attention : undefined;
-    const session = view.name === "session" ? sessions.get(view.id) : undefined;
-    if (target?.requestId && session && (session.eventEpoch ?? 0) === target.eventEpoch &&
-        dockRequests(pendingRequests(session.pendingApproval)).some((request) => request.requestId === target.requestId)) return;
-    rightPanel.show("subagents");
-    // A route change, not unrelated panel state, requests focus/navigation.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [attentionKey]);
 
   // Bottom terminal dock visibility (Codex layout: toggled, never an always-visible bar).
   // Migrates the legacy wollipog.shelldock.collapsed pref on first run.
@@ -592,6 +578,9 @@ export function Shell() {
         e.preventDefault();
         // Escaping a session returns to the Sessions mode it was opened from (list or board).
         navigate(sessionsDestination(instanceScope));
+      } else if (owner === "inbox-preview") {
+        e.preventDefault();
+        focusZone(document, "list");
       } else if (owner === "inbox-filter") {
         e.preventDefault();
         window.dispatchEvent(new Event("wollipog:clear-inbox-query"));

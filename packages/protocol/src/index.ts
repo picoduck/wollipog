@@ -655,7 +655,13 @@
 // 209: replacement connections resume bounded manual skill correlations from current-server
 //      pending authority and retained runner-local admission; old peers retain timeout fallback.
 // 210: content-bound cost correction coordinates and explicitly approved metadata repair.
-export const PROTOCOL_VERSION = 210;
+// 211: who resolved a permission (#2628): the control plane sends `resolvedBy`, the organization
+//      user who submitted the decision or the governance policy that auto-resolved it, with
+//      `resolve_permission`, and the runner records it on the `permission_resolved` it emits for
+//      exactly that request, so a Decision Record names its decider per occurrence. Additive +
+//      optional: older runners ignore the field and older control planes send none; such
+//      resolutions name nobody, as before.
+export const PROTOCOL_VERSION = 211;
 export const SKILL_REPORT_REQUEST_LIFETIME_MS = 30_000;
 export const MAX_SKILL_REPORT_REQUESTS = 64;
 export { boundedIssueNumbers, epicChecklistMembers, normalizeCampaignIssueScopeSnapshot } from "./campaign-issue-scope.js";
@@ -725,6 +731,7 @@ export const SESSION_NAMING_TRANSPORT_MARGIN_MS = SESSION_NAMING_CLEANUP_BUDGET_
 export const SESSION_NAMING_SUPERVISION_MARGIN_MS = SESSION_NAMING_TRANSPORT_MARGIN_MS + 1_000;
 export { buildConversationHandoff, handoffDestinationError } from "./conversation-handoff.js";
 export { PROMPT_TITLE_MAX, titleFromPrompt } from "./session-title.js";
+export { plainTextPreview } from "./plain-text-preview.js";
 export * from "./campaign-work-ledger.js";
 export {
   SLASH_COMMAND_NAME_CHARACTERS,
@@ -5276,6 +5283,11 @@ export type SessionEventPayload =
       resolutionReason?: StructuredRequestResolutionReason;
       /** Controlling session when this decision came through Parent Control. */
       resolvedByParentSessionId?: string;
+      /** v211: who settled this occurrence (#2628), delivered with the decision and recorded for
+       * exactly this request. Absent for a Parent Control or Wollipog-initiated resolution, a
+       * provider's own, and from older runners and control planes. Never shown raw: the transcript
+       * names the member relative to the viewer and the policy by its name. */
+      resolvedBy?: PermissionResolver;
     }
   | { kind: "question_request"; requestId: string; occurrenceId?: string; questions: AgentQuestion[]; ownerToolUseId?: string; async?: boolean }
   | { kind: "question_policy_answered"; requestId: string; questionEventSeq?: number; policies: { policyId: string; name: string }[] }
@@ -9036,6 +9048,12 @@ export interface PricedSessionCostMessage {
   costReconciliationRepair?: { id: string; expected: CostCorrectionRunnerState };
 }
 
+/** Who settled a permission (#2628): the organization user who submitted the decision, or the
+ * governance policy that auto-resolved it. Identifiers only; never request content. */
+export type PermissionResolver =
+  | { kind: "user"; userId: string }
+  | { kind: "policy"; policyId: string };
+
 export interface ResolvePermissionMessage {
   type: "resolve_permission";
   sessionId: string;
@@ -9044,6 +9062,8 @@ export interface ResolvePermissionMessage {
   optionId: string | null;
   /** Present only for a delegated descendant resolution authorized by the control plane. */
   resolvedByParentSessionId?: string;
+  /** v211: who settled it, recorded on its `permission_resolved`. */
+  resolvedBy?: PermissionResolver;
 }
 
 /** Answer a structured agent question (question_request). Answers are keyed by AgentQuestion.id

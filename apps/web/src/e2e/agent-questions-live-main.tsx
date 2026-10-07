@@ -93,7 +93,11 @@ function LiveQuestionFixture() {
     : context;
   // As SessionDetail: the question waits on the request dock above the composer and its transcript row
   // is a marker (#2205).
-  const docked = session ? dockRequests(prioritizedPendingRequests(session.pendingApproval)) : [];
+  // While Answer Mode is open the question is shown in the composer alone (#2212).
+  const composerAnswers = pendingQuestion !== null && responseStyle === "composer" &&
+    (pendingQuestion.recoveryReason !== "provider_restart" || pendingQuestion.recoveryAction === "resume_answer");
+  const docked = session ? dockRequests(prioritizedPendingRequests(session.pendingApproval))
+    .filter((request) => !(composerAnswers && answerActive && request.requestId === pendingQuestion?.requestId)) : [];
 
   return (
     <ApiProvider client={client}>
@@ -138,7 +142,9 @@ function LiveQuestionFixture() {
                   requestIds: docked.map((request) => request.requestId),
                   render: ({ trailing, revealRequestId, concealTrailing }) => (
                     <RequestDock session={session} requests={docked} runnerOnline onSessionUpdate={setSession}
-                      headTrailing={trailing} revealRequestId={revealRequestId} onConceal={concealTrailing} />
+                      headTrailing={trailing} revealRequestId={revealRequestId} onConceal={concealTrailing}
+                      composerAnswer={composerAnswers && pendingQuestion
+                        ? { requestId: pendingQuestion.requestId, onAnswer: () => setAnswerActive(true) } : undefined} />
                   ),
                 }} />
               )}
@@ -169,9 +175,8 @@ function LiveQuestionFixture() {
                       questions={pendingQuestion.questions ?? []}
                       runnerOnline
                       active={answerActive}
-                      showWaiting={responseStyle === "composer"}
+                      recovery={pendingQuestion.recoveryReason === "provider_restart"}
                       inputRef={answerInputRef}
-                      onEnter={() => setAnswerActive(true)}
                       onExit={() => setAnswerActive(false)}
                       onSessionUpdate={setSession}
                     />

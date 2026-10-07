@@ -196,7 +196,7 @@ export const CSS_SURFACE = {
   "flex-basis", "flex-direction", "flex-shrink", "flex-wrap", "font", "font-display",
   "font-family", "font-size", "font-style", "font-variant-numeric", "font-weight", "gap",
   "grid-area", "grid-auto-columns", "grid-auto-flow", "grid-column", "grid-row",
-  "grid-template-columns", "grid-template-rows", "height", "image-rendering", "inset",
+  "grid-template-columns", "grid-template-rows", "height", "image-rendering", "inset", "isolation",
   "inset-inline-end", "inset-inline-start", "justify-content",
   "justify-items", "justify-self", "left", "letter-spacing", "line-height", "list-style",
   "margin", "margin-bottom", "margin-inline-start", "margin-left",
@@ -205,12 +205,12 @@ export const CSS_SURFACE = {
   "overflow", "overflow-anchor", "overflow-wrap", "overflow-x", "overflow-y",
   "overscroll-behavior", "padding", "padding-block", "padding-bottom", "padding-inline",
   "padding-inline-end", "padding-inline-start", "padding-left", "padding-right", "padding-top",
-  "place-content", "place-items", "pointer-events", "position", "resize", "right", "row-gap",
+  "place-items", "pointer-events", "position", "resize", "right", "row-gap",
   "scroll-behavior", "scroll-margin-inline-end", "scroll-padding-inline", "scroll-snap-align", "scroll-snap-type", "scrollbar-color",
   "scrollbar-width", "src", "stroke", "stroke-linecap", "stroke-width", "table-layout", "text-align",
   "text-decoration", "text-overflow", "text-transform", "top",
   "touch-action", "transform", "transform-origin", "transition", "transition-duration", "transition-property",
-  "user-select", "vertical-align", "visibility", "white-space", "width", "word-break", "z-index",
+  "user-select", "vertical-align", "visibility", "white-space", "width", "word-break", "writing-mode", "z-index",
   ],
   /** Pseudo-classes and pseudo-elements, without their leading colons. */
   pseudos: [

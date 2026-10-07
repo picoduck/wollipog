@@ -93,20 +93,6 @@ test("duplicate names show their machine in the tab and in All Groups", async ({
   await expect(page.getByRole("menuitemradio", { name: /^Docs Site on Build Server 02, 1/ })).toBeVisible();
 });
 
-test("on a phone search takes its own full-width row above the tabs, and All Groups stays beside them", async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 844 });
-  await openGroups(page);
-  const box = async (selector: string) => (await page.locator(selector).boundingBox())!;
-  const [bar, search, tabs, allGroups] = await Promise.all([
-    box(".tabs-bar"), box(".tabs-tools > .inbox-search"), box(".tabs-bar > .tabs"), box(".tabs-bar > .tabs-all"),
-  ]);
-  expect(search.width).toBe(bar.width);
-  expect(search.y + search.height).toBeLessThanOrEqual(tabs.y);
-  expect(allGroups.x).toBeGreaterThanOrEqual(tabs.x + tabs.width);
-  expect(allGroups.y + allGroups.height / 2).toBeCloseTo(tabs.y + tabs.height / 2, 0);
-  expect(allGroups.x + allGroups.width).toBeLessThanOrEqual(bar.x + bar.width);
-});
-
 test.describe("with a touch pointer", () => {
   test.use({ hasTouch: true });
 
@@ -209,30 +195,4 @@ test("right-clicking an unselected project tab opens its menu without selecting 
   await page.keyboard.press("Escape");
   await expect(design).toBeFocused();
   await expect(all).toHaveAttribute("aria-selected", "true");
-});
-
-test.describe("on a phone", () => {
-  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
-
-  test("the project menu is a bottom sheet titled with the project, with 44px items and no Reveal in File Manager (#2199)", async ({ page }) => {
-    await openGroups(page);
-    await tablist(page).getByRole("tab", { name: /^Billing/ }).tap();
-    await page.getByRole("button", { name: "Billing Actions" }).tap();
-    const sheet = page.getByRole("menu", { name: "Billing Actions" });
-    await expect(sheet).toBeVisible();
-    await expect(sheet.locator(".menu-head")).toHaveText("Billing");
-    await expect(sheet.locator(".menu-head")).toBeVisible();
-    // Docked to the bottom once it has slid in (§7.5).
-    await expect.poll(async () => {
-      const box = (await sheet.boundingBox())!;
-      return [box.x, box.width, Math.round(box.y + box.height)];
-    }).toEqual([0, 390, 844]);
-    const items = sheet.getByRole("menuitem");
-    await expect(items.locator(".menu-text")).toHaveText([
-      "New Session Here", "Rename Workspace…", "Pin Workspace", "Create Permanent Worktree…", "Archive All Sessions…",
-    ]);
-    for (const height of await items.evaluateAll((rows) => rows.map((row) => row.getBoundingClientRect().height))) {
-      expect(height).toBeGreaterThanOrEqual(44);
-    }
-  });
 });

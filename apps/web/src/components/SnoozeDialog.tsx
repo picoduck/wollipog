@@ -2,7 +2,7 @@ import { useEffect, useId, useLayoutEffect, useMemo, useReducer, useRef, useStat
 import type { SessionReminderView, SessionReminderWakePolicy, SetSessionReminderRequest } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import {
-  browserTimeZone,
+  reminderDisplayZone,
   formatReminderInstant,
   formatReminderReturnDay,
   formatReminderTileTime,
@@ -147,7 +147,7 @@ export function SnoozeDialog({
   const now = new Date();
   // Every time in the dialog reads in the zone its helper names, this browser's. A stored instant
   // is absolute, so showing it here reinterprets nothing, and saving still sends its own zone.
-  const displayZone = browserTimeZone();
+  const displayZone = reminderDisplayZone();
   const tileTime = (schedule: ParsedReminderSchedule) => formatReminderTileTime(
     schedule.scheduleKind === "timed" ? { ...schedule, timeZone: displayZone } : schedule,
     now.getTime(),

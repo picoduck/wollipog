@@ -9,11 +9,17 @@ import { ErrorIcon } from "./Icons.js";
  * is one sentence that says what is wrong and how to fix it. The sibling of FieldWarning, which
  * never blocks.
  */
-export function FieldError({ id, children }: { id: string; children: ReactNode }) {
+export function FieldError({ id, children, as: Tag = "p", className }: {
+  id: string;
+  children: ReactNode;
+  /** `span` inside phrasing content, such as a choice row's label. */
+  as?: "p" | "span";
+  className?: string;
+}) {
   return (
-    <p className="field-error" id={id}>
+    <Tag className={`field-error${className ? ` ${className}` : ""}`} id={id}>
       <ErrorIcon className="field-error-icon" size={14} aria-hidden="true" />
       <span>{children}</span>
-    </p>
+    </Tag>
   );
 }

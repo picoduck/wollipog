@@ -1336,13 +1336,14 @@ test.describe("the appearance controls", () => {
     });
   }
 
-  test("the whole panel is three rows, one per setting", async ({ page }) => {
+  test("the whole panel is four rows, one per setting", async ({ page }) => {
     // The defect this replaced, stated as a number: three settings rendered as ten rows under three
     // headings, so Appearance did not fit on a phone and the alternatives were never side by side.
+    // Sessions Layout (#2219) is the fourth setting, and the fourth row.
     await useHarness(page, "dark", { section: "appearance" });
-    await expect(page.locator(".settings-panel .ui-row")).toHaveCount(3);
+    await expect(page.locator(".settings-panel .ui-row")).toHaveCount(4);
     await expect(page.locator(".settings-panel .settings-group")).toHaveCount(1);
-    await expect(page.locator(".settings-panel .ui-row-title")).toHaveText(["Theme", "Color Scheme", "Density"]);
+    await expect(page.locator(".settings-panel .ui-row-title")).toHaveText(["Theme", "Color Scheme", "Density", "Sessions Layout"]);
   });
 
   test("the closed controls share an edge and the open scheme list fits readable content", async ({ page }) => {
@@ -1553,7 +1554,7 @@ test.describe("the appearance controls", () => {
      * page that was behaving perfectly — a spec that cannot pass says nothing about the contract.
      * The bound stays as a guard against a control that never gains focus at all.
      */
-    for (let press = 0; press < 20 && stops.at(-1) !== "Density:Compact"; press += 1) {
+    for (let press = 0; press < 20 && stops.at(-1) !== "Sessions Layout:Preview Below"; press += 1) {
       await page.keyboard.press("Tab");
       const reached = await page.evaluate(() => {
         const active = document.activeElement;
@@ -1566,7 +1567,7 @@ test.describe("the appearance controls", () => {
       if (reached) stops.push(reached);
     }
     expect(stops, "the controls are reached in order, and each group only once")
-      .toEqual(["Theme:System", "picker", "Density:Compact"]);
+      .toEqual(["Theme:System", "picker", "Density:Compact", "Sessions Layout:Preview Below"]);
 
     // And the reason a group costs one stop, asserted where it lives rather than inferred from the
     // traversal: every other option is held at -1 by the roving rule. Counted per group, because a
@@ -1576,7 +1577,7 @@ test.describe("the appearance controls", () => {
       stops: [...group.querySelectorAll("[role=radio]")].filter((radio) => radio.getAttribute("tabindex") === "0").length,
     })));
     expect(rovingStops, "each group carries exactly one tab stop")
-      .toEqual([{ group: "Theme", stops: 1 }, { group: "Density", stops: 1 }]);
+      .toEqual([{ group: "Theme", stops: 1 }, { group: "Density", stops: 1 }, { group: "Sessions Layout", stops: 1 }]);
   });
 
   test("a disabled appearance row keeps its controls visible and explains nothing away", async ({ page }) => {

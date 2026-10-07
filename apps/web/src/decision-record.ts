@@ -165,17 +165,21 @@ export function permissionOutcome(item: PermissionItem): DecisionOutcome {
   }
 }
 
-/**
- * A resolved permission as a Decision Record. The runner's `permission_resolved` names who decided
- * only when a parent session did; a person and a policy both resolve permissions without naming
- * themselves there, so any other row names no one rather than guess (the audit cannot be tied to one
- * occurrence of a reused provider request id).
- */
+/** Who settled a permission, from its own `permission_resolved`: the parent session, or the member
+ * or policy that event names (#2628). Nobody when it names no one (an older runner or control
+ * plane): the audit cannot be tied to one occurrence of a reused provider request id. */
+function permissionActor(item: PermissionItem): DecisionActor | undefined {
+  if (item.resolvedByParentSessionId) return { kind: "parent", sessionId: item.resolvedByParentSessionId };
+  const by = item.resolvedBy;
+  if (by?.kind === "user" && by.userId) return { kind: "member", userId: by.userId };
+  if (by?.kind === "policy" && by.policyId) return { kind: "policy", policyId: by.policyId };
+  return undefined;
+}
+
+/** A resolved permission as a Decision Record. */
 export function permissionDecisionRecord(item: PermissionItem): DecisionRecordModel {
   const outcome = permissionOutcome(item);
-  const actor: DecisionActor | undefined = item.resolvedByParentSessionId
-    ? { kind: "parent", sessionId: item.resolvedByParentSessionId }
-    : undefined;
+  const actor = permissionActor(item);
   const context = item.context;
   const facts: DecisionFact[] = [];
   if (context?.toolName) facts.push({ label: "Tool", value: context.toolName });
@@ -191,6 +195,7 @@ export function permissionDecisionRecord(item: PermissionItem): DecisionRecordMo
     auditIds: [
       ["Request ID", item.requestId],
       ...(item.resolvedByParentSessionId ? [["Parent Session ID", item.resolvedByParentSessionId] as const] : []),
+      ...(actor?.kind === "policy" && actor.policyId ? [["Policy ID", actor.policyId] as const] : []),
     ],
   };
 }
