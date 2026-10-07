@@ -5,7 +5,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { Window } from "happy-dom";
 import ts from "typescript";
-import { assertNoDomNode, describeDomNode } from "./dom-test-assertions.js";
+import { assertNoDomNode, assertSameDomNode, describeDomNode } from "./dom-test-assertions.js";
 
 const SRC = fileURLToPath(new URL(".", import.meta.url));
 const WEB = fileURLToPath(new URL("..", import.meta.url));
@@ -120,6 +120,49 @@ test("only null passes, exactly as assert.equal(found, null) did", () => {
   assert.throws(() => assertNoDomNode(undefined, "the alert has no retry"), {
     message: "the alert has no retry: found undefined rather than null",
   });
+});
+
+test("a failing same-node check reports promptly, naming both elements", () => {
+  const domWindow = new Window();
+  try {
+    const later = domWindow.document.createElement("button");
+    later.className = "choice-tile";
+    later.setAttribute("role", "radio");
+    later.textContent = "Later Today";
+    const tomorrow = later.cloneNode() as typeof later;
+    tomorrow.textContent = "Tomorrow Morning";
+    domWindow.document.body.append(later, tomorrow);
+    tomorrow.focus();
+
+    assertSameDomNode(domWindow.document.activeElement, tomorrow);
+    assertSameDomNode(null, null);
+    assertSameDomNode(undefined, undefined);
+    const started = performance.now();
+    assert.throws(
+      () => assertSameDomNode(domWindow.document.activeElement, later, "the first tile takes focus"),
+      { message: 'the first tile takes focus: expected button.choice-tile[role="radio"] with text "Later Today", '
+        + 'found button.choice-tile[role="radio"] with text "Tomorrow Morning"' },
+    );
+    // `assert.equal(activeElement, later)` inspects both nodes; in a rendered dialog test that grew
+    // the process to about 15 GB (#2731). A second is headroom, not a tuned threshold.
+    assert.ok(performance.now() - started < 1000, "the failure is reported without inspecting either node");
+
+    assert.throws(() => assertSameDomNode(null, later), {
+      message: 'expected button.choice-tile[role="radio"] with text "Later Today", found null',
+    });
+    assert.throws(() => assertSameDomNode(later, undefined), {
+      message: 'expected undefined, found button.choice-tile[role="radio"] with text "Later Today"',
+    });
+    assert.throws(() => assertSameDomNode(undefined, null), { message: "expected null, found undefined" });
+    // Distinct nodes that describe alike must not read as a pass.
+    const twin = later.cloneNode(true) as typeof later;
+    assert.throws(() => assertSameDomNode(twin, later), {
+      message: 'expected button.choice-tile[role="radio"] with text "Later Today", '
+        + "found a different node that describes the same",
+    });
+  } finally {
+    domWindow.close();
+  }
 });
 
 test("the element description stays short whatever the element carries", () => {

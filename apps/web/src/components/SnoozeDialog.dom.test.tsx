@@ -1,6 +1,6 @@
 import { fireDomEvent } from "./test-dom-events.js";
 import assert from "node:assert/strict";
-import test, { mock } from "node:test";
+import test, { afterEach, beforeEach, mock } from "node:test";
 import React, { act, type ReactElement } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
@@ -16,7 +16,7 @@ import {
   type ParsedReminderSchedule,
 } from "../reminder-schedule.js";
 import { SnoozeDialog } from "./SnoozeDialog.js";
-import { ariaReferencedText, assertNoDomNode } from "../dom-test-assertions.js";
+import { ariaReferencedText, assertNoDomNode, assertSameDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/inbox" });
 for (const [name, value] of Object.entries({
@@ -38,6 +38,21 @@ for (const [name, value] of Object.entries({
 const TITLE = "Fix the half-cent rounding bug";
 // Dialogs are portalled to <body>, so the tests query the body.
 const body = domWindow.document.body as unknown as HTMLElement;
+
+// Every test starts at local noon (#2731). Later Today is offered only until 21:00, and the tiles'
+// times, which tile takes opening focus and where the arrows go all follow the clock, so an unpinned
+// file passes or fails by the hour. A test that needs another instant moves it with `setTime`.
+const PINNED_NOW = new Date(2026, 9, 6, 12, 0).getTime();
+beforeEach(() => { mock.timers.enable({ apis: ["Date"], now: PINNED_NOW }); });
+afterEach(() => { mock.timers.reset(); });
+
+/**
+ * Focus compared by identity. `assert.equal(activeElement, node)` inspects both happy-dom nodes
+ * when it fails, which exhausted memory instead of reporting (#2731).
+ */
+function assertFocused(expected: Element | null | undefined, message?: string) {
+  assertSameDomNode(domWindow.document.activeElement, expected, message);
+}
 
 /** Mount `element`; `rerender` replaces it in the same root, so the dialog keeps its state. */
 async function mount(element: ReactElement) {
@@ -135,7 +150,7 @@ test("the default dialog is the session's title, six tiles with their times, one
     assert.equal(primary().textContent, "Snooze Session");
     assert.equal(primary().disabled, false, "the primary stays enabled in a short form (§8.5)");
     assert.equal(buttonNamed("Cancel")?.className, "btn");
-    assert.equal(domWindow.document.activeElement, tiles()[0], "the tiles' one stop takes opening focus");
+    assertFocused(tiles()[0], "the tiles' one stop takes opening focus");
 
     // No system words, uppercase labels or retired fields remain.
     const text = body.textContent ?? "";
@@ -151,10 +166,24 @@ test("the default dialog is the session's title, six tiles with their times, one
     assert.equal(group.getAttribute("aria-invalid"), "true");
     assert.equal(ariaReferencedText(group, "aria-describedby"), "Choose when it returns.");
     assert.equal(body.querySelector(".snooze-choice > .field-error")?.textContent, "Choose when it returns.");
-    assert.equal(domWindow.document.activeElement, tiles()[0]);
+    assertFocused(tiles()[0]);
     await chooseTile("Next Week");
     assert.equal(group.hasAttribute("aria-invalid"), false, "choosing clears the error");
     assertNoDomNode(body.querySelector(".field-error"));
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("opened after 9 PM, Later Today stays in place as too late and opening focus starts on Tomorrow Morning", async () => {
+  mock.timers.setTime(new Date(2026, 9, 6, 22, 30).getTime());
+  const view = await mount(<SnoozeDialog sessionTitle={TITLE} supportsSomeday onClose={() => undefined} onSave={async () => undefined} />);
+  try {
+    assert.deepEqual(tiles().map((tile) => ariaReferencedText(tile, "aria-labelledby")),
+      ["Later Today", "Tomorrow Morning", "Next Week", "Next Month", "Someday", "Custom…"]);
+    assert.equal(tileNamed("Later Today")?.getAttribute("aria-disabled"), "true");
+    assert.equal(ariaReferencedText(tileNamed("Later Today")!, "aria-describedby"), "Too late today");
+    assertFocused(tileNamed("Tomorrow Morning"), "the tiles' one stop skips the unavailable preset");
   } finally {
     await view.unmount();
   }
@@ -169,7 +198,7 @@ test("Tomorrow Morning saves the same reminder as before, and the summary says w
     onSave={async (request) => { saved.push(request); }}
   />);
   try {
-    assert.equal(tileNamed("Someday"), undefined, "Someday needs a server that supports it");
+    assertSameDomNode(tileNamed("Someday"), undefined, "Someday needs a server that supports it");
     assert.equal(tiles().length, 5);
     await chooseTile("Tomorrow Morning");
     assert.equal(tileNamed("Tomorrow Morning")?.getAttribute("aria-checked"), "true");
@@ -195,19 +224,19 @@ test("arrows move and select the tiles; only a pointer on Custom… goes on to i
     const group = body.querySelector<HTMLElement>('[role="radiogroup"]')!;
     tiles()[0]!.focus();
     await act(async () => { fireDomEvent.keyDown(tiles()[0]!, { key: "ArrowRight" }); });
-    assert.equal(domWindow.document.activeElement, tileNamed("Tomorrow Morning"));
+    assertFocused(tileNamed("Tomorrow Morning"));
     assert.equal(tileNamed("Tomorrow Morning")?.getAttribute("aria-checked"), "true");
     assert.equal(tileNamed("Tomorrow Morning")?.tabIndex, 0, "the selected tile is the group's one stop");
     await act(async () => { fireDomEvent.keyDown(domWindow.document.activeElement as unknown as Element, { key: "End" }); });
     assert.equal(tileNamed("Custom…")?.getAttribute("aria-checked"), "true");
-    assert.equal(domWindow.document.activeElement, tileNamed("Custom…"), "arrows keep focus in the tiles");
+    assertFocused(tileNamed("Custom…"), "arrows keep focus in the tiles");
     assert.ok(field(), "Custom… reveals Snooze Until");
     assert.equal(group.contains(domWindow.document.activeElement as never), true);
 
     await chooseTile("Next Week");
     assertNoDomNode(field());
     await chooseTile("Custom…", true);
-    assert.equal(domWindow.document.activeElement, field(), "a pointer on Custom… goes on to its field");
+    assertFocused(field(), "a pointer on Custom… goes on to its field");
   } finally {
     await view.unmount();
   }
@@ -225,7 +254,7 @@ test("Custom… takes a named date, and a numeric date is an error at the field 
     const input = field()!;
     const label = body.querySelector<HTMLLabelElement>(`label[for="${input.id}"]`);
     assert.equal(label?.textContent, "Snooze Until");
-    assert.equal(label?.closest(".field"), input.closest(".field"), "one §8.1 field");
+    assertSameDomNode(label?.closest(".field"), input.closest(".field"), "one §8.1 field");
     assert.equal(input.getAttribute("role"), "combobox");
     assert.equal(input.hasAttribute("placeholder"), false);
     assert.match(ariaReferencedText(input, "aria-describedby") ?? "",
@@ -261,7 +290,7 @@ test("Custom… takes a named date, and a numeric date is an error at the field 
     assert.equal(primary().disabled, false);
     await press(primary());
     assert.equal(saved.length, 0);
-    assert.equal(domWindow.document.activeElement, input);
+    assertFocused(input);
 
     // The error clears as soon as the value resolves.
     await typeSchedule("Dec 10 9am");
@@ -359,7 +388,7 @@ test("Edit Reminder starts on Custom… with the stored words and saves the stor
     assert.equal(body.querySelector(".modal-title")?.textContent, "Edit Reminder");
     assert.equal(tileNamed("Custom…")?.getAttribute("aria-checked"), "true");
     assert.equal(field()?.value, "2099-05-06T21:45");
-    assert.equal(domWindow.document.activeElement, field(), "a fine pointer opens on the field");
+    assertFocused(field(), "a fine pointer opens on the field");
     assert.equal(returnEarly().checked, false);
     // The stored Tokyo instant reads in the zone the helper names, like every time in the dialog.
     assert.equal(summary(), `Returns ${formatReminderReturnDay(stored.scheduledFor!, browserTimeZone())}.`);
@@ -484,7 +513,7 @@ test("a live change keeps the whole draft, refuses the primary with a reason, an
     input.focus();
 
     await view.rerender(dialog(updated));
-    assert.equal(domWindow.document.activeElement, input, "a live update must not remount or move focus");
+    assertFocused(input, "a live update must not remount or move focus");
     assert.equal(input.value, "today at 11:59 pm");
     assert.equal(returnEarly().checked, false);
     const notice = body.querySelector(".notice.t-warning[role=\"alert\"]");
@@ -501,7 +530,7 @@ test("a live change keeps the whole draft, refuses the primary with a reason, an
     await press(buttonNamed("Reload Reminder"));
     assertNoDomNode(body.querySelector('[role="alert"]'));
     assertNoDomNode(body.querySelector(".snooze-blocked-reason"));
-    assert.equal(domWindow.document.activeElement, field(), "reloading keeps focus in the dialog");
+    assertFocused(field(), "reloading keeps focus in the dialog");
     assert.equal(field()?.value, "2099-05-06T07:45");
     assert.equal(returnEarly().checked, true);
     assert.equal(summary(), `Returns ${formatReminderReturnDay(updated.scheduledFor!, browserTimeZone())}.`);
@@ -551,7 +580,7 @@ test("fired, removed, and recreated reminders have distinct live-conflict messag
     submit.focus();
     await view.rerender(dialog({ ...original, state: "fired", revision: 2, firedAt: 2, wakeReason: "scheduled" } as SessionReminderView));
     assert.match(alertText(), /already fired/i);
-    assert.equal(domWindow.document.activeElement, submit);
+    assertFocused(submit);
     assert.equal(submit.getAttribute("aria-disabled"), "true");
 
     await press(buttonNamed("Reload Reminder"));
@@ -560,7 +589,7 @@ test("fired, removed, and recreated reminders have distinct live-conflict messag
     await view.rerender(dialog(undefined));
     assert.match(alertText(), /removed in another client/i);
     assert.match(alertText(), /Create a new reminder from them, or start over/);
-    assert.equal(domWindow.document.activeElement, dismiss);
+    assertFocused(dismiss);
     assert.equal(dismiss.disabled, false);
     assert.equal(dismiss.getAttribute("aria-disabled"), "true");
     assert.ok(buttonNamed("Start New Reminder"));
@@ -650,7 +679,7 @@ test("409 reconciliation distinguishes authoritative reminder states without liv
       assert.equal(input.value, "in 3 hours", `${scenario.name}: the typed draft`);
       assert.equal(returnEarly().checked, false, `${scenario.name}: the Return Early draft`);
       assert.match(alertText(), scenario.message, scenario.name);
-      assert.equal(domWindow.document.activeElement, input, `${scenario.name}: reconciliation keeps focus`);
+      assertFocused(input, `${scenario.name}: reconciliation keeps focus`);
 
       await press(buttonNamed(scenario.action));
       const active = domWindow.document.activeElement as unknown as HTMLElement | null;
@@ -659,12 +688,12 @@ test("409 reconciliation distinguishes authoritative reminder states without liv
         assertNoDomNode(field(), "a reset starts from the tiles");
         assert.equal(tiles().some((tile) => tile.getAttribute("aria-checked") === "true"), false);
         assert.equal(returnEarly().checked, true, "a reset restores Return Early");
-        assert.equal(active, tiles()[0]);
+        assertSameDomNode(active, tiles()[0]);
         await chooseTile("Tomorrow Morning");
       } else if (scenario.authoritative.state === "fired") {
         await chooseTile("Next Week");
       } else {
-        assert.equal(active, field());
+        assertSameDomNode(active, field());
       }
       await press(primary());
       assert.equal(accepted?.expectedRevision, scenario.expectedRevision, scenario.name);
@@ -697,17 +726,17 @@ test("a removed reminder can be recreated explicitly from the complete preserved
 
     await view.rerender(dialog(undefined));
     assert.match(alertText(), /removed in another client/i);
-    assert.equal(domWindow.document.activeElement, input, "remote removal keeps the active draft field focused");
+    assertFocused(input, "remote removal keeps the active draft field focused");
     await press(buttonNamed("Create New Reminder from Draft"));
 
     assert.equal(body.querySelector(".modal-title")?.textContent, "Create New Reminder");
     assert.equal(ariaReferencedText(body.querySelector<HTMLElement>('[role="dialog"]')!, "aria-describedby"), TITLE);
     assert.match(body.querySelector('.snooze-form > [role="status"].sr-only')?.textContent ?? "",
       /creating a new reminder from the preserved draft.*will not be restored/i);
-    assert.equal(domWindow.document.activeElement, input, "draft reuse keeps focus in the dialog");
+    assertFocused(input, "draft reuse keeps focus in the dialog");
     assert.equal(input.value, "in 3 hours");
     assert.equal(returnEarly().checked, false);
-    assert.equal(buttonNamed("Remove Reminder"), undefined, "a new reminder has nothing to remove");
+    assertSameDomNode(buttonNamed("Remove Reminder"), undefined, "a new reminder has nothing to remove");
 
     await press(primary());
     assert.equal(accepted?.expectedRevision, 0, "draft reuse is create-only");
@@ -770,17 +799,17 @@ test("a concurrent recreation blocks preserved-draft creation and reload keeps f
     await view.rerender(dialog(undefined));
     await press(buttonNamed("Create New Reminder from Draft"));
     const input = field()!;
-    assert.equal(domWindow.document.activeElement, input);
+    assertFocused(input);
 
     await view.rerender(dialog(recreated));
     assert.match(alertText(), /created in another client/i);
-    assert.equal(domWindow.document.activeElement, input, "the new conflict does not move focus");
+    assertFocused(input, "the new conflict does not move focus");
     assert.equal(primary().getAttribute("aria-disabled"), "true");
     await press(primary());
     assert.equal(saved.length, 0, "the create-only write is blocked when recreation is known");
 
     await press(buttonNamed("Reload Reminder"));
-    assert.equal(domWindow.document.activeElement, field());
+    assertFocused(field());
     assert.equal(field()?.value, "in 2 hours");
     await press(primary());
     assert.equal(saved[0]?.expectedRevision, 1);
@@ -817,7 +846,7 @@ test("a create-only race reconciles a reminder recreated without live delivery",
     assert.equal(saved[0]?.expectedRevision, 0);
     assert.equal(reconciliations, 1);
     assert.match(alertText(), /created in another client/i);
-    assert.equal(domWindow.document.activeElement, input, "reconciliation keeps focus in the dialog");
+    assertFocused(input, "reconciliation keeps focus in the dialog");
 
     await press(buttonNamed("Reload Reminder"));
     assert.equal(field()?.value, "in 2 hours");
@@ -853,7 +882,7 @@ test("a failed reconciliation is a danger notice above the footer, and only the 
     });
     const failure = body.querySelector('.notice.t-danger[role="alert"]');
     assert.ok(failure, "a danger notice");
-    assert.equal(failure.parentElement?.lastElementChild, failure, "at the body's end, above the footer (§7.3)");
+    assertSameDomNode(failure.parentElement?.lastElementChild, failure, "at the body's end, above the footer (§7.3)");
     assert.match(failure.textContent ?? "", /Couldn't load the current reminder\. not found/);
     assert.equal(saveCalls, 1);
     assert.equal(readCalls, 1);
@@ -923,7 +952,7 @@ test("schedule suggestions expose listbox semantics and keyboard selection submi
     assert.equal(input.getAttribute("aria-expanded"), "true");
     assert.equal(input.getAttribute("aria-controls"), listbox.id);
     assert.equal(listbox.getAttribute("aria-label"), "Schedule Suggestions");
-    assert.equal(listbox.closest(".snooze-form"), input.closest(".snooze-form"), "the list stays in the dialog's flow");
+    assertSameDomNode(listbox.closest(".snooze-form"), input.closest(".snooze-form"), "the list stays in the dialog's flow");
     // Each suggestion is named by its phrase and described by the instant it resolves to (#2369).
     assert.deepEqual(options.map((option) => ariaReferencedText(option, "aria-labelledby")), [
       "In 23 Minutes", "In 23 Hours", "In 23 Days",
@@ -1028,7 +1057,7 @@ test("touch selection remains focus-safe and IME Enter never selects or submits"
       fireDomEvent.click(option);
     });
     assert.equal(input.value, "In 7 Days");
-    assert.equal(domWindow.document.activeElement, input);
+    assertFocused(input);
     assert.equal(saved.length, 0, "pointer and touch selection choose a schedule without submitting");
     assert.match(summary(), /^Returns /);
   } finally {
@@ -1118,7 +1147,7 @@ test("a complete typed schedule leaves Enter to the form even while broader sugg
 });
 
 test("a typed relative time keeps its instant through a live change and draft reuse", async () => {
-  mock.timers.enable({ apis: ["Date"], now: Date.UTC(2026, 9, 6, 15, 0) });
+  mock.timers.setTime(Date.UTC(2026, 9, 6, 15, 0));
   const original = pendingReminder({ scheduledFor: Date.UTC(2026, 9, 7, 15, 0) });
   let accepted: SetSessionReminderRequest | undefined;
   const dialog = (reminder: SessionReminderView | undefined) => <SnoozeDialog
@@ -1142,13 +1171,12 @@ test("a typed relative time keeps its instant through a live change and draft re
     assert.equal(accepted?.scheduledFor, Date.UTC(2026, 9, 6, 17, 0));
   } finally {
     await view.unmount();
-    mock.timers.reset();
   }
 });
 
 test("a chosen preset's tile, summary and saved instant agree after the clock moves on", async () => {
   // Local noon, so Later Today (three hours on) stays today in any zone.
-  mock.timers.enable({ apis: ["Date"], now: new Date(2026, 9, 6, 12, 0).getTime() });
+  mock.timers.setTime(new Date(2026, 9, 6, 12, 0).getTime());
   let accepted: SetSessionReminderRequest | undefined;
   const view = await mount(<SnoozeDialog
     sessionTitle={TITLE}
@@ -1173,13 +1201,12 @@ test("a chosen preset's tile, summary and saved instant agree after the clock mo
     assert.equal(accepted?.scheduledFor, chosen);
   } finally {
     await view.unmount();
-    mock.timers.reset();
   }
 });
 
 test("a preset that expired before it was clicked is refused, and the dialog never keeps a preset without its time", async () => {
   // Opened at 20:55 local, when Later Today (23:55) is still offered.
-  mock.timers.enable({ apis: ["Date"], now: new Date(2026, 9, 6, 20, 55).getTime() });
+  mock.timers.setTime(new Date(2026, 9, 6, 20, 55).getTime());
   const saved: SetSessionReminderRequest[] = [];
   const view = await mount(<SnoozeDialog
     sessionTitle={TITLE}
@@ -1206,7 +1233,6 @@ test("a preset that expired before it was clicked is refused, and the dialog nev
     assert.equal(body.querySelector(".snooze-choice > .field-error")?.textContent, "Choose when it returns.");
   } finally {
     await view.unmount();
-    mock.timers.reset();
   }
 });
 
@@ -1224,11 +1250,11 @@ test("a pointer on an already chosen Custom… goes to its field at once and lea
     assert.equal(tileNamed("Custom…")?.getAttribute("aria-checked"), "true");
     tileNamed("Custom…")!.focus();
     await chooseTile("Custom…", true);
-    assert.equal(domWindow.document.activeElement, field(), "the click goes on to Snooze Until");
+    assertFocused(field(), "the click goes on to Snooze Until");
 
     returnEarly().focus();
     await view.rerender(dialog({ ...stored, revision: 2, updatedAt: 2 }));
-    assert.equal(domWindow.document.activeElement, returnEarly(), "a later commit does not pull focus into the field");
+    assertFocused(returnEarly(), "a later commit does not pull focus into the field");
   } finally {
     await view.unmount();
   }
