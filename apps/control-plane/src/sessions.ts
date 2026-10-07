@@ -9411,6 +9411,7 @@ export class SessionsService {
           responseOwner: decision.authority,
           occurrenceId: decision.occurrenceId,
           request: this.workflowDecisionApproval(decision),
+          ...(viewer === "human" ? descendantAccountFacts(session) : {}),
         }];
       },
     );
@@ -9435,6 +9436,7 @@ export class SessionsService {
           responseOwner,
           occurrenceId: request.occurrenceId,
           request,
+          ...(viewer === "human" ? descendantAccountFacts(session) : {}),
         }];
       });
     });
@@ -14415,4 +14417,17 @@ function replacePendingApproval(
   const [first, ...rest] = pendingRequests(current).map((request) =>
     request.requestId === replacement.requestId ? replacement : request);
   return { ...first!, ...(rest.length ? { additionalRequests: rest } : {}) };
+}
+
+/** A child request's own harness and machine account, so the parent's request card never reads its
+ * own in their place (#2714). Only a person's Requests panel shows them: an Orchestrator's listing
+ * carries no account label, which may be an email. Absent account fields stay absent: the child
+ * uses the machine default. */
+function descendantAccountFacts(session: Pick<SessionView, "driver" | "providerAccountId" | "providerAccountLabel">):
+  Pick<DescendantRequestView, "driver" | "providerAccountId" | "providerAccountLabel"> {
+  return {
+    driver: session.driver,
+    ...(session.providerAccountId ? { providerAccountId: session.providerAccountId } : {}),
+    ...(session.providerAccountLabel ? { providerAccountLabel: session.providerAccountLabel } : {}),
+  };
 }

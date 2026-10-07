@@ -4076,6 +4076,20 @@ test("opt-in Parent Control resolves exact nested request occurrences with agent
     ]);
     assert.equal(listed.data.requests[0]?.eventEpoch, grandchild.eventEpoch);
     assert.equal(listed.data.requests[0]?.responseOwner, "orchestrator");
+    // A person's card reads the child's own harness and account, never the parent's (#2714).
+    const accountFacts = (viewer: "human" | "orchestrator") => Object.entries(svc.descendantRequests(parent.data.id, () => true, viewer)
+      .data!.requests.find((request) => request.occurrenceId === questionOccurrence)!)
+      .filter(([key]) => key === "driver" || key.startsWith("providerAccount"));
+    assert.deepEqual(accountFacts("human"), [["driver", grandchild.driver]], "a child on the machine default sends no account");
+    db.raw().prepare("UPDATE sessions SET driver='codex', provider_account_id='codex-work', provider_account_label='Codex Work' WHERE id=?")
+      .run(grandchild.id);
+    db.raw().prepare("UPDATE sessions SET provider_account_id='parent-account', provider_account_label='Parent Account' WHERE id=?")
+      .run(parent.data.id);
+    assert.deepEqual(accountFacts("human"),
+      [["driver", "codex"], ["providerAccountId", "codex-work"], ["providerAccountLabel", "Codex Work"]]);
+    assert.deepEqual(accountFacts("orchestrator"), [], "an Orchestrator's listing carries no account label");
+    db.raw().prepare("UPDATE sessions SET driver=?, provider_account_id=NULL, provider_account_label=NULL WHERE id=?")
+      .run(grandchild.driver, grandchild.id);
     assert.ok(Number.isFinite(listed.data.requests[0]?.createdAt),
       "request metadata includes a stable age for the inbox");
     const requestCreatedAt = listed.data.requests[0]!.createdAt;

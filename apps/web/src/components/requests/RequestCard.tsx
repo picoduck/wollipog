@@ -78,6 +78,10 @@ export interface RequestCardProps {
   /** Someone else answers this request (an Orchestrator-owned child request, #2206): the card says
    * so in a neutral notice under its title and shows the request's facts, with no actions. */
   readOnlyNotice?: string;
+  /** The session's harness and machine account are not known here (a child's request read from an
+   * older server, #2714): the card shows no account facts rather than another session's, and Check
+   * Again stays in its footer. */
+  accountUnknown?: boolean;
 }
 
 /**
@@ -103,6 +107,7 @@ export function RequestCard({
   headingRef,
   concealed = false,
   readOnlyNotice,
+  accountUnknown = false,
 }: RequestCardProps) {
   const api = useApi();
   const runner = useOptionalStoreSelector((state) => state.runners.get(session.runnerId));
@@ -191,16 +196,17 @@ export function RequestCard({
     ? signInCardActions(request.options)
     : { ...requestCardActions(request.options), recheck: null, methods: [] };
   const { tertiary, secondary, menu: menuOptions, primary, recheck, methods } = actions;
-  const recovery = authenticationRecoveryPanelApplies(session, request);
-  // Check Again lives on the recovery body's Last Checked fact. Where that body is not shown (a child's
-  // sign-in read under a parent of another driver) the recheck stays reachable as a secondary.
+  const recovery = !accountUnknown && authenticationRecoveryPanelApplies(session, request);
+  // Check Again lives on the recovery body's Last Checked fact. Where that body is not shown (a
+  // harness without it, or a child whose account is unknown here) the recheck stays a secondary.
   const footerSecondary = recheck && !recovery ? [...secondary, recheck] : secondary;
   // What Choose Another Account… belongs to: this card and the account it was opened against. A
   // change to either closes the dialog and drops its notice, so neither speaks for a newer card.
   const accountCardKey = `${request.requestId}\u0000${session.providerAccountId ?? ""}`;
   // A `not_resumable` refusal holds for every account, so the choice leaves this request's footer.
   const [cantSwitch, setCantSwitch] = useState<string | null>(null);
-  const canChooseAccount = authenticationAccountChoiceApplies(session, request, runner) && cantSwitch !== request.requestId;
+  const canChooseAccount = !accountUnknown && authenticationAccountChoiceApplies(session, request, runner) &&
+    cantSwitch !== request.requestId;
   const [choosingAccount, setChoosingAccount] = useState<string | null>(null);
   const [accountNotice, setAccountNotice] = useState<{ key: string; text: string; cantSwitch: boolean } | null>(null);
   const [identityRefresh, setIdentityRefresh] = useState(0);

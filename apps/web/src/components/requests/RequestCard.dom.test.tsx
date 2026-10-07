@@ -7,6 +7,7 @@ import {
   prioritizedPendingRequests,
   removePendingRequest,
   type ControlPlaneToUi,
+  type DescendantRequestView,
   type PendingApproval,
   type RunnerView,
   type SessionView,
@@ -24,6 +25,7 @@ import { RequestDock, dockRequests } from "./RequestDock.js";
 import { decideDockedRequest, revealDockedRequest } from "./request-reveal.js";
 import type { FollowTailState } from "../../useFollowTail.js";
 import { SessionNoticeSlot } from "../SessionNoticeSlot.js";
+import { SessionRequestPanel, sessionRequestPanelKey } from "../SessionRequestPanel.js";
 import { useIsMobile } from "../useIsMobile.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -504,8 +506,8 @@ test("each sign-in state has exactly one primary, or only Cancel Sign-In while a
 });
 
 test("without the recovery body, Recheck Authentication stays a footer secondary", async () => {
-  // The Requests panel reads a Claude Code child's sign-in with its ACP parent's driver, so the
-  // recovery body (and its Check Again) does not render there.
+  // A harness without the recovery body (an ACP agent's sign-in), or a child's sign-in whose account
+  // an older server did not send (#2714): its Check Again does not render.
   const decisions: unknown[] = [];
   const request = recovery([AUTH.login, AUTH.revalidate, AUTH.dismiss]);
   const view = await renderWithRunner(
@@ -519,6 +521,111 @@ test("without the recovery body, Recheck Authentication stays a footer secondary
       .find((button) => button.textContent === "Recheck Authentication")!;
     await act(async () => { recheck.click(); await tick(); await tick(); });
     assert.deepEqual(decisions, [{ requestId: "provider-auth:card", optionId: "auth:revalidate" }]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+/** A child's sign-in in its parent's Requests panel, open on its card. */
+function childSignIn(
+  parent: Partial<SessionView>,
+  child: Pick<DescendantRequestView, "driver" | "providerAccountId" | "providerAccountLabel">,
+  client: Partial<ApiClient> = {},
+) {
+  const request = { ...recovery([AUTH.acceptCurrent, AUTH.revalidate, AUTH.dismiss]), occurrenceId: "child-auth-occurrence" };
+  const descendant: DescendantRequestView = {
+    sessionId: "session-child",
+    sessionTitle: "Child",
+    runnerId: "runner-1",
+    runnerOnline: true,
+    eventEpoch: 0,
+    createdAt: Date.now() - 30_000,
+    responseOwner: "human",
+    occurrenceId: "child-auth-occurrence",
+    request,
+    ...child,
+  };
+  return renderWithRunner(
+    <SessionRequestPanel
+      session={sessionWith(null, { id: "session-parent", title: "Parent", ...parent })}
+      descendants={[descendant]}
+      selectedKey={sessionRequestPanelKey("session-child", "child-auth-occurrence")}
+      onSelectedKeyChange={() => {}}
+      onDescendantsUpdate={() => {}}
+      onOpenChild={() => {}}
+    />,
+    {},
+    { authenticationAccounts: async () => ({ accounts: [...CHOICES] }), ...client },
+  );
+}
+const factTerms = (container: HTMLElement) => [...container.querySelectorAll("dt")].map((dt) => dt.textContent);
+const factValue = (container: HTMLElement, label: string) =>
+  [...container.querySelectorAll("dt")].find((dt) => dt.textContent === label)?.nextElementSibling?.textContent ?? null;
+
+test("a child's sign-in in the Requests panel reads the child's harness and account, never the parent's (#2714)", async () => {
+  const cases: Array<[string, Partial<SessionView>]> = [
+    ["an ACP parent", { driver: "acp", providerAccountId: undefined, providerAccountLabel: undefined }],
+    ["a parent on another account", { driver: "claude-code", providerAccountId: "claude-parent", providerAccountLabel: "Claude Parent" }],
+  ];
+  for (const [name, parent] of cases) {
+    const selections: Array<{ sessionId: string; input: unknown }> = [];
+    const identities: string[] = [];
+    const view = await childSignIn(parent, { driver: "claude-code", providerAccountId: "claude-work", providerAccountLabel: "Claude Work" }, {
+      authenticationCurrentIdentity: async (sessionId: string) => {
+        identities.push(sessionId);
+        return { identity: { status: "authenticated", emailSupported: true, email: "person@example.test", observedAt: Date.now() } };
+      },
+      selectAuthenticationAccount: async (sessionId: string, input: unknown) => {
+        selections.push({ sessionId, input });
+        return { accepted: true as const };
+      },
+    });
+    try {
+      assert.deepEqual(factTerms(view.container), ["This Session Uses", "Signed In Now", "Last Checked"], name);
+      assert.match(factValue(view.container, "This Session Uses") ?? "", /^Claude Work/, name);
+      assert.doesNotMatch(view.container.textContent ?? "", /Claude Parent/, name);
+      assert.equal(factValue(view.container, "Last Checked")?.includes("Check Again"), true, name);
+      assert.ok(identities.length > 0 && identities.every((id) => id === "session-child"), `${name}: the child's identity is read`);
+      const choose = [...view.container.querySelectorAll<HTMLButtonElement>(".request-card-foot button")]
+        .find((button) => button.textContent === "Choose Another Account…");
+      assert.ok(choose, name);
+      await act(async () => { choose.click(); await tick(); await tick(); });
+      await act(async () => { dialogButton("Use Account")!.click(); await tick(); await tick(); });
+      assert.deepEqual(selections, [{
+        sessionId: "session-child",
+        input: { requestId: "provider-auth:card", providerAccountId: "claude-personal", expectedProviderAccountId: "claude-work" },
+      }], `${name}: the child's account is the expected one`);
+    } finally {
+      await view.unmount();
+    }
+  }
+});
+
+test("a child on the machine default reads Machine Default Sign-In under a parent bound to an account (#2714)", async () => {
+  const view = await childSignIn(
+    { driver: "claude-code", providerAccountId: "claude-parent", providerAccountLabel: "Claude Parent" },
+    { driver: "claude-code" },
+  );
+  try {
+    assert.match(factValue(view.container, "This Session Uses") ?? "", /^Machine Default Sign-In/);
+    assert.doesNotMatch(view.container.textContent ?? "", /Claude Parent/);
+    assert.equal([...view.container.querySelectorAll(".request-card-foot button")]
+      .some((button) => button.textContent === "Choose Another Account…"), false, "an unbound child has no account to switch from");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a child's sign-in from an older server, without the child's account, shows no account facts (#2714)", async () => {
+  const view = await childSignIn(
+    { driver: "claude-code", providerAccountId: "claude-parent", providerAccountLabel: "Claude Parent" },
+    {},
+  );
+  try {
+    assert.deepEqual(factTerms(view.container).filter((term) =>
+      term === "This Session Uses" || term === "Signed In Now" || term === "Last Checked"), []);
+    assert.doesNotMatch(view.container.textContent ?? "", /Claude Parent|Machine Default Sign-In/);
+    assert.deepEqual(footer(view.container), ["Dismiss Recovery", "Recheck Authentication", "Use Current Account (primary)"]);
   } finally {
     await view.unmount();
   }

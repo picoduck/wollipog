@@ -13032,6 +13032,9 @@ export class ControlPlaneDb {
     updatedAt: number;
     requestCreatedAtById: Record<string, number>;
     pendingApproval: PendingApproval | null;
+    driver: AgentDriverKind;
+    providerAccountId?: string;
+    providerAccountLabel?: string;
   }> {
     const rows = this.stmt(`
       WITH RECURSIVE descendants(id) AS (
@@ -13039,6 +13042,7 @@ export class ControlPlaneDb {
         UNION
         SELECT s.id FROM sessions s JOIN descendants d ON s.parent_session_id=d.id
       ) SELECT s.id, s.title, s.runner_id, s.event_epoch, s.updated_at, s.pending_approval,
+          s.driver, s.provider_account_id, s.provider_account_label,
           (
             SELECT COALESCE(json_group_object(
               json_extract(event.payload, '$.requestId'),
@@ -13073,6 +13077,9 @@ export class ControlPlaneDb {
       updated_at: number;
       request_created_at_by_id: string;
       pending_approval: string | null;
+      driver: string | null;
+      provider_account_id: string | null;
+      provider_account_label: string | null;
     }>;
     return rows.map((row) => {
       const parsedTimes = parseJson<Record<string, unknown>>(row.request_created_at_by_id) ?? {};
@@ -13088,6 +13095,9 @@ export class ControlPlaneDb {
         updatedAt: row.updated_at,
         requestCreatedAtById,
         pendingApproval: parseJson<PendingApproval>(row.pending_approval),
+        driver: (row.driver as AgentDriverKind) ?? "acp",
+        providerAccountId: row.provider_account_id ?? undefined,
+        providerAccountLabel: row.provider_account_label ?? undefined,
       };
     });
   }

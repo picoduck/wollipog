@@ -4687,6 +4687,12 @@ export interface DescendantRequestView {
   responseOwner: WorkflowDecisionAuthority;
   occurrenceId: string;
   request: PendingApproval;
+  /** The child's own harness and machine account, so its request card names the child's account
+   * rather than the viewing parent's (#2714). Sent to a person's view only, never to an
+   * Orchestrator's listing. Omitted by older servers; the card then shows no account facts. */
+  driver?: AgentDriverKind;
+  providerAccountId?: string;
+  providerAccountLabel?: string;
 }
 
 /** A descendant that cannot start its next turn until a condition clears (#1650). Listed beside
