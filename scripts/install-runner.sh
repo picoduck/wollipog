@@ -443,7 +443,9 @@ if [ "$with_control_plane" -eq 1 ]; then
   # but before its saved-state bookkeeping. Retain uncertain evidence until commit or
   # proven complete rollback; a retained stage name never grants a later attempt ownership.
   web_publication_started=1
-  if path_present "${web_dir}.previous"; then
+  # A retry may have only the previous generation after an interrupted save-current.
+  # Keep it in place unless current will replace it during normal two-generation rotation.
+  if path_present "$web_dir" && path_present "${web_dir}.previous"; then
     mv "${web_dir}.previous" "$web_stage/previous" || { rollback_web; exit 1; }
     previous_saved=1
   fi

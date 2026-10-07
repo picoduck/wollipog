@@ -610,8 +610,8 @@ posixTest("headless publication retains evidence for fresh and partial owned lay
       const interruption = { boundary: "promote", timing, signal };
       f.h.setInterruption(interruption);
       const stage = retainedPublicationStage(f, interruption, f.h.run("--control-plane"));
-      assert.deepEqual(snapshot(f.web + ".previous"), f.originals[0]);
-      assert.deepEqual(snapshot(join(stage, "previous")), f.originals[1]);
+      assert.deepEqual(snapshot(f.web + ".previous"), generations === "previous" ? f.originals[1] : f.originals[0]);
+      assert.equal(existsSync(join(stage, "previous")), false, "a sole previous generation stays outside disposable scratch");
       const promoted = timing === "after";
       assert.equal(readFileSync(join(promoted ? f.web : join(stage, "web"), "index.html"), "utf8"), "<html>dashboard</html>");
       if (!promoted) assert.equal(existsSync(f.web), false);
@@ -660,31 +660,126 @@ posixTest("headless committed publication cleans disposable scratch even when co
   }
 });
 
-posixTest("later attempts never adopt or clean retained stages or similarly named foreign paths", (t) => {
-  const f = interruptedPublicationFixture(t);
-  const interruption = { boundary: "save-current", timing: "after", signal: "TERM" };
-  f.h.setInterruption(interruption);
-  const stage = retainedPublicationStage(f, interruption, f.h.run("--control-plane"));
-  const retained = snapshot(stage);
-  const foreign = join(f.parent, ".wollipog-web.stage.foreign");
-  const link = join(f.parent, ".wollipog-web.stage.foreign-link");
-  mkdirSync(foreign);
-  writeFileSync(join(foreign, "index.html"), "unrelated generation");
-  symlinkSync(foreign, link);
-  const foreignBefore = [snapshot(foreign), snapshot(link)];
-  f.h.setInterruption({});
-  const retry = f.h.run("--control-plane");
-  assert.equal(retry.status, 0, retry.stderr + retry.stdout);
-  assert.deepEqual(snapshot(stage), retained);
-  assert.deepEqual([snapshot(foreign), snapshot(link)], foreignBefore);
-  // A retained stage cannot substitute for missing namespace provenance.
-  rmSync(layoutMarker(f.h));
-  const before = snapshot(f.h.home);
-  const unmarked = f.h.run("--control-plane");
-  assert.notEqual(unmarked.status, 0);
-  assert.match(unmarked.stderr, /Refusing/u);
-  assert.deepEqual(snapshot(f.h.home), before);
-  f.assertPrivate();
+posixTest("later attempts preserve sole previous and never adopt or clean retained stages or similarly named foreign paths", async (t) => {
+  for (const signal of ["HUP", "INT", "TERM"]) await t.test(signal, (t) => {
+    const f = interruptedPublicationFixture(t);
+    chmodSync(f.web, 0o751);
+    chmodSync(join(f.web, "index.html"), 0o640);
+    writeFileSync(join(f.web, "generation.bin"), Buffer.from([0, 255, 128, 10]), { mode: 0o600 });
+    f.originals[0] = snapshot(f.web);
+    const interruption = { boundary: "save-current", timing: "after", signal };
+    f.h.setInterruption(interruption);
+    const stage = retainedPublicationStage(f, interruption, f.h.run("--control-plane"));
+    const retained = snapshot(stage);
+    const foreign = join(f.parent, ".wollipog-web.stage.foreign");
+    const link = join(f.parent, ".wollipog-web.stage.foreign-link");
+    mkdirSync(foreign);
+    writeFileSync(join(foreign, "index.html"), "unrelated generation");
+    symlinkSync(foreign, link);
+    const foreignBefore = [snapshot(foreign), snapshot(link)];
+    assert.equal(existsSync(f.web), false);
+    assert.deepEqual(snapshot(f.web + ".previous"), f.originals[0]);
+    assert.deepEqual(snapshot(join(stage, "previous")), f.originals[1]);
+    f.h.setInterruption({});
+    f.h.setFault("promote");
+    const failedRetry = f.h.run("--control-plane");
+    assert.notEqual(failedRetry.status, 0);
+    assert.equal(existsSync(f.web), false);
+    assert.deepEqual(snapshot(f.web + ".previous"), f.originals[0]);
+    assert.deepEqual(snapshot(stage), retained);
+    assert.deepEqual([snapshot(foreign), snapshot(link)], foreignBefore);
+    assert.deepEqual(readdirSync(f.parent).filter((name) => name.startsWith(".wollipog-web.stage.")).sort(),
+      [stage, foreign, link].map((path) => relative(f.parent, path)).sort(), "failed retry cleans only its scratch");
+    f.h.setFault("");
+    const retry = f.h.run("--control-plane");
+    assert.equal(retry.status, 0, retry.stderr + retry.stdout);
+    assert.equal(readFileSync(join(f.web, "index.html"), "utf8"), "<html>dashboard</html>");
+    assert.deepEqual(snapshot(f.web + ".previous"), f.originals[0]);
+    assert.deepEqual(snapshot(layoutMarker(f.h)), f.markerBefore);
+    assert.deepEqual(snapshot(stage), retained);
+    assert.deepEqual([snapshot(foreign), snapshot(link)], foreignBefore);
+    assert.deepEqual(readdirSync(f.parent).filter((name) => name.startsWith(".wollipog-web.stage.")).sort(),
+      [stage, foreign, link].map((path) => relative(f.parent, path)).sort(), "successful retry cleans only its scratch");
+    // A retained stage cannot substitute for missing namespace provenance.
+    rmSync(layoutMarker(f.h));
+    const before = snapshot(f.h.home);
+    const unmarked = f.h.run("--control-plane");
+    assert.notEqual(unmarked.status, 0);
+    assert.match(unmarked.stderr, /Refusing/u);
+    assert.deepEqual(snapshot(f.h.home), before);
+    f.assertPrivate();
+  });
+});
+
+posixTest("admitted previous-only publication preserves exact generation identity through failure, success and normal rotation", async (t) => {
+  for (const fault of ["", "extract", "promote"]) await t.test(fault || "success", (t) => {
+    const f = interruptedPublicationFixture(t, { generations: "previous" });
+    const previous = f.web + ".previous";
+    chmodSync(previous, 0o751);
+    chmodSync(join(previous, "index.html"), 0o640);
+    mkdirSync(join(previous, "nested"), { mode: 0o750 });
+    writeFileSync(join(previous, "nested", "generation.bin"), Buffer.from([0, 255, 128, 10]), { mode: 0o600 });
+    const original = snapshot(previous);
+    if (fault) {
+      f.h.setFault(fault);
+      const failed = f.h.run("--control-plane");
+      assert.notEqual(failed.status, 0);
+      assert.equal(existsSync(f.web), false);
+      assert.deepEqual(snapshot(previous), original);
+      assert.deepEqual(snapshot(layoutMarker(f.h)), f.markerBefore);
+      assert.deepEqual(readdirSync(f.parent).filter((name) => name.startsWith(".wollipog-web.stage.")), []);
+      f.assertPrivate();
+      f.h.setFault("");
+    }
+    const result = f.h.run("--control-plane");
+    assert.equal(result.status, 0, result.stderr + result.stdout);
+    assert.equal(readFileSync(join(f.web, "index.html"), "utf8"), "<html>dashboard</html>");
+    assert.deepEqual(snapshot(previous), original, "bytes, directory/file inodes, uid, gid and modes survive");
+    assert.deepEqual(snapshot(layoutMarker(f.h)), f.markerBefore);
+    assert.deepEqual(readdirSync(f.parent).filter((name) => name.startsWith(".wollipog-web.stage.")), []);
+    const current = snapshot(f.web);
+    const rotated = f.h.run("--control-plane");
+    assert.equal(rotated.status, 0, rotated.stderr + rotated.stdout);
+    assert.deepEqual(snapshot(previous), current, "a subsequent ordinary two-generation rotation still replaces previous");
+    assert.equal(readFileSync(join(f.web, "index.html"), "utf8"), "<html>dashboard</html>");
+    assert.deepEqual(snapshot(layoutMarker(f.h)), f.markerBefore);
+    assert.deepEqual(readdirSync(f.parent).filter((name) => name.startsWith(".wollipog-web.stage.")), []);
+    f.assertPrivate();
+  });
+});
+
+posixTest("previous-only retries refuse invalid provenance, malformed generations and foreign locks without mutation", async (t) => {
+  for (const collision of ["unmarked", "malformed-marker", "symlink-marker", "symlink-previous", "missing-index", "symlink-index", "lock-directory", "lock-symlink"]) {
+    await t.test(collision, (t) => {
+      const f = interruptedPublicationFixture(t, { generations: "previous" });
+      const previous = f.web + ".previous";
+      const foreign = join(f.h.root, "foreign");
+      mkdirSync(foreign);
+      writeFileSync(join(foreign, "index.html"), "foreign generation");
+      writeFileSync(join(foreign, "marker"), markerBytes);
+      if (collision === "unmarked") rmSync(layoutMarker(f.h));
+      if (collision === "malformed-marker") writeFileSync(layoutMarker(f.h), markerBytes + "extra\n");
+      if (collision === "symlink-marker") {
+        rmSync(layoutMarker(f.h)); symlinkSync(join(foreign, "marker"), layoutMarker(f.h));
+      }
+      if (collision === "symlink-previous") {
+        rmSync(previous, { recursive: true }); symlinkSync(foreign, previous);
+      }
+      if (collision === "missing-index" || collision === "symlink-index") rmSync(join(previous, "index.html"));
+      if (collision === "symlink-index") symlinkSync(join(foreign, "index.html"), join(previous, "index.html"));
+      const lock = join(f.parent, ".wollipog-web-install.lock");
+      if (collision === "lock-directory") {
+        mkdirSync(lock); writeFileSync(join(lock, "foreign-sentinel"), "unrelated lock bytes");
+      }
+      if (collision === "lock-symlink") symlinkSync(foreign, lock);
+      const before = [snapshot(f.h.home), snapshot(foreign)];
+      const result = f.h.run("--control-plane");
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /Refusing/u);
+      assert.deepEqual([snapshot(f.h.home), snapshot(foreign)], before);
+      assert.equal(existsSync(f.web), false);
+    });
+  }
 });
 
 posixTest("headless sibling bundle preserves legacy refresh and explicitly discloses mixed-layout env boundaries", (t) => {
