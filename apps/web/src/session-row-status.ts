@@ -17,6 +17,8 @@ export interface SessionRowStatusContext {
   reminder?: SessionReminderView;
   /** How long a stalled session has been silent, in milliseconds; absent while it is not stalled. */
   stalledForMs?: number;
+  /** A phone parent's human-owned descendant reason, visible even when its family chip is dots. */
+  familyFollowUpLabel?: "Needs Your Input" | "Ready for Review";
 }
 
 /** The one badge a row draws. */
@@ -108,6 +110,20 @@ export function sessionRowStatus(session: SessionStatusSource, context: SessionR
       description: "A new result is waiting for your assessment or next instructions.", needsYou: true };
   }
   const others = needs.slice(1).map(conditionName);
+  const familyLabel = context.familyFollowUpLabel;
+  if (familyLabel && needs.length === 0 &&
+      (familyLabel === "Needs Your Input" ? 3 : 2) >= sessionFollowUp(session as SessionView).priority) {
+    const previous = primary;
+    const keepPrevious = previous && previous.meta.label !== familyLabel &&
+      (previous.kind !== "lifecycle" || previous.meta.tone === "danger" || previous.needsYou || session.stopOperation);
+    if (keepPrevious) others.unshift(conditionName(previous));
+    const description = familyLabel === "Needs Your Input"
+      ? "A session in this family is waiting for your input."
+      : "A result in this family is waiting for your assessment or next instructions.";
+    primary = { kind: "lifecycle", meta: { label: familyLabel,
+      tone: keepPrevious && previous.meta.tone === "danger" ? "danger" : "warning", pulse: false },
+      description: keepPrevious ? `${description} ${previous.description}` : description, needsYou: true };
+  }
   if (!primary) return { badge: null, others };
 
   const stalled = stalledForMs !== undefined;

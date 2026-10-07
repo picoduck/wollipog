@@ -113,9 +113,11 @@ function InboxRowInner({
   const runnerOnline = useOptionalStoreSelector((state) => state.runners.get(session.runnerId)?.status !== "offline") ?? true;
   const lastActivityAt = inboxRowTimestamp(session, activity);
   const meaningfulAt = session.attention?.meaningfulAt ?? lastActivityAt;
+  const children: InboxThreadChildren | null = threadChildren ? JSON.parse(threadChildren) as InboxThreadChildren : null;
   const status = sessionRowStatus(session, {
     runnerOnline,
     reminder,
+    familyFollowUpLabel: threeRow ? children?.followUpLabel : undefined,
     stalledForMs: stalled
       ? activityNow > 0 && lastActivityAt !== null ? Math.max(STALL_THRESHOLD_MS, activityNow - lastActivityAt) : STALL_THRESHOLD_MS
       : undefined,
@@ -127,7 +129,6 @@ function InboxRowInner({
   const worktree = branchState.kind === "branch" ? branchState.worktree : null;
   const baseRef = worktree ? displayBaseRef(worktree) : null;
 
-  const children: InboxThreadChildren | null = threadChildren ? JSON.parse(threadChildren) as InboxThreadChildren : null;
   const childrenLabel = children ? inboxThreadChildrenLabel(children) : null;
   /* The family chip: one dot per child and the rollup, on the title line of a parent card. It reads
      the same whether the thread is expanded or collapsed, which is the point of putting the rollup

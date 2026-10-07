@@ -109,6 +109,25 @@ test("a snoozed session's background result counts toward its one status", () =>
   assert.deepEqual(withAttention.others, []);
 });
 
+test("phone family reasons use one badge while preserving warnings and stronger own input", () => {
+  assert.equal(label(sessionRowStatus(session({ status: "running" }), {
+    familyFollowUpLabel: "Needs Your Input" })), "Needs Your Input");
+  assert.equal(label(sessionRowStatus(session({ status: "running" }), {
+    familyFollowUpLabel: "Ready for Review" })), "Ready for Review");
+  const disconnected = sessionRowStatus(session({ status: "running" }), {
+    runnerOnline: false, familyFollowUpLabel: "Ready for Review" });
+  assert.equal(label(disconnected), "Ready for Review");
+  assert.deepEqual(disconnected.others, ["Disconnected"]);
+  assert.equal(disconnected.badge?.meta.tone, "danger");
+  assert.match(disconnected.badge?.title ?? "", /disconnected|offline|not connected/i);
+  const ownQuestion = sessionRowStatus(session({ status: "input_required",
+    pendingApproval: { requestId: "q", kind: "question", title: "Choose", options: [] } }), {
+    familyFollowUpLabel: "Ready for Review" });
+  assert.equal(label(ownQuestion), "Answer Required");
+  assert.equal(label(sessionRowStatus(session({ status: "running" }))), "Running",
+    "controller-owned descendants have no human family reason to promote");
+});
+
 test("a stalled session's badge turns danger, stops pulsing, and says how long it has been silent", () => {
   const status = sessionRowStatus(session({ status: "running" }), { stalledForMs: 14 * 60_000 });
   assert.equal(label(status), "Running");

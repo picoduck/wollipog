@@ -35,18 +35,17 @@ test("a family sorts as one unit with the parent first, children indent under it
   await page.setViewportSize({ width: 1280, height: 900 });
   await openList(page);
   await expect(page.locator(".inbox-row")).toHaveCount(9);
-  // Fired reminders lead as before. Then urgency before recency: the live family, two of whose
-  // children are waiting, is ONE unit placed by that most urgent member, parent first and its
-  // children by the same rule; the fixture's older waiting session follows; then the running and
-  // queued rows; the snoozed row is hidden from Active.
+  // Concrete human input leads due reminders; tied legacy occurrence times use deterministic IDs.
+  // The family stays ONE parent-first unit, with questions ahead of permissions. Quiet/idle
+  // placement alone creates no result, and the snoozed row remains hidden from Active.
   expect(await titles(page)).toEqual([
-    "Review Session",
+    "Approval Session",
     "Ship the usage and cost overhaul",
-    "#603: Normalize the allowance window",
     "#601: Link the cost source",
+    "#603: Normalize the allowance window",
     "#600: Add the usage table",
     "#602: Roll the daily budget over",
-    "Approval Session",
+    "Review Session",
     "Queued Session",
     "Running Session",
   ]);
@@ -55,7 +54,7 @@ test("a family sorts as one unit with the parent first, children indent under it
   await expect(page.locator(".inbox-row-shell.stacked")).toHaveCount(0);
   const parent = parentRow(page);
   await expect(parent.locator(".inbox-thread-toggle")).toHaveAttribute("aria-label", "Collapse Thread");
-  await expect(parent.locator(".inbox-thread-family-text")).toHaveText("4 Children · 2 Awaiting Input");
+  await expect(parent.locator(".inbox-thread-family-text")).toHaveText("4 Children · Needs Your Input");
   await expect(parent.locator(".inbox-thread-family")).toHaveClass(/waiting/);
   await expect(parent.locator(".inbox-thread-dot")).toHaveCount(4);
   await expect(page.locator(".inbox-row-shell.thread-child")).toHaveCount(4);
@@ -89,7 +88,7 @@ test("t, Shift+T, p, and the arrows drive the thread, the chevron is the pointer
   await list.press("t");
   await expect(page.locator(".inbox-row-shell.thread-child")).toHaveCount(0);
   await expect(parentRow(page).locator(".inbox-thread-toggle")).toHaveAttribute("aria-expanded", "false");
-  await expect(parentRow(page).locator(".inbox-thread-family-text")).toHaveText("4 Children · 2 Awaiting Input");
+  await expect(parentRow(page).locator(".inbox-thread-family-text")).toHaveText("4 Children · Needs Your Input");
   await page.screenshot({ path: `${EVIDENCE}/desktop-collapsed.png`, fullPage: true });
   await page.reload();
   await expect(page.locator(".page-tabs .tabs-bar")).toBeVisible();
@@ -100,11 +99,11 @@ test("t, Shift+T, p, and the arrows drive the thread, the chevron is the pointer
   await list.press("t");
   await expect(page.locator(".inbox-row-shell.thread-child")).toHaveCount(4);
   await list.press("j");
-  await expect(page.locator('.inbox-row-shell[aria-selected="true"]')).toContainText("#603");
+  await expect(page.locator('.inbox-row-shell[aria-selected="true"]')).toContainText("#601");
   await list.press("p");
   await expect(page.locator('.inbox-row-shell[aria-selected="true"]')).toContainText("Ship the usage");
   await list.press("ArrowRight");
-  await expect(page.locator('.inbox-row-shell[aria-selected="true"]')).toContainText("#603");
+  await expect(page.locator('.inbox-row-shell[aria-selected="true"]')).toContainText("#601");
   await list.press("t");
   await expect(page.locator('.inbox-row-shell[aria-selected="true"]')).toContainText("Ship the usage");
   await expect(page.locator(".inbox-row-shell.thread-child")).toHaveCount(0);
@@ -204,6 +203,8 @@ test("a phone narrows the spine and keeps the family chip's dots", async ({ page
   await expect(page.locator(".inbox-row-shell.thread-child")).toHaveCount(4);
   await expect(parentRow(page).locator(".inbox-thread-dot")).toHaveCount(4);
   await expect(parentRow(page).locator(".inbox-thread-family-text")).toBeHidden();
+  await expect(parentRow(page).locator(".status")).toHaveText("Needs Your Input");
+  await expect(parentRow(page).locator(".status")).toBeVisible();
   // One status on a phone as on a desktop (#2209): the top-priority kind and "+1" for the other kind.
   const approval = page.locator(".inbox-row-shell", { hasText: "Approval Session" });
   await expect(approval.locator(".status")).toHaveCount(1);
@@ -255,6 +256,27 @@ test("a phone narrows the spine and keeps the family chip's dots", async ({ page
   expect(wideThree.signalsOverflowRight).toBeLessThanOrEqual(0.5);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: `${EVIDENCE}/phone-expanded.png`, fullPage: true });
+});
+
+test("phone parents visibly identify review work and suppress controller-owned requests and results", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`${PAGE}&family-follow-up=review`);
+  const parent = parentRow(page);
+  await expect(parent.locator(".status")).toHaveText("Ready for Review");
+  await expect(parent.locator(".status")).toBeVisible();
+  await parent.locator(".inbox-thread-toggle").click();
+  await expect(page.locator(".inbox-row-shell.thread-child")).toHaveCount(0);
+  await expect(parent.locator(".status")).toHaveText("Ready for Review");
+  await expect(parent.locator(".status")).toBeVisible();
+  const box = await parent.locator(".status").evaluate((badge) => ({
+    width: badge.clientWidth, contentWidth: badge.scrollWidth, right: badge.getBoundingClientRect().right,
+  }));
+  expect(box.contentWidth).toBeLessThanOrEqual(box.width);
+  expect(box.right).toBeLessThanOrEqual(390);
+  await page.goto(`${PAGE}&family-follow-up=controlled`);
+  await expect(parent.locator(".status")).toHaveText("Running");
+  await expect(parent.locator(".status")).toHaveCount(1);
+  await expect(parent.locator(".inbox-thread-family")).not.toContainText(/Needs Your Input|Ready for Review/);
 });
 
 test("the mobile thread toggle confines paint beside both provider icons at both densities", async ({ page }) => {

@@ -507,7 +507,8 @@ test("desktop can apply a pending Inbox order without losing selection or scroll
   await page.evaluate(() => {
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-overflow-35", {
       lastEventAt: 2_000,
-      preview: "Newest activity is waiting for deliberate order adoption.",
+      attention: { version: 1, meaningfulAt: 2_000, humanActions: [], result: null, acknowledgedRevision: null },
+      preview: "Meaningful work is waiting for deliberate order adoption.",
       status: "running",
     });
   });
@@ -590,7 +591,9 @@ for (const scenario of [
   await settlePreviewLayout(page, 2);
   if (scenario.patch) {
     await page.evaluate(({ patch }) => {
-      window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-overflow-17", patch);
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-overflow-17", { ...patch,
+        attention: { version: 1, meaningfulAt: patch.lastEventAt, humanActions: [], result: null,
+          acknowledgedRevision: null } });
     }, { patch: scenario.patch });
   }
 

@@ -230,7 +230,7 @@ export interface InboxThreadChild {
 
 /** What a parent card says about its thread, whether or not the thread is expanded. */
 export interface InboxThreadChildren {
-  followUpLabel?: string;
+  followUpLabel?: "Needs Your Input" | "Ready for Review";
   count: number;
   /** Children with a pending request. */
   waiting: number;
@@ -321,7 +321,8 @@ export function threadInboxRows<T extends { session: SessionView }>(
         ...descendantAttention(childrenByParent.get(child.id) ?? [], new Set(seen).add(child.id))]);
     const strongest = descendantAttention(children, next).sort((a, b) => b.priority - a.priority)[0];
     const summary: InboxThreadChildren | null = children.length === 0 ? null : {
-      ...(strongest && strongest.priority >= 2 ? { followUpLabel: strongest.label } : {}),
+      ...(strongest && strongest.priority >= 2 ? { followUpLabel: strongest.group === "needs_input"
+        ? "Needs Your Input" as const : "Ready for Review" as const } : {}),
       count: children.length,
       waiting: children.filter((child) => isInboxBlocked(child)).length,
       children: children.map((child) => ({

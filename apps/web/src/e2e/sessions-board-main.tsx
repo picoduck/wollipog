@@ -172,6 +172,21 @@ if (threads) {
     ],
   } as never;
   approval.attentionOwners = [{ requestId: "test-289", toolCallId: "verifier", resolved: true, name: "Verifier", role: "tester" }];
+  const familyFollowUp = new URLSearchParams(location.search).get("family-follow-up");
+  if (familyFollowUp === "review" || familyFollowUp === "controlled") {
+    for (const child of sessions.filter((item) => item.parentSessionId === "s-orchestrator")) {
+      if (familyFollowUp === "review") {
+        child.status = "running";
+        child.pendingApproval = null;
+      } else if (child.pendingApproval) {
+        child.pendingRequestOwners = { human: 0, orchestrator: 1,
+          requests: [{ requestId: child.pendingApproval.requestId, owner: "orchestrator" }] };
+      }
+      child.attention = { version: 1, meaningfulAt: now, humanActions: [], acknowledgedRevision: null,
+        result: child.id === "s-child-601" ? { revision: "family-result", at: now,
+          owner: familyFollowUp === "controlled" ? "orchestrator" : "human" } : null };
+    }
+  }
 }
 
 if (fullShell) {

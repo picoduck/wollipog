@@ -391,10 +391,10 @@ test("long-pressed rows and cards pin their target, persist the state, and expos
   await page.setViewportSize({ width: 390, height: 640 });
   await openHarness(page);
   let cdp = await touchSession(page);
-  const queued = page.locator(".inbox-row-shell", { hasText: "Queued Session" });
+  const runningRow = page.locator(".inbox-row-shell", { hasText: "Running Session" });
 
-  await longPressUntilMenu(cdp, page, await centerOf(queued));
-  let menu = page.getByRole("menu", { name: "Session Actions for Queued Session" });
+  await longPressUntilMenu(cdp, page, await centerOf(runningRow));
+  let menu = page.getByRole("menu", { name: "Session Actions for Running Session" });
   const pinRow = menu.getByRole("menuitem", { name: "Pin Session" });
   await expect(pinRow).toBeVisible();
   // At 390px the menu is a bottom sheet that slides up; measure its resting position, not a frame.
@@ -404,24 +404,26 @@ test("long-pressed rows and cards pin their target, persist the state, and expos
   expect(menuBox.y + menuBox.height).toBeLessThanOrEqual(640);
   await pinRow.click();
   await expect(menu).toHaveCount(0, "the action dismisses the touch menu");
-  await expect(queued.getByLabel("Pinned Session")).toBeVisible();
-  await expect(queued.getByLabel("Pinned Session")).toHaveAttribute("title", "Pinned Session");
-  await expect(page.locator('.inbox-row-shell[aria-rowindex="2"] .inbox-row-title')).toHaveText("Queued Session",
-    "the exact long-pressed row moves to the top of the ordinary sessions, below the returned reminder");
+  await expect(runningRow.getByLabel("Pinned Session")).toBeVisible();
+  await expect(runningRow.getByLabel("Pinned Session")).toHaveAttribute("title", "Pinned Session");
+  await expect(page.locator('.inbox-row-shell[aria-rowindex="1"] .inbox-row-title')).toHaveText("Approval Session");
+  await expect(page.locator('.inbox-row-shell[aria-rowindex="2"] .inbox-row-title')).toHaveText("Review Session");
+  await expect(page.locator('.inbox-row-shell[aria-rowindex="3"] .inbox-row-title')).toHaveText("Running Session",
+    "the exact long-pressed row leads Working, below human input and the returned reminder");
   expect(harnessPath(page)).toBe("/");
   await expect(page.locator(".inbox-view.expanded")).toHaveCount(0);
 
   await page.reload();
   await expect(page.locator(".page-tabs .tabs-bar")).toBeVisible();
-  const persistedQueued = page.locator(".inbox-row-shell", { hasText: "Queued Session" });
-  await expect(persistedQueued.getByLabel("Pinned Session")).toBeVisible();
-  await persistedQueued.click({ button: "right" });
-  menu = page.getByRole("menu", { name: "Session Actions for Queued Session" });
+  const persistedRunningRow = page.locator(".inbox-row-shell", { hasText: "Running Session" });
+  await expect(persistedRunningRow.getByLabel("Pinned Session")).toBeVisible();
+  await persistedRunningRow.click({ button: "right" });
+  menu = page.getByRole("menu", { name: "Session Actions for Running Session" });
   await expect(menu.getByRole("menuitem", { name: "Unpin Session" })).toBeVisible();
   await menu.getByRole("menuitem", { name: "Unpin Session" }).click();
-  await expect(persistedQueued.getByLabel("Pinned Session")).toHaveCount(0);
-  await expect(page.locator('.inbox-row-shell[aria-rowindex="2"] .inbox-row-title')).toHaveText("Approval Session",
-    "unpinning restores the existing Inbox ordering");
+  await expect(persistedRunningRow.getByLabel("Pinned Session")).toHaveCount(0);
+  await expect(page.locator('.inbox-row-shell[aria-rowindex="3"] .inbox-row-title')).toHaveText("Queued Session",
+    "unpinning restores the Working group's deterministic order without displacing input");
 
   await page.getByRole("radiogroup", { name: "Sessions View" }).getByRole("radio", { name: /Board/ }).click();
   cdp = await touchSession(page);

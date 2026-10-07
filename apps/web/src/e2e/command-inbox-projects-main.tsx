@@ -249,6 +249,8 @@ function initialModel(): FixtureModel {
         activeTurnId: index < 4 ? `turn-overflow-${index}` : null,
         updatedAt: 100 - index,
         lastEventAt: 100 - index,
+        attention: { version: 1, meaningfulAt: 100 - index, humanActions: [], result: null,
+          acknowledgedRevision: null },
         preview: index < 4 ? `Running activity ${index + 1}` : `Waiting session ${index + 1}`,
       });
       return value;
