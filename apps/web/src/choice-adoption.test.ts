@@ -147,6 +147,10 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   // The Board's Machine and Agent menus (#2201) are §9.1's radio-like menus: All and one MenuItem
   // row per machine or agent with the trailing check. They replaced Board.tsx's two native selects.
   ["components/BoardFilters.tsx", "raw-radiogroup", 4],
+  // The phone Sessions app bar's ⋯ sheet (#2211): View (List, Board) and Show (Active, Snoozed)
+  // are §9.1 radio-like MenuItem rows with the trailing check, as the page header's view switch
+  // and Snoozed toggle fold into it. Choosing one navigates or filters; none sets a form value.
+  ["components/SessionsAppBar.tsx", "raw-radiogroup", 3],
   ["components/EditorSelect.tsx", "raw-radiogroup", 1],
   ["components/InstanceSelector.tsx", "raw-radiogroup", 1],
   ["components/PodsView.tsx", "raw-radiogroup", 1],

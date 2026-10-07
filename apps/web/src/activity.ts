@@ -149,8 +149,13 @@ export function activitySeries(activity: SessionActivity | undefined, now: numbe
 /** How many of the newest one-minute buckets count as recent tool activity (#2209). */
 export const RECENT_ACTIVITY_BUCKETS = 10;
 
-/** Tool activity in the last ten minutes: a non-zero count in the newest ten buckets of `activitySeries()`. */
+/**
+ * Tool activity in the last ten minutes: a non-zero count in the newest ten buckets of `activitySeries()`.
+ * A `now` of 0 is a row that does not read the clock (InboxList), never the first minute of 1970, so
+ * an event stamped then is not recent.
+ */
 export function hasRecentActivity(activity: SessionActivity | undefined, now: number): boolean {
+  if (now <= 0) return false;
   return activitySeries(activity, now).slice(-RECENT_ACTIVITY_BUCKETS).some((count) => count > 0);
 }
 

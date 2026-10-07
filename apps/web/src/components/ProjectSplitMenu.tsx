@@ -42,6 +42,9 @@ export interface ProjectSplitActionsProps {
   onPinnedChange: (pinned: boolean) => void;
   onNewSession: (preset: NewSessionPreset) => void;
   onManageProject?: () => void;
+  /** Offered from a phone menu sheet: the archive confirmation replaces the sheet, and its Back
+   * brings the sheet back (§7.5). */
+  confirmBack?: { label: string; run: () => void };
 }
 
 export interface ProjectSplitMenuProps extends ProjectSplitActionsProps {
@@ -121,20 +124,25 @@ const sessionsWord = (count: number) => `${count} Session${count === 1 ? "" : "s
  * danger style (§9.1). Choosing an action runs it after the menu has handed focus back to where it
  * was opened, so a dialog it opens returns focus there.
  */
-export function useProjectSplitActions({
-  split,
-  unfilteredSplit,
-  runner,
-  stopBeforeArchiveSupported = true,
-  pinned,
-  onPinnedChange,
-  onNewSession,
-  onManageProject,
-}: ProjectSplitActionsProps): ProjectSplitActions | null {
+export function useProjectSplitActions(props: ProjectSplitActionsProps | null): ProjectSplitActions | null {
   const api = useApi();
   const { confirm, showToast, showUndo } = useFeedback();
   const phone = useIsMobile();
   const [renaming, setRenaming] = useState(false);
+  // Null for a group with no project (All, No Project), so a caller that follows the current group
+  // keeps one hook call as the group changes.
+  if (!props) return null;
+  const {
+    split,
+    unfilteredSplit,
+    runner,
+    stopBeforeArchiveSupported = true,
+    pinned,
+    onPinnedChange,
+    onNewSession,
+    onManageProject,
+    confirmBack,
+  } = props;
 
   const durableProject = split.project?.kind === "durable" ? split.project.project : null;
   const durableLocation = split.project?.kind === "durable" ? split.project.primaryLocation : null;
@@ -240,6 +248,7 @@ export function useProjectSplitActions({
       detailRowsOverflow: detail.overflow,
       confirmLabel: archiveStopsRuntime ? "Archive and Stop" : "Archive Sessions",
       ...(archiveStopsRuntime ? { tone: "danger" as const } : {}),
+      ...(confirmBack ? { back: confirmBack } : {}),
     });
     if (!accepted) return;
     try {

@@ -1544,9 +1544,6 @@ kbd {
     justify-content: center;
   }
   .page-primary-key { display: none; }
-  /* Until the phone Sessions bar (#2211), its List / Board switch is icons alone; each option's
-     accessible name stays its label. */
-  .sessions-view .sessions-view-label { display: none; }
   .page-primary-label {
     position: absolute;
     width: 1px;
@@ -12006,6 +12003,39 @@ body.shell-dock-dragging * {
 @container app (max-width: 1099px) {
   .inbox-search { width: 200px; }
 }
+/* The phone Sessions app bar (#2211, §15.1): the page header's 48px bar alone, with no tab row and
+   no space under it, so the first row starts 8px below it (the list's own padding). Its title is
+   the group picker: the group's name truncating, a caret and the attention badges. Search mode
+   swaps the row for the full-width field and Cancel. While Snoozed is on, a strip under the bar
+   says so and offers Show Active, whose button makes it 44px on touch. */
+.page-header.sessions-app-bar { margin-bottom: 0; }
+.sessions-group-picker {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  height: var(--control-h);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: var(--type-title);
+  text-align: start;
+  cursor: pointer;
+}
+.sessions-group-picker-caret { flex: none; }
+.sessions-app-bar-search { gap: var(--space-2); }
+.sessions-app-bar-search > .inbox-search { flex: 1; width: auto; min-width: 0; }
+.sessions-snoozed-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  border-top: 1px solid var(--border);
+  color: var(--text-dim);
+  font: var(--type-body);
+}
 .inbox-list {
   min-height: 0;
   flex: 1;
@@ -12550,9 +12580,9 @@ body.shell-dock-dragging * {
 }
 
 @media (max-width: 760px) {
-  /* The search field takes a full-width row of its own above the tabs (#2082); the tab bar's
-     phone rules, after its own, put it there. */
-  .inbox-search { width: 100%; }
+  /* Under the phone app bar the first card starts 8px down, its own 4px margin after this 4px, so
+     the first row is at most 56px below the top of the page (#2211). */
+  .inbox-list { padding-top: var(--space-1); }
   /* A phone has no width for a 26px indent: the spine narrows (#896). */
   .inbox-row-shell.thread-child { margin-left: 14px; }
   .inbox-row-shell.thread-child::after,
@@ -16474,14 +16504,6 @@ body.shell-dock-dragging * {
 }
 .tab > .group-name { max-width: 200px; }
 .group-name-machine { color: var(--text-faint); font-weight: var(--weight-normal); }
-/* Phones: the bar wraps and its tools come first, a full-width row above the tabs (#2082), while
-   the list button stays beside the scrolling tab row. */
-@media (max-width: 760px) {
-  .page-tabs:has(> .tabs-bar) { height: auto; }
-  .tabs-bar { flex-wrap: wrap; row-gap: var(--space-2); height: auto; }
-  .tabs-bar > .tabs { flex: 1 1 0; height: var(--control-h-lg); }
-  .tabs-tools { order: -1; flex: 1 0 100%; margin-left: 0; }
-}
 
 /* Counts (§11.4). A plain count sits 4px after its label; a count that needs the user is a 16px
    count badge, amber, or red for the danger tone. Zero is never shown in color. */

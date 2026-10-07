@@ -133,4 +133,7 @@ test("the activity strip shows while Running or Starting, or for ten minutes aft
   assert.equal(hasRecentActivity(minutesAgo(9), now + ACTIVITY_BUCKET_MS), false, "it lapses once ten minutes pass");
   assert.equal(hasRecentActivity(minutesAgo(10), now), false);
   assert.equal(hasRecentActivity(undefined, now), false);
+  // A row that does not read the clock passes 0: an event in the first minute of 1970 is not recent.
+  assert.equal(hasRecentActivity(recordSessionActivity(undefined, 10), 0), false);
+  assert.equal(showsActivityStrip("idle", recordSessionActivity(undefined, 10), 0), false);
 });

@@ -356,6 +356,8 @@ for (const viewport of ["mobile", "desktop"] as const) {
 }
 
 test("InboxView preserves the server-authoritative Project count when reminders hide no rows", async () => {
+  // The group tabs and the header's own buttons are desktop's; a phone has the app bar (#2211).
+  mobileViewport = false;
   const { container, root } = mountTestRoot();
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
@@ -412,6 +414,8 @@ test("InboxView preserves the server-authoritative Project count when reminders 
 });
 
 test("Active and Snoozed badges follow the selected Project split and live reminders", async () => {
+  // The group tabs and the header's own buttons are desktop's; a phone has the app bar (#2211).
+  mobileViewport = false;
   const { container, root } = mountTestRoot();
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
@@ -504,6 +508,8 @@ function accessibleText(node: Node): string {
 }
 
 test("the Sessions header's New Session uses the active tab's preset, and ⋯ explains an unavailable New Project…", async () => {
+  // The group tabs and the header's own buttons are desktop's; a phone has the app bar (#2211).
+  mobileViewport = false;
   const { container, root } = mountTestRoot();
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
@@ -574,6 +580,8 @@ test("the Sessions header's New Session uses the active tab's preset, and ⋯ ex
 });
 
 test("group tabs draw blocked and stalled counts as aria-hidden badges and name them in words (#2031)", async () => {
+  // The group tabs and the header's own buttons are desktop's; a phone has the app bar (#2211).
+  mobileViewport = false;
   const { container, root } = mountTestRoot();
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
@@ -657,6 +665,8 @@ test("group tabs draw blocked and stalled counts as aria-hidden badges and name 
 });
 
 test("two groups with one name each name their machine in the tab, All Groups and their accessible names (#2180)", async () => {
+  // The group tabs and the header's own buttons are desktop's; a phone has the app bar (#2211).
+  mobileViewport = false;
   const { container, root } = mountTestRoot();
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
@@ -739,6 +749,8 @@ test("two groups with one name each name their machine in the tab, All Groups an
 // #2051: a durable Project archive runs on the server over every unarchived session, so the
 // confirmation counts and lists the snoozed ones hidden from Active, and the Active ones from Snoozed.
 test("a Project's archive confirmation lists its sessions from Active and Snoozed alike", async () => {
+  // The group tabs and the header's own buttons are desktop's; a phone has the app bar (#2211).
+  mobileViewport = false;
   const { container, root } = mountTestRoot();
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
@@ -867,16 +879,20 @@ test("the tab the URL names survives widening from a phone to a desktop that rem
   await act(async () => { tab("Alpha").click(); });
   assert.match(selected(), /Alpha/);
 
-  // On a phone, Beta is chosen and the URL names it.
+  // On a phone, Beta is chosen from the app bar's group picker (#2211) and the URL names it.
   await act(async () => {
     mobileViewport = true;
     domWindow.dispatchEvent(new domWindow.Event("resize"));
   });
-  await act(async () => { tab("Beta").click(); });
+  await act(async () => { container.querySelector<HTMLButtonElement>(".sessions-group-picker")!.click(); });
+  const betaRow = [...domWindow.document.querySelectorAll<HTMLButtonElement>(
+    '[role="menu"][aria-label="Session Groups"] [role="menuitemradio"]',
+  )].find((row) => row.textContent?.includes("Beta"))!;
+  await act(async () => { betaRow.click(); });
   const betaKey = pushed.at(-1)?.split;
-  assert.ok(typeof betaKey === "string", "choosing a tab writes it to the URL");
+  assert.ok(typeof betaKey === "string", "choosing a group writes it to the URL");
   await act(async () => { render(betaKey); });
-  assert.match(selected(), /Beta/);
+  assert.match(container.querySelector(".sessions-group-picker")?.textContent ?? "", /Beta/);
 
   // Widening restores the desktop's Alpha, and the URL's Beta wins.
   await act(async () => {
@@ -888,7 +904,8 @@ test("the tab the URL names survives widening from a phone to a desktop that rem
 });
 
 test("reminder membership stays exclusive while scoped attention reconciles in Snoozed list and board", async () => {
-  mobileViewport = true;
+  // The header's Snoozed toggle is desktop's; a phone has it in the app bar's ⋯ (#2211).
+  mobileViewport = false;
   const { container, root } = mountTestRoot();
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
@@ -3084,6 +3101,198 @@ test("U and the menu's Mark Unread and Mark Read toggle a session's unread dot (
   } finally {
     mobileViewport = true;
   }
+});
+
+/** The phone Sessions app bar (#2211), mounted with two Projects: Alpha with two sessions waiting on
+ * the user and one stalled, and Beta with one idle session and one snoozed. */
+async function mountPhoneBar(name: string, options: { pushed?: Array<{ name: string; split?: string | null }>; presets?: unknown[] } = {}) {
+  mobileViewport = true;
+  const { container, root } = mountTestRoot();
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: name,
+    runtimeKey: `${name}:1`,
+    createSocket: () => socket,
+    close() {},
+  };
+  const spyNavigation: ViewNavigation = {
+    current: () => ({ name: "inbox" }),
+    push: (view) => void options.pushed?.push(view as { name: string; split?: string | null }),
+    listen: () => () => {},
+  };
+  const project = (id: string, projectName: string, count: number): ProjectView => ({
+    id, name: projectName, hidden: false, locations: [], activeSessionCount: count, unarchivedSessionCount: count,
+    totalSessionCount: count, createdAt: 1, updatedAt: 1,
+  });
+  const now = Date.now();
+  await act(async () => {
+    root.render(
+      <StoreProvider connection={connection} navigation={spyNavigation}>
+        <FeedbackProvider>
+          <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined}
+            onNewSession={(preset) => options.presets?.push(preset)} onOpenShortcuts={() => undefined} />
+        </FeedbackProvider>
+      </StoreProvider>,
+    );
+  });
+  await act(async () => {
+    socket.push({
+      type: "snapshot",
+      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true, sessionReminders: true },
+      runners: [],
+      boxes: [],
+      sessions: [
+        session("alpha-blocked-1", now, { projectId: "alpha", status: "input_required", title: "Fix the deploy" }),
+        session("alpha-blocked-2", now - 1, { projectId: "alpha", status: "input_required", title: "Ship the release" }),
+        session("alpha-stalled", 1, { projectId: "alpha", status: "running", updatedAt: 1, title: "Migrate the database" }),
+        session("beta-idle", 10, { projectId: "beta", title: "Write the docs" }),
+        session("beta-snoozed", 9, { projectId: "beta", title: "Plan the offsite" }),
+      ],
+      projects: [project("alpha", "Alpha", 3), project("beta", "Beta", 2)],
+      reminders: [reminder("beta-snoozed")],
+      runs: [],
+      pods: [],
+    });
+  });
+  const body = domWindow.document.body as unknown as HTMLElement;
+  const bar = () => container.querySelector<HTMLElement>(".sessions-app-bar")!;
+  const picker = () => bar().querySelector<HTMLButtonElement>(".sessions-group-picker")!;
+  const sheet = (label: string) => body.querySelector<HTMLElement>(`[role="menu"][aria-label="${label}"]`);
+  const chooseGroup = async (groupName: string) => {
+    await act(async () => { picker().click(); });
+    const row = [...sheet("Session Groups")!.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')]
+      .find((candidate) => candidate.textContent?.startsWith(groupName))!;
+    await act(async () => { row.click(); });
+  };
+  const openMore = async () => {
+    await act(async () => { bar().querySelector<HTMLButtonElement>('[aria-label="More Actions"]')!.click(); });
+    return sheet("More Actions")!;
+  };
+  return { container, root, body, bar, picker, sheet, chooseGroup, openMore };
+}
+
+test("on a phone one 48px app bar replaces the page header, its action row and the group tabs (#2211)", async () => {
+  const presets: unknown[] = [];
+  const { container, bar, picker, sheet, chooseGroup } = await mountPhoneBar("phone-app-bar-test", { presets });
+
+  assertNoDomNode(container.querySelector(".tabs-bar"), "the group tabs are a picker on a phone (§10.1)");
+  assertNoDomNode(container.querySelector(".page-tabs"), "no tab row under the bar");
+  assertNoDomNode(container.querySelector(".page-action"), "no secondary buttons in the bar");
+  assert.equal(container.querySelectorAll(".page-header").length, 1, "the bar is the page's only header");
+  const title = bar().querySelector("h1#page-title")!;
+  assert.equal(title.textContent, "Sessions", "the page keeps its h1 for the shell's focus rescue");
+  assert.equal(title.getAttribute("tabindex"), "-1");
+
+  // The picker is the bar's title: the group, a caret and the attention badges, said in words.
+  assert.equal(picker().getAttribute("aria-label"), "All, 2 Blocked, 1 Stalled");
+  assert.equal(picker().getAttribute("aria-haspopup"), "menu");
+  assert.deepEqual([...picker().querySelectorAll(".count-badge")].map((badge) => [badge.textContent, badge.getAttribute("aria-hidden")]),
+    [["2", "true"], ["1", "true"]]);
+
+  await act(async () => { picker().click(); });
+  const groups = sheet("Session Groups")!;
+  assert.equal(groups.querySelector(".menu-head")?.textContent, "Session Groups");
+  assert.deepEqual([...groups.querySelectorAll('[role="menuitemradio"]')].map((row) => row.getAttribute("aria-label")),
+    ["All, 4, 2 Blocked, 1 Stalled", "Alpha, 3, 2 Blocked, 1 Stalled", "Beta, 1", "No Project, 0"]);
+  await act(async () => { [...groups.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')][2]!.click(); });
+  assertNoDomNode(sheet("Session Groups"), "choosing a group closes the sheet");
+  assert.equal(picker().getAttribute("aria-label"), "Beta", "a group with nothing waiting adds no words");
+  assert.deepEqual(rowTitles(container), ["Write the docs"], "the list switches to the group");
+  assert.equal(domWindow.document.activeElement, picker(), "focus returns to the picker");
+
+  // New Session is the 44px `+`, named by its label, and presets the current Project.
+  const create = bar().querySelector<HTMLButtonElement>(".page-primary")!;
+  assert.equal(accessibleText(create), "New Session");
+  await act(async () => { create.click(); });
+  assert.deepEqual(presets.at(-1), { projectId: "beta" });
+  await chooseGroup("Alpha");
+  assert.equal(picker().getAttribute("aria-label"), "Alpha, 2 Blocked, 1 Stalled");
+});
+
+test("the phone ⋯ sheet lists View, Show, New Project… and the current project's actions in that order (#2211)", async () => {
+  const pushed: Array<{ name: string; split?: string | null }> = [];
+  const { container, bar, picker, sheet, chooseGroup, openMore } = await mountPhoneBar("phone-more-sheet-test", { pushed });
+
+  let more = await openMore();
+  const entries = () => [...more.querySelectorAll<HTMLElement>(".menu-label, [role^='menuitem']")]
+    .map((node) => node.classList.contains("menu-label") ? `# ${node.textContent}` : node.querySelector(".menu-text")?.textContent);
+  assert.deepEqual(entries(), ["# View", "List", "Board", "# Show", "Active Sessions", "Snoozed Sessions", "New Project…"],
+    "All has no project actions");
+  assert.deepEqual([...more.querySelectorAll('[role="menuitemradio"]')].map((item) => item.getAttribute("aria-checked")),
+    ["true", "false", "true", "false"]);
+  assert.equal(more.querySelector('[role="group"][aria-label="Show"] [role="menuitemradio"]:last-child')?.getAttribute("aria-label"),
+    "Snoozed Sessions, 1", "Snoozed carries its count, in words");
+  await act(async () => { [...more.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')][1]!.click(); });
+  assertNoDomNode(sheet("More Actions"), "choosing closes the sheet");
+  assert.equal(pushed.at(-1)?.name, "board", "Board switches to the Board route");
+
+  await chooseGroup("Alpha");
+  more = await openMore();
+  assert.deepEqual(entries(), [
+    "# View", "List", "Board", "# Show", "Active Sessions", "Snoozed Sessions", "New Project…",
+    "# Alpha", "New Session Here", "Rename Project…", "Pin Project", "Create Permanent Worktree…", "Manage Project",
+    "Archive All Sessions…",
+  ], "the project's actions follow under its name, without Reveal in File Manager on a phone");
+
+  // Snoozed: the strip says so under the bar, and Show Active returns, focusing the picker.
+  const snoozedItem = [...more.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')]
+    .find((item) => item.textContent?.startsWith("Snoozed Sessions"))!;
+  await act(async () => { snoozedItem.click(); });
+  const strip = bar().querySelector<HTMLElement>(".sessions-snoozed-strip")!;
+  assert.equal(strip.querySelector("span")?.textContent, "Showing snoozed sessions.");
+  assertNoDomNode(picker().querySelector(".count-badge"), "Snoozed draws no attention badge");
+  assert.equal(picker().getAttribute("aria-label"), "Alpha");
+  await act(async () => { [...strip.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Show Active")!.click(); });
+  assertNoDomNode(bar().querySelector(".sessions-snoozed-strip"), "Show Active removes the strip");
+  assert.equal(picker().getAttribute("aria-label"), "Alpha, 2 Blocked, 1 Stalled");
+  assert.equal(domWindow.document.activeElement, picker());
+  assert.deepEqual(rowTitles(container), ["Fix the deploy", "Ship the release", "Migrate the database"]);
+});
+
+test("a confirmation opened from the phone ⋯ sheet replaces it, and Back brings the sheet back (§7.5, #2211)", async () => {
+  const { body, sheet, chooseGroup, openMore } = await mountPhoneBar("phone-more-back-test");
+  await chooseGroup("Alpha");
+  const more = await openMore();
+  const archive = [...more.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+    .find((item) => item.textContent?.startsWith("Archive"))!;
+  await act(async () => { archive.click(); });
+  assertNoDomNode(sheet("More Actions"), "the confirmation does not stack on the sheet");
+  const dialog = body.querySelector<HTMLElement>('[role="dialog"]')!;
+  const back = dialog.querySelector<HTMLButtonElement>(".modal-back")!;
+  assert.equal(back.getAttribute("aria-label"), "Back to More Actions");
+  await act(async () => { back.click(); });
+  assertNoDomNode(body.querySelector('[role="dialog"]'), "Back closes the confirmation");
+  assert.ok(sheet("More Actions"), "and brings the sheet back");
+});
+
+test("the phone app bar's Search swaps the bar for a focused full-width field, and Cancel restores it (#2211)", async () => {
+  const { container, bar, picker } = await mountPhoneBar("phone-search-mode-test");
+  const searchButton = () => bar().querySelector<HTMLButtonElement>('[aria-label="Search Sessions"]')!;
+  const field = () => bar().querySelector<HTMLInputElement>(".inbox-search input");
+  assertNoDomNode(field(), "the bar shows no field until Search is tapped");
+
+  await act(async () => { searchButton().click(); });
+  assert.equal(domWindow.document.activeElement, field(), "focus moves into the field");
+  assertNoDomNode(bar().querySelector(".sessions-group-picker"), "search mode replaces the bar's picker and icons");
+  await act(async () => {
+    const input = field()!;
+    Object.getOwnPropertyDescriptor(domWindow.HTMLInputElement.prototype, "value")!.set!.call(input, "deploy");
+    input.dispatchEvent(new domWindow.Event("input", { bubbles: true }) as unknown as Event);
+  });
+  assert.deepEqual(rowTitles(container), ["Fix the deploy"], "the list follows the query (#2200)");
+
+  const cancel = [...bar().querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Cancel")!;
+  await act(async () => { cancel.click(); });
+  assertNoDomNode(field(), "Cancel restores the bar");
+  assert.ok(picker());
+  assert.equal(domWindow.document.activeElement, searchButton(), "focus returns to Search");
+  assert.equal(rowTitles(container).length, 4, "and the query is cleared");
+
+  // Escape in the field does what Cancel does.
+  await act(async () => { searchButton().click(); });
+  await act(async () => { field()!.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as unknown as Event); });
+  assertNoDomNode(field());
+  assert.equal(domWindow.document.activeElement, searchButton());
 });
 
 test("every mounted root is torn down before the next test starts", () => {

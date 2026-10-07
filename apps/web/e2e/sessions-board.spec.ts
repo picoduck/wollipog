@@ -12,9 +12,23 @@ import { dialogMotionSettled } from "./dialog-motion.js";
 
 const PAGE = "/sessions-board-e2e.html";
 
+/** The Sessions header: the tab row on desktop, the app bar on a phone (#2211). */
+const SESSIONS_HEADER = ".page-tabs .tabs-bar, .sessions-app-bar";
+
 async function openHarness(page: Page, path = "/") {
   await page.goto(`${PAGE}?path=${encodeURIComponent(path)}`);
-  await expect(page.locator(".page-tabs .tabs-bar")).toBeVisible();
+  await expect(page.locator(SESSIONS_HEADER)).toBeVisible();
+}
+
+/** Switches List / Board: the header's view switch, or on a phone the app bar's ⋯ (#2211). */
+async function chooseView(page: Page, view: "List" | "Board") {
+  const bar = page.locator(".sessions-app-bar");
+  if (await bar.count() === 0) {
+    await page.getByRole("radiogroup", { name: "Sessions View" }).getByRole("radio", { name: view }).click();
+    return;
+  }
+  await bar.getByRole("button", { name: "More Actions" }).click();
+  await page.getByRole("menu", { name: "More Actions" }).getByRole("menuitemradio", { name: view, exact: true }).click();
 }
 
 function harnessPath(page: Page): string | null {
@@ -65,48 +79,57 @@ test.describe("with a touch pointer", () => {
   // The 44px option height at phone width is a touch size, keyed to the pointer (#1799).
   test.use({ hasTouch: true });
 
-  test("the header's view switch and Snoozed are touch-sized, and a phone draws List / Board as icons", async ({ page }) => {
+  test("the header's view switch and Snoozed are touch-sized, and a phone has them as 44px items in the app bar's ⋯", async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 800 });
     await openHarness(page);
-    await expect(page.getByRole("radio", { name: "List" })).toBeVisible();
-    await expect(page.locator(".sessions-view-label").first()).toBeVisible();
+    await expect(page.getByRole("radio", { name: "List" })).toHaveText("List");
     const snoozed = page.getByRole("button", { name: "Snoozed, 1", exact: true });
     await expect(snoozed).toHaveAttribute("aria-pressed", "false");
     expect((await snoozed.boundingBox())!.height).toBeGreaterThanOrEqual(44);
 
+    // On a phone the 48px app bar replaces the header and its tab row (#2211): View and Show are
+    // radio items in its ⋯ sheet, 44px tall, and Snoozed carries its count.
     await page.setViewportSize({ width: 390, height: 844 });
-    // The shared segmented control (§10.2) draws a 38px option inside a 44px track and gives each
-    // option the track's inset as its hit area, so the TARGET is 44px: a tap 2.5px above or below
-    // the visible option still lands on it.
-    for (const name of ["List", "Board"]) {
-      const option = page.getByRole("radio", { name });
-      await expect(option).toBeVisible();
-      const track = option.locator("xpath=ancestor::*[@role='radiogroup'][1]");
-      expect((await track.boundingBox())!.height).toBeGreaterThanOrEqual(44);
-      expect(await option.evaluate((element) => {
-        const box = element.getBoundingClientRect();
-        const x = box.left + box.width / 2;
-        return [box.top - 2.5, box.bottom + 2.5].every((y) => element.contains(document.elementFromPoint(x, y)));
-      }), `${name} is a 44px target`).toBe(true);
+    const bar = page.locator(".sessions-app-bar");
+    await expect(bar).toBeVisible();
+    await expect(page.locator(".page-tabs")).toHaveCount(0);
+    await expect(page.getByRole("radiogroup", { name: "Sessions View" })).toHaveCount(0);
+    await expect(snoozed).toHaveCount(0);
+    await bar.getByRole("button", { name: "More Actions" }).click();
+    const more = page.getByRole("menu", { name: "More Actions" });
+    for (const name of ["List", "Board", "Active Sessions", "Snoozed Sessions, 1"]) {
+      const item = more.getByRole("menuitemradio", { name, exact: true });
+      await expect(item).toBeVisible();
+      expect((await item.boundingBox())!.height, name).toBeGreaterThanOrEqual(44);
     }
-    // Until the phone Sessions bar (#2211) the app bar draws List / Board as icons, and Snoozed is
-    // in ⋯ as a checked item with its count.
-    await expect(page.locator(".sessions-view-label").first()).toBeHidden();
-    await expect(snoozed).toBeHidden();
-    await page.locator(".page-header").getByRole("button", { name: "More Actions" }).click();
-    const showSnoozed = page.getByRole("menuitemcheckbox", { name: "Show Snoozed Sessions, 1" });
-    await expect(showSnoozed).toHaveAttribute("aria-checked", "false");
-    expect((await showSnoozed.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    await expect(more.getByRole("menuitemradio", { name: "List", exact: true })).toHaveAttribute("aria-checked", "true");
     await page.keyboard.press("Escape");
+    await expect(more).toHaveCount(0);
 
     // A search field sharing a row of controls was left 97px and cut its placeholder to "Sear"
-    // (#2082). It takes a full-width row of its own instead.
-    const geometry = await toolbarGeometry(page);
+    // (#2082). Search mode gives it the bar's whole width beside Cancel.
+    await bar.getByRole("button", { name: "Search Sessions" }).click();
+    const geometry = await bar.evaluate((header) => {
+      const input = header.querySelector<HTMLInputElement>(".inbox-search input")!;
+      const style = getComputedStyle(input);
+      const context = document.createElement("canvas").getContext("2d")!;
+      context.font = style.font;
+      const row = header.querySelector(".page-header-row")!;
+      const rowBox = row.getBoundingClientRect();
+      return {
+        inputWidth: input.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
+        placeholderWidth: context.measureText(input.placeholder).width,
+        contained: [...row.children].every((child) => {
+          const box = child.getBoundingClientRect();
+          return box.left >= rowBox.left - 0.5 && box.right <= rowBox.right + 0.5;
+        }),
+      };
+    });
     expect(geometry.inputWidth).toBeGreaterThanOrEqual(160);
     expect(geometry.inputWidth, "the whole placeholder shows").toBeGreaterThanOrEqual(geometry.placeholderWidth);
-    expect(geometry.searchOwnRow).toBe(true);
     expect(geometry.contained).toBe(true);
-    const create = (await page.locator(".page-header").getByRole("button", { name: "New Session", exact: true }).boundingBox())!;
+    await bar.getByRole("button", { name: "Cancel" }).click();
+    const create = (await bar.getByRole("button", { name: "New Session", exact: true }).boundingBox())!;
     expect(create.width).toBeGreaterThanOrEqual(44);
     expect(create.height).toBeGreaterThanOrEqual(44);
 
@@ -152,7 +175,7 @@ test("the Sessions list runs to its pane's lower edge with no footer or shortcut
     });
     expect(gap, `at ${width}px nothing sits under the list`).toBeLessThanOrEqual(1);
   }
-  await page.getByRole("radio", { name: "Board" }).click();
+  await chooseView(page, "Board");
   await expect(page.locator(".inbox-activity-footer, .inbox-shortcut-rail")).toHaveCount(0);
 });
 
@@ -382,7 +405,7 @@ test("pin indicators keep their shape and card geometry across viewports, densit
     }
   }
 
-  await page.getByRole("radio", { name: "Board" }).click();
+  await chooseView(page, "Board");
   const card = page.locator(".board .card", { hasText: "Queued Session" });
   await expect(card.getByLabel("Pinned Session")).toBeVisible();
   const cardHeight = await card.evaluate((node) => node.getBoundingClientRect().height);
@@ -431,7 +454,7 @@ test("long-pressed rows and cards pin their target, persist the state, and expos
   await expect(page.locator(".inbox-view.expanded")).toHaveCount(0);
 
   await page.reload();
-  await expect(page.locator(".page-tabs .tabs-bar")).toBeVisible();
+  await expect(page.locator(SESSIONS_HEADER)).toBeVisible();
   const persistedQueued = page.locator(".inbox-row-shell", { hasText: "Queued Session" });
   await expect(persistedQueued.getByLabel("Pinned Session")).toBeVisible();
   await persistedQueued.click({ button: "right" });
@@ -442,7 +465,7 @@ test("long-pressed rows and cards pin their target, persist the state, and expos
   await expect(page.locator('.inbox-row-shell[aria-rowindex="2"] .inbox-row-title')).toHaveText("Approval Session",
     "unpinning restores the existing Inbox ordering");
 
-  await page.getByRole("radiogroup", { name: "Sessions View" }).getByRole("radio", { name: /Board/ }).click();
+  await chooseView(page, "Board");
   cdp = await touchSession(page);
   const running = page.locator(".board .card", { hasText: "Running Session" });
   await longPressUntilMenu(cdp, page, await centerOf(running));

@@ -1,3 +1,4 @@
+import { flushSync } from "react-dom";
 import { type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { prioritizedPendingRequests, providerSupportsConversationFork, type SessionReminderView, type SessionView, type SetSessionReminderRequest, type SnoozeScheduleInput, type SourceLocation } from "@wollipog/protocol";
 import { archiveAndStopMessage, archiveResultMessage, archiveResultTone, sessionArchiveRequiresStop } from "../archive-actions.js";
@@ -41,10 +42,10 @@ import { useStoreActions, useStoreSelector } from "../store.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { destination, encodeResourceId, type AttentionTarget, type SessionsTab } from "../navigation.js";
 import { useApi } from "../api-context.js";
-import { useFeedback } from "./FeedbackProvider.js";
+import { useFeedback, type ConfirmationOptions } from "./FeedbackProvider.js";
 import { InboxList, type InboxListEntry } from "./InboxList.js";
 import { CreateProjectDialog } from "./CreateProjectDialog.js";
-import { ProjectSplitMenu } from "./ProjectSplitMenu.js";
+import { ProjectSplitMenu, type ProjectSplitActionsProps } from "./ProjectSplitMenu.js";
 import { SessionDetail, type PreviewForkControls } from "./SessionDetail.js";
 import type { RightPanelState } from "./RightPanel.js";
 import type { PinnedSummaryState } from "./pinned-summary-state.js";
@@ -79,6 +80,7 @@ import { ProviderLoginCard } from "./ProviderLoginCard.js";
 import { RecommendedSkillsNotice } from "./RecommendedSkillsNotice.js";
 import { ProjectSetupSuggestion } from "./WorktreeSetupNotice.js";
 import { SessionGroupTabs } from "./SessionGroupTabs.js";
+import { SessionsAppBar } from "./SessionsAppBar.js";
 import { sessionGroupFullName, sessionGroupLabels, sessionGroupRunnerId } from "../session-groups.js";
 import { runnerDisplay } from "../runners.js";
 import { normalizeSessionsQuery, searchInboxSplits, sessionMatchesQuery } from "../sessions-search.js";
@@ -263,6 +265,9 @@ export function InboxView({
   // Enter may arrive before the deferred filter has committed. Keep the request in React state so
   // the handoff uses the rows for the exact query the input displays, never the previous result set.
   const [searchFocusPending, setSearchFocusPending] = useState(false);
+  // The phone app bar's search mode (#2211): the bar is the field and Cancel. A query kept from
+  // before (a session opened from the results, or a desktop narrowed to a phone) keeps it open.
+  const [phoneSearchOpen, setPhoneSearchOpen] = useState(false);
   const openSearchPalette = useOpenSearchPalette();
   const [creatingProject, setCreatingProject] = useState(false);
   const [reminderMode, setReminderMode] = useState<ReminderInboxMode>("ordinary");
@@ -407,6 +412,17 @@ export function InboxView({
     window.addEventListener("wollipog:clear-inbox-query", exitSearch);
     return () => window.removeEventListener("wollipog:clear-inbox-query", exitSearch);
   }, [exitSearch]);
+
+  // `/` on a phone-width window: the app bar's Search mode holds the field the shortcut focuses.
+  useEffect(() => {
+    if (!isMobile) return;
+    const openSearch = () => {
+      flushSync(() => setPhoneSearchOpen(true));
+      viewRef.current?.ownerDocument.querySelector<HTMLInputElement>(".sessions-app-bar .inbox-search input")?.focus();
+    };
+    window.addEventListener("wollipog:open-inbox-search", openSearch);
+    return () => window.removeEventListener("wollipog:open-inbox-search", openSearch);
+  }, [isMobile]);
 
   useEffect(() => {
     setSeen(loadSeen(instanceScope));
@@ -1164,7 +1180,7 @@ export function InboxView({
     await removeReminder(sessionId, current);
   }, [reminders, removeReminder]);
 
-  const archive = useCallback(async (sessionId: string) => {
+  const archive = useCallback(async (sessionId: string, back?: ConfirmationOptions["back"]) => {
     const session = sessions.get(sessionId);
     if (!session) return;
     // The `E` shortcut, the rail and the row menu all land here; a refused person is told why and
@@ -1189,6 +1205,7 @@ export function InboxView({
           message: archiveAndStopMessage(session.title, retrying),
           confirmLabel: retrying ? "Retry Stop" : "Archive and Stop",
           tone: retrying ? "default" : "danger",
+          ...(back ? { back } : {}),
           ...(!retrying && sessionRemindersSupported ? {
             secondaryAction: {
               label: "Snooze Instead…",
@@ -1449,29 +1466,73 @@ export function InboxView({
     return undefined;
   }, [activeProjectId, sessions, setupNoticeSessionIds]);
   const newSession = () => onNewSession?.(activeNewSessionPreset);
+  const projectPinned = (split: InboxSplit) => split.key !== null && (pinnedProjects.has(split.key) ||
+    (split.project?.kind === "durable" && split.project.legacyKeys.some((key) => pinnedProjects.has(key))));
+  const projectActionsFor = (split: InboxSplit): ProjectSplitActionsProps => {
+    const durableProjectId = split.project?.kind === "durable" ? split.project.project.id : undefined;
+    return {
+      split,
+      unfilteredSplit: baseSplits.find((candidate) => candidate.key === split.key),
+      runner: runners.get(sessionGroupRunnerId(split) ?? ""),
+      stopBeforeArchiveSupported,
+      pinned: projectPinned(split),
+      onPinnedChange: (enabled) => setProjectPinned(split, enabled),
+      onNewSession: (preset) => onNewSession?.(preset),
+      onManageProject: durableProjectId ? () => navigate({ name: "projects", id: durableProjectId }) : undefined,
+    };
+  };
+  const changeViewMode = (mode: SessionsViewMode) => {
+    if (mode === viewMode) return;
+    // The route IS the mode; the App-level view effect persists it as last-used.
+    // A tab the URL names stays named across the mode switch.
+    navigate({ name: mode === "board" ? "board" : "inbox", ...(routeSplit === undefined ? {} : { split: routeSplit }) });
+  };
   return (
     <>
-    {/* The Sessions page header (§4.2): the view switch, the Snoozed filter, ⋯ and New Session. It
-        goes when a session opens, and the view below keeps its place in the tree. */}
-    {!expanded && (
+    {/* The Sessions page header (§4.2): the view switch, the Snoozed filter, ⋯ and New Session; on a
+        phone, the 48px app bar with the group picker (#2211). It goes when a session opens, and the
+        view below keeps its place in the tree. */}
+    {!expanded && isMobile && (
+      <SessionsAppBar
+        title={destination("inbox").name}
+        splits={searchedSplits}
+        labels={groupLabels}
+        activeKey={activeSplit?.key ?? null}
+        snoozed={reminderMode === "snoozed"}
+        onSelectGroup={selectSplit}
+        search={{
+          open: phoneSearchOpen || query !== "",
+          query,
+          onOpen: () => setPhoneSearchOpen(true),
+          onChange: changeQuery,
+          // Cancel hands focus back to Search itself, so it clears without the list's focus handoff.
+          onCancel: () => {
+            changeQuery("");
+            setPhoneSearchOpen(false);
+          },
+        }}
+        viewMode={viewMode}
+        onViewModeChange={changeViewMode}
+        reminders={sessionRemindersSupported ? { snoozedCount, onModeChange: setReminderMode } : null}
+        newProjectUnavailableReason={projectsSupported ? null : "New Project is unavailable on this connection."}
+        onNewProject={() => setCreatingProject(true)}
+        projectActions={activeSplit && activeSplit.project !== null ? projectActionsFor(activeSplit) : null}
+        onNewSession={newSession}
+      />
+    )}
+    {!expanded && !isMobile && (
       <PageHeader
         title={destination("inbox").name}
         controls={(
           <>
             <SegmentedControl<SessionsViewMode>
               label="Sessions View"
-              className="sessions-view"
               value={viewMode}
               options={[
-                { value: "list", label: <><ListIcon size={16} /><span className="sessions-view-label">List</span></>, ariaLabel: "List", title: "List" },
-                { value: "board", label: <><BoardIcon size={16} /><span className="sessions-view-label">Board</span></>, ariaLabel: "Board", title: "Board" },
+                { value: "list", label: <><ListIcon size={16} />List</>, ariaLabel: "List", title: "List" },
+                { value: "board", label: <><BoardIcon size={16} />Board</>, ariaLabel: "Board", title: "Board" },
               ]}
-              onChange={(mode) => {
-                if (mode === viewMode) return;
-                // The route IS the mode; the App-level view effect persists it as last-used.
-                // A tab the URL names stays named across the mode switch.
-                navigate({ name: mode === "board" ? "board" : "inbox", ...(routeSplit === undefined ? {} : { split: routeSplit }) });
-              }}
+              onChange={changeViewMode}
             />
             {/* Where the preview sits (§6.3, #2219): only where Preview Right can apply, so the compact
                 header keeps its budget. The Board keeps its place but hides it from sight, focus and
@@ -1523,24 +1584,14 @@ export function InboxView({
             }}
             tabMenu={(split, { active, request, closeRequest }) => {
               if (split.project === null) return null;
-              const durableProjectId = split.project.kind === "durable" ? split.project.project.id : undefined;
-              const pinned = split.key !== null && (pinnedProjects.has(split.key) ||
-                (split.project.kind === "durable" && split.project.legacyKeys.some((key) => pinnedProjects.has(key))));
               return (
                 <ProjectSplitMenu
                   // The tab counts a search's matches; the group's actions (Archive All Sessions)
                   // still act on the whole group.
-                  split={splits.find((candidate) => candidate.key === split.key) ?? split}
-                  unfilteredSplit={baseSplits.find((candidate) => candidate.key === split.key)}
+                  {...projectActionsFor(splits.find((candidate) => candidate.key === split.key) ?? split)}
                   active={active}
                   tabMenu={request}
                   onTabMenuClose={closeRequest}
-                  runner={runners.get(sessionGroupRunnerId(split) ?? "")}
-                  stopBeforeArchiveSupported={stopBeforeArchiveSupported}
-                  pinned={pinned}
-                  onPinnedChange={(enabled) => setProjectPinned(split, enabled)}
-                  onNewSession={(preset) => onNewSession?.(preset)}
-                  onManageProject={durableProjectId ? () => navigate({ name: "projects", id: durableProjectId }) : undefined}
                 />
               );
             }}
@@ -1781,7 +1832,11 @@ export function InboxView({
             void dismissReturnedReminder(sessionId)
               .catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" }));
           }}
-          onArchive={(sessionId) => { void archive(sessionId); }}
+          onArchive={(sessionId) => {
+            // On a phone the confirmation replaces the sheet, and Back brings the sheet back (§7.5).
+            const menu = sessionMenu;
+            void archive(sessionId, isMobile ? { label: "Back to Session Actions", run: () => setSessionMenu(menu) } : undefined);
+          }}
           renameRefusal={sessionCommandRefusal(menuSession, "rename")}
           archiveRefusal={sessionArchiveActionRefusal(menuSession)}
         />

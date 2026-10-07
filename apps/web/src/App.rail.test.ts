@@ -416,8 +416,8 @@ test("Sessions Search is one fixed width whether idle, focused or holding a quer
     "200px in the compact tier");
   assert.doesNotMatch(css, /\.inbox-search[^{]*:focus-within[^{]*\{/, "focus never restyles the field's box");
   assert.doesNotMatch(css, /\.inbox-search[^{]*\{[^}]*transition/, "the field never animates a width");
-  assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.inbox-search\s*\{\s*width:\s*100%;\s*\}/,
-    "small screens give Search a full-width row of its own (#2082)");
+  assert.match(css, /\.sessions-app-bar-search > \.inbox-search\s*\{\s*flex:\s*1;\s*width:\s*auto;/,
+    "a phone's Search mode gives the field the app bar's width beside Cancel (#2082, #2211)");
 });
 
 /**
