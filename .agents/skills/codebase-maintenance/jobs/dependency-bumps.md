@@ -5,6 +5,17 @@ would actually require.
 
 ## Ground Truth
 
+Start by reading the latest Dependency Queue Health workflow run, its conclusion, and its job
+log. It lists uncovered packages and dependency PRs older than seven days, giving the sweep a
+starting point before package-by-package investigation. Find it with
+`gh run list --workflow dependency-queue-health.yml --limit 1 --json databaseId,status,conclusion,url`,
+then inspect that run's jobs. If `gh run view <run-id> --log` or `--log-failed` returns empty
+output for a completed job, fetch its log with
+`gh api repos/picoduck/wollipog/actions/jobs/<job-id>/logs` and save it in the run's scratch
+directory. A pending run or unavailable log is a coverage limit, not proof that the queue is
+healthy. Recheck all listed package versions, publish dates, PR states, and checks: the workflow
+log is a lead, not a replacement for the ground-truth commands below.
+
 - `pnpm outdated -r` for the version gap across every workspace package.
 - `pnpm audit --json` for known advisories. Do not run `pnpm audit --fix`; it changes the tree.
 - For the desktop crate, `cargo update --dry-run --manifest-path apps/desktop/src-tauri/Cargo.toml`
