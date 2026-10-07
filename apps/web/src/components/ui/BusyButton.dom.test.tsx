@@ -86,7 +86,8 @@ test("a busy button keeps its label and width, puts a spinner before the label a
   assert.equal(domWindow.getComputedStyle(button as never).width, idleWidth, "the width does not change");
   assert.equal(button.style.minWidth, idleWidth);
   assert.equal(button.getAttribute("data-busy-spinner"), "prepended");
-  assert.equal(Number.parseFloat(button.style.paddingInline), 0, "the spinner's room comes from the padding, whatever the caller set");
+  assert.equal(button.getAttribute("data-spinner-room"), "", "a .btn without an icon keeps the spinner's room reserved");
+  assert.equal(button.style.paddingInline, "", "busy, the stylesheet's own padding applies, not a zeroed one (#2645)");
   assert.equal(status().textContent, "Installing the update…");
 
   await act(async () => { reset().click(); });
@@ -143,7 +144,26 @@ test("a spinner takes a leading icon's place", async () => {
   assertNoDomNode(button.querySelector('[data-testid="icon"]'));
   assert.equal(button.firstElementChild?.className, "spinner");
   assert.equal(button.getAttribute("data-busy-spinner"), "replaced");
+  assert.equal(button.hasAttribute("data-spinner-room"), false, "an icon is the spinner's room, so nothing is reserved");
   assert.equal(button.textContent, "Add Skill");
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+test("only a .btn reserves the spinner's room; any other button still takes it from its padding", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const render = (busy: boolean) => root.render(
+    <BusyButton className="icon-btn sm" busy={busy} progress="Dismissing…">Dismiss</BusyButton>,
+  );
+  await act(async () => { render(false); });
+  const button = container.querySelector("button")!;
+  assert.equal(button.hasAttribute("data-spinner-room"), false, "`icon-btn` contains `btn` but is not a .btn");
+  await act(async () => { render(true); });
+  assert.equal(button.getAttribute("data-busy-spinner"), "prepended");
+  assert.equal(Number.parseFloat(button.style.paddingInline), 0, "without reserved room the spinner's room comes from the padding");
   await act(async () => root.unmount());
   container.remove();
 });
@@ -156,4 +176,16 @@ test("the stylesheet draws the spinner at 14px and keeps a busy button's variant
   // A busy primary keeps its fill: the disabled rule would otherwise grey it out while it runs.
   assert.match(css, /\.btn\.primary\[aria-busy="true"\]\[aria-disabled="true"\] \{[^}]*background: var\(--primary-bg\)/);
   assert.match(css, /\.btn\.sm\[data-busy-spinner="prepended"\] \{[^}]*gap: var\(--space-0-5\)/);
+  // The reserved room is the size's padding plus half the spinner and its busy gap, at rest only
+  // (#2645). The real-browser measurement is apps/web/e2e/busy-button.spec.ts.
+  for (const [selector, padding, gap] of [
+    [".btn", "--space-3", "--space-1"],
+    [".btn.sm", "--space-2", "--space-0-5"],
+    [".btn.lg", "--space-4", "--space-1"],
+  ] as const) {
+    const rule = `\n${selector}[data-spinner-room]:not([aria-busy="true"]) {`;
+    assert.ok(css.includes(rule), `${selector} reserves the spinner's room`);
+    const body = css.slice(css.indexOf(rule) + rule.length).split("}")[0] ?? "";
+    assert.match(body, new RegExp(`padding-inline: calc\\(var\\(${padding}\\) \\+ \\(var\\(--icon-sm\\) \\+ var\\(${gap}\\)\\) / 2\\);`));
+  }
 });

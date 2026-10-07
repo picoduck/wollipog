@@ -21,15 +21,54 @@ async function coarse(page: Page): Promise<boolean> {
   return page.evaluate(() => matchMedia("(pointer: coarse)").matches);
 }
 
+/** A `.btn` size's own inline padding (§3.1): `.sm` 8px, `.lg` 16px, otherwise 12px. */
+async function normalPadding(button: Locator): Promise<number> {
+  return button.evaluate((element) => element.classList.contains("sm") ? 8 : element.classList.contains("lg") ? 16 : 12);
+}
+
+/** Where the label sits at rest, and whether the button reserves the spinner's room (#2645). */
+async function idleLayout(button: Locator) {
+  return button.evaluate((element) => {
+    const own = element.getBoundingClientRect();
+    const text = document.createRange();
+    text.selectNodeContents([...element.childNodes].find((node) => node.nodeType === Node.TEXT_NODE)!);
+    const words = text.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    return {
+      reserved: element.hasAttribute("data-spinner-room"),
+      // A container that shares its width out equally (a phone dialog footer) makes the button
+      // wider than its content, so it keeps the size's own padding there instead.
+      stretched: style.flexGrow !== "0",
+      hasIcon: element.querySelector("svg") !== null,
+      padding: [Number.parseFloat(style.paddingLeft), Number.parseFloat(style.paddingRight)],
+      offCentre: (words.left - own.left) - (own.right - words.right),
+    };
+  });
+}
+
 /** Presses `button`, then checks it against the measurements taken just before. */
 async function expectSteadyWhenBusy(button: Locator, label: string, neighbour?: Locator) {
   const idle = await box(button);
+  const padding = await normalPadding(button);
+  const rest = await idleLayout(button);
+  // A button with a leading icon is unchanged; one without reserves the spinner's room at rest:
+  // its own padding plus half the spinner and its busy gap a side, with the label centred.
+  expect(rest.reserved, `${label}: only a button without a leading icon reserves the spinner's room`).toBe(!rest.hasIcon);
+  if (rest.reserved) {
+    const room = rest.stretched ? 0 : (14 + (padding === 8 ? 2 : 4)) / 2;
+    expect(rest.padding, `${label}: the idle padding carries the spinner's room unless stretched`)
+      .toEqual([padding + room, padding + room]);
+    expectGeometry(Math.abs(rest.offCentre), `${label}: the label is centred at rest`).toBeLessThanOrEqual(0.61);
+  } else {
+    expect(rest.padding, `${label}: a button with an icon keeps its own padding`).toEqual([padding, padding]);
+  }
   const neighbourIdle = neighbour ? await box(neighbour) : null;
   await button.click();
   await expect(button).toHaveAttribute("aria-busy", "true");
   await expect(button).toHaveText(label);
   const busy = await box(button);
-  expectGeometry(Math.abs(busy.width - idle.width), `${label}: the width does not change`).toBeLessThanOrEqual(0.61);
+  // Exactly: the busy width is the idle width, locked inline, and the reserved room is what fills it.
+  expect(busy.width, `${label}: the width does not change`).toBe(idle.width);
   expectGeometry(Math.abs(busy.height - idle.height), `${label}: the height does not change`).toBeLessThanOrEqual(0.61);
   expectGeometry(Math.abs(busy.left - idle.left), `${label}: the button does not move`).toBeLessThanOrEqual(0.61);
   if (neighbour && neighbourIdle) {
@@ -54,12 +93,18 @@ async function expectSteadyWhenBusy(button: Locator, label: string, neighbour?: 
     text.selectNodeContents(label);
     const words = text.getBoundingClientRect();
     const lines = new Set([...text.getClientRects()].map((rect) => Math.round(rect.top))).size;
+    const style = getComputedStyle(element);
+    const borderLeft = Number.parseFloat(style.borderLeftWidth);
+    const borderRight = Number.parseFloat(style.borderRightWidth);
     return {
       spinner: { width: spin.width, height: spin.height },
       spinnerFirst: element.firstElementChild === spinner,
       spinnerBeforeLabel: spin.right <= words.left + 0.5,
       overflowLeft: own.left - Math.min(spin.left, words.left),
       overflowRight: Math.max(spin.right, words.right) - own.right,
+      // From the inside of the border, so these compare directly with the inline padding.
+      spinnerInset: spin.left - (own.left + borderLeft),
+      labelInset: (own.right - borderRight) - words.right,
       lines,
     };
   });
@@ -69,6 +114,15 @@ async function expectSteadyWhenBusy(button: Locator, label: string, neighbour?: 
   expect(inside.lines, `${label}: the label stays on one line`).toBe(1);
   expectGeometry(inside.overflowLeft, `${label}: the spinner stays inside the button`).toBeLessThanOrEqual(0.61);
   expectGeometry(inside.overflowRight, `${label}: the label stays inside the button`).toBeLessThanOrEqual(0.61);
+  // #2645: neither the spinner nor the label comes closer to an edge than the size's own padding.
+  expectGeometry(padding - inside.spinnerInset, `${label}: the spinner keeps the inline padding`).toBeLessThanOrEqual(0.61);
+  expectGeometry(padding - inside.labelInset, `${label}: the label keeps the inline padding`).toBeLessThanOrEqual(0.61);
+  if (rest.reserved) {
+    // Centred, with the same room each side. A button sized by its content (the width check above)
+    // is then filled exactly, padding to padding; one stretched by its container keeps more.
+    expectGeometry(Math.abs(inside.spinnerInset - inside.labelInset), `${label}: the busy content is centred`)
+      .toBeLessThanOrEqual(0.61);
+  }
   return busy;
 }
 

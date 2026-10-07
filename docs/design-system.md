@@ -530,11 +530,17 @@ States
 | Selected / on (toggle buttons) | `--bg-elev-3` fill **plus a 1px `--control-outline` edge** (icon buttons: an inset edge), `aria-pressed="true"`, and an icon or label change. The edge is what separates "on" from "hovered": with one fill for both, a toggle that is on looks hovered. |
 | Focus | 2px `--focus` ring, 2px offset (§16.1). |
 | Disabled | Text `--text-faint`, fill unchanged, no hover, `cursor: not-allowed`. No opacity. A control with no fill of its own (ghost, icon button, a composer bar ghost control) rests in `--text-dim`, which `--text-faint` is only about 1.2:1 from, so its label and glyph take `--text-disabled` instead: at least 1.8:1 below rest and 3:1 on `--bg` and `--bg-elev` in every scheme. The scheme generator derives the tier, and raises a scheme's `--text-dim` rather than adding a per-component exception if it ever stops fitting. Filled controls (secondary, primary, danger) keep `--text-faint` on their fill; a ghost toggle that is on keeps its on fill and takes `--text-disabled`. In forced colors, text and edge are `GrayText`, for `disabled` and `aria-disabled="true"` alike. A disabled control that the user would reasonably expect to work shows its reason as visible text next to it (§8.6), never only in `title`. |
-| Busy | Label stays; a 14px spinner replaces the leading icon (or is prepended); the button keeps its width (`min-width` locked on press). In forced colors it keeps the enabled button ink, not `GrayText`. |
+| Busy | Label stays; a 14px spinner replaces the leading icon (or is prepended); the button keeps its width (`min-width` locked on press) and its normal inline padding. A button without a leading icon reserves the spinner's room at rest (below). In forced colors it keeps the enabled button ink, not `GrayText`. |
 
 Busy is one component, `BusyButton` (`apps/web/src/components/ui/BusyButton.tsx`). It locks the
-button to the width it had just before it became busy; a prepended spinner takes its room from the
-inline padding, so the button neither grows nor moves its neighbours. It sets `aria-busy="true"` and
+button to the width it had just before it became busy, so the button neither grows nor moves its
+neighbours. A `.btn` without a leading icon reserves the spinner's room even at rest: its inline
+padding is the size's own plus half of the 14px spinner and its busy gap on each side (`.btn.sm`
+8 + 8px, `.btn` 12 + 9px, `.btn.lg` 16 + 9px), with the label centred, so it is 16px (`.sm`) or 18px
+wider than a plain button with the same label. Busy, the padding returns to the size's own and the
+spinner, gap and label fill exactly the reserved room: the same width, and neither the spinner nor
+the label closer to an edge than the normal padding (#2645). A button with a leading icon reserves
+nothing; the spinner takes the icon's place. It sets `aria-busy="true"` and
 `aria-disabled="true"` (not `disabled`, which would drop the focus the person pressed it with) and
 refuses further presses, keeps its variant's fill, and announces a sentence-case `progress` line
 ("Installing the update…") through a polite live region. Toast actions (`ToastOptions.action.progress`)

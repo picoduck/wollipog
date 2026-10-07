@@ -20,9 +20,13 @@ export interface BusyButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonEle
  * Swapping the label for "Installing…" made the button change width, so its neighbours shifted and
  * a narrow row could wrap, and the label stopped naming the action. Here the label stays, a 14px
  * spinner takes the leading icon's place (or is prepended), and the button is locked to the width it
- * had just before it became busy. When the spinner is prepended it takes the room from the button's
- * inline padding rather than widening it, with the narrower gap of the `[data-busy-spinner]` rule
- * in styles.css.
+ * had just before it became busy.
+ *
+ * A `.btn` without a leading icon carries the spinner's room at rest (`[data-spinner-room]` in
+ * styles.css): half the spinner and its gap as extra inline padding on each side, so the label is
+ * centred. Busy, the spinner and label move into the button's normal padding at the same width, so
+ * neither touches an edge and nothing beside it moves (#2645). Any other class has no reserved room,
+ * so there a prepended spinner still takes its room from the inline padding.
  *
  * Busy is `aria-busy` plus `aria-disabled`, not `disabled`: a disabled button drops the focus the
  * person just pressed it with, so the click is refused here instead. The live line is a sibling, since
@@ -60,14 +64,16 @@ export function BusyButton({ busy, progress, children, icon, ref, className, sty
     }
     onClick?.(event);
   };
-  // A prepended spinner takes its room from the inline padding. Inline, so a caller's own padding
-  // (a `style` prop or a more specific class) cannot push the spinner and label past the edges.
+  // A `.btn` keeps the spinner's room reserved in its idle padding. Without that room, a prepended
+  // spinner takes it from the inline padding: inline, so a caller's own padding (a `style` prop or a
+  // more specific class) cannot push the spinner and label past the edges.
+  const reservesRoom = !icon && (className ?? "").split(/\s+/u).includes("btn");
   const prepended = busy && !icon;
   const lockedStyle = lockedWidth == null ? style : {
     ...style,
     width: lockedWidth,
     minWidth: lockedWidth,
-    ...(prepended ? { paddingInline: 0 } : {}),
+    ...(prepended && !reservesRoom ? { paddingInline: 0 } : {}),
   };
 
   return (
@@ -81,6 +87,7 @@ export function BusyButton({ busy, progress, children, icon, ref, className, sty
         aria-busy={busy || undefined}
         aria-disabled={busy ? true : rest["aria-disabled"]}
         data-busy-spinner={busy ? (prepended ? "prepended" : "replaced") : undefined}
+        data-spinner-room={reservesRoom ? "" : undefined}
         onClick={handleClick}
       >
         {busy ? <Spinner decorative /> : icon}
