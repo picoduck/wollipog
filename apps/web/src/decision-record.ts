@@ -166,10 +166,13 @@ export function permissionOutcome(item: PermissionItem): DecisionOutcome {
 }
 
 /** Who settled a permission, from its own `permission_resolved`: the parent session, or the member
- * or policy that event names (#2628). Nobody when it names no one (an older runner or control
- * plane): the audit cannot be tied to one occurrence of a reused provider request id. */
+ * or policy that event names (#2628), including a person's sign-in action (#2742). Nobody when it
+ * names no one (an older runner or control plane): the audit cannot be tied to one occurrence of a
+ * reused provider request id. A sign-in rechecked automatically was chosen by nobody, whatever the
+ * event carries. */
 function permissionActor(item: PermissionItem): DecisionActor | undefined {
   if (item.resolvedByParentSessionId) return { kind: "parent", sessionId: item.resolvedByParentSessionId };
+  if (item.resolvedOptionId === "auth:automatic-retry") return undefined;
   const by = item.resolvedBy;
   if (by?.kind === "user" && by.userId) return { kind: "member", userId: by.userId };
   if (by?.kind === "policy" && by.policyId) return { kind: "policy", policyId: by.policyId };

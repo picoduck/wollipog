@@ -12,7 +12,7 @@ import { RequestKindIcon, pendingRequestsTitle } from "../components/requests/re
 import { useQuestionWhereAsked } from "../components/requests/where-asked.js";
 import type { TimelineItem } from "../timeline.js";
 import { QuestionRowGallery } from "./question-row-gallery.js";
-import { ResolverGallery } from "./resolver-gallery.js";
+import { ResolverGallery, SignInResolverGallery } from "./resolver-gallery.js";
 import { setQuestionResponseStyle, useQuestionResponseStyle } from "../question-response-style.js";
 import { useFollowTail } from "../useFollowTail.js";
 import "../styles.css";
@@ -469,4 +469,6 @@ createRoot(document.getElementById("root")!).render(params.get("set") === "galle
   ? <main id="question-frame" className="timeline"><QuestionRowGallery /></main>
   : params.get("set") === "resolvers"
     ? <main id="question-frame" className="timeline"><ResolverGallery solo={params.get("viewer") === "solo"} /></main>
-    : <Fixture />);
+    : params.get("set") === "sign-in-resolvers"
+      ? <main id="question-frame" className="timeline"><SignInResolverGallery solo={params.get("viewer") === "solo"} /></main>
+      : <Fixture />);

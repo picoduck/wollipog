@@ -15166,7 +15166,7 @@ export class SessionManager {
       return;
     }
     if (requestId.startsWith("provider-auth:")) {
-      void this.resolveProviderAuthentication(sessionId, requestId, optionId).catch(() => {
+      void this.resolveProviderAuthentication(sessionId, requestId, optionId, decidedBy).catch(() => {
         const meta = this.store.readMeta(sessionId);
         if (meta?.providerAuthBlock) {
           this.emitProviderAuthenticationCard(
@@ -18420,10 +18420,12 @@ export class SessionManager {
     return settled();
   }
 
+  /** `decidedBy` is the person who chose this action (#2742); it names only this session's outcome. */
   private async resolveProviderAuthentication(
     sessionId: string,
     requestId: string,
     optionId: string | null,
+    decidedBy?: PermissionResolver,
   ): Promise<void> {
     let meta = this.store.readMeta(sessionId);
     let block = meta?.providerAuthBlock;
@@ -18465,6 +18467,7 @@ export class SessionManager {
         kind: "permission_resolved",
         requestId,
         optionId: "auth:dismiss",
+        ...(decidedBy ? { resolvedBy: decidedBy } : {}),
       });
       if (retainedPrompt) {
         this.emitEvent(sessionId, {
@@ -18569,6 +18572,8 @@ export class SessionManager {
         observation,
         acceptingCurrent,
         optionId,
+        false,
+        decidedBy,
       );
     } finally {
       this.providerAuthOperations.delete(block.credentialScopeId);
@@ -18583,6 +18588,9 @@ export class SessionManager {
     targetOnly: boolean,
     targetResolutionOptionId: string,
     credentialContextChanged = false,
+    // Who chose the target's action (#2742). Other sessions sharing the credential scope recover
+    // automatically, which nobody chose, so their outcomes stay unnamed.
+    targetResolvedBy?: PermissionResolver,
   ): Promise<void> {
     const candidates = targetOnly
       ? this.store.listSessions().filter((meta) => meta.sessionId === targetSessionId)
@@ -18740,6 +18748,7 @@ export class SessionManager {
           optionId: meta.sessionId === targetSessionId
             ? targetResolutionOptionId
             : "auth:automatic-retry",
+          ...(meta.sessionId === targetSessionId && targetResolvedBy ? { resolvedBy: targetResolvedBy } : {}),
         });
       }
       if (block.delivery === "uncertain") {

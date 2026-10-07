@@ -12671,7 +12671,7 @@ test("authentication actions remain parked until the runner reports their outcom
   });
   db.updateSessionStatus(id, "input_required", Date.now());
 
-  const res = svc.approve(id, "provider-auth:recovery-a", "auth:revalidate");
+  const res = svc.approve(id, "provider-auth:recovery-a", "auth:revalidate", { kind: "agent", id: "agent-1" });
   assert.ok(res.ok);
   assert.deepEqual(hub.sentOfType("resolve_permission").at(-1), {
     type: "resolve_permission",
@@ -12685,6 +12685,46 @@ test("authentication actions remain parked until the runner reports their outcom
   const stale = svc.approve(id, "provider-auth:recovery-a", "auth:not-offered");
   assert.equal(stale.ok, false);
   assert.equal(stale.status, 409);
+});
+
+test("a member's sign-in action names them to the runner, as an ordinary permission does (#2742)", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  const ask = (requestId: string) => {
+    db.setPendingApproval(id, {
+      requestId,
+      title: "Authentication Required — Claude Code",
+      kind: "authentication",
+      options: [
+        { optionId: "auth:login", name: "Start Sign-In", kind: "allow_once" },
+        { optionId: "auth:revalidate", name: "Recheck Authentication", kind: "allow_once" },
+        { optionId: "auth:dismiss", name: "Dismiss Recovery", kind: "reject_once" },
+      ],
+    });
+    db.updateSessionStatus(id, "input_required", Date.now());
+  };
+  const sent = () => hub.sentOfType("resolve_permission").at(-1)!;
+
+  for (const optionId of ["auth:login", "auth:revalidate", "auth:dismiss"]) {
+    ask(`provider-auth:${optionId}`);
+    assert.ok(svc.approve(id, `provider-auth:${optionId}`, optionId, { kind: "human", id: "usr_grace" }).ok);
+    assert.deepEqual(sent(), {
+      type: "resolve_permission", sessionId: id, requestId: `provider-auth:${optionId}`, optionId,
+      resolvedBy: { kind: "user", userId: "usr_grace" },
+    }, optionId);
+  }
+
+  ask("provider-auth:agent");
+  assert.ok(svc.approve(id, "provider-auth:agent", "auth:revalidate", { kind: "agent", id: "agent-1" }).ok);
+  assert.equal(sent().resolvedBy, undefined, "only a person is named");
+
+  ask("provider-auth:anonymous");
+  assert.ok(svc.approve(id, "provider-auth:anonymous", "auth:revalidate", { kind: "human" }).ok);
+  assert.equal(sent().resolvedBy, undefined, "a person without an id is not guessed");
+
+  ask("provider-auth:parent");
+  assert.ok(svc.approve(id, "provider-auth:parent", "auth:revalidate", { kind: "human", id: "usr_grace" }, "parent-session").ok);
+  assert.equal(sent().resolvedBy, undefined, "a Parent Control decision names nobody here");
 });
 
 test("approve with a null optionId returns the session to idle", () => {

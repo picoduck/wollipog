@@ -398,6 +398,51 @@ test("a permission names who decided it from its own resolution: You, another me
   }
 });
 
+test("a sign-in card names the member who chose its action, and nobody for an automatic recheck (#2742)", async () => {
+  const SIGN_IN: PermissionOption[] = [
+    { optionId: "auth:login", name: "Start Sign-In", kind: "allow_once" },
+    { optionId: "auth:revalidate", name: "Recheck Authentication", kind: "allow_once" },
+    { optionId: "auth:dismiss", name: "Dismiss Recovery", kind: "reject_once" },
+  ];
+  const signIn = (requestId: string, optionId: string, resolvedBy?: Extract<SessionEventPayload, { kind: "permission_resolved" }>["resolvedBy"]) => [
+    event({ kind: "permission_request", requestId, title: "Sign In to Claude Code", options: SIGN_IN, purpose: "authentication" }),
+    event({ kind: "permission_resolved", requestId, optionId, ...(resolvedBy ? { resolvedBy } : {}) }),
+  ];
+  const items = deriveTimeline([
+    ...signIn("provider-auth:recheck", "auth:revalidate", { kind: "user", userId: "usr-ada-x7" }),
+    ...signIn("provider-auth:login", "auth:login", { kind: "user", userId: "usr-grace-x7" }),
+    ...signIn("provider-auth:dismiss", "auth:dismiss", { kind: "user", userId: "usr-departed-x7" }),
+    ...signIn("provider-auth:automatic", "auth:automatic-retry"),
+    // Never sent by the runner (#2742), and still unnamed if it were.
+    ...signIn("provider-auth:automatic-named", "auth:automatic-retry", { kind: "user", userId: "usr-ada-x7" }),
+    ...signIn("provider-auth:older-peer", "auth:revalidate"),
+  ]);
+  const view = await mount(items, {}, undefined, sharedViewer);
+  try {
+    await view.online();
+    const rows = view.rows();
+    assert.deepEqual(rows.map((row) => row.querySelector("summary")?.getAttribute("aria-label")), [
+      "Allowed Sign In to Claude Code by You",
+      "Allowed Sign In to Claude Code by Grace Hopper",
+      "Rejected Sign In to Claude Code by Another Member",
+      "Rechecked Automatically Sign In to Claude Code",
+      "Rechecked Automatically Sign In to Claude Code",
+      "Allowed Sign In to Claude Code",
+    ]);
+    for (const row of rows) row.open = true;
+    const decidedBy = rows.map((row) => {
+      const terms = [...row.querySelectorAll("dt")];
+      const index = terms.findIndex((term) => term.textContent === "Decided By");
+      return index < 0 ? null : row.querySelectorAll("dd")[index]?.textContent;
+    });
+    assert.deepEqual(decidedBy, ["You", "Grace Hopper", "Another Member", null, null, null]);
+    for (const row of rows.slice(3)) assertNoDomNode(row.querySelector(".tl-decision-by"));
+    assert.doesNotMatch(view.container.textContent ?? "", /x7/, "a user id is never shown");
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("each occurrence of a reused provider request id names its own decider (#2628)", async () => {
   const governancePolicies: ApiClient["governancePolicies"] = async () => ({ policies: [
     { policyId: "deny-shell-x7", name: "No Shell in Production" },
