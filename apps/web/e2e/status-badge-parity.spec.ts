@@ -202,7 +202,7 @@ for (const width of [390, 1280] as const) {
     const running = await read();
     // The fixture's session has been silent for a while, so its one badge may also say it is stalled.
     expect(running.names).toHaveLength(1);
-    expect(running.names[0]).toMatch(/^Status: Running(, Stalled)?$/);
+    expect(running.names[0]).toMatch(/^Status: (Stalled, )?Running$/);
     // While the session awaits its next prompt, the work is the one status, drawn like Running.
     await applyStatuses(page, { status: "idle", backgroundWorkState: "running", approval: false });
     await expect(row.getByLabel("Status: Waiting on External Job")).toBeVisible();

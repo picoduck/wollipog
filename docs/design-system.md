@@ -758,8 +758,8 @@ extending the settled one-bar session chrome app-wide.
   Delayed and Notification Pending are passive), so it is the same at every width. The Sessions rows,
   the preview bar and the Board cards use the same function. The Sessions preview bar (#2210) shows
   its first badge and "+N" exactly; a row (`sessionRowStatus()`, #2209) shows the same badge with
-  three exceptions of its own: no badge for Awaiting Prompt, Returned for a fired reminder, and the
-  danger tone for a stalled session.
+  three exceptions of its own: no badge for Awaiting Prompt, Returned for a fired reminder, and a
+  stalled session's badge in the danger tone, reading Stalled in place of a busy lifecycle (#2215).
 - It opens the Session Status popover (§9.2, 340px; a bottom sheet on phones): the title, then one
   row per condition with its badge, one sentence and the action that resolves it where one exists
   (Review Request, Answer, Sign In…, Open for Background Work, Open Agents, Open Requests). Result
@@ -896,6 +896,17 @@ Rules
 - A description equal to the name (case-insensitive) is not shown.
 - Group headers inside a list: `--type-label` in `--text-dim`, 32px tall, Title Case exactly as
   written, optional count in `--text-faint`. Not sticky unless the list is long (>30).
+- **Thread families (#896, #2215)** in the Sessions list. A parent row's chevron is the §5.5 one: a
+  14px `ChevronRight` in `--text-dim` inside a 28px `.icon-btn.sm` (36px to look and 44px to hit on
+  touch), in the row's leading padding and centred on line one, turning 90° while the thread is open
+  over `--dur-base`. It keeps `aria-expanded`, the names "Expand Thread" and "Collapse Thread" and
+  its tooltip with the key (T), and is not a tab stop: the list owns the keyboard (T, Shift+T, P). The
+  title shrinks to its content and the **family chip** follows it directly (dots, then the rollup,
+  "4 Children · 1 Awaiting Input"). Below a 600px list (a narrow column, Preview Right, phones) the
+  chip keeps only its dots; it is an image named by the whole rollup, which its tooltip repeats.
+  Children indent under a 2px `--border-strong` spine with a tick into each row. A stalled parent or
+  child says so once, with its one status badge (§11.1); there is no stalled rail or border, because
+  the leading edge is the selection bar.
 
 ### 5.3 Cards (Grid)
 
@@ -1573,8 +1584,12 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
   user, show only the attention badge, not "Awaiting Input" as well. A Sessions row (#2209) shows the
   top attention kind with a neutral "+N" for the others (listed in its tooltip), on the session bar's
   ranking (`sessionRowStatus()` over `sessionStatusSummary()`), and no badge for Awaiting Prompt.
-  Stalled is not a second badge: the row's badge takes the danger tone and its tooltip says how long
-  the session has been silent.
+  Stalled is not a second badge: the row's badge takes the danger tone, stops pulsing, and its tooltip
+  says how long the session has been silent. Where that badge would be a busy lifecycle (Queued,
+  Starting, Running) it reads **Stalled** (#2215), named "Status: Stalled, Running" with the tooltip
+  "Running, but no activity for 14 minutes.", so forced colors and readers without colour vision
+  still tell a stalled row from a working one. An attention badge keeps its own label (attention
+  outranks lifecycle) and adds ", Stalled" to its accessible name. No rail, border or second pill.
 
 ### 11.2 One Vocabulary and Tone Table
 

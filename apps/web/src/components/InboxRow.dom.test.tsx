@@ -102,11 +102,12 @@ test("a stalled running row shows one badge, in the danger tone, saying how long
   await withRow(session, (container) => {
     const shown = badges(container);
     assert.equal(shown.length, 1, "Stalled is not a second badge");
-    assert.equal(shown[0]!.textContent, "Running");
+    // In words, not only the tone (#2215): forced colors and colour-blind readers see Stalled.
+    assert.equal(shown[0]!.textContent, "Stalled");
     assert.ok(shown[0]!.classList.contains("t-danger"));
     assert.ok(!shown[0]!.classList.contains("pulse"), "a stalled badge does not pulse");
-    assert.equal(shown[0]!.getAttribute("aria-label"), "Status: Running, Stalled");
-    assert.match(shown[0]!.getAttribute("title") ?? "", /Stalled: no activity for 14 minutes\.$/);
+    assert.equal(shown[0]!.getAttribute("aria-label"), "Status: Stalled, Running");
+    assert.equal(shown[0]!.getAttribute("title"), "Running, but no activity for 14 minutes.");
   }, { stalled: true });
 });
 
@@ -431,8 +432,17 @@ test("a parent row carries the chevron and family chip, and a child row its thre
     assert.equal(chevron.getAttribute("aria-expanded"), "true");
     assert.equal(chevron.getAttribute("tabindex"), "-1", "the grid owns the keyboard; T toggles");
     assertNoDomNode(container.querySelector("button button"), "the chevron is not nested in the row button");
+    // §5.5 (#2215): the 14px ChevronRight icon in a small icon button, never a text glyph.
+    assert.match(chevron.className, /\bicon-btn sm\b/);
+    assert.ok(chevron.querySelector("svg.disclosure-chevron"), "the chevron is the §5.5 icon");
+    assert.equal(chevron.textContent, "", "no text glyph in the chevron");
+    assert.doesNotMatch(shell.textContent ?? "", /[▶▸▾›]/, "no text glyph anywhere in the row");
     const chip = container.querySelector<HTMLElement>(".inbox-thread-family")!;
     assert.match(chip.className, /waiting/);
+    // Dots only below a 600px list, so the chip is an image named by the whole rollup.
+    assert.equal(chip.getAttribute("role"), "img");
+    assert.equal(chip.getAttribute("aria-label"), "2 Children · 1 Awaiting Input");
+    assert.equal(chip.previousElementSibling?.className, "inbox-row-title", "the chip follows the title directly");
     assert.equal(chip.querySelector(".inbox-thread-family-text")?.textContent, "2 Children · 1 Awaiting Input");
     assert.deepEqual([...chip.querySelectorAll(".inbox-thread-dot")].map((dot) => dot.className),
       ["inbox-thread-dot blocked", "inbox-thread-dot done"]);

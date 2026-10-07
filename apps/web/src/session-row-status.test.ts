@@ -86,12 +86,29 @@ test("a snoozed session's background result counts toward its one status", () =>
 });
 
 test("a stalled session's badge turns danger, stops pulsing, and says how long it has been silent", () => {
-  const status = sessionRowStatus(session({ status: "running" }), { stalledForMs: 14 * 60_000 });
-  assert.equal(label(status), "Running");
-  assert.equal(status.badge?.meta.tone, "danger");
-  assert.equal(status.badge?.meta.pulse, false);
-  assert.equal(status.badge?.ariaLabel, "Status: Running, Stalled");
-  assert.match(status.badge?.title ?? "", /Stalled: no activity for 14 minutes\.$/);
+  // A busy lifecycle says Stalled in words (#2215), so the stall survives forced colors.
+  for (const [status, was] of [["running", "Running"], ["starting", "Starting"], ["queued", "Queued"]] as const) {
+    const stalled = sessionRowStatus(session({ status }), { stalledForMs: 14 * 60_000 });
+    assert.equal(label(stalled), "Stalled", status);
+    assert.equal(stalled.badge?.meta.tone, "danger");
+    assert.ok(!stalled.badge?.meta.pulse, "a stalled badge does not pulse");
+    assert.equal(stalled.badge?.ariaLabel, `Status: Stalled, ${was}`);
+    assert.equal(stalled.badge?.title, `${was}, but no activity for 14 minutes.`);
+  }
+  // An attention badge outranks the lifecycle (#2182) and keeps its own label, in the danger tone.
+  const blocked = sessionRowStatus(session({ status: "input_required",
+    pendingApproval: { requestId: "a", options: [], title: "Run it?" } } as unknown as Partial<SessionView>),
+  { stalledForMs: 14 * 60_000 });
+  assert.equal(label(blocked), "Approval Required");
+  assert.equal(blocked.badge?.meta.tone, "danger");
+  assert.equal(blocked.badge?.ariaLabel, "Status: Approval Required, Stalled");
+  assert.match(blocked.badge?.title ?? "", /Stalled: no activity for 14 minutes\.$/);
+  // Awaiting Input with no request behind it ranks as Input Required, an attention kind.
+  const awaiting = sessionRowStatus(session({ status: "input_required" }), { stalledForMs: 14 * 60_000 });
+  assert.equal(label(awaiting), "Input Required");
+  assert.equal(awaiting.badge?.ariaLabel, "Status: Input Required, Stalled");
+  // Not stalled: the lifecycle as it is.
+  assert.equal(label(sessionRowStatus(session({ status: "running" }))), "Running");
   assert.equal(silenceDuration(60_000), "1 minute");
   assert.equal(silenceDuration(10 * 60_000), "10 minutes");
   assert.equal(silenceDuration(125 * 60_000), "2 hours");

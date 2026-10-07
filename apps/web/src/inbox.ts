@@ -353,13 +353,6 @@ export function threadInboxRows<T extends { session: SessionView }>(
   return out;
 }
 
-/** Parents in a threaded list, in list order. */
-export function inboxThreadParents<T extends { session: SessionView; thread: InboxThreadPosition }>(
-  rows: readonly T[],
-): T[] {
-  return rows.filter((row) => row.thread.children !== null);
-}
-
 function inboxSplit(
   key: InboxSplitKey,
   kind: InboxSplit["kind"],

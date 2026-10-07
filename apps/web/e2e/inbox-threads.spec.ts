@@ -273,26 +273,29 @@ test("the mobile thread toggle confines paint beside both provider icons at both
       const before = await toggle.getAttribute("aria-expanded");
       const geometry = await parentRow(page).evaluate((shell) => {
         const target = shell.querySelector<HTMLElement>(".inbox-thread-toggle")!;
-        const glyph = target.querySelector<HTMLElement>("span")!;
+        const glyph = target.querySelector<SVGElement>("svg")!;
         const providerIcon = shell.querySelector<HTMLElement>(".inbox-row-sender .agent-icon")!;
         const targetBox = target.getBoundingClientRect();
         const glyphBox = glyph.getBoundingClientRect();
         const iconBox = providerIcon.getBoundingClientRect();
         return {
           targetWidth: targetBox.width,
+          targetRight: targetBox.right,
           glyphRight: glyphBox.right,
           iconLeft: iconBox.left,
-          targetBackground: getComputedStyle(target).backgroundColor,
         };
       });
-      expect(geometry.targetWidth).toBeGreaterThanOrEqual(32);
+      // A touch `.icon-btn.sm` (#2215): 36px to look, with a 44px hit area borrowed around it.
+      expect(geometry.targetWidth).toBe(36);
       expect(geometry.glyphRight, `${provider}/${density}: painted glyph clears provider`)
         .toBeLessThanOrEqual(geometry.iconLeft);
-      expect(geometry.targetBackground).toBe("rgba(0, 0, 0, 0)");
+      // The whole button ends before the provider, so its press fill, which Chrome may still be
+      // showing from the previous tap, never paints over it (the old 32px target did, #2215).
+      expect(geometry.targetRight, `${provider}/${density}: the button clears provider`)
+        .toBeLessThanOrEqual(geometry.iconLeft + 0.5);
       const box = (await toggle.boundingBox())!;
       await tapAt(cdp, { x: box.x + box.width / 2, y: box.y + box.height / 2 });
       await expect(toggle).toHaveAttribute("aria-expanded", before === "true" ? "false" : "true");
-      await expect(toggle).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
     }
   }
   await page.screenshot({ path: `${EVIDENCE}/phone-toggle-clear.png`, fullPage: true });

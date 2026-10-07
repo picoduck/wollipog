@@ -76,8 +76,10 @@ function snoozedCondition(session: SessionStatusSource, needs: readonly SessionC
  * 3. Else a fired reminder's Returned.
  * 4. Else the lifecycle status, except Awaiting Prompt, which shows no badge.
  *
- * Stalled is not a second badge: a stalled session's badge takes the danger tone, stops pulsing, and
- * its tooltip says how long the session has been silent.
+ * Stalled is not a second badge (#2215). A stalled session whose badge would be its busy lifecycle
+ * (Queued, Starting, Running) reads Stalled instead; an attention badge keeps its own label.
+ * Either way the badge takes the danger tone, stops pulsing, and its tooltip says how long the session
+ * has been silent.
  */
 export function sessionRowStatus(session: SessionStatusSource, context: SessionRowStatusContext = {}): SessionRowStatus {
   const { reminder, stalledForMs } = context;
@@ -102,15 +104,39 @@ export function sessionRowStatus(session: SessionStatusSource, context: SessionR
   const others = needs.slice(1).map(conditionName);
   if (!primary) return { badge: null, others };
 
-  const stalled = stalledForMs !== undefined;
-  const silence = stalled ? silenceDuration(stalledForMs) : "";
+  if (stalledForMs === undefined) {
+    return {
+      badge: { meta: primary.meta, count: primary.count, title: primary.description, ariaLabel: `Status: ${conditionName(primary)}` },
+      others,
+    };
+  }
+  const silence = silenceDuration(stalledForMs);
+  // A busy lifecycle status says Stalled in words (#2215), so a stalled row never reads like a
+  // working one where its tone does not show: in forced colors, or without colour vision.
+  if (primary.kind === "lifecycle" && STALLABLE_LIFECYCLE_LABELS.has(primary.meta.label)) {
+    return {
+      badge: {
+        meta: statusMeta("session", "stalled"),
+        title: `${primary.meta.label}, but no activity for ${silence}.`,
+        ariaLabel: `Status: Stalled, ${primary.meta.label}`,
+      },
+      others,
+    };
+  }
+  // Anything else keeps its own label, which already differs from a working session's.
   return {
     badge: {
-      meta: stalled ? { ...primary.meta, tone: "danger", pulse: false } : primary.meta,
+      meta: { ...primary.meta, tone: "danger", pulse: false },
       count: primary.count,
-      title: stalled ? `${primary.description} Stalled: no activity for ${silence}.` : primary.description,
-      ariaLabel: `Status: ${conditionName(primary)}${stalled ? ", Stalled" : ""}`,
+      title: `${primary.description} Stalled: no activity for ${silence}.`,
+      ariaLabel: `Status: ${conditionName(primary)}, Stalled`,
     },
     others,
   };
 }
+
+/** The busy lifecycle labels a stalled session can show (`isSessionStalled()`); a stalled Awaiting
+ * Input session ranks as an attention kind instead, which keeps its label. */
+const STALLABLE_LIFECYCLE_LABELS: ReadonlySet<string> = new Set(
+  (["queued", "starting", "running"] as const).map((status) => statusMeta("session", status).label),
+);

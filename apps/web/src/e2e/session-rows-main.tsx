@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import type { SessionReminderView, SessionView } from "@wollipog/protocol";
 import { ACTIVITY_BUCKET_MS, recordSessionActivity, type SessionActivity } from "../activity.js";
 import { InboxList, type InboxListEntry } from "../components/InboxList.js";
+import { threadInboxRows } from "../inbox.js";
 import "../styles.css";
 
 /**
@@ -16,6 +17,11 @@ import "../styles.css";
  * selection and unread. `?theme=light|dark`, `?density=comfortable`, `?selected=<id>` (default
  * `session-selected`), `?selectedUnread=1` to make the selected row unread too, `?listWidth=<px>` for a
  * narrow list, and `?focus=1` to put keyboard focus in the list.
+ *
+ * `?family=1` leads with a thread family (#2215): a running parent with a waiting, a stalled, a
+ * running and a completed child, threaded by `threadInboxRows()` as InboxView threads them, and its
+ * chevron and chip toggle it. `?collapsed=1` starts it collapsed; `?familyTitle=long` gives the
+ * parent a title too long for its line.
  */
 
 const QUERY = new URLSearchParams(window.location.search);
@@ -114,7 +120,35 @@ const SESSION_ROWS: readonly InboxListEntry[] = [
     lastEventAt: SESSION_ROWS_NOW - minutes(180), ...branch("plan/sessions-list") }), projectName: "Wollipog", unread: false },
 ];
 
+const FAMILY = QUERY.has("family");
+const FAMILY_TITLE = QUERY.get("familyTitle") === "long"
+  ? "Family Parent: Ship the Usage and Cost Overhaul Across the Control Plane, the Runner, the Web App, the Phone "
+    + "App and Every Desktop Build, With Budgets, Allowance Windows, Cost Sources and the Daily Rollover Report"
+  : "Family Parent: Ship the Usage Overhaul";
+const familyChild = (id: string, title: string, extra: Partial<SessionView>) =>
+  ({ session: session(id, title, { parentSessionId: "family-parent", ...extra }), projectName: "Wollipog", unread: false });
+/** A thread family (#2215), in the order InboxView would hand it over. */
+const FAMILY_ROWS: readonly InboxListEntry[] = [
+  { session: session("family-parent", FAMILY_TITLE, { status: "running", lastEventAt: SESSION_ROWS_NOW - minutes(1),
+    role: "orchestrator", preview: "Four children are working through the usage overhaul; one is waiting on you." } as Partial<SessionView>),
+  projectName: "Wollipog", unread: false },
+  familyChild("family-waiting", "Waiting Child: Keep Protocol 105 or Bump to 106?", {
+    status: "input_required", lastEventAt: SESSION_ROWS_NOW - minutes(3),
+    pendingApproval: { requestId: "family-ask", kind: "question", title: "Keep protocol 105 or bump to 106?", options: [] },
+  } as unknown as Partial<SessionView>),
+  familyChild("family-stalled", "Stalled Child: Normalize the Allowance Window", {
+    status: "running", lastEventAt: SESSION_ROWS_NOW - minutes(14) }),
+  familyChild("family-running", "Running Child: Add the Usage Table", {
+    status: "running", lastEventAt: SESSION_ROWS_NOW - minutes(0) }),
+  familyChild("family-done", "Completed Child: Roll the Daily Budget Over", {
+    status: "completed", lastEventAt: SESSION_ROWS_NOW - minutes(30) }),
+];
+const STALLED = new Set(["session-stalled", "family-stalled"]);
+
 const ACTIVITY = new Map<string, SessionActivity>([
+  ["family-parent", activityAt(1, 2, 4, 9)],
+  ["family-stalled", activityAt(14, 15, 19)],
+  ["family-running", activityAt(0, 0, 1, 3)],
   ["session-selected", activityAt(1, 2, 2, 3, 5, 8, 9, 12, 14, 20)],
   ["session-running", activityAt(0, 0, 0, 1, 1, 2, 4, 6, 6, 7, 11, 15, 16, 22, 28)],
   ["session-recent", activityAt(4, 5, 5, 7, 9, 13, 18)],
@@ -127,9 +161,17 @@ const ACTIVITY = new Map<string, SessionActivity>([
 function SessionRows() {
   const [selected, setSelected] = useState(QUERY.get("selected") ?? "session-selected");
   // The selected row is also unread when asked, so one capture shows selected-and-unread.
-  const entries = SESSION_ROWS.map((entry) => QUERY.get("selectedUnread") && entry.session.id === selected
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(
+    () => new Set(QUERY.get("collapsed") ? ["family-parent"] : []));
+  const rows = SESSION_ROWS.map((entry) => QUERY.get("selectedUnread") && entry.session.id === selected
     ? { ...entry, unread: true }
     : entry);
+  const entries = FAMILY ? threadInboxRows([...FAMILY_ROWS, ...rows], collapsed, STALLED) : rows;
+  const toggleThread = (sessionId: string) => setCollapsed((current) => {
+    const next = new Set(current);
+    if (!next.delete(sessionId)) next.add(sessionId);
+    return next;
+  });
   return (
     <div className="inbox-view" style={{ height: "100vh" }}>
       <div className="inbox-list-pane" style={{ flex: 1, width: LIST_WIDTH ? `${LIST_WIDTH}px` : undefined }}>
@@ -138,7 +180,7 @@ function SessionRows() {
           selectedSessionId={selected}
           pinnedSessionIds={new Set(["session-running"])}
           activityBySession={ACTIVITY}
-          stalledSessionIds={new Set(["session-stalled"])}
+          stalledSessionIds={STALLED}
           activityNow={SESSION_ROWS_NOW}
           runningCount={2}
           queuedCount={1}
@@ -146,6 +188,7 @@ function SessionRows() {
           filtered={false}
           onNewSession={() => undefined}
           onSelect={setSelected}
+          onToggleThread={toggleThread}
           onExpand={() => undefined}
           onSessionMenu={() => undefined}
           onScrollPosition={() => undefined}
