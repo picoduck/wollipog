@@ -16063,6 +16063,9 @@ body.shell-dock-dragging * {
 .ui-row-desc { font-size: var(--text-xs); color: var(--text-faint); line-height: var(--leading-tight); }
 .ui-row-icon, .ui-row-chevron { display: inline-flex; color: var(--text-faint); }
 .ui-row-icon { width: 17px; justify-content: center; }
+/* A navigation row without an icon keeps the slot but not its width, so its title starts where
+   a switch row's does: the switch row's leading slot is just as empty and takes no room (#2642). */
+.ui-row-icon:empty { width: 0; }
 
 /* A row whose control is a GROUP, so the row is a div: it contains buttons and cannot be one.
    It must therefore stop advertising itself as pressable. A pointer cursor and a hover fill on
@@ -16228,8 +16231,6 @@ body.shell-dock-dragging * {
 .approvals-skeleton-row { cursor: default; }
 .approvals-skeleton-row:hover:not(.is-disabled) { background: transparent; border-color: transparent; }
 .approvals-skeleton-row > .ui-row-body { gap: var(--space-2); }
-/* No leading icon, so no icon gutter: the names line up with the switch rows above. */
-.tool-policy-row > .ui-row-icon { width: 0; }
 /* Label-prefixed meta items 12px apart, one line, never separated by dots (§5.2, §11.3). */
 .policy-meta { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .policy-meta-item + .policy-meta-item { margin-inline-start: var(--space-3); }
