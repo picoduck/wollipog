@@ -557,7 +557,7 @@ posixTest("headless sibling bundle restores both owned generations after publica
   });
 });
 
-function interruptedPublicationFixture(t, { legacy = false, generations = "both" } = {}) {
+function interruptedPublicationFixture(t, { legacy = false, generations = "both", configuredWeb = false } = {}) {
   const h = harness({ legacy });
   t.after(() => rmSync(h.root, { recursive: true, force: true }));
   const web = legacy ? join(h.home, ".local", "share", "wollipog", "web") : siblingWeb(h);
@@ -575,6 +575,9 @@ function interruptedPublicationFixture(t, { legacy = false, generations = "both"
   for (const dir of [data, config]) {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     writeFileSync(join(dir, "inert-sentinel"), "stored private bytes", { mode: 0o600 });
+  }
+  if (configuredWeb) {
+    writeFileSync(join(config, "control-plane.env"), 'WOLLIPOG_WEB_DIST="' + web + '"\n', { mode: 0o600 });
   }
   const originals = [snapshot(web), snapshot(web + ".previous")];
   const privateBefore = [snapshot(data), snapshot(config)];
@@ -775,6 +778,130 @@ posixTest("later attempts preserve sole previous and never adopt or clean retain
     assert.deepEqual(snapshot(f.h.home), before);
     f.assertPrivate();
   });
+});
+
+posixTest("unmarked legacy retries refuse selection drift after successful save-current interruption", async (t) => {
+  for (const signal of ["HUP", "INT", "TERM"]) await t.test(signal, (t) => {
+    const f = interruptedPublicationFixture(t, { legacy: true, configuredWeb: true });
+    const interruption = { boundary: "save-current", timing: "after", signal };
+    f.h.setInterruption(interruption);
+    const stage = retainedPublicationStage(f, interruption, f.h.run("--control-plane"));
+    assert.equal(existsSync(f.web), false);
+    assert.deepEqual(snapshot(f.web + ".previous"), f.originals[0]);
+    assert.deepEqual(snapshot(join(stage, "previous")), f.originals[1]);
+    const retained = snapshot(stage);
+    const foreign = join(f.parent, ".wollipog-web.stage.foreign");
+    const link = join(f.parent, ".wollipog-web.stage.foreign-link");
+    mkdirSync(foreign, { mode: 0o700 });
+    writeFileSync(join(foreign, "sentinel"), "unrelated fixture bytes", { mode: 0o600 });
+    symlinkSync(foreign, link);
+    const before = [snapshot(f.h.home), snapshot(foreign), snapshot(link)];
+    f.h.setInterruption({});
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const retry = f.h.run("--control-plane");
+      assert.equal(retry.error, undefined);
+      assert.notEqual(retry.status, 0, "an unproven legacy retry cannot report success at a sibling path");
+      assert.match(retry.stderr, /Refusing a legacy dashboard retry/u);
+      assert.ok(retry.stderr.includes(f.web) && retry.stderr.includes(f.web + ".previous"));
+      assert.match(retry.stderr, /Inspect these dashboard paths and any retained publication evidence before retrying/u);
+      assert.doesNotMatch(retry.stdout, /Downloading /u);
+      assert.deepEqual([snapshot(f.h.home), snapshot(foreign), snapshot(link)], before);
+      assert.deepEqual(snapshot(stage), retained);
+      assert.deepEqual(snapshot(f.web + ".previous"), f.originals[0]);
+      assert.equal(existsSync(siblingWeb(f.h)), false);
+      assert.equal(existsSync(layoutMarker(f.h)), false);
+      f.assertPrivate();
+    }
+  });
+});
+
+posixTest("missing legacy current refuses every unproven previous shape without following or adopting it", async (t) => {
+  for (const shape of ["directory", "file", "symlink", "dangling-symlink", "missing-index", "symlink-index"]) {
+    await t.test(shape, (t) => {
+      const f = interruptedPublicationFixture(t, { legacy: true, generations: "fresh", configuredWeb: true });
+      const bin = join(f.h.home, ".local", "bin");
+      mkdirSync(bin, { recursive: true });
+      for (const name of ["wollipog-runner", "agent-manager-runner", "wollipog", "wollipog-control-plane"]) {
+        writeFileSync(join(bin, name), "original inert executable bytes", { mode: 0o755 });
+      }
+      const previous = f.web + ".previous";
+      const foreign = join(f.h.root, "foreign");
+      mkdirSync(foreign, { mode: 0o700 });
+      writeFileSync(join(foreign, "index.html"), "unrelated private bytes", { mode: 0o600 });
+      if (shape === "file") writeFileSync(previous, "unproven bytes", { mode: 0o600 });
+      else if (shape === "symlink") symlinkSync(foreign, previous);
+      else if (shape === "dangling-symlink") symlinkSync(join(f.h.root, "absent"), previous);
+      else {
+        mkdirSync(previous, { mode: 0o751 });
+        if (shape === "symlink-index") symlinkSync(join(foreign, "index.html"), join(previous, "index.html"));
+        else if (shape !== "missing-index") writeFileSync(join(previous, "index.html"), "unproven dashboard bytes", { mode: 0o640 });
+      }
+      const stage = join(f.parent, ".wollipog-web.stage.foreign");
+      mkdirSync(stage); writeFileSync(join(stage, "sentinel"), "unrelated retained-looking state");
+      const before = [snapshot(f.h.home), snapshot(foreign)];
+      const result = f.h.run("--control-plane");
+      assert.equal(result.error, undefined);
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /Refusing a legacy dashboard retry/u);
+      assert.doesNotMatch(result.stdout, /Downloading /u);
+      assert.deepEqual([snapshot(f.h.home), snapshot(foreign)], before);
+      assert.equal(existsSync(siblingWeb(f.h)), false);
+      assert.equal(existsSync(layoutMarker(f.h)), false);
+      f.assertPrivate();
+    });
+  }
+});
+
+posixTest("a before-save-current legacy interruption retains selection on ordinary retry", (t) => {
+  const f = interruptedPublicationFixture(t, { legacy: true, configuredWeb: true });
+  const interruption = { boundary: "save-current", timing: "before", signal: "TERM" };
+  f.h.setInterruption(interruption);
+  const stage = retainedPublicationStage(f, interruption, f.h.run("--control-plane"));
+  assert.deepEqual(snapshot(f.web), f.originals[0]);
+  const retained = snapshot(stage);
+  f.h.setInterruption({});
+  const result = f.h.run("--control-plane");
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr + result.stdout);
+  assert.equal(readFileSync(join(f.web, "index.html"), "utf8"), "<html>dashboard</html>");
+  assert.deepEqual(snapshot(f.web + ".previous"), f.originals[0]);
+  assert.deepEqual(snapshot(stage), retained);
+  assert.equal(existsSync(siblingWeb(f.h)), false);
+  assert.equal(existsSync(layoutMarker(f.h)), false);
+  f.assertPrivate();
+});
+
+posixTest("existing sibling provenance remains authoritative beside unmarked legacy previous", (t) => {
+  const f = interruptedPublicationFixture(t, { configuredWeb: true });
+  const legacyPrevious = join(f.h.home, ".local", "share", "wollipog", "web.previous");
+  mkdirSync(legacyPrevious, { mode: 0o751 });
+  writeFileSync(join(legacyPrevious, "index.html"), "unproven legacy bytes", { mode: 0o640 });
+  const before = snapshot(legacyPrevious);
+  const result = f.h.run("--control-plane");
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr + result.stdout);
+  assert.equal(readFileSync(join(f.web, "index.html"), "utf8"), "<html>dashboard</html>");
+  assert.deepEqual(snapshot(f.web + ".previous"), f.originals[0]);
+  assert.deepEqual(snapshot(legacyPrevious), before);
+  assert.deepEqual(snapshot(layoutMarker(f.h)), f.markerBefore);
+  f.assertPrivate();
+});
+
+posixTest("stage names alone do not affect fresh dashboard selection", (t) => {
+  const f = interruptedPublicationFixture(t, { legacy: true, generations: "fresh", configuredWeb: true });
+  const foreign = join(f.parent, ".wollipog-web.stage.foreign");
+  const link = join(f.parent, ".wollipog-web.stage.foreign-link");
+  mkdirSync(foreign); writeFileSync(join(foreign, "sentinel"), "unrelated fixture bytes");
+  symlinkSync(foreign, link);
+  const before = [snapshot(foreign), snapshot(link)];
+  const result = f.h.run("--control-plane");
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr + result.stdout);
+  assert.equal(readFileSync(join(siblingWeb(f.h), "index.html"), "utf8"), "<html>dashboard</html>");
+  assert.equal(readFileSync(layoutMarker(f.h), "utf8"), markerBytes);
+  assert.equal(existsSync(f.web), false);
+  assert.deepEqual([snapshot(foreign), snapshot(link)], before);
+  f.assertPrivate();
 });
 
 posixTest("admitted previous-only publication preserves exact generation identity through failure, success and normal rotation", async (t) => {

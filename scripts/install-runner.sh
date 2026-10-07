@@ -268,6 +268,10 @@ if [ "$with_control_plane" -eq 1 ]; then
     fi
   elif path_present "$legacy_web"; then
     web_dir="$legacy_web"
+  elif path_present "${legacy_web}.previous"; then
+    echo "Refusing a legacy dashboard retry: $legacy_web is absent but ${legacy_web}.previous exists; dashboard selection cannot be established safely." >&2
+    echo "Inspect these dashboard paths and any retained publication evidence before retrying; nothing was adopted, removed, or repaired." >&2
+    exit 1
   else
     web_dir="$sibling_web"
   fi
