@@ -120,14 +120,17 @@ export function useWorktreeSetupSuggestion(
 }
 
 /** The Sessions view's notice for the open Project tab. */
-export function ProjectSetupSuggestion({ session, projectName, onGenerated }: {
+export function ProjectSetupSuggestion({ session, projectName, trailing, onGenerated }: {
   session: SessionView & { projectId: string };
   projectName: string;
+  /** The Sessions list slot's "+N More" (#2221). */
+  trailing?: ReactNode;
   onGenerated: (sessionId: string) => void;
 }) {
   const setup = useWorktreeSetupSuggestion(session, onGenerated);
   return (
     <WorktreeSetupNotice projectName={projectName} generating={setup.generating} dismissing={setup.dismissing}
-      error={setup.error} generateRefusal={setup.generateRefusal} onGenerate={setup.generate} onDismiss={setup.dismiss} />
+      error={setup.error} generateRefusal={setup.generateRefusal} trailing={trailing}
+      onGenerate={setup.generate} onDismiss={setup.dismiss} />
   );
 }

@@ -1081,7 +1081,8 @@ master-detail pages stay side by side.
 - **Panes.** Both panes are flush (no card) and span the page between the gutters, so the page
   title, the tab row, the rows and the preview all start at one left edge. The list body and the
   preview body each scroll on their own; the page never scrolls. Notices above the list (order
-  changed, sign-in) take list height; they do not push the divider. A new selection resets the
+  changed, sign-in) take list height in whole rows; they do not push the divider, and no row is cut
+  at it (#2221, the list notice slot of §13.2). A new selection resets the
   preview's scroll to its request or latest turn; resizing never scrolls either pane.
 - **Divider.** The list's 1px `--border` bottom edge is the divider. A 9px hit band (17px on coarse
   pointers) is centered on it with `cursor: row-resize`, plus a 32×4px `--border-strong` grip in the
@@ -1173,7 +1174,10 @@ master-detail pages stay side by side.
   isolated so its docked request stays under the band. The preview's bar, meta line, docked request
   and transcript start at `--preview-inset`: the page gutter when stacked, `--space-6` from the
   divider in Preview Right. The 400px column is under 880px, so rows keep #2209's two-line anatomy,
-  and a notice above the list tops the list column only.
+  and a notice above the list tops the list column only. The preview bar's badge collapses on the
+  preview's own width, not the window's tier (#2221): wherever the full badge would leave the title
+  truncated under 200px (`DETAIL_TITLE_READABLE_PX`), as in Preview Right at 1100px, the badge is its
+  dot with the label in its tooltip.
 
 ---
 
@@ -2251,6 +2255,39 @@ Replaces `.quarantine-banner`, `.skills-unavailable-notice`, `.worktree-setup-no
 `.campaign-continuation-notice`, `.campaign-held-children`, `.box-hint`, `.composer-error`, `.composer-attachment-notice`,
 `.queued-error`, `.form-error` (when used as a banner), `.settings-inline-error`, `.skills-git-held`
 and `PendingSetting`.
+
+**Sessions list notice slot (#2221).** The top of the Sessions list pane has one slot of its own:
+above the rows when stacked, at the top of the list column in Preview Right, and above the columns on
+the Board. `SessionsListNotices` (`apps/web/src/components/SessionsListNotices.tsx`) is a second
+`SessionNoticeSlot`, so the ranking, the "+N More" menu (named "Sessions Notices") and the focus rules
+are the session slot's. Its ranks, in `LIST_NOTICE_RANK`: a machine sign-in that belongs to no
+session 1 (warning while pending, danger once failed or timed out), the open Project's setup
+suggestion 2 (info, only on that Project's tab), Recommended Skills 3 (info). Each entry keeps its own
+way out (Cancel Sign-In or Dismiss, Dismiss Setup Notice, Dismiss All), so the slot's info dismissal
+is unused. While reconnecting the slot is hidden, since what it would show is stale (§12.5).
+
+- **Machine sign-in** (`MachineSignInNotice`): "Sign In to {Provider} on {Machine}", one sentence for
+  the sign-in's state, the device code inline after it in a `.code-well` with its copy button, then
+  **Open Sign-In Page** (opens the provider's page in a new tab) and **Cancel Sign-In**. A provider
+  that expects a pasted code adds a labeled Authorization Code field (`type="password"`,
+  `autocomplete="off"`, never stored) and **Submit Code**; every button is a `BusyButton`. A failed or
+  timed-out sign-in is "Sign-In to {Provider} on {Machine} Failed" (or "Timed Out") with its reason and
+  **Dismiss**. Two or more sign-ins are one notice with "+N More". `ProviderLoginCard` stays for the
+  sign-in Request Card and Settings.
+- **Recommended Skills** (#1768): the title and two-sentence body, then the skills as one short list,
+  each name a link to the skill ("Open in Skills" tooltip) with **Dismiss** beside it (named "Dismiss
+  {name}"), and **Dismiss All** as the notice's one action. Where the list is 600px or wider the
+  skills and Dismiss All share one line after the body; narrower, one skill per line; on phones each
+  line is 44px and Dismiss All spans the notice. Buttons are disabled while a request is in flight; a
+  partial failure keeps what the server did not record and says "Could not dismiss {names}. Try
+  again." in `--danger-text` with `role="alert"`. No confirmation: Show Recommendation in Skills undoes
+  a dismissal.
+- **New order** is not a notice: when live activity would reorder the list, a neutral line under the
+  slot reads "New activity changed the order." with a ghost **Apply**, which the sentence describes.
+  Nothing in the header or the tab row moves for it.
+- **Budget.** The slot, the order line and Reconnecting… are the list head. Stacked, the head takes
+  whole rows of the list's height (§6.3): the divider keeps its stored position, the rows under the
+  head end at it without a cut row, and what the head leaves of its last row is space under it.
 
 **Request dock.** Pending permission requests and questions dock directly above the composer, in the
 notice slot, in attention priority order. The dock is the only amber surface for a request, and it

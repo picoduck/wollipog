@@ -1,18 +1,26 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Notice } from "./Notice.js";
 import { useApi } from "../api-context.js";
 import { viewPath } from "../navigation.js";
 import { skillRecommended, skillsFromPayload, type SkillSummary } from "../skills.js";
 
+export interface SkillRecommendations {
+  skills: SkillSummary[];
+  /** A dismissal is in flight; every button waits for it. */
+  busy: boolean;
+  /** The partial failure's sentence, or null. */
+  error: string | null;
+  dismiss: (targets: SkillSummary[]) => Promise<void>;
+}
+
 /**
- * Built-in skills the signed-in user has neither assigned nor dismissed, as an Inbox notice. It applies
- * the Skills view's recommendation rule to the same library listing and writes the same per-user
- * dismissal as Dismiss Recommendation there, so the two surfaces never disagree. Dismiss All dismisses
- * each listed skill; a later release's new built-in skill has no dismissal and appears again. Hidden
- * when none remain, and when the library cannot be read. It offers no assignment, which a viewer
- * could not make: Open in Skills leads to it.
+ * Built-in skills the signed-in user has neither assigned nor dismissed. It applies the Skills view's
+ * recommendation rule to the same library listing and writes the same per-user dismissal as Dismiss
+ * Recommendation there, so the two surfaces never disagree. Dismiss All dismisses each listed skill;
+ * a later release's new built-in skill has no dismissal and appears again. Empty when none remain,
+ * and when the library cannot be read.
  */
-export function RecommendedSkillsNotice({ onOpen }: { onOpen: (skillId: string) => void }) {
+export function useSkillRecommendations(): SkillRecommendations {
   const api = useApi();
   const [skills, setSkills] = useState<SkillSummary[]>([]);
   const [busy, setBusy] = useState(false);
@@ -26,7 +34,7 @@ export function RecommendedSkillsNotice({ onOpen }: { onOpen: (skillId: string) 
       const recommended = skillsFromPayload(await api.listSkills()).filter(skillRecommended);
       if (started === generation.current) setSkills(recommended);
     } catch {
-      // A pointer never gets in the way of the Inbox; the Skills view reports library errors.
+      // A pointer never gets in the way of the Sessions list; the Skills view reports library errors.
     }
   }, [api]);
 
@@ -41,7 +49,7 @@ export function RecommendedSkillsNotice({ onOpen }: { onOpen: (skillId: string) 
     };
   }, [load]);
 
-  const dismiss = async (targets: SkillSummary[]) => {
+  const dismiss = useCallback(async (targets: SkillSummary[]) => {
     generation.current++;
     setBusy(true);
     setError(null);
@@ -53,42 +61,61 @@ export function RecommendedSkillsNotice({ onOpen }: { onOpen: (skillId: string) 
     setSkills((current) => current.filter((skill) => !dismissed.has(skill.id)));
     if (failed.length > 0) setError(`Could not dismiss ${failed.join(", ")}. Try again.`);
     setBusy(false);
-  };
+  }, [api]);
 
+  return { skills, busy, error, dismiss };
+}
+
+/**
+ * The Recommended Skills notice in the Sessions list's notice slot (#1768, #2221): the body, then
+ * the skills as one short list, each a link to the skill with its own Dismiss, and Dismiss All as the
+ * notice's one action. Where the list is 600px or wider the skills and Dismiss All share one line;
+ * narrower, one skill per line. It offers no assignment, which a viewer could not make: the link
+ * leads to it. No confirmation: Show Recommendation in Skills undoes a dismissal.
+ */
+export function RecommendedSkillsNotice({ recommendations, trailing, onOpen }: {
+  recommendations: SkillRecommendations;
+  /** The slot's "+N More". */
+  trailing?: ReactNode;
+  onOpen: (skillId: string) => void;
+}) {
+  const { skills, busy, error, dismiss } = recommendations;
   if (skills.length === 0) return null;
   return (
-    <Notice as="section" tone="info" ariaLabel="Recommended Skills" title="Recommended Skills"
-      actions={(
-        <button type="button" className="btn ghost sm" disabled={busy} onClick={() => void dismiss(skills)}>
-          Dismiss All
-        </button>
-      )}>
+    <Notice as="section" tone="info" ariaLabel="Recommended Skills" title="Recommended Skills" trailing={trailing}>
       <p>
         Wollipog includes skills that teach agents in Wollipog sessions to use its tools. They are not on any machine
         until they are assigned in Skills.
       </p>
       {error && <p className="notice-error" role="alert">{error}</p>}
-      <ul className="recommended-skills-notice-list">
-        {skills.map((skill) => (
-          <li key={skill.id}>
-            <a
-              href={viewPath({ name: "skills", id: skill.id })}
-              title="Open in Skills"
-              onClick={(event) => {
-                if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-                event.preventDefault();
-                onOpen(skill.id);
-              }}
-            >
-              {skill.name}
-            </a>
-            <button type="button" className="btn ghost sm" disabled={busy} aria-label={`Dismiss ${skill.name}`}
-              title={`Dismiss ${skill.name}`} onClick={() => void dismiss([skill])}>
-              Dismiss
-            </button>
-          </li>
-        ))}
-      </ul>
+      <div className="skill-recommendations-row">
+        <ul className="skill-recommendations-list" aria-label="Skills">
+          {skills.map((skill) => (
+            <li key={skill.id}>
+              <a
+                className="link"
+                href={viewPath({ name: "skills", id: skill.id })}
+                title="Open in Skills"
+                onClick={(event) => {
+                  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                  event.preventDefault();
+                  onOpen(skill.id);
+                }}
+              >
+                {skill.name}
+              </a>
+              <button type="button" className="btn ghost sm" disabled={busy} aria-label={`Dismiss ${skill.name}`}
+                onClick={() => void dismiss([skill])}>
+                Dismiss
+              </button>
+            </li>
+          ))}
+        </ul>
+        <button type="button" className="btn sm skill-recommendations-all" disabled={busy}
+          onClick={() => void dismiss(skills)}>
+          Dismiss All
+        </button>
+      </div>
     </Notice>
   );
 }

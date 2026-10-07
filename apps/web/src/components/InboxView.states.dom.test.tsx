@@ -390,7 +390,7 @@ test("disconnecting keeps the last-known rows, dimmed under Reconnecting, and ne
   assert.ok(container.querySelector(".inbox-list") === grid, "the same grid stays, with its scroll and focus");
   assert.ok(grid.closest(".inbox-list-stale.is-stale"), "the rows are dimmed");
   assert.equal(container.querySelectorAll(".inbox-row").length, 2, "the rows stay");
-  const line = container.querySelector<HTMLElement>(".inbox-list-pane > .inbox-list-status")!;
+  const line = container.querySelector<HTMLElement>(".inbox-list-pane > .inbox-list-head > .inbox-list-status")!;
   assert.equal(line.textContent, "Reconnecting…");
   assert.ok(!line.closest(".is-stale"), "the Reconnecting line is not dimmed");
   assertNoDomNode(container.querySelector(".inbox-state"));

@@ -503,8 +503,8 @@ test("desktop can apply a pending Inbox order without losing selection or scroll
   const selectedKey = await list.locator('.inbox-row-shell[aria-selected="true"]').evaluate((row) =>
     row.closest<HTMLElement>("[data-virtual-row]")?.dataset.virtualKey ?? null);
   expect(selectedKey).not.toBeNull();
-  // The page header's controls and the tab row's search field. The pending-order button is
-  // conditional, so none of these may move when it appears or leaves (#1675).
+  // The page header's controls and the tab row's search field. The pending-order line is
+  // conditional, so none of these may move when it appears or leaves (#1675, #2221).
   const stationaryToolbar = () => page.locator(".page-header .page-actions > *, .tabs-tools > .inbox-search")
     .evaluateAll((elements) => elements.map((element) => {
       const rect = element.getBoundingClientRect();
@@ -522,14 +522,12 @@ test("desktop can apply a pending Inbox order without losing selection or scroll
       status: "running",
     });
   });
-  const applyOrder = page.getByRole("button", { name: "Apply New Order" });
+  // A quiet line above the rows, never a control in the header or the tab row (#2221).
+  const orderLine = page.locator(".inbox-list-pane > .inbox-list-head > .inbox-order-line");
+  await expect(orderLine).toHaveText("New activity changed the order.Apply");
+  const applyOrder = orderLine.getByRole("button", { name: "Apply", exact: true });
   await expect(applyOrder).toBeVisible();
   expect(await stationaryToolbar()).toEqual(toolbarWithoutButton);
-  const applyOrderBox = await applyOrder.boundingBox();
-  const searchBox = await page.locator(".tabs-tools > .inbox-search").boundingBox();
-  expect(applyOrderBox && searchBox && applyOrderBox.x + applyOrderBox.width <= searchBox.x).toBe(true);
-  // The toolbar gives the button its width from the Project tabs, not by clipping the button.
-  expect(await applyOrder.evaluate((button) => button.scrollWidth <= button.clientWidth)).toBe(true);
   const before = await inboxViewportAnchor(page);
   expect(before.key).not.toBeNull();
 
