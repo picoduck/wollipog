@@ -1368,38 +1368,34 @@ function SessionDetailLoaded({
   const retitleReceiptRef = useRef<HTMLDivElement>(null);
   const rightPanelRef = useRef(rightPanel);
   rightPanelRef.current = rightPanel;
-  // An attention link naming one of the dock's requests (the Sessions list's top request, an Inbox
-  // card) expands that request and moves focus to it; App leaves the Agents panel closed for it.
+  // Resolve attention only against this generation's known requests. Cold links stay on the
+  // transcript while hydration catches up; they never guess an Agents overview first.
   const handledAttentionRef = useRef<string | null>(null);
-  const dockedRequestIds = dockedRequests.map((request) => request.requestId).join("\n");
-  useEffect(() => {
-    const requestId = attentionTarget?.requestId;
-    if (!requestId || attentionTarget.eventEpoch !== (session.eventEpoch ?? 0) ||
-        !dockedRequestIds.split("\n").includes(requestId)) return;
-    const key = JSON.stringify([session.id, attentionTarget.eventEpoch, requestId, attentionTarget.activationId ?? 0]);
+  const attentionRequest = attentionTarget && attentionTarget.eventEpoch === (session.eventEpoch ?? 0)
+    ? attentionTarget.requestId === undefined ? prioritizedRequests[0]
+      : prioritizedRequests.find((request) => request.requestId === attentionTarget.requestId)
+    : undefined;
+  const resolvedAttentionTarget = attentionTarget && attentionRequest
+    ? { ...attentionTarget, requestId: attentionRequest.requestId } : attentionTarget;
+  useLayoutEffect(() => {
+    if (mode !== "expanded" || !attentionTarget || !attentionRequest) return;
+    const requestId = attentionRequest.requestId;
+    const key = JSON.stringify([session.id, attentionTarget.eventEpoch, attentionTarget.requestId, attentionTarget.activationId ?? 0]);
     if (handledAttentionRef.current === key) return;
+    if (attentionRequest.ownerToolUseId) {
+      handledAttentionRef.current = key;
+      rightPanelRef.current.show("subagents");
+      return;
+    }
+    // Close an obstructing panel before paint, then let the mounted dock reveal the exact card.
+    if (rightPanelRef.current.open) rightPanelRef.current.close();
     // After the dock has mounted; a re-render before the frame reschedules it.
     const frame = window.requestAnimationFrame(() => {
       if (!focusSessionRequest(session.id, requestId)) return;
       handledAttentionRef.current = key;
-      // A cold deep link opens the Agents panel before the session has loaded; it is not needed for
-      // a docked request, and on a phone it would cover the card.
-      if (rightPanelRef.current.open && rightPanelRef.current.mode === "subagents") rightPanelRef.current.close();
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [attentionTarget, dockedRequestIds, session.eventEpoch, session.id]);
-  const attentionEntryScope = useRef<string | null>(null);
-  useEffect(() => {
-    if (mode !== "expanded") return;
-    const scope = `${session.id}:${session.eventEpoch ?? 0}`;
-    if (attentionEntryScope.current === scope) return;
-    attentionEntryScope.current = scope;
-    // The Agents panel answers a worker's request and lists an async question beside the others;
-    // the session's own requests are on the dock.
-    if (pendingRequests(session.pendingApproval).some((request) => request.ownerToolUseId || request.async)) {
-      rightPanelRef.current.show("subagents");
-    }
-  }, [mode, session.id, session.eventEpoch, session.pendingApproval]);
+  }, [mode, attentionTarget, attentionRequest, session.id]);
   const backgroundInventoryRequestRef = useRef<string | null>(null);
   const [backgroundInventoryError, setBackgroundInventoryError] = useState<string | null>(null);
   const [backgroundInventoryAttempt, setBackgroundInventoryAttempt] = useState(0);
@@ -4590,9 +4586,8 @@ function SessionDetailLoaded({
   // which lists every pending request (a worker's beside an async question).
   const reviewPendingRequest = useCallback((requestId: string) => {
     if (focusSessionRequest(session.id, requestId)) return;
-    rightPanel.show("subagents");
     navigate({ name: "session", id: session.id, attention: { eventEpoch: session.eventEpoch ?? 0, requestId } });
-  }, [navigate, rightPanel, session.eventEpoch, session.id]);
+  }, [navigate, session.eventEpoch, session.id]);
 
   // The pending questions, whose transcript rows are markers (#2205): the dock's, and a worker's,
   // whose Jump to Question opens the Agents panel. Keyed by their ids, so heartbeats that replace the
@@ -6348,7 +6343,6 @@ function SessionDetailLoaded({
             if (top && dockedRequests.includes(top) && focusSessionRequest(session.id, top.requestId)) return;
             const requests = pendingRequests(session.pendingApproval);
             if (requests.length > 1) {
-              rightPanel.show("subagents");
               navigate({ name: "session", id: session.id, attention: {
                 eventEpoch: session.eventEpoch ?? 0,
               } });
@@ -6358,9 +6352,7 @@ function SessionDetailLoaded({
               rightPanel.show("requests");
               return;
             }
-            // Navigation makes the target reload-safe; the direct state transition also makes a
-            // repeat press reopen a panel that was closed while the route stayed unchanged.
-            rightPanel.show("subagents");
+            // Each activation is handled against the known request, including a repeated press.
             navigate({ name: "session", id: session.id, attention: {
               eventEpoch: session.eventEpoch ?? 0,
               ...(requests.length === 1 ? { requestId: requests[0]!.requestId } : {}),
@@ -7222,7 +7214,7 @@ function SessionDetailLoaded({
           session={session}
           earlierActivityUnloaded={isPartialHistory(eventWindow)}
           sourceLocation={sourceLocation}
-          attentionTarget={attentionTarget}
+          attentionTarget={resolvedAttentionTarget}
           onOpenSourceLocation={openSourceLocation}
           onClearSourceLocation={clearSourceLocation}
           runnerOnline={runnerOnline}

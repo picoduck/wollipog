@@ -45,6 +45,9 @@ const reminderConflict = new URLSearchParams(location.search).get("reminder-conf
 /** Sessions in the lifecycle states the archive label and Fork Conversation tell apart (#2214): a
  * running turn in a worktree, a finished session, and a control plane that stops before archiving. */
 const lifecycle = new URLSearchParams(location.search).has("lifecycle");
+const entryRegressions = new URLSearchParams(location.search).has("entry-regressions");
+let entryHydrated = !new URLSearchParams(location.search).has("entry-cold");
+let resolveEntrySession: (() => void) | undefined;
 
 const runner: RunnerView = {
   runnerId: "runner-1",
@@ -185,6 +188,24 @@ if (fullShell) {
   }
 }
 
+if (entryRegressions) {
+  const orchestrator = sessions.find((value) => value.id === "s-approval")!;
+  orchestrator.role = "orchestrator";
+  orchestrator.parentControl = "questions_and_approvals";
+  orchestrator.pendingApproval = {
+    requestId: "async-question", kind: "question", title: "Choose the Release Target", async: true,
+    options: [], questions: [{ id: "target", header: "Target", question: "Where should the release go?",
+      options: [{ label: "Staging" }, { label: "Production" }], allowOther: true }],
+    additionalRequests: [{ requestId: "worker-question", ownerToolUseId: "fixture-child", kind: "question",
+      title: "Choose the Worker Check", options: [], questions: [{ id: "check", header: "Check",
+        question: "Which check should the worker run?", options: [{ label: "Unit Tests" }, { label: "Browser Tests" }] }] }],
+  };
+  const standard = sessions.find((value) => value.id === "s-running")!;
+  standard.role = "normal";
+  const descendant = sessions.find((value) => value.id === "s-queued")!;
+  descendant.parentSessionId = orchestrator.id;
+}
+
 // More sessions waiting on the user, so the rail's Sessions badge reaches two and three digits
 // (#2110). Each is blocked the way a real one is: waiting on a pending request.
 const moreBlocked = Number(new URLSearchParams(location.search).get("more-blocked") ?? 0);
@@ -279,7 +300,7 @@ function snapshot(): UiSnapshotMessage {
     },
     runners: groups ? [structuredClone(runner), structuredClone(secondRunner)] : [structuredClone(runner)],
     boxes: [],
-    sessions: structuredClone(sessions),
+    sessions: structuredClone(entryHydrated ? sessions : sessions.filter((value) => value.id !== "s-approval")),
     reminders: structuredClone(reminders),
     runs: [],
     pods: [],
@@ -319,6 +340,8 @@ declare global {
     __providerLoginCalls: string[];
     __publishProviderLogins: (logins: ProviderLoginView[]) => void;
     __replayProviderLoginSnapshot: () => void;
+    __hydrateEntrySession: () => void;
+    __updateEntrySession: (change: Partial<SessionView>) => void;
   }
 }
 window.__setColumnCalls = [];
@@ -330,6 +353,16 @@ window.__publishProviderLogins = logins => {
   socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
 };
 window.__replayProviderLoginSnapshot = () => socket?.push(snapshot());
+window.__hydrateEntrySession = () => {
+  entryHydrated = true;
+  socket?.push(snapshot());
+  resolveEntrySession?.();
+};
+window.__updateEntrySession = (change) => {
+  const value = sessions.find((candidate) => candidate.id === "s-approval")!;
+  Object.assign(value, change);
+  socket?.push({ type: "session_upsert", session: structuredClone(value) });
+};
 
 const reconciledReminder: SessionReminderView = {
   ...reminders.find((candidate) => candidate.sessionId === "s-snoozed")!,
@@ -397,10 +430,25 @@ const client = {
     return { removed: true as const };
   },
   session: async (id: string) => {
+    if (id === "s-approval" && !entryHydrated) await new Promise<void>((resolve) => { resolveEntrySession = resolve; });
     const value = sessions.find((candidate) => candidate.id === id);
     if (!value) throw new Error("session not found");
     return { session: structuredClone(value) };
   },
+  ...(entryRegressions ? {
+    sideChat: async (id: string) => ({ sideChat: {
+      parentSessionId: id, createdAt: 1,
+      session: session(`sidechat-${id}`, "Side Chat", "running", { status: "running" }),
+    } }),
+    descendantRequests: async () => ({ requests: [{
+      sessionId: "s-queued", sessionTitle: "Queued Session", runnerId: runner.runnerId, runnerOnline: true,
+      eventEpoch: 7, createdAt: 1, responseOwner: "human" as const, occurrenceId: "primary-1",
+      request: structuredClone(sessions.find((value) => value.id === "s-queued")!.pendingApproval!),
+    }] }),
+    childSessions: async (id: string, eventEpoch: number) => ({
+      sessionId: id, eventEpoch, children: [], attentionOwners: [], hasMore: false, lastSeq: 0,
+    }),
+  } : {}),
   getSessionEventPage: async () => ({ events: [], hasOlder: false }) as never,
   getSessionEventTailPage: async () => ({ events: [], hasOlder: false }) as never,
   git: async () => ({}),

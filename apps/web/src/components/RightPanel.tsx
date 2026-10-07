@@ -63,8 +63,8 @@ export function panelReturnFocusTarget(
 
 /**
  * The right side panel's app-level state. Lives in App.tsx (NOT inside the per-session-keyed
- * SessionDetail) so the open/mode/width prefs survive navigating between sessions; persisted
- * like every other wollipog.* pref (best-effort localStorage).
+ * SessionDetail) so mode/width preferences and panel drafts survive navigation. Agents visibility
+ * is limited to the current visit, even when old browser storage says it was open.
  */
 export interface RightPanelState {
   open: boolean;
@@ -87,10 +87,11 @@ export interface RightPanelState {
   consumeSubagentFocusRequest: (sessionId: string, eventEpoch: number, request: number) => void;
 }
 
-export function useRightPanelState(): RightPanelState {
+export function useRightPanelState(navigationScope: string | null = null): RightPanelState {
   const [open, setOpen] = useState(() => {
     try {
-      return loadBrowserStorageValue("wollipog.rightpanel.open") === "1";
+      return parseStoredRightPanelMode(loadBrowserStorageValue("wollipog.rightpanel.mode")) !== "subagents" &&
+        loadBrowserStorageValue("wollipog.rightpanel.open") === "1";
     } catch {
       return false;
     }
@@ -112,6 +113,13 @@ export function useRightPanelState(): RightPanelState {
   const [dragging, setDragging] = useState(false);
   const [subagentTarget, setSubagentTarget] = useState<RightPanelState["subagentTarget"]>(null);
   const nextSubagentFocusRequest = useRef(0);
+  const [previousScope, setPreviousScope] = useState(navigationScope);
+  // Adjust before children render, so navigation cannot commit an Agents panel for the new visit.
+  // Other panel preferences and all session-scoped scratch stay intact.
+  if (previousScope !== navigationScope) {
+    setPreviousScope(navigationScope);
+    if (mode === "subagents") setOpen(false);
+  }
 
   // Persist once a value settles — not on every pointermove during a drag.
   useEffect(() => {
