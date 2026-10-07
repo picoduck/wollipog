@@ -1176,6 +1176,18 @@ test.describe("on a phone with the software keyboard open", () => {
     await expect(dockedCard(page).locator(".question-step-note")).toContainText("Question 2 of 2");
   });
 
+  test("a row tapped right after typing in the composer takes the tap, though the dock regrows on blur (#2675)", async ({ page }) => {
+    // A question tall enough that the dock is at its cap: 40% while the composer has focus, 50% after.
+    await page.goto("/agent-questions-e2e.html?set=long");
+    const composer = page.getByRole("textbox", { name: "Composer" });
+    await composer.tap();
+    await composer.fill("One more thing first.");
+    await expect(composer).toBeFocused();
+    const rolling = dockedCard(page).getByRole("radio", { name: /^Rolling/ });
+    await rolling.tap();
+    await expect(rolling).toBeChecked();
+  });
+
   test("Show Where Asked and Jump to Question are icon buttons named as on desktop, with 44px targets (#2205)", async ({ page }) => {
     await page.goto("/agent-questions-e2e.html");
     const targets = [

@@ -25,6 +25,7 @@ import { CopyButton } from "../common.js";
 import { StructuredQuestionText } from "../StructuredQuestionText.js";
 import { ProviderLoginCard } from "../ProviderLoginCard.js";
 import { useIsMobile } from "../useIsMobile.js";
+import { holdFieldFocus } from "./hold-field-focus.js";
 import { useRemovedFocus } from "../useRemovedFocus.js";
 import {
   AuthenticationRecoveryPanel,
@@ -416,6 +417,9 @@ export function RequestCard({
       data-read-only={readOnly ? "" : undefined}
       aria-labelledby={titleId}
       aria-busy={busy !== null || undefined}
+      // A press while a field (the sign-in's code, or the composer) has focus keeps it there until the
+      // click lands, so the dock does not regrow under the finger on a touch phone (#2675).
+      onMouseDown={holdFieldFocus}
     >
       <RequestCardHead
         kind={<><RequestKindIcon request={request} />{meta.label}</>}

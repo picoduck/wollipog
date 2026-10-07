@@ -18,7 +18,6 @@ import {
 import { useQuestionResponseStyle } from "../question-response-style.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { clearEvidenceReviewDraft } from "../evidence-review-drafts.js";
-import { KEYBOARD_EDITABLE, TOUCH_PHONE_MEDIA } from "../mobile-viewport.js";
 import { LocateIcon, QuestionIcon } from "./Icons.js";
 import { Notice } from "./Notice.js";
 import { StructuredQuestionText } from "./StructuredQuestionText.js";
@@ -32,6 +31,7 @@ import {
   questionStepLabel,
   type QuestionChoice,
 } from "./requests/QuestionStep.js";
+import { holdFieldFocus } from "./requests/hold-field-focus.js";
 import { revealDockedRequest } from "./requests/request-reveal.js";
 
 const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
@@ -782,19 +782,6 @@ export function SessionQuestionBanner({
   // Only the keyboard opening moves the body.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [keyboardOpen]);
-
-  // On a touch phone a focused field is the software keyboard: the dock caps lower and the rail hides
-  // (styles.css). Pressing a row or a button while typing keeps the field focused until the click
-  // lands, since its blur would restore that layout between the press and the click and move the
-  // control out from under the finger. Choosing or moving on then takes focus as usual.
-  const holdFieldFocus = (event: React.MouseEvent<HTMLElement>) => {
-    const active = event.currentTarget.ownerDocument.activeElement;
-    const target = event.target as HTMLElement;
-    if (!(active instanceof HTMLElement) || !event.currentTarget.contains(active) || !active.matches(KEYBOARD_EDITABLE) ||
-        target.closest(KEYBOARD_EDITABLE) || !target.closest("button, label, input") ||
-        !event.currentTarget.ownerDocument.defaultView?.matchMedia(TOUCH_PHONE_MEDIA).matches) return;
-    event.preventDefault();
-  };
 
   const onKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
     if (event.defaultPrevented || event.nativeEvent.isComposing) return;

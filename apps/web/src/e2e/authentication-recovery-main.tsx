@@ -50,6 +50,8 @@ declare global {
     __WOLLIPOG_AUTH_RECOVERY_E2E__: {
       selections(): unknown[];
       decisions(): unknown[];
+      /** Authorization codes submitted on the `signing-in` card, in order. */
+      codes(): string[];
       identityRequests(): number;
       removeAccount(id: string): void;
       signOutAccount(id: string): void;
@@ -62,10 +64,12 @@ const STARTED = Date.now() - 4 * 60_000;
 const CARD = "provider-auth:recovery-e2e";
 const selections: unknown[] = [];
 const decisions: unknown[] = [];
+const codes: string[] = [];
 let identityRequests = 0;
 window.__WOLLIPOG_AUTH_RECOVERY_E2E__ = {
   selections: () => [...selections],
   decisions: () => [...decisions],
+  codes: () => [...codes],
   identityRequests: () => identityRequests,
   removeAccount: (id) => {
     accountOptions = accountOptions.filter((account) => account.id !== id);
@@ -353,6 +357,11 @@ const client = {
     return { accepted: true as const };
   },
   startProviderLogin: async () => ({}) as never,
+  // The sign-in keeps waiting, so a capture shows the card the code was submitted from.
+  submitProviderLoginCode: async (_runnerId: string, _operationId: string, code: string) => {
+    codes.push(code);
+    return {};
+  },
   // The card stays as it is, so a capture shows what the person pressed rather than the next state.
   approve: async (_id: string, input: { requestId: string; optionId: string }) => {
     decisions.push(input);
