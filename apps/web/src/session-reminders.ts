@@ -6,6 +6,8 @@ import {
   type SessionView,
 } from "@wollipog/protocol";
 import { formatReminderInstant } from "./reminder-schedule.js";
+import { sortInboxSessions } from "./inbox.js";
+import { sessionFollowUp } from "./session-follow-up.js";
 import {
   BACKGROUND_DELIVERY_STATUS,
   backgroundDeliveryAccessibleName,
@@ -93,24 +95,30 @@ export function sortSessionsForReminders(
   sessions: readonly SessionView[],
   reminders: ReadonlyMap<string, SessionReminderView>,
   mode: ReminderInboxMode,
+  pins: ReadonlySet<string> = new Set(),
 ): SessionView[] {
+  if (mode === "ordinary") {
+    const original = new Map(sessions.map((session) => [session.id, session]));
+    const withDueFollowUp = sessions.map((session) => {
+      const reminder = reminders.get(session.id);
+      return reminder?.state === "fired" && sessionFollowUp(session).priority < 2
+        ? { ...session, attention: { version: 1 as const, humanActions: session.attention?.humanActions ?? [],
+            meaningfulAt: session.attention?.meaningfulAt ?? session.createdAt,
+            result: { revision: "reminder", at: reminder.firedAt ?? session.createdAt, owner: "human" as const },
+            acknowledgedRevision: null } } : session;
+    });
+    return sortInboxSessions(withDueFollowUp, pins).map((session) => original.get(session.id)!);
+  }
   return [...sessions].sort((left, right) => {
     const leftReminder = reminders.get(left.id);
     const rightReminder = reminders.get(right.id);
-    if (mode === "snoozed") {
-      const leftSomeday = leftReminder?.scheduleKind === "someday";
-      const rightSomeday = rightReminder?.scheduleKind === "someday";
-      if (leftSomeday !== rightSomeday) return leftSomeday ? 1 : -1;
-      const leftScheduledFor = leftReminder?.scheduledFor;
-      const rightScheduledFor = rightReminder?.scheduledFor;
-      if (leftScheduledFor === undefined || rightScheduledFor === undefined) return 0;
-      return leftScheduledFor - rightScheduledFor;
-    }
-    const leftFired = leftReminder?.state === "fired";
-    const rightFired = rightReminder?.state === "fired";
-    if (leftFired !== rightFired) return leftFired ? -1 : 1;
-    if (leftFired && rightFired) return (rightReminder?.firedAt ?? 0) - (leftReminder?.firedAt ?? 0);
-    return 0;
+    const leftSomeday = leftReminder?.scheduleKind === "someday";
+    const rightSomeday = rightReminder?.scheduleKind === "someday";
+    if (leftSomeday !== rightSomeday) return leftSomeday ? 1 : -1;
+    const leftScheduledFor = leftReminder?.scheduledFor;
+    const rightScheduledFor = rightReminder?.scheduledFor;
+    if (leftScheduledFor === undefined || rightScheduledFor === undefined) return 0;
+    return leftScheduledFor - rightScheduledFor;
   });
 }
 

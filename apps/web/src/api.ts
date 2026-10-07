@@ -791,11 +791,12 @@ export function createApiClient(transport: ApiTransport) {
   // in-flight setConfig round trip.
   preparePromptImages: (id: string, images: PromptImageInput[]) =>
     Promise.all(images.map((image) => uploadPromptImage(transport, id, image))),
-  prompt: async (id: string, text: string, images: PromptImageInput[] = [], config?: SessionConfig, slashCommand?: string) => {
+  prompt: async (id: string, text: string, images: PromptImageInput[] = [], config?: SessionConfig, slashCommand?: string,
+    reviewedResultRevision?: string) => {
     const references = await Promise.all(images.map((image) => uploadPromptImage(transport, id, image)));
     return req<SessionView>(`/api/sessions/${id}/prompt`, {
       method: "POST",
-      body: JSON.stringify({ text, images: references, config, slashCommand }),
+      body: JSON.stringify({ text, images: references, config, slashCommand, reviewedResultRevision }),
     });
   },
   invokeSessionCommand: (id: string, request: InvokeSessionCommandRequest) =>
@@ -1116,6 +1117,11 @@ export function createApiClient(transport: ApiTransport) {
 
   retryStop: (id: string) =>
     req<SessionView>(`/api/sessions/${id}/retry-stop`, { method: "POST" }),
+
+  markResultReviewed: (id: string, revision: string) =>
+    req<{ acknowledged: boolean; session: SessionView }>(`/api/sessions/${encodeURIComponent(id)}/result/acknowledge`, {
+      method: "POST", body: JSON.stringify({ revision }),
+    }),
 
   acknowledgeBackgroundMissingResult: (id: string, continuationId: string) =>
     req<SessionView>(

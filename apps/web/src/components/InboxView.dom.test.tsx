@@ -160,6 +160,11 @@ const rightPanel = {
 
 function session(id: string, lastEventAt: number, overrides: Partial<SessionView> = {}): SessionView {
   return {
+    // This fixture instant represents meaningful work, not a streamed delta. Tests for chatter
+    // keep this summary unchanged while updating the event/activity fields separately.
+    attention: { version: 1, meaningfulAt: lastEventAt, result: null, acknowledgedRevision: null,
+      humanActions: overrides.status === "input_required" || overrides.pendingApproval
+        ? [{ requestId: overrides.pendingApproval?.requestId ?? "input", rank: 3, requestedAt: lastEventAt }] : [] },
     id,
     runnerId: "runner-1",
     workspaceId: "workspace-1",
@@ -2395,7 +2400,7 @@ test("InboxView threads a family under its parent and t, Shift+T, p, and the arr
   assert.deepEqual(rowTitles(container), ["Session Parent", "Session Waiting", "Session Done", "Session Lone"]);
   const shells = () => [...container.querySelectorAll<HTMLElement>(".inbox-row-shell")];
   assert.deepEqual(shells().map((shell) => shell.className.includes("thread-child")), [false, true, true, false]);
-  assert.equal(container.querySelector(".inbox-thread-family-text")?.textContent, "2 Children · 1 Awaiting Input");
+  assert.equal(container.querySelector(".inbox-thread-family-text")?.textContent, "2 Children · Needs Your Input");
   assert.match(container.querySelector(".inbox-thread-family")?.className ?? "", /waiting/);
   const selectedTitle = () =>
     container.querySelector<HTMLElement>('.inbox-row-shell[aria-selected="true"] .inbox-row-title')?.textContent ?? null;
@@ -2410,7 +2415,7 @@ test("InboxView threads a family under its parent and t, Shift+T, p, and the arr
   await press("t");
   assert.deepEqual(rowTitles(container), ["Session Parent", "Session Lone"], "a collapsed parent's children leave the list");
   assert.equal(container.querySelector(".inbox-thread-toggle")?.getAttribute("aria-expanded"), "false");
-  assert.equal(container.querySelector(".inbox-thread-family-text")?.textContent, "2 Children · 1 Awaiting Input",
+  assert.equal(container.querySelector(".inbox-thread-family-text")?.textContent, "2 Children · Needs Your Input",
     "the rollup still says a child is waiting while the thread is collapsed");
   assertNoDomNode(container.querySelector(".inbox-order-update"), "hidden children are not a pending reorder");
   await act(async () => { socket.push({ type: "session_upsert", session: session("Lone", 45) }); });

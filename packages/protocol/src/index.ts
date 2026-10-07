@@ -4361,6 +4361,8 @@ export interface ConsumeWorkflowDecisionRequest {
 }
 
 export interface PendingApproval {
+  /** Control-plane occurrence time. Reconnects preserve it; provider timestamps do not own it. */
+  requestedAt?: number;
   /** v108: runner-verified spawning tool identity; never a raw provider thread id. */
   ownerToolUseId?: string;
   /** v108: other concurrent provider requests in this SAME approval store. The first request
@@ -6654,8 +6656,25 @@ export interface SessionCommandPermissions {
   gitActions?: SessionCommandPermission;
 }
 
+/** Compact CP-owned follow-up facts. No transcript fetch or lifecycle inference is required. */
+export interface SessionAttentionSummary {
+  version: 1;
+  humanActions: Array<{ requestId: string; rank: number; requestedAt: number }>;
+  meaningfulAt: number;
+  result: {
+    revision: string;
+    at: number;
+    owner: "human" | "orchestrator";
+  } | null;
+  /** The receiving user's acknowledgment. Omitted on unscoped mutation responses; null means
+   * this viewer has none. Agent views never carry a human's acknowledgment. */
+  acknowledgedRevision?: string | null;
+}
+
 /** Denormalised session record for the UI (board cards + lists). */
 export interface SessionView {
+  /** Omitted by older peers. Absence never implies an outstanding result. */
+  attention?: SessionAttentionSummary;
   id: string;
   /** Control-plane-attributed creator session. Never accepted from a client or runner snapshot. */
   parentSessionId?: string | null;
@@ -10653,6 +10672,8 @@ export interface CreateRunRequest {
 }
 
 export interface PromptRequest {
+  /** Exact result displayed when these follow-up instructions were submitted. */
+  reviewedResultRevision?: string;
   text: string;
   images?: PromptImageInput[];
   config?: SessionConfig;
@@ -10689,6 +10710,7 @@ export type PromptAdmissionView = SessionView & { promptDelivery?: PromptDeliver
 /** Body for POST /api/sessions/:id/steer. Exactly one of direct content or promotePromptId is
  * accepted by the route. A fresh submissionId identifies each user action, including promotion. */
 export interface SteerRequest {
+  reviewedResultRevision?: string;
   submissionId: string;
   turnId: string;
   text?: string;

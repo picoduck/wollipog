@@ -1,4 +1,5 @@
 import type { SessionReminderView, SessionView } from "@wollipog/protocol";
+import { sessionFollowUp } from "./session-follow-up.js";
 import { reminderBadgeDescription, reminderBadgeLabel, snoozedSessionAttentionReason } from "./session-reminders.js";
 import {
   sessionStatusSummary,
@@ -98,6 +99,10 @@ export function sessionRowStatus(session: SessionStatusSource, context: SessionR
     } else if (primary.meta.label === statusMeta("session", "idle").label) {
       primary = null;
     }
+  }
+  if (session.attention && sessionFollowUp(session as SessionView).group === "ready_for_review") {
+    primary = { kind: "lifecycle", meta: { label: "Ready for Review", tone: "warning", pulse: false },
+      description: "A new result is waiting for your assessment or next instructions.", needsYou: true };
   }
   const others = needs.slice(1).map(conditionName);
   if (!primary) return { badge: null, others };

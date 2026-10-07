@@ -238,6 +238,7 @@ export function withHoldAdviceFor<T extends Pick<SessionView, "holds" | "queueHo
 
 /** The ownership lookups `withSessionCommandPermissions` needs from the database. */
 export interface SessionCommandPermissionSource {
+  sessionAttentionForUser?(session: SessionView, userId: string | null): SessionView;
   isSessionOwner(principal: HumanPrincipal, sessionId: string): boolean;
   isSessionDescendant(ancestorId: string, targetId: string): boolean;
   /** Whether `principal` may read the session at all; a campaign lists only such held children. */
@@ -479,6 +480,7 @@ export function withSessionCommandPermissions<T extends SessionView>(
   session: T,
 ): T {
   if (!principal) return session;
+  session = (source.sessionAttentionForUser?.(session, principal.kind === "human" ? principal.userId : null) ?? session) as T;
   session = withCampaignWorkFor(source, principal, session);
   const commandPermissions = sessionCommandPermissions(principal, session, permissionFacts(source, principal, session.id));
   return withSessionHoldAdviceFor(source, principal, { ...session, commandPermissions },

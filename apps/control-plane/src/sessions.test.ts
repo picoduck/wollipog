@@ -17899,7 +17899,8 @@ test("hydrateRunnerSessions persists a snapshot's pendingApproval so it survives
   svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ status: "input_required", pendingApproval: approval })]);
   const identified = db.getSession("s_box1")!.pendingApproval!;
   assert.match(identified.occurrenceId ?? "", /^request_[0-9a-f]{32}$/u);
-  const { occurrenceId: _occurrenceId, ...persistedApproval } = identified;
+  const { occurrenceId: _occurrenceId, requestedAt, ...persistedApproval } = identified;
+  assert.equal(typeof requestedAt, "number");
   assert.deepEqual(persistedApproval, approval);
 
   // Clearing it on the box (next snapshot) clears the cache.

@@ -37,6 +37,7 @@ import {
 } from "../session-actions.js";
 import { loadKeySet, saveKeySet, SESSION_PIN_KEY } from "../pins.js";
 import { isUnread, loadSeen, markSeen, markUnread, saveSeen } from "../sessions-seen.js";
+import { outstandingSessionResult } from "../session-follow-up.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { destination, encodeResourceId, type AttentionTarget, type SessionsTab } from "../navigation.js";
@@ -94,6 +95,7 @@ export function filterInboxSplitsForReminderMode(
   reminders: ReadonlyMap<string, SessionReminderView>,
   mode: ReminderInboxMode,
   stalledSessionIds: ReadonlySet<string>,
+  pinnedSessions: ReadonlySet<string> = new Set(),
 ): InboxSplit[] {
   return baseSplits.map((split) => {
     const visibleSessions = split.sessions.filter((session) => sessionVisibleForReminderMode(
@@ -108,7 +110,7 @@ export function filterInboxSplitsForReminderMode(
       : Math.max(0, split.count - hiddenLocalCount);
     return {
       ...split,
-      sessions: sortSessionsForReminders(visibleSessions, reminders, mode),
+      sessions: sortSessionsForReminders(visibleSessions, reminders, mode, pinnedSessions),
       count,
       blockedCount: visibleSessions.reduce((total, session) => total + Number(isInboxBlocked(session)), 0),
       stalledCount: visibleSessions.reduce((total, session) => total + Number(stalledSessionIds.has(session.id)), 0),
@@ -434,9 +436,9 @@ export function InboxView({
     projectsSupported,
   ), [pinnedProjects, pinnedSessions, projects, projectsSupported, sessions, stalledSessionIds]);
   const reminderSplits = useMemo(() => ({
-    ordinary: filterInboxSplitsForReminderMode(baseSplits, reminders, "ordinary", stalledSessionIds),
-    snoozed: filterInboxSplitsForReminderMode(baseSplits, reminders, "snoozed", stalledSessionIds),
-  }), [baseSplits, reminders, stalledSessionIds]);
+    ordinary: filterInboxSplitsForReminderMode(baseSplits, reminders, "ordinary", stalledSessionIds, pinnedSessions),
+    snoozed: filterInboxSplitsForReminderMode(baseSplits, reminders, "snoozed", stalledSessionIds, pinnedSessions),
+  }), [baseSplits, reminders, stalledSessionIds, pinnedSessions]);
   const splits = reminderSplits[reminderMode];
   // Two groups with one name each add their machine (#2180).
   const groupLabels = useMemo(() => {
@@ -892,6 +894,7 @@ export function InboxView({
       sessionId,
       anchor,
       unread: target ? isUnread(seenRef.current, target.id, target.lastEventAt) : false,
+      reviewedResultRevision: target?.attention?.result?.revision,
       restoreTarget: restoreTarget ? () => restoreTarget() ?? listRestore() : listRestore,
     });
   }, []);
@@ -1757,6 +1760,13 @@ export function InboxView({
             setRenameSession({ sessionId, returnFocusRef: { get current() { return restore(); } } });
           }}
           onTogglePin={togglePin}
+          onMarkReviewed={sessionMenu.reviewedResultRevision && outstandingSessionResult(sessions.get(sessionMenu.sessionId)!) ? (sessionId) => {
+            if (sessionMenu.reviewedResultRevision) void api.markResultReviewed(sessionId, sessionMenu.reviewedResultRevision)
+              .then(({ acknowledged, session }) => {
+                loadSession(session);
+                if (!acknowledged) showToast("A newer result is waiting for review.");
+              }).catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" }));
+          } : undefined}
           onSnooze={(sessionId) => {
             const restore = sessionMenu.restoreTarget;
             setSnoozeReturnFocusRef({ get current() { return restore(); } });

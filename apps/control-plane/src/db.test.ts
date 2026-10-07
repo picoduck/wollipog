@@ -3722,7 +3722,8 @@ test("updateSessionStatus clears pending approval when leaving input_required", 
   db.setPendingApproval("sess-1", approval);
   const identified = db.getSession("sess-1")!.pendingApproval!;
   assert.match(identified.occurrenceId ?? "", /^request_[0-9a-f]{32}$/u);
-  const { occurrenceId: _occurrenceId, ...persistedApproval } = identified;
+  const { occurrenceId: _occurrenceId, requestedAt, ...persistedApproval } = identified;
+  assert.equal(typeof requestedAt, "number");
   assert.deepEqual(persistedApproval, approval);
 
   // staying in input_required keeps it
@@ -8141,7 +8142,8 @@ test("setPendingApproval tolerates being set and cleared", () => {
   db.setPendingApproval("sess-1", approval);
   const identified = db.getSession("sess-1")!.pendingApproval!;
   assert.match(identified.occurrenceId ?? "", /^request_[0-9a-f]{32}$/u);
-  const { occurrenceId: _occurrenceId, ...persistedApproval } = identified;
+  const { occurrenceId: _occurrenceId, requestedAt, ...persistedApproval } = identified;
+  assert.equal(typeof requestedAt, "number");
   assert.deepEqual(persistedApproval, approval);
   db.setPendingApproval("sess-1", null);
   assert.equal(db.getSession("sess-1")!.pendingApproval, null);

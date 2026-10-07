@@ -334,7 +334,8 @@ test("selected, unread, and selected-and-unread rows each show their own treatme
 });
 
 test("the relative time renders once, trailing the status line on both shapes", async () => {
-  const session = baseSession({ status: "running", lastEventAt: Date.now() - 15 * 60_000 });
+  const session = baseSession({ status: "running", lastEventAt: Date.now(),
+    attention: { version: 1, meaningfulAt: Date.now() - 15 * 60_000, humanActions: [], result: null } });
   for (const threeRow of [true, false]) {
     await withRow(session, (container) => {
       const times = container.querySelectorAll("time");

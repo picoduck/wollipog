@@ -4406,6 +4406,7 @@ export class SessionsService {
     images: PromptImageInput[] = [],
     slashCommand?: string,
     config?: SessionConfig,
+    reviewedResultRevision?: string,
   ): ServiceResult<PromptAdmissionView> {
     // Capture the exact fired row before admission. If another client snoozes again while the
     // prompt is being delivered, its revision or identity changes and the acknowledgment cannot
@@ -4421,7 +4422,11 @@ export class SessionsService {
       "session",
       true,
     );
-    if (!result.ok || observedReminder?.state !== "fired") return result;
+    if (!result.ok) return result;
+    if (reviewedResultRevision && this.db.acknowledgeSessionResult(sessionId, userId, reviewedResultRevision)) {
+      this.hub.sessionChangedById(sessionId);
+    }
+    if (observedReminder?.state !== "fired") return result;
     const removed = this.db.removeSessionReminder(
       sessionId,
       userId,
@@ -12584,6 +12589,8 @@ export class SessionsService {
       if (runnerSeq <= cursor) return; // already ingested (duplicate live frame / replay)
       this.db.invalidateCampaignReportsForLiveEvent(sessionId, payload, now);
       if (runnerSeq !== cursor + 1) {
+        this.db.observeSessionAttentionEvent(sessionId, payload, now, `runner:${history?.historyEpoch ?? "legacy"}:${runnerSeq}`);
+        this.hub.sessionChangedById(sessionId);
         if (indexedHistory) this.db.reconcileRunnerHistory(sessionId, history.historyEpoch!, runnerSeq);
         this.noteLiveContinuationArm(sessionId, payload);
         this.rehydrate.add(sessionId);

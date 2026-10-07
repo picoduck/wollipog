@@ -14,6 +14,19 @@ const reminder = (extra: Partial<SessionReminderView>): SessionReminderView => (
 
 const label = (status: ReturnType<typeof sessionRowStatus>) => status.badge?.meta.label ?? null;
 
+test("outstanding human results use the single row badge without overriding human input", () => {
+  const attention = { version: 1 as const, humanActions: [], meaningfulAt: 1,
+    result: { revision: "r1", at: 1, owner: "human" as const }, acknowledgedRevision: null };
+  assert.equal(label(sessionRowStatus(session({ status: "running", attention }))), "Ready for Review");
+  assert.equal(label(sessionRowStatus(session({ status: "idle", attention }))), "Ready for Review");
+  assert.equal(label(sessionRowStatus(session({ status: "running", attention: { ...attention, acknowledgedRevision: "r1" } }))), "Running");
+  assert.equal(label(sessionRowStatus(session({ status: "running", attention: { ...attention,
+    result: { ...attention.result, owner: "orchestrator" } } }))), "Running");
+  const question = { requestId: "q", kind: "question" as const, title: "Choose", options: [] };
+  assert.equal(label(sessionRowStatus(session({ status: "running", pendingApproval: question,
+    attention: { ...attention, humanActions: [{ requestId: "q", rank: 3, requestedAt: 1 }] } }))), "Answer Required");
+});
+
 test("Awaiting Prompt shows no badge; every other lifecycle shows its own", () => {
   assert.deepEqual(sessionRowStatus(session()), { badge: null, others: [] });
   for (const [status, expected] of [

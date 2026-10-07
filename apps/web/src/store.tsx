@@ -1267,9 +1267,15 @@ function reducer(state: State, action: Action): State {
           // Only reads carry this client's command permissions (#1843); a mutation's response
           // does not. They follow who is looking and who owns the session, not its state, so keep
           // the last verdict rather than re-offer a command the server refuses.
-          const session = msg.session.commandPermissions === undefined && previousSession?.commandPermissions
+          let session = msg.session.commandPermissions === undefined && previousSession?.commandPermissions
             ? { ...msg.session, commandPermissions: previousSession.commandPermissions }
             : msg.session;
+          // Mutation responses have shared attention facts but no viewer identity. Preserve this
+          // viewer's exact acknowledgment; a new result revision still remains outstanding.
+          if (session.attention && session.attention.acknowledgedRevision === undefined && previousSession?.attention) {
+            session = { ...session, attention: { ...session.attention,
+              acknowledgedRevision: previousSession.attention.acknowledgedRevision } };
+          }
           sessions.set(msg.session.id, session);
           state.activity.set(msg.session.id, reconcileSessionActivity(
             state.activity.get(msg.session.id),

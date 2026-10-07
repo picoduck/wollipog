@@ -111,7 +111,7 @@ function InboxRowInner({
   // A surface without a store (a harness page) cannot see the runner, so it keeps the conservative
   // delivery wording rather than claiming the runner is offline.
   const runnerOnline = useOptionalStoreSelector((state) => state.runners.get(session.runnerId)?.status !== "offline") ?? true;
-  const lastActivityAt = inboxRowTimestamp(session, activity);
+  const lastActivityAt = session.attention?.meaningfulAt ?? inboxRowTimestamp(session, activity);
   const status = sessionRowStatus(session, {
     runnerOnline,
     reminder,

@@ -119,7 +119,7 @@ function storedReminder(database: string, userId: string): { reminderId: string;
   }
 }
 
-function seed(database: string, runner: RunnerMetadata): { ownerUserId: string; reminderIds: Map<string, string> } {
+function seed(database: string, runner: RunnerMetadata): { ownerUserId: string; reminderIds: Map<string, string>; resultRevision: string } {
   const db = ControlPlaneDb.open(database);
   try {
     const now = Date.now();
@@ -237,7 +237,9 @@ function seed(database: string, runner: RunnerMetadata): { ownerUserId: string; 
       now,
     }).kind, "updated");
     assert.equal(db.fireDueSessionReminders(now).length, 2);
-    return { ownerUserId: identity.userId, reminderIds };
+    db.appendEvent(SESSION_ID, { kind: "agent_message", text: "A finding to review", final: true }, now + 7);
+    return { ownerUserId: identity.userId, reminderIds,
+      resultRevision: db.getSession(SESSION_ID)!.attention!.result!.revision };
   } finally {
     db.close();
   }
@@ -306,6 +308,18 @@ test("prompt route acknowledges fired reminders only for accepted human principa
     authorization: `Bearer ${OTHER_TOKEN}`,
     "content-type": "application/json",
   };
+  const acknowledge = async (headers: Record<string, string>, revision: string, id = SESSION_ID) => {
+    const response = await fetch(`${baseUrl}/api/sessions/${id}/result/acknowledge`, {
+      method: "POST", headers, body: JSON.stringify({ revision, userId: "ignored-forged-user" }),
+    });
+    return { response, body: await response.json() as JsonObject };
+  };
+  assert.equal((await acknowledge(otherHeaders, seeded.resultRevision, PRIVATE_SESSION_ID)).response.status, 404);
+  assert.equal((await acknowledge(humanHeaders, "stale")).body.acknowledged, false);
+  assert.equal((await acknowledge(humanHeaders, seeded.resultRevision)).body.acknowledged, true);
+  const peerSession = await fetch(`${baseUrl}/api/sessions/${SESSION_ID}`, { headers: otherHeaders });
+  const peerView = await peerSession.json() as { session: { attention: { acknowledgedRevision: string | null } } };
+  assert.equal(peerView.session.attention.acknowledgedRevision, null, "another device/user must not inherit the owner's acknowledgment");
   const otherRead = await readReminder(otherHeaders);
   assert.equal(otherRead.response.status, 200);
   assert.deepEqual(otherRead.body.reminder?.reminderId, seeded.reminderIds.get(OTHER_USER_ID));
@@ -362,6 +376,18 @@ test("prompt route acknowledges fired reminders only for accepted human principa
     "a failed human prompt must retain the exact fired reminder",
   );
 
+  // Advance the durable projection before runner reconciliation starts; direct fixture writes
+  // must not race the service's SQLite transaction.
+  const oldResultRevision = seeded.resultRevision;
+  const newResultDb = new DatabaseSync(database);
+  newResultDb.exec("PRAGMA busy_timeout=5000");
+  try {
+    seeded.resultRevision = "concurrent-http-result";
+    newResultDb.prepare("UPDATE session_attention SET result_revision=?,result_at=?,meaningful_at=? WHERE session_id=?")
+      .run(seeded.resultRevision, Date.now(), Date.now(), SESSION_ID);
+  } finally { newResultDb.close(); }
+  assert.equal((await acknowledge(humanHeaders, oldResultRevision)).body.acknowledged, false);
+
   const socket = new WebSocket(`ws://127.0.0.1:${port}/runner`);
   sockets.add(socket);
   const inbox = new JsonInbox(socket);
@@ -397,18 +423,23 @@ test("prompt route acknowledges fired reminders only for accepted human principa
   }));
   await inbox.take((message) => message.type === "registered");
 
+  const readAttention = async (headers: Record<string, string>) => {
+    const response = await fetch(`${baseUrl}/api/sessions/${SESSION_ID}`, { headers });
+    assert.equal(response.status, 200);
+    return (await response.json() as { session: { attention: { acknowledgedRevision?: string | null } } }).session.attention;
+  };
   const deliverPrompt = async (headers: Record<string, string>, text: string): Promise<JsonObject> => {
     const delivery = inbox.take((message) =>
       message.type === "prompt_session" && message.sessionId === SESSION_ID);
     const response = await fetch(`${baseUrl}/api/sessions/${SESSION_ID}/prompt`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, reviewedResultRevision: seeded.resultRevision }),
     });
     const responseBody = await response.text();
     if (response.status !== 200) void delivery.catch(() => {});
     assert.equal(response.status, 200, responseBody);
-    return await delivery;
+    return await delivery.catch((error: Error) => { throw new Error(`${text}: ${error.message}; response=${responseBody}; server=${output}`); });
   };
 
   const agentDelivery = await deliverPrompt({
@@ -420,12 +451,17 @@ test("prompt route acknowledges fired reminders only for accepted human principa
   assert.equal(storedReminder(database, seeded.ownerUserId)?.state, "fired",
     "an agent-control prompt must not acknowledge the human user's reminder");
   assert.equal(storedReminder(database, OTHER_USER_ID)?.state, "fired");
+  assert.equal((await readAttention(humanHeaders)).acknowledgedRevision, oldResultRevision,
+    "agent prompts cannot acknowledge a human's newer result");
+  assert.equal((await readAttention(otherHeaders)).acknowledgedRevision, null);
 
   const otherDelivery = await deliverPrompt({
     authorization: `Bearer ${OTHER_TOKEN}`,
     "content-type": "application/json",
   }, "other user's accepted prompt");
   assert.equal(otherDelivery.text, "other user's accepted prompt");
+  assert.equal((await readAttention(otherHeaders)).acknowledgedRevision, seeded.resultRevision);
+  assert.equal((await readAttention(humanHeaders)).acknowledgedRevision, oldResultRevision);
   assert.equal(storedReminder(database, OTHER_USER_ID), null);
   const removedRead = await readReminder(otherHeaders);
   assert.equal(removedRead.response.status, 200);
@@ -439,8 +475,31 @@ test("prompt route acknowledges fired reminders only for accepted human principa
 
   const humanDelivery = await deliverPrompt(humanHeaders, "owner's accepted prompt");
   assert.equal(humanDelivery.text, "owner's accepted prompt");
+  assert.equal((await readAttention(humanHeaders)).acknowledgedRevision, seeded.resultRevision);
   assert.equal(storedReminder(database, seeded.ownerUserId), null,
     "an accepted human prompt removes that user's fired reminder");
+
+  const handoff = async (headers: Record<string, string>, revision: string, id = SESSION_ID) => {
+    const response = await fetch(`${baseUrl}/api/sessions/${id}/result/handoff`, {
+      method: "POST", headers, body: JSON.stringify({ revision }),
+    });
+    return { response, body: await response.json() as JsonObject };
+  };
+  const agentHeaders = { authorization: `Bearer ${AGENT_TOKEN}`,
+    [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: PARENT_SESSION_ID, "content-type": "application/json" };
+  assert.equal((await handoff(agentHeaders, seeded.resultRevision)).response.status, 403,
+    "an ordinary parent is not an Orchestrator result controller");
+  const roleDb = new DatabaseSync(database);
+  roleDb.exec("PRAGMA busy_timeout=5000");
+  roleDb.prepare("UPDATE sessions SET session_role='orchestrator' WHERE id=?").run(PARENT_SESSION_ID);
+  roleDb.close();
+  assert.equal((await handoff(agentHeaders, "stale")).body.handedOff, false);
+  const handedOff = await handoff(agentHeaders, seeded.resultRevision);
+  assert.equal(handedOff.response.status, 200);
+  assert.equal(handedOff.body.handedOff, true);
+  assert.equal((handedOff.body.session as { attention: { result: { owner: string } } }).attention.result.owner, "human");
+  assert.equal((await handoff(agentHeaders, seeded.resultRevision, PARENT_SESSION_ID)).response.status, 403,
+    "a controller cannot hand off its own result as a descendant");
 
   const somedayWrite = await fetch(`${baseUrl}/api/sessions/${SESSION_ID}/reminder`, {
     method: "PUT",

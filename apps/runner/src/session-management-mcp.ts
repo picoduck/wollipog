@@ -529,6 +529,7 @@ function unfinishedBackgroundJobs(s: Json): { unfinishedBackgroundJobs?: Json[] 
 /** Field-map a SessionView to the compact shape every session-returning tool shares. */
 function mapSession(s: Json): Json {
   return {
+    ...(s?.attention ? { attention: s.attention } : {}),
     id: s?.id,
     title: s?.title,
     status: s?.status,
@@ -894,7 +895,7 @@ const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "l
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question", "resolve_descendant_approval",
   "resolve_descendant_workflow_decision", "review_descendant_ui_evidence", "request_workflow_decision", "get_workflow_decision", "consume_workflow_decision",
   "reconcile_workflow_decision",
-  "wait_session", "list_governance_policies", "get_governance_policy", "create_session", "prompt_session",
+  "wait_session", "list_governance_policies", "get_governance_policy", "create_session", "prompt_session", "handoff_session_result",
   "stop_session", "stop_background_job", "restart_session", "archive_session", "set_guardrails", "create_worktree",
   "attach_worktree", "select_worktree", "discard_worktree"]);
 const PARENT_CONTROL_TOOLS = new Set(["get_campaign_issue_scope", "request_campaign_issue_scope_change", "request_github_issue_closure", "close_github_issue",
@@ -2480,6 +2481,25 @@ export const TOOLS: McpTool[] = [
       });
       if (!r.ok) return errorResult(r.message);
       return textResult({ session: mapSession(r.data), delivery: promptDelivery(r.data) });
+    },
+  },
+  {
+    name: "handoff_session_result",
+    description: "Hand off one exact descendant result revision for human review. Only its controlling Orchestrator may hand it off. This changes follow-up presentation, never approval or execution authority; a newer result requires a new handoff.",
+    inputSchema: {
+      type: "object",
+      properties: { sessionId: { type: "string" }, revision: { type: "string" } },
+      required: ["sessionId", "revision"], additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.sessionId !== "string" || typeof args?.revision !== "string" || !args.revision) {
+        return errorResult("sessionId and an exact result revision are required");
+      }
+      if (args.sessionId === deps.selfSessionId) return errorResult("refusing: that is my own session");
+      const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(args.sessionId)}/result/handoff`, {
+        revision: args.revision,
+      });
+      return r.ok ? textResult({ handedOff: r.data?.handedOff, session: mapSession(r.data?.session) }) : errorResult(r.message);
     },
   },
   {
