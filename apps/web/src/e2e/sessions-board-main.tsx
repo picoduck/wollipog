@@ -445,8 +445,8 @@ const client = {
       eventEpoch: 7, createdAt: 1, responseOwner: "human" as const, occurrenceId: "primary-1",
       request: structuredClone(sessions.find((value) => value.id === "s-queued")!.pendingApproval!),
     }] }),
-    childSessions: async (id: string, eventEpoch: number) => ({
-      sessionId: id, eventEpoch, children: [], attentionOwners: [], hasMore: false, lastSeq: 0,
+    childSessions: async (_id: string, eventEpoch: number) => ({
+      eventEpoch, children: [], attentionOwners: [], unidentifiedChildren: 0, nextAfter: null, truncated: false,
     }),
   } : {}),
   getSessionEventPage: async () => ({ events: [], hasOlder: false }) as never,
