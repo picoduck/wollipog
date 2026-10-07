@@ -90,6 +90,7 @@ import {
   MonitorCog as LucideMonitorCog,
   NotebookText as LucideNotebookText,
   Package as LucidePackage,
+  PanelBottom as LucidePanelBottom,
   PanelLeftClose as LucidePanelLeftClose,
   PanelLeftOpen as LucidePanelLeftOpen,
   PanelRight as LucidePanelRight,
@@ -495,6 +496,11 @@ export function EyeOffIcon(props: IconProps) {
 
 export function PanelRightIcon(props: IconProps) {
   return <LibraryIcon glyph={LucidePanelRight} {...props} />;
+}
+
+/** Preview Below: the Sessions preview under the list (#2219). */
+export function PanelBottomIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucidePanelBottom} {...props} />;
 }
 
 /** The rail's foot: Expand Navigation shows the labelled rail (#1968). */

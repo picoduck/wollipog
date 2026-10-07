@@ -196,7 +196,7 @@ export const CSS_SURFACE = {
   "flex-basis", "flex-direction", "flex-shrink", "flex-wrap", "font", "font-display",
   "font-family", "font-size", "font-style", "font-variant-numeric", "font-weight", "gap",
   "grid-area", "grid-auto-columns", "grid-auto-flow", "grid-column", "grid-row",
-  "grid-template-columns", "grid-template-rows", "height", "image-rendering", "inset",
+  "grid-template-columns", "grid-template-rows", "height", "image-rendering", "inset", "isolation",
   "inset-inline-end", "inset-inline-start", "justify-content",
   "justify-items", "justify-self", "left", "letter-spacing", "line-height", "list-style",
   "margin", "margin-bottom", "margin-inline-start", "margin-left",

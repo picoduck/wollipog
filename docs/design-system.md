@@ -332,6 +332,7 @@ elevation with `1px solid var(--border-strong)` in both themes. The modal backdr
 | `--measure` | 68ch | Prose. |
 | `--list-pane-w` | 320px (280–440 resizable) | Master list in side-by-side master-detail. |
 | `--sessions-list-h` | 45% of the split area, whole rows | Stacked list height (§6.3): at least 3 rows; the preview keeps 240px. Sessions only. |
+| `--sessions-list-w` | 400px (280–440 resizable) | Preview Right's list column (§6.3). Sessions only. |
 | `--panel-w` | 400px (320–640) | Right side panel, docked. |
 | `--chat-max` | 860px | Unchanged. |
 | `--bottom-bar-h` | 56px + safe area | Phone tab bar, labeled. |
@@ -997,7 +998,8 @@ variant by default and offers side by side as a user preference (§6.3).
   (§6.2). `.master-detail-state` takes both panes' place for an empty collection or a load error
   (§6.1, §12). `DetailSkeleton` (`common.tsx`) is the detail's loading state. The page resets the
   detail's `scrollTop` on each route, and on a phone it restores the list's position on Back. The
-  side-by-side resize handle is not built yet; Sessions' stacked divider is (§6.3).
+  side-by-side resize handle is built for Sessions' Preview Right (#2219, §6.3), and its stacked
+  divider (#2217); Agent Skills' list pane does not resize yet.
 
 ### 6.1 The Default Detail State (No Selection)
 
@@ -1106,6 +1108,26 @@ master-detail pages stay side by side.
   unmounts for the board or a phone width) clears its height. The docked request card at the top of
   the preview sits in an opaque slot with a 1px `--border` hairline and `--elev-1`, so the transcript
   visibly scrolls beneath it.
+- **Built (#2219), Preview Right.** `sessions-preview-layout.ts` stores `below` (the default, and
+  what any missing or unknown value reads as) or `right` in `wollipog.sessions.previewLayout`, per
+  device and instance, never synced; a module store keeps the header control and the Settings row
+  live with each other. The Preview Layout control (`PanelBottomIcon`, `PanelRightIcon`; tooltips
+  "Preview below the list" and "Preview beside the list") follows List/Board in the header's controls
+  slot, at 1100px and wider only. On the Board it keeps its width but is hidden, inert and out of the
+  accessibility tree, so switching List/Board never moves the switch (#2159). `.inbox-view` carries
+  `data-layout` with the layout in effect: `right` only when the preference is Preview Right and the
+  window is 1100px or wider, so a compact window stacks and the stored choice returns when it widens.
+  The Board, an open session and a phone carry none. Preview Right places the same panes by column: `--sessions-list-w` (stored in
+  `wollipog.sessions.listWidth`) then the preview, both full height. Its divider is the column's right
+  hairline, drawn on the preview's first pixel in a 4px `col-resize` band (17px on coarse pointers);
+  the line turns 2px `--border-strong` on hover and drag and 2px `--focus` on keyboard focus, and only
+  touch, which cannot hover, keeps a 6×40px pill grip. `aria-orientation="vertical"` and
+  `aria-valuenow` in pixels; ←/→ move 16px, Home and End go to 280px and 440px, Enter or a
+  double-click restores 400px, and only a release or a key stores a width. The preview pane is
+  isolated so its docked request stays under the band. The preview's bar, meta line, docked request
+  and transcript start at `--preview-inset`: the page gutter when stacked, `--space-6` from the
+  divider in Preview Right. The 400px column is under 880px, so rows keep #2209's two-line anatomy,
+  and a notice above the list tops the list column only.
 
 ---
 

@@ -23,6 +23,7 @@ import { FeedbackProvider } from "./FeedbackProvider.js";
 import { INBOX_COLLAPSED_THREADS_KEY, type InboxSplit } from "../inbox.js";
 import { loadKeySet, saveKeySet, SESSION_PIN_KEY } from "../pins.js";
 import { loadSeen, saveSeen } from "../sessions-seen.js";
+import { loadSessionsPreviewLayout, resetSessionsPreviewLayoutForTest, setSessionsPreviewLayout } from "../sessions-preview-layout.js";
 import type { RightPanelState } from "./RightPanel.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
@@ -1669,6 +1670,12 @@ test("board mode shares the Sessions toolbar scope and toggles back to the list"
   assertNoDomNode(container.querySelector(".inbox-list"), "and not the list");
   assertNoDomNode(container.querySelector(".master-detail-resize"), "the preview split belongs to list mode");
   assert.equal(container.querySelector(".inbox-view")?.classList.contains("sessions-md"), false, "the board is not the stacked grid");
+  // The Board ignores the preview layout (#2219). Its control keeps its width so List / Board does
+  // not move, but it is out of sight, focus and the accessibility tree.
+  const reserved = container.querySelector<HTMLElement>(".sessions-preview-layout");
+  assert.equal(reserved?.getAttribute("aria-hidden"), "true");
+  assert.equal(reserved?.hasAttribute("inert"), true);
+  assert.equal(reserved?.hasAttribute("data-reserved"), true);
   assert.ok(container.querySelector(".tabs-bar"), "the shared split tabs stay above the board");
   assert.equal(container.querySelectorAll(".board .card").length, 2,
     "archived sessions never reach the board columns");
@@ -1699,6 +1706,60 @@ test("board mode shares the Sessions toolbar scope and toggles back to the list"
   assert.deepEqual(pushed.at(-1), { name: "inbox" },
     "switching modes navigates: the route is the mode");
 
+});
+
+test("the Preview Layout control after List / Board switches the list to Preview Right, and a phone has neither (#2219)", async () => {
+  mobileViewport = false;
+  resetSessionsPreviewLayoutForTest();
+  domWindow.localStorage.clear();
+  setWindowFocused(true);
+  setVisibility("visible");
+  const { container, root } = mountTestRoot();
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "sessions-preview-layout",
+    runtimeKey: "sessions-preview-layout:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  const navigation: ViewNavigation = { current: () => ({ name: "inbox" }), push: () => {}, listen: () => () => {} };
+  await act(async () => {
+    root.render(
+      <StoreProvider connection={connection} navigation={navigation}>
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
+      </StoreProvider>,
+    );
+  });
+  await act(async () => { socket.push(snapshot([session("A", 30), session("B", 20)])); });
+
+  const view = () => container.querySelector<HTMLElement>(".inbox-view")!;
+  const control = () => container.querySelector('[role="radiogroup"][aria-label="Preview Layout"]');
+  const groups = [...container.querySelectorAll(".page-header .page-controls [role=radiogroup]")];
+  assert.deepEqual(groups.map((group) => group.getAttribute("aria-label")), ["Sessions View", "Preview Layout"],
+    "right after List / Board, in the header's controls slot");
+  const radios = [...control()!.querySelectorAll<HTMLButtonElement>('[role="radio"]')];
+  assert.deepEqual(radios.map((radio) => [radio.getAttribute("aria-label"), radio.title, radio.getAttribute("aria-checked")]), [
+    ["Preview Below", "Preview below the list", "true"],
+    ["Preview Right", "Preview beside the list", "false"],
+  ]);
+  assert.equal(view().dataset["layout"], "below", "Preview Below is the default");
+  assert.equal(container.querySelector('[role="separator"]')?.getAttribute("aria-orientation"), "horizontal");
+
+  await act(async () => { radios[1]!.click(); });
+  assert.equal(view().dataset["layout"], "right");
+  assert.equal(view().style.getPropertyValue("--sessions-list-w"), "400px");
+  assert.equal(container.querySelector('[role="separator"]')?.getAttribute("aria-orientation"), "vertical");
+  assert.equal(loadSessionsPreviewLayout(), "right", "the choice is stored for this device");
+
+  // A phone has no preview, so it has no layout to choose, whatever is stored.
+  mobileViewport = true;
+  await act(async () => { domWindow.dispatchEvent(new domWindow.Event("resize")); });
+  assertNoDomNode(control(), "a phone has no Preview Layout control");
+  assert.equal(view().dataset["layout"], undefined);
+  assertNoDomNode(container.querySelector('[role="separator"]'));
+
+  setSessionsPreviewLayout("below");
+  await act(async () => root.unmount());
 });
 
 test("row and card context menus share one surface, act on their target, and never navigate", async () => {

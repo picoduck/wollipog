@@ -48,7 +48,7 @@ import { ProjectSplitMenu } from "./ProjectSplitMenu.js";
 import { SessionDetail, type PreviewForkControls } from "./SessionDetail.js";
 import type { RightPanelState } from "./RightPanel.js";
 import type { PinnedSummaryState } from "./pinned-summary-state.js";
-import { useIsMobile } from "./useIsMobile.js";
+import { useIsCompact, useIsMobile } from "./useIsMobile.js";
 import { useInboxKeys, type InboxKeyActions } from "../useInboxKeys.js";
 import {
   sessionVisibleForReminderMode,
@@ -57,17 +57,19 @@ import {
 } from "../session-reminders.js";
 import { SnoozeDialog } from "./SnoozeDialog.js";
 import { SessionContextMenu, type SessionContextMenuState } from "./SessionContextMenu.js";
-import { SessionsSplitDivider } from "./SessionsSplitDivider.js";
+import { SessionsListWidthDivider, SessionsSplitDivider } from "./SessionsSplitDivider.js";
 import { readSessionsSplitGeometry, sessionsListRowsForRatio, type SessionsSplitGeometry } from "../sessions-split.js";
 import { RenameSessionDialog } from "./RenameSessionDialog.js";
 import type { NewSessionPreset } from "./NewSessionDialog.js";
-import { BoardIcon, ListIcon } from "./Icons.js";
+import { BoardIcon, ListIcon, PanelBottomIcon, PanelRightIcon } from "./Icons.js";
 import { PageHeader } from "./PageHeader.js";
 import { shortcutDisplay } from "../shortcuts.js";
 import { sessionDisplayTitle } from "../session-title.js";
 import { Board } from "./Board.js";
 import { BoardFilterTools } from "./BoardFilters.js";
 import type { SessionsViewMode } from "../sessions-view-mode.js";
+import { loadSessionsListWidth, saveSessionsListWidth, type SessionsPreviewLayout } from "../sessions-preview-layout.js";
+import { useSessionsPreviewLayout } from "../use-sessions-preview-layout.js";
 import { dispatchVirtualViewportIntent } from "../viewport-intent.js";
 import { virtualTargetScrollAdjustment } from "./MeasuredVirtualList.js";
 import type { PreviewNavigationControls } from "./usePreviewNavigationRegistration.js";
@@ -218,6 +220,9 @@ export function InboxView({
   } = useStoreActions();
   const instanceScope = useInstanceScope();
   const isMobile = useIsMobile();
+  // Preview Right applies in windows 1100px and wider only (§6.3, #2219): the compact tier stacks.
+  const isCompact = useIsCompact();
+  const [previewLayout, setPreviewLayout] = useSessionsPreviewLayout();
   // Rows must not move while the user is reading or aiming at the list, and neither breakpoint can
   // key that on live input: touch has no pre-contact hover signal, and a desktop pointer rests
   // still for long stretches while its owner scans the Inbox. So the collapsed Inbox holds its
@@ -268,6 +273,7 @@ export function InboxView({
   } | null>(null);
   const [snoozeReturnFocusRef, setSnoozeReturnFocusRef] = useState<{ current: HTMLElement | null } | undefined>(undefined);
   const [splitGeometry, setSplitGeometry] = useState<SessionsSplitGeometry>(UNMEASURED_SPLIT);
+  const [listWidth, setListWidth] = useState(() => loadSessionsListWidth(instanceScope));
   const machineProviderLogins = useMemo(() => [...runners.values()].flatMap((runner) =>
     (runner.providerLogins ?? [])
       .filter((login) => !login.sessionId && login.status !== "succeeded" && login.status !== "cancelled")
@@ -403,6 +409,7 @@ export function InboxView({
     setPinnedProjects(loadKeySet(PROJECT_PIN_KEY, instanceScope));
     setPinnedSessions(loadKeySet(SESSION_PIN_KEY, instanceScope));
     setCollapsedThreads(loadKeySet(INBOX_COLLAPSED_THREADS_KEY, instanceScope));
+    setListWidth(loadSessionsListWidth(instanceScope));
   }, [instanceScope]);
 
   useEffect(() => {
@@ -1386,9 +1393,16 @@ export function InboxView({
     navigate({ name: "session", id: sessionId, location: { path: ".wollipog.json" } });
   }, [activeSplit?.key, navigate, selectSession]);
 
-  // The stacked list and preview (§6.3): whole rows of the stored ratio, on desktop and tablet only.
-  // No search match (#2200) gives the list the whole page, with no preview to divide from.
-  const stacked = !boardMode && !isMobile && !expanded && !noMatches;
+  // The list and preview (§6.3), on desktop and tablet only. No search match (#2200) gives the list
+  // the whole page, with no preview to divide from. Stacked is whole rows of the stored ratio; Preview
+  // Right (#2219) is the stored list width beside the preview, in windows 1100px and wider.
+  const split = !boardMode && !isMobile && !expanded && !noMatches;
+  const layout: SessionsPreviewLayout = previewLayout === "right" && !isCompact ? "right" : "below";
+  const stacked = split && layout === "below";
+  const changeListWidth = useCallback((width: number) => {
+    setListWidth(width);
+    saveSessionsListWidth(width, instanceScope);
+  }, [instanceScope]);
   const listRows = sessionsListRowsForRatio(inbox.splitRatio, splitGeometry);
   useLayoutEffect(() => {
     const view = viewRef.current;
@@ -1426,21 +1440,40 @@ export function InboxView({
       <PageHeader
         title={destination("inbox").name}
         controls={(
-          <SegmentedControl<SessionsViewMode>
-            label="Sessions View"
-            className="sessions-view"
-            value={viewMode}
-            options={[
-              { value: "list", label: <><ListIcon size={16} /><span className="sessions-view-label">List</span></>, ariaLabel: "List", title: "List" },
-              { value: "board", label: <><BoardIcon size={16} /><span className="sessions-view-label">Board</span></>, ariaLabel: "Board", title: "Board" },
-            ]}
-            onChange={(mode) => {
-              if (mode === viewMode) return;
-              // The route IS the mode; the App-level view effect persists it as last-used.
-              // A tab the URL names stays named across the mode switch.
-              navigate({ name: mode === "board" ? "board" : "inbox", ...(routeSplit === undefined ? {} : { split: routeSplit }) });
-            }}
-          />
+          <>
+            <SegmentedControl<SessionsViewMode>
+              label="Sessions View"
+              className="sessions-view"
+              value={viewMode}
+              options={[
+                { value: "list", label: <><ListIcon size={16} /><span className="sessions-view-label">List</span></>, ariaLabel: "List", title: "List" },
+                { value: "board", label: <><BoardIcon size={16} /><span className="sessions-view-label">Board</span></>, ariaLabel: "Board", title: "Board" },
+              ]}
+              onChange={(mode) => {
+                if (mode === viewMode) return;
+                // The route IS the mode; the App-level view effect persists it as last-used.
+                // A tab the URL names stays named across the mode switch.
+                navigate({ name: mode === "board" ? "board" : "inbox", ...(routeSplit === undefined ? {} : { split: routeSplit }) });
+              }}
+            />
+            {/* Where the preview sits (§6.3, #2219): only where Preview Right can apply, so the compact
+                header keeps its budget. The Board keeps its place but hides it from sight, focus and
+                the accessibility tree, so switching List / Board never moves the switch (#2159). */}
+            {!isMobile && !isCompact && (
+              <span className="sessions-preview-layout" data-reserved={boardMode ? "" : undefined}
+                aria-hidden={boardMode || undefined} inert={boardMode || undefined}>
+                <SegmentedControl<SessionsPreviewLayout>
+                  label="Preview Layout"
+                  value={previewLayout}
+                  options={[
+                    { value: "below", label: <PanelBottomIcon size={16} />, ariaLabel: "Preview Below", title: "Preview below the list" },
+                    { value: "right", label: <PanelRightIcon size={16} />, ariaLabel: "Preview Right", title: "Preview beside the list" },
+                  ]}
+                  onChange={setPreviewLayout}
+                />
+              </span>
+            )}
+          </>
         )}
         secondary={sessionRemindersSupported ? [{
           label: "Snoozed",
@@ -1534,9 +1567,12 @@ export function InboxView({
       />
     )}
     <div
-      className={`inbox-view${stacked ? " master-detail sessions-md" : ""}${expanded ? " expanded" : ""}${boardMode ? " board-mode" : ""}`}
+      className={`inbox-view${split ? " master-detail sessions-md" : ""}${expanded ? " expanded" : ""}${boardMode ? " board-mode" : ""}`}
       ref={viewRef}
-      style={stacked ? { "--sessions-list-rows": listRows } as CSSProperties : undefined}
+      data-layout={split ? layout : undefined}
+      style={!split ? undefined : stacked
+        ? { "--sessions-list-rows": listRows } as CSSProperties
+        : { "--sessions-list-w": `${listWidth}px` } as CSSProperties}
       data-focus-zone={expanded ? "main" : "list"}
     >
       <section
@@ -1657,6 +1693,7 @@ export function InboxView({
           {stacked && (
             <SessionsSplitDivider grid={viewRef} geometry={splitGeometry} rows={listRows} onRatioChange={setInboxRatio} />
           )}
+          {split && !stacked && <SessionsListWidthDivider grid={viewRef} width={listWidth} onWidthChange={changeListWidth} />}
           <div className="inbox-preview-pane" ref={previewPaneRef} data-focus-zone="main">
             {surfaceSessionId ? (
               <SessionDetail

@@ -121,6 +121,10 @@ test("every referenced custom property is defined in the shared root scope", () 
     ["--tl-diff-digits", ".tl-diff"], // a transcript diff's widest line number, set per diff (#2187)
     // The stacked Sessions list track (§6.3, #2217), whole rows of the stored ratio; a drag sets it.
     ["--sessions-list-h", ".master-detail.sessions-md"],
+    // Preview Right's list column (§6.3, #2219): InboxView sets the stored width; a drag sets it.
+    ["--sessions-list-w", '.sessions-md[data-layout="right"]'],
+    // Where the Sessions preview's bar, meta line, request dock and transcript start (#2219).
+    ["--preview-inset", ".session-detail.preview"],
   ]);
   for (const [name, owner] of COMPONENT_LOCAL) {
     assert.ok(soleRuleProps(owner).has(name), `${name} is declared on ${owner}`);

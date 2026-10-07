@@ -1410,7 +1410,11 @@ kbd {
 }
 
 /* The view switch (`controls`) leads the actions and never folds into ⋯ (§3.3). */
-.page-controls { display: flex; flex: none; }
+.page-controls { display: flex; flex: none; gap: var(--space-2); }
+/* The Sessions Preview Layout control (#2219). The Board ignores the layout, so the control is hidden
+   there, but keeps its width so List / Board stays under the pointer when it is switched. */
+.sessions-preview-layout { display: flex; }
+.sessions-preview-layout[data-reserved] { visibility: hidden; }
 /* A toggle secondary's plain count sits 4px after its label (§11.4). */
 .page-action:has(> .count) { gap: var(--space-1); }
 /* A toggle secondary is a ghost button, whose transparent rest outranks the shared on state, so
@@ -11935,6 +11939,46 @@ body.shell-dock-dragging * {
   .master-detail-resize::before { top: 8px; }
   .master-detail-resize::after { top: 5.5px; left: calc(50% - 20px); width: 40px; height: 6px; }
 }
+/* Preview Right (#2219, §6 and §6.3): the list column at its stored width beside the preview, each
+   scrolling on its own. The divider is the column's right hairline, drawn on the preview's first
+   pixel as the stacked one is, in a 4px hit band. Its grip is the line itself at 2px, on hover and
+   drag only, and --focus on keyboard focus; touch, which cannot hover, keeps the pill grip. */
+.sessions-md[data-layout="right"] {
+  /* InboxView sets the stored width inline, and a drag sets it until release. */
+  --sessions-list-w: 400px;
+  grid-template-columns: var(--sessions-list-w) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+}
+/* Isolated, so its docked request (--z-sticky) stays under the divider's band where they overlap; the
+   pane clips its overflow, so nothing inside it needs to rise above the list. */
+.sessions-md[data-layout="right"] > .inbox-preview-pane { grid-row: 1; grid-column: 2; isolation: isolate; }
+.sessions-md[data-layout="right"] > .master-detail-resize {
+  grid-row: 1;
+  grid-column: 2;
+  align-self: stretch;
+  justify-self: start;
+  width: 4px;
+  height: auto;
+  margin: 0 0 0 -2px;
+  cursor: col-resize;
+}
+.sessions-md[data-layout="right"] > .master-detail-resize::before { top: 0; bottom: 0; left: 2px; width: 1px; height: auto; }
+.sessions-md[data-layout="right"] > .master-detail-resize::after { display: none; }
+.sessions-md[data-layout="right"] > .master-detail-resize:is([data-dragging], :focus-visible)::before { width: 2px; }
+@media (hover: hover) {
+  .sessions-md[data-layout="right"] > .master-detail-resize:hover::before { width: 2px; }
+}
+@media (pointer: coarse) {
+  .sessions-md[data-layout="right"] > .master-detail-resize { width: 17px; margin-left: -8px; }
+  .sessions-md[data-layout="right"] > .master-detail-resize::before { left: 8px; }
+  .sessions-md[data-layout="right"] > .master-detail-resize::after {
+    display: block;
+    top: calc(50% - 20px);
+    left: 5.5px;
+    width: 6px;
+    height: 40px;
+  }
+}
 .inbox-order-update { white-space: nowrap; }
 .inbox-tab-group {
   position: relative;
@@ -12439,11 +12483,15 @@ body.shell-dock-dragging * {
 /* The Sessions preview (#2210; §4.3, §6.3): a quick look, so it starts at the page gutter like the
    page title and the rows above it, and its reading column is at most --chat-max wide, never
    centered: its end padding is the gutter or whatever is left past the column. A size container,
-   so its request dock caps at half the preview. */
+   so its request dock caps at half the preview. --preview-inset is where the bar, the meta line, the
+   request dock and the transcript start: the page gutter under the list, and --space-6 from the
+   divider in Preview Right (#2219). */
 .session-detail.preview {
+  --preview-inset: var(--page-gutter);
   background: var(--bg);
   container: session-preview / size;
 }
+.sessions-md[data-layout="right"] .session-detail.preview { --preview-inset: var(--space-6); }
 .session-detail.preview .right-panel,
 .session-detail.preview .right-panel-resizer,
 .session-detail.preview .composer { display: none; }
@@ -12452,15 +12500,15 @@ body.shell-dock-dragging * {
 .session-detail.preview .detail-main { min-height: 0; }
 .session-detail.preview .detail-scroll {
   padding-block: var(--space-3);
-  padding-inline: var(--page-gutter) max(var(--page-gutter), calc(100% - var(--page-gutter) - var(--chat-max)));
+  padding-inline: var(--preview-inset) max(var(--page-gutter), calc(100% - var(--preview-inset) - var(--chat-max)));
 }
-.session-detail.preview .transcript-history-band { padding-inline: var(--page-gutter) max(var(--page-gutter), calc(100% - var(--page-gutter) - var(--chat-max))); }
+.session-detail.preview .transcript-history-band { padding-inline: var(--preview-inset) max(var(--page-gutter), calc(100% - var(--preview-inset) - var(--chat-max))); }
 .session-detail.preview .transcript-tail-anchor > .btn.transcript-tail-control {
-  right: max(var(--page-gutter), calc(100% - var(--page-gutter) - var(--chat-max)));
-  left: var(--page-gutter);
+  right: max(var(--page-gutter), calc(100% - var(--preview-inset) - var(--chat-max)));
+  left: var(--preview-inset);
 }
 /* The detail bar's one row, with the meta line under it as part of the same header. */
-.session-preview-bar { border-bottom: 0; }
+.session-preview-bar { padding-left: var(--preview-inset); border-bottom: 0; }
 .session-preview-open { flex: none; }
 /* Neutral facts (§11.3): the machine, the branch and the agent, each after its 14px icon, 12px
    apart on one line; the last fact gives way first. */
@@ -12471,7 +12519,7 @@ body.shell-dock-dragging * {
   gap: var(--space-3);
   min-width: 0;
   margin: 0;
-  padding: 0 var(--page-gutter) var(--space-2);
+  padding: 0 var(--page-gutter) var(--space-2) var(--preview-inset);
   overflow: hidden;
   border-bottom: 1px solid var(--border);
   color: var(--text-dim);
@@ -12501,7 +12549,7 @@ body.shell-dock-dragging * {
   overflow-y: auto;
   overscroll-behavior: contain;
   margin: 0;
-  padding: var(--space-2) max(var(--page-gutter), calc(100% - var(--page-gutter) - var(--chat-max))) var(--space-2) var(--page-gutter);
+  padding: var(--space-2) max(var(--page-gutter), calc(100% - var(--preview-inset) - var(--chat-max))) var(--space-2) var(--preview-inset);
   /* The transcript scrolls beneath the dock, so the dock draws an edge over it (#2217): a hairline,
      which dark themes need because --elev-1 barely shows on their canvas, and the shadow. */
   position: relative;

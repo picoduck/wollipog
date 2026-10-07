@@ -5,7 +5,7 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import { INBOX_SPLIT_RATIO_DEFAULT } from "../inbox.js";
 import { sessionsListRowsForRatio, type SessionsSplitGeometry } from "../sessions-split.js";
-import { SessionsSplitDivider } from "./SessionsSplitDivider.js";
+import { SessionsListWidthDivider, SessionsSplitDivider } from "./SessionsSplitDivider.js";
 
 const domWindow = new Window({ url: "http://localhost/inbox" });
 for (const [name, value] of Object.entries({
@@ -98,5 +98,89 @@ test("a drag the divider does not finish leaves no unsnapped height on the grid 
   await act(async () => { render(false); });
   assert.equal(grid.current!.style.getPropertyValue("--sessions-list-h"), "", "the stacked grid returns to whole rows");
   assert.deepEqual(stored, [], "an unfinished drag stores nothing");
+  await act(async () => root.unmount());
+});
+
+/** Preview Right's grid, with the list width InboxView renders on it. */
+function renderWidthDivider(width: number, stored: number[], mounted = true) {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const grid = createRef<HTMLDivElement>();
+  const render = (next: number, show = mounted) => root.render(
+    <div ref={grid} style={{ "--sessions-list-w": `${next}px` } as React.CSSProperties}>
+      {show && <SessionsListWidthDivider grid={grid} width={next} onWidthChange={(value) => stored.push(value)} />}
+    </div>,
+  );
+  return { container, root, grid, render };
+}
+
+test("Preview Right's divider names itself, reports pixels, and moves 16px from the keyboard (#2219)", async () => {
+  const stored: number[] = [];
+  const { container, root, render } = renderWidthDivider(400, stored);
+  await act(async () => { render(400); });
+  const divider = container.querySelector<HTMLElement>('[role="separator"]')!;
+  assert.equal(divider.getAttribute("aria-label"), "Resize List and Preview");
+  assert.equal(divider.getAttribute("aria-orientation"), "vertical");
+  assert.equal(divider.tabIndex, 0);
+  assert.deepEqual(["aria-valuenow", "aria-valuemin", "aria-valuemax"].map((name) => divider.getAttribute(name)), ["400", "280", "440"]);
+
+  const press = (key: string, init: { shiftKey?: boolean } = {}) => {
+    const event = new domWindow.KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...init });
+    act(() => { divider.dispatchEvent(event as never); });
+    return event.defaultPrevented;
+  };
+  for (const key of ["ArrowLeft", "ArrowRight", "Home", "End", "Enter"]) assert.equal(press(key), true, key);
+  assert.deepEqual(stored, [384, 416, 280, 440, 400]);
+  stored.length = 0;
+  assert.equal(press("ArrowLeft", { shiftKey: true }), false, "a modified arrow is not a resize");
+  assert.equal(press("ArrowUp"), false, "↑ and ↓ belong to the list");
+  assert.deepEqual(stored, []);
+
+  // At either bound a key keeps the column where it is.
+  await act(async () => { render(280); });
+  press("ArrowLeft");
+  await act(async () => { render(440); });
+  press("ArrowRight");
+  assert.deepEqual(stored, [280, 440]);
+
+  act(() => { divider.dispatchEvent(new domWindow.MouseEvent("dblclick", { bubbles: true }) as never); });
+  assert.equal(stored.at(-1), 400, "a double-click restores 400px");
+  await act(async () => root.unmount());
+});
+
+test("a release keeps the width React renders on the grid, and an unfinished drag leaves none (#2219)", async () => {
+  const stored: number[] = [];
+  const { container, root, grid, render } = renderWidthDivider(348, stored);
+  await act(async () => { render(348); });
+  const divider = container.querySelector<HTMLElement>('[role="separator"]')!;
+  // happy-dom lays nothing out, so the grid's left edge is 0 and clientX is the column's width.
+  const pointer = (type: string, clientX: number) => new domWindow.PointerEvent(type, {
+    bubbles: true, cancelable: true, pointerId: 3, button: 0, clientX,
+  });
+  const width = () => grid.current!.style.getPropertyValue("--sessions-list-w");
+
+  // A press and release that does not move: React renders the same width, so it must still be there.
+  act(() => { divider.dispatchEvent(pointer("pointerdown", 348) as never); });
+  act(() => { divider.dispatchEvent(pointer("pointerup", 348) as never); });
+  assert.equal(width(), "348px");
+  assert.deepEqual(stored, [348]);
+
+  // A drag follows the pointer within the bounds; a cancel puts the column back.
+  act(() => { divider.dispatchEvent(pointer("pointerdown", 348) as never); });
+  act(() => { divider.dispatchEvent(pointer("pointermove", 900) as never); });
+  assert.equal(width(), "440px", "never past 440px");
+  act(() => { divider.dispatchEvent(pointer("pointermove", 100) as never); });
+  assert.equal(width(), "280px", "never under 280px");
+  act(() => { divider.dispatchEvent(pointer("pointercancel", 100) as never); });
+  assert.equal(width(), "348px");
+  assert.deepEqual(stored, [348], "a cancelled drag stores nothing");
+
+  // The window narrows to the stacked layout mid-drag: the divider unmounts before any release.
+  act(() => { divider.dispatchEvent(pointer("pointerdown", 348) as never); });
+  act(() => { divider.dispatchEvent(pointer("pointermove", 300) as never); });
+  assert.equal(width(), "300px");
+  await act(async () => { render(348, false); });
+  assert.deepEqual(stored, [348], "an unfinished drag stores nothing");
   await act(async () => root.unmount());
 });
