@@ -284,7 +284,8 @@ if (filtersScenario) {
 
 // One card of every kind the Board draws (#2222): idle and running cards whose previews are raw
 // markdown, a permission request whose agent names its options Always Allow, Allow and Reject, a
-// question, a sign-in with two methods and a cancel, and a parent with four children.
+// question, a sign-in with two methods and a cancel, a running parent with four children, and an idle
+// parent with four children, whose card draws no status badge, so its chip has the line to itself.
 const cardsScenario = new URLSearchParams(location.search).has("cards");
 if (cardsScenario) {
   const now = Date.now();
@@ -338,6 +339,14 @@ if (cardsScenario) {
     session("s-child-4", "#603: Normalize the allowance window", "review", {
       ...claude, ...recent(12), status: "input_required", parentSessionId: "s-parent",
       pendingApproval: { requestId: "req-child-4", kind: "question", title: "Bump the protocol to 106?", options: [], questions: [] },
+    }),
+    session("s-idle-parent", "Plan the onboarding rewrite", "review", { ...claude, ...recent(20), role: "orchestrator" }),
+    session("s-idle-child-1", "#610: Draft the welcome flow", "queued", { ...claude, ...recent(20), parentSessionId: "s-idle-parent" }),
+    session("s-idle-child-2", "#611: Pick the sample project", "done", { ...claude, ...recent(50), status: "completed", parentSessionId: "s-idle-parent" }),
+    session("s-idle-child-3", "#612: Record the setup video", "done", { ...claude, ...recent(55), status: "completed", parentSessionId: "s-idle-parent" }),
+    session("s-idle-child-4", "#613: Name the first-run checklist", "review", {
+      ...claude, ...recent(15), status: "input_required", parentSessionId: "s-idle-parent",
+      pendingApproval: { requestId: "req-idle-child-4", kind: "question", title: "Keep the checklist to five steps?", options: [], questions: [] },
     }),
   );
 }

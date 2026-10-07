@@ -591,7 +591,7 @@ test.describe("with a mouse at 1440×900 (#2214)", () => {
 /** The cards scenario (#2222): one card of every kind, on the Board. */
 async function openCards(page: Page) {
   await page.goto(`${PAGE}?cards&path=${encodeURIComponent("/board")}`);
-  await expect(page.locator(".board .card")).toHaveCount(10);
+  await expect(page.locator(".board .card")).toHaveCount(15);
 }
 
 /** Each card's measured anatomy: line counts, wrapping buttons, and its transform. */
@@ -637,6 +637,7 @@ async function expectWholeStatusLines(page: Page) {
     return {
       id: card.dataset.sessionId!,
       parent: card.dataset.sessionId === "s-parent",
+      hasBadge: Boolean(badge),
       badgeClipped: badge ? badge.scrollWidth > badge.clientWidth + 0.5 || badge.getBoundingClientRect().right > line.right + 0.5 : false,
       hasStrip: Boolean(strip),
       // On the line and whole, or wrapped below it, where the line clips it.
@@ -725,6 +726,13 @@ test.describe("Board cards at 1440×900 (#2222)", () => {
     for (const card of await cardGeometry(page)) expect(card.wrappedButtons, `${card.id}'s buttons`).toEqual([]);
     const narrow = await expectWholeStatusLines(page);
     expect(narrow.find((line) => line.parent)!.chipDotsOnly, "a 230px parent card keeps only the chip's dots").toBe(true);
+    // An idle parent draws no badge, so its chip has the whole line, which still cannot hold the
+    // rollup: measured uncapped, it keeps its dots rather than ellipsizing its words and calling that
+    // a fit (#2222's review CR-5.1), and is still named by the whole rollup.
+    const idleParent = narrow.find((line) => line.id === "s-idle-parent")!;
+    expect({ badge: idleParent.hasBadge, dotsOnly: idleParent.chipDotsOnly, name: idleParent.chipName },
+      "a 230px parent card with no badge keeps only the chip's dots")
+      .toEqual({ badge: false, dotsOnly: true, name: "4 Children · 1 Awaiting Input" });
     // Nothing on a card's status line crosses the card's edge.
     const overflowing = await page.locator(".board .card").evaluateAll((cards) => cards.filter((card) => {
       const edge = card.getBoundingClientRect().right;
