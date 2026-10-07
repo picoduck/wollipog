@@ -668,10 +668,11 @@ test.describe("Board cards at 1440×900 (#2222)", () => {
     expect(await idle.evaluate((card) => getComputedStyle(card).transform), "hovering moves nothing").toBe("none");
     expect(await idle.boundingBox()).toEqual(box);
 
-    // Cards in one column without a request are the same height whatever their status.
-    const heights = await page.locator(".column.col-running .card").evaluateAll((cards) =>
-      cards.map((card) => Math.round(card.getBoundingClientRect().height)));
-    expect(new Set(heights).size, `running column heights ${heights.join(", ")}`).toBe(1);
+    // Cards in one column without a request differ in height only by their title's lines, whatever
+    // their status: the rest of each card is the same height. (A title's wrap depends on the fonts.)
+    const heights = await page.locator(".column.col-running .card").evaluateAll((cards) => cards.map((card) =>
+      Math.round(card.getBoundingClientRect().height - card.querySelector(".card-title")!.getBoundingClientRect().height)));
+    expect(new Set(heights).size, `running column heights without titles ${heights.join(", ")}`).toBe(1);
   });
 
   test("a permission card shows exactly Approve and Deny at equal width, and Approve answers the request", async ({ page }) => {
