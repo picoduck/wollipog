@@ -4,7 +4,7 @@
  */
 const MAX_INPUT_LENGTH = 2_000;
 /** Markdown's backslash-escapable punctuation. */
-const ESCAPED = /\\([\\`*_{}[\]()#+\-.!|>~<])/g;
+const ESCAPABLE = "\\`*_{}[]()#+-.!|>~<";
 const TAG_NAMES = "a|b|i|u|s|em|strong|code|kbd|pre|sub|sup|p|div|span|details|summary|ul|ol|li|table|thead|tbody|tr|td|th|h[1-6]|blockquote";
 /**
  * The HTML an agent's markdown actually carries, in lowercase as agents write it. An opening tag
@@ -13,24 +13,61 @@ const TAG_NAMES = "a|b|i|u|s|em|strong|code|kbd|pre|sub|sup|p|div|span|details|s
  */
 const HTML_TAG = new RegExp(`(?<!\\w)<(?:${TAG_NAMES})\\b[^>]*>|</(?:${TAG_NAMES})>|<(?:br|hr|img)\\b[^>]*>`, "g");
 const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: "\"", "#39": "'", apos: "'", nbsp: " " };
-const CODE_SPAN = /(`+)([\s\S]*?)\1(?!`)/g;
+/** A placeholder's marks, private-use characters. Input holding either keeps it as a placeholder too. */
+const OPEN = "";
+const CLOSE = "";
+const PLACEHOLDER = /(\d+)/g;
 
 /**
- * One line of inline markdown as text. Code keeps its contents exactly as written, including a span
- * the 240-character cut left open; an escaped character is kept as itself. Both are set aside as
- * placeholders first, so emphasis around them still pairs up. Links and images keep their text.
- * Emphasis and strikethrough markers go only in pairs, so an identifier with a trailing underscore
- * ("name_"), snake_case, `**kwargs` and arithmetic ("2 * 3") keep every character.
+ * One line, in a single pass, as the text whose markdown is stripped, with a placeholder for each
+ * thing kept exactly as written: a code span's contents (one the 240-character cut left open runs to
+ * the end of the line), an escaped character, and either placeholder mark if the input holds one.
+ * An escaped backtick is a character, so it never opens a span. In a table row an escaped pipe is a
+ * pipe even inside code, as GFM renders it.
  */
-function plainLine(line: string): string {
+function protect(line: string, table: boolean): { text: string; kept: string[] } {
   const kept: string[] = [];
-  const keep = (text: string) => `${kept.push(text) - 1}`;
-  let text = line
-    .replace(CODE_SPAN, (_, _fence: string, code: string) => keep(code.trim()))
-    .replace(ESCAPED, (_, char: string) => keep(char));
-  const open = text.indexOf("`");
-  if (open >= 0) text = text.slice(0, open) + keep(text.slice(open).replace(/^`+/, ""));
-  return text
+  const keep = (value: string) => `${OPEN}${kept.push(value) - 1}${CLOSE}`;
+  let text = "";
+  let index = 0;
+  while (index < line.length) {
+    const char = line[index]!;
+    if (char === "\\" && index + 1 < line.length && ESCAPABLE.includes(line[index + 1]!)) {
+      text += keep(line[index + 1]!);
+      index += 2;
+    } else if (char === "`") {
+      let opened = index;
+      while (line[opened] === "`") opened += 1;
+      const size = opened - index;
+      // The span closes at the next run of exactly as many backticks.
+      let close = -1;
+      for (let at = line.indexOf("`", opened); at >= 0 && close < 0;) {
+        let run = at;
+        while (line[run] === "`") run += 1;
+        if (run - at === size) close = at;
+        else at = line.indexOf("`", run);
+      }
+      const code = line.slice(opened, close < 0 ? line.length : close);
+      text += keep((table ? code.replace(/\\\|/g, "|") : code).trim());
+      index = close < 0 ? line.length : close + size;
+    } else {
+      text += char === OPEN || char === CLOSE ? keep(char) : char;
+      index += 1;
+    }
+  }
+  return { text, kept };
+}
+
+/**
+ * One line of inline markdown as text. Links and images keep their text. Emphasis and
+ * strikethrough markers go only in pairs, so an identifier with a trailing underscore ("name_"),
+ * snake_case, `**kwargs` and arithmetic ("2 * 3") keep every character; a placeholder sits between a
+ * pair like any other character, so emphasis around code still pairs up.
+ */
+function plainLine(line: string, table: boolean): string {
+  const { text, kept } = protect(line, table);
+  const cells = table ? text.replace(/^\s*\||\|\s*$/g, "").replace(/\s*\|\s*/g, "  ") : text;
+  return cells
     .replace(/!\[([^\]]*)\](?:\([^)]*\)?|\[[^\]]*\])?/g, "$1")
     .replace(/\[\^[^\]]*\]/g, "")
     .replace(/\[([^\]]*)\](?:\([^)]*\)?|\[[^\]]*\])/g, "$1")
@@ -44,7 +81,7 @@ function plainLine(line: string): string {
     .replace(/(^|[^\w*])\*(?=[^\s*])(.+?)(?<=[^\s*])\*(?![\w*])/g, "$1$2")
     .replace(/(^|[^\w])_(?=[^\s_])(.+?)(?<=[^\s_])_(?!\w)/g, "$1$2")
     .replace(/&(amp|lt|gt|quot|#39|apos|nbsp);/g, (_, name: string) => ENTITIES[name]!)
-    .replace(/(\d+)/g, (_, index: string) => kept[Number(index)]!);
+    .replace(PLACEHOLDER, (_, index: string) => kept[Number(index)]!);
 }
 
 /**
@@ -78,8 +115,7 @@ export function plainTextPreview(markdown: string | null | undefined): string {
       .replace(/^\s*(?:[-*+]|\d{1,9}[.)])\s+(?:\[[ xX]\]\s+)?/, "");
     const heading = /^\s{0,3}#{1,6}(?:\s+|$)/.exec(line);
     if (heading) line = line.slice(heading[0].length).replace(/\s+#+\s*$/, "");
-    if (/^\s*\|/.test(line)) line = line.replace(/^\s*\||\|\s*$/g, "").replace(/\s*\|\s*/g, "  ");
-    lines.push(plainLine(line));
+    lines.push(plainLine(line, /^\s*\|/.test(line)));
   }
   return lines.join(" ").replace(/\s+/g, " ").trim();
 }

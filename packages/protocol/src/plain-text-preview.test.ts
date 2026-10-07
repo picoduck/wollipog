@@ -53,10 +53,22 @@ test("a construct the 240-character cut ended inside still reads as text", () =>
   // An emphasis the cut left open keeps its marker rather than guess: "**kwargs" looks the same.
   assert.equal(plainTextPreview("This is **important"), "This is **important");
   assert.equal(plainTextPreview("Read `__init__.py"), "Read __init__.py");
+  assert.equal(plainTextPreview("Run `rg \\["), "Run rg \\[");
+});
+
+test("an escaped backtick is a character, not the start of code", () => {
+  assert.equal(plainTextPreview("Use \\` as a literal backtick, then `__init__.py`."), "Use ` as a literal backtick, then __init__.py.");
+});
+
+test("the placeholder marks are kept when the input itself holds them", () => {
+  assert.equal(plainTextPreview("0"), "0");
+  assert.equal(plainTextPreview("0 and `real`"), "0 and real");
 });
 
 test("tables lose their rules and pipes, and HTML its common tags", () => {
   assert.equal(plainTextPreview("| Name | Status |\n| --- | :---: |\n| api | passing |"), "Name Status api passing");
+  // An escaped pipe is part of its cell, inside code too, as GFM renders it.
+  assert.equal(plainTextPreview("| cmd | note |\n| --- | --- |\n| `a\\|b` | x \\| y |"), "cmd note a|b x | y");
   assert.equal(plainTextPreview("Line one<br>line two <strong>done</strong>"), "Line one line two done");
   assert.equal(plainTextPreview("Returns Vec<String> or Option<T>"), "Returns Vec<String> or Option<T>");
   assert.equal(plainTextPreview("Changed the type from Box<T> to Box<U> and Pair<A, B>"),
