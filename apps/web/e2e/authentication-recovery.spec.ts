@@ -315,28 +315,6 @@ test.describe("touch phone", () => {
       await page.keyboard.press("Escape");
     }
   });
-
-  test("Submit Code tapped right after typing the Authorization Code takes the tap, with the typed code (#2675)", async ({ page }) => {
-    const card = await open(page, "scenario=signing-in&width=390&height=844", "Signing In — Claude Code");
-    const field = card.getByLabel("Authorization Code");
-    // The focused field reads as "the software keyboard is up": the dock caps at 40% and the tab bar
-    // hides. A tap that moved focus off the field would regrow the dock under the finger (#2205).
-    await field.fill("auth-code-2675");
-    await expect(field).toBeFocused();
-    await card.getByRole("button", { name: "Submit Code" }).tap();
-    await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_AUTH_RECOVERY_E2E__.codes())).toEqual(["auth-code-2675"]);
-  });
-
-  test("a docked card's primary tapped right after typing in the composer takes the tap (#2675)", async ({ page }) => {
-    const card = await open(page, "scenario=email&width=390&height=844");
-    const composer = page.getByRole("combobox", { name: /^Messages you send now wait/ });
-    await composer.tap();
-    await composer.fill("Checking the account first.");
-    await expect(composer).toBeFocused();
-    await card.getByRole("button", { name: "Use Current Account" }).tap();
-    await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_AUTH_RECOVERY_E2E__.decisions()))
-      .toEqual([{ requestId: "provider-auth:recovery-e2e", optionId: "auth:accept-current" }]);
-  });
 });
 
 for (const [width, height] of [[1440, 900], [390, 844]] as const) {
@@ -375,3 +353,29 @@ for (const [width, height] of [[1440, 900], [390, 844]] as const) {
     expect(right).toBeLessThanOrEqual(width + 0.5);
   });
 }
+
+test.describe("touch phone, typing then tapping the card (#2675)", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  test("Submit Code tapped right after typing the Authorization Code takes the tap, with the typed code", async ({ page }) => {
+    const card = await open(page, "scenario=signing-in&width=390&height=844", "Signing In — Claude Code");
+    const field = card.getByLabel("Authorization Code");
+    // The focused field reads as "the software keyboard is up": the dock caps at 40% and the tab bar
+    // hides. A tap that moved focus off the field would regrow the dock under the finger (#2205).
+    await field.fill("auth-code-2675");
+    await expect(field).toBeFocused();
+    await card.getByRole("button", { name: "Submit Code" }).tap();
+    await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_AUTH_RECOVERY_E2E__.codes())).toEqual(["auth-code-2675"]);
+  });
+
+  test("a docked card's primary tapped right after typing in the composer takes the tap", async ({ page }) => {
+    const card = await open(page, "scenario=email&width=390&height=844");
+    const composer = page.getByRole("combobox", { name: /^Messages you send now wait/ });
+    await composer.tap();
+    await composer.fill("Checking the account first.");
+    await expect(composer).toBeFocused();
+    await card.getByRole("button", { name: "Use Current Account" }).tap();
+    await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_AUTH_RECOVERY_E2E__.decisions()))
+      .toEqual([{ requestId: "provider-auth:recovery-e2e", optionId: "auth:accept-current" }]);
+  });
+});
