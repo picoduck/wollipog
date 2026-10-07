@@ -245,8 +245,7 @@ test.describe("at 1440×900", () => {
     const withNotice = await split(page);
     expect(withNotice.line).toBe(without.line);
     expect(withNotice.whole).toBeLessThan(6);
-    // The notice takes whole rows, so none is cut at the divider (#2221).
-    expect(withNotice.cut).toBe(0);
+    // Whole rows with a notice, and where the leftover goes, are measured in sessions-list-notices.spec.ts (#2221).
   });
 
   test("F6 cycles the list and the preview, and Escape in the preview returns to the selected row", async ({ page }) => {

@@ -25,6 +25,8 @@ const shownTitle = (page: Page): Locator => slot(page).locator(".notice-title");
 type Split = {
   /** The divider's hairline: the list track's bottom edge. */
   line: number;
+  /** The first rendered row's top edge. */
+  firstTop: number;
   /** Rows wholly between the list's scroll top and the line. */
   whole: number;
   /** Rows the line passes through. */
@@ -43,29 +45,40 @@ async function split(page: Page): Promise<Split> {
     const scroller = list.getBoundingClientRect();
     const listHead = view.querySelector<HTMLElement>(".inbox-list-head")!.getBoundingClientRect();
     const line = pane.bottom;
+    // What shows of the list ends at the scroll box or the divider, whichever comes first; a row the
+    // virtualizer keeps past the scroll box is clipped, not cut.
+    const edge = Math.min(line, scroller.bottom);
     const rows = [...list.querySelectorAll<HTMLElement>(".inbox-row-shell")].map((row) => row.getBoundingClientRect());
-    const whole = rows.filter((row) => row.top >= scroller.top - 0.5 && row.bottom <= line + 0.5);
+    const whole = rows.filter((row) => row.top >= scroller.top - 0.5 && row.bottom <= edge + 0.5);
     return {
       line,
       whole: whole.length,
-      cut: rows.filter((row) => row.top < line - 0.5 && row.bottom > line + 0.5).length,
+      cut: rows.filter((row) => row.top < edge - 0.5 && row.bottom > edge + 0.5).length,
       lastBottom: Math.max(...whole.map((row) => row.bottom)),
+      firstTop: Math.min(...rows.map((row) => row.top)),
       rowHeight: Number.parseFloat(getComputedStyle(view).getPropertyValue("--row-h-2")),
-      headBottom: listHead.bottom,
+      // An empty head is not displayed; the rows then start at the list's own top.
+      headBottom: listHead.height > 0 ? listHead.bottom : scroller.top,
       listTop: scroller.top,
     };
   });
 }
 
-/** Whole rows only, ending at the divider, which is where it is without a notice. */
+/** Whole rows only, starting right under the list head and ending within one row of the divider,
+ * which is where it is without a notice. The space a notice leaves of its last row is under the rows. */
 async function expectWholeRowsAt(page: Page, line: number): Promise<Split> {
   await expect.poll(async () => {
     const measured = await split(page);
-    return { line: measured.line, cut: measured.cut, endsAtLine: Math.abs(measured.lastBottom - measured.line) < 0.5 };
-  }, { message: "the divider stays, no row is cut and the rows end at it" }).toEqual({ line, cut: 0, endsAtLine: true });
-  const measured = await split(page);
-  expect(measured.listTop).toBeGreaterThanOrEqual(measured.headBottom - 0.5);
-  return measured;
+    return {
+      line: measured.line,
+      cut: measured.cut,
+      // The list's own 8px top pad is the gap between the head and the first row.
+      startsUnderHead: Math.abs(measured.firstTop - (measured.headBottom + 8)) < 0.5,
+      leftoverUnderRows: measured.line - measured.lastBottom > -0.5 && measured.line - measured.lastBottom < measured.rowHeight,
+    };
+  }, { message: "the divider stays, no row is cut, the rows start under the head and the leftover is under them" })
+    .toEqual({ line, cut: 0, startsUnderHead: true, leftoverUnderRows: true });
+  return split(page);
 }
 
 for (const viewport of [

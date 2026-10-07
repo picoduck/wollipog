@@ -1444,8 +1444,9 @@ export function InboxView({
     return () => observer.disconnect();
   }, [stacked]);
   // The list head (the notice slot, the new-order line, Reconnecting…) takes whole rows of the
-  // stacked list's height (#2221): the rows under it keep to whole rows and end at the divider, which
-  // stays where the stored ratio puts it. What the head leaves of its last row is space under it.
+  // stacked list's height (#2221): the rows start right under it and keep to whole rows, and the
+  // divider stays where the stored ratio puts it. What the head leaves of its last row is space
+  // under the last whole row, above the divider.
   const listHeadRef = useRef<HTMLDivElement>(null);
   const [listHeadHeight, setListHeadHeight] = useState(0);
   useLayoutEffect(() => {

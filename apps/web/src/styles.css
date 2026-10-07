@@ -12063,16 +12063,16 @@ body.shell-dock-dragging * {
 }
 .sessions-md .inbox-list { padding-top: var(--space-2); }
 /* Stacked, the list head takes whole rows (--sessions-list-head-rows, which InboxView measures) and
-   the list keeps the rest from the bottom up, so its rows end at the divider, none is cut and the
-   divider never moves for a notice (#2221). One row at least: a head taller than the list leaves
-   the pane clipping the list rather than the notice. */
+   the list keeps the rest as whole rows right under the head, so none is cut and the divider never
+   moves for a notice (#2221). What the head leaves of its last row is space under the list's last
+   row, above the divider, never between the notice and the rows. One row at least: a head taller
+   than the list leaves the pane clipping the list rather than the notice. */
 .sessions-md:not([data-layout="right"]) .inbox-list {
   flex: none;
   height: max(
     calc(var(--space-2) + var(--row-h-2)),
     calc(var(--sessions-list-h) - var(--sessions-list-head-rows, 0) * var(--row-h-2))
   );
-  margin-top: auto;
 }
 /* The divider (§6.3): the hairline under the list's last row, a hit band centred on it, and a grip
    that is always visible, since a rule between two full-width panes does not read as movable. Hover

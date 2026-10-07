@@ -2286,8 +2286,10 @@ is unused. While reconnecting the slot is hidden, since what it would show is st
   slot reads "New activity changed the order." with a ghost **Apply**, which the sentence describes.
   Nothing in the header or the tab row moves for it.
 - **Budget.** The slot, the order line and Reconnecting… are the list head. Stacked, the head takes
-  whole rows of the list's height (§6.3): the divider keeps its stored position, the rows under the
-  head end at it without a cut row, and what the head leaves of its last row is space under it.
+  whole rows of the list's height (§6.3): the divider keeps its stored position, the rows start right
+  under the head at the list's 8px pad, none is cut, and what the head leaves of its last row is space
+  under the last whole row, just above the divider. Nothing is reserved for the order line while it
+  is hidden: the rows move down when it appears, and no header or tab-row control does.
 
 **Request dock.** Pending permission requests and questions dock directly above the composer, in the
 notice slot, in attention priority order. The dock is the only amber surface for a request, and it
