@@ -18,7 +18,7 @@ import {
   authenticationAccountChoiceApplies,
   authenticationRecoveryPanelApplies,
 } from "./AuthenticationRecoveryPanel.js";
-import { textBefore } from "../dom-test-assertions.js";
+import { assertNoDomNode, textBefore } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/session/session-auth" });
 domWindow.localStorage.setItem("wollipog.hide-account-emails", "true");
@@ -343,97 +343,18 @@ test("while a sign-in runs only the session's account is a fact, and the sign-in
   }
 });
 
-test("the other accounts list with their status and next action, and selection names the card", async () => {
+test("a refused account choice elsewhere reads the identity again", async () => {
   const api = client();
   const view = await render(
-    <AuthenticationRecoveryPanel session={session()} approval={approval} runner={runner()} runnerOnline choosingAccount />,
+    <AuthenticationRecoveryPanel session={session()} approval={approval} runner={runner()} runnerOnline />,
     api.value,
   );
   try {
-    const rows = [...view.container.querySelectorAll<HTMLElement>(".auth-recovery-account")];
-    assert.deepEqual(rows.map((row) => row.dataset.availability), ["available", "sign_in_required", "status_unknown"],
-      "the current account is not offered as an alternative");
-    assert.match(rows[0]!.textContent ?? "", /Claude Personal.*Signed In/);
-    assert.match(rows[1]!.textContent ?? "", /Claude Old.*Sign-In Required.*signed out/);
-    assert.match(rows[2]!.textContent ?? "", /Claude Maybe.*Status Unknown/);
-    assert.equal(view.container.querySelector(".atag")?.outerHTML ?? null, null);
-    assert.equal(view.container.querySelector(".auth-recovery-account .primary")?.outerHTML ?? null, null,
-      "the card's footer holds its one primary");
-    assert.ok(view.button("Check and Use Claude Old"), "a signed-out account can still be rechecked");
-    assert.ok(view.button("Check and Use Claude Maybe"));
-
-    const signIn = [...rows[1]!.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent?.trim() === "Sign In");
-    assert.ok(signIn, "a Machine manager can start sign-in for a signed-out account from the card");
-    await act(async () => { signIn.click(); await tick(); });
-    assert.deepEqual(api.calls.signIns, [{ accountId: "claude-old" }]);
-
-    const use = view.button("Use Claude Personal");
-    assert.ok(use);
-    await act(async () => { use.click(); await tick(); });
-    assert.deepEqual(api.calls.selections, [{
-      requestId: CARD,
-      providerAccountId: "claude-personal",
-      expectedProviderAccountId: "claude-work",
-    }]);
-  } finally {
-    await view.cleanup();
-  }
-});
-
-test("email-shaped account labels stay masked and are named by distinct hidden ordinals", async () => {
-  const api = client();
-  const emailLabels = { ...api.value, authenticationAccounts: async () => ({ accounts: [
-    { id: "claude-work", label: "work@example.test", authStatus: "authenticated" as const, availability: "current" as const },
-    { id: "claude-a", label: "alex@example.test", authStatus: "authenticated" as const, availability: "available" as const },
-    { id: "claude-b", label: "blair@example.test", authStatus: "unknown" as const, availability: "status_unknown" as const },
-  ] }) } as ApiClient;
-  const view = await render(
-    <AuthenticationRecoveryPanel
-      session={session({ providerAccountLabel: "work@example.test" })}
-      approval={approval}
-      runner={runner()}
-      runnerOnline
-      choosingAccount
-    />,
-    emailLabels,
-  );
-  try {
-    const html = view.container.innerHTML;
-    for (const label of ["work@example.test", "alex@example.test", "blair@example.test"]) {
-      assert.equal(html.includes(label), false, `${label} is absent before reveal`);
-    }
-    assert.ok(view.button("Use Hidden Account 1"));
-    assert.ok(view.button("Check and Use Hidden Account 2"));
-
-    // #1954: no mask stands alone. Each says what it hides and follows a visible label.
-    const masks = [...view.container.querySelectorAll(".pid-mask")];
-    assert.ok(masks.every((mask) => mask.textContent === "Email Hidden"));
-    for (const label of ["This Session Uses", "Signed In Now"]) {
-      const value = fact(view.container, label)!;
-      assert.equal(textBefore(value.parentElement!, value.querySelector(".pid-mask")!), label);
-    }
-    const rows = [...view.container.querySelectorAll(".auth-recovery-account")];
-    assert.equal(rows.length, 2);
-    for (const row of rows) assert.equal(textBefore(row, row.querySelector(".pid-mask")!), "Account");
-    assert.equal(masks.length, 4, "the reported email, the configured label, and both other accounts");
-    assert.equal(view.container.querySelector("button[title]")?.outerHTML ?? null, null, "no button has a title");
-  } finally {
-    await view.cleanup();
-  }
-});
-
-test("a viewer who cannot manage the Machine is told who can sign the account in", async () => {
-  const api = client();
-  const view = await render(
-    <AuthenticationRecoveryPanel session={session()} approval={approval} runner={runner({ canManage: false })} runnerOnline
-      choosingAccount />,
-    api.value,
-  );
-  try {
-    const row = view.container.querySelector<HTMLElement>('[data-availability="sign_in_required"]');
-    assert.match(row?.textContent ?? "", /Ask a machine owner or organization admin to sign in to it/);
-    assert.equal([...row!.querySelectorAll("button")].some((button) => button.textContent?.trim() === "Sign In"), false);
+    assert.equal(api.calls.identity, 1);
+    await view.draw(<AuthenticationRecoveryPanel session={session()} approval={approval} runner={runner()} runnerOnline refreshKey={1} />);
+    assert.equal(api.calls.identity, 2);
+    assertNoDomNode(view.container.querySelector(".auth-recovery-accounts"),
+      "the Machine's other accounts are not on the card (#2208)");
   } finally {
     await view.cleanup();
   }
@@ -463,36 +384,14 @@ test("an account change while the card is open discards the old identity and fet
   }
 });
 
-test("a refused selection explains itself and refreshes when the card or account changed", async () => {
-  const api = client({
-    select: async () => {
-      throw new ApiError("The session's configured account changed while this card was open.", 409, "account_changed");
-    },
-  });
-  const view = await render(
-    <AuthenticationRecoveryPanel session={session()} approval={approval} runner={runner()} runnerOnline choosingAccount />,
-    api.value,
-  );
-  try {
-    await act(async () => { view.button("Use Claude Personal")!.click(); await tick(); await tick(); });
-    const row = view.container.querySelector<HTMLElement>('[data-availability="available"]');
-    assert.match(row?.querySelector('[role="alert"]')?.textContent ?? "", /configured account changed/,
-      "the refusal renders in the chosen account's row, beside the control that was used");
-    assert.equal(api.calls.identity, 2);
-  } finally {
-    await view.cleanup();
-  }
-});
-
 test("offline and older runners keep the card usable with clear guidance and no identity request", async () => {
   const offline = client();
   const offlineView = await render(
-    <AuthenticationRecoveryPanel session={session()} approval={approval} runner={runner()} runnerOnline={false} choosingAccount />,
+    <AuthenticationRecoveryPanel session={session()} approval={approval} runner={runner()} runnerOnline={false} />,
     offline.value,
   );
   try {
     assert.equal(fact(offlineView.container, "Signed In Now")!.textContent, "Unknown while the runner is offline.");
-    assert.match(offlineView.container.textContent ?? "", /The runner is offline\. Accounts will load when it reconnects\./);
     assert.equal(offline.calls.identity + offline.calls.accounts, 0);
   } finally {
     await offlineView.cleanup();

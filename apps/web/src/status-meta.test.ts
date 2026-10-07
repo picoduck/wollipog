@@ -140,6 +140,7 @@ const TABLE: readonly Row[] = [
   ["provider_account", "signed_in", "Signed In", "success"],
   ["provider_account", "sign_in_required", "Sign-In Required", "warning"],
   ["provider_account", "signed_out", "Signed Out", "neutral"],
+  ["provider_account", "status_unknown", "Status Unknown", "neutral"],
   // Transcript share link
   ["share", "active", "Active", "success"],
   ["share", "expired", "Expired", "neutral"],

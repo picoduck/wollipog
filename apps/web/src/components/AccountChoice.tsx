@@ -1,4 +1,4 @@
-import React from "react";
+import React, { type ReactNode } from "react";
 import type { SubscriptionUsageBucket } from "@wollipog/protocol";
 import { maskedAccountTitles } from "../personal-identifiers.js";
 import { AccountIdentifierRevealButton } from "./AccountIdentifier.js";
@@ -94,6 +94,14 @@ export interface AccountRowAccount {
   stale?: boolean;
   /** Why the account cannot be chosen, shown as the row's visible second line. */
   disabledReason?: string;
+  /** The account's state beside its title, as an inline status badge (§11.2 Provider account). */
+  status?: ReactNode;
+  /** A second line that says what to do with the account; it takes the meters' place. */
+  note?: string;
+  /** A refused choice of this account, as the row's field error (§8.5). */
+  error?: string;
+  /** One control at the row's end (Sign In). */
+  action?: ReactNode;
 }
 
 /** The session's own account, which leads the list. */
@@ -110,17 +118,20 @@ export interface CurrentAccountRow {
 }
 
 /** Row titles for a revealed or masked list: the listed accounts are numbered among themselves, so
- * the current row never shifts their numbers. */
+ * the current row never shifts their numbers. `maskedTitles` fixes each account's masked title by id
+ * instead, for a list whose accounts can leave while it is open: the rest keep their numbers. */
 export function accountRowTitles(
   current: CurrentAccountRow | null,
   accounts: readonly AccountRowAccount[],
   revealed: boolean,
+  maskedTitles?: ReadonlyMap<string, string>,
 ): { current: string | null; accounts: string[] } {
+  const masked = maskedAccountTitles(accounts.map((account) => account.label));
   return {
     current: current ? (revealed ? current.label : maskedAccountTitles([current.label])[0]!) : null,
     accounts: revealed
       ? accounts.map((account) => account.label)
-      : maskedAccountTitles(accounts.map((account) => account.label)),
+      : accounts.map((account, index) => maskedTitles?.get(account.id) ?? masked[index]!),
   };
 }
 
@@ -132,7 +143,9 @@ export function accountRowTitles(
  * "Removed Account", never the stored label, says what that means, and has no meters, because a
  * removed account has no usage to show.
  */
-export function accountRowOption({ id, title, current = false, removedFrom, buckets = [], stale = false, disabled = false, disabledReason }: {
+export function accountRowOption({
+  id, title, current = false, removedFrom, buckets = [], stale = false, disabled = false, disabledReason, status, note, error, action,
+}: {
   id: string;
   /** The row's title as it may be shown: masked or revealed by the caller. */
   title: string;
@@ -143,17 +156,25 @@ export function accountRowOption({ id, title, current = false, removedFrom, buck
   stale?: boolean;
   disabled?: boolean;
   disabledReason?: string;
+  status?: ReactNode;
+  note?: string;
+  error?: string;
+  action?: ReactNode;
 }): ChoiceRowOption<string> {
   const removed = removedFrom !== undefined;
   return {
     value: id,
     title: removed ? "Removed Account" : title,
-    status: current ? <StatusBadge tone="neutral" noDot label="Current" /> : undefined,
+    status: current ? <StatusBadge tone="neutral" noDot label="Current" /> : status,
     description: removed
       ? `Removed from ${removedFrom}. This session keeps its sign-in until you switch.`
-      : buckets.length > 0 || stale ? <AccountUsageMeters buckets={buckets} stale={stale} /> : undefined,
+      : note ?? (buckets.length > 0 || stale ? <AccountUsageMeters buckets={buckets} stale={stale} /> : undefined),
     disabled: disabled || disabledReason !== undefined,
     disabledReason,
+    error,
+    action,
+    // The row's input carries its account, so a caller can move focus to a refused row.
+    inputData: { "data-account-id": id },
   };
 }
 
@@ -161,7 +182,9 @@ export function accountRowOption({ id, title, current = false, removedFrom, buck
  * The account rows: the session's current account first, then every other account, as one radio
  * group. Switch Account and Choose Another Account share it, so there is one chooser.
  */
-export function AccountRows({ id, label = "Accounts", current, accounts, value, onChange, revealed, disabled = false }: {
+export function AccountRows({
+  id, label = "Accounts", current, accounts, value, onChange, revealed, maskedTitles, disabled = false,
+}: {
   id?: string;
   /** The group's accessible name. */
   label?: string;
@@ -170,10 +193,12 @@ export function AccountRows({ id, label = "Accounts", current, accounts, value, 
   value: string | null;
   onChange: (id: string) => void;
   revealed: boolean;
+  /** Each account's masked title by id, when the caller keeps them stable (`accountRowTitles`). */
+  maskedTitles?: ReadonlyMap<string, string>;
   /** Every row refuses a change, as while a choice is being applied. */
   disabled?: boolean;
 }) {
-  const titles = accountRowTitles(current, accounts, revealed);
+  const titles = accountRowTitles(current, accounts, revealed, maskedTitles);
   const options = [
     ...(current ? [accountRowOption({
       id: current.id,
@@ -191,6 +216,10 @@ export function AccountRows({ id, label = "Accounts", current, accounts, value, 
       stale: account.stale,
       disabled,
       disabledReason: account.disabledReason,
+      status: account.status,
+      note: account.note,
+      error: account.error,
+      action: account.action,
     })),
   ];
   return (

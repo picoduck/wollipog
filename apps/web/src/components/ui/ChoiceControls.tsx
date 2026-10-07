@@ -18,6 +18,7 @@ import {
   useDismissiblePopover,
 } from "../interactions.js";
 import { MOBILE_BREAKPOINT_PX } from "../useIsMobile.js";
+import { FieldError } from "../FieldError.js";
 
 /** An option's label and the second lines under it: its description and, when unavailable, why. */
 interface ListboxOptionText {
@@ -139,13 +140,33 @@ export function InlineListbox<T>({
  * check and the radio dot are siblings the stylesheet reveals from `input:checked`, which is how
  * the drawn state and the announced state come from one value.
  */
-function ChoiceMark({ type, className, ...input }: {
+function ChoiceMark({ type, className, inputRef, onRemovedWhileFocused, ...input }: {
   type: "checkbox" | "radio";
   className?: string;
+  /** The input, for an owner that moves focus to it. */
+  inputRef?: React.MutableRefObject<HTMLInputElement | null>;
+  /** Called as the input is unmounted while it still has focus: the commit that removes it, before
+   * the browser drops focus to <body>. */
+  onRemovedWhileFocused?: () => void;
 } & Omit<React.InputHTMLAttributes<HTMLInputElement>, "type" | "className">) {
+  const ownRef = useRef<HTMLInputElement | null>(null);
+  const removedRef = useRef(onRemovedWhileFocused);
+  removedRef.current = onRemovedWhileFocused;
+  // Layout cleanups of a deleted subtree run before its DOM is removed, so focus is still readable.
+  useLayoutEffect(() => () => {
+    const node = ownRef.current;
+    if (node && node.ownerDocument.activeElement === node) removedRef.current?.();
+  }, []);
   return (
     <span className={`${type === "checkbox" ? "checkbox-mark" : "radio-mark"}${className ? ` ${className}` : ""}`}>
-      <input type={type} {...input} />
+      <input
+        type={type}
+        {...input}
+        ref={(node) => {
+          ownRef.current = node;
+          if (inputRef) inputRef.current = node;
+        }}
+      />
       {type === "checkbox"
         ? <CheckIcon size={14} className="checkbox-check" />
         : <span className="radio-dot" aria-hidden="true" />}
@@ -424,6 +445,17 @@ export interface ChoiceRowOption<T extends string> {
   disabled?: boolean;
   /** Why it is disabled. Rendered as the row's second line — §11.3: never hide a setting that could exist. */
   disabledReason?: string;
+  /**
+   * A field error for this row alone (§8.5): one sentence in place of its second lines, named by
+   * its input's `aria-describedby`, with the input `aria-invalid`. A refused choice says why where
+   * it was made.
+   */
+  error?: string;
+  /**
+   * One control at the row's end, such as Sign In on an account that is signed out. It sits outside
+   * the row's label, which may hold no second control, so pressing it never checks the row.
+   */
+  action?: ReactNode;
   /** `data-*` attributes for the row's input, for a caller that finds its controls again (the
    * question card restores focus to the same choice when it moves, #2196). */
   inputData?: Readonly<Record<`data-${string}`, string>>;
@@ -464,6 +496,8 @@ export function ChoiceRow({
   meta,
   disabled,
   disabledReason,
+  error,
+  action,
   inputData,
   compact,
   show,
@@ -484,8 +518,23 @@ export function ChoiceRow({
   const titleId = `${ids}-title`;
   const descriptionId = `${ids}-desc`;
   const reasonId = `${ids}-reason`;
-  const showReason = Boolean(disabled && disabledReason);
-  const describedBy = [
+  const errorId = `${ids}-error`;
+  // Gaining or losing `action` changes the row's root (a <label>, or a <div> around one), which
+  // replaces its input. An input removed while focused, as when a refused account's row gains Sign
+  // In, would leave focus on <body>; the new input takes it back, and only when nothing else has it.
+  const withAction = Boolean(action) && !show;
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const refocusRef = useRef(false);
+  useLayoutEffect(() => {
+    if (!refocusRef.current) return;
+    refocusRef.current = false;
+    const input = inputRef.current;
+    const active = input?.ownerDocument.activeElement;
+    if (input && (!active || active === input.ownerDocument.body)) input.focus({ preventScroll: true });
+  });
+  const showReason = Boolean(disabled && disabledReason) && !error;
+  // An error replaces the row's second lines and is its whole description while it shows (§8.5).
+  const describedBy = error ? errorId : [
     description ? descriptionId : null,
     showReason ? reasonId : null,
   ].filter(Boolean).join(" ") || undefined;
@@ -493,6 +542,8 @@ export function ChoiceRow({
   const mark = (
     <ChoiceMark
       {...inputData}
+      inputRef={inputRef}
+      onRemovedWhileFocused={() => { refocusRef.current = true; }}
       type={type}
       name={name}
       checked={checked}
@@ -504,6 +555,7 @@ export function ChoiceRow({
       aria-disabled={disabled || undefined}
       aria-labelledby={titleId}
       aria-describedby={describedBy}
+      aria-invalid={error ? true : undefined}
       onChange={select}
       // A checked radio fires no `change` when it is clicked (or Space is pressed on it) again,
       // but the cards this replaced reported that re-selection, and callers rely on it: New
@@ -519,7 +571,7 @@ export function ChoiceRow({
         {title}
         {status && <span className="choice-row-status">{status}</span>}
       </span>
-      {description && (
+      {description && !error && (
         <span
           className={showReason ? "sr-only" : "choice-row-desc"}
           id={descriptionId}
@@ -529,10 +581,19 @@ export function ChoiceRow({
         </span>
       )}
       {showReason && <small className="choice-row-reason" id={reasonId}>{disabledReason}</small>}
+      {error && <FieldError as="span" className="choice-row-error" id={errorId}>{error}</FieldError>}
     </span>
     {meta && <span className="choice-row-meta">{meta}</span>}
   </>;
   const modifiers = `${compact ? " compact" : ""}${disabled ? " is-disabled" : ""}`;
+  if (withAction) {
+    return (
+      <div className={`choice-row has-action${modifiers}`}>
+        <label className="choice-row-main">{mark}{content}</label>
+        <span className="choice-row-action">{action}</span>
+      </div>
+    );
+  }
   if (show) {
     return (
       <div className={`choice-row has-show${modifiers}${show.current ? " is-current" : ""}`}>
@@ -626,6 +687,8 @@ export function ChoiceRows<T extends string>({
           meta={option.meta}
           disabled={option.disabled}
           disabledReason={option.disabledReason}
+          error={option.error}
+          action={option.action}
           inputData={option.inputData}
           show={show && { current: show.value === option.value, onShow: () => show.onShow(option.value), controls: show.controls }}
         />

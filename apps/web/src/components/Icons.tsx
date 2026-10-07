@@ -120,6 +120,7 @@ import {
   TriangleAlert as LucideTriangleAlert,
   Upload as LucideUpload,
   UserPlus as LucideUserPlus,
+  UserX as LucideUserX,
   Users as LucideUsers,
   UsersRound as LucideUsersRound,
   WandSparkles as LucideWandSparkles,
@@ -522,6 +523,11 @@ export function FolderOpenIcon(props: IconProps) {
 /** Why a choice can't be made: a disabled command's reason (#2155). */
 export function BanIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideBan} {...props} />;
+}
+
+/** An account removed from its machine while it was listed (#2208). */
+export function UserXIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideUserX} {...props} />;
 }
 
 export function FolderUpIcon(props: IconProps) {

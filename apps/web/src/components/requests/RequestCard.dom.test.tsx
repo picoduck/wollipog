@@ -457,6 +457,13 @@ const recovery = (options: PendingApproval["options"], title = "Authentication R
 });
 const signInSession = (request: PendingApproval, overrides: Partial<SessionView> = {}) =>
   sessionWith(request, { providerAccountId: "claude-work", providerAccountLabel: "Claude Work", ...overrides });
+const chooseDialog = () => domWindow.document.querySelector('[role="dialog"]') as unknown as HTMLElement | null;
+const dialogButton = (name: string) => [...(chooseDialog()?.querySelectorAll<HTMLButtonElement>("button") ?? [])]
+  .find((button) => (button.getAttribute("aria-label") ?? button.textContent?.trim()) === name);
+const CHOICES = [
+  { id: "claude-work", label: "Claude Work", authStatus: "authenticated", availability: "current" },
+  { id: "claude-personal", label: "Claude Personal", authStatus: "authenticated", availability: "available" },
+] as const;
 
 test("each sign-in state has exactly one primary, or only Cancel Sign-In while a sign-in runs (#2198)", async () => {
   const methods = recovery([
@@ -571,7 +578,12 @@ test("on a phone, Dismiss Recovery and Choose Another Account… overflow into �
     assert.deepEqual(items().map((item) => item.querySelector(".menu-label")?.textContent ?? item.textContent),
       ["Choose Another Account…", "Dismiss Recovery"]);
     await act(async () => { items()[0]!.click(); await tick(); await tick(); });
-    assert.ok(view.container.querySelector(".auth-recovery-accounts"), "the menu item opens the other accounts");
+    assert.equal(chooseDialog()?.getAttribute("aria-labelledby") &&
+      domWindow.document.getElementById(chooseDialog()!.getAttribute("aria-labelledby")!)?.textContent,
+    "Choose Another Account", "the menu item opens the dialog");
+    // This Machine has no other account, so the dialog's dismiss reads Done.
+    await act(async () => { dialogButton("Done")!.click(); await tick(); await tick(); });
+    assertNoDomNode(chooseDialog(), "Done closes it");
 
     // While a decision is sent, the menu's Choose Another Account… is unavailable, as the button is.
     await act(async () => { button("Use Current Account")!.click(); await tick(); });
@@ -587,7 +599,7 @@ test("on a phone, Dismiss Recovery and Choose Another Account… overflow into �
     const choose = items().find((item) => item.textContent?.startsWith("Choose Another Account…"));
     assert.equal(choose?.getAttribute("aria-disabled"), "true");
     await act(async () => { choose?.click(); await tick(); });
-    assert.ok(view.container.querySelector(".auth-recovery-accounts"), "still open: the click did nothing");
+    assertNoDomNode(chooseDialog(), "the click did nothing while a decision is sent");
     await act(async () => { settle(); await tick(); await tick(); });
     await act(async () => { body().dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); await tick(); });
 
@@ -660,21 +672,94 @@ test("crossing the phone breakpoint keeps focus in the card that held it, even w
   }
 });
 
-test("Choose Another Account… opens the Machine's other accounts in the card body", async () => {
+/** The card with Choose Another Account… opened, and a selection that the runner answers with `code`. */
+async function openChooser(code: string | null) {
   const request = recovery([AUTH.acceptCurrent, AUTH.revalidate, AUTH.dismiss]);
+  let identity = 0;
   const view = await renderWithRunner(
     <RequestCard session={signInSession(request)} request={request} runnerOnline presentation="dock" />, {},
+    {
+      authenticationAccounts: async () => ({ accounts: [...CHOICES] }),
+      authenticationCurrentIdentity: async () => {
+        identity += 1;
+        return { identity: { status: "authenticated", emailSupported: true, email: "person@example.test", observedAt: Date.now() } };
+      },
+      selectAuthenticationAccount: async () => {
+        if (code) throw new ApiError(`runner says ${code}: provider account 'claude-personal' is not configured`, 409, code);
+        return { accepted: true as const };
+      },
+    },
   );
+  const choose = () => [...view.container.querySelectorAll<HTMLButtonElement>(".request-card-foot button")]
+    .find((button) => button.textContent === "Choose Another Account…") ?? null;
+  await act(async () => { choose()!.click(); await tick(); await tick(); });
+  return { view, choose, identity: () => identity };
+}
+
+test("Choose Another Account… opens its dialog, and a chosen account closes it", async () => {
+  const { view, choose } = await openChooser(null);
   try {
-    const choose = [...view.container.querySelectorAll<HTMLButtonElement>(".request-card-foot button")]
-      .find((button) => button.textContent === "Choose Another Account…")!;
-    assert.equal(choose.getAttribute("aria-expanded"), "false");
-    assertNoDomNode(view.container.querySelector(".auth-recovery-accounts"), "closed until asked");
-    await act(async () => { choose.click(); await tick(); await tick(); });
-    assert.equal(choose.getAttribute("aria-expanded"), "true");
-    const list = domWindow.document.getElementById(choose.getAttribute("aria-controls")!);
-    assert.ok(list?.classList.contains("auth-recovery-accounts"));
+    assert.equal(choose()!.getAttribute("aria-haspopup"), "dialog");
+    assert.equal(choose()!.hasAttribute("aria-expanded"), false, "it opens a dialog, not a region of the card");
+    assertNoDomNode(view.container.querySelector(".auth-recovery-accounts"), "the card no longer lists accounts");
+    const dialog = chooseDialog()!;
+    assert.match(dialog.textContent ?? "", /Continue this session with another Claude Code account on Studio\./);
+    assert.ok(dialog.querySelector('[role="radiogroup"][aria-label="Accounts"]'));
+    await act(async () => { dialogButton("Use Account")!.click(); await tick(); await tick(); });
+    assertNoDomNode(chooseDialog(), "a selection closes the dialog");
+    assertNoDomNode(view.container.querySelector(".request-card-body > .notice"), "and leaves no notice");
   } finally {
+    await view.unmount();
+  }
+});
+
+test("a not_resumable refusal closes the dialog, shows the can't-switch notice and removes Choose Another Account…", async () => {
+  const { view, choose } = await openChooser("not_resumable");
+  try {
+    await act(async () => { dialogButton("Use Account")!.click(); await tick(); await tick(); });
+    assertNoDomNode(chooseDialog());
+    const notice = view.container.querySelector<HTMLElement>(".request-card-body > .notice");
+    assert.equal(notice?.textContent?.trim(),
+      "This conversation can't continue under another account. Sign in again with the current account, or start a new session.");
+    assert.ok(notice?.classList.contains("compact"));
+    assert.equal(notice?.getAttribute("role"), "alert");
+    assertNoDomNode(choose(), "Choose Another Account… leaves the footer for this request");
+    assert.ok(view.container.querySelector(".request-card-body")!.firstElementChild === notice,
+      "the notice heads the scrolling body, so the card's frame does not take the facts' room");
+    assert.deepEqual(footer(view.container), ["Dismiss Recovery", "Use Current Account (primary)"]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("an account_changed refusal closes the dialog and the card reads its facts again; nothing switches", async () => {
+  const { view, identity } = await openChooser("account_changed");
+  try {
+    const before = identity();
+    await act(async () => { dialogButton("Use Account")!.click(); await tick(); await tick(); });
+    assertNoDomNode(chooseDialog());
+    assert.equal(identity(), before + 1, "the facts are read again for the new configured account");
+    assert.equal(view.container.querySelector(".request-card-body > .notice")?.textContent?.trim(),
+      "This session's account changed while you were choosing, so nothing was switched.");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a refusal, then Cancel, leaves the refusal as a one-line notice on the card, never the runner's words", async () => {
+  const { view, choose } = await openChooser("operation_in_progress");
+  try {
+    await act(async () => { dialogButton("Use Account")!.click(); await tick(); await tick(); });
+    assert.match(chooseDialog()!.querySelector(".field-error")?.textContent ?? "", /Try again in a moment\./);
+    await act(async () => { dialogButton("Cancel")!.click(); await tick(); await tick(); });
+    const notice = view.container.querySelector<HTMLElement>(".request-card-body > .notice");
+    assert.equal(notice?.textContent?.trim(), "Another sign-in or check is running for this session. Try again in a moment.");
+    assert.doesNotMatch(view.container.textContent ?? "", /not configured|runner says/);
+    // Opening the dialog again clears the old notice.
+    await act(async () => { choose()!.click(); await tick(); await tick(); });
+    assertNoDomNode(view.container.querySelector(".request-card-body > .notice"));
+  } finally {
+    await act(async () => { dialogButton("Cancel")?.click(); await tick(); });
     await view.unmount();
   }
 });

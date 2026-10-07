@@ -28,8 +28,15 @@ import "../styles.css";
  * - `methods`: an ACP agent (OpenCode) that offers several sign-in methods;
  * - `signing-in`: a sign-in the runner is running for this session, waiting for a pasted code;
  * - `older`: a pre-v180 runner that cannot report the signed-in account;
- * - `refused`: signed in as a different account, and the runner refuses another account as signed out.
+ * - `refused`: signed in as a different account, and the runner refuses another account as signed out,
+ *   which the Machine's inventory then reports too;
+ * - `not-resumable`: the same, but the conversation cannot continue under any other account;
+ * - `removed`: the same, but the chosen account was removed from the Machine before the runner saw
+ *   the choice (`account_unavailable`), and the dashboard has not heard yet;
+ * - `none`: no other account is added to the Machine.
  * `?emailLabels=1` names two of the other accounts with an email, as people often do.
+ * `__WOLLIPOG_AUTH_RECOVERY_E2E__.removeAccount(id)` removes an account from the Machine, as the
+ * runner reports it, while the page is open.
  * `?theme=light|dark`, `?width=`, `?height=`. */
 const params = new URLSearchParams(window.location.search);
 const scenario = params.get("scenario") ?? "email";
@@ -40,7 +47,13 @@ document.documentElement.setAttribute("data-theme", params.get("theme") === "lig
 
 declare global {
   interface Window {
-    __WOLLIPOG_AUTH_RECOVERY_E2E__: { selections(): unknown[]; decisions(): unknown[]; identityRequests(): number };
+    __WOLLIPOG_AUTH_RECOVERY_E2E__: {
+      selections(): unknown[];
+      decisions(): unknown[];
+      identityRequests(): number;
+      removeAccount(id: string): void;
+      signOutAccount(id: string): void;
+    };
   }
 }
 
@@ -54,6 +67,18 @@ window.__WOLLIPOG_AUTH_RECOVERY_E2E__ = {
   selections: () => [...selections],
   decisions: () => [...decisions],
   identityRequests: () => identityRequests,
+  removeAccount: (id) => {
+    accountOptions = accountOptions.filter((account) => account.id !== id);
+    runner.providerAccounts = runner.providerAccounts!.filter((account) => account.id !== id);
+    socket?.onmessage?.({ data: JSON.stringify({ type: "runner_upsert", runner } satisfies ControlPlaneToUi) });
+  },
+  signOutAccount: (id) => {
+    accountOptions = accountOptions.map((account) => account.id === id
+      ? { ...account, authStatus: "unauthenticated", availability: "sign_in_required" } : account);
+    runner.providerAccounts = runner.providerAccounts!.map((account) => account.id === id
+      ? { ...account, authStatus: "unauthenticated" } : account);
+    socket?.onmessage?.({ data: JSON.stringify({ type: "runner_upsert", runner } satisfies ControlPlaneToUi) });
+  },
 };
 
 const runner = {
@@ -88,9 +113,11 @@ const runner = {
     : RUNNER_CAPABILITY_MIN_PROTOCOL.providerAuthenticationAccountRecovery,
   providerAccounts: [
     { id: "claude-work", label: "Work Subscription", provider: "claude", authStatus: "authenticated" },
-    { id: "claude-personal", label: emailLabels ? "jordan.personal@example.net" : "Personal Max", provider: "claude", authStatus: "authenticated" },
-    { id: "claude-team", label: emailLabels ? "team.pilot@example.org" : "Team Pilot", provider: "claude", authStatus: "unauthenticated" },
-    { id: "claude-lab", label: "Lab Sandbox", provider: "claude", authStatus: "unknown" },
+    ...scenario === "none" ? [] : [
+      { id: "claude-personal", label: emailLabels ? "jordan.personal@example.net" : "Personal Max", provider: "claude", authStatus: "authenticated" },
+      { id: "claude-team", label: emailLabels ? "team.pilot@example.org" : "Team Pilot", provider: "claude", authStatus: "unauthenticated" },
+      { id: "claude-lab", label: "Lab Sandbox", provider: "claude", authStatus: "unknown" },
+    ],
   ],
   providerLogins: scenario === "signing-in" ? [{
     operationId: "login-e2e",
@@ -240,6 +267,7 @@ const snapshotMessage: ControlPlaneToUi = {
   pods: [],
 };
 
+let socket: FixtureSocket | null = null;
 class FixtureSocket implements UiSocket {
   readonly readyState = UI_SOCKET_OPEN;
   onopen: (() => void) | null = null;
@@ -247,6 +275,7 @@ class FixtureSocket implements UiSocket {
   onclose: ((event: { code: number }) => void) | null = null;
   onerror: (() => void) | null = null;
   constructor() {
+    socket = this;
     setTimeout(() => {
       this.onopen?.();
       this.onmessage?.({ data: JSON.stringify(snapshotMessage) });
@@ -269,7 +298,7 @@ const navigation: ViewNavigation = {
   listen: () => () => {},
 };
 
-const accountOptions: ProviderAuthenticationAccountOption[] = runner.providerAccounts!.map((account) => ({
+let accountOptions: ProviderAuthenticationAccountOption[] = runner.providerAccounts!.map((account) => ({
   id: account.id,
   label: account.label,
   authStatus: account.authStatus,
@@ -297,18 +326,29 @@ const client = {
       },
     };
   },
-  authenticationAccounts: async () => ({ accounts: accountOptions }),
+  authenticationAccounts: async () => ({ accounts: [...accountOptions] }),
   selectAuthenticationAccount: async (
     _id: string,
     input: { requestId: string; providerAccountId: string; expectedProviderAccountId: string },
   ) => {
     selections.push(input);
     if (scenario === "refused") {
+      // The runner's recheck found the account signed out, and the Machine reports it so.
+      window.__WOLLIPOG_AUTH_RECOVERY_E2E__.signOutAccount(input.providerAccountId);
       throw new ApiError(
         "The provider reports that this account is signed out. Sign in to it, then choose it again.",
         409,
         "sign_in_required",
       );
+    }
+    if (scenario === "not-resumable") {
+      throw new ApiError("This provider conversation cannot resume under another account.", 409, "not_resumable");
+    }
+    if (scenario === "removed") {
+      // Gone from the Machine before the runner saw the choice; the dashboard hears of it later.
+      accountOptions = accountOptions.filter((account) => account.id !== input.providerAccountId);
+      throw new ApiError(`That account cannot be used for this session: provider account '${input.providerAccountId}' ` +
+        "is not configured.", 409, "account_unavailable");
     }
     return { accepted: true as const };
   },

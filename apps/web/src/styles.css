@@ -6064,7 +6064,7 @@ textarea {
    Guardrails (#2175) puts its one footer line here too: what empty means, or a Viewer's refusal.
    Hand Off (#2186) says why Create Handoff is disabled: "Choose a supported service tier." Snooze
    (#2181) says why a reminder conflict refuses its primary: "Reload the reminder before saving." */
-.modal-foot > :is(.session-move-reason, .switch-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason) {
+.modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason) {
   flex: 0 1 auto;
   min-width: 0;
   margin: 0 auto 0 0;
@@ -6075,13 +6075,23 @@ textarea {
    buttons and wraps there, rather than pushing the primary onto a second row. */
 .modal-foot > .snooze-blocked-reason { flex: 1 1 0; }
 @media (max-width: 760px) {
-  .modal-foot > :is(.session-move-reason, .switch-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason) { flex-basis: 100%; }
+  .modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason) { flex-basis: 100%; }
 }
 /* Switch Account (#2149): one dim sentence about what moves, then the Accounts head and its rows. */
 .switch-account-rule {
   margin: 0;
   color: var(--text-dim);
   font: var(--type-body);
+}
+.choose-account-body {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+}
+.choose-account-accounts {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
 }
 .switch-account-accounts {
   display: grid;
@@ -9202,59 +9212,6 @@ textarea,
   background: none;
 }
 .provider-login-card[data-embedded] :is(p, form, .provider-login-device-code) { margin: 0; }
-/* The other accounts on the session's Machine, opened by Choose Another Account… until #2208's
-   dialog replaces the list. */
-.auth-recovery-accounts {
-  display: grid;
-  gap: var(--space-2);
-  min-width: 0;
-}
-.auth-recovery-accounts h4 {
-  margin: 0;
-  color: var(--text-dim-on-tint);
-  font: var(--type-label);
-}
-.auth-recovery-accounts .facts-help {
-  margin: 0;
-  color: var(--text-dim-on-tint);
-  font: var(--type-small);
-}
-.auth-recovery-account-list {
-  display: grid;
-  gap: 6px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.auth-recovery-account {
-  display: grid;
-  gap: 4px;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg-elev);
-}
-.auth-recovery-account-head,
-.auth-recovery-account-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
-.auth-recovery-account-error {
-  margin: 0;
-}
-/* Its natural width first, so a long revealed email moves the status tag to the next line rather
-   than breaking mid-word beside it. */
-.auth-recovery-account-label {
-  flex: 1 1 auto;
-  min-width: 0;
-  font-weight: 600;
-  overflow-wrap: anywhere;
-}
-.auth-recovery-account-actions {
-  justify-content: flex-end;
-}
 .inbox-provider-logins {
   display: grid;
   gap: 8px;
@@ -16601,7 +16558,10 @@ body.shell-dock-dragging * {
   .choice-row:hover:not(.is-disabled) { background: var(--bg-elev-2); }
 }
 .choice-row:has(> .radio-mark > input:checked),
-.choice-row:has(> .checkbox-mark > input:checked) { background: var(--surface-selected); }
+.choice-row:has(> .checkbox-mark > input:checked),
+.choice-row.has-action:has(> .choice-row-main > :is(.radio-mark, .checkbox-mark) > input:checked) {
+  background: var(--surface-selected);
+}
 .choice-row.is-disabled { cursor: not-allowed; }
 .choice-row.is-disabled :is(.choice-row-title, .choice-row-meta) { color: var(--text-faint); }
 /* The marker's box is one title line tall, so it centres on the first line and not the row. */
@@ -16628,6 +16588,31 @@ body.shell-dock-dragging * {
   white-space: nowrap;
 }
 .choice-row-reason { color: var(--text-faint); font: var(--type-small); }
+/* A refused choice's field error (§8.5) in the second line's place; it wraps rather than being cut. */
+.choice-row-error { overflow-wrap: anywhere; }
+/* A row with a control at its end (`action`, Choose Another Account's Sign In): the label holds the
+   marker and text, as a plain row's does, and the control sits beside it, outside the label. */
+.choice-row.has-action {
+  flex-wrap: nowrap;
+  align-items: center;
+  padding-block: 0;
+  padding-inline-start: 0;
+}
+.choice-row-main {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  align-content: center;
+  align-items: flex-start;
+  align-self: stretch;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: var(--space-2) 0 var(--space-2) var(--space-3);
+  cursor: pointer;
+}
+.choice-row.is-disabled > .choice-row-main { cursor: not-allowed; }
+.choice-row-main > :is(.radio-mark, .checkbox-mark) { height: 20px; }
+.choice-row-action { display: flex; flex: none; align-items: center; }
 .choice-row-meta {
   display: flex;
   flex: none;

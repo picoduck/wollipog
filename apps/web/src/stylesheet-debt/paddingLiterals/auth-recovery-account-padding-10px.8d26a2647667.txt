@@ -1,1 +1,0 @@
-|.auth-recovery-account|padding|10px

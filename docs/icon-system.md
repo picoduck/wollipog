@@ -111,7 +111,8 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `FileIcon` | Lucide | `File` | Generic file; a file row in the @ picker beside the folder row. |
 | `FileCodeIcon` | Lucide | `FileCode` | A file, line or diff reference attached to a message: the composer's reference chip and the transcript's. |
 | `FolderOpenIcon` | Lucide | `FolderOpen` | Open in Files: shows a referenced file in the Files panel. |
-| `BanIcon` | Lucide | `Ban` | Why a choice can't be made: a disabled command's reason in the / picker. |
+| `BanIcon` | Lucide | `Ban` | Why a choice can't be made: a disabled command's reason in the / picker; the sign-in card's notice that a conversation can't continue under another account. |
+| `UserXIcon` | Lucide | `UserX` | An account removed from its machine while Choose Another Account listed it. |
 | `FolderUpIcon` | Lucide | `CornerUpLeft` | Navigate to the parent directory. |
 | `QuestionIcon` | Lucide | `MessageCircleQuestion` | A question: an agent's question row and pending-question marker in the transcript; Side Chat's launcher; the Request Card's Question kind. |
 | `LocateIcon` | Lucide | `Locate` | Show Where Asked: scrolls the transcript to a docked question's marker. |
