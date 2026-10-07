@@ -467,8 +467,18 @@ function SessionCard({
       }}
       onDragEnd={onDragEnd}
     >
-      {/* Line 1 (#2222): who and where, which gives up width first, then the pin and the time. The
-          ⋯ that ends the line is written last, so it stacks above the stretched open button. */}
+      {/* The card's one primary click (§5.3): its box is stretched over the whole card. Screen readers
+          meet the title first. */}
+      <button
+        type="button"
+        className="card-title card-open"
+        onClick={(event) => { event.stopPropagation(); onOpen(); }}
+      >
+        {sessionDisplayTitle(session.title)}
+      </button>
+      {/* Line 1 (#2222), drawn first by `order`: who and where, which gives up width first, then the
+          pin and the time. It is written after the stretched open button, as is the ⋯ that ends the
+          line, so their tooltips and controls stack above it. */}
       <div className="card-head">
         <span className="card-sender">
           <AgentIcon driver={session.driver} agentName={session.agentName} size={16} />
@@ -486,14 +496,6 @@ function SessionCard({
           <SessionRowTime className="card-time" lastActivityAt={lastActivityAt} reminder={reminder} />
         </span>
       </div>
-      {/* The card's one primary click (§5.3): its box is stretched over the whole card. */}
-      <button
-        type="button"
-        className="card-title card-open"
-        onClick={(event) => { event.stopPropagation(); onOpen(); }}
-      >
-        {sessionDisplayTitle(session.title)}
-      </button>
       <div className="card-status">
         <SessionRowStatusBadge status={status} />
         {strip && <ActivityStrip activity={activity} now={activityNow} compact />}

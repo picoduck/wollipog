@@ -3363,8 +3363,10 @@ textarea {
 @media (hover: hover) {
   .card:hover { border-color: var(--border-strong); background: var(--bg-elev-3); }
 }
-/* Line 1 keeps the trailing room ⋯ takes, so the time never moves under it. */
+/* Line 1 keeps the trailing room ⋯ takes, so the time never moves under it. It is written after the
+   stretched title, so `order` draws it first. */
 .card-head {
+  order: -1;
   display: flex;
   align-items: center;
   gap: var(--space-3);
@@ -3392,7 +3394,9 @@ textarea {
   min-width: 0;
 }
 .card-machine > svg { flex: none; }
+/* Positioned, so the pin's and the snoozed time's tooltips stack above the stretched click. */
 .card-head-trail {
+  position: relative;
   display: inline-flex;
   flex: none;
   align-items: center;

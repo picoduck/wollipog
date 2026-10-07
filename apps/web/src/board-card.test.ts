@@ -35,6 +35,12 @@ test("a sign-in menu lists the methods with descriptions, then Cancel Sign-In la
   assert.deepEqual(boardCardSignInItems([option("auth_1_method_1", "allow_once"), { ...option("auth_1_skip", "reject_once"), name: "Skip for Now" }])
     .map(({ label }) => label), ["auth_1_method_1", "Skip for Now"]);
   assert.equal(boardCardSignInItems([{ ...option("x", "reject_once"), name: "Cancel sign-in" }])[0]!.label, "Cancel Sign-In");
+  // Cancel Sign-In is last even when the runner lists it before another reject option.
+  assert.deepEqual(boardCardSignInItems([
+    option("browser", "allow_once"),
+    { ...option("cancel", "reject_once"), name: "Cancel sign-in" },
+    { ...option("skip", "reject_once"), name: "Skip for Now" },
+  ]).map(({ label }) => label), ["browser", "Skip for Now", "Cancel Sign-In"]);
   // Dismiss Recovery is not a cancellation, so it keeps its name.
   assert.deepEqual(boardCardSignInItems([option("auth:login", "allow_once"), { ...option("auth:dismiss", "reject_once"), name: "Dismiss Recovery" }])
     .map(({ label, danger }) => [label, danger]), [["auth:login", false], ["Dismiss Recovery", true]]);

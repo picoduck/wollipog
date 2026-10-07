@@ -608,6 +608,15 @@ test.describe("Board cards at 1440×900 (#2222)", () => {
     expect(before.find((card) => card.id === "s-idle")!.titleLines, "a long title clamps at two lines").toBe(2);
 
     const idle = page.locator('.board .card[data-session-id="s-idle"]');
+    // Line 1 is drawn first, and its time stacks above the stretched open button, so its tooltip shows.
+    expect(await idle.evaluate((card) => {
+      const head = card.querySelector(".card-head")!.getBoundingClientRect();
+      const title = card.querySelector(".card-title")!.getBoundingClientRect();
+      const time = card.querySelector(".card-time")!;
+      const box = time.getBoundingClientRect();
+      const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+      return { headFirst: head.bottom <= title.top + 0.5, timeOnTop: hit !== null && time.contains(hit) };
+    })).toEqual({ headFirst: true, timeOnTop: true });
     const box = await idle.boundingBox();
     const more = idle.getByRole("button", { name: "More Actions" });
     expect(await more.evaluate((button) => getComputedStyle(button).opacity)).toBe("0");

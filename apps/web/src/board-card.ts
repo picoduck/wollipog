@@ -45,12 +45,11 @@ const isCancellation = (option: PermissionOption) => option.optionId === "auth:c
  */
 export function boardCardSignInItems(options: readonly PermissionOption[]): BoardCardSignInItem[] {
   const methods = options.filter(isAllow).map((option) => ({ option, label: option.name, danger: false }));
-  const danger = options.filter(isReject).map((option) => ({
-    option,
-    label: isCancellation(option) ? "Cancel Sign-In" : option.name,
-    danger: true,
-  }));
-  return [...methods, ...danger];
+  const rejects = options.filter(isReject);
+  // Cancel Sign-In is last whatever order the runner lists its reject options in.
+  const others = rejects.filter((option) => !isCancellation(option)).map((option) => ({ option, label: option.name, danger: true }));
+  const cancels = rejects.filter(isCancellation).map((option) => ({ option, label: "Cancel Sign-In", danger: true }));
+  return [...methods, ...others, ...cancels];
 }
 
 /**
