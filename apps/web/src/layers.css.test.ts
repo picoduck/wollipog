@@ -124,8 +124,9 @@ test("no unacknowledged rule sets a layer on a guarded surface", () => {
   const EXPECTED = new Set([
     ".modal-backdrop", ".menu-backdrop", ".palette-backdrop", ".toast-region",
     ".picker", ".right-panel", ".instance-selector",
-    // The compact tier's Requests sheet over the transcript (#2206), on the panel's own layer.
-    '.detail-columns > .right-panel[data-mode="requests"]',
+    // The panel's sheet over the transcript where docking would squeeze the chat (#2206, #2725), on
+    // the panel's own layer.
+    '.detail-columns > .right-panel[data-presentation="overlay"]',
   ]);
   const touching = new Set<string>();
   for (const decl of zIndexDecls) {
@@ -168,7 +169,7 @@ test("the composer pickers stay below the mobile right panel", () => {
   // asserting only the picker left the panel free to drift to a lower layer.
   assert.equal(layerOf(".picker"), "var(--z-sticky)");
   assert.equal(layerOf(".right-panel"), "var(--z-panel)");
-  assert.equal(layerOf('.detail-columns > .right-panel[data-mode="requests"]'), "var(--z-panel)");
+  assert.equal(layerOf('.detail-columns > .right-panel[data-presentation="overlay"]'), "var(--z-panel)");
   assert.ok(tokenValue("--z-sticky") < tokenValue("--z-panel"));
 });
 

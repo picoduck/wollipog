@@ -3804,33 +3804,29 @@ textarea {
 }
 .share-address-detail code,
 .share-error-detail { font-family: var(--font-mono); }
-/* In the compact tier (761–1099px, §15.2) the Requests panel opens over the transcript from the
-   right, as a sheet over a scrim on the chat column (#2206); a press on the scrim closes it. The
-   session bar stays outside it. Elsewhere the scrim is not drawn. */
-.rp-scrim { display: none; }
-@container app (max-width: 1099px) {
-  .detail-columns:has(> .right-panel[data-mode="requests"]) { position: relative; }
-  .detail-columns > .rp-scrim {
-    display: block;
-    position: absolute;
-    inset: 0;
-    z-index: var(--z-panel);
-    background: var(--modal-backdrop);
-    animation: modal-fade-in var(--dur-base) var(--ease-out);
-  }
-  .detail-columns > .right-panel[data-mode="requests"] {
-    position: absolute;
-    top: 0;
-    right: 0;
-    bottom: 0;
-    z-index: var(--z-panel);
-    margin: 0;
-    border-top: none;
-    border-right: none;
-    border-bottom: none;
-    box-shadow: var(--elev-2);
-  }
-  .detail-columns:has(> .right-panel[data-mode="requests"]) > .right-panel-resizer { display: none; }
+/* Where docking would leave the chat column under 480px (§15.2), every panel mode opens over the
+   transcript from the right, as a sheet over a scrim on the chat column (#2206, #2725); a press on
+   the scrim closes it. RightPanel.tsx measures the row and draws the scrim only then, without a
+   resize handle. The session bar stays outside it. A phone's panel is full-screen instead. */
+.detail-columns:has(> .right-panel[data-presentation="overlay"]) { position: relative; }
+.detail-columns > .rp-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-panel);
+  background: var(--modal-backdrop);
+  animation: modal-fade-in var(--dur-base) var(--ease-out);
+}
+.detail-columns > .right-panel[data-presentation="overlay"] {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: var(--z-panel);
+  margin: 0;
+  border-top: none;
+  border-right: none;
+  border-bottom: none;
+  box-shadow: var(--elev-2);
 }
 .right-panel-resizer {
   width: 7px;

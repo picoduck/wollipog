@@ -1190,8 +1190,9 @@ child session's title as a link to it; then the Request Card in its panel presen
 Requests" returns to the list, at its scroll position, with focus on the request's row. An answered
 request gives way to the next one in its group, and with none left the list comes back. Loading is
 skeleton rows, unavailable a danger notice with Retry, and empty the compact state "Nothing Waiting"
-with a link to Decision History. In the compact tier the panel opens over the transcript from the
-right with a scrim (§15.2); on a phone it is the full-screen panel.
+with a link to Decision History. Where docking would leave the chat column under 480px the panel
+opens over the transcript from the right with a scrim, as every mode does (§15.2); on a phone it is
+the full-screen panel.
 
 ## 7. Dialogs and Sheets
 
@@ -2539,7 +2540,13 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
   when keeping the label would leave the truncated title under `DETAIL_TITLE_READABLE_PX`, measured
   as `DetailBar` does. At 1100px and wider it is always the full badge.
 - Right panel docks at 320px or overlays as a sheet from the right with a scrim when the chat column
-  would drop below 480px.
+  would drop below 480px. Every mode follows this one rule (#2725), measured from the row the chat
+  column and the panel share, so the labelled rail and the panel's own width count: the row less the
+  panel and its 10px handle is the chat column's room. Overlaid, the panel sits on the right edge of
+  the session body over a scrim on the chat column. The session bar stays outside the scrim, a press
+  on the scrim closes the panel as Close Panel does, and the resize handle is hidden. The stored width
+  is unchanged and returns when the panel docks again. Switching modes never changes the
+  presentation at a given width. Phones keep their full-screen panel.
 
 ### 15.3 Touch on Any Width
 

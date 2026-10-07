@@ -422,6 +422,54 @@ test("the close button is an icon named Close Panel in every mode, Requests incl
   }
 });
 
+test("every mode overlays the chat with a scrim where docking would leave it under 480px, and docks otherwise (#2725)", async () => {
+  let state!: RightPanelState;
+  const panel = await mountPanel(<PanelHarness onState={(next) => { state = next; }} />);
+  // The row the chat column and the panel share is the panel's parent here.
+  let rowWidth = 700;
+  panel.container.getBoundingClientRect = () => ({
+    width: rowWidth, height: 600, top: 0, left: 0, right: rowWidth, bottom: 600, x: 0, y: 0, toJSON: () => ({}),
+  }) as DOMRect;
+  const aside = () => panel.container.querySelector<HTMLElement>("#right-panel");
+  const opener = panel.container.querySelector<HTMLButtonElement>("#recorded")!;
+  const nextFrame = () => act(async () => {
+    await new Promise((resolve) => domWindow.requestAnimationFrame(() => resolve(undefined)));
+  });
+  try {
+    const storedWidth = state.width;
+    for (const mode of ["launcher", "requests", "review", "files", "decisions", "subagents", "background"] as const) {
+      await act(async () => state.show(mode));
+      assert.equal(aside()?.dataset.presentation, "overlay", mode);
+      assert.ok(panel.container.querySelector(".rp-scrim"), `${mode}: a scrim covers the chat column`);
+      assertNoDomNode(panel.container.querySelector(".right-panel-resizer"), `${mode}: no resize handle while overlaid`);
+    }
+    assert.equal(state.width, storedWidth, "overlaying leaves the stored width alone");
+
+    // A press on the scrim closes the panel and returns focus as Close Panel does.
+    for (const close of [
+      () => panel.container.querySelector<HTMLElement>(".rp-close")!.click(),
+      () => panel.container.querySelector<HTMLElement>(".rp-scrim")!.click(),
+    ]) {
+      await act(async () => { state.close(); });
+      opener.focus();
+      await act(async () => state.show("files"));
+      await act(async () => close());
+      await nextFrame();
+      assert.equal(state.open, false);
+      assert.ok((domWindow.document.activeElement as unknown as Element | null) === (opener as unknown as Element),
+        "focus returns to the opener");
+    }
+
+    rowWidth = 1200;
+    await act(async () => state.show("review"));
+    assert.equal(aside()?.dataset.presentation, "docked");
+    assertNoDomNode(panel.container.querySelector(".rp-scrim"), "a docked panel draws no scrim");
+    assert.ok(panel.container.querySelector(".right-panel-resizer"), "and keeps its handle");
+  } finally {
+    await panel.dispose();
+  }
+});
+
 test("a persisted terminal mode restores the launcher instead of an empty panel", async () => {
   // Older builds reserved a "terminal" panel mode that nothing could open; the value can still
   // sit in localStorage, and restoring it must land on the launcher (#1201).

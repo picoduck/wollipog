@@ -16,6 +16,7 @@ import {
   RIGHT_PANEL_MAX_WIDTH,
   RIGHT_PANEL_MIN_WIDTH,
   clampRightPanelWidth,
+  rightPanelOverlays,
   parseStoredRightPanelMode,
   parseStoredRightPanelWidth,
   resolveRightPanelDrag,
@@ -38,6 +39,7 @@ import { BackgroundWorkPanel } from "./BackgroundWorkPanel.js";
 import { loadBrowserStorageValue, saveBrowserStorageValue } from "../instance-storage.js";
 import { SessionRequestPanel, sessionRequestPanelKey, type DescendantRequestStatus } from "./SessionRequestPanel.js";
 import { CampaignStatusPanel } from "./CampaignStatusPanel.js";
+import { useIsMobile } from "./useIsMobile.js";
 import type { CampaignStatusAvailability } from "../campaign-status.js";
 
 /** Viewport-aware width ceiling: the panel may take at most ~40% of the window, so the
@@ -329,6 +331,34 @@ export function RightPanel({
     return () => window.removeEventListener("resize", onWinResize);
   }, []);
 
+  // The row the chat column and the panel share (`.detail-columns`), measured before paint so the
+  // panel never shows docked for a frame where it overlays (§15.2; #2725). Its width does not depend
+  // on the panel's presentation, so overlaying cannot flip the answer back.
+  const asideRef = useRef<HTMLElement>(null);
+  const [columnsWidth, setColumnsWidth] = useState<number | null>(null);
+  useLayoutEffect(() => {
+    const columns = asideRef.current?.parentElement;
+    if (!state.open || !columns) return;
+    // A row with no width has not been laid out (or is hidden); it docks, as before measuring.
+    const measure = () => setColumnsWidth(columns.getBoundingClientRect().width || null);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(columns);
+    return () => observer.disconnect();
+  }, [state.open]);
+  const phone = useIsMobile();
+  // Every mode docks or overlays by the same rule; a phone's panel is full-screen (styles.css).
+  const overlay = state.open && !phone && columnsWidth !== null &&
+    rightPanelOverlays(columnsWidth, clampRightPanelWidth(state.width, viewportMax));
+  // A drag that widens the panel into an overlay loses its handle; end the drag with it.
+  useEffect(() => {
+    if (!overlay || !dragRef.current) return;
+    dragRef.current = null;
+    state.setDragging(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [overlay]);
+
   // Guard against a mid-drag unmount: closing the panel (shortcut/header button)
   // unmounts the resizer mid-drag and the lostpointercapture never reaches React.
   useEffect(() => {
@@ -594,7 +624,8 @@ export function RightPanel({
 
   return (
     <>
-      <div
+      {/* An overlaying panel has no handle: it keeps the width chosen while docked (#2725). */}
+      {!overlay && <div
         className="right-panel-resizer"
         role="separator"
         aria-orientation="vertical"
@@ -613,14 +644,17 @@ export function RightPanel({
         onLostPointerCapture={onLostCapture}
         onKeyDown={onResizerKeyDown}
         onDoubleClick={() => state.setWidth(() => RIGHT_PANEL_DEFAULT_WIDTH)}
-      />
-      {/* In the compact tier the Requests panel opens over the transcript (#2206, §15.2); the scrim
-          is drawn only there (styles.css), and a press on it closes the panel. */}
-      {state.mode === "requests" && <div className="rp-scrim" aria-hidden="true" onClick={state.close} />}
+      />}
+      {/* Where docking would leave the chat column under 480px, every mode opens over the transcript
+          from the right, over a scrim a press on which closes the panel as Close Panel does (§15.2;
+          #2206, #2725). */}
+      {overlay && <div className="rp-scrim" aria-hidden="true" onClick={state.close} />}
       <aside
+        ref={asideRef}
         id="right-panel"
         className="right-panel"
         data-mode={state.mode}
+        data-presentation={overlay ? "overlay" : "docked"}
         style={{ width: effectiveWidth }}
         aria-label={MODE_TITLES[state.mode]}
       >

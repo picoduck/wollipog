@@ -634,8 +634,9 @@ test.describe("on a phone's touch screen", () => {
   });
 });
 
-test("at 940px the Requests panel opens over the transcript from the right, with a scrim that closes it (#2206)", async ({ page }) => {
-  await page.setViewportSize({ width: 940, height: 800 });
+test("where docking would leave the chat under 480px the Requests panel opens over the transcript from the right, with a scrim that closes it (#2206, #2725)", async ({ page }) => {
+  // This fixture has no rail: at 800px a 320px panel (40% of the window) and its handle leave 470px.
+  await page.setViewportSize({ width: 800, height: 800 });
   await page.goto("/request-surfaces-e2e.html?scenario=descendants");
   const chatBefore = (await page.locator(".detail-chat").boundingBox())!;
   await openRequests(page);
