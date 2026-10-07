@@ -5720,6 +5720,9 @@ textarea {
   font: var(--type-small);
 }
 .request-card-reasons > p { margin: 0; }
+/* One row wherever the options fit. Buttons never shrink, so options too wide for a narrow phone (a
+   trust request's two long labels, #2641) wrap, the primary still last, rather than run off the
+   card's edge. */
 .request-card-foot {
   display: flex;
   flex-wrap: wrap;
@@ -5729,12 +5732,6 @@ textarea {
 }
 /* A tertiary option sits at the far left, apart from the rest (§3.2): a sign-in's Dismiss Recovery. */
 .request-card-foot > .request-card-tertiary { margin-right: auto; }
-@media (max-width: 760px) {
-  /* One footer row on a phone, where the dock is in thumb reach. */
-  .request-card[data-presentation="dock"] .request-card-foot { flex-wrap: nowrap; }
-  /* Except beside a tertiary: the rest wrap under it rather than push it off the card's edge. */
-  .request-card[data-presentation="dock"] .request-card-foot:has(> .request-card-tertiary) { flex-wrap: wrap; }
-}
 /* The card in a side panel's detail (#2206): flush on the panel, with no wash or frame, a title-sized
    heading, and its footer stuck to the panel's lower edge above a hairline. The detail scrolls as one
    page, so a short panel never squeezes the card's body away. */

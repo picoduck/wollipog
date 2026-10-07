@@ -2171,7 +2171,9 @@ follows these rules so it never crowds out the conversation it asks about:
   in the menu (Reject, ⋯ Always Allow in This Session, Allow). A request whose only allow is
   `allow_always` (worktree setup trust, Pi project trust) makes the first `allow_always` its primary,
   so a request with an allow option always has a visible primary and whatever lets the work continue
-  is never hidden (#2641); only a request with no allow at all has none. A and D act only where
+  is never hidden (#2641); only a request with no allow at all has none. Options too wide for one row
+  on a narrow phone (a trust request's two long labels) wrap, the primary still last, rather than run
+  off the card's edge. A and D act only where
   exactly one `allow_once` or `reject_once` exists: a trust request's lasting grant takes a click,
   while D still takes a worktree setup's one-time Create Without Setup. A reason nobody can act (the runner is offline, a Viewer's refusal, a
   machine-owner-only sign-in) is a visible foot-note the disabled buttons reference; a failed

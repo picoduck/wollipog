@@ -516,6 +516,14 @@ for (const viewport of [
     await expect(trust).toHaveText("Trust This Configuration");
     await expect(trust.locator("kbd")).toHaveCount(0);
     await expect(trust).toBeInViewport({ ratio: 1 });
+    // Two long labels do not fit one phone row: they wrap inside the footer rather than run off the
+    // card's edge.
+    const footBox = (await foot.boundingBox())!;
+    for (const button of await foot.getByRole("button").all()) {
+      const box = (await button.boundingBox())!;
+      expect(box.x).toBeGreaterThanOrEqual(footBox.x);
+      expect(box.x + box.width).toBeLessThanOrEqual(footBox.x + footBox.width);
+    }
     await expect(card(page).getByRole("button", { name: "More Choices" })).toHaveCount(0);
 
     await trust.click();
