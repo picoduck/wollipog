@@ -152,11 +152,23 @@ fi
 exec rm "$@"
 `);
   executable(join(fakeBin, "ln"), `
+${signalInjection}
+for arg in "$@"; do case "$arg" in -f|"$TEST_ROOT/"*) ;; *) exit 94 ;; esac; done
 if [ "$#" -eq 2 ] && [ "$2" = "$TEST_WEB_MARKER" ] && [ "$TEST_FAULT" = marker ]; then exit 88; fi
 if [ "$#" -eq 2 ] && [ "$2" = "$TEST_WEB_MARKER" ] && [ "$TEST_FAULT" = marker-collision ]; then
   printf 'concurrent unrelated marker\n' > "$TEST_WEB_MARKER"
 fi
+if [ "$#" -eq 2 ] && [ "$2" = "$TEST_WEB_MARKER" ] && [ "$TEST_FAULT" = marker-collision-signal ]; then
+  PATH="$TEST_ORIGINAL_PATH" ln "$TEST_ROOT/foreign-marker" "$TEST_WEB_MARKER"
+fi
 PATH="$TEST_ORIGINAL_PATH"; export PATH
+if [ "$#" -eq 2 ] && [ "$2" = "$TEST_WEB_MARKER" ]; then
+  if inject_signal marker before; then exit 0; fi
+  if ln "$@"; then link_status=0; else link_status=$?; fi
+  printf '%s\\n' "$link_status" > "$TEST_ROOT/marker-link-status"
+  if inject_signal marker after; then exit "$link_status"; fi
+  exit "$link_status"
+fi
 exec ln "$@"
 `);
   if (!options.omitCmp) executable(join(fakeBin, "cmp"), `
@@ -484,23 +496,33 @@ posixTest("headless sibling bundle extraction, marker and first-publication fail
     h.setFault(fault);
     const result = h.run("--control-plane");
     assert.notEqual(result.status, 0);
+    assert.doesNotMatch(result.stderr, /retained owned evidence/u);
     assert.deepEqual(namespace(h), [null, null, null]);
     assert.equal(readdirSync(join(h.home, ".local", "bin")).some((name) => name.startsWith(".wollipog-web")), false);
     assert.equal(statSync(join(h.home, ".local", "share", "wollipog")).mode & 0o7777, 0o700);
   });
 });
 
-posixTest("headless sibling bundle exclusive marker publication preserves a concurrent unrelated marker", (t) => {
-  const h = harness();
-  t.after(() => rmSync(h.root, { recursive: true, force: true }));
-  h.setFault("marker-collision");
-  const result = h.run("--control-plane");
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /Could not exclusively publish dashboard layout marker/u);
-  assert.equal(readFileSync(layoutMarker(h), "utf8"), "concurrent unrelated marker\n");
-  assert.equal(existsSync(siblingWeb(h)), false);
-  assert.equal(existsSync(siblingWeb(h) + ".previous"), false);
-  assert.equal(readdirSync(join(h.home, ".local", "bin")).filter((name) => name.startsWith(".wollipog-web") && name !== ".wollipog-web-layout-v1").length, 0);
+posixTest("headless sibling bundle exclusive marker publication preserves a concurrent unrelated marker", async (t) => {
+  for (const fault of ["marker-collision", "marker-collision-signal"]) await t.test(fault, (t) => {
+    const h = harness();
+    t.after(() => rmSync(h.root, { recursive: true, force: true }));
+    const foreign = join(h.root, "foreign-marker");
+    writeFileSync(foreign, "concurrent unrelated marker\n", { mode: 0o640 });
+    const foreignBefore = snapshot(foreign);
+    h.setFault(fault);
+    const result = h.run("--control-plane");
+    assert.equal(result.error, undefined);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Could not exclusively publish dashboard layout marker/u);
+    assert.doesNotMatch(result.stderr, /retained owned evidence/u);
+    assert.equal(readFileSync(layoutMarker(h), "utf8"), "concurrent unrelated marker\n");
+    assert.deepEqual(snapshot(foreign), foreignBefore);
+    if (fault === "marker-collision-signal") assert.deepEqual(snapshot(layoutMarker(h)), foreignBefore);
+    assert.equal(existsSync(siblingWeb(h)), false);
+    assert.equal(existsSync(siblingWeb(h) + ".previous"), false);
+    assert.equal(readdirSync(join(h.home, ".local", "bin")).filter((name) => name.startsWith(".wollipog-web") && name !== ".wollipog-web-layout-v1").length, 0);
+  });
 });
 
 posixTest("headless sibling bundle restores both owned generations after publication failure and preserves failed-rollback evidence", async (t) => {
@@ -579,6 +601,50 @@ function retainedPublicationStage(fixture, interruption, result) {
   fixture.assertPrivate();
   return stage;
 }
+
+posixTest("headless marker publication retains uncertain evidence before linking and after exclusive success or collision", async (t) => {
+  for (const signal of ["HUP", "INT", "TERM"]) for (const outcome of ["before", "success", "collision"]) {
+    await t.test(`${outcome}:${signal}`, (t) => {
+      const f = interruptedPublicationFixture(t, { generations: "fresh" });
+      const foreign = join(f.h.root, "foreign-marker");
+      writeFileSync(foreign, "unrelated marker bytes\n", { mode: 0o640 });
+      const foreignBefore = snapshot(foreign);
+      if (outcome === "collision") f.h.setFault("marker-collision-signal");
+      const interruption = { boundary: "marker", timing: outcome === "before" ? "before" : "after", signal };
+      f.h.setInterruption(interruption);
+      const result = f.h.run("--control-plane");
+      // Pin the real syscall result before checking the retained-evidence contract.
+      if (outcome === "before") assert.equal(existsSync(join(f.h.root, "marker-link-status")), false);
+      else assert.equal(readFileSync(join(f.h.root, "marker-link-status"), "utf8"), outcome === "success" ? "0\n" : "1\n");
+      const stage = retainedPublicationStage(f, interruption, result);
+      assert.equal(readFileSync(join(stage, "web", "index.html"), "utf8"), "<html>dashboard</html>");
+      assert.deepEqual([snapshot(f.web), snapshot(f.web + ".previous")], [null, null]);
+      assert.ok(result.stderr.includes("Inspect dashboard layout marker " + layoutMarker(f.h)));
+      assert.ok(result.stderr.includes("presence or name alone does not establish ownership for adoption or deletion"));
+      assert.equal(readdirSync(f.parent).some((name) => name.startsWith(".wollipog-web-layout.")), false);
+      assert.deepEqual(snapshot(foreign), foreignBefore, "foreign bytes and identity survive every signal boundary");
+      if (outcome === "before") assert.equal(existsSync(layoutMarker(f.h)), false);
+      else if (outcome === "collision") assert.deepEqual(snapshot(layoutMarker(f.h)), foreignBefore, "early retention never grants foreign-marker deletion authority");
+      else {
+        assert.equal(readFileSync(layoutMarker(f.h), "utf8"), markerBytes);
+        const markerBefore = snapshot(layoutMarker(f.h)), stageBefore = snapshot(stage);
+        const unrelatedStage = join(f.parent, ".wollipog-web.stage.foreign");
+        mkdirSync(unrelatedStage); writeFileSync(join(unrelatedStage, "sentinel"), "unrelated evidence");
+        const unrelatedBefore = snapshot(unrelatedStage);
+        f.h.setInterruption({});
+        const retry = f.h.run("--control-plane");
+        assert.equal(retry.error, undefined);
+        assert.equal(retry.status, 0, retry.stderr + retry.stdout);
+        assert.equal(readFileSync(join(f.web, "index.html"), "utf8"), "<html>dashboard</html>");
+        assert.deepEqual(snapshot(layoutMarker(f.h)), markerBefore);
+        assert.deepEqual(snapshot(stage), stageBefore, "later attempts never adopt or clean the original retained stage");
+        assert.deepEqual(snapshot(unrelatedStage), unrelatedBefore);
+        assert.deepEqual(readdirSync(f.parent).filter((name) => name.startsWith(".wollipog-web.stage.")).sort(), [stage, unrelatedStage].map((path) => path.slice(f.parent.length + 1)).sort());
+        f.assertPrivate();
+      }
+    });
+  }
+});
 
 posixTest("headless publication retains each generation across HUP/INT/TERM before moves and after successful renames", async (t) => {
   for (const legacy of [false, true]) for (const signal of ["HUP", "INT", "TERM"]) {

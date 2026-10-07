@@ -385,6 +385,9 @@ if [ "$with_control_plane" -eq 1 ]; then
     if [ "$web_publication_started" -eq 1 ] && [ "$web_committed" -eq 0 ]; then
       keep_web_evidence=1
       echo "Dashboard publication did not commit; retained owned evidence at $web_stage. Inspect it and dashboard paths $web_dir and ${web_dir}.previous before retrying; no data permissions were repaired." >&2
+      if [ "$web_dir" = "$sibling_web" ]; then
+        echo "Inspect dashboard layout marker $web_marker; its presence or name alone does not establish ownership for adoption or deletion." >&2
+      fi
     fi
     [ -z "$cp_partial" ] || rm -f "$cp_partial"
     [ -z "$web_partial" ] || rm -f "$web_partial"
@@ -418,7 +421,14 @@ if [ "$with_control_plane" -eq 1 ]; then
   if [ "$web_dir" = "$sibling_web" ] && ! path_present "$web_marker"; then
     marker_partial=$(mktemp "$bindir/.wollipog-web-layout.XXXXXX")
     printf '%s\n' wollipog-sibling-web-v1 > "$marker_partial"
-    ln "$marker_partial" "$web_marker" || { echo "Could not exclusively publish dashboard layout marker: $web_marker" >&2; exit 1; }
+    # A signal can arrive after exclusive creation but before its bookkeeping.
+    # This arms owned-stage retention, never marker deletion authority.
+    web_publication_started=1
+    ln "$marker_partial" "$web_marker" || {
+      web_publication_started=0
+      echo "Could not exclusively publish dashboard layout marker: $web_marker" >&2
+      exit 1
+    }
     new_web_marker=1
   fi
   previous_saved=0
