@@ -37,6 +37,8 @@ export type ShortcutId =
   | "inbox-expand-thread"
   | "inbox-collapse-thread"
   | "inbox-fork"
+  | "inbox-next-split"
+  | "inbox-previous-split"
   | "inbox-approve"
   | "inbox-deny"
   | "inbox-archive"
@@ -302,6 +304,20 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     label: "Fork Conversation",
     scope: "Sessions List",
     binding: { key: "f", bare: true },
+  },
+  {
+    id: "inbox-next-split",
+    group: "Sessions List",
+    label: "Next Split",
+    scope: "Sessions List",
+    binding: { key: "Tab", bare: true },
+  },
+  {
+    id: "inbox-previous-split",
+    group: "Sessions List",
+    label: "Previous Split",
+    scope: "Sessions List",
+    binding: { key: "Tab", shift: true, bare: true },
   },
   {
     id: "inbox-approve",

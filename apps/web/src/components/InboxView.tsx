@@ -1312,6 +1312,8 @@ export function InboxView({
         previewForkControls.fork();
       }
     },
+    nextSplit: () => selectSplit(nextInboxSplitKey(splits.map((split) => split.key), activeSplit?.key ?? null, "next")),
+    previousSplit: () => selectSplit(nextInboxSplitKey(splits.map((split) => split.key), activeSplit?.key ?? null, "previous")),
     approve: () => { if (displayedSelection) void decide(displayedSelection, "approve").catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" })); },
     deny: () => { if (displayedSelection) void decide(displayedSelection, "deny").catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" })); },
     archive: () => { if (displayedSelection) void archive(displayedSelection); },

@@ -47,6 +47,7 @@ test("the central Inbox layer handles bare keys but never steals typing or termi
     toggleAllThreads: action("toggleAllThreads"), goToParent: action("goToParent"),
     expandThread: action("expandThread"), collapseThread: action("collapseThread"),
     fork: action("fork"),
+    nextSplit: action("nextSplit"), previousSplit: action("previousSplit"),
     approve: action("approve"), deny: action("deny"), archive: action("archive"),
     snooze: action("snooze"),
     pin: action("pin"), unread: action("unread"), reply: action("reply"),
@@ -64,12 +65,7 @@ test("the central Inbox layer handles bare keys but never steals typing or termi
   const list = container.querySelector<HTMLElement>(".inbox-list")!;
   list.focus();
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "j", bubbles: true }));
-  // Tab is the browser's (#2217): from the list it reaches the divider, then the preview bar.
-  for (const shiftKey of [false, true]) {
-    const tab = new domWindow.KeyboardEvent("keydown", { key: "Tab", shiftKey, bubbles: true, cancelable: true });
-    domWindow.dispatchEvent(tab);
-    assert.equal(tab.defaultPrevented, false, `${shiftKey ? "Shift+" : ""}Tab keeps its native focus move`);
-  }
+  domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: " ", shiftKey: true, bubbles: true }));
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "G", shiftKey: true, bubbles: true }));
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "End", bubbles: true }));
@@ -77,7 +73,7 @@ test("the central Inbox layer handles bare keys but never steals typing or termi
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "f", bubbles: true }));
-  assert.deepEqual(calls, ["next", "pageUp", "resumeFollow", "last", "first", "next", "previous", "fork"]);
+  assert.deepEqual(calls, ["next", "nextSplit", "pageUp", "resumeFollow", "last", "first", "next", "previous", "fork"]);
   const callsBeforeModifiedGridKeys = [...calls];
   for (const modifier of ["ctrlKey", "metaKey", "altKey", "shiftKey"] as const) {
     for (const key of ["ArrowDown", "ArrowUp", "Home", "End"]) {
@@ -99,8 +95,8 @@ test("the central Inbox layer handles bare keys but never steals typing or termi
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }));
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "F2", bubbles: true }));
-  assert.deepEqual(calls.slice(8), ["toggleThread", "toggleAllThreads", "goToParent", "expandThread", "collapseThread", "openTopRequest"]);
-  calls.length = 8;
+  assert.deepEqual(calls.slice(9), ["toggleThread", "toggleAllThreads", "goToParent", "expandThread", "collapseThread", "openTopRequest"]);
+  calls.length = 9;
 
   const composer = container.querySelector<HTMLTextAreaElement>('[aria-label="Composer"]')!;
   composer.focus();
@@ -115,20 +111,27 @@ test("the central Inbox layer handles bare keys but never steals typing or termi
   for (const key of ["Enter", " ", "Tab", "a", "d"]) {
     domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key, bubbles: true }));
   }
-  assert.deepEqual(calls, ["next", "pageUp", "resumeFollow", "last", "first", "next", "previous", "fork"],
+  assert.deepEqual(calls, ["next", "nextSplit", "pageUp", "resumeFollow", "last", "first", "next", "previous", "fork"],
     "typing contexts and native controls own their keys before the Inbox layer");
 
   container.querySelector<HTMLElement>("summary")!.focus();
   for (const key of ["Enter", " ", "Tab", "a", "d", "j"]) {
     domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key, bubbles: true }));
   }
-  assert.deepEqual(calls, ["next", "pageUp", "resumeFollow", "last", "first", "next", "previous", "fork"],
+  assert.deepEqual(calls, ["next", "nextSplit", "pageUp", "resumeFollow", "last", "first", "next", "previous", "fork"],
     "request disclosure summaries own their keys without running any row actions");
 
   const detail = container.querySelector<HTMLElement>(".detail-scroll")!;
   detail.focus();
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "End", bubbles: true }));
   assert.equal(calls.at(-1), "resumeFollow", "End keeps its preview-follow behavior in the reading pane");
+  // #2217: in the reading pane Tab and Shift+Tab move focus, so Shift+Tab walks back to the divider.
+  for (const shiftKey of [false, true]) {
+    const tab = new domWindow.KeyboardEvent("keydown", { key: "Tab", shiftKey, bubbles: true, cancelable: true });
+    domWindow.dispatchEvent(tab);
+    assert.equal(tab.defaultPrevented, false, `${shiftKey ? "Shift+" : ""}Tab in the preview keeps its native focus move`);
+  }
+  assert.equal(calls.at(-1), "resumeFollow", "no group switch from the reading pane");
 
   previewAvailable = false;
   detail.focus();

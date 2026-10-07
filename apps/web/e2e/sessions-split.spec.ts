@@ -117,20 +117,35 @@ for (const viewport of [
 test.describe("at 1440×900", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
-  test("keys move the divider by whole rows, and the divider is a stop between the list and the preview bar", async ({ page }) => {
+  test("F6 into the preview, then Shift+Tab, reaches the divider, and its keys move it by whole rows", async ({ page }) => {
     await open(page);
     await page.locator(".inbox-row").filter({ hasText: BLOCKED }).click();
     const grid = page.getByRole("grid");
     await expect(grid).toBeFocused();
+    // Tab and Shift+Tab in the list still switch groups (epic #2227 keeps the binding; #2180).
+    const selectedTab = page.getByRole("tablist", { name: "Session Groups" }).locator('[role="tab"][aria-selected="true"]');
+    await expect(selectedTab).toHaveText(/^All/);
     await page.keyboard.press("Tab");
+    await expect(selectedTab).toHaveText(/^Alpha/);
+    await page.keyboard.press("Shift+Tab");
+    await expect(selectedTab).toHaveText(/^All/);
+    await expect(grid).toBeFocused();
+
+    // The divider's keyboard path: F6 into the preview, then Shift+Tab back through it.
+    await page.keyboard.press("F6");
+    await expect(page.locator(".inbox-preview-pane .detail-scroll")).toBeFocused();
+    let presses = 0;
+    while (presses < 12 && !(await divider(page).evaluate((element) => element === document.activeElement))) {
+      await page.keyboard.press("Shift+Tab");
+      presses += 1;
+      expect(await page.evaluate(() => Boolean(document.activeElement?.closest(".inbox-preview-pane, .master-detail-resize"))),
+        "Shift+Tab walks back through the preview, not into another group").toBe(true);
+    }
     await expect(divider(page)).toBeFocused();
+    await expect(selectedTab, "walking back to the divider switches no group").toHaveText(/^All/);
     let paint = await dividerPaint(page);
     expect(paint.line).toEqual({ height: "2px", color: paint.tokens.focus });
     expect(paint.outline, "no ring beside the line; forced colors paints the transparent one").toBe("rgba(0, 0, 0, 0)");
-    await page.keyboard.press("Tab");
-    await expect(page.locator(".session-preview-bar :focus")).toHaveCount(1);
-    await page.keyboard.press("Shift+Tab");
-    await expect(divider(page)).toBeFocused();
 
     await page.keyboard.press("ArrowUp");
     await expectRows(page, 5);

@@ -1062,8 +1062,9 @@ master-detail pages stay side by side.
   own trailing column, so hover never hides the time or the status.
 - **Keyboard.** F6 and Shift+F6 cycle rail → list → preview (§16.1). ↑/↓ move the selection and the
   preview follows; keys that act on the previewed item (page the preview, approve, open) work while
-  focus stays in the list. Tab from the list reaches the divider, then the preview bar. Escape in the
-  preview returns focus to the selected row.
+  focus stays in the list. Tab and Shift+Tab in the list switch groups (kept by epic #2227, #2180),
+  so the divider is reached with F6 into the preview, then Shift+Tab back through it; in the preview
+  Tab and Shift+Tab are plain focus moves. Escape in the preview returns focus to the selected row.
 - **Side by side as a preference.** Sessions offers the §6 side-by-side grid as **Preview Right**
   (list 400px, 280–440, vertical divider with the hover-only grip of §6). The choice is a per-device
   preference with **Preview Below** as the default; it is set by an icon segmented control right
@@ -1085,10 +1086,9 @@ master-detail pages stay side by side.
   which forced colors paints. The stored range stays 25–75% and bounds the row range too, so every
   count survives a reload: where the split area is taller than about 930px (56px rows) Home stops at
   the 25% floor rather than three rows, and End at the 75% cap. An unfinished drag (the divider
-  unmounts for the board or a phone width) clears its height. Tab is a plain focus
-  move on Sessions: the bare Tab and Shift+Tab that used to switch tabs from the list are retired,
-  and the tab row keeps ←/→. The docked request card at the top of the preview sits in an opaque slot
-  with a 1px `--border` hairline and `--elev-1`, so the transcript visibly scrolls beneath it.
+  unmounts for the board or a phone width) clears its height. The docked request card at the top of
+  the preview sits in an opaque slot with a 1px `--border` hairline and `--elev-1`, so the transcript
+  visibly scrolls beneath it.
 
 ---
 
