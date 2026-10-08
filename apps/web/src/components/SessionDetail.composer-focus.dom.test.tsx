@@ -5358,6 +5358,57 @@ test("Edit as a New Turn exits Answer Mode and reveals the copied message", { ti
   }
 });
 
+test("a multiline message copied out of Answer Mode is grown to fit as its composer mounts (#2764)", { timeout: 5_000 }, async () => {
+  // The textarea Answer Mode replaced mounts already holding the copied text. The draft is not the
+  // session view's state, so nothing re-renders it for the change; the textarea's own commit has to
+  // grow it, in browsers without `field-sizing: content`.
+  const prototype = domWindow.HTMLTextAreaElement.prototype;
+  const descriptors = ["clientWidth", "scrollHeight"].map((name) =>
+    [name, Object.getOwnPropertyDescriptor(prototype, name)] as const);
+  Object.defineProperty(prototype, "clientWidth", { configurable: true, get: () => 800 });
+  Object.defineProperty(prototype, "scrollHeight", {
+    configurable: true,
+    get(this: HTMLTextAreaElement) { return this.value.split("\n").length * 40; },
+  });
+  setQuestionResponseStyle("composer", domWindow as never);
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft, {
+    mainEventPayloads: [{ kind: "user_message", text: "line one\nline two\nline three\nline four", images: [] }],
+  });
+  try {
+    await resolveDraft(draft, "");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
+    await fixture.pushSession({
+      pendingApproval: {
+        requestId: "ask-resend-multiline",
+        title: "Choose a target",
+        options: [],
+        kind: "question",
+        questions: [{ id: "target", question: "Choose a target", options: [{ label: "Staging" }] }],
+      },
+    });
+    await act(async () => { flushFrames(); });
+    assert.ok(fixture.container.querySelector(".composer-answer-input"));
+
+    const edit = fixture.container.querySelector<HTMLButtonElement>('button[aria-label="Edit as a New Turn"]');
+    assert.ok(edit);
+    await act(async () => { edit.click(); });
+    await flushAsyncWork();
+    await act(async () => { flushFrames(); });
+
+    const ordinary = fixture.container.querySelector<HTMLTextAreaElement>(".composer-input");
+    assert.equal(ordinary?.value, "line one\nline two\nline three\nline four");
+    assert.equal(ordinary?.style.height, "160px", "the copied message is shown at its full height");
+  } finally {
+    await unmountFixture(fixture);
+    setQuestionResponseStyle("interactive", domWindow as never);
+    for (const [name, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(prototype, name, descriptor);
+      else delete (prototype as unknown as Record<string, unknown>)[name];
+    }
+  }
+});
+
 test("a pending Composer Response preserves an ordinary draft and R enters and exits Answer Mode", { timeout: 5_000 }, async () => {
   setQuestionResponseStyle("composer", domWindow as never);
   const draft = deferred<ComposerDraft | null>();

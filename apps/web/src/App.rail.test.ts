@@ -194,8 +194,8 @@ test("the transcript's lower edge has one floating tail control, and context and
   // Answer Mode replaces the bar, Model Settings included, so it carries the two triggers itself.
   assert.match(detail, /usage=\{composerAnswerActive \? <>\s*<ContextWindowMeter session=\{session\} resolution=\{contextWindow\} placement="bar" \/>\s*<SessionUsageControl session=\{session\} placement="bar" \/>\s*<\/> : null\}\s*usageOwnRow=\{composerUsageNarrow\}/);
   // The Reply shortcut's hint is a keycap in the idle, unfocused composer's placeholder row.
-  assert.match(detail, /const composerReplyKeycap = sessionReadingKeys && canPrompt && activePane === "reader" && text === "" &&\s*!composerIdleCollapsed && !composerAnswerActive;/);
-  assert.match(detail, /\{composerReplyKeycap && \([\s\S]*<div className="composer-reply-hint" aria-hidden="true">\s*<kbd>\{shortcutDisplay\("session-reading-reply"\)\}<\/kbd>\s*<\/div>\s*\)\}\s*<textarea/,
+  assert.match(detail, /const composerReplyKeycap = sessionReadingKeys && canPrompt && activePane === "reader" && !composerHasText &&\s*!composerIdleCollapsed && !composerAnswerActive;/);
+  assert.match(detail, /\{composerReplyKeycap && \([\s\S]*<div className="composer-reply-hint" aria-hidden="true">\s*<kbd>\{shortcutDisplay\("session-reading-reply"\)\}<\/kbd>\s*<\/div>\s*\)\}\s*<ComposerTextarea/,
     "the keycap sits in a zero-height row directly above the textarea");
   // #781: the cost control remains distinct from the neighboring context meter.
   assert.doesNotMatch(detail, /of \$\{[a-zA-Z]+\} context|sessionPreviewUsage/,
