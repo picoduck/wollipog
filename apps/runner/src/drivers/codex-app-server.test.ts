@@ -1384,12 +1384,34 @@ test("newSession validates then resumes the exact persisted thread without repla
   assert.deepEqual(calls, [
     { method: "plugin/reconcile", params: { reason: "wollipog_session_start" } },
     { method: "thread/read", params: { threadId: "thread-7", includeTurns: false } },
-    { method: "thread/resume", params: { threadId: "thread-7", serviceTier: "default" } },
+    { method: "thread/resume", params: { threadId: "thread-7", excludeTurns: true, serviceTier: "default" } },
     { method: "skills/list", params: { cwds: ["/resume"] } },
   ]);
   assert.deepEqual(h.serviceTiers, [null]);
   assert.equal((h.driver as any).config.serviceTier, undefined);
   assert.deepEqual(h.events, []); // provider history is never copied into the normalized log
+});
+
+test("newSession resumes large conversations without requesting historical turns", async () => {
+  const h = makeHarness({ resumeId: "large-thread" });
+  const calls: string[] = [];
+  (h.driver as any).peer = {
+    request: async (method: string, params: any) => {
+      calls.push(method);
+      if (method === "thread/read") {
+        return { thread: { id: "large-thread", status: { type: "idle" } } };
+      }
+      if (method === "thread/resume" && params.excludeTurns !== true) {
+        throw new Error("historical turns exceed the transport record limit");
+      }
+      return { thread: { id: "large-thread", turns: [] } };
+    },
+    requestWithDeadline: async () => ({ data: [] }),
+  };
+  assert.equal(await h.driver.newSession("/resume"), "large-thread");
+  assert.equal(h.driver.agentSessionId(), "large-thread");
+  assert.deepEqual(calls, ["thread/read", "thread/resume"]);
+  assert.deepEqual(h.events, []);
 });
 
 test("active thread validation returns a typed retryable conflict and never starts a replacement", async () => {
