@@ -51,14 +51,18 @@ diagnose; the TAP stream is the record that survives that failure.
 
 If all tests pass but coverage reporting fails, inspect the TAP warning before classifying any
 coverage gaps. One run reported `Could not report code coverage` with an unterminated JSON string
-at position 1310720 and produced an empty lcov file. Retry the same coverage command at most once,
-adding `NODE_V8_COVERAGE=<scratch>/v8` to retain raw V8 coverage for diagnosis. This is a bounded
-diagnostic retry, not a proven fix for the truncation. Preserve both attempts' TAP output, exit
-statuses, and lcov files separately, plus a small diagnostic excerpt identifying the failing raw
-file and its size. Raw coverage can occupy several GiB; after recording that evidence, remove only
-this run's own `<scratch>/v8` directory. If the retry still fails, report coverage as unavailable
-and stop coverage-based triage; passing tests alone do not establish coverage gaps. Never weaken
-tests or repeat the full suite indefinitely to obtain a report.
+at position 1310720 and produced an empty lcov file. Retry the coverage command at most once,
+using distinct reporter destinations such as `<scratch>/tap-retry.txt` and
+`<scratch>/lcov-retry.info`, and adding `NODE_V8_COVERAGE=<scratch>/v8` to retain raw V8 coverage
+for diagnosis. This is a bounded diagnostic retry, not a proven fix for the truncation. Preserve
+both attempts' TAP output, exit statuses, and lcov files separately. Record a small diagnostic
+excerpt and the failing raw file's size when the warning identifies one; otherwise note that the
+file is unavailable rather than searching every raw file. Raw coverage can occupy several GiB;
+after recording that evidence, remove only this run's own `<scratch>/v8` directory using its
+literal absolute path. If cleanup is refused, record the retained path and size as an `environment`
+item and continue without widening permissions. If the retry still fails, report coverage as
+unavailable and stop coverage-based triage; passing tests alone do not establish coverage gaps.
+Never weaken tests or repeat the full suite indefinitely to obtain a report.
 
 When a finding rests on a mutation probe (the real module against a copy with one guard removed),
 write the probe files in the run's scratch directory with the `.mts` extension and run them from
