@@ -1448,7 +1448,9 @@ app.register(async (instance) => {
         svc.onGovernanceTripped(runnerId!, msg);
         break;
       case "session_event":
-        svc.onSessionEvent(msg.sessionId, msg.payload, msg.seq, msg.ts, runnerId ?? undefined);
+        // Normally undefined: a large payload stages its blobs in the background. Only a staging
+        // backlog over its byte bound holds this runner's frames, pausing socket reads.
+        await svc.onSessionEvent(msg.sessionId, msg.payload, msg.seq, msg.ts, runnerId ?? undefined);
         break;
       case "session_queue": {
         // Ephemeral relay — the prompts waiting behind the running turn, straight to

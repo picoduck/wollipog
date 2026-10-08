@@ -12,11 +12,17 @@ the sidecar key.
   bounded raw bytes. Exact byte count and SHA-256 must match validated metadata before any row is
   committed.
 - Blob writes use a private temporary file, flush it, and atomically publish it without replacement into
-  `sha256/<first-two-hex>/<full-sha256>`. Existing keys are read and verified instead of overwritten;
-  identical content deduplicates across artifacts.
+  `sha256/<first-two-hex>/<full-sha256>`, then flush the directory. Existing keys are read and
+  verified instead of overwritten, and their directory is flushed in case a concurrent writer has not
+  yet done so; identical content deduplicates across artifacts.
 - A durable pending-write row exists before the sidecar write. If the process stops after the rename
   but before artifact metadata commits, startup removes the unreferenced blob. A failed metadata
   insert also attempts immediate cleanup.
+- Large session-event payload chunks are staged off the event loop (`stageArtifactBlob`). The pending
+  row commits without a flush, and the WAL is then flushed on the thread pool before the blob is
+  published, so the row is durable before the blob can exist. Hashing, the write, and both flushes
+  also run on the thread pool. Artifact rows commit only after the blob is durable. While a staging
+  is in flight, pending cleanup and blob collection skip its key.
 - Reads accept only lowercase 64-hex keys, reject symlinks/non-files, require the exact metadata
   size, and recompute SHA-256 before returning bytes. Missing, truncated, replaced, or tampered blobs
   fail closed; raw export never falls back to an unrelated file or inline request value.

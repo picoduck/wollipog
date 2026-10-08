@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, webcrypto } from "node:crypto";
 import {
   chmodSync,
   closeSync,
@@ -12,6 +12,7 @@ import {
   unlinkSync,
   writeSync,
 } from "node:fs";
+import { chmod, link, lstat, mkdir, open, readFile, unlink, type FileHandle } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 
 const SHA256_KEY = /^[a-f0-9]{64}$/;
@@ -25,6 +26,11 @@ export class ArtifactBlobIntegrityError extends Error {
 
 export interface ArtifactBlobStore {
   put(key: string, bytes: Buffer): void;
+  /** `put` for callers on the event loop: hashing, writes, flushes and the publishing link run on
+   * the thread pool. `beforePublish` runs once the content is flushed and before it can appear at
+   * its content path, so a caller can first make its pending-write record durable. The blob is
+   * durable, verified and published when the promise resolves. */
+  putDurable(key: string, bytes: Buffer, beforePublish?: () => Promise<void>): Promise<void>;
   read(key: string, expectedSize: number): Buffer;
   delete(key: string): boolean;
   readonly rootPath: string | null;
@@ -32,6 +38,12 @@ export interface ArtifactBlobStore {
 
 export function artifactBlobSha256(bytes: Buffer): string {
   return createHash("sha256").update(bytes).digest("hex");
+}
+
+/** SHA-256 on the thread pool, so a multi-megabyte digest does not block the event loop. */
+export async function artifactBlobSha256Async(bytes: Buffer): Promise<string> {
+  // Node buffers here are never backed by a SharedArrayBuffer.
+  return Buffer.from(await webcrypto.subtle.digest("SHA-256", bytes as Uint8Array<ArrayBuffer>)).toString("hex");
 }
 
 export function assertArtifactBlobKey(key: string): void {
@@ -58,6 +70,15 @@ function verifyBytes(key: string, bytes: Buffer, expectedSize: number): void {
   }
 }
 
+async function verifyBytesAsync(key: string, bytes: Buffer, expectedSize: number): Promise<void> {
+  if (!Number.isSafeInteger(expectedSize) || expectedSize < 0 || bytes.byteLength !== expectedSize) {
+    throw new ArtifactBlobIntegrityError("artifact blob size does not match metadata");
+  }
+  if (await artifactBlobSha256Async(bytes) !== key) {
+    throw new ArtifactBlobIntegrityError("artifact blob digest does not match its content key");
+  }
+}
+
 export class MemoryArtifactBlobStore implements ArtifactBlobStore {
   readonly rootPath = null;
   private readonly blobs = new Map<string, Buffer>();
@@ -72,6 +93,13 @@ export class MemoryArtifactBlobStore implements ArtifactBlobStore {
       return;
     }
     this.blobs.set(key, Buffer.from(bytes));
+  }
+
+  async putDurable(key: string, bytes: Buffer, beforePublish?: () => Promise<void>): Promise<void> {
+    assertArtifactBlobKey(key);
+    await verifyBytesAsync(key, bytes, bytes.byteLength);
+    await beforePublish?.();
+    this.put(key, bytes);
   }
 
   read(key: string, expectedSize: number): Buffer {
@@ -141,6 +169,8 @@ export class FileArtifactBlobStore implements ArtifactBlobStore {
       const existing = this.read(key, bytes.byteLength);
       if (!existing.equals(bytes)) throw new ArtifactBlobIntegrityError("artifact blob key collision");
       try { chmodSync(finalPath, 0o600); } catch { /* Best effort on Windows. */ }
+      // A concurrent putDurable may have linked this path without flushing its directory yet.
+      this.flushDirectory(parent);
       return;
     }
 
@@ -164,12 +194,104 @@ export class FileArtifactBlobStore implements ArtifactBlobStore {
         const existing = this.read(key, bytes.byteLength);
         if (!existing.equals(bytes)) throw new ArtifactBlobIntegrityError("artifact blob key collision");
         unlinkSync(temporaryPath);
+        this.flushDirectory(parent);
       }
       try { chmodSync(finalPath, 0o600); } catch { /* Best effort on Windows. */ }
       this.read(key, bytes.byteLength);
     } catch (error) {
       if (handle !== null) closeSync(handle);
       if (existsSync(temporaryPath)) unlinkSync(temporaryPath);
+      throw error;
+    }
+  }
+
+  private async assertDirectoryAsync(path: string): Promise<void> {
+    const stat = await lstat(path);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      throw new ArtifactBlobIntegrityError("artifact blob directory is not a real directory");
+    }
+  }
+
+  private async flushDirectoryAsync(path: string): Promise<void> {
+    let handle: FileHandle | null = null;
+    try {
+      handle = await open(path, "r");
+      await handle.sync();
+    } catch {
+      // Best effort for the same reasons as flushDirectory.
+    } finally {
+      try { await handle?.close(); } catch { /* Directory flush is best effort. */ }
+    }
+  }
+
+  /** Verify an already-published blob and flush it and its directory: another writer may have
+   * linked it without completing its own directory flush. */
+  private async adoptExisting(key: string, finalPath: string, expectedSize: number): Promise<void> {
+    const stat = await lstat(finalPath);
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw new ArtifactBlobIntegrityError("artifact blob is not a regular file");
+    }
+    if (stat.size !== expectedSize) throw new ArtifactBlobIntegrityError("artifact blob size does not match metadata");
+    // The digest equals the key, which is the digest of the caller's bytes: same content.
+    await verifyBytesAsync(key, await readFile(finalPath), expectedSize);
+    try { await chmod(finalPath, 0o600); } catch { /* Best effort on Windows. */ }
+    const handle = await open(finalPath, "r");
+    try { await handle.sync(); } finally { await handle.close(); }
+    await this.flushDirectoryAsync(dirname(finalPath));
+  }
+
+  async putDurable(key: string, bytes: Buffer, beforePublish?: () => Promise<void>): Promise<void> {
+    assertArtifactBlobKey(key);
+    await verifyBytesAsync(key, bytes, bytes.byteLength);
+    const finalPath = this.path(key);
+    const parent = dirname(finalPath);
+    await mkdir(parent, { recursive: true, mode: 0o700 });
+    await this.assertDirectoryAsync(parent);
+    try { await chmod(parent, 0o700); } catch { /* Best effort on Windows. */ }
+
+    const published = async () => {
+      try {
+        await lstat(finalPath);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    if (await published()) {
+      await this.adoptExisting(key, finalPath, bytes.byteLength);
+      return;
+    }
+
+    const temporaryPath = join(parent, `.${key}.${randomUUID()}.tmp`);
+    let handle: FileHandle | null = null;
+    try {
+      handle = await open(temporaryPath, "wx", 0o600);
+      await handle.writeFile(bytes);
+      await handle.sync();
+      await handle.close();
+      handle = null;
+      await beforePublish?.();
+      try {
+        // The same no-replace publication as put.
+        await link(temporaryPath, finalPath);
+      } catch (error) {
+        if (!(await published())) throw error;
+        await unlink(temporaryPath);
+        await this.adoptExisting(key, finalPath, bytes.byteLength);
+        return;
+      }
+      await unlink(temporaryPath);
+      await this.flushDirectoryAsync(parent);
+      try { await chmod(finalPath, 0o600); } catch { /* Best effort on Windows. */ }
+      const stat = await lstat(finalPath);
+      if (!stat.isFile() || stat.size !== bytes.byteLength) {
+        throw new ArtifactBlobIntegrityError("artifact blob size does not match metadata");
+      }
+    } catch (error) {
+      if (handle !== null) {
+        try { await handle.close(); } catch { /* Already failing. */ }
+      }
+      try { await unlink(temporaryPath); } catch { /* Already published or never created. */ }
       throw error;
     }
   }
