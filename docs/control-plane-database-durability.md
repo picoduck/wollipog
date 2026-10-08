@@ -55,10 +55,13 @@ A rolled-back ingest transaction takes with it everything it wrote in the same t
 - campaign-report rebinding, background-continuation projection, usage coverage, and event-artifact
   links.
 
-Large payloads are published as artifacts in `FULL` commits before their event row. An artifact
-whose event rolled back is left unreferenced, and startup collects it
-(`collectOrphanedEventPayloadArtifacts`). Re-ingesting the event republishes the same
-content-addressed bytes.
+Large payloads are published as artifacts before their event row. Their blobs are made durable
+off the event loop first, including a WAL flush of their pending-write rows; their artifact rows
+then commit relaxed, like the event row (`createStagedEventPayloadArtifacts`). An artifact row that
+rolls back leaves a durable pending row, so startup removes its blob. An artifact whose event rolled
+back is left unreferenced, and startup collects it (`collectOrphanedEventPayloadArtifacts`).
+Re-ingesting the event republishes the same content-addressed bytes. See
+[large session-event payloads](./large-event-payloads.md).
 
 Nothing else is exposed, because every other write still flushes at its commit:
 
@@ -176,3 +179,9 @@ Limits:
 - `pnpm benchmark:event-ingest [--dir <path>]` measures the real per-event commit cost and fails
   above a 1 ms p50. Point `--dir` at the disk that holds the database: on tmpfs every flush is free,
   which hides a regression.
+- `event-payload-staging.test.ts` copies the database, WAL, and blob root at every step of a large
+  payload's ingestion, as a process crash would leave them, and checks that recovery never leaves a
+  row referencing a missing blob. It also pins that the pending row is flushed before the blob is
+  published and that the artifact rows commit relaxed, after it.
+- `pnpm benchmark:event-payload [--dir <path>]` fails if a 16 KiB to 1 MiB payload blocks the event
+  loop for 2 ms or more at p95.

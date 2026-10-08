@@ -20,6 +20,7 @@ import type {
   SessionReminderView,
   SessionConfig,
   SessionEventPayload,
+  SessionStatus,
   OrchestratorSettingsView,
   SetSessionReminderRequest,
   SessionSnapshot,
@@ -75,6 +76,7 @@ import {
   sessionBlocksConversationFork,
   type PreStagedDeliveryPlan,
 } from "./sessions.js";
+import { RunnerFrameQueue } from "./runner-frame-queue.js";
 
 for (const scenario of ["downgrade", "revision-ahead", "identity-conflict", "stopped", "archived"]) test(`unsupported reconciled snapshot isolates its session and preserves enforcement: ${scenario}`, async () => {
   const { db, hub, svc } = makeHarness();
@@ -17765,6 +17767,342 @@ test("runner deletion removes session-only large-event artifacts and their blobs
   assert.ok(db.deleteRunner(RUNNER_ID));
   assert.equal(db.getSession(id), null);
   assert.ok(artifactIds.every((artifactId) => db.getWorkflowArtifact(artifactId) === null));
+});
+
+/** Hold every blob staging until released, so a test can act while a payload is in flight. */
+function gateArtifactStaging(
+  db: ControlPlaneDb,
+  gatedCalls = Infinity,
+): { release: () => void; calls: () => number; restore: () => void } {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const stage = db.stageArtifactBlob.bind(db);
+  let calls = 0;
+  db.stageArtifactBlob = async (key, bytes, createdAt) => {
+    if (++calls <= gatedCalls) await gate;
+    await stage(key, bytes, createdAt);
+  };
+  return { release, calls: () => calls, restore: () => { db.stageArtifactBlob = stage; } };
+}
+
+const pendingBlobCount = (db: ControlPlaneDb) =>
+  (db.raw().prepare("SELECT COUNT(*) AS n FROM artifact_blob_pending").get() as { n: number }).n;
+
+test("a staged large live event commits only after its chunks are durable", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  const text = "durable-first-".repeat(2_000);
+  const gate = gateArtifactStaging(db);
+  let prepared;
+  try {
+    const staging = svc.stageLiveSessionEventPayload(id, { kind: "command_output", text }, undefined, RUNNER_ID);
+    assert.ok(staging, "a large payload is staged asynchronously");
+    assert.deepEqual(db.listSessionWorkflowArtifacts(id), [], "no row exists while the blob is in flight");
+    const waiting = svc.awaitStagedLiveSessionEvent(id, staging);
+    gate.release();
+    prepared = await waiting;
+  } finally {
+    gate.restore();
+  }
+  assert.ok(prepared.staged);
+  svc.onSessionEvent(id, { kind: "command_output", text }, undefined, undefined, RUNNER_ID, prepared);
+  const event = db.listEvents(id).find((candidate) => candidate.payload.kind === "command_output")!;
+  assert.ok(event.payload.kind === "command_output" && event.payload.textRefs?.length);
+  assert.equal(
+    Buffer.concat(event.payload.textRefs!.map((ref) => db.readWorkflowArtifactBytes(ref.artifactId)!)).toString("utf8"),
+    text,
+  );
+  assert.equal(pendingBlobCount(db), 0);
+  prepared.staged!.release();
+  assert.ok(db.readWorkflowArtifactBytes(event.payload.textRefs![0]!.artifactId), "releasing again is harmless");
+});
+
+test("an inline payload, an unknown session, or a runner that does not own it stages nothing", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  let staged = 0;
+  const stage = db.stageArtifactBlob.bind(db);
+  db.stageArtifactBlob = async (...args) => { staged += 1; return stage(...args); };
+  try {
+    const payload = { kind: "stderr" as const, text: "not-yours-".repeat(3_000) };
+    assert.equal(svc.stageLiveSessionEventPayload(id, payload, undefined, "another-runner"), undefined);
+    assert.equal(svc.stageLiveSessionEventPayload("no-such-session", payload, undefined, RUNNER_ID), undefined);
+    assert.equal(svc.stageLiveSessionEventPayload(id, { kind: "stderr", text: "small" }, undefined, RUNNER_ID), undefined);
+    assert.equal(staged, 0, "no blob is written before the ownership check passes");
+  } finally {
+    db.stageArtifactBlob = stage;
+  }
+});
+
+test("a large live event whose blob staging fails keeps its original payload inline", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  const original = "lossless-staged-".repeat(3_000);
+  const stage = db.stageArtifactBlob.bind(db);
+  db.stageArtifactBlob = async (key, bytes, createdAt) => {
+    await stage(key, bytes, createdAt);
+    throw new Error("storage unavailable");
+  };
+  let prepared;
+  try {
+    const staging = svc.stageLiveSessionEventPayload(id, { kind: "stderr", text: original }, undefined, RUNNER_ID);
+    prepared = await svc.awaitStagedLiveSessionEvent(id, staging!);
+  } finally {
+    db.stageArtifactBlob = stage;
+  }
+  assert.equal(prepared.staged, null);
+  svc.onSessionEvent(id, { kind: "stderr", text: original }, undefined, undefined, RUNNER_ID, prepared);
+  const event = db.listEvents(id).find((candidate) => candidate.payload.kind === "stderr")!;
+  assert.deepEqual(event.payload, { kind: "stderr", text: original });
+  assert.deepEqual(db.listSessionWorkflowArtifacts(id), []);
+  assert.equal(pendingBlobCount(db), 0, "the failed staging removed its pending blob");
+});
+
+test("a live event whose history was reset while its payload staged is re-read from the runner", async () => {
+  const { db, hub, svc } = makeHarness();
+  const requests: string[] = [];
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ seq: 0, historyEpoch: 10 })]);
+  hub.requestHandler = (msg) => {
+    requests.push(msg.type);
+    throw new Error("runner did not respond in time");
+  };
+  const payload = { kind: "command_output" as const, text: "old-generation-".repeat(2_000) };
+  const gate = gateArtifactStaging(db);
+  let prepared;
+  try {
+    const staging = svc.stageLiveSessionEventPayload("s_box1", payload, 1_001, RUNNER_ID);
+    const waiting = svc.awaitStagedLiveSessionEvent("s_box1", staging!);
+    svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ seq: 1, historyEpoch: 11 })]);
+    gate.release();
+    prepared = await waiting;
+  } finally {
+    gate.restore();
+  }
+  svc.onSessionEvent("s_box1", payload, 1, 1_001, RUNNER_ID, prepared);
+  assert.deepEqual(db.listEvents("s_box1"), [], "the old generation's event never enters the new one");
+  assert.deepEqual(db.listSessionWorkflowArtifacts("s_box1"), []);
+  assert.equal(pendingBlobCount(db), 0);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.ok(requests.includes("session_history_page"), JSON.stringify(requests));
+});
+
+/** Staging hashes and writes on the thread pool, so wait on time, not a count of turns. */
+async function eventually(condition: () => boolean, what: string, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    assert.ok(Date.now() < deadline, `timed out waiting until ${what}`);
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+async function untilStagingStarts(gate: { calls: () => number }): Promise<void> {
+  await eventually(() => gate.calls() > 0, "staging started");
+}
+
+test("an indexed history page staged across a history reset is not applied", async () => {
+  const { db, hub, svc } = makeHarness();
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ seq: 1, historyEpoch: 10 })]);
+  let pages = 0;
+  hub.requestHandler = (msg) => {
+    if (msg.type !== "session_history_page") throw new Error("unexpected request");
+    if (++pages > 1) throw new Error("runner did not respond in time");
+    return {
+      type: "session_history_page_result",
+      requestId: msg.requestId,
+      sessionId: msg.sessionId,
+      ok: true,
+      events: [{ seq: 1, ts: 100, payload: { kind: "command_output", text: "old-generation-".repeat(2_000) } }],
+      page: { logEpoch: 10, throughSeq: 1, nextAfterSeq: 1, hasMore: false },
+    };
+  };
+  const gate = gateArtifactStaging(db);
+  try {
+    const hydration = svc.hydrateHistory("s_box1");
+    await untilStagingStarts(gate);
+    svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ seq: 1, historyEpoch: 11 })]);
+    gate.release();
+    await hydration;
+  } finally {
+    gate.restore();
+  }
+  assert.deepEqual(db.listEvents("s_box1"), [], "the old generation's page never enters the new one");
+  assert.equal(db.getRunnerHistoryState("s_box1")?.historyEpoch, 11, "nor resets history back to it");
+  assert.deepEqual(db.listSessionWorkflowArtifacts("s_box1"), []);
+  assert.equal(pendingBlobCount(db), 0);
+  assert.equal(pages, 2, "a fresh pass reads the current history instead");
+});
+
+test("a legacy history batch staged across a reprocess is not appended", async () => {
+  const { db, hub, svc } = makeHarness();
+  db.registerRunner(runnerMeta(), Date.now(), 53);
+  const replacement = { seq: 1, ts: 200, payload: { kind: "agent_message" as const, text: "replacement-generation event" } };
+  let histories = 0;
+  hub.requestHandler = (msg) => {
+    if (msg.type === "session_history") {
+      // The first batch predates the reprocess and carries a suffix the replacement log lacks.
+      const events = ++histories === 1
+        ? [
+            { seq: 1, ts: 100, payload: { kind: "agent_message" as const, text: "old-generation event" } },
+            { seq: 2, ts: 101, payload: { kind: "command_output" as const, text: "old-generation-suffix-".repeat(2_000) } },
+          ]
+        : [replacement];
+      return { type: "session_history_result", requestId: msg.requestId, sessionId: msg.sessionId, ok: true, events };
+    }
+    if (msg.type === "reprocess_session") {
+      return {
+        type: "reprocess_session_result",
+        requestId: msg.requestId,
+        sessionId: msg.sessionId,
+        ok: true,
+        snapshot: snapshot({ adopted: true, seq: 1 }),
+        events: [replacement],
+      };
+    }
+    throw new Error("unexpected request");
+  };
+  const gate = gateArtifactStaging(db, 1);
+  try {
+    svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ adopted: true, seq: 2, historyEpoch: undefined })]);
+    const hydration = svc.hydrateHistory("s_box1");
+    await untilStagingStarts(gate);
+    const reprocessed = await svc.reprocessSession("s_box1");
+    assert.equal(reprocessed.ok, true, reprocessed.error ?? "reprocess failed");
+    gate.release();
+    await hydration;
+  } finally {
+    gate.restore();
+  }
+  assert.deepEqual(
+    db.listEvents("s_box1").map((event) => event.payload.kind === "agent_message" ? event.payload.text : event.payload.kind),
+    ["replacement-generation event"],
+    "only the replacement generation remains",
+  );
+  assert.deepEqual(db.listSessionWorkflowArtifacts("s_box1"), []);
+  assert.equal(pendingBlobCount(db), 0);
+});
+
+test("an older reprocess result staged across a newer reprocess does not replace it", async () => {
+  const { db, hub, svc } = makeHarness();
+  db.registerRunner(runnerMeta(), Date.now(), 53);
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ adopted: true, seq: 1, historyEpoch: undefined })]);
+  let reprocesses = 0;
+  hub.requestHandler = (msg) => {
+    if (msg.type !== "reprocess_session") throw new Error("runner did not respond in time");
+    const older = ++reprocesses === 1;
+    return {
+      type: "reprocess_session_result",
+      requestId: msg.requestId,
+      sessionId: msg.sessionId,
+      ok: true,
+      snapshot: snapshot({ adopted: true, seq: 1, preview: older ? "older" : "newer" }),
+      events: [{
+        seq: 1,
+        ts: older ? 100 : 200,
+        payload: older
+          ? { kind: "command_output", text: "older-result-".repeat(2_000) }
+          : { kind: "agent_message", text: "newer-result" },
+      }],
+    };
+  };
+  const gate = gateArtifactStaging(db, 1);
+  let first;
+  try {
+    const older = svc.reprocessSession("s_box1");
+    await untilStagingStarts(gate);
+    const newer = await svc.reprocessSession("s_box1");
+    assert.equal(newer.ok, true, newer.error ?? "newer reprocess failed");
+    gate.release();
+    first = await older;
+  } finally {
+    gate.restore();
+  }
+  assert.equal(first.status, 409, "the older result is refused rather than applied");
+  assert.deepEqual(
+    db.listEvents("s_box1").map((event) => event.payload.kind === "agent_message" ? event.payload.text : event.payload.kind),
+    ["newer-result"],
+  );
+  assert.equal(db.getSession("s_box1")?.preview, "newer");
+  assert.deepEqual(db.listSessionWorkflowArtifacts("s_box1"), []);
+  assert.equal(pendingBlobCount(db), 0);
+});
+
+test("a history page with a malformed payload releases the stagings that succeeded beside it", async () => {
+  const { db, hub, svc } = makeHarness();
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ seq: 2, historyEpoch: 7 })]);
+  hub.requestHandler = (msg) => {
+    if (msg.type !== "session_history_page") throw new Error("unexpected request");
+    return {
+      type: "session_history_page_result",
+      requestId: msg.requestId,
+      sessionId: msg.sessionId,
+      ok: true,
+      events: [
+        { seq: 1, ts: 100, payload: { kind: "command_output", text: "valid-large-".repeat(2_000) } },
+        { seq: 2, ts: 101, payload: null as unknown as SessionEventPayload },
+      ],
+      page: { logEpoch: 7, throughSeq: 2, nextAfterSeq: 2, hasMore: false },
+    };
+  };
+  await svc.hydrateHistory("s_box1");
+  assert.equal(pendingBlobCount(db), 0, "no pending blob is left behind");
+  assert.equal((db as unknown as { stagingArtifactBlobs: Map<string, number> }).stagingArtifactBlobs.size, 0,
+    "no staging reservation is left behind");
+});
+
+test("a runner's frames keep arrival order while a large payload becomes durable", async () => {
+  const { db, hub, svc } = makeHarness();
+  const slow = seedSession(svc, hub);
+  const other = seedSession(svc, hub);
+  db.updateSessionStatus(slow, "running", Date.now());
+  const gate = gateArtifactStaging(db);
+  const handled: string[] = [];
+  type Frame =
+    | { type: "session_event"; sessionId: string; payload: SessionEventPayload }
+    | { type: "session_status"; sessionId: string; status: SessionStatus };
+  type Staging = NonNullable<ReturnType<SessionsService["stageLiveSessionEventPayload"]>>;
+  // Wired as index.ts wires the runner socket.
+  const queue = new RunnerFrameQueue<Frame, Staging>(async (frame, staging) => {
+    try {
+      const prepared = staging ? await svc.awaitStagedLiveSessionEvent(frame.sessionId, staging) : undefined;
+      handled.push(`${frame.sessionId === slow ? "slow" : "other"}:${
+        frame.type === "session_event" ? frame.payload.kind : frame.status}`);
+      if (frame.type === "session_event") {
+        svc.onSessionEvent(frame.sessionId, frame.payload, undefined, undefined, RUNNER_ID, prepared);
+      } else {
+        svc.onSessionStatus(frame.sessionId, frame.status, undefined, undefined, RUNNER_ID);
+      }
+    } finally {
+      if (staging) svc.discardStagedLiveSessionEvent(staging);
+    }
+  }, () => assert.fail("the queue must not fail"), undefined, undefined, undefined, {
+    runnerWide: () => false,
+    prepare: (frame) => frame.type === "session_event"
+      ? svc.stageLiveSessionEventPayload(frame.sessionId, frame.payload, undefined, RUNNER_ID)
+      : undefined,
+    discard: (staging) => svc.discardStagedLiveSessionEvent(staging),
+  });
+  try {
+    queue.enqueue({ type: "session_event", sessionId: slow, payload: { kind: "command_output", text: "big-".repeat(5_000) } }, 1);
+    queue.enqueue({ type: "session_event", sessionId: slow, payload: {
+      kind: "question_request", requestId: "q1", questions: [{ id: "q", header: "Next", question: "Continue?", options: [] }],
+    } as SessionEventPayload }, 1);
+    queue.enqueue({ type: "session_status", sessionId: slow, status: "completed" }, 1);
+    queue.enqueue({ type: "session_event", sessionId: other, payload: { kind: "agent_message", messageId: "m", text: "meanwhile" } }, 1);
+    await untilStagingStarts(gate);
+    for (let index = 0; index < 5; index++) await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(handled, [], "nothing overtakes the frame whose payload is still in flight");
+    assert.deepEqual(db.listSessionWorkflowArtifacts(slow), []);
+    gate.release();
+    await eventually(() => handled.length === 4, "every frame was handled");
+  } finally {
+    gate.restore();
+    queue.close();
+  }
+  assert.deepEqual(handled, ["slow:command_output", "slow:question_request", "slow:completed", "other:agent_message"]);
+  const session = db.getSession(slow)!;
+  assert.equal(session.status, "completed", "the terminal status lands after the question it followed");
+  assert.equal(session.pendingApproval ?? null, null);
+  assert.equal(pendingBlobCount(db), 0);
 });
 
 test("indexed history pages externalize large payloads before cache persistence and broadcast", async () => {

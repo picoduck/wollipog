@@ -26,7 +26,13 @@ import {
   RunnerConnectionLimits,
   runnerAuthTimeoutMs,
 } from "./runner-channel.js";
-import { RunnerFrameQueue, runnerFrameBypassesInventory, setRunnerReceivePressure } from "./runner-frame-queue.js";
+import {
+  RunnerFrameQueue,
+  runnerFrameBypassesInventory,
+  runnerFrameSessionKey,
+  setRunnerReceivePressure,
+} from "./runner-frame-queue.js";
+import type { StagedSessionEventPayload } from "./event-payloads.js";
 import { installStartupReadinessGate } from "./startup-readiness.js";
 import { WorktreeCreateCoordinator } from "./worktree-create-coordinator.js";
 import { legacyPeerWorktreeRetirement } from "./worktree-retirement.js";
@@ -228,6 +234,7 @@ import {
   SESSION_COMMAND_INVOCATION_RETENTION_MS,
   sessionBlocksConversationFork,
   SessionsService,
+  type PreparedLiveSessionEvent,
 } from "./sessions.js";
 import { videoFrameValidationSessionId } from "./video-frame-validation.js";
 import { ShellRegistry } from "./shell-registry.js";
@@ -1168,7 +1175,7 @@ app.register(async (instance) => {
     await svc.flushRunnerAttention(runnerId, currentSocket);
     runtimeAttentionBatch = undefined;
   };
-  const handleRunnerFrame = async (msg: RunnerToControlPlane) => {
+  const handleRunnerFrame = async (msg: RunnerToControlPlane, prepared?: PreparedLiveSessionEvent) => {
     // A malformed frame (missing/mistyped fields survive the cast-only parseMessage) or a
     // transient persistence error must not escape this listener: an uncaught throw here becomes a
     // fatal uncaughtException that drops EVERY runner/session/dashboard connection. Isolate the
@@ -1448,7 +1455,7 @@ app.register(async (instance) => {
         svc.onGovernanceTripped(runnerId!, msg);
         break;
       case "session_event":
-        svc.onSessionEvent(msg.sessionId, msg.payload, msg.seq, msg.ts, runnerId ?? undefined);
+        svc.onSessionEvent(msg.sessionId, msg.payload, msg.seq, msg.ts, runnerId ?? undefined, prepared);
         break;
       case "session_queue": {
         // Ephemeral relay — the prompts waiting behind the running turn, straight to
@@ -1772,7 +1779,20 @@ app.register(async (instance) => {
     }
   };
 
-  const frameQueue = new RunnerFrameQueue<RunnerToControlPlane>(handleRunnerFrame, () => {
+  type Staging = Promise<StagedSessionEventPayload | null>;
+  const frameQueue = new RunnerFrameQueue<RunnerToControlPlane, Staging>(async (msg, staging) => {
+    try {
+      // Frames stay in arrival order: a large event waits here for its durable payload, and the
+      // frames behind it (still counted toward read pressure) wait for it (#2794).
+      const prepared = staging && msg.type === "session_event"
+        ? await svc.awaitStagedLiveSessionEvent(msg.sessionId, staging)
+        : undefined;
+      await handleRunnerFrame(msg, prepared);
+    } finally {
+      // Idempotent: covers frames the handler rejected before reaching onSessionEvent.
+      if (staging) svc.discardStagedLiveSessionEvent(staging);
+    }
+  }, () => {
     app.log.warn({ event: "runner_frame_queue_closed", entryPoint: "runner_socket", runnerId },
       "runner replay exceeded its bounded queue or failed");
     socket.terminate();
@@ -1780,6 +1800,14 @@ app.register(async (instance) => {
     if (!setRunnerReceivePressure(socket, paused)) return;
     app.log.debug({ event: "runner_frame_backpressure", entryPoint: "runner_socket", runnerId, paused },
       "runner receive flow control changed");
+  }, {
+    // A large event payload starts becoming durable off the event loop as soon as it is queued,
+    // so several flush in parallel; nothing is staged past a frame about the whole runner.
+    runnerWide: (msg) => runnerFrameSessionKey(msg) === null,
+    prepare: (msg) => msg.type === "session_event"
+      ? svc.stageLiveSessionEventPayload(msg.sessionId, msg.payload, msg.ts, runnerId ?? undefined)
+      : undefined,
+    discard: (staging) => svc.discardStagedLiveSessionEvent(staging),
   });
   socket.on("message", (raw: Buffer) => {
     const msg = parseMessage<RunnerToControlPlane>(raw.toString());

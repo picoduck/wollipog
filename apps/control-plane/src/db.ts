@@ -10,8 +10,9 @@ import { CLAUDE_RECONCILIATION_SCHEMA, normalizeReconciledSnapshot } from "./cla
 import { priceUsage, resolveCostSource, type RateTable } from "./usage-pricing.js";
 import { collapseAgentSpawnObservations, type StructuredAgentSpawnObservation } from "./child-session-registry.js";
 import { mkdirSync, readFileSync } from "node:fs";
+import { open as openFile } from "node:fs/promises";
 import { uptime } from "node:os";
-import { dirname } from "node:path";
+import { dirname, resolve as resolvePath } from "node:path";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import {
   FileArtifactBlobStore,
@@ -4760,10 +4761,11 @@ export class ControlPlaneDb {
     private readonly db: DatabaseSync,
     private readonly artifactBlobs: ArtifactBlobStore,
     private readonly controlPlaneInstanceId: string,
-    private readonly walJournal: boolean,
+    /** The write-ahead log file, or null outside WAL journaling (where every commit is FULL). */
+    private readonly walPath: string | null,
     hostRebooted: boolean,
   ) {
-    this.ingestRollback = hostRebooted && walJournal
+    this.ingestRollback = hostRebooted && walPath !== null
       ? { settled: new Set(), runnerTails: new Map(), controlPlaneEvents: new Set() }
       : null;
   }
@@ -4790,6 +4792,10 @@ export class ControlPlaneDb {
   onEventEpochAdvanced(listener: ((sessionId: string) => void) | null): void {
     this.eventEpochAdvancedListener = listener;
   }
+
+  /** Content keys with a stageArtifactBlob in flight, counted per staging. Their pending row and
+   * file must outlive every staging, so pending cleanup and blob collection skip them. */
+  private readonly stagingArtifactBlobs = new Map<string, number>();
 
   /** Compiled-statement cache. Every hot path (one appendEvent + two sessionViews per streamed
    * delta) was re-`prepare()`ing its SQL from text on each call; SQL strings here are static
@@ -6449,7 +6455,9 @@ export class ControlPlaneDb {
         db.exec(`ALTER TABLE orchestrator_campaign_child_reports ADD COLUMN ${column}`);
       }
     }
-    const controlPlane = new ControlPlaneDb(db, artifactBlobs, instanceId, journalMode === "wal", hostRebooted);
+    const controlPlane = new ControlPlaneDb(
+      db, artifactBlobs, instanceId, journalMode === "wal" ? `${resolvePath(location)}-wal` : null, hostRebooted,
+    );
     try {
       controlPlane.recoverPendingArtifactBlobs();
       controlPlane.migrateInlineWorkflowArtifacts();
@@ -21551,8 +21559,13 @@ export class ControlPlaneDb {
    * Usage stays FULL: after a rollback, the reconnect snapshot would book a lost token_usage as flat
    * totals before its replay (reconcileUsageSnapshotInTransaction), dropping its cache breakdown. */
   private replayableCommit<T>(payloads: readonly SessionEventPayload[], work: () => T): T {
-    if (!this.walJournal || payloads.some((payload) => payload.kind === "token_usage") ||
-        (this.db as DatabaseSync & { isTransaction?: boolean }).isTransaction) {
+    if (payloads.some((payload) => payload.kind === "token_usage")) return work();
+    return this.relaxedCommit(work);
+  }
+
+  /** Runs work's commits under synchronous=NORMAL in WAL mode; see replayableCommit. */
+  private relaxedCommit<T>(work: () => T): T {
+    if (!this.walPath || (this.db as DatabaseSync & { isTransaction?: boolean }).isTransaction) {
       return work();
     }
     this.db.exec("PRAGMA synchronous = NORMAL;");
@@ -24189,27 +24202,7 @@ export class ControlPlaneDb {
             );
           }
         }
-        this.stmt(
-          `INSERT INTO artifacts
-           (id, run_id, session_id, kind, name, mime_type, encoding, data, blob_key, size_bytes, sha256,
-            created_by_kind, created_by_id, metadata, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?)`,
-        ).run(
-          artifact.artifactId,
-          artifact.runId ?? null,
-          artifact.sessionId ?? null,
-          artifact.kind,
-          artifact.name,
-          artifact.mimeType,
-          artifact.encoding,
-          artifact.sha256,
-          artifact.sizeBytes,
-          artifact.sha256,
-          artifact.createdBy.kind,
-          artifact.createdBy.id ?? null,
-          artifact.metadata ? JSON.stringify(artifact.metadata) : null,
-          artifact.createdAt,
-        );
+        this.insertArtifactRow(artifact);
         if (options.preparedPromptImageExpiresAt !== undefined) {
           const inserted = this.stmt(
             `INSERT INTO prepared_prompt_image_artifacts
@@ -24237,6 +24230,101 @@ export class ControlPlaneDb {
     } catch (error) {
       this.cleanupPendingArtifactBlob(artifact.sha256);
       throw error;
+    }
+  }
+
+  private insertArtifactRow(artifact: WorkflowArtifactView): void {
+    this.stmt(
+      `INSERT INTO artifacts
+       (id, run_id, session_id, kind, name, mime_type, encoding, data, blob_key, size_bytes, sha256,
+        created_by_kind, created_by_id, metadata, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      artifact.artifactId,
+      artifact.runId ?? null,
+      artifact.sessionId ?? null,
+      artifact.kind,
+      artifact.name,
+      artifact.mimeType,
+      artifact.encoding,
+      artifact.sha256,
+      artifact.sizeBytes,
+      artifact.sha256,
+      artifact.createdBy.kind,
+      artifact.createdBy.id ?? null,
+      artifact.metadata ? JSON.stringify(artifact.metadata) : null,
+      artifact.createdAt,
+    );
+  }
+
+  /** Make one blob durable without blocking the event loop, ahead of the row that will reference
+   * it (#2794). The pending row commits first and its WAL frames are flushed off-thread before the
+   * blob can appear at its content path, so startup recovery can always remove an unreferenced
+   * blob. Every call, successful or not, must be paired with one releaseStagedArtifactBlob. */
+  async stageArtifactBlob(key: string, bytes: Buffer, createdAt: number): Promise<void> {
+    assertArtifactBlobKey(key);
+    this.stagingArtifactBlobs.set(key, (this.stagingArtifactBlobs.get(key) ?? 0) + 1);
+    this.relaxedCommit(() => this.stmt("INSERT OR IGNORE INTO artifact_blob_pending (blob_key, created_at) VALUES (?, ?)")
+      .run(key, createdAt));
+    await this.artifactBlobs.putDurable(key, bytes, () => this.flushWal());
+  }
+
+  /** End one stageArtifactBlob. When the last staging of a key ends without a committed artifact
+   * row, its pending blob is cleaned up now rather than at the next startup. */
+  releaseStagedArtifactBlob(key: string): void {
+    const remaining = (this.stagingArtifactBlobs.get(key) ?? 0) - 1;
+    if (remaining > 0) {
+      this.stagingArtifactBlobs.set(key, remaining);
+      return;
+    }
+    this.stagingArtifactBlobs.delete(key);
+    try {
+      if (this.stmt("SELECT 1 FROM artifact_blob_pending WHERE blob_key=?").get(key)) {
+        this.relaxedCommit(() => this.cleanupPendingArtifactBlob(key));
+      }
+    } catch {
+      // Startup recovery owns a pending row that cannot be cleaned up now.
+    }
+  }
+
+  /** Commit metadata for session-event payload chunks whose blobs a still-unreleased
+   * stageArtifactBlob made durable. Like the event row that follows, the chunks are replayable
+   * from the runner, so the commit is relaxed: if an OS crash rolls it back, the durable pending
+   * row lets startup recovery remove the blob. */
+  createStagedEventPayloadArtifacts(artifacts: readonly WorkflowArtifactView[]): void {
+    for (const artifact of artifacts) {
+      if (!this.stagingArtifactBlobs.has(artifact.sha256) || artifact.runId ||
+          artifact.metadata?.purpose !== "session_event_payload" ||
+          !Number.isSafeInteger(artifact.sizeBytes) || artifact.sizeBytes < 0 ||
+          artifact.sizeBytes > MAX_WORKFLOW_ARTIFACT_BLOB_BYTES) {
+        throw new Error("event payload artifact is not a staged durable blob");
+      }
+    }
+    this.relaxedCommit(() => this.atomic(() => {
+      for (const artifact of artifacts) {
+        this.insertArtifactRow(artifact);
+        this.stmt("DELETE FROM artifact_blob_pending WHERE blob_key=?").run(artifact.sha256);
+      }
+    }));
+  }
+
+  /** Flush the WAL to disk on the thread pool. A relaxed commit's frames are already written to
+   * the file, and fsync covers every earlier write to it, so the commit is durable afterwards. */
+  private async flushWal(): Promise<void> {
+    if (!this.walPath) return;
+    let handle;
+    try {
+      handle = await openFile(this.walPath, "r+");
+    } catch (error) {
+      // Only closing the connection removes the log, after checkpointing every frame into the
+      // flushed database file.
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
     }
   }
 
@@ -24548,6 +24636,8 @@ export class ControlPlaneDb {
   }
 
   private cleanupPendingArtifactBlob(blobKey: string): void {
+    // An in-flight staging owns the pending row until its own release.
+    if (this.stagingArtifactBlobs.has(blobKey)) return;
     try {
       const references = this.stmt("SELECT COUNT(*) AS count FROM artifacts WHERE blob_key=?")
         .get(blobKey) as unknown as { count: number };
@@ -24784,6 +24874,11 @@ export class ControlPlaneDb {
     for (const row of rows) {
       try {
         assertArtifactBlobKey(row.blob_key);
+        // A staged blob is about to gain its artifact row; keep the queue entry for a later pass.
+        if (this.stagingArtifactBlobs.has(row.blob_key)) {
+          retained += 1;
+          continue;
+        }
         const references = this.stmt("SELECT COUNT(*) AS count FROM artifacts WHERE blob_key=?")
           .get(row.blob_key) as unknown as { count: number };
         if (Number(references.count) > 0) {
