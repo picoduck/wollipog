@@ -155,25 +155,7 @@ test("closing a socket discards queued work and isolates handler rejection", asy
   assert.equal(failure, 1);
 });
 
-interface LaneFrame { key: string | null; name: string; prepare?: Promise<string> }
-
-function laneQueue(options: { limits?: { frames: number; bytes: number }; onPressure?: (paused: boolean) => void } = {}) {
-  const handled: Array<{ name: string; prepared?: string }> = [];
-  const discarded: string[] = [];
-  let active = 0;
-  const queue = new RunnerFrameQueue<LaneFrame, string>(async (frame, prepared) => {
-    assert.equal(active, 0, "frames are handled one at a time");
-    active += 1;
-    handled.push({ name: frame.name, ...(prepared !== undefined ? { prepared } : {}) });
-    await tick();
-    active -= 1;
-  }, () => assert.fail("lanes must not fail the queue"), options.limits, undefined, options.onPressure, {
-    key: (frame) => frame.key,
-    prepare: (frame) => frame.prepare,
-    discard: (prepared) => discarded.push(prepared),
-  });
-  return { queue, handled, discarded };
-}
+interface PreparedFrame { name: string; runnerWide?: boolean; malformed?: boolean }
 
 function deferred(): { promise: Promise<string>; resolve: (value: string) => void } {
   let resolve!: (value: string) => void;
@@ -183,108 +165,128 @@ function deferred(): { promise: Promise<string>; resolve: (value: string) => voi
 
 const settle = async () => { for (let n = 0; n < 20; n++) await tick(); };
 
-test("a preparing frame holds only its own key's later frames, in arrival order", async () => {
-  const { queue, handled } = laneQueue();
-  const staging = deferred();
-  queue.enqueue({ key: "a", name: "a1", prepare: staging.promise }, 1);
-  queue.enqueue({ key: "a", name: "a2" }, 1);
-  queue.enqueue({ key: "b", name: "b1" }, 1);
-  queue.enqueue({ key: "a", name: "a3" }, 1);
-  queue.enqueue({ key: "b", name: "b2" }, 1);
-  await settle();
-  assert.deepEqual(handled.map((frame) => frame.name), ["b1", "b2"]);
-  staging.resolve("durable");
-  await settle();
-  assert.deepEqual(handled, [
-    { name: "b1" }, { name: "b2" }, { name: "a1", prepared: "durable" }, { name: "a2" }, { name: "a3" },
-  ]);
-  queue.close();
-});
-
-test("a keyless frame waits for every earlier frame and holds every later one", async () => {
-  const { queue, handled } = laneQueue();
-  const staging = deferred();
-  queue.enqueue({ key: "a", name: "a1", prepare: staging.promise }, 1);
-  queue.enqueue({ key: null, name: "register" }, 1);
-  queue.enqueue({ key: "b", name: "b1" }, 1);
-  await settle();
-  assert.equal(handled.length, 0, "the barrier and everything after it wait");
-  staging.resolve("durable");
-  await settle();
-  assert.deepEqual(handled.map((frame) => frame.name), ["a1", "register", "b1"]);
-  queue.close();
-});
-
-test("frames of one key are prepared in parallel while held", async () => {
+/** A queue whose frames each wait for their own preparation, as a large session event waits for
+ * its durable payload (#2794). */
+function preparingQueue(options: { limits?: { frames: number; bytes: number }; onPressure?: (paused: boolean) => void } = {}) {
+  const gates = new Map<string, ReturnType<typeof deferred>>();
   const prepared: string[] = [];
-  const first = deferred();
-  const second = deferred();
-  const queue = new RunnerFrameQueue<LaneFrame, string>(async () => {}, () => assert.fail("no failure"),
-    undefined, undefined, undefined, {
-      key: (frame) => frame.key,
-      prepare: (frame) => { prepared.push(frame.name); return frame.prepare; },
-      discard: () => {},
-    });
-  queue.enqueue({ key: "a", name: "a1", prepare: first.promise }, 1);
-  queue.enqueue({ key: "a", name: "a2", prepare: second.promise }, 1);
+  const handled: string[] = [];
+  const discarded: string[] = [];
+  let active = 0;
+  const queue = new RunnerFrameQueue<PreparedFrame, Promise<string>>(async (frame, preparation) => {
+    assert.equal(active, 0, "frames are handled one at a time");
+    active += 1;
+    try {
+      handled.push(preparation ? `${frame.name}:${await preparation}` : frame.name);
+    } finally {
+      active -= 1;
+    }
+  }, () => assert.fail("preparation must not fail the queue"), options.limits, undefined, options.onPressure, {
+    runnerWide: (frame) => frame.runnerWide === true,
+    prepare: (frame) => {
+      if (frame.malformed) throw new TypeError("missing payload");
+      prepared.push(frame.name);
+      const gate = deferred();
+      gates.set(frame.name, gate);
+      return gate.promise;
+    },
+    discard: (preparation) => { void preparation.then((value) => discarded.push(value)); },
+  });
+  return { queue, gates, prepared, handled, discarded };
+}
+
+test("frames are handled in arrival order while later frames are prepared ahead", async () => {
+  const { queue, gates, prepared, handled } = preparingQueue();
+  queue.enqueue({ name: "large-a" }, 1);
+  queue.enqueue({ name: "small-b" }, 1);
+  queue.enqueue({ name: "large-c" }, 1);
   await settle();
-  assert.deepEqual(prepared, ["a1", "a2"], "the held frame's durable write starts without waiting for the first");
-  first.resolve("one");
-  second.resolve("two");
+  assert.deepEqual(prepared, ["large-a", "small-b", "large-c"], "every queued frame's preparation has started");
+  assert.equal(handled.length, 0);
+  gates.get("large-c")!.resolve("durable");
+  gates.get("small-b")!.resolve("inline");
   await settle();
+  assert.equal(handled.length, 0, "a later frame never overtakes the one still preparing");
+  gates.get("large-a")!.resolve("durable");
+  await settle();
+  assert.deepEqual(handled, ["large-a:durable", "small-b:inline", "large-c:durable"]);
   queue.close();
 });
 
-test("held frames stay counted toward read pressure", async () => {
+test("nothing behind a runner-wide frame is prepared until it has been handled", async () => {
+  const { queue, gates, prepared, handled } = preparingQueue();
+  queue.enqueue({ name: "register", runnerWide: true }, 1);
+  queue.enqueue({ name: "event" }, 1);
+  await settle();
+  assert.deepEqual(prepared, ["register"], "registration may materialize the session the event names");
+  gates.get("register")!.resolve("done");
+  await settle();
+  assert.deepEqual(prepared, ["register", "event"]);
+  gates.get("event")!.resolve("durable");
+  await settle();
+  assert.deepEqual(handled, ["register:done", "event:durable"]);
+  queue.close();
+});
+
+test("frames waiting behind a preparing frame stay counted toward read pressure", async () => {
   const pressure: boolean[] = [];
-  const { queue, handled } = laneQueue({ limits: { frames: 64, bytes: 400 }, onPressure: (paused) => pressure.push(paused) });
-  const staging = deferred();
-  queue.enqueue({ key: "a", name: "a1", prepare: staging.promise }, 10);
-  for (let n = 2; n <= 10; n++) queue.enqueue({ key: "a", name: `a${n}` }, 10);
+  const { queue, gates, handled } = preparingQueue({
+    limits: { frames: 64, bytes: 400 }, onPressure: (paused) => pressure.push(paused),
+  });
+  for (let n = 1; n <= 11; n++) queue.enqueue({ name: `frame-${n}` }, 10);
   await settle();
   assert.equal(handled.length, 0);
-  assert.deepEqual(pressure, [true], "frames waiting behind a durable write pause socket reads");
-  staging.resolve("durable");
+  assert.deepEqual(pressure, [true], "frames queued behind a durable write pause socket reads");
+  for (const gate of gates.values()) gate.resolve("ready");
   await settle();
-  assert.equal(handled.length, 10);
+  assert.equal(handled.length, 11);
   assert.deepEqual(pressure, [true, false]);
   queue.close();
 });
 
-test("closing the queue discards prepared values, including ones that settle afterward", async () => {
-  const { queue, handled, discarded } = laneQueue();
-  const staging = deferred();
-  queue.enqueue({ key: "a", name: "a1", prepare: staging.promise }, 1);
-  queue.enqueue({ key: "b", name: "b1", prepare: Promise.resolve("ready") }, 1);
-  await tick();
-  // b1 is prepared and runnable but the queue closes before it runs.
-  queue.close();
-  staging.resolve("settled-after-close");
+test("closing the queue discards every prepared frame it did not hand to the handler", async () => {
+  const { queue, gates, handled, discarded } = preparingQueue();
+  queue.enqueue({ name: "head" }, 1);
+  queue.enqueue({ name: "queued" }, 1);
   await settle();
-  assert.ok(handled.every((frame) => frame.name !== "a1"));
-  const handledValues = handled.map((frame) => frame.prepared);
-  assert.deepEqual(
-    [...discarded, ...handledValues].sort(),
-    ["ready", "settled-after-close"],
-    "every prepared value is either handled or discarded, exactly once",
-  );
+  queue.close();
+  for (const [name, gate] of gates) gate.resolve(name);
+  await settle();
+  assert.deepEqual(handled, ["head:head"], "the handler owns the frame it was given");
+  assert.deepEqual(discarded, ["queued"]);
 });
 
-test("a frame whose preparation throws is handled unprepared", async () => {
-  const handled: string[] = [];
-  const queue = new RunnerFrameQueue<LaneFrame, string>(async (frame, prepared) => {
-    handled.push(`${frame.name}:${prepared ?? "unprepared"}`);
-  }, () => assert.fail("a malformed frame is the handler's to reject"), undefined, undefined, undefined, {
-    key: (frame) => frame.key,
-    prepare: (frame) => {
-      if (frame.name === "malformed") throw new TypeError("missing payload");
-      return undefined;
-    },
-    discard: () => {},
-  });
-  queue.enqueue({ key: "a", name: "malformed" }, 1);
-  queue.enqueue({ key: "a", name: "next" }, 1);
+test("a frame whose preparation throws is handled unprepared, in order", async () => {
+  const { queue, gates, handled } = preparingQueue();
+  queue.enqueue({ name: "malformed", malformed: true }, 1);
+  queue.enqueue({ name: "next" }, 1);
   await settle();
-  assert.deepEqual(handled, ["malformed:unprepared", "next:unprepared"]);
+  gates.get("next")!.resolve("ready");
+  await settle();
+  assert.deepEqual(handled, ["malformed", "next:ready"]);
+  queue.close();
+});
+
+test("a frame that cannot be classified is treated as runner-wide", async () => {
+  const prepared: string[] = [];
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const queue = new RunnerFrameQueue<PreparedFrame, string>(async (frame) => { if (frame.name === "first") await held; },
+    () => assert.fail("no failure"), undefined, undefined, undefined, {
+      runnerWide: (frame) => {
+        if (frame.malformed) throw new TypeError("missing snapshot");
+        return false;
+      },
+      prepare: (frame) => { prepared.push(frame.name); return frame.name; },
+      discard: () => {},
+    });
+  queue.enqueue({ name: "first" }, 1);
+  queue.enqueue({ name: "unclassified", malformed: true }, 1);
+  queue.enqueue({ name: "after" }, 1);
+  await settle();
+  assert.deepEqual(prepared, ["first", "unclassified"], "nothing behind it is prepared early");
+  release();
+  await settle();
+  assert.deepEqual(prepared, ["first", "unclassified", "after"]);
   queue.close();
 });

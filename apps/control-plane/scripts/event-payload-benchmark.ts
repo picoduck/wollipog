@@ -19,7 +19,7 @@ import { ControlPlaneDb } from "../src/db.js";
 import { externalizeSessionEventPayload, stageSessionEventPayload } from "../src/event-payloads.js";
 import type { Hub } from "../src/hub.js";
 import { RunnerFrameQueue } from "../src/runner-frame-queue.js";
-import { SessionsService, type PreparedLiveSessionEvent } from "../src/sessions.js";
+import { SessionsService } from "../src/sessions.js";
 
 const SIZES = [16 * 1024 + 1, 64 * 1024, 256 * 1024, 1024 * 1024];
 const ITERATIONS = 40;
@@ -124,9 +124,14 @@ async function measureIngest(db: ControlPlaneDb, mode: "synchronous" | "staged")
   return results;
 }
 
-/** One session streams large outputs while another streams small messages, both from one runner
- * through the runner frame queue and SessionsService, wired as the runner socket wires them. */
-async function measureStream(db: ControlPlaneDb, automaticCheckpoints: boolean) {
+/** One session streams large outputs while another streams small messages, through the runner
+ * frame queue and SessionsService wired as the runner socket wires them: both sessions on one
+ * runner (one frame queue, so the small session waits in arrival order), or on two runners. */
+async function measureStream(
+  db: ControlPlaneDb,
+  variant: "sameRunner" | "otherRunner" | "sameRunnerWithoutCheckpoints",
+) {
+  const automaticCheckpoints = variant !== "sameRunnerWithoutCheckpoints";
   db.raw().exec("PRAGMA wal_checkpoint(TRUNCATE);");
   db.raw().exec(`PRAGMA wal_autocheckpoint = ${automaticCheckpoints ? 1_000 : 0};`);
   const delivered = new Map<string, number>();
@@ -143,19 +148,27 @@ async function measureStream(db: ControlPlaneDb, automaticCheckpoints: boolean) 
   const noop = () => undefined;
   const svc = new SessionsService(db, hub, { info: noop, warn: noop, error: noop, debug: noop } as never);
   type Frame = { type: "session_event"; sessionId: string; payload: SessionEventPayload; seq: number };
-  const frames = new RunnerFrameQueue<Frame, PreparedLiveSessionEvent>(async (frame, prepared) => {
-    svc.onSessionEvent(frame.sessionId, frame.payload, frame.seq, undefined, "runner-benchmark", prepared);
+  type Staging = NonNullable<ReturnType<SessionsService["stageLiveSessionEventPayload"]>>;
+  const runnerQueue = () => new RunnerFrameQueue<Frame, Staging>(async (frame, staging) => {
+    try {
+      const prepared = staging ? await svc.awaitStagedLiveSessionEvent(frame.sessionId, staging) : undefined;
+      svc.onSessionEvent(frame.sessionId, frame.payload, frame.seq, undefined, "runner-benchmark", prepared);
+    } finally {
+      if (staging) svc.discardStagedLiveSessionEvent(staging);
+    }
   }, () => { throw new Error("the runner frame queue failed"); }, undefined, undefined, undefined, {
-    key: (frame) => frame.sessionId,
-    prepare: (frame) => svc.prepareLiveSessionEvent(frame.sessionId, frame.payload, undefined, "runner-benchmark"),
-    discard: (prepared) => svc.discardPreparedLiveSessionEvent(prepared),
+    runnerWide: () => false,
+    prepare: (frame) => svc.stageLiveSessionEventPayload(frame.sessionId, frame.payload, undefined, "runner-benchmark"),
+    discard: (staging) => svc.discardStagedLiveSessionEvent(staging),
   });
-  const send = (sessionId: string, payload: SessionEventPayload, seq: number) =>
+  const largeFrames = runnerQueue();
+  const smallFrames = variant === "otherRunner" ? runnerQueue() : largeFrames;
+  const send = (frames: RunnerFrameQueue<Frame, Staging>, sessionId: string, payload: SessionEventPayload, seq: number) =>
     frames.enqueue({ type: "session_event", sessionId, payload, seq }, Buffer.byteLength(JSON.stringify(payload)));
   const smallSends = new Map<string, number>();
   const largeSends: number[] = [];
-  const smallSession = `stream-small-${automaticCheckpoints}`;
-  const largeSession = `stream-large-${automaticCheckpoints}`;
+  const smallSession = `stream-small-${variant}`;
+  const largeSession = `stream-large-${variant}`;
   let smallSeq = 0;
   let largeSeq = 0;
   const probe = stallProbe();
@@ -169,11 +182,11 @@ async function measureStream(db: ControlPlaneDb, automaticCheckpoints: boolean) 
         const due = startedAt + smallSeq * STREAM_SMALL_INTERVAL_MS;
         const text = `small-${++smallSeq}`;
         smallSends.set(text, due);
-        send(smallSession, { kind: "agent_message", messageId: text, text }, smallSeq);
+        send(smallFrames, smallSession, { kind: "agent_message", messageId: text, text }, smallSeq);
       }
       while (startedAt + largeSeq * STREAM_LARGE_INTERVAL_MS <= now && largeSeq < STREAM_LARGE_EVENTS) {
         largeSends.push(startedAt + largeSeq * STREAM_LARGE_INTERVAL_MS);
-        send(largeSession, { kind: "command_output", text: uniqueText(1024 * 1024) }, ++largeSeq);
+        send(largeFrames, largeSession, { kind: "command_output", text: uniqueText(1024 * 1024) }, ++largeSeq);
       }
       if (now >= endAt && largeSeq >= STREAM_LARGE_EVENTS) resolve();
       else setTimeout(tick, 0);
@@ -181,13 +194,15 @@ async function measureStream(db: ControlPlaneDb, automaticCheckpoints: boolean) 
     tick();
   });
   while (delivered.size < smallSends.size + largeSends.length) await new Promise((resolve) => setTimeout(resolve, 5));
-  frames.close();
+  largeFrames.close();
+  smallFrames.close();
   const stall = probe.stop();
   const smallLatency = [...smallSends].map(([text, due]) => delivered.get(text)! - due);
   const largeLatency = largeSends.map((due, index) => delivered.get(`command_output${index + 1}`)! - due);
   assert.ok(smallLatency.every(Number.isFinite) && largeLatency.every(Number.isFinite), "every event was delivered");
   db.raw().exec("PRAGMA wal_autocheckpoint = 1000;");
   return {
+    variant,
     automaticCheckpoints,
     largeEvents: STREAM_LARGE_EVENTS,
     largeEventBytes: 1024 * 1024,
@@ -200,17 +215,18 @@ async function measureStream(db: ControlPlaneDb, automaticCheckpoints: boolean) 
 
 try {
   const db = ControlPlaneDb.open(join(root, "control-plane.db"));
+  const variants = ["sameRunner", "otherRunner", "sameRunnerWithoutCheckpoints"] as const;
   seed(db, [
     "ingest-synchronous", "ingest-staged",
-    "stream-small-true", "stream-large-true", "stream-small-false", "stream-large-false",
+    ...variants.flatMap((variant) => [`stream-small-${variant}`, `stream-large-${variant}`]),
   ]);
   const synchronous = await measureIngest(db, "synchronous");
   const staged = await measureIngest(db, "staged");
-  const stream = await measureStream(db, true);
-  const streamWithoutCheckpoints = await measureStream(db, false);
+  const stream = [];
+  for (const variant of variants) stream.push(await measureStream(db, variant));
   db.close();
   console.log(JSON.stringify({
-    directory: values.dir ?? tmpdir(), synchronous, staged, stream, streamWithoutCheckpoints, maxStallP95Ms: MAX_STALL_P95_MS,
+    directory: values.dir ?? tmpdir(), synchronous, staged, stream, maxStallP95Ms: MAX_STALL_P95_MS,
   }, null, 2));
   for (const result of staged) {
     assert.ok(result.eventLoopStall.p95Ms < MAX_STALL_P95_MS,

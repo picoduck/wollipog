@@ -24,11 +24,11 @@ export function runnerFrameBypassesInventory(type: string): boolean {
   return INVENTORY_BYPASS_TYPES.has(type);
 }
 
-/** The session a queued runner frame acts on, or null for a frame about the runner as a whole.
- * A frame keeps its order against its own session's frames and every keyless frame. */
+/** The session a queued runner frame acts on, or null for a frame about the runner as a whole. */
 export function runnerFrameSessionKey(message: RunnerToControlPlane): string | null {
-  if (message.type === "session_runtime_updated") return message.snapshot.id;
-  const sessionId = (message as { sessionId?: unknown }).sessionId;
+  // Frames are cast, not validated, until their handler runs; a malformed one must not throw here.
+  const fields = message as { sessionId?: unknown; snapshot?: { id?: unknown } | null };
+  const sessionId = message.type === "session_runtime_updated" ? fields.snapshot?.id : fields.sessionId;
   return typeof sessionId === "string" ? sessionId : null;
 }
 
@@ -44,15 +44,14 @@ export function setRunnerReceivePressure(
   return true;
 }
 
-/** Lets frames for one session wait for asynchronous preparation (a large event payload being
- * made durable, #2794) without holding up other sessions' frames. */
-export interface RunnerFrameLanes<T, P> {
-  /** The session a frame belongs to, or null for a frame that waits for every earlier frame. */
-  key(message: T): string | null;
-  /** Called once per frame at its turn in arrival order. A promise holds that frame, and every
-   * later frame with the same key, until it settles; the settled value is passed to handle. A
-   * promise must not reject; a synchronous throw leaves the frame unprepared. */
-  prepare(message: T): P | Promise<P> | undefined;
+/** Starts work a frame needs before it can be handled (a large event payload being made durable
+ * off the event loop, #2794) while earlier frames are still queued, so that work overlaps. Frames
+ * are still handled strictly in arrival order. */
+export interface RunnerFramePreparation<T, P> {
+  /** Whether a frame acts on the runner as a whole; no later frame is prepared before it is handled. */
+  runnerWide(message: T): boolean;
+  /** Called once per frame, in arrival order; the result is passed to handle. */
+  prepare(message: T): P | undefined;
   /** Releases the prepared value of a frame that close() dropped. */
   discard(prepared: P): void;
 }
@@ -60,9 +59,7 @@ export interface RunnerFrameLanes<T, P> {
 interface QueuedFrame<T, P> {
   message: T;
   bytes: number;
-  key: string | null;
-  turned: boolean;
-  waiting: boolean;
+  runnerWide: boolean;
   prepared?: P;
 }
 
@@ -73,7 +70,10 @@ export class RunnerFrameQueue<T, P = never> {
   private closed = false;
   private pressured = false;
   private inventoryFrameReserve = 0;
-  private wake: (() => void) | null = null;
+  /** Queued frames are prepared as a prefix of `pending`; this is its length. */
+  private preparedCount = 0;
+  /** The frame being handled is runner-wide, so nothing behind it may be prepared yet. */
+  private handlingRunnerWide = false;
 
   constructor(
     private readonly handle: (message: T, prepared?: P) => Promise<void>,
@@ -81,7 +81,7 @@ export class RunnerFrameQueue<T, P = never> {
     private limits = { frames: 4096, bytes: 2 * MAX_RUNNER_CLIENT_MESSAGE_BYTES },
     private readonly afterDrain: () => Promise<void> = async () => {},
     private readonly onPressure: (paused: boolean) => void = () => {},
-    private readonly lanes?: RunnerFrameLanes<T, P>,
+    private readonly preparation?: RunnerFramePreparation<T, P>,
   ) {}
 
   /** The early registration ACK legitimately triggers one negotiated frame per retained session.
@@ -100,32 +100,52 @@ export class RunnerFrameQueue<T, P = never> {
       this.onFailure();
       return;
     }
-    this.pending.push({
-      message, bytes, key: this.lanes ? this.lanes.key(message) : null, turned: false, waiting: false,
-    });
+    let runnerWide = true;
+    try {
+      runnerWide = this.preparation ? this.preparation.runnerWide(message) : true;
+    } catch {
+      // A frame that cannot be classified is treated as acting on the whole runner.
+    }
+    this.pending.push({ message, bytes, runnerWide });
     this.bytes += bytes;
     this.updatePressure();
-    this.signal();
+    this.prepareAhead();
     if (!this.draining) void this.drain();
   }
 
   close(): void {
     this.closed = true;
-    const dropped = this.pending;
+    const dropped = this.pending.slice(0, this.preparedCount);
     this.pending = [];
+    this.preparedCount = 0;
     this.bytes = 0;
     this.updatePressure();
-    this.signal();
-    // A frame still preparing is discarded when its preparation settles (see turn).
     for (const frame of dropped) {
-      if (frame.turned && !frame.waiting && frame.prepared !== undefined) this.lanes?.discard(frame.prepared);
+      if (frame.prepared !== undefined) this.discard(frame.prepared);
     }
   }
 
-  private signal(): void {
-    const wake = this.wake;
-    this.wake = null;
-    wake?.();
+  private discard(prepared: P): void {
+    try {
+      this.preparation?.discard(prepared);
+    } catch {
+      // Releasing is best effort; startup recovery owns anything left behind.
+    }
+  }
+
+  /** Prepare queued frames in arrival order, up to and including the first runner-wide one: a
+   * frame after it may depend on what it changes (registration materializes sessions). */
+  private prepareAhead(): void {
+    if (!this.preparation || this.handlingRunnerWide) return;
+    while (this.preparedCount < this.pending.length) {
+      if (this.preparedCount > 0 && this.pending[this.preparedCount - 1]!.runnerWide) return;
+      const frame = this.pending[this.preparedCount++]!;
+      try {
+        frame.prepared = this.preparation.prepare(frame.message);
+      } catch {
+        // A malformed frame runs unprepared, so its handler rejects it the usual way.
+      }
+    }
   }
 
   private updatePressure(): void {
@@ -134,7 +154,6 @@ export class RunnerFrameQueue<T, P = never> {
     // The early ACK permits an entire advertised inventory to arrive before registration has
     // finished. Do not pause that legitimate metadata burst and strand liveness frames behind it.
     // Byte pressure still paces large snapshots/output at the same fixed memory ceiling.
-    // Frames held behind a preparing frame stay counted, so they are paced the same way.
     const highFrames = this.inventoryFrameReserve + Math.max(1,
       Math.min(1024, Math.floor((this.limits.frames - this.inventoryFrameReserve) / 2)));
     const highBytes = this.limits.bytes / 4;
@@ -146,68 +165,29 @@ export class RunnerFrameQueue<T, P = never> {
     this.onPressure(paused);
   }
 
-  private turn(frame: QueuedFrame<T, P>): void {
-    frame.turned = true;
-    let prepared: P | Promise<P> | undefined;
-    try {
-      prepared = this.lanes?.prepare(frame.message);
-    } catch {
-      // A malformed frame runs unprepared, so its handler rejects it the usual way.
-      return;
-    }
-    if (!(prepared instanceof Promise)) {
-      frame.prepared = prepared;
-      return;
-    }
-    frame.waiting = true;
-    void prepared.then((value) => {
-      frame.prepared = value;
-      frame.waiting = false;
-      if (!this.pending.includes(frame)) this.lanes?.discard(value);
-      this.signal();
-    });
-  }
-
-  /** The earliest frame that may run: frames run in arrival order, except that a frame whose key
-   * has an earlier frame still waiting waits too, and a keyless frame waits for every earlier one.
-   * Every frame before a keyless one is prepared at its turn, held or not, so consecutive large
-   * payloads of one session are made durable in parallel. */
-  private nextRunnable(): number {
-    const held = new Set<string>();
-    for (let index = 0; index < this.pending.length; index++) {
-      const frame = this.pending[index]!;
-      if (frame.key === null) {
-        if (index > 0) return -1;
-      } else if (held.has(frame.key)) {
-        if (!frame.turned) this.turn(frame);
-        continue;
-      }
-      if (!frame.turned) this.turn(frame);
-      if (!frame.waiting) return index;
-      if (frame.key === null) return -1;
-      held.add(frame.key);
-    }
-    return -1;
-  }
-
   private async drain(): Promise<void> {
     this.draining = true;
     try {
       while (!this.closed) {
-        const index = this.nextRunnable();
-        if (index < 0) {
+        if (this.pending.length === 0) {
           await this.afterDrain();
-          if (this.closed) break;
           if (this.pending.length === 0) break;
-          if (this.nextRunnable() < 0) {
-            await new Promise<void>((resolve) => { this.wake = resolve; });
-          }
           continue;
         }
-        const [next] = this.pending.splice(index, 1);
-        this.bytes -= next!.bytes;
+        this.prepareAhead();
+        const next = this.pending.shift()!;
+        this.preparedCount = Math.max(0, this.preparedCount - 1);
+        this.bytes -= next.bytes;
         this.updatePressure();
-        await this.handle(next!.message, next!.prepared);
+        this.handlingRunnerWide = next.runnerWide;
+        this.prepareAhead();
+        // The handler may wait for its own preparation; frames behind it stay queued and counted.
+        try {
+          await this.handle(next.message, next.prepared);
+        } finally {
+          this.handlingRunnerWide = false;
+        }
+        this.prepareAhead();
         // A replay burst must not become a synchronous loop once registration completes.
         await new Promise<void>((resolve) => setImmediate(resolve));
       }

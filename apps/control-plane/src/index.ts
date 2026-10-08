@@ -32,6 +32,7 @@ import {
   runnerFrameSessionKey,
   setRunnerReceivePressure,
 } from "./runner-frame-queue.js";
+import type { StagedSessionEventPayload } from "./event-payloads.js";
 import { installStartupReadinessGate } from "./startup-readiness.js";
 import { WorktreeCreateCoordinator } from "./worktree-create-coordinator.js";
 import { legacyPeerWorktreeRetirement } from "./worktree-retirement.js";
@@ -1778,12 +1779,18 @@ app.register(async (instance) => {
     }
   };
 
-  const frameQueue = new RunnerFrameQueue<RunnerToControlPlane, PreparedLiveSessionEvent>(async (msg, prepared) => {
+  type Staging = Promise<StagedSessionEventPayload | null>;
+  const frameQueue = new RunnerFrameQueue<RunnerToControlPlane, Staging>(async (msg, staging) => {
     try {
+      // Frames stay in arrival order: a large event waits here for its durable payload, and the
+      // frames behind it (still counted toward read pressure) wait for it (#2794).
+      const prepared = staging && msg.type === "session_event"
+        ? await svc.awaitStagedLiveSessionEvent(msg.sessionId, staging)
+        : undefined;
       await handleRunnerFrame(msg, prepared);
     } finally {
       // Idempotent: covers frames the handler rejected before reaching onSessionEvent.
-      if (prepared) svc.discardPreparedLiveSessionEvent(prepared);
+      if (staging) svc.discardStagedLiveSessionEvent(staging);
     }
   }, () => {
     app.log.warn({ event: "runner_frame_queue_closed", entryPoint: "runner_socket", runnerId },
@@ -1794,13 +1801,13 @@ app.register(async (instance) => {
     app.log.debug({ event: "runner_frame_backpressure", entryPoint: "runner_socket", runnerId, paused },
       "runner receive flow control changed");
   }, {
-    // A large event payload is made durable off the event loop before its event commits (#2794).
-    // Only its own session's later frames wait for that; other sessions' frames keep flowing.
-    key: runnerFrameSessionKey,
+    // A large event payload starts becoming durable off the event loop as soon as it is queued,
+    // so several flush in parallel; nothing is staged past a frame about the whole runner.
+    runnerWide: (msg) => runnerFrameSessionKey(msg) === null,
     prepare: (msg) => msg.type === "session_event"
-      ? svc.prepareLiveSessionEvent(msg.sessionId, msg.payload, msg.ts, runnerId ?? undefined)
+      ? svc.stageLiveSessionEventPayload(msg.sessionId, msg.payload, msg.ts, runnerId ?? undefined)
       : undefined,
-    discard: (prepared) => svc.discardPreparedLiveSessionEvent(prepared),
+    discard: (staging) => svc.discardStagedLiveSessionEvent(staging),
   });
   socket.on("message", (raw: Buffer) => {
     const msg = parseMessage<RunnerToControlPlane>(raw.toString());

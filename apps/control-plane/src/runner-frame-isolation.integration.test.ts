@@ -184,6 +184,9 @@ test(
       JSON.stringify({ type: "session_event" }),
       JSON.stringify({ type: "session_status" }),
       JSON.stringify({ type: "shell_output" }),
+      // Keyed into per-session lanes before any handler runs (#2794).
+      JSON.stringify({ type: "session_runtime_updated" }),
+      JSON.stringify({ type: "session_runtime_updated", snapshot: null }),
     ];
 
     for (const frame of malformedFrames) {

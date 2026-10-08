@@ -203,6 +203,7 @@ import {
   type CampaignContinuationRecord,
   type ControlPlaneDb,
   type RestartNoticeEntry,
+  type RunnerHistoryState,
   type SessionPromptCommandRecord,
   type SessionAutomationOrigin,
   type SessionStopConfirmation,
@@ -321,9 +322,9 @@ const SESSION_STOP_FAILURE_MESSAGE_MAX_CHARS = 240;
 /** Large history payloads staged at once; each holds a UTF-8 copy of up to 32 MiB. */
 const HISTORY_PAYLOAD_STAGING_CONCURRENCY = 4;
 
-/** What prepareLiveSessionEvent captured at a live event's turn in the runner's frame order. */
+/** A live event whose large payload was staged, as awaitStagedLiveSessionEvent returns it. */
 export interface PreparedLiveSessionEvent {
-  /** The session's event epoch at that turn; a later reset makes the event stale. */
+  /** The session's event epoch when the event's turn came; a reset while it waited makes it stale. */
   eventEpoch: number | null;
   /** The large payload's durable chunks; null if staging failed and the event stays inline. */
   staged?: StagedSessionEventPayload | null;
@@ -12506,41 +12507,59 @@ export class SessionsService {
   ): Promise<Array<StagedSessionEventPayload | null | undefined>> {
     const staged: Array<StagedSessionEventPayload | null | undefined> = new Array(events.length);
     let next = 0;
+    // Never rejects, so every staging that succeeds reaches the caller, who releases it.
     const worker = async () => {
       while (next < events.length) {
         const index = next++;
-        const event = events[index]!;
-        if (externalizableEventPayloadBytes(event.payload) > 0) {
-          staged[index] = await this.stageEventPayload(sessionId, event.payload, event.ts);
+        let bytes = 0;
+        try {
+          bytes = externalizableEventPayloadBytes(events[index]!.payload);
+        } catch {
+          // A malformed payload is left to the synchronous path, which rejects or keeps it inline.
         }
+        if (bytes > 0) staged[index] = await this.stageEventPayload(sessionId, events[index]!.payload, events[index]!.ts);
       }
     };
     await Promise.all(Array.from({ length: HISTORY_PAYLOAD_STAGING_CONCURRENCY }, worker));
     return staged;
   }
 
-  /** Called at a live event's turn in the runner's frame order (#2794). It records the session's
-   * event epoch and, for a payload too large to stay inline, starts making its chunks durable off
-   * the event loop; the runner frame queue then holds this session's later frames, and only this
-   * session's, until that finishes. An unknown session or a runner that does not own it stages
-   * nothing; onSessionEvent rejects the event as before. */
-  prepareLiveSessionEvent(
+  /** Whether the session's cached history was reset or replaced since `before` was read. A
+   * history batch read before then must not be applied: it may belong to an older generation. */
+  private historyChangedSince(sessionId: string, before: RunnerHistoryState | null): boolean {
+    const after = this.db.getRunnerHistoryState(sessionId);
+    return !before || !after || after.eventEpoch !== before.eventEpoch || after.historyEpoch !== before.historyEpoch;
+  }
+
+  /** Called as a live event's frame is queued (#2794): for a payload too large to stay inline,
+   * start making its chunks durable off the event loop, so the work overlaps the frames ahead of
+   * it. Undefined for a payload that stays inline, an unknown session, or a runner that does not
+   * own the session; onSessionEvent then handles the event as before. */
+  stageLiveSessionEventPayload(
     sessionId: string,
     payload: SessionEventPayload,
     runnerTs: number | undefined,
     fromRunnerId: string | undefined,
-  ): PreparedLiveSessionEvent | Promise<PreparedLiveSessionEvent> {
-    const eventEpoch = this.db.getRunnerHistoryState(sessionId)?.eventEpoch ?? null;
-    if (externalizableEventPayloadBytes(payload) === 0) return { eventEpoch };
+  ): Promise<StagedSessionEventPayload | null> | undefined {
+    if (externalizableEventPayloadBytes(payload) === 0) return undefined;
     const session = this.db.getSession(sessionId);
-    if (!session || (fromRunnerId && session.runnerId !== fromRunnerId)) return { eventEpoch };
-    return this.stageEventPayload(sessionId, payload, runnerTs ?? Date.now())
-      .then((staged) => ({ eventEpoch, staged }));
+    if (!session || (fromRunnerId && session.runnerId !== fromRunnerId)) return undefined;
+    return this.stageEventPayload(sessionId, payload, runnerTs ?? Date.now());
   }
 
-  /** Release a prepared event that will never be applied. */
-  discardPreparedLiveSessionEvent(prepared: PreparedLiveSessionEvent): void {
-    prepared.staged?.release();
+  /** At the event's turn in its runner's frame order, wait for its staged payload. The epoch is
+   * read first, so a history reset during the wait makes onSessionEvent re-read the session. */
+  async awaitStagedLiveSessionEvent(
+    sessionId: string,
+    staging: Promise<StagedSessionEventPayload | null>,
+  ): Promise<PreparedLiveSessionEvent> {
+    const eventEpoch = this.db.getRunnerHistoryState(sessionId)?.eventEpoch ?? null;
+    return { eventEpoch, staged: await staging };
+  }
+
+  /** Release a staging whose event was applied, rejected, or dropped. Idempotent. */
+  discardStagedLiveSessionEvent(staging: Promise<StagedSessionEventPayload | null>): void {
+    void staging.then((staged) => staged?.release());
   }
 
   /** Canonical user-message identity is durable delivery evidence whether it arrives live or
@@ -12584,8 +12603,8 @@ export class SessionsService {
     );
   }
 
-  /** Ingest one live runner event. The runner socket passes what prepareLiveSessionEvent captured
-   * at the event's turn; without it, a large payload is written on the calling thread. */
+  /** Ingest one live runner event. The runner socket passes a staged large payload from
+   * awaitStagedLiveSessionEvent; without one, a large payload is written on the calling thread. */
   onSessionEvent(
     sessionId: string,
     payload: SessionEventPayload,
@@ -12615,8 +12634,8 @@ export class SessionsService {
       this.log.warn(`ignoring session_event for ${sessionId} from ${fromRunnerId} (owned by ${session.runnerId})`);
       return;
     }
-    // An event held while its own or an earlier payload became durable belongs to the history its
-    // turn saw. If that history was reset meanwhile, the runner's log is the authority again.
+    // An event that waited for its payload to become durable belongs to the history its turn saw.
+    // If that history was reset meanwhile, the runner's log is the authority again.
     if (prepared && prepared.eventEpoch !== (this.db.getRunnerHistoryState(sessionId)?.eventEpoch ?? null)) {
       this.rehydrate.add(sessionId);
       void this.hydrateHistory(sessionId);
@@ -13948,8 +13967,14 @@ export class SessionsService {
         }
         if ((res.events.at(-1)?.seq ?? afterSeq) !== page.nextAfterSeq ||
             (page.hasMore && res.events.length === 0)) { rejectPage("invalid_page_cursor"); return; }
-        // Large payloads become durable before the synchronous reconcile and append below.
+        // Large payloads become durable before the synchronous reconcile and append below. A reset
+        // meanwhile makes this page stale; a fresh pass reads the current history instead.
+        const historyBeforeStaging = this.db.getRunnerHistoryState(sessionId);
         staged = await this.stageEventPayloads(sessionId, res.events);
+        if (this.historyChangedSince(sessionId, historyBeforeStaging)) {
+          this.rehydrate.add(sessionId);
+          return;
+        }
 
         if (logEpoch === undefined) {
           logEpoch = page.logEpoch;
@@ -14068,7 +14093,12 @@ export class SessionsService {
       let trailingAsk: PendingApproval | null = null;
       let projectedSteering = false;
       const events = [...res.events].sort((a, b) => a.seq - b.seq);
+      const historyBeforeStaging = this.db.getRunnerHistoryState(sessionId);
       staged = await this.stageEventPayloads(sessionId, events);
+      if (this.historyChangedSince(sessionId, historyBeforeStaging)) {
+        this.rehydrate.add(sessionId);
+        return;
+      }
       for (const [index, e] of events.entries()) {
         if (e.seq <= this.db.getHydratedSeq(sessionId)) continue;
         const prepared = this.externalizeEventOrOriginal(sessionId, e.payload, e.ts, staged[index]);
