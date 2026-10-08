@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { beforeEach, test } from "node:test";
+import { beforeEach, mock, test } from "node:test";
 
 /**
  * Two tabs of the same browser, sharing one origin's storage (#1391).
@@ -21,6 +21,26 @@ const backing = new Map<string, string>();
 let denyWrites = false;
 let denyRemovals = false;
 let onNextWrite: (() => void) | null = null;
+
+// The page both tabs listen on. A browser tells every other tab of a storage change with a `storage`
+// event; with `deliverStorageEvents` on, each write here does so (to the writer too, which only
+// costs it a sweep).
+const page = Object.assign(new EventTarget(), { document: Object.assign(new EventTarget(), { visibilityState: "visible" }) });
+(globalThis as { window?: unknown }).window = page;
+let deliverStorageEvents = false;
+/** When set, storage events wait here until `deliverHeldStorageEvents`, as a busy tab's would. */
+let heldStorageEvents: string[] | null = null;
+function announce(key: string): void {
+  if (!deliverStorageEvents) return;
+  if (heldStorageEvents !== null) heldStorageEvents.push(key);
+  else page.dispatchEvent(Object.assign(new Event("storage"), { key }));
+}
+function deliverHeldStorageEvents(): void {
+  const held = heldStorageEvents ?? [];
+  heldStorageEvents = null;
+  for (const key of held) page.dispatchEvent(Object.assign(new Event("storage"), { key }));
+}
+
 (globalThis as { localStorage?: unknown }).localStorage = {
   get length(): number {
     return backing.size;
@@ -30,6 +50,7 @@ let onNextWrite: (() => void) | null = null;
   setItem: (key: string, value: string): void => {
     if (denyWrites) throw new DOMException("Storage quota exceeded", "QuotaExceededError");
     backing.set(key, value);
+    announce(key);
     // A hook for the one thing two synchronous pages cannot otherwise be made to do in a test:
     // interleave. The other tab acts in the middle of this page's storage call, which is exactly
     // where a real second tab's turn can fall.
@@ -42,6 +63,7 @@ let onNextWrite: (() => void) | null = null;
   removeItem: (key: string): void => {
     if (denyRemovals) throw new DOMException("Storage is not available", "SecurityError");
     backing.delete(key);
+    announce(key);
   },
 };
 
@@ -63,12 +85,41 @@ function storedChars(): number {
   return storedRecordKeys().reduce((total, key) => total + key.length + backing.get(key)!.length, 0);
 }
 
+/**
+ * A write that has reached storage. Writes are mirrored after a short pause (#2764), and every case
+ * here is about what the other tab finds once they have been, so each write waits out that pause.
+ */
+function writeNow(tab: PanelScratch, ...args: Parameters<PanelScratch["writePanelScratch"]>): void {
+  tab.writePanelScratch(...args);
+  tab.flushPanelScratch();
+}
+
+/**
+ * Run with a clock both tabs read, starting past every stamp earlier cases minted. A page's stamps
+ * run ahead of the wall clock while it mutates in a burst, and these cases run whole bursts within
+ * a millisecond, so which of two edits a few milliseconds apart is newer is decided here, not by
+ * how many stamps the cases before it happened to mint.
+ */
+let sharedClockEpoch = 0;
+async function withSharedClock(run: (advance: (ms: number) => void) => void | Promise<void>): Promise<void> {
+  // Each case starts its own ten minutes later, past what the one before it stamped.
+  sharedClockEpoch += 1;
+  mock.timers.enable({ apis: ["Date"], now: Date.now() + sharedClockEpoch * 10 * 60 * 1000 });
+  try {
+    await run((ms) => mock.timers.tick(ms));
+  } finally {
+    mock.timers.reset();
+  }
+}
+
 /** A tab that has already been open on an empty origin, so it never saw what is written next. */
 function openOnEmptyOrigin(tab: PanelScratch): void {
   tab.readPanelScratch(tab.panelScratchScopeKey("session-never-used"), "files.directory");
 }
 
 beforeEach(() => {
+  deliverStorageEvents = false;
+  heldStorageEvents = null;
   denyWrites = false;
   denyRemovals = false;
   onNextWrite = null;
@@ -83,10 +134,10 @@ test("an unsent draft survives a reload even though the other tab has written si
   const mine = tabA.panelScratchScopeKey("session-a");
   const theirs = tabB.panelScratchScopeKey("session-b");
   openOnEmptyOrigin(tabB);
-  tabA.writePanelScratch(mine, "review.requestBody", "half a pull request description", "draft");
+  writeNow(tabA, mine, "review.requestBody", "half a pull request description", "draft");
 
-  tabB.writePanelScratch(theirs, "files.directory", "apps/web");
-  tabB.writePanelScratch(theirs, "review.requestBody", "the other tab's description", "draft");
+  writeNow(tabB, theirs, "files.directory", "apps/web");
+  writeNow(tabB, theirs, "review.requestBody", "the other tab's description", "draft");
 
   tabA.dropPanelScratchMemory();
 
@@ -96,12 +147,170 @@ test("an unsent draft survives a reload even though the other tab has written si
     "and the other tab's, which is now stored beside it rather than instead of it");
 });
 
+test("an edit still waiting for storage does not overwrite a newer edit another tab stored (#2764)", async () => {
+  // Writes wait for a pause before they are mirrored, so tab B can store a later edit of the same
+  // draft while tab A's earlier one is still waiting. Flushing A's must not put the older words back.
+  await withSharedClock((advance) => {
+    const scope = tabA.panelScratchScopeKey("session-1");
+    writeNow(tabA, scope, "review.requestBody", "first", "draft");
+    assert.equal(tabB.readPanelScratch(scope, "review.requestBody"), "first");
+
+    advance(5);
+    tabA.writePanelScratch(scope, "review.requestBody", "earlier edit in tab A", "draft");
+    advance(5);
+    writeNow(tabB, scope, "review.requestBody", "later edit in tab B", "draft");
+    advance(5);
+    tabA.flushPanelScratch();
+
+    tabA.dropPanelScratchMemory();
+    assert.equal(tabA.readPanelScratch(scope, "review.requestBody"), "later edit in tab B",
+      "a reload restores the newest words, whichever tab typed them");
+  });
+});
+
+test("an earlier edit flushed first does not shadow a later edit flushed after it (#2764)", async () => {
+  // The reverse of the case above: the later edit is the one still waiting. Stamps are the moment
+  // each edit was typed, not the moment it was flushed, so the order the flushes land in is not
+  // what decides which words survive.
+  await withSharedClock((advance) => {
+    const scope = tabA.panelScratchScopeKey("session-1");
+    writeNow(tabA, scope, "review.requestBody", "first", "draft");
+    assert.equal(tabB.readPanelScratch(scope, "review.requestBody"), "first");
+
+    advance(5);
+    tabB.writePanelScratch(scope, "review.requestBody", "earlier edit in tab B", "draft");
+    advance(5);
+    tabA.writePanelScratch(scope, "review.requestBody", "later edit in tab A", "draft");
+    advance(5);
+    tabB.flushPanelScratch();
+    tabA.flushPanelScratch();
+
+    tabB.dropPanelScratchMemory();
+    assert.equal(tabB.readPanelScratch(scope, "review.requestBody"), "later edit in tab A");
+  });
+});
+
+test("two tabs typing in the same millisecond never share a stamp a send could retire (#2764)", async () => {
+  // A marker is stamped with the value it removed. Had tab B's value kept the stamp tab A's value
+  // was typed under, sending tab A's draft would retire tab B's unsent replacement with it.
+  await withSharedClock(() => {
+    const scope = tabA.panelScratchScopeKey("session-1");
+    openOnEmptyOrigin(tabA);
+    openOnEmptyOrigin(tabB);
+    tabA.writePanelScratch(scope, "sidechat.draft", "A", "draft");
+    tabB.writePanelScratch(scope, "sidechat.draft", "B", "draft");
+    tabA.flushPanelScratch();
+    tabB.flushPanelScratch();
+
+    tabA.clearPanelScratchIf(scope, "sidechat.draft", "A", tabA.panelScratchRevision(scope, "sidechat.draft"));
+
+    tabB.dropPanelScratchMemory();
+    assert.equal(tabB.readPanelScratch(scope, "sidechat.draft"), "B",
+      "the other tab's draft outlives a send that was not about it");
+  });
+});
+
+test("a send in one tab does not erase another tab's draft typed in the same millisecond (#2764)", async () => {
+  // Tab A's draft is stored and sent while tab B's, typed at the same moment, is still waiting. The
+  // send's marker carries A's stamp; B's value must not be the one it retires.
+  await withSharedClock(() => {
+    const scope = tabA.panelScratchScopeKey("session-1");
+    openOnEmptyOrigin(tabA);
+    openOnEmptyOrigin(tabB);
+    tabA.writePanelScratch(scope, "sidechat.draft", "A", "draft");
+    tabB.writePanelScratch(scope, "sidechat.draft", "B", "draft");
+    tabA.flushPanelScratch();
+    tabA.clearPanelScratchIf(scope, "sidechat.draft", "A", tabA.panelScratchRevision(scope, "sidechat.draft"));
+    tabB.flushPanelScratch();
+
+    tabB.dropPanelScratchMemory();
+    assert.equal(tabB.readPanelScratch(scope, "sidechat.draft"), "B");
+  });
+});
+
+test("an edit typed after another tab's burst outranks it, whatever that tab's stamps reached (#2764)", async () => {
+  // Tab A's two quick writes stamp past the clock. Tab B's edit a millisecond later is still the
+  // newer one, because it is stamped past what is stored when it is typed.
+  await withSharedClock((advance) => {
+    const scope = tabA.panelScratchScopeKey("session-1");
+    openOnEmptyOrigin(tabA);
+    openOnEmptyOrigin(tabB);
+    tabA.writePanelScratch(scope, "review.requestBody", "A first", "draft");
+    tabA.writePanelScratch(scope, "review.requestBody", "A second", "draft");
+    tabA.flushPanelScratch();
+    advance(1);
+    writeNow(tabB, scope, "review.requestBody", "B later", "draft");
+
+    tabA.dropPanelScratchMemory();
+    assert.equal(tabA.readPanelScratch(scope, "review.requestBody"), "B later");
+  });
+});
+
+for (const order of ["the burst first", "the later edit first"]) {
+  test(`a burst still waiting in one tab does not outrank a later edit in another, flushing ${order} (#2764)`, async () => {
+    // Neither tab's edits have reached storage when the other types. Tab A's two quick writes must
+    // not be stamped past the clock, or they would beat tab B's edit a millisecond later.
+    await withSharedClock((advance) => {
+      const scope = tabA.panelScratchScopeKey("session-1");
+      openOnEmptyOrigin(tabA);
+      openOnEmptyOrigin(tabB);
+      tabA.writePanelScratch(scope, "review.requestBody", "A first", "draft");
+      tabA.writePanelScratch(scope, "review.requestBody", "A second", "draft");
+      advance(1);
+      tabB.writePanelScratch(scope, "review.requestBody", "B later", "draft");
+      const flushes = order === "the burst first" ? [tabA, tabB] : [tabB, tabA];
+      for (const tab of flushes) tab.flushPanelScratch();
+
+      tabA.dropPanelScratchMemory();
+      assert.equal(tabA.readPanelScratch(scope, "review.requestBody"), "B later");
+    });
+  });
+}
+
+test("the ceiling is restored when the other tab's storage events arrive after both tabs grew (#2764)", async () => {
+  // Both tabs grow their own records and flush before either hears of the other. The events
+  // arriving later have to collect the excess themselves; nobody may be about to write again.
+  deliverStorageEvents = true;
+  const mine = tabA.panelScratchScopeKey("session-a");
+  const theirs = tabB.panelScratchScopeKey("session-b");
+  writeNow(tabA, mine, "review.requestBody", "short", "draft");
+  writeNow(tabB, theirs, "review.requestBody", "short", "draft");
+
+  heldStorageEvents = [];
+  writeNow(tabA, mine, "review.requestBody", "a".repeat(150_000), "draft");
+  writeNow(tabB, theirs, "review.requestBody", "b".repeat(150_000), "draft");
+  assert.ok(storedChars() > tabA.PANEL_SCRATCH_PERSIST_CHAR_LIMIT, "neither tab could see the other's growth");
+
+  deliverHeldStorageEvents();
+  await new Promise((resolve) => setTimeout(resolve, tabA.PANEL_SCRATCH_PERSIST_DELAY_MS + 50));
+  assert.ok(storedChars() <= tabA.PANEL_SCRATCH_PERSIST_CHAR_LIMIT,
+    `stored ${storedChars()} characters, ceiling ${tabA.PANEL_SCRATCH_PERSIST_CHAR_LIMIT}`);
+});
+
+test("the character ceiling holds when both tabs grow records that already exist (#2764)", () => {
+  // A write to an existing record skips the origin-wide sweep while this page's measurement says
+  // the ceiling holds. That measurement leaves the other tab's growth out, so the other tab's
+  // storage event has to retire it, or two tabs each under the ceiling by their own count would
+  // together stay over it.
+  deliverStorageEvents = true;
+  const mine = tabA.panelScratchScopeKey("session-a");
+  const theirs = tabB.panelScratchScopeKey("session-b");
+  writeNow(tabA, mine, "review.requestBody", "short", "draft");
+  writeNow(tabB, theirs, "review.requestBody", "short", "draft");
+
+  writeNow(tabA, mine, "review.requestBody", "a".repeat(150_000), "draft");
+  writeNow(tabB, theirs, "review.requestBody", "b".repeat(150_000), "draft");
+
+  assert.ok(storedChars() <= tabA.PANEL_SCRATCH_PERSIST_CHAR_LIMIT,
+    `stored ${storedChars()} characters, ceiling ${tabA.PANEL_SCRATCH_PERSIST_CHAR_LIMIT}`);
+});
+
 test("a draft one tab sends is not written back by the tab still holding it", () => {
   // Per-scope records alone would not do this: tab B's copy of the scope is live, it knows nothing
   // about the send, and its next write would put the message back. The deletion marker is what
   // outlives that copy.
   const scope = tabA.panelScratchScopeKey("session-1");
-  tabA.writePanelScratch(scope, "sidechat.draft", "on its way", "draft");
+  writeNow(tabA, scope, "sidechat.draft", "on its way", "draft");
   assert.equal(tabB.readPanelScratch(scope, "sidechat.draft"), "on its way",
     "both tabs are showing the same unsent message");
 
@@ -111,7 +320,7 @@ test("a draft one tab sends is not written back by the tab still holding it", ()
   // Tab B is never told — nothing crosses between pages — and goes on using that session.
   assert.equal(tabB.readPanelScratch(scope, "sidechat.draft"), "on its way",
     "which is exactly the copy this case is about");
-  tabB.writePanelScratch(scope, "files.directory", "apps/web");
+  writeNow(tabB, scope, "files.directory", "apps/web");
 
   tabA.dropPanelScratchMemory();
   tabB.dropPanelScratchMemory();
@@ -127,73 +336,84 @@ test("retyping after the other tab's send is kept, so a marker retires rather th
   // A marker that outlived its own value would suppress everything written under that key for as
   // long as it lived, which would be a worse loss than the one it prevents.
   const scope = tabA.panelScratchScopeKey("session-1");
-  tabA.writePanelScratch(scope, "sidechat.draft", "on its way", "draft");
+  writeNow(tabA, scope, "sidechat.draft", "on its way", "draft");
   assert.equal(tabB.readPanelScratch(scope, "sidechat.draft"), "on its way");
   tabA.clearPanelScratchIf(scope, "sidechat.draft", "on its way",
     tabA.panelScratchRevision(scope, "sidechat.draft"));
 
-  tabB.writePanelScratch(scope, "sidechat.draft", "a second thought", "draft");
+  writeNow(tabB, scope, "sidechat.draft", "a second thought", "draft");
 
   tabA.dropPanelScratchMemory();
   assert.equal(tabA.readPanelScratch(scope, "sidechat.draft"), "a second thought");
 });
 
-test("the scope bound holds over the records, not over either tab's map", () => {
-  // Neither map is the bound any more: each tab knows only its own half, so the sweep has to be
-  // over what is actually stored or two tabs would keep twice the limit between them.
-  openOnEmptyOrigin(tabB);
-  for (let index = 0; index < tabA.PANEL_SCRATCH_SESSION_LIMIT; index += 1) {
-    tabA.writePanelScratch(tabA.panelScratchScopeKey(`session-a-${index}`), "files.directory", "apps/web");
-  }
-  for (let index = 0; index < tabB.PANEL_SCRATCH_SESSION_LIMIT; index += 1) {
-    tabB.writePanelScratch(tabB.panelScratchScopeKey(`session-b-${index}`), "files.directory", "apps/web");
-  }
+test("the scope bound holds over the records, not over either tab's map", async () => {
+  // Stamps are wall-clock time, so "least recently used" is decided by when each write happened;
+  // the clock moves a millisecond per write to make that order the one written here.
+  await withSharedClock((advance) => {
+    // Neither map is the bound any more: each tab knows only its own half, so the sweep has to be
+    // over what is actually stored or two tabs would keep twice the limit between them.
+    openOnEmptyOrigin(tabB);
+    for (let index = 0; index < tabA.PANEL_SCRATCH_SESSION_LIMIT; index += 1) {
+      writeNow(tabA, tabA.panelScratchScopeKey(`session-a-${index}`), "files.directory", "apps/web");
+      advance(1);
+    }
+    for (let index = 0; index < tabB.PANEL_SCRATCH_SESSION_LIMIT; index += 1) {
+      writeNow(tabB, tabB.panelScratchScopeKey(`session-b-${index}`), "files.directory", "apps/web");
+      advance(1);
+    }
 
-  assert.equal(storedRecordKeys().length, tabA.PANEL_SCRATCH_SESSION_LIMIT,
-    "sixteen scopes between two tabs still store eight");
-  // Least recently used first, and every one of tab A's is older than every one of tab B's.
-  assert.equal(backing.get(`${RECORD_PREFIX}${tabB.panelScratchScopeKey("session-b-7")}`) !== undefined,
-    true, "the newest is kept");
-  assert.equal(backing.get(`${RECORD_PREFIX}${tabA.panelScratchScopeKey("session-a-0")}`), undefined,
-    "the oldest is what the bound spent, whichever tab wrote it");
+    assert.equal(storedRecordKeys().length, tabA.PANEL_SCRATCH_SESSION_LIMIT,
+      "sixteen scopes between two tabs still store eight");
+    // Least recently used first, and every one of tab A's is older than every one of tab B's.
+    assert.equal(backing.get(`${RECORD_PREFIX}${tabB.panelScratchScopeKey("session-b-7")}`) !== undefined,
+      true, "the newest is kept");
+    assert.equal(backing.get(`${RECORD_PREFIX}${tabA.panelScratchScopeKey("session-a-0")}`), undefined,
+      "the oldest is what the bound spent, whichever tab wrote it");
+  });
 });
 
-test("the character ceiling holds over what both tabs stored together", () => {
+test("the character ceiling holds over what both tabs stored together", async () => {
   // Unsent text is exempt from the scope bound in both tabs, so the ceiling is the only thing
-  // standing between two tabs of drafts and unbounded storage.
-  const long = "x".repeat(50_000);
-  openOnEmptyOrigin(tabB);
-  for (let index = 0; index < 6; index += 1) {
-    const scope = tabA.panelScratchScopeKey(`session-a-${index}`);
-    tabA.writePanelScratch(scope, "review.requestBody", `a-${index}:${long}`, "draft");
-  }
-  for (let index = 0; index < 6; index += 1) {
-    const scope = tabB.panelScratchScopeKey(`session-b-${index}`);
-    tabB.writePanelScratch(scope, "review.requestBody", `b-${index}:${long}`, "draft");
-  }
+  // standing between two tabs of drafts and unbounded storage. The clock moves a millisecond per
+  // write, so which state is freshest is decided by when it was written.
+  await withSharedClock((advance) => {
+    const long = "x".repeat(50_000);
+    openOnEmptyOrigin(tabB);
+    for (let index = 0; index < 6; index += 1) {
+      const scope = tabA.panelScratchScopeKey(`session-a-${index}`);
+      writeNow(tabA, scope, "review.requestBody", `a-${index}:${long}`, "draft");
+      advance(1);
+    }
+    for (let index = 0; index < 6; index += 1) {
+      const scope = tabB.panelScratchScopeKey(`session-b-${index}`);
+      writeNow(tabB, scope, "review.requestBody", `b-${index}:${long}`, "draft");
+      advance(1);
+    }
 
-  assert.equal(tabA.panelScratchScopeCount(), 6, "tab A still holds every draft it was given");
-  assert.ok(storedChars() <= tabA.PANEL_SCRATCH_PERSIST_CHAR_LIMIT,
-    `stored ${storedChars()} characters, ceiling ${tabA.PANEL_SCRATCH_PERSIST_CHAR_LIMIT}`);
+    assert.equal(tabA.panelScratchScopeCount(), 6, "tab A still holds every draft it was given");
+    assert.ok(storedChars() <= tabA.PANEL_SCRATCH_PERSIST_CHAR_LIMIT,
+      `stored ${storedChars()} characters, ceiling ${tabA.PANEL_SCRATCH_PERSIST_CHAR_LIMIT}`);
 
-  tabB.dropPanelScratchMemory();
-  assert.equal(tabB.readPanelScratch(tabB.panelScratchScopeKey("session-b-5"), "review.requestBody"),
-    `b-5:${long}`, "the ceiling is spent on the freshest state");
+    tabB.dropPanelScratchMemory();
+    assert.equal(tabB.readPanelScratch(tabB.panelScratchScopeKey("session-b-5"), "review.requestBody"),
+      `b-5:${long}`, "the ceiling is spent on the freshest state");
+  });
 });
 
 test("a refused write never retracts the record the other tab has written since", () => {
   const scope = tabA.panelScratchScopeKey("session-1");
-  tabA.writePanelScratch(scope, "sidechat.draft", "on its way", "draft");
-  tabA.writePanelScratch(scope, "files.directory", "apps/web");
+  writeNow(tabA, scope, "sidechat.draft", "on its way", "draft");
+  writeNow(tabA, scope, "files.directory", "apps/web");
   assert.equal(tabB.readPanelScratch(scope, "sidechat.draft"), "on its way");
 
   // Tab B writes last, so what is in storage is its latest state rather than tab A's stale one.
-  tabB.writePanelScratch(scope, "files.directory", "packages/protocol");
+  writeNow(tabB, scope, "files.directory", "packages/protocol");
   const theirs = backing.get(`${RECORD_PREFIX}${scope}`);
   assert.ok(theirs, "the other tab's record is stored");
 
   denyWrites = true;
-  tabA.writePanelScratch(scope, "files.directory", "apps");
+  writeNow(tabA, scope, "files.directory", "apps");
   assert.equal(backing.get(`${RECORD_PREFIX}${scope}`), theirs,
     "a record this tab did not write is not this tab's to take back");
 
@@ -208,8 +428,8 @@ test("a removal that failed leaves no claim on the record the other tab writes n
   // tab last wrote, and a removal that failed re-read whatever was in storage and called it its
   // own — so a removal that recovered later could retract a record another tab had written since.
   const scope = tabA.panelScratchScopeKey("session-1");
-  tabA.writePanelScratch(scope, "sidechat.draft", "on its way", "draft");
-  tabA.writePanelScratch(scope, "files.directory", "apps/web");
+  writeNow(tabA, scope, "sidechat.draft", "on its way", "draft");
+  writeNow(tabA, scope, "files.directory", "apps/web");
   assert.equal(tabB.readPanelScratch(scope, "sidechat.draft"), "on its way");
 
   // Tab A's send lands while storage refuses everything, so neither the write nor the retraction
@@ -222,14 +442,14 @@ test("a removal that failed leaves no claim on the record the other tab writes n
   // Tab B's storage is fine, and its write makes the record tab B's.
   denyWrites = false;
   denyRemovals = false;
-  tabB.writePanelScratch(scope, "files.directory", "packages/protocol");
+  writeNow(tabB, scope, "files.directory", "packages/protocol");
   const theirs = backing.get(`${RECORD_PREFIX}${scope}`);
   assert.ok(theirs, "the other tab wrote while this one could not");
 
   // Removals come back for tab A while its writes are still refused: the exact recovery order that
   // used to hand it a claim on whatever it read back.
   denyWrites = true;
-  tabA.writePanelScratch(scope, "files.directory", "apps");
+  writeNow(tabA, scope, "files.directory", "apps");
   assert.equal(backing.get(`${RECORD_PREFIX}${scope}`), theirs,
     "the other tab's record survives the recovery");
 
@@ -244,9 +464,9 @@ test("a tab that can write again takes back only its own stale record", () => {
   const mine = tabA.panelScratchScopeKey("session-a");
   const theirs = tabB.panelScratchScopeKey("session-b");
   openOnEmptyOrigin(tabB);
-  tabA.writePanelScratch(mine, "sidechat.draft", "on its way", "draft");
-  tabA.writePanelScratch(mine, "files.directory", "apps/web");
-  tabB.writePanelScratch(theirs, "review.requestBody", "the other tab's draft", "draft");
+  writeNow(tabA, mine, "sidechat.draft", "on its way", "draft");
+  writeNow(tabA, mine, "files.directory", "apps/web");
+  writeNow(tabB, theirs, "review.requestBody", "the other tab's draft", "draft");
 
   denyWrites = true;
   tabA.clearPanelScratchIf(mine, "sidechat.draft", "on its way",
@@ -278,12 +498,12 @@ test("a send does not retire a replacement when a future stamp forced both to ad
     cleared: {},
   }));
 
-  tabA.writePanelScratch(scope, "sidechat.draft", "on its way", "draft");
+  writeNow(tabA, scope, "sidechat.draft", "on its way", "draft");
   const sent = tabA.panelScratchRevision(scope, "sidechat.draft");
 
   // Tab B sees that message and replaces it while tab A's send is still in flight.
   assert.equal(tabB.readPanelScratch(scope, "sidechat.draft"), "on its way");
-  tabB.writePanelScratch(scope, "sidechat.draft", "a second thought", "draft");
+  writeNow(tabB, scope, "sidechat.draft", "a second thought", "draft");
 
   tabA.clearPanelScratchIf(scope, "sidechat.draft", "on its way", sent);
 

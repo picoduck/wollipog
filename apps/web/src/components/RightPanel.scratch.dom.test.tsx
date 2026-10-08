@@ -29,6 +29,7 @@ import {
   panelScratchScopeKey,
   readPanelScratch,
   writePanelScratch,
+  usePanelScratchDraft,
   usePanelScratchText,
 } from "../right-panel-scratch.js";
 import { ReviewPanel } from "./ReviewPanel.js";
@@ -983,6 +984,38 @@ test("live scratch text restores valid values and falls back for missing or refu
     }
   } finally {
     await act(async () => root.unmount());
+    host.remove();
+  }
+});
+
+test("a draft still waiting for storage is written when its body moves session or unmounts (#2764)", async () => {
+  const stored = (sessionId: string) => {
+    const raw = domWindow.localStorage.getItem(`wollipog.right-panel-scratch.v2:${panelScratchScopeKey(sessionId)}`);
+    return raw === null ? undefined : (JSON.parse(raw) as { values: Record<string, { value: string }> })
+      .values["sidechat.draft"]?.value;
+  };
+  let type: (next: string) => void = () => {};
+  function Draft({ sessionId }: { sessionId: string }) {
+    const [draft, setDraft] = usePanelScratchDraft(panelScratchScopeKey(sessionId), "sidechat.draft");
+    type = setDraft;
+    return <output>{draft}</output>;
+  }
+  const host = domWindow.document.createElement("div");
+  domWindow.document.body.append(host);
+  const root = createRoot(host as unknown as Element);
+  try {
+    await act(async () => root.render(<Draft sessionId="session-1" />));
+    await act(async () => type("typed in the first session"));
+    assert.equal(stored("session-1"), undefined, "a keystroke is not written at once");
+
+    await act(async () => root.render(<Draft sessionId="session-2" />));
+    assert.equal(stored("session-1"), "typed in the first session", "moving to another session writes it");
+
+    await act(async () => type("typed in the second session"));
+    assert.equal(stored("session-2"), undefined);
+    await act(async () => root.unmount());
+    assert.equal(stored("session-2"), "typed in the second session", "unmounting writes it");
+  } finally {
     host.remove();
   }
 });

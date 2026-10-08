@@ -7,12 +7,23 @@ import {
   clearPanelScratch,
   clearPanelScratchIf,
   dropPanelScratchMemory,
+  flushPanelScratch,
   panelScratchRevision,
   panelScratchScopeCount,
   panelScratchScopeKey,
   readPanelScratch,
-  writePanelScratch,
+  writePanelScratch as writePanelScratchLater,
 } from "./right-panel-scratch.js";
+
+/**
+ * A write that has reached storage. Writes are mirrored after a short pause (#2764); the cases here
+ * are about what is stored once they have been, so each one waits out that pause. The pause itself
+ * is covered in right-panel-scratch.debounce.test.ts.
+ */
+function writePanelScratch(...args: Parameters<typeof writePanelScratchLater>): void {
+  writePanelScratchLater(...args);
+  flushPanelScratch();
+}
 
 /** Where one scope's record lives, spelled the way the module writes it. */
 const RECORD_PREFIX = "wollipog.right-panel-scratch.v2:";
@@ -244,6 +255,10 @@ test("a sent draft releases its scope to the bound on the spot", () => {
   assert.equal(readPanelScratch(scopes[1]!, "files.directory"), undefined,
     "the least recently used released scope is the one the bound takes");
   assert.equal(readPanelScratch(scopes[0]!, "files.directory"), "apps/web");
+  // Storage obeys the same bound at once. A removal always sweeps, even though a write to an
+  // existing record otherwise skips the origin-wide sweep (#2764).
+  assert.equal(storedRecordKeys().length, PANEL_SCRATCH_SESSION_LIMIT,
+    "the stored records are held to the bound by the send too");
 });
 
 test("blank text is not a draft, so an untouched composer cannot pin a scope", () => {
@@ -713,6 +728,27 @@ test("the key a mutation moved wins over a stored value stamped in the future", 
   reload();
   assert.equal(readPanelScratch(scope, "files.directory"), "packages/protocol",
     "what the user just chose is what a reload restores");
+});
+
+test("a draft sent before its edit reached storage does not bring back a copy stamped ahead (#2764)", () => {
+  // The edit is still waiting for storage when it is sent. The stored copy it replaced is stamped
+  // past this page's clock (a clock corrected after running two minutes ahead), so the send's
+  // marker has to be stamped past it too, which only settling the edit first gives it.
+  const scope = panelScratchScopeKey("session-1");
+  backing.set(`${RECORD_PREFIX}${scope}`, JSON.stringify({
+    version: 2,
+    writer: "a-page-two-minutes-ahead",
+    touchedAt: Date.now() + 120_000,
+    values: { "sidechat.draft": { value: "old draft", retention: "draft", updatedAt: Date.now() + 120_000 } },
+    cleared: {},
+  }));
+  assert.equal(readPanelScratch(scope, "sidechat.draft"), "old draft");
+
+  writePanelScratchLater(scope, "sidechat.draft", "edited and sent", "draft");
+  clearPanelScratchIf(scope, "sidechat.draft", "edited and sent", panelScratchRevision(scope, "sidechat.draft"));
+
+  reload();
+  assert.equal(readPanelScratch(scope, "sidechat.draft"), undefined, "the send stays sent");
 });
 
 test("the whole-map record is kept until its contents are stored somewhere else", () => {
