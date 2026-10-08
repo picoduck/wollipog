@@ -1253,7 +1253,7 @@ app.register(async (instance) => {
           authenticationTimer = undefined;
         }
         connectionAdmission.authenticated();
-        hub.attachRunner(runnerId, runnerClient);
+        hub.attachRunner(runnerId, runnerClient, msg.protocolVersion ?? null);
         if (!runnerSupportsProtocol(msg.protocolVersion, "harnessSelectionBackgroundConsumers") &&
             db.getRunner(runnerId)?.harnessSelections?.length) {
           db.replaceSubscriptionUsageSnapshots(runnerId, []);

@@ -907,6 +907,12 @@ const WORKING_SESSION_STATUSES = new Set<SessionStatus>([
  * hold the text and the queue submit it again. Such a runner keeps Pi on queue-only admission. */
 const AUTO_STEER_DRIVERS = new Set(["claude-code", "codex-app-server", "pi"]);
 
+/** Live event kinds whose ingest audits, notifies or evaluates policy against the session as it
+ * was before the event. Every other kind reads only its ingest head (#2761). */
+const SESSION_VIEW_BEFORE_EVENT_KINDS = new Set<SessionEventPayload["kind"]>([
+  "permission_request", "question_request", "review_decision", "policy_transport", "token_usage",
+]);
+
 /** Classify a message the runner accepted onto the steering lane. `converted_to_queue` is the
  * runner telling us the turn ended under the attempt and it became an ordinary queued prompt, so
  * it is reported as queued — the sender's next move differs, and saying "steered" there would be
@@ -12603,6 +12609,15 @@ export class SessionsService {
     );
   }
 
+  /** The protocol version of the runner's live connection, which the hub keeps per connection
+   * (#2761), so a per-event capability check does not reload the runner record. Narrow hub test
+   * doubles omit it and read the stored record. */
+  private runnerProtocolVersion(runnerId: string): number | null | undefined {
+    return typeof this.hub.runnerProtocolVersion === "function"
+      ? this.hub.runnerProtocolVersion(runnerId)
+      : this.db.getRunner(runnerId)?.protocolVersion;
+  }
+
   /** Ingest one live runner event. The runner socket passes a staged large payload from
    * awaitStagedLiveSessionEvent; without one, a large payload is written on the calling thread. */
   onSessionEvent(
@@ -12628,10 +12643,10 @@ export class SessionsService {
     fromRunnerId: string | undefined,
     prepared: PreparedLiveSessionEvent | undefined,
   ): void {
-    const session = this.db.getSession(sessionId);
-    if (!session) return;
-    if (fromRunnerId && session.runnerId !== fromRunnerId) {
-      this.log.warn(`ignoring session_event for ${sessionId} from ${fromRunnerId} (owned by ${session.runnerId})`);
+    const head = this.db.sessionIngestHead(sessionId);
+    if (!head) return;
+    if (fromRunnerId && head.runnerId !== fromRunnerId) {
+      this.log.warn(`ignoring session_event for ${sessionId} from ${fromRunnerId} (owned by ${head.runnerId})`);
       return;
     }
     // An event that waited for its payload to become durable belongs to the history its turn saw.
@@ -12647,11 +12662,16 @@ export class SessionsService {
       this.onSessionStatus(sessionId, payload.status);
       return;
     }
+    // A streamed event builds its session view once, when its change is published (#2761). The
+    // kinds that audit, notify or evaluate policy against the session as it was before the event
+    // build that view now, before anything changes it.
+    let before = SESSION_VIEW_BEFORE_EVENT_KINDS.has(payload.kind) ? this.db.getSession(sessionId) : null;
+    const session = (): SessionView => before ??= this.db.getSession(sessionId)!;
     const campaignBefore = (
       payload.kind === "permission_request" || payload.kind === "question_request" ||
       payload.kind === "permission_resolved" || payload.kind === "question_resolved"
-    ) && session.parentSessionId
-      ? this.campaignEventController(this.db.getSession(session.parentSessionId))
+    ) && head.parentSessionId
+      ? this.campaignEventController(this.db.getSession(head.parentSessionId))
       : null;
     const incomingRequest: PendingApproval | null = payload.kind === "permission_request" ? {
       ...(payload.ownerToolUseId ? { ownerToolUseId: payload.ownerToolUseId } : {}),
@@ -12679,9 +12699,9 @@ export class SessionsService {
         ? { effect: "ask" as const, policy: null, matchedPolicyIds: [] }
         : evaluateApprovalPolicies(
             {
-              scope: approvalScope(session, approval),
-              status: session.status,
-              costUsd: session.costUsd,
+              scope: approvalScope(session(), approval),
+              status: session().status,
+              costUsd: session().costUsd,
               toolCallCount: this.db.countToolCalls(sessionId),
               escalated: Boolean(escalatedBy),
             },
@@ -12700,11 +12720,11 @@ export class SessionsService {
       return { escalatedBy, policyDecision, policyOption, effectiveEffect };
     })() : null;
     const suppressRequestReminder = Boolean(
-      incomingRequest && this.orchestratorOwnsGenericRequest(session, incomingRequest),
+      incomingRequest && this.orchestratorOwnsGenericRequest(session(), incomingRequest),
     );
     const isCompletedUserMessage = payload.kind === "user_message" &&
       payload.final !== false && !payload.commandInvocation;
-    const generatedOwnership = (session.titleSource ?? "generated") === "generated";
+    const generatedOwnership = (head.titleSource ?? "generated") === "generated";
     const shouldGenerateInitialTitle = Boolean(this.titleGenerator) && isCompletedUserMessage &&
       generatedOwnership && !this.db.hasCompletedUserMessage(sessionId) &&
       (!this.titleGenerationEnabled || this.titleGenerationEnabled(sessionId));
@@ -12718,7 +12738,7 @@ export class SessionsService {
     // past the gap — pull the ordered history from the box (which includes this event) instead.
     const history = runnerSeq != null ? this.db.getRunnerHistoryState(sessionId) : null;
     const indexedHistory = runnerSeq != null && history?.historyEpoch != null && runnerSupportsProtocol(
-      this.db.getRunner(session.runnerId)?.protocolVersion,
+      this.runnerProtocolVersion(head.runnerId),
       "indexedHistory",
     );
     if (runnerSeq != null) {
@@ -12795,7 +12815,12 @@ export class SessionsService {
         )
       : false;
     if (payload.kind !== "question_request") {
-      this.hub.sessionEvent(ev, suppressRequestReminder ? { suppressReminderWake: true } : undefined);
+      // The kinds the hub would publish the session for (user messages, final agent messages,
+      // response completion) reach a publication below on every path, once applied (#2761).
+      this.hub.sessionEvent(ev, {
+        callerPublishesSession: true,
+        ...(suppressRequestReminder ? { suppressReminderWake: true } : {}),
+      });
     }
     if (reconciledSteering || reconciledCommand ||
         payload.kind === "background_continuation_delivered") {
@@ -12807,18 +12832,18 @@ export class SessionsService {
     if (this.db.hasSessionStopIntent(sessionId)) {
       if (payload.kind === "question_request") this.hub.sessionEvent(ev, { suppressReminderWake: true });
       this.db.updateSessionStatus(sessionId, "stopped", now, { cause: "requested" });
-      this.sendStopCommand(session.runnerId, sessionId);
+      this.sendStopCommand(head.runnerId, sessionId);
       this.hub.sessionChangedById(sessionId);
       return;
     }
     if (payload.kind === "policy_transport") {
-      this.recordPolicyTransportAudit(session, payload, now);
+      this.recordPolicyTransportAudit(session(), payload, now);
     }
 
     // The first real user message names an untitled session (Codex-style) for immediate feedback.
     // The runner persists the same fallback into meta.title. A later CP semantic result is marked
     // separately so stale non-provider hydration cannot revert it. Streamed chunks are skipped.
-    if (isCompletedUserMessage && generatedOwnership && session.title === UNTITLED) {
+    if (isCompletedUserMessage && generatedOwnership && head.title === UNTITLED) {
       const t = titleFromPrompt(payload.text);
       if (t) this.db.setSessionTitle(sessionId, t, now, "generated");
     }
@@ -12835,12 +12860,12 @@ export class SessionsService {
       // carries no provider credential or transcript content, and older runners retain their
       // provider-reported local-cost behavior.
       if (runnerSupportsProtocol(
-        this.db.getRunner(session.runnerId)?.protocolVersion,
+        this.runnerProtocolVersion(head.runnerId),
         "pricedSessionCost",
       )) {
         let frame: import("@wollipog/protocol").PricedSessionCostMessage | undefined;
         if (reconciliationRevision(this.db, sessionId) > 0 || latestReconciliationRepair(this.db, sessionId)) {
-          const supportsIdentity = runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "costReconciliationIdentity");
+          const supportsIdentity = runnerSupportsProtocol(this.runnerProtocolVersion(head.runnerId), "costReconciliationIdentity");
           if (supportsIdentity) {
             try { frame = correctionFrame(this.db, sessionId); }
             catch { /* Missing correction provenance defers price synchronization. */ }
@@ -12849,12 +12874,12 @@ export class SessionsService {
             // Retain accepted usage and budget enforcement while missing provenance fences price sync.
             // Never strip the coordinate and fall back to an unbound cumulative price.
             this.log.warn(JSON.stringify({ event: "cost_reconciliation_price_deferred", entryPoint: "runner",
-              runnerId: session.runnerId, sessionId, reason: supportsIdentity ? "correction_prefix_unavailable" : "runner_upgrade_required" }));
+              runnerId: head.runnerId, sessionId, reason: supportsIdentity ? "correction_prefix_unavailable" : "runner_upgrade_required" }));
           }
         } else {
           frame = { type: "priced_session_cost", sessionId, costUsd: this.db.sessionCostUsd(sessionId) };
         }
-        if (frame) this.hub.sendToRunner(session.runnerId, frame);
+        if (frame) this.hub.sendToRunner(head.runnerId, frame);
       }
       // Guardrail card gate: pause + ask once a policy rule trips. A v47 runner independently
       // cancels the active turn at the normalized usage threshold; v106 also applies that gate to
@@ -12862,7 +12887,7 @@ export class SessionsService {
       // trailing idle can't wipe it.
       // A mid-turn park is an attention moment — push it (no-op unless the gate flipped status).
       this.gateOnPolicy(sessionId, now);
-      this.notifyTransition(session, sessionId);
+      this.notifyTransition(session(), sessionId);
     }
 
     if (payload.kind === "permission_request") {
@@ -12870,7 +12895,7 @@ export class SessionsService {
       const { escalatedBy, policyDecision, policyOption, effectiveEffect } = permissionDecision!;
       if (escalatedBy) {
         this.recordGovernanceAudit(
-          session,
+          session(),
           approval,
           "review",
           "escalated",
@@ -12879,25 +12904,25 @@ export class SessionsService {
         );
       }
       this.recordGovernanceAudit(
-        session,
+        session(),
         approval,
         "request",
         "pending",
-        { kind: "agent", id: session.agentId ?? session.driver },
+        { kind: "agent", id: session().agentId ?? session().driver },
         now,
       );
 
       const occupiedHook = this.db.getSession(sessionId)?.pendingApproval;
       if (occupiedHook?.kind === "policy_hook") {
         const optionId = approval.options.find((option) => option.kind === "reject_once")?.optionId ?? null;
-        this.hub.sendToRunner(session.runnerId, {
+        this.hub.sendToRunner(head.runnerId, {
           type: "resolve_permission",
           sessionId,
           requestId: approval.requestId,
           optionId,
         });
         this.recordGovernanceAudit(
-          session,
+          session(),
           approval,
           "resolution",
           "denied",
@@ -12911,7 +12936,7 @@ export class SessionsService {
 
       if (policyDecision.policy) {
         this.recordGovernanceAudit(
-          session,
+          session(),
           approval,
           "policy_decision",
           effectiveEffect === "ask" ? "asked" : effectiveEffect === "allow" ? "allowed" : "denied",
@@ -12923,10 +12948,10 @@ export class SessionsService {
 
       const actionAdmission = effectiveEffect === "deny"
         ? null
-        : this.workflowDecisionActionForPermission(session, approval);
+        : this.workflowDecisionActionForPermission(session(), approval);
       if (actionAdmission) {
         const actor: GovernanceActor = { kind: "system", id: "workflow-decision-action-admission" };
-        const sent = this.hub.sendToRunner(session.runnerId, {
+        const sent = this.hub.sendToRunner(head.runnerId, {
           type: "resolve_permission",
           sessionId,
           requestId: approval.requestId,
@@ -12948,7 +12973,7 @@ export class SessionsService {
           this.db.setPendingApproval(sessionId, remaining);
           this.db.updateSessionStatus(sessionId, hasBlockingPendingRequest(remaining) ? "input_required" : "running", now);
           this.recordWorkflowDecisionAudit(consumed, "consumed", actor, now);
-          this.recordGovernanceAudit(session, approval, "resolution", "allowed", actor, now, {
+          this.recordGovernanceAudit(session(), approval, "resolution", "allowed", actor, now, {
             optionId: actionAdmission.optionId,
             ...(policyDecision.policy ? { governancePolicyId: policyDecision.policy.policyId } : {}),
             workflowDecision: {
@@ -12965,7 +12990,7 @@ export class SessionsService {
           this.hub.sessionChangedById(consumed.controllingSessionId);
           return;
         }
-        this.recordGovernanceAudit(session, approval, "resolution", "delivery_failed", actor, now, {
+        this.recordGovernanceAudit(session(), approval, "resolution", "delivery_failed", actor, now, {
           optionId: actionAdmission.optionId,
           ...(policyDecision.policy ? { governancePolicyId: policyDecision.policy.policyId } : {}),
           workflowDecision: {
@@ -12985,7 +13010,7 @@ export class SessionsService {
           addPendingRequestPreservingRunnerGuardrails(this.db.getSession(sessionId)?.pendingApproval, approval),
         );
         this.db.updateSessionStatus(sessionId, "input_required", now);
-        this.notifyTransition(session, sessionId);
+        this.notifyTransition(session(), sessionId);
         this.publishCampaignAttentionTransition(campaignBefore);
         return;
       }
@@ -12993,7 +13018,7 @@ export class SessionsService {
       if (effectiveEffect !== "ask") {
         const actor: GovernanceActor = { kind: "policy", id: policyDecision.policy!.policyId };
         const optionId = policyOption?.optionId ?? null;
-        const sent = this.hub.sendToRunner(session.runnerId, {
+        const sent = this.hub.sendToRunner(head.runnerId, {
           type: "resolve_permission",
           sessionId,
           requestId: approval.requestId,
@@ -13011,7 +13036,7 @@ export class SessionsService {
           // turn just like a selected reject_once, so both auto effects remain running here.
           this.db.updateSessionStatus(sessionId, hasBlockingPendingRequest(remaining) ? "input_required" : "running", now);
           this.recordGovernanceAudit(
-            session,
+            session(),
             approval,
             "resolution",
             effectiveEffect === "allow" ? "allowed" : "denied",
@@ -13025,7 +13050,7 @@ export class SessionsService {
           this.hub.sessionChangedById(sessionId);
           return;
         }
-        this.recordGovernanceAudit(session, approval, "resolution", "delivery_failed", actor, now, {
+        this.recordGovernanceAudit(session(), approval, "resolution", "delivery_failed", actor, now, {
           optionId,
           governancePolicyId: policyDecision.policy!.policyId,
         });
@@ -13037,14 +13062,14 @@ export class SessionsService {
       );
       this.db.updateSessionStatus(sessionId, "input_required", now);
       // Push BEFORE any runner-side trailing status event (which would then be a non-transition).
-      this.notifyTransition(session, sessionId);
+      this.notifyTransition(session(), sessionId);
     }
 
     if (payload.kind === "review_decision") {
       const reviewer = reviewerForAudit(payload.reviewer);
       if (reviewer) {
         this.recordGovernanceAudit(
-          session,
+          session(),
           { requestId: payload.requestId ?? payload.reviewId, kind: "permission" },
           "review",
           payload.outcome,
@@ -13056,7 +13081,7 @@ export class SessionsService {
       const receipt = validatedGuardianApprovalReviewReceipt(payload.approvalReviewReceipt);
       const receiptCommandDigest = receipt && createHash("sha256").update(receipt.input, "utf8").digest("hex");
       if (receipt && reviewer?.kind === "agent" && reviewer.id === "codex-guardian" &&
-          payload.outcome === "allowed" && session.driver === receipt.transport &&
+          payload.outcome === "allowed" && session().driver === receipt.transport &&
           receipt.inputSha256 === receiptCommandDigest) {
         const receiptDigest = auditDigest({
           transport: receipt.transport,
@@ -13065,7 +13090,7 @@ export class SessionsService {
           itemId: receipt.itemId,
         })!;
         const actionAdmission = this.workflowDecisionActionForCommand(
-          session,
+          session(),
           receipt.toolName,
           receipt.input,
           receipt.turnId,
@@ -13075,7 +13100,7 @@ export class SessionsService {
         if (actionAdmission) {
           const actor: GovernanceActor = { kind: "system", id: "workflow-decision-action-admission" };
           const consumed = this.db.consumeWorkflowDecisionActionWithReceipt(
-            session.id,
+            session().id,
             actionAdmission.decision.occurrenceId,
             actionAdmission.commandDigest,
             receiptDigest,
@@ -13084,7 +13109,7 @@ export class SessionsService {
           if (consumed) {
             this.recordWorkflowDecisionAudit(consumed, "consumed", actor, now);
             this.recordGovernanceAudit(
-              session,
+              session(),
               {
                 requestId: receipt.itemId,
                 kind: "permission",
@@ -13112,7 +13137,7 @@ export class SessionsService {
           // Burn a valid unmatched provider invocation identity as well: a delayed replay must not
           // consume a future grant that happens to carry the same canonical command.
           this.db.claimWorkflowDecisionActionReceipt(
-            session.id,
+            session().id,
             receiptDigest,
             auditDigest({ kind: "pr_merge_enqueue", command: receipt.input })!,
             now,
@@ -13126,11 +13151,11 @@ export class SessionsService {
       // question card and answers via POST /api/sessions/:id/answer.
       const approval = incomingRequest!;
       this.recordGovernanceAudit(
-        session,
+        session(),
         approval,
         "request",
         "pending",
-        { kind: "agent", id: session.agentId ?? session.driver },
+        { kind: "agent", id: session().agentId ?? session().driver },
         now,
         { content: payload.questions },
       );
@@ -13145,7 +13170,7 @@ export class SessionsService {
       }
       if (occupiedHook?.kind === "policy_hook") {
         this.hub.sessionEvent(ev, { suppressReminderWake: true });
-        const sent = this.hub.sendToRunner(session.runnerId, {
+        const sent = this.hub.sendToRunner(head.runnerId, {
           type: "answer_question",
           sessionId,
           requestId: approval.requestId,
@@ -13154,7 +13179,7 @@ export class SessionsService {
           action: "dismiss",
         });
         this.recordGovernanceAudit(
-          session,
+          session(),
           approval,
           "resolution",
           sent ? "dismissed" : "delivery_failed",
@@ -13165,16 +13190,16 @@ export class SessionsService {
         this.hub.sessionChangedById(sessionId);
         return;
       }
-      const automatic = questionPolicyAnswers(payload.questions, this.db.listGovernancePolicies(), this.db.sessionOwnerUser(sessionId), session);
+      const automatic = questionPolicyAnswers(payload.questions, this.db.listGovernancePolicies(), this.db.sessionOwnerUser(sessionId), session());
       if (automatic) {
         const policySummary = this.questionAnswerSummary(sessionId, payload.questions, automatic.answers);
-        const sent = this.hub.sendToRunner(session.runnerId, {
+        const sent = this.hub.sendToRunner(head.runnerId, {
           type: "answer_question", sessionId, requestId: approval.requestId,
           answers: automatic.answers, action: "submit",
           ...(policySummary ? { answerSummary: policySummary } : {}),
         });
         for (const policy of automatic.policies) {
-          this.recordGovernanceAudit(session, approval, "policy_decision", sent ? "answered" : "delivery_failed",
+          this.recordGovernanceAudit(session(), approval, "policy_decision", sent ? "answered" : "delivery_failed",
             { kind: "policy", id: policy.policyId }, now, { governancePolicyId: policy.policyId });
         }
         if (sent) {
@@ -13200,7 +13225,7 @@ export class SessionsService {
       );
       if (!payload.async) {
         this.db.updateSessionStatus(sessionId, "input_required", now);
-        this.notifyTransition(session, sessionId);
+        this.notifyTransition(session(), sessionId);
       }
     }
 

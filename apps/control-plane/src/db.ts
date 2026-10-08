@@ -1542,9 +1542,9 @@ CREATE TABLE IF NOT EXISTS question_policy_answers (
 CREATE INDEX IF NOT EXISTS idx_sessions_runner ON sessions(runner_id);
 -- Run detail filters members by run id (partial: most sessions have none).
 CREATE INDEX IF NOT EXISTS idx_sessions_run ON sessions(run_id) WHERE run_id IS NOT NULL;
--- Phase 8: countToolCalls runs on every sessionView broadcast for guardrailed sessions — a partial
--- covering expression index keeps it index-only instead of an O(all events) row scan per event.
--- The expression text must match the query byte-for-byte.
+-- The tool-call counter's triggers probe this partial expression index for another row with the
+-- same tool call id, and its first-open backfill counts through it. The expression text must match
+-- those queries byte-for-byte.
 CREATE INDEX IF NOT EXISTS idx_session_events_tool_call
   ON session_events(session_id, json_extract(payload,'$.toolCallId')) WHERE kind='tool_call';
 
@@ -3333,6 +3333,14 @@ export interface RunnerHistoryReconciliation extends RunnerHistoryState {
   reset: boolean;
 }
 
+/** The session fields live event ingest reads before applying an event; see sessionIngestHead. */
+export interface SessionIngestHead {
+  runnerId: string;
+  parentSessionId: string | null;
+  title: string;
+  titleSource: SessionTitleSource;
+}
+
 export interface HydratedRunnerEvent {
   seq: number;
   ts: number;
@@ -4460,10 +4468,79 @@ type ConfirmedSessionNamingHarnessTargetWrite = SessionNamingHarnessTargetWrite 
 // subtracts a deleted child's last charge, so deleting history cannot replenish an allowance, and a
 // restart re-reserves the child's unspent limits.
 const TERMINAL_STATUS_SQL = "('completed','failed','stopped')";
-// Matches countToolCalls byte-for-byte so it stays index-only on idx_session_events_tool_call.
+// A session's distinct tool calls, read from the counter that TOOL_CALL_COUNT_TRIGGERS_SQL keeps.
 const toolCallCountSql = (sessionId: string) =>
-  `(SELECT COUNT(DISTINCT json_extract(payload,'$.toolCallId')) FROM session_events
-     WHERE session_id=${sessionId} AND kind='tool_call')`;
+  `(COALESCE((SELECT tool_calls FROM session_tool_call_counts WHERE session_id=${sessionId}), 0))`;
+
+// Distinct tool calls per session (#2761): COUNT(DISTINCT json_extract(payload,'$.toolCallId')) over
+// the session's tool_call events, maintained by triggers on every insert, delete and update of
+// session_events, including cascades, instead of being recounted on every session view. Each
+// trigger asks the expression index whether another row still carries the same id, so one probe
+// keeps duplicates (claude-code reports one frame per status change) counted once. The comparison
+// is SQL `=`, which treats values as DISTINCT does: 1 and 1.0 are equal, 1 and '1' are not, and
+// NULL never counts. A session with no tool calls has no row. No trigger here names `sessions`, so
+// migrations can still rebuild that table. A migration that rebuilds session_events must recount.
+const TOOL_CALL_ID_SQL = (row: string) => `json_extract(${row}.payload,'$.toolCallId')`;
+const otherToolCallRowSql = (row: "NEW" | "OLD", excludeSelf: boolean) =>
+  `SELECT 1 FROM session_events WHERE session_id=${row}.session_id AND kind='tool_call'
+     AND json_extract(payload,'$.toolCallId')=${TOOL_CALL_ID_SQL(row)}${excludeSelf ? ` AND id<>${row}.id` : ""}`;
+const TOOL_CALL_COUNT_TRIGGERS_SQL = /* sql */ `
+DROP TRIGGER IF EXISTS session_events_tool_call_count_insert;
+CREATE TRIGGER session_events_tool_call_count_insert
+AFTER INSERT ON session_events
+WHEN NEW.kind='tool_call' AND ${TOOL_CALL_ID_SQL("NEW")} IS NOT NULL
+  AND NOT EXISTS (${otherToolCallRowSql("NEW", true)})
+BEGIN
+  INSERT INTO session_tool_call_counts (session_id, tool_calls) VALUES (NEW.session_id, 1)
+    ON CONFLICT(session_id) DO UPDATE SET tool_calls=tool_calls+1;
+END;
+DROP TRIGGER IF EXISTS session_events_tool_call_count_delete;
+CREATE TRIGGER session_events_tool_call_count_delete
+AFTER DELETE ON session_events
+WHEN OLD.kind='tool_call' AND ${TOOL_CALL_ID_SQL("OLD")} IS NOT NULL
+  AND NOT EXISTS (${otherToolCallRowSql("OLD", false)})
+BEGIN
+  UPDATE session_tool_call_counts SET tool_calls=tool_calls-1 WHERE session_id=OLD.session_id;
+  DELETE FROM session_tool_call_counts WHERE session_id=OLD.session_id AND tool_calls<=0;
+END;
+-- An update is the delete of the old row followed by the insert of the new one, except that a row
+-- keeping its own session and id was already counted and still is.
+DROP TRIGGER IF EXISTS session_events_tool_call_count_update;
+CREATE TRIGGER session_events_tool_call_count_update
+AFTER UPDATE OF session_id, kind, payload ON session_events
+WHEN OLD.kind='tool_call' OR NEW.kind='tool_call'
+BEGIN
+  UPDATE session_tool_call_counts SET tool_calls=tool_calls-1
+   WHERE session_id=OLD.session_id AND OLD.kind='tool_call' AND ${TOOL_CALL_ID_SQL("OLD")} IS NOT NULL
+     AND NOT EXISTS (${otherToolCallRowSql("OLD", false)});
+  DELETE FROM session_tool_call_counts WHERE session_id=OLD.session_id AND tool_calls<=0;
+  INSERT INTO session_tool_call_counts (session_id, tool_calls)
+    SELECT NEW.session_id, 1
+     WHERE NEW.kind='tool_call' AND ${TOOL_CALL_ID_SQL("NEW")} IS NOT NULL
+       AND NOT (OLD.kind='tool_call' AND OLD.session_id=NEW.session_id
+         AND ${TOOL_CALL_ID_SQL("OLD")} IS ${TOOL_CALL_ID_SQL("NEW")})
+       AND NOT EXISTS (${otherToolCallRowSql("NEW", true)})
+    ON CONFLICT(session_id) DO UPDATE SET tool_calls=tool_calls+1;
+END;`;
+
+/** Create the tool-call counter on first open, counting existing history, then (re)install its
+ * triggers so they always match this code. Runs in the caller's transaction. */
+function installToolCallCounter(db: DatabaseSync): void {
+  const exists = db.prepare(
+    "SELECT 1 AS present FROM sqlite_master WHERE type='table' AND name='session_tool_call_counts'",
+  ).get();
+  if (!exists) {
+    db.exec(`CREATE TABLE session_tool_call_counts (
+      session_id TEXT PRIMARY KEY,
+      tool_calls INTEGER NOT NULL
+    ) WITHOUT ROWID`);
+    db.exec(`INSERT INTO session_tool_call_counts (session_id, tool_calls)
+      SELECT session_id, COUNT(DISTINCT json_extract(payload,'$.toolCallId')) FROM session_events
+       WHERE kind='tool_call' GROUP BY session_id
+      HAVING COUNT(DISTINCT json_extract(payload,'$.toolCallId')) > 0`);
+  }
+  db.exec(TOOL_CALL_COUNT_TRIGGERS_SQL);
+}
 const childCostChargeSql = (row: string) => {
   const used = `(MAX(${row}.cost_usd, ${row}.usage_peak_cost_usd)+MAX(0, ${row}.child_cost_reserved_usd))`;
   return `CASE WHEN ${row}.status IN ${TERMINAL_STATUS_SQL} THEN ${used}
@@ -4475,8 +4552,8 @@ const childToolCallChargeSql = (row: string) => {
   return `CASE WHEN ${row}.status IN ${TERMINAL_STATUS_SQL} THEN ${used}
      ELSE MAX(${row}.parent_reserved_tool_calls, ${used}) END`;
 };
-// Recreated on every open so the installed definitions always match this code. They read
-// session_events, so a migration that rebuilds that table must drop them first. The connection
+// Recreated on every open so the installed definitions always match this code. They read the
+// tool-call counter, which the session_events triggers maintain. The connection
 // enables recursive triggers, so a change in a child's charge re-fires the counter triggers on each
 // ancestor in turn until one's charge is unchanged. Tool calls reported after settlement are
 // raised by raiseSettledChildToolCallCharge once per insert batch rather than by recounting
@@ -6198,6 +6275,16 @@ export class ControlPlaneDb {
     db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id, id)");
     db.exec("UPDATE sessions SET cost_budget_step_usd=cost_budget_usd WHERE cost_budget_step_usd IS NULL AND cost_budget_usd IS NOT NULL");
     db.exec("UPDATE sessions SET max_tool_calls_step=max_tool_calls WHERE max_tool_calls_step IS NULL AND max_tool_calls IS NOT NULL");
+    // The child-charge triggers and their legacy settlement below read the tool-call counter, so
+    // it is counted first, in its own transaction with its triggers.
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      installToolCallCounter(db);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
     // Per-child allowance charges. Add the columns, settle pre-existing children, and install the
     // triggers in one transaction so no existing child is ever left uncharged or double-counted.
     db.exec("BEGIN IMMEDIATE");
@@ -17628,14 +17715,13 @@ export class ControlPlaneDb {
    * Distinct tool invocations recorded for a session — derived from the event log so it is
    * restart-safe, immune to reprocess/clear drift, and includes hydrated/backfilled history
    * (those tool calls happened). DISTINCT because claude-code emits a tool_call frame per status
-   * change of the same invocation (same toolCallId); codex drivers emit one.
+   * change of the same invocation (same toolCallId); codex drivers emit one. Read from the counter
+   * the session_events triggers maintain (#2761), so a view never recounts history.
    */
   countToolCalls(id: string): number {
-    const row = this.stmt(
-        "SELECT COUNT(DISTINCT json_extract(payload,'$.toolCallId')) AS c FROM session_events WHERE session_id=? AND kind='tool_call'",
-      )
-      .get(id) as { c: number };
-    return row.c ?? 0;
+    const row = this.stmt("SELECT tool_calls FROM session_tool_call_counts WHERE session_id=?")
+      .get(id) as { tool_calls: number } | undefined;
+    return row?.tool_calls ?? 0;
   }
 
   /** Tool calls that reach a terminal child after its settlement (late hydration or a history
@@ -20798,6 +20884,19 @@ export class ControlPlaneDb {
     return row
       ? this.sessionView(row, undefined, this.sessionStopIntent(id), true, this.childSessionAllocations(id).liveCount)
       : null;
+  }
+
+  /** The few session fields live event ingest reads before applying a streamed event, without
+   * building its view; the view is built once, when the change is published (#2761). */
+  sessionIngestHead(id: string): SessionIngestHead | null {
+    const row = this.stmt("SELECT runner_id, parent_session_id, title, title_source FROM sessions WHERE id=?")
+      .get(id) as { runner_id: string; parent_session_id: string | null; title: string; title_source: string | null } | undefined;
+    return row ? {
+      runnerId: row.runner_id,
+      parentSessionId: row.parent_session_id ?? null,
+      title: row.title,
+      titleSource: (row.title_source as SessionTitleSource | null) ?? "generated",
+    } : null;
   }
 
   private advanceSessionAttentionRevision(sessionId: string): void {

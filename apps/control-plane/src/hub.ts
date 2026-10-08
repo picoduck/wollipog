@@ -358,6 +358,8 @@ export class Hub {
   private readonly maxUiConnectionStartsGlobalPerWindow: number;
   private readonly runnerSockets = new Map<string, Socket>();
   private readonly runnerFrameActivity = new WeakMap<Socket, number>();
+  /** Protocol version each runner connection registered with; see attachRunner. */
+  private readonly runnerProtocolVersions = new WeakMap<Socket, number | null>();
   /** In-flight runner request/response calls (git actions), keyed by requestId. */
   private readonly pendingRequests = new Map<string, PendingRequest>();
   /** Ephemeral per-session prompt queue state (runner-reported; never persisted). Overlaid onto the
@@ -405,10 +407,21 @@ export class Hub {
 
   /* ----------------------------- Runners --------------------------------- */
 
-  attachRunner(runnerId: string, socket: Socket): void {
+  /** `protocolVersion` is the one the connection registered with, the value registration stored for
+   * the runner. It is kept for the life of this socket, so per-event capability checks need not
+   * reload the runner record (#2761). */
+  attachRunner(runnerId: string, socket: Socket, protocolVersion?: number | null): void {
     const previous = this.runnerSockets.get(runnerId);
     this.runnerSockets.set(runnerId, socket);
+    if (protocolVersion !== undefined) this.runnerProtocolVersions.set(socket, protocolVersion);
     if (previous && previous !== socket) previous.close?.(1008, "runner credential replaced");
+  }
+
+  /** The protocol version of the runner's live connection, or the stored one while it has none. */
+  runnerProtocolVersion(runnerId: string): number | null | undefined {
+    const socket = this.runnerSockets.get(runnerId);
+    if (socket && this.runnerProtocolVersions.has(socket)) return this.runnerProtocolVersions.get(socket);
+    return this.db.getRunner?.(runnerId)?.protocolVersion;
   }
 
   /** Immediately sever the current connection — after credential revocation, or when a liveness
@@ -477,7 +490,7 @@ export class Hub {
       : "sessionId" in command ? command.sessionId : undefined;
     if (!sessionId || !(command.type === "start_session" || command.type === "prompt_session" ||
         command.type === "answer_recovered_question")) return msg;
-    if ((this.db.getRunner?.(runnerId)?.protocolVersion ?? 0) < PROJECT_MEMORY_MIN_PROTOCOL) return msg;
+    if ((this.runnerProtocolVersion(runnerId) ?? 0) < PROJECT_MEMORY_MIN_PROTOCOL) return msg;
     const session = this.db.getSession(sessionId);
     if (!session || session.runnerId !== runnerId) return msg;
     const projectMemory = { projectId: session.projectId ?? null,
@@ -493,7 +506,7 @@ export class Hub {
     const sessionId = command.type === "start_session" ? command.spec.sessionId
       : "sessionId" in command ? command.sessionId : undefined;
     if (!sessionId || !["start_session", "prompt_session", "answer_recovered_question"].includes(command.type)) return msg;
-    if (!runnerSupportsProtocol(this.db.getRunner?.(runnerId)?.protocolVersion, "artifactSessionGuidance")) return msg;
+    if (!runnerSupportsProtocol(this.runnerProtocolVersion(runnerId), "artifactSessionGuidance")) return msg;
     const session = this.db.getSession(sessionId);
     if (!session || session.runnerId !== runnerId) return msg;
     const owner = this.db.sessionOwnerUser(sessionId);
@@ -507,7 +520,7 @@ export class Hub {
   private syncSessionArtifactUploads(session: SessionView, userId?: string): void {
     const owner = this.db.sessionOwnerUser(session.id);
     if (userId && owner?.userId !== userId) return;
-    if (!runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "artifactSessionGuidance")) return;
+    if (!runnerSupportsProtocol(this.runnerProtocolVersion(session.runnerId), "artifactSessionGuidance")) return;
     this.sendToRunner(session.runnerId, { type: "set_session_artifact_uploads", sessionId: session.id,
       preference: this.db.artifactUploadPreference(owner?.userId) });
   }
@@ -1168,7 +1181,7 @@ export class Hub {
   }
 
   private syncSessionProjectMemory(session: SessionView): void {
-    if ((this.db.getRunner?.(session.runnerId)?.protocolVersion ?? 0) < PROJECT_MEMORY_MIN_PROTOCOL) return;
+    if ((this.runnerProtocolVersion(session.runnerId) ?? 0) < PROJECT_MEMORY_MIN_PROTOCOL) return;
     this.sendToRunner(session.runnerId, { type: "set_session_project_memory", sessionId: session.id,
       projectMemory: { projectId: session.projectId ?? null,
         sharing: session.projectId ? this.db.projectMemorySharing(session.projectId) : "separate" } });
@@ -1337,10 +1350,16 @@ export class Hub {
     }
   }
 
-  sessionEvent(event: SessionEvent, options?: { suppressReminderWake?: boolean }): void {
+  /** `callerPublishesSession` is for a caller that publishes the session's change itself once it
+   * has applied the event, so the session view is built once (#2761). */
+  sessionEvent(
+    event: SessionEvent,
+    options?: { suppressReminderWake?: boolean; callerPublishesSession?: boolean },
+  ): void {
     this.broadcast({ type: "session_event", event });
-    if (event.payload.kind === "user_message" || event.payload.kind === "agent_response_completed" ||
-        (event.payload.kind === "agent_message" && event.payload.final)) this.sessionChangedById(event.sessionId);
+    if (!options?.callerPublishesSession && (
+      event.payload.kind === "user_message" || event.payload.kind === "agent_response_completed" ||
+      (event.payload.kind === "agent_message" && event.payload.final))) this.sessionChangedById(event.sessionId);
     if (options?.suppressReminderWake) return;
     const reason = reminderWakeReasonForEvent(event.payload);
     if (!reason) return;
