@@ -1,6 +1,7 @@
 import { fireDomEvent } from "./test-dom-events.js";
 import assert from "node:assert/strict";
 import test from "node:test";
+import { afterEach, beforeEach, describe, mock } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
@@ -23,6 +24,9 @@ import { InboxView } from "./InboxView.js";
 import type { RightPanelState } from "./RightPanel.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
+import { ApiProvider } from "../api-context.js";
+import { api as realApi, type ApiClient } from "../api.js";
+import { SESSIONS_ARRIVAL_WAIT_MS } from "../sessions-states.js";
 
 /**
  * One Sessions state per situation (#2220): an empty group replaces both panes with one state and
@@ -199,7 +203,7 @@ function snapshot(options: { sessions?: SessionView[]; projects?: ProjectView[];
   };
 }
 
-async function mount(options: { routeSplit?: string | null } = {}) {
+async function mount(options: { routeSplit?: string | null; api?: ApiClient } = {}) {
   const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(mountPoint as never);
   const container = domWindow.document.body as unknown as HTMLDivElement;
@@ -218,14 +222,16 @@ async function mount(options: { routeSplit?: string | null } = {}) {
   const created: Array<NewSessionPreset | undefined> = [];
   await act(async () => {
     root.render(
-      <StoreProvider connection={connection} navigation={navigation}>
-        <InboxView
-          rightPanel={rightPanel}
-          onOpenTerminal={() => undefined}
-          onNewSession={(preset) => created.push(preset)}
-          {...(options.routeSplit === undefined ? {} : { routeSplit: options.routeSplit })}
-        />
-      </StoreProvider>,
+      <ApiProvider {...(options.api ? { client: options.api } : {})}>
+        <StoreProvider connection={connection} navigation={navigation}>
+          <InboxView
+            rightPanel={rightPanel}
+            onOpenTerminal={() => undefined}
+            onNewSession={(preset) => created.push(preset)}
+            {...(options.routeSplit === undefined ? {} : { routeSplit: options.routeSplit })}
+          />
+        </StoreProvider>
+      </ApiProvider>,
     );
   });
   return { container, socket, created };
@@ -460,4 +466,237 @@ test("F6 into a loading preview lands on a target the accessibility tree can see
   assert.ok(active.classList.contains("inbox-preview-skeleton"));
   assertNoDomNode(active.closest('[aria-hidden="true"]'), "the focused target is not hidden from assistive technology");
   assert.ok(active.getAttribute("aria-label"), "and it has a name");
+});
+
+// A group's sessions that never arrive end in Couldn't Load Sessions with Retry, not an endless
+// skeleton (#2803, §12.3). The wait runs on fake timers; the store's own timers stay real.
+describe("sessions that never arrive", () => {
+  beforeEach(() => { mock.timers.enable({ apis: ["setTimeout"] }); });
+  afterEach(() => { mock.timers.reset(); });
+
+  const docsSplit = durableInboxProjectKey("project-docs");
+  const tick = async (ms: number) => { await act(async () => { mock.timers.tick(ms); }); };
+  const skeleton = (container: HTMLElement) => container.querySelector<HTMLElement>(".inbox-list-pane .inbox-skeleton");
+  const failure = (container: HTMLElement) => container.querySelector<HTMLElement>(".inbox-state .notice.t-danger");
+  const retryButton = (container: HTMLElement) => [...failure(container)!.querySelectorAll<HTMLButtonElement>("button")]
+    .find((button) => button.textContent?.trim() === "Retry")!;
+  /** A client that answers only the list Retry asks for. Everything else (the preview's transcript,
+   * the skill list) stays pending rather than reaching for a network the test does not have. */
+  function client(listSessions: () => Promise<{ sessions: SessionView[] }>): ApiClient & { calls: number } {
+    const stub = Object.fromEntries(Object.keys(realApi).map((key) => [key, () => new Promise(() => {})])) as
+      unknown as ApiClient & { calls: number };
+    stub.calls = 0;
+    stub.listSessions = () => { stub.calls += 1; return listSessions(); };
+    return stub;
+  }
+  async function waitingGroup(api?: ApiClient) {
+    const view = await mount({ routeSplit: docsSplit, ...(api ? { api } : {}) });
+    await act(async () => { view.socket.push(snapshot({ projects: [project([location("available")], 8)] })); });
+    assert.ok(skeleton(view.container), "the group starts on its skeleton");
+    return view;
+  }
+
+  test("the skeleton holds until the wait elapses, then Couldn't Load Sessions with Retry replaces both panes", async () => {
+    const { container } = await waitingGroup();
+    await tick(SESSIONS_ARRIVAL_WAIT_MS - 1);
+    assert.ok(skeleton(container), "still the skeleton just before the wait ends");
+    assertNoDomNode(container.querySelector(".inbox-state"));
+
+    await tick(1);
+    const state = failure(container)!;
+    assert.ok(state, "a danger notice in the panes' place (§12.4)");
+    assert.ok(state.closest(".master-detail-state.inbox-state"));
+    assert.equal(state.getAttribute("role"), "alert");
+    assert.equal(state.querySelector(".notice-title")?.textContent, "Couldn't Load Sessions");
+    assert.equal(state.querySelector(".notice-title")?.tagName, "H2");
+    assert.equal(state.querySelector(".notice-body")?.textContent,
+      "Docs Site has 8 sessions, but they didn't arrive. Retry to ask for them again.");
+    assert.deepEqual([...state.querySelectorAll("button")].map((button) => button.textContent?.trim()), ["Retry"],
+      "no Show Details: a wait that ran out has no raw detail");
+    assertNoDomNode(skeleton(container));
+    assertNoDomNode(container.querySelector(".inbox-list"));
+    assertNoDomNode(container.querySelector(".inbox-preview-pane"));
+    assert.doesNotMatch(container.textContent ?? "", /No Sessions Yet|Loading 8 sessions/);
+    assert.ok(headerNewSession(container), "the header keeps New Session");
+  });
+
+  test("Retry asks for the sessions again and shows the skeleton; sessions arriving afterwards replace it", async () => {
+    const api = client(async () => ({ sessions: [] }));
+    const { container, socket } = await waitingGroup(api);
+    await tick(SESSIONS_ARRIVAL_WAIT_MS);
+    const retry = retryButton(container);
+    retry.focus();
+    await act(async () => { retry.click(); });
+    assert.equal(api.calls, 1, "Retry asks for the sessions again");
+    assert.ok(skeleton(container), "Retry returns to the skeleton");
+    assertNoDomNode(container.querySelector(".inbox-state"));
+    assert.ok(focused() === skeleton(container), "focus moves to the skeleton, not <body>");
+
+    await tick(SESSIONS_ARRIVAL_WAIT_MS - 1);
+    assert.ok(skeleton(container), "Retry starts a whole new wait");
+    await act(async () => {
+      socket.push({ type: "session_upsert", session: session("late", { projectId: "project-docs" }) });
+    });
+    assertNoDomNode(skeleton(container));
+    assertNoDomNode(container.querySelector(".inbox-state"));
+    assert.ok(container.querySelector(".inbox-list .inbox-row"), "rows replace the skeleton");
+    await tick(SESSIONS_ARRIVAL_WAIT_MS);
+    assertNoDomNode(container.querySelector(".inbox-state"), "an elapsed old wait never brings the state back");
+  });
+
+  test("the sessions Retry fetches fill the group, without touching other groups or newer live rows", async () => {
+    const live = session("live", { projectId: "project-docs", title: "Live Title" });
+    const api = client(async () => ({
+      sessions: [
+        session("fetched", { projectId: "project-docs" }),
+        session("elsewhere", { projectId: "project-other" }),
+        session("archived", { projectId: "project-docs", archived: true }),
+        { ...live, title: "Stale Title" },
+      ],
+    }));
+    const { container, socket } = await waitingGroup(api);
+    await tick(SESSIONS_ARRIVAL_WAIT_MS);
+    let resolveList!: () => void;
+    const listed = new Promise<void>((resolve) => { resolveList = resolve; });
+    const fetchSessions = api.listSessions;
+    api.listSessions = async () => { await listed; return fetchSessions(); };
+    await act(async () => { retryButton(container).click(); });
+    // A live update lands while the request is in flight; the older response must not overwrite it.
+    await act(async () => { socket.push({ type: "session_upsert", session: live }); });
+    await act(async () => { resolveList(); await listed; });
+    const titles = [...container.querySelectorAll(".inbox-list .inbox-row")].map((row) => row.textContent ?? "");
+    assert.equal(titles.length, 2, "the group's own missing session joins the live one");
+    assert.ok(titles.some((text) => text.includes("Session fetched")));
+    assert.ok(titles.some((text) => text.includes("Live Title")) && !titles.some((text) => text.includes("Stale Title")));
+  });
+
+  /** A Retry whose list request answers only when the test says, with whatever it says then. */
+  function deferredClient() {
+    let settle!: (result: { sessions: SessionView[] } | Error) => void;
+    const api = client(() => new Promise((resolve, reject) => {
+      settle = (result) => (result instanceof Error ? reject(result) : resolve(result));
+    }));
+    return { api, settle: (result: { sessions: SessionView[] } | Error) => settle(result) };
+  }
+
+  test("a Retry response never restores a session removed while it was in flight", async () => {
+    const { api, settle } = deferredClient();
+    const { container, socket } = await waitingGroup(api);
+    await tick(SESSIONS_ARRIVAL_WAIT_MS);
+    await act(async () => { retryButton(container).click(); });
+    const gone = session("gone", { projectId: "project-docs" });
+    await act(async () => { socket.push({ type: "session_upsert", session: gone }); });
+    await act(async () => { socket.push({ type: "session_removed", sessionId: "gone" }); });
+    await act(async () => { settle({ sessions: [gone, session("fetched", { projectId: "project-docs" })] }); });
+    const rows = [...container.querySelectorAll(".inbox-list .inbox-row")].map((row) => row.textContent ?? "");
+    assert.equal(rows.length, 1, "only the session the stream never spoke for");
+    assert.match(rows[0]!, /Session fetched/);
+  });
+
+  test("a Retry response never restores a session removed before this client ever held it", async () => {
+    const { api, settle } = deferredClient();
+    const { container, socket } = await waitingGroup(api);
+    await tick(SESSIONS_ARRIVAL_WAIT_MS);
+    await act(async () => { retryButton(container).click(); });
+    await act(async () => { socket.push({ type: "session_removed", sessionId: "never-held" }); });
+    await act(async () => { settle({ sessions: [session("never-held", { projectId: "project-docs" })] }); });
+    assertNoDomNode(container.querySelector(".inbox-list .inbox-row"), "the removal outranks the older list");
+    assert.ok(skeleton(container));
+  });
+
+  test("a Retry response that a newer snapshot overtook adds nothing", async () => {
+    const { api, settle } = deferredClient();
+    const { container, socket } = await waitingGroup(api);
+    await tick(SESSIONS_ARRIVAL_WAIT_MS);
+    await act(async () => { retryButton(container).click(); });
+    await act(async () => { socket.push(snapshot({ projects: [project([location("available")], 8)] })); });
+    await act(async () => { settle({ sessions: [session("stale", { projectId: "project-docs" })] }); });
+    assertNoDomNode(container.querySelector(".inbox-list .inbox-row"), "the newer snapshot is the authority");
+    assert.ok(skeleton(container));
+  });
+
+  test("a superseded Retry's failure never fails a fresh wait", async () => {
+    const { api, settle } = deferredClient();
+    const { container } = await waitingGroup(api);
+    await tick(SESSIONS_ARRIVAL_WAIT_MS);
+    await act(async () => { retryButton(container).click(); });
+    const search = container.querySelector<HTMLInputElement>(".inbox-search input")!;
+    await act(async () => {
+      search.focus();
+      search.value = "docs";
+      fireDomEvent.change(search as never, { target: { value: "docs" } as never });
+    });
+    await act(async () => { fireDomEvent.keyDown(search as never, { key: "Escape" }); });
+    await act(async () => { await new Promise((resolve) => domWindow.setTimeout(resolve, 0)); });
+    assert.ok(skeleton(container), "back on the group, waiting afresh");
+    await act(async () => { settle(new Error("old request rejected")); });
+    assertNoDomNode(failure(container), "the old request belongs to a wait that is over");
+    assert.ok(skeleton(container));
+    await tick(SESSIONS_ARRIVAL_WAIT_MS);
+    assert.ok(failure(container), "the fresh wait still runs out on its own");
+    assertNoDomNode(failure(container)!.querySelector(".notice-details-toggle"), "with no detail from the old request");
+  });
+
+  test("a Retry whose request fails shows the state again at once, with the reason behind Show Details", async () => {
+    const api = client(async () => { throw new Error("HTTP 503: control plane unavailable"); });
+    const { container } = await waitingGroup(api);
+    await tick(SESSIONS_ARRIVAL_WAIT_MS);
+    await act(async () => { retryButton(container).click(); });
+    const state = failure(container)!;
+    assert.ok(state, "the failed request ends the wait early");
+    const toggle = [...state.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Show Details")!;
+    assert.ok(toggle);
+    await act(async () => { toggle.click(); });
+    assert.equal(state.querySelector(".notice-details-body code")?.textContent, "HTTP 503: control plane unavailable");
+    await tick(SESSIONS_ARRIVAL_WAIT_MS);
+    assert.equal(failure(container)?.querySelector(".notice-details-body code")?.textContent,
+      "HTTP 503: control plane unavailable", "the wait's own deadline keeps the reason");
+  });
+
+  test("sessions that arrive before the wait elapses never show the state", async () => {
+    const { container, socket } = await waitingGroup();
+    await tick(SESSIONS_ARRIVAL_WAIT_MS - 1);
+    await act(async () => {
+      socket.push({ type: "session_upsert", session: session("arrived", { projectId: "project-docs" }) });
+    });
+    await tick(SESSIONS_ARRIVAL_WAIT_MS * 3);
+    assertNoDomNode(container.querySelector(".inbox-state"));
+    assert.ok(container.querySelector(".inbox-list .inbox-row"));
+  });
+
+  test("disconnecting while waiting shows Reconnecting, never the state", async () => {
+    const { container, socket } = await waitingGroup();
+    await tick(SESSIONS_ARRIVAL_WAIT_MS - 1);
+    await act(async () => { socket.onclose?.({ code: 1006 }); });
+    await tick(SESSIONS_ARRIVAL_WAIT_MS * 3);
+    assertNoDomNode(failure(container), "the wait applies only to a connected client");
+    assert.equal(container.querySelector(".inbox-state .state.offline")?.textContent, "Reconnecting…");
+  });
+
+  test("disconnecting after the state appeared shows Reconnecting in its place", async () => {
+    const { container, socket } = await waitingGroup();
+    await tick(SESSIONS_ARRIVAL_WAIT_MS);
+    assert.ok(failure(container));
+    await act(async () => { socket.onclose?.({ code: 1006 }); });
+    assertNoDomNode(failure(container));
+    assert.equal(container.querySelector(".inbox-state .state.offline")?.textContent, "Reconnecting…");
+  });
+
+  test("leaving the group and coming back starts a fresh wait", async () => {
+    const { container } = await waitingGroup();
+    await tick(SESSIONS_ARRIVAL_WAIT_MS);
+    assert.ok(failure(container));
+    const search = container.querySelector<HTMLInputElement>(".inbox-search input")!;
+    await act(async () => {
+      search.focus();
+      search.value = "docs";
+      fireDomEvent.change(search as never, { target: { value: "docs" } as never });
+    });
+    assertNoDomNode(failure(container), "a search does not wait, so it shows No Matches");
+    await act(async () => { fireDomEvent.keyDown(search as never, { key: "Escape" }); });
+    await act(async () => { await new Promise((resolve) => domWindow.setTimeout(resolve, 0)); });
+    assert.ok(skeleton(container), "clearing the search waits again from the start");
+    await tick(SESSIONS_ARRIVAL_WAIT_MS - 1);
+    assertNoDomNode(failure(container));
+  });
 });

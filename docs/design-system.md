@@ -2029,6 +2029,19 @@ Transcripts** (`.btn.ghost`), which opens the command palette with the query. Bu
   none has arrived, the list is `SessionsListSkeleton`: a status line, "Loading 8 sessions…" when the
   count is known, over `--row-h-2` skeleton rows (a phone's are three-line cards), as many as are
   coming between 3 and 6. The preview shows a skeleton of its bar. Never a state card in between.
+- **Sessions that never arrive (#2803).** Once the snapshot has loaded, a connected group waits
+  `SESSIONS_ARRIVAL_WAIT_MS`, **10 seconds**, for the sessions its count promises. The snapshot
+  carries a group's sessions with its count, so the wait only covers a live update's lag. If none
+  has arrived by then, one §12.4 error state replaces both panes (`SessionsArrivalFailed`): "Couldn't
+  Load Sessions", "Docs Site has 8 sessions, but they didn't arrive. Retry to ask for them again.",
+  and **Retry**. Retry shows the skeleton again for a fresh wait and asks for the session list
+  again (`GET /api/sessions`, the list the snapshot is built from). The group adds those sessions
+  the live stream has not spoken for while the request was in flight, and nothing if a newer
+  snapshot arrived first. If that request fails, the state comes back at once with the error behind
+  Show Details. Sessions that arrive at any point, including while the state shows, replace it with
+  rows.
+  While disconnected the wait does not run: the group keeps §12.5's Reconnecting treatment, and a
+  fresh wait starts once the connection is back. A search or the Snoozed view never waits.
 
 ### 12.4 Error
 

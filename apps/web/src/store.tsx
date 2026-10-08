@@ -1705,6 +1705,8 @@ export class Store {
   private readerCacheBytes = 0;
   private gapRequestSequence = 0;
   private readonly gapOperations = new Map<string, EventGapFence>();
+  /** The session ids each in-flight session backfill must leave alone (#2803). */
+  private readonly backfillFences = new Set<Set<string>>();
   private readonly gapPauseChecks = new Map<string, () => boolean>();
   private readonly pendingGapLive = new Map<string, DeferredLiveBuffer>();
   /** These arrays never enter timeline derivation or the inactive-reader cache. */
@@ -1736,6 +1738,10 @@ export class Store {
   };
 
   dispatch = (action: Action): void => {
+    // A removal speaks for a session even when this client never held it (#2803).
+    if (action.type === "msg" && action.msg.type === "session_removed") {
+      for (const spoken of this.backfillFences) spoken.add(action.msg.sessionId);
+    }
     let next = reducer(this.state, action);
     if (next === this.state) return;
     // Explicit resets also cover rolling senders that omit the epoch. Their authoritative
@@ -2089,6 +2095,39 @@ export class Store {
   getSession = (sessionId: string): SessionView | undefined => this.state.sessions.get(sessionId);
   loadSession = (session: SessionView): void =>
     this.dispatch({ type: "msg", msg: { type: "session_upsert", session } });
+  /**
+   * Fences a session list read outside the live stream (#2803). The returned `apply` adds only the
+   * sessions the stream has not spoken for since the read began: none this client holds, none that
+   * arrived, changed or was removed while the read was in flight (held here or not), and nothing at
+   * all once a newer snapshot has replaced the list. `cancel` drops a read that failed.
+   */
+  beginSessionsBackfill = (): { apply: (sessions: readonly SessionView[]) => void; cancel: () => void } => {
+    const revision = this.state.snapshotRevision;
+    const spoken = new Set<string>();
+    let previous = this.state.sessions;
+    const unsubscribe = this.subscribe(() => {
+      const next = this.state.sessions;
+      if (next === previous) return;
+      for (const [sessionId, session] of previous) if (next.get(sessionId) !== session) spoken.add(sessionId);
+      for (const sessionId of next.keys()) if (!previous.has(sessionId)) spoken.add(sessionId);
+      previous = next;
+    });
+    this.backfillFences.add(spoken);
+    const cancel = () => {
+      unsubscribe();
+      this.backfillFences.delete(spoken);
+    };
+    return {
+      apply: (sessions) => {
+        cancel();
+        if (this.state.snapshotRevision !== revision) return;
+        for (const session of sessions) {
+          if (!spoken.has(session.id) && !this.state.sessions.has(session.id)) this.loadSession(session);
+        }
+      },
+      cancel,
+    };
+  };
   beginEventHistoryLoad = (
     sessionId: string,
     eventEpoch = sessionEventEpoch(this.state.sessions.get(sessionId)),
@@ -2654,7 +2693,7 @@ export function useHasStore(): boolean {
 }
 
 /** Stable action handles (never cause re-renders). */
-export function useStoreActions(): Pick<Store, "dispatch" | "navigate" | "setInboxPersistenceEnabled" | "setInboxSelection" | "setInboxSplit" | "setInboxRatio" | "setFilters" | "loadEvents" | "loadOlderEvents" | "beginOlderEventsLoad" | "failOlderEventsLoad" | "eventWindowBase" | "loadSession" | "getSession" | "beginEventHistoryLoad" | "failEventHistoryLoad" | "isEventGapRecoveryCurrent" | "beginEventGapRecovery" | "cancelEventGapRecovery" | "finishEventGapRecovery" | "loadEventGapWindow" | "deferEventTail" | "beginLaterEventsLoad" | "loadLaterEvents" | "failLaterEventsLoad" | "promoteDeferredEventTail" | "loadPodContext" | "eventHighWater" | "recoveryAfter" | "recoveryReadAfter" | "eventEpoch" | "reconcileShellOutputs" | "loadShellHistory" | "removeShellOutput" | "reconnectNow"> {
+export function useStoreActions(): Pick<Store, "dispatch" | "navigate" | "setInboxPersistenceEnabled" | "setInboxSelection" | "setInboxSplit" | "setInboxRatio" | "setFilters" | "loadEvents" | "loadOlderEvents" | "beginOlderEventsLoad" | "failOlderEventsLoad" | "eventWindowBase" | "loadSession" | "getSession" | "beginSessionsBackfill" | "beginEventHistoryLoad" | "failEventHistoryLoad" | "isEventGapRecoveryCurrent" | "beginEventGapRecovery" | "cancelEventGapRecovery" | "finishEventGapRecovery" | "loadEventGapWindow" | "deferEventTail" | "beginLaterEventsLoad" | "loadLaterEvents" | "failLaterEventsLoad" | "promoteDeferredEventTail" | "loadPodContext" | "eventHighWater" | "recoveryAfter" | "recoveryReadAfter" | "eventEpoch" | "reconcileShellOutputs" | "loadShellHistory" | "removeShellOutput" | "reconnectNow"> {
   return useStoreHandle();
 }
 

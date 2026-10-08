@@ -84,7 +84,9 @@ import { runnerDisplay } from "../runners.js";
 import { normalizeSessionsQuery, searchInboxSplits, sessionMatchesQuery } from "../sessions-search.js";
 import { SessionsNoMatches, SessionsSearchField } from "./SessionsSearch.js";
 import { SessionsListSkeleton, SessionsPreviewSkeleton, SessionsSituationState } from "./SessionsStates.js";
+import { SessionsArrivalFailed, useSessionsArrivalWait } from "./SessionsStates.js";
 import { sessionsSituation, sessionsSituationOffersNewSession, sessionsSyncingCount } from "../sessions-states.js";
+import { sessionsToRestore } from "../sessions-states.js";
 import { useOpenSearchPalette } from "./search-palette-context.js";
 import { State, useSnapshotState } from "./State.js";
 import { StaleContent } from "./StaleContent.js";
@@ -217,6 +219,7 @@ export function InboxView({
   const {
     navigate,
     loadSession,
+    beginSessionsBackfill,
     setInboxPersistenceEnabled,
     setInboxSelection,
     setInboxSplit,
@@ -606,17 +609,43 @@ export function InboxView({
   const listView = expandedSessionId === null && !boardMode;
   const listOffline = listView && snapshot.offline;
   const syncingCount = sessionsSyncingCount(activeSplit, reminderMode, normalizedQuery);
+  // A connected group still waiting for the sessions its count promises (#2803). The wait is
+  // bounded: past it, Couldn't Load Sessions with Retry replaces the skeleton. Reconnecting keeps
+  // its own treatment, and the wait starts again once the connection is back.
+  const arrival = useSessionsArrivalWait(
+    listView && !snapshot.offline && !snapshot.loading && entries.length === 0 && !noMatches && syncingCount !== null
+      ? activeSplit?.key ?? null
+      : null,
+  );
+  const arrivalFailedCount = arrival.failed ? syncingCount : null;
+  // Retry returns to the skeleton for a fresh wait and asks for the sessions again: the list the
+  // snapshot is built from, of which the group takes the sessions the live stream has not spoken
+  // for meanwhile. A failed request ends that wait early with its reason; one that finds nothing
+  // lets the wait run out.
+  const retryArrival = () => {
+    const fail = arrival.retry();
+    if (activeSplit?.project?.kind !== "durable") return;
+    const projectId = activeSplit.project.project.id;
+    const backfill = beginSessionsBackfill();
+    api.listSessions().then(
+      ({ sessions: fetched }) => backfill.apply(sessionsToRestore(fetched, projectId)),
+      (cause: unknown) => {
+        backfill.cancel();
+        fail(cause instanceof Error ? cause.message : String(cause));
+      },
+    );
+  };
   // A group whose sessions have not arrived shows skeleton rows, never a state card.
   const listSkeleton = listView && !snapshot.offline && entries.length === 0 && !noMatches &&
-    (snapshot.loading || syncingCount !== null);
+    arrivalFailedCount === null && (snapshot.loading || syncingCount !== null);
   // Disconnected with nothing loaded: Reconnecting in the panes' place, never "No … Yet" (§12.5).
   const reconnectingEmpty = listOffline && entries.length === 0;
   const situation = listView && !snapshot.offline && !snapshot.loading && !noMatches && !listSkeleton &&
-    entries.length === 0
+    arrivalFailedCount === null && entries.length === 0
     ? sessionsSituation({ split: activeSplit, mode: reminderMode, snoozedInGroup: snoozedCount, machineName })
     : null;
   // One state replaces both panes (§6.1): no divider and no preview.
-  const pageState = noMatches || reconnectingEmpty || situation !== null;
+  const pageState = noMatches || reconnectingEmpty || arrivalFailedCount !== null || situation !== null;
   // While the state offers New Session, the header does not (§12.1).
   const stateOffersNewSession = situation !== null && sessionsSituationOffersNewSession(situation);
   // A live update can take the selected session out of the results, the last match or the last
@@ -1715,6 +1744,13 @@ export function InboxView({
                 }}
                 onClearSearch={exitSearch}
                 {...(openSearchPalette ? { onSearchTranscripts: () => openSearchPalette(deferredQuery.trim()) } : {})}
+              />
+            ) : arrivalFailedCount !== null ? (
+              <SessionsArrivalFailed
+                group={activeSplit ? sessionGroupFullName(groupLabels.get(activeSplit.key) ?? { name: activeSplit.name }) : ""}
+                count={arrivalFailedCount}
+                detail={arrival.detail}
+                onRetry={retryArrival}
               />
             ) : situation ? (
               <SessionsSituationState

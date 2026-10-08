@@ -1,3 +1,4 @@
+import type { SessionView } from "@wollipog/protocol";
 import type { InboxSplit } from "./inbox.js";
 import { destination } from "./navigation.js";
 import type { ReminderInboxMode } from "./session-reminders.js";
@@ -144,4 +145,27 @@ export function sessionsSyncingCount(
 ): number | null {
   if (!split || mode !== "ordinary" || query !== "") return null;
   return split.sessions.length === 0 && split.count > 0 ? split.count : null;
+}
+
+/**
+ * How long a connected group waits for the sessions its count promises before the list says they
+ * didn't arrive (§12.3, #2803). A snapshot carries a group's sessions with its count, so once one
+ * has loaded the wait covers only a live update's lag; ten seconds is far past that, and short
+ * enough that a stalled sync is not a silent dead end.
+ */
+export const SESSIONS_ARRIVAL_WAIT_MS = 10_000;
+
+/** The sentence under "Couldn't Load Sessions" (§12.4), in the person's terms. */
+export function sessionsArrivalFailedMessage(group: string, count: number): string {
+  return count === 1
+    ? `${group} has 1 session, but it didn't arrive. Retry to ask for it again.`
+    : `${group} has ${count} sessions, but they didn't arrive. Retry to ask for them again.`;
+}
+
+/**
+ * The sessions a Retry's fresh list offers a group (#2803): its own unarchived ones. The store's
+ * backfill fence then keeps out any the live stream has spoken for.
+ */
+export function sessionsToRestore(fetched: readonly SessionView[], projectId: string): SessionView[] {
+  return fetched.filter((session) => session.projectId === projectId && !session.archived);
 }
