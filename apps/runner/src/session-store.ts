@@ -588,6 +588,9 @@ const LAZY_META_KEYS = new Set<string>([
   "preview", "seq", "tokensIn", "tokensOut", "contextTokensUsed", "contextWindow", "costUsd", "updatedAt",
 ]);
 const META_FLUSH_MS = 250;
+/** A warm append layout skips cold-segment checks, so a streaming session still re-validates the full
+ * layout from disk (segment presence and size) at least this often, as the uncached path did. */
+const HISTORY_LAYOUT_REVALIDATE_MS = META_FLUSH_MS;
 
 export class SessionStore {
   /**
@@ -633,10 +636,11 @@ export class SessionStore {
   /** Append-path layout per session and log epoch. Cold segments never change once a manifest
    * references them, so a hit needs only the manifest's identity and the active file's size. Every
    * path that changes the layout (compaction, reset, lock hand-off, removal, failed append) replaces
-   * or drops the entry, and a manifest identity mismatch refetches from disk. */
+   * or drops the entry, a manifest identity mismatch refetches from disk, and an entry older than
+   * HISTORY_LAYOUT_REVALIDATE_MS is re-validated so external segment damage still fails appends. */
   private readonly historyLayoutCache = new Map<
     string,
-    { epoch: number; manifestKey: string | null; layout: HistoryLayout }
+    { epoch: number; manifestKey: string | null; layout: HistoryLayout; validatedAt: number }
   >();
   private historyMaintenanceCursor: string | null = null;
   constructor(
@@ -833,19 +837,23 @@ export class SessionStore {
    * it and reset removes it, so inode, nanosecond mtime, and size together change on every switch. */
   private historyManifestKey(id: string): string | null {
     try {
-      const s = statSync(this.historyManifestPath(id), { bigint: true });
-      return `${s.ino}:${s.mtimeNs}:${s.size}`;
+      return this.manifestKeyOf(this.historyManifestPath(id));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw error;
     }
   }
 
+  private manifestKeyOf(path: string): string {
+    const s = statSync(path, { bigint: true });
+    return `${s.ino}:${s.mtimeNs}:${s.size}`;
+  }
+
   /** Remember a layout for the append path. A pending legacy-fence intent keeps the session on the
    * uncached path so every append retries the fence exactly as before. */
   private cacheHistoryLayout(id: string, epoch: number, manifestKey: string | null, layout: HistoryLayout): void {
     if (existsSync(this.historyLegacyFencePath(id))) this.historyLayoutCache.delete(id);
-    else this.historyLayoutCache.set(id, { epoch, manifestKey, layout });
+    else this.historyLayoutCache.set(id, { epoch, manifestKey, layout, validatedAt: performance.now() });
   }
 
   /** The append target without re-reading the manifest or touching cold segments. The manifest is
@@ -853,7 +861,10 @@ export class SessionStore {
   private appendHistoryLayout(id: string, epoch: number): HistoryLayout {
     const manifestKey = this.historyManifestKey(id);
     const cached = this.historyLayoutCache.get(id);
-    if (!cached || cached.epoch !== epoch || cached.manifestKey !== manifestKey) {
+    if (
+      !cached || cached.epoch !== epoch || cached.manifestKey !== manifestKey ||
+      performance.now() - cached.validatedAt >= HISTORY_LAYOUT_REVALIDATE_MS
+    ) {
       this.historyLayoutCache.delete(id);
       const layout = this.historyLayout(id, epoch);
       this.cacheHistoryLayout(id, epoch, manifestKey, layout);
@@ -1923,14 +1934,18 @@ export class SessionStore {
     }
   }
 
-  private publishHistoryManifest(id: string, manifest: HistoryManifest): void {
+  /** Returns the identity of the exact manifest inode published. Rename keeps inode, mtime, and size,
+   * so a later stat that differs means another publication replaced this one. */
+  private publishHistoryManifest(id: string, manifest: HistoryManifest): string {
     const path = this.historyManifestPath(id);
     const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
     try {
       writeFileSync(tmp, JSON.stringify(manifest));
       this.fsyncFile(tmp);
+      const published = this.manifestKeyOf(tmp);
       renameSync(tmp, path);
       this.fsyncDirectory(this.dir(id));
+      return published;
     } finally {
       rmSync(tmp, { force: true });
     }
@@ -2072,13 +2087,14 @@ export class SessionStore {
       if (layout.active.file === "events.ndjson") {
         this.writeLegacyFenceIntent(id, activeFile, retiredFile);
       }
-      this.publishHistoryManifest(id, manifest);
+      const publishedKey = this.publishHistoryManifest(id, manifest);
       committed = true;
       if (layout.active.file === "events.ndjson") this.recoverLegacyFence(id, manifest);
       // Extend the append layout in place of a full refetch: the new segment was just written,
-      // fsynced, and published, so only the manifest identity and new active file need reading.
+      // fsynced, and published, so only the new active file needs reading. Keying the entry by the
+      // published inode, not a fresh stat, makes any later replacement miss.
       try {
-        this.cacheHistoryLayout(id, epoch, this.historyManifestKey(id), this.layoutFromManifest(id, manifest));
+        this.cacheHistoryLayout(id, epoch, publishedKey, this.layoutFromManifest(id, manifest));
       } catch {
         this.historyLayoutCache.delete(id); // the next append refetches and reports any damage
       }

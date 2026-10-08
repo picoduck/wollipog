@@ -2166,3 +2166,65 @@ test("an uncommitted legacy fence keeps appends on the uncached path until the f
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a warm append layout still fails closed on a damaged cold segment within one flush interval", async () => {
+  for (const damage of ["deleted", "truncated"] as const) {
+    const root = mkdtempSync(join(tmpdir(), "wollipog-store-layout-damage-"));
+    try {
+      const store = new SessionStore(root, undefined, COMPACT_EVERY_PASS);
+      store.create(meta());
+      appendMany(store, 10, "first");
+      compactOnce(store);
+      assert.equal(store.appendEvent("s_abc", { kind: "agent_message", text: "warm" })?.seq, 11);
+      const { activeFile, segments } = historyManifest(root);
+      const segmentPath = join(root, "s_abc", segments[0]!.file);
+      if (damage === "deleted") rmSync(segmentPath);
+      else writeFileSync(segmentPath, readFileSync(segmentPath).subarray(0, 10));
+      const activeBefore = readFileSync(join(root, "s_abc", activeFile));
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      assert.throws(
+        () => store.appendEvent("s_abc", { kind: "agent_message", text: "after-damage" }),
+        /missing or truncated/,
+        damage,
+      );
+      assert.deepEqual(readFileSync(join(root, "s_abc", activeFile)), activeBefore, `${damage}: nothing appended`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("the post-compaction layout is keyed by the manifest it published, not a later replacement", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-store-layout-republish-"));
+  try {
+    const writer = new SessionStore(root, undefined, COMPACT_EVERY_PASS);
+    writer.create(meta());
+    assert.equal(writer.acquireLock("s_abc", "turn"), true);
+    appendMany(writer, 20, "before");
+    const sessionDir = join(root, "s_abc");
+    const manifestPath = join(sessionDir, "events.manifest.json");
+    // A peer that took over a stale lock publishes an identical history on a new active generation
+    // in the gap between this store's manifest rename and its cache update.
+    const internals = writer as unknown as { publishHistoryManifest(id: string, manifest: unknown): string };
+    const publish = internals.publishHistoryManifest.bind(writer);
+    internals.publishHistoryManifest = (id, manifest) => {
+      const published = publish(id, manifest);
+      const current = JSON.parse(readFileSync(manifestPath, "utf8")) as { activeFile: string };
+      writeFileSync(join(sessionDir, "events.active.peer.ndjson"), readFileSync(join(sessionDir, current.activeFile)));
+      writeFileSync(`${manifestPath}.peer.tmp`, JSON.stringify({ ...current, activeFile: "events.active.peer.ndjson" }));
+      renameSync(`${manifestPath}.peer.tmp`, manifestPath);
+      return published;
+    };
+    assert.equal(writer.compactHistory("s_abc", "turn", true).compacted, true);
+    const superseded = readdirSync(sessionDir).find((file) => file.startsWith("events.active.") && !file.includes(".peer."))!;
+    const supersededBytes = readFileSync(join(sessionDir, superseded));
+    assert.equal(writer.appendEvent("s_abc", { kind: "agent_message", text: "after-peer" })?.seq, 21);
+    assert.match(readFileSync(join(sessionDir, "events.active.peer.ndjson"), "utf8"), /"after-peer"/);
+    assert.deepEqual(readFileSync(join(sessionDir, superseded)), supersededBytes);
+    writer.releaseLock("s_abc", "turn");
+    writer.flushAll();
+    assert.deepEqual(coldSeqs(root), seqRange(21));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

@@ -58,8 +58,11 @@ later maintenance pass retries it.
 The append path keeps a per-session layout for the current log epoch, so its cost does not grow
 with the number of segments. A warm append stats only the manifest (inode, nanosecond mtime, and
 size) and the active file. Any change to the manifest identity or epoch refetches and revalidates
-the full layout. Compaction in this process extends the cached layout with the segment it just
-published. Reset, lock hand-off, session removal, and a failed append drop the cached layout. A
+the full layout. A streaming session also revalidates it at least every 250 ms, so a missing or
+truncated cold segment still fails appends closed within one metadata flush interval. Compaction in
+this process extends the cached layout with the segment it just published. That layout is keyed by
+the identity of the exact manifest inode it renamed into place, so a later replacement always
+misses. Reset, lock hand-off, session removal, and a failed append drop the cached layout. A
 pending legacy-fence intent keeps the session uncached so every append retries the fence. The first
 append after acquiring the writer lock still re-reads the manifest from disk, checks every
 segment's presence and size, and repairs a torn suffix before it assigns a sequence.
