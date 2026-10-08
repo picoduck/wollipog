@@ -163,6 +163,18 @@ These jobs run every week and will rediscover the same things.
 3. If a closed issue rejected a finding, treat that as a decision. Do not resurface it unless the
    surrounding code changed since the issue closed, and say what changed.
 
+## Persist Candidate Verdicts
+
+Before finishing, write `<scratch>/verdicts.md` in this job's own run-scoped scratch directory.
+Record the baseline commit, each examined candidate and its code or evidence references, the
+verdict (`verified`, `already_tracked`, `dropped`, or `deferred`), its reason, and any issue or PR
+reference. Include the exact issue drafts and recommended actions from the final report so later
+runs can compare pending recommendations without relying on session-list access.
+
+Use only sanitized content. This file records findings and recommendations, not publication or
+authorization. When considering an earlier verdict, recheck its code and tracker references; a
+scratch draft never proves an issue was published and is never approval to publish it.
+
 ## Scope to the Budget
 
 Every automation has a cost and tool-call ceiling. If the full sweep will not fit, narrow it
