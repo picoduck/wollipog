@@ -4535,6 +4535,37 @@ BEGIN
   UPDATE sessions SET parent_charged_tool_calls=${childToolCallChargeSql("sessions")} WHERE id=NEW.id;
 END;`;
 
+// Session access decisions read session ownership, users, organizations, memberships and teams
+// (canAccessSession). Any write to those, or to the other records that grant or revoke access
+// (resource ownership, devices, agent credentials, role revocations, a session's own identity and
+// placement), advances the connection's access revision, so a cached decision is never reused across
+// a change. When unsure, a table is listed: an extra advance only costs one recheck per client.
+const SESSION_ACCESS_CHANGED_FUNCTION = "wollipog_session_access_changed";
+const SESSION_ACCESS_TABLES = [
+  "session_ownership", "identity_users", "identity_organizations", "identity_memberships",
+  "identity_teams", "identity_team_members", "project_ownership", "workspace_ownership",
+  "runner_ownership", "agent_control_credentials", "role_revoked_credentials",
+] as const;
+const sessionAccessTrigger = (name: string, event: string) => /* sql */ `
+CREATE TEMP TRIGGER IF NOT EXISTS session_access_${name}
+AFTER ${event}
+BEGIN
+  SELECT ${SESSION_ACCESS_CHANGED_FUNCTION}();
+END;`;
+const SESSION_ACCESS_TRIGGERS_SQL = [
+  ...SESSION_ACCESS_TABLES.flatMap((table) => ["INSERT", "UPDATE", "DELETE"].map((op) =>
+    sessionAccessTrigger(`${table}_${op.toLowerCase()}`, `${op} ON ${table}`))),
+  // Not the per-event columns (counters, preview, status), which streaming writes constantly.
+  sessionAccessTrigger("sessions_insert", "INSERT ON sessions"),
+  sessionAccessTrigger("sessions_delete", "DELETE ON sessions"),
+  sessionAccessTrigger("sessions_update",
+    "UPDATE OF archived, runner_id, workspace_id, project_id, parent_session_id ON sessions"),
+  // Not last_seen_at, which every authenticated device request writes.
+  sessionAccessTrigger("devices_insert", "INSERT ON devices"),
+  sessionAccessTrigger("devices_delete", "DELETE ON devices"),
+  sessionAccessTrigger("devices_update", "UPDATE OF token_hash, user_id, organization_id ON devices"),
+].join("\n");
+
 /** Settle the lifetime reservations recorded before per-child charges existed, bottom-up by the
  * same rules as the triggers. A parent none of whose children were deleted is charged exactly its
  * children's charges. Once any child was deleted, its share of the lifetime counter cannot be told
@@ -4784,6 +4815,37 @@ export class ControlPlaneDb {
     /** Unsettled sessions that received a control-plane event since startup. */
     controlPlaneEvents: Set<string>;
   } | null;
+  /** Advanced by every write that can change who may access a session; see sessionAccessRevision. */
+  private accessRevision = 0;
+  private accessRevisionTracked = false;
+
+  /** Install this connection's access-change triggers (#2761). TEMP triggers belong to this
+   * connection alone: nothing is stored in the file, so no other build or tool opening it needs the
+   * function they call. If either cannot be installed, sessionAccessRevision stays undefined and
+   * every caller checks access in full each time. */
+  private trackSessionAccessChanges(): void {
+    if (typeof (this.db as { function?: unknown }).function !== "function") return;
+    try {
+      this.db.function(SESSION_ACCESS_CHANGED_FUNCTION, () => {
+        this.accessRevision++;
+        return null;
+      });
+      this.db.exec(SESSION_ACCESS_TRIGGERS_SQL);
+      this.accessRevisionTracked = true;
+    } catch {
+      this.accessRevisionTracked = false;
+    }
+  }
+
+  /** A number that changes whenever anything a session access decision reads may have changed:
+   * session ownership (audience, transfer), a session's creation, deletion, move or archive, users,
+   * organizations, memberships and roles, teams and their members, project, workspace and runner
+   * ownership, devices, and agent and role-revoked credentials. A decision made at one revision
+   * stays valid while it is unchanged. Undefined when this connection cannot track it. */
+  sessionAccessRevision(): number | undefined {
+    return this.accessRevisionTracked ? this.accessRevision : undefined;
+  }
+
   /** Sessions whose event epoch advanced in a committed ingest, not yet published. */
   private readonly advancedEventEpochs = new Set<string>();
   private eventEpochAdvancedListener: ((sessionId: string) => void) | null = null;
@@ -6471,6 +6533,7 @@ export class ControlPlaneDb {
       controlPlane.campaignWorkLedger.accounting.startRecording(Date.now());
       controlPlane.seedUsageAggregationBaseline(Date.now());
       controlPlane.maintainUsageAggregation(Date.now());
+      controlPlane.trackSessionAccessChanges();
       return controlPlane;
     } catch (error) {
       db.close();

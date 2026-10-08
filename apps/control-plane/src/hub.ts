@@ -234,7 +234,13 @@ interface UiClientInfo {
   sentCommandPermissions?: Map<string, string>;
   backgroundObservationWindowStartedAt?: number;
   backgroundObservationsInWindow?: number;
+  /** This client's session access decisions, valid only at the database access revision they were
+   * made under (#2761). Any change to what decides access discards them all. */
+  sessionAccess?: { revision: number; principal: AuthPrincipal; decisions: Map<string, boolean> };
 }
+
+/** Bound on one client's cached session access decisions; past it the cache starts over. */
+const MAX_CACHED_SESSION_ACCESS_DECISIONS = 4_096;
 
 interface UiSubscriptionAdmission {
   windowStartedAt: number;
@@ -1382,7 +1388,24 @@ export class Hub {
     return this.isOrganizationAdmin(principal) && principal.organizationId === PERSONAL_ORGANIZATION_ID;
   }
 
-  private canReceive(principal: AuthPrincipal | undefined, msg: ControlPlaneToUi): boolean {
+  /** Whether this client may see the session, from its cached decision while the database's
+   * access revision is unchanged (#2761). Without a revision, every call checks in full. */
+  private clientCanAccessSession(principal: AuthPrincipal, sessionId: string, info?: UiClientInfo): boolean {
+    const revision = info ? this.db.sessionAccessRevision?.() : undefined;
+    if (!info || revision === undefined) return this.db.canAccessSession(principal, sessionId);
+    let cache = info.sessionAccess;
+    if (!cache || cache.revision !== revision || cache.principal !== principal ||
+        cache.decisions.size >= MAX_CACHED_SESSION_ACCESS_DECISIONS) {
+      cache = info.sessionAccess = { revision, principal, decisions: new Map() };
+    }
+    const cached = cache.decisions.get(sessionId);
+    if (cached !== undefined) return cached;
+    const allowed = this.db.canAccessSession(principal, sessionId);
+    cache.decisions.set(sessionId, allowed);
+    return allowed;
+  }
+
+  private canReceive(principal: AuthPrincipal | undefined, msg: ControlPlaneToUi, info?: UiClientInfo): boolean {
     if (msg.type === "session_reminder_upsert" || msg.type === "session_reminder_removed") {
       const sessionId = msg.type === "session_reminder_upsert" ? msg.reminder.sessionId : msg.sessionId;
       return this.reminderPrincipalMatches(msg.userId, principal) &&
@@ -1399,7 +1422,7 @@ export class Hub {
       case "runner_removed":
         return false;
       case "session_upsert":
-        return this.db.canAccessSession(principal, msg.session.id);
+        return this.clientCanAccessSession(principal, msg.session.id, info);
       case "project_upsert":
         return this.db.canAccessProject(principal, msg.project.id);
       case "project_removed":
@@ -1410,10 +1433,10 @@ export class Hub {
       case "shell_output":
       case "shell_exit": {
         const sessionId = msg.type === "session_event" ? msg.event.sessionId : msg.sessionId;
-        return this.db.canAccessSession(principal, sessionId);
+        return this.clientCanAccessSession(principal, sessionId, info);
       }
       case "shell_registry_reconciled":
-        return msg.sessionIds.every((sessionId) => this.db.canAccessSession(principal, sessionId));
+        return msg.sessionIds.every((sessionId) => this.clientCanAccessSession(principal, sessionId, info));
       case "box_upsert":
       case "box_removed":
       case "run_upsert":
@@ -1460,7 +1483,7 @@ export class Hub {
     const sessionDataByPermissions = new Map<string, string>();
     for (const [client, info] of this.uiClients) {
       if (!this.isSubscribed(info, msg)) continue;
-      if (!(predicate ? predicate(info.principal, info) : this.canReceive(info.principal, msg))) continue;
+      if (!(predicate ? predicate(info.principal, info) : this.canReceive(info.principal, msg, info))) continue;
       const projectedMessages = this.compatibilityProjection(info, msg);
       for (const projected of projectedMessages) {
         let clientData = projected === msg ? data : JSON.stringify(projected);
