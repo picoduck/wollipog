@@ -80,6 +80,43 @@ test("a Project with unsynced sessions shows skeleton rows and Loading 8 session
   expect(await page.evaluate(() => (window as unknown as { __stateSeen: boolean }).__stateSeen)).toBe(false);
 });
 
+for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+  test(`at ${viewport.width}×${viewport.height} sessions that never arrive end in Couldn't Load Sessions, and Retry returns to the skeleton, then rows (#2803)`, async ({ page }) => {
+    await page.clock.install();
+    await open(page, fixture("syncing", DOCS_TAB), viewport);
+    const skeleton = page.locator(".inbox-skeleton");
+    await expect(skeleton.getByRole("status")).toHaveText("Loading 8 sessions…");
+    await page.clock.runFor(9_000);
+    await expect(skeleton).toBeVisible();
+    await page.clock.runFor(1_000);
+    const state = page.locator(".inbox-state");
+    await expect(state.getByRole("heading", { name: "Couldn't Load Sessions", level: 2 })).toBeVisible();
+    await expect(state.getByRole("alert")).toContainText("Docs Site has 8 sessions, but they didn't arrive.");
+    await expect(skeleton).toHaveCount(0);
+    await expect(page.locator(".inbox-preview-pane")).toHaveCount(0);
+    const retry = state.getByRole("button", { name: "Retry", exact: true });
+    if (viewport.width >= 760) {
+      // Under the tab row, on the page grid, as every Sessions state is.
+      const [tabs, notice, pageTitle] = await Promise.all([
+        page.locator(".page-header .tabs-bar").boundingBox(),
+        state.getByRole("alert").boundingBox(),
+        page.locator("#page-title").boundingBox(),
+      ]);
+      expect(notice!.y).toBeGreaterThanOrEqual(tabs!.y + tabs!.height);
+      expect(Math.abs(notice!.x - pageTitle!.x)).toBeLessThanOrEqual(1);
+    }
+
+    await retry.click();
+    await expect(skeleton.getByRole("status")).toHaveText("Loading 8 sessions…");
+    await expect(state).toHaveCount(0);
+    await page.evaluate(() => window.__deliverSessions());
+    await expect(page.getByRole("grid", { name: "Sessions", exact: true }).getByRole("row")).toHaveCount(8);
+    await expect(skeleton).toHaveCount(0);
+    await page.clock.runFor(20_000);
+    await expect(state).toHaveCount(0);
+  });
+}
+
 test("disconnecting keeps the rows visible and dimmed under Reconnecting…, and reconnecting removes the dimming", async ({ page }) => {
   await open(page, fixture("sessions", DOCS_TAB), { width: 1440, height: 900 });
   const grid = page.getByRole("grid", { name: "Sessions", exact: true });

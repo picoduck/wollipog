@@ -29,6 +29,7 @@ import "../styles.css";
  * - `no-project`: sessions only in Docs Site; open `path=/?tab=%20no-project`.
  * - `sessions` (the default): five sessions in Docs Site, for Snoozed, No Matches and Reconnecting.
  * - `syncing`: Docs Site counts 8 sessions and none has arrived; `__deliverSessions()` sends them.
+ *   Until then, the list Retry asks for (#2803) holds none of them either.
  *
  * `__dropConnection()` loses the connection and holds every retry silent; once the store has
  * opened a retry socket (`__retryPending()`), `__restoreConnection()` answers that one with a fresh
@@ -198,6 +199,7 @@ window.__deliverSessions = () => {
 const client = {
   ...api,
   listSkills: async () => ({ skills: [] }),
+  listSessions: async () => ({ sessions: structuredClone(sessions) }),
   session: async (id: string) => {
     const value = sessions.find((candidate) => candidate.id === id);
     if (!value) throw new Error("session not found");

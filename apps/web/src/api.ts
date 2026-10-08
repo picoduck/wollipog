@@ -1035,6 +1035,10 @@ export function createApiClient(transport: ApiTransport) {
       body: JSON.stringify({ column }),
     }),
 
+  /** The non-archived session list the live snapshot carries, asked for again when a group's
+   * sessions never arrived (#2803). */
+  listSessions: () => req<{ sessions: SessionView[] }>("/api/sessions"),
+
   /** Full session list including archived — the live snapshot only carries non-archived
    * sessions, while archived sessions remain reachable through search and direct links. */
   listAllSessions: () => req<{ sessions: SessionView[] }>("/api/sessions?archived=true"),

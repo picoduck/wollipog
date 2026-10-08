@@ -12,6 +12,8 @@ import {
   sessionsSyncingCount,
   type SessionsSituation,
 } from "./sessions-states.js";
+import { SESSIONS_ARRIVAL_WAIT_MS, sessionsArrivalFailedMessage, sessionsToRestore } from "./sessions-states.js";
+import type { SessionView } from "@wollipog/protocol";
 
 const machines: Record<string, string> = { "runner-studio": "Studio", "runner-laptop": "Laptop" };
 const machineName = (runnerId: string) => machines[runnerId] ?? "";
@@ -131,4 +133,23 @@ test("a group waits for the sessions its count promises, with 3 to 6 skeleton ro
   assert.equal(sessionsLoadingMessage(8), "Loading 8 sessions…");
   assert.equal(sessionsLoadingMessage(1), "Loading 1 session…");
   assert.equal(sessionsLoadingMessage(null), "Loading sessions…");
+});
+
+test("sessions that never arrive say so in the person's terms after a bounded wait (#2803)", () => {
+  assert.equal(SESSIONS_ARRIVAL_WAIT_MS, 10_000, "the wait §12.3 documents");
+  assert.equal(sessionsArrivalFailedMessage("Docs Site", 8),
+    "Docs Site has 8 sessions, but they didn't arrive. Retry to ask for them again.");
+  assert.equal(sessionsArrivalFailedMessage("Docs Site", 1),
+    "Docs Site has 1 session, but it didn't arrive. Retry to ask for it again.");
+});
+
+test("Retry adds only the group's missing, unarchived sessions (#2803)", () => {
+  const fetched = [
+    { id: "missing", projectId: "project-docs", archived: false },
+    { id: "known", projectId: "project-docs", archived: false },
+    { id: "elsewhere", projectId: "project-other", archived: false },
+    { id: "archived", projectId: "project-docs", archived: true },
+  ] as SessionView[];
+  const known = new Map([["known", fetched[1]]]);
+  assert.deepEqual(sessionsToRestore(fetched, "project-docs", (id) => known.get(id)).map((session) => session.id), ["missing"]);
 });

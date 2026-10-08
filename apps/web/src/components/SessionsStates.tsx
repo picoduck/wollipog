@@ -1,5 +1,8 @@
-import React from "react";
+import React, { useEffect, useRef, useState } from "react";
+import { destination } from "../navigation.js";
 import {
+  SESSIONS_ARRIVAL_WAIT_MS,
+  sessionsArrivalFailedMessage,
   sessionsLoadingMessage,
   sessionsSituationMessage,
   sessionsSituationOffersNewSession,
@@ -121,5 +124,72 @@ export function SessionsPreviewSkeleton() {
     <div className="inbox-preview-skeleton" role="group" aria-label="Session Preview" tabIndex={-1}>
       <span className="skeleton-bar title" aria-hidden="true" />
     </div>
+  );
+}
+
+/**
+ * Whether the sessions a group's count promises failed to arrive (§12.3, #2803). `group` is the
+ * group's key while a connected client waits on it, and null whenever it is not waiting: its
+ * sessions arrived, the connection dropped, or the list shows something else. Each wait starts
+ * fresh, so leaving and coming back never inherits an old failure. `retry` starts another wait
+ * and returns a callback that ends that one wait early with the reason, if it is still current.
+ */
+export function useSessionsArrivalWait(group: string | null): {
+  failed: boolean;
+  detail: string | null;
+  retry: () => (detail: string) => void;
+} {
+  const [attempt, setAttempt] = useState(0);
+  const [outcome, setOutcome] = useState<{ wait: string; detail: string | null } | null>(null);
+  const wait = group === null ? null : `${attempt}:${group}`;
+  const waitRef = useRef(wait);
+  waitRef.current = wait;
+  useEffect(() => {
+    // An outcome belongs to the wait that produced it; a new wait (or none) starts clean.
+    setOutcome(null);
+    if (wait === null) return;
+    const timer = setTimeout(() => setOutcome({ wait, detail: null }), SESSIONS_ARRIVAL_WAIT_MS);
+    return () => clearTimeout(timer);
+  }, [wait]);
+  const failed = wait !== null && outcome?.wait === wait;
+  return {
+    failed,
+    detail: failed ? outcome.detail : null,
+    retry: () => {
+      const next = group === null ? null : `${attempt + 1}:${group}`;
+      setAttempt(attempt + 1);
+      return (detail) => {
+        if (next !== null && waitRef.current === next) setOutcome({ wait: next, detail });
+      };
+    },
+  };
+}
+
+/**
+ * The Sessions state when a group's sessions never arrived (§12.4, #2803): a danger notice in the
+ * panes' place with Retry, which asks for the group's sessions again and returns to the skeleton.
+ * A failed request's own message is the raw detail behind Show Details.
+ */
+export function SessionsArrivalFailed({
+  group,
+  count,
+  detail,
+  onRetry,
+}: {
+  group: string;
+  count: number;
+  detail: string | null;
+  onRetry: () => void;
+}) {
+  return (
+    <State
+      variant="error"
+      title={`Couldn't Load ${destination("inbox").name}`}
+      headingLevel={2}
+      actions={<button type="button" className="btn lg" onClick={onRetry}>Retry</button>}
+      details={detail === null ? undefined : <div className="code-well"><code>{detail}</code></div>}
+    >
+      {sessionsArrivalFailedMessage(group, count)}
+    </State>
   );
 }
