@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
-import type { AgentDriverKind, RunnerToControlPlane, SessionConfig, SessionLaunchSpec } from "@wollipog/protocol";
+import type { AgentDriverKind, RunnerToControlPlane, SessionConfig, SessionEventPayload, SessionLaunchSpec } from "@wollipog/protocol";
 import type { Driver, DriverCallbacks, DriverOptions } from "./drivers/driver.js";
 import { ClaudeCodeDriver } from "./drivers/claude-code.js";
 import { CodexAppServerResumeError } from "./drivers/codex-app-server.js";
@@ -2619,6 +2619,95 @@ test("authentication recovery fans out only to matching credential scopes", asyn
     h.cleanup();
   }
 });
+
+test("a person's sign-in names them on their session only; sessions it recovers automatically stay unnamed (#2742)", async () => {
+  let h!: ReturnType<typeof harness>;
+  // As in the fan-out test above: the second probe surfaces the card, and the person's sign-in passes.
+  let rechecks = 0;
+  const controller: ProviderAuthRecoveryController = {
+    describe: () => ({ id: "scope-a", provider: "codex", canStartLogin: true, configuredCredential: false }),
+    revalidate: async () => ++rechecks === 2
+      ? { status: "unauthenticated" }
+      : { status: "authenticated", identityId: "account-a" },
+    startLogin: async () => "completed",
+    cancel: () => false,
+  };
+  h = harness({ providerCredentialIdentityId: "account-a" }, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, async () => {
+    h.callbacks().onAuthenticationFailure?.();
+  }, controller);
+  try {
+    h.manager.prompt("resume-session", "uncertain target");
+    for (let index = 0; index < 5; index += 1) await tick();
+    const target = h.store.readMeta("resume-session")!;
+    h.store.create(stored(h.root, {
+      sessionId: "shared-scope",
+      providerCredentialScopeId: "scope-a",
+      providerCredentialIdentityId: "account-a",
+      providerAuthBlock: { ...target.providerAuthBlock!, recoveryId: "shared-recovery" },
+      pendingApproval: { ...target.pendingApproval!, requestId: "provider-auth:shared-recovery" },
+      status: "input_required",
+    }));
+    h.manager.resolvePermission("resume-session", target.pendingApproval!.requestId, "auth:login", undefined,
+      { kind: "user", userId: "usr_grace" });
+    for (let index = 0; index < 6; index += 1) await tick();
+    const resolution = (sessionId: string) => h.store.readEvents(sessionId)
+      .map((event) => event.payload)
+      .filter((payload) => payload.kind === "permission_resolved")
+      .at(-1);
+    // Start Sign-In re-issues the card for its login, so the outcome settles that card.
+    const { requestId: _login, ...own } = resolution("resume-session") as Extract<SessionEventPayload, { kind: "permission_resolved" }>;
+    assert.deepEqual(own, {
+      kind: "permission_resolved",
+      optionId: "auth:login",
+      resolvedBy: { kind: "user", userId: "usr_grace" },
+    });
+    assert.deepEqual(resolution("shared-scope"), {
+      kind: "permission_resolved",
+      requestId: "provider-auth:shared-recovery",
+      optionId: "auth:automatic-retry",
+    }, "the session the same sign-in recovered names nobody");
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+for (const [name, resolvedByParentSessionId, resolvedBy, expected] of [
+  ["a member's dismissal names them", undefined, { kind: "user", userId: "usr_ada" }, { kind: "user", userId: "usr_ada" }],
+  ["a Parent Control dismissal names nobody", "parent-session", { kind: "user", userId: "usr_ada" }, undefined],
+  ["a malformed decider is dropped", undefined, { kind: "user", userId: 7 }, undefined],
+  ["an older control plane's dismissal names nobody", undefined, undefined, undefined],
+] as const) {
+  test(`Dismiss Recovery: ${name} (#2742)`, async () => {
+    let h!: ReturnType<typeof harness>;
+    h = harness({
+      driver: "claude-code",
+      command: "claude",
+      agentId: "claude-native",
+    }, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, async () => {
+      h.callbacks().onAuthenticationFailure?.();
+    });
+    try {
+      h.manager.prompt("resume-session", "legacy auth failure");
+      for (let index = 0; index < 5; index += 1) await tick();
+      const requestId = h.store.readMeta("resume-session")!.pendingApproval!.requestId;
+      h.manager.resolvePermission("resume-session", requestId, "auth:dismiss", resolvedByParentSessionId, resolvedBy);
+      for (let index = 0; index < 4; index += 1) await tick();
+      const resolution = h.store.readEvents("resume-session")
+        .map((event) => event.payload)
+        .find((payload) => payload.kind === "permission_resolved");
+      assert.deepEqual(resolution, {
+        kind: "permission_resolved",
+        requestId,
+        optionId: "auth:dismiss",
+        ...(expected ? { resolvedBy: expected } : {}),
+      });
+    } finally {
+      h.manager.shutdownAll();
+      h.cleanup();
+    }
+  });
+}
 
 test("cancelled sign-in stays blocked while changed credential context can be explicitly dismissed", async () => {
   const login = deferred<"completed" | "cancelled" | "failed">();

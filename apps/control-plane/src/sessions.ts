@@ -9839,11 +9839,17 @@ export class SessionsService {
       if (optionId !== null && !pending.options.some((option) => option.optionId === optionId)) {
         return fail("authentication action is not offered by the current recovery request", 409);
       }
+      // Who chose this sign-in action (#2742): the runner names them on this session's outcome only,
+      // never on the other sessions the same recovery completes automatically.
+      const resolvedBy: PermissionResolver | undefined = actor.kind === "human" && actor.id && !resolvedByParentSessionId
+        ? { kind: "user", userId: actor.id }
+        : undefined;
       const sent = this.hub.sendToRunner(session.runnerId, {
         type: "resolve_permission",
         sessionId,
         requestId,
         optionId,
+        ...(resolvedBy ? { resolvedBy } : {}),
       });
       if (!sent) return fail("runner is offline", 409);
       this.recordGovernanceAudit(session, pending, "resolution", optionId === null ? "dismissed" : "allowed", actor, now, { optionId });
