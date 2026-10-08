@@ -106,8 +106,10 @@ A session's rolled-back rows are always a suffix of runner events, because any o
 have flushed everything before it. The recovered events take the next free per-session sequence
 numbers. If the control plane writes its own event to the session before they return (a reconnect
 notice, for example), those numbers differ from the ones dashboards saw before the crash. The event
-epoch does not change, so a dashboard that kept the pre-crash transcript open is not told to reload
-it.
+epoch does not change, so a dashboard that stayed open across the restart keeps its pre-crash copy
+and fetches only events above its old position. That dashboard can show a duplicated, missing, or
+misplaced event until the page is reloaded. Dashboards hold transcripts only in memory, so a reload
+or a newly opened dashboard shows the correct history.
 
 Limits:
 
