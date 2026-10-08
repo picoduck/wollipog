@@ -106,6 +106,18 @@ async function streamThenCrash(root: string, campaign = false): Promise<{
     reportSeq = report.events[0]!.seq;
     // A FULL commit: it also flushes every relaxed commit before it, so the report itself survives.
     db.verifyCampaignChildReport("campaign", "sess-1", reportSeq, 1_004);
+    const ledger = db.campaignWorkLedger;
+    const planned = ledger.recordPlan("campaign", "campaign", {
+      items: [{ key: "item", dispatchState: "queued" }], planComplete: true,
+    }, 1_005);
+    assert.ok(planned.ok);
+    const workItemId = planned.data.items[0]!.workItemId;
+    assert.ok(ledger.assign("campaign", "campaign", workItemId, "sess-1",
+      { title: null, harness: null, agentName: null, model: null, effort: null }, 1_006).ok);
+    assert.ok(ledger.recordVerification("campaign", {
+      workItemId, childSessionId: "sess-1", outcome: "delivered",
+      report: db.campaignReportIdentity("sess-1", reportSeq), verifiedBySessionId: "campaign",
+    }, 1_007).ok);
   }
   db.close();
   assert.equal(existsSync(`${live}-wal`), false, "closing checkpointed the WAL into the database file");
@@ -256,6 +268,15 @@ test("a verified campaign report stays verified when a rollback replay advances 
       db.finishCampaignReportHistoryHydration("sess-1");
       assert.equal(db.campaignChildReportVerified("campaign", "sess-1"), true,
         "completing hydration does not discard the restamped verification");
+
+      // The delivered work-item proof moved too, so an identical retry still resolves to it.
+      const { id: workItemId } = db.raw().prepare(
+        "SELECT id FROM campaign_work_items WHERE campaign_session_id='campaign'",
+      ).get() as { id: string };
+      const retry = db.campaignWorkLedger.verificationTarget("campaign", workItemId, "sess-1", "delivered",
+        db.campaignReportIdentity("sess-1", reportSeq!));
+      assert.ok(retry.ok, "an identical verification retry is not refused after the epoch advance");
+      assert.ok(retry.data.existing);
     } finally {
       db.close();
     }

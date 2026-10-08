@@ -732,6 +732,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   last_event_at  INTEGER,
   hydrated_seq   INTEGER NOT NULL DEFAULT 0,
   event_epoch    INTEGER NOT NULL DEFAULT 0,
+  recovered_event_epochs INTEGER NOT NULL DEFAULT 0,
   retained_attachment_through_seq INTEGER,
   runner_history_epoch INTEGER,
   runner_history_tail_seq INTEGER NOT NULL DEFAULT 0,
@@ -3310,7 +3311,8 @@ export interface HydratedRunnerEvent {
 }
 
 export type AppendHydratedPageResult =
-  | { applied: true; events: SessionEvent[] }
+  /** `eventEpoch` is the session's epoch after the page, which a crash-recovery replay can advance. */
+  | { applied: true; events: SessionEvent[]; eventEpoch: number }
   | { applied: false; events: [] };
 
 export interface CachedEventPage {
@@ -5903,6 +5905,9 @@ export class ControlPlaneDb {
       // CP-owned event-log generation. Reprocess increments it so reconnecting dashboards can
       // distinguish a replacement timeline from an append-only history gap.
       "event_epoch INTEGER NOT NULL DEFAULT 0",
+      // How many of those increments only renumbered a crash-recovered suffix (#2793). The rows
+      // stayed, so accounting scopes keep event_epoch minus this (accountingEventEpoch).
+      "recovered_event_epochs INTEGER NOT NULL DEFAULT 0",
       // NULL marks a pre-upgrade reset; its retained prefix is inferred until the next reset.
       "retained_attachment_through_seq INTEGER",
       // Protocol v54 runner-owned log generation. NULL means a migrated/pre-v54 row whose current
@@ -14662,6 +14667,15 @@ export class ControlPlaneDb {
     };
   }
 
+  /** The event epoch that accounting scopes (cost corrections and their evidence) bind to. A
+   * crash-recovery advance renumbers only the cached suffix and keeps every row and id, so it
+   * leaves this unchanged; a history reset or clear still changes it. */
+  accountingEventEpoch(sessionId: string): number {
+    const row = this.stmt("SELECT event_epoch - recovered_event_epochs AS epoch FROM sessions WHERE id=?")
+      .get(sessionId) as { epoch: number } | undefined;
+    return row?.epoch ?? 0;
+  }
+
   private settleIngestRollback(sessionId: string): void {
     if (!this.ingestRollback) return;
     this.ingestRollback.settled.add(sessionId);
@@ -14696,31 +14710,46 @@ export class ControlPlaneDb {
   }
 
   /** Gives a session a new event epoch while keeping its cached rows, because replayed events
-   * took different sequence numbers than dashboards saw before a crash. A campaign report proof
-   * whose event kept its number moves to the new epoch; any other follows the replay rebind rules. */
+   * took different sequence numbers than dashboards saw before a crash. A campaign or work-item
+   * report proof whose event kept its number moves to the new epoch; any other follows the replay
+   * rebind rules. Accounting scopes do not move (accountingEventEpoch). */
   private advanceEventEpochInTransaction(sessionId: string): number {
     // A legacy proof is only interpretable in a cache that has never left epoch 0.
     this.captureUnresetLegacyCampaignReports(sessionId);
+    const previousEpoch = (this.stmt("SELECT event_epoch FROM sessions WHERE id=?").get(sessionId) as
+      { event_epoch: number }).event_epoch;
     const reports = this.stmt(
-      `SELECT verification.campaign_session_id, verification.report_event_seq,
-              verification.report_ts, verification.report_digest
-         FROM orchestrator_campaign_child_reports verification
-         JOIN sessions child ON child.id=verification.child_session_id
-        WHERE verification.child_session_id=? AND verification.report_digest IS NOT NULL
-          AND verification.report_event_epoch=child.event_epoch`,
-    ).all(sessionId) as Array<{
+      `SELECT campaign_session_id, report_event_seq, report_ts, report_digest
+         FROM orchestrator_campaign_child_reports
+        WHERE child_session_id=? AND report_digest IS NOT NULL AND report_event_epoch=?`,
+    ).all(sessionId, previousEpoch) as Array<{
       campaign_session_id: string; report_event_seq: number; report_ts: number | null; report_digest: string;
     }>;
-    this.stmt("UPDATE sessions SET event_epoch=event_epoch+1 WHERE id=?").run(sessionId);
-    const eventEpoch = (this.stmt("SELECT event_epoch FROM sessions WHERE id=?").get(sessionId) as
-      { event_epoch: number }).event_epoch;
+    const workVerifications = this.stmt(
+      `SELECT id, report_seq, report_ts, report_digest FROM campaign_work_verifications
+        WHERE child_session_id=? AND report_digest IS NOT NULL AND report_event_epoch=?`,
+    ).all(sessionId, previousEpoch) as Array<{
+      id: string; report_seq: number; report_ts: number | null; report_digest: string;
+    }>;
+    this.stmt(
+      "UPDATE sessions SET event_epoch=event_epoch+1, recovered_event_epochs=recovered_event_epochs+1 WHERE id=?",
+    ).run(sessionId);
+    const eventEpoch = previousEpoch + 1;
+    const unchanged = (seq: number, ts: number | null, digest: string) => {
+      const current = this.campaignReportIdentity(sessionId, seq);
+      return current.ts === ts && current.digest === digest;
+    };
     for (const report of reports) {
-      const current = this.campaignReportIdentity(sessionId, report.report_event_seq);
-      if (current.ts !== report.report_ts || current.digest !== report.report_digest) continue;
+      if (!unchanged(report.report_event_seq, report.report_ts, report.report_digest)) continue;
       this.stmt(
         `UPDATE orchestrator_campaign_child_reports SET report_event_epoch=?
           WHERE campaign_session_id=? AND child_session_id=?`,
       ).run(eventEpoch, report.campaign_session_id, sessionId);
+    }
+    for (const verification of workVerifications) {
+      if (!unchanged(verification.report_seq, verification.report_ts, verification.report_digest)) continue;
+      this.stmt("UPDATE campaign_work_verifications SET report_event_epoch=? WHERE id=?")
+        .run(eventEpoch, verification.id);
     }
     this.stmt(
       `UPDATE managed_background_deliveries SET projected_event_epoch=?
@@ -21531,7 +21560,7 @@ export class ControlPlaneDb {
       }
       if (events.length === 0) {
         this.db.exec("COMMIT");
-        return { applied: true, events: [] };
+        return { applied: true, events: [], eventEpoch: state.event_epoch };
       }
       const advanceEpoch = this.ingestReassignsSequence(sessionId);
       const eventEpoch = advanceEpoch ? this.advanceEventEpochInTransaction(sessionId) : state.event_epoch;
@@ -21629,7 +21658,7 @@ export class ControlPlaneDb {
       if (events.some((event) => event.payload.kind === "tool_call")) this.raiseSettledChildToolCallCharge(sessionId);
       this.db.exec("COMMIT");
       this.noteCommittedIngest(sessionId, finalRunnerSeq, advanceEpoch);
-      appliedResult = { applied: true, events: inserted };
+      appliedResult = { applied: true, events: inserted, eventEpoch };
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;

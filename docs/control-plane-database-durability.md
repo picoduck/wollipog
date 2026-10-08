@@ -135,11 +135,19 @@ example, a runner may have streamed events while the control plane was down. Tha
 transcript reload for the affected session. A session whose replay continues its surviving history
 in order keeps its epoch, because each event returns to its old number.
 
-Other records bound to the old epoch are kept valid. A campaign report verification whose report
-event still has the same sequence number, timestamp, and digest moves to the new epoch. The report
-must already have been durable when it was verified, because verification is a `FULL` commit.
-Background-continuation projections move to the new epoch as well. Proofs that do not match follow
-the same replay rebinding rules as a history reset.
+Other records bound to the old epoch are kept valid:
+
+- A campaign report verification or a work-item verification moves to the new epoch when its report
+  event still has the same sequence number, timestamp, and digest. The report must already have been
+  durable when it was verified, because verification is a `FULL` commit. Proofs that do not match
+  follow the same replay rebinding rules as a history reset.
+- Background-continuation projections move to the new epoch.
+- Accounting does not move. Claude cost corrections bind their identity, export, and recovery scope
+  to `accountingEventEpoch`: the event epoch minus the session's `recovered_event_epochs`. A recovery
+  advance keeps every row and event id, so it leaves that value unchanged. A history reset or clear
+  still changes it.
+- A history-page chain that advances the epoch on one page continues with the new epoch on the
+  next, so the pending ask it collects across pages is restored.
 
 Limits:
 

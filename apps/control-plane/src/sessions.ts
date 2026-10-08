@@ -13887,6 +13887,8 @@ export class SessionsService {
           this.rehydrate.add(sessionId);
           return;
         }
+        // A crash-recovery replay can advance the epoch; later pages keep the accumulated ask.
+        eventEpoch = applied.eventEpoch;
         let projectedBackgroundDelivery = false;
         let projectedSteering = false;
         for (let i = 0; i < applied.events.length; i++) {
