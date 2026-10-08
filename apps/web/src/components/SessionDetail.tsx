@@ -7191,9 +7191,11 @@ function SessionDetailLoaded({
                   composerDraftVersionRef.current += 1;
                   invalidateComposerMutationRecovery(mutationKey);
                   // A changed draft is a new message: the composer's notices were about the old one.
-                  // Each reset is skipped when there is nothing to reset, so a keystroke renders the
-                  // textarea alone rather than this whole view (#2764).
-                  if (composerErrorEntries.length > 0) clearComposerErrors();
+                  // The resets below are skipped when there is nothing to reset, so a keystroke
+                  // renders the textarea alone rather than this whole view (#2764). The errors are
+                  // cleared through their updater instead, which leaves an empty set untouched and
+                  // still sees one queued since this view last rendered (a paste's refusal).
+                  clearComposerErrors();
                   setText(e.currentTarget.value);
                   updateComposerSelection(
                     e.currentTarget.selectionStart,

@@ -50,6 +50,8 @@ for (const [name, value] of Object.entries({
   Event: domWindow.Event,
   MouseEvent: domWindow.MouseEvent,
   KeyboardEvent: domWindow.KeyboardEvent,
+  File: domWindow.File,
+  FileReader: domWindow.FileReader,
   MutationObserver: domWindow.MutationObserver,
   getComputedStyle: domWindow.getComputedStyle.bind(domWindow),
   React,
@@ -367,6 +369,33 @@ test("pasted text is left to the browser and lands in the draft", async () => {
     // The browser inserts the pasted text and reports it as input.
     await view.change("Look at this stack trace");
     assert.equal(composer.value, "Look at this stack trace");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a keystroke clears an attachment refusal queued just before it", async () => {
+  // The refusal of a pasted image is queued as the paste is handled; a keystroke that lands before
+  // the session view renders it still makes a new message, so the notice goes with the old one.
+  const view = await mount();
+  try {
+    await view.type("draft");
+    const composer = view.composer();
+    const file = new domWindow.File(["<svg/>"], "drawing.svg", { type: "image/svg+xml" });
+    const paste = new domWindow.Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, "clipboardData", {
+      value: { items: [{ kind: "file", type: "image/svg+xml", getAsFile: () => file }], files: [file] },
+    });
+    await act(async () => {
+      composer.dispatchEvent(paste as never);
+      await Promise.resolve();
+      fireDomEvent.change(composer, { target: { value: "draft edited", selectionStart: 12, selectionEnd: 12 } });
+    });
+    await view.settle();
+    assert.equal(view.composer().value, "draft edited");
+    const alerts = [...view.container.querySelectorAll('[role="alert"]')].map((alert) => alert.textContent ?? "");
+    assert.equal(alerts.some((text) => text.includes("Not Supported")), false,
+      `the refusal belonged to the draft before the edit: ${alerts.join(" | ")}`);
   } finally {
     await view.unmount();
   }
