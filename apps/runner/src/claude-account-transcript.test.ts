@@ -1,14 +1,95 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
+import type { AgentContext } from "@wollipog/protocol";
 import { transferClaudeAccountTranscript, WSL_TRANSFER } from "./claude-account-transcript.js";
 
 const id = "11111111-2222-4333-8444-555555555555";
 const exec = promisify(execFile);
+
+function snapshotFixture(root: string): unknown[] {
+  const entries: unknown[] = [];
+  const visit = (relative: string) => {
+    const path = join(root, relative);
+    const info = lstatSync(path);
+    entries.push({
+      path: relative, directory: info.isDirectory(), mode: info.mode,
+      mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs,
+      contents: info.isFile() ? readFileSync(path).toString("hex") : null,
+    });
+    if (info.isDirectory()) {
+      for (const entry of readdirSync(path).sort()) visit(join(relative, entry));
+    }
+  };
+  visit("");
+  return entries;
+}
+
+const invalidIds = [
+  "", ".", "../selected", "../../selected", "nested/selected", "nested\\selected",
+  "..\\..\\selected", "selected.jsonl", "space id", "semi;id", "dollar$id",
+  "line\nid", "accent-é", "emoji-🦆", "nul\0id",
+];
+
+for (const context of [{ kind: "native" }, { kind: "wsl", distro: "synthetic-unused-distro" }] satisfies AgentContext[]) {
+  for (const existingStore of [false, true]) {
+    test(`${context.kind}: unsafe conversation IDs leave an ${existingStore ? "existing" : "absent"} destination store untouched`, async (t) => {
+      for (const unsafeId of invalidIds) {
+        await t.test(JSON.stringify(unsafeId), async (t) => {
+          const root = mkdtempSync(join(tmpdir(), "claude-transfer-unsafe-"));
+          t.after(() => rmSync(root, { recursive: true, force: true }));
+          const source = join(root, "source");
+          const target = join(root, "target");
+          mkdirSync(join(source, "projects", "project"), { recursive: true });
+          mkdirSync(target);
+          writeFileSync(join(source, "projects", "project", `${id}.jsonl`), "synthetic selected conversation\n");
+          // A removed guard would resolve ../../selected outside the project store, but
+          // everything it could read or overwrite here still belongs to this fixture.
+          for (const home of [source, target]) mkdirSync(join(home, "selected"));
+          writeFileSync(join(source, "selected.jsonl"), "synthetic traversal conversation\n");
+          writeFileSync(join(source, "selected", "child.jsonl"), "synthetic source child\n");
+          writeFileSync(join(target, "selected", "child.jsonl"), "retained target child\n");
+          writeFileSync(join(target, "marker.txt"), "retained target marker\n");
+          if (existingStore) {
+            mkdirSync(join(target, "projects", "project"), { recursive: true });
+            writeFileSync(join(target, "projects", "project", `${id}.jsonl`), "retained destination conversation\n");
+          }
+          const before = snapshotFixture(root);
+          try {
+            // WSL must refuse in the shared entry point before dispatching any command;
+            // these cases require neither an installed distro nor a real account home.
+            await assert.rejects(transferClaudeAccountTranscript(context, unsafeId, source, target), {
+              message: "the provider conversation id is unsafe for transcript transfer",
+            });
+          } finally {
+            assert.deepEqual(snapshotFixture(root), before, "unsafe ID changed fixture contents or metadata");
+          }
+        });
+      }
+    });
+  }
+}
+
+test("native: the full allowed ID alphabet still transfers only the selected conversation", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "claude-transfer-safe-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const source = join(root, "source");
+  const target = join(root, "target");
+  const safeId = "Az_09-valid";
+  mkdirSync(join(source, "projects", "project"), { recursive: true });
+  mkdirSync(target);
+  writeFileSync(join(source, "projects", "project", `${safeId}.jsonl`), "synthetic selected conversation\n");
+  writeFileSync(join(source, "projects", "project", `${id}.jsonl`), "synthetic other conversation\n");
+  const before = snapshotFixture(source);
+  await transferClaudeAccountTranscript({ kind: "native" }, safeId, source, target);
+  assert.equal(readFileSync(join(target, "projects", "project", `${safeId}.jsonl`), "utf8"), "synthetic selected conversation\n");
+  assert.deepEqual(readdirSync(join(target, "projects", "project")), [`${safeId}.jsonl`]);
+  assert.deepEqual(snapshotFixture(source), before);
+});
 
 for (const implementation of ["native", "WSL shell"] as const) {
   // Run the exact WSL script locally: its filesystem behavior and argument quoting need no
