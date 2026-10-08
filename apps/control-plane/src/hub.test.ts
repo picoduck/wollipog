@@ -1409,7 +1409,8 @@ test("the UI writer serializes sends, coalesces interleaved replaceable upserts,
     },
   };
   hub.addUiClient(socket);
-  const session = (updatedAt: number) => ({ id: "session-a", updatedAt } as SessionView);
+  // Distinct titles are transitions, so neither upsert is paced; the writer alone coalesces them.
+  const session = (updatedAt: number) => ({ id: "session-a", title: `T${updatedAt}`, updatedAt } as SessionView);
   hub.sessionEvent(sessionEvent("session-a", 1));
   hub.sessionChanged(session(1));
   hub.sessionEvent(sessionEvent("session-a", 2));
@@ -1432,8 +1433,8 @@ test("replacing a queued upsert subtracts its bytes before enforcing the hard ce
   const closed: number[] = [];
   const socket: Socket = { asyncDelivery: true, send: () => {} };
   hub.addUiClient(socket, { deviceId: null, close: (code) => closed.push(code ?? 0) });
-  hub.sessionChanged({ id: "session-a", preview: "x".repeat(6 * 1024 * 1024) } as SessionView);
-  hub.sessionChanged({ id: "session-a", preview: "small" } as SessionView);
+  hub.sessionChanged({ id: "session-a", title: "Large", preview: "x".repeat(6 * 1024 * 1024) } as SessionView);
+  hub.sessionChanged({ id: "session-a", title: "Small", preview: "small" } as SessionView);
   hub.shellOutput("session-a", "shell-a", "stdout", "y".repeat(2 * 1024 * 1024));
   assert.deepEqual(closed, [], "the replaced six-megabyte frame no longer counts against the queue");
 });
