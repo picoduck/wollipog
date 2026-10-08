@@ -271,6 +271,17 @@ into ACP's stable prompt-text command form only after the live session advertise
 onExit})`; all subsequent calls (`initialize`, `newSession`, `prompt`, `cancel`,
 `resolvePermission`, `dispose`, `.pid`) already match the interface.
 
+Drivers emit one `agent_message` or `agent_thought` per provider delta. `SessionManager` routes every
+driver's callbacks through a `TextDeltaCoalescer` (`text-delta-coalescer.ts`, #2762), which merges
+consecutive non-final deltas of one stream (same kind, `messageId`, and `parentToolUseId`) and emits
+at most one text event per 75 ms window. The first delta after a quiet window goes out immediately,
+so time to first text does not grow. Pending text is flushed first by every other driver event and
+callback, by each event append and status change in `SessionManager`, by turn settlement, Stop,
+interrupt, provider exit, and runner shutdown, and before a merge would pass 4,096 characters, so
+merged text stays within the control plane's 8,192-character search document. History therefore
+holds exactly the uncoalesced sequence with adjacent same-stream deltas concatenated, and event
+shapes are unchanged.
+
 ---
 
 ## 2. ClaudeCodeDriver — native `claude` (subscription)
