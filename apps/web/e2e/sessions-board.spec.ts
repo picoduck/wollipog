@@ -98,6 +98,10 @@ test.describe("with a touch pointer", () => {
     await expect(snoozed).toHaveCount(0);
     await bar.getByRole("button", { name: "More Actions" }).click();
     const more = page.getByRole("menu", { name: "More Actions" });
+    await expect(more).toBeVisible();
+    // The sheet slides up (`sheet-open`), and a box read mid-slide goes through the transform in
+    // float32, a hair off 44 (43.99993896484375 failed CI, #2822). At rest the items are exactly 44.
+    await dialogMotionSettled(page);
     for (const name of ["List", "Board", "Active Sessions", "Snoozed Sessions, 1"]) {
       const item = more.getByRole("menuitemradio", { name, exact: true });
       await expect(item).toBeVisible();
