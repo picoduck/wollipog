@@ -1329,15 +1329,17 @@ export class SessionStore {
 
   /** Stream complete NDJSON lines with a hard carry ceiling. At most one bounded record plus one
    * 64 KiB read chunk is retained; an attacker-controlled missing newline cannot grow memory with
-   * file size. Returning false stops after the current complete line. */
+   * file size. Returning false stops after the current complete line. A `pinned` layout is scanned as
+   * captured instead of the current one, so a concurrent manifest switch cannot pull other sources in. */
   private scanHistoryLines(
     id: string,
     startOffset: number,
     endOffset: number,
     visit: (line: Buffer, offset: number) => boolean | void,
+    pinned?: HistoryLayout,
   ): { completeBytes: number; trailingBytes: number; stopped: boolean } {
     this.historyScanObserver?.(startOffset, endOffset);
-    const layout = this.historyLayout(id);
+    const layout = pinned ?? this.historyLayout(id);
     if (
       !Number.isSafeInteger(startOffset) || !Number.isSafeInteger(endOffset) ||
       startOffset < 0 || endOffset < startOffset || endOffset > layout.totalBytes
@@ -2071,13 +2073,15 @@ export class SessionStore {
     const scanEnd = activeStart + plan.maxCutBytes;
     while (sliceStart < scanEnd) {
       const sliceEnd = Math.min(scanEnd, sliceStart + sliceBytes);
+      // The cut lies inside the planned active file. Scanning the pinned layout keeps a peer's newly
+      // published segment (which a fresh layout would verify by hashing it whole) out of the scan.
       const scanned = this.scanHistoryLines(id, sliceStart, sliceEnd, (line, offset) => {
         const event = this.parseStoredEvent(line);
         if (firstSeq === 0) firstSeq = event.seq;
         if (event.seq > plan.maxCutSeq) return false;
         lastSeq = event.seq;
         cutBytes = offset + line.length + 1 - activeStart;
-      });
+      }, layout);
       if (scanned.stopped || sliceEnd === scanEnd) break;
       if (scanned.completeBytes === sliceStart) {
         sliceBytes *= 2; // one record wider than the slice; scanHistoryLines bounds its size
@@ -2086,6 +2090,9 @@ export class SessionStore {
         sliceBytes = HISTORY_COMPACTION_SCAN_SLICE_BYTES;
       }
       await yieldToEventLoop();
+      if (this.historyManifestKey(id) !== manifestKey || (this.readDiskMetaRaw(id)?.logEpoch ?? 0) !== epoch) {
+        throw new HistoryStoreError("history_epoch_changed", "session history changed during compaction");
+      }
     }
     const expectedFirstSeq = (layout.manifest?.segments.at(-1)?.lastSeq ?? 0) + 1;
     if (cutBytes <= 0 || firstSeq !== expectedFirstSeq || lastSeq >= plan.tailSeq) return notCompacted;

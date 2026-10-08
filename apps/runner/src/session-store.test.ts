@@ -38,6 +38,7 @@ import {
   symlinkSync,
   writeSync,
 } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { join } from "node:path";
@@ -2551,6 +2552,49 @@ test("failed control-file staging leaves no temp file, and orphaned staged files
     assert.equal(collected.compacted, 1);
     assert.ok(collected.orphansRemoved >= 2);
     assert.deepEqual(readdirSync(sessionDir).filter((file) => file.endsWith(".tmp")), []);
+    assert.deepEqual(coldSeqs(root), seqRange(4_000));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a peer publication between cut-scan slices abandons the plan without hashing the peer's segment", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-store-compact-scanrace-"));
+  try {
+    const store = megabyteSession(root);
+    const sessionDir = join(root, "s_abc");
+    const internals = store as unknown as { hashFile(path: string): string };
+    const hashFile = internals.hashFile.bind(store);
+    let hashed = 0;
+    internals.hashFile = (path) => {
+      hashed++;
+      return hashFile(path);
+    };
+    const { result } = await duringEachTurn(store.maintainHistories("maintenance", 1), (tick) => {
+      if (tick !== 1) return;
+      // A peer process publishes its own compaction of the same prefix between two scan slices.
+      const bytes = readFileSync(join(sessionDir, "events.ndjson"));
+      const cut = bytes.indexOf(0x0a, 1024 * 1024) + 1;
+      const segment = bytes.subarray(0, cut);
+      const lastLine = segment.subarray(segment.lastIndexOf(0x0a, segment.length - 2) + 1, segment.length - 1);
+      writeFileSync(join(sessionDir, "events.segment.peer.ndjson"), segment);
+      writeFileSync(join(sessionDir, "events.active.peer.ndjson"), bytes.subarray(cut));
+      writeFileSync(join(sessionDir, "events.manifest.json"), JSON.stringify({
+        version: 1,
+        logEpoch: 0,
+        activeFile: "events.active.peer.ndjson",
+        segments: [{
+          file: "events.segment.peer.ndjson",
+          firstSeq: 1,
+          lastSeq: (JSON.parse(lastLine.toString("utf8")) as { seq: number }).seq,
+          bytes: cut,
+          sha256: createHash("sha256").update(segment).digest("hex"),
+        }],
+      }));
+    });
+    assert.equal(result.compacted, 0);
+    assert.equal(result.errors, 1);
+    assert.equal(hashed, 0, "the compacting store never hashed the peer's segment on the event loop");
     assert.deepEqual(coldSeqs(root), seqRange(4_000));
   } finally {
     rmSync(root, { recursive: true, force: true });
