@@ -221,6 +221,12 @@ interface MeasuredVirtualListProps<T> {
   /** Whether structural and width changes should preserve the current logical row. */
   preserveAnchor?: boolean;
   /**
+   * Names the set the items belong to, such as a search query. A change means the items are a
+   * different set, not a reorder of the old one: the held logical row is released and the list
+   * returns to the top (#2804). Items that change under the same key keep the reader's row.
+   */
+  resultSetKey?: string;
+  /**
    * The current item set is a partial history page that may still recover the requested key.
    * Missing anchors remain pending until the authoritative history chain completes.
    */
@@ -357,6 +363,7 @@ function VirtualList<T>({
   itemsDirtyFrom = 0,
   getInitialAnchor,
   preserveAnchor = true,
+  resultSetKey,
   anchorRecoveryPending = false,
   onVisibleAnchorChange,
   onAnchorLost,
@@ -417,7 +424,12 @@ function VirtualList<T>({
   const handledRevealRef = useRef<{ key: string; requestId: number } | null>(null);
   const pendingRevealOutcomeRef = useRef<number | null>(null);
   const previousItemsVersionRef = useRef(itemsVersion);
-  if (preserveAnchor && (previousItemsRef.current !== items || previousItemsVersionRef.current !== itemsVersion) &&
+  // The key the committed rows belong to. Advanced only in the commit, by the reset effect below, so
+  // a render React discards (a deferred search render interrupted by typing) cannot consume a change.
+  const committedResultSetKeyRef = useRef(resultSetKey);
+  const resultSetChanged = committedResultSetKeyRef.current !== resultSetKey;
+  if (preserveAnchor && !resultSetChanged &&
+      (previousItemsRef.current !== items || previousItemsVersionRef.current !== itemsVersion) &&
       pendingAnchorRef.current == null && lostAnchorRef.current == null) {
     pendingAnchorRef.current = visibleAnchorRef.current;
     anchorCorrectionRequiresIntentRef.current = false;
@@ -969,6 +981,32 @@ function VirtualList<T>({
       window.removeEventListener("drop", clear, true);
     };
   }, [draggedKey]);
+
+  // Declared before the anchor correction below, so in the commit that shows a different result set
+  // that correction finds nothing held and cannot carry the previous set's row into this one.
+  useLayoutEffect(() => {
+    if (committedResultSetKeyRef.current === resultSetKey) return;
+    committedResultSetKeyRef.current = resultSetKey;
+    if (clearAnchorFrameRef.current != null) cancelAnimationFrame(clearAnchorFrameRef.current);
+    if (widthAnchorFrameRef.current != null) cancelAnimationFrame(widthAnchorFrameRef.current);
+    if (lostAnchorFrameRef.current != null) cancelAnimationFrame(lostAnchorFrameRef.current);
+    clearAnchorFrameRef.current = null;
+    widthAnchorFrameRef.current = null;
+    widthAnchorRef.current = null;
+    lostAnchorFrameRef.current = null;
+    pendingAnchorRef.current = null;
+    anchorCorrectionRequiresIntentRef.current = false;
+    initialAnchorAppliedRef.current = true;
+    lostAnchorRef.current = null;
+    lostAnchorIsMountRestoreRef.current = false;
+    lostAnchorIntentVersionRef.current = null;
+    rekeyedAnchorRef.current = null;
+    anchorCorrectionScrollTopRef.current = null;
+    anchorCorrectionIntentVersionRef.current = null;
+    visibleAnchorRef.current = null;
+    const scroll = scrollRef.current;
+    if (scroll) scroll.scrollTop = 0;
+  }, [resultSetKey, scrollRef]);
 
   useLayoutEffect(() => {
     if (!initialMeasurementsReady) return;
