@@ -14491,11 +14491,16 @@ export class SessionsService {
       // append) its events for this session — the box re-issued them with new ids, so a live append
       // would duplicate the whole timeline against the stale cache.
       const events = deferHistory ? [] : (res.events ?? []);
-      // Large payloads become durable before the cache is swapped in one synchronous pass.
+      // Large payloads become durable before the cache is swapped in one synchronous pass. If
+      // another reprocess or a history reset replaced the history meanwhile, this result is older.
+      const historyBeforeStaging = this.db.getRunnerHistoryState(sessionId);
       const staged = await this.stageEventPayloads(sessionId, events);
       const now = Date.now();
       const inserted = [];
       try {
+        if (this.historyChangedSince(sessionId, historyBeforeStaging)) {
+          return fail("the session's history changed while it was being reprocessed; reprocess it again", 409);
+        }
         this.db.clearSessionEvents(sessionId);
         for (const [index, event] of events.entries()) {
           const prepared = this.externalizeEventOrOriginal(sessionId, event.payload, event.ts, staged[index]);

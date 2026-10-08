@@ -17975,6 +17975,51 @@ test("a legacy history batch staged across a reprocess is not appended", async (
   assert.equal(pendingBlobCount(db), 0);
 });
 
+test("an older reprocess result staged across a newer reprocess does not replace it", async () => {
+  const { db, hub, svc } = makeHarness();
+  db.registerRunner(runnerMeta(), Date.now(), 53);
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ adopted: true, seq: 1, historyEpoch: undefined })]);
+  let reprocesses = 0;
+  hub.requestHandler = (msg) => {
+    if (msg.type !== "reprocess_session") throw new Error("runner did not respond in time");
+    const older = ++reprocesses === 1;
+    return {
+      type: "reprocess_session_result",
+      requestId: msg.requestId,
+      sessionId: msg.sessionId,
+      ok: true,
+      snapshot: snapshot({ adopted: true, seq: 1, preview: older ? "older" : "newer" }),
+      events: [{
+        seq: 1,
+        ts: older ? 100 : 200,
+        payload: older
+          ? { kind: "command_output", text: "older-result-".repeat(2_000) }
+          : { kind: "agent_message", text: "newer-result" },
+      }],
+    };
+  };
+  const gate = gateArtifactStaging(db, 1);
+  let first;
+  try {
+    const older = svc.reprocessSession("s_box1");
+    await untilStagingStarts(gate);
+    const newer = await svc.reprocessSession("s_box1");
+    assert.equal(newer.ok, true, newer.error ?? "newer reprocess failed");
+    gate.release();
+    first = await older;
+  } finally {
+    gate.restore();
+  }
+  assert.equal(first.status, 409, "the older result is refused rather than applied");
+  assert.deepEqual(
+    db.listEvents("s_box1").map((event) => event.payload.kind === "agent_message" ? event.payload.text : event.payload.kind),
+    ["newer-result"],
+  );
+  assert.equal(db.getSession("s_box1")?.preview, "newer");
+  assert.deepEqual(db.listSessionWorkflowArtifacts("s_box1"), []);
+  assert.equal(pendingBlobCount(db), 0);
+});
+
 test("a history page with a malformed payload releases the stagings that succeeded beside it", async () => {
   const { db, hub, svc } = makeHarness();
   svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ seq: 2, historyEpoch: 7 })]);
