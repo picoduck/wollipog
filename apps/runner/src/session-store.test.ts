@@ -2600,3 +2600,35 @@ test("a peer publication between cut-scan slices abandons the plan without hashi
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("orphan collection during the copy never leaves a manifest naming removed files", async () => {
+  for (const collector of ["peer_store", "same_store"] as const) {
+    const root = mkdtempSync(join(tmpdir(), "wollipog-store-compact-collect-"));
+    try {
+      megabyteSession(root);
+      const zeroGrace = { ...COMPACT_MEGABYTES, orphanGraceMs: 0 };
+      const compactor = new SessionStore(root, undefined, zeroGrace);
+      const peer = new SessionStore(root, undefined, zeroGrace);
+      const sessionDir = join(root, "s_abc");
+      let collected = -1;
+      const { result } = await duringEachTurn(compactor.maintainHistories("maintenance", 1), () => {
+        if (collected >= 0 || !readdirSync(sessionDir).some((file) => file.startsWith("events.active."))) return;
+        const store = collector === "peer_store" ? peer : compactor;
+        collected = (store as unknown as { cleanupHistoryOrphans(id: string): number }).cleanupHistoryOrphans("s_abc");
+      });
+      assert.ok(collected >= 0, `${collector}: collection ran while the copy was in flight`);
+      if (collector === "peer_store") {
+        assert.ok(collected >= 1, "the peer removed the unreferenced prepared files");
+        assert.equal(result.compacted, 0);
+        assert.equal(result.errors, 1);
+        assert.equal(existsSync(join(sessionDir, "events.manifest.json")), false);
+      } else {
+        assert.equal(collected, 0, "this store keeps its own in-flight files");
+        assert.equal(result.compacted, 1);
+      }
+      assert.deepEqual(coldSeqs(root), seqRange(4_000), collector);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});

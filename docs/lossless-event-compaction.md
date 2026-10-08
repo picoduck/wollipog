@@ -57,8 +57,10 @@ file. It:
    the active inode are unchanged. Idle maintenance re-takes the lock only with an exclusive create,
    so it never overwrites or steals a lock that a turn took meanwhile. If more than 256 KiB arrived
    since the last catch-up, it lets the lock go and catches up again, up to four times. Otherwise it
-   copies the remaining complete lines and re-reads the lock. Finally it atomically renames the
-   staged files into place, which publishes the manifest. A changed epoch or manifest abandons the
+   copies the remaining complete lines, checks that the prepared segment, active file, and staged
+   files still exist (orphan collection in another store could have removed them), and re-reads
+   the lock. Finally it atomically renames the staged files into place, which publishes the
+   manifest. A changed epoch or manifest abandons the
    copy, as do a remaining torn suffix and a lock now held by another owner;
 6. retires the former `events.ndjson` inode and places a directory at that legacy path.
 
@@ -70,7 +72,8 @@ active generation.
 Until step 5 publishes, readers keep using the previous manifest and files. After it, readers use
 the new generation. Superseded files remain for one hour so a cross-process reader that captured the prior
 layout can finish, then bounded orphan collection removes at most 32 files per session/pass.
-Unpublished crash debris is never referenced and follows the same cleanup path. The directory fence
+Unpublished crash debris is never referenced and follows the same cleanup path. Orphan collection skips
+the files of a compaction that the same store is still preparing. The directory fence
 makes a pre-compaction runner binary fail its legacy read/append closed instead of creating a second
 writable log beside the manifest. If Windows temporarily blocks retirement for an open reader, a
 later maintenance pass retries it.

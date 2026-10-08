@@ -24,6 +24,7 @@ import {
   readSync,
   closeSync,
   fsyncSync,
+  fstatSync,
   futimesSync,
   lstatSync,
   truncateSync,
@@ -661,6 +662,9 @@ export class SessionStore {
     { epoch: number; manifestKey: string | null; layout: HistoryLayout; validatedAt: number }
   >();
   private historyMaintenanceCursor: string | null = null;
+  /** Tokens of compactions this process is preparing. Their files are unreferenced until publication,
+   * so orphan collection must leave them alone even with a zero grace period. */
+  private readonly compactionsInFlight = new Set<string>();
   constructor(
     private readonly root: string = join(homedir(), ".agent-manager", "sessions"),
     private readonly historyScanObserver?: (startOffset: number, endOffset: number) => void,
@@ -1968,8 +1972,8 @@ export class SessionStore {
   }
 
   /** Write and fsync a small control file beside its target without blocking the event loop. */
-  private async stageHistoryFile(path: string, contents: string): Promise<StagedHistoryFile> {
-    const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  private async stageHistoryFile(path: string, token: string, contents: string): Promise<StagedHistoryFile> {
+    const tmp = `${path}.${process.pid}.${token}.tmp`;
     try {
       const handle = await open(tmp, "wx");
       try {
@@ -2109,6 +2113,7 @@ export class SessionStore {
     let activeOut: FileHandle | null = null;
     const staged: StagedHistoryFile[] = [];
     let committed = false;
+    this.compactionsInFlight.add(token);
     try {
       source = await open(layout.active.path, "r");
       const sourceIdentity = await source.stat({ bigint: true });
@@ -2133,13 +2138,13 @@ export class SessionStore {
       };
       const legacy = layout.active.file === "events.ndjson";
       if (legacy) {
-        staged.push(await this.stageHistoryFile(this.historyLegacyFencePath(id), JSON.stringify({
+        staged.push(await this.stageHistoryFile(this.historyLegacyFencePath(id), token, JSON.stringify({
           version: HISTORY_LEGACY_FENCE_VERSION,
           activeFile,
           retiredFile,
         })));
       }
-      const stagedManifest = await this.stageHistoryFile(this.historyManifestPath(id), JSON.stringify(manifest));
+      const stagedManifest = await this.stageHistoryFile(this.historyManifestPath(id), token, JSON.stringify(manifest));
       staged.push(stagedManifest);
 
       // Appends keep arriving while this awaits. Catch up off the lock until the remainder fits the
@@ -2182,6 +2187,24 @@ export class SessionStore {
         this.writeAll(activeOut.fd, tail);
         fsyncSync(activeOut.fd);
       }
+      // While the lock was free, another store's orphan collection may have removed the prepared files.
+      // Writes to an unlinked active file still succeed, so check the names before committing to them.
+      let preparedSegment;
+      let preparedActive;
+      try {
+        preparedSegment = lstatSync(segmentPath);
+        preparedActive = lstatSync(activePath, { bigint: true });
+      } catch {
+        preparedSegment = preparedActive = null;
+      }
+      const written = fstatSync(activeOut.fd, { bigint: true });
+      if (
+        !preparedSegment?.isFile() || preparedSegment.size !== cutBytes ||
+        !preparedActive?.isFile() || preparedActive.ino !== written.ino || preparedActive.dev !== written.dev ||
+        staged.some((file) => !existsSync(file.tmp))
+      ) {
+        throw new HistoryStoreError("history_epoch_changed", "prepared compaction files were removed before publication");
+      }
       // The session lock is best effort: another acquirer can overwrite it. Re-read it last.
       if (!this.ownsLock(id, owner)) return notCompacted;
       // The fence intent must be durable before the manifest that commits it.
@@ -2200,6 +2223,7 @@ export class SessionStore {
       // index/checkpoint caches and frozen cursor boundaries intact.
       return { compacted: true, bytesArchived: cutBytes };
     } finally {
+      this.compactionsInFlight.delete(token);
       await Promise.all([source?.close(), activeOut?.close()]).catch(() => undefined);
       rmSync(segmentTmp, { force: true });
       for (const file of staged) rmSync(file.tmp, { force: true });
@@ -2315,6 +2339,7 @@ export class SessionStore {
     try {
       for (const entry of readdirSync(this.dir(id), { withFileTypes: true })) {
         if (removed >= limit || !entry.isFile() || referenced.has(entry.name)) continue;
+        if ([...this.compactionsInFlight].some((token) => entry.name.includes(token))) continue;
         if (
           !this.isHistoryFileName(entry.name) &&
           !/^events\.(active|segment)\..+\.ndjson\.tmp$/.test(entry.name) &&
