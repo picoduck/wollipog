@@ -4,6 +4,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import { brotliDecompressSync, gunzipSync } from "node:zlib";
 import { DESKTOP_BUILD_ENV, DESKTOP_EXCLUDED_ASSETS, isDesktopBuild, stripManifestLink } from "./desktop-bundle.js";
 
 /**
@@ -139,6 +140,9 @@ test("a desktop build ships neither the service worker nor the manifest", { time
   assert.doesNotMatch(html, /rel="manifest"/,
     "the link would 404 on every launch now that the file is gone");
   assertBundledTerminalFont(out);
+  // #2767: the webview reads the bundle from disk, so sidecars would only enlarge the package.
+  assert.deepEqual(readdirSync(join(out, "assets")).filter((name) => /\.(?:br|gz)$/u.test(name)), [],
+    "the desktop bundle must not carry precompressed sidecars");
 });
 
 test("an ordinary web build keeps both, because the PWA is the point there", { timeout: 300_000 }, () => {
@@ -155,4 +159,17 @@ test("an ordinary web build keeps both, because the PWA is the point there", { t
   }
   assert.match(readFileSync(join(out, "index.html"), "utf8"), /rel="manifest"/);
   assertBundledTerminalFont(out);
+
+  // #2767: every script and stylesheet the control plane serves has brotli and gzip sidecars that
+  // decode to it exactly, and nothing outside assets/ (sw.js above all) has one.
+  const assets = readdirSync(join(out, "assets"));
+  const text = assets.filter((name) => /\.(?:js|css)$/u.test(name));
+  assert.ok(text.length >= 2, "the build must emit at least the entry script and stylesheet");
+  for (const name of text) {
+    const source = readFileSync(join(out, "assets", name));
+    assert.ok(brotliDecompressSync(readFileSync(join(out, "assets", `${name}.br`))).equals(source), `${name}.br`);
+    assert.ok(gunzipSync(readFileSync(join(out, "assets", `${name}.gz`))).equals(source), `${name}.gz`);
+  }
+  assert.deepEqual(readdirSync(out).filter((name) => /\.(?:br|gz)$/u.test(name)), [],
+    "stable names outside assets/ must never get a sidecar");
 });

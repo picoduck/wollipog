@@ -4,15 +4,25 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
-import fastifyStatic from "@fastify/static";
+import { brotliCompressSync, brotliDecompressSync, gunzipSync, gzipSync } from "node:zlib";
 import { carriesTokenParam, redactTokenInUrl } from "./auth.js";
-import { appShellSecurityHeaders, injectSameOriginMarker, isIndexHtmlPath, isSpaNavigation } from "./web-dist.js";
+import { injectSameOriginMarker, isSpaNavigation } from "./web-dist.js";
+import {
+  APP_SHELL_CACHE_CONTROL,
+  HASHED_ASSET_CACHE_CONTROL,
+  REVALIDATED_CACHE_CONTROL,
+  appShellHeaders,
+  isContentHashedAssetName,
+  registerWebAppStatic,
+} from "./web-static.js";
 
 const INDEX = "<!doctype html><html><head><title>t</title></head><body><div id=root></div></body></html>";
 
+const ENTRY_JS = `console.log(${JSON.stringify("x".repeat(4096))});`;
+
 /**
- * The REAL serving wiring from index.ts — @fastify/static, the explicit shell routes, and the
- * SPA-fallback notFound handler — over a temp bundle. `http-auth.test.ts` stubs static with a
+ * The REAL static registration from web-static.ts plus index.ts's explicit shell routes and
+ * SPA-fallback notFound handler, over a temp bundle. `http-auth.test.ts` stubs static with a
  * plain wildcard; this exercises the plugin itself, which is where the `/index.html` and `/ui/`
  * holes lived.
  */
@@ -22,6 +32,15 @@ function buildServingApp(t: { after: (fn: () => void) => void }): { app: Fastify
   writeFileSync(join(root, "index.html"), INDEX);
   mkdirSync(join(root, "assets"), { recursive: true });
   writeFileSync(join(root, "assets", "app-abc.js"), "console.log(1)");
+  // A hashed entry chunk with the sidecars the web build writes beside it.
+  writeFileSync(join(root, "assets", "index-B0_CIkYt.js"), ENTRY_JS);
+  writeFileSync(join(root, "assets", "index-B0_CIkYt.js.br"), brotliCompressSync(ENTRY_JS));
+  writeFileSync(join(root, "assets", "index-B0_CIkYt.js.gz"), gzipSync(ENTRY_JS));
+  // Hashed, but with no sidecar (a watched build that has not compressed it yet).
+  writeFileSync(join(root, "assets", "index-DrZFfbC3.css"), "body{color:red}");
+  // A stray sidecar beside a stable name must never be served: it may predate the file.
+  writeFileSync(join(root, "sw.js.br"), brotliCompressSync("self.oldWorker = true;"));
+  writeFileSync(join(root, "sw.js.gz"), gzipSync("self.oldWorker = true;"));
   writeFileSync(join(root, "secret.txt"), "not a navigation target");
   // The PWA assets the web build now emits (public/ passthrough).
   writeFileSync(join(root, "manifest.webmanifest"), JSON.stringify({ name: "t", start_url: "/" }));
@@ -31,18 +50,13 @@ function buildServingApp(t: { after: (fn: () => void) => void }): { app: Fastify
 
   const logged: string[] = [];
   const app = Fastify();
-  app.register(fastifyStatic, {
-    root,
-    prefix: "/",
-    index: false,
-    allowedPath: (pathname) => !isIndexHtmlPath(pathname),
-  });
+  registerWebAppStatic(app, root);
 
   const html = injectSameOriginMarker(INDEX);
   const serveShell = async (req: FastifyRequest, reply: FastifyReply) => {
     const rawUrl = req.raw.url ?? "";
     if (carriesTokenParam(rawUrl)) return reply.redirect(rawUrl.split("?")[0] || "/", 303);
-    return reply.headers(appShellSecurityHeaders(html)).type("text/html; charset=utf-8").send(html);
+    return reply.headers(appShellHeaders(html)).type("text/html; charset=utf-8").send(html);
   };
   app.get("/", serveShell);
   app.get("/index.html", serveShell);
@@ -53,7 +67,7 @@ function buildServingApp(t: { after: (fn: () => void) => void }): { app: Fastify
     const rawUrl = req.raw.url ?? "";
     const pathname = rawUrl.split("?")[0] ?? "";
     if (!carriesTokenParam(rawUrl) && isSpaNavigation(req.method, pathname)) {
-      return reply.headers(appShellSecurityHeaders(html)).type("text/html; charset=utf-8").send(html);
+      return reply.headers(appShellHeaders(html)).type("text/html; charset=utf-8").send(html);
     }
     logged.push(redactTokenInUrl(rawUrl));
     reply.code(404).send({ error: "not found" });
@@ -208,6 +222,103 @@ test("the API and sockets never fall back to the shell", async (t) => {
 test("static cannot escape the bundle root", async (t) => {
   const { app } = buildServingApp(t);
   await app.ready();
-  const res = await app.inject({ method: "GET", url: "/../package.json" });
-  assert.ok(res.statusCode >= 400, `traversal must be refused, got ${res.statusCode}`);
+  for (const url of ["/../package.json", "/assets/../index.html", "/assets/../../package.json"]) {
+    const res = await app.inject({ method: "GET", url });
+    assert.ok(res.statusCode >= 400 || isShell(res), `${url} must be refused or answered by the marked shell`);
+    assert.ok(!res.body.includes(INDEX), `${url} must not serve the raw entry document`);
+  }
+});
+
+const varyNames = (value: unknown) => String(value ?? "").toLowerCase().split(/\s*,\s*/);
+
+// #2767: the hashed bundle was sent uncompressed and revalidated on every load.
+test("hashed assets are served precompressed when accepted, and cached immutably", async (t) => {
+  const { app } = buildServingApp(t);
+  await app.ready();
+  const url = "/assets/index-B0_CIkYt.js";
+
+  const br = await app.inject({ method: "GET", url, headers: { "accept-encoding": "gzip, deflate, br, zstd" } });
+  assert.equal(br.statusCode, 200);
+  assert.equal(br.headers["content-encoding"], "br");
+  assert.match(String(br.headers["content-type"]), /javascript/, "the sidecar keeps the original's type");
+  assert.equal(brotliDecompressSync(br.rawPayload).toString(), ENTRY_JS);
+  assert.ok(br.rawPayload.length < ENTRY_JS.length);
+  assert.equal(br.headers["cache-control"], HASHED_ASSET_CACHE_CONTROL);
+  assert.ok(varyNames(br.headers.vary).includes("accept-encoding"));
+
+  // Chromium over plain HTTP (a phone on the LAN) advertises gzip but not brotli.
+  const gz = await app.inject({ method: "GET", url, headers: { "accept-encoding": "gzip, deflate" } });
+  assert.equal(gz.headers["content-encoding"], "gzip");
+  assert.equal(gunzipSync(gz.rawPayload).toString(), ENTRY_JS);
+  assert.equal(gz.headers["cache-control"], HASHED_ASSET_CACHE_CONTROL);
+  assert.ok(varyNames(gz.headers.vary).includes("accept-encoding"));
+
+  // The uncompressed fallback varies too, or a shared cache could hand it to a client that
+  // accepts compression (or a compressed body to one that does not).
+  const identity = await app.inject({ method: "GET", url, headers: { "accept-encoding": "identity" } });
+  assert.equal(identity.headers["content-encoding"], undefined);
+  assert.equal(identity.body, ENTRY_JS);
+  assert.equal(identity.headers["cache-control"], HASHED_ASSET_CACHE_CONTROL);
+  assert.ok(varyNames(identity.headers.vary).includes("accept-encoding"));
+
+  // Each representation has its own validator, so a revalidation cannot mix them up.
+  assert.notEqual(br.headers.etag, gz.headers.etag);
+  assert.notEqual(gz.headers.etag, identity.headers.etag);
+});
+
+test("a hashed asset without a sidecar falls back to the file itself", async (t) => {
+  const { app } = buildServingApp(t);
+  await app.ready();
+  const res = await app.inject({ method: "GET", url: "/assets/index-DrZFfbC3.css", headers: { "accept-encoding": "br, gzip" } });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.headers["content-encoding"], undefined);
+  assert.equal(res.body, "body{color:red}");
+  assert.match(String(res.headers["content-type"]), /text\/css/);
+  assert.equal(res.headers["cache-control"], HASHED_ASSET_CACHE_CONTROL);
+  assert.ok(varyNames(res.headers.vary).includes("accept-encoding"));
+
+  // A missing hashed asset still 404s honestly, whatever the client accepts.
+  const missing = await app.inject({ method: "GET", url: "/assets/gone-AbCdEf12.js", headers: { "accept-encoding": "br, gzip" } });
+  assert.equal(missing.statusCode, 404);
+  assert.ok(!isShell(missing));
+});
+
+test("only names that carry a content hash are cached immutably", async (t) => {
+  const { app } = buildServingApp(t);
+  await app.ready();
+  const res = await app.inject({ method: "GET", url: "/assets/app-abc.js" });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.headers["cache-control"], REVALIDATED_CACHE_CONTROL);
+
+  assert.equal(isContentHashedAssetName("index-B0_CIkYt.js"), true);
+  assert.equal(isContentHashedAssetName("rehype-highlight-B7dvKAt5.js"), true);
+  assert.equal(isContentHashedAssetName("index-B0_CIkYt.js.br"), true, "a sidecar follows its file");
+  assert.equal(isContentHashedAssetName("WollipogJetBrainsMonoNerd-Regular-Bq4ZObyS.woff2"), true);
+  assert.equal(isContentHashedAssetName("app-abc.js"), false);
+  assert.equal(isContentHashedAssetName("sw.js"), false);
+  assert.equal(isContentHashedAssetName("index.js.br"), false);
+});
+
+test("the entry document and the service worker are never cached immutably", async (t) => {
+  const { app } = buildServingApp(t);
+  await app.ready();
+  for (const url of ["/", "/index.html", "/INDEX.HTML", "/sessions/~YQBiAGMA", "/board"]) {
+    const res = await app.inject({ method: "GET", url, headers: { "accept-encoding": "br, gzip" } });
+    assert.ok(isShell(res), `${url} should render the shell`);
+    assert.equal(res.headers["cache-control"], APP_SHELL_CACHE_CONTROL, `${url} must be revalidated`);
+  }
+
+  const sw = await app.inject({ method: "GET", url: "/sw.js", headers: { "accept-encoding": "br, gzip" } });
+  assert.equal(sw.statusCode, 200);
+  assert.equal(sw.headers["cache-control"], APP_SHELL_CACHE_CONTROL);
+  // Stable names never come from a sidecar, so the stray old one beside sw.js cannot be served.
+  assert.equal(sw.headers["content-encoding"], undefined);
+  assert.equal(sw.body, "self.addEventListener('install', () => {});");
+
+  // Other stable names stay cacheable but are revalidated before each use.
+  for (const url of ["/manifest.webmanifest", "/icons/icon-192.png"]) {
+    const res = await app.inject({ method: "GET", url });
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.headers["cache-control"], REVALIDATED_CACHE_CONTROL, `${url} must be revalidated`);
+  }
 });
