@@ -31,6 +31,7 @@ import {
   codexHookInventoryVerdict,
   codexHookIsolationVerdict,
   codexHookStateDisableOverride,
+  codexHookTrustVerdict,
   readCodexHookInventory,
   withoutCodexHooksFeatureDisable,
   type CodexHookEntry,
@@ -39,6 +40,7 @@ import {
 import { orchestratorLaunchArgs } from "./orchestrator-preset.js";
 import {
   claudeHookSessionProtectionsPath,
+  provisionCodexGuard,
   refreshClaudeGuardProtections,
   resetClaudeGuardState,
   type ClaudeHookHost,
@@ -380,6 +382,57 @@ test("a modified (re-hashed) hook counts as untrusted", () => {
   ], "guard");
   assert.equal(verdict.ok, false);
   assert.deepEqual(!verdict.ok && verdict.foreignUntrusted, ["edited"]);
+});
+
+for (const trustStatus of ["untrusted", "modified"] as const) {
+  test(`the runner's enabled Codex hook is refused when its trust status is ${trustStatus}`, () => {
+    assert.deepEqual(codexHookTrustVerdict([
+      { key: RUNNER_HOOK_KEY, enabled: true, trustStatus, command: "guard" },
+    ], "guard"), {
+      ok: false,
+      reason: `Codex still reports the runner's PreToolUse hook as ${trustStatus}, so it would be skipped silently`,
+    });
+  });
+}
+
+test("the runner's enabled trusted Codex hook is accepted", () => {
+  assert.deepEqual(codexHookTrustVerdict([
+    { key: RUNNER_HOOK_KEY, enabled: true, trustStatus: "trusted", command: "guard" },
+  ], "guard"), { ok: true });
+});
+
+test("Codex guard provisioning refuses a hook that stays untrusted after the trust override", async () => {
+  await withDir(async (dir) => {
+    const source = meta();
+    const probes: CodexHookInventoryProbe[] = [];
+    const inventories: CodexHookEntry[][] = [];
+    const result = await provisionCodexGuard(source, {
+      protections: PROTECTED,
+      cwd: REPO,
+      platform: "linux",
+      verifyGuardLaunch: () => ({ ok: true }),
+      readHookInventory: async (probe) => {
+        probes.push(probe);
+        const entries = [{ ...runnerHookEntry(probe), trustStatus: "untrusted" }];
+        inventories.push(entries);
+        return entries;
+      },
+    }, () => {}, hookHost(dir));
+
+    assert.equal(probes.length, 2, "trust must be read back after applying the hash override");
+    assert.equal(stateOverrideOf(probes[0]!.args), null);
+    const trustOverride = stateOverrideOf(probes[1]!.args);
+    assert.ok(trustOverride);
+    assert.ok(trustOverride.includes(RUNNER_HOOK_KEY));
+    assert.ok(trustOverride.includes(`trusted_hash="${RUNNER_HOOK_HASH}"`));
+    assert.deepEqual(inventories.map((entries) => entries[0]!.trustStatus), ["untrusted", "untrusted"]);
+    assert.deepEqual(result, {
+      args: source.args,
+      guardActive: false,
+      reason: "Codex still reports the runner's PreToolUse hook as untrusted, so it would be skipped silently",
+    });
+    assert.equal(codexGuardActiveInArgs(result.args), false);
+  });
 });
 
 test("a Codex TUI is refused when the inventory cannot be enumerated", async () => {
