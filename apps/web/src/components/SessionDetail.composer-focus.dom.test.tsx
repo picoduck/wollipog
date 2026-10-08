@@ -4235,9 +4235,9 @@ test("a Viewer's Stop Turn, queued-message actions and Plan control are disabled
         assert.notEqual(stopTurn.title, reason);
         continue;
       }
-      // The refusal is visible once, in the queue tray's header, and every queue action references it.
-      const header = fixture.container.querySelector(".queue-head");
-      assert.ok([...header!.querySelectorAll(".queue-note")].some((note) => note.textContent === reason));
+      // The refusal is said once, above the queue tray's rows, and every queue action references it.
+      const notes = fixture.container.querySelector(".queue-notes");
+      assert.ok([...notes!.querySelectorAll(".queue-note")].some((note) => note.textContent === reason));
       for (const [name, control] of Object.entries({ stopTurn, edit, cancel, plan })) {
         assert.equal(control.disabled, true, `${name} is disabled for a Viewer`);
         const described = control.getAttribute("aria-describedby");

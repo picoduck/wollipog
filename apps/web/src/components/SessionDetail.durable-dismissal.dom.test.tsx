@@ -553,11 +553,14 @@ test("a terminal receipt listed beside a held live queue stays dismissible and i
     assert.equal(dismiss.disabled, false);
     assertNoDomNode(receiptRow.querySelector('button[aria-label="Cancel Queued Message"]'));
 
-    // The held queue is said once, in the tray's header, never on a row (#2178).
-    const head = fixture.container.querySelector<HTMLElement>(".queue-head");
-    assert.equal(head?.querySelector(".status")?.textContent, "Held");
-    assert.equal(head?.querySelector(".status")?.classList.contains("t-warning"), true);
-    assert.ok([...head!.querySelectorAll(".queue-note")].some((note) => note.textContent === HELD_NOTE));
+    // The held queue is said once, on the tray's summary line and above its rows, never on a row
+    // (#2178, #2788).
+    const summary = fixture.container.querySelector<HTMLElement>(".queue-summary");
+    const held = summary?.querySelector(".status");
+    assert.equal(held?.textContent, "Held");
+    assert.equal(held?.classList.contains("t-warning"), true);
+    assert.ok([...fixture.container.querySelectorAll(".queue-notes .queue-note")]
+      .some((note) => note.textContent === HELD_NOTE));
     const liveRow = fixture.container.querySelector<HTMLElement>('[data-testid="queued-prompt-queue-live"]');
     assert.ok(liveRow);
     assertNoDomNode(liveRow.querySelector(".status"), "a held row carries no badge of its own");

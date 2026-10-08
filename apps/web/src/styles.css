@@ -5382,7 +5382,7 @@ textarea {
 }
 /* The queue tray (#2178): messages waiting behind the turn, docked on the composer card so they read
    as lined up behind the one being written. Inset from the card's edges, solid edge, open at the
-   bottom where the card takes over, and a hairline between rows. */
+   bottom where the card takes over, and a hairline between rows. Collapsed, it is only its summary. */
 .queue {
   margin: 0 var(--space-3);
   background: var(--bg-elev);
@@ -5391,19 +5391,31 @@ textarea {
   border-top-left-radius: var(--radius-md);
   border-top-right-radius: var(--radius-md);
 }
-.queue-head {
+/* The tray starts as this one line (#2788): the §5.5 disclosure across the tray's full width, with
+   the Held badge and the most severe row status after the count. It stays one line on a phone; the
+   count gives way before the badges do. */
+.queue-summary {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  column-gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-}
-.queue-count {
-  font: var(--type-label);
+  width: 100%;
+  min-height: var(--control-h);
+  padding: 0 var(--space-3) 0 var(--space-2);
+  gap: var(--space-2);
+  border-radius: inherit;
   color: var(--text);
 }
+.queue-count {
+  min-width: 0;
+  overflow: hidden;
+  font: var(--type-label);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.queue-summary > .status { flex: none; }
+/* What holds for every row, said once above them; it is hidden with them. */
+.queue-notes {
+  padding: 0 var(--space-3) var(--space-2);
+}
 .queue-note {
-  flex-basis: 100%;
   margin: 0;
   font: var(--type-small);
   color: var(--text-dim);

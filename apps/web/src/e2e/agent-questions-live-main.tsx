@@ -10,6 +10,7 @@ import { SessionNoticeSlot } from "../components/SessionNoticeSlot.js";
 import { RequestDock, dockRequests } from "../components/requests/RequestDock.js";
 import { RequestKindIcon, pendingRequestsTitle } from "../components/requests/request-meta.js";
 import { ComposerQuestionResponse } from "../components/ComposerQuestionResponse.js";
+import { ChevronRightIcon } from "../components/Icons.js";
 import type { TimelineItem } from "../timeline.js";
 import { useQuestionResponseStyle } from "../question-response-style.js";
 import "../styles.css";
@@ -35,6 +36,8 @@ function LiveQuestionFixture() {
   const fallbackFocusRef = useRef<HTMLTextAreaElement>(null);
   const answerInputRef = useRef<HTMLInputElement>(null);
   const [answerActive, setAnswerActive] = useState(false);
+  // The composer's queue tray starts as one collapsed summary line, as QueuedMessages does (#2788).
+  const [queueExpanded, setQueueExpanded] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const questionEventRef = useRef<Extract<TimelineItem, { kind: "question" }> | null>(null);
   const transcriptContext = useMemo<TimelineItem[]>(() => Array.from({ length: 48 }, (_, index) => (
@@ -152,10 +155,14 @@ function LiveQuestionFixture() {
               <div className="composer">
                 {showQueuedPrompts && queuedPrompts.length > 0 && (
                   <section className="queue" aria-label="Queued Messages">
-                    <div className="queue-head">
-                      <span className="queue-count">{queuedPrompts.length} Queued</span>
-                    </div>
-                    <ul className="queue-rows">
+                    <button type="button" className="disclosure-trigger queue-summary" aria-expanded={queueExpanded}
+                      aria-controls="live-queue-rows" onClick={() => setQueueExpanded((open) => !open)}>
+                      <ChevronRightIcon className="disclosure-chevron" />
+                      <span className="queue-count">
+                        {queuedPrompts.length} {queuedPrompts.length === 1 ? "Queued Message" : "Queued Messages"}
+                      </span>
+                    </button>
+                    <ul id="live-queue-rows" className="queue-rows" hidden={!queueExpanded}>
                       {queuedPrompts.map((prompt) => (
                         <li className="queue-row" key={prompt.id}>
                           <span className="queue-text">{prompt.text}</span>
