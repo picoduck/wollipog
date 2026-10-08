@@ -4368,6 +4368,8 @@ export interface ConsumeWorkflowDecisionRequest {
 }
 
 export interface PendingApproval {
+  /** Control-plane occurrence time. Reconnects preserve it; provider timestamps do not own it. */
+  requestedAt?: number;
   /** v108: runner-verified spawning tool identity; never a raw provider thread id. */
   ownerToolUseId?: string;
   /** v108: other concurrent provider requests in this SAME approval store. The first request
@@ -5212,8 +5214,8 @@ export type SessionEventPayload =
   | { kind: "agent_message"; text: string; final?: boolean; messageId?: string; parentToolUseId?: string }
   /** Control-plane-authored row for a file attachment. Bytes remain in the private artifact store. */
   | { kind: "artifact_attached"; artifact: WorkflowArtifactView }
-  /** Content-free evidence that a response delivered as message chunks reached a successful turn
-   * boundary. Completion-only responses continue to use `agent_message.final` instead. */
+  /** Content-free evidence that live top-level output reached a successful turn boundary.
+   * `agent_message.final` completes an individual message, which may occur mid-turn. */
   | { kind: "agent_response_completed" }
   | { kind: "agent_thought"; text: string; final?: boolean; messageId?: string; parentToolUseId?: string }
   | {
@@ -6672,8 +6674,29 @@ export interface SessionCommandPermissions {
   gitActions?: SessionCommandPermission;
 }
 
+/** Compact CP-owned follow-up facts. No transcript fetch or lifecycle inference is required. */
+export interface SessionAttentionSummary {
+  version: 1;
+  /** Durable CP ordering fence for shared attention facts, independent of event hydration. */
+  revision?: number;
+  humanActions: Array<{ requestId: string; rank: number; requestedAt: number }>;
+  meaningfulAt: number;
+  result: {
+    revision: string;
+    at: number;
+    owner: "human" | "orchestrator";
+  } | null;
+  /** The receiving user's acknowledgment. Omitted on unscoped mutation responses; null means
+   * this viewer has none. Agent views never carry a human's acknowledgment. */
+  acknowledgedRevision?: string | null;
+  /** Per-user ordering fence; omitted with the acknowledgment on unscoped responses. */
+  acknowledgmentRevision?: number;
+}
+
 /** Denormalised session record for the UI (board cards + lists). */
 export interface SessionView {
+  /** Omitted by older peers. Absence never implies an outstanding result. */
+  attention?: SessionAttentionSummary;
   id: string;
   /** Control-plane-attributed creator session. Never accepted from a client or runner snapshot. */
   parentSessionId?: string | null;
@@ -10683,6 +10706,8 @@ export interface CreateRunRequest {
 }
 
 export interface PromptRequest {
+  /** Exact result displayed when these follow-up instructions were submitted. */
+  reviewedResultRevision?: string;
   text: string;
   images?: PromptImageInput[];
   config?: SessionConfig;
@@ -10719,6 +10744,7 @@ export type PromptAdmissionView = SessionView & { promptDelivery?: PromptDeliver
 /** Body for POST /api/sessions/:id/steer. Exactly one of direct content or promotePromptId is
  * accepted by the route. A fresh submissionId identifies each user action, including promotion. */
 export interface SteerRequest {
+  reviewedResultRevision?: string;
   submissionId: string;
   turnId: string;
   text?: string;

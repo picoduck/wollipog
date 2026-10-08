@@ -79,6 +79,7 @@ function positional(args: string[]): string[] {
     "--title", "--model", "--effort", "--permission-mode", "--after", "--limit", "--for", "--timeout",
     "--interval", "--cost-budget", "--max-tool-calls", "--session", "--branch", "--base", "--base-ref",
     "--max-child-sessions", "--offset", "--event-epoch",
+    "--revision",
   ]);
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
@@ -432,6 +433,12 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       return words[2] && words.slice(3).join(" ").trim()
         ? { tool: "prompt_session", input: { sessionId: words[2], text: words.slice(3).join(" ") } }
         : { error: "session prompt requires an id and text" };
+    case "handoff-result": {
+      const revision = option(args, "--revision");
+      return words[2] && revision
+        ? { tool: "handoff_session_result", input: { sessionId: words[2], revision } }
+        : { error: "session handoff-result requires an id and --revision" };
+    }
     case "wait":
       return words[2]
         ? {

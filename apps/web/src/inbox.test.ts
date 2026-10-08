@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ProjectView, SessionStatus, SessionView } from "@wollipog/protocol";
 import { workspaceLocationKey } from "./projects.js";
+import { outstandingSessionResult, sessionFollowUp } from "./session-follow-up.js";
+import { sortSessionsForReminders } from "./session-reminders.js";
 import {
   INBOX_ALL_SPLIT_KEY,
   INBOX_NO_PROJECT_SPLIT_KEY,
@@ -90,17 +92,72 @@ function session(
   };
 }
 
-test("sortInboxSessions pins first and otherwise uses last event time descending", () => {
+test("sortInboxSessions pins within a priority group and ignores noisy event recency", () => {
   const sorted = sortInboxSessions([
     session("old", { lastEventAt: 10 }),
     session("none", { lastEventAt: null, updatedAt: 100 }),
     session("new", { lastEventAt: 30 }),
     session("pinned", { lastEventAt: 1 }),
   ], new Set(["pinned"]));
-  assert.deepEqual(sorted.map(({ id }) => id), ["pinned", "new", "old", "none"]);
+  assert.deepEqual(sorted.map(({ id }) => id), ["pinned", "new", "none", "old"]);
 });
 
-test("sortInboxSessions uses updated time and id as deterministic fallbacks", () => {
+test("input, results, work, and quiet are independent of lifecycle and pins", () => {
+  const attention = (at: number, revision: string | null, acknowledgedRevision: string | null = null) => ({
+    version: 1 as const, meaningfulAt: at, humanActions: [], acknowledgedRevision,
+    result: revision ? { revision, at, owner: "human" as const } : null,
+  });
+  const input = session("input", { status: "running", attention: { ...attention(2, "also-a-result"),
+    humanActions: [{ requestId: "question", rank: 3, requestedAt: 2 }] } });
+  const readyRunning = session("ready-running", { status: "running", attention: attention(10, "r1") });
+  const readyIdle = session("ready-idle", { status: "idle", attention: attention(9, "r2") });
+  const reviewed = session("reviewed", { status: "completed", attention: attention(30, "r3", "r3") });
+  const quiet = session("quiet", { status: "idle", column: "review", attention: attention(40, null) });
+  const working = session("working", { status: "running", attention: attention(50, null) });
+  assert.deepEqual(sortInboxSessions([quiet, reviewed, readyIdle, working, input, readyRunning],
+    new Set(["quiet", "working"])).map(({ id }) => id),
+  ["input", "ready-running", "ready-idle", "working", "quiet", "reviewed"]);
+  assert.equal(sessionFollowUp(input).group, "needs_input");
+  assert.equal(outstandingSessionResult(reviewed), null);
+  assert.equal(sessionFollowUp(session("legacy", { status: "idle", preview: "Old text", messageCount: 99 })).group, "quiet");
+});
+
+test("canonical request ranks then oldest requests win; results use newest revision time", () => {
+  const input = (id: string, rank: number, requestedAt: number) => session(id, { status: "running",
+    attention: { version: 1, humanActions: [{ requestId: id, rank, requestedAt }], meaningfulAt: 1,
+      result: null, acknowledgedRevision: null } });
+  assert.deepEqual(sortInboxSessions([input("new-question", 3, 30), input("old-permission", 4, 1),
+    input("auth", 1, 40), input("old-question", 3, 10)]).map(({ id }) => id),
+  ["auth", "old-question", "new-question", "old-permission"]);
+});
+
+test("agent-owned child results and requests stay unattended; handed-off results roll up a family", () => {
+  const parent = session("parent", { status: "running" });
+  const child = session("child", { parentSessionId: "parent", status: "input_required",
+    pendingRequestOwners: { human: 0, orchestrator: 1 },
+    attention: { version: 1, humanActions: [], meaningfulAt: 2,
+      result: { revision: "r1", at: 2, owner: "orchestrator" }, acknowledgedRevision: null } });
+  const human = session("human", { status: "running", attention: { version: 1, humanActions: [], meaningfulAt: 3,
+    result: { revision: "r2", at: 3, owner: "human" }, acknowledgedRevision: null } });
+  assert.deepEqual(sortInboxSessions([parent, child, human]).map(({ id }) => id), ["human", "parent", "child"]);
+  const handedOff = { ...child, attention: { ...child.attention!, result: { ...child.attention!.result!, at: 4, owner: "human" as const } } };
+  const rows = threadInboxRows(sortInboxSessions([parent, handedOff, human]).map((session) => ({ session })), new Set());
+  assert.deepEqual(rows.map(({ session }) => session.id), ["parent", "child", "human"]);
+  assert.match(inboxThreadChildrenLabel(rows[0]!.thread.children!), /Ready for Review/);
+});
+
+test("a due reminder surfaces follow-up but cannot outrank human input or split a family", () => {
+  const parent = session("parent");
+  const child = session("child", { status: "running", parentSessionId: "parent" });
+  const input = session("input", { pendingApproval: { requestId: "request", title: "Choose", kind: "question", options: [] } });
+  const due = { reminderId: "due", sessionId: "child", state: "fired" as const, revision: 1,
+    createdAt: 1, updatedAt: 2, firedAt: 2, originalExpression: "tomorrow", wakePolicy: "regardless" as const,
+    scheduledFor: 2, timeZone: "UTC" };
+  assert.deepEqual(sortSessionsForReminders([parent, child, input], new Map([["child", due]]), "ordinary",
+    new Set(["child"])).map(({ id }) => id), ["input", "parent", "child"]);
+});
+
+test("sortInboxSessions ignores updated time and uses stable creation time and id for old peers", () => {
   const sorted = sortInboxSessions([
     session("b", { lastEventAt: 5, updatedAt: 8 }),
     session("c", { lastEventAt: 5, updatedAt: 9 }),
@@ -108,7 +165,7 @@ test("sortInboxSessions uses updated time and id as deterministic fallbacks", ()
     session("null-b", { lastEventAt: null, updatedAt: 7 }),
     session("null-a", { lastEventAt: null, updatedAt: 8 }),
   ]);
-  assert.deepEqual(sorted.map(({ id }) => id), ["c", "a", "b", "null-a", "null-b"]);
+  assert.deepEqual(sorted.map(({ id }) => id), ["a", "b", "c", "null-a", "null-b"]);
 });
 
 test("deriveInboxSplits emits All, pinned projects, other projects, then Chats", () => {
@@ -127,7 +184,7 @@ test("deriveInboxSplits emits All, pinned projects, other projects, then Chats",
     [alphaKey, "Alpha"],
     [" chats", "Chats"],
   ]);
-  assert.deepEqual(splits[0]!.sessions.map(({ id }) => id), ["chat", "alpha", "zulu"]);
+  assert.deepEqual(splits[0]!.sessions.map(({ id }) => id), ["alpha", "chat", "zulu"]);
   assert.equal(splits.some((split) => split.sessions.some(({ id }) => id === "archived")), false);
 });
 
@@ -300,12 +357,11 @@ test("split counts include blocked sessions and every split uses inbox card orde
   for (const split of [splits[0]!, splits.find(({ key: candidate }) => candidate === key)!]) {
     assert.equal(split.count, 3);
     assert.equal(split.blockedCount, 1);
-    // Pinned first, then the session waiting on a decision ahead of the one merely running (#896).
-    assert.deepEqual(split.sessions.map(({ id }) => id), ["pinned", "blocked", "new"]);
+    assert.deepEqual(split.sessions.map(({ id }) => id), ["blocked", "new", "pinned"]);
   }
 });
 
-test("sortInboxSessions puts urgency before recency: stalled and blocked, blocked, running, settled", () => {
+test("sortInboxSessions puts input above work and quiet, independently of stalls and noisy recency", () => {
   const sorted = sortInboxSessions([
     session("settled-new", { status: "completed", lastEventAt: 50 }),
     session("running", { status: "running", lastEventAt: 40 }),
@@ -315,7 +371,7 @@ test("sortInboxSessions puts urgency before recency: stalled and blocked, blocke
     session("pinned-settled", { status: "idle", lastEventAt: 1 }),
   ], new Set(["pinned-settled"]), new Set(["stalled-blocked", "running"]));
   assert.deepEqual(sorted.map(({ id }) => id),
-    ["pinned-settled", "stalled-blocked", "blocked-newer", "blocked", "running", "settled-new"]);
+    ["blocked", "blocked-newer", "stalled-blocked", "running", "pinned-settled", "settled-new"]);
   assert.equal(inboxUrgency(session("s", { status: "running" }), new Set(["s"])), 1, "a stalled RUNNING session is not blocked");
 });
 
@@ -339,7 +395,7 @@ test("sortInboxSessions keeps a family together, placed by its strongest member,
     session("parent", { status: "idle", lastEventAt: 1 }),
     session("child", { status: "idle", lastEventAt: 2, parentSessionId: "parent" }),
   ], new Set(["child"]));
-  assert.deepEqual(pinnedChild.map(({ id }) => id), ["parent", "child", "lone"], "a pinned child pins its family");
+  assert.deepEqual(pinnedChild.map(({ id }) => id), ["lone", "parent", "child"], "a pinned child cannot override human input");
 });
 
 test("inboxPinnedAncestorIds finds every present ancestor without treating it as directly pinned", () => {
@@ -377,10 +433,10 @@ test("threadInboxRows nests children under a present parent and drops a collapse
   ]);
   const parent = expanded[0]!.thread;
   assert.equal(parent.collapsed, false);
-  assert.deepEqual(parent.children, { count: 2, waiting: 1, children: [
+  assert.deepEqual(parent.children, { followUpLabel: "Needs Your Input", count: 2, waiting: 1, children: [
     { id: "a", title: "Child A", state: "stalled" }, { id: "b", title: "Child B", state: "done" },
   ] });
-  assert.equal(inboxThreadChildrenLabel(parent.children!), "2 Children · 1 Awaiting Input");
+  assert.equal(inboxThreadChildrenLabel(parent.children!), "2 Children · Needs Your Input");
   assert.equal(expanded[2]!.thread.children?.count, 1, "a child with children carries its own rollup");
   assert.equal(expanded[4]!.thread.children, null);
 

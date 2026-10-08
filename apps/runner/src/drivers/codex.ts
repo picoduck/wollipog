@@ -92,6 +92,7 @@ export class CodexDriver implements Driver {
   private cwd: string;
   private disposed = false;
   private cancelled = false;
+  private responseHasText = false;
   private config: SessionConfig;
   private readonly deps: CodexDriverDeps;
   private readonly descendantOwner = {};
@@ -157,6 +158,7 @@ export class CodexDriver implements Driver {
     // Reset the prior turn before the asynchronous probe; a new cancellation during
     // the probe still wins at the post-await check and must not launch a process.
     this.cancelled = false;
+    this.responseHasText = false;
     let isolationArgs: string[] = [];
     // The coupled preset always isolates MCP servers; the additive role does so only when the human
     // asked for Integration Isolation. Codex merges MCP tables even when the CLI supplies one, so
@@ -364,6 +366,10 @@ export class CodexDriver implements Driver {
         this.handleItem(msg.type, msg.item);
         return null;
       case "turn.completed": {
+        if (this.responseHasText) {
+          this.responseHasText = false;
+          this.cb.onEvent({ kind: "agent_response_completed" });
+        }
         const u = msg.usage ?? {};
         this.cb.onEvent({
           kind: "token_usage",
@@ -376,9 +382,11 @@ export class CodexDriver implements Driver {
         return "end_turn";
       }
       case "turn.failed":
+        this.responseHasText = false;
         if (msg.error?.message) this.emitErrorOrAuthenticationFailure(String(msg.error.message));
         return "refusal";
       case "error":
+        this.responseHasText = false;
         this.emitErrorOrAuthenticationFailure(String(msg.message ?? "codex error"));
         return "refusal";
       default:
@@ -402,7 +410,10 @@ export class CodexDriver implements Driver {
     const completed = phase === "item.completed";
     switch (item.type) {
       case "agent_message":
-        if (completed && item.text) this.cb.onEvent({ kind: "agent_message", text: item.text, messageId: id, final: true });
+        if (completed && item.text) {
+          this.responseHasText = true;
+          this.cb.onEvent({ kind: "agent_message", text: item.text, messageId: id, final: true });
+        }
         break;
       case "reasoning":
         // Current `codex exec --json` exposes readable reasoning only as an authoritative

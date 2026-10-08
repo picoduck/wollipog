@@ -4531,7 +4531,12 @@ app.post("/api/sessions/:id/prompt", async (req, reply) => {
   // A person sending from the dashboard has the queue in front of them and an explicit Steer
   // control; an agent parent sending to a descendant has neither, which is why its mid-turn
   // message used to vanish (#1406). Give only the agent lane the steer-first admission.
-  if (human) return respond(reply, svc.promptFromUser(human.userId, id, text, images, slashCommand, body?.config));
+  if (human) {
+    const result = svc.promptFromUser(human.userId, id, text, images, slashCommand, body?.config,
+      typeof body?.reviewedResultRevision === "string" ? body.reviewedResultRevision : undefined);
+    return respond(reply, result.ok && result.data ? { ...result, data: withSessionCommandPermissions(db, human,
+      { ...result.data, attention: db.getSession(id)?.attention }) } : result);
+  }
   // Hold advice in the refusal, the delivery report and the returned view, including a nested
   // Orchestrator's campaign, names only the tools this agent credential may call (#1863).
   const principal = requestPrincipals.get(req) ?? requestPrincipal(req);
@@ -4543,6 +4548,41 @@ app.post("/api/sessions/:id/prompt", async (req, reply) => {
     : result);
 });
 
+app.post("/api/sessions/:id/result/handoff", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const session = db.getSession(id);
+  const principal = requestPrincipals.get(req) ?? requestPrincipal(req);
+  if (!session || !principal || !db.canAccessSession(principal, id)) {
+    return reply.code(404).send({ error: "session not found" });
+  }
+  const controllerId = db.sessionResultOrchestrator(id);
+  if (!controllerId ||
+      (principal.kind === "agent" ? principal.credentialSessionId !== controllerId : !db.isSessionOwner(principal, controllerId))) {
+    return reply.code(403).send({ error: "only the controlling Orchestrator or its human owner may hand off a result" });
+  }
+  const revision = (req.body as { revision?: unknown } | null)?.revision;
+  if (typeof revision !== "string" || !revision || revision.length > 200) {
+    return reply.code(400).send({ error: "an exact result revision is required" });
+  }
+  const handedOff = db.handoffSessionResult(id, revision);
+  if (handedOff) hub.sessionChangedById(id);
+  return { handedOff, session: withSessionCommandPermissions(db, principal, db.getSession(id)!) };
+});
+
+app.post("/api/sessions/:id/result/acknowledge", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const human = requestHuman(req);
+  if (!human) return reply.code(403).send({ error: "human identity is required" });
+  if (!db.canAccessSession(human, id)) return reply.code(404).send({ error: "session not found" });
+  const revision = (req.body as { revision?: unknown } | null)?.revision;
+  if (typeof revision !== "string" || !revision || revision.length > 200) {
+    return reply.code(400).send({ error: "an exact result revision is required" });
+  }
+  const acknowledged = db.acknowledgeSessionResult(id, human.userId, revision);
+  if (acknowledged) hub.sessionChangedById(id);
+  return { acknowledged, session: withSessionCommandPermissions(db, human, db.getSession(id)!) };
+});
+
 app.post("/api/sessions/:id/command-invocations", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   return respond(reply, svc.invokeSessionCommand(id, req.body as InvokeSessionCommandRequest));
@@ -4550,7 +4590,13 @@ app.post("/api/sessions/:id/command-invocations", async (req, reply) => {
 
 app.post("/api/sessions/:id/steer", async (req, reply) => {
   const id = (req.params as { id: string }).id;
-  return respond(reply, await svc.steer(id, req.body as SteerRequest));
+  const body = req.body as SteerRequest;
+  const result = await svc.steer(id, body);
+  const human = requestHuman(req);
+  if (human && result.ok && typeof body.reviewedResultRevision === "string" && body.reviewedResultRevision &&
+      body.reviewedResultRevision.length <= 200 &&
+      db.reviewSessionResultAfterSteering(id, human.userId, body.submissionId, body.reviewedResultRevision)) hub.sessionChangedById(id);
+  return respond(reply, result);
 });
 
 app.post("/api/sessions/:id/steering/:submissionId/resolve", async (req, reply) => {

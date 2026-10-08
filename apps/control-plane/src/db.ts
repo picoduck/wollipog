@@ -5,6 +5,7 @@
  */
 
 import { DatabaseSync } from "node:sqlite";
+import { attentionRequestRank } from "@wollipog/protocol";
 import { CLAUDE_RECONCILIATION_SCHEMA, normalizeReconciledSnapshot } from "./claude-cost-reconciliation.js";
 import { priceUsage, resolveCostSource, type RateTable } from "./usage-pricing.js";
 import { collapseAgentSpawnObservations, type StructuredAgentSpawnObservation } from "./child-session-registry.js";
@@ -971,6 +972,37 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_orchestrator_campaign_continuation_active
   WHERE state IN ('pending','running','missing_result');
 CREATE INDEX IF NOT EXISTS idx_orchestrator_campaign_continuation_campaign
   ON orchestrator_campaign_continuations(campaign_session_id, created_at, continuation_id);
+
+-- Only new live results populate this projection; historical hydration is deliberately quiet.
+CREATE TABLE IF NOT EXISTS session_attention (
+  session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+  revision INTEGER NOT NULL DEFAULT 0,
+  meaningful_at INTEGER NOT NULL,
+  result_revision TEXT,
+  result_at INTEGER,
+  pending_response INTEGER NOT NULL DEFAULT 0,
+  human_handoff_revision TEXT
+);
+CREATE TABLE IF NOT EXISTS session_attention_results (
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  revision TEXT NOT NULL,
+  PRIMARY KEY (session_id, revision)
+);
+CREATE TABLE IF NOT EXISTS session_result_acknowledgments (
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES identity_users(user_id) ON DELETE CASCADE,
+  result_revision TEXT NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 1,
+  acknowledged_at INTEGER NOT NULL,
+  PRIMARY KEY (session_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS session_result_steering_reviews (
+  request_id TEXT NOT NULL REFERENCES session_steering_attempts(request_id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES identity_users(user_id) ON DELETE CASCADE,
+  result_revision TEXT NOT NULL,
+  settled INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (request_id,user_id)
+);
 
 -- A reminder belongs to one human even when the underlying session is shared. The single row per
 -- (session,user) makes replacement atomic, while state+revision make firing and multi-client edits
@@ -4887,6 +4919,12 @@ export class ControlPlaneDb {
     // with REPLACE has one.
     db.exec("PRAGMA recursive_triggers = ON;");
     db.exec(SCHEMA);
+    for (const [table, defaultValue] of [["session_attention", 0], ["session_result_acknowledgments", 1]] as const) {
+      const columns = db.prepare(`PRAGMA table_info(${table})`).all() as unknown as Array<{ name: string }>;
+      if (!columns.some((column) => column.name === "revision")) {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN revision INTEGER NOT NULL DEFAULT ${defaultValue}`);
+      }
+    }
     const videoReceiptColumns = new Set((db.prepare("PRAGMA table_info(ui_evidence_review_receipts)")
       .all() as unknown as Array<{ name: string }>).map((column) => column.name));
     for (const [name, type] of [
@@ -13831,6 +13869,10 @@ export class ControlPlaneDb {
       id,
     );
     this.writeSessionStopProvenance(id, existing?.status, status, RUNNER_REPORTED_STOP, now);
+    if (existing && existing.status !== status) this.stmt(`
+      INSERT INTO session_attention(session_id,meaningful_at) VALUES (?,?)
+      ON CONFLICT(session_id) DO UPDATE SET meaningful_at=MAX(meaningful_at,excluded.meaningful_at)`).run(id, now);
+    if (existing && (existing.status !== status || existing.pending_approval !== pendingJson)) this.advanceSessionAttentionRevision(id);
     if (snap.providerAccountId) {
       this.stmt("UPDATE sessions SET provider_account_id=?, provider_account_label=?, provider_account_automatically_selected=? WHERE id=?")
         .run(snap.providerAccountId, snap.providerAccountLabel ?? snap.providerAccountId,
@@ -14635,6 +14677,14 @@ export class ControlPlaneDb {
       this.recordChildToolCallPeak(id);
       this.stmt("DELETE FROM session_events WHERE session_id=?").run(id);
       this.stmt("DELETE FROM session_events_fts WHERE session_id=?").run(id);
+      this.stmt(`UPDATE session_attention SET meaningful_at=(SELECT created_at FROM sessions WHERE id=?),
+        result_revision=NULL,result_at=NULL,pending_response=0,human_handoff_revision=NULL,revision=revision+1
+        WHERE session_id=?`).run(id, id);
+      this.stmt("DELETE FROM session_attention_results WHERE session_id=?").run(id);
+      this.stmt(`UPDATE session_result_acknowledgments SET result_revision='',revision=revision+1
+        WHERE session_id=?`).run(id);
+      this.stmt(`UPDATE session_result_steering_reviews SET settled=1 WHERE request_id IN
+        (SELECT request_id FROM session_steering_attempts WHERE session_id=?)`).run(id);
       this.stmt(
         `UPDATE managed_background_deliveries
             SET transcript_projected_at=NULL, projected_event_epoch=NULL, projected_event_seq=NULL
@@ -14689,6 +14739,10 @@ export class ControlPlaneDb {
     const keepWorkflowPause = !isTerminal(status) &&
       pendingRequests(pending).some((request) => request.kind === "workflow_decision");
     const effectiveStatus: SessionStatus = keepWorkflowPause ? "input_required" : status;
+    if (current && current.status !== effectiveStatus) this.stmt(`
+      INSERT INTO session_attention(session_id,meaningful_at) VALUES (?,?)
+      ON CONFLICT(session_id) DO UPDATE SET meaningful_at=MAX(meaningful_at,excluded.meaningful_at)`).run(id, now);
+    if (current && current.status !== effectiveStatus) this.advanceSessionAttentionRevision(id);
     this.stmt("UPDATE sessions SET status=?, capacity_wait=NULL, updated_at=? WHERE id=?")
       .run(effectiveStatus, now, id);
     // The overloads require provenance for `stopped`; an untyped caller still records a stop that
@@ -17528,6 +17582,7 @@ export class ControlPlaneDb {
       approval ? pendingApprovalWithOccurrenceIds(approval, existing) : null);
     this.stmt("UPDATE sessions SET pending_approval=? WHERE id=?")
       .run(identified ? JSON.stringify(identified) : null, id);
+    if (JSON.stringify(existing) !== JSON.stringify(identified)) this.advanceSessionAttentionRevision(id);
   }
 
   getPolicyHookApproval(sessionId: string, requestId: string): PolicyHookApprovalRecord | null {
@@ -17619,6 +17674,7 @@ export class ControlPlaneDb {
         this.stmt(
           "UPDATE sessions SET pending_approval=?, status='input_required', updated_at=? WHERE id=?",
         ).run(JSON.stringify(input.approval), input.now, input.sessionId);
+        this.advanceSessionAttentionRevision(input.sessionId);
       }
       for (const audit of input.audits ?? []) this.appendGovernanceAudit(audit);
       const created = this.getPolicyHookApproval(input.sessionId, input.requestId)!;
@@ -17720,6 +17776,7 @@ export class ControlPlaneDb {
         ...approval.approval,
         ...(pending.length ? { additionalRequests: pending } : {}),
       }), now, sessionId);
+      this.advanceSessionAttentionRevision(sessionId);
       const promoted = this.getPolicyHookApproval(sessionId, next.request_id)!;
       this.db.exec("COMMIT");
       return promoted;
@@ -17752,6 +17809,7 @@ export class ControlPlaneDb {
       ...pending.approval,
       ...(asyncQuestions.length ? { additionalRequests: asyncQuestions } : {}),
     }), now, sessionId);
+    this.advanceSessionAttentionRevision(sessionId);
     return pending;
   }
 
@@ -19461,6 +19519,7 @@ export class ControlPlaneDb {
       }
       const updated = this.stmt("SELECT * FROM session_steering_attempts WHERE request_id=?")
         .get(row.request_id) as unknown as SteeringAttemptRow;
+      this.settleSteeringResultReviews(row.request_id, now);
       this.db.exec("COMMIT");
       return this.steeringAttemptView(updated);
     } catch (error) {
@@ -19588,6 +19647,7 @@ export class ControlPlaneDb {
       );
       const updated = this.stmt("SELECT * FROM session_steering_attempts WHERE request_id=?")
         .get(result.requestId) as unknown as SteeringAttemptRow;
+      this.settleSteeringResultReviews(result.requestId, now);
       this.db.exec("COMMIT");
       return this.steeringAttemptView(updated);
     } catch (error) {
@@ -19634,6 +19694,10 @@ export class ControlPlaneDb {
          AND compacted_at IS NULL
          AND (disposition='pending' OR (disposition='uncertain' AND receipt_json IS NULL))`,
     ).run(now, now, sessionId, submissionId, turnId);
+    if (updated.changes) {
+      const request = this.findSteeringAttemptBySubmission(sessionId, submissionId);
+      if (request) this.settleSteeringResultReviews(request.requestId, now);
+    }
     return Number(updated.changes) > 0;
   }
 
@@ -20566,6 +20630,112 @@ export class ControlPlaneDb {
       : null;
   }
 
+  private advanceSessionAttentionRevision(sessionId: string): void {
+    this.stmt(`INSERT INTO session_attention(session_id,meaningful_at,revision)
+      SELECT id,created_at,1 FROM sessions WHERE id=?
+      ON CONFLICT(session_id) DO UPDATE SET revision=revision+1`).run(sessionId);
+  }
+
+  /** Called only for live evidence, including a live frame waiting behind a history gap. */
+  observeSessionAttentionEvent(sessionId: string, payload: SessionEventPayload, ts: number, revision: string): void {
+    const message = payload.kind === "agent_message" && !payload.parentToolUseId;
+    const observed = (message && (payload.text.trim() || payload.final === true)) ||
+      payload.kind === "agent_response_completed" || (payload.kind === "user_message" && payload.final !== false) ||
+      payload.kind === "question_request" || payload.kind === "permission_request";
+    if (observed && !this.stmt("INSERT OR IGNORE INTO session_attention_results(session_id,revision) VALUES (?,?)")
+      .run(sessionId, revision).changes) return;
+    // `final` completes a message item, which can precede more tools or commentary. Only the
+    // provider's successful response boundary promotes live output into review work.
+    if (message && payload.text.trim()) {
+      this.stmt(`INSERT INTO session_attention(session_id,meaningful_at,pending_response)
+        SELECT id,created_at,1 FROM sessions WHERE id=?
+        ON CONFLICT(session_id) DO UPDATE SET pending_response=1`).run(sessionId);
+      return;
+    }
+    const pending = (this.stmt("SELECT pending_response FROM session_attention WHERE session_id=?")
+      .get(sessionId) as { pending_response: number } | undefined)?.pending_response === 1;
+    const final = payload.kind === "agent_response_completed" && pending;
+    const meaningful = final || (payload.kind === "user_message" && payload.final !== false) || payload.kind === "question_request" ||
+      payload.kind === "permission_request";
+    if (!meaningful) return;
+    this.stmt(`INSERT INTO session_attention(session_id,meaningful_at) VALUES (?,?)
+      ON CONFLICT(session_id) DO UPDATE SET meaningful_at=MAX(meaningful_at,excluded.meaningful_at)`)
+      .run(sessionId, ts);
+    if (final) {
+      this.stmt(`UPDATE session_attention SET result_revision=?,result_at=?,pending_response=0
+        WHERE session_id=? AND (result_revision IS NULL OR result_revision<>?)`)
+        .run(revision, ts, sessionId, revision);
+    }
+    this.advanceSessionAttentionRevision(sessionId);
+  }
+
+  /** Exact-revision CAS. A stale acknowledgment cannot consume a concurrently arriving result. */
+  acknowledgeSessionResult(sessionId: string, userId: string, revision: string, now = Date.now()): boolean {
+    return this.stmt(`INSERT INTO session_result_acknowledgments(session_id,user_id,result_revision,acknowledged_at)
+      SELECT session_id,?,?,? FROM session_attention WHERE session_id=? AND result_revision=?
+      ON CONFLICT(session_id,user_id) DO UPDATE SET result_revision=excluded.result_revision,
+        acknowledged_at=excluded.acknowledged_at,revision=revision+1`).run(userId, revision, now, sessionId, revision).changes > 0;
+  }
+
+  /** An unconfirmed steer keeps its exact personal review intent across late receipts/restarts. */
+  reviewSessionResultAfterSteering(sessionId: string, userId: string, submissionId: string, revision: string): boolean {
+    const attempt = this.findSteeringAttemptBySubmission(sessionId, submissionId);
+    if (!attempt) return false;
+    this.stmt(`INSERT OR IGNORE INTO session_result_steering_reviews(request_id,user_id,result_revision)
+      VALUES (?,?,?)`).run(attempt.requestId, userId, revision);
+    return this.settleSteeringResultReviews(attempt.requestId, Date.now());
+  }
+
+  private settleSteeringResultReviews(requestId: string, now: number): boolean {
+    const attempt = this.stmt(`SELECT session_id,disposition,resolution_action,resolved_at
+      FROM session_steering_attempts WHERE request_id=?`).get(requestId) as
+      { session_id: string; disposition: string; resolution_action: string | null; resolved_at: number | null } | undefined;
+    if (!attempt) return false;
+    const accepted = attempt.disposition === "accepted" || attempt.disposition === "converted_to_queue" ||
+      (attempt.resolution_action === "queue_again" && attempt.resolved_at !== null);
+    if (!accepted && attempt.disposition !== "rejected") return false;
+    const reviews = this.stmt(`SELECT user_id,result_revision FROM session_result_steering_reviews
+      WHERE request_id=? AND settled=0`).all(requestId) as Array<{ user_id: string; result_revision: string }>;
+    let changed = false;
+    for (const review of reviews) {
+      if (accepted) changed = this.acknowledgeSessionResult(attempt.session_id, review.user_id, review.result_revision, now) || changed;
+    }
+    this.stmt("UPDATE session_result_steering_reviews SET settled=1 WHERE request_id=?").run(requestId);
+    return changed;
+  }
+
+  /** The outermost durable Orchestrator owns descendant results, including nested helpers. */
+  sessionResultOrchestrator(sessionId: string): string | null {
+    const seen = new Set<string>([sessionId]);
+    let parentId = (this.stmt("SELECT parent_session_id FROM sessions WHERE id=?").get(sessionId) as
+      { parent_session_id: string | null } | undefined)?.parent_session_id;
+    let controller: string | null = null;
+    for (let depth = 0; parentId && depth < 64 && !seen.has(parentId); depth++) {
+      seen.add(parentId);
+      const parent = this.stmt("SELECT parent_session_id,session_role,permission_mode,orchestrator_policy FROM sessions WHERE id=?")
+        .get(parentId) as { parent_session_id: string | null; session_role: SessionRole | null; permission_mode: string | null;
+          orchestrator_policy: string | null } | undefined;
+      if (!parent) return null;
+      if (sessionRole({ role: parent.session_role, permissionMode: parent.permission_mode }) === "orchestrator" &&
+          orchestratorCampaignPolicyFromJson(parent.orchestrator_policy)) controller = parentId;
+      parentId = parent.parent_session_id;
+    }
+    return parentId ? null : controller;
+  }
+
+  handoffSessionResult(sessionId: string, revision: string): boolean {
+    return this.stmt(`UPDATE session_attention SET human_handoff_revision=?,revision=revision+1
+      WHERE session_id=? AND result_revision=?`).run(revision, sessionId, revision).changes > 0;
+  }
+
+  sessionAttentionForUser(session: SessionView, userId: string | null): SessionView {
+    if (!session.attention) return session;
+    const ack = userId ? this.stmt(`SELECT result_revision,revision FROM session_result_acknowledgments
+      WHERE session_id=? AND user_id=?`).get(session.id, userId) as { result_revision: string; revision: number } | undefined : undefined;
+    return { ...session, attention: { ...session.attention, acknowledgedRevision: ack?.result_revision || null,
+      acknowledgmentRevision: ack?.revision ?? 0 } };
+  }
+
   /**
    * `replaceExisting` unlinks whatever child currently holds the parent's row and installs the new
    * one in the same transaction, so the parent is never briefly left with no side chat at all. The
@@ -20752,7 +20922,7 @@ export class ControlPlaneDb {
     // newer runner counters whose cost is not known yet; the detailed `/usage` consumer applies
     // the same processed-token freshness test before accepting its provenance.
     const costSource = this.sessionCostSource(row.id, row.input_tokens + row.output_tokens);
-    return {
+    const view: SessionView = {
       id: row.id,
       runnerId: row.runner_id,
       workspaceId: row.workspace_id,
@@ -20885,6 +21055,23 @@ export class ControlPlaneDb {
       eventEpoch: row.event_epoch ?? 0,
       preview: row.preview,
       pendingApproval: pending,
+      attention: (() => {
+        const facts = this.stmt("SELECT * FROM session_attention WHERE session_id=?").get(row.id) as
+          { revision: number; meaningful_at: number; result_revision: string | null; result_at: number | null; human_handoff_revision: string | null } | undefined;
+        return {
+          version: 1 as const,
+          revision: facts?.revision ?? 0,
+          humanActions: pendingRequests(pending).filter((request) =>
+            pendingRequestOwners?.requests?.find((owner) => owner.requestId === request.requestId)?.owner !== "orchestrator")
+            .map((request) => ({ requestId: request.requestId, rank: attentionRequestRank(request),
+              requestedAt: request.requestedAt ?? request.workflowDecision?.createdAt ??
+                (isPolicyApproval(request) ? this.getPolicyHookApproval(row.id, request.requestId)?.createdAt : undefined) ?? row.created_at })),
+          meaningfulAt: facts?.meaningful_at ?? row.created_at,
+          result: facts?.result_revision ? { revision: facts.result_revision, at: facts.result_at!,
+            owner: facts.human_handoff_revision !== facts.result_revision && this.sessionResultOrchestrator(row.id)
+              ? "orchestrator" as const : "human" as const } : null,
+        };
+      })(),
       ...(pendingRequestOwners ? { pendingRequestOwners } : {}),
       ...(attentionOwners.length ? { attentionOwners } : {}),
       ...(durablePromptQueue.length ? { queued: durablePromptQueue } : {}),
@@ -20921,6 +21108,24 @@ export class ControlPlaneDb {
       // Lazy: sessions without the guardrail never pay the COUNT (same class as messageCount).
       toolCallCount: row.max_tool_calls != null ? this.countToolCalls(row.id) : undefined,
     };
+    // Recoverable child failures belong to the controller, like its other work. An explicit
+    // human-owned escalation remains represented by the pending request above.
+    const recoveryActions = [
+      ...(view.historyQuarantine ? [{ requestId: "history-recovery", rank: 0,
+        requestedAt: view.historyQuarantine.detectedAt }] : []),
+      ...(view.worktreeRecovery ? [{ requestId: `worktree-recovery:${view.worktreeRecovery.recoveryId}`, rank: 0,
+        requestedAt: view.worktreeRecovery.detectedAt }] : []),
+      ...(view.stopOperation?.status === "stop_failed" ? [{ requestId: `stop-recovery:${view.stopOperation.operationId}`, rank: 0,
+        requestedAt: view.stopOperation.failure?.failedAt ?? view.stopOperation.requestedAt }] : []),
+      ...(view.backgroundDeliveries ?? []).filter((delivery) =>
+        delivery.watchdogState === "continuation_blocked" || delivery.watchdogState === "accepted_without_result")
+        .map((delivery) => ({ requestId: `background-recovery:${delivery.parentTurnId}`, rank: 0,
+          requestedAt: delivery.missingResultAt ?? delivery.acceptedAt ?? delivery.queuedAt ?? row.created_at })),
+    ];
+    if (recoveryActions.length && !this.sessionResultOrchestrator(row.id)) {
+      view.attention!.humanActions.push(...recoveryActions);
+    }
+    return view;
   }
 
   /** Resolve descendant request ownership from durable ancestry and the current root policy.
@@ -21243,6 +21448,10 @@ export class ControlPlaneDb {
         )
         .run(sessionId, seq, options?.runnerSeq ?? null, ts, payload.kind, JSON.stringify(payload));
       if (options?.runnerSeq === undefined || options.armBackgroundStatusSettlement) {
+        this.observeSessionAttentionEvent(sessionId, payload, ts, options?.runnerSeq === undefined
+          ? `event:${Number(info.lastInsertRowid)}` : `runner:${options.historyEpoch ?? "legacy"}:${options.runnerSeq}`);
+      }
+      if (options?.runnerSeq === undefined || options.armBackgroundStatusSettlement) {
         this.invalidateCampaignReportsForLiveEvent(sessionId, payload, ts);
       }
       this.rebindCampaignReportInTransaction(sessionId, seq, ts, payload);
@@ -21435,6 +21644,7 @@ export class ControlPlaneDb {
         );
         const rowId = Number(info.lastInsertRowid);
         if (options.armBackgroundStatusSettlement) {
+          this.observeSessionAttentionEvent(sessionId, event.payload, event.ts, `runner:${expected.historyEpoch}:${event.seq}`);
           this.invalidateCampaignReportsForLiveEvent(sessionId, event.payload, event.ts);
         }
         this.rebindCampaignReportInTransaction(sessionId, cpSeq, event.ts, event.payload);
@@ -26710,12 +26920,14 @@ function pendingApprovalWithOccurrenceIds(
   prior?: PendingApproval | null,
 ): PendingApproval {
   const priorByRequestId = new Map(
-    pendingRequests(prior).map((request) => [request.requestId, request.occurrenceId]),
+    pendingRequests(prior).map((request) => [request.requestId, request]),
   );
   const identify = (request: PendingApproval): PendingApproval => ({
     ...request,
-    occurrenceId: request.occurrenceId || priorByRequestId.get(request.requestId) ||
+    occurrenceId: request.occurrenceId || priorByRequestId.get(request.requestId)?.occurrenceId ||
       `request_${randomUUID().replace(/-/g, "")}`,
+    requestedAt: (!request.occurrenceId || request.occurrenceId === priorByRequestId.get(request.requestId)?.occurrenceId)
+      ? priorByRequestId.get(request.requestId)?.requestedAt ?? Date.now() : Date.now(),
     ...(request.additionalRequests
       ? { additionalRequests: request.additionalRequests.map(identify) }
       : {}),

@@ -48,6 +48,7 @@ import {
 } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
+import { outstandingSessionResult } from "../session-follow-up.js";
 import { SkillsUnavailableNotice, skillsUnavailableSentence, useSessionSkillsUnavailable, useSkillsNoticeDismissal } from "./SkillsUnavailableNotice.js";
 import { isPartialHistory, isRebuiltEventsArray, useStoreActions, useStoreSelector } from "../store.js";
 import { useShowAgentLogs } from "../agent-logs.js";
@@ -5522,7 +5523,8 @@ function SessionDetailLoaded({
         });
         commandSubmissionRetryRef.current = null;
       } else {
-        const prompted = await api.prompt(sessionId, promptText, outgoingImages, cfg, slashCommand);
+        const prompted = await api.prompt(sessionId, promptText, outgoingImages, cfg, slashCommand,
+          outstandingSessionResult(session)?.revision);
         if (prompted && viewGenerationRef.current === generation &&
             (prompted.status === "queued" || prompted.status === "starting") &&
             hasNewPendingPrompt(knownPendingPromptIds, prompted.pendingPrompts)) {
@@ -5651,6 +5653,7 @@ function SessionDetailLoaded({
     );
     try {
       const receipt = await api.steer(sessionId, {
+        reviewedResultRevision: outstandingSessionResult(session)?.revision,
         submissionId: browserRandomUUID(),
         turnId: session.activeTurnId!,
         ...(outgoing ? { text: outgoing } : {}),

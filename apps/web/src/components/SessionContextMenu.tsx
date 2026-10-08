@@ -9,6 +9,7 @@ import { consumeLongPressClick, handleMenuKeyDown } from "./interactions.js";
 import {
   AlarmClockIcon,
   ArchiveIcon,
+  CheckIcon,
   DismissReminderIcon,
   EditIcon,
   MarkReadIcon,
@@ -22,6 +23,7 @@ import { MenuItem, MenuNote, MenuSeparator, MenuSurface } from "./Menu.js";
 import { useIsCoarsePointer } from "./useIsMobile.js";
 
 export interface SessionContextMenuState {
+  reviewedResultRevision?: string;
   sessionId: string;
   /** Viewport coordinates of the invoking pointer or the focused row's edge. */
   anchor: { x: number; y: number };
@@ -66,6 +68,7 @@ export function SessionContextMenu({
   onSnooze,
   onDismissReminder,
   onArchive,
+  onMarkReviewed,
   renameRefusal = null,
   archiveRefusal = null,
 }: {
@@ -91,6 +94,7 @@ export function SessionContextMenu({
   onSnooze: (sessionId: string) => void;
   onDismissReminder?: (sessionId: string) => void;
   onArchive: (sessionId: string) => void;
+  onMarkReviewed?: (sessionId: string) => void;
   /** Why the signed-in person may not rename or archive the session (#1857). The item then stays
    * listed, disabled and described by the reason. */
   renameRefusal?: string | null;
@@ -177,6 +181,7 @@ export function SessionContextMenu({
       <MenuItem icon={pinned ? <UnpinIcon /> : <PinIcon />} {...key("inbox-pin")} onClick={act(onTogglePin, true)}>
         {pinned ? "Unpin Session" : "Pin Session"}
       </MenuItem>
+      {onMarkReviewed && <MenuItem icon={<CheckIcon />} onClick={act(onMarkReviewed, true)}>Mark Reviewed</MenuItem>}
       <MenuItem icon={unread ? <MarkReadIcon /> : <MarkUnreadIcon />} {...key("inbox-unread")} onClick={act((sessionId) => onSetUnread(sessionId, !unread), true)}>
         {unread ? "Mark Read" : "Mark Unread"}
       </MenuItem>

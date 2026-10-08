@@ -8,6 +8,7 @@ import type {
 } from "@wollipog/protocol";
 import { groupLegacySessionsByWorkspace, workspaceLocationKey } from "./projects.js";
 import type { ProjectSessionPreset } from "./project-session-selection.js";
+import { sessionFollowUp } from "./session-follow-up.js";
 
 export const INBOX_ALL_SPLIT_KEY = null;
 export const INBOX_NO_PROJECT_SPLIT_KEY = " no-project";
@@ -88,8 +89,9 @@ export function isInboxActiveStatus(status: SessionStatus): boolean {
 
 export function isInboxBlocked(
   session: Pick<SessionView, "status" | "pendingApproval"> &
-    Partial<Pick<SessionView, "orchestratorCampaign" | "pendingRequestOwners">>,
+    Partial<SessionView>,
 ): boolean {
+  if (session.attention) return sessionFollowUp(session as SessionView).group === "needs_input";
   if ((session.orchestratorCampaign?.pendingRequests?.human ?? 0) > 0) return true;
   if (session.pendingRequestOwners && session.pendingRequestOwners.human === 0) return false;
   return session.status === "input_required" || session.pendingApproval != null;
@@ -102,60 +104,53 @@ export function isInboxRunning(session: Pick<SessionView, "status">): boolean {
 export const INBOX_COLLAPSED_THREADS_KEY = "wollipog.inbox.collapsedThreads";
 
 /**
- * How much a card wants the reader now. A session waiting on a decision that has also stalled has
- * waited longest; one merely waiting comes next; a running one is worth watching; the rest are
- * settled. The list orders by this before recency, so the family of an orchestrator whose child is
- * blocked rises with that child instead of sinking under whatever ran most recently.
+ * Human input, outstanding results, unattended work, then quiet sessions. Lifecycle, unread
+ * activity, and stalls alone never manufacture an outstanding result.
  */
 export function inboxUrgency(
   session: Pick<SessionView, "id" | "status" | "pendingApproval"> &
-    Partial<Pick<SessionView, "orchestratorCampaign" | "pendingRequestOwners">>,
-  stalledSessionIds: ReadonlySet<string> = new Set(),
+    Partial<SessionView>,
+  _stalledSessionIds: ReadonlySet<string> = new Set(),
 ): number {
-  if (isInboxBlocked(session)) return stalledSessionIds.has(session.id) ? 3 : 2;
-  return isInboxActiveStatus(session.status) ? 1 : 0;
+  return sessionFollowUp(session as SessionView).priority;
 }
 
 interface InboxOrderKey {
   pinned: boolean;
   urgency: number;
-  lastEventAt: number;
-  updatedAt: number;
+  requestRank: number;
+  at: number;
   id: string;
 }
 
 function compareInboxOrderKeys(left: InboxOrderKey, right: InboxOrderKey): number {
-  if (left.pinned !== right.pinned) return left.pinned ? -1 : 1;
   if (left.urgency !== right.urgency) return right.urgency - left.urgency;
-  if (left.lastEventAt !== right.lastEventAt) return right.lastEventAt - left.lastEventAt;
-  if (right.updatedAt !== left.updatedAt) return right.updatedAt - left.updatedAt;
+  if (left.pinned !== right.pinned) return left.pinned ? -1 : 1;
+  if (left.urgency === 3 && left.requestRank !== right.requestRank) return left.requestRank - right.requestRank;
+  if (left.at !== right.at) return left.urgency === 3 ? left.at - right.at : right.at - left.at;
   return left.id.localeCompare(right.id);
 }
 
 function sessionOrderKey(
   session: SessionView,
   pinnedSessions: ReadonlySet<string>,
-  stalledSessionIds: ReadonlySet<string>,
+  _stalledSessionIds: ReadonlySet<string>,
 ): InboxOrderKey {
+  const attention = sessionFollowUp(session);
   return {
     pinned: pinnedSessions.has(session.id),
-    urgency: inboxUrgency(session, stalledSessionIds),
-    lastEventAt: session.lastEventAt ?? Number.NEGATIVE_INFINITY,
-    updatedAt: session.updatedAt,
+    urgency: attention.priority,
+    requestRank: attention.requestRank,
+    at: attention.at,
     id: session.id,
   };
 }
 
-/** A family's key is its strongest member on every axis, so the whole thread sits where its most
- * urgent, most recent member would sit alone; the parent's id keeps the tiebreak deterministic. */
+/** Keep the strongest member's coherent request/result key and the parent's deterministic id. */
 function familyOrderKey(own: InboxOrderKey, members: InboxOrderKey[]): InboxOrderKey {
-  return members.reduce((key, member) => ({
-    pinned: key.pinned || member.pinned,
-    urgency: Math.max(key.urgency, member.urgency),
-    lastEventAt: Math.max(key.lastEventAt, member.lastEventAt),
-    updatedAt: Math.max(key.updatedAt, member.updatedAt),
-    id: key.id,
-  }), own);
+  const best = [own, ...members].reduce((best, member) =>
+    compareInboxOrderKeys({ ...member, pinned: false }, { ...best, pinned: false }) < 0 ? member : best);
+  return { ...best, id: own.id, pinned: own.pinned || members.some((member) => member.pinned) };
 }
 
 /** Children present in `sessions` keyed by parent id; a child whose parent is absent has no entry
@@ -175,7 +170,7 @@ function inboxChildrenByParent(sessions: readonly SessionView[]): Map<string, Se
 }
 
 /**
- * Stable card ordering: pinned first, then urgency, then latest event, with deterministic
+ * Stable card ordering: human input, outstanding results, work, then quiet, with deterministic
  * fallbacks. A session whose parent is also in the list never orders on its own: the parent and
  * every descendant travel as one family, placed by the family's strongest member, with the parent
  * first and each generation ordered among itself by the same rule (#896).
@@ -235,6 +230,7 @@ export interface InboxThreadChild {
 
 /** What a parent card says about its thread, whether or not the thread is expanded. */
 export interface InboxThreadChildren {
+  followUpLabel?: "Needs Your Input" | "Ready for Review";
   count: number;
   /** Children with a pending request. */
   waiting: number;
@@ -288,7 +284,8 @@ export function inboxThreadChildrenLabel(children: InboxThreadChildren): string 
   const parts = [`${children.count} ${children.count === 1 ? "Child" : "Children"}`];
   const running = children.children.filter((child) => child.state === "running").length;
   const done = children.children.filter((child) => child.state === "done").length;
-  if (children.waiting > 0) parts.push(`${children.waiting} Awaiting Input`);
+  if (children.followUpLabel) parts.push(children.followUpLabel);
+  else if (children.waiting > 0) parts.push(`${children.waiting} Awaiting Input`);
   else if (running > 0) parts.push(`${running} Running`);
   else if (done === children.count) parts.push(`${done} Completed`);
   return parts.join(" · ");
@@ -319,7 +316,13 @@ export function threadInboxRows<T extends { session: SessionView }>(
     const next = new Set(trail).add(row.session.id);
     const children = (childrenByParent.get(row.session.id) ?? [])
       .filter((child) => !next.has(child.id) && !emitted.has(child.id));
+    const descendantAttention = (members: SessionView[], seen: Set<string>): ReturnType<typeof sessionFollowUp>[] =>
+      members.flatMap((child) => seen.has(child.id) ? [] : [sessionFollowUp(child),
+        ...descendantAttention(childrenByParent.get(child.id) ?? [], new Set(seen).add(child.id))]);
+    const strongest = descendantAttention(children, next).sort((a, b) => b.priority - a.priority)[0];
     const summary: InboxThreadChildren | null = children.length === 0 ? null : {
+      ...(strongest && strongest.priority >= 2 ? { followUpLabel: strongest.group === "needs_input"
+        ? "Needs Your Input" as const : "Ready for Review" as const } : {}),
       count: children.length,
       waiting: children.filter((child) => isInboxBlocked(child)).length,
       children: children.map((child) => ({

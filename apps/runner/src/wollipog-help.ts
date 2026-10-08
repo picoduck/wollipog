@@ -76,6 +76,7 @@ export function sessionHelp(): string {
     "                 [--prompt <text>] [--title <title>] [--model <model>] [--effort <effort>] [--permission-mode <mode>] [--worktree]",
     "                 [--cost-budget <usd>] [--max-tool-calls <count>] [--max-child-sessions <count>] [--json]",
     "  session prompt <session-id> <text> [--json]",
+    "  session handoff-result <session-id> --revision <result-revision> [--json]",
     "  session wait <session-id> [--for <state,...>] [--timeout <ms>] [--interval <ms>] [--json]",
     "  session stop <session-id> [--json]",
     "  session stop-job <session-id> <job-id> [--json]",

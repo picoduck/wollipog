@@ -114,6 +114,7 @@ const AGENT_CONTROL_API_ROUTES = new Set([
   "POST /api/sessions/:id/workflow-decisions/:occurrenceId/consume",
   "POST /api/sessions/:id/workflow-decisions/:occurrenceId/reconcile",
   "POST /api/sessions/:id/prompt",
+  "POST /api/sessions/:id/result/handoff",
   "POST /api/sessions/:id/stop",
   "POST /api/sessions/:id/restart",
   "POST /api/sessions/:id/archive",
@@ -143,6 +144,7 @@ const AGENT_CONTROL_API_ROUTES = new Set([
 ]);
 
 const ORCHESTRATOR_API_ROUTES = new Set([
+  "POST /api/sessions/:id/result/handoff",
   "GET /api/compatibility", "GET /api/runners", "GET /api/sessions", "GET /api/sessions/:id",
   "GET /api/sessions/:id/events", "GET /api/governance/policies",
   "GET /api/sessions/:id/campaign/issue-scope",

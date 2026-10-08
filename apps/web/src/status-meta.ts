@@ -448,7 +448,7 @@ export interface SessionStatusContext {
 
 /** The session fields the ranking reads. */
 export type SessionStatusSource = Pick<SessionView, "status" | "pendingApproval" | "attentionOwners"> &
-  Partial<Pick<SessionView, "orchestratorCampaign" | "pendingRequestOwners" | "archived" |
+  Partial<Pick<SessionView, "attention" | "orchestratorCampaign" | "pendingRequestOwners" | "archived" |
     "archiveStatus" | "archiveOperation" | "stopOperation" | "historyQuarantine" | "capacityWait" |
     "queueHold" | "holds" | "backgroundWorkState" | "backgroundDeliveries">>;
 

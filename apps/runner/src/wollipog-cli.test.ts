@@ -1128,6 +1128,26 @@ test("CLI issue closure preserves the exact proposal and refuses other sessions 
   assert.ok(calls.every((call) => call.url.endsWith("/api/compatibility")));
 });
 
+test("CLI exact-result handoff forwards the descendant revision and refuses its own session", async () => {
+  const calls: Array<{ url: string; body?: string }> = [];
+  const output: string[] = [];
+  const fetch: McpFetch = async (url, init) => {
+    calls.push({ url, body: init?.body });
+    return { ok: true, status: 200, text: async () => JSON.stringify(url.endsWith("/api/compatibility")
+      ? { protocolVersion: PROTOCOL_VERSION } : { handedOff: true, session: { id: "child" } }) };
+  };
+  const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "test-token",
+    WOLLIPOG_SESSION_ID: "parent", WOLLIPOG_PERMISSION_PRESET: "orchestrator" };
+  const invoke = (args: string[]) => runWollipogCli(["node", "cli.js", "--wollipog-cli", ...args], env,
+    { stdout: (text) => output.push(text), stderr: (text) => output.push(text) }, fetch);
+  assert.equal(await invoke(["session", "handoff-result", "child", "--revision", "result-7", "--json"]), 0, output.join(""));
+  assert.equal(calls.at(-1)!.url, "http://cp/api/sessions/child/result/handoff");
+  assert.deepEqual(JSON.parse(calls.at(-1)!.body!), { revision: "result-7" });
+  calls.length = 0;
+  assert.equal(await invoke(["session", "handoff-result", "parent", "--revision", "result-7", "--json"]), 1);
+  assert.ok(calls.every((call) => call.url.endsWith("/api/compatibility")));
+});
+
 test("CLI campaign ledger commands map to their tools and refuse other sessions or old control planes (#2417)", async () => {
   const calls: Array<{ url: string; method?: string; body?: string }> = [];
   let version = PROTOCOL_VERSION;

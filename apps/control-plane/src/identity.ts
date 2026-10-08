@@ -73,7 +73,7 @@ export function mutationAuthorizationError(
   if (principal.kind === "agent") return null;
   // Session reminders are private per-user Inbox metadata, not a mutation of the shared session.
   // The route separately requires a human principal and exact read access to the session.
-  if (routePath === "/api/sessions/:id/reminder") {
+  if (routePath === "/api/sessions/:id/reminder" || routePath === "/api/sessions/:id/result/acknowledge") {
     return null;
   }
   if (routePath === "/api/projects/:id/worktree-setup-notice/dismiss") {

@@ -418,6 +418,7 @@ test("tools/list returns the curated session and workflow tools with schemas", a
       "discard_worktree",
       "create_session",
       "prompt_session",
+      "handoff_session_result",
       "stop_session",
       "stop_background_job",
       "restart_session",
@@ -1611,6 +1612,19 @@ test("stop_session -> POST /api/sessions/:id/stop", async () => {
   await callTool(deps, "stop_session", { sessionId: "s_2" });
   assert.equal(calls[0]!.method, "POST");
   assert.equal(calls[0]!.url, `${CP_URL}/api/sessions/s_2/stop`);
+});
+
+test("handoff_session_result sends the exact revision and preserves compact result facts", async () => {
+  const attention = { version: 1, humanActions: [], meaningfulAt: 1,
+    result: { revision: "r1", at: 1, owner: "human" }, acknowledgedRevision: null };
+  const { deps, calls } = makeDeps(() => ({ status: 200, body: { handedOff: true, session: { id: "child", attention } } }));
+  const response = await callTool(deps, "handoff_session_result", { sessionId: "child", revision: "r1" });
+  assert.deepEqual(calls[0]!.body, { revision: "r1" });
+  assert.equal(calls[0]!.url, `${CP_URL}/api/sessions/child/result/handoff`);
+  assert.deepEqual(JSON.parse(resultText(response)).session.attention, attention);
+  calls.length = 0;
+  assert.equal((await callTool(deps, "handoff_session_result", { sessionId: SELF_ID, revision: "r1" })).isError, true);
+  assert.equal(calls.length, 0);
 });
 
 test("stop_background_job -> POST /api/sessions/:id/background-jobs/:jobId/stop, and refuses its own session (#1780)", async () => {

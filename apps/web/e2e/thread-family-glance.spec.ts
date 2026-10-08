@@ -13,7 +13,7 @@ const FAMILY = "/session-rows-e2e.html?family=1";
 const parent = (page: Page) => page.locator(".inbox-row-shell", { hasText: "Family Parent:" });
 const childRow = (page: Page, prefix: string) => page.locator(".inbox-row-shell", { hasText: `${prefix} Child:` });
 const chip = (page: Page) => parent(page).locator(".inbox-thread-family");
-const LABEL = "4 Children · 1 Awaiting Input";
+const LABEL = "4 Children · Needs Your Input";
 
 /** The horizontal gap from the end of the title's rendered box to the start of the chip. */
 const chipGap = (row: Locator) => row.evaluate((shell) => {
@@ -59,6 +59,8 @@ for (const shape of [
     await expect(chip(page).locator(".inbox-thread-family-text")).toBeHidden();
     await expect(chip(page)).toHaveAccessibleName(LABEL);
     await expect(chip(page)).toHaveAttribute("title", LABEL);
+    await expect(parent(page).locator(".status")).toHaveText("Needs Your Input");
+    await expect(parent(page).locator(".status")).toBeVisible();
     // The row's own name, which a screen reader reads for the row, keeps the rollup too.
     await expect(parent(page).locator(".inbox-row")).toHaveAccessibleName(new RegExp(LABEL));
     const { gap } = await chipGap(parent(page));

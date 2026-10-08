@@ -61,6 +61,18 @@ async function withRow(
 const badges = (container: Element) => [...container.querySelectorAll<HTMLElement>(".status")];
 const minutesAgo = (minutes: number): SessionActivity => recordSessionActivity(undefined, NOW - minutes * ACTIVITY_BUCKET_MS);
 
+test("a parent keeps its human family reason in the single badge across phone and desktop shapes", async () => {
+  for (const reason of ["Needs Your Input", "Ready for Review"] as const) {
+    await withRow(baseSession({ status: "running" }), async (container, rerender) => {
+      assert.deepEqual(badges(container).map((badge) => badge.textContent), [reason]);
+      await rerender({ threeRow: false });
+      assert.deepEqual(badges(container).map((badge) => badge.textContent), [reason]);
+      assert.match(container.querySelector(".inbox-thread-family-text")?.textContent ?? "", new RegExp(reason));
+    }, { threeRow: true, threadChildren: JSON.stringify({ count: 1, waiting: reason === "Needs Your Input" ? 1 : 0,
+      followUpLabel: reason, children: [{ id: "child", title: "Child", state: "running" }] }) });
+  }
+});
+
 test("a blocked row with an approval and two questions shows one badge plus \"+1\" and no lifecycle badge", async () => {
   const session = baseSession({
     status: "input_required",
@@ -108,6 +120,15 @@ test("a stalled running row shows one badge, in the danger tone, saying how long
     assert.ok(!shown[0]!.classList.contains("pulse"), "a stalled badge does not pulse");
     assert.equal(shown[0]!.getAttribute("aria-label"), "Status: Stalled, Running");
     assert.equal(shown[0]!.getAttribute("title"), "Running, but no activity for 14 minutes.");
+  }, { stalled: true });
+});
+
+test("meaningful work time labels the row while actual activity determines the stall duration", async () => {
+  const session = baseSession({ status: "running", lastEventAt: NOW - 14 * 60_000,
+    attention: { version: 1, humanActions: [], meaningfulAt: NOW - 40 * 60_000, result: null } });
+  await withRow(session, (container) => {
+    assert.match(badges(container)[0]!.getAttribute("title") ?? "", /no activity for 14 minutes/);
+    assert.equal(container.querySelector("time")?.getAttribute("dateTime"), new Date(NOW - 40 * 60_000).toISOString());
   }, { stalled: true });
 });
 
@@ -375,7 +396,8 @@ test("selected, unread, and selected-and-unread rows each show their own treatme
 });
 
 test("the relative time renders once, trailing the status line on both shapes", async () => {
-  const session = baseSession({ status: "running", lastEventAt: Date.now() - 15 * 60_000 });
+  const session = baseSession({ status: "running", lastEventAt: Date.now(),
+    attention: { version: 1, meaningfulAt: Date.now() - 15 * 60_000, humanActions: [], result: null } });
   for (const threeRow of [true, false]) {
     await withRow(session, (container) => {
       const times = container.querySelectorAll("time");

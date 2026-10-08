@@ -151,9 +151,12 @@ function InboxRowInner({
   // delivery wording rather than claiming the runner is offline.
   const runnerOnline = useOptionalStoreSelector((state) => state.runners.get(session.runnerId)?.status !== "offline") ?? true;
   const lastActivityAt = inboxRowTimestamp(session, activity);
+  const meaningfulAt = session.attention?.meaningfulAt ?? lastActivityAt;
+  const children: InboxThreadChildren | null = threadChildren ? JSON.parse(threadChildren) as InboxThreadChildren : null;
   const status = sessionRowStatus(session, {
     runnerOnline,
     reminder,
+    familyFollowUpLabel: children?.followUpLabel,
     stalledForMs: sessionStalledForMs(stalled, activityNow, lastActivityAt),
   });
   const strip = showsActivityStrip(session.status, activity, activityNow);
@@ -163,7 +166,6 @@ function InboxRowInner({
   const worktree = branchState.kind === "branch" ? branchState.worktree : null;
   const baseRef = worktree ? displayBaseRef(worktree) : null;
 
-  const children: InboxThreadChildren | null = threadChildren ? JSON.parse(threadChildren) as InboxThreadChildren : null;
   const childrenLabel = children ? inboxThreadChildrenLabel(children) : null;
   /* The family chip: one dot per child and the rollup, directly after the parent's title (#2215). It
      reads the same whether the thread is expanded or collapsed, which is the point of putting the
@@ -229,7 +231,7 @@ function InboxRowInner({
   ) : null;
   /* A snoozed row's time cell says when it returns, behind an alarm clock, instead of how long ago
      it last did something (#2209). */
-  const time = <SessionRowTime className="inbox-row-time" lastActivityAt={lastActivityAt} reminder={reminder} />;
+  const time = <SessionRowTime className="inbox-row-time" lastActivityAt={meaningfulAt} reminder={reminder} />;
   /* The row's trailing actions (#2214, §3.3, §5.2): Snooze, Archive and ⋯, after the row button
      rather than in it, since a button cannot nest a button. A fine pointer sees them on hover or
      focus-within, over the row's own fill at the end of the title line, so the status and the time

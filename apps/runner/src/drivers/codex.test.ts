@@ -259,6 +259,7 @@ test("Codex exec drains final message and usage records after process exit", asy
   assert.equal(await turn, "end_turn");
   assert.deepEqual(events, [
     { kind: "agent_message", text: "complete answer", messageId: "final-message", final: true },
+    { kind: "agent_response_completed" },
     { kind: "token_usage", inputTokens: 12, outputTokens: 7, cachedInputTokens: 3 },
   ]);
   driver.dispose();
@@ -272,6 +273,19 @@ test("item.completed agent_message -> agent_message event", () => {
   });
   assert.equal(r, null);
   assert.deepEqual(events, [{ kind: "agent_message", text: "hello world", messageId: "i1", final: true }]);
+});
+
+test("whole message items create one response boundary only when the turn succeeds", () => {
+  const { driver, events } = makeDriver();
+  handleEvent(driver, { type: "item.completed", item: { id: "commentary", type: "agent_message", text: "Investigating" } });
+  assert.equal(events.some((event) => event.kind === "agent_response_completed"), false);
+  handleEvent(driver, { type: "turn.failed", error: { message: "failed" } });
+  handleEvent(driver, { type: "turn.completed" });
+  assert.equal(events.some((event) => event.kind === "agent_response_completed"), false);
+  handleEvent(driver, { type: "item.completed", item: { id: "report", type: "agent_message", text: "Report" } });
+  handleEvent(driver, { type: "turn.completed" });
+  handleEvent(driver, { type: "turn.completed" });
+  assert.equal(events.filter((event) => event.kind === "agent_response_completed").length, 1);
 });
 
 test("agent_message only emits on item.completed, not item.started", () => {

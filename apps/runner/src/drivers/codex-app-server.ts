@@ -2256,6 +2256,7 @@ export class CodexAppServerDriver implements Driver {
         // the bubble. A completion-only item is already whole and may be marked final safely.
         if (completed && item.text && !this.seenItems.has(`msg:${id}`)) {
           this.seenItems.add(`msg:${id}`);
+          if (!parentToolUseId) this.streamedAgentResponse = true;
           this.cb.onEvent({
             kind: "agent_message",
             text: String(item.text),

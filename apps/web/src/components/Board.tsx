@@ -580,7 +580,7 @@ function SessionCard({
         )}
         <span className="card-head-trail">
           {pinned && <SessionPinIndicator />}
-          <SessionRowTime className="card-time" lastActivityAt={lastActivityAt} reminder={reminder} />
+          <SessionRowTime className="card-time" lastActivityAt={session.attention?.meaningfulAt ?? lastActivityAt} reminder={reminder} />
         </span>
       </div>
       {/* ⋯ ends line 1 on screen and follows it in focus order, before the request's buttons. */}
@@ -809,4 +809,3 @@ function CardSignInMenu({ items, unavailable, describedBy, onChoose }: {
     </>
   );
 }
-

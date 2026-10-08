@@ -139,6 +139,7 @@ interface PromptFixtureRequest {
   images: PromptImageInput[];
   config?: SessionConfig;
   slashCommand?: string;
+  reviewedResultRevision?: string;
 }
 
 interface SessionCommandFixtureRequest {
@@ -224,6 +225,27 @@ function initialModel(): FixtureModel {
       session("session-no-project", "No Project Session", null, "loose-workspace"),
     ],
   };
+  if (SCENARIO === "human-follow-up") {
+    const base = Date.now() - 3000;
+    const make = (id: string, title: string, status: SessionView["status"], at: number) => ({
+      ...session(id, title, "alpha", "alpha-workspace"), status, createdAt: base, updatedAt: base + at, lastEventAt: base + at,
+      attention: { version: 1 as const, meaningfulAt: base + at, humanActions: [], result: null,
+        acknowledgedRevision: null } as NonNullable<SessionView["attention"]>,
+    });
+    const input = make("session-input", "Choose the Release Target", "running", 500);
+    input.pendingApproval = { requestId: "environment", title: "Which environment?", kind: "question", options: [],
+      questions: [{ id: "environment", question: "Which environment?", options: [{ label: "Staging" }, { label: "Production" }] }] };
+    input.attention.humanActions = [{ requestId: "environment", rank: 3, requestedAt: base + 500 }];
+    const review = make("session-review", "Findings Ready for Assessment", "running", 10);
+    review.attention.result = { revision: "result-1", at: base + 10, owner: "human" };
+    const work = make("session-working", "Investigating in the Background", "running", 2000);
+    const quiet = make("session-quiet", "Previously Reviewed Explanation", "idle", 1000);
+    quiet.attention.result = { revision: "quiet-1", at: base + 1000, owner: "human" };
+    quiet.attention.acknowledgedRevision = "quiet-1";
+    initial.sessions = [work, quiet, review, input];
+    initial.projects[0]!.unarchivedSessionCount = 4;
+    initial.projects[0]!.totalSessionCount = 4;
+  }
   if (SCENARIO === "inbox-live-scroll") {
     initial.sessions = Array.from({ length: 36 }, (_, index) => {
       const value = session(
@@ -237,6 +259,8 @@ function initialModel(): FixtureModel {
         activeTurnId: index < 4 ? `turn-overflow-${index}` : null,
         updatedAt: 100 - index,
         lastEventAt: 100 - index,
+        attention: { version: 1, meaningfulAt: 100 - index, humanActions: [], result: null,
+          acknowledgedRevision: null },
         preview: index < 4 ? `Running activity ${index + 1}` : `Waiting session ${index + 1}`,
       });
       return value;
@@ -2194,6 +2218,7 @@ const client = {
     images: PromptImageInput[] = [],
     config?: SessionConfig,
     slashCommand?: string,
+    reviewedResultRevision?: string,
   ) => {
     const value = model.sessions.find((candidate) => candidate.id === id);
     if (!value) throw new Error("session not found");
@@ -2203,6 +2228,7 @@ const client = {
       images,
       ...(config ? { config } : {}),
       ...(slashCommand ? { slashCommand } : {}),
+      ...(reviewedResultRevision ? { reviewedResultRevision } : {}),
     }));
     if (failNextPromptRequest) {
       failNextPromptRequest = false;
@@ -2215,7 +2241,20 @@ const client = {
       });
       pendingPromptSettlement = null;
     }
+    if (reviewedResultRevision && value.attention?.result?.revision === reviewedResultRevision) {
+      value.attention.acknowledgedRevision = reviewedResultRevision;
+      saveModel();
+      socket?.push({ type: "session_upsert", session: structuredClone(value) });
+    }
     return structuredClone(value);
+  },
+  markResultReviewed: async (id: string, revision: string) => {
+    const value = model.sessions.find((candidate) => candidate.id === id)!;
+    const acknowledged = value.attention?.result?.revision === revision;
+    if (acknowledged) value.attention!.acknowledgedRevision = revision;
+    saveModel();
+    socket?.push({ type: "session_upsert", session: structuredClone(value) });
+    return { acknowledged, session: structuredClone(value) };
   },
   invokeSessionCommand: async (id: string, request: InvokeSessionCommandRequest) => {
     const value = model.sessions.find((candidate) => candidate.id === id);

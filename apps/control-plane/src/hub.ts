@@ -1223,6 +1223,8 @@ export class Hub {
 
   sessionEvent(event: SessionEvent, options?: { suppressReminderWake?: boolean }): void {
     this.broadcast({ type: "session_event", event });
+    if (event.payload.kind === "user_message" || event.payload.kind === "agent_response_completed" ||
+        (event.payload.kind === "agent_message" && event.payload.final)) this.sessionChangedById(event.sessionId);
     if (options?.suppressReminderWake) return;
     const reason = reminderWakeReasonForEvent(event.payload);
     if (!reason) return;
@@ -1359,11 +1361,11 @@ export class Hub {
         }
         if (projected.type === "session_upsert" && info.principal !== undefined) {
           const session = withSessionCommandPermissions(this.db, info.principal, projected.session);
-          const key = permissionsKey(session);
+          const key = permissionsKey(session) + JSON.stringify(session.attention);
           const shared = projected === msg ? sessionDataByPermissions.get(key) : undefined;
           clientData = shared ?? JSON.stringify({ ...projected, session } satisfies ControlPlaneToUi);
           if (projected === msg && shared === undefined) sessionDataByPermissions.set(key, clientData);
-          (info.sentCommandPermissions ??= new Map()).set(session.id, key);
+          (info.sentCommandPermissions ??= new Map()).set(session.id, permissionsKey(session));
         }
         if (projected.type === "session_removed") info.sentCommandPermissions?.delete(projected.sessionId);
         if (projected.type === "session_upsert") info.visibleSessionIds?.add(projected.session.id);
