@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { useIsTouchPhone } from "./components/useIsMobile.js";
 import { TOUCH_PHONE_MEDIA } from "./mobile-viewport.js";
 
 /**
@@ -66,20 +67,22 @@ export function enterKeystrokeSends(shiftKey: boolean, win: Window = window): bo
   return enterKeyBehavior(win) === "send" ? !shiftKey : shiftKey;
 }
 
-/** Live value for render-time copy (the Send tooltip); tracks the setter and breakpoint changes. */
+function subscribeToStoredChoice(onChange: () => void): () => void {
+  window.addEventListener(ENTER_KEY_CHANGE_EVENT, onChange);
+  window.addEventListener("storage", onChange);
+  return () => {
+    window.removeEventListener(ENTER_KEY_CHANGE_EVENT, onChange);
+    window.removeEventListener("storage", onChange);
+  };
+}
+
+/**
+ * Live value for render-time copy (the Send tooltip); tracks the setter, other tabs and breakpoint
+ * changes. The session view re-renders on every streamed event, so the subscription keeps one identity
+ * and the device class comes from the shared touch-phone store, which evaluates its query once (#2797).
+ */
 export function useEnterKeyBehavior(): EnterKeyBehavior {
-  return useSyncExternalStore(
-    (onChange) => {
-      const mq = window.matchMedia(TOUCH_PHONE_MEDIA);
-      mq.addEventListener("change", onChange);
-      window.addEventListener(ENTER_KEY_CHANGE_EVENT, onChange);
-      window.addEventListener("storage", onChange);
-      return () => {
-        mq.removeEventListener("change", onChange);
-        window.removeEventListener(ENTER_KEY_CHANGE_EVENT, onChange);
-        window.removeEventListener("storage", onChange);
-      };
-    },
-    () => enterKeyBehavior(),
-  );
+  const touchPhone = useIsTouchPhone();
+  const stored = useSyncExternalStore(subscribeToStoredChoice, () => storedEnterKeyBehavior());
+  return stored ?? (touchPhone ? "newline" : "send");
 }

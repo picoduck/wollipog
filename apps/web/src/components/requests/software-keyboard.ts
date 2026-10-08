@@ -1,4 +1,4 @@
-import { useSyncExternalStore } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 
 /**
  * How far the visual viewport must be shorter than the layout viewport before it reads as a software
@@ -22,11 +22,11 @@ function subscribe(win: Window, listener: () => void): () => void {
   };
 }
 
-/** The request dock caps lower while the keyboard is open, so the transcript keeps its half (§13.2). */
+/** The request dock caps lower while the keyboard is open, so the transcript keeps its half (§13.2).
+ * The session view re-renders on every streamed event, so the subscription keeps one identity per
+ * window: a new one would remove and re-add both listeners on every render (#2797). */
 export function useSoftwareKeyboardOpen(win: Window | undefined = typeof window === "undefined" ? undefined : window): boolean {
-  return useSyncExternalStore(
-    (listener) => win ? subscribe(win, listener) : () => {},
-    () => win ? softwareKeyboardOpen(win) : false,
-    () => false,
-  );
+  const subscribeToWindow = useCallback((listener: () => void) => win ? subscribe(win, listener) : () => {}, [win]);
+  const getSnapshot = useCallback(() => win ? softwareKeyboardOpen(win) : false, [win]);
+  return useSyncExternalStore(subscribeToWindow, getSnapshot, () => false);
 }
