@@ -1717,10 +1717,15 @@ uppercase transform.
 
 **Queue tray** (`QueuedMessages`, #2178). Messages not yet sent wait in `.queue`, docked on the
 composer card: inset `--space-3` from its edges with no gap, a solid `--border` edge, top corners
-`--radius-md`, and a hairline between rows. One header reads "<n> Queued", carries the one Held
-badge when the whole queue is held, and says once in sentence case what holds for every row: the
-held explanation, a steering reason every row shares ("Claude Code can't take steering mid-turn, so
-these send when the turn ends."), a cancel none of them can use, or a Viewer's refusal. A row carries
+`--radius-md`, and a hairline between rows. It starts collapsed to one summary line (#2788): a
+full-width §5.5 disclosure trigger, `--control-h` tall, reading "1 Queued Message" or "<n> Queued
+Messages" and carrying the one Held badge when the whole queue is held. While collapsed it also
+carries the most severe row status that needs the person (Delivery Failed, else Delivery Uncertain).
+Only the summary opens or closes the tray: arrivals, removals and status changes never do, the choice
+lasts while the session stays open, and every session starts collapsed. Expanded, the tray says once
+in sentence case what holds for every row: the held explanation, a steering reason every row shares
+("Claude Code can't take steering mid-turn, so these send when the turn ends."), a cancel none of
+them can use, or a Viewer's refusal. A row carries
 a badge only where it differs from "Queued" (Steering…, Pending Delivery, Delivery Uncertain,
 Delivery Failed), reads its first line (an image-only message reads "Image attachment" after the
 paperclip icon), and ends in Steer (`.btn.sm.ghost`, only where steering works for that row), Edit

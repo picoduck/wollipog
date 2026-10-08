@@ -13,7 +13,7 @@ import {
 } from "../conversation-steering.js";
 import { isTerminalDeliveryReceipt } from "../session-actions.js";
 import { statusMeta, type StatusMeta } from "../status-meta.js";
-import { ArrowUpIcon, CloseIcon, EditIcon, MoreHorizontalIcon, PaperclipIcon } from "./Icons.js";
+import { ArrowUpIcon, ChevronRightIcon, CloseIcon, EditIcon, MoreHorizontalIcon, PaperclipIcon } from "./Icons.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuSurface } from "./Menu.js";
 import { StatusBadge } from "./StatusBadge.js";
@@ -60,7 +60,8 @@ interface QueuedMessageAction {
 interface QueuedRow {
   prompt: QueuedPromptView;
   terminal: boolean;
-  /** The row's status badge, only where it differs from an ordinary queued message (§11.2). */
+  /** The row's status, only where it differs from an ordinary queued message (§11.2). */
+  statusKey: QueuedRowStatus | null;
   status: StatusMeta | null;
   /** Steering works for this row, so desktop shows Steer. */
   steerShown: boolean;
@@ -101,8 +102,13 @@ export interface QueuedMessagesProps {
   onFocusLost?: () => void;
 }
 
-function rowStatus(prompt: QueuedPromptView, locallyPromoting: boolean): StatusMeta | null {
-  const value = prompt.durableDeliveryState === "failed"
+type QueuedRowStatus = "failed" | "uncertain" | "pending_delivery" | "steering";
+
+/** Row statuses the collapsed summary carries, most severe first: the ones that need the person. */
+const SUMMARY_STATUSES = ["failed", "uncertain"] as const satisfies readonly QueuedRowStatus[];
+
+function rowStatus(prompt: QueuedPromptView, locallyPromoting: boolean): QueuedRowStatus | null {
+  return prompt.durableDeliveryState === "failed"
     ? "failed"
     : prompt.durableDeliveryState === "uncertain"
       ? "uncertain"
@@ -113,7 +119,6 @@ function rowStatus(prompt: QueuedPromptView, locallyPromoting: boolean): StatusM
           : prompt.steeringState === "uncertain"
             ? "uncertain"
             : null;
-  return value === null ? null : statusMeta("queuedMessage", value);
 }
 
 function sentenceStart(text: string): string {
@@ -122,10 +127,12 @@ function sentenceStart(text: string): string {
 
 /**
  * The composer's queue tray (docs/design-system.md §11.2, §19.4; #2178): messages waiting behind
- * the turn, docked on the composer card. One header counts them and says once what holds for every
- * row: a held queue, a steering reason they share, a cancel they all lack, a Viewer's refusal. A row
- * carries a status only where it differs from "queued". On a phone each row is its text and one ⋯
- * button that opens the shared menu sheet, every action listed with its reason.
+ * the turn, docked on the composer card. It starts as one summary line (#2788): a disclosure that
+ * counts them, with the Held badge and the most severe row status beside the count. Expanded, it says
+ * once what holds for every row: a held queue, a steering reason they share, a cancel they all lack,
+ * a Viewer's refusal. A row carries a status only where it differs from "queued". On a phone each
+ * row is its text and one ⋯ button that opens the shared menu sheet, every action listed with its
+ * reason.
  */
 export function QueuedMessages({
   sessionId,
@@ -147,6 +154,18 @@ export function QueuedMessages({
 }: QueuedMessagesProps) {
   const phone = useIsMobile();
   const trayRef = useRef<HTMLElement>(null);
+  const summaryRef = useRef<HTMLButtonElement>(null);
+  // The person's choice for this session only: a new session starts collapsed, and nothing but the
+  // summary changes it, so arrivals and status updates never open the tray.
+  const [disclosure, setDisclosure] = useState({ sessionId, expanded: false });
+  const expanded = disclosure.sessionId === sessionId && disclosure.expanded;
+  const toggleExpanded = () => {
+    // Collapsing hides the rows; focus left in one returns to the summary rather than to <body>.
+    const summary = summaryRef.current;
+    const active = summary?.ownerDocument.activeElement;
+    if (expanded && active !== summary && trayRef.current?.contains(active ?? null)) summary?.focus();
+    setDisclosure({ sessionId, expanded: !expanded });
+  };
   // A phone row's action sheet is portalled to <body>, so focus in it is tracked by its marker.
   const focusRemoved = useRemovedFocus(trayRef, "[data-queue-sheet]");
   useLayoutEffect(() => {
@@ -203,10 +222,12 @@ export function QueuedMessages({
                 ? "This message can't be canceled until its machine accepts it."
                 : null),
         };
+    const statusKey = rowStatus(prompt, locallyPromoting);
     return {
       prompt,
       terminal,
-      status: rowStatus(prompt, locallyPromoting),
+      statusKey,
+      status: statusKey === null ? null : statusMeta("queuedMessage", statusKey),
       steerShown: !terminal && !locallyPromoting && availability.available,
       steerUnavailable: availability.available ? null : availability.reason,
       steer: { reason: steerReason },
@@ -244,6 +265,11 @@ export function QueuedMessages({
     ? cancelReasons[0]
     : null;
 
+  const summaryStatus = expanded
+    ? undefined
+    : SUMMARY_STATUSES.find((key) => rows.some((row) => row.statusKey === key));
+  const rowsId = `queued-rows-${sessionId}`;
+
   const describedBy = (row: QueuedRow, action: "steer" | "edit" | "remove"): string | undefined => {
     if (refusal !== null) return refusalId;
     if (action === "remove" && row.remove.kind === "cancel" && row.remove.reason !== null) {
@@ -254,22 +280,39 @@ export function QueuedMessages({
 
   return (
     <section ref={trayRef} className={`queue${phone ? " is-phone" : ""}`} aria-label="Queued Messages">
-      <div className="queue-head">
-        <span className="queue-count">{prompts.length} Queued</span>
+      <button
+        ref={summaryRef}
+        type="button"
+        className="disclosure-trigger queue-summary"
+        aria-expanded={expanded}
+        aria-controls={rowsId}
+        onClick={toggleExpanded}
+      >
+        <ChevronRightIcon className="disclosure-chevron" />
+        <span className="queue-count">
+          {prompts.length} {prompts.length === 1 ? "Queued Message" : "Queued Messages"}
+        </span>
         {held && <StatusBadge meta={statusMeta("queuedMessage", "held")} inline />}
-        {refusal !== null && <p className="queue-note" id={refusalId}>{refusal}</p>}
-        {held && <p className="queue-note">{HELD_REASON}</p>}
-        {steeringNote !== null && <p className="queue-note">{steeringNote}</p>}
-        {sharedCancelReason !== null && <p className="queue-note" id={cancelReasonId}>{sharedCancelReason}</p>}
-      </div>
-      <ul className="queue-rows">
+        {summaryStatus !== undefined && (
+          <StatusBadge meta={statusMeta("queuedMessage", summaryStatus)} inline />
+        )}
+      </button>
+      {(refusal !== null || held || steeringNote !== null || sharedCancelReason !== null) && (
+        <div className="queue-notes" hidden={!expanded}>
+          {refusal !== null && <p className="queue-note" id={refusalId}>{refusal}</p>}
+          {held && <p className="queue-note">{HELD_REASON}</p>}
+          {steeringNote !== null && <p className="queue-note">{steeringNote}</p>}
+          {sharedCancelReason !== null && <p className="queue-note" id={cancelReasonId}>{sharedCancelReason}</p>}
+        </div>
+      )}
+      <ul id={rowsId} className="queue-rows" hidden={!expanded}>
         {rows.map((row) => {
           const { prompt } = row;
           const editing = editingPromptId === prompt.id;
           const ownCancelReason = row.remove.kind === "cancel" && row.remove.reason !== null &&
             refusal === null && sharedCancelReason === null ? row.remove.reason : null;
           // Where rows differ, an ordinary row that cannot steer says why on its own line; a row with
-          // a status is explained by it, and a reason every row shares is in the header.
+          // a status is explained by it, and a reason every row shares is said once above the rows.
           const ownSteerReason = !row.terminal && row.status === null && steeringNote === null && !held
             ? row.steerUnavailable
             : null;

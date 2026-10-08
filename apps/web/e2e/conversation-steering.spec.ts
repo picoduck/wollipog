@@ -49,7 +49,15 @@ function tray(page: Page) {
   return page.getByRole("region", { name: "Queued Messages" });
 }
 
-test("a steering reason every row shares is said once in the tray header, with no Steer or ⓘ on a row", async ({ page }) => {
+/** The tray starts as one collapsed summary (#2788); a test that works with its rows opens it. */
+async function expandTray(page: Page) {
+  const summary = tray(page).locator(".queue-summary");
+  await expect(summary).toBeVisible();
+  if (await summary.getAttribute("aria-expanded") !== "true") await summary.click();
+  await expect(summary).toHaveAttribute("aria-expanded", "true");
+}
+
+test("a steering reason every row shares is said once above the tray's rows, with no Steer or ⓘ on a row", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   const reason = "Wollipog has not confirmed an active provider turn.";
   await page.evaluate((reason) => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
@@ -59,7 +67,8 @@ test("a steering reason every row shares is said once in the tray header, with n
       { id: "coordinate-queue-2", text: "And this one", steerable: false, steerDisabledReason: reason },
     ],
   }), reason);
-  await expect(tray(page).locator(".queue-count")).toHaveText("2 Queued");
+  await expect(tray(page).locator(".queue-count")).toHaveText("2 Queued Messages");
+  await expandTray(page);
   await expect(tray(page).locator(".queue-note")).toHaveText([reason]);
   await expect(tray(page).getByRole("button", { name: "Steer Queued Message" })).toHaveCount(0);
   await expect(tray(page)).not.toContainText("ⓘ");
@@ -88,7 +97,8 @@ test("on a phone each queued row keeps 250px for its text and one 44px actions b
       { id: "queue-steering", text: "Already on its way", steeringState: "promoting" },
     ],
   }));
-  await expect(tray(page).locator(".queue-count")).toHaveText("3 Queued");
+  await expect(tray(page).locator(".queue-count")).toHaveText("3 Queued Messages");
+  await expandTray(page);
   for (const id of ["queue-eligible", "queue-ineligible", "queue-steering"]) {
     const row = page.getByTestId(`queued-prompt-${id}`);
     const buttons = row.getByRole("button");
@@ -139,6 +149,10 @@ test("a failed delivery shows its reason in the notice slot and keeps its badge 
     "\u201cShip the release notes today\u201d wasn't delivered. The machine restarted before it took the message.",
   );
   await expect(notice.getByRole("button", { name: "Dismiss Failed Message" })).toBeEnabled();
+  // Collapsed, the summary line raises the failure; its row carries it once the tray is open.
+  await expect(tray(page).locator(".queue-summary .status")).toHaveText("Delivery Failed");
+  await expandTray(page);
+  await expect(tray(page).locator(".queue-summary .status")).toHaveCount(0);
   const row = page.getByTestId("queued-prompt-queue-failed");
   await expect(row.locator(".status")).toHaveText("Delivery Failed");
   await expect(row).not.toContainText("The machine restarted");
@@ -487,19 +501,20 @@ test("steering gates fail closed across protocol, provider, active-turn, held-qu
       { id: "queue-eligible", text: "Eligible prompt", steerable: true },
     ],
   }));
+  await expandTray(page);
   await composer.fill("held queue");
   await page.keyboard.press("Control+Enter");
   await expect(page.getByRole("alert", { name: "Message Not Sent" }).locator(".notice-body")).toHaveText(
     "Steering waits until the current turn settles or the pending request is answered.",
   );
   await expect.poll(requests).toBe(0);
-  // A held queue is said once, in the tray's header, and no row offers Steer (#2178).
-  await expect(tray(page).locator(".queue-head .status")).toHaveText("Held");
+  // A held queue is said once, on the tray's summary line, and no row offers Steer (#2178).
+  await expect(tray(page).locator(".queue-summary .status")).toHaveText("Held");
   await expect(tray(page).locator(".queue-rows .status")).toHaveCount(0);
   await expect(tray(page).getByRole("button", { name: "Steer Queued Message" })).toHaveCount(0);
 
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", { queueHeld: false }));
-  await expect(tray(page).locator(".queue-head .status")).toHaveCount(0);
+  await expect(tray(page).locator(".queue-summary .status")).toHaveCount(0);
   // Rows that differ: only the eligible one offers Steer.
   await expect(page.getByTestId("queued-prompt-queue-ineligible").getByRole("button", { name: "Steer Queued Message" }))
     .toHaveCount(0);
@@ -524,6 +539,7 @@ test("a pending Stop Turn blocks direct steering and queued promotion", async ({
   await composer.fill("Do not steer during stop");
   await page.keyboard.press("Control+Enter");
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringRequests().length)).toBe(0);
+  await expandTray(page);
   await expect(page.getByTestId("queued-prompt-queue-during-stop").getByRole("button", { name: "Steer Queued Message" }))
     .toHaveCount(0);
   await expect(tray(page).locator(".queue-note")).toHaveText(["Wait for the current stop request to settle before steering."]);
@@ -540,6 +556,7 @@ test("queued promotion uses stable queue identity and reconciles one canonical a
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
     queued: [{ id: "queue-promote-stable", text: "Promote this exact prompt", steerable: true }],
   }));
+  await expandTray(page);
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.deferNextSteeringResult());
 
   const queued = page.getByTestId("queued-prompt-queue-promote-stable");
@@ -665,6 +682,7 @@ async function seedEditableQueue(page: Page, { withImage = false } = {}) {
       ],
     });
   }, withImage);
+  await expandTray(page);
 }
 
 /** A recovered edit whose queued message changed elsewhere, so it can't be retried. */
@@ -1064,6 +1082,7 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
         ],
       });
     });
+    await expandTray(page);
 
     const completedGroup = page.locator('[data-terminal-status="queued_again"]');
     await expect(completedGroup).toBeVisible();
@@ -1153,6 +1172,7 @@ test("rejected receipts stay compact on mobile and clear durably without touchin
       ],
     });
   });
+  await expandTray(page);
 
   const group = page.locator(".steering-terminal-receipts");
   await expect(group).toBeVisible();
@@ -1265,4 +1285,146 @@ test("authoritative snapshot replacement restores uncertainty and canonical acce
   await expect(receipt(page, "accepted-after-reconnect")).toHaveCount(0);
   await expect(page.getByText("Canonical after reconnect", { exact: true })).toHaveCount(1);
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringRequests().length)).toBe(1);
+});
+
+test.describe("the collapsed queue tray (#2788)", () => {
+  const many = [
+    { id: "queue-1", text: "Run the integration suite after the migration lands", steerable: true,
+      liveQueueObserved: true, editable: true, editRevision: "r1" },
+    { id: "queue-2", text: "Then summarize the failures", steerable: true, liveQueueObserved: true,
+      editable: true, editRevision: "r2" },
+    { id: "queue-3", text: "Open a pull request when it is green", steerable: true, liveQueueObserved: true },
+    { id: "queue-4", text: "Ship the release notes today", steerable: false, durableDeliveryState: "failed",
+      durableDeliveryError: "The machine restarted before it took the message." },
+    { id: "queue-5", text: "Tag the build", steerable: true, liveQueueObserved: true },
+    { id: "queue-6", text: "Post the summary in the channel", steerable: true, liveQueueObserved: true },
+  ];
+
+  /** The summary's box and the tray's: collapsed, the tray is its summary and its top border. */
+  async function trayGeometry(page: Page) {
+    const summary = (await tray(page).locator(".queue-summary").boundingBox())!;
+    const whole = (await tray(page).boundingBox())!;
+    return { summary, whole };
+  }
+
+  for (const width of [1280, 390]) {
+    test(`at ${width}px any number of messages, held or failed, is one summary line that opens on demand`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 844 });
+      await expect(tray(page)).toHaveCount(0);
+
+      await page.evaluate((first) => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
+        queued: [first],
+      }), many[0]!);
+      const summary = tray(page).locator(".queue-summary");
+      await expect(summary).toHaveText("1 Queued Message");
+      await expect(summary).toHaveAttribute("aria-expanded", "false");
+      const one = await trayGeometry(page);
+      expect(one.whole.height - one.summary.height, "the tray is its summary line and top border").toBeLessThanOrEqual(1);
+      await expect(page.getByTestId("queued-prompt-queue-1")).toBeHidden();
+
+      await page.evaluate((queued) => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
+        queued, queueHeld: true,
+      }), many);
+      await expect(summary.locator(".queue-count")).toHaveText("6 Queued Messages");
+      await expect(summary.locator(".status")).toHaveText(["Held", "Delivery Failed"]);
+      await expect(summary, "arrivals and a failure do not open the tray").toHaveAttribute("aria-expanded", "false");
+      const six = await trayGeometry(page);
+      expect(six.whole.height, "six held messages and a failure still take one line").toBe(one.whole.height);
+      for (const badge of await summary.locator(".status").all()) {
+        const box = (await badge.boundingBox())!;
+        expect(box.y).toBeGreaterThanOrEqual(six.summary.y);
+        expect(box.y + box.height).toBeLessThanOrEqual(six.summary.y + six.summary.height);
+        expect(box.x + box.width).toBeLessThanOrEqual(six.summary.x + six.summary.width);
+      }
+      // The failure's reason stays in the notice slot whether the tray is open or not.
+      await expect(page.getByRole("alert", { name: "Message Not Delivered" })).toBeVisible();
+      await page.screenshot({ path: test.info().outputPath(`queue-collapsed-${width}.png`) });
+
+      // Hidden rows take no focus: Tab leaves the summary for whatever follows the tray.
+      await summary.focus();
+      await page.keyboard.press("Tab");
+      expect(await page.evaluate(() => document.activeElement?.closest(".queue") === null)).toBe(true);
+
+      await summary.focus();
+      await page.keyboard.press("Enter");
+      await expect(summary).toHaveAttribute("aria-expanded", "true");
+      await expect(tray(page).locator(".queue-text")).toHaveText(many.map((prompt) => prompt.text));
+      await expect(tray(page).locator(".queue-note")).toContainText(["Held until the current turn"]);
+      await expect(page.getByTestId("queued-prompt-queue-4").locator(".status")).toHaveText("Delivery Failed");
+      await expect(summary.locator(".status")).toHaveText(["Held"]);
+      await page.screenshot({ path: test.info().outputPath(`queue-expanded-${width}.png`) });
+
+      await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
+        queueHeld: false,
+      }));
+      await expect(summary.locator(".status")).toHaveCount(0);
+      await expect(summary, "a status change does not close the tray").toHaveAttribute("aria-expanded", "true");
+      await summary.focus();
+      await page.keyboard.press("Space");
+      await expect(summary).toHaveAttribute("aria-expanded", "false");
+      await expect(page.getByTestId("queued-prompt-queue-1")).toBeHidden();
+    });
+  }
+
+  test("collapsing while a queued message is being edited keeps the edit, the draft and the queue", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 844 });
+    await page.evaluate((queued) => {
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(99);
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", { queued });
+    }, many.slice(0, 2));
+    const composer = page.locator(".composer-input");
+    await composer.fill("Unsent local draft");
+    await expandTray(page);
+    await page.getByTestId("queued-prompt-queue-1").getByRole("button", { name: "Edit Queued Message" }).click();
+    await expect(composer).toHaveValue("Run the integration suite after the migration lands");
+    await composer.fill("Run the integration suite twice");
+
+    const summary = tray(page).locator(".queue-summary");
+    await summary.click();
+    await expect(summary).toHaveAttribute("aria-expanded", "false");
+    await expect(summary).toHaveText("2 Queued Messages");
+    await expect(page.locator(".composer-box > .composer-mode .composer-mode-title")).toHaveText("Editing Queued Message");
+    await expect(composer).toHaveValue("Run the integration suite twice");
+    await summary.click();
+    await expect(page.getByTestId("queued-prompt-queue-1")).toHaveAttribute("aria-current", "true");
+
+    await page.getByRole("button", { name: "Cancel Edit", exact: true }).click();
+    await expect(composer).toHaveValue("Unsent local draft");
+    await expect(tray(page).locator(".queue-row")).toHaveCount(2);
+    await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests().length)).toBe(0);
+  });
+
+  test.describe("on a touch screen", () => {
+    test.use({ hasTouch: true });
+
+    test("the summary is a 44px tap target that a tap opens and closes", async ({ page }) => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.evaluate((queued) => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", { queued }),
+        many);
+      const summary = tray(page).locator(".queue-summary");
+      expect((await summary.boundingBox())?.height).toBe(44);
+      await summary.tap();
+      await expect(summary).toHaveAttribute("aria-expanded", "true");
+      await expect(page.getByTestId("queued-prompt-queue-6")).toBeVisible();
+      await summary.tap();
+      await expect(summary).toHaveAttribute("aria-expanded", "false");
+      await expect(page.getByTestId("queued-prompt-queue-6")).toBeHidden();
+    });
+  });
+
+  test("another session's tray starts collapsed", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 844 });
+    await page.evaluate((queued) => {
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", { queued });
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-no-project", { queued });
+    }, many.slice(0, 2));
+    await expandTray(page);
+    await page.getByRole("button", { name: "Back to Sessions" }).click();
+    await page.getByRole("tab", { name: /No Project/ }).click();
+    await page.getByRole("button", { name: /No Project Session/ }).click();
+    const expand = page.getByRole("button", { name: "Open Session", exact: true });
+    if (await expand.isVisible()) await expand.click();
+    await expect(tray(page).locator(".queue-summary")).toHaveText("2 Queued Messages");
+    await expect(tray(page).locator(".queue-summary")).toHaveAttribute("aria-expanded", "false");
+  });
 });
