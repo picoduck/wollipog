@@ -152,7 +152,9 @@ export function useSessionsArrivalWait(group: string | null): {
   useEffect(() => {
     if (current.group === null) return;
     const { id } = current;
-    const timer = setTimeout(() => setOutcome({ id, detail: null }), SESSIONS_ARRIVAL_WAIT_MS);
+    // A Retry that already failed this wait keeps its reason past the deadline.
+    const timer = setTimeout(() => setOutcome((prior) => prior?.id === id ? prior : { id, detail: null }),
+      SESSIONS_ARRIVAL_WAIT_MS);
     return () => clearTimeout(timer);
   }, [current.group, current.id]);
   const failed = current.group !== null && outcome?.id === current.id;

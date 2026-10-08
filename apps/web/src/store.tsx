@@ -1705,6 +1705,8 @@ export class Store {
   private readerCacheBytes = 0;
   private gapRequestSequence = 0;
   private readonly gapOperations = new Map<string, EventGapFence>();
+  /** The session ids each in-flight session backfill must leave alone (#2803). */
+  private readonly backfillFences = new Set<Set<string>>();
   private readonly gapPauseChecks = new Map<string, () => boolean>();
   private readonly pendingGapLive = new Map<string, DeferredLiveBuffer>();
   /** These arrays never enter timeline derivation or the inactive-reader cache. */
@@ -1736,6 +1738,10 @@ export class Store {
   };
 
   dispatch = (action: Action): void => {
+    // A removal speaks for a session even when this client never held it (#2803).
+    if (action.type === "msg" && action.msg.type === "session_removed") {
+      for (const spoken of this.backfillFences) spoken.add(action.msg.sessionId);
+    }
     let next = reducer(this.state, action);
     if (next === this.state) return;
     // Explicit resets also cover rolling senders that omit the epoch. Their authoritative
@@ -2092,8 +2098,8 @@ export class Store {
   /**
    * Fences a session list read outside the live stream (#2803). The returned `apply` adds only the
    * sessions the stream has not spoken for since the read began: none this client holds, none that
-   * arrived, changed or went away while the read was in flight, and nothing at all once a newer
-   * snapshot has replaced the list. `cancel` drops a read that failed.
+   * arrived, changed or was removed while the read was in flight (held here or not), and nothing at
+   * all once a newer snapshot has replaced the list. `cancel` drops a read that failed.
    */
   beginSessionsBackfill = (): { apply: (sessions: readonly SessionView[]) => void; cancel: () => void } => {
     const revision = this.state.snapshotRevision;
@@ -2106,15 +2112,20 @@ export class Store {
       for (const sessionId of next.keys()) if (!previous.has(sessionId)) spoken.add(sessionId);
       previous = next;
     });
+    this.backfillFences.add(spoken);
+    const cancel = () => {
+      unsubscribe();
+      this.backfillFences.delete(spoken);
+    };
     return {
       apply: (sessions) => {
-        unsubscribe();
+        cancel();
         if (this.state.snapshotRevision !== revision) return;
         for (const session of sessions) {
           if (!spoken.has(session.id) && !this.state.sessions.has(session.id)) this.loadSession(session);
         }
       },
-      cancel: unsubscribe,
+      cancel,
     };
   };
   beginEventHistoryLoad = (

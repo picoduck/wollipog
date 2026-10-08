@@ -593,6 +593,17 @@ describe("sessions that never arrive", () => {
     assert.match(rows[0]!, /Session fetched/);
   });
 
+  test("a Retry response never restores a session removed before this client ever held it", async () => {
+    const { api, settle } = deferredClient();
+    const { container, socket } = await waitingGroup(api);
+    await tick(SESSIONS_ARRIVAL_WAIT_MS);
+    await act(async () => { retryButton(container).click(); });
+    await act(async () => { socket.push({ type: "session_removed", sessionId: "never-held" }); });
+    await act(async () => { settle({ sessions: [session("never-held", { projectId: "project-docs" })] }); });
+    assertNoDomNode(container.querySelector(".inbox-list .inbox-row"), "the removal outranks the older list");
+    assert.ok(skeleton(container));
+  });
+
   test("a Retry response that a newer snapshot overtook adds nothing", async () => {
     const { api, settle } = deferredClient();
     const { container, socket } = await waitingGroup(api);
@@ -637,6 +648,9 @@ describe("sessions that never arrive", () => {
     assert.ok(toggle);
     await act(async () => { toggle.click(); });
     assert.equal(state.querySelector(".notice-details-body code")?.textContent, "HTTP 503: control plane unavailable");
+    await tick(SESSIONS_ARRIVAL_WAIT_MS);
+    assert.equal(failure(container)?.querySelector(".notice-details-body code")?.textContent,
+      "HTTP 503: control plane unavailable", "the wait's own deadline keeps the reason");
   });
 
   test("sessions that arrive before the wait elapses never show the state", async () => {
