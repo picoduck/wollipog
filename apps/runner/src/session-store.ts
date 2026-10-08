@@ -491,6 +491,7 @@ const HISTORY_COMPACTION_COPY_CHUNK_BYTES = 1024 * 1024;
  * synchronous publish step. */
 const HISTORY_COMPACTION_LOCKED_CATCH_UP_BYTES = 256 * 1024;
 const HISTORY_COMPACTION_CATCH_UP_ROUNDS = 8;
+const HISTORY_COMPACTION_PUBLISH_ATTEMPTS = 4;
 const HISTORY_UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 const HISTORY_RESET_VERSION = 1;
 const HISTORY_MANIFEST_VERSION = 1;
@@ -1967,14 +1968,19 @@ export class SessionStore {
   /** Write and fsync a small control file beside its target without blocking the event loop. */
   private async stageHistoryFile(path: string, contents: string): Promise<StagedHistoryFile> {
     const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
-    const handle = await open(tmp, "wx");
     try {
-      await handle.writeFile(contents);
-      await handle.sync();
-    } finally {
-      await handle.close();
+      const handle = await open(tmp, "wx");
+      try {
+        await handle.writeFile(contents);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      return { tmp, path, key: this.manifestKeyOf(tmp) };
+    } catch (error) {
+      rmSync(tmp, { force: true });
+      throw error;
     }
-    return { tmp, path, key: this.manifestKeyOf(tmp) };
   }
 
   /** Atomically publish a staged file and make the rename durable. Returns the identity of the exact
@@ -2108,15 +2114,6 @@ export class SessionStore {
       if (copiedThrough !== layout.active.bytes) {
         throw new HistoryStoreError("history_corrupt", "session history changed during compaction");
       }
-      // Catch up with appends made during the copy so the locked remainder stays small.
-      for (let round = 0; round < HISTORY_COMPACTION_CATCH_UP_ROUNDS; round++) {
-        const size = Number((await source.stat({ bigint: true })).size);
-        if (size - copiedThrough <= HISTORY_COMPACTION_LOCKED_CATCH_UP_BYTES) break;
-        copiedThrough = await this.appendCompleteHistoryLines(source, copiedThrough, size, activeOut);
-      }
-      await activeOut.sync();
-      await this.fsyncDirectoryAsync(this.dir(id));
-
       // Stage the control files too, so publication is only renames plus one directory fsync.
       const manifest: HistoryManifest = {
         version: HISTORY_MANIFEST_VERSION,
@@ -2138,21 +2135,38 @@ export class SessionStore {
       const stagedManifest = await this.stageHistoryFile(this.historyManifestPath(id), JSON.stringify(manifest));
       staged.push(stagedManifest);
 
-      if (yieldLock ? !this.acquireLock(id, owner) : !this.ownsLock(id, owner)) return notCompacted;
-      // Everything from here to the cache update runs without yielding: no append from this process
-      // can interleave, and other processes are fenced by the writer lock. Handles close afterward.
-      const beforePublish = this.readDiskMeta(id);
-      let current;
-      try { current = lstatSync(layout.active.path, { bigint: true }); } catch { current = null; }
-      if (
-        !beforePublish || (beforePublish.logEpoch ?? 0) !== epoch ||
-        this.historyManifestKey(id) !== manifestKey ||
-        !current?.isFile() || current.ino !== sourceIdentity.ino || current.dev !== sourceIdentity.dev ||
-        Number(current.size) < copiedThrough
-      ) {
-        throw new HistoryStoreError("history_epoch_changed", "session history changed during compaction");
+      // Appends keep arriving while this awaits. Catch up off the lock until the remainder fits the
+      // synchronous bound; a burst that lands just before the lock is taken sends it back for another
+      // asynchronous round instead of being copied while every session waits.
+      let remainder = 0;
+      for (let attempt = 1; ; attempt++) {
+        for (let round = 0; round < HISTORY_COMPACTION_CATCH_UP_ROUNDS; round++) {
+          const size = Number((await source.stat({ bigint: true })).size);
+          if (size - copiedThrough <= HISTORY_COMPACTION_LOCKED_CATCH_UP_BYTES) break;
+          copiedThrough = await this.appendCompleteHistoryLines(source, copiedThrough, size, activeOut);
+        }
+        await activeOut.sync();
+        if (attempt === 1) await this.fsyncDirectoryAsync(this.dir(id));
+
+        if (!(yieldLock ? this.acquireFreeLock(id, owner) : this.ownsLock(id, owner))) return notCompacted;
+        // Everything from here to the cache update runs without yielding: no append from this process
+        // can interleave, and other processes are fenced by the writer lock. Handles close afterward.
+        const beforePublish = this.readDiskMeta(id);
+        let current;
+        try { current = lstatSync(layout.active.path, { bigint: true }); } catch { current = null; }
+        if (
+          !beforePublish || (beforePublish.logEpoch ?? 0) !== epoch ||
+          this.historyManifestKey(id) !== manifestKey ||
+          !current?.isFile() || current.ino !== sourceIdentity.ino || current.dev !== sourceIdentity.dev ||
+          Number(current.size) < copiedThrough
+        ) {
+          throw new HistoryStoreError("history_epoch_changed", "session history changed during compaction");
+        }
+        remainder = Number(current.size) - copiedThrough;
+        if (remainder <= HISTORY_COMPACTION_LOCKED_CATCH_UP_BYTES) break;
+        if (yieldLock) this.releaseLock(id, owner);
+        if (attempt >= HISTORY_COMPACTION_PUBLISH_ATTEMPTS) return notCompacted;
       }
-      const remainder = Number(current.size) - copiedThrough;
       if (remainder > 0) {
         const tail = Buffer.alloc(remainder);
         const read = readSync(source.fd, tail, 0, remainder, copiedThrough);
@@ -2161,6 +2175,8 @@ export class SessionStore {
         this.writeAll(activeOut.fd, tail);
         fsyncSync(activeOut.fd);
       }
+      // The session lock is best effort: another acquirer can overwrite it. Re-read it last.
+      if (!this.ownsLock(id, owner)) return notCompacted;
       // The fence intent must be durable before the manifest that commits it.
       for (const file of staged) this.publishHistoryFile(id, file);
       committed = true;
@@ -2295,6 +2311,7 @@ export class SessionStore {
         if (
           !this.isHistoryFileName(entry.name) &&
           !/^events\.(active|segment)\..+\.ndjson\.tmp$/.test(entry.name) &&
+          !/^events\.(manifest|legacy-fence)\.json\..+\.tmp$/.test(entry.name) &&
           !/^events\.retired\..+\.ndjson$/.test(entry.name)
         ) continue;
         const path = join(this.dir(id), entry.name);
@@ -3063,6 +3080,20 @@ export class SessionStore {
     } catch {
       return false;
     }
+  }
+
+  /** Take the lock only if no lock file exists, with an exclusive create. A compaction that let the
+   * lock go for its copy must never take it back by overwriting or by stale takeover. */
+  private acquireFreeLock(id: string, owner: string): boolean {
+    try {
+      writeFileSync(this.lockPath(id), owner, { flag: "wx" });
+    } catch {
+      return false;
+    }
+    this.seqReconciled.delete(id);
+    this.checkpointCache.delete(id);
+    this.historyLayoutCache.delete(id);
+    return this.ownsLock(id, owner);
   }
 
   ownsLock(id: string, owner: string): boolean {

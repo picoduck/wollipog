@@ -2448,3 +2448,111 @@ test("a reset or competing compaction during the copy aborts publication without
     }
   }
 });
+
+test("publication never steals or keeps a writer lock another owner took during the copy", async () => {
+  for (const shape of ["stale_lock_appeared", "lock_overwritten_after_acquire"] as const) {
+    const root = mkdtempSync(join(tmpdir(), "wollipog-store-compact-lockrace-"));
+    try {
+      const store = megabyteSession(root);
+      const lockPath = join(root, "s_abc", "lock");
+      if (shape === "lock_overwritten_after_acquire") {
+        // A non-atomic acquirer elsewhere writes its owner over the lock maintenance just created.
+        const internals = store as unknown as { acquireFreeLock(id: string, owner: string): boolean };
+        const acquire = internals.acquireFreeLock.bind(store);
+        internals.acquireFreeLock = (id, owner) => {
+          const acquired = acquire(id, owner);
+          writeFileSync(lockPath, "racing-turn");
+          return acquired;
+        };
+      }
+      const { result } = await duringEachTurn(store.maintainHistories("maintenance", 1), (tick) => {
+        if (tick !== 3 || shape !== "stale_lock_appeared") return;
+        writeFileSync(lockPath, "crashed-turn");
+        const old = new Date(Date.now() - 5 * 60 * 1_000);
+        utimesSync(lockPath, old, old);
+      });
+      assert.equal(result.compacted, 0, shape);
+      assert.equal(existsSync(join(root, "s_abc", "events.manifest.json")), false, shape);
+      assert.deepEqual(compactionDebris(root), [], shape);
+      assert.equal(readFileSync(lockPath, "utf8"), shape === "stale_lock_appeared" ? "crashed-turn" : "racing-turn", shape);
+      assert.deepEqual(coldSeqs(root), seqRange(4_000), shape);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("a burst that lands just before publication is caught up off the lock, never copied under it", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-store-compact-burst-"));
+  try {
+    const store = megabyteSession(root);
+    const turn = new SessionStore(root, undefined, COMPACT_MEGABYTES);
+    const internals = store as unknown as {
+      fsyncDirectoryAsync(path: string): Promise<void>;
+      writeAll(fd: number, contents: Buffer): void;
+    };
+    const fsyncDirectory = internals.fsyncDirectoryAsync.bind(store);
+    let burst = false;
+    internals.fsyncDirectoryAsync = async (path) => {
+      await fsyncDirectory(path);
+      if (burst) return;
+      burst = true;
+      assert.equal(turn.acquireLock("s_abc", "turn"), true);
+      for (let i = 0; i < 1_200; i++) turn.appendEvent("s_abc", { kind: "agent_message", text: `burst-${i}-${"z".repeat(1_000)}` });
+      turn.flushAll();
+      turn.releaseLock("s_abc", "turn");
+    };
+    let largestLockedWrite = 0;
+    const writeAll = internals.writeAll.bind(store);
+    internals.writeAll = (fd, contents) => {
+      largestLockedWrite = Math.max(largestLockedWrite, contents.length);
+      writeAll(fd, contents);
+    };
+    const result = await store.maintainHistories("maintenance", 1);
+    assert.equal(burst, true);
+    assert.equal(result.compacted, 1);
+    assert.ok(largestLockedWrite <= 256 * 1024, `copied ${largestLockedWrite} bytes under the lock`);
+    assert.match(readFileSync(join(root, "s_abc", historyManifest(root).activeFile), "utf8"), /"burst-1199-/);
+    const events = new SessionStore(root, undefined, COMPACT_MEGABYTES).readEvents("s_abc");
+    assert.deepEqual(events.map((event) => event.seq), seqRange(5_200));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("failed control-file staging leaves no temp file, and orphaned staged files are collected", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-store-compact-stage-"));
+  try {
+    const store = megabyteSession(root);
+    const internals = store as unknown as { manifestKeyOf(path: string): string };
+    const manifestKeyOf = internals.manifestKeyOf.bind(store);
+    let failed = false;
+    internals.manifestKeyOf = (path) => {
+      if (!failed && path.endsWith(".tmp")) {
+        failed = true;
+        throw new Error("injected stat failure");
+      }
+      return manifestKeyOf(path);
+    };
+    const result = await store.maintainHistories("maintenance", 1);
+    assert.equal(failed, true);
+    assert.equal(result.errors, 1);
+    assert.deepEqual(readdirSync(join(root, "s_abc")).filter((file) => file.endsWith(".tmp")), []);
+    assert.deepEqual(compactionDebris(root), []);
+
+    // A crash between staging and publication leaves temp files that only orphan collection can see.
+    const sessionDir = join(root, "s_abc");
+    for (const file of ["events.manifest.json.123.dead.tmp", "events.legacy-fence.json.123.dead.tmp"]) {
+      writeFileSync(join(sessionDir, file), "{}");
+      const old = new Date(Date.now() - 2 * 60 * 60 * 1_000);
+      utimesSync(join(sessionDir, file), old, old);
+    }
+    const collected = await new SessionStore(root, undefined, COMPACT_MEGABYTES).maintainHistories("maintenance", 1);
+    assert.equal(collected.compacted, 1);
+    assert.ok(collected.orphansRemoved >= 2);
+    assert.deepEqual(readdirSync(sessionDir).filter((file) => file.endsWith(".tmp")), []);
+    assert.deepEqual(coldSeqs(root), seqRange(4_000));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

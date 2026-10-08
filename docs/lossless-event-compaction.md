@@ -54,9 +54,12 @@ file. It:
    lines, then fsyncs the new files and their directory. It also stages fsynced temp copies of the
    manifest and, for the first compaction of a legacy log, the fence intent;
 5. takes the lock again and, without yielding, verifies that the epoch, the manifest identity, and
-   the active inode are unchanged. It copies any remaining complete lines and atomically renames
-   the staged files into place, which publishes the manifest. A changed epoch or manifest
-   abandons the copy, as does a remaining torn suffix or a turn that holds the lock;
+   the active inode are unchanged. Idle maintenance re-takes the lock only with an exclusive create,
+   so it never overwrites or steals a lock that a turn took meanwhile. If more than 256 KiB arrived
+   since the last catch-up, it lets the lock go and catches up again, up to four times. Otherwise it
+   copies the remaining complete lines and re-reads the lock. Finally it atomically renames the
+   staged files into place, which publishes the manifest. A changed epoch or manifest abandons the
+   copy, as do a remaining torn suffix and a lock now held by another owner;
 6. retires the former `events.ndjson` inode and places a directory at that legacy path.
 
 Torn-tail repair only truncates after a file's final newline, and a reset changes the epoch, so
