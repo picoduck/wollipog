@@ -50,6 +50,8 @@ import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { SkillsUnavailableNotice, skillsUnavailableSentence, useSessionSkillsUnavailable, useSkillsNoticeDismissal } from "./SkillsUnavailableNotice.js";
 import { isPartialHistory, isRebuiltEventsArray, useStoreActions, useStoreSelector } from "../store.js";
+import { useShowAgentLogs } from "../agent-logs.js";
+import { agentLogOnly } from "../work-steps.js";
 import { shortenPath, titleCaseLabel } from "../format.js";
 import { COMPOSER_USAGE_MIN_COLUMN_REM, composerUsagePlacement, useNarrowerThanRem } from "../composer-usage-placement.js";
 import { accountLabelText, isPersonalIdentifier, redactPersonalIdentifiers } from "../personal-identifiers.js";
@@ -341,6 +343,8 @@ const OPENING_HISTORY_MAX_PAGES = 10;
 /** Leave the earlier-history control safely above a tail-following viewport instead of stopping as
  * soon as the reader gains a one-pixel scroll range. */
 const OPENING_HISTORY_HEADROOM_PX = EARLIER_ACTIVITY_TRIGGER_PX;
+/** The history notice's details when the cache stopped short because its machine is offline. */
+const MACHINE_OFFLINE_HISTORY_ERROR = "Session activity could not finish loading while its machine is offline.";
 
 type EarlierActivityIntent = "single-scroll" | "touch-traversal";
 
@@ -1044,6 +1048,7 @@ function SessionDetailLoaded({
     return window?.eventEpoch === (s.sessions.get(sessionId)?.eventEpoch ?? 0) ? window : undefined;
   });
   const runner = useStoreSelector((s) => s.runners.get(session.runnerId));
+  const showAgentLogs = useShowAgentLogs();
   const allSessions = useStoreSelector((s) => s.sessions);
   const allRunners = useStoreSelector((s) => s.runners);
   const worktreeSetupConfigSupported = useStoreSelector((s) => s.worktreeSetupConfigSupported);
@@ -2450,6 +2455,24 @@ function SessionDetailLoaded({
   const completedOpeningRef = useRef(false);
   completedOpeningRef.current = eventHistory?.everComplete === true &&
     eventHistory.refreshing === false && eventHistory.error === null;
+  // The control plane fills its history cache from the session's machine, so an incomplete cache
+  // stays incomplete while that machine is offline; reading it again only holds the skeleton (#2773).
+  // Read at each answer, so a machine that reconnects mid-read keeps filling it.
+  const machineOfflineRef = useRef(false);
+  machineOfflineRef.current = runner?.status === "offline";
+  const cacheCannotFill = useCallback(() => machineOfflineRef.current, []);
+  // Once the machine reconnects it can fill the cache again, so a history that stopped short reads
+  // again rather than waiting for Retry.
+  const historyFailedRef = useRef(false);
+  historyFailedRef.current = eventHistory?.error != null;
+  const priorRunnerStatusRef = useRef(runner?.status);
+  useEffect(() => {
+    const prior = priorRunnerStatusRef.current;
+    priorRunnerStatusRef.current = runner?.status;
+    if (prior === "offline" && runner?.status === "online" && historyFailedRef.current) {
+      setHistoryRetry((value) => value + 1);
+    }
+  }, [runner?.status]);
   const acknowledgedOpeningRef = useRef<{
     api: typeof api; instanceScope: string; sessionId: string; eventEpoch: number; generation: number;
   } | null>(null);
@@ -2533,6 +2556,7 @@ function SessionDetailLoaded({
             }
           },
           isCurrent: canApply,
+          cacheCannotFill,
         },
       ).then((result) => {
         if (cancelled) return;
@@ -2547,7 +2571,9 @@ function SessionDetailLoaded({
           }
           // Unsupported backward reads wait for ordinary acknowledged recovery. Do not start an
           // unbounded forward walk here and recreate the slow opening path.
-          failEventHistoryLoad(sessionId, "Could not load session activity before the live connection was ready.", epoch, revision, generation);
+          failEventHistoryLoad(sessionId, cacheCannotFill()
+            ? MACHINE_OFFLINE_HISTORY_ERROR
+            : "Could not load session activity before the live connection was ready.", epoch, revision, generation);
         }
       }).catch(() => {
         if (cancelled) return;
@@ -2574,7 +2600,7 @@ function SessionDetailLoaded({
       if (metadataRetryTimer !== undefined) window.clearTimeout(metadataRetryTimer);
     };
   }, [api, instanceScope, sessionId, conn, recoveryRevision, recoveryEventEpoch, recoveryGeneration,
-    historyRetry, beginEventHistoryLoad, failEventHistoryLoad, loadEvents, loadSession, getSession]);
+    historyRetry, beginEventHistoryLoad, failEventHistoryLoad, loadEvents, loadSession, getSession, cacheCannotFill]);
 
   // Opening a session reads a bounded window at the TAIL: one request paints the newest activity
   // no matter how long the session is. Reopening after an outage instead backfills only the gap
@@ -2609,6 +2635,7 @@ function SessionDetailLoaded({
           ? loadEventGapWindow(gapFence, events, complete, hasOlder, turnAligned)
           : loadEvents(id, events, pageEpoch, revision, complete, generation, hasOlder, turnAligned),
       isCurrent,
+      cacheCannotFill,
     };
     const request = { sessionId, after, eventEpoch: epoch, recoveryRevision };
     const forwardRecovery = () => recoverSessionHistory(request, historyOptions);
@@ -2640,7 +2667,9 @@ function SessionDetailLoaded({
       });
     void load.then((complete) => {
       if (isCurrent() && !complete) {
-        failEventHistoryLoad(sessionId, "Some session activity could not be loaded.", epoch, recoveryRevision, generation);
+        failEventHistoryLoad(sessionId, cacheCannotFill()
+          ? MACHINE_OFFLINE_HISTORY_ERROR
+          : "Some session activity could not be loaded.", epoch, recoveryRevision, generation);
       }
     }).catch(() => {
       if (isCurrent()) {
@@ -2654,7 +2683,7 @@ function SessionDetailLoaded({
       if (gapFence) cancelEventGapRecovery(gapFence);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api, sessionId, loadEvents, conn, recoveryRevision, recoveryReadAfter, recoveryEventEpoch, recoveryGeneration, historyRetry, beginEventHistoryLoad, failEventHistoryLoad, isEventGapRecoveryCurrent, beginEventGapRecovery, cancelEventGapRecovery, finishEventGapRecovery, loadEventGapWindow, deferEventTail]);
+  }, [api, sessionId, loadEvents, conn, recoveryRevision, recoveryReadAfter, recoveryEventEpoch, recoveryGeneration, historyRetry, beginEventHistoryLoad, failEventHistoryLoad, isEventGapRecoveryCurrent, beginEventGapRecovery, cancelEventGapRecovery, finishEventGapRecovery, loadEventGapWindow, deferEventTail, cacheCannotFill]);
 
   const loadLater = useCallback(() => {
     const request = beginLaterEventsLoad(sessionId);
@@ -4681,8 +4710,13 @@ function SessionDetailLoaded({
   // ("Starting Claude Code", #2172), not a lone Working row.
   const startingWithoutActivity = session.status === "starting" && items.length === 0 && !showOptimistic &&
     activeTurnProgress === null && (session.pendingPrompts?.length ?? 0) === 0;
+  // With Show Agent Logs off, a transcript of only Agent Logs renders no row, so a whole history of
+  // them is empty rather than a blank reader (#2773). A partial window keeps its timeline: earlier
+  // activity can still hold rows. Governance decisions are rows the timeline adds to these items.
+  const historyPartial = isPartialHistory(eventWindow);
+  const shownItemCount = !showAgentLogs && !historyPartial && agentLogOnly(timelineItems) ? 0 : items.length;
   const transcript = transcriptPresentation({
-    itemCount: items.length,
+    itemCount: shownItemCount,
     hasOptimistic: showOptimistic,
     working: activeTurnVisible && !startingWithoutActivity,
     history: eventHistory,
@@ -4691,7 +4725,6 @@ function SessionDetailLoaded({
   // Receipts for messages already sent are rows of the transcript, under their message (#2171). The
   // full session view shows steering, command and rename receipts; the pending prompts show
   // everywhere the transcript does.
-  const historyPartial = isPartialHistory(eventWindow);
   const steeringReceipts = mode === "expanded"
     ? deriveSteeringReceipts(session.steeringAttempts ?? [], items, session.activeTurnId, historyPartial)
     : [];
@@ -6515,6 +6548,7 @@ function SessionDetailLoaded({
                   loaded={evs?.length ?? 0}
                   total={session.messageCount > 0 ? session.messageCount : undefined}
                   machine={runnerDisp.name || undefined}
+                  machineOffline={runner?.status === "offline"}
                   canRetry={conn === "online" && !transcript.busy}
                   onRetry={() => setHistoryRetry((value) => value + 1)}
                 />

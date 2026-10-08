@@ -563,6 +563,39 @@ test("a cache that never catches up shows what it has rather than an empty reade
     "the budget expires into a visible, explicitly incomplete transcript");
 });
 
+test("a cache that cannot fill settles on its first answer, and one that can again keeps reading (#2773)", async () => {
+  // The session's machine is offline: reading the window again cannot change it.
+  let cannotFill = true;
+  let requests = 0;
+  const applied: Array<{ seqs: number[]; complete: boolean }> = [];
+  const options = {
+    fetchTailPage: async () => {
+      requests += 1;
+      return { events: [event(1)], eventEpoch: 1, nextBefore: 1, hasMoreOlder: false, cacheComplete: false };
+    },
+    applyWindow: (_id: string, events: SessionEvent[], _epoch: number, _revision: number, complete: boolean) =>
+      applied.push({ seqs: events.map((entry) => entry.seq), complete }),
+    isCurrent: () => true,
+    cacheCannotFill: () => cannotFill,
+    wait: async () => {},
+  };
+  const offline = await recoverSessionHistoryWindow({ sessionId: "s1", eventEpoch: 1, recoveryRevision: 0 }, options);
+  assert.deepEqual(offline, { supported: true, complete: false });
+  assert.equal(requests, 1, "one read, not the whole re-read budget");
+  assert.deepEqual(applied, [{ seqs: [1], complete: false }]);
+
+  // The machine reconnects during a later read: the cache can fill, so the window waits for it.
+  requests = 0;
+  applied.length = 0;
+  cannotFill = false;
+  const online = await recoverSessionHistoryWindow(
+    { sessionId: "s1", eventEpoch: 1, recoveryRevision: 0 },
+    { ...options, maxIdlePolls: 3 },
+  );
+  assert.deepEqual(online, { supported: true, complete: false });
+  assert.equal(requests, 4, "the full budget while the cache can still fill");
+});
+
 test("a re-read window keeps polling the tail instead of walking the log forward", async () => {
   const pages: SessionEventsResponse[] = [
     { events: [event(1)], eventEpoch: 1, nextBefore: 1, hasMoreOlder: false, cacheComplete: false },

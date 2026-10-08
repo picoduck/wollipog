@@ -5,12 +5,14 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type {
   ControlPlaneToUi,
+  GovernanceAuditEntry,
   ProjectView,
   RunnerView,
   SessionEvent,
   SessionEventsResponse,
   SessionView,
 } from "@wollipog/protocol";
+import { setShowAgentLogs } from "../agent-logs.js";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ViewNavigation } from "../navigation.js";
@@ -127,6 +129,8 @@ async function mountSession({
   cachedEvents = 0,
   mode = "expanded",
   protocolVersion = 200,
+  runnerStatus = "online",
+  governance = [],
 }: {
   status?: SessionView["status"];
   archived?: boolean;
@@ -134,6 +138,9 @@ async function mountSession({
   cachedEvents?: number;
   mode?: "expanded" | "preview";
   protocolVersion?: number;
+  runnerStatus?: RunnerView["status"];
+  /** Governance audit entries the session's Decision History holds. */
+  governance?: GovernanceAuditEntry[];
 } = {}) {
   sequence += 1;
   const id = `reading-states-${sequence}`;
@@ -157,6 +164,7 @@ async function mountSession({
     session: () => new Promise<never>(() => {}),
     getSessionEventPage: () => new Promise<never>(() => {}),
     getSessionEventTailPage: () => new Promise<SessionEventsResponse>((resolve, reject) => { tail.push({ resolve, reject }); }),
+    governanceAudit: async () => ({ entries: governance, hasMore: false }),
   } as unknown as ApiClient;
   const record = (panel: string) => { shown.push(panel); };
   let actions: StoreActions | undefined;
@@ -183,7 +191,7 @@ async function mountSession({
     socket.push({
       type: "snapshot",
       capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-      runners: [{ ...runner, protocolVersion }],
+      runners: [{ ...runner, protocolVersion, status: runnerStatus }],
       boxes: [],
       projects: [project],
       sessions: [session],
@@ -206,6 +214,11 @@ async function mountSession({
     async disconnect(conn: "offline" | "unauthorized" = "offline") {
       assert.ok(actions, "store actions are available");
       await act(async () => actions!.dispatch({ type: "conn", conn }));
+      await flushAsyncWork();
+    },
+    /** The session's machine connects or disconnects. */
+    async setRunnerStatus(status: RunnerView["status"]) {
+      await act(async () => socket.push({ type: "runner_upsert", runner: { ...runner, protocolVersion, status } }));
       await flushAsyncWork();
     },
     /** A later recovery of this session's history fails, as a reconnect's would. */
@@ -434,6 +447,109 @@ test("a slow load adds its sentence after 3 seconds, with the snapshot's event c
     assertNoDomNode(view.container.querySelector(".transcript-tail-control"), "no follow control while loading");
   } finally {
     await view.unmount();
+  }
+});
+
+/** A harness boot line: an Agent Log, which the transcript hides unless Show Agent Logs is on. */
+function agentLogEvent(sessionId: string): SessionEvent {
+  return { id: 1, sessionId, seq: 1, ts: 1, payload: { kind: "stderr", text: "[agent] ready\n" } };
+}
+
+test("an incomplete history whose machine is offline settles after one read (#2773)", async () => {
+  const view = await mountSession({ status: "stopped", messageCount: 1, runnerStatus: "offline" });
+  try {
+    // Only the machine can fill the rest of the cache, so reading the same window again cannot help.
+    await view.resolveTail({ events: [agentLogEvent(view.id)], nextBefore: 1, cacheComplete: false });
+    await flushAsyncWork(300);
+    assert.equal(view.tailRequests(), 0, "no further read while the machine is offline");
+    assertNoDomNode(view.scroller.querySelector(".transcript-skeleton"), "the reader left its loading state");
+    const notices = view.reader.querySelectorAll(".notice");
+    assert.equal(notices.length, 1, "one history notice");
+    const notice = notices[0] as HTMLElement;
+    assert.equal(notice.querySelector(".notice-title")?.textContent, "Couldn't Load the Full Conversation");
+    assert.equal(notice.querySelector(".notice-body")?.textContent, "Loaded 1 event from Build Box, which is offline.");
+    await act(async () => view.button(notice, "Show Details")!.click());
+    assert.equal(notice.querySelector(".notice-details-body")?.textContent,
+      "Session activity could not finish loading while its machine is offline.");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a history that stopped short while its machine was offline reads again when it reconnects (#2773)", async () => {
+  const view = await mountSession({ status: "stopped", messageCount: 3, runnerStatus: "offline" });
+  try {
+    await view.resolveTail({ events: [agentLogEvent(view.id)], nextBefore: 1, cacheComplete: false });
+    await flushAsyncWork(200);
+    assert.equal(view.tailRequests(), 0);
+    assert.equal(view.reader.querySelectorAll(".notice").length, 1, "the history notice says it stopped short");
+    await view.setRunnerStatus("online");
+    assert.equal(view.tailRequests(), 1, "the reconnected machine can fill the cache, so the reader reads again");
+    const events = transcriptEvents(view.id, 2).slice(0, 3);
+    await view.resolveTail({ events, nextBefore: 1 });
+    assertNoDomNode(view.reader.querySelector(".notice"), "the complete history clears the notice");
+    assert.ok(view.scroller.querySelector(".timeline"), "the loaded activity is on screen");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a long history still filling from an online machine keeps its loading notice (#2773)", async () => {
+  const view = await mountSession({ messageCount: 1240 });
+  try {
+    await view.resolveTail({ events: transcriptEvents(view.id, 100), nextBefore: 1, cacheComplete: false });
+    await flushAsyncWork(3050);
+    assert.equal(view.scroller.querySelector(".transcript-skeleton-sentence")?.textContent,
+      "Loading a long conversation (1,240 events)…");
+    assert.equal(view.tailRequests(), 1, "the reader reads the window again while the cache fills");
+    const tail = transcriptEvents(view.id, 620).slice(-200);
+    await view.resolveTail({ events: tail, nextBefore: tail[0]!.seq, hasMoreOlder: true, turnAligned: true });
+    assertNoDomNode(view.scroller.querySelector(".transcript-skeleton"));
+    assert.ok(view.scroller.querySelector(".timeline"), "the newest activity is on screen");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a history of only hidden Agent Logs is the empty state, not a blank reader (#2773)", async () => {
+  const view = await mountSession({ status: "stopped", messageCount: 1 });
+  try {
+    await view.resolveTail({ events: [agentLogEvent(view.id)], nextBefore: 1 });
+    const state = view.scroller.querySelector(".state.compact") as HTMLElement;
+    assert.ok(state, "the empty state stands in for the hidden boot line");
+    assert.equal(state.querySelector(".state-title")?.textContent, "No Messages");
+    assertNoDomNode(view.reader.querySelector(".notice"), "a complete history has no notice");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a governance decision beside hidden Agent Logs keeps the timeline (#2773)", async () => {
+  const view = await mountSession({ status: "stopped", messageCount: 1, governance: [{
+    auditId: "audit-1", requestId: "hook-1", approvalKind: "policy_hook", stage: "resolution", outcome: "denied",
+    actor: { kind: "human", id: "device-1" }, scope: { sessionId: `reading-states-${sequence + 1}`, runnerId: runner.runnerId },
+    timestamp: 5,
+  }] });
+  try {
+    await view.resolveTail({ events: [agentLogEvent(view.id)], nextBefore: 1 });
+    await flushAsyncWork(50);
+    assertNoDomNode(view.scroller.querySelector(".state"), "a decision row is not an empty history");
+    assert.ok(view.scroller.querySelector(".timeline"), "the timeline renders the decision");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("Show Agent Logs shows a history of only Agent Logs as its row (#2773)", async () => {
+  setShowAgentLogs(true);
+  const view = await mountSession({ status: "stopped", messageCount: 1 });
+  try {
+    await view.resolveTail({ events: [agentLogEvent(view.id)], nextBefore: 1 });
+    assertNoDomNode(view.scroller.querySelector(".state"), "no empty state while the log is shown");
+    assert.ok(view.scroller.querySelector(".timeline"), "the transcript renders the Agent Log");
+  } finally {
+    await view.unmount();
+    setShowAgentLogs(false);
   }
 });
 
