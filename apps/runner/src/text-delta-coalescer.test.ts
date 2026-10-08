@@ -161,6 +161,18 @@ test("property: a merged event never exceeds the size threshold unless one delta
   ), { numRuns: 300 });
 });
 
+test("close lands pending text and passes every later event straight through", () => {
+  const h = harness();
+  h.coalescer.push(delta("a"));
+  h.coalescer.push(delta("b"));
+  h.coalescer.close();
+  assert.deepEqual(h.payloads(), [delta("a"), delta("b")]);
+  h.coalescer.push(delta("c"));
+  h.coalescer.push(delta("d"));
+  assert.deepEqual(h.payloads(), [delta("a"), delta("b"), delta("c"), delta("d")]);
+  assert.equal(h.time.pendingTimers(), 0);
+});
+
 test("only the plain streaming delta shape is coalescible", () => {
   assert.equal(isCoalescibleTextDelta(delta("x")), true);
   assert.equal(isCoalescibleTextDelta({ kind: "agent_message", text: "x" }), true);

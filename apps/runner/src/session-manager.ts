@@ -3091,8 +3091,7 @@ export class SessionManager {
   ): boolean {
     const active = this.active.get(sessionId);
     if (!active || (expected && active !== expected)) return false;
-    this.flushTextDeltas(sessionId);
-    this.textDeltaCoalescers.delete(sessionId);
+    this.closeTextDeltas(sessionId);
     if (releaseLease) this.releaseActiveWorktreeLease(active);
     const deleted = this.active.delete(sessionId);
     if (deleted) {
@@ -9819,8 +9818,9 @@ export class SessionManager {
     images: PromptImageInput[],
     durable?: DurableCommandLifecycle,
   ): boolean {
-    if (this.active.get(sessionId)?.historyIntegrityFailure) return false;
+    // Landing pending text can itself latch a history failure, so check only after it.
     this.flushTextDeltas(sessionId);
+    if (this.active.get(sessionId)?.historyIntegrityFailure) return false;
     try {
       const payload: SessionEventPayload = {
         kind: "user_message",
@@ -15810,8 +15810,7 @@ export class SessionManager {
     // "reaped" and the caller would release the lease over a live provider. Track clean completion.
     let clean = true;
     // A provider stopped mid-message keeps every delta it already streamed.
-    for (const coalescer of this.textDeltaCoalescers.values()) coalescer.flush();
-    this.textDeltaCoalescers.clear();
+    for (const sessionId of [...this.textDeltaCoalescers.keys()]) this.closeTextDeltas(sessionId);
     for (const entry of this.active.values()) {
       try {
         entry.client.dispose();
@@ -15936,7 +15935,11 @@ export class SessionManager {
     worktreePath?: string | null,
     capacityWait?: RunnerCapacityBlocker,
   ): void {
+    const latchedBeforeFlush = this.active.get(sessionId)?.historyIntegrityFailure;
     this.flushTextDeltas(sessionId);
+    // A flush that latched a history failure has already published the failed status; a status
+    // computed before it must not overwrite that.
+    if (!latchedBeforeFlush && this.active.get(sessionId)?.historyIntegrityFailure && status !== "failed") return;
     const authMeta = this.store.readMeta(sessionId);
     // A durable block holds prompt admission even while its shared probe is silent or another
     // session owns the credential-scope card. Turn settlement must not create attention alone.
@@ -16032,10 +16035,10 @@ export class SessionManager {
     }
   }
 
-  /** Coalesce one provider launch's streamed text deltas. A replaced launch's pending text lands
-   * first, so a retiring provider's last words never follow its replacement's. */
+  /** Coalesce one provider launch's streamed text deltas. A replaced launch's coalescer is closed
+   * first, so a retiring provider's pending and late text never follows its replacement's. */
   private coalesceTextDeltas(sessionId: string, callbacks: DriverCallbacks): DriverCallbacks {
-    this.flushTextDeltas(sessionId);
+    this.closeTextDeltas(sessionId);
     const coalesced = coalesceDriverTextDeltas(callbacks, {
       onError: (error) => this.log(`streamed text flush failed for ${sessionId}: ${errText(error)}`),
     });
@@ -16044,9 +16047,28 @@ export class SessionManager {
   }
 
   /** Land a session's pending streamed text. Every event append, status change, turn settlement,
-   * provider exit, and shutdown calls this first, so coalescing never reorders history. */
+   * provider exit, and shutdown calls this first, so coalescing never reorders history. Best
+   * effort: an append failure is already latched per session, and a secondary fault must not
+   * abort the caller's own lifecycle step. */
   private flushTextDeltas(sessionId: string): void {
-    this.textDeltaCoalescers.get(sessionId)?.flush();
+    try {
+      this.textDeltaCoalescers.get(sessionId)?.flush();
+    } catch (error) {
+      this.log(`streamed text flush failed for ${sessionId}: ${errText(error)}`);
+    }
+  }
+
+  /** Flush and detach a session's coalescer once its provider stops being the live owner. Late
+   * output from the retiring provider then passes straight through instead of waiting unflushed. */
+  private closeTextDeltas(sessionId: string): void {
+    const coalescer = this.textDeltaCoalescers.get(sessionId);
+    if (!coalescer) return;
+    this.textDeltaCoalescers.delete(sessionId);
+    try {
+      coalescer.close();
+    } catch (error) {
+      this.log(`streamed text flush failed for ${sessionId}: ${errText(error)}`);
+    }
   }
 
   private emitEvent(

@@ -67,6 +67,7 @@ export class TextDeltaCoalescer {
   private pendingChars = 0;
   private lastTextEmitAt = Number.NEGATIVE_INFINITY;
   private timer: unknown = null;
+  private closed = false;
 
   constructor(
     private readonly emit: (payload: SessionEventPayload) => void,
@@ -86,7 +87,7 @@ export class TextDeltaCoalescer {
 
   /** Route one driver event: merge a text delta, or flush pending text and then emit the event. */
   push(payload: SessionEventPayload): void {
-    if (!isCoalescibleTextDelta(payload)) {
+    if (this.closed || !isCoalescibleTextDelta(payload)) {
       this.flush();
       this.emit(payload);
       return;
@@ -133,6 +134,13 @@ export class TextDeltaCoalescer {
     this.pendingChars = 0;
     this.lastTextEmitAt = this.now();
     this.emit({ ...pending, text });
+  }
+
+  /** Flush, then pass every later event straight through. A retiring or shut-down provider can
+   * still emit late output, and nothing would flush text it left pending. */
+  close(): void {
+    this.closed = true;
+    this.flush();
   }
 }
 

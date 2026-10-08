@@ -38,6 +38,7 @@ async function harness() {
   let turn = deferred<StopReason>();
   let callbacks!: DriverCallbacks;
   let promptStarted = false;
+  let disposals = 0;
   const driver: Driver = {
     pid: undefined,
     initialize: async () => {},
@@ -47,7 +48,7 @@ async function harness() {
     setConfig: () => {},
     cancel: () => { turn.resolve("cancelled"); },
     resolvePermission: () => false,
-    dispose: () => { turn.resolve("cancelled"); },
+    dispose: () => { disposals++; turn.resolve("cancelled"); },
   };
   const manager = new SessionManager((message) => sent.push(message), () => {}, store, "runner-1", undefined,
     (_kind, _options, registered) => { callbacks = registered; return driver; });
@@ -88,8 +89,16 @@ async function harness() {
     manager, store, sent, history, frames, cleanup,
     emit: (payload: SessionEventPayload) => callbacks.onEvent(payload),
     callbacks: () => callbacks,
+    disposals: () => disposals,
     settle: (stop: StopReason) => turn.resolve(stop),
     nextTurn: () => { turn = deferred<StopReason>(); },
+    /** Private manager seams for lifecycle paths a driver cannot trigger on its own. */
+    internals: () => manager as unknown as {
+      deleteActiveSession(sessionId: string): boolean;
+      emitEvent(sessionId: string, payload: SessionEventPayload): unknown;
+      emitStatus(sessionId: string, status: string): void;
+      appendAcceptedSteeringEvent(sessionId: string, turnId: string, submissionId: string, text: string, images: unknown[]): boolean;
+    },
   };
 }
 
@@ -212,5 +221,78 @@ test("a session-manager event appended mid-message follows the pending text", as
     h.emit(delta("two"));
     h.callbacks().onStderr("provider warning");
     assert.deepEqual(h.history().map(describe), ["agent_message:m1:one ", "agent_message:m1:two", "stderr"]);
+  } finally { h.cleanup(); }
+});
+
+test("a retired provider's late text passes straight through instead of waiting unflushed", async () => {
+  const h = await harness();
+  try {
+    h.emit(delta("a"));
+    h.emit(delta("b"));
+    h.internals().deleteActiveSession(SESSION);
+    assert.deepEqual(h.history().map(describe), ["agent_message:m1:a", "agent_message:m1:b"]);
+    h.emit(delta("late "));
+    h.emit(delta("words"));
+    h.internals().emitEvent(SESSION, { kind: "error", message: "manager event" });
+    assert.deepEqual(h.history().map(describe), [
+      "agent_message:m1:a",
+      "agent_message:m1:b",
+      "agent_message:m1:late ",
+      "agent_message:m1:words",
+      "error",
+    ]);
+  } finally { h.cleanup(); }
+});
+
+/** Make the next history append throw, as a full or failing disk would. */
+function failNextAppend(store: SessionStore): void {
+  const append = store.appendEvent.bind(store);
+  let failed = false;
+  store.appendEvent = ((...args: Parameters<SessionStore["appendEvent"]>) => {
+    if (!failed) { failed = true; throw new Error("disk full"); }
+    return append(...args);
+  }) as SessionStore["appendEvent"];
+}
+
+test("steering is refused when landing pending text latches a history failure", async () => {
+  const h = await harness();
+  try {
+    h.emit(delta("a"));
+    h.emit(delta("pending"));
+    failNextAppend(h.store);
+    assert.equal(h.internals().appendAcceptedSteeringEvent(SESSION, "turn-1", "submission-1", "steer", []), false);
+    assert.equal(h.history().some((payload) => payload.kind === "user_message"), false);
+  } finally { h.cleanup(); }
+});
+
+test("a status computed before a flush that latches a history failure does not overwrite failed", async () => {
+  const h = await harness();
+  try {
+    h.emit(delta("a"));
+    h.emit(delta("pending"));
+    failNextAppend(h.store);
+    h.internals().emitStatus(SESSION, "idle");
+    const statuses = h.sent.flatMap((message) => message.type === "session_status" ? [message.status] : []);
+    assert.equal(statuses.at(-1), "failed", `statuses: ${statuses.join(", ")}`);
+    assert.equal(h.store.readMeta(SESSION)?.status, "failed");
+  } finally { h.cleanup(); }
+});
+
+test("shutdown disposes every provider even when landing pending text fails", async () => {
+  const h = await harness();
+  try {
+    h.emit(delta("a"));
+    h.emit(delta("pending"));
+    const append = h.store.appendEvent;
+    const patch = h.store.patchMeta;
+    h.store.appendEvent = (() => { throw new Error("disk full"); }) as SessionStore["appendEvent"];
+    h.store.patchMeta = (() => { throw new Error("disk full"); }) as SessionStore["patchMeta"];
+    try {
+      assert.doesNotThrow(() => h.manager.shutdownAll());
+    } finally {
+      h.store.appendEvent = append;
+      h.store.patchMeta = patch;
+    }
+    assert.equal(h.disposals(), 1);
   } finally { h.cleanup(); }
 });
