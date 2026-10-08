@@ -219,7 +219,7 @@ export function InboxView({
   const {
     navigate,
     loadSession,
-    getSession,
+    beginSessionsBackfill,
     setInboxPersistenceEnabled,
     setInboxSelection,
     setInboxSplit,
@@ -611,15 +611,20 @@ export function InboxView({
   );
   const arrivalFailedCount = arrival.failed ? syncingCount : null;
   // Retry returns to the skeleton for a fresh wait and asks for the sessions again: the list the
-  // snapshot is built from, of which the group takes the sessions it is missing. A failed request
-  // ends that wait early with its reason; one that finds nothing lets the wait run out.
+  // snapshot is built from, of which the group takes the sessions the live stream has not spoken
+  // for meanwhile. A failed request ends that wait early with its reason; one that finds nothing
+  // lets the wait run out.
   const retryArrival = () => {
     const fail = arrival.retry();
     if (activeSplit?.project?.kind !== "durable") return;
     const projectId = activeSplit.project.project.id;
+    const backfill = beginSessionsBackfill();
     api.listSessions().then(
-      ({ sessions: fetched }) => { for (const session of sessionsToRestore(fetched, projectId, getSession)) loadSession(session); },
-      (cause: unknown) => fail(cause instanceof Error ? cause.message : String(cause)),
+      ({ sessions: fetched }) => backfill.apply(sessionsToRestore(fetched, projectId)),
+      (cause: unknown) => {
+        backfill.cancel();
+        fail(cause instanceof Error ? cause.message : String(cause));
+      },
     );
   };
   // A group whose sessions have not arrived shows skeleton rows, never a state card.

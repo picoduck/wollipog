@@ -480,9 +480,12 @@ describe("sessions that never arrive", () => {
   const failure = (container: HTMLElement) => container.querySelector<HTMLElement>(".inbox-state .notice.t-danger");
   const retryButton = (container: HTMLElement) => [...failure(container)!.querySelectorAll<HTMLButtonElement>("button")]
     .find((button) => button.textContent?.trim() === "Retry")!;
-  /** The real client with only the list Retry asks for replaced. */
+  /** A client that answers only the list Retry asks for. Everything else (the preview's transcript,
+   * the skill list) stays pending rather than reaching for a network the test does not have. */
   function client(listSessions: () => Promise<{ sessions: SessionView[] }>): ApiClient & { calls: number } {
-    const stub = { ...realApi, calls: 0 };
+    const stub = Object.fromEntries(Object.keys(realApi).map((key) => [key, () => new Promise(() => {})])) as
+      unknown as ApiClient & { calls: number };
+    stub.calls = 0;
     stub.listSessions = () => { stub.calls += 1; return listSessions(); };
     return stub;
   }
@@ -565,6 +568,62 @@ describe("sessions that never arrive", () => {
     assert.equal(titles.length, 2, "the group's own missing session joins the live one");
     assert.ok(titles.some((text) => text.includes("Session fetched")));
     assert.ok(titles.some((text) => text.includes("Live Title")) && !titles.some((text) => text.includes("Stale Title")));
+  });
+
+  /** A Retry whose list request answers only when the test says, with whatever it says then. */
+  function deferredClient() {
+    let settle!: (result: { sessions: SessionView[] } | Error) => void;
+    const api = client(() => new Promise((resolve, reject) => {
+      settle = (result) => (result instanceof Error ? reject(result) : resolve(result));
+    }));
+    return { api, settle: (result: { sessions: SessionView[] } | Error) => settle(result) };
+  }
+
+  test("a Retry response never restores a session removed while it was in flight", async () => {
+    const { api, settle } = deferredClient();
+    const { container, socket } = await waitingGroup(api);
+    await tick(SESSIONS_ARRIVAL_WAIT_MS);
+    await act(async () => { retryButton(container).click(); });
+    const gone = session("gone", { projectId: "project-docs" });
+    await act(async () => { socket.push({ type: "session_upsert", session: gone }); });
+    await act(async () => { socket.push({ type: "session_removed", sessionId: "gone" }); });
+    await act(async () => { settle({ sessions: [gone, session("fetched", { projectId: "project-docs" })] }); });
+    const rows = [...container.querySelectorAll(".inbox-list .inbox-row")].map((row) => row.textContent ?? "");
+    assert.equal(rows.length, 1, "only the session the stream never spoke for");
+    assert.match(rows[0]!, /Session fetched/);
+  });
+
+  test("a Retry response that a newer snapshot overtook adds nothing", async () => {
+    const { api, settle } = deferredClient();
+    const { container, socket } = await waitingGroup(api);
+    await tick(SESSIONS_ARRIVAL_WAIT_MS);
+    await act(async () => { retryButton(container).click(); });
+    await act(async () => { socket.push(snapshot({ projects: [project([location("available")], 8)] })); });
+    await act(async () => { settle({ sessions: [session("stale", { projectId: "project-docs" })] }); });
+    assertNoDomNode(container.querySelector(".inbox-list .inbox-row"), "the newer snapshot is the authority");
+    assert.ok(skeleton(container));
+  });
+
+  test("a superseded Retry's failure never fails a fresh wait", async () => {
+    const { api, settle } = deferredClient();
+    const { container } = await waitingGroup(api);
+    await tick(SESSIONS_ARRIVAL_WAIT_MS);
+    await act(async () => { retryButton(container).click(); });
+    const search = container.querySelector<HTMLInputElement>(".inbox-search input")!;
+    await act(async () => {
+      search.focus();
+      search.value = "docs";
+      fireDomEvent.change(search as never, { target: { value: "docs" } as never });
+    });
+    await act(async () => { fireDomEvent.keyDown(search as never, { key: "Escape" }); });
+    await act(async () => { await new Promise((resolve) => domWindow.setTimeout(resolve, 0)); });
+    assert.ok(skeleton(container), "back on the group, waiting afresh");
+    await act(async () => { settle(new Error("old request rejected")); });
+    assertNoDomNode(failure(container), "the old request belongs to a wait that is over");
+    assert.ok(skeleton(container));
+    await tick(SESSIONS_ARRIVAL_WAIT_MS);
+    assert.ok(failure(container), "the fresh wait still runs out on its own");
+    assertNoDomNode(failure(container)!.querySelector(".notice-details-toggle"), "with no detail from the old request");
   });
 
   test("a Retry whose request fails shows the state again at once, with the reason behind Show Details", async () => {

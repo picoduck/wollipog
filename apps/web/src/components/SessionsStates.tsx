@@ -130,36 +130,40 @@ export function SessionsPreviewSkeleton() {
 /**
  * Whether the sessions a group's count promises failed to arrive (§12.3, #2803). `group` is the
  * group's key while a connected client waits on it, and null whenever it is not waiting: its
- * sessions arrived, the connection dropped, or the list shows something else. Each wait starts
- * fresh, so leaving and coming back never inherits an old failure. `retry` starts another wait
- * and returns a callback that ends that one wait early with the reason, if it is still current.
+ * sessions arrived, the connection dropped, or the list shows something else. Every wait, whether
+ * a new group, a return to one or a Retry, takes a new id, and an outcome counts only for the id
+ * that produced it, so an old failure never carries into a fresh wait. `retry` starts another wait
+ * and returns a callback that ends that one wait early with the reason, while it is still current.
  */
 export function useSessionsArrivalWait(group: string | null): {
   failed: boolean;
   detail: string | null;
   retry: () => (detail: string) => void;
 } {
-  const [attempt, setAttempt] = useState(0);
-  const [outcome, setOutcome] = useState<{ wait: string; detail: string | null } | null>(null);
-  const wait = group === null ? null : `${attempt}:${group}`;
-  const waitRef = useRef(wait);
-  waitRef.current = wait;
+  const [wait, setWait] = useState({ group, id: 0 });
+  const [outcome, setOutcome] = useState<{ id: number; detail: string | null } | null>(null);
+  let current = wait;
+  if (wait.group !== group) {
+    current = { group, id: wait.id + 1 };
+    setWait(current);
+  }
+  const currentId = useRef(current.id);
+  currentId.current = current.id;
   useEffect(() => {
-    // An outcome belongs to the wait that produced it; a new wait (or none) starts clean.
-    setOutcome(null);
-    if (wait === null) return;
-    const timer = setTimeout(() => setOutcome({ wait, detail: null }), SESSIONS_ARRIVAL_WAIT_MS);
+    if (current.group === null) return;
+    const { id } = current;
+    const timer = setTimeout(() => setOutcome({ id, detail: null }), SESSIONS_ARRIVAL_WAIT_MS);
     return () => clearTimeout(timer);
-  }, [wait]);
-  const failed = wait !== null && outcome?.wait === wait;
+  }, [current.group, current.id]);
+  const failed = current.group !== null && outcome?.id === current.id;
   return {
     failed,
     detail: failed ? outcome.detail : null,
     retry: () => {
-      const next = group === null ? null : `${attempt + 1}:${group}`;
-      setAttempt(attempt + 1);
+      const id = current.id + 1;
+      setWait({ group: current.group, id });
       return (detail) => {
-        if (next !== null && waitRef.current === next) setOutcome({ wait: next, detail });
+        if (currentId.current === id) setOutcome({ id, detail });
       };
     },
   };

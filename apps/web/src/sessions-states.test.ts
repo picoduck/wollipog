@@ -143,13 +143,11 @@ test("sessions that never arrive say so in the person's terms after a bounded wa
     "Docs Site has 1 session, but it didn't arrive. Retry to ask for it again.");
 });
 
-test("Retry adds only the group's missing, unarchived sessions (#2803)", () => {
+test("Retry offers only the group's own unarchived sessions (#2803)", () => {
   const fetched = [
-    { id: "missing", projectId: "project-docs", archived: false },
-    { id: "known", projectId: "project-docs", archived: false },
+    { id: "mine", projectId: "project-docs", archived: false },
     { id: "elsewhere", projectId: "project-other", archived: false },
     { id: "archived", projectId: "project-docs", archived: true },
   ] as SessionView[];
-  const known = new Map([["known", fetched[1]]]);
-  assert.deepEqual(sessionsToRestore(fetched, "project-docs", (id) => known.get(id)).map((session) => session.id), ["missing"]);
+  assert.deepEqual(sessionsToRestore(fetched, "project-docs").map((session) => session.id), ["mine"]);
 });

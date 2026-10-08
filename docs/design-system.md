@@ -2035,9 +2035,11 @@ Transcripts** (`.btn.ghost`), which opens the command palette with the query. Bu
   has arrived by then, one §12.4 error state replaces both panes (`SessionsArrivalFailed`): "Couldn't
   Load Sessions", "Docs Site has 8 sessions, but they didn't arrive. Retry to ask for them again.",
   and **Retry**. Retry shows the skeleton again for a fresh wait and asks for the session list
-  again (`GET /api/sessions`, the list the snapshot is built from), adding the group's sessions the
-  client lacks. If that request fails, the state comes back at once with the error behind Show
-  Details. Sessions that arrive at any point, including while the state shows, replace it with rows.
+  again (`GET /api/sessions`, the list the snapshot is built from). The group adds those sessions
+  the live stream has not spoken for while the request was in flight, and nothing if a newer
+  snapshot arrived first. If that request fails, the state comes back at once with the error behind
+  Show Details. Sessions that arrive at any point, including while the state shows, replace it with
+  rows.
   While disconnected the wait does not run: the group keeps §12.5's Reconnecting treatment, and a
   fresh wait starts once the connection is back. A search or the Snoozed view never waits.
 

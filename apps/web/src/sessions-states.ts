@@ -163,13 +163,9 @@ export function sessionsArrivalFailedMessage(group: string, count: number): stri
 }
 
 /**
- * The sessions a Retry's fresh list adds to a group (#2803): the group's own, and only those the
- * live store lacks, so a response that is older than a live update never overwrites it.
+ * The sessions a Retry's fresh list offers a group (#2803): its own unarchived ones. The store's
+ * backfill fence then keeps out any the live stream has spoken for.
  */
-export function sessionsToRestore(
-  fetched: readonly SessionView[],
-  projectId: string,
-  known: (sessionId: string) => unknown,
-): SessionView[] {
-  return fetched.filter((session) => session.projectId === projectId && !session.archived && known(session.id) === undefined);
+export function sessionsToRestore(fetched: readonly SessionView[], projectId: string): SessionView[] {
+  return fetched.filter((session) => session.projectId === projectId && !session.archived);
 }
