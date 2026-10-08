@@ -1,0 +1,131 @@
+# Control-plane database durability
+
+The control plane keeps one SQLite connection (`ControlPlaneDb.open` in
+`apps/control-plane/src/db.ts`) in WAL mode. This page records which commits wait for a disk flush,
+what an OS crash or power loss can therefore roll back, and how the runner's retained event log
+recovers it.
+
+## Settings
+
+- `journal_mode=WAL`.
+- `busy_timeout=250` (`CONTROL_PLANE_DB_BUSY_TIMEOUT_MS`). Exactly one control plane owns a
+  database file, and in WAL mode readers and SQLite-aware backups (`VACUUM INTO`, the online backup
+  API) never block its writes. Only another writer, such as test seeding or a manual edit, can
+  hold the write lock. A statement that meets that lock now waits up to 250 ms instead of failing
+  at once with `SQLITE_BUSY`. The wait blocks the event loop, so it stays short: a lock held longer
+  still fails fast, and periodic work defers its tick as before.
+- `synchronous=FULL` on the connection: every commit flushes the WAL before it returns, so a
+  control-plane decision is durable once it has been acknowledged.
+- Runner-replayable event ingest is the one exception. `appendEvent` called with a runner sequence
+  number and `appendHydratedPage` switch the connection to `synchronous=NORMAL` for their own
+  transaction and back to `FULL` afterwards (`replayableCommit`). They are relaxed only in WAL mode
+  (outside WAL, `NORMAL` can corrupt the file), and never for a transaction that carries a
+  `token_usage` event (see below).
+
+Flushing every streamed event capped ingest near 150 events per second, because each flush blocks
+the control plane's only thread. Measured on a local NVMe SSD with 500 sessions and about 220,000
+events, 10 streaming sessions and 6 dashboards:
+
+| Measurement                                | Every commit flushed | Event ingest relaxed |
+| ------------------------------------------ | -------------------- | -------------------- |
+| `appendEvent` p50                          | 5.1 ms               | 0.07 ms              |
+| Runner-to-dashboard p50 / p95, 200 events/s | 1.4 s / 2.9 s        | 0.5 ms / 9 ms        |
+| Runner-to-dashboard p50 / p95, 300 events/s | 4.4 s / 8.6 s        | 0.5 ms / 12 ms       |
+
+## What a Crash Can Lose
+
+**A control-plane process crash, kill, or out-of-memory exit loses nothing.** Committed WAL frames
+are already in the operating system's page cache.
+
+**An OS crash or power loss never corrupts the database.** WAL frames are checksummed, and recovery
+discards an incomplete tail. It can roll back exactly one kind of commit: a relaxed event-ingest
+transaction that no later flush has covered.
+
+The WAL is flushed by every `FULL` commit (that is, any other write: a status change, a prompt, a
+decision) and by every checkpoint (by default each 1,000 WAL pages). A flush covers the whole file,
+so it also makes every earlier relaxed commit durable. The exposure is therefore the run of event
+commits since the most recent other write or checkpoint. The operating system usually writes those
+pages back within seconds, but nothing guarantees it.
+
+A rolled-back ingest transaction takes with it everything it wrote in the same transaction:
+
+- the event rows and their transcript search entries;
+- the session's hydrated-history cursor;
+- the session preview, last-activity time, and message count;
+- campaign-report rebinding, background-continuation projection, usage coverage, and event-artifact
+  links.
+
+Large payloads are published as artifacts in `FULL` commits before their event row. An artifact
+whose event rolled back is left unreferenced, and startup collects it
+(`collectOrphanedEventPayloadArtifacts`). Re-ingesting the event republishes the same
+content-addressed bytes.
+
+Nothing else is exposed, because every other write still flushes at its commit:
+
+- prompts and queued messages;
+- permission and workflow decisions, including the consumption of single-use approvals;
+- runner, device, and agent credentials and their revocation, and transcript-share revocation;
+- settings, governance and audit records, and session status;
+- events the control plane writes itself, which carry no runner sequence number (artifact
+  attachments, runner disconnect and reconnect notices, question attribution);
+- `token_usage` events and usage retention maintenance.
+
+Usage events stay `FULL` because replay could not restore them faithfully. On reconnect the
+runner's snapshot reaches the control plane before the lost events are pulled again, and
+`reconcileUsageSnapshotInTransaction` books the missing usage as flat totals and marks it covered.
+The replayed event is then skipped, losing its cache breakdown, and a provider that reports no
+cost would be priced as if nothing were cached. A `FULL` commit flushes every earlier relaxed
+commit too, so a rolled-back run of events never contains a usage event.
+
+Relaxing the whole connection was rejected for this reason. A rolled-back consumption or revocation
+has no other copy, so it would silently re-enable a used approval or a revoked credential.
+
+## How the Runner's Log Recovers Lost Events
+
+The runner keeps every event it has sent in its session store (`apps/runner/src/session-store.ts`):
+an append-only log plus lossless compaction segments, retained for as long as the runner holds the
+session. The control plane's hydrated-history cursor rolls back in the same transaction as the
+events, so after a crash the control plane is consistently behind rather than holding gaps.
+
+1. The control plane restarts, and the runner reconnects and re-registers.
+2. The runner republishes each session's durable tail (`session_runtime_updated`, sent by
+   `publishNegotiatedSessionSnapshots`). The control plane records the larger tail and marks the
+   session's cached history incomplete (`reconcileRunnerHistoryInTransaction`). It does not pull
+   anything yet.
+3. The missing events are pulled when the first of these happens:
+   - **The session's next live event.** `onSessionEvent` (`apps/control-plane/src/sessions.ts`) sees
+     a runner sequence number that is not the cursor plus one. It does not store the event out of
+     order; it calls `hydrateHistory` instead.
+   - **Any read of the session's history.** `GET /api/sessions/:id/events` and the child-session page
+     route call `hydrateHistory`. Until it finishes, responses report `cacheComplete: false`.
+   - **Campaign verification**, which force-hydrates the child session.
+4. `hydrateHistory` requests contiguous pages from the cursor (`session_history_page`) and applies
+   them with `appendHydratedPage`.
+
+A session's rolled-back rows are always a suffix of runner events, because any other write would
+have flushed everything before it. The recovered events take the next free per-session sequence
+numbers. If the control plane writes its own event to the session before they return (a reconnect
+notice, for example), those numbers differ from the ones dashboards saw before the crash. The event
+epoch does not change, so a dashboard that stayed open across the restart keeps its pre-crash copy
+and fetches only events above its old position. That dashboard can show a duplicated, missing, or
+misplaced event until the page is reloaded. Dashboards hold transcripts only in memory, so a reload
+or a newly opened dashboard shows the correct history.
+
+Limits:
+
+- Recovery is lazy. A session that receives no new event and is never opened stays behind, so its
+  newest events are missing from its transcript, search, and preview until something reads it.
+- The runner must still hold the session. If its history epoch changed, the control plane resets
+  and re-pulls the whole log instead.
+- A runner on the same host shares the power loss. It flushes its log on a 250 ms debounce after
+  appending and at lifecycle points, so it can lose its own last fraction of a second of events.
+  Nothing can recover those. This was already true before ingest was relaxed.
+
+## Guards
+
+- `db.test.ts`, test "only runner-replayable event ingest commits without a per-commit WAL flush":
+  records the `synchronous` level at every commit. It fails if ingest flushes again, or if the
+  relaxation leaks to the connection or to control-plane writes.
+- `pnpm benchmark:event-ingest [--dir <path>]` measures the real per-event commit cost and fails
+  above a 1 ms p50. Point `--dir` at the disk that holds the database: on tmpfs every flush is free,
+  which hides a regression.

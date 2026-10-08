@@ -35,6 +35,7 @@ import { archiveSessionPage } from "./archive-session-page.js";
 import { parseRateTable } from "./usage-pricing.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import {
+  CONTROL_PLANE_DB_BUSY_TIMEOUT_MS,
   ControlPlaneDb,
   GOVERNANCE_AUDIT_RETENTION_MS,
   RUNNER_REPORTED_STOP,
@@ -323,6 +324,80 @@ test("a durable steered user message resolves a lost accepted receipt", () => {
     reason: "provider_rejected",
   }, 5)?.state, "accepted", "accepted history evidence cannot be downgraded by a later receipt");
   assert.equal(db.resolveSteeringAttemptFromUserMessage("sess-1", "unknown", "turn-1", 5), false);
+});
+
+/** The synchronous level in force at each COMMIT the database issues: 1 is NORMAL, 2 is FULL. */
+function recordCommitSynchronousLevels(db: ControlPlaneDb): number[] {
+  const raw = db.raw();
+  const levels: number[] = [];
+  const exec = raw.exec.bind(raw);
+  raw.exec = (sql: string) => {
+    if (sql === "COMMIT") levels.push(Number(Object.values(raw.prepare("PRAGMA synchronous").get()!)[0]));
+    return exec(sql);
+  };
+  return levels;
+}
+
+test("only runner-replayable event ingest commits without a per-commit WAL flush", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-commit-durability-"));
+  let db: ControlPlaneDb | undefined;
+  try {
+    db = ControlPlaneDb.open(join(root, "control-plane.db"));
+    const pragma = (name: string) => Object.values(db!.raw().prepare(`PRAGMA ${name}`).get()!)[0];
+    // Control-plane decisions (consumed approvals, revocations, prompts) must stay durable once
+    // acknowledged; docs/control-plane-database-durability.md explains why only ingest relaxes.
+    assert.equal(pragma("journal_mode"), "wal");
+    assert.equal(pragma("synchronous"), 2, "the connection keeps synchronous=FULL");
+    assert.equal(pragma("busy_timeout"), CONTROL_PLANE_DB_BUSY_TIMEOUT_MS);
+    db.registerRunner(meta(), 1);
+    db.createSession(newSession());
+    const levels = recordCommitSynchronousLevels(db);
+
+    // Due again, so the first accruing append also runs usage retention maintenance.
+    (db as unknown as { lastUsageMaintenance: number }).lastUsageMaintenance = 0;
+    const runnerEvent = { runnerSeq: 1, historyEpoch: null, accrueUsage: true };
+    db.appendEvent("sess-1", { kind: "agent_message", text: "streamed" }, 2, runnerEvent);
+    const usage = { kind: "token_usage", inputTokens: 10, outputTokens: 2, costUsd: 0.01 } as const;
+    db.appendEvent("sess-1", usage, 3, { ...runnerEvent, runnerSeq: 2 });
+    db.appendEvent("sess-1", { kind: "stderr", text: "control-plane authored" }, 4);
+    db.reconcileRunnerHistory("sess-1", 7, 3);
+    const hydrate = (payload: Parameters<ControlPlaneDb["appendEvent"]>[1]) => db!.appendHydratedPage(
+      "sess-1",
+      { afterSeq: db!.getHydratedSeq("sess-1"), historyEpoch: 7, eventEpoch: 0 },
+      [{ seq: db!.getHydratedSeq("sess-1") + 1, ts: 5, payload }],
+    );
+    assert.equal(hydrate({ kind: "agent_message", text: "hydrated" }).applied, true);
+    assert.equal(hydrate(usage).applied, true);
+    assert.deepEqual(levels, [
+      1, // live runner event
+      2, // usage retention maintenance after it
+      2, // runner token_usage: a lost one could not be re-accounted in detail
+      2, // control-plane event
+      2, // history-state reconciliation
+      1, // hydrated runner event
+      2, // hydrated token_usage
+    ]);
+    assert.equal(pragma("synchronous"), 2, "the connection returns to FULL after each relaxed commit");
+
+    assert.throws(() => db!.appendEvent("missing-session", { kind: "agent_message", text: "x" }, 5, {
+      runnerSeq: 1, historyEpoch: null,
+    }));
+    assert.equal(pragma("synchronous"), 2, "a failed relaxed commit still restores FULL");
+  } finally {
+    db?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  const memory = withRunner();
+  try {
+    memory.createSession(newSession());
+    const levels = recordCommitSynchronousLevels(memory);
+    memory.appendEvent("sess-1", { kind: "agent_message", text: "streamed" }, 2, { runnerSeq: 1, historyEpoch: null });
+    assert.equal(Object.values(memory.raw().prepare("PRAGMA journal_mode").get()!)[0], "memory");
+    assert.deepEqual(levels, [2], "NORMAL is only corruption-safe under WAL, so any other journal keeps FULL");
+  } finally {
+    memory.close();
+  }
 });
 
 test("startup indexes prompt-image references from previously committed user messages", () => {

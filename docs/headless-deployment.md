@@ -172,7 +172,9 @@ including from a phone, needs one of the HTTPS routes below.
 The SQLite database and the artifact directory beside it are one consistency unit: back them up
 together with SQLite-aware tooling (`VACUUM INTO` or the online backup API), never by copying a live
 database, and keep them on persistent local storage, not a network filesystem. Exactly one control
-plane may own a database file. Configuration and credential files (`control-plane.env`,
+plane may own a database file. An OS crash or power loss can roll back only the newest streamed
+runner events, which the runner's log restores; see
+[control-plane database durability](./control-plane-database-durability.md). Configuration and credential files (`control-plane.env`,
 `runner.config.json`, `runner.token`, the `.local-device-token`) are small; back them up with the
 same care as the database, because they are what a restored host needs to rejoin without re-pairing.
 
