@@ -4818,6 +4818,8 @@ export class ControlPlaneDb {
   /** Advanced by every write that can change who may access a session; see sessionAccessRevision. */
   private accessRevision = 0;
   private accessRevisionTracked = false;
+  /** SQLite's data_version when the revision was last read; see sessionAccessRevision. */
+  private accessDataVersion: number | null = null;
 
   /** Install this connection's access-change triggers (#2761). TEMP triggers belong to this
    * connection alone: nothing is stored in the file, so no other build or tool opening it needs the
@@ -4841,9 +4843,19 @@ export class ControlPlaneDb {
    * session ownership (audience, transfer), a session's creation, deletion, move or archive, users,
    * organizations, memberships and roles, teams and their members, project, workspace and runner
    * ownership, devices, and agent and role-revoked credentials. A decision made at one revision
-   * stays valid while it is unchanged. Undefined when this connection cannot track it. */
+   * stays valid while it is unchanged. Undefined when this connection cannot track it.
+   *
+   * The triggers see only this connection's writes. A commit by any other connection (a manual
+   * edit, a seeding script, another process) changes SQLite's data_version, and that advances the
+   * revision too, whatever it wrote. */
   sessionAccessRevision(): number | undefined {
-    return this.accessRevisionTracked ? this.accessRevision : undefined;
+    if (!this.accessRevisionTracked) return undefined;
+    const dataVersion = (this.stmt("PRAGMA data_version").get() as { data_version: number }).data_version;
+    if (dataVersion !== this.accessDataVersion) {
+      this.accessDataVersion = dataVersion;
+      this.accessRevision++;
+    }
+    return this.accessRevision;
   }
 
   /** Sessions whose event epoch advanced in a committed ingest, not yet published. */

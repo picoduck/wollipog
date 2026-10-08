@@ -259,6 +259,31 @@ test("without an access revision every send checks access in full", (t) => {
   assert.equal(h.checks.count, 5);
 });
 
+test("a commit by another connection invalidates on the very next send; its checkpoints do not", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-access-external-"));
+  const location = join(root, "control-plane.db");
+  const h = harness(location);
+  const other = new DatabaseSync(location);
+  try {
+    h.createSession("s-1", { kind: "team", teamId: "team-a" });
+    const bob = h.connect(principal("bob"));
+    h.emit("s-1");
+    assert.equal(bob.eventsFor("s-1"), 1);
+    // The control plane's triggers never see this write; SQLite's data_version does.
+    other.prepare("DELETE FROM identity_team_members WHERE team_id='team-a' AND user_id='bob'").run();
+    h.emit("s-1");
+    assert.equal(bob.eventsFor("s-1"), 1, "the very next send after the external commit is denied");
+    // A checkpoint from another connection (the WAL checkpoint worker) commits nothing.
+    const revision = h.db.sessionAccessRevision();
+    other.prepare("PRAGMA wal_checkpoint(PASSIVE)").get();
+    assert.equal(h.db.sessionAccessRevision(), revision);
+  } finally {
+    other.close();
+    h.db.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("the access triggers live only on the control plane's connection", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-access-revision-"));
   const location = join(root, "control-plane.db");
