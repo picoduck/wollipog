@@ -221,6 +221,9 @@ export interface SessionHistoryWindowOptions {
     turnAligned?: boolean,
   ) => void;
   isCurrent: () => boolean;
+  /** True while nothing can fill the cache, such as when the session's machine is offline (#2773).
+   * Reading the same window again cannot change its answer, so the first incomplete answer is final. */
+  cacheCannotFill?: () => boolean;
   wait?: (ms: number) => Promise<void>;
   idlePollMs?: number;
   maxIdlePolls?: number;
@@ -286,9 +289,9 @@ export async function recoverSessionHistoryWindow(
     // an old prefix of the log. Painting that would reproduce the oldest-first open this window
     // exists to remove, so re-read the same window instead of showing it. Targeted WebSocket
     // delivery supplies live rows in the meantime, and the reader keeps its loading state.
-    if (++idlePolls > maxIdlePolls) {
-      // The cache never caught up. Show whatever it does hold rather than leaving the reader with
-      // nothing, still reporting the load as incomplete so the transcript says so.
+    if (++idlePolls > maxIdlePolls || options.cacheCannotFill?.() === true) {
+      // The cache never caught up, or cannot. Show whatever it does hold rather than leaving the
+      // reader with nothing, still reporting the load as incomplete so the transcript says so.
       applyPage(false);
       return { supported: true, complete: false };
     }

@@ -29,6 +29,9 @@ import "../styles.css";
  *   earlier-page request in flight, `?older=fail` rejects it, `?older=unsupported` answers it as a
  *   server without backward reads does, and the default resolves it.
  * - `unpaired`: the server refuses this device before anything is cached (#2579).
+ * - `incomplete`: every read answers with a cache still filling from the machine, holding only a
+ *   hidden Agent Log (#2773). `?runner=offline` shows that machine as offline.
+ * - `agent-logs`: a stopped session whose complete history is one hidden Agent Log (#2773).
  *
  * `?theme=light|dark` picks the theme and `?mode=preview` renders the Inbox preview. The right
  * panel records the mode it was asked to show in `body[data-right-panel-mode]`. `?failed=1` adds a
@@ -41,6 +44,7 @@ const older = params.get("older") ?? "resolve";
 const mode = params.get("mode") === "preview" ? ("preview" as const) : ("expanded" as const);
 const count = Number(params.get("count") ?? "0");
 const failedPrompt = params.get("failed") === "1";
+const runnerStatus = params.get("runner") === "offline" ? "offline" : "online";
 
 const SESSION_ID = "transcript-states-session";
 const PROJECT_ID = "project-wollipog";
@@ -49,6 +53,8 @@ const statusByState: Record<string, SessionStatus> = {
   starting: "starting",
   stopped: "stopped",
   archived: "stopped",
+  incomplete: "stopped",
+  "agent-logs": "stopped",
 };
 const status: SessionStatus = statusByState[state] ?? "idle";
 
@@ -58,7 +64,7 @@ const runner = {
   displayName: "Build Box",
   os: "linux",
   version: "1",
-  status: "online",
+  status: runnerStatus,
   agents: [{
     id: "claude",
     name: "Claude Code",
@@ -98,6 +104,9 @@ const events: SessionEvent[] = payloads.map((payload, index) => ({
   id: index + 1, sessionId: SESSION_ID, seq: index + 1, ts: 1_760_000_000_000 + index * 1000, payload,
 }));
 const hasEvents = state === "earlier" || state === "history-partial";
+const agentLog: SessionEvent = {
+  id: 1, sessionId: SESSION_ID, seq: 1, ts: 1_760_000_000_000, payload: { kind: "stderr", text: "[agent] ready\n" },
+};
 
 const session = {
   id: SESSION_ID,
@@ -202,6 +211,11 @@ const client = {
     tailRequestCount += 1;
     document.body.dataset.tailRequestCount = String(tailRequestCount);
     if (state === "loading" || state === "unpaired") return never();
+    if (state === "incomplete" || state === "agent-logs") {
+      return Promise.resolve({
+        events: [agentLog], eventEpoch, nextBefore: 1, hasMoreOlder: false, cacheComplete: state === "agent-logs",
+      });
+    }
     if (state === "history-error" || state === "history-partial") {
       return Promise.reject(new Error("GET /api/sessions/transcript-states-session/events/tail failed: 502 Bad Gateway"));
     }

@@ -59,9 +59,17 @@ export function TranscriptEmptyState({
   );
 }
 
-/** How much of the history arrived, and from where, for the history notice's body. */
-export function transcriptHistoryLoadedSentence(loaded: number, total: number | undefined, machine: string | undefined): string {
-  const from = machine ? ` from ${machine}` : "";
+/** How much of the history arrived, and from where, for the history notice's body. An offline
+ * machine is why the rest cannot arrive yet, so the sentence says so (#2773). */
+export function transcriptHistoryLoadedSentence(
+  loaded: number,
+  total: number | undefined,
+  machine: string | undefined,
+  machineOffline = false,
+): string {
+  const from = machine
+    ? ` from ${machine}${machineOffline ? ", which is offline" : ""}`
+    : machineOffline ? " while its machine is offline" : "";
   if (loaded <= 0) return `No activity loaded${from}.`;
   const events = (count: number) => `${count.toLocaleString("en-US")} ${count === 1 ? "event" : "events"}`;
   if (total !== undefined && total > loaded) return `Loaded ${loaded.toLocaleString("en-US")} of ${events(total)}${from}.`;
@@ -77,6 +85,7 @@ export function TranscriptHistoryNotice({
   loaded,
   total,
   machine,
+  machineOffline = false,
   canRetry,
   onRetry,
 }: {
@@ -87,6 +96,8 @@ export function TranscriptHistoryNotice({
   /** The session's event count, when the snapshot reports one. */
   total?: number;
   machine?: string;
+  /** The session's machine is offline, so the rest of its history cannot load yet. */
+  machineOffline?: boolean;
   canRetry: boolean;
   onRetry: () => void;
 }) {
@@ -108,7 +119,7 @@ export function TranscriptHistoryNotice({
       actions={<button className="btn sm" type="button" disabled={!canRetry} onClick={onRetry}>Retry</button>}
       details={error ? <code className="transcript-history-error">{error}</code> : undefined}
     >
-      {transcriptHistoryLoadedSentence(loaded, total, machine)}
+      {transcriptHistoryLoadedSentence(loaded, total, machine, machineOffline)}
     </Notice>
   );
 }

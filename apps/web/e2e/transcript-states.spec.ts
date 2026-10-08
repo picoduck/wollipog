@@ -199,3 +199,37 @@ test("a slow load says what it is waiting for after 3 seconds", async ({ page })
   await page.clock.runFor(3_000);
   await expect(page.locator(".transcript-skeleton-sentence")).toHaveText("Loading a long conversation (1,240 events)…");
 });
+
+/** A session whose only event is a hidden Agent Log, and whose machine cannot finish filling the
+ * history cache (#2773). */
+test.describe("a history its machine cannot finish", () => {
+  for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+    test(`an offline machine's incomplete history settles on its notice at once at ${viewport.width}px`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await open(page, "state=incomplete&runner=offline&count=1");
+      const notice = page.locator(".detail-reader .notice");
+      // Well inside the reader's 12-second re-read budget: the first answer is the last.
+      await expect(notice).toContainText("Couldn't Load the Full Conversation", { timeout: 2_000 });
+      await expect(notice).toContainText("Loaded 1 event from Build Box, which is offline.");
+      await expect(page.locator(".transcript-skeleton")).toHaveCount(0);
+      await page.waitForTimeout(500);
+      await expect(page.locator("body")).toHaveAttribute("data-tail-request-count", "1");
+    });
+  }
+
+  test("a long history filling from an online machine keeps its loading notice", async ({ page }) => {
+    await page.clock.install();
+    await open(page, "state=incomplete&count=1240");
+    await page.clock.runFor(3_000);
+    await expect(page.locator(".transcript-skeleton-sentence")).toHaveText("Loading a long conversation (1,240 events)…");
+    await expect(page.locator(".detail-reader .notice")).toHaveCount(0);
+    await expect.poll(async () => Number(await page.locator("body").getAttribute("data-tail-request-count")))
+      .toBeGreaterThan(1);
+  });
+
+  test("a complete history of only hidden Agent Logs is the empty state", async ({ page }) => {
+    await open(page, "state=agent-logs&count=1");
+    await expect(page.locator(".detail-scroll .state .state-title")).toHaveText("No Messages");
+    await expect(page.locator(".transcript-skeleton")).toHaveCount(0);
+  });
+});
