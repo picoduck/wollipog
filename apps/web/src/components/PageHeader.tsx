@@ -250,9 +250,12 @@ export function DetailBar({
   const compact = useIsCompact();
   const onSearch = useContext(AppBarSearchContext);
   const headingRef = useRef<HTMLDivElement>(null);
+  const hasStatus = Boolean(status);
   // Whether the badge is a dot is measured against the full badge, every time, so the answer never
   // depends on the previous one. The attribute is written straight to the DOM inside one layout
   // pass: React does not own it, and nothing paints between taking it off and putting it back.
+  // It runs again when its inputs change (#2798): the tier and the title here, the title's room
+  // through the heading's one observer, and what the badge shows through its own mutations.
   useLayoutEffect(() => {
     const heading = headingRef.current;
     const badge = heading?.querySelector<HTMLElement>(".detail-bar-status");
@@ -268,12 +271,24 @@ export function DetailBar({
       badge.title = badge.textContent ?? "";
     };
     measure();
-    if (typeof ResizeObserver === "undefined") return;
-    // The heading's width is set by the bar, never by the badge, so a collapse cannot re-trigger it.
-    const observer = new ResizeObserver(measure);
-    observer.observe(heading);
-    return () => observer.disconnect();
-  });
+    let cancelled = false;
+    void document.fonts?.ready.then(() => {
+      if (!cancelled) measure();
+    });
+    // The heading takes the bar's free space, so it resizes with the bar and with the actions beside
+    // it, but never with the badge, so a collapse cannot re-trigger the observer.
+    const resized = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    resized?.observe(heading);
+    // The status is any node, so a new label or count is read from the DOM rather than from props.
+    // Only content is watched: the attributes `measure` writes would otherwise re-trigger it.
+    const relabelled = typeof MutationObserver === "undefined" ? null : new MutationObserver(measure);
+    relabelled?.observe(badge, { characterData: true, childList: true, subtree: true });
+    return () => {
+      cancelled = true;
+      resized?.disconnect();
+      relabelled?.disconnect();
+    };
+  }, [compact, title, hasStatus]);
   const action = (item: DetailBarAction, kind: "btn" | "btn primary") => {
     const iconOnly = compact && Boolean(item.icon);
     return (
