@@ -1401,6 +1401,44 @@ test.describe("an expanded question reads across the whole reading column (#2786
     await expect.poll(() => readingPosition(page)).toEqual(before);
   });
 
+  test("Show Where Asked collapses an expanded question and shows the transcript at its place", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto("/agent-questions-e2e.html?set=long-text&after=60");
+    const card = dockedCard(page);
+    await showFullQuestion(card).click();
+    await expectReadingMode(page);
+    await card.getByRole("button", { name: "Show Where Asked", exact: true }).click();
+    await expect(page.locator(".detail-main")).toHaveCSS("visibility", "visible");
+    await expect(strip(page)).toBeVisible();
+    await expect(marker(page)).toBeVisible();
+    await expect(marker(page)).toHaveAttribute("data-selected", "");
+    // The question comes back from the strip as the person left it: collapsed.
+    await strip(page).getByRole("button", { name: "Expand Request" }).click();
+    await expect(showFullQuestion(card)).toHaveAttribute("aria-expanded", "false");
+    await expect(page.locator(".detail-main")).toHaveCSS("visibility", "visible");
+  });
+
+  test("an answer reached from the keyboard under the expanded card's head line comes into view below it", async ({ page }) => {
+    await page.setViewportSize({ width: 844, height: 390 });
+    await page.goto("/agent-questions-e2e.html?set=long-choices");
+    const card = dockedCard(page);
+    await showFullQuestion(card).click();
+    const proceed = card.locator(".choice-row").filter({ hasText: "Proceed" });
+    // Scroll the first answer up under the sticky head line, where it is inside the card but unseen,
+    // then reach it with Tab from the question.
+    await proceed.evaluate((row) => {
+      const card = row.closest<HTMLElement>(".question-card")!;
+      const head = card.querySelector(".request-card-head")!.getBoundingClientRect();
+      card.scrollTop += row.getBoundingClientRect().top - head.top;
+      card.querySelector<HTMLElement>(".question-text")!.focus({ preventScroll: true });
+    });
+    const [under, head] = [await geometry(proceed), await geometry(card.locator(".request-card-head"))];
+    expect(under.top).toBeLessThan(head.bottom - 1);
+    await page.keyboard.press("Tab");
+    await expect(card.getByRole("radio", { name: /^Proceed/ })).toBeFocused();
+    await expect.poll(async () => (await geometry(proceed)).top >= head.bottom - 0.5).toBe(true);
+  });
+
   test("rotating and resizing keep the question expanded across whatever column there is", async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto("/agent-questions-e2e.html?set=paragraph&more=1&queued=3");

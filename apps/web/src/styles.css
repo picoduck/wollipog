@@ -5594,16 +5594,17 @@ textarea {
    keyboard open or not. The slot covers the transcript rather than squeezing it, so the transcript
    keeps its size and its reading position underneath and is as it was when the question collapses.
    Hidden, it takes no pointer, no focus and no screen reader. The card fills the slot and scrolls
-   between its head line and its footer (SessionApproval.tsx). */
-.chat-reading > .session-notice-slot:has(.question-card[data-question-expanded]) {
+   between its head line and its footer (SessionApproval.tsx). Behind the dock's strip the card is
+   hidden, and reading mode ends with it. */
+.chat-reading > .session-notice-slot:has(> .request-dock > .request-dock-card:not([hidden]) > .question-card[data-question-expanded]) {
   position: absolute;
   inset: 0;
   max-height: none;
 }
-.chat-reading:has(> .session-notice-slot .question-card[data-question-expanded]) > .detail-main {
+.chat-reading:has(> .session-notice-slot > .request-dock > .request-dock-card:not([hidden]) > .question-card[data-question-expanded]) > .detail-main {
   visibility: hidden;
 }
-.chat-reading > .session-notice-slot:has(.question-card[data-question-expanded]) > .request-dock,
+.chat-reading > .session-notice-slot:has(> .request-dock > .request-dock-card:not([hidden]) > .question-card[data-question-expanded]) > .request-dock,
 .request-dock .request-dock-card:has(> .question-card[data-question-expanded]),
 .request-dock .question-card[data-question-expanded] {
   flex: 1 1 auto;
@@ -14307,7 +14308,7 @@ body.shell-dock-dragging * {
       input:focus:not([readonly], [type="button"], [type="checkbox"], [type="color"],
         [type="file"], [type="image"], [type="radio"], [type="range"], [type="reset"],
         [type="submit"])
-    ) .chat-reading > .session-notice-slot:not(:has(.question-card[data-question-expanded])) {
+    ) .chat-reading > .session-notice-slot:not(:has(> .request-dock > .request-dock-card:not([hidden]) > .question-card[data-question-expanded])) {
       max-height: 40cqh;
     }
     /* And compacts a docked question card as the visual-viewport signal does (#2205), for the same

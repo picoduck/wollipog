@@ -773,13 +773,17 @@ export function SessionQuestionBanner({
     for (const scroller of [body, card, dock, dock?.parentElement?.closest<HTMLElement>(".session-notice-slot")]) {
       if (!scroller) continue;
       const bounds = scroller.getBoundingClientRect();
-      // The card scrolls under its footer in a short column (styles.css): the field must clear it.
+      // The card scrolls under its footer in a short column (styles.css), and expanded under its head
+      // line too (#2786): the field must clear both.
       const foot = scroller === card ? card.querySelector<HTMLElement>(":scope > .request-card-foot") : null;
+      const head = scroller === card ? card.querySelector<HTMLElement>(":scope > .request-card-head") : null;
       const bottom = foot && getComputedStyle(foot).position === "sticky"
         ? Math.min(bounds.bottom, foot.getBoundingClientRect().top) : bounds.bottom;
+      const top = head && getComputedStyle(head).position === "sticky"
+        ? Math.max(bounds.top, head.getBoundingClientRect().bottom) : bounds.top;
       const rect = field.getBoundingClientRect();
-      if (rect.top < bounds.top) scroller.scrollTop -= bounds.top - rect.top;
-      else if (rect.bottom > bottom) scroller.scrollTop += Math.min(rect.bottom - bottom, rect.top - bounds.top);
+      if (rect.top < top) scroller.scrollTop -= top - rect.top;
+      else if (rect.bottom > bottom) scroller.scrollTop += Math.min(rect.bottom - bottom, rect.top - top);
     }
   };
   // The keyboard opens after the field took focus and lowers the dock's cap, which can hide it again.
@@ -871,7 +875,12 @@ export function SessionQuestionBanner({
               aria-label={QUESTION_CARD_COPY.showWhereAsked}
               aria-describedby={whereAsked.unavailableReason ? whereAskedId : undefined}
               disabled={whereAsked.unavailableReason !== null}
-              onClick={whereAsked.onShow}
+              // The transcript is what Show Where Asked shows, so an expanded question collapses
+              // first rather than covering it (#2786).
+              onClick={() => {
+                if (titleExpanded) setExpandedQuestion(null);
+                whereAsked.onShow();
+              }}
             >
               <span className="question-where-asked-label">{QUESTION_CARD_COPY.showWhereAsked}</span>
             </BusyButton>

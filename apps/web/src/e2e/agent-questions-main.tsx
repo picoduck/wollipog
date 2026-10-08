@@ -164,6 +164,13 @@ const longTextQuestions: AgentQuestion[] = [{
   options: [{ label: "Proceed" }, { label: "Hold" }],
 }];
 
+// The same question with enough answers that, expanded, the first can scroll up under the head line
+// (#2786).
+const longChoiceQuestions: AgentQuestion[] = [{
+  ...longTextQuestions[0]!,
+  options: ["Proceed", "Hold", "Split the Plan", "Ask Again Later", "Escalate", "Close It"].map((label) => ({ label })),
+}];
+
 // A paragraph-long question with a header and an inline code span: a few lines more than the docked
 // card shows before Show Full Question (#2683).
 const paragraphQuestions: AgentQuestion[] = [{
@@ -272,6 +279,8 @@ function Fixture() {
       ? longQuestions
       : params.get("set") === "long-text"
         ? longTextQuestions
+      : params.get("set") === "long-choices"
+        ? longChoiceQuestions
         : params.get("set") === "long-label"
           ? longLabelQuestions
         : params.get("set") === "paragraph"
