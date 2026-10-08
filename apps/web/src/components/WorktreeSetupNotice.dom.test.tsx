@@ -10,7 +10,7 @@ import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
-import { ProjectSetupSuggestion, WORKTREE_SETUP_DOCS_URL, WorktreeSetupNotice } from "./WorktreeSetupNotice.js";
+import { useWorktreeSetupSuggestion, WORKTREE_SETUP_DOCS_URL, WorktreeSetupNotice } from "./WorktreeSetupNotice.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
@@ -140,6 +140,19 @@ class FakeSocket implements UiSocket {
 }
 
 const navigation: ViewNavigation = { current: () => ({ name: "inbox" }), push() {}, listen: () => () => {} };
+
+/** The Sessions list's setup suggestion, as `SessionsListNotices` composes it (#2221). */
+function ProjectSetupSuggestion({ session, projectName, onGenerated }: {
+  session: SessionView & { projectId: string };
+  projectName: string;
+  onGenerated: (sessionId: string) => void;
+}) {
+  const setup = useWorktreeSetupSuggestion(session, onGenerated);
+  return (
+    <WorktreeSetupNotice projectName={projectName} generating={setup.generating} dismissing={setup.dismissing}
+      error={setup.error} generateRefusal={setup.generateRefusal} onGenerate={setup.generate} onDismiss={setup.dismiss} />
+  );
+}
 
 /** A connected suggestion on a store that knows the session's Machine as "Build Box". */
 async function withSuggestion(

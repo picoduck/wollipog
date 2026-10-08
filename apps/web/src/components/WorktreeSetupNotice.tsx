@@ -72,6 +72,10 @@ export function WorktreeSetupNotice({
  * writes the file in that session's worktree and then dismisses the suggestion for the Project on the
  * server; `onGenerated` opens the file. A failure reads as one sentence and the raw error goes to the
  * console, since it names runner internals the person cannot act on.
+ *
+ * Its progress and error belong to the session they were started for: the Sessions list keeps this
+ * hook while the open Project tab changes and while another notice is shown in the suggestion's
+ * place (#2221), so a request in flight stays guarded and never shows on another Project.
  */
 export function useWorktreeSetupSuggestion(
   session: (SessionView & { projectId: string }) | undefined,
@@ -83,9 +87,13 @@ export function useWorktreeSetupSuggestion(
     const box = [...state.boxes.values()].find((candidate) => candidate.runnerId === session.runnerId);
     return runnerDisplay(state.runners.get(session.runnerId), box, session.runnerId).name;
   });
-  const [generating, setGenerating] = useState(false);
-  const [dismissing, setDismissing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [states, setStates] = useState<ReadonlyMap<string, SetupSuggestionState>>(() => new Map());
+  const update = (sessionId: string, patch: Partial<SetupSuggestionState>) => setStates((current) => {
+    const next = new Map(current);
+    next.set(sessionId, { ...(current.get(sessionId) ?? IDLE_SETUP), ...patch });
+    return next;
+  });
+  const { generating, dismissing, error } = (session && states.get(session.id)) || IDLE_SETUP;
   const generateRefusal = session ? sessionCommandRefusal(session, "worktreeSetup") : null;
   return {
     generating,
@@ -94,40 +102,35 @@ export function useWorktreeSetupSuggestion(
     generateRefusal,
     generate: () => {
       if (!session || generating || dismissing || generateRefusal !== null) return;
-      setGenerating(true);
-      setError(null);
-      void api.generateWorktreeSetup(session.id)
+      const { id } = session;
+      update(id, { generating: true, error: null });
+      void api.generateWorktreeSetup(id)
         .then(() => api.dismissWorktreeSetupNotice(session.projectId))
-        .then(() => onGenerated(session.id))
+        .then(() => onGenerated(id))
         .catch((cause: unknown) => {
           console.warn("Generating the worktree setup file failed", cause);
-          setError(`Couldn’t read the repository on ${machine || "its machine"}. Check that it’s online, then try again.`);
+          update(id, { error: `Couldn’t read the repository on ${machine || "its machine"}. Check that it’s online, then try again.` });
         })
-        .finally(() => setGenerating(false));
+        .finally(() => update(id, { generating: false }));
     },
     dismiss: () => {
       if (!session || generating || dismissing) return;
-      setDismissing(true);
-      setError(null);
+      const { id } = session;
+      update(id, { dismissing: true, error: null });
       void api.dismissWorktreeSetupNotice(session.projectId)
         .catch((cause: unknown) => {
           console.warn("Dismissing the worktree setup notice failed", cause);
-          setError("Couldn’t dismiss this suggestion. Try again.");
+          update(id, { error: "Couldn’t dismiss this suggestion. Try again." });
         })
-        .finally(() => setDismissing(false));
+        .finally(() => update(id, { dismissing: false }));
     },
   };
 }
 
-/** The Sessions view's notice for the open Project tab. */
-export function ProjectSetupSuggestion({ session, projectName, onGenerated }: {
-  session: SessionView & { projectId: string };
-  projectName: string;
-  onGenerated: (sessionId: string) => void;
-}) {
-  const setup = useWorktreeSetupSuggestion(session, onGenerated);
-  return (
-    <WorktreeSetupNotice projectName={projectName} generating={setup.generating} dismissing={setup.dismissing}
-      error={setup.error} generateRefusal={setup.generateRefusal} onGenerate={setup.generate} onDismiss={setup.dismiss} />
-  );
+interface SetupSuggestionState {
+  generating: boolean;
+  dismissing: boolean;
+  error: string | null;
 }
+
+const IDLE_SETUP: SetupSuggestionState = { generating: false, dismissing: false, error: null };

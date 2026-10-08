@@ -1483,8 +1483,9 @@ kbd {
   gap: var(--space-2);
 }
 .detail-bar-status { display: inline-flex; }
-/* The compact tier (§15.2): where the full badge would leave the title truncated below a readable
-   width, DetailBar marks it and the badge becomes its dot, with the label in its tooltip. The label
+/* The compact tier (§15.2), and the Sessions preview's bar at any width (#2221): where the full badge
+   would leave the title truncated below a readable width, DetailBar or SessionPreviewBar marks it and
+   the badge becomes its dot, with the label in its tooltip. The label
    stays in the text, clipped, so the accessible name does not change: the box is the badge's 8px
    padding either side of its 6px dot, and an 8px gap starts the label exactly at the clip edge. */
 .detail-bar-status[data-dot] > .status {
@@ -9331,12 +9332,6 @@ textarea,
   background: none;
 }
 .provider-login-card[data-embedded] :is(p, form, .provider-login-device-code) { margin: 0; }
-.inbox-provider-logins {
-  display: grid;
-  gap: 8px;
-  padding: 0 12px 10px;
-  border-bottom: 1px solid var(--border);
-}
 .runner-details-body {
   padding-bottom: 2px;
 }
@@ -9727,39 +9722,97 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   background: var(--bg-elev);
 }
 
-/* The Inbox's recommendation and a Project's setup suggestion sit in the list pane, inset on every
-   side; the list below brings its own top padding. */
-.inbox-list-pane > .notice { margin: var(--space-3) var(--space-3) 0; }
-
-.recommended-skills-notice-list {
+/* The Sessions list head (#2221, §13.2, §6.3): the one list notice, the quiet new-order line and
+   Reconnecting…, inset at the list's edges and 8px from the top as the rows are; the list below
+   brings its own top padding. A 104px notice and its pad are then exactly two 56px rows. */
+.inbox-list-head {
+  display: grid;
+  flex: none;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3) 0;
+}
+.inbox-list-head:empty { display: none; }
+.inbox-list-head > .list-notice-slot { margin: 0; }
+.inbox-list-head > .inbox-list-status { padding: 0; }
+/* New activity would reorder the rows: one neutral line with Apply, never a notice. */
+.inbox-order-line {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin: var(--space-1) 0 0;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  color: var(--text-dim);
+  font: var(--type-body);
+}
+/* Recommended Skills (#1768, #2221): each skill a link with its own Dismiss, then Dismiss All. Where
+   the list is 600px or wider they share one line after the body; narrower, one skill per line. */
+.skill-recommendations-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+.skill-recommendations-list {
+  display: grid;
+  gap: var(--space-1);
+  align-self: stretch;
+  margin: 0;
   padding: 0;
   list-style: none;
 }
-
-.recommended-skills-notice-list > li {
+.skill-recommendations-list > li {
   display: flex;
   align-items: center;
-  gap: 2px;
-  padding: 2px 2px 2px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
-  background: var(--bg-elev-3);
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
 }
-
-.recommended-skills-notice-list a {
-  color: var(--accent);
-  font-family: var(--mono);
-  font-size: var(--text-sm);
-  text-decoration: none;
+.skill-recommendations-list a {
+  min-width: 0;
+  font: var(--type-small);
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
 }
-
-.recommended-skills-notice-list a:hover {
-  text-decoration: underline;
+@container list (min-width: 600px) {
+  .skill-recommendations-row {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    column-gap: var(--space-4);
+  }
+  .skill-recommendations-list {
+    display: flex;
+    flex-wrap: wrap;
+    align-self: auto;
+    gap: var(--space-1) var(--space-4);
+  }
+  .skill-recommendations-list > li { justify-content: flex-start; gap: var(--space-1); }
 }
+/* Phones: 44px lines, from the buttons' token, and Dismiss All across the notice. */
+@media (max-width: 760px) {
+  .skill-recommendations-row { --control-h-sm: 44px; }
+  .skill-recommendations-list { gap: 0; }
+  .skill-recommendations-row > .skill-recommendations-all { align-self: stretch; max-width: none; }
+}
+/* A machine sign-in (#2221): the device code inline after its sentence, and the code field in one
+   row with Submit Code. */
+.machine-sign-in-sentence {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.machine-sign-in-code { align-items: center; }
+.machine-sign-in-code > code { letter-spacing: 0.08em; white-space: nowrap; }
+.machine-sign-in-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+.machine-sign-in-form > label { color: var(--text-dim); font: var(--type-small); }
+.machine-sign-in-form > input { flex: 1 1 160px; min-width: 0; }
 
 /* Version-skew: the runner registered with an older PROTOCOL_VERSION than this dashboard. */
 .outdated-badge {
@@ -12005,6 +12058,18 @@ body.shell-dock-dragging * {
   grid-column: 1;
 }
 .sessions-md .inbox-list { padding-top: var(--space-2); }
+/* Stacked, the list head takes whole rows (--sessions-list-head-rows, which InboxView measures) and
+   the list keeps the rest as whole rows right under the head, so none is cut and the divider never
+   moves for a notice (#2221). What the head leaves of its last row is space under the list's last
+   row, above the divider, never between the notice and the rows. One row at least: a head taller
+   than the list leaves the pane clipping the list rather than the notice. */
+.sessions-md:not([data-layout="right"]) .inbox-list {
+  flex: none;
+  height: max(
+    calc(var(--space-2) + var(--row-h-2)),
+    calc(var(--sessions-list-h) - var(--sessions-list-head-rows, 0) * var(--row-h-2))
+  );
+}
 /* The divider (§6.3): the hairline under the list's last row, a hit band centred on it, and a grip
    that is always visible, since a rule between two full-width panes does not read as movable. Hover
    and drag draw the line at 2px --border-strong, keyboard focus at 2px --focus; no ring, no band. */
@@ -12093,7 +12158,6 @@ body.shell-dock-dragging * {
     height: 40px;
   }
 }
-.inbox-order-update { white-space: nowrap; }
 .inbox-tab-group {
   position: relative;
   display: inline-flex;

@@ -111,6 +111,8 @@ test("every referenced custom property is defined in the shared root scope", () 
     "--zone-line-width",
     // InboxView's stacked list row count (#2217); absent means the three-row minimum.
     "--sessions-list-rows",
+    // The whole rows the stacked list's head takes (#2221); absent means none.
+    "--sessions-list-head-rows",
   ]);
 
   // Component-local by design (docs/design-system.md §19.4 rejects promoting them): each is

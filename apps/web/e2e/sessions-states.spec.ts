@@ -100,7 +100,7 @@ test("disconnecting keeps the rows visible and dimmed under Reconnecting…, and
   await expect(page.locator(".inbox-list-status")).toHaveCount(0);
 
   await page.evaluate(() => window.__dropConnection());
-  const line = page.locator(".inbox-list-pane > .inbox-list-status");
+  const line = page.locator(".inbox-list-pane > .inbox-list-head > .inbox-list-status");
   await expect(line).toHaveText("Reconnecting…");
   await expect(line).toHaveCSS("color", colors.dim);
   await expect(grid.getByRole("row")).toHaveCount(5);
