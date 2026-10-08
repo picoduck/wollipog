@@ -160,10 +160,14 @@ export function QueuedMessages({
   const [disclosure, setDisclosure] = useState({ sessionId, expanded: false });
   const expanded = disclosure.sessionId === sessionId && disclosure.expanded;
   const toggleExpanded = () => {
-    // Collapsing hides the rows; focus left in one returns to the summary rather than to <body>.
+    // Collapsing hides the rows and closes a phone row's sheet (QueuedMessageActionMenu); focus left
+    // in either returns to the summary rather than to <body>.
     const summary = summaryRef.current;
     const active = summary?.ownerDocument.activeElement;
-    if (expanded && active !== summary && trayRef.current?.contains(active ?? null)) summary?.focus();
+    if (expanded && active && active !== summary &&
+        (trayRef.current?.contains(active) || active.closest("[data-queue-sheet]") !== null)) {
+      summary?.focus();
+    }
     setDisclosure({ sessionId, expanded: !expanded });
   };
   // A phone row's action sheet is portalled to <body>, so focus in it is tracked by its marker.
@@ -331,8 +335,8 @@ export function QueuedMessages({
                 {queuedMessageLabel(prompt)}
               </span>
               {phone ? (
-                <QueuedMessageActionMenu row={row} onSteer={onSteer} onEdit={onEdit} onCancel={onCancel}
-                  onDismiss={onDismiss} />
+                <QueuedMessageActionMenu row={row} concealed={!expanded} onSteer={onSteer} onEdit={onEdit}
+                  onCancel={onCancel} onDismiss={onDismiss} />
               ) : (
                 <>
                   <div className="queue-actions">
@@ -405,14 +409,19 @@ export function QueuedMessages({
 
 /** A phone row's one ⋯ button and its sheet: every action listed, each disabled one with its
  * reason as the visible second line (§9.1). */
-function QueuedMessageActionMenu({ row, onSteer, onEdit, onCancel, onDismiss }: {
+function QueuedMessageActionMenu({ row, concealed, onSteer, onEdit, onCancel, onDismiss }: {
   row: QueuedRow;
+  /** The tray is collapsed, hiding this row. */
+  concealed: boolean;
   onSteer: (prompt: QueuedPromptView) => void;
   onEdit: (prompt: QueuedPromptView) => void;
   onCancel: (prompt: QueuedPromptView) => void;
   onDismiss: (prompt: QueuedPromptView) => void;
 }) {
   const [open, setOpen] = useState(false);
+  // The sheet is portalled to <body>, so hiding the row would not hide it: a collapse closes it. The
+  // summary that collapsed the tray already holds any focus the sheet had.
+  if (concealed && open) setOpen(false);
   // Unavailable items stay reachable, so a keyboard or screen-reader user hears each reason.
   const menu = useAccessibleMenu(open, setOpen, "queued-message-actions", "menu", { reachUnavailable: true });
   const { prompt } = row;

@@ -335,6 +335,7 @@ test("on a phone each row is its text and one Queued Message Actions button whos
       const buttons = [...tray.row(id).querySelectorAll("button")];
       assert.deepEqual(buttons.map((button) => button.getAttribute("aria-label")), ["Queued Message Actions"]);
     }
+    await act(async () => { tray.summary()!.click(); });
     await act(async () => { tray.button(tray.row("b"), "Queued Message Actions")!.click(); });
     const items = [...domWindow.document.querySelectorAll('[role="menuitem"]')] as unknown as HTMLButtonElement[];
     assert.deepEqual(items.map((item) => item.querySelector(".menu-text")?.textContent),
@@ -360,6 +361,7 @@ test("focus in a phone row's open action sheet returns to the composer when the 
   let lost = 0;
   const tray = await render({ prompts: [queued("a")], onFocusLost: () => { lost += 1; } });
   try {
+    await act(async () => { tray.summary()!.click(); });
     await act(async () => { tray.button(tray.row("a"), "Queued Message Actions")!.click(); });
     const item = domWindow.document.querySelector('[role="menuitem"]') as unknown as HTMLButtonElement;
     await act(async () => { item.focus(); });
@@ -474,6 +476,28 @@ test("another session starts collapsed", async () => {
     assert.equal(tray.summary()?.getAttribute("aria-expanded"), "false");
     assert.equal(tray.summary()?.getAttribute("aria-controls"), "queued-rows-session-2");
   } finally {
+    await tray.unmount();
+  }
+});
+
+test("collapsing on a phone closes a row's open action sheet and returns its focus to the summary", async () => {
+  phone = true;
+  let lost = 0;
+  const tray = await render({ prompts: [queued("a")], onFocusLost: () => { lost += 1; } });
+  try {
+    await act(async () => { tray.summary()!.click(); });
+    await act(async () => { tray.button(tray.row("a"), "Queued Message Actions")!.click(); });
+    const item = domWindow.document.querySelector('[role="menuitem"]') as unknown as HTMLButtonElement;
+    await act(async () => { item.focus(); });
+    // A screen reader's cursor can reach the summary without dismissing the sheet first.
+    await act(async () => { tray.summary()!.click(); });
+    assert.equal(tray.summary()?.getAttribute("aria-expanded"), "false");
+    assertNoDomNode(domWindow.document.querySelector('[role="menu"]'), "the sheet closes with its row");
+    assert.ok((domWindow.document.activeElement as unknown) === tray.summary(), "focus is on the summary");
+    assert.equal(lost, 0);
+    assert.deepEqual(tray.calls, { steer: [], edit: [], cancel: [], dismiss: [] });
+  } finally {
+    phone = false;
     await tray.unmount();
   }
 });
