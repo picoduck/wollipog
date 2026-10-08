@@ -836,12 +836,10 @@ export class SessionStore {
   /** Identity of the published manifest. Compaction always publishes by renaming a fresh file over
    * it and reset removes it, so inode, nanosecond mtime, and size together change on every switch. */
   private historyManifestKey(id: string): string | null {
-    try {
-      return this.manifestKeyOf(this.historyManifestPath(id));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-      throw error;
-    }
+    // Most sessions never compact, so a missing manifest is the common case on every append. Report it
+    // without an exception: inside the runner a thrown ENOENT costs tens of microseconds.
+    const s = statSync(this.historyManifestPath(id), { bigint: true, throwIfNoEntry: false });
+    return s ? `${s.ino}:${s.mtimeNs}:${s.size}` : null;
   }
 
   private manifestKeyOf(path: string): string {
