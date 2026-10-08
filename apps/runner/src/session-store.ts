@@ -630,6 +630,14 @@ export class SessionStore {
   private readonly eventProjectionIndexes = new Map<string, SessionEventProjectionIndex>();
   /** Immutable segment hashes are expensive but only need revalidation when inode metadata changes. */
   private readonly verifiedHistorySegments = new Map<string, string>();
+  /** Append-path layout per session and log epoch. Cold segments never change once a manifest
+   * references them, so a hit needs only the manifest's identity and the active file's size. Every
+   * path that changes the layout (compaction, reset, lock hand-off, removal, failed append) replaces
+   * or drops the entry, and a manifest identity mismatch refetches from disk. */
+  private readonly historyLayoutCache = new Map<
+    string,
+    { epoch: number; manifestKey: string | null; layout: HistoryLayout }
+  >();
   private historyMaintenanceCursor: string | null = null;
   constructor(
     private readonly root: string = join(homedir(), ".agent-manager", "sessions"),
@@ -787,6 +795,11 @@ export class SessionStore {
     const expectedEpoch = epoch ?? (this.readDiskMetaRaw(id)?.logEpoch ?? 0);
     const manifest = this.readHistoryManifest(id, expectedEpoch);
     this.recoverLegacyFence(id, manifest);
+    return this.layoutFromManifest(id, manifest);
+  }
+
+  /** Lay out an already-validated manifest. Only the mutable active file is inspected. */
+  private layoutFromManifest(id: string, manifest: HistoryManifest | null): HistoryLayout {
     const sources: HistorySource[] = [];
     let virtualStart = 0;
     for (const segment of manifest?.segments ?? []) {
@@ -801,17 +814,55 @@ export class SessionStore {
     }
     const activeFile = manifest?.activeFile ?? "events.ndjson";
     const activePath = join(this.dir(id), activeFile);
-    let activeBytes: number;
+    const active = { file: activeFile, path: activePath, virtualStart, bytes: this.activeHistoryBytes(activePath) };
+    sources.push(active);
+    return { manifest, sources, active, coldBytes: virtualStart, totalBytes: virtualStart + active.bytes };
+  }
+
+  private activeHistoryBytes(path: string): number {
     try {
-      const activeStat = lstatSync(activePath);
+      const activeStat = lstatSync(path);
       if (!activeStat.isFile() || activeStat.isSymbolicLink()) throw new Error("not a regular file");
-      activeBytes = activeStat.size;
+      return activeStat.size;
     } catch {
       throw new HistoryStoreError("history_corrupt", "session history active file is missing");
     }
-    const active = { file: activeFile, path: activePath, virtualStart, bytes: activeBytes };
-    sources.push(active);
-    return { manifest, sources, active, coldBytes: virtualStart, totalBytes: virtualStart + activeBytes };
+  }
+
+  /** Identity of the published manifest. Compaction always publishes by renaming a fresh file over
+   * it and reset removes it, so inode, nanosecond mtime, and size together change on every switch. */
+  private historyManifestKey(id: string): string | null {
+    try {
+      const s = statSync(this.historyManifestPath(id), { bigint: true });
+      return `${s.ino}:${s.mtimeNs}:${s.size}`;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+  }
+
+  /** Remember a layout for the append path. A pending legacy-fence intent keeps the session on the
+   * uncached path so every append retries the fence exactly as before. */
+  private cacheHistoryLayout(id: string, epoch: number, manifestKey: string | null, layout: HistoryLayout): void {
+    if (existsSync(this.historyLegacyFencePath(id))) this.historyLayoutCache.delete(id);
+    else this.historyLayoutCache.set(id, { epoch, manifestKey, layout });
+  }
+
+  /** The append target without re-reading the manifest or touching cold segments. The manifest is
+   * stat'ed before any refetch, so a switch racing the read leaves an older key that misses next time. */
+  private appendHistoryLayout(id: string, epoch: number): HistoryLayout {
+    const manifestKey = this.historyManifestKey(id);
+    const cached = this.historyLayoutCache.get(id);
+    if (!cached || cached.epoch !== epoch || cached.manifestKey !== manifestKey) {
+      this.historyLayoutCache.delete(id);
+      const layout = this.historyLayout(id, epoch);
+      this.cacheHistoryLayout(id, epoch, manifestKey, layout);
+      return layout;
+    }
+    const { layout } = cached;
+    layout.active.bytes = this.activeHistoryBytes(layout.active.path);
+    layout.totalBytes = layout.coldBytes + layout.active.bytes;
+    return layout;
   }
 
   has(id: string): boolean {
@@ -973,6 +1024,7 @@ export class SessionStore {
     const diskEpoch = disk.logEpoch ?? 0;
     if (diskEpoch <= intent.nextEpoch) {
       this.pending.delete(id);
+      this.historyLayoutCache.delete(id);
       // The reset intent fences every manifest-aware reader. Publish the canonical empty legacy
       // active file, then remove the manifest so a crash at any later point still reads epoch N+1
       // as empty. Immutable segments and superseded active generations are cleanup-only afterward.
@@ -1750,8 +1802,10 @@ export class SessionStore {
     if (!meta) return null;
     const epoch = meta.logEpoch ?? 0;
     let seq: number;
-    let offset: number;
+    let offset: number | undefined;
     if (!this.seqReconciled.has(id)) {
+      // Reconciliation re-derives the whole layout from disk; nothing cached may outlive it.
+      this.historyLayoutCache.delete(id);
       let tail = this.historyTail(id, true);
       if (tail.completeBytes < tail.fileBytes) {
         // A crash can leave an incomplete JSON suffix. Appending onto it would corrupt the next
@@ -1797,10 +1851,19 @@ export class SessionStore {
       offset = tail.completeBytes;
     } else {
       seq = meta.seq + 1;
-      offset = this.historyLayout(id, epoch).totalBytes;
     }
+    const layout = this.appendHistoryLayout(id, epoch);
+    offset ??= layout.totalBytes;
     const ev: StoredEvent = { seq, ts, payload };
-    appendFileSync(this.historyLayout(id, epoch).active.path, `${JSON.stringify(ev)}\n`);
+    try {
+      appendFileSync(layout.active.path, `${JSON.stringify(ev)}\n`);
+    } catch (error) {
+      // A failed write can leave a torn suffix. Reconcile the tail and layout from disk next time
+      // instead of appending after bytes no reader will accept.
+      this.historyLayoutCache.delete(id);
+      this.seqReconciled.delete(id);
+      throw error;
+    }
     try {
       this.appendHistoryCheckpoint(id, epoch, { seq, offset });
     } catch {
@@ -2012,6 +2075,13 @@ export class SessionStore {
       this.publishHistoryManifest(id, manifest);
       committed = true;
       if (layout.active.file === "events.ndjson") this.recoverLegacyFence(id, manifest);
+      // Extend the append layout in place of a full refetch: the new segment was just written,
+      // fsynced, and published, so only the manifest identity and new active file need reading.
+      try {
+        this.cacheHistoryLayout(id, epoch, this.historyManifestKey(id), this.layoutFromManifest(id, manifest));
+      } catch {
+        this.historyLayoutCache.delete(id); // the next append refetches and reports any damage
+      }
       // Logical history is byte-identical. Only source-file topology changed; keep the derived
       // index/checkpoint caches and frozen cursor boundaries intact.
       return { compacted: true, bytesArchived: cutBytes };
@@ -2756,6 +2826,7 @@ export class SessionStore {
     this.pending.delete(id);
     this.seqReconciled.delete(id);
     this.checkpointCache.delete(id);
+    this.historyLayoutCache.delete(id);
     this.historyIndexInfoCache.delete(id);
     this.historyBoundaryCache.delete(id);
     this.eventProjectionIndexes.delete(id);
@@ -2794,6 +2865,7 @@ export class SessionStore {
       if (!alreadyMine) {
         this.seqReconciled.delete(id);
         this.checkpointCache.delete(id);
+        this.historyLayoutCache.delete(id);
       }
       return true;
     } catch {
@@ -2829,6 +2901,7 @@ export class SessionStore {
       rmSync(this.lockPath(id), { force: true });
       this.seqReconciled.delete(id);
       this.checkpointCache.delete(id);
+      this.historyLayoutCache.delete(id);
     } catch {
       /* ignore — no lock file, or unreadable (racing removal) */
     }

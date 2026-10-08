@@ -1929,3 +1929,240 @@ test("idle maintenance rotates fairly and rebuilds missing indexes off the promp
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+const COMPACT_EVERY_PASS = {
+  triggerActiveBytes: 1,
+  retainActiveBytes: 64,
+  retainActiveEvents: 2,
+  maxSegmentBytes: 64 * 1024,
+  orphanGraceMs: 60 * 60 * 1_000,
+};
+
+function appendMany(store: SessionStore, count: number, label: string): void {
+  for (let i = 0; i < count; i++) store.appendEvent("s_abc", { kind: "agent_message", text: `${label}-${i}` });
+}
+
+function compactOnce(store: SessionStore, owner = "maintenance"): void {
+  assert.equal(store.acquireLock("s_abc", owner), true);
+  try {
+    assert.equal(store.compactHistory("s_abc", owner, true).compacted, true);
+  } finally {
+    store.releaseLock("s_abc", owner);
+  }
+}
+
+function historyManifest(root: string): { activeFile: string; segments: Array<{ file: string }> } {
+  return JSON.parse(readFileSync(join(root, "s_abc", "events.manifest.json"), "utf8")) as {
+    activeFile: string;
+    segments: Array<{ file: string }>;
+  };
+}
+
+/** Every event as a process that starts now would see it: a cold store reading from disk. */
+function coldSeqs(root: string): number[] {
+  return new SessionStore(root, undefined, COMPACT_EVERY_PASS).readEvents("s_abc").map((event) => event.seq);
+}
+
+const seqRange = (count: number) => Array.from({ length: count }, (_, i) => i + 1);
+
+test("the append layout follows each compaction this store publishes under the writer lock", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-store-layout-own-"));
+  try {
+    const store = new SessionStore(root, undefined, COMPACT_EVERY_PASS);
+    store.create(meta());
+    assert.equal(store.acquireLock("s_abc", "turn"), true);
+    for (let round = 0; round < 9; round++) {
+      appendMany(store, 10, `round-${round}`);
+      assert.equal(store.compactHistory("s_abc", "turn", true).compacted, true);
+      const appended = store.appendEvent("s_abc", { kind: "agent_message", text: `after-${round}` });
+      const manifest = historyManifest(root);
+      assert.equal(manifest.segments.length, round + 1);
+      assert.match(
+        readFileSync(join(root, "s_abc", manifest.activeFile), "utf8"),
+        new RegExp(`"seq":${appended!.seq},.*"after-${round}"`),
+        "the append after a compaction lands in the newly published active generation",
+      );
+    }
+    store.releaseLock("s_abc", "turn");
+    assert.deepEqual(coldSeqs(root), seqRange(99));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a warm append layout refetches when another process publishes a compaction", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-store-layout-peer-"));
+  try {
+    const writer = new SessionStore(root, undefined, COMPACT_EVERY_PASS);
+    writer.create(meta());
+    appendMany(writer, 20, "before");
+    let expected = 20;
+    // The first switch retires the legacy file; later ones leave the superseded active generation
+    // in place for grace-period readers, so a stale append target would still accept writes.
+    for (let round = 0; round < 3; round++) {
+      const superseded = existsSync(join(root, "s_abc", "events.manifest.json"))
+        ? historyManifest(root).activeFile
+        : "events.ndjson";
+      const supersededBytes = readFileSync(join(root, "s_abc", superseded));
+      compactOnce(new SessionStore(root, undefined, COMPACT_EVERY_PASS));
+      const appended = writer.appendEvent("s_abc", { kind: "agent_message", text: `after-peer-${round}` });
+      expected += 1;
+      assert.equal(appended?.seq, expected);
+      const { activeFile } = historyManifest(root);
+      assert.notEqual(activeFile, superseded);
+      assert.match(readFileSync(join(root, "s_abc", activeFile), "utf8"), new RegExp(`"after-peer-${round}"`));
+      if (round > 0) {
+        assert.deepEqual(readFileSync(join(root, "s_abc", superseded)), supersededBytes, "superseded generation unchanged");
+      }
+      appendMany(writer, 10, `between-${round}`);
+      expected += 10;
+    }
+    writer.flushAll();
+    assert.deepEqual(coldSeqs(root), seqRange(expected));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a warm append layout follows an epoch replacement and a crashed reset from another process", () => {
+  for (const shape of ["reset", "crashed_reset_intent"] as const) {
+    const root = mkdtempSync(join(tmpdir(), "wollipog-store-layout-epoch-"));
+    try {
+      const writer = new SessionStore(root, undefined, COMPACT_EVERY_PASS);
+      writer.create(meta());
+      for (let round = 0; round < 3; round++) {
+        appendMany(writer, 10, `old-${round}`);
+        compactOnce(writer);
+      }
+      appendMany(writer, 3, "old-tail");
+      writer.flushAll();
+      const oldEpoch = writer.readMeta("s_abc")?.logEpoch ?? 0;
+      if (shape === "reset") {
+        new SessionStore(root, undefined, COMPACT_EVERY_PASS).resetEvents("s_abc");
+      } else {
+        writeFileSync(
+          join(root, "s_abc", "events.reset.json"),
+          JSON.stringify({ version: 1, nextEpoch: oldEpoch + 1 }),
+        );
+      }
+      const appended = writer.appendEvent("s_abc", { kind: "agent_message", text: "new-epoch" });
+      assert.equal(appended?.seq, 1, shape);
+      assert.equal(writer.readMeta("s_abc")?.logEpoch, oldEpoch + 1, shape);
+      assert.equal(existsSync(join(root, "s_abc", "events.manifest.json")), false, shape);
+      assert.match(readFileSync(join(root, "s_abc", "events.ndjson"), "utf8"), /"new-epoch"/, shape);
+      writer.flushAll();
+      assert.deepEqual(coldSeqs(root), [1], shape);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("a restart after compactions and a torn tail recovers from disk with a cold cache", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-store-layout-restart-"));
+  try {
+    const crashed = new SessionStore(root, undefined, COMPACT_EVERY_PASS);
+    crashed.create(meta());
+    assert.equal(crashed.acquireLock("s_abc", "turn"), true);
+    for (let round = 0; round < 8; round++) {
+      appendMany(crashed, 10, `round-${round}`);
+      assert.equal(crashed.compactHistory("s_abc", "turn", true).compacted, true);
+    }
+    appendMany(crashed, 5, "unflushed");
+    // Crash mid-append: a partial record on the active generation and a metadata flush that never ran.
+    const { activeFile, segments } = historyManifest(root);
+    assert.equal(segments.length, 8);
+    appendFileSync(join(root, "s_abc", activeFile), '{"seq":86,"ts":1,"payl');
+
+    const restarted = new SessionStore(root, undefined, COMPACT_EVERY_PASS);
+    assert.ok((restarted.readMeta("s_abc")?.seq ?? 0) < 85, "disk metadata lags the durable log");
+    assert.equal(restarted.acquireLock("s_abc", "turn"), true, "the restarted owner reclaims its own lock");
+    assert.equal(restarted.appendEvent("s_abc", { kind: "agent_message", text: "after-restart" })?.seq, 86);
+    restarted.flushAll();
+    assert.doesNotMatch(readFileSync(join(root, "s_abc", activeFile), "utf8"), /"payl"|"payl$/, "torn bytes removed");
+    assert.deepEqual(coldSeqs(root), seqRange(86));
+    const page = new SessionStore(root, undefined, COMPACT_EVERY_PASS).readEventPage("s_abc", { afterSeq: 80, limit: 10 });
+    assert.equal(page.ok, true);
+    if (page.ok) assert.deepEqual(page.events.map((event) => event.seq), [81, 82, 83, 84, 85, 86]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a failed append drops the warm layout and repairs a torn suffix before the next sequence", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-store-layout-failed-"));
+  try {
+    const store = new SessionStore(root, undefined, COMPACT_EVERY_PASS);
+    store.create(meta());
+    assert.equal(store.acquireLock("s_abc", "turn"), true);
+    for (let round = 0; round < 2; round++) {
+      appendMany(store, 10, `round-${round}`);
+      assert.equal(store.compactHistory("s_abc", "turn", true).compacted, true);
+    }
+    assert.equal(store.appendEvent("s_abc", { kind: "agent_message", text: "warm" })?.seq, 21);
+    assert.throws(() => store.appendEvent("s_abc", { kind: "agent_message", text: 1n } as never));
+    // Stand-in for the partial write a failed append can leave behind.
+    appendFileSync(join(root, "s_abc", historyManifest(root).activeFile), '{"seq":22,"ts":');
+    assert.equal(store.appendEvent("s_abc", { kind: "agent_message", text: "after-failure" })?.seq, 22);
+    store.releaseLock("s_abc", "turn");
+    store.flushAll();
+    assert.deepEqual(coldSeqs(root), seqRange(22));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a warm append layout never hides a missing active file or outlives session removal", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-store-layout-removed-"));
+  try {
+    const store = new SessionStore(root, undefined, COMPACT_EVERY_PASS);
+    store.create(meta());
+    appendMany(store, 10, "first");
+    compactOnce(store);
+    assert.equal(store.appendEvent("s_abc", { kind: "agent_message", text: "warm" })?.seq, 11);
+    const activePath = join(root, "s_abc", historyManifest(root).activeFile);
+    const activeBytes = readFileSync(activePath);
+    rmSync(activePath);
+    assert.throws(
+      () => store.appendEvent("s_abc", { kind: "agent_message", text: "lost" }),
+      /active file is missing/,
+    );
+    writeFileSync(activePath, activeBytes);
+
+    store.remove("s_abc");
+    store.create(meta());
+    assert.equal(store.appendEvent("s_abc", { kind: "agent_message", text: "recreated" })?.seq, 1);
+    assert.equal(statSync(join(root, "s_abc", "events.ndjson")).isFile(), true);
+    store.flushAll();
+    assert.deepEqual(coldSeqs(root), [1]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an uncommitted legacy fence keeps appends on the uncached path until the fence lands", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-store-layout-fence-"));
+  try {
+    const writer = new SessionStore(root, undefined, COMPACT_EVERY_PASS);
+    writer.create(meta());
+    appendMany(writer, 20, "legacy");
+    compactOnce(new SessionStore(root, undefined, COMPACT_EVERY_PASS));
+    // Reproduce a fence whose retirement rename was refused (an open Windows reader).
+    const sessionDir = join(root, "s_abc");
+    const retiredFile = readdirSync(sessionDir).find((file) => file.startsWith("events.retired."))!;
+    rmSync(join(sessionDir, "events.ndjson"), { recursive: true, force: true });
+    renameSync(join(sessionDir, retiredFile), join(sessionDir, "events.ndjson"));
+    writeFileSync(join(sessionDir, "events.legacy-fence.json"), JSON.stringify({
+      version: 1,
+      activeFile: historyManifest(root).activeFile,
+      retiredFile,
+    }));
+    assert.equal(writer.appendEvent("s_abc", { kind: "agent_message", text: "fenced" })?.seq, 21);
+    assert.equal(statSync(join(sessionDir, "events.ndjson")).isDirectory(), true, "the append retried the fence");
+    assert.equal(existsSync(join(sessionDir, "events.legacy-fence.json")), false);
+    writer.flushAll();
+    assert.deepEqual(coldSeqs(root), seqRange(21));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
