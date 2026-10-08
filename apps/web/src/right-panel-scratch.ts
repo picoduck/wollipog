@@ -579,6 +579,7 @@ function hydrate(): void {
   loaded.sort((left, right) => left.record.touchedAt - right.record.touchedAt);
   for (const { scope, record, raw } of loaded) {
     hydratedRaw.set(scope, raw);
+    observeStoredStamps(scope, record.values, record.cleared);
     scopeTouchedAt.set(scope, record.touchedAt);
     if (record.values.size === 0) continue;
     const values = new Map<string, ScratchValue>();
@@ -724,12 +725,15 @@ function persistScope(scope: string, mutations: readonly Mutation[]): void {
     // A set keeps the stamp of the moment it was typed, and the merge below orders it against
     // whatever another page stored under the key since: the newer edit wins, and a deletion
     // marker retires an edit typed before the value it removed, as it would have had this edit been
-    // mirrored at once. Two kinds of stored stamp say nothing about which edit came first, and the
+    // mirrored at once. Three kinds of stored stamp say nothing about which edit came first, and the
     // edit being mirrored is moved past them:
     //
     // - One in the future: a clock that has since been corrected, an older build's counter, a
     //   hand-edited record. The edit replaces the copy it was typed over; without this it would lose
     //   to it until the clock caught up, and a send of it would leave a marker below that copy.
+    // - One this page saw stored before the edit, that reads as newer only because it was stamped
+    //   ahead of the clock (an older build counted past the clock in bursts) and the clock has
+    //   passed it by the time of the flush. The edit was typed over it, so it replaces it.
     // - One in the same millisecond: another page typing, or sending, while both edits waited. The
     //   later flush wins, which is the order storage gave them when every edit was mirrored at once,
     //   and the two values never share a stamp a marker could retire both by.
@@ -741,9 +745,10 @@ function persistScope(scope: string, mutations: readonly Mutation[]): void {
     const rivals = [values.get(mutated.key)?.updatedAt, cleared.get(mutated.key)]
       .filter((at): at is number => at !== undefined)
       .sort((left, right) => left - right);
+    const seen = storedStampsSeen.get(scope);
     for (const rival of rivals) {
       if (rival < held.updatedAt) continue;
-      if (rival >= now + 1) {
+      if (rival >= now + 1 || seen?.has(rival) === true) {
         held.updatedAt = stampMillisecond(rival) + 1 + pageFraction;
       } else if (stampMillisecond(rival) === stampMillisecond(held.updatedAt)) {
         held.updatedAt = rival + STAMP_STEP;
@@ -760,6 +765,7 @@ function persistScope(scope: string, mutations: readonly Mutation[]): void {
   }
   applyClearedMarkers(values, cleared);
   const written = writeRecord(scope, scopeTouchedAt.get(scope) ?? stamp(), values, cleared);
+  if (written !== null) observeStoredStamps(scope, values, cleared);
   // An existing record rewritten within the measured bounds cannot have broken either of them, so
   // the sweep, which reads every record on the origin, is skipped and this write touched one key.
   // A removal always sweeps: a scope that stops holding unsent text can become the one to collect.
@@ -773,6 +779,23 @@ function persistScope(scope: string, mutations: readonly Mutation[]): void {
         storedRecordsEstimate <= PANEL_SCRATCH_SESSION_LIMIT) return;
   }
   enforceRecordBounds(scope);
+}
+
+/**
+ * Scope → every stamp this page has seen stored under it, values and markers alike, by reading the
+ * record when it hydrated or by writing it since. A stored stamp this page had seen before an edit
+ * is one the edit was typed over, however its clock reads it now (see `persistScope`); one it has
+ * not seen may be another page's newer edit.
+ */
+const storedStampsSeen = new Map<string, Set<number>>();
+
+function observeStoredStamps(
+  scope: string,
+  values: Map<string, PersistedValue>,
+  cleared: Map<string, number>,
+): void {
+  const stamps = [...values.values()].map((held) => held.updatedAt);
+  storedStampsSeen.set(scope, new Set([...stamps, ...cleared.values()]));
 }
 
 /**
@@ -890,6 +913,21 @@ function recordWriter(raw: string): string | null {
 }
 
 /**
+ * Remove a record the sweep collects, and take it off the measurement only once it is gone. A
+ * refused removal leaves it stored, so the measurement no longer describes storage and is
+ * discarded: the next write sweeps again instead of trusting a total that counts it as collected.
+ */
+function forgetMeasured(storageKey: string, bytes: number): void {
+  deleteRaw(storageKey);
+  if (readRaw(storageKey) !== null) {
+    storedCharsEstimate = null;
+    return;
+  }
+  if (storedCharsEstimate !== null) storedCharsEstimate -= bytes;
+  storedRecordsEstimate -= 1;
+}
+
+/**
  * Hold the origin's records under the scope bound and the character ceiling.
  *
  * The bounds belong here rather than to any one map, because the records are the union of every
@@ -931,9 +969,7 @@ function enforceRecordBounds(keep: string | null): void {
   for (const { scope, storageKey, raw, bytes } of raws) {
     const record = parseRecord(raw);
     if (record === null || scope === "") {
-      deleteRaw(storageKey);
-      storedCharsEstimate = (storedCharsEstimate ?? 0) - bytes;
-      storedRecordsEstimate -= 1;
+      forgetMeasured(storageKey, bytes);
       continue;
     }
     let unsent = false;
@@ -956,10 +992,8 @@ function enforceRecordBounds(keep: string | null): void {
   candidates.sort((left, right) => left.recency - right.recency);
   const kept = new Set(candidates);
   const collect = (candidate: Candidate): void => {
-    deleteRaw(candidate.storageKey);
+    forgetMeasured(candidate.storageKey, candidate.bytes);
     kept.delete(candidate);
-    storedCharsEstimate = (storedCharsEstimate ?? 0) - candidate.bytes;
-    storedRecordsEstimate -= 1;
   };
 
   // The scope bound, over records that still hold something, on the same terms the map uses: text
@@ -1171,6 +1205,7 @@ export function dropPanelScratchMemory(): void {
   consumedRevisions.clear();
   scopeTouchedAt.clear();
   hydratedRaw.clear();
+  storedStampsSeen.clear();
   hydrated = false;
   // A reload is a fresh page: it has written nothing yet, it is not the page that wrote whatever is
   // in storage, and it learns what is there by hydrating from it.

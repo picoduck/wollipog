@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { beforeEach, test } from "node:test";
+import { beforeEach, mock, test } from "node:test";
 import {
   PANEL_SCRATCH_CLEARED_SCOPE_LIMIT,
   PANEL_SCRATCH_PERSIST_CHAR_LIMIT,
@@ -809,4 +809,80 @@ test("a whole-map record that could not be removed cannot overwrite newer edits"
     "the replayed import does not take the edit back");
   assert.equal(readPanelScratch(scope, "sidechat.draft"), undefined,
     "nor does it resurrect what was sent");
+});
+
+/**
+ * Records the build before #2764 wrote: its stamps counted past the clock in bursts, so a draft
+ * written at clock N could read N + 2. By the time a debounced edit typed over it at N is mirrored,
+ * the clock has passed that stamp, and it reads like a newer edit unless the page knows it saw it.
+ */
+for (const kind of ["a value", "a deletion marker"] as const) {
+  test(`an edit replaces ${kind} an older build stamped ahead of the clock (#2764)`, () => {
+    // A day apart per case, past every stamp an earlier case minted.
+    mock.timers.enable({ apis: ["Date"], now: Date.now() + (kind === "a value" ? 365 : 367) * 24 * 60 * 60 * 1000 });
+    try {
+      const scope = panelScratchScopeKey("session-1");
+      const ahead = Date.now() + 2;
+      backing.set(`${RECORD_PREFIX}${scope}`, JSON.stringify({
+        version: 2,
+        writer: "a-page-of-the-previous-build",
+        touchedAt: ahead,
+        values: kind === "a value"
+          ? { "review.requestBody": { value: "old draft", retention: "draft", updatedAt: ahead } }
+          : { "files.directory": { value: "apps/web", retention: "disposable", updatedAt: ahead } },
+        cleared: kind === "a value" ? {} : { "review.requestBody": ahead },
+      }));
+      readPanelScratch(scope, "files.directory");
+
+      writePanelScratchLater(scope, "review.requestBody", "new text", "draft");
+      mock.timers.tick(300);
+      flushPanelScratch();
+
+      reload();
+      assert.equal(readPanelScratch(scope, "review.requestBody"), "new text");
+    } finally {
+      mock.timers.reset();
+    }
+  });
+}
+
+test("sending a replacement of a value an older build stamped ahead does not bring it back (#2764)", () => {
+  mock.timers.enable({ apis: ["Date"], now: Date.now() + 369 * 24 * 60 * 60 * 1000 });
+  try {
+    const scope = panelScratchScopeKey("session-1");
+    const ahead = Date.now() + 2;
+    backing.set(`${RECORD_PREFIX}${scope}`, JSON.stringify({
+      version: 2,
+      writer: "a-page-of-the-previous-build",
+      touchedAt: ahead,
+      values: { "sidechat.draft": { value: "old draft", retention: "draft", updatedAt: ahead } },
+      cleared: {},
+    }));
+    assert.equal(readPanelScratch(scope, "sidechat.draft"), "old draft");
+
+    writePanelScratchLater(scope, "sidechat.draft", "edited and sent", "draft");
+    mock.timers.tick(300);
+    clearPanelScratchIf(scope, "sidechat.draft", "edited and sent", panelScratchRevision(scope, "sidechat.draft"));
+
+    reload();
+    assert.equal(readPanelScratch(scope, "sidechat.draft"), undefined, "the send stays sent");
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("a collection storage refused is swept again rather than counted as done (#2764)", () => {
+  // A write to an existing record skips the origin-wide sweep while the last measurement says the
+  // ceiling holds. A removal the sweep made but storage refused must not count in that measurement.
+  const first = panelScratchScopeKey("session-1");
+  const second = panelScratchScopeKey("session-2");
+  writePanelScratch(first, "review.requestBody", `1:${"a".repeat(150_000)}`, "draft");
+  denyRemovals = true;
+  writePanelScratch(second, "review.requestBody", `2:${"b".repeat(150_000)}`, "draft");
+  assert.ok(storedChars() > PANEL_SCRATCH_PERSIST_CHAR_LIMIT, "the collection was refused");
+
+  denyRemovals = false;
+  writePanelScratch(second, "review.requestBody", `2:${"b".repeat(150_001)}`, "draft");
+  assert.ok(storedChars() <= PANEL_SCRATCH_PERSIST_CHAR_LIMIT,
+    `stored ${storedChars()} characters, ceiling ${PANEL_SCRATCH_PERSIST_CHAR_LIMIT}`);
 });
