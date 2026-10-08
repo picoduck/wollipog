@@ -13872,8 +13872,9 @@ body.shell-dock-dragging * {
   margin: 0;
 }
 /* Show Where Asked, after the time, and Collapse Question while the question is expanded; each
-   icon-only on a phone under the same name (§15.1). */
-@media (max-width: 760px) {
+   icon-only in a card narrower than 600px (a phone, a column beside the right panel) under the same
+   name (§15.1). */
+@container question-card (max-width: 599px) {
   /* Square: `.btn.sm`'s padding and `.btn`'s max-content cap would size it by its label. */
   .btn:is(.question-where-asked, .question-collapse) {
     width: var(--control-h-sm);
@@ -13889,6 +13890,8 @@ body.shell-dock-dragging * {
   position: sticky;
   z-index: var(--z-sticky);
   top: 0;
+  flex-wrap: wrap;
+  row-gap: var(--space-1);
   background: inherit;
 }
 .question-card[data-question-expanded][data-clip-start]::before { border-bottom: none; }

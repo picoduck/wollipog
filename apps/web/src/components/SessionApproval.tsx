@@ -543,13 +543,19 @@ export function SessionQuestionBanner({
     setExpandedQuestion(titleExpanded ? null : question.id);
   };
   // The whole question is read from its first line: a card scrolled down to reach Show Full Question
-  // brings the question's start back into view, within the card alone.
+  // brings the question's start back into view, within the card alone, below the head line that now
+  // stays at its top edge (#2786).
   useIsomorphicLayoutEffect(() => {
     const title = titleRef.current;
     const card = cardRef.current;
     if (!titleExpanded || !title || !card) return;
-    const padding = parseFloat(card.ownerDocument.defaultView?.getComputedStyle(card).paddingTop ?? "") || 0;
-    const above = card.getBoundingClientRect().top + padding - title.getBoundingClientRect().top;
+    const style = (element: Element) => card.ownerDocument.defaultView?.getComputedStyle(element);
+    const head = card.querySelector<HTMLElement>(":scope > .request-card-head");
+    const padding = parseFloat(style(card)?.paddingTop ?? "") || 0;
+    const edge = head && style(head)?.position === "sticky"
+      ? head.getBoundingClientRect().bottom
+      : card.getBoundingClientRect().top + padding;
+    const above = edge - title.getBoundingClientRect().top;
     if (above > 0) card.scrollTop -= above;
   }, [titleExpanded]);
 

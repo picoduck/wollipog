@@ -1439,6 +1439,49 @@ test.describe("an expanded question reads across the whole reading column (#2786
     await expect.poll(async () => (await geometry(proceed)).top >= head.bottom - 0.5).toBe(true);
   });
 
+  test("a cramped card scrolled down to Show Full Question expands with its first line below the head line", async ({ page }) => {
+    await page.setViewportSize({ width: 1024, height: 600 });
+    await page.goto("/agent-questions-e2e.html?set=long-choices&more=1");
+    const card = dockedCard(page);
+    await expect(card).toHaveAttribute("data-card-scrolls", "");
+    // Reach the toggle the way a reader does: by scrolling the cramped card down to it.
+    await card.evaluate((element) => {
+      const toggle = element.querySelector(".question-text-toggle")!;
+      element.scrollTop += toggle.getBoundingClientRect().bottom - element.getBoundingClientRect().bottom + 80;
+    });
+    expect(await card.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+    await showFullQuestion(card).click();
+    await expectReadingMode(page);
+    const [title, head] = [await geometry(card.locator(".question-text")), await geometry(card.locator(".request-card-head"))];
+    expect(title.top, "the question's first line is not under the head line").toBeGreaterThanOrEqual(head.bottom - 0.5);
+  });
+
+  // A phone, and a desktop window whose chat column is narrow beside the right panel.
+  for (const { name, width, column } of [
+    { name: "a 320px phone", width: 320, column: null },
+    { name: "a 520px column in a 1280px window", width: 1280, column: 520 },
+  ]) {
+    test(`in ${name} an expanded recovery question's head line keeps every control in the card`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 800 });
+      await page.goto("/agent-questions-e2e.html?set=long-choices&recovery=1&resume=1&notice=1");
+      if (column) await page.addStyleTag({ content: `.detail-chat { max-width: ${column}px; }` });
+      const card = dockedCard(page);
+      await expect(card.locator(".request-card-kind")).toContainText("Recovery Required");
+      await expect(card.locator(".request-card-head").getByRole("button", { name: /More/ })).toBeVisible();
+      await showFullQuestion(card).click();
+      const head = card.locator(".request-card-head");
+      expect(await head.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+      const cardBox = await geometry(card);
+      for (const name of ["Show Where Asked", "Collapse Question", /More/]) {
+        const control = head.getByRole("button", { name, exact: true });
+        await expect(control).toBeVisible();
+        const box = await geometry(control);
+        expect(box.right, `${name} stays inside the card`).toBeLessThanOrEqual(cardBox.right + 0.5);
+        expect(box.left).toBeGreaterThanOrEqual(cardBox.left - 0.5);
+      }
+    });
+  }
+
   test("rotating and resizing keep the question expanded across whatever column there is", async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto("/agent-questions-e2e.html?set=paragraph&more=1&queued=3");

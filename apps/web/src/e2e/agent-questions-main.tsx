@@ -7,7 +7,7 @@ import { focusSessionRequest } from "../components/SessionApproval.js";
 import { ComposerQuestionResponse } from "../components/ComposerQuestionResponse.js";
 import { QueuedMessages } from "../components/QueuedMessages.js";
 import { EventTimeline, type TimelineRevealRequest } from "../components/EventTimeline.js";
-import { SessionNoticeSlot } from "../components/SessionNoticeSlot.js";
+import { SESSION_NOTICE_RANK, SessionNoticeSlot, type SessionNoticeEntry } from "../components/SessionNoticeSlot.js";
 import { RequestDock } from "../components/requests/RequestDock.js";
 import { RequestKindIcon, pendingRequestsTitle } from "../components/requests/request-meta.js";
 import { useQuestionWhereAsked } from "../components/requests/where-asked.js";
@@ -80,6 +80,14 @@ const queuedSteering = {
   queueHeld: false,
   stopPending: false,
 } as const;
+// `notice=1` gives the session a condition of its own, which waits behind the card's "+1 More".
+const noticeEntries: SessionNoticeEntry[] = params.get("notice") === "1" ? [{
+  key: "archived",
+  severity: "warning",
+  rank: SESSION_NOTICE_RANK.archived,
+  title: "Session Archived",
+  render: () => <p>This session is archived.</p>,
+}] : [];
 // Keycaps are a fine pointer's hints; the session shows them where a keyboard is likely (#2196).
 const showKeyHints = params.get("keys") === "1";
 let shouldHold = params.get("hold") === "1";
@@ -464,7 +472,7 @@ function Fixture() {
                   </div>
                 </div>
                 {request && !answering && (
-                  <SessionNoticeSlot sessionId={SESSION_ID} entries={[]} lead={{
+                  <SessionNoticeSlot sessionId={SESSION_ID} entries={noticeEntries} lead={{
                     key: "request-dock",
                     title: pendingRequestsTitle(1 + waitingRequests.length),
                     icon: <RequestKindIcon request={request} />,
