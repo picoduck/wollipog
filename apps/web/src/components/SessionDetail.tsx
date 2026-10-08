@@ -1,11 +1,14 @@
 import { browserRandomUUID } from "../browser-crypto.js";
 import { State } from "./State.js";
 import {
+  type ComponentProps,
   type KeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
   type RefObject,
+  Profiler,
+  memo,
   useCallback,
   useEffect,
   useId,
@@ -123,6 +126,14 @@ import {
   useRecoveryAnnouncement,
 } from "./TranscriptTailControl.js";
 import { ApprovalsControl, ComposerButton, ModelEffortControl, useModelSettingsAvailable } from "./ComposerControls.js";
+import { reportRenderProbe, SESSION_VIEW_PROBE, TRANSCRIPT_PROBE } from "./render-probe.js";
+import {
+  ComposerIdlePreview,
+  ComposerTextarea,
+  useComposerTextSelector,
+  useComposerTextStore,
+  type ComposerTextSnapshot,
+} from "./ComposerTextInput.js";
 import { modelSupportsImages, resolveCaps } from "../caps.js";
 import { PinnedSummary } from "./PinnedSummary.js";
 import { PinnedSummaryDock } from "./PinnedSummaryDock.js";
@@ -271,6 +282,7 @@ import {
   suggestComposerCommands,
   unlistedCommandNames,
   type ComposerCommand,
+  type ComposerCommandTrigger,
   type ComposerCommandResolution,
   type ComposerCommandResolutionOptions,
   type ProviderComposerCommand,
@@ -925,6 +937,68 @@ export function useDescendantRequestPolling({
   };
 }
 
+// Facts the session view reads from the composer's draft in render (#2764). Module-level, so the
+// selector keeps its identity and a keystroke that leaves the fact unchanged renders nothing here.
+const composerHoldsText = ({ text }: ComposerTextSnapshot) => text !== "";
+const composerHoldsMessage = ({ text }: ComposerTextSnapshot) => text.trim() !== "";
+const composerHoldsLineBreak = ({ text }: ComposerTextSnapshot) => /[\r\n]/u.test(text);
+
+interface ComposerTriggers {
+  slashTrigger: ComposerCommandTrigger | null;
+  /** The draft and caret an open slash token is dismissed for; null with no token. */
+  slashDismissKey: string | null;
+  workspaceTrigger: { start: number; query: string } | null;
+  workspaceDismissKey: string | null;
+}
+
+/** The slash and @ tokens under a collapsed caret, and the keys that dismissing either is bound to. */
+function composerTriggersAt(
+  { text, selection }: ComposerTextSnapshot,
+  skillSigil: boolean,
+  workspaceReferencesSupported: boolean,
+): ComposerTriggers {
+  const collapsed = selection.start === selection.end;
+  const slashTrigger = collapsed ? findComposerCommandTrigger(text, selection.start, { skillSigil }) : null;
+  const workspaceTrigger = workspaceReferencesSupported && collapsed
+    ? findWorkspaceReferenceTrigger(text, selection.start)
+    : null;
+  const dismissKey = `${text}\u0000${selection.start}`;
+  return {
+    slashTrigger,
+    slashDismissKey: slashTrigger ? dismissKey : null,
+    workspaceTrigger,
+    workspaceDismissKey: workspaceTrigger ? dismissKey : null,
+  };
+}
+
+function sameComposerTriggers(left: ComposerTriggers, right: ComposerTriggers): boolean {
+  const slash = left.slashTrigger === right.slashTrigger || (
+    left.slashTrigger !== null && right.slashTrigger !== null &&
+    left.slashTrigger.start === right.slashTrigger.start && left.slashTrigger.end === right.slashTrigger.end &&
+    left.slashTrigger.query === right.slashTrigger.query && left.slashTrigger.raw === right.slashTrigger.raw &&
+    left.slashTrigger.sigil === right.slashTrigger.sigil
+  );
+  const workspace = left.workspaceTrigger === right.workspaceTrigger || (
+    left.workspaceTrigger !== null && right.workspaceTrigger !== null &&
+    left.workspaceTrigger.start === right.workspaceTrigger.start &&
+    left.workspaceTrigger.query === right.workspaceTrigger.query
+  );
+  return slash && workspace && left.slashDismissKey === right.slashDismissKey &&
+    left.workspaceDismissKey === right.workspaceDismissKey;
+}
+
+/**
+ * The transcript behind the timeline's own props compare, with the render probe inside that
+ * boundary, so the probe counts the timeline's renders rather than its parent's (#2764).
+ */
+const ProfiledEventTimeline = memo(function ProfiledEventTimeline(props: ComponentProps<typeof EventTimeline>) {
+  return (
+    <Profiler id={TRANSCRIPT_PROBE} onRender={reportRenderProbe}>
+      <EventTimeline {...props} />
+    </Profiler>
+  );
+});
+
 /**
  * Whether a node belongs to the composer: inside its box, or inside a menu one of its controls
  * opened. Composer menus are portalled to <body> (the shared MenuSurface), so moving focus into one,
@@ -1143,7 +1217,11 @@ function SessionDetailLoaded({
   const recoveryRevision = useStoreSelector((s) =>
     subscriptionRecoveryRevision(s.streamSubscriptions, [sessionId]));
   const activity = useStoreSelector((s) => s.activity.get(sessionId));
-  const [text, setText] = useState("");
+  // The draft lives outside this component's state, so typing renders the composer alone (#2764).
+  const composerText = useComposerTextStore();
+  const composerHasText = useComposerTextSelector(composerText, composerHoldsText);
+  const composerHasMessage = useComposerTextSelector(composerText, composerHoldsMessage);
+  const composerMultiline = useComposerTextSelector(composerText, composerHoldsLineBreak);
   const [composerExpanded, setComposerExpanded] = useState(false);
   const composerExpansionSessionRef = useRef(sessionId);
   const draftDirty = useRef(false);
@@ -1346,7 +1424,6 @@ function SessionDetailLoaded({
     mode,
     measureFrame: null as number | null,
   });
-  const [composerSelection, setComposerSelection] = useState({ start: 0, end: 0 });
   const [slashDismissedFor, setSlashDismissedFor] = useState<string | null>(null);
   // The close match the arrow keys reached under an unknown command, for the token it was reached
   // under; none is active until then, so Enter can't guess (#2176).
@@ -1540,7 +1617,10 @@ function SessionDetailLoaded({
     };
   }, [composerFocusKey, sessionId]);
 
-  useLayoutEffect(() => {
+  // Runs after each commit that can make a pending restore possible: an expansion, a session, or a
+  // changed draft (through the textarea's `onTextCommitted`, since the draft is not state here).
+  const restorePendingComposerFocusRef = useRef(() => {});
+  restorePendingComposerFocusRef.current = () => {
     const pending = pendingComposerFocusRestoreRef.current;
     const element = inputRef.current;
     if (!pending || !element || composerComposingRef.current) return;
@@ -1556,7 +1636,10 @@ function SessionDetailLoaded({
     if (!restoreComposerFocus(element, pending)) return;
     pendingComposerFocusRestoreRef.current = null;
     reportComposerFocus(sessionId, "restore", element, false);
-  }, [composerExpanded, isMobile, sessionId, text]);
+  };
+  useLayoutEffect(() => {
+    restorePendingComposerFocusRef.current();
+  }, [composerExpanded, isMobile, sessionId]);
 
   useEffect(() => {
     let clearExplicitTransferTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1827,12 +1910,14 @@ function SessionDetailLoaded({
       : new Set([...current].filter((image) => images.includes(image))));
   }, [images]);
   const draftState = useRef<{ text: string; images: PromptImageInput[] }>({ text: "", images: [] });
-  draftState.current = { text, images };
+  draftState.current = { text: composerText.text, images };
+  const setText = useCallback((next: string) => {
+    draftState.current = { ...draftState.current, text: next };
+    composerText.setText(next);
+  }, [composerText]);
   const updateComposerSelection = useCallback((start: number, end = start) => {
-    setComposerSelection((current) => current.start === start && current.end === end
-      ? current
-      : { start, end });
-  }, []);
+    composerText.setSelection(start, end);
+  }, [composerText]);
   const setProgrammaticComposerText = useCallback((
     next: string,
     caret = next.length,
@@ -1850,7 +1935,7 @@ function SessionDetailLoaded({
     // a new message, so the composer's notices about the old one go with it. A caller that has a
     // notice for the new draft sets it afterwards.
     if (!hydration) clearComposerErrors();
-  }, [clearComposerErrors, updateComposerSelection]);
+  }, [clearComposerErrors, setText, updateComposerSelection]);
   const persistQueuedPromptEditRecovery = useCallback((recovery: QueuedPromptEditRecovery): boolean =>
     queuedEditRecoveryScope !== null &&
       saveDurableQueuedEditRecovery(queuedEditRecoveryScope, recovery),
@@ -2361,10 +2446,19 @@ function SessionDetailLoaded({
 
   // Coalesce rapid edits so typing beside a large base64 attachment does not rewrite it on every
   // keystroke. Dirty edits save even while hydration is pending; unmount cleanup below flushes
-  // captured state when the user navigates away before the timer fires.
+  // captured state when the user navigates away before the timer fires. The draft's text is not state
+  // here, so its changes restart the timer through a store subscription (#2764).
   useEffect(() => {
-    if (!draftDirty.current) return;
-    const timer = window.setTimeout(() => {
+    let timer: number | undefined;
+    // A store notification arrives inside the change, before the caller may have finished marking
+    // the draft dirty or clean (a send clears the text and then the flag), so whether to save is
+    // decided when the timer fires, where the effect used to decide it after the commit.
+    const schedule = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(save, 400);
+    };
+    const save = () => {
+      if (!draftDirty.current) return;
       if (queuedEditRef.current) {
         const recovery = queuedEditRecoveryScope
           ? loadRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey)
@@ -2396,10 +2490,20 @@ function SessionDetailLoaded({
         return;
       }
       void saveComposerDraft(sessionId, latest.text, latest.images, instanceScope);
-    }, 400);
-    return () => window.clearTimeout(timer);
-  }, [images, instanceScope, mutationKey, persistQueuedPromptEditRecovery, queuedEditRecoveryScope, sessionId,
-    storeQueuedPromptEditRecovery, text]);
+    };
+    if (draftDirty.current) schedule();
+    let lastText = composerText.text;
+    const unsubscribe = composerText.subscribe(() => {
+      if (composerText.text === lastText) return;
+      lastText = composerText.text;
+      schedule();
+    });
+    return () => {
+      unsubscribe();
+      window.clearTimeout(timer);
+    };
+  }, [composerText, images, instanceScope, mutationKey, persistQueuedPromptEditRecovery, queuedEditRecoveryScope,
+    sessionId, storeQueuedPromptEditRecovery]);
 
   useEffect(
     () => () => {
@@ -3240,12 +3344,23 @@ function SessionDetailLoaded({
   // Auto-grow the composer to its content. The probe is confined to the composer box so a draft
   // keystroke can never reflow — and scroll-clamp — the transcript above it (BUG-017). A browser
   // with `field-sizing: content` grows it from the stylesheet instead (#2154).
-  useLayoutEffect(() => {
+  const autoGrowComposerRef = useRef(() => {});
+  autoGrowComposerRef.current = () => {
     if (mode !== "expanded" || composerFieldSizesToContent()) return;
     const el = inputRef.current;
     if (!el) return;
     resizeComposerToContent(el);
-  }, [mode, text]);
+  };
+  useLayoutEffect(() => {
+    autoGrowComposerRef.current();
+  }, [mode]);
+  // A changed draft commits in the textarea alone, so what followed the draft here runs from the
+  // textarea's layout phase instead: a pending focus restore, then the auto-grow, in the order their
+  // effects above run.
+  const handleComposerTextCommitted = useCallback(() => {
+    restorePendingComposerFocusRef.current();
+    autoGrowComposerRef.current();
+  }, []);
 
   // Once the runner echoes the real user_message (count rises past the send baseline), drop the
   // optimistic bubble so the just-sent message isn't rendered twice.
@@ -4073,7 +4188,7 @@ function SessionDetailLoaded({
     : queuedEditReconciliation.status === "retryable"
       ? "This edit hasn't been saved yet."
       : queuedEditReconciliation.reason;
-  const canSend = canPrompt && (text.trim().length > 0 || images.length > 0);
+  const canSend = canPrompt && (composerHasMessage || images.length > 0);
   const restartRefusal = sessionCommandRefusal(session, "restart");
   // The control plane refuses to restart an archived session, so the composer offers no Restart
   // there; the Session Archived notice's Unarchive (and Restart) is the way back (#2301).
@@ -4210,7 +4325,7 @@ function SessionDetailLoaded({
     worktreeSetupRefusal]);
   const primaryComposerAction = composerPrimaryAction({
     canStopTurn,
-    hasContent: text.length > 0 || images.length > 0,
+    hasContent: composerHasText || images.length > 0,
     stopping: stopRequestPending,
   });
   const conversationCheckpointTurns = useMemo(
@@ -4829,20 +4944,20 @@ function SessionDetailLoaded({
       (submissionIsSkillRef.current.get(invocation.submissionId) ??
         (skillIds.has(invocation.providerCommandId) || skillOnlyNames.has(invocation.commandName.toLowerCase())));
   }, [agentCaps?.slashCommands, dollarSkills]);
-  const slashTrigger = useMemo(
-    () => composerSelection.start === composerSelection.end
-      ? findComposerCommandTrigger(text, composerSelection.start, { skillSigil: composerSkillSigil })
-      : null,
-    [composerSelection.end, composerSelection.start, composerSkillSigil, text],
-  );
   const workspaceReferencesSupported = runnerSupportsProtocol(runner?.protocolVersion, "workspaceReferences");
-  const workspaceTrigger = useMemo(
-    () => workspaceReferencesSupported && composerSelection.start === composerSelection.end
-      ? findWorkspaceReferenceTrigger(text, composerSelection.start)
-      : null,
-    [composerSelection.end, composerSelection.start, text, workspaceReferencesSupported],
+  // The slash and @ tokens under the caret. Typing outside one changes none of this, so it renders
+  // nothing here; typing inside one does, since the menus filter on every keystroke.
+  // Each selector keeps its identity while its inputs do, so a render for anything else (a streamed
+  // event) reuses what it selected instead of recomputing it, as the memos these replaced did.
+  const selectComposerTriggers = useCallback(
+    (snapshot: ComposerTextSnapshot) => composerTriggersAt(snapshot, composerSkillSigil, workspaceReferencesSupported),
+    [composerSkillSigil, workspaceReferencesSupported],
   );
-  const workspaceDismissKey = workspaceTrigger ? `${text}\u0000${composerSelection.start}` : null;
+  const { slashTrigger, slashDismissKey, workspaceTrigger, workspaceDismissKey } = useComposerTextSelector(
+    composerText,
+    selectComposerTriggers,
+    sameComposerTriggers,
+  );
   const workspacePickerOpen = canPrompt && workspaceTrigger !== null && workspaceDismissedFor !== workspaceDismissKey;
   useEffect(() => {
     if (!workspacePickerOpen || !workspaceTrigger?.query) {
@@ -4896,7 +5011,8 @@ function SessionDetailLoaded({
 
   const selectWorkspaceCandidate = (candidate: WorkspaceReferenceCandidate) => {
     if (!workspaceTrigger) return;
-    const nextText = text.slice(0, workspaceTrigger.start) + text.slice(composerSelection.start);
+    const text = composerText.text;
+    const nextText = text.slice(0, workspaceTrigger.start) + text.slice(composerText.selection.start);
     markDraftDirty();
     setProgrammaticComposerText(nextText, workspaceTrigger.start);
     setWorkspaceDismissedFor(null);
@@ -4914,9 +5030,10 @@ function SessionDetailLoaded({
     // A textarea keeps its selection after the menu takes focus, and it is exact where the state
     // copy can lag a programmatic change (a recalled prompt); the copy covers a textarea that does
     // not hold the draft yet.
+    const { text, selection } = composerText;
     const live = input.value === text;
-    const start = Math.min(live ? input.selectionStart : composerSelection.start, text.length);
-    const end = Math.min(Math.max(live ? input.selectionEnd : composerSelection.end, start), text.length);
+    const start = Math.min(live ? input.selectionStart : selection.start, text.length);
+    const end = Math.min(Math.max(live ? input.selectionEnd : selection.end, start), text.length);
     const before = text.slice(0, start);
     // The trigger needs the start of the message or whitespace before "@".
     const inserted = before === "" || /\s$/u.test(before) ? "@" : " @";
@@ -4938,7 +5055,6 @@ function SessionDetailLoaded({
     // The picker's order (each group once, best match's group first) is the order arrows walk.
     return composerCommandsInPickerOrder(slashTrigger.query ? ranked : ranked.filter((command) => command.available));
   }, [composerCommands, slashTrigger]);
-  const slashDismissKey = slashTrigger ? `${text}\u0000${composerSelection.start}` : null;
   // A slash query that matches nothing keeps the picker open on its no-match row, so a typo does
   // not look like an ordinary message; Escape or a space closes it. A `$` stays ordinary text.
   const slashNoMatch = slashTrigger !== null && slashTrigger.sigil !== "$" && slashTrigger.query !== "" &&
@@ -4964,25 +5080,32 @@ function SessionDetailLoaded({
     ? selectedCloseMatch?.id ?? null
     : retainActiveComposerCommandId(activeSlashCommandId, slashMatches);
   const selectedSlashCommand = slashMatches.find((command) => command.id === selectedSlashCommandId);
-  const composerCommandResolution = useMemo(
-    () => resolveComposerCommandInvocation(text, composerCommands, {
+  // The command the draft resolves to, if any; only which command it is matters to the render.
+  const selectResolvedCommand = useCallback(({ text }: ComposerTextSnapshot) => {
+    const resolution = resolveComposerCommandInvocation(text, composerCommands, {
       unknownCommands: rejectUnknownCommands ? "reject" : "plaintext",
       skillSigil: composerSkillSigil,
       unlistedNames,
-    }),
-    [composerCommands, composerSkillSigil, rejectUnknownCommands, text, unlistedNames],
-  );
-  const commandPreservesAttachedImages = composerCommandResolution.kind === "command" &&
-    durableCommandPreservesAttachments(composerCommandResolution.command, images.length > 0);
+    });
+    return resolution.kind === "command" ? resolution.command : null;
+  }, [composerCommands, composerSkillSigil, rejectUnknownCommands, unlistedNames]);
+  const composerResolvedCommand = useComposerTextSelector(composerText, selectResolvedCommand);
+  const commandPreservesAttachedImages = composerResolvedCommand !== null &&
+    durableCommandPreservesAttachments(composerResolvedCommand, images.length > 0);
   // The composer's own slot entries (#2156), behind the session's conditions of the same severity.
   // An error is danger with its own Dismiss, and Retry where the failed action can be repeated with
   // the kept draft; the note that a command keeps the attached images is info, dismissed by the slot.
   const composerErrorEntries = Object.entries(composerErrors) as [ComposerErrorSource, ComposerError][];
+  // A failed send is about the draft that failed. Once the composer holds another one (a slash
+  // command or Edit as a New Turn replaced it), the entry and its Retry no longer apply.
+  const selectRetriesStillHeld = useCallback(({ text }: ComposerTextSnapshot) =>
+    (Object.entries(composerErrors) as [ComposerErrorSource, ComposerError][])
+      .flatMap(([source, { retry }]) => retry && composerHoldsDraft({ text, images }, retry.draft) ? [source] : [])
+      .join("\n"), [composerErrors, images]);
+  const retriesStillHeld = useComposerTextSelector(composerText, selectRetriesStillHeld);
   for (const [source, composerError] of composerErrorEntries) {
     const retry = composerError.retry;
-    // A failed send is about the draft that failed. Once the composer holds another one (a slash
-    // command or Edit as a New Turn replaced it), the entry and its Retry no longer apply.
-    if (retry && !composerHoldsDraft({ text, images }, retry.draft)) continue;
+    if (retry && !retriesStillHeld.split("\n").includes(source)) continue;
     const retryRefusal = retry ? promptUnavailableReason : null;
     const refusalId = `composer-${source}-retry-refusal`;
     sessionNotices.push({
@@ -5015,8 +5138,8 @@ function SessionDetailLoaded({
       ),
     });
   }
-  if (commandPreservesAttachedImages && composerCommandResolution.kind === "command") {
-    const commandLabel = composerCommandResolution.command.label;
+  if (commandPreservesAttachedImages && composerResolvedCommand !== null) {
+    const commandLabel = composerResolvedCommand.label;
     sessionNotices.push({
       key: `attachment-note:${commandLabel}`,
       severity: "info",
@@ -5033,7 +5156,12 @@ function SessionDetailLoaded({
   // A slash command that wasn't sent (#2176) is a warning while its draft is unchanged: editing the
   // draft clears it. An unknown token offers its closest match, which replaces only the token, and
   // both kinds offer Send as Text, which repeats the refused send or steer with the text as typed.
-  const visibleCommandNotSent = commandNotSent?.text === text && !queuedEdit ? commandNotSent : null;
+  const selectCommandNotSentStillHeld = useCallback(
+    ({ text }: ComposerTextSnapshot) => commandNotSent !== null && commandNotSent.text === text,
+    [commandNotSent],
+  );
+  const commandNotSentStillHeld = useComposerTextSelector(composerText, selectCommandNotSentStillHeld);
+  const visibleCommandNotSent = commandNotSentStillHeld && !queuedEdit ? commandNotSent : null;
   if (visibleCommandNotSent) {
     const { problem, action } = visibleCommandNotSent;
     // The suggestion is read from the current catalog, so a collision added since the refusal uses
@@ -5153,7 +5281,7 @@ function SessionDetailLoaded({
       ),
     });
   });
-  const composerIdleCollapsed = isMobile && !composerExpanded && !/[\r\n]/u.test(text) &&
+  const composerIdleCollapsed = isMobile && !composerExpanded && !composerMultiline &&
     images.length === 0 && session.pendingApproval == null &&
     !historyQuarantine && !queuedEdit && composerErrorEntries.length === 0 && !retitleFeedback && !dictation.recording &&
     !dragActive && !paletteOpen && !workspacePickerOpen;
@@ -5171,24 +5299,31 @@ function SessionDetailLoaded({
   };
   // The phone capsule's preview (#2154): the draft's first line to edit, or who a new message goes
   // to. A composer that cannot send says why instead.
-  const composerIdleDraft = text.trim();
-  const composerIdlePreview = composerIdleDraft || (canPrompt ? `Message ${composerAgent}` : composerPlaceholder);
+  const composerIdlePlaceholder = canPrompt ? `Message ${composerAgent}` : composerPlaceholder;
   // R focuses the composer from the reader; the idle, unfocused composer says so (#2166).
-  const composerReplyKeycap = sessionReadingKeys && canPrompt && activePane === "reader" && text === "" &&
+  const composerReplyKeycap = sessionReadingKeys && canPrompt && activePane === "reader" && !composerHasText &&
     !composerIdleCollapsed && !composerAnswerActive;
   useEffect(() => {
     setActiveSlashCommandId((current) => retainActiveComposerCommandId(current, slashMatches));
   }, [slashMatches]);
   // Editing the draft clears a refused command's notice for good, so undoing the edit doesn't bring
   // it back; so does leaving the session.
-  useEffect(() => {
-    setCommandNotSent((current) => current && current.text !== text ? null : current);
-  }, [text]);
-  useEffect(() => setCommandNotSent(null), [sessionId]);
   // Each draft starts with no close match active, so Enter can't inherit an earlier draft's choice.
-  useEffect(() => setActiveCloseMatch(null), [sessionId, text]);
+  // The draft is not state here, so both follow it through the store (#2764).
+  useEffect(() => {
+    let lastText = composerText.text;
+    return composerText.subscribe(() => {
+      const text = composerText.text;
+      if (text === lastText) return;
+      lastText = text;
+      setCommandNotSent((current) => current && current.text !== text ? null : current);
+      setActiveCloseMatch((current) => current === null ? current : null);
+    });
+  }, [composerText]);
+  useEffect(() => setCommandNotSent(null), [sessionId]);
+  useEffect(() => setActiveCloseMatch(null), [sessionId]);
   const setComposerCaret = (caret: number) => {
-    setComposerSelection({ start: caret, end: caret });
+    composerText.setSelection(caret, caret);
     window.requestAnimationFrame(() => {
       const input = inputRef.current;
       if (!input) return;
@@ -5199,13 +5334,13 @@ function SessionDetailLoaded({
   // The picker sits where the notice does, so a refusal closes it for this draft, as Escape would;
   // the notice offers what the picker did.
   const showCommandNotSent = (problem: CommandNotSent["problem"], action: CommandNotSent["action"]) => {
-    setCommandNotSent({ problem, action, text });
+    setCommandNotSent({ problem, action, text: composerText.text });
     if (slashDismissKey) setSlashDismissedFor(slashDismissKey);
   };
   // Use /review: the close match replaces the unknown token, the rest of the message stays, and the
   // caret follows the command so its arguments can be typed.
   const applyCommandSuggestion = (command: ComposerCommand) => {
-    const replacement = replaceLeadingCommandToken(text, command);
+    const replacement = replaceLeadingCommandToken(composerText.text, command);
     markDraftDirty();
     flushSync(() => {
       setHistIdx(-1);
@@ -5218,7 +5353,7 @@ function SessionDetailLoaded({
   };
   const insertSlashCommand = (command: ComposerCommand) => {
     if (!slashTrigger || !command.available) return;
-    const replacement = replaceComposerCommandTrigger(text, slashTrigger, command);
+    const replacement = replaceComposerCommandTrigger(composerText.text, slashTrigger, command);
     draftDirty.current = true;
     composerDraftVersionRef.current += 1;
     pendingComposerFocusRestoreRef.current = null;
@@ -5375,6 +5510,7 @@ function SessionDetailLoaded({
     // Sending ends dictation first (#2193) and drops what the engine has not settled: a phrase
     // landing while the request is in flight would join the sent text or be lost to restoration.
     dictation.cancel();
+    const text = composerText.text;
     const outgoing = text.trim();
     let invocation: ComposerCommandResolution = asText
       ? { kind: "plaintext", text: outgoing }
@@ -5616,6 +5752,7 @@ function SessionDetailLoaded({
     }
     // A command that resolves is steering content as typed, but an unknown one is never sent
     // (#2176), and an escaped `//x` steers as `/x`.
+    const text = composerText.text;
     const resolved = asText ? null
       : resolveComposerCommandInvocation(text.trim(), composerCommands, composerCommandResolutionOptions);
     if (resolved?.kind === "unknown") {
@@ -5885,7 +6022,7 @@ function SessionDetailLoaded({
       return;
     }
     const submittedDraft = {
-      text: text.trim(),
+      text: composerText.text.trim(),
       images: images.map((image) => ({ ...image })),
     };
     if (!submittedDraft.text && submittedDraft.images.length === 0) return;
@@ -6151,7 +6288,7 @@ function SessionDetailLoaded({
     // empty or already browsing history, so a multi-line draft's caret navigation isn't hijacked.
     // Alt+↑/↓ is Session Reading's Previous/Next Session, never a recall.
     if (!queuedEdit && !paletteOpen && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && userPrompts.length) {
-      if (e.key === "ArrowUp" && (histIdx !== -1 || text === "")) {
+      if (e.key === "ArrowUp" && (histIdx !== -1 || composerText.text === "")) {
         e.preventDefault();
         const idx = histIdx === -1 ? userPrompts.length - 1 : Math.max(0, histIdx - 1);
         setHistIdx(idx);
@@ -6673,38 +6810,40 @@ function SessionDetailLoaded({
               ) : (
                 <>
                   {items.length > 0 && (
-                    <EventTimeline
-                      driver={session.driver}
-                      items={timelineItems}
-                      sessionActive={isTimelineSessionActive(session.status)}
-                      onOpenSubagent={mode === "expanded" ? openSubagent : undefined}
-                      onOpenSourceLocation={openSourceLocation}
-                      onOpenInReview={mode === "expanded" ? openInReview : undefined}
-                      onOpenSession={openSession}
-                      workspaceRoot={session.worktreePath ?? runner?.workspaces.find((workspace) => workspace.id === session.workspaceId)?.path}
-                      scrollRef={scrollRef}
-                      historyKey={timelineHistoryKey}
-                      getInitialAnchor={followTail.getInitialAnchor}
-                      preserveAnchor={!followTail.isFollowing}
-                      anchorRecoveryPending={anchorRecoveryPending}
-                      onVisibleAnchorChange={followTail.onVisibleAnchorChange}
-                      onAnchorLost={followTail.onAnchorLost}
-                      // Keep checkpoint actions discoverable when the runner or worktree cannot
-                      // currently satisfy them; activation still uses the existing API contract.
-                      onRewind={mode === "expanded" ? onRewind : undefined}
-                      rewindUnavailableReason={rewindUnavailableReason}
-                      onFork={mode === "expanded" ? onFork : undefined}
-                      handoff={mode === "expanded" ? handoffControls : undefined}
-                      turnRetry={mode === "expanded" ? turnRetry : undefined}
-                      onEditAndResend={mode === "expanded" ? openResendAction : undefined}
-                      editAndResendUnavailableReason={promptUnavailableReason ?? undefined}
-                      onEditInFork={mode === "expanded" ? openForkEditAction : undefined}
-                      editInForkAvailabilityByItem={mode === "expanded" ? editInForkAvailabilityByItem : undefined}
-                      forkAvailabilityByTurn={mode === "expanded" ? forkAvailabilityByTurn : undefined}
-                      revealRequest={timelineRevealRequest}
-                      onRevealHandled={handleTimelineReveal}
-                      questionContext={timelineQuestionContext}
-                    />
+                    <Profiler id={SESSION_VIEW_PROBE} onRender={reportRenderProbe}>
+                      <ProfiledEventTimeline
+                        driver={session.driver}
+                        items={timelineItems}
+                        sessionActive={isTimelineSessionActive(session.status)}
+                        onOpenSubagent={mode === "expanded" ? openSubagent : undefined}
+                        onOpenSourceLocation={openSourceLocation}
+                        onOpenInReview={mode === "expanded" ? openInReview : undefined}
+                        onOpenSession={openSession}
+                        workspaceRoot={session.worktreePath ?? runner?.workspaces.find((workspace) => workspace.id === session.workspaceId)?.path}
+                        scrollRef={scrollRef}
+                        historyKey={timelineHistoryKey}
+                        getInitialAnchor={followTail.getInitialAnchor}
+                        preserveAnchor={!followTail.isFollowing}
+                        anchorRecoveryPending={anchorRecoveryPending}
+                        onVisibleAnchorChange={followTail.onVisibleAnchorChange}
+                        onAnchorLost={followTail.onAnchorLost}
+                        // Keep checkpoint actions discoverable when the runner or worktree cannot
+                        // currently satisfy them; activation still uses the existing API contract.
+                        onRewind={mode === "expanded" ? onRewind : undefined}
+                        rewindUnavailableReason={rewindUnavailableReason}
+                        onFork={mode === "expanded" ? onFork : undefined}
+                        handoff={mode === "expanded" ? handoffControls : undefined}
+                        turnRetry={mode === "expanded" ? turnRetry : undefined}
+                        onEditAndResend={mode === "expanded" ? openResendAction : undefined}
+                        editAndResendUnavailableReason={promptUnavailableReason ?? undefined}
+                        onEditInFork={mode === "expanded" ? openForkEditAction : undefined}
+                        editInForkAvailabilityByItem={mode === "expanded" ? editInForkAvailabilityByItem : undefined}
+                        forkAvailabilityByTurn={mode === "expanded" ? forkAvailabilityByTurn : undefined}
+                        revealRequest={timelineRevealRequest}
+                        onRevealHandled={handleTimelineReveal}
+                        questionContext={timelineQuestionContext}
+                      />
+                    </Profiler>
                   )}
                 </>
               )}
@@ -7002,8 +7141,10 @@ function SessionDetailLoaded({
                   <kbd>{shortcutDisplay("session-reading-reply")}</kbd>
                 </div>
               )}
-              <textarea
+              <ComposerTextarea
+                store={composerText}
                 ref={inputRef}
+                onTextCommitted={handleComposerTextCommitted}
                 className="composer-input"
                 role="combobox"
                 aria-autocomplete="list"
@@ -7015,7 +7156,6 @@ function SessionDetailLoaded({
                   : paletteOpen && selectedSlashCommandId
                     ? slashCommandOptionId(slashListboxId, selectedSlashCommandId)
                     : undefined}
-                value={text}
                 onFocus={(event) => {
                   setComposerExpanded(true);
                   composerExplicitFocusTransferRef.current = false;
@@ -7051,14 +7191,18 @@ function SessionDetailLoaded({
                   composerDraftVersionRef.current += 1;
                   invalidateComposerMutationRecovery(mutationKey);
                   // A changed draft is a new message: the composer's notices were about the old one.
+                  // The resets below are skipped when there is nothing to reset, so a keystroke
+                  // renders the textarea alone rather than this whole view (#2764). The errors are
+                  // cleared through their updater instead, which leaves an empty set untouched and
+                  // still sees one queued since this view last rendered (a paste's refusal).
                   clearComposerErrors();
                   setText(e.currentTarget.value);
                   updateComposerSelection(
                     e.currentTarget.selectionStart,
                     e.currentTarget.selectionEnd,
                   );
-                  setSlashDismissedFor(null);
-                  setWorkspaceDismissedFor(null);
+                  if (slashDismissedFor !== null) setSlashDismissedFor(null);
+                  if (workspaceDismissedFor !== null) setWorkspaceDismissedFor(null);
                   if (histIdx !== -1) setHistIdx(-1); // typing exits history browsing
                 }}
                 onKeyDown={onKeyDown}
@@ -7112,14 +7256,11 @@ function SessionDetailLoaded({
                     imagesRefusedReason={modelRefusesImages}
                     onAttachImages={addFiles}
                   />
-                  <ComposerButton
-                    variant="plain"
-                    className={`composer-idle-preview${composerIdleDraft ? "" : " is-empty"}`}
-                    aria-label={composerIdleDraft ? `Edit Draft: ${composerIdleDraft}` : composerIdlePreview}
+                  <ComposerIdlePreview
+                    store={composerText}
+                    placeholder={composerIdlePlaceholder}
                     onClick={expandIdleComposer}
-                  >
-                    {composerIdlePreview}
-                  </ComposerButton>
+                  />
                   <ApprovalsControl session={session} apply={applyConfig} disabledReason={composerControlsDisabledReason} />
                   <ModelEffortControl
                     session={session}
