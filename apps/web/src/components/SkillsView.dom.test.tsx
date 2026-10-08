@@ -11,10 +11,15 @@ import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import type { RunnerSkillsResponse } from "../skills.js";
 import { SkillsView } from "./SkillsView.js";
-import { RecommendedSkillsNotice } from "./RecommendedSkillsNotice.js";
+import { RecommendedSkillsNotice, useSkillRecommendations } from "./RecommendedSkillsNotice.js";
 import { FeedbackContext } from "./FeedbackProvider.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
+
+/** The Sessions list slot owns the hook and hands it to the notice (#2221). */
+function RecommendedSkillsHarness() {
+  return <RecommendedSkillsNotice recommendations={useSkillRecommendations()} onOpen={() => {}} />;
+}
 
 const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
@@ -859,11 +864,11 @@ test("a recommendation dismissed in the Skills view or the Inbox notice is dismi
     const container = domWindow.document.body as unknown as HTMLDivElement;
     const root = createRoot(mountPoint);
     await act(async () => {
-      root.render(<ApiProvider client={client}><RecommendedSkillsNotice onOpen={() => {}} /></ApiProvider>);
+      root.render(<ApiProvider client={client}><RecommendedSkillsHarness /></ApiProvider>);
     });
     await act(settle);
     return {
-      names: () => [...container.querySelectorAll(".recommended-skills-notice-list a")].map((link) => link.textContent),
+      names: () => [...container.querySelectorAll(".skill-recommendations-list a")].map((link) => link.textContent),
       async dismiss(name: string) {
         const button = container.querySelector<HTMLButtonElement>(`button[aria-label="Dismiss ${name}"]`);
         assert.ok(button);

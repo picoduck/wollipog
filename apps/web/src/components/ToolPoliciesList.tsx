@@ -40,7 +40,6 @@ export function ToolPoliciesList({ policies }: { policies: readonly GovernancePo
           <NavRow
             key={policy.policyId}
             id={approvalsPolicyAnchorId(policy.policyId)}
-            className="tool-policy-row"
             hasPopup="dialog"
             title={policy.name.trim() || policy.policyId}
             badge={<StatusBadge tone="neutral" noDot label={POLICY_EFFECT_LABELS[policy.effect]} />}

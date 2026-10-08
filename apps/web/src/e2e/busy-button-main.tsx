@@ -14,6 +14,7 @@ import "../styles.css";
  * `?surface=toast&toast=install|undo` shows one toast whose action never finishes, and
  * `?surface=confirm` opens a confirmation whose confirm action never finishes. `?surface=states`
  * (#2130) renders every variant enabled, `disabled`, `aria-disabled` and busy side by side.
+ * `?surface=footer-sm` (#2645) is a dialog footer whose small primary never finishes.
  * `?theme=light` switches theme. Chosen by query string so every state is a clean reload.
  */
 
@@ -70,6 +71,25 @@ function States() {
   );
 }
 
+/**
+ * Dialog footers, which reserve no room at rest (#2645): a small primary beside Cancel, and a
+ * primary that mounts busy, as a dialog reopened while its action still runs does.
+ */
+function FooterSm() {
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 400px)", gap: 16, padding: 24 }}>
+      <div className="modal-foot" data-fixture="footer-sm" style={{ width: "100%" }}>
+        <button className="btn sm" type="button" data-neighbour="before">Cancel</button>
+        <PressToBusy className="btn primary sm" label="Install and Restart" />
+      </div>
+      <div className="modal-foot" data-fixture="footer-mounted-busy" style={{ width: "100%" }}>
+        <button className="btn" type="button">Cancel</button>
+        <BusyButton className="btn primary" busy progress="Creating the skill…">Create Skill</BusyButton>
+      </div>
+    </div>
+  );
+}
+
 function Toast({ kind }: { kind: "install" | "undo" }) {
   const { showToast, showUndo } = useFeedback();
   useEffect(() => {
@@ -106,7 +126,8 @@ function Harness() {
       {surface === "toast" ? <Toast kind={params.get("toast") === "undo" ? "undo" : "install"} />
         : surface === "confirm" ? <Confirm />
           : surface === "states" ? <States />
-            : <Buttons />}
+            : surface === "footer-sm" ? <FooterSm />
+              : <Buttons />}
     </FeedbackProvider>
   );
 }

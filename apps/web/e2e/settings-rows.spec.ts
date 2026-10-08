@@ -765,6 +765,48 @@ test("every section renders its own panel", async ({ page }) => {
 });
 
 /**
+ * A navigation row without an icon used to keep a 17px empty icon gutter, so its title started to
+ * the right of the switch rows in the same panel (#2642). Measured inside each row, so rows in
+ * different groups still compare, at a desktop and a phone width.
+ */
+for (const width of [1440, 390]) {
+  test(`navigation rows without an icon start their titles where switch rows do at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    let iconless = 0;
+    let withIcon = 0;
+    for (const { id, title } of SETTINGS_SECTIONS) {
+      await useHarness(page, "dark", { section: id, defaults: "agent" });
+      const rows = await page.locator(".settings-panel .ui-row").evaluateAll((elements) => elements.map((row) => {
+        const rowLeft = row.getBoundingClientRect().left;
+        const icon = row.querySelector(".ui-row-icon");
+        return {
+          name: row.querySelector(".ui-row-title")?.textContent ?? "",
+          kind: row.classList.contains("ui-row-switch") ? "switch" : row.classList.contains("ui-row-nav") ? "nav" : "other",
+          iconWidth: icon && icon.childNodes.length > 0 ? icon.getBoundingClientRect().width : null,
+          offset: (row.querySelector(".ui-row-title")?.getBoundingClientRect().left ?? Number.NaN) - rowLeft,
+        };
+      }));
+      const switchOffsets = [...new Set(rows.filter((row) => row.kind === "switch").map((row) => row.offset))];
+      expect(switchOffsets.length, `${title}: every switch title starts at one x`).toBeLessThanOrEqual(1);
+      for (const row of rows.filter((candidate) => candidate.kind === "nav")) {
+        if (row.iconWidth !== null) {
+          withIcon += 1;
+          expect(row.iconWidth, `${title}: "${row.name}" keeps its 17px icon column`).toBe(17);
+          expect(row.offset, `${title}: "${row.name}" starts its title after its icon`).toBeGreaterThan(17);
+        } else if (switchOffsets.length === 1) {
+          iconless += 1;
+          expect(row.offset, `${title}: "${row.name}" starts its title where the switch rows do`).toBe(switchOffsets[0]);
+        }
+      }
+    }
+    // Behavior has icon-less navigation rows beside switch rows, and Keyboard has a row with an
+    // icon; without them this test would pass having measured nothing.
+    expect(iconless, "icon-less navigation rows were measured beside switch rows").toBeGreaterThanOrEqual(1);
+    expect(withIcon, "a navigation row with an icon was measured").toBeGreaterThanOrEqual(1);
+  });
+}
+
+/**
  * Run in a real touch context. Resizing the viewport does not make desktop Chromium a coarse-pointer
  * device, so `@media (pointer: coarse)` never matched and the earlier version of this test passed
  * with the 44px rule deleted.

@@ -241,10 +241,11 @@ test.describe("at 1440×900", () => {
     await open(page);
     const without = await expectRows(page, 6);
     await open(page, "&skills=list");
-    await expect(page.locator(".inbox-list-pane > .notice")).toBeVisible();
+    await expect(page.locator(".inbox-list-pane > .inbox-list-head .notice")).toBeVisible();
     const withNotice = await split(page);
     expect(withNotice.line).toBe(without.line);
     expect(withNotice.whole).toBeLessThan(6);
+    // Whole rows with a notice, and where the leftover goes, are measured in sessions-list-notices.spec.ts (#2221).
   });
 
   test("F6 cycles the list and the preview, and Escape in the preview returns to the selected row", async ({ page }) => {

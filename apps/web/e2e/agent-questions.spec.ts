@@ -545,13 +545,16 @@ test("a failure notice's Show Details growing at the end of a scrolling card bri
   await expect.poll(async () => (await cardEdges(card)).below).toBe(true);
 });
 
-test("a card whose body scrolls on its own, or that is not capped, draws no edge lines (#2698)", async ({ page }) => {
+test("a card whose body scrolls on its own draws the body's line, not the card's, and one not capped draws none (#2698, #2715)", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/agent-questions-e2e.html?set=paragraph&more=1");
   const card = dockedCard(page);
   await expect(card).toBeVisible();
   expect(await card.evaluate((element) => element.hasAttribute("data-card-scrolls"))).toBe(false);
   expect(await cardEdges(card)).toMatchObject({ above: false, below: false });
+  // The body scrolls instead, so its own lower edge carries the one line every Request Card draws.
+  expect(await card.locator(".request-card-body").evaluate((body) =>
+    body.hasAttribute("data-clip-end") && getComputedStyle(body, "::after").borderTopStyle === "solid")).toBe(true);
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/agent-questions-e2e.html?set=short");
   expect(await cardEdges(dockedCard(page))).toEqual({ above: false, below: false, range: 0 });
@@ -813,6 +816,37 @@ test("a single-member installation keeps reading every answer and decision as it
     "by You", "by You", "by Allow Reads",
   ]);
 });
+
+for (const width of [1440, 390]) {
+  test(`a sign-in card names the member who chose its action, and nobody for an automatic recheck at ${width}px (#2742, #2783)`, async ({ page }) => {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+    await page.goto("/agent-questions-e2e.html?set=sign-in-resolvers");
+    const timeline = page.getByRole("list", { name: "Sign-In Resolver Rows" });
+    for (const group of await timeline.getByRole("button", { name: /^Worked/ }).all()) await group.click();
+    const rows = timeline.locator("details.tl-decision");
+    await expect.poll(() => rows.locator("summary").evaluateAll((summaries) =>
+      summaries.map((summary) => summary.getAttribute("aria-label")))).toEqual([
+      "Allowed Sign In to Claude Code by You",
+      "Allowed Sign In to Claude Code by Grace Hopper",
+      "Allowed Sign In to Claude Code by Another Member",
+      "Rejected Sign In to Claude Code by Grace Hopper",
+      "Another Account Selected Sign In to Claude Code by You",
+      "Rechecked Automatically Sign In to Claude Code",
+      "Allowed Sign In to Claude Code",
+    ]);
+    await expect(rows.locator(".tl-decision-by")).toHaveText([
+      "by You", "by Grace Hopper", "by Another Member", "by Grace Hopper", "by You",
+    ]);
+    for (const row of await rows.all()) await row.locator("summary").click();
+    for (const [index, name] of ["You", "Grace Hopper", "Another Member", "Grace Hopper", "You"].entries()) {
+      await expect(rows.nth(index).locator(".facts dt").first()).toHaveText("Decided By");
+      await expect(rows.nth(index).locator(".facts dd").first()).toHaveText(name);
+    }
+    for (const index of [5, 6]) await expect(rows.nth(index).locator(".facts dt", { hasText: "Decided By" })).toHaveCount(0);
+    expect(await page.locator("#question-frame").innerText()).not.toMatch(/user-/);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+  });
+}
 
 for (const width of [1280, 390]) {
   for (const style of ["interactive", "composer"]) {
@@ -1174,6 +1208,18 @@ test.describe("on a phone with the software keyboard open", () => {
     await dockedCard(page).locator(".question-input").fill("Shipped the dock.");
     await dockedCard(page).getByRole("button", { name: "Next", exact: true }).tap();
     await expect(dockedCard(page).locator(".question-step-note")).toContainText("Question 2 of 2");
+  });
+
+  test("a row tapped right after typing in the composer takes the tap, though the dock regrows on blur (#2675)", async ({ page }) => {
+    // A question tall enough that the dock is at its cap: 40% while the composer has focus, 50% after.
+    await page.goto("/agent-questions-e2e.html?set=long");
+    const composer = page.getByRole("textbox", { name: "Composer" });
+    await composer.tap();
+    await composer.fill("One more thing first.");
+    await expect(composer).toBeFocused();
+    const rolling = dockedCard(page).getByRole("radio", { name: /^Rolling/ });
+    await rolling.tap();
+    await expect(rolling).toBeChecked();
   });
 
   test("Show Where Asked and Jump to Question are icon buttons named as on desktop, with 44px targets (#2205)", async ({ page }) => {

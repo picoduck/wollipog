@@ -493,7 +493,7 @@ for (const viewport of [
   { name: "mobile", width: 390, height: 844 },
   { name: "desktop", width: 1280, height: 800 },
 ]) {
-  test(`a worktree setup request is answered on the dock with its command, facts and menu choice on ${viewport.name}`, async ({ page }) => {
+  test(`a worktree setup request is answered on the dock with its command, facts and visible trust primary on ${viewport.name}`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await page.goto("/request-surfaces-e2e.html?scenario=standalone");
 
@@ -506,11 +506,27 @@ for (const viewport of [
     await expect(card(page).locator(".facts")).toContainText("wollipog.worktree_setup");
     await expect(card(page).locator(".facts")).toContainText("fix/responsive-approval");
     await expect(card(page).locator(".code-well")).toContainText("pnpm setup:step-12");
-    await expect(card(page).locator(".request-card-foot").getByRole("button", { name: "Create Without Setup", exact: true })).toBeVisible();
-    await expect(card(page).locator(".request-card-foot")).not.toContainText("Trust This Configuration");
+    // With no allow_once, the trust option is the one visible primary, last, and nothing waits in a
+    // menu (#2641).
+    const foot = card(page).locator(".request-card-foot");
+    // D's keycap names the one-time Create Without Setup; the lasting trust takes a click, so no A.
+    await expect(foot.getByRole("button")).toHaveText(["Create Without SetupD", "Trust This Configuration"]);
+    await expect(foot.locator(".btn.primary")).toHaveCount(1);
+    const trust = foot.locator(".btn.primary");
+    await expect(trust).toHaveText("Trust This Configuration");
+    await expect(trust.locator("kbd")).toHaveCount(0);
+    await expect(trust).toBeInViewport({ ratio: 1 });
+    // Two long labels do not fit one phone row: they wrap inside the footer rather than run off the
+    // card's edge.
+    const footBox = (await foot.boundingBox())!;
+    for (const button of await foot.getByRole("button").all()) {
+      const box = (await button.boundingBox())!;
+      expect(box.x).toBeGreaterThanOrEqual(footBox.x);
+      expect(box.x + box.width).toBeLessThanOrEqual(footBox.x + footBox.width);
+    }
+    await expect(card(page).getByRole("button", { name: "More Choices" })).toHaveCount(0);
 
-    await card(page).getByRole("button", { name: "More Choices" }).click();
-    await page.getByRole("menuitem", { name: "Trust This Configuration" }).click();
+    await trust.click();
     await expect(card(page)).toHaveCount(0);
     // The resolved request becomes its Decision Record (#2204): the outcome word, never the option id.
     await expect(requestRow).toHaveCount(0);
@@ -618,8 +634,9 @@ test.describe("on a phone's touch screen", () => {
   });
 });
 
-test("at 940px the Requests panel opens over the transcript from the right, with a scrim that closes it (#2206)", async ({ page }) => {
-  await page.setViewportSize({ width: 940, height: 800 });
+test("where docking would leave the chat under 480px the Requests panel opens over the transcript from the right, with a scrim that closes it (#2206, #2725)", async ({ page }) => {
+  // This fixture has no rail: at 800px a 320px panel (40% of the window) and its handle leave 470px.
+  await page.setViewportSize({ width: 800, height: 800 });
   await page.goto("/request-surfaces-e2e.html?scenario=descendants");
   const chatBefore = (await page.locator(".detail-chat").boundingBox())!;
   await openRequests(page);

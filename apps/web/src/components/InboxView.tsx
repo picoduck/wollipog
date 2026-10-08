@@ -1,5 +1,5 @@
-import { type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { prioritizedPendingRequests, providerSupportsConversationFork, type SessionReminderView, type SessionView, type SetSessionReminderRequest, type SnoozeScheduleInput, type SourceLocation } from "@wollipog/protocol";
+import { type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, useCallback, useDeferredValue, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { prioritizedPendingRequests, providerSupportsConversationFork, type BoardColumn, type SessionReminderView, type SessionView, type SetSessionReminderRequest, type SnoozeScheduleInput, type SourceLocation } from "@wollipog/protocol";
 import { archiveAndStopMessage, archiveResultMessage, archiveResultTone, sessionArchiveRequiresStop } from "../archive-actions.js";
 import { sessionArchiveActionRefusal, sessionCommandRefusal } from "../session-command-permissions.js";
 import {
@@ -67,7 +67,7 @@ import { PageHeader } from "./PageHeader.js";
 import { shortcutDisplay } from "../shortcuts.js";
 import { sessionDisplayTitle } from "../session-title.js";
 import { Board } from "./Board.js";
-import { BoardFilterTools } from "./BoardFilters.js";
+import { BoardFiltersSheet, BoardFilterStrip, BoardFilterTools } from "./BoardFilters.js";
 import type { SessionsViewMode } from "../sessions-view-mode.js";
 import { loadSessionsListWidth, saveSessionsListWidth, type SessionsPreviewLayout } from "../sessions-preview-layout.js";
 import { useSessionsPreviewLayout } from "../use-sessions-preview-layout.js";
@@ -76,9 +76,7 @@ import { virtualTargetScrollAdjustment } from "./MeasuredVirtualList.js";
 import type { PreviewNavigationControls } from "./usePreviewNavigationRegistration.js";
 import { SegmentedControl } from "./ui/ChoiceControls.js";
 import { worktreeSetupNoticeSessionIds } from "../worktree-setup-notice.js";
-import { ProviderLoginCard } from "./ProviderLoginCard.js";
-import { RecommendedSkillsNotice } from "./RecommendedSkillsNotice.js";
-import { ProjectSetupSuggestion } from "./WorktreeSetupNotice.js";
+import { SessionsListNotices } from "./SessionsListNotices.js";
 import { SessionGroupTabs } from "./SessionGroupTabs.js";
 import { SessionsAppBar } from "./SessionsAppBar.js";
 import { sessionGroupFullName, sessionGroupLabels, sessionGroupRunnerId } from "../session-groups.js";
@@ -248,6 +246,10 @@ export function InboxView({
   // Board mode renders no list rows, so the browsing-order lease has nothing to protect there —
   // and a hold captured on the board would present a stale "Apply New Order" back in list mode.
   const boardMode = viewMode === "board" && expandedSessionId === null;
+  // The phone Board's column (#2216) lives here rather than in the Board, which No Matches replaces
+  // while a search finds nothing; it is forgotten when the Board closes.
+  const [boardColumn, setBoardColumn] = useState<BoardColumn | null>(null);
+  if (!boardMode && boardColumn !== null) setBoardColumn(null);
   const browsingOrderLease = expandedSessionId === null && !boardMode && (isMobile || !inboxAway);
   const browsingOrderLeaseRef = useRef(browsingOrderLease);
   browsingOrderLeaseRef.current = browsingOrderLease;
@@ -1444,6 +1446,35 @@ export function InboxView({
     observer.observe(view);
     return () => observer.disconnect();
   }, [stacked]);
+  // The list head (the notice slot, the new-order line, Reconnecting…) takes whole rows of the
+  // stacked list's height (#2221): the rows start right under it and keep to whole rows, and the
+  // divider stays where the stored ratio puts it. What the head leaves of its last row is space
+  // under the last whole row, above the divider.
+  const listHeadRef = useRef<HTMLDivElement>(null);
+  const [listHeadHeight, setListHeadHeight] = useState(0);
+  useLayoutEffect(() => {
+    const head = listHeadRef.current;
+    if (!stacked || !head) {
+      setListHeadHeight(0);
+      return;
+    }
+    const measure = () => setListHeadHeight(head.getBoundingClientRect().height);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(head);
+    return () => observer.disconnect();
+  }, [stacked]);
+  // The epsilon keeps a head of exactly whole rows from taking one more through floating-point error.
+  const listHeadRows = stacked && listHeadHeight > 0 && splitGeometry.rowHeight > 0
+    ? Math.ceil(listHeadHeight / splitGeometry.rowHeight - 1e-6)
+    : 0;
+  const orderLineId = `inbox-order-line-${useId().replace(/:/gu, "")}`;
+  // A list notice that held focus and went (Dismiss All took the last skill) leaves focus in the list.
+  const focusListZone = useCallback(() => {
+    const target = listRef.current ?? stateRef.current ?? document.getElementById("page-title");
+    target?.focus({ preventScroll: true });
+  }, []);
   const activeProjectId = activeSplit?.project?.kind === "durable" ? activeSplit.project.project.id : undefined;
   const activeDurableProject = activeSplit?.project?.kind === "durable" ? activeSplit.project.project : null;
   // The setup suggestion is per Project (#1977): one notice above the list on that Project's tab,
@@ -1513,7 +1544,8 @@ export function InboxView({
         // While the page's state offers New Session, the bar does not (§12.1, #2220).
         onNewSession={stateOffersNewSession ? undefined : newSession}
         newSessionShortcut={shortcutDisplay("new-session")}
-        boardTools={boardMode ? <BoardFilterTools sessions={boardSessions} /> : undefined}
+        boardFilters={boardMode ? <BoardFiltersSheet sessions={boardSessions} /> : undefined}
+        boardFilterStrip={boardMode ? <BoardFilterStrip sessions={boardSessions} /> : undefined}
       />
     )}
     {!expanded && !isMobile && (
@@ -1593,19 +1625,6 @@ export function InboxView({
             }}
             tools={(
               <>
-                <span className="sr-only" aria-live="polite" aria-atomic="true">
-                  {orderUpdateAvailable ? "A newer Sessions order is available." : ""}
-                </span>
-                {orderUpdateAvailable && (
-                  <button
-                    type="button"
-                    className="btn sm inbox-order-update"
-                    title="Apply the latest session order."
-                    onClick={applyCanonicalOrder}
-                  >
-                    Apply New Order
-                  </button>
-                )}
                 {boardMode && <BoardFilterTools sessions={boardSessions} />}
                 <SessionsSearchField
                   value={query}
@@ -1635,7 +1654,7 @@ export function InboxView({
       ref={viewRef}
       data-layout={split ? layout : undefined}
       style={!split ? undefined : stacked
-        ? { "--sessions-list-rows": listRows } as CSSProperties
+        ? { "--sessions-list-rows": listRows, "--sessions-list-head-rows": listHeadRows } as CSSProperties
         : { "--sessions-list-w": `${listWidth}px` } as CSSProperties}
       data-focus-zone={expanded ? "main" : "list"}
     >
@@ -1645,18 +1664,36 @@ export function InboxView({
         aria-hidden={expanded || undefined}
         inert={expanded || undefined}
       >
-        {machineProviderLogins.length > 0 && (
-          <section className="inbox-provider-logins" aria-label="Machine Provider Sign-Ins">
-            {machineProviderLogins.map(({ runnerId, login }) => (
-              <ProviderLoginCard key={JSON.stringify([runnerId, login.operationId])} runnerId={runnerId} login={login} />
-            ))}
-          </section>
-        )}
-        <RecommendedSkillsNotice onOpen={(skillId) => navigate({ name: "skills", id: skillId })} />
-        {activeSetupSession && activeDurableProject && (
-          <ProjectSetupSuggestion key={activeSetupSession.id} session={activeSetupSession}
-            projectName={activeDurableProject.name} onGenerated={openGeneratedWorktreeSetup} />
-        )}
+        {/* What sits above the rows (§13.2, #2221): the one list notice, then the quiet new-order
+            line, then the Reconnecting… line. Stacked, it takes whole rows of the list's height, so
+            the divider stays put and no row is cut at it. */}
+        <div className="inbox-list-head" ref={listHeadRef}>
+          <SessionsListNotices
+            signIns={machineProviderLogins}
+            machineName={machineName}
+            {...(activeSetupSession && activeDurableProject
+              ? { setup: { session: activeSetupSession, projectName: activeDurableProject.name } }
+              : {})}
+            hidden={snapshot.offline}
+            onOpenSkill={(skillId) => navigate({ name: "skills", id: skillId })}
+            onSetupGenerated={openGeneratedWorktreeSetup}
+            onFocusLost={focusListZone}
+          />
+          {/* Live activity would reorder the rows. Neutral and outside the slot, so no notice ever
+              waits behind it, and nothing in the header or the tab row moves for it. */}
+          {orderUpdateAvailable && (
+            <div className="inbox-order-line">
+              <span id={orderLineId}>New activity changed the order.</span>
+              <button type="button" className="btn sm ghost" aria-describedby={orderLineId} onClick={applyCanonicalOrder}>
+                Apply
+              </button>
+            </div>
+          )}
+          {listOffline && !pageState && <p className="inbox-list-status" role="status">Reconnecting…</p>}
+        </div>
+        <span className="sr-only" data-live="order" aria-live="polite" aria-atomic="true">
+          {orderUpdateAvailable ? "New activity changed the order." : ""}
+        </span>
         {pageState ? (
           // One state in both panes' place (§6.1), on the page grid. It is the list zone's landing
           // spot while the list is replaced (F6, §16.1).
@@ -1699,15 +1736,16 @@ export function InboxView({
             }}
             onNewSession={newSession}
             onSessionMenu={openSessionMenuAt}
+            column={boardColumn}
+            onColumnChange={setBoardColumn}
           />
         ) : listSkeleton ? (
           <SessionsListSkeleton count={syncingCount} threeRow={isMobile} />
         ) : (
           <>
             {/* The last-known list stays readable and operable while the connection is down, dimmed
-                under a neutral line (§12.5). The wrapper is always there, so reconnecting keeps the
-                grid, its scroll position and its focus. */}
-            {listOffline && <p className="inbox-list-status" role="status">Reconnecting…</p>}
+                under a neutral line in the list head (§12.5). The wrapper is always there, so
+                reconnecting keeps the grid, its scroll position and its focus. */}
             <StaleContent stale={listOffline} className="inbox-list-stale">
               <InboxList
                 ref={captureListRef}

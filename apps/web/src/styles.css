@@ -477,6 +477,9 @@
      physical right safe area because the interface currently has a left-to-right layout. The gap
      keeps neighbours 8px apart, so each 36px button's borrowed 44px hit area stays its own (§2.8). */
   --mobile-session-action-gap: var(--space-2);
+  /* The Request Card's inline padding (§13.2), which the line at a clipped edge reaches across
+     (#2715); a card in a side panel's detail has none. */
+  --request-card-pad-x: var(--space-4);
   --mobile-session-trailing-inset: calc(12px + env(safe-area-inset-right, 0px));
 
   /* --- Radius by hierarchy (docs/design-system.md §2.5): inline 4, control 6, container 8,
@@ -1480,8 +1483,9 @@ kbd {
   gap: var(--space-2);
 }
 .detail-bar-status { display: inline-flex; }
-/* The compact tier (§15.2): where the full badge would leave the title truncated below a readable
-   width, DetailBar marks it and the badge becomes its dot, with the label in its tooltip. The label
+/* The compact tier (§15.2), and the Sessions preview's bar at any width (#2221): where the full badge
+   would leave the title truncated below a readable width, DetailBar or SessionPreviewBar marks it and
+   the badge becomes its dot, with the label in its tooltip. The label
    stays in the text, clipped, so the accessible name does not change: the box is the badge's 8px
    padding either side of its 6px dot, and an 8px gap starts the label exactly at the clip edge. */
 .detail-bar-status[data-dot] > .status {
@@ -1796,10 +1800,8 @@ kbd {
   max-width: none;
 }
 /* Busy (§3.1, `BusyButton`): the action is running, not unavailable, so the button keeps its
-   variant's fill and text and only stops taking input. Its width is locked inline to the idle width;
-   a prepended spinner takes its room from the inline padding, with a narrower gap so some padding
-   is left (12 + 12 ≥ 14 + 4, and on `.sm` 8 + 8 ≥ 14 + 2), so the button neither grows nor moves
-   its neighbours. */
+   variant's fill and text and only stops taking input. Its width is locked inline to the idle width,
+   so the button neither grows nor moves its neighbours. */
 .btn[aria-busy="true"] {
   cursor: progress;
 }
@@ -1822,13 +1824,37 @@ kbd {
   border-color: transparent;
   color: var(--danger-fg);
 }
-/* BusyButton zeroes the inline padding on the element itself, so a caller's padding cannot win. */
+/* A prepended spinner sits a narrower gap from the label than an icon does. */
 .btn[data-busy-spinner="prepended"] {
   gap: var(--space-1);
 }
 .btn.sm[data-busy-spinner="prepended"] {
   gap: var(--space-0-5);
 }
+/* A BusyButton without a leading icon reserves the spinner's room at rest (#2645): half the spinner
+   and its busy gap as extra inline padding on each side, so the label stays centred. Busy, the
+   padding returns to the size's own, and the spinner, gap and label fill exactly the reserved room:
+   same width, and neither the spinner nor the label touches an edge. */
+.btn[data-spinner-room]:not([aria-busy="true"]) {
+  padding-inline: calc(var(--space-3) + (var(--icon-sm) + var(--space-1)) / 2);
+}
+.btn.sm[data-spinner-room]:not([aria-busy="true"]) {
+  padding-inline: calc(var(--space-2) + (var(--icon-sm) + var(--space-0-5)) / 2);
+}
+.btn.lg[data-spinner-room]:not([aria-busy="true"]) {
+  padding-inline: calc(var(--space-4) + (var(--icon-sm) + var(--space-1)) / 2);
+}
+/* A dialog footer reserves nothing: a 400px confirmation's three buttons only just share one row,
+   and on a phone the footer is equal halves, already wider than their labels. Busy, the spinner
+   takes its room from the inline padding instead, so the footer neither wraps nor moves; a `.btn`
+   keeps 3px a side (12 + 12 = 14 + 4 + 6). A `.sm` has exactly the spinner's room in its padding
+   (8 + 8 = 14 + 2), so it reserves 2px a side, which it keeps when busy, and is never flush. Only a
+   locked width gives up padding: a button that mounts busy has no idle width, so it keeps its own. */
+.modal-foot > .btn[data-spinner-room]:not([aria-busy="true"]) { padding-inline: var(--space-3); }
+.modal-foot > .btn.sm[data-spinner-room]:not([aria-busy="true"]) { padding-inline: calc(var(--space-2) + var(--space-0-5)); }
+.modal-foot > .btn.lg[data-spinner-room]:not([aria-busy="true"]) { padding-inline: var(--space-4); }
+.modal-foot > .btn[data-spinner-room][data-busy-spinner="prepended"][data-width-locked] { padding-inline: 0; }
+.modal-foot > .btn.sm[data-spinner-room][data-busy-spinner="prepended"][data-width-locked] { padding-inline: var(--space-0-5); }
 /* The spinner draws in the button's own text colour, so it reads on a primary or danger fill. */
 .btn[aria-busy="true"] .spinner {
   flex: none;
@@ -3316,12 +3342,33 @@ textarea {
   align-self: center;
 }
 .board:not(.is-dragging) .column.is-empty > .column-body { display: none; }
-@media (max-width: 760px) {
-  /* A phone's columns are swipeable pages, but an empty one is still a strip, and opens to a page
-     while a card is dragged. */
-  .board .column.is-empty { flex: 0 0 var(--space-10); }
-  .board.is-dragging .column.is-empty { flex: 0 0 84vw; }
+/* The phone Board (#2216, §15.1): one column at a time. The column tabs run the pane's width on a
+   hairline under the app bar, and the chosen column's cards fill the width below them, scrolling
+   on their own. The pane's inset gives way to the page gutter. */
+.inbox-view.board-mode > .inbox-list-pane > .board-wrap.is-phone {
+  padding: 0;
+  overflow: hidden;
 }
+.board.board-phone {
+  flex-direction: column;
+  gap: 0;
+  overflow: hidden;
+}
+.board-column-tabs {
+  flex: none;
+  padding-inline: var(--page-gutter);
+  border-bottom: 1px solid var(--border);
+}
+/* A short tab ("Done 0") still makes a full touch target. */
+.board-column-tab {
+  justify-content: center;
+  min-width: var(--control-h);
+}
+.board-phone > .column {
+  flex: 1;
+  min-width: 0;
+}
+.board-phone > .column > .column-body { padding: var(--space-2) var(--page-gutter); }
 .column-body {
   flex: 1;
   overflow-y: auto;
@@ -3509,6 +3556,9 @@ textarea {
 /* The narrow-card exception (§3.1): Approve and Deny share the row as an equal pair, never wrapping. */
 .decision-pair .notice-actions { flex-wrap: nowrap; }
 .decision-pair .notice-actions > .btn { flex: 1 1 0; min-width: 0; max-width: none; }
+/* An equal pair: room reserved at rest (#2645) would make a BusyButton's share the wider one. */
+.decision-pair .notice-actions > .btn[data-spinner-room]:not([aria-busy="true"]) { padding-inline: var(--space-3); }
+.decision-pair .notice-actions > .btn.sm[data-spinner-room]:not([aria-busy="true"]) { padding-inline: var(--space-2); }
 
 /* ---------------------------- Session detail ---------------------------- */
 .session-detail,
@@ -3783,33 +3833,29 @@ textarea {
 }
 .share-address-detail code,
 .share-error-detail { font-family: var(--font-mono); }
-/* In the compact tier (761–1099px, §15.2) the Requests panel opens over the transcript from the
-   right, as a sheet over a scrim on the chat column (#2206); a press on the scrim closes it. The
-   session bar stays outside it. Elsewhere the scrim is not drawn. */
-.rp-scrim { display: none; }
-@container app (max-width: 1099px) {
-  .detail-columns:has(> .right-panel[data-mode="requests"]) { position: relative; }
-  .detail-columns > .rp-scrim {
-    display: block;
-    position: absolute;
-    inset: 0;
-    z-index: var(--z-panel);
-    background: var(--modal-backdrop);
-    animation: modal-fade-in var(--dur-base) var(--ease-out);
-  }
-  .detail-columns > .right-panel[data-mode="requests"] {
-    position: absolute;
-    top: 0;
-    right: 0;
-    bottom: 0;
-    z-index: var(--z-panel);
-    margin: 0;
-    border-top: none;
-    border-right: none;
-    border-bottom: none;
-    box-shadow: var(--elev-2);
-  }
-  .detail-columns:has(> .right-panel[data-mode="requests"]) > .right-panel-resizer { display: none; }
+/* Where docking would leave the chat column under 480px (§15.2), every panel mode opens over the
+   transcript from the right, as a sheet over a scrim on the chat column (#2206, #2725); a press on
+   the scrim closes it. RightPanel.tsx measures the row and draws the scrim only then, without a
+   resize handle. The session bar stays outside it. A phone's panel is full-screen instead. */
+.detail-columns:has(> .right-panel[data-presentation="overlay"]) { position: relative; }
+.detail-columns > .rp-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-panel);
+  background: var(--modal-backdrop);
+  animation: modal-fade-in var(--dur-base) var(--ease-out);
+}
+.detail-columns > .right-panel[data-presentation="overlay"] {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: var(--z-panel);
+  margin: 0;
+  border-top: none;
+  border-right: none;
+  border-bottom: none;
+  box-shadow: var(--elev-2);
 }
 .right-panel-resizer {
   width: 7px;
@@ -5663,7 +5709,7 @@ textarea {
   gap: var(--space-2);
   min-width: 0;
   min-height: 0;
-  padding: var(--space-3) var(--space-4);
+  padding: var(--space-3) var(--request-card-pad-x);
   border: 1px solid color-mix(in srgb, var(--amber) 32%, transparent);
   border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--amber) 7%, var(--bg-elev));
@@ -5733,6 +5779,14 @@ textarea {
   overscroll-behavior: contain;
 }
 .request-card-body > * { flex: none; }
+/* The body reaches the card's inner edges, its content still inset by the card's padding, so the line
+   at a clipped edge (below) spans the card as a divider. Drawn only across the content, it would sit
+   exactly where a code well's or a field's own frame ends, and read as that box closing (#2715). */
+.request-card > .request-card-body {
+  margin-right: calc(-1 * var(--request-card-pad-x));
+  margin-left: calc(-1 * var(--request-card-pad-x));
+  padding-inline: var(--request-card-pad-x);
+}
 @container chat-reading (max-height: 480px) {
   /* A reading column too short to keep the card's head and footer still around a scrolling body (a
      phone in landscape, a short Sessions preview): the whole card scrolls inside the capped dock. */
@@ -5768,7 +5822,7 @@ textarea {
     top: calc(-1 * var(--space-3));
     flex: none;
     height: var(--space-3);
-    margin: calc(-1 * var(--space-3)) 0 calc(-1 * var(--space-2));
+    margin: calc(-1 * var(--space-3)) calc(-1 * var(--request-card-pad-x)) calc(-1 * var(--space-2));
     background: inherit;
   }
   .request-dock .question-card > .request-card-foot {
@@ -5780,10 +5834,31 @@ textarea {
   }
 }
 .request-card .request-card-body > * { margin: 0; }
-/* A sign-in's body fades its lower edge while more waits below (#2198), so a line the edge cuts reads
-   as more to scroll to rather than as a stray mark. */
-.request-card[data-request-kind="sign_in"] .request-card-body[data-more-below] {
-  mask-image: linear-gradient(to bottom, #000 calc(100% - var(--space-6)), transparent);
+/* Every Request Card's one "more below" signal (#2715, §13.2): while a body scrolls, each edge it can
+   still scroll past shows a `--border` hairline (clip-edges.ts marks them), as a question card that
+   scrolls whole marks its own edges (#2698) and a sticky header does once content scrolls under it
+   (§2.6). A line the edge cuts then reads as more to scroll to, not a stray mark. A border, not a
+   fade: nothing is dimmed to look disabled, and it stays drawn in forced colors. Each line is a
+   sticky edge of the scrolling body that cancels the body's gap, so neither takes room. */
+.request-card-body[data-clip-start]::before,
+.request-card-body[data-clip-end]::after {
+  content: "";
+  position: sticky;
+  z-index: var(--z-sticky);
+  flex: none;
+  margin-right: calc(-1 * var(--request-card-pad-x));
+  margin-left: calc(-1 * var(--request-card-pad-x));
+  pointer-events: none;
+}
+.request-card-body[data-clip-start]::before {
+  top: 0;
+  margin-bottom: calc(-1 * var(--space-3) - 1px);
+  border-bottom: 1px solid var(--border);
+}
+.request-card-body[data-clip-end]::after {
+  bottom: 0;
+  margin-top: calc(-1 * var(--space-3) - 1px);
+  border-top: 1px solid var(--border);
 }
 .request-card-body > .code-well > pre { max-height: none; }
 .request-card-reasons {
@@ -5793,6 +5868,9 @@ textarea {
   font: var(--type-small);
 }
 .request-card-reasons > p { margin: 0; }
+/* One row wherever the options fit. Buttons never shrink, so options too wide for a narrow phone (a
+   trust request's two long labels, #2641) wrap, the primary still last, rather than run off the
+   card's edge. */
 .request-card-foot {
   display: flex;
   flex-wrap: wrap;
@@ -5802,16 +5880,11 @@ textarea {
 }
 /* A tertiary option sits at the far left, apart from the rest (§3.2): a sign-in's Dismiss Recovery. */
 .request-card-foot > .request-card-tertiary { margin-right: auto; }
-@media (max-width: 760px) {
-  /* One footer row on a phone, where the dock is in thumb reach. */
-  .request-card[data-presentation="dock"] .request-card-foot { flex-wrap: nowrap; }
-  /* Except beside a tertiary: the rest wrap under it rather than push it off the card's edge. */
-  .request-card[data-presentation="dock"] .request-card-foot:has(> .request-card-tertiary) { flex-wrap: wrap; }
-}
 /* The card in a side panel's detail (#2206): flush on the panel, with no wash or frame, a title-sized
    heading, and its footer stuck to the panel's lower edge above a hairline. The detail scrolls as one
    page, so a short panel never squeezes the card's body away. */
 .request-card[data-presentation="panel"] {
+  --request-card-pad-x: 0px;
   flex: none;
   padding: var(--space-4) 0 0;
   border: 0;
@@ -9249,8 +9322,13 @@ textarea,
   min-width: 0;
 }
 .sign-in-body > * { margin: 0; }
-/* Its rows hold 28px controls (Show Email, Check Again), so they sit closer than text-only facts. */
+/* Its rows hold 28px controls (Show Email, Check Again), so they sit closer than text-only facts. On
+   touch those controls are 36px with a borrowed 44px hit area (§2.8): 8px apart, so Show Email's and
+   Check Again's hit areas meet rather than overlap and neither takes the other's taps (#2730). */
 .sign-in-facts { row-gap: var(--space-1); }
+@media (pointer: coarse) {
+  .sign-in-facts { row-gap: var(--space-2); }
+}
 .sign-in-facts dd {
   display: flex;
   flex-wrap: wrap;
@@ -9279,12 +9357,6 @@ textarea,
   background: none;
 }
 .provider-login-card[data-embedded] :is(p, form, .provider-login-device-code) { margin: 0; }
-.inbox-provider-logins {
-  display: grid;
-  gap: 8px;
-  padding: 0 12px 10px;
-  border-bottom: 1px solid var(--border);
-}
 .runner-details-body {
   padding-bottom: 2px;
 }
@@ -9675,39 +9747,97 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   background: var(--bg-elev);
 }
 
-/* The Inbox's recommendation and a Project's setup suggestion sit in the list pane, inset on every
-   side; the list below brings its own top padding. */
-.inbox-list-pane > .notice { margin: var(--space-3) var(--space-3) 0; }
-
-.recommended-skills-notice-list {
+/* The Sessions list head (#2221, §13.2, §6.3): the one list notice, the quiet new-order line and
+   Reconnecting…, inset at the list's edges and 8px from the top as the rows are; the list below
+   brings its own top padding. A 104px notice and its pad are then exactly two 56px rows. */
+.inbox-list-head {
+  display: grid;
+  flex: none;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3) 0;
+}
+.inbox-list-head:empty { display: none; }
+.inbox-list-head > .list-notice-slot { margin: 0; }
+.inbox-list-head > .inbox-list-status { padding: 0; }
+/* New activity would reorder the rows: one neutral line with Apply, never a notice. */
+.inbox-order-line {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin: var(--space-1) 0 0;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  color: var(--text-dim);
+  font: var(--type-body);
+}
+/* Recommended Skills (#1768, #2221): each skill a link with its own Dismiss, then Dismiss All. Where
+   the list is 600px or wider they share one line after the body; narrower, one skill per line. */
+.skill-recommendations-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+.skill-recommendations-list {
+  display: grid;
+  gap: var(--space-1);
+  align-self: stretch;
+  margin: 0;
   padding: 0;
   list-style: none;
 }
-
-.recommended-skills-notice-list > li {
+.skill-recommendations-list > li {
   display: flex;
   align-items: center;
-  gap: 2px;
-  padding: 2px 2px 2px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
-  background: var(--bg-elev-3);
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
 }
-
-.recommended-skills-notice-list a {
-  color: var(--accent);
-  font-family: var(--mono);
-  font-size: var(--text-sm);
-  text-decoration: none;
+.skill-recommendations-list a {
+  min-width: 0;
+  font: var(--type-small);
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
 }
-
-.recommended-skills-notice-list a:hover {
-  text-decoration: underline;
+@container list (min-width: 600px) {
+  .skill-recommendations-row {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    column-gap: var(--space-4);
+  }
+  .skill-recommendations-list {
+    display: flex;
+    flex-wrap: wrap;
+    align-self: auto;
+    gap: var(--space-1) var(--space-4);
+  }
+  .skill-recommendations-list > li { justify-content: flex-start; gap: var(--space-1); }
 }
+/* Phones: 44px lines, from the buttons' token, and Dismiss All across the notice. */
+@media (max-width: 760px) {
+  .skill-recommendations-row { --control-h-sm: 44px; }
+  .skill-recommendations-list { gap: 0; }
+  .skill-recommendations-row > .skill-recommendations-all { align-self: stretch; max-width: none; }
+}
+/* A machine sign-in (#2221): the device code inline after its sentence, and the code field in one
+   row with Submit Code. */
+.machine-sign-in-sentence {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.machine-sign-in-code { align-items: center; }
+.machine-sign-in-code > code { letter-spacing: 0.08em; white-space: nowrap; }
+.machine-sign-in-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+.machine-sign-in-form > label { color: var(--text-dim); font: var(--type-small); }
+.machine-sign-in-form > input { flex: 1 1 160px; min-width: 0; }
 
 /* Version-skew: the runner registered with an older PROTOCOL_VERSION than this dashboard. */
 .outdated-badge {
@@ -10420,6 +10550,8 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
     overflow-wrap: anywhere;
     text-align: center;
   }
+  /* Equal halves are already wider than a small button's label: no 2px to reserve (#2645). */
+  .modal-foot > .btn.sm[data-spinner-room]:not([aria-busy="true"]) { padding-inline: var(--space-2); }
   .modal-foot > .form-error { flex-basis: 100%; }
   /* The destructive tertiary becomes a full-width ghost danger row at the body's end. */
   .modal-body > .modal-tertiary { display: flex; }
@@ -11953,6 +12085,18 @@ body.shell-dock-dragging * {
   grid-column: 1;
 }
 .sessions-md .inbox-list { padding-top: var(--space-2); }
+/* Stacked, the list head takes whole rows (--sessions-list-head-rows, which InboxView measures) and
+   the list keeps the rest as whole rows right under the head, so none is cut and the divider never
+   moves for a notice (#2221). What the head leaves of its last row is space under the list's last
+   row, above the divider, never between the notice and the rows. One row at least: a head taller
+   than the list leaves the pane clipping the list rather than the notice. */
+.sessions-md:not([data-layout="right"]) .inbox-list {
+  flex: none;
+  height: max(
+    calc(var(--space-2) + var(--row-h-2)),
+    calc(var(--sessions-list-h) - var(--sessions-list-head-rows, 0) * var(--row-h-2))
+  );
+}
 /* The divider (§6.3): the hairline under the list's last row, a hit band centred on it, and a grip
    that is always visible, since a rule between two full-width panes does not read as movable. Hover
    and drag draw the line at 2px --border-strong, keyboard focus at 2px --focus; no ring, no band. */
@@ -12041,7 +12185,6 @@ body.shell-dock-dragging * {
     height: 40px;
   }
 }
-.inbox-order-update { white-space: nowrap; }
 .inbox-tab-group {
   position: relative;
   display: inline-flex;
@@ -12089,14 +12232,11 @@ body.shell-dock-dragging * {
 .sessions-group-picker-caret { flex: none; }
 .sessions-app-bar-search { gap: var(--space-2); }
 .sessions-app-bar-search > .inbox-search { flex: 1; width: auto; min-width: 0; }
-/* The Board's Filters and count, on their own row under a phone's bar until #2216. */
-.sessions-app-bar-tools {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  border-top: 1px solid var(--border);
-}
-.sessions-snoozed-strip {
+/* The strips under the bar: Snoozed, and the Board's filters (#2216), each a line of text and one
+   action, which makes the strip 44px on touch. A long machine or agent name ends in an ellipsis;
+   the result count after it never does. */
+.sessions-snoozed-strip,
+.board-filter-strip {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -12104,6 +12244,26 @@ body.shell-dock-dragging * {
   border-top: 1px solid var(--border);
   color: var(--text-dim);
   font: var(--type-body);
+}
+.board-filter-strip-text {
+  display: flex;
+  gap: var(--space-1);
+  min-width: 0;
+  white-space: nowrap;
+}
+.board-filter-strip-what {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.board-filter-strip-result { flex: none; }
+:is(.sessions-snoozed-strip, .board-filter-strip) > .btn { flex: none; }
+/* The bar's Filters (#2216): the icon alone, then the plain count of filters applied beside it. */
+.icon-btn.board-filters-button:has(> .count) {
+  gap: var(--space-1);
+  width: auto;
+  min-width: var(--control-h);
+  padding: 0 var(--space-2);
 }
 .inbox-list {
   min-height: 0;
@@ -13458,7 +13618,8 @@ body.shell-dock-dragging * {
 .card[draggable="true"]:active {
   cursor: grabbing;
 }
-.column.drag-over {
+.column.drag-over,
+.board-column-tab.drag-over {
   outline: 1px dashed var(--accent);
   outline-offset: -1px;
   border-radius: var(--radius-sm);
@@ -13642,7 +13803,7 @@ body.shell-dock-dragging * {
   top: calc(-1 * var(--space-3));
   flex: none;
   height: var(--space-3);
-  margin: calc(-1 * var(--space-3)) 0 calc(-1 * var(--space-2));
+  margin: calc(-1 * var(--space-3)) calc(-1 * var(--request-card-pad-x)) calc(-1 * var(--space-2));
   background: inherit;
 }
 .question-card[data-card-scrolls] > .request-card-foot {
@@ -13656,13 +13817,14 @@ body.shell-dock-dragging * {
    (#2698), as a sticky header does once content scrolls under it (§2.6), so answers under the
    footer read as more to come rather than a card that ends there. SessionApproval.tsx marks the
    edges only while the card itself scrolls. A border, not a fade: nothing above it is dimmed to
-   look disabled, and it stays drawn in forced colors. Neither line takes room. */
+   look disabled, and it stays drawn in forced colors. Neither line takes room, and each spans the
+   card across its padding, as a scrolling body's lines do (#2715). */
 .question-card[data-clip-end] > .request-card-foot::before {
   content: "";
   position: absolute;
   top: 0;
-  right: 0;
-  left: 0;
+  right: calc(-1 * var(--request-card-pad-x));
+  left: calc(-1 * var(--request-card-pad-x));
   border-top: 1px solid var(--border);
   pointer-events: none;
 }
@@ -14295,19 +14457,6 @@ body.shell-dock-dragging * {
   .pairing-controls {
     flex: 1;
     display: flex;
-  }
-
-
-  /* Board: columns become swipeable full-width pages instead of a 5-across grid. */
-  .board {
-    display: flex;
-    gap: 12px;
-    scroll-snap-type: x mandatory;
-    -webkit-overflow-scrolling: touch;
-  }
-  .board .column {
-    flex: 0 0 84vw;
-    scroll-snap-align: start;
   }
 
 
@@ -16063,6 +16212,9 @@ body.shell-dock-dragging * {
 .ui-row-desc { font-size: var(--text-xs); color: var(--text-faint); line-height: var(--leading-tight); }
 .ui-row-icon, .ui-row-chevron { display: inline-flex; color: var(--text-faint); }
 .ui-row-icon { width: 17px; justify-content: center; }
+/* A navigation row without an icon keeps the slot but not its width, so its title starts where
+   a switch row's does: the switch row's leading slot is just as empty and takes no room (#2642). */
+.ui-row-icon:empty { width: 0; }
 
 /* A row whose control is a GROUP, so the row is a div: it contains buttons and cannot be one.
    It must therefore stop advertising itself as pressable. A pointer cursor and a hover fill on
@@ -16228,8 +16380,6 @@ body.shell-dock-dragging * {
 .approvals-skeleton-row { cursor: default; }
 .approvals-skeleton-row:hover:not(.is-disabled) { background: transparent; border-color: transparent; }
 .approvals-skeleton-row > .ui-row-body { gap: var(--space-2); }
-/* No leading icon, so no icon gutter: the names line up with the switch rows above. */
-.tool-policy-row > .ui-row-icon { width: 0; }
 /* Label-prefixed meta items 12px apart, one line, never separated by dots (§5.2, §11.3). */
 .policy-meta { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .policy-meta-item + .policy-meta-item { margin-inline-start: var(--space-3); }

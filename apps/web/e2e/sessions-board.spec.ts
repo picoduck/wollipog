@@ -408,9 +408,12 @@ test("pin indicators keep their shape and card geometry across viewports, densit
   }
 
   await chooseView(page, "Board");
+  // A phone Board shows one column at a time (#2216).
+  await page.getByRole("tab", { name: /^Queued, / }).click();
   const card = page.locator(".board .card", { hasText: "Queued Session" });
   await expect(card.getByLabel("Pinned Session")).toBeVisible();
   const cardHeight = await card.evaluate((node) => node.getBoundingClientRect().height);
+  await page.getByRole("tab", { name: /^Running, / }).click();
   const peerCardHeight = await page.locator(".board .card", { hasText: "Running Session" })
     .evaluate((node) => node.getBoundingClientRect().height);
   expect(Math.abs(cardHeight - peerCardHeight), "the Board badge does not change card height").toBeLessThanOrEqual(0.5);
@@ -470,6 +473,8 @@ test("long-pressed rows and cards pin their target, persist the state, and expos
     "unpinning restores the Working group's deterministic order without displacing input");
 
   await chooseView(page, "Board");
+  // The phone Board opens on Needs Input and shows one column at a time (#2216).
+  await page.getByRole("tab", { name: /^Running, / }).click();
   cdp = await touchSession(page);
   const running = page.locator(".board .card", { hasText: "Running Session" });
   await longPressUntilMenu(cdp, page, await centerOf(running));
@@ -482,6 +487,7 @@ test("long-pressed rows and cards pin their target, persist the state, and expos
 
   await page.reload();
   await expect(page.locator(".board-wrap")).toBeVisible();
+  await page.getByRole("tab", { name: /^Running, / }).click();
   const persistedRunning = page.locator(".board .card", { hasText: "Running Session" });
   await expect(persistedRunning.getByLabel("Pinned Session")).toBeVisible();
   await persistedRunning.click({ button: "right" });
@@ -587,7 +593,7 @@ test.describe("with a mouse at 1440×900 (#2214)", () => {
 /** The cards scenario (#2222): one card of every kind, on the Board. */
 async function openCards(page: Page) {
   await page.goto(`${PAGE}?cards&path=${encodeURIComponent("/board")}`);
-  await expect(page.locator(".board .card")).toHaveCount(10);
+  await expect(page.locator(".board .card")).toHaveCount(15);
 }
 
 /** Each card's measured anatomy: line counts, wrapping buttons, and its transform. */
@@ -633,6 +639,7 @@ async function expectWholeStatusLines(page: Page) {
     return {
       id: card.dataset.sessionId!,
       parent: card.dataset.sessionId === "s-parent",
+      hasBadge: Boolean(badge),
       badgeClipped: badge ? badge.scrollWidth > badge.clientWidth + 0.5 || badge.getBoundingClientRect().right > line.right + 0.5 : false,
       hasStrip: Boolean(strip),
       // On the line and whole, or wrapped below it, where the line clips it.
@@ -721,6 +728,13 @@ test.describe("Board cards at 1440×900 (#2222)", () => {
     for (const card of await cardGeometry(page)) expect(card.wrappedButtons, `${card.id}'s buttons`).toEqual([]);
     const narrow = await expectWholeStatusLines(page);
     expect(narrow.find((line) => line.parent)!.chipDotsOnly, "a 230px parent card keeps only the chip's dots").toBe(true);
+    // An idle parent draws no badge, so its chip has the whole line, which still cannot hold the
+    // rollup: measured uncapped, it keeps its dots rather than ellipsizing its words and calling that
+    // a fit (#2222's review CR-5.1), and is still named by the whole rollup.
+    const idleParent = narrow.find((line) => line.id === "s-idle-parent")!;
+    expect({ badge: idleParent.hasBadge, dotsOnly: idleParent.chipDotsOnly, name: idleParent.chipName },
+      "a 230px parent card with no badge keeps only the chip's dots")
+      .toEqual({ badge: false, dotsOnly: true, name: "4 Children · 1 Awaiting Input" });
     // Nothing on a card's status line crosses the card's edge.
     const overflowing = await page.locator(".board .card").evaluateAll((cards) => cards.filter((card) => {
       const edge = card.getBoundingClientRect().right;

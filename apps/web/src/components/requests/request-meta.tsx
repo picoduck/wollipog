@@ -80,21 +80,25 @@ export interface RequestCardActions {
   tertiary: PermissionOption | null;
   /** `reject_*` options, in the provider's order: secondary buttons before the menu. */
   secondary: PermissionOption[];
-  /** `allow_always` and every other option: the ⋯ menu before the primary. */
+  /** `allow_always` beside an `allow_once`, and every other option: the ⋯ menu before the primary. */
   menu: PermissionOption[];
-  /** The one `allow_once` option: the card's only primary, last. */
+  /** The card's only primary, last: the first `allow_once`, or the first allow option when none is. */
   primary: PermissionOption | null;
 }
 
 /**
  * The footer's order (§3.2; #2179): secondary options, then the ⋯ menu when there are extra
  * options, then the one primary, last. The order never follows the provider's: a reject is always a
- * secondary, `allow_always` and any option without a kind wait in the menu with their descriptions,
- * and only the first `allow_once` is the primary. Budget and tool-call pauses map the same way, so
- * their Stop comes before Continue.
+ * secondary, any option without a kind waits in the menu with its description, and the first
+ * `allow_once` is the primary, with an `allow_always` beside it in the menu. A request whose only
+ * allow is `allow_always` (worktree setup trust, Pi project trust) makes that its primary, so
+ * whatever lets the work continue is never hidden (#2641). Budget and tool-call pauses map the same
+ * way, so their Stop comes before Continue.
  */
 export function requestCardActions(options: readonly PermissionOption[]): RequestCardActions {
-  const primary = options.find((option) => option.kind === "allow_once") ?? null;
+  const primary = options.find((option) => option.kind === "allow_once")
+    ?? options.find((option) => option.kind === "allow_always")
+    ?? null;
   const secondary = options.filter((option) => option.kind === "reject_once" || option.kind === "reject_always");
   const menu = options.filter((option) => option !== primary && !secondary.includes(option));
   return { tertiary: null, secondary, menu, primary };
@@ -165,7 +169,9 @@ export function signInCardActions(options: readonly PermissionOption[]): SignInC
 }
 
 /** The one-key intent a keycap names, only where exactly one option has that kind (as the Inbox's A
- * and D, `approvalOptionForIntent`), so a key never guesses between two choices. */
+ * and D, `approvalOptionForIntent`), so a key never guesses between two choices. A acts only on an
+ * `allow_once` and D only on a `reject_once`: a lasting grant or refusal (a trust request's primary)
+ * takes a click, never one key (#2641). */
 export function requestOptionForIntent(
   options: readonly PermissionOption[],
   intent: "approve" | "deny",

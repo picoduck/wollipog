@@ -102,9 +102,12 @@ const continuationBusy = new URLSearchParams(window.location.search).get("busy")
 const continuationRefusal = new URLSearchParams(window.location.search).get("refusal") === "1"
   ? "Your Viewer role is read-only." : null;
 // `scenario=empty` is a campaign with nothing pending: the Requests panel's "Nothing Waiting" (#2206).
+// `scenario=child-sign-in` is a Claude Code child's sign-in under an ACP parent, or with
+// `parentAccount=1` under a Claude Code parent bound to another account (#2714).
+const parentAccount = new URLSearchParams(window.location.search).get("parentAccount") === "1";
 const requestScenario = scenario === "descendants" || scenario === "polling" || scenario === "held" ||
-  scenario === "empty";
-const includeDescendants = scenario === "descendants" || scenario === "held" ||
+  scenario === "empty" || scenario === "child-sign-in";
+const includeDescendants = scenario === "descendants" || scenario === "held" || scenario === "child-sign-in" ||
   new URLSearchParams(window.location.search).get("children") === "1";
 const requestedPollStatus = new URLSearchParams(window.location.search).get("pollStatus");
 const descendantRequestStatus: DescendantRequestStatus = requestedPollStatus === "loading" ||
@@ -313,6 +316,22 @@ function standaloneApprovalSession(): SessionView {
 }
 
 function descendantRequests(): DescendantRequestView[] {
+  if (scenario === "child-sign-in") {
+    return [{
+      sessionId: "child-sign-in",
+      sessionTitle: "Claude Code Child",
+      runnerId: "runner",
+      runnerOnline: true,
+      eventEpoch: 1,
+      createdAt: Date.now() - 2 * 60_000,
+      responseOwner: "human",
+      occurrenceId: "occurrence-sign-in",
+      request: { ...signInRequest(), occurrenceId: "occurrence-sign-in" },
+      driver: "claude-code",
+      providerAccountId: "claude-work",
+      providerAccountLabel: "Claude Work",
+    }];
+  }
   return Array.from({ length: 12 }, (_, index) => {
     const orchestrator = index % 3 === 2;
     // Child 4's merge waits for the person: a merge decision answered on the panel's card (#2206).
@@ -752,13 +771,17 @@ function Fixture() {
     ? heldCampaignSession()
     : scenario === "gallery"
     ? continuationSession()
-    : scenario === "descendants" || scenario === "polling" || scenario === "empty" ? {
+    : scenario === "descendants" || scenario === "polling" || scenario === "empty" || scenario === "child-sign-in" ? {
         ...evidenceSession(),
         status: "running",
         pendingApproval: null,
+        ...(scenario === "child-sign-in" ? parentAccount
+          ? { driver: "claude-code", providerAccountId: "claude-parent", providerAccountLabel: "Claude Parent" }
+          : { driver: "acp", agentName: "OpenCode" } : {}),
         orchestratorCampaign: {
           pendingRequests: scenario === "descendants"
             ? { human: 8, orchestrator: 4 }
+            : scenario === "child-sign-in" ? { human: 1, orchestrator: 0 }
             : scenario === "empty" ? { human: 0, orchestrator: 0 } : { human: 1, orchestrator: 0 },
         } as SessionView["orchestratorCampaign"],
       } as SessionView
@@ -842,6 +865,9 @@ function Fixture() {
   };
   const client = {
     ...api,
+    authenticationCurrentIdentity: async () => ({
+      identity: { status: "unauthenticated" as const, emailSupported: true, email: null, observedAt: Date.now() - 60_000 },
+    }),
     artifactExport: async (artifactId: string) => {
       artifactRequests.push(artifactId);
       if (holdArtifacts) return new Promise<Blob>(() => {});

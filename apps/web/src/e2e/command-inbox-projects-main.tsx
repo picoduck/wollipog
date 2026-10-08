@@ -19,6 +19,7 @@ import {
   type PromptImageInput,
   type ProjectView,
   type ProviderAccountDefinition,
+  type ProviderLoginView,
   type RunView,
   type RunnerView,
   type SessionConfig,
@@ -114,6 +115,12 @@ const STORAGE_KEY = `wollipog.e2e.project-inbox-model${SCENARIO ? `.${SCENARIO}`
  * removed from the machine), `none` (no other account), `auth` (blocked on authentication) or
  * `reasons` (the endpoint lists an exhausted and an unknown-usage account with its reasons, #2276). */
 const SWITCH_ACCOUNTS = SCENARIO === "switch-account" ? FIXTURE_QUERY.get("accounts") ?? "default" : null;
+/** `?listNotices=` (#2221): what the Sessions list's notice slot holds, comma-separated. `sign-in` is a
+ * pending device-code sign-in on the fixture machine, `two-sign-ins` adds a second on it, `code` is a
+ * sign-in that expects a pasted authorization code, `failed` a failed one; `skills` lists two
+ * recommended built-in skills; `setup` gives the preview-bar scenario's Alpha Project a setup
+ * suggestion. */
+const LIST_NOTICES = new Set((FIXTURE_QUERY.get("listNotices") ?? "").split(",").filter(Boolean));
 
 interface FixtureModel {
   projects: ProjectView[];
@@ -413,6 +420,7 @@ function initialModel(): FixtureModel {
           branch: "fix/billing-schema-migration",
           baseRef: "origin/main",
           source: "created",
+          ...(LIST_NOTICES.has("setup") ? { setupConfig: { status: "absent" as const } } : {}),
         }],
         pendingApproval: {
           ...permission("request-migrate", "Run the Migration Script", longCommand),
@@ -1081,6 +1089,19 @@ const runner: RunnerView = {
     ],
   } : {}),
 };
+{
+  const login = (operationId: string, overrides: Partial<ProviderLoginView>): ProviderLoginView => ({
+    operationId, accountId: `acct-${operationId}`, label: "Work Account", provider: "codex",
+    status: "waiting_for_provider", verificationUrl: "https://auth.example.com/device", startedAt: Date.now(), ...overrides,
+  });
+  const logins: ProviderLoginView[] = [
+    ...(LIST_NOTICES.has("sign-in") || LIST_NOTICES.has("two-sign-ins") ? [login("sign-in-1", { userCode: "WXYZ-1234" })] : []),
+    ...(LIST_NOTICES.has("two-sign-ins") ? [login("sign-in-2", { provider: "claude", userCode: "KQ7M-PL3D" })] : []),
+    ...(LIST_NOTICES.has("code") ? [login("sign-in-code", { provider: "claude", status: "awaiting_code", expectsCode: true })] : []),
+    ...(LIST_NOTICES.has("failed") ? [login("sign-in-failed", { status: "failed", error: "The provider refused the sign-in." })] : []),
+  ];
+  if (logins.length > 0) runner.providerLogins = logins;
+}
 if (SCENARIO === "conversation-handoff") runner.agents.push({
   id: "claude", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code",
   authStatus: "authenticated", available: true,
@@ -1146,6 +1167,7 @@ function snapshot(): UiSnapshotMessage {
       ...(UNARCHIVE_RESTART ? { unarchiveAndRestart: true } : {}),
       ...(SESSION_REMINDERS ? { sessionReminders: true } : {}),
       ...(orchestratorRoleSupported ? { orchestratorRole: true } : {}),
+      ...(LIST_NOTICES.has("setup") ? { worktreeSetupConfig: true } : {}),
     },
     runners: SHELL_SKILLS_MODE === "detail" ? [runner, secondSkillRunner]
       : SHELL_SKILLS_MODE === "notices" ? [noticeStudio, noticeLaptop]
@@ -1498,7 +1520,8 @@ const shellOverviewMachine = () => {
 };
 /** The overview's offline second machine. */
 const shellOfflineRunner: RunnerView | null = SHELL_OVERVIEW || SCENARIO === "preview-bar"
-  ? { ...structuredClone(runner), runnerId: "runner-2", hostname: "studio-workstation", displayName: "Studio Workstation", status: "offline" }
+  ? { ...structuredClone(runner), runnerId: "runner-2", hostname: "studio-workstation", displayName: "Studio Workstation", status: "offline",
+    providerLogins: undefined }
   : null;
 if (SHELL_OVERVIEW) runner.displayName = "Build Machine";
 const shellSkills = SHELL_SKILLS_MODE === "empty" ? [] : SHELL_SKILLS_MODE === "list" ? SHELL_LIST_SKILLS : SHELL_OVERVIEW ? SHELL_OVERVIEW_SKILLS : Array.from(
@@ -1829,9 +1852,28 @@ function unavailableSwitchAccount(
   return { id, label: email, reason, ...(exhaustedWindow ? { exhaustedWindow } : {}) };
 }
 
+/** `?listNotices=skills`: two recommended built-ins, and the per-user dismissal that hides them. */
+const listNoticeSkills = ["orchestrate-issues", "using-wollipog"].map((name) => ({
+  id: `builtin-${name}`, name, builtIn: { release: "0.29.1", heldUpdate: null }, recommendation: { dismissed: false },
+  assignmentCount: 0,
+}));
 const client = {
   ...api,
   ...shellSkillsApi,
+  ...(LIST_NOTICES.has("skills") ? {
+    listSkills: async () => ({ skills: structuredClone(listNoticeSkills) }),
+    setSkillRecommendationDismissed: async (id: string, dismissed: boolean) => {
+      const skill = listNoticeSkills.find((candidate) => candidate.id === id)!;
+      skill.recommendation = { dismissed };
+      return { skill: structuredClone(skill) };
+    },
+  } : {}),
+  ...(LIST_NOTICES.size > 0 ? {
+    cancelProviderLogin: async () => undefined,
+    submitProviderLoginCode: async () => undefined,
+    dismissProviderLoginNotice: async () => undefined,
+    dismissWorktreeSetupNotice: async () => undefined,
+  } : {}),
   // Deciding a request removes it, so the session's next request comes up (#2210).
   ...(SCENARIO === "preview-bar" ? { approve: async (id: string, body: { requestId: string; optionId: string | null }) => {
     const value = model.sessions.find((candidate) => candidate.id === id);

@@ -150,7 +150,7 @@ test("agents and older runners cannot reach recovery identity or selection", asy
 });
 
 test("account selection validates the card, binding, and compatibility before the runner rechecks it", async (t) => {
-  const { app, sent } = await setup(t, {
+  const { app, db, sent } = await setup(t, {
     reply: (message) => ({
       type: "select_provider_authentication_account_result",
       requestId: (message as { requestId: string }).requestId,
@@ -185,4 +185,7 @@ test("account selection validates the card, binding, and compatibility before th
   assert.deepEqual(accepted.json(), { accepted: true });
   assert.deepEqual(sent.map((message) => (message as { providerAccountId: string }).providerAccountId),
     ["claude-old", "claude-personal"]);
+  // The member who chose it is named on the card's Decision Record (#2783).
+  const member = { kind: "user", userId: db.localIdentityContext().userId };
+  assert.deepEqual(sent.map((message) => (message as { resolvedBy?: unknown }).resolvedBy), [member, member]);
 });

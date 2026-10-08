@@ -66,8 +66,12 @@ test("All and Project lists share priorities; new results defer reordering while
   });
   await expect(row(page, work)).toHaveAttribute("aria-selected", "true");
   await expect.poll(() => titles(page)).toEqual([input, result, work, quiet]);
-  await page.getByRole("button", { name: "Apply New Order", exact: true }).click();
+  const orderLine = page.locator(".inbox-order-line");
+  await expect(orderLine).toBeVisible();
+  await expect(orderLine).toContainText("New activity changed the order.");
+  await orderLine.getByRole("button", { name: "Apply", exact: true }).click();
   await expect.poll(() => titles(page)).toEqual([input, work, result, quiet]);
+  await expect(orderLine).toHaveCount(0);
   await expect(grid).toBeFocused();
   await grid.press("j");
   await expect(row(page, result)).toHaveAttribute("aria-selected", "true");

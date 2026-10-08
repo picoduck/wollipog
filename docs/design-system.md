@@ -530,11 +530,27 @@ States
 | Selected / on (toggle buttons) | `--bg-elev-3` fill **plus a 1px `--control-outline` edge** (icon buttons: an inset edge), `aria-pressed="true"`, and an icon or label change. The edge is what separates "on" from "hovered": with one fill for both, a toggle that is on looks hovered. |
 | Focus | 2px `--focus` ring, 2px offset (§16.1). |
 | Disabled | Text `--text-faint`, fill unchanged, no hover, `cursor: not-allowed`. No opacity. A control with no fill of its own (ghost, icon button, a composer bar ghost control) rests in `--text-dim`, which `--text-faint` is only about 1.2:1 from, so its label and glyph take `--text-disabled` instead: at least 1.8:1 below rest and 3:1 on `--bg` and `--bg-elev` in every scheme. The scheme generator derives the tier, and raises a scheme's `--text-dim` rather than adding a per-component exception if it ever stops fitting. Filled controls (secondary, primary, danger) keep `--text-faint` on their fill; a ghost toggle that is on keeps its on fill and takes `--text-disabled`. In forced colors, text and edge are `GrayText`, for `disabled` and `aria-disabled="true"` alike. A disabled control that the user would reasonably expect to work shows its reason as visible text next to it (§8.6), never only in `title`. |
-| Busy | Label stays; a 14px spinner replaces the leading icon (or is prepended); the button keeps its width (`min-width` locked on press). In forced colors it keeps the enabled button ink, not `GrayText`. |
+| Busy | Label stays; a 14px spinner replaces the leading icon (or is prepended); the button keeps its width (`min-width` locked on press) and its normal inline padding. A button without a leading icon reserves the spinner's room at rest (below). In forced colors it keeps the enabled button ink, not `GrayText`. |
 
 Busy is one component, `BusyButton` (`apps/web/src/components/ui/BusyButton.tsx`). It locks the
-button to the width it had just before it became busy; a prepended spinner takes its room from the
-inline padding, so the button neither grows nor moves its neighbours. It sets `aria-busy="true"` and
+button to the width it had just before it became busy, so the button neither grows nor moves its
+neighbours. A `.btn` without a leading icon reserves the spinner's room even at rest: its inline
+padding is the size's own plus half of the 14px spinner and its busy gap on each side (`.btn.sm`
+8 + 8px, `.btn` 12 + 9px, `.btn.lg` 16 + 9px), with the label centred, so it is 16px (`.sm`) or 18px
+wider than a plain button with the same label. Busy, the padding returns to the size's own and the
+spinner, gap and label fill exactly the reserved room: the same width, and neither the spinner nor
+the label closer to an edge than the normal padding (#2645). That applies to a button sized by its
+label, with two exceptions. A button in an equal share (the board's Approve and Deny pair) is
+already wider than its label, so it keeps the size's own padding at rest: reserved room there would
+only make its share wider than its neighbour's. And a dialog footer reserves nothing, because a
+400px confirmation's three buttons (a secondary action, Cancel and the confirm) only just share one
+row and cannot spare the room; on a phone its buttons are equal halves anyway. There the spinner
+takes its room from the inline padding, as before: a `.btn` keeps about 3px a side when busy, and a
+`.btn.sm`, whose padding is exactly the spinner's room, reserves 2px a side so it is never flush
+(except on a phone, where the halves are wide enough already). Only a locked width gives its padding
+up, so a footer button that mounts busy (a dialog reopened while its action still runs) keeps its own.
+A button with a leading icon reserves nothing; the spinner takes the icon's place. It sets
+`aria-busy="true"` and
 `aria-disabled="true"` (not `disabled`, which would drop the focus the person pressed it with) and
 refuses further presses, keeps its variant's fill, and announces a sentence-case `progress` line
 ("Installing the update…") through a polite live region. Toast actions (`ToastOptions.action.progress`)
@@ -864,7 +880,8 @@ The Sessions Board (#2201) is the model case: its columns have no border and no 
 are the only boxes. A column's header is its Title Case name after a 6px status dot (§11.1: Running
 info, Needs Input warning, Queued, Review and Done neutral) with a plain count (§11.4), never
 uppercased or tracked. An empty column folds to a 40px strip with its header on end and stays a
-drop target; while a card is dragged, every strip opens to full width.
+drop target; while a card is dragged, every strip opens to full width. A phone shows one column at a
+time under column tabs instead (§15.1, #2216).
 
 ### 5.2 Rows
 
@@ -1080,7 +1097,8 @@ master-detail pages stay side by side.
 - **Panes.** Both panes are flush (no card) and span the page between the gutters, so the page
   title, the tab row, the rows and the preview all start at one left edge. The list body and the
   preview body each scroll on their own; the page never scrolls. Notices above the list (order
-  changed, sign-in) take list height; they do not push the divider. A new selection resets the
+  changed, sign-in) take list height in whole rows; they do not push the divider, and no row is cut
+  at it (#2221, the list notice slot of §13.2). A new selection resets the
   preview's scroll to its request or latest turn; resizing never scrolls either pane.
 - **Divider.** The list's 1px `--border` bottom edge is the divider. A 9px hit band (17px on coarse
   pointers) is centered on it with `cursor: row-resize`, plus a 32×4px `--border-strong` grip in the
@@ -1172,7 +1190,10 @@ master-detail pages stay side by side.
   isolated so its docked request stays under the band. The preview's bar, meta line, docked request
   and transcript start at `--preview-inset`: the page gutter when stacked, `--space-6` from the
   divider in Preview Right. The 400px column is under 880px, so rows keep #2209's two-line anatomy,
-  and a notice above the list tops the list column only.
+  and a notice above the list tops the list column only. The preview bar's badge collapses on the
+  preview's own width, not the window's tier (#2221): wherever the full badge would leave the title
+  truncated under 200px (`DETAIL_TITLE_READABLE_PX`), as in Preview Right at 1100px, the badge is its
+  dot with the label in its tooltip.
 
 ---
 
@@ -1189,8 +1210,9 @@ child session's title as a link to it; then the Request Card in its panel presen
 Requests" returns to the list, at its scroll position, with focus on the request's row. An answered
 request gives way to the next one in its group, and with none left the list comes back. Loading is
 skeleton rows, unavailable a danger notice with Retry, and empty the compact state "Nothing Waiting"
-with a link to Decision History. In the compact tier the panel opens over the transcript from the
-right with a scrim (§15.2); on a phone it is the full-screen panel.
+with a link to Decision History. Where docking would leave the chat column under 480px the panel
+opens over the transcript from the right with a scrim, as every mode does (§15.2); on a phone it is
+the full-screen panel.
 
 ## 7. Dialogs and Sheets
 
@@ -1594,8 +1616,8 @@ compact widths, detail sub-views.
   All, then the machines by their disambiguated names, or each machine's agents in a group under
   its name as a `MenuLabel`. An agent its machine reports unavailable is an `aria-disabled` row with
   its `unavailableReason` (or "Not available on {machine}.") as the second line. A set filter adds a
-  quiet "10 of 29" (`--type-small`, `--text-faint`, tabular) and a ghost **Clear**. Below 1100px,
-  phones included until the phone Board (#2216), the two fold into one **Filters** menu button with
+  quiet "10 of 29" (`--type-small`, `--text-faint`, tabular) and a ghost **Clear**. In the compact
+  tier (761–1099px) the two fold into one **Filters** menu button with
   the plain count of active filters, `aria-pressed` while any is set and named "Filters, 1 Active";
   its menu holds a Machine group and an Agent group, then **Clear Filters** after a separator while
   any is set, so the row keeps room for the group tabs.
@@ -1782,7 +1804,10 @@ row names who decided from its own `permission_resolved` (#2628): the control pl
 `resolvedBy`, the member who submitted the decision or the policy that auto-resolved it, and the
 runner records it on that exact resolution (protocol 211), so each occurrence of a reused provider
 request id is named by its own decider. The member reads relative to the viewer by the #2527 rules,
-the policy by its name. A Parent Control decision names the parent session instead. A resolution
+the policy by its name. A Parent Control decision names the parent session instead. A sign-in
+card's Start Sign-In, Recheck, Use Current Account, Dismiss Recovery or Choose Another Account… names
+the member who chose it on the session where they acted (#2742, #2783). The same recovery completing other sessions that share the
+credential scope ("Rechecked Automatically") names nobody, because nobody chose it. A resolution
 from an older runner or control plane, or one Wollipog made itself, names nobody rather than
 guessing: the audit cannot be tied to one occurrence of a reused provider request id. The
 body is a §5.4 `.facts` list, each fact once: Decided By (a parent session's title links to it),
@@ -2251,6 +2276,41 @@ Replaces `.quarantine-banner`, `.skills-unavailable-notice`, `.worktree-setup-no
 `.queued-error`, `.form-error` (when used as a banner), `.settings-inline-error`, `.skills-git-held`
 and `PendingSetting`.
 
+**Sessions list notice slot (#2221).** The top of the Sessions list pane has one slot of its own:
+above the rows when stacked, at the top of the list column in Preview Right, and above the columns on
+the Board. `SessionsListNotices` (`apps/web/src/components/SessionsListNotices.tsx`) is a second
+`SessionNoticeSlot`, so the ranking, the "+N More" menu (named "Sessions Notices") and the focus rules
+are the session slot's. Its ranks, in `LIST_NOTICE_RANK`: a machine sign-in that belongs to no
+session 1 (warning while pending, danger once failed or timed out), the open Project's setup
+suggestion 2 (info, only on that Project's tab), Recommended Skills 3 (info). Each entry keeps its own
+way out (Cancel Sign-In or Dismiss, Dismiss Setup Notice, Dismiss All), so the slot's info dismissal
+is unused. While reconnecting the slot is hidden, since what it would show is stale (§12.5).
+
+- **Machine sign-in** (`MachineSignInNotice`): "Sign In to {Provider} on {Machine}", one sentence for
+  the sign-in's state, the device code inline after it in a `.code-well` with its copy button, then
+  **Open Sign-In Page** (opens the provider's page in a new tab) and **Cancel Sign-In**. A provider
+  that expects a pasted code adds a labeled Authorization Code field (`type="password"`,
+  `autocomplete="off"`, never stored) and **Submit Code**; every button is a `BusyButton`. A failed or
+  timed-out sign-in is "Sign-In to {Provider} on {Machine} Failed" (or "Timed Out") with its reason and
+  **Dismiss**. Two or more sign-ins are one notice with "+N More". `ProviderLoginCard` stays for the
+  sign-in Request Card and Settings.
+- **Recommended Skills** (#1768): the title and two-sentence body, then the skills as one short list,
+  each name a link to the skill ("Open in Skills" tooltip) with **Dismiss** beside it (named "Dismiss
+  {name}"), and **Dismiss All** as the notice's one action. Where the list is 600px or wider the
+  skills and Dismiss All share one line after the body; narrower, one skill per line; on phones each
+  line is 44px and Dismiss All spans the notice. Buttons are disabled while a request is in flight; a
+  partial failure keeps what the server did not record and says "Could not dismiss {names}. Try
+  again." in `--danger-text` with `role="alert"`. No confirmation: Show Recommendation in Skills undoes
+  a dismissal.
+- **New order** is not a notice: when live activity would reorder the list, a neutral line under the
+  slot reads "New activity changed the order." with a ghost **Apply**, which the sentence describes.
+  Nothing in the header or the tab row moves for it.
+- **Budget.** The slot, the order line and Reconnecting… are the list head. Stacked, the head takes
+  whole rows of the list's height (§6.3): the divider keeps its stored position, the rows start right
+  under the head at the list's 8px pad, none is cut, and what the head leaves of its last row is space
+  under the last whole row, just above the divider. Nothing is reserved for the order line while it
+  is hidden: the rows move down when it appears, and no header or tab-row control does.
+
 **Request dock.** Pending permission requests and questions dock directly above the composer, in the
 notice slot, in attention priority order. The dock is the only amber surface for a request, and it
 follows these rules so it never crowds out the conversation it asks about:
@@ -2259,6 +2319,16 @@ follows these rules so it never crowds out the conversation it asks about:
   the session bar and the composer) on desktop and 50% on phones, and at 40% while the software
   keyboard is open. The card's head, title and footer stay fixed; only its body scrolls (a question
   card may scroll as a whole under its footer instead, below).
+- **One "more below" signal for every kind** (#2715). While a card's body scrolls, each edge it can
+  still scroll past shows a `--border` hairline (`useClipEdges()`, `data-clip-start` and
+  `data-clip-end`), the line a question card that scrolls whole draws at its own edges (#2698) and a
+  sticky header draws once content scrolls under it (§2.6). It clears at the end it reaches. A line
+  the edge cuts then reads as more to scroll to, not a stray mark. The line spans the card across its
+  padding, as a divider: drawn only across the content, it would sit exactly where a code well's or a
+  field's own frame ends and read as that box closing. A border, never a fade: nothing is dimmed to
+  look disabled, it stays drawn in forced colors, and it takes no room. Sign-in,
+  permission, budget, workflow decision, evidence and question cards all use it; a body in a side
+  panel's detail never scrolls on its own (the detail scrolls as one page), so it has none.
 - **Only the top request is expanded.** The others wait behind one "+N More Requests" row that opens
   into one-line rows (kind icon, title, owner, time; owner hidden on phones). Choosing a row brings
   that request to the top for this view; the priority order is unchanged. A and D act on the
@@ -2275,9 +2345,16 @@ follows these rules so it never crowds out the conversation it asks about:
   Sign-In, Question), the owner and the time. Then the title in `--type-section`, a policy ask's
   "Asked by <policy>" and "Rejects automatically in 9:42", and the body: the command in a code well
   (§11.7) and the match context as facts (§5.4). The footer is `requestCardActions()`: `reject_*`
-  options as secondaries, `allow_always` and every other option in a ⋯ menu with its description as
-  the item's second line, and the first `allow_once` as the one primary, last; a request with no
-  `allow_once` has no primary. A reason nobody can act (the runner is offline, a Viewer's refusal, a
+  options as secondaries, every option without a kind in a ⋯ menu with its description as the item's
+  second line, and the first `allow_once` as the one primary, last, with any `allow_always` beside it
+  in the menu (Reject, ⋯ Always Allow in This Session, Allow). A request whose only allow is
+  `allow_always` (worktree setup trust, Pi project trust) makes the first `allow_always` its primary,
+  so a request with an allow option always has a visible primary and whatever lets the work continue
+  is never hidden (#2641); only a request with no allow at all has none. Options too wide for one row
+  on a narrow phone (a trust request's two long labels) wrap, the primary still last, rather than run
+  off the card's edge. A and D act only where exactly one `allow_once` or `reject_once` exists: a
+  trust request's lasting grant takes a click, while D still takes a worktree setup's one-time Create
+  Without Setup. A reason nobody can act (the runner is offline, a Viewer's refusal, a
   machine-owner-only sign-in) is a visible foot-note the disabled buttons reference; a failed
   decision is a compact danger notice above the footer. The dock is the notice slot's `lead`
   (`SessionNoticeSlot`), at the end of the `.chat-reading` column, a size container its caps are
@@ -2316,7 +2393,8 @@ follows these rules so it never crowds out the conversation it asks about:
   about a row, scrolls as a whole under a footer that stays at its bottom edge, inside the cap.
   While content is under the footer or above the top padding, that edge shows a `--border`
   hairline, as a sticky header does (§2.6), so answers under the footer read as more to come
-  (#2698); neither line takes room.
+  (#2698); neither line takes room. Where only the body scrolls, the body's edges carry the same
+  line (#2715).
 - **UI evidence is a grid of named tiles** (`components/requests/EvidenceReview.tsx`, #2197). The
   card's title says what to do ("Review 4 screenshots before approving") unless the request has a
   title of its own. The body is, top to bottom: the HTTPS or Localhost Required notice (warning,
@@ -2366,9 +2444,12 @@ follows these rules so it never crowds out the conversation it asks about:
   `KeyRound`. The body is `.facts`: This Session Uses (the configured account, masked, or Machine
   Default Sign-In, with its help beside it), Signed In Now (the provider-reported account, masked,
   with Show Email) and Last Checked (a relative time with a `.btn.sm.ghost` Check Again that runs the
-  runner's recheck), then one sentence naming the situation and what the primary does, never claiming
+  runner's recheck); the facts' rows are 4px apart, 8px on a coarse pointer so Show Email's and Check
+  Again's 44px hit areas (§2.8) never overlap (#2730). Then one sentence naming the situation and what
+  the primary does, never claiming
   a mismatch Signed In Now cannot show; the runner's guidance waits behind Request Details, and a body
-  cut by the dock's cap fades its lower edge. The primary is Use Current Account or Start Sign-In, and
+  cut by the dock's cap shows the one "more below" hairline at its lower edge (#2715; it replaced
+  #2198's fade). The primary is Use Current Account or Start Sign-In, and
   Recheck Authentication only when the runner offers neither (then Check Again is hidden). Dismiss
   Recovery is a ghost tertiary at the footer's far left, and Choose Another Account… is the
   secondary when the session can switch accounts; below 760px, where the two and the primary do not
@@ -2493,9 +2574,10 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
 | Tables | Rows (§14). |
 | Toolbars and filters | One row: search field + a "Filters" button that opens a sheet with the filters and a result count. Native selects that size to their longest option are removed. |
 | Tabs | Scroll with fade and active-into-view; more than 4 become a view picker. |
-| Sessions app bar | One 48px bar (`SessionsAppBar`, #2211) replaces the page header, its action row and the group tabs, so the first row starts 56px down. The title is the group picker: the group's name, a caret and its attention count badges (none in Snoozed), named with the attention in words; it opens the Session Groups sheet of §10.1's All Groups rows. Then Search, which swaps the bar for the full-width search field (focused) and Cancel, which clears the query and restores the bar; it filters the list as §8.4's field does and never opens the palette. Then ⋯, a sheet with View (List, Board) and Show (Active Sessions, Snoozed Sessions with its count) as radio items, New Project…, and the current project's actions under a section label with its name; and the 44px `+` New Session. While Snoozed is on, a strip under the bar says "Showing snoozed sessions." with Show Active; in Board mode the Board's Filters sit on a row under the bar until the phone Board (#2216). A confirmation opened from a sheet replaces it with Back (§7.5). |
+| Sessions app bar | One 48px bar (`SessionsAppBar`, #2211) replaces the page header, its action row and the group tabs, so the first row starts 56px down. The title is the group picker: the group's name, a caret and its attention count badges (none in Snoozed), named with the attention in words; it opens the Session Groups sheet of §10.1's All Groups rows. Then Search, which swaps the bar for the full-width search field (focused) and Cancel, which clears the query and restores the bar; it filters the list as §8.4's field does and never opens the palette. Then ⋯, a sheet with View (List, Board) and Show (Active Sessions, Snoozed Sessions with its count) as radio items, New Project…, and the current project's actions under a section label with its name; and the 44px `+` New Session. In Board mode, Filters follows Search (see Board below). While Snoozed is on, a strip under the bar says "Showing snoozed sessions." with Show Active. A confirmation opened from a sheet replaces it with Back (§7.5). |
+| Board | One column at a time (#2216). Under the app bar, the column tabs (§10.1) in the order Needs Input, Running, Review, Done, Queued, each with its plain count, Needs Input's a warning count badge while above zero; each tab is named "Running, 13" and is at least 44px wide. The row scrolls with the edge fade when the tabs do not fit. Below it, the chosen column's cards run the width inside the gutter and scroll on their own; an empty column says "No sessions are in Done." The Board opens on the first column with a card in that order and keeps its column, the opening one or the one chosen, while it stays open: a live update never moves it. Each tab is also a drop target for a card dragged with a mouse. The app bar's **Filters** (`FilterIcon`, `.icon-btn`) follows Search: named "Filters" or "Filters, 1 Active", `aria-pressed` and showing the plain number applied while any filter is set. It opens the Filters sheet: the result count ("Showing 10 of 29", which also describes the sheet), the Machine group and the Agent group of §10.1's rows (44px on touch), then Clear Filters after a separator while any is set. A choice applies at once and the sheet stays open, so the count answers it; the scrim, Escape or Tab closes it. While a filter is set, a strip under the Snoozed strip says what is filtered and how many remain ("Machine: Studio Mac. Agent: Codex. Showing 3 of 29.", a long name ending in an ellipsis, the count never) with **Clear Filters**, which hands focus to Filters. |
 | Toasts | Bottom center above the tab bar or composer, inside the safe area; one visible (§13.1). |
-| Request dock | Caps at 50% of the chat column, 40% while the software keyboard is open; its body scrolls, and it shrinks to the 44px strip while reading back (§13.2). |
+| Request dock | Caps at 50% of the chat column, 40% while the software keyboard is open; its body scrolls, and it shrinks to the 44px strip while reading back (§13.2). A press on a docked card's button, row or label while a text field has focus (the card's own, or the composer) keeps that field focused until the click lands (`holdFieldFocus`, #2205, #2675), so the cap never changes between press and click and the tap lands where it was aimed. |
 | Keyboard hints | Hidden (`pointer: coarse`). |
 | Live usage | The composer bar seats the context ring and the session cost before the mic as two borderless ghost `ComposerButton` triggers (§3.1, #2174), `--composer-ctl` tall, in `--type-small` and `--text-dim`, each opening its popover. Below 760px, or in a composer column narrower than 40rem (640px at the default text size) at any width, they leave the bar so it never wraps, and Model Settings opens with a Session Usage group at the top: Context Window (ring, percentage and "72K of 200K") and Session Cost. Each is a row named by its label that opens its trigger's breakdown in Model Settings' place, as a dialog pushes onto a sheet (§7.5): the title row names the breakdown and gains Back, Escape returns to the choices with focus on the row, and the next Escape closes Model Settings (#2447). Where Model Settings cannot open (an agent with nothing to configure, or a person who may not change it), they take their own right-aligned row above the bar instead, hidden while a phone composer is collapsed. Answer Mode, which replaces the bar, carries the two triggers beside Submit, or on their own row above its buttons in a narrow column. A session with no usage yet shows neither (#2166). |
 | Dictation | The mic is a ghost square `ComposerButton`, named "Dictate", with a 44px hit area on touch like every bar control. A tap starts dictation and the next tap stops it; a press held 400ms or longer is push-to-talk and stops on release; Enter or Space on the focused mic toggles it, and Escape in the composer or Send ends it. While it listens the mic wears the pressed toggle (§3.1) and is named "Stop Dictating", and the bar's left group becomes a `role="status"` strip: an 8px `--red` dot (still under reduced motion), "Listening…", an mm:ss timer, words not yet final in `--text-faint`, and "Tap the mic to stop" ("Release to stop" while held). The hint outranks the unsettled words: in a strip narrower than 20rem (a phone) the words stay out, and below 15rem the hint does too. The mic is disabled with the composer (#2154), and a composer that becomes blocked stops listening (#2193). |
@@ -2530,7 +2612,13 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
   when keeping the label would leave the truncated title under `DETAIL_TITLE_READABLE_PX`, measured
   as `DetailBar` does. At 1100px and wider it is always the full badge.
 - Right panel docks at 320px or overlays as a sheet from the right with a scrim when the chat column
-  would drop below 480px.
+  would drop below 480px. Every mode follows this one rule (#2725), measured from the row the chat
+  column and the panel share, so the labelled rail and the panel's own width count: the row less the
+  panel and its 10px handle is the chat column's room. Overlaid, the panel sits on the right edge of
+  the session body over a scrim on the chat column. The session bar stays outside the scrim, a press
+  on the scrim closes the panel as Close Panel does, and the resize handle is hidden. The stored width
+  is unchanged and returns when the panel docks again. Switching modes never changes the
+  presentation at a given width. Phones keep their full-screen panel.
 
 ### 15.3 Touch on Any Width
 

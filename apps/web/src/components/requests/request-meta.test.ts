@@ -51,14 +51,51 @@ test("the footer orders secondary options, then the menu, then the one primary, 
   assert.deepEqual(ids(signIn.menu), ["auth:revalidate", "other"]);
   assert.deepEqual(ids(signIn.secondary), ["auth:dismiss"]);
 
-  // No allow_once: no primary is invented; an allow_always still waits in the menu.
-  const trust = requestCardActions([
-    { optionId: "trust", name: "Trust This Configuration", kind: "allow_always" },
-    { optionId: "skip", name: "Create Without Setup", kind: "reject_once" },
+  // No allow_once: the trust option that lets the work continue is the primary, never hidden in the
+  // menu (#2641). Worktree setup trust rejects once; Pi project trust rejects always.
+  for (const reject of ["reject_once", "reject_always"] as const) {
+    const trust = requestCardActions([
+      { optionId: "trust", name: "Trust This Configuration", kind: "allow_always" },
+      { optionId: "skip", name: "Create Without Setup", kind: reject },
+    ]);
+    assert.equal(trust.primary?.optionId, "trust", reject);
+    assert.deepEqual(trust.menu, [], reject);
+    assert.deepEqual(ids(trust.secondary), ["skip"], reject);
+  }
+
+  // Several allow_always options and no allow_once: the first is the primary, the rest wait in the menu.
+  const scopes = requestCardActions([
+    { optionId: "skip", name: "Skip", kind: "reject_always" },
+    { optionId: "project", name: "Trust This Project", kind: "allow_always" },
+    { optionId: "everywhere", name: "Trust Everywhere", kind: "allow_always" },
   ]);
-  assert.equal(trust.primary, null);
-  assert.deepEqual(ids(trust.menu), ["trust"]);
-  assert.deepEqual(ids(trust.secondary), ["skip"]);
+  assert.equal(scopes.primary?.optionId, "project");
+  assert.deepEqual(ids(scopes.menu), ["everywhere"]);
+
+  // Only rejects, or only options without a kind: no allow, so no primary is invented.
+  assert.equal(requestCardActions([{ optionId: "deny", name: "Reject", kind: "reject_once" }]).primary, null);
+  assert.equal(requestCardActions([{ optionId: "other", name: "Other" }]).primary, null);
+});
+
+test("no set of options with an allow among them leaves the footer without a primary", () => {
+  const kinds = ["allow_once", "allow_always", "reject_once", "reject_always", undefined] as const;
+  // Every ordered set of one to three options: the primary exists exactly when an allow does, and is
+  // the first allow_once where there is one.
+  const sets: PermissionOption[][] = [[]];
+  for (let size = 0; size < 3; size += 1) {
+    for (const set of sets.filter((candidate) => candidate.length === size)) {
+      for (const kind of kinds) sets.push([...set, { optionId: `o${set.length}`, name: `O${set.length}`, ...(kind ? { kind } : {}) }]);
+    }
+  }
+  for (const options of sets) {
+    const { primary, secondary, menu } = requestCardActions(options);
+    const allowOnce = options.find((option) => option.kind === "allow_once");
+    const anyAllow = options.find((option) => option.kind === "allow_once" || option.kind === "allow_always");
+    const label = options.map((option) => option.kind ?? "none").join(",");
+    assert.equal(primary, allowOnce ?? anyAllow ?? null, label);
+    // Every option is shown exactly once.
+    assert.equal(secondary.length + menu.length + (primary ? 1 : 0), options.length, label);
+  }
 });
 
 test("A and D name an option only where exactly one has that kind", () => {
@@ -70,6 +107,20 @@ test("A and D name an option only where exactly one has that kind", () => {
   assert.equal(requestOptionForIntent(options, "deny")?.optionId, "deny");
   assert.equal(requestOptionForIntent([...options, { optionId: "again", name: "Again", kind: "allow_once" }], "approve"), null);
   assert.equal(requestOptionForIntent([{ optionId: "always", name: "Always", kind: "allow_always" }], "approve"), null);
+  // A trust request's primary is a lasting grant, so A leaves it to a click (#2641); D still takes a
+  // one-time reject, and never a lasting one.
+  const worktreeTrust: PermissionOption[] = [
+    { optionId: "trust", name: "Trust This Configuration", kind: "allow_always" },
+    { optionId: "skip", name: "Create Without Setup", kind: "reject_once" },
+  ];
+  assert.equal(requestOptionForIntent(worktreeTrust, "approve"), null);
+  assert.equal(requestOptionForIntent(worktreeTrust, "deny")?.optionId, "skip");
+  const piTrust: PermissionOption[] = [
+    { optionId: "trust", name: "Trust This Project", kind: "allow_always" },
+    { optionId: "skip", name: "Skip Project Resources", kind: "reject_always" },
+  ];
+  assert.equal(requestOptionForIntent(piTrust, "approve"), null);
+  assert.equal(requestOptionForIntent(piTrust, "deny"), null);
 });
 
 test("every request kind has one label", () => {

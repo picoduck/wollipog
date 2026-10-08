@@ -22,6 +22,22 @@ export const RIGHT_PANEL_KEY_STEP = 16;
 export const RIGHT_PANEL_MODES = ["launcher", "requests", "campaign", "review", "files", "browser", "sidechat", "subagents", "background", "decisions"] as const;
 export type RightPanelMode = (typeof RIGHT_PANEL_MODES)[number];
 
+/** The least room the chat column keeps beside a docked panel (§15.2); with less the panel overlays. */
+export const RIGHT_PANEL_CHAT_MIN_WIDTH = 480;
+
+/** The resize handle's share of the row: 7px wide, 5px before it and -2px after (styles.css). */
+export const RIGHT_PANEL_RESIZER_SPAN = 10;
+
+/**
+ * Whether the panel opens over the transcript rather than docking beside it (§15.2; #2725): when
+ * docking it, with its handle, would leave the chat column under 480px. `columnsWidth` is the row the
+ * chat column and the panel share, so the rail (labelled or not) and the panel's own width both
+ * count. Every mode answers the same way at the same width; phones keep their full-screen panel.
+ */
+export function rightPanelOverlays(columnsWidth: number, panelWidth: number): boolean {
+  return columnsWidth - panelWidth - RIGHT_PANEL_RESIZER_SPAN < RIGHT_PANEL_CHAT_MIN_WIDTH;
+}
+
 /** Clamp a panel width. `max` lets callers pass a viewport-aware ceiling (e.g. 40% of the
  * window width) so the panel can never squeeze the transcript + composer into a sliver on a
  * narrow window; it is itself floored at RIGHT_PANEL_MIN_WIDTH so a tiny window can't invert

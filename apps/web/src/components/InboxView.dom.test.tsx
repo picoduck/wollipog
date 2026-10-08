@@ -8,6 +8,7 @@ import {
   PROTOCOL_VERSION,
   type ControlPlaneToUi,
   type ProjectView,
+  type RunnerView,
   type SessionReminderView,
   type SessionView,
   type SetSessionReminderRequest,
@@ -1075,7 +1076,7 @@ test("InboxView keeps mobile browsing order stable before and through a touch", 
   // row, so the preview text below is store state the row deliberately no longer prints.
   // Attention outranks lifecycle (§11.1), so the question's pill is the whole proof.
   assert.match(container.textContent ?? "", /Answer Required/);
-  assertNoDomNode(container.querySelector(".inbox-order-update"),
+  assertNoDomNode(container.querySelector(".inbox-order-line"),
     "the desktop manual-order affordance does not crowd the mobile Inbox toolbar");
 
   await act(async () => { socket.push({ type: "session_removed", sessionId: "A" }); });
@@ -1173,12 +1174,18 @@ test("InboxView holds desktop browsing order until the user leaves the window", 
   const selectedBeforeApply = [...container.querySelectorAll<HTMLButtonElement>(".inbox-row")]
     .find((row) => row.textContent?.includes("Session B"));
   await act(async () => { selectedBeforeApply?.click(); });
-  const applyOrder = [...container.querySelectorAll<HTMLButtonElement>("button")]
-    .find((button) => button.textContent?.trim() === "Apply New Order");
-  assert.ok(applyOrder, "sustained desktop activity exposes a deliberate reorder boundary");
-  assert.equal(applyOrder.nextElementSibling, container.querySelector(".inbox-search"),
-    "the conditional button leads Search so showing it cannot move the field (#1675)");
-  assert.match(container.textContent ?? "", /A newer Sessions order is available/);
+  const orderLine = container.querySelector<HTMLElement>(".inbox-order-line");
+  assert.ok(orderLine, "sustained desktop activity exposes a deliberate reorder boundary");
+  // A quiet line under the list's notice slot (#2221), never a control in the header or the tab row,
+  // so showing it cannot move one (#1675).
+  assert.ok(orderLine.parentElement?.matches(".inbox-list-pane > .inbox-list-head"), "the line sits above the rows");
+  assertNoDomNode(orderLine.closest(".page-header"), "nothing joins the header or the tab row");
+  assert.equal(orderLine.querySelector("span")?.textContent, "New activity changed the order.");
+  const applyOrder = orderLine.querySelector<HTMLButtonElement>("button")!;
+  assert.equal(applyOrder.textContent?.trim(), "Apply");
+  assert.equal(applyOrder.getAttribute("aria-describedby"), orderLine.querySelector("span")?.id,
+    "Apply is described by the sentence it applies");
+  assert.match(container.querySelector('[data-live="order"]')?.textContent ?? "", /New activity changed the order\./);
   await act(async () => { applyOrder.click(); });
   assert.deepEqual(rowTitles(container), ["Session B", "Session C", "Session A"]);
   assert.match(
@@ -1186,7 +1193,7 @@ test("InboxView holds desktop browsing order until the user leaves the window", 
     /Session B/,
     "manual reordering preserves selection by session identity",
   );
-  assertNoDomNode(container.querySelector(".inbox-order-update"), "the indicator clears after adoption");
+  assertNoDomNode(container.querySelector(".inbox-order-line"), "the indicator clears after adoption");
   assert.equal(domWindow.document.activeElement, container.querySelector(".inbox-list"),
     "keyboard activation returns focus to the list without scrolling it");
 
@@ -1200,7 +1207,7 @@ test("InboxView holds desktop browsing order until the user leaves the window", 
   // Leaving the window is the safe boundary: canonical recency ordering is applied there.
   await act(async () => { domWindow.dispatchEvent(new domWindow.Event("blur")); });
   assert.deepEqual(rowTitles(container), ["Session B", "Session C"]);
-  assertNoDomNode(container.querySelector(".inbox-order-update"),
+  assertNoDomNode(container.querySelector(".inbox-order-line"),
     "an automatic safe boundary clears the pending-order indicator");
   await act(async () => { socket.push({ type: "session_upsert", session: session("C", 80) }); });
   assert.deepEqual(rowTitles(container), ["Session C", "Session B"]);
@@ -1294,9 +1301,9 @@ test("InboxView does not offer a reorder when only a removed selected id remains
 
   await act(async () => { socket.push({ type: "session_removed", sessionId: "A" }); });
   assert.deepEqual(rowTitles(container), ["Session B"]);
-  assertNoDomNode(container.querySelector(".inbox-order-update"),
+  assertNoDomNode(container.querySelector(".inbox-order-line"),
     "a stale selected-id placeholder is not a visible order difference");
-  assert.doesNotMatch(container.textContent ?? "", /A newer Sessions order is available/);
+  assert.doesNotMatch(container.textContent ?? "", /New activity changed the order/);
 
 });
 
@@ -2498,7 +2505,7 @@ test("InboxView threads a family under its parent and t, Shift+T, p, and the arr
   assert.equal(container.querySelector(".inbox-thread-toggle")?.getAttribute("aria-expanded"), "false");
   assert.equal(container.querySelector(".inbox-thread-family-text")?.textContent, "2 Children · Needs Your Input",
     "the rollup still says a child is waiting while the thread is collapsed");
-  assertNoDomNode(container.querySelector(".inbox-order-update"), "hidden children are not a pending reorder");
+  assertNoDomNode(container.querySelector(".inbox-order-line"), "hidden children are not a pending reorder");
   await act(async () => { socket.push({ type: "session_upsert", session: session("Lone", 45) }); });
   assert.deepEqual(rowTitles(container), ["Session Parent", "Session Lone"], "collapse survives a live update");
   await press("t");
@@ -2782,6 +2789,96 @@ test("the setup suggestion is one notice above an eligible Project's list, never
 
   await openTab("All");
   assert.deepEqual(setupNotices(), []);
+});
+
+test("the list holds one notice: a machine sign-in first, then the Project's setup suggestion or Recommended Skills (#2221)", async () => {
+  mobileViewport = false;
+  const { container, root } = mountTestRoot();
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "inbox-list-notices",
+    runtimeKey: "inbox-list-notices:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  const client = {
+    ...api,
+    listSkills: async () => ({ skills: ["orchestrate-issues", "using-wollipog"].map((name) => ({
+      id: `skill-${name}`, name, builtIn: { release: "0.28.0", heldUpdate: null }, recommendation: { dismissed: false },
+      assignmentCount: 0,
+    })) }),
+  } as unknown as ApiClient;
+  const project: ProjectView = {
+    id: "payments", name: "Payments Service", hidden: false, locations: [], activeSessionCount: 0,
+    unarchivedSessionCount: 1, totalSessionCount: 1, createdAt: 1, updatedAt: 1,
+  };
+  const runner = (providerLogins: RunnerView["providerLogins"]): RunnerView => ({
+    runnerId: "runner-1", hostname: "build-box", displayName: "Build Box", os: "linux", version: "1", status: "online",
+    agents: [], workspaces: [], connectedAt: 1, lastSeen: 1, protocolVersion: PROTOCOL_VERSION, providerLogins,
+  });
+  const pendingLogin = {
+    operationId: "op-1", accountId: "acct-1", label: "Work Account", provider: "codex" as const,
+    status: "waiting_for_provider" as const, verificationUrl: "https://auth.example.com/device", userCode: "WXYZ-1234",
+    startedAt: 1,
+  };
+  await act(async () => {
+    root.render(
+      <ApiProvider client={client}>
+        <StoreProvider connection={connection} navigation={navigation}>
+          <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
+        </StoreProvider>
+      </ApiProvider>,
+    );
+  });
+  await act(async () => {
+    socket.push({
+      type: "snapshot",
+      capabilities: {
+        sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true,
+        worktreeSetupConfig: true,
+      },
+      runners: [runner([pendingLogin])],
+      boxes: [],
+      sessions: [session("pay-1", 50, {
+        projectId: "payments", createdAt: 1, useWorktree: true, worktreePath: "/worktrees/pay-1",
+        worktrees: [{ id: "worktree-pay-1", path: "/worktrees/pay-1", branch: "agent/pay-1", source: "created",
+          setupConfig: { status: "absent" } }],
+      })],
+      projects: [project],
+      worktreeSetupNoticeDismissals: [],
+      runs: [],
+      pods: [],
+    });
+  });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
+  const head = () => container.querySelector<HTMLElement>(".inbox-list-pane > .inbox-list-head");
+  const notices = () => [...(head()?.querySelectorAll(".notice") ?? [])];
+  const shownTitle = () => head()?.querySelector(".notice-title")?.textContent ?? null;
+  const more = () => head()?.querySelector(".session-notice-more")?.textContent ?? null;
+  const openTab = async (name: string) => {
+    const tab = [...container.querySelectorAll<HTMLElement>(".tabs-bar .tab")].find((candidate) => candidate.textContent?.includes(name));
+    assert.ok(tab, `missing the ${name} tab`);
+    await act(async () => { tab.click(); });
+  };
+
+  await openTab("Payments Service");
+  assert.equal(notices().length, 1, "exactly one notice above the list");
+  assert.equal(shownTitle(), "Sign In to Codex on Build Box");
+  assert.equal(more(), "+2 More");
+  assert.equal(Boolean(head()!.compareDocumentPosition(container.querySelector(".inbox-list")!) & 4), true,
+    "the slot sits above the rows");
+  assertNoDomNode(container.querySelector(".provider-login-card"), "the bordered sign-in card is gone from the list");
+
+  await act(async () => { socket.push({ type: "runner_upsert", runner: runner([]) }); });
+  assert.equal(shownTitle(), "Set Up Payments Service", "with the sign-in resolved, the Project's tab shows its setup");
+  assert.equal(more(), "+1 More");
+  await openTab("All");
+  assert.equal(shownTitle(), "Recommended Skills", "elsewhere, Recommended Skills");
+  assert.equal(more(), null);
+
+  // Reconnecting hides the slot: what it shows may be stale (§12.5).
+  await act(async () => { socket.onclose?.({ code: 1006 }); });
+  assert.equal(notices().length, 0);
 });
 
 test("A on the Sessions list acts on the preview dock's expanded request, not the session's top one (#2179)", async () => {

@@ -123,9 +123,23 @@ test("Open Agent survives a late tail measurement after revealing a step", async
   });
   const bounds = await openAgent.boundingBox();
   expect(bounds).not.toBeNull();
-  await page.mouse.move(bounds!.x + bounds!.width / 2, bounds!.y + bounds!.height / 2);
+  const pointer = { x: bounds!.x + bounds!.width / 2, y: bounds!.y + bounds!.height / 2 };
+  await page.mouse.move(pointer.x, pointer.y);
   await page.mouse.down();
-  await expect.poll(() => list.evaluate((element) => element.getBoundingClientRect().height)).toBeGreaterThan(oldHeight + 100);
+  // The growth lands above Open Agent while the reader follows the tail. For the frame or two it
+  // takes following to settle the reader at the tail again, the button is not under the held pointer,
+  // and a release then misses it, exactly as one would after the pointer moved off (#2755). Release
+  // once the growth has landed AND the reader is back at the tail AND the pointer is over Open Agent,
+  // read in one evaluation: before the correction the reader is never at the tail. If following never
+  // brings the button back under the pointer, this wait fails, so a lost activation still fails.
+  await expect.poll(() => openAgent.evaluate((button, { x, y, grownPast }) => {
+    const reader = document.querySelector<HTMLElement>("[data-testid='reader']")!;
+    const timeline = document.querySelector<HTMLElement>(".timeline")!;
+    const hit = document.elementFromPoint(x, y);
+    return timeline.getBoundingClientRect().height > grownPast &&
+      reader.scrollHeight - reader.clientHeight - reader.scrollTop <= 1 &&
+      hit !== null && button.contains(hit);
+  }, { ...pointer, grownPast: oldHeight + 100 }), "the held pointer is over Open Agent once the tail settles").toBe(true);
   await page.mouse.up();
   await expect(page.getByTestId("opened-subagent")).toHaveText("release-audit-agent");
 });

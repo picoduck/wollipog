@@ -10,6 +10,7 @@ import {
   parseStoredRightPanelMode,
   parseStoredRightPanelWidth,
   resolveRightPanelDrag,
+  rightPanelOverlays,
 } from "./right-panel.js";
 
 test("clampRightPanelWidth: pins to the min/max bounds and passes in-range values through", () => {
@@ -87,4 +88,16 @@ test("resolveRightPanelDrag: dragging below the snap threshold collapses", () =>
   assert.equal(r.collapse, true);
   // Width still reports the clamped minimum so live rendering never shows a sliver.
   assert.equal(r.width, RIGHT_PANEL_MIN_WIDTH);
+});
+
+test("rightPanelOverlays: the panel overlays exactly when docking would leave the chat column under 480px (#2725)", () => {
+  // The row less the panel and its 10px handle is the chat column.
+  assert.equal(rightPanelOverlays(380 + 10 + 480, 380), false, "480px left: docks");
+  assert.equal(rightPanelOverlays(380 + 10 + 479, 380), true, "479px left: overlays");
+  // A 940px window with the 64px rail and a 376px panel (40% of the window) keeps 490px; with the
+  // 208px labelled rail it keeps about 346px.
+  assert.equal(rightPanelOverlays(940 - 64, 376), false);
+  assert.equal(rightPanelOverlays(940 - 208, 376), true);
+  // The same width answers the same way whichever mode the panel shows: the rule has no mode.
+  assert.equal(rightPanelOverlays(761 - 64, 304), true);
 });

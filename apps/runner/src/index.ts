@@ -2971,6 +2971,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           msg.recoveryRequestId,
           msg.providerAccountId,
           msg.expectedProviderAccountId,
+          msg.resolvedBy,
         ).catch((error: unknown) => {
           log(`provider authentication account selection failed: ${errText(error)}`);
           return { ok: false, code: undefined, error: "the account selection could not be completed" };

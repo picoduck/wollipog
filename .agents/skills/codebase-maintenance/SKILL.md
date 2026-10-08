@@ -59,6 +59,11 @@ Hard rules:
    there. The managed-worktree guard cannot inspect those shapes and refuses them with a message
    that blames runner-owned guard state (#1632); sweeps on 2026-09-23 and 2026-09-28 each lost a
    retry to it. The rule applies to the sweep itself, not only to follow-up work.
+   Resolve a scratch script's directory to an absolute path before any `cd` in the script:
+   `scratch_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)" || exit 1`.
+   Use that absolute directory for every input and output, including copied scripts. Resolving
+   `dirname "$0"` after changing directories can redirect scratch output into the repository
+   when the script was launched through a relative path.
 
 7. Follow-up work in this session. A human may reply to the report with "publish", then "claim
    and fix" — that is their call, and it converts this session into a fixing session for the

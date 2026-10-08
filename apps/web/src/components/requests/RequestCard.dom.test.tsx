@@ -7,6 +7,7 @@ import {
   prioritizedPendingRequests,
   removePendingRequest,
   type ControlPlaneToUi,
+  type DescendantRequestView,
   type PendingApproval,
   type RunnerView,
   type SessionView,
@@ -24,6 +25,7 @@ import { RequestDock, dockRequests } from "./RequestDock.js";
 import { decideDockedRequest, revealDockedRequest } from "./request-reveal.js";
 import type { FollowTailState } from "../../useFollowTail.js";
 import { SessionNoticeSlot } from "../SessionNoticeSlot.js";
+import { SessionRequestPanel, sessionRequestPanelKey } from "../SessionRequestPanel.js";
 import { useIsMobile } from "../useIsMobile.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -69,6 +71,27 @@ const pause = (kind: "cost_budget" | "max_tool_calls"): PendingApproval => ({
   options: [
     { optionId: "continue", name: "Continue", kind: "allow_once" },
     { optionId: "cancel", name: "Stop", kind: "reject_once" },
+  ],
+});
+/** The two requests whose only allow is `allow_always` (#2641): worktree setup trust and Pi project trust. */
+const worktreeTrust = (): PendingApproval => ({
+  requestId: "worktree-setup:one:hash",
+  kind: "permission",
+  title: "Trust Worktree Setup Configuration?",
+  context: { toolName: "wollipog.worktree_setup", path: "/workspace/project", input: "pnpm install" },
+  options: [
+    { optionId: "trust", name: "Trust This Configuration", kind: "allow_always" },
+    { optionId: "skip", name: "Create Without Setup", kind: "reject_once" },
+  ],
+});
+const piTrust = (): PendingApproval => ({
+  requestId: "pi-trust:one",
+  kind: "permission",
+  title: "Trust Pi Project Resources?",
+  context: { toolName: "pi.project_trust", input: "/workspace/project" },
+  options: [
+    { optionId: "trust", name: "Trust This Project", kind: "allow_always" },
+    { optionId: "skip", name: "Skip Project Resources", kind: "reject_always" },
   ],
 });
 const signIn = (): PendingApproval => ({
@@ -122,6 +145,9 @@ test("the footer is the secondary options, the ⋯ menu when there are extra opt
     [permission(), ["Reject", "More Choices", "Allow (primary)"]],
     [pause("cost_budget"), ["Stop", "Continue (primary)"]],
     [pause("max_tool_calls"), ["Stop", "Continue (primary)"]],
+    // With no allow_once, the trust option is the visible primary, not a menu item (#2641).
+    [worktreeTrust(), ["Create Without Setup", "Trust This Configuration (primary)"]],
+    [piTrust(), ["Skip Project Resources", "Trust This Project (primary)"]],
   ];
   for (const [request, expected] of cases) {
     const view = await render(<RequestCard session={sessionWith(request)} request={request} runnerOnline presentation="dock" />);
@@ -329,6 +355,53 @@ test("A and D act on the card and its keycaps show only where they would", async
   }
 });
 
+test("a trust request's primary takes a click, not A, and D names only a one-time reject (#2641)", async () => {
+  for (const [request, expectedKeycaps, denied] of [
+    [worktreeTrust(), [["Create Without SetupD", "D"]], [{ requestId: "worktree-setup:one:hash", optionId: "skip" }]],
+    [piTrust(), [], []],
+  ] as const) {
+    const decisions: unknown[] = [];
+    function Harness() {
+      const intentRef = useRef<RequestIntentHandler | null>(null);
+      return (
+        <>
+          <RequestCard session={sessionWith(request)} request={request} runnerOnline presentation="dock"
+            showKeyHints intentRef={intentRef} />
+          <button type="button" data-press="approve" onClick={() => intentRef.current?.("approve")}>Press A</button>
+          <button type="button" data-press="deny" onClick={() => intentRef.current?.("deny")}>Press D</button>
+        </>
+      );
+    }
+    const view = await render(<Harness />, { approve: async (_id, body) => { decisions.push(body); return sessionWith(null); } });
+    try {
+      const keycaps = [...view.container.querySelectorAll(".request-card-foot kbd")].map((key) => [key.parentElement?.textContent, key.textContent]);
+      assert.deepEqual(keycaps, expectedKeycaps, request.title);
+      await act(async () => { view.container.querySelector<HTMLButtonElement>('[data-press="approve"]')!.click(); await tick(); });
+      assert.deepEqual(decisions, [], `A does not grant ${request.title}`);
+      await act(async () => { view.container.querySelector<HTMLButtonElement>('[data-press="deny"]')!.click(); await tick(); });
+      assert.deepEqual(decisions, denied, request.title);
+    } finally {
+      await view.unmount();
+    }
+  }
+});
+
+test("a trust request's primary sends its trust option", async () => {
+  const decisions: unknown[] = [];
+  const request = worktreeTrust();
+  const view = await render(
+    <RequestCard session={sessionWith(request)} request={request} runnerOnline presentation="dock" />,
+    { approve: async (_id, body) => { decisions.push(body); return sessionWith(null); } },
+  );
+  try {
+    assertNoDomNode(view.container.querySelector('[aria-label="More Choices"]'), "no menu: every option is visible");
+    await act(async () => { view.container.querySelector<HTMLButtonElement>(".request-card-foot .primary")!.click(); await tick(); });
+    assert.deepEqual(decisions, [{ requestId: "worktree-setup:one:hash", optionId: "trust" }]);
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("a machine-owner-only sign-in shows its reason as text and the button refers to it", async () => {
   const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(mountPoint as never);
@@ -504,8 +577,8 @@ test("each sign-in state has exactly one primary, or only Cancel Sign-In while a
 });
 
 test("without the recovery body, Recheck Authentication stays a footer secondary", async () => {
-  // The Requests panel reads a Claude Code child's sign-in with its ACP parent's driver, so the
-  // recovery body (and its Check Again) does not render there.
+  // A harness without the recovery body (an ACP agent's sign-in), or a child's sign-in whose account
+  // an older server did not send (#2714): its Check Again does not render.
   const decisions: unknown[] = [];
   const request = recovery([AUTH.login, AUTH.revalidate, AUTH.dismiss]);
   const view = await renderWithRunner(
@@ -519,6 +592,111 @@ test("without the recovery body, Recheck Authentication stays a footer secondary
       .find((button) => button.textContent === "Recheck Authentication")!;
     await act(async () => { recheck.click(); await tick(); await tick(); });
     assert.deepEqual(decisions, [{ requestId: "provider-auth:card", optionId: "auth:revalidate" }]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+/** A child's sign-in in its parent's Requests panel, open on its card. */
+function childSignIn(
+  parent: Partial<SessionView>,
+  child: Pick<DescendantRequestView, "driver" | "providerAccountId" | "providerAccountLabel">,
+  client: Partial<ApiClient> = {},
+) {
+  const request = { ...recovery([AUTH.acceptCurrent, AUTH.revalidate, AUTH.dismiss]), occurrenceId: "child-auth-occurrence" };
+  const descendant: DescendantRequestView = {
+    sessionId: "session-child",
+    sessionTitle: "Child",
+    runnerId: "runner-1",
+    runnerOnline: true,
+    eventEpoch: 0,
+    createdAt: Date.now() - 30_000,
+    responseOwner: "human",
+    occurrenceId: "child-auth-occurrence",
+    request,
+    ...child,
+  };
+  return renderWithRunner(
+    <SessionRequestPanel
+      session={sessionWith(null, { id: "session-parent", title: "Parent", ...parent })}
+      descendants={[descendant]}
+      selectedKey={sessionRequestPanelKey("session-child", "child-auth-occurrence")}
+      onSelectedKeyChange={() => {}}
+      onDescendantsUpdate={() => {}}
+      onOpenChild={() => {}}
+    />,
+    {},
+    { authenticationAccounts: async () => ({ accounts: [...CHOICES] }), ...client },
+  );
+}
+const factTerms = (container: HTMLElement) => [...container.querySelectorAll("dt")].map((dt) => dt.textContent);
+const factValue = (container: HTMLElement, label: string) =>
+  [...container.querySelectorAll("dt")].find((dt) => dt.textContent === label)?.nextElementSibling?.textContent ?? null;
+
+test("a child's sign-in in the Requests panel reads the child's harness and account, never the parent's (#2714)", async () => {
+  const cases: Array<[string, Partial<SessionView>]> = [
+    ["an ACP parent", { driver: "acp", providerAccountId: undefined, providerAccountLabel: undefined }],
+    ["a parent on another account", { driver: "claude-code", providerAccountId: "claude-parent", providerAccountLabel: "Claude Parent" }],
+  ];
+  for (const [name, parent] of cases) {
+    const selections: Array<{ sessionId: string; input: unknown }> = [];
+    const identities: string[] = [];
+    const view = await childSignIn(parent, { driver: "claude-code", providerAccountId: "claude-work", providerAccountLabel: "Claude Work" }, {
+      authenticationCurrentIdentity: async (sessionId: string) => {
+        identities.push(sessionId);
+        return { identity: { status: "authenticated", emailSupported: true, email: "person@example.test", observedAt: Date.now() } };
+      },
+      selectAuthenticationAccount: async (sessionId: string, input: unknown) => {
+        selections.push({ sessionId, input });
+        return { accepted: true as const };
+      },
+    });
+    try {
+      assert.deepEqual(factTerms(view.container), ["This Session Uses", "Signed In Now", "Last Checked"], name);
+      assert.match(factValue(view.container, "This Session Uses") ?? "", /^Claude Work/, name);
+      assert.doesNotMatch(view.container.textContent ?? "", /Claude Parent/, name);
+      assert.equal(factValue(view.container, "Last Checked")?.includes("Check Again"), true, name);
+      assert.ok(identities.length > 0 && identities.every((id) => id === "session-child"), `${name}: the child's identity is read`);
+      const choose = [...view.container.querySelectorAll<HTMLButtonElement>(".request-card-foot button")]
+        .find((button) => button.textContent === "Choose Another Account…");
+      assert.ok(choose, name);
+      await act(async () => { choose.click(); await tick(); await tick(); });
+      await act(async () => { dialogButton("Use Account")!.click(); await tick(); await tick(); });
+      assert.deepEqual(selections, [{
+        sessionId: "session-child",
+        input: { requestId: "provider-auth:card", providerAccountId: "claude-personal", expectedProviderAccountId: "claude-work" },
+      }], `${name}: the child's account is the expected one`);
+    } finally {
+      await view.unmount();
+    }
+  }
+});
+
+test("a child on the machine default reads Machine Default Sign-In under a parent bound to an account (#2714)", async () => {
+  const view = await childSignIn(
+    { driver: "claude-code", providerAccountId: "claude-parent", providerAccountLabel: "Claude Parent" },
+    { driver: "claude-code" },
+  );
+  try {
+    assert.match(factValue(view.container, "This Session Uses") ?? "", /^Machine Default Sign-In/);
+    assert.doesNotMatch(view.container.textContent ?? "", /Claude Parent/);
+    assert.equal([...view.container.querySelectorAll(".request-card-foot button")]
+      .some((button) => button.textContent === "Choose Another Account…"), false, "an unbound child has no account to switch from");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a child's sign-in from an older server, without the child's account, shows no account facts (#2714)", async () => {
+  const view = await childSignIn(
+    { driver: "claude-code", providerAccountId: "claude-parent", providerAccountLabel: "Claude Parent" },
+    {},
+  );
+  try {
+    assert.deepEqual(factTerms(view.container).filter((term) =>
+      term === "This Session Uses" || term === "Signed In Now" || term === "Last Checked"), []);
+    assert.doesNotMatch(view.container.textContent ?? "", /Claude Parent|Machine Default Sign-In/);
+    assert.deepEqual(footer(view.container), ["Dismiss Recovery", "Recheck Authentication", "Use Current Account (primary)"]);
   } finally {
     await view.unmount();
   }

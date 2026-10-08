@@ -18,7 +18,6 @@ import {
 import { useQuestionResponseStyle } from "../question-response-style.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { clearEvidenceReviewDraft } from "../evidence-review-drafts.js";
-import { KEYBOARD_EDITABLE, TOUCH_PHONE_MEDIA } from "../mobile-viewport.js";
 import { LocateIcon, QuestionIcon } from "./Icons.js";
 import { Notice } from "./Notice.js";
 import { StructuredQuestionText } from "./StructuredQuestionText.js";
@@ -32,7 +31,9 @@ import {
   questionStepLabel,
   type QuestionChoice,
 } from "./requests/QuestionStep.js";
+import { holdFieldFocus } from "./requests/hold-field-focus.js";
 import { revealDockedRequest } from "./requests/request-reveal.js";
+import { useClipEdges } from "./requests/clip-edges.js";
 
 const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 /** Below this much room for its body, a capped question card scrolls as a whole (#2683): about a row. */
@@ -523,35 +524,10 @@ export function SessionQuestionBanner({
   }, [titleExpanded]);
 
   // While the card itself scrolls (expanded, cramped, or a short column's container rule), the edges
-  // it can still scroll past show a line (#2698), marked as a tab row's clipped edges are. The marks
-  // follow the scroll position and the size of the card and of everything in it, including what
-  // grows on its own (a notice's Show Details); after each render the card's current children are
-  // observed and the marks re-read, so a new notice or a layout switch is seen too.
-  const updateClip = useRef<() => void>(() => undefined);
-  useIsomorphicLayoutEffect(() => {
-    const card = cardRef.current;
-    if (!card) return;
-    const update = () => {
-      const scrolls = card.scrollHeight > card.clientHeight + 1 &&
-        card.ownerDocument.defaultView?.getComputedStyle(card).overflowY !== "visible";
-      card.toggleAttribute("data-clip-start", scrolls && card.scrollTop > 1);
-      card.toggleAttribute("data-clip-end", scrolls && card.scrollTop + card.clientHeight < card.scrollHeight - 1);
-    };
-    card.addEventListener("scroll", update, { passive: true });
-    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(update);
-    updateClip.current = () => {
-      observer?.observe(card);
-      // Observing an element twice is a no-op; children that left are released on disconnect.
-      for (const child of card.children) observer?.observe(child);
-      update();
-    };
-    updateClip.current();
-    return () => {
-      card.removeEventListener("scroll", update);
-      observer?.disconnect();
-    };
-  }, []);
-  useIsomorphicLayoutEffect(() => updateClip.current());
+  // it can still scroll past show a line (#2698); while only its body scrolls, the body's edges do,
+  // as every Request Card's body does (#2715).
+  useClipEdges(cardRef);
+  useClipEdges(stepRef);
 
   const updateDraft = (target: AgentQuestion, value: QuestionResponseDraft) => {
     setDrafts((current) => {
@@ -782,19 +758,6 @@ export function SessionQuestionBanner({
   // Only the keyboard opening moves the body.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [keyboardOpen]);
-
-  // On a touch phone a focused field is the software keyboard: the dock caps lower and the rail hides
-  // (styles.css). Pressing a row or a button while typing keeps the field focused until the click
-  // lands, since its blur would restore that layout between the press and the click and move the
-  // control out from under the finger. Choosing or moving on then takes focus as usual.
-  const holdFieldFocus = (event: React.MouseEvent<HTMLElement>) => {
-    const active = event.currentTarget.ownerDocument.activeElement;
-    const target = event.target as HTMLElement;
-    if (!(active instanceof HTMLElement) || !event.currentTarget.contains(active) || !active.matches(KEYBOARD_EDITABLE) ||
-        target.closest(KEYBOARD_EDITABLE) || !target.closest("button, label, input") ||
-        !event.currentTarget.ownerDocument.defaultView?.matchMedia(TOUCH_PHONE_MEDIA).matches) return;
-    event.preventDefault();
-  };
 
   const onKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
     if (event.defaultPrevented || event.nativeEvent.isComposing) return;

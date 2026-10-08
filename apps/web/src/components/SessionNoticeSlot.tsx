@@ -30,6 +30,10 @@ import { registerRequestRevealer } from "./requests/request-reveal.js";
  * NOT AN ENTRY. A campaign notice describes an Orchestrator campaign rather than whether this
  * session can take its next turn: Campaign Continuation and Held Children. They stay under the
  * session bar, in that order, and never collapse into "+N More" (§13.2; #2036).
+ *
+ * THE SESSIONS LIST. The notices above the Sessions list are a second instance of this slot with its
+ * own ranks (`SessionsListNotices`, `LIST_NOTICE_RANK`; #2221), so the two share one ranking and one
+ * menu.
  */
 
 export type SessionNoticeSeverity = "danger" | "warning" | "info";
@@ -131,11 +135,15 @@ function dismissInfo(sessionId: string, key: string): void {
   for (const listener of [...dismissalListeners]) listener();
 }
 
-export function SessionNoticeSlot({ sessionId, entries, lead, onFocusLost }: {
+export function SessionNoticeSlot({ sessionId, entries, lead, label = "Session Notices", className, onFocusLost }: {
+  /** Whose info dismissals these are. The Sessions list's slot passes its own fixed scope. */
   sessionId: string;
   entries: readonly SessionNoticeEntry[];
   /** Shown ahead of every entry, which then wait behind its "+N More". */
   lead?: SessionNoticeLead;
+  /** The "+N More" menu's name, Title Case. */
+  label?: string;
+  className?: string;
   /** Where focus goes when the slot is gone while a control in it, or its "+N More" menu, held
    * focus: the composer, or the page title when the composer cannot take it. */
   onFocusLost?: () => void;
@@ -240,7 +248,7 @@ export function SessionNoticeSlot({ sessionId, entries, lead, onFocusLost }: {
           surfaceRef={menu.menuRef}
           anchor={{ trigger: menu.triggerRef }}
           id={menu.menuId}
-          label="Session Notices"
+          label={label}
           align="end"
           onDismiss={() => menu.close(true)}
           onKeyDown={menu.onMenuKeyDown}
@@ -266,7 +274,7 @@ export function SessionNoticeSlot({ sessionId, entries, lead, onFocusLost }: {
   );
 
   return (
-    <div ref={slotRef} className="session-notice-slot" data-notice-key={keyOf(shown)} tabIndex={-1}>
+    <div ref={slotRef} className={className ? `session-notice-slot ${className}` : "session-notice-slot"} data-notice-key={keyOf(shown)} tabIndex={-1}>
       {"lead" in shown ? shown.lead.render({ trailing, revealRequestId, concealTrailing: () => {
         setMenuOpen(false);
         return menuOpen;

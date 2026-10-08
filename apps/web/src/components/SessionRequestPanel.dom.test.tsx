@@ -258,13 +258,12 @@ test("a child's permission opens on the Request Card with its command, facts and
     const facts = card.querySelector(".facts")?.textContent ?? "";
     assert.match(facts, /wollipog\.worktree_setup/);
     assert.match(facts, /fix\/example/);
-    // An allow_always option waits in the ⋯ menu; the reject is the visible secondary.
+    // With no allow_once, the allow_always trust option is the primary, last; the reject is the
+    // visible secondary before it (#2641).
     assert.deepEqual(footButtons(container).map((button) => button.textContent || button.getAttribute("aria-label")),
-      ["Create Without Setup", "More Choices"]);
+      ["Create Without Setup", "Trust This Configuration"]);
+    assert.ok(footButtons(container)[1]!.classList.contains("primary"));
     await act(async () => { footButtons(container)[1]!.click(); });
-    const trust = [...(domWindow.document.body as unknown as HTMLElement).querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
-      .find((item) => item.textContent === "Trust This Configuration")!;
-    await act(async () => { trust.click(); });
     assert.deepEqual(approvals, [{ requestId: "worktree-setup:one:hash", optionId: "trust" }]);
   } finally {
     await act(async () => root.unmount());

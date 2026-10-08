@@ -114,6 +114,49 @@ const soloViewer = viewerIdentity({
 
 const policies = { names: new Map([["allow-reads", "Allow Reads"]]), load: () => {}, invalidate: () => {} };
 
+/**
+ * Sign-in cards as the runner records them (#2742): the member who chose Recheck, Start Sign-In,
+ * Use Current Account, Dismiss Recovery or another account (#2783) is named on the session where
+ * they acted. A session the
+ * same recovery completed automatically, and a resolution from an older peer, name nobody.
+ */
+const signInEvents: SessionEvent[] = [];
+function signIn(requestId: string, optionId: string, minute: number, resolvedBy?: PermissionResolver): void {
+  signInEvents.push({
+    id: signInEvents.length + 1, sessionId: "gallery", seq: signInEvents.length + 1, ts: at(minute),
+    payload: {
+      kind: "permission_request", requestId, title: "Sign In to Claude Code", purpose: "authentication",
+      options: [
+        { optionId: "auth:accept-current", name: "Use Current Account", kind: "allow_once" },
+        { optionId: "auth:login", name: "Start Sign-In", kind: "allow_once" },
+        { optionId: "auth:revalidate", name: "Recheck Authentication", kind: "allow_once" },
+        { optionId: "auth:dismiss", name: "Dismiss Recovery", kind: "reject_once" },
+      ],
+    },
+  });
+  signInEvents.push({
+    id: signInEvents.length + 1, sessionId: "gallery", seq: signInEvents.length + 1, ts: at(minute + 1),
+    payload: { kind: "permission_resolved", requestId, optionId, ...(resolvedBy ? { resolvedBy } : {}) },
+  });
+}
+signIn("provider-auth:recheck", "auth:revalidate", 20, { kind: "user", userId: ADA });
+signIn("provider-auth:login", "auth:login", 22, { kind: "user", userId: GRACE });
+signIn("provider-auth:accept", "auth:accept-current", 24, { kind: "user", userId: DEPARTED });
+signIn("provider-auth:dismiss", "auth:dismiss", 26, { kind: "user", userId: GRACE });
+// Choose Another Account… names the member who chose it (#2783).
+signIn("provider-auth:select", "auth:select-account", 27, { kind: "user", userId: ADA });
+signIn("provider-auth:automatic", "auth:automatic-retry", 28);
+signIn("provider-auth:older-peer", "auth:revalidate", 30);
+const signInItems = deriveTimeline(signInEvents);
+
+export function SignInResolverGallery({ solo = false }: { solo?: boolean }) {
+  return (
+    <ViewerIdentityContext.Provider value={solo ? soloViewer : sharedViewer}>
+      <EventTimeline ariaLabel="Sign-In Resolver Rows" items={signInItems} />
+    </ViewerIdentityContext.Provider>
+  );
+}
+
 export function ResolverGallery({ solo = false }: { solo?: boolean }) {
   return (
     <GovernancePolicyNamesContext.Provider value={policies}>

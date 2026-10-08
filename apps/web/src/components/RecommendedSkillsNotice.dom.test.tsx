@@ -7,7 +7,7 @@ import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { viewPath } from "../navigation.js";
-import { RecommendedSkillsNotice } from "./RecommendedSkillsNotice.js";
+import { RecommendedSkillsNotice, useSkillRecommendations } from "./RecommendedSkillsNotice.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
@@ -27,6 +27,11 @@ type FakeSkill = { id: string; name: string; builtIn?: typeof builtIn; recommend
 const recommended = (id: string, name: string): FakeSkill =>
   ({ id, name, builtIn, recommendation: { dismissed: false }, assignmentCount: 0 });
 
+/** The Sessions list slot owns the hook and hands it to the notice (#2221). */
+function Harness({ onOpen }: { onOpen: (skillId: string) => void }) {
+  return <RecommendedSkillsNotice recommendations={useSkillRecommendations()} onOpen={onOpen} />;
+}
+
 const settle = async () => { await new Promise((resolve) => setTimeout(resolve, 10)); };
 
 async function mount(client: ApiClient) {
@@ -37,7 +42,7 @@ async function mount(client: ApiClient) {
   await act(async () => {
     root.render(
       <ApiProvider client={client}>
-        <RecommendedSkillsNotice onOpen={(skillId) => { opened.push(skillId); }} />
+        <Harness onOpen={(skillId) => { opened.push(skillId); }} />
       </ApiProvider>,
     );
   });
@@ -46,7 +51,7 @@ async function mount(client: ApiClient) {
   const shown = () => container.querySelector('[aria-label="Recommended Skills"]') !== null;
   return {
     container, opened, shown,
-    names: () => [...container.querySelectorAll(".recommended-skills-notice-list a")].map((link) => link.textContent),
+    names: () => [...container.querySelectorAll(".skill-recommendations-list a")].map((link) => link.textContent),
     button: (label: string) => [...container.querySelectorAll<HTMLButtonElement>("button")]
       .find((candidate) => candidate.getAttribute("aria-label") === label || candidate.textContent?.trim() === label),
     async click(target: HTMLElement | undefined) {
@@ -98,7 +103,7 @@ test("the notice lists built-in skills neither assigned nor dismissed, links eac
   const view = await mount(server.client);
   assert.equal(view.shown(), true);
   assert.deepEqual(view.names(), ["orchestrate-issues", "using-wollipog"]);
-  const link = view.container.querySelector<HTMLAnchorElement>(".recommended-skills-notice-list a")!;
+  const link = view.container.querySelector<HTMLAnchorElement>(".skill-recommendations-list a")!;
   assert.equal(link.getAttribute("href"), viewPath({ name: "skills", id: "a" }));
   assert.equal(link.getAttribute("title"), "Open in Skills");
   await view.click(link);

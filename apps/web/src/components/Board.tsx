@@ -1,6 +1,7 @@
 import { BoardIcon, ChevronDownIcon, ComputerIcon, MoreHorizontalIcon } from "./Icons.js";
 import { State, useSnapshotState } from "./State.js";
-import { type DragEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { type DragEvent, type KeyboardEvent, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import {
   BOARD_COLUMNS,
   plainTextPreview,
@@ -29,11 +30,14 @@ import { sessionRowStatus } from "../session-row-status.js";
 import { sessionDisplayTitle } from "../session-title.js";
 import { ActivityStrip } from "./ActivityStrip.js";
 import { AgentIcon } from "./AgentIcon.js";
+import { CountBadge } from "./CountBadge.js";
 import { inboxRowReadsClock } from "./InboxList.js";
 import { inboxRowTimestamp, sessionStalledForMs, SessionRowTime } from "./InboxRow.js";
 import { MenuItem, MenuSeparator, MenuSurface } from "./Menu.js";
 import { Notice } from "./Notice.js";
 import { SessionRowStatusBadge } from "./SessionRowStatusBadge.js";
+import { TabList } from "./Tabs.js";
+import { useIsMobile } from "./useIsMobile.js";
 
 const sessionCardKey = (session: SessionView) => session.id;
 const estimateSessionCard = (session: SessionView) => session.pendingApproval ? 196 : 118;
@@ -47,13 +51,24 @@ const COLUMN_TONE: Record<BoardColumn, "neutral" | "info" | "warning"> = {
   done: "neutral",
 };
 
+/** The phone Board's column order (#2216): what needs the person first, then what is moving, Queued last. */
+export const PHONE_BOARD_COLUMNS: readonly BoardColumn[] = ["input_required", "running", "review", "done", "queued"];
+
+const COLUMN_TITLE = new Map(BOARD_COLUMNS.map((column) => [column.id, column.title]));
+
+/** The column a phone Board opens on (#2216): the first with a card, in `PHONE_BOARD_COLUMNS` order. */
+export function openingBoardColumn(byColumn: ReadonlyMap<BoardColumn, readonly unknown[]>): BoardColumn {
+  return PHONE_BOARD_COLUMNS.find((column) => (byColumn.get(column)?.length ?? 0) > 0) ?? PHONE_BOARD_COLUMNS[0]!;
+}
+
 /**
  * The Sessions view's board mode: the same scoped session list the list mode renders (project
  * split, search, and reminder filtering applied by the parent), grouped into status columns.
  * The Machine and Agent filters are board-local refinements on top of that shared scope; their
- * menu buttons live in the Sessions tab row (`BoardFilterTools`, #2201).
+ * menu buttons live in the Sessions tab row (`BoardFilterTools`, #2201), and on a phone in the app
+ * bar's Filters sheet (#2216). A phone shows one column at a time under a strip of column tabs.
  */
-export function Board({ sessions: scoped, reminders = new Map(), stalledSessionIds = new Set(), pinnedSessionIds = new Set(), searchActive, onShowAll, onNewSession, onSessionMenu }: {
+export function Board({ sessions: scoped, reminders = new Map(), stalledSessionIds = new Set(), pinnedSessionIds = new Set(), searchActive, onShowAll, onNewSession, onSessionMenu, column, onColumnChange }: {
   /** Already scoped by the Sessions toolbar: unarchived, split, query, and reminder mode. */
   sessions: SessionView[];
   stalledSessionIds?: ReadonlySet<string>;
@@ -66,6 +81,13 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
   onNewSession: () => void;
   /** Right-click, long-press, or keyboard context menu on a card (#154). */
   onSessionMenu: (sessionId: string, anchor: { x: number; y: number }, restoreTarget: () => HTMLElement | null) => void;
+  /**
+   * The phone Board's column, held by an owner that outlives the Board (#2216): the Sessions page
+   * swaps the Board for No Matches while a search finds nothing, and the column must survive that.
+   * Null until the Board first has sessions. Without it the Board holds the column itself.
+   */
+  column?: BoardColumn | null;
+  onColumnChange?: (column: BoardColumn) => void;
 }) {
   const api = useApi();
   const { setFilters, navigate } = useStoreActions();
@@ -100,7 +122,7 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
   const visible = useMemo(() => filterBoardSessions(scoped, filters), [scoped, filters]);
 
   const byColumn = useMemo(() => {
-    const cols = new Map<string, SessionView[]>();
+    const cols = new Map<BoardColumn, SessionView[]>();
     for (const c of BOARD_COLUMNS) cols.set(c.id, []);
     for (const s of visible) cols.get(s.column)?.push(s);
     // `scoped` already carries the canonical, pin- and family-aware Inbox order. Preserve it
@@ -108,6 +130,38 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
     // from a row; sorting again by `updatedAt` would erase that structural choice.
     return cols;
   }, [visible]);
+
+  // A phone shows one column (#2216). The Board opens on the first column with a card and then keeps
+  // its column, the opening one or the one chosen, while it stays open: a live update that empties
+  // the column or fills an earlier one never moves the page under the person reading it.
+  const phone = useIsMobile();
+  const [ownColumn, setOwnColumn] = useState<BoardColumn | null>(null);
+  const phoneColumn = column !== undefined ? column : ownColumn;
+  const setPhoneColumn = onColumnChange ?? setOwnColumn;
+  const shownColumn = phoneColumn ?? openingBoardColumn(byColumn);
+  // The opening column is recorded before paint, so the first frame already shows it.
+  const hasSessions = visible.length > 0;
+  useLayoutEffect(() => {
+    if (phoneColumn === null && hasSessions) setPhoneColumn(shownColumn);
+  }, [phoneColumn, hasSessions, setPhoneColumn, shownColumn]);
+  const tabIdPrefix = `board-column-${useId().replace(/:/g, "")}`;
+  const columnTabId = (column: BoardColumn) => `${tabIdPrefix}-tab-${column}`;
+  const columnPanelId = `${tabIdPrefix}-panel`;
+  // Arrow keys, Home and End move between the column tabs and show the column they reach (§10.1).
+  const onColumnTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, from: BoardColumn) => {
+    const index = PHONE_BOARD_COLUMNS.indexOf(from);
+    const last = PHONE_BOARD_COLUMNS.length - 1;
+    const next = event.key === "ArrowRight" ? (index === last ? 0 : index + 1)
+      : event.key === "ArrowLeft" ? (index === 0 ? last : index - 1)
+        : event.key === "Home" ? 0
+          : event.key === "End" ? last
+            : null;
+    if (next === null) return;
+    event.preventDefault();
+    const column = PHONE_BOARD_COLUMNS[next]!;
+    flushSync(() => setPhoneColumn(column));
+    document.getElementById(columnTabId(column))?.focus();
+  };
 
   // The family chip on a parent's card (#896). The Board does not nest, and a parent's children
   // are usually in other columns, so the rollup is read off the whole scope rather than a column.
@@ -168,13 +222,13 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
     setDragging(false);
   };
   const colDragProps = (colId: BoardColumn) => ({
-    onDragEnter: (e: DragEvent<HTMLDivElement>) => {
+    onDragEnter: (e: DragEvent<HTMLElement>) => {
       if (!e.dataTransfer.types.includes("text/wollipog-session")) return;
       const d = dragDepth.current.get(colId) ?? 0;
       dragDepth.current.set(colId, d + 1);
       setDragOverCol(colId);
     },
-    onDragOver: (e: DragEvent<HTMLDivElement>) => {
+    onDragOver: (e: DragEvent<HTMLElement>) => {
       if (!e.dataTransfer.types.includes("text/wollipog-session")) return;
       e.preventDefault(); // required or the browser refuses the drop
       e.dataTransfer.dropEffect = "move";
@@ -188,7 +242,7 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
         dragDepth.current.set(colId, d);
       }
     },
-    onDrop: (e: DragEvent<HTMLDivElement>) => {
+    onDrop: (e: DragEvent<HTMLElement>) => {
       e.preventDefault();
       dragDepth.current.set(colId, 0);
       setDragOverCol(null);
@@ -202,8 +256,25 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
     },
   });
 
+  const columnBody = (list: SessionView[]) => (
+    <BoardColumnBody
+      sessions={list}
+      pinnedSessionIds={pinnedSessionIds}
+      reminders={reminders}
+      stalledSessionIds={stalledSessionIds}
+      projectName={projectName}
+      machineName={machineName}
+      runnerStatus={(runnerId) => runners.get(runnerId)?.status}
+      onOpen={(sessionId) => navigate({ name: "session", id: sessionId })}
+      threadChildren={threadChildren}
+      onDragStart={startDrag}
+      onDragEnd={clearDragState}
+      onSessionMenu={onSessionMenu}
+    />
+  );
+
   return (
-    <div className="board-wrap" tabIndex={-1}>
+    <div className={`board-wrap${phone ? " is-phone" : ""}`} tabIndex={-1}>
       {visible.length === 0 && (snapshot.offline || snapshot.loading) ? (
         // No snapshot, or no connection: an empty map proves nothing yet (§12.5).
         <State variant={snapshot.offline ? "offline" : "loading"}>
@@ -261,6 +332,52 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
               : <>Click “New Session” to start an agent.</>}
           </State>
         )
+      ) : phone ? (
+        // One column at a time (#2216, §15.1): the column tabs with their counts, Needs Input's as a
+        // warning badge, then the chosen column's cards at full width. A tab is also a drop target,
+        // for a narrow window with a mouse.
+        <div className={`board board-phone${dragging ? " is-dragging" : ""}`}>
+          <TabList label="Board Columns" className="board-column-tabs">
+            {PHONE_BOARD_COLUMNS.map((id) => {
+              const title = COLUMN_TITLE.get(id) ?? id;
+              const count = byColumn.get(id)?.length ?? 0;
+              const selected = id === shownColumn;
+              return (
+                <button
+                  key={id}
+                  id={columnTabId(id)}
+                  type="button"
+                  role="tab"
+                  aria-selected={selected}
+                  aria-controls={columnPanelId}
+                  // The badge is aria-hidden, so the count joins the name.
+                  aria-label={`${title}, ${count}`}
+                  tabIndex={selected ? 0 : -1}
+                  className={`tab board-column-tab col-${id}${dragOverCol === id ? " drag-over" : ""}`}
+                  onClick={() => setPhoneColumn(id)}
+                  onKeyDown={(event) => onColumnTabKeyDown(event, id)}
+                  {...colDragProps(id)}
+                >
+                  {title}
+                  {id === "input_required" && count > 0
+                    ? <CountBadge count={count} />
+                    : <span className="count">{count}</span>}
+                </button>
+              );
+            })}
+          </TabList>
+          <div
+            id={columnPanelId}
+            role="tabpanel"
+            aria-labelledby={columnTabId(shownColumn)}
+            className={`column col-${shownColumn}${dragOverCol === shownColumn ? " drag-over" : ""}`}
+            {...colDragProps(shownColumn)}
+          >
+            {(byColumn.get(shownColumn)?.length ?? 0) === 0 ? (
+              <State compact>No sessions are in {COLUMN_TITLE.get(shownColumn) ?? shownColumn}.</State>
+            ) : columnBody(byColumn.get(shownColumn) ?? [])}
+          </div>
+        </div>
       ) : (
         <div className={`board${dragging ? " is-dragging" : ""}`}>
           {BOARD_COLUMNS.map((col) => {
@@ -279,20 +396,7 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
                   <span className="column-title">{col.title}</span>
                   <span className="count">{list.length}</span>
                 </div>
-                <BoardColumnBody
-                  sessions={list}
-                  pinnedSessionIds={pinnedSessionIds}
-                  reminders={reminders}
-                  stalledSessionIds={stalledSessionIds}
-                  projectName={projectName}
-                  machineName={machineName}
-                  runnerStatus={(runnerId) => runners.get(runnerId)?.status}
-                  onOpen={(sessionId) => navigate({ name: "session", id: sessionId })}
-                  threadChildren={threadChildren}
-                  onDragStart={startDrag}
-                  onDragEnd={clearDragState}
-                  onSessionMenu={onSessionMenu}
-                />
+                {columnBody(list)}
               </div>
             );
           })}

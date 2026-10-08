@@ -284,17 +284,19 @@ test("while a sign-in runs, what the person must do is in view without scrolling
   }
 });
 
-test("a body cut by the dock's cap fades its lower edge, so a cut line never reads as a stray mark", async ({ page }) => {
+test("a body cut by the dock's cap draws a hairline at its lower edge, never a fade, so a cut line never reads as a stray mark (#2715)", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   for (const scenario of ["email", "older", "readonly", "methods"] as const) {
     const card = await open(page, `scenario=${scenario}`, scenario === "methods" ? "Sign in to OpenCode" : undefined);
     const state = await card.locator(".request-card-body").evaluate((body) => ({
       overflows: body.scrollTop + body.clientHeight < body.scrollHeight - 1,
-      marked: body.hasAttribute("data-more-below"),
+      marked: body.hasAttribute("data-clip-end"),
+      line: getComputedStyle(body, "::after").borderTopStyle === "solid",
       masked: getComputedStyle(body).maskImage !== "none",
     }));
     expect(state.marked, scenario).toBe(state.overflows);
-    expect(state.masked, scenario).toBe(state.overflows);
+    expect(state.line, scenario).toBe(state.overflows);
+    expect(state.masked, scenario).toBe(false);
   }
 });
 
@@ -315,6 +317,38 @@ test.describe("touch phone", () => {
       await page.keyboard.press("Escape");
     }
   });
+
+  test("Show Email and Check Again each keep their own 44px touch target (#2730)", async ({ page }) => {
+    const card = await open(page, "scenario=email&width=390&height=844");
+    for (const [label, name, selector] of [
+      ["Signed In Now", "Show Email", ".pid-toggle"],
+      ["Last Checked", "Check Again", "button.btn"],
+    ] as const) {
+      const control = fact(card, label).getByRole("button", { name });
+      // The card's body scrolls on a phone (#2179): centre the control, away from the body's clipping
+      // edge, where any target would be cut.
+      await control.evaluate((element) => element.scrollIntoView({ block: "center" }));
+      const box = (await control.boundingBox())!;
+      const cx = box.x + box.width / 2;
+      const cy = box.y + box.height / 2;
+      // 21px from the centre on every side is inside a 44px target: each lands on this control, never
+      // on the other fact's.
+      const hits = await page.evaluate(([x, y, own, text]) => [[x, y - 21], [x, y + 21], [x - 21, y], [x + 21, y]]
+        .map(([px, py]) => {
+          const hit = document.elementFromPoint(px!, py!)?.closest<HTMLElement>(own!);
+          return hit?.textContent?.trim().startsWith(text!) || hit?.getAttribute("aria-label") === text;
+        }), [cx, cy, selector, name] as const);
+      expect(hits, name).toEqual([true, true, true, true]);
+    }
+  });
+});
+
+test("with a fine pointer at 1440×900 the facts keep their 4px rows: only touch spaces them out (#2730)", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  for (const scenario of ["email", "signed-out"] as const) {
+    const card = await open(page, `scenario=${scenario}`);
+    await expect(card.locator(".sign-in-facts"), scenario).toHaveCSS("row-gap", "4px");
+  }
 });
 
 for (const [width, height] of [[1440, 900], [390, 844]] as const) {
@@ -353,3 +387,29 @@ for (const [width, height] of [[1440, 900], [390, 844]] as const) {
     expect(right).toBeLessThanOrEqual(width + 0.5);
   });
 }
+
+test.describe("touch phone, typing then tapping the card (#2675)", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  test("Submit Code tapped right after typing the Authorization Code takes the tap, with the typed code", async ({ page }) => {
+    const card = await open(page, "scenario=signing-in&width=390&height=844", "Signing In — Claude Code");
+    const field = card.getByLabel("Authorization Code");
+    // The focused field reads as "the software keyboard is up": the dock caps at 40% and the tab bar
+    // hides. A tap that moved focus off the field would regrow the dock under the finger (#2205).
+    await field.fill("auth-code-2675");
+    await expect(field).toBeFocused();
+    await card.getByRole("button", { name: "Submit Code" }).tap();
+    await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_AUTH_RECOVERY_E2E__.codes())).toEqual(["auth-code-2675"]);
+  });
+
+  test("a docked card's primary tapped right after typing in the composer takes the tap", async ({ page }) => {
+    const card = await open(page, "scenario=email&width=390&height=844");
+    const composer = page.getByRole("combobox", { name: /^Messages you send now wait/ });
+    await composer.tap();
+    await composer.fill("Checking the account first.");
+    await expect(composer).toBeFocused();
+    await card.getByRole("button", { name: "Use Current Account" }).tap();
+    await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_AUTH_RECOVERY_E2E__.decisions()))
+      .toEqual([{ requestId: "provider-auth:recovery-e2e", optionId: "auth:accept-current" }]);
+  });
+});

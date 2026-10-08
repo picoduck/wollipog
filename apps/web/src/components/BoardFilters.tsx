@@ -1,11 +1,12 @@
-import React, { useMemo, useState, type ReactNode } from "react";
+import React, { useId, useMemo, useState, type MouseEvent, type ReactNode } from "react";
+import { flushSync } from "react-dom";
 import type { BoxView, SessionView } from "@wollipog/protocol";
 import { useStoreActions, useStoreSelector, type Filters } from "../store.js";
 import { machineOptionLabels, runnerDisplay } from "../runners.js";
-import { ChevronDownIcon } from "./Icons.js";
+import { ChevronDownIcon, FilterIcon } from "./Icons.js";
 import { useAccessibleMenu } from "./interactions.js";
-import { MenuItem, MenuLabel, MenuSeparator, MenuSurface } from "./Menu.js";
-import { useIsCompact, useIsMobile } from "./useIsMobile.js";
+import { MenuItem, MenuLabel, MenuNote, MenuSeparator, MenuSurface } from "./Menu.js";
+import { useIsCompact } from "./useIsMobile.js";
 
 /**
  * The Board's Machine and Agent filters (#2201): menu buttons in the Sessions tab row's tools
@@ -31,6 +32,19 @@ export function activeBoardFilterCount(filters: Filters): number {
 /** "Filters, 1 Active": the compact Filters button's accessible name (§17.1). */
 export function boardFiltersButtonName(active: number): string {
   return active > 0 ? `Filters, ${active} Active` : "Filters";
+}
+
+/** "Showing 10 of 29": how many of the Board's sessions the filters leave (§15.1). */
+export function boardFilterResult(shown: number, total: number): string {
+  return `Showing ${shown} of ${total}`;
+}
+
+/** What the filters keep, as the phone filter strip says it: "Machine: Studio Mac. Agent: Codex." */
+export function boardFilterSummary(filters: Filters, options: Pick<BoardFilterOptions, "machineLabel" | "agentLabel">): string {
+  return [
+    filters.runnerId ? `Machine: ${options.machineLabel(filters.runnerId)}.` : null,
+    filters.agentId ? `Agent: ${options.agentLabel(filters.agentId)}.` : null,
+  ].filter(Boolean).join(" ");
 }
 
 export interface MachineFilterOption {
@@ -170,16 +184,23 @@ export function AgentFilterItems({ groups, current, onChoose }: {
   );
 }
 
-/** A `.btn.sm.ghost` menu button that names its choice and is pressed while a filter is set. */
-function FilterMenuButton({ label, menuLabel, ariaLabel, pressed, filter, children }: {
-  /** The visible text: the current choice, or "All Machines". */
+/**
+ * A menu button that is pressed while a filter is set: in the tab row a `.btn.sm.ghost` that names its
+ * choice, and on a phone the app bar's Filters icon button, whose menu is the Filters sheet (#2216).
+ */
+function FilterMenuButton({ label, menuLabel, ariaLabel, pressed, filter, sheet = false, describedBy, children }: {
+  /** The visible text: the current choice, or "All Machines"; the icon and count in the app bar. */
   label: ReactNode;
   /** The menu's accessible name (§9.1). */
   menuLabel: string;
   ariaLabel?: string;
   pressed: boolean;
-  /** Which filter the button sets, for tests and evidence: "machine", "agent" or "both". */
-  filter: "machine" | "agent" | "both";
+  /** Which filter the button sets, for tests and evidence: "machine", "agent", "both" or "sheet". */
+  filter: "machine" | "agent" | "both" | "sheet";
+  /** The app bar's icon button, with no caret (§15.1). */
+  sheet?: boolean;
+  /** The id of what describes the menu: the sheet's result count. */
+  describedBy?: string;
   children: (choose: (apply: () => void) => void) => ReactNode;
 }) {
   const [open, setOpen] = useState(false);
@@ -194,8 +215,9 @@ function FilterMenuButton({ label, menuLabel, ariaLabel, pressed, filter, childr
       <button
         ref={menu.triggerRef}
         type="button"
-        className="btn sm ghost board-filter"
+        className={sheet ? "icon-btn board-filters-button" : "btn sm ghost board-filter"}
         data-board-filter={filter}
+        title={sheet ? menuLabel : undefined}
         aria-label={ariaLabel}
         aria-pressed={pressed}
         aria-haspopup="menu"
@@ -205,7 +227,7 @@ function FilterMenuButton({ label, menuLabel, ariaLabel, pressed, filter, childr
         onKeyDown={menu.onTriggerKeyDown}
       >
         {label}
-        <ChevronDownIcon size={14} />
+        {!sheet && <ChevronDownIcon size={14} />}
       </button>
       {open && (
         <MenuSurface
@@ -213,6 +235,7 @@ function FilterMenuButton({ label, menuLabel, ariaLabel, pressed, filter, childr
           anchor={{ trigger: menu.triggerRef }}
           id={menu.menuId}
           label={menuLabel}
+          aria-describedby={describedBy}
           align="end"
           onDismiss={() => menu.close(true)}
           onKeyDown={menu.onMenuKeyDown}
@@ -226,9 +249,10 @@ function FilterMenuButton({ label, menuLabel, ariaLabel, pressed, filter, childr
 
 /**
  * The Board's tools in the Sessions tab row (#2201): "All Machines ▾" and "All Agents ▾", which name
- * the choice once one is set. Below 1100px they fold into one Filters button that opens both groups
- * (§15.2). A set filter adds a quiet "10 of 29" note and Clear; in the folded Filters menu, Clear is
- * its last row, so the row keeps room for the group tabs.
+ * the choice once one is set. In the compact tier they fold into one Filters button that opens both
+ * groups (§15.2). A set filter adds a quiet "10 of 29" note and Clear; in the folded Filters menu,
+ * Clear is its last row, so the row keeps room for the group tabs. A phone has no tab row: its app
+ * bar carries `BoardFiltersSheet` and `BoardFilterStrip` instead (#2216).
  */
 export function BoardFilterTools({ sessions }: {
   /** The Board's scope before its own filters: what "of 29" counts. */
@@ -237,10 +261,7 @@ export function BoardFilterTools({ sessions }: {
   const filters = useStoreSelector((s) => s.filters);
   const { setFilters } = useStoreActions();
   const options = useBoardFilterOptions();
-  const compact = useIsCompact();
-  const phone = useIsMobile();
-  // Phones fold the same way until the phone Board's Filters sheet (#2216).
-  const folded = compact || phone;
+  const folded = useIsCompact();
   const active = activeBoardFilterCount(filters);
   const shown = useMemo(() => filterBoardSessions(sessions, filters).length, [filters, sessions]);
   const machineChoice = filters.runnerId ? options.machineLabel(filters.runnerId) : null;
@@ -318,5 +339,102 @@ export function BoardFilterTools({ sessions }: {
         <button type="button" className="btn sm ghost" onClick={clear}>Clear</button>
       )}
     </>
+  );
+}
+
+/**
+ * The phone Board's Filters (#2216, §15.1): an icon button in the Sessions app bar, pressed
+ * with the number applied while any filter is set, that opens a bottom sheet holding the Machine and
+ * Agent lists, the result count and, while a filter is set, Clear Filters. A choice applies at once
+ * and the sheet stays open, so the count answers it; the scrim, Escape or Tab closes the sheet.
+ */
+export function BoardFiltersSheet({ sessions }: {
+  /** The Board's scope before its own filters: what "of 29" counts. */
+  sessions: readonly SessionView[];
+}) {
+  const filters = useStoreSelector((s) => s.filters);
+  const { setFilters } = useStoreActions();
+  const options = useBoardFilterOptions();
+  const active = activeBoardFilterCount(filters);
+  const shown = useMemo(() => filterBoardSessions(sessions, filters).length, [filters, sessions]);
+  const resultId = `board-filters-result-${useId().replace(/:/g, "")}`;
+  return (
+    <FilterMenuButton
+      sheet
+      filter="sheet"
+      label={<><FilterIcon />{active > 0 && <span className="count" aria-hidden="true">{active}</span>}</>}
+      ariaLabel={boardFiltersButtonName(active)}
+      menuLabel="Filters"
+      pressed={active > 0}
+      describedBy={resultId}
+    >
+      {() => (
+        <>
+          <MenuNote id={resultId}>{boardFilterResult(shown, sessions.length)}</MenuNote>
+          <div role="group" aria-label="Machine">
+            <MenuLabel>Machine</MenuLabel>
+            <MachineFilterItems machines={options.machines} current={filters.runnerId}
+              onChoose={(runnerId) => setFilters({ runnerId })} />
+          </div>
+          <MenuSeparator />
+          <div role="group" aria-label="Agent">
+            <MenuLabel>Agent</MenuLabel>
+            <AgentFilterItems groups={options.agentGroups} current={filters.agentId}
+              onChoose={(agentId) => setFilters({ agentId })} />
+          </div>
+          {active > 0 && (
+            <>
+              <MenuSeparator />
+              <MenuItem
+                data-menu-label="Clear Filters"
+                onClick={(event) => {
+                  // The row leaves with the filters, so focus lands on All Machines rather than <body>.
+                  const sheet = event.currentTarget.closest<HTMLElement>(".menu");
+                  flushSync(() => setFilters(NO_FILTERS));
+                  sheet?.querySelector<HTMLElement>(".menu-item")?.focus();
+                }}
+              >
+                Clear Filters
+              </MenuItem>
+            </>
+          )}
+        </>
+      )}
+    </FilterMenuButton>
+  );
+}
+
+/**
+ * The phone Board's filter strip (#2216): while a filter is set, a 44px strip under the app bar
+ * says what is filtered and how many sessions remain ("Agent: Codex. Showing 10 of 29."), with Clear
+ * Filters. It is the Snoozed strip's pattern (#2211); a long name ends in an ellipsis, never the count.
+ */
+export function BoardFilterStrip({ sessions }: {
+  /** The Board's scope before its own filters: what "of 29" counts. */
+  sessions: readonly SessionView[];
+}) {
+  const filters = useStoreSelector((s) => s.filters);
+  const { setFilters } = useStoreActions();
+  const options = useBoardFilterOptions();
+  const shown = useMemo(() => filterBoardSessions(sessions, filters).length, [filters, sessions]);
+  if (activeBoardFilterCount(filters) === 0) return null;
+  const summary = boardFilterSummary(filters, options);
+  const result = `${boardFilterResult(shown, sessions.length)}.`;
+  const clear = (event: MouseEvent<HTMLButtonElement>) => {
+    // The strip leaves with the filters, so focus moves to the bar's Filters button, or to the
+    // search field while Search mode holds the bar, rather than <body>.
+    const header = event.currentTarget.closest("header");
+    flushSync(() => setFilters(NO_FILTERS));
+    header?.querySelector<HTMLElement>(".board-filters-button, .inbox-search input")?.focus();
+  };
+  return (
+    <div className="board-filter-strip" title={`${summary} ${result}`}>
+      <span className="board-filter-strip-text">
+        <span className="board-filter-strip-what">{summary}</span>
+        {" "}
+        <span className="board-filter-strip-result">{result}</span>
+      </span>
+      <button type="button" className="btn ghost" onClick={clear}>Clear Filters</button>
+    </div>
   );
 }

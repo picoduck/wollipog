@@ -394,13 +394,8 @@ export function SessionRequestPanel({
           ) : (
             <RequestCard
               key={detail.key}
-              session={{
-                ...session,
-                id: detail.sessionId,
-                title: detail.sessionTitle,
-                runnerId: detail.runnerId,
-                pendingApproval: detail.request,
-              }}
+              session={childRequestSession(session, detail.descendant)}
+              accountUnknown={!detail.descendant.driver}
               request={detail.request}
               runnerOnline={detail.runnerOnline}
               presentation="panel"
@@ -482,6 +477,27 @@ export function SessionRequestPanel({
       </div>
     </div>
   );
+}
+
+/**
+ * The session a child's request card reads (#2714). The parent's view lends only the reader's
+ * permissions on it; the harness and machine account are the child's own, so a sign-in card names
+ * the child's account and Choose Another Account… expects it. An older server sends neither, and
+ * the card is then told the account is unknown rather than shown the parent's.
+ */
+export function childRequestSession(session: SessionView, request: DescendantRequestView): SessionView {
+  return {
+    ...session,
+    id: request.sessionId,
+    title: request.sessionTitle,
+    runnerId: request.runnerId,
+    pendingApproval: request.request,
+    driver: request.driver ?? session.driver,
+    providerAccountId: request.providerAccountId,
+    providerAccountLabel: request.providerAccountLabel,
+    providerAccountAutomaticallySelected: undefined,
+    providerAccountSwitchFailure: undefined,
+  };
 }
 
 export function sessionRequestPanelKey(sessionId: string, occurrenceId: string): string {

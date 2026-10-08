@@ -9416,6 +9416,7 @@ export class SessionsService {
           responseOwner: decision.authority,
           occurrenceId: decision.occurrenceId,
           request: this.workflowDecisionApproval(decision),
+          ...(viewer === "human" ? descendantAccountFacts(session) : {}),
         }];
       },
     );
@@ -9440,6 +9441,7 @@ export class SessionsService {
           responseOwner,
           occurrenceId: request.occurrenceId,
           request,
+          ...(viewer === "human" ? descendantAccountFacts(session) : {}),
         }];
       });
     });
@@ -9842,11 +9844,17 @@ export class SessionsService {
       if (optionId !== null && !pending.options.some((option) => option.optionId === optionId)) {
         return fail("authentication action is not offered by the current recovery request", 409);
       }
+      // Who chose this sign-in action (#2742): the runner names them on this session's outcome only,
+      // never on the other sessions the same recovery completes automatically.
+      const resolvedBy: PermissionResolver | undefined = actor.kind === "human" && actor.id && !resolvedByParentSessionId
+        ? { kind: "user", userId: actor.id }
+        : undefined;
       const sent = this.hub.sendToRunner(session.runnerId, {
         type: "resolve_permission",
         sessionId,
         requestId,
         optionId,
+        ...(resolvedBy ? { resolvedBy } : {}),
       });
       if (!sent) return fail("runner is offline", 409);
       this.recordGovernanceAudit(session, pending, "resolution", optionId === null ? "dismissed" : "allowed", actor, now, { optionId });
@@ -14422,4 +14430,17 @@ function replacePendingApproval(
   const [first, ...rest] = pendingRequests(current).map((request) =>
     request.requestId === replacement.requestId ? replacement : request);
   return { ...first!, ...(rest.length ? { additionalRequests: rest } : {}) };
+}
+
+/** A child request's own harness and machine account, so the parent's request card never reads its
+ * own in their place (#2714). Only a person's Requests panel shows them: an Orchestrator's listing
+ * carries no account label, which may be an email. Absent account fields stay absent: the child
+ * uses the machine default. */
+function descendantAccountFacts(session: Pick<SessionView, "driver" | "providerAccountId" | "providerAccountLabel">):
+  Pick<DescendantRequestView, "driver" | "providerAccountId" | "providerAccountLabel"> {
+  return {
+    driver: session.driver,
+    ...(session.providerAccountId ? { providerAccountId: session.providerAccountId } : {}),
+    ...(session.providerAccountLabel ? { providerAccountLabel: session.providerAccountLabel } : {}),
+  };
 }

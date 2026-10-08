@@ -43,6 +43,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `ProjectsIcon` | Lucide | `FolderKanban` | Project collection navigation. |
 | `BoardIcon` | Lucide | `Columns3` | Generic board columns. |
 | `ListIcon` | Lucide | `List` | Generic list layout. |
+| `FilterIcon` | Lucide | `ListFilter` | The phone Board's Filters button, which opens the Filters sheet. |
 | `AlarmClockIcon` | Lucide | `AlarmClock` | Snooze: a snoozed Sessions row's return time (#2209) and the Sessions preview bar's Snooze button (#2210), and the Sessions No Snoozed Sessions and No Active Sessions states (#2220). |
 | `DismissReminderIcon` | Lucide | `AlarmClockOff` | Dismiss Reminder in the Sessions context menu (#2214). |
 | `ConnectionsIcon` | Lucide | `MonitorCog` | Runner connection management. |
