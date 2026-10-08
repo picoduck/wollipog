@@ -17886,11 +17886,17 @@ test("a live event whose history was reset while its payload staged is re-read f
   assert.ok(requests.includes("session_history_page"), JSON.stringify(requests));
 });
 
-async function untilStagingStarts(gate: { calls: () => number }): Promise<void> {
-  for (let attempt = 0; attempt < 200 && gate.calls() === 0; attempt++) {
-    await new Promise<void>((resolve) => setImmediate(resolve));
+/** Staging hashes and writes on the thread pool, so wait on time, not a count of turns. */
+async function eventually(condition: () => boolean, what: string, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    assert.ok(Date.now() < deadline, `timed out waiting until ${what}`);
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
   }
-  assert.ok(gate.calls() > 0, "staging started");
+}
+
+async function untilStagingStarts(gate: { calls: () => number }): Promise<void> {
+  await eventually(() => gate.calls() > 0, "staging started");
 }
 
 test("an indexed history page staged across a history reset is not applied", async () => {
@@ -18082,11 +18088,12 @@ test("a runner's frames keep arrival order while a large payload becomes durable
     } as SessionEventPayload }, 1);
     queue.enqueue({ type: "session_status", sessionId: slow, status: "completed" }, 1);
     queue.enqueue({ type: "session_event", sessionId: other, payload: { kind: "agent_message", messageId: "m", text: "meanwhile" } }, 1);
+    await untilStagingStarts(gate);
     for (let index = 0; index < 5; index++) await new Promise<void>((resolve) => setImmediate(resolve));
     assert.deepEqual(handled, [], "nothing overtakes the frame whose payload is still in flight");
     assert.deepEqual(db.listSessionWorkflowArtifacts(slow), []);
     gate.release();
-    for (let index = 0; index < 50 && handled.length < 4; index++) await new Promise<void>((resolve) => setImmediate(resolve));
+    await eventually(() => handled.length === 4, "every frame was handled");
   } finally {
     gate.restore();
     queue.close();
