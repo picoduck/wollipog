@@ -10,6 +10,7 @@ import {
   DEFAULT_WAL_AUTOCHECKPOINT_PAGES,
   WAL_CHECKPOINT_BACKSTOP_PAGES,
   WalCheckpointer,
+  sqliteHasWalResetFix,
   type WalCheckpointerEvent,
   type WalCheckpointerOptions,
 } from "./wal-checkpointer.js";
@@ -22,6 +23,9 @@ import {
  */
 
 const RUNNER_ID = "wal-runner";
+/** The worker never runs on a SQLite without the WAL-reset fix; its behaviour is tested where it runs. */
+const LIVE = sqliteHasWalResetFix(process.versions.sqlite)
+  ? {} : { skip: `SQLite ${process.versions.sqlite} lacks the WAL-reset fix, so no worker runs` };
 
 function runnerMeta(): RunnerMetadata {
   return {
@@ -75,7 +79,7 @@ async function until(condition: () => boolean, what: string, timeoutMs = 10_000)
 const has = (events: WalCheckpointerEvent[], type: WalCheckpointerEvent["type"]) =>
   events.some((event) => event.type === type);
 
-test("the worker checkpoints the log while the main connection's own checkpoint waits at the backstop", async (t) => {
+test("the worker checkpoints the log while the main connection's own checkpoint waits at the backstop", LIVE, async (t) => {
   const h = open(t, { intervalMs: 20 });
   await until(() => has(h.events, "online"), "the worker to start");
   assert.equal(h.pragma("wal_autocheckpoint"), WAL_CHECKPOINT_BACKSTOP_PAGES);
@@ -95,7 +99,7 @@ test("the worker runs only PASSIVE checkpoints", () => {
   assert.deepEqual([...new Set(modes)], ["PASSIVE"], "no FULL, RESTART or TRUNCATE checkpoint");
 });
 
-test("main-connection readers and writers never wait for the worker", async (t) => {
+test("main-connection readers and writers never wait for the worker", LIVE, async (t) => {
   const h = open(t, { intervalMs: 1 });
   await until(() => has(h.events, "online"), "the worker to start");
   // Any wait for a lock the worker held would now fail at once with SQLITE_BUSY.
@@ -115,7 +119,7 @@ test("main-connection readers and writers never wait for the worker", async (t) 
     "a complete checkpoint once the reader is gone");
 });
 
-test("a dead worker leaves the log bounded by the backstop, and the main connection keeps writing", async (t) => {
+test("a dead worker leaves the log bounded by the backstop, and the main connection keeps writing", LIVE, async (t) => {
   const backstopPages = 64;
   const h = open(t, { intervalMs: 20, backstopPages, restartDelaysMs: [60_000] });
   await until(() => has(h.events, "online"), "the worker to start");
@@ -137,7 +141,7 @@ test("a dead worker leaves the log bounded by the backstop, and the main connect
   assert.equal(h.db.getHydratedSeq("s-1"), 2_000, "every commit succeeded without the worker");
 });
 
-test("a crashed worker restarts and resumes checkpointing", async (t) => {
+test("a crashed worker restarts and resumes checkpointing", LIVE, async (t) => {
   const h = open(t, { intervalMs: 20, restartDelaysMs: [20] });
   await until(() => has(h.events, "online"), "the worker to start");
   await (h.checkpointer as unknown as { worker: { terminate(): Promise<number> } }).worker.terminate();
@@ -149,7 +153,7 @@ test("a crashed worker restarts and resumes checkpointing", async (t) => {
   assert.equal(h.checkpointer.running(), true);
 });
 
-test("a worker that cannot open the database never takes the control plane down", async (t) => {
+test("a worker that cannot open the database never takes the control plane down", LIVE, async (t) => {
   const h = open(t, { intervalMs: 20 });
   const events: WalCheckpointerEvent[] = [];
   const broken = new WalCheckpointer(h.db.raw(), join(h.location, "not-a-directory", "missing.db"), {
@@ -167,16 +171,17 @@ test("a worker that cannot open the database never takes the control plane down"
   assert.equal(events.length, settled, "a stopped checkpointer schedules nothing more");
 });
 
-test("a clean shutdown checkpoints once more and leaves no log or lock behind", async (t) => {
+test("a clean shutdown checkpoints once more and leaves no log or lock behind", LIVE, async (t) => {
   const h = open(t, { intervalMs: 60_000 });
   await until(() => has(h.events, "online"), "the worker to start");
   h.ingest(300);
   assert.ok(existsSync(h.wal));
+  const reportsBeforeStop = h.events.length;
   h.db.stopWalCheckpoints();
   assert.equal(h.checkpointer.running(), false);
   // The worker reported its last checkpoint before it closed; the report arrives on a later turn.
-  await until(() => has(h.events, "checkpoint"), "the last checkpoint's report");
-  const last = h.events.filter((event) => event.type === "checkpoint").at(-1);
+  await until(() => has(h.events.slice(reportsBeforeStop), "checkpoint"), "the last checkpoint's report");
+  const last = h.events.slice(reportsBeforeStop).filter((event) => event.type === "checkpoint").at(-1);
   assert.equal(last?.type === "checkpoint" && last.checkpointed, last?.type === "checkpoint" && last.log,
     "the stop ran a complete last checkpoint");
   assert.equal(h.pragma("wal_autocheckpoint"), DEFAULT_WAL_AUTOCHECKPOINT_PAGES);
@@ -201,4 +206,45 @@ test("an in-memory database has no log to checkpoint", () => {
   } finally {
     db.close();
   }
+});
+
+test("the worker runs only on a SQLite with the WAL-reset fix", (t) => {
+  // https://sqlite.org/wal.html#the_wal_reset_bug: fixed in 3.51.3, backported to 3.44.6 and 3.50.7.
+  const cases: Array<[string | undefined, boolean]> = [
+    ["3.47.2", false], // Node 22.13.0, the oldest supported runtime
+    ["3.51.2", false], ["3.51.3", true], ["3.53.1", true], ["3.60.0", true], ["4.0.0", true],
+    ["3.44.5", false], ["3.44.6", true], ["3.45.0", false], ["3.50.6", false], ["3.50.7", true],
+    ["", false], [undefined, false], ["unknown", false],
+  ];
+  for (const [version, fixed] of cases) assert.equal(sqliteHasWalResetFix(version), fixed, String(version));
+
+  const root = mkdtempSync(join(tmpdir(), "wollipog-wal-unfixed-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const db = ControlPlaneDb.open(join(root, "control-plane.db"));
+  t.after(() => db.close());
+  const events: WalCheckpointerEvent[] = [];
+  const checkpointer = db.startWalCheckpoints({ sqliteVersion: "3.47.2", onEvent: (event) => events.push(event) });
+  assert.equal(checkpointer?.running(), false);
+  assert.deepEqual(events, [{ type: "disabled", reason: "SQLite 3.47.2 lacks the WAL-reset fix" }]);
+  assert.equal(Object.values(db.raw().prepare("PRAGMA wal_autocheckpoint").get()!)[0], DEFAULT_WAL_AUTOCHECKPOINT_PAGES,
+    "the main connection keeps checkpointing itself");
+  db.stopWalCheckpoints();
+});
+
+test("restart backoff advances until a worker stays up long enough to count as healthy", LIVE, async (t) => {
+  const kill = async (h: ReturnType<typeof open>, online: number) => {
+    await until(() => h.events.filter((event) => event.type === "online").length === online, `start ${online}`);
+    await (h.checkpointer as unknown as { worker: { terminate(): Promise<number> } }).worker.terminate();
+    await until(() => h.events.filter((event) => event.type === "exited").length === online, `exit ${online}`);
+  };
+  const delays = (h: ReturnType<typeof open>) =>
+    h.events.flatMap((event) => event.type === "exited" ? [event.restartInMs] : []);
+
+  const failing = open(t, { intervalMs: 20, restartDelaysMs: [10, 50, 100], healthyAfterMs: 60_000 });
+  for (let started = 1; started <= 3; started++) await kill(failing, started);
+  assert.deepEqual(delays(failing), [10, 50, 100], "a worker that keeps dying backs off");
+
+  const healthy = open(t, { intervalMs: 20, restartDelaysMs: [10, 50, 100], healthyAfterMs: 0 });
+  for (let started = 1; started <= 3; started++) await kill(healthy, started);
+  assert.deepEqual(delays(healthy), [10, 10, 10], "a worker that stayed healthy restarts at the first delay");
 });
