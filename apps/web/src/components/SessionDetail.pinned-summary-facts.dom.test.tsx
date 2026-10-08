@@ -43,7 +43,7 @@ for (const [name, value] of Object.entries({
 Object.defineProperty(domWindow, "matchMedia", {
   configurable: true,
   value: (query: string) => ({
-    matches: phone && query === "(max-width: 760px)",
+    get matches() { return phone && query === "(max-width: 760px)"; },
     media: query,
     addEventListener() {},
     removeEventListener() {},
@@ -189,6 +189,8 @@ function assertBarHasNoFacts(bar: HTMLElement) {
 for (const width of [{ phone: false, name: "desktop" }, { phone: true, name: "phone" }]) {
   test(`the ${width.name} session bar holds no account, branch, pull request, changes or detached-work fact`, async () => {
     await withSession({ phone: width.phone }, async (container) => {
+      // The phone bar is the app bar's second line, without the desktop detail bar's geometry.
+      assert.equal(sessionBar(container).classList.contains("detail-bar"), !width.phone, `renders the ${width.name} bar`);
       assertBarHasNoFacts(sessionBar(container));
     });
   });

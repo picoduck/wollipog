@@ -16,7 +16,7 @@ Object.defineProperty(domWindow, "matchMedia", {
   configurable: true,
   writable: true,
   value: (query: string) => ({
-    matches: query === "(max-width: 760px)" ? phone : false,
+    get matches() { return query === "(max-width: 760px)" ? phone : false; },
     media: query,
     onchange: null,
     addEventListener() {},

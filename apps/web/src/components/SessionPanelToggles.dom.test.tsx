@@ -13,7 +13,7 @@ let coarsePointer = false;
 Object.defineProperty(domWindow, "matchMedia", {
   configurable: true,
   value: (query: string) => ({
-    matches: query === "(pointer: coarse)" && coarsePointer,
+    get matches() { return query === "(pointer: coarse)" && coarsePointer; },
     media: query,
     addEventListener() {},
     removeEventListener() {},

@@ -14,7 +14,7 @@ import { markdownPlainText as plainText } from "./markdown-plain-text.js";
 const domWindow = new Window({ url: "http://localhost/" });
 let coarsePointer = false;
 const matchMedia = (query: string) => ({
-  matches: query === "(pointer: coarse)" ? coarsePointer : false,
+  get matches() { return query === "(pointer: coarse)" ? coarsePointer : false; },
   media: query,
   onchange: null,
   addEventListener() {},

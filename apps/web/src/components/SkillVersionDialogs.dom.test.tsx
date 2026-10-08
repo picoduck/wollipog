@@ -25,7 +25,7 @@ installDomTestCleanup(domWindow);
 let phoneWidth = false;
 Object.defineProperty(domWindow, "matchMedia", {
   configurable: true,
-  value: (query: string) => ({ matches: phoneWidth && query.includes("max-width"), media: query, addEventListener() {}, removeEventListener() {} }),
+  value: (query: string) => ({ get matches() { return phoneWidth && query.includes("max-width"); }, media: query, addEventListener() {}, removeEventListener() {} }),
 });
 for (const [name, value] of Object.entries({
   window: domWindow,

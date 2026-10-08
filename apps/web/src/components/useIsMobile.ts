@@ -36,25 +36,61 @@ const TABLET_QUERY = `(max-width: ${TABLET_BREAKPOINT_PX}px)`;
 export const COMPACT_QUERY = `(min-width: ${MOBILE_BREAKPOINT_PX + 1}px) and (max-width: ${COMPACT_BREAKPOINT_PX - 1}px)`;
 const SHORT_QUERY =`(max-height: ${SHORT_VIEWPORT_PX}px)`;
 
-/** Live width flag; re-renders on breakpoint crossings only (not every resize pixel —
- * the snapshot is a boolean, so useSyncExternalStore ignores same-value notifications).
- * `resize` is subscribed as well: emulated/automated viewports can deliver the resize before
- * the MediaQueryList change event, and the flag must track the layout the CSS already shows. */
-function useMediaQuery(query: string): boolean {
-  return useSyncExternalStore(
-    (onChange) => {
-      const mq = window.matchMedia(query);
-      mq.addEventListener("change", onChange);
-      window.addEventListener("resize", onChange);
+interface MediaQueryStore {
+  subscribe: (onChange: () => void) => () => void;
+  getSnapshot: () => boolean;
+}
+
+/** A server render has no viewport; it renders the desktop layout. */
+const SERVER_STORE: MediaQueryStore = { subscribe: () => () => {}, getSnapshot: () => false };
+
+/** One store per query, shared by every component that reads it (#2766): `matchMedia` runs once per
+ * query, and `subscribe` keeps one identity, so a re-render never re-subscribes. */
+let stores: { target: Window; matchMedia: Window["matchMedia"]; byQuery: Map<string, MediaQueryStore> } | undefined;
+
+/** One `change` and one `resize` listener serve all of a query's subscribers, attached while it
+ * has any. `resize` is subscribed as well: emulated/automated viewports can deliver the resize
+ * before the MediaQueryList change event, and the flag must track the layout the CSS already shows. */
+function createStore(target: Window, query: string): MediaQueryStore {
+  const list = target.matchMedia(query);
+  const listeners = new Set<() => void>();
+  const notify = () => listeners.forEach((listener) => listener());
+  return {
+    subscribe(onChange) {
+      if (listeners.size === 0) {
+        list.addEventListener("change", notify);
+        target.addEventListener("resize", notify);
+      }
+      listeners.add(onChange);
       return () => {
-        mq.removeEventListener("change", onChange);
-        window.removeEventListener("resize", onChange);
+        if (!listeners.delete(onChange) || listeners.size > 0) return;
+        list.removeEventListener("change", notify);
+        target.removeEventListener("resize", notify);
       };
     },
-    () => window.matchMedia(query).matches,
-    // A server render has no viewport; it renders the desktop layout.
-    () => false,
-  );
+    getSnapshot: () => list.matches,
+  };
+}
+
+function mediaQueryStore(query: string): MediaQueryStore {
+  if (typeof window === "undefined") return SERVER_STORE;
+  // A different window or matchMedia (tests swap both) starts over rather than read stale lists.
+  if (stores?.target !== window || stores.matchMedia !== window.matchMedia) {
+    stores = { target: window, matchMedia: window.matchMedia, byQuery: new Map() };
+  }
+  let store = stores.byQuery.get(query);
+  if (!store) {
+    store = createStore(window, query);
+    stores.byQuery.set(query, store);
+  }
+  return store;
+}
+
+/** Live width flag; re-renders on breakpoint crossings only (not every resize pixel —
+ * the snapshot is a boolean, so useSyncExternalStore ignores same-value notifications). */
+function useMediaQuery(query: string): boolean {
+  const store = mediaQueryStore(query);
+  return useSyncExternalStore(store.subscribe, store.getSnapshot, SERVER_STORE.getSnapshot);
 }
 
 /** Live phone-width flag. */
@@ -87,12 +123,5 @@ export function useIsShortViewport(): boolean {
  * Distinct from useIsMobile: a narrow desktop window is mobile-wide but has a hardware keyboard,
  * so copy and behavior keyed on the SOFTWARE keyboard must not follow width alone. */
 export function useIsTouchPhone(): boolean {
-  return useSyncExternalStore(
-    (onChange) => {
-      const mq = window.matchMedia(TOUCH_PHONE_MEDIA);
-      mq.addEventListener("change", onChange);
-      return () => mq.removeEventListener("change", onChange);
-    },
-    () => window.matchMedia(TOUCH_PHONE_MEDIA).matches,
-  );
+  return useMediaQuery(TOUCH_PHONE_MEDIA);
 }

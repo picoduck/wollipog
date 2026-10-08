@@ -313,7 +313,7 @@ test("More closes when the viewport leaves the phone breakpoint", async () => {
   let phone = true;
   const prior = domWindow.matchMedia;
   domWindow.matchMedia = ((query: string) => ({
-    matches: phone,
+    get matches() { return phone; },
     media: query,
     onchange: null,
     addEventListener() {},
@@ -484,7 +484,7 @@ test("crossing to desktop from the Settings row hands focus to the desktop gear"
   let phone = true;
   const prior = domWindow.matchMedia;
   domWindow.matchMedia = ((query: string) => ({
-    matches: phone,
+    get matches() { return phone; },
     media: query,
     onchange: null,
     addEventListener() {},

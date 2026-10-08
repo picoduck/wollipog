@@ -13,7 +13,7 @@ let matchingMedia = new Set<string>();
 Object.defineProperty(domWindow, "matchMedia", {
   configurable: true,
   value: (query: string) => ({
-    matches: matchingMedia.has(query),
+    get matches() { return matchingMedia.has(query); },
     media: query,
     addEventListener: () => undefined,
     removeEventListener: () => undefined,
