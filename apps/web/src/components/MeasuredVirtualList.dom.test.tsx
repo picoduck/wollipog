@@ -559,3 +559,73 @@ test("reader movement during incomplete history is durable before recovery or un
     Object.defineProperty(globalThis, "cancelAnimationFrame", { configurable: true, writable: true, value: cancelFrame });
   }
 });
+
+function ResultSetFixture({ items, resultSetKey }: { items: string[]; resultSetKey: string }) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  return (
+    <div ref={scrollRef} data-testid="breakpoint-reader" style={{ overflow: "auto" }}>
+      <MeasuredVirtualList
+        items={items}
+        getKey={(item) => item}
+        renderItem={(item) => item}
+        scrollRef={scrollRef}
+        estimateSize={() => 97}
+        overscan={6}
+        preserveAnchor
+        resultSetKey={resultSetKey}
+        className="breakpoint-list"
+      />
+    </div>
+  );
+}
+
+test("a new result set starts at the top, while a reorder under the same key keeps the reader's row (#2804)", async () => {
+  Object.assign(breakpointGeometry, { width: 390, rowHeight: 98, viewportHeight: 637 });
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const keyOffset = (reader: HTMLElement, key: string) =>
+    reader.querySelector<HTMLElement>(`[data-virtual-row][data-virtual-key="${key}"]`)!.getBoundingClientRect().top;
+  try {
+    await act(async () => root.render(<ResultSetFixture items={BREAKPOINT_ROWS} resultSetKey="" />));
+    const reader = container.querySelector<HTMLElement>("[data-testid='breakpoint-reader']");
+    assert.ok(reader);
+    // A browser clamps scrollTop to the current layout's end.
+    let scrollTop = 0;
+    Object.defineProperty(reader, "scrollTop", {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => { scrollTop = Math.max(0, Math.min(value, breakpointMaxScrollTop())); },
+    });
+    reader.scrollTop = 455;
+    await act(async () => {
+      reader.dispatchEvent(new domWindow.Event("scroll") as never);
+    });
+    assert.equal(keyOffset(reader, "row-4"), -56);
+
+    // A live reorder moves a row from above the reader's to the end: the reader's row stays put.
+    const reordered = [...BREAKPOINT_ROWS.slice(1), BREAKPOINT_ROWS[0]!];
+    await act(async () => root.render(<ResultSetFixture items={reordered} resultSetKey="" />));
+    assert.equal(keyOffset(reader, "row-4"), -56, "a reorder keeps the reader's row where it was");
+    assert.equal(reader.scrollTop, 357);
+
+    // A search answers with a different set that still holds the reader's row. It starts at the top.
+    const results = ["row-2", "row-3", "row-4", "row-5", "row-6", "row-7", "row-8", "row-9"];
+    await act(async () => root.render(<ResultSetFixture items={results} resultSetKey="row" />));
+    assert.equal(reader.scrollTop, 0, "a different result set does not carry the reader's row into it");
+    assert.equal(keyOffset(reader, "row-2"), 7);
+
+    // A later update under the same key holds the new first row, not the old set's.
+    await act(async () => root.render(<ResultSetFixture items={[...results]} resultSetKey="row" />));
+    assert.equal(reader.scrollTop, 0);
+
+    // Clearing the search is a new set too.
+    await act(async () => root.render(<ResultSetFixture items={reordered} resultSetKey="" />));
+    assert.equal(reader.scrollTop, 0, "the whole list returns at its first row");
+    assert.equal(keyOffset(reader, "row-1"), 7);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    Object.assign(breakpointGeometry, { width: 390, rowHeight: 98, viewportHeight: 637 });
+  }
+});

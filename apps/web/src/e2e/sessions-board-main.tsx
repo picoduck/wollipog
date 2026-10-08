@@ -467,6 +467,7 @@ declare global {
     __replayProviderLoginSnapshot: () => void;
     __hydrateEntrySession: () => void;
     __updateEntrySession: (change: Partial<SessionView>) => void;
+    __updateSession: (sessionId: string, change: Partial<SessionView>) => void;
   }
 }
 window.__setColumnCalls = [];
@@ -483,8 +484,10 @@ window.__hydrateEntrySession = () => {
   socket?.push(snapshot());
   for (const resolve of entrySessionWaiters.splice(0)) resolve();
 };
-window.__updateEntrySession = (change) => {
-  const value = sessions.find((candidate) => candidate.id === "s-approval")!;
+window.__updateEntrySession = (change) => window.__updateSession("s-approval", change);
+// Live activity on any session, as the control plane delivers it (#2804).
+window.__updateSession = (sessionId, change) => {
+  const value = sessions.find((candidate) => candidate.id === sessionId)!;
   Object.assign(value, change);
   socket?.push({ type: "session_upsert", session: structuredClone(value) });
 };

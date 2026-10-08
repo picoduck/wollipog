@@ -68,6 +68,11 @@ function ConnectedInboxRow(props: Omit<InboxRowProps, "activity" | "activityNow"
 
 export const InboxList = forwardRef<HTMLDivElement, {
   entries: InboxListEntry[];
+  /**
+   * The search the entries answer. Changing it shows the new results from the top; a reorder under
+   * the same search keeps the reader's row (#2804).
+   */
+  query?: string;
   selectedSessionId: string | null;
   pinnedSessionIds: ReadonlySet<string>;
   pinnedAncestorSessionIds?: ReadonlySet<string>;
@@ -91,6 +96,7 @@ export const InboxList = forwardRef<HTMLDivElement, {
   stopBeforeArchiveSupported?: boolean;
 }>(function InboxList({
   entries,
+  query = "",
   selectedSessionId,
   pinnedSessionIds,
   pinnedAncestorSessionIds = new Set(),
@@ -180,6 +186,7 @@ export const InboxList = forwardRef<HTMLDivElement, {
         // navigation moves between.
         pinnedKey={selectedSessionId}
         preserveAnchor
+        resultSetKey={query}
         estimateSize={threeRow ? estimateThreeRowInboxRow : estimateTwoRowInboxRow}
         scrollRef={listRef}
         overscan={6}

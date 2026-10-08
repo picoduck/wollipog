@@ -582,15 +582,23 @@ export function InboxView({
     });
   }, [liveIds, browsingOrderLease]);
 
+  // Until the layout effect above renders its replacement, the held order belongs to the previous
+  // structural key. Projecting a new search's rows through it led the first commit with the old
+  // results, so the list held the old first match across the change (#2804). Show the live order
+  // that effect is about to hold instead.
+  const structuralChangePending = structuralOrderKeyRef.current !== null &&
+    structuralOrderKeyRef.current !== structuralOrderKey;
+  const displayedHeldOrder = structuralChangePending ? null : heldOrder;
+
   // Threading happens AFTER the held order is applied (#896): a held order is a flat list of ids,
   // and threading only moves a child under its parent and drops a collapsed parent's children, so
   // the rows the user was browsing keep their places. Threading the live list before holding it
   // would have appended a re-expanded thread's children at the END of the held order instead.
   const entries = useMemo(() => threadInboxRows(
-    heldOrder ? reconcileInboxItems(heldOrder, liveEntries, (entry) => entry.session.id) : liveEntries,
+    displayedHeldOrder ? reconcileInboxItems(displayedHeldOrder, liveEntries, (entry) => entry.session.id) : liveEntries,
     collapsedThreads,
     stalledSessionIds,
-  ), [collapsedThreads, heldOrder, liveEntries, stalledSessionIds]);
+  ), [collapsedThreads, displayedHeldOrder, liveEntries, stalledSessionIds]);
   const displayedIds = useMemo(() => entries.map((entry) => entry.session.id), [entries]);
   displayedIdsRef.current = displayedIds;
   // What the list pane shows (#2220), in the §12 order: offline, loading, no results, empty, rows.
@@ -633,10 +641,10 @@ export function InboxView({
   });
   // The order the list WOULD show if nothing were held, threaded the same way, so a collapsed
   // thread's absent children never read as a pending reorder.
-  const liveDisplayedIds = useMemo(() => heldOrder
+  const liveDisplayedIds = useMemo(() => displayedHeldOrder
     ? threadInboxRows(liveEntries, collapsedThreads, stalledSessionIds).map((entry) => entry.session.id)
-    : displayedIds, [collapsedThreads, displayedIds, heldOrder, liveEntries, stalledSessionIds]);
-  const orderUpdateAvailable = !isMobile && !boardMode && heldOrder !== null && (
+    : displayedIds, [collapsedThreads, displayedIds, displayedHeldOrder, liveEntries, stalledSessionIds]);
+  const orderUpdateAvailable = !isMobile && !boardMode && displayedHeldOrder !== null && (
     displayedIds.length !== liveDisplayedIds.length || displayedIds.some((id, index) => id !== liveDisplayedIds[index])
   );
   // A selection that threading hid (its thread was collapsed, or a search kept the parent and not
@@ -1750,6 +1758,7 @@ export function InboxView({
               <InboxList
                 ref={captureListRef}
                 entries={entries}
+                query={normalizedQuery}
                 selectedSessionId={displayedSelection}
                 pinnedSessionIds={pinnedSessions}
                 pinnedAncestorSessionIds={pinnedAncestorSessionIds}
