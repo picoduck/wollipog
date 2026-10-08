@@ -122,10 +122,12 @@ import type {
   DriverBackgroundJobStopResult,
   DriverBackgroundTerminalJob,
   DriverBackgroundWorkUpdate,
+  DriverCallbacks,
   DriverSteerResult,
   DriverSubscriptionUsageUpdate,
   StopReason,
 } from "./drivers/driver.js";
+import { coalesceDriverTextDeltas, type TextDeltaCoalescer } from "./text-delta-coalescer.js";
 import { CodexAppServerResumeError } from "./drivers/codex-app-server.js";
 import type { CodexPromptTemplate } from "./discovery/codex-prompts.js";
 import {
@@ -1195,6 +1197,8 @@ export class SessionManager {
    * process must still fail closed instead of matching the replacement generation. */
   private readonly queueEditGeneration = randomUUID();
   private readonly active = new Map<string, ActiveSession>();
+  /** The live provider launch's streamed-text coalescer per session (#2762). */
+  private readonly textDeltaCoalescers = new Map<string, TextDeltaCoalescer>();
   /** Stable ordering spans active queues, promotion reservations, and app-server recovery queues. */
   private readonly nextQueueOrdinalBySession = new Map<string, number>();
   /** Per-session single-consumer steering lane. Admission remains synchronous; provider work does not. */
@@ -3087,6 +3091,8 @@ export class SessionManager {
   ): boolean {
     const active = this.active.get(sessionId);
     if (!active || (expected && active !== expected)) return false;
+    this.flushTextDeltas(sessionId);
+    this.textDeltaCoalescers.delete(sessionId);
     if (releaseLease) this.releaseActiveWorktreeLease(active);
     const deleted = this.active.delete(sessionId);
     if (deleted) {
@@ -7809,7 +7815,7 @@ export class SessionManager {
           hookStateDir: this.guardStateSandbox?.hookStateDir,
           ...(launchPreparation?.codexPrompts ? { codexPrompts: launchPreparation.codexPrompts } : {}),
         },
-        {
+        this.coalesceTextDeltas(sessionId, {
         supportsWorkerAttention: () => runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "workerAttention"),
         onEvent: (p) => this.onDriverEvent(sessionId, p),
         onClaudeUsageCheckpoint: (checkpoint) => {
@@ -7981,7 +7987,7 @@ export class SessionManager {
           const updated = this.store.readMeta(sessionId);
           if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
         },
-      },
+      }),
       );
     } catch (error) {
       if (worktreeLeaseOwner) this.store.releaseWorktreeLease(sessionId, worktreeLeaseOwner);
@@ -9814,6 +9820,7 @@ export class SessionManager {
     durable?: DurableCommandLifecycle,
   ): boolean {
     if (this.active.get(sessionId)?.historyIntegrityFailure) return false;
+    this.flushTextDeltas(sessionId);
     try {
       const payload: SessionEventPayload = {
         kind: "user_message",
@@ -12959,7 +12966,8 @@ export class SessionManager {
     try {
       let stop: Awaited<ReturnType<Driver["prompt"]>>;
       entry.usageWindowRejection = undefined;
-      stop = await entry.client.prompt(`${text}${workspaceReferenceText}`, images, slashCommand);
+      stop = await entry.client.prompt(`${text}${workspaceReferenceText}`, images, slashCommand)
+        .finally(() => this.flushTextDeltas(sessionId));
       if (entry.historyIntegrityFailure) return;
       this.captureAgentSessionId(sessionId, entry.client); // codex threadId becomes known after turn 1
       if (backgroundJobIds?.length && stop === "refusal" && !entry.backgroundPromptAccepted) {
@@ -13330,7 +13338,7 @@ export class SessionManager {
 
     let providerPromise: Promise<StopReason>;
     try {
-      providerPromise = entry.client.invokeCommand(prepared);
+      providerPromise = entry.client.invokeCommand(prepared).finally(() => this.flushTextDeltas(sessionId));
     } catch (error) {
       await this.rollbackPreparedCommandCheckpoint(sessionId, entry, checkpoint);
       this.emitEvent(sessionId, { kind: "error", message: `session command failed: ${errText(error)}` });
@@ -14031,6 +14039,8 @@ export class SessionManager {
   }
 
   cancel(sessionId: string): void {
+    // Text the provider streamed before the interrupt precedes everything the interrupt records.
+    this.flushTextDeltas(sessionId);
     // Cancellation of an initial start is a generation boundary just like deletion, but it is not
     // a permanent tombstone: a later explicit Restart may allocate a fresh generation.
     const cancelledPreparation = this.invalidateLaunchGeneration(sessionId);
@@ -14275,6 +14285,7 @@ export class SessionManager {
   }
 
   stop(sessionId: string): void {
+    this.flushTextDeltas(sessionId);
     // Stop is a terminal lifecycle boundary even while launch is suspended in an asynchronous
     // provider-authentication probe. Fence that generation before the probe can persist a new
     // recovery block or publish a non-terminal status for the stopped session.
@@ -15798,6 +15809,9 @@ export class SessionManager {
     // processes alive AND unregistered for reaping, so waitForPendingKills would falsely report
     // "reaped" and the caller would release the lease over a live provider. Track clean completion.
     let clean = true;
+    // A provider stopped mid-message keeps every delta it already streamed.
+    for (const coalescer of this.textDeltaCoalescers.values()) coalescer.flush();
+    this.textDeltaCoalescers.clear();
     for (const entry of this.active.values()) {
       try {
         entry.client.dispose();
@@ -15922,6 +15936,7 @@ export class SessionManager {
     worktreePath?: string | null,
     capacityWait?: RunnerCapacityBlocker,
   ): void {
+    this.flushTextDeltas(sessionId);
     const authMeta = this.store.readMeta(sessionId);
     // A durable block holds prompt admission even while its shared probe is silent or another
     // session owns the credential-scope card. Turn settlement must not create attention alone.
@@ -16017,12 +16032,30 @@ export class SessionManager {
     }
   }
 
+  /** Coalesce one provider launch's streamed text deltas. A replaced launch's pending text lands
+   * first, so a retiring provider's last words never follow its replacement's. */
+  private coalesceTextDeltas(sessionId: string, callbacks: DriverCallbacks): DriverCallbacks {
+    this.flushTextDeltas(sessionId);
+    const coalesced = coalesceDriverTextDeltas(callbacks, {
+      onError: (error) => this.log(`streamed text flush failed for ${sessionId}: ${errText(error)}`),
+    });
+    this.textDeltaCoalescers.set(sessionId, coalesced.coalescer);
+    return coalesced.callbacks;
+  }
+
+  /** Land a session's pending streamed text. Every event append, status change, turn settlement,
+   * provider exit, and shutdown calls this first, so coalescing never reorders history. */
+  private flushTextDeltas(sessionId: string): void {
+    this.textDeltaCoalescers.get(sessionId)?.flush();
+  }
+
   private emitEvent(
     sessionId: string,
     payload: SessionEventPayload,
     durable?: DurableCommandLifecycle,
     preserveAsyncQuestionOccurrence = false,
   ): ReturnType<SessionStore["appendEvent"]> | undefined {
+    this.flushTextDeltas(sessionId);
     if ((payload.kind === "user_message" || payload.kind === "agent_message" ||
         payload.kind === "agent_thought" || payload.kind === "tool_call") &&
         this.store.readMeta(sessionId)?.providerUnstartedThreadId) {
