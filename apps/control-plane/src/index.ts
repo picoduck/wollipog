@@ -12,7 +12,6 @@ import { randomUUID } from "node:crypto";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import websocket from "@fastify/websocket";
 import cors from "@fastify/cors";
-import fastifyStatic from "@fastify/static";
 import { canMutateQuestionPolicy } from "./question-policy.js";
 import { automaticAccountSwitchForRunner } from "./automatic-account-switch-compatibility.js";
 import {
@@ -237,14 +236,13 @@ import { pushDecision } from "./push-decision.js";
 import { automationPushMessage } from "./automation-push-decision.js";
 import { validateSubscription, WebPushSender } from "./web-push.js";
 import {
-  appShellSecurityHeaders,
   injectSameOriginMarker,
   readWebIndexHtml,
-  isIndexHtmlPath,
   isSpaNavigation,
   resolveWebDist,
   shouldCacheWebIndex,
 } from "./web-dist.js";
+import { appShellHeaders, registerWebAppStatic } from "./web-static.js";
 import { normalizeDriverTelemetry, telemetryWindowDays } from "./driver-telemetry.js";
 import { registerUsageRoutes } from "./usage-routes.js";
 import { UsageRateTableService, defaultUsagePricingCachePath, resolveUsagePricingUrl } from "./usage-rate-table.js";
@@ -841,24 +839,13 @@ app.addHook("onResponse", async (req, reply) => {
 // REST + /ui (no CORS), and the fragment never reaches the server. Absent bundle → API-only.
 //
 // SECURITY INVARIANT: every sensitive route is an EXPLICIT `/api/...` (or `/ui`, `/runner`)
-// route, and Fastify prefers explicit routes over this plugin's wildcard. So the wildcard can
-// only ever serve files under webDist (traversal-guarded by @fastify/static) or the public app
-// shell — it can never reach a mutating handler with `routeOptions.url === "/*"` and thus skip
-// the device-auth gate above.
+// route, and Fastify prefers explicit routes over the static wildcards. So they can only ever
+// serve files under webDist or the public app shell — they can never reach a mutating handler
+// with `routeOptions.url === "/*"` and thus skip the device-auth gate above. Caching and
+// compression policy lives with the registration in web-static.ts.
 const webDist = resolveWebDist();
 if (webDist) {
-  // `allowedPath` refuses every routable spelling of the entry document (`/INDEX.HTML`,
-  // `/./index.html`, `/index.html/` …). An explicit `/index.html` route only beats the wildcard
-  // for that exact string; the rest would otherwise be served raw off disk — unmarked — and a
-  // phone opening one would point its API calls at itself. Refused paths fall through to the
-  // notFound handler, which renders the marked shell. Fastify rejects an authority-form-looking
-  // `//index.html` before routing, which is also safe because no entry-document bytes are served.
-  app.register(fastifyStatic, {
-    root: webDist,
-    prefix: "/",
-    index: false,
-    allowedPath: (pathname) => !isIndexHtmlPath(pathname),
-  });
+  registerWebAppStatic(app, webDist);
   app.log.info(`serving the web app from ${webDist}`);
 } else {
   app.log.info("no web bundle found (run `pnpm --filter @wollipog/web build`) — serving the API only");
@@ -887,7 +874,7 @@ app.setNotFoundHandler((req, reply) => {
   // client-side navigation, and rendering the shell would leave that reusable credential in
   // history/referrers instead of taking the redacting 404 path below.
   if (html && !carriesTokenParam(rawUrl) && isSpaNavigation(req.method, pathname)) {
-    return reply.headers(appShellSecurityHeaders(html)).type("text/html; charset=utf-8").send(html);
+    return reply.headers(appShellHeaders(html)).type("text/html; charset=utf-8").send(html);
   }
   req.log.info({ url: redactTokenInUrl(rawUrl) }, "route not found");
   reply.code(404).send({ error: "not found" });
@@ -1967,7 +1954,7 @@ const serveShell = async (req: FastifyRequest, reply: FastifyReply) => {
   // so nothing functional is lost.
   const rawUrl = req.raw.url ?? "";
   if (carriesTokenParam(rawUrl)) return reply.redirect(rawUrl.split("?")[0] || "/", 303);
-  return reply.headers(appShellSecurityHeaders(html)).type("text/html; charset=utf-8").send(html);
+  return reply.headers(appShellHeaders(html)).type("text/html; charset=utf-8").send(html);
 };
 app.get("/", serveShell);
 app.get("/index.html", serveShell);

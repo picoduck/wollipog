@@ -5,6 +5,7 @@ import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import { DESKTOP_EXCLUDED_ASSETS, isDesktopBuild, stripManifestLink } from "./src/desktop-bundle.js";
 import { webviewTargets } from "./src/css-support.js";
+import { precompressEmittedAssets } from "./src/precompressed-assets.js";
 
 const appRoot = dirname(fileURLToPath(import.meta.url));
 
@@ -45,10 +46,32 @@ function excludePwaAssetsFromDesktop(): Plugin {
   };
 }
 
+/**
+ * #2767 — write `.br` / `.gz` sidecars for the hashed assets, which the control plane serves to
+ * browsers that accept them (see `precompressed-assets.ts` and the control plane's
+ * `web-static.ts`).
+ *
+ * The desktop bundle gets them too: the webview ignores them, but the app also ships this
+ * directory as its `web/` resource, which its control-plane sidecar serves to paired phones. Not
+ * for the Playwright bundle, which `vite preview` serves without them. A watched build uses a
+ * faster brotli level so a rebuild does not spend seconds per save; until a sidecar is written,
+ * the file is served as is.
+ */
+function precompressAssets(mode: string): Plugin {
+  return {
+    name: "wollipog-precompress-assets",
+    apply: "build",
+    async writeBundle(output, bundle) {
+      if (mode === "production-e2e" || !output.dir) return;
+      await precompressEmittedAssets(output.dir, Object.keys(bundle), this.meta.watchMode ? 9 : 11);
+    },
+  };
+}
+
 // The control plane runs separately (default http://127.0.0.1:4317). The web app
 // talks to it directly over CORS + websocket; override via VITE_CONTROL_PLANE_*.
 export default defineConfig(({ mode }) => ({
-  plugins: [react(), excludePwaAssetsFromDesktop()],
+  plugins: [react(), excludePwaAssetsFromDesktop(), precompressAssets(mode)],
   build: {
     target: WOLLIPOG_WEBVIEW_TARGETS,
     cssTarget: WOLLIPOG_WEBVIEW_TARGETS,
