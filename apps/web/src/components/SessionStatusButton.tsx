@@ -137,6 +137,7 @@ export function SessionStatusButton({
 
   // The attribute and tooltip are written straight to the DOM inside one layout pass, as DetailBar
   // does: React does not own them, and nothing paints between taking them off and putting them back.
+  // It runs again when what sizes the badge changes: its label and "+N" (the tooltip) and its count.
   useLayoutEffect(() => {
     const trigger = popover.triggerRef.current;
     if (!trigger) return;
@@ -160,15 +161,24 @@ export function SessionStatusButton({
     void document.fonts?.ready.then(() => {
       if (!cancelled) measure();
     });
-    // The bar's width is set by the pane, never by the badge, so a collapse cannot re-trigger it.
+    // The title's room changes with the bar and with what sits beside it (#2765). Neither is sized by
+    // the badge, so a collapse cannot re-trigger the observer; the title and this button are, so
+    // they are left out.
     const bar = trigger.parentElement;
     const observer = typeof ResizeObserver === "undefined" || !bar ? null : new ResizeObserver(measure);
-    if (bar) observer?.observe(bar);
+    if (bar && observer) {
+      observer.observe(bar);
+      for (const child of bar.children) if (child !== trigger && child !== title) observer.observe(child);
+    }
+    // A renamed title resizes none of those, so its text is watched instead.
+    const renamed = typeof MutationObserver === "undefined" ? null : new MutationObserver(measure);
+    renamed?.observe(title, { characterData: true, childList: true, subtree: true });
     return () => {
       cancelled = true;
       observer?.disconnect();
+      renamed?.disconnect();
     };
-  });
+  }, [compact, tooltip, primary.count, popover.triggerRef, titleRef]);
 
   // A popover with nothing to act on holds focus itself, so Escape and Tab still work from it.
   useLayoutEffect(() => {
