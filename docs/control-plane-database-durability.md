@@ -28,7 +28,12 @@ recovers it.
   wait for the worker; frames it cannot copy yet wait for the next pass. While the worker runs, the
   main connection's automatic checkpoint is raised from SQLite's default of 1,000 pages to a
   backstop of 16,384 pages (64 MiB at 4 KiB pages). The backstop fires only when the worker falls
-  behind, stalls, or has died, so the log stays bounded either way. A worker that exits or fails to
+  behind, stops checkpointing, or has died, and the log stays bounded in each of those cases. One
+  case it cannot bound: a worker checkpoint that hangs inside the kernel, on storage that stops
+  completing flushes, keeps SQLite's checkpoint lock, so the backstop's own checkpoints return busy
+  and the log grows until the flush completes. No checkpoint can make progress then. Before the
+  worker, the same hang froze the event loop inside the commit that ran the checkpoint; now
+  ingest continues. A worker that exits or fails to
   start is logged and restarted after 1, 5, then 30 seconds (back to 1 second once a worker has
   stayed up for a minute); the control plane never depends on it. A clean shutdown stops the
   worker after one last checkpoint pass. The main connection's commits are unchanged by any of

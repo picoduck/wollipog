@@ -141,6 +141,21 @@ test("a dead worker leaves the log bounded by the backstop, and the main connect
   assert.equal(h.db.getHydratedSeq("s-1"), 2_000, "every commit succeeded without the worker");
 });
 
+test("a live worker that stops checkpointing leaves the log bounded by the backstop", LIVE, async (t) => {
+  const backstopPages = 64;
+  // The worker runs its first pass and then none for an hour: alive, holding no lock, not keeping up.
+  const h = open(t, { intervalMs: 3_600_000, backstopPages });
+  await until(() => has(h.events, "online"), "the worker to start");
+  const pageSize = Number(h.pragma("page_size"));
+  const walPages = () => Math.max(0, statSync(h.wal).size - 32) / (pageSize + 24);
+  h.db.raw().exec("PRAGMA wal_checkpoint(TRUNCATE)");
+  h.ingest(2_000);
+  assert.ok(walPages() <= backstopPages * 3,
+    `the log holds ${walPages()} pages after 2,000 commits with a ${backstopPages}-page backstop`);
+  assert.equal(h.checkpointer.running(), true);
+  assert.equal(h.db.getHydratedSeq("s-1"), 2_000);
+});
+
 test("a crashed worker restarts and resumes checkpointing", LIVE, async (t) => {
   const h = open(t, { intervalMs: 20, restartDelaysMs: [20] });
   await until(() => has(h.events, "online"), "the worker to start");

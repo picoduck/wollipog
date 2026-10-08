@@ -9,8 +9,9 @@ import { Worker } from "node:worker_threads";
  * connection instead. PASSIVE never takes the write lock and never waits for one, so readers and
  * writers on the main connection are never blocked by it; frames it cannot copy yet are left for
  * the next pass. The main connection keeps an automatic checkpoint as a backstop, at a threshold
- * high enough that it fires only when the worker is not keeping up, so the log stays bounded even
- * if the worker stalls or dies. See docs/control-plane-database-durability.md.
+ * high enough that it fires only when the worker is not keeping up, so the log stays bounded when
+ * the worker falls behind, stops checkpointing or dies. Only a checkpoint hung inside the kernel
+ * holds the checkpoint lock against it. See docs/control-plane-database-durability.md.
  */
 
 /** Pages the log may hold before the main connection checkpoints it itself (64 MiB at 4 KiB). */
