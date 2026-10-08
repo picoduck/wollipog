@@ -26,7 +26,12 @@ import {
   RunnerConnectionLimits,
   runnerAuthTimeoutMs,
 } from "./runner-channel.js";
-import { RunnerFrameQueue, runnerFrameBypassesInventory, setRunnerReceivePressure } from "./runner-frame-queue.js";
+import {
+  RunnerFrameQueue,
+  runnerFrameBypassesInventory,
+  runnerFrameSessionKey,
+  setRunnerReceivePressure,
+} from "./runner-frame-queue.js";
 import { installStartupReadinessGate } from "./startup-readiness.js";
 import { WorktreeCreateCoordinator } from "./worktree-create-coordinator.js";
 import { legacyPeerWorktreeRetirement } from "./worktree-retirement.js";
@@ -228,6 +233,7 @@ import {
   SESSION_COMMAND_INVOCATION_RETENTION_MS,
   sessionBlocksConversationFork,
   SessionsService,
+  type PreparedLiveSessionEvent,
 } from "./sessions.js";
 import { videoFrameValidationSessionId } from "./video-frame-validation.js";
 import { ShellRegistry } from "./shell-registry.js";
@@ -1168,7 +1174,7 @@ app.register(async (instance) => {
     await svc.flushRunnerAttention(runnerId, currentSocket);
     runtimeAttentionBatch = undefined;
   };
-  const handleRunnerFrame = async (msg: RunnerToControlPlane) => {
+  const handleRunnerFrame = async (msg: RunnerToControlPlane, prepared?: PreparedLiveSessionEvent) => {
     // A malformed frame (missing/mistyped fields survive the cast-only parseMessage) or a
     // transient persistence error must not escape this listener: an uncaught throw here becomes a
     // fatal uncaughtException that drops EVERY runner/session/dashboard connection. Isolate the
@@ -1448,9 +1454,7 @@ app.register(async (instance) => {
         svc.onGovernanceTripped(runnerId!, msg);
         break;
       case "session_event":
-        // Normally undefined: a large payload stages its blobs in the background. Only a staging
-        // backlog over its byte bound holds this runner's frames, pausing socket reads.
-        await svc.onSessionEvent(msg.sessionId, msg.payload, msg.seq, msg.ts, runnerId ?? undefined);
+        svc.onSessionEvent(msg.sessionId, msg.payload, msg.seq, msg.ts, runnerId ?? undefined, prepared);
         break;
       case "session_queue": {
         // Ephemeral relay — the prompts waiting behind the running turn, straight to
@@ -1774,7 +1778,14 @@ app.register(async (instance) => {
     }
   };
 
-  const frameQueue = new RunnerFrameQueue<RunnerToControlPlane>(handleRunnerFrame, () => {
+  const frameQueue = new RunnerFrameQueue<RunnerToControlPlane, PreparedLiveSessionEvent>(async (msg, prepared) => {
+    try {
+      await handleRunnerFrame(msg, prepared);
+    } finally {
+      // Idempotent: covers frames the handler rejected before reaching onSessionEvent.
+      if (prepared) svc.discardPreparedLiveSessionEvent(prepared);
+    }
+  }, () => {
     app.log.warn({ event: "runner_frame_queue_closed", entryPoint: "runner_socket", runnerId },
       "runner replay exceeded its bounded queue or failed");
     socket.terminate();
@@ -1782,6 +1793,14 @@ app.register(async (instance) => {
     if (!setRunnerReceivePressure(socket, paused)) return;
     app.log.debug({ event: "runner_frame_backpressure", entryPoint: "runner_socket", runnerId, paused },
       "runner receive flow control changed");
+  }, {
+    // A large event payload is made durable off the event loop before its event commits (#2794).
+    // Only its own session's later frames wait for that; other sessions' frames keep flowing.
+    key: runnerFrameSessionKey,
+    prepare: (msg) => msg.type === "session_event"
+      ? svc.prepareLiveSessionEvent(msg.sessionId, msg.payload, msg.ts, runnerId ?? undefined)
+      : undefined,
+    discard: (prepared) => svc.discardPreparedLiveSessionEvent(prepared),
   });
   socket.on("message", (raw: Buffer) => {
     const msg = parseMessage<RunnerToControlPlane>(raw.toString());

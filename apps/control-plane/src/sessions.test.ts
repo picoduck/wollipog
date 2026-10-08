@@ -20,6 +20,7 @@ import type {
   SessionReminderView,
   SessionConfig,
   SessionEventPayload,
+  SessionStatus,
   OrchestratorSettingsView,
   SetSessionReminderRequest,
   SessionSnapshot,
@@ -73,9 +74,10 @@ import {
   resolveEffectiveModelEffort,
   resolveEffectiveServiceTier,
   sessionBlocksConversationFork,
-  STAGED_LIVE_EVENT_BACKLOG_BYTES,
+  type PreparedLiveSessionEvent,
   type PreStagedDeliveryPlan,
 } from "./sessions.js";
+import { RunnerFrameQueue } from "./runner-frame-queue.js";
 
 for (const scenario of ["downgrade", "revision-ahead", "identity-conflict", "stopped", "archived"]) test(`unsupported reconciled snapshot isolates its session and preserves enforcement: ${scenario}`, async () => {
   const { db, hub, svc } = makeHarness();
@@ -17066,11 +17068,10 @@ test("hydrateRunnerSessions updates an existing cached session without duplicati
   assert.equal(s.tokensIn, 99);
 });
 
-test("a known runner history epoch change atomically clears the cache and broadcasts its new CP epoch", async () => {
+test("a known runner history epoch change atomically clears the cache and broadcasts its new CP epoch", () => {
   const { db, hub, svc } = makeHarness();
   svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ seq: 0, historyEpoch: 10 })]);
   svc.onSessionEvent("s_box1", { kind: "command_output", text: "old-generation-".repeat(2_000) }, 1, 1_001);
-  await svc.sessionEventsStaged();
   assert.equal(db.listEvents("s_box1").length, 1);
   const oldPayload = db.listEvents("s_box1")[0]!.payload;
   assert.equal(oldPayload.kind, "command_output");
@@ -17686,13 +17687,12 @@ test("a terminal snapshot orphans an armed settlement like a terminal status eve
     "a later run's Ready is emitted; the terminal snapshot orphaned the stale marker");
 });
 
-test("large live event payloads persist and broadcast only a bounded artifact-backed preview", async () => {
+test("large live event payloads persist and broadcast only a bounded artifact-backed preview", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);
   const original = `head-${"x".repeat(7_000)} uniqueftstoken ${"x".repeat(13_000)} uniquemiddletoken ${"y".repeat(20_000)}-tail`;
 
   svc.onSessionEvent(id, { kind: "command_output", text: original });
-  await svc.sessionEventsStaged();
 
   const event = db.listEvents(id)[0]!;
   assert.equal(event.payload.kind, "command_output");
@@ -17720,61 +17720,44 @@ test("large live event payloads persist and broadcast only a bounded artifact-ba
   assert.ok(artifactIds.every((artifactId) => db.getWorkflowArtifact(artifactId) === null));
 });
 
-test("artifact storage failure keeps the original large live event losslessly", async () => {
+test("artifact storage failure keeps the original large live event losslessly", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);
   const original = "lossless-".repeat(3_000);
-  const stage = db.stageArtifactBlob.bind(db);
-  db.stageArtifactBlob = async (key, bytes, createdAt) => {
-    await stage(key, bytes, createdAt);
-    throw new Error("storage unavailable");
-  };
+  const create = db.createWorkflowArtifactBytes.bind(db);
+  db.createWorkflowArtifactBytes = () => { throw new Error("storage unavailable"); };
   try {
     svc.onSessionEvent(id, { kind: "stderr", text: original });
-    await svc.sessionEventsStaged();
   } finally {
-    db.stageArtifactBlob = stage;
+    db.createWorkflowArtifactBytes = create;
   }
   const event = db.listEvents(id)[0]!;
   assert.deepEqual(event.payload, { kind: "stderr", text: original });
   assert.deepEqual(hub.sessionEventCalls.at(-1)?.payload, event.payload);
   assert.equal(db.listSessionWorkflowArtifacts(id).length, 0);
-  assert.equal((db.raw().prepare("SELECT COUNT(*) AS n FROM artifact_blob_pending").get() as { n: number }).n, 0,
-    "the failed staging removed its pending blob");
 });
 
-test("event append failure rolls back artifacts created for that uncommitted event", async () => {
+test("event append failure rolls back artifacts created for that uncommitted event", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);
   const append = db.appendEvent.bind(db);
   db.appendEvent = () => { throw new Error("event append failed"); };
-  const requests: string[] = [];
-  hub.requestHandler = (msg) => {
-    requests.push(msg.type);
-    throw new Error("runner did not respond in time");
-  };
   try {
-    svc.onSessionEvent(id, { kind: "command_output", text: "append-rollback-".repeat(2_000) });
-    await svc.sessionEventsStaged();
+    assert.throws(
+      () => svc.onSessionEvent(id, { kind: "command_output", text: "append-rollback-".repeat(2_000) }),
+      /event append failed/,
+    );
   } finally {
     db.appendEvent = append;
   }
   assert.deepEqual(db.listEvents(id), []);
   assert.deepEqual(db.listSessionWorkflowArtifacts(id), []);
-  assert.equal((db.raw().prepare("SELECT COUNT(*) AS n FROM artifact_blob_pending").get() as { n: number }).n, 0);
-  db.collectWorkflowArtifactBlobs();
-  assert.equal((db.raw().prepare("SELECT COUNT(*) AS n FROM artifact_blob_gc").get() as { n: number }).n, 0,
-    "the released blob is collectable");
-  assert.ok(requests.some((type) => type === "session_history" || type === "session_history_page"),
-    `a failure after staging re-reads the session from runner history instead of dropping the event: ${
-      JSON.stringify(requests)}`);
 });
 
-test("runner deletion removes session-only large-event artifacts and their blobs", async () => {
+test("runner deletion removes session-only large-event artifacts and their blobs", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);
   svc.onSessionEvent(id, { kind: "command_output", text: "runner-delete-".repeat(2_000) });
-  await svc.sessionEventsStaged();
   const payload = db.listEvents(id)[0]!.payload;
   assert.equal(payload.kind, "command_output");
   const artifactIds = payload.kind === "command_output"
@@ -17788,116 +17771,162 @@ test("runner deletion removes session-only large-event artifacts and their blobs
 });
 
 /** Hold every blob staging until released, so a test can act while a payload is in flight. */
-function gateArtifactStaging(db: ControlPlaneDb, gatedCalls = Infinity): { release: () => void; restore: () => void } {
+function gateArtifactStaging(db: ControlPlaneDb): { release: () => void; calls: () => number; restore: () => void } {
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
   const stage = db.stageArtifactBlob.bind(db);
   let calls = 0;
   db.stageArtifactBlob = async (key, bytes, createdAt) => {
-    if (calls++ < gatedCalls) await gate;
+    calls += 1;
+    await gate;
     await stage(key, bytes, createdAt);
   };
-  return { release, restore: () => { db.stageArtifactBlob = stage; } };
+  return { release, calls: () => calls, restore: () => { db.stageArtifactBlob = stage; } };
 }
 
-test("a large live payload holds only its own session's later events until its blobs are durable", async () => {
+const pendingBlobCount = (db: ControlPlaneDb) =>
+  (db.raw().prepare("SELECT COUNT(*) AS n FROM artifact_blob_pending").get() as { n: number }).n;
+
+test("a prepared large live event commits only after its chunks are durable", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  const text = "durable-first-".repeat(2_000);
+  const gate = gateArtifactStaging(db);
+  let prepared;
+  try {
+    const pending = svc.prepareLiveSessionEvent(id, { kind: "command_output", text }, undefined, RUNNER_ID);
+    assert.ok(pending instanceof Promise, "a large payload is staged asynchronously");
+    assert.deepEqual(db.listSessionWorkflowArtifacts(id), [], "no row exists while the blob is in flight");
+    gate.release();
+    prepared = await pending;
+  } finally {
+    gate.restore();
+  }
+  assert.ok(prepared.staged);
+  svc.onSessionEvent(id, { kind: "command_output", text }, undefined, undefined, RUNNER_ID, prepared);
+  const event = db.listEvents(id).find((candidate) => candidate.payload.kind === "command_output")!;
+  assert.ok(event.payload.kind === "command_output" && event.payload.textRefs?.length);
+  assert.equal(
+    Buffer.concat(event.payload.textRefs!.map((ref) => db.readWorkflowArtifactBytes(ref.artifactId)!)).toString("utf8"),
+    text,
+  );
+  assert.equal(pendingBlobCount(db), 0);
+  prepared.staged!.release();
+  assert.ok(db.readWorkflowArtifactBytes(event.payload.textRefs![0]!.artifactId), "releasing again is harmless");
+});
+
+test("an unknown session or a runner that does not own it stages nothing", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  let staged = 0;
+  const stage = db.stageArtifactBlob.bind(db);
+  db.stageArtifactBlob = async (...args) => { staged += 1; return stage(...args); };
+  try {
+    const payload = { kind: "stderr" as const, text: "not-yours-".repeat(3_000) };
+    const foreign = svc.prepareLiveSessionEvent(id, payload, undefined, "another-runner");
+    const unknown = svc.prepareLiveSessionEvent("no-such-session", payload, undefined, RUNNER_ID);
+    assert.ok(!(foreign instanceof Promise) && foreign.staged === undefined);
+    assert.ok(!(unknown instanceof Promise) && unknown.staged === undefined);
+    assert.equal(staged, 0, "no blob is written before the ownership check passes");
+  } finally {
+    db.stageArtifactBlob = stage;
+  }
+});
+
+test("a large live event whose blob staging fails keeps its original payload inline", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  const original = "lossless-staged-".repeat(3_000);
+  const stage = db.stageArtifactBlob.bind(db);
+  db.stageArtifactBlob = async (key, bytes, createdAt) => {
+    await stage(key, bytes, createdAt);
+    throw new Error("storage unavailable");
+  };
+  let prepared;
+  try {
+    prepared = await svc.prepareLiveSessionEvent(id, { kind: "stderr", text: original }, undefined, RUNNER_ID);
+  } finally {
+    db.stageArtifactBlob = stage;
+  }
+  assert.equal(prepared.staged, null);
+  svc.onSessionEvent(id, { kind: "stderr", text: original }, undefined, undefined, RUNNER_ID, prepared);
+  const event = db.listEvents(id).find((candidate) => candidate.payload.kind === "stderr")!;
+  assert.deepEqual(event.payload, { kind: "stderr", text: original });
+  assert.deepEqual(db.listSessionWorkflowArtifacts(id), []);
+  assert.equal(pendingBlobCount(db), 0, "the failed staging removed its pending blob");
+});
+
+test("a held live event whose history was reset meanwhile is re-read from the runner instead", async () => {
+  const { db, hub, svc } = makeHarness();
+  const requests: string[] = [];
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ seq: 0, historyEpoch: 10 })]);
+  hub.requestHandler = (msg) => {
+    requests.push(msg.type);
+    throw new Error("runner did not respond in time");
+  };
+  const payload = { kind: "command_output" as const, text: "old-generation-".repeat(2_000) };
+  const gate = gateArtifactStaging(db);
+  let prepared;
+  try {
+    const pending = svc.prepareLiveSessionEvent("s_box1", payload, 1_001, RUNNER_ID);
+    svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ seq: 1, historyEpoch: 11 })]);
+    gate.release();
+    prepared = await pending;
+  } finally {
+    gate.restore();
+  }
+  svc.onSessionEvent("s_box1", payload, 1, 1_001, RUNNER_ID, prepared);
+  assert.deepEqual(db.listEvents("s_box1"), [], "the old generation's event never enters the new one");
+  assert.deepEqual(db.listSessionWorkflowArtifacts("s_box1"), []);
+  assert.equal(pendingBlobCount(db), 0);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.ok(requests.includes("session_history_page"), JSON.stringify(requests));
+});
+
+test("a session's later frames wait behind its large payload while other sessions continue", async () => {
   const { db, hub, svc } = makeHarness();
   const slow = seedSession(svc, hub);
   const other = seedSession(svc, hub);
+  db.updateSessionStatus(slow, "running", Date.now());
   const gate = gateArtifactStaging(db);
-  const messages = (sessionId: string) => db.listEvents(sessionId)
-    .filter((event) => event.payload.kind === "command_output" || event.payload.kind === "agent_message")
-    .map((event) => event.payload.kind);
+  const handled: string[] = [];
+  type Frame =
+    | { type: "session_event"; sessionId: string; payload: SessionEventPayload }
+    | { type: "session_status"; sessionId: string; status: SessionStatus };
+  const queue = new RunnerFrameQueue<Frame, PreparedLiveSessionEvent>(async (frame, prepared) => {
+    handled.push(`${frame.sessionId === slow ? "slow" : "other"}:${
+      frame.type === "session_event" ? frame.payload.kind : frame.status}`);
+    if (frame.type === "session_event") {
+      svc.onSessionEvent(frame.sessionId, frame.payload, undefined, undefined, RUNNER_ID, prepared);
+    } else {
+      svc.onSessionStatus(frame.sessionId, frame.status, undefined, undefined, RUNNER_ID);
+    }
+  }, () => assert.fail("the queue must not fail"), undefined, undefined, undefined, {
+    key: (frame) => frame.sessionId,
+    prepare: (frame) => frame.type === "session_event"
+      ? svc.prepareLiveSessionEvent(frame.sessionId, frame.payload, undefined, RUNNER_ID)
+      : undefined,
+    discard: (prepared) => svc.discardPreparedLiveSessionEvent(prepared),
+  });
   try {
-    assert.equal(svc.onSessionEvent(slow, { kind: "command_output", text: "durable-first-".repeat(2_000) }), undefined,
-      "a backlog under its bound applies no backpressure to the runner");
-    svc.onSessionEvent(slow, { kind: "agent_message", messageId: "after", text: "after the large output" });
-    svc.onSessionEvent(other, { kind: "agent_message", messageId: "other", text: "another session" });
-
-    assert.deepEqual(messages(slow), [], "the slow session persists nothing before its blob is durable");
-    assert.deepEqual(db.listSessionWorkflowArtifacts(slow), []);
-    assert.deepEqual(messages(other), ["agent_message"], "another session's event is applied at once");
+    queue.enqueue({ type: "session_event", sessionId: slow, payload: { kind: "command_output", text: "big-".repeat(5_000) } }, 1);
+    queue.enqueue({ type: "session_event", sessionId: slow, payload: {
+      kind: "question_request", requestId: "q1", questions: [{ id: "q", header: "Next", question: "Continue?", options: [] }],
+    } as SessionEventPayload }, 1);
+    queue.enqueue({ type: "session_status", sessionId: slow, status: "completed" }, 1);
+    queue.enqueue({ type: "session_event", sessionId: other, payload: { kind: "agent_message", messageId: "m", text: "meanwhile" } }, 1);
+    for (let index = 0; index < 5; index++) await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(handled, ["other:agent_message"], "only the other session's frame ran while the blob was in flight");
     gate.release();
-    await svc.sessionEventsStaged();
+    for (let index = 0; index < 50 && handled.length < 4; index++) await new Promise<void>((resolve) => setImmediate(resolve));
   } finally {
     gate.restore();
+    queue.close();
   }
-  assert.deepEqual(messages(slow), ["command_output", "agent_message"], "arrival order is preserved");
-  assert.deepEqual(
-    hub.sessionEventCalls.filter((event) => event.sessionId === slow).map((event) => event.payload.kind)
-      .filter((kind) => kind === "command_output" || kind === "agent_message"),
-    ["command_output", "agent_message"],
-  );
-  const large = db.listEvents(slow).find((event) => event.payload.kind === "command_output")!.payload;
-  assert.ok(large.kind === "command_output" && large.textRefs?.length);
-  assert.equal(
-    (db.raw().prepare("SELECT COUNT(*) AS n FROM artifact_blob_pending").get() as { n: number }).n, 0,
-  );
-});
-
-test("a staged live event that history already delivered is dropped with its staging", async () => {
-  const { db, hub, svc } = makeHarness();
-  const text = "replayed-large-output-".repeat(2_000);
-  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ seq: 1, historyEpoch: 7 })]);
-  hub.requestHandler = (msg) => {
-    if (msg.type !== "session_history_page") throw new Error("unexpected request");
-    return {
-      type: "session_history_page_result",
-      requestId: msg.requestId,
-      sessionId: msg.sessionId,
-      ok: true,
-      events: [{ seq: 1, ts: 100, payload: { kind: "command_output", text } }],
-      page: { logEpoch: 7, throughSeq: 1, nextAfterSeq: 1, hasMore: false },
-    };
-  };
-  const gate = gateArtifactStaging(db, 1);
-  try {
-    svc.onSessionEvent("s_box1", { kind: "command_output", text }, 1, 100);
-    await svc.hydrateHistory("s_box1");
-    assert.equal(db.listEvents("s_box1").length, 1, "history delivered the event while the live copy staged");
-    gate.release();
-    await svc.sessionEventsStaged();
-  } finally {
-    gate.restore();
-  }
-  const events = db.listEvents("s_box1");
-  assert.equal(events.length, 1, "the live copy is a duplicate and is not appended");
-  assert.equal(db.listSessionWorkflowArtifacts("s_box1").length, 1, "only the history copy has artifact rows");
-  const payload = events[0]!.payload;
-  assert.ok(payload.kind === "command_output" && payload.textRefs?.length);
-  assert.equal(db.readWorkflowArtifactBytes(payload.textRefs![0]!.artifactId)?.toString("utf8"), text,
-    "releasing the duplicate staging keeps the shared blob");
-  assert.equal(
-    (db.raw().prepare("SELECT COUNT(*) AS n FROM artifact_blob_pending").get() as { n: number }).n, 0,
-  );
-});
-
-test("a live staging backlog over its byte bound holds the runner's next frames", async () => {
-  const { db, hub, svc } = makeHarness();
-  const id = seedSession(svc, hub);
-  const gate = gateArtifactStaging(db);
-  // Each payload stays under the 32 MiB event limit; the third crosses the backlog bound.
-  const size = Math.ceil(STAGED_LIVE_EVENT_BACKLOG_BYTES / 3) + 1;
-  let held: Promise<void> | undefined;
-  try {
-    assert.equal(svc.onSessionEvent(id, { kind: "stderr", text: "a".repeat(size) }), undefined);
-    assert.equal(svc.onSessionEvent(id, { kind: "stderr", text: "b".repeat(size) }), undefined);
-    held = svc.onSessionEvent(id, { kind: "stderr", text: "c".repeat(size) });
-    assert.ok(held, "the frame that crosses the bound returns a promise the runner socket awaits");
-    let settled = false;
-    void held.then(() => { settled = true; });
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    assert.equal(settled, false, "the hold lasts until that event is applied");
-    gate.release();
-    await held;
-    await svc.sessionEventsStaged();
-  } finally {
-    gate.restore();
-  }
-  assert.deepEqual(db.listEvents(id).filter((event) => event.payload.kind === "stderr").length, 3);
-  assert.equal(svc.onSessionEvent(id, { kind: "stderr", text: "d".repeat(size) }), undefined,
-    "the backlog accounting returns to zero once applied");
-  await svc.sessionEventsStaged();
+  assert.deepEqual(handled, ["other:agent_message", "slow:command_output", "slow:question_request", "slow:completed"]);
+  const session = db.getSession(slow)!;
+  assert.equal(session.status, "completed", "the terminal status still lands after the question it followed");
+  assert.equal(session.pendingApproval ?? null, null);
 });
 
 test("indexed history pages externalize large payloads before cache persistence and broadcast", async () => {
@@ -18200,7 +18229,6 @@ test("reprocessSession advances the event epoch before publishing the replacemen
   db.registerRunner(runnerMeta(), Date.now(), 53);
   svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ adopted: true, seq: 1 })]);
   svc.onSessionEvent("s_box1", { kind: "command_output", text: "stale-parser-output-".repeat(2_000) });
-  await svc.sessionEventsStaged();
   const stalePayload = db.listEvents("s_box1")[0]!.payload;
   assert.equal(stalePayload.kind, "command_output");
   const staleArtifactIds = stalePayload.kind === "command_output"
