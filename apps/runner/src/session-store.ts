@@ -837,9 +837,12 @@ export class SessionStore {
    * it and reset removes it, so inode, nanosecond mtime, and size together change on every switch. */
   private historyManifestKey(id: string): string | null {
     // Most sessions never compact, so a missing manifest is the common case on every append. Report it
-    // without an exception: inside the runner a thrown ENOENT costs tens of microseconds.
-    const s = statSync(this.historyManifestPath(id), { bigint: true, throwIfNoEntry: false });
-    return s ? `${s.ino}:${s.mtimeNs}:${s.size}` : null;
+    // without an exception: inside the runner a thrown ENOENT costs tens of microseconds. lstat keeps a
+    // symlinked manifest from resolving to "missing"; like segments and the active file, it is refused.
+    const s = lstatSync(this.historyManifestPath(id), { bigint: true, throwIfNoEntry: false });
+    if (!s) return null;
+    if (!s.isFile()) throw new HistoryStoreError("history_corrupt", "session history manifest is not a regular file");
+    return `${s.ino}:${s.mtimeNs}:${s.size}`;
   }
 
   private manifestKeyOf(path: string): string {

@@ -35,6 +35,7 @@ import {
   statSync,
   utimesSync,
   writeFileSync,
+  symlinkSync,
   writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -2226,5 +2227,35 @@ test("the post-compaction layout is keyed by the manifest it published, not a la
     assert.deepEqual(coldSeqs(root), seqRange(21));
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a symlinked or unreachable manifest fails appends closed instead of reading as missing", () => {
+  if (process.platform === "win32") return; // creating symlinks needs elevated rights there
+  for (const shape of ["symlink_to_manifest", "symlink_through_file"] as const) {
+    const root = mkdtempSync(join(tmpdir(), "wollipog-store-layout-symlink-"));
+    try {
+      const store = new SessionStore(root, undefined, COMPACT_EVERY_PASS);
+      store.create(meta());
+      appendMany(store, 10, "first");
+      compactOnce(store);
+      assert.equal(store.appendEvent("s_abc", { kind: "agent_message", text: "warm" })?.seq, 11, shape);
+      const sessionDir = join(root, "s_abc");
+      const activePath = join(sessionDir, historyManifest(root).activeFile);
+      const manifestPath = join(sessionDir, "events.manifest.json");
+      const relocated = join(sessionDir, "relocated-manifest.json");
+      renameSync(manifestPath, relocated);
+      // The second shape cannot be resolved at all (ENOTDIR), which a plain stat would report as missing.
+      symlinkSync(shape === "symlink_to_manifest" ? relocated : join(relocated, "nested"), manifestPath);
+      const activeBefore = readFileSync(activePath);
+      assert.throws(
+        () => store.appendEvent("s_abc", { kind: "agent_message", text: "through-symlink" }),
+        /manifest is not a regular file/,
+        shape,
+      );
+      assert.deepEqual(readFileSync(activePath), activeBefore, `${shape}: nothing appended`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 });
