@@ -284,6 +284,38 @@ test("a commit by another connection invalidates on the very next send; its chec
   }
 });
 
+test("a revocation committed by another connection while a frame fans out denies the clients after it", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-access-fanout-"));
+  const location = join(root, "control-plane.db");
+  const h = harness(location);
+  const other = new DatabaseSync(location);
+  try {
+    h.createSession("s-1", { kind: "team", teamId: "team-a" });
+    // Alice connects first, so the hub sends to her before it checks Bob.
+    const alice = h.connect(principal("alice"));
+    const bob = h.connect(principal("bob"));
+    h.emit("s-1");
+    assert.deepEqual([alice.eventsFor("s-1"), bob.eventsFor("s-1")], [1, 1]);
+    let revoked = false;
+    const send = alice.send.bind(alice);
+    alice.send = (data: string) => {
+      send(data);
+      if (!revoked) {
+        revoked = true;
+        other.prepare("DELETE FROM identity_team_members WHERE team_id='team-a' AND user_id='bob'").run();
+      }
+    };
+    h.emit("s-1");
+    assert.equal(revoked, true);
+    assert.deepEqual([alice.eventsFor("s-1"), bob.eventsFor("s-1")], [2, 1],
+      "Bob's check, after the commit, already denies this frame");
+  } finally {
+    other.close();
+    h.db.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("the access triggers live only on the control plane's connection", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-access-revision-"));
   const location = join(root, "control-plane.db");

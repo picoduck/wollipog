@@ -1389,14 +1389,10 @@ export class Hub {
   }
 
   /** Whether this client may see the session, from its cached decision while the database's
-   * access revision is unchanged (#2761). `revision` is read once per broadcast; without one, every
-   * call checks in full. */
-  private clientCanAccessSession(
-    principal: AuthPrincipal,
-    sessionId: string,
-    info?: UiClientInfo,
-    revision?: number,
-  ): boolean {
+   * access revision is unchanged (#2761). The revision is read for every client: another
+   * connection can commit while a broadcast fans out. Without one, every call checks in full. */
+  private clientCanAccessSession(principal: AuthPrincipal, sessionId: string, info?: UiClientInfo): boolean {
+    const revision = info ? this.db.sessionAccessRevision?.() : undefined;
     if (!info || revision === undefined) return this.db.canAccessSession(principal, sessionId);
     let cache = info.sessionAccess;
     if (!cache || cache.revision !== revision || cache.principal !== principal ||
@@ -1410,12 +1406,7 @@ export class Hub {
     return allowed;
   }
 
-  private canReceive(
-    principal: AuthPrincipal | undefined,
-    msg: ControlPlaneToUi,
-    info?: UiClientInfo,
-    accessRevision?: number,
-  ): boolean {
+  private canReceive(principal: AuthPrincipal | undefined, msg: ControlPlaneToUi, info?: UiClientInfo): boolean {
     if (msg.type === "session_reminder_upsert" || msg.type === "session_reminder_removed") {
       const sessionId = msg.type === "session_reminder_upsert" ? msg.reminder.sessionId : msg.sessionId;
       return this.reminderPrincipalMatches(msg.userId, principal) &&
@@ -1432,7 +1423,7 @@ export class Hub {
       case "runner_removed":
         return false;
       case "session_upsert":
-        return this.clientCanAccessSession(principal, msg.session.id, info, accessRevision);
+        return this.clientCanAccessSession(principal, msg.session.id, info);
       case "project_upsert":
         return this.db.canAccessProject(principal, msg.project.id);
       case "project_removed":
@@ -1443,10 +1434,10 @@ export class Hub {
       case "shell_output":
       case "shell_exit": {
         const sessionId = msg.type === "session_event" ? msg.event.sessionId : msg.sessionId;
-        return this.clientCanAccessSession(principal, sessionId, info, accessRevision);
+        return this.clientCanAccessSession(principal, sessionId, info);
       }
       case "shell_registry_reconciled":
-        return msg.sessionIds.every((sessionId) => this.clientCanAccessSession(principal, sessionId, info, accessRevision));
+        return msg.sessionIds.every((sessionId) => this.clientCanAccessSession(principal, sessionId, info));
       case "box_upsert":
       case "box_removed":
       case "run_upsert":
@@ -1491,11 +1482,9 @@ export class Hub {
     // A session view carries the receiving principal's command permissions (#1843). Most clients
     // share one verdict, so serialize once per distinct verdict rather than once per client.
     const sessionDataByPermissions = new Map<string, string>();
-    // Read once: nothing below writes the database, so it cannot change during this broadcast.
-    const accessRevision = this.db.sessionAccessRevision?.();
     for (const [client, info] of this.uiClients) {
       if (!this.isSubscribed(info, msg)) continue;
-      if (!(predicate ? predicate(info.principal, info) : this.canReceive(info.principal, msg, info, accessRevision))) continue;
+      if (!(predicate ? predicate(info.principal, info) : this.canReceive(info.principal, msg, info))) continue;
       const projectedMessages = this.compatibilityProjection(info, msg);
       for (const projected of projectedMessages) {
         let clientData = projected === msg ? data : JSON.stringify(projected);
