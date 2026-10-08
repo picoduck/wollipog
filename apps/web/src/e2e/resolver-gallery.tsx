@@ -116,7 +116,8 @@ const policies = { names: new Map([["allow-reads", "Allow Reads"]]), load: () =>
 
 /**
  * Sign-in cards as the runner records them (#2742): the member who chose Recheck, Start Sign-In,
- * Use Current Account or Dismiss Recovery is named on the session where they acted. A session the
+ * Use Current Account, Dismiss Recovery or another account (#2783) is named on the session where
+ * they acted. A session the
  * same recovery completed automatically, and a resolution from an older peer, name nobody.
  */
 const signInEvents: SessionEvent[] = [];
@@ -142,6 +143,8 @@ signIn("provider-auth:recheck", "auth:revalidate", 20, { kind: "user", userId: A
 signIn("provider-auth:login", "auth:login", 22, { kind: "user", userId: GRACE });
 signIn("provider-auth:accept", "auth:accept-current", 24, { kind: "user", userId: DEPARTED });
 signIn("provider-auth:dismiss", "auth:dismiss", 26, { kind: "user", userId: GRACE });
+// Choose Another Account… names the member who chose it (#2783).
+signIn("provider-auth:select", "auth:select-account", 27, { kind: "user", userId: ADA });
 signIn("provider-auth:automatic", "auth:automatic-retry", 28);
 signIn("provider-auth:older-peer", "auth:revalidate", 30);
 const signInItems = deriveTimeline(signInEvents);

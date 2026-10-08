@@ -1789,8 +1789,8 @@ row names who decided from its own `permission_resolved` (#2628): the control pl
 runner records it on that exact resolution (protocol 211), so each occurrence of a reused provider
 request id is named by its own decider. The member reads relative to the viewer by the #2527 rules,
 the policy by its name. A Parent Control decision names the parent session instead. A sign-in
-card's Start Sign-In, Recheck, Use Current Account or Dismiss Recovery names the member who chose it
-on the session where they acted (#2742). The same recovery completing other sessions that share the
+card's Start Sign-In, Recheck, Use Current Account, Dismiss Recovery or Choose Another Account… names
+the member who chose it on the session where they acted (#2742, #2783). The same recovery completing other sessions that share the
 credential scope ("Rechecked Automatically") names nobody, because nobody chose it. A resolution
 from an older runner or control plane, or one Wollipog made itself, names nobody rather than
 guessing: the audit cannot be tied to one occurrence of a reused provider request id. The

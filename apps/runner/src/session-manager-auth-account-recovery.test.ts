@@ -272,6 +272,41 @@ test("choosing another account rechecks it, pins its identity, and replays the r
   }
 });
 
+for (const [name, resolvedBy, expected] of [
+  ["names the member who chose it", { kind: "user", userId: "usr_grace" }, { kind: "user", userId: "usr_grace" }],
+  ["drops a malformed decider", { kind: "user", userId: 7 }, undefined],
+  ["from an older control plane names nobody", undefined, undefined],
+] as const) {
+  test(`choosing another account ${name} on that session's resolution only (#2783)`, async () => {
+    const h = harness({
+      "/claude/work": { observations: [{ status: "authenticated", identityId: "identity-intruder" }] },
+      "/claude/personal": { observations: [{ status: "authenticated", identityId: "identity-personal" }] },
+    });
+    try {
+      const requestId = await parkOnMismatch(h);
+      assert.deepEqual(
+        await h.manager.selectProviderAuthenticationAccount(SESSION, requestId, "claude-personal", "claude-work", resolvedBy),
+        { ok: true },
+      );
+      await h.manager.providerAuthSelections.get(SESSION);
+      const resolutions = h.store.listSessions().flatMap((meta) => h.store.readEvents(meta.sessionId)
+        .map((event) => ({ sessionId: meta.sessionId, payload: event.payload }))
+        .filter(({ payload }) => payload.kind === "permission_resolved"));
+      assert.deepEqual(resolutions, [{
+        sessionId: SESSION,
+        payload: {
+          kind: "permission_resolved",
+          requestId,
+          optionId: "auth:select-account",
+          ...(expected ? { resolvedBy: expected } : {}),
+        },
+      }]);
+    } finally {
+      h.cleanup();
+    }
+  });
+}
+
 test("a signed-out, stale, or already-bound account selection fails closed without moving the session", async () => {
   const h = harness({
     "/claude/work": { observations: [{ status: "authenticated", identityId: "identity-intruder" }] },
