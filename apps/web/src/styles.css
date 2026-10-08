@@ -1800,10 +1800,8 @@ kbd {
   max-width: none;
 }
 /* Busy (§3.1, `BusyButton`): the action is running, not unavailable, so the button keeps its
-   variant's fill and text and only stops taking input. Its width is locked inline to the idle width;
-   a prepended spinner takes its room from the inline padding, with a narrower gap so some padding
-   is left (12 + 12 ≥ 14 + 4, and on `.sm` 8 + 8 ≥ 14 + 2), so the button neither grows nor moves
-   its neighbours. */
+   variant's fill and text and only stops taking input. Its width is locked inline to the idle width,
+   so the button neither grows nor moves its neighbours. */
 .btn[aria-busy="true"] {
   cursor: progress;
 }
@@ -1826,13 +1824,37 @@ kbd {
   border-color: transparent;
   color: var(--danger-fg);
 }
-/* BusyButton zeroes the inline padding on the element itself, so a caller's padding cannot win. */
+/* A prepended spinner sits a narrower gap from the label than an icon does. */
 .btn[data-busy-spinner="prepended"] {
   gap: var(--space-1);
 }
 .btn.sm[data-busy-spinner="prepended"] {
   gap: var(--space-0-5);
 }
+/* A BusyButton without a leading icon reserves the spinner's room at rest (#2645): half the spinner
+   and its busy gap as extra inline padding on each side, so the label stays centred. Busy, the
+   padding returns to the size's own, and the spinner, gap and label fill exactly the reserved room:
+   same width, and neither the spinner nor the label touches an edge. */
+.btn[data-spinner-room]:not([aria-busy="true"]) {
+  padding-inline: calc(var(--space-3) + (var(--icon-sm) + var(--space-1)) / 2);
+}
+.btn.sm[data-spinner-room]:not([aria-busy="true"]) {
+  padding-inline: calc(var(--space-2) + (var(--icon-sm) + var(--space-0-5)) / 2);
+}
+.btn.lg[data-spinner-room]:not([aria-busy="true"]) {
+  padding-inline: calc(var(--space-4) + (var(--icon-sm) + var(--space-1)) / 2);
+}
+/* A dialog footer reserves nothing: a 400px confirmation's three buttons only just share one row,
+   and on a phone the footer is equal halves, already wider than their labels. Busy, the spinner
+   takes its room from the inline padding instead, so the footer neither wraps nor moves; a `.btn`
+   keeps 3px a side (12 + 12 = 14 + 4 + 6). A `.sm` has exactly the spinner's room in its padding
+   (8 + 8 = 14 + 2), so it reserves 2px a side, which it keeps when busy, and is never flush. Only a
+   locked width gives up padding: a button that mounts busy has no idle width, so it keeps its own. */
+.modal-foot > .btn[data-spinner-room]:not([aria-busy="true"]) { padding-inline: var(--space-3); }
+.modal-foot > .btn.sm[data-spinner-room]:not([aria-busy="true"]) { padding-inline: calc(var(--space-2) + var(--space-0-5)); }
+.modal-foot > .btn.lg[data-spinner-room]:not([aria-busy="true"]) { padding-inline: var(--space-4); }
+.modal-foot > .btn[data-spinner-room][data-busy-spinner="prepended"][data-width-locked] { padding-inline: 0; }
+.modal-foot > .btn.sm[data-spinner-room][data-busy-spinner="prepended"][data-width-locked] { padding-inline: var(--space-0-5); }
 /* The spinner draws in the button's own text colour, so it reads on a primary or danger fill. */
 .btn[aria-busy="true"] .spinner {
   flex: none;
@@ -3534,6 +3556,9 @@ textarea {
 /* The narrow-card exception (§3.1): Approve and Deny share the row as an equal pair, never wrapping. */
 .decision-pair .notice-actions { flex-wrap: nowrap; }
 .decision-pair .notice-actions > .btn { flex: 1 1 0; min-width: 0; max-width: none; }
+/* An equal pair: room reserved at rest (#2645) would make a BusyButton's share the wider one. */
+.decision-pair .notice-actions > .btn[data-spinner-room]:not([aria-busy="true"]) { padding-inline: var(--space-3); }
+.decision-pair .notice-actions > .btn.sm[data-spinner-room]:not([aria-busy="true"]) { padding-inline: var(--space-2); }
 
 /* ---------------------------- Session detail ---------------------------- */
 .session-detail,
@@ -10525,6 +10550,8 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
     overflow-wrap: anywhere;
     text-align: center;
   }
+  /* Equal halves are already wider than a small button's label: no 2px to reserve (#2645). */
+  .modal-foot > .btn.sm[data-spinner-room]:not([aria-busy="true"]) { padding-inline: var(--space-2); }
   .modal-foot > .form-error { flex-basis: 100%; }
   /* The destructive tertiary becomes a full-width ghost danger row at the body's end. */
   .modal-body > .modal-tertiary { display: flex; }
