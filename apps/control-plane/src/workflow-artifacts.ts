@@ -81,8 +81,8 @@ function hasWebmDocType(bytes: Buffer): boolean {
 export function videoBytesMatchMime(mimeType: string, bytes: Buffer): boolean {
   if (mimeType === "video/mp4") {
     return bytes.length >= 16 && bytes.readUInt32BE(0) >= 16 &&
-      bytes.subarray(4, 8).toString("ascii") === "ftyp" &&
-      ["isom", "iso2", "mp41", "mp42", "avc1", "M4V ", "dash"].includes(bytes.subarray(8, 12).toString("ascii"));
+      bytes.subarray(4, 8).toString("latin1") === "ftyp" &&
+      ["isom", "iso2", "mp41", "mp42", "avc1", "M4V ", "dash"].includes(bytes.subarray(8, 12).toString("latin1"));
   }
   return mimeType === "video/webm" && hasWebmDocType(bytes);
 }
@@ -95,11 +95,12 @@ export function screenshotBytesMatchMime(mimeType: string, bytes: Buffer): boole
     return bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
   }
   if (mimeType === "image/gif") {
-    const signature = bytes.length >= 6 ? bytes.subarray(0, 6).toString("ascii") : "";
+    // Unlike ascii decoding, latin1 preserves each byte's high bit.
+    const signature = bytes.length >= 6 ? bytes.subarray(0, 6).toString("latin1") : "";
     return signature === "GIF87a" || signature === "GIF89a";
   }
   return mimeType === "image/webp" && bytes.length >= 12 &&
-    bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP";
+    bytes.subarray(0, 4).toString("latin1") === "RIFF" && bytes.subarray(8, 12).toString("latin1") === "WEBP";
 }
 
 export function validateWorkflowArtifact(input: unknown): ArtifactValidation {

@@ -1,9 +1,52 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { validateWorkflowArtifact, videoBytesMatchMime } from "./workflow-artifacts.js";
+import { screenshotBytesMatchMime, validateWorkflowArtifact, videoBytesMatchMime } from "./workflow-artifacts.js";
 
 const mp4 = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from("ftypisom"), Buffer.alloc(12)]);
 const webm = Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x87, 0x42, 0x82, 0x84]), Buffer.from("webm"), Buffer.alloc(8)]);
+
+test("GIF and WebP validation compares every signature byte exactly", () => {
+  const cases: Array<[string, Buffer, number[]]> = [
+    ["image/gif", Buffer.from("GIF87a"), [0, 1, 2, 3, 4, 5]],
+    ["image/gif", Buffer.from("GIF89a"), [0, 1, 2, 3, 4, 5]],
+    ["image/webp", Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(4), Buffer.from("WEBP")]),
+      [0, 1, 2, 3, 8, 9, 10, 11]],
+  ];
+  for (const [mimeType, bytes, offsets] of cases) {
+    const validate = (data: Buffer) => validateWorkflowArtifact({
+      sessionId: "session", kind: "screenshot", name: "image", mimeType, encoding: "base64", data: data.toString("base64"),
+    });
+    assert.equal(screenshotBytesMatchMime(mimeType, bytes), true);
+    assert.equal(validate(bytes).ok, true);
+    assert.equal(screenshotBytesMatchMime(mimeType, bytes.subarray(0, bytes.length - 1)), false);
+    for (const offset of offsets) {
+      const mismatching = Buffer.from(bytes);
+      mismatching[offset] = mismatching[offset]! | 0x80;
+      const label = `${mimeType} high bit at byte ${offset}`;
+      assert.equal(screenshotBytesMatchMime(mimeType, mismatching), false, label);
+      assert.deepEqual(validate(mismatching), { ok: false, error: "screenshot bytes do not match the declared MIME type" }, label);
+    }
+  }
+});
+
+test("MP4 validation compares the signature and every supported major brand byte exactly", () => {
+  for (const brand of ["isom", "iso2", "mp41", "mp42", "avc1", "M4V ", "dash"]) {
+    const bytes = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from(`ftyp${brand}`), Buffer.alloc(12)]);
+    const validate = (data: Buffer) => validateWorkflowArtifact({
+      sessionId: "session", kind: "video", name: "clip", mimeType: "video/mp4", encoding: "base64", data: data.toString("base64"),
+    });
+    assert.equal(videoBytesMatchMime("video/mp4", bytes), true, brand);
+    assert.equal(validate(bytes).ok, true, brand);
+    assert.equal(videoBytesMatchMime("video/mp4", bytes.subarray(0, 15)), false, "truncated MP4");
+    for (let offset = 4; offset < 12; offset++) {
+      const mismatching = Buffer.from(bytes);
+      mismatching[offset] = mismatching[offset]! | 0x80;
+      const label = `${brand} high bit at byte ${offset}`;
+      assert.equal(videoBytesMatchMime("video/mp4", mismatching), false, label);
+      assert.deepEqual(validate(mismatching), { ok: false, error: "video bytes do not match the declared MIME type" }, label);
+    }
+  }
+});
 
 test("validates and content-addresses each workflow artifact contract", () => {
   const cases = [

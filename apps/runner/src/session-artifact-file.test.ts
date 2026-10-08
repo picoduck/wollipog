@@ -10,6 +10,37 @@ import { readMediaFileForAttach, sniffImageMediaType, sniffVideoMediaType } from
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from("pixels")]);
 const WEBM = Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x87, 0x42, 0x82, 0x84]), Buffer.from("webm"), Buffer.alloc(8)]);
 
+test("image sniffing rejects high-bit mismatches in GIF and WebP signatures", () => {
+  const cases: Array<[string, Buffer, number[]]> = [
+    ["image/gif", Buffer.from("GIF87a"), [0, 1, 2, 3, 4, 5]],
+    ["image/gif", Buffer.from("GIF89a"), [0, 1, 2, 3, 4, 5]],
+    ["image/webp", Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(4), Buffer.from("WEBP")]),
+      [0, 1, 2, 3, 8, 9, 10, 11]],
+  ];
+  for (const [mimeType, bytes, offsets] of cases) {
+    assert.equal(sniffImageMediaType(bytes), mimeType);
+    assert.equal(sniffImageMediaType(bytes.subarray(0, bytes.length - 1)), null);
+    for (const offset of offsets) {
+      const mismatching = Buffer.from(bytes);
+      mismatching[offset] = mismatching[offset]! | 0x80;
+      assert.equal(sniffImageMediaType(mismatching), null, `${mimeType} high bit at byte ${offset}`);
+    }
+  }
+});
+
+test("MP4 sniffing compares the signature and every supported major brand byte exactly", () => {
+  for (const brand of ["isom", "iso2", "mp41", "mp42", "avc1", "M4V ", "dash"]) {
+    const bytes = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from(`ftyp${brand}`), Buffer.alloc(12)]);
+    assert.equal(sniffVideoMediaType(bytes), "video/mp4", brand);
+    assert.equal(sniffVideoMediaType(bytes.subarray(0, 15)), null, "truncated MP4");
+    for (let offset = 4; offset < 12; offset++) {
+      const mismatching = Buffer.from(bytes);
+      mismatching[offset] = mismatching[offset]! | 0x80;
+      assert.equal(sniffVideoMediaType(mismatching), null, `${brand} high bit at byte ${offset}`);
+    }
+  }
+});
+
 test("video sniffing reads the bounded EBML DocType and preserves MP4 recognition", () => {
   const signature = Buffer.from([0x1a, 0x45, 0xdf, 0xa3]);
   const docType = (value: string) => Buffer.concat([Buffer.from([0x42, 0x82, 0x80 | value.length]), Buffer.from(value)]);

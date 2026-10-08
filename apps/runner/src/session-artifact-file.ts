@@ -77,8 +77,8 @@ export function sniffImageMediaType(bytes: Buffer): string | null {
 
 export function sniffVideoMediaType(bytes: Buffer): string | null {
   if (bytes.length >= 16 && bytes.readUInt32BE(0) >= 16 &&
-      bytes.subarray(4, 8).toString("ascii") === "ftyp" &&
-      ["isom", "iso2", "mp41", "mp42", "avc1", "M4V ", "dash"].includes(bytes.subarray(8, 12).toString("ascii"))) {
+      bytes.subarray(4, 8).toString("latin1") === "ftyp" &&
+      ["isom", "iso2", "mp41", "mp42", "avc1", "M4V ", "dash"].includes(bytes.subarray(8, 12).toString("latin1"))) {
     return "video/mp4";
   }
   if (hasWebmDocType(bytes)) return "video/webm";
