@@ -7,6 +7,10 @@
   "main": "src/bounded-child-process.ts",
   "types": "src/bounded-child-process.ts",
   "exports": {
+    "./webm-header-corpus": {
+      "types": "./src/webm-header-corpus.ts",
+      "default": "./src/webm-header-corpus.ts"
+    },
     "./bounded-child-process": {
       "types": "./src/bounded-child-process.ts",
       "default": "./src/bounded-child-process.ts"

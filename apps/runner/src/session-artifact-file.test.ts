@@ -1,3 +1,4 @@
+import { webmHeaderCorpus } from "@wollipog/test-support/webm-header-corpus";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { appendFileSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
@@ -41,48 +42,24 @@ test("MP4 sniffing compares the signature and every supported major brand byte e
   }
 });
 
-test("video sniffing reads the bounded EBML DocType and preserves MP4 recognition", () => {
-  const signature = Buffer.from([0x1a, 0x45, 0xdf, 0xa3]);
-  const docType = (value: string) => Buffer.concat([Buffer.from([0x42, 0x82, 0x80 | value.length]), Buffer.from(value)]);
-  const header = (...elements: Buffer[]) => {
-    const content = Buffer.concat(elements);
-    assert.ok(content.length < 127);
-    return Buffer.concat([signature, Buffer.from([0x80 | content.length]), content]);
-  };
-  const version = Buffer.from([0x42, 0x86, 0x81, 0x01]);
-  const mp4 = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from("ftypisom"), Buffer.alloc(12)]);
-  assert.equal(sniffVideoMediaType(mp4), "video/mp4");
-  assert.equal(sniffVideoMediaType(WEBM), "video/webm");
-  assert.equal(sniffVideoMediaType(header(version, docType("webm"))), "video/webm",
-    "DocType may follow another header element");
-  assert.equal(sniffVideoMediaType(header(Buffer.from([0x42, 0x82, 0x86]), Buffer.from("webm\0x"))), "video/webm",
-    "a null terminator may follow the WebM DocType");
-
-  const rejected: Array<[string, Buffer]> = [
-    ["Matroska with trailing decoy", Buffer.concat([header(docType("matroska")), Buffer.from("webm")])],
-    ["WebM text in another element", header(Buffer.from([0xec, 0x84]), Buffer.from("webm"))],
-    ["missing DocType with trailing decoy", Buffer.concat([header(version), Buffer.from("webm")])],
-    ["non-null DocType suffix", header(docType("webmx"))],
-    ["invalid DocType bytes with decoy", Buffer.concat([
-      header(Buffer.from([0x42, 0x82, 0x84, 0xf7, 0xe5, 0xe2, 0xed])), Buffer.from("webm"),
-    ])],
-    ["duplicate DocTypes", header(docType("webm"), docType("matroska"))],
-    ["unknown header size", Buffer.concat([signature, Buffer.from([0xff]), docType("webm")])],
-    ["truncated header", Buffer.concat([signature, Buffer.from([0x89]), docType("webm")])],
-    ["out-of-bounds DocType", Buffer.concat([signature, Buffer.from([0x87, 0x42, 0x82, 0x85]), Buffer.from("webm")])],
-    ["invalid child ID", Buffer.concat([signature, Buffer.from([0x87, 0x00]), docType("webm")])],
-    ["unknown child size", Buffer.concat([signature, Buffer.from([0x86, 0xec, 0xff]), Buffer.from("webm")])],
-  ];
-  for (const [name, bytes] of rejected) assert.equal(sniffVideoMediaType(bytes), null, name);
-
-  const size2 = (size: number) => Buffer.from([0x40 | (size >> 8), size & 0xff]);
-  const bounded = Buffer.concat([
-    signature, size2(4090), Buffer.from([0xec]), size2(4080), Buffer.alloc(4080), docType("webm"),
-  ]);
-  assert.equal(bounded.length, 4096);
-  assert.equal(sniffVideoMediaType(bounded), "video/webm", "DocType at the scan limit is valid");
-  assert.equal(sniffVideoMediaType(Buffer.concat([signature, size2(4091), bounded.subarray(6), Buffer.alloc(1)])), null,
-    "a header beyond the scan limit is rejected");
+test("video sniffing and file attachment use the common bounded-header corpus", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wollipog-webm-corpus-"));
+  const file = join(dir, "clip.webm");
+  try {
+    for (const { name, bytes, accepted } of webmHeaderCorpus()) {
+      assert.equal(sniffVideoMediaType(bytes), accepted ? "video/webm" : null, name);
+      writeFileSync(file, bytes);
+      const result = await readMediaFileForAttach(file);
+      assert.equal(result.ok, accepted, name);
+      if (result.ok) {
+        assert.equal(result.kind, "video", name);
+        assert.equal(result.mediaType, "video/webm", name);
+        assert.equal(result.sizeBytes, bytes.length, name);
+        assert.equal(result.sha256, createHash("sha256").update(bytes).digest("hex"), name);
+        assert.deepEqual(result.bytes, bytes, name);
+      }
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("video attachment reads a content-typed bounded file without trusting its extension", async () => {

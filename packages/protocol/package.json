@@ -11,6 +11,10 @@
       "types": "./src/index.ts",
       "default": "./src/index.ts"
     },
+    "./webm-header": {
+      "types": "./src/webm-header.ts",
+      "default": "./src/webm-header.ts"
+    },
     "./skills-digest": {
       "types": "./src/skills-digest.ts",
       "default": "./src/skills-digest.ts"
