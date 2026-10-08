@@ -2210,7 +2210,6 @@ export class SessionStore {
       // The fence intent must be durable before the manifest that commits it.
       for (const file of staged) this.publishHistoryFile(id, file);
       committed = true;
-      if (legacy) this.recoverLegacyFence(id, manifest);
       // Extend the append layout in place of a full refetch: the new segment was just written,
       // fsynced, and published, so only the new active file needs reading. Keying the entry by the
       // published inode, not a fresh stat, makes any later replacement miss.
@@ -2218,6 +2217,15 @@ export class SessionStore {
         this.cacheHistoryLayout(id, epoch, stagedManifest.key, this.layoutFromManifest(id, manifest));
       } catch {
         this.historyLayoutCache.delete(id); // the next append refetches and reports any damage
+      }
+      if (legacy) {
+        // Retiring the legacy file is its own durable step (rename, mkdir, directory fsync). The committed
+        // intent makes any layout read finish it, even after a crash, so let other work run first. This
+        // continuation resumed from I/O, so one immediate would still run in this loop iteration; the
+        // second waits for the next one, after its timers and I/O.
+        await yieldToEventLoop();
+        await yieldToEventLoop();
+        this.recoverLegacyFence(id, manifest);
       }
       // Logical history is byte-identical. Only source-file topology changed; keep the derived
       // index/checkpoint caches and frozen cursor boundaries intact.
