@@ -21,6 +21,24 @@ recovers it.
   transaction and back to `FULL` afterwards (`replayableCommit`). They are relaxed only in WAL mode
   (outside WAL, `NORMAL` can corrupt the file), and never for a transaction that carries a
   `token_usage` event (see below).
+- Checkpoints run on a worker thread (`WalCheckpointer` in `apps/control-plane/src/wal-checkpointer.ts`),
+  started by the control plane after it opens the database. About every 250 ms the worker runs
+  `wal_checkpoint(PASSIVE)` on its own connection, which uses `synchronous=FULL`. PASSIVE never
+  takes the write lock and never waits for one, so the main connection's readers and writers never
+  wait for the worker; frames it cannot copy yet wait for the next pass. While the worker runs, the
+  main connection's automatic checkpoint is raised from SQLite's default of 1,000 pages to a
+  backstop of 16,384 pages (64 MiB at 4 KiB pages). The backstop fires only when the worker falls
+  behind, stalls, or has died, so the log stays bounded either way. A worker that exits or fails to
+  start is logged and restarted after 1, 5, then 30 seconds; the control plane never depends on it.
+  A clean shutdown stops the worker after one last checkpoint, which flushes the log. The main
+  connection's commits are unchanged by any of this: `journal_mode` and `synchronous` are exactly
+  as above. Tools and tests that open the database without starting the worker keep SQLite's
+  default automatic checkpoint.
+
+Before the worker, the automatic checkpoint ran inside whichever commit crossed 1,000 pages, so it
+copied the log and flushed both files on the event loop in the middle of event ingest. On the
+same synthetic database at 600 streamed events per second with 8 dashboards, that alone set the
+delivery p95 (about 16 ms); see #2761 for the measurements.
 
 Flushing every streamed event capped ingest near 150 events per second, because each flush blocks
 the control plane's only thread. Measured on a local NVMe SSD with 500 sessions and about 220,000
@@ -42,10 +60,13 @@ discards an incomplete tail. It can roll back exactly one kind of commit: a rela
 transaction that no later flush has covered.
 
 The WAL is flushed by every `FULL` commit (that is, any other write: a status change, a prompt, a
-decision) and by every checkpoint (by default each 1,000 WAL pages). A flush covers the whole file,
-so it also makes every earlier relaxed commit durable. The exposure is therefore the run of event
-commits since the most recent other write or checkpoint. The operating system usually writes those
-pages back within seconds, but nothing guarantees it.
+decision) and by every checkpoint: the worker's pass about every 250 ms while the log has frames,
+or the backstop at 16,384 pages if the worker is not running. A flush covers the whole file, so it
+also makes every earlier relaxed commit durable. The exposure is therefore the run of event commits
+since the most recent other write or checkpoint, which while the worker runs is at most about a
+quarter of a second of streaming. Without the worker (a tool that opens the file directly) it is
+up to 1,000 pages, as before. The operating system usually writes those pages back within seconds,
+but nothing guarantees it.
 
 A rolled-back ingest transaction takes with it everything it wrote in the same transaction:
 
@@ -171,6 +192,12 @@ Limits:
 - `db.test.ts`, test "only runner-replayable event ingest commits without a per-commit WAL flush":
   records the `synchronous` level at every commit. It fails if ingest flushes again, or if the
   relaxation leaks to the connection or to control-plane writes.
+- `wal-checkpointer.test.ts`: the worker checkpoints while the connection stays `FULL` in WAL mode;
+  only PASSIVE checkpoints exist; main-connection writes with no busy timeout never meet a lock
+  while the worker runs, even beside a long-lived reader; a dead worker leaves the log bounded by
+  the backstop while every commit succeeds; a crashed worker restarts; a worker that cannot open
+  the file never affects the control plane; and a clean shutdown checkpoints once more, leaves no
+  log, and holds no lock.
 - `ingest-rollback-recovery.test.ts` simulates a rolled-back suffix by reopening a copy of the
   database taken before the relaxed commits on a different host boot. It drives the web store as an
   open dashboard and checks that the dashboard ends with the server's order without a reload. It

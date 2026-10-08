@@ -426,6 +426,15 @@ const app = Fastify({
     },
   },
 });
+// Checkpoint the write-ahead log off the event loop (#2761). Only failures are logged.
+db.startWalCheckpoints({
+  onEvent: (event) => {
+    if (event.type === "failed") app.log.warn({ error: event.message }, "WAL checkpoint worker failed");
+    else if (event.type === "exited") {
+      app.log.warn({ code: event.code, restartInMs: event.restartInMs }, "WAL checkpoint worker exited; restarting");
+    }
+  },
+});
 
 const CHILD_SESSION_REGISTRY_CACHE_LIMIT = 128;
 const CHILD_SESSION_REGISTRY_SCAN_PAGE_SIZE = 1_000;
@@ -6307,6 +6316,8 @@ app.addHook("onClose", async () => {
     await outboundEvents.close();
   } finally {
     orchestrator.shutdown();
+    // One last checkpoint flushes the log, so a clean exit leaves no relaxed commit exposed.
+    db.stopWalCheckpoints();
   }
 });
 // Re-entrancy guard: a second signal (or an uncaughtException raised WHILE app.close() drains)
