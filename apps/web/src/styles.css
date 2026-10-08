@@ -5564,8 +5564,9 @@ textarea {
    dock below it: the notice slot's lead entry, directly above the composer (§13.2). It is a size
    container, so the dock's cap is a share of the column, never of the page: at most 40% on desktop,
    50% on a phone and 40% again while the software keyboard is open, which keeps at least half of the
-   column for the transcript. */
+   column for the transcript. A question the person expanded is the exception (reading mode, below). */
 .chat-reading {
+  position: relative;
   display: flex;
   flex-direction: column;
   flex: 1;
@@ -5589,6 +5590,25 @@ textarea {
   .chat-reading > .session-notice-slot { max-height: 50cqh; }
 }
 .chat-reading > .session-notice-slot:has(> .request-dock[data-keyboard-open]) { max-height: 40cqh; }
+/* Reading mode (#2786): a question the person expanded takes the whole reading column, with the
+   keyboard open or not. The slot covers the transcript rather than squeezing it, so the transcript
+   keeps its size and its reading position underneath and is as it was when the question collapses.
+   Hidden, it takes no pointer, no focus and no screen reader. The card fills the slot and scrolls
+   between its head line and its footer (SessionApproval.tsx). */
+.chat-reading > .session-notice-slot:has(.question-card[data-question-expanded]) {
+  position: absolute;
+  inset: 0;
+  max-height: none;
+}
+.chat-reading:has(> .session-notice-slot .question-card[data-question-expanded]) > .detail-main {
+  visibility: hidden;
+}
+.chat-reading > .session-notice-slot:has(.question-card[data-question-expanded]) > .request-dock,
+.request-dock .request-dock-card:has(> .question-card[data-question-expanded]),
+.request-dock .question-card[data-question-expanded] {
+  flex: 1 1 auto;
+  min-height: 0;
+}
 /* In a column too short for the card's head, title, footer and a few lines of body (a phone in
    landscape), the dock scrolls as a whole rather than squeezing the body away; it never passes its cap. */
 .request-dock {
@@ -13850,29 +13870,49 @@ body.shell-dock-dragging * {
   max-height: none;
   margin: 0;
 }
-/* Show Where Asked, after the time; icon-only on a phone under the same name (§15.1). */
+/* Show Where Asked, after the time, and Collapse Question while the question is expanded; each
+   icon-only on a phone under the same name (§15.1). */
 @media (max-width: 760px) {
   /* Square: `.btn.sm`'s padding and `.btn`'s max-content cap would size it by its label. */
-  .btn.question-where-asked {
+  .btn:is(.question-where-asked, .question-collapse) {
     width: var(--control-h-sm);
     max-width: none;
     padding: 0;
   }
-  .question-where-asked-label { display: none; }
+  :is(.question-where-asked-label, .question-collapse-label) { display: none; }
+}
+/* Expanded (#2786), the head line stays at the card's top edge as the footer stays at its bottom,
+   so Collapse Question is in reach however long the question is. What scrolls passes under it, and
+   the "more above" line moves to its lower edge. */
+.question-card[data-question-expanded] > .request-card-head {
+  position: sticky;
+  z-index: var(--z-sticky);
+  top: 0;
+  background: inherit;
+}
+.question-card[data-question-expanded][data-clip-start]::before { border-bottom: none; }
+.question-card[data-question-expanded][data-clip-start] > .request-card-head::after {
+  content: "";
+  position: absolute;
+  right: calc(-1 * var(--request-card-pad-x));
+  bottom: calc(-1 * var(--space-2));
+  left: calc(-1 * var(--request-card-pad-x));
+  border-bottom: 1px solid var(--border);
+  pointer-events: none;
 }
 /* With the software keyboard open the card keeps the question and its answer: no head line, a
    one-line title without Show Full Question, and Back and Next or Submit Answers (§13.2). */
-.question-card[data-keyboard-open] > .request-card-head,
-.question-card[data-keyboard-open] .question-dismiss,
-.question-card[data-keyboard-open] .question-step-note,
+.question-card[data-keyboard-open]:not([data-question-expanded]) > .request-card-head,
+.question-card[data-keyboard-open]:not([data-question-expanded]) .question-dismiss,
+.question-card[data-keyboard-open]:not([data-question-expanded]) .question-step-note,
 .question-card[data-keyboard-open] .question-text-toggle { display: none; }
-.question-card[data-keyboard-open] > .question-text {
+.question-card[data-keyboard-open]:not([data-question-expanded]) > .question-text {
   display: -webkit-box;
   overflow: hidden;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 1;
 }
-.question-card[data-keyboard-open] > .question-text > * { display: inline; }
+.question-card[data-keyboard-open]:not([data-question-expanded]) > .question-text > * { display: inline; }
 .tl-perm-head {
   display: flex;
   align-items: center;
@@ -14267,7 +14307,7 @@ body.shell-dock-dragging * {
       input:focus:not([readonly], [type="button"], [type="checkbox"], [type="color"],
         [type="file"], [type="image"], [type="radio"], [type="range"], [type="reset"],
         [type="submit"])
-    ) .chat-reading > .session-notice-slot {
+    ) .chat-reading > .session-notice-slot:not(:has(.question-card[data-question-expanded])) {
       max-height: 40cqh;
     }
     /* And compacts a docked question card as the visual-viewport signal does (#2205), for the same
@@ -14280,8 +14320,8 @@ body.shell-dock-dragging * {
       input:focus:not([readonly], [type="button"], [type="checkbox"], [type="color"],
         [type="file"], [type="image"], [type="radio"], [type="range"], [type="reset"],
         [type="submit"])
-    ) .request-dock :is(.question-card > .request-card-head, .question-dismiss, .question-step-note,
-      .question-text-toggle) {
+    ) .request-dock .question-card:not([data-question-expanded]) :is(.request-card-head, .question-dismiss,
+      .question-step-note, .question-text-toggle) {
       display: none;
     }
     .detail-chat:has(
@@ -14291,7 +14331,7 @@ body.shell-dock-dragging * {
       input:focus:not([readonly], [type="button"], [type="checkbox"], [type="color"],
         [type="file"], [type="image"], [type="radio"], [type="range"], [type="reset"],
         [type="submit"])
-    ) .request-dock .question-card > .question-text {
+    ) .request-dock .question-card:not([data-question-expanded]) > .question-text {
       display: -webkit-box;
       overflow: hidden;
       -webkit-box-orient: vertical;
@@ -14304,7 +14344,7 @@ body.shell-dock-dragging * {
       input:focus:not([readonly], [type="button"], [type="checkbox"], [type="color"],
         [type="file"], [type="image"], [type="radio"], [type="range"], [type="reset"],
         [type="submit"])
-    ) .request-dock .question-card > .question-text > * { display: inline; }
+    ) .request-dock .question-card:not([data-question-expanded]) > .question-text > * { display: inline; }
   }
 
   /* From 600px the five tabs would sit about 150px apart, so they keep a 480px centered measure. */

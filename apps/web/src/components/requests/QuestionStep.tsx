@@ -57,7 +57,7 @@ export const QUESTION_CARD_COPY = {
   recoveryResume: "The runner restarted after this question was asked. Submit the preserved form to resume the existing agent conversation and deliver these answers once. Prior tool calls will not be replayed.",
   showWhereAsked: "Show Where Asked",
   showFullQuestion: "Show Full Question",
-  showLess: "Show Less",
+  collapseQuestion: "Collapse Question",
   findingWhereAsked: "Loading the transcript back to where the question was asked…",
   whereAskedNotLoaded: "This question's place in the transcript isn't loaded.",
   recoveryDismiss: "The runner restarted after this question was asked, so its original answer channel is no longer available. Review the preserved question, then dismiss it and send a new prompt to continue safely. No prior tool calls will be replayed.",

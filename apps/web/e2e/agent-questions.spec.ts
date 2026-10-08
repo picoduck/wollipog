@@ -414,7 +414,7 @@ const questionText = (card: Locator) => card.locator(".question-text").evaluate(
 });
 const showFullQuestion = (card: Locator) => card.getByRole("button", { name: "Show Full Question" });
 
-test("a question taller than the capped card ends on a whole line, and Show Full Question shows it whole with its answers and footer in reach (#2683)", async ({ page }) => {
+test("a question taller than the capped card ends on a whole line, and Show Full Question shows it whole across the reading column with its answers and footer in reach (#2683, #2786)", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/agent-questions-e2e.html?set=long-text");
   const bar = page.getByRole("region", { name: "Agent Questions" });
@@ -422,10 +422,12 @@ test("a question taller than the capped card ends on a whole line, and Show Full
   // Clamped, the question never scrolls on its own and no line is cut through.
   expect(await questionText(bar)).toEqual({ cut: false, overflowY: "hidden", hidden: true });
   await showFullQuestion(bar).click();
-  const showLess = bar.getByRole("button", { name: "Show Less" });
-  await expect(showLess).toHaveAttribute("aria-expanded", "true");
+  const collapse = bar.getByRole("button", { name: "Collapse Question" });
+  await expect(collapse).toHaveAttribute("aria-expanded", "true");
+  await expect(collapse).toBeFocused();
   expect(await questionText(bar)).toEqual({ cut: false, overflowY: "visible", hidden: false });
-  // The card scrolls the whole question under its footer, inside the dock's cap.
+  // The card scrolls the whole question between its head line and its footer, across the whole
+  // reading column (#2786).
   const submit = bar.getByRole("button", { name: "Submit Answers" });
   const dismiss = bar.getByRole("button", { name: "Dismiss", exact: true });
   for (const control of [submit, dismiss]) {
@@ -433,7 +435,8 @@ test("a question taller than the capped card ends on a whole line, and Show Full
     expect((await geometry(control)).bottom).toBeLessThanOrEqual((await geometry(bar)).bottom);
   }
   const [slot, reading] = [await geometry(page.locator(".chat-reading > .session-notice-slot")), await geometry(page.locator(".chat-reading"))];
-  expect(slot.height).toBeLessThanOrEqual(reading.height * 0.5 + 1);
+  expect(slot).toEqual(reading);
+  await expect(page.locator(".detail-main")).toHaveCSS("visibility", "hidden");
   const proceed = page.getByRole("radio", { name: "Proceed" });
   await proceed.scrollIntoViewIfNeeded();
   await expectInsideViewport(proceed, page);
@@ -463,8 +466,9 @@ test("at 390×844 a paragraph question behind +1 More Request expands and collap
   await expect(card.locator(".question-text")).toContainText("Did you approve it, or should it wait?");
   for (const name of ["Submit Answers", "Dismiss"]) await expectInsideViewport(card.getByRole("button", { name, exact: true }), page);
 
-  await card.getByRole("button", { name: "Show Less" }).click();
+  await card.getByRole("button", { name: "Collapse Question" }).click();
   await expect(showFullQuestion(card)).toHaveAttribute("aria-expanded", "false");
+  await expect(showFullQuestion(card)).toBeFocused();
   expect(await questionText(card)).toEqual({ cut: false, overflowY: "hidden", hidden: true });
   await expect(card.getByRole("radio", { name: /Hold It/ })).toBeChecked();
   await card.getByRole("button", { name: "Submit Answers" }).click();
@@ -519,10 +523,14 @@ for (const theme of ["dark", "light"] as const) {
     // At the end nothing is left below.
     await card.evaluate((element) => { element.scrollTop = element.scrollHeight; });
     await expect.poll(() => cardEdges(card)).toEqual({ above: true, below: false, range: start.range });
-    // Expanded, the rest of the question and the answers are below again.
+    // Expanded, the card takes the whole reading column (#2786): the line below shows exactly while
+    // the rest of the question and the answers are still under the footer.
     await card.evaluate((element) => { element.scrollTop = 0; });
     await card.getByRole("button", { name: "Show Full Question" }).click();
-    await expect.poll(async () => (await cardEdges(card)).below).toBe(true);
+    await expect.poll(async () => {
+      const edges = await cardEdges(card);
+      return { above: edges.above, below: edges.below === edges.range > 1 };
+    }).toEqual({ above: false, below: true });
   });
 }
 
@@ -1241,6 +1249,166 @@ test.describe("on a phone with the software keyboard open", () => {
       });
       expect(hit.width).toBeGreaterThanOrEqual(44);
       expect(hit.height).toBeGreaterThanOrEqual(44);
+    }
+  });
+});
+
+test.describe("an expanded question reads across the whole reading column (#2786)", () => {
+  /**
+   * Where the transcript is, as its reader sees it. Following, it is at its latest row; reading back,
+   * it shows the same first row at the same offset. Rows measured while the column was taller can
+   * change the scroll height, so the raw offset is not compared. Hidden, the transcript has no role,
+   * so it is found by its class.
+   */
+  const readingPosition = (page: Page) => page.locator(".detail-scroll").evaluate((element) => {
+    const box = element.getBoundingClientRect();
+    const rows = [...element.querySelectorAll<HTMLElement>("[data-virtual-row]")];
+    const first = rows.find((row) => row.getBoundingClientRect().bottom > box.top + 1);
+    const last = rows.findLast((row) => row.getBoundingClientRect().top < box.bottom - 1);
+    const state = element.getAttribute("data-follow-tail-state");
+    return state === "following"
+      ? {
+          state,
+          atTail: element.scrollHeight - element.scrollTop - element.clientHeight <= 2,
+          lastRow: last?.getAttribute("data-virtual-key") ?? null,
+        }
+      : {
+          state,
+          firstRow: first?.getAttribute("data-virtual-key") ?? null,
+          firstRowOffset: first ? Math.round(first.getBoundingClientRect().top - box.top) : null,
+        };
+  });
+
+  /** The expanded card fills the column, its head line and footer in view and clear of each other. */
+  async function expectReadingMode(page: Page) {
+    const card = dockedCard(page);
+    const collapse = card.getByRole("button", { name: "Collapse Question" });
+    await expect(collapse).toHaveAttribute("aria-expanded", "true");
+    const column = await geometry(page.locator(".chat-reading"));
+    expect(await geometry(page.locator(".chat-reading > .session-notice-slot"))).toEqual(column);
+    await expect(page.locator(".detail-main")).toHaveCSS("visibility", "hidden");
+    // The dock takes the slot's height, less its padding; nothing is held back for the transcript.
+    const dock = await geometry(page.locator(".request-dock"));
+    expect(dock.height).toBeGreaterThanOrEqual(column.height - 24);
+    const cardBox = await geometry(card);
+    expect(cardBox.bottom).toBeGreaterThanOrEqual(dock.bottom - 1);
+    const head = await geometry(card.locator(".request-card-head"));
+    const foot = await geometry(card.locator(".request-card-foot"));
+    for (const control of [collapse, card.getByRole("button", { name: "Dismiss", exact: true }),
+      card.getByRole("button", { name: "Submit Answers" })]) {
+      await expectInsideViewport(control, page);
+      const box = await geometry(control);
+      expect(box.top).toBeGreaterThanOrEqual(cardBox.top - 0.5);
+      expect(box.bottom).toBeLessThanOrEqual(cardBox.bottom + 0.5);
+    }
+    expect(head.bottom, "the head line and the footer never overlap").toBeLessThanOrEqual(foot.top + 0.5);
+    // The whole question is shown, never clamped to the keyboard's one line.
+    expect(await questionText(card)).toEqual({ cut: false, overflowY: "visible", hidden: false });
+  }
+
+  const viewports = [
+    { name: "phone", width: 390, height: 844, keyboard: false },
+    { name: "phone-keyboard", width: 390, height: 844, keyboard: true },
+    { name: "landscape", width: 844, height: 390, keyboard: false },
+    { name: "landscape-keyboard", width: 844, height: 390, keyboard: true },
+    { name: "desktop", width: 1440, height: 900, keyboard: false },
+  ];
+  for (const viewport of viewports) {
+    test(`a long question behind +1 More Request with queued messages fills the column and collapses back at ${viewport.name}`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await page.goto("/agent-questions-e2e.html?set=long-text&more=1&queued=4&after=40");
+      const card = dockedCard(page);
+      await expect(page.locator(".request-dock-more")).toContainText("+1 More Request");
+      // The queue tray is one summary line, so it never crowds the question (#2788).
+      await expect(page.locator(".queue-summary")).toHaveText("4 Queued Messages");
+      const before = await readingPosition(page);
+      await card.getByRole("radio", { name: /^Hold/ }).click();
+
+      await showFullQuestion(card).click();
+      await expect(card.getByRole("button", { name: "Collapse Question" })).toBeFocused();
+      await expectReadingMode(page);
+      // The keyboard opening takes the expanded question none of its room back (#2205's compact
+      // layout is for a card that is not being read).
+      if (viewport.keyboard) {
+        await page.evaluate(() => window.setAgentQuestionKeyboard(true));
+        await expect(card).toHaveAttribute("data-keyboard-open", "");
+        await expectReadingMode(page);
+        await expect(card.getByRole("button", { name: "Dismiss", exact: true })).toBeVisible();
+      }
+      await page.screenshot({ path: test.info().outputPath(`reading-${viewport.name}.png`) });
+      // Every answer is reachable inside the card, and Submit Answers stays in reach.
+      const proceed = card.getByRole("radio", { name: /^Proceed/ });
+      await proceed.scrollIntoViewIfNeeded();
+      await expectInsideViewport(proceed, page);
+      await expect(card.getByRole("button", { name: "Collapse Question" })).toBeInViewport();
+      // What scrolled passes under the head line, whose lower edge now draws the "more above" line.
+      await expect.poll(() => card.evaluate((element) => {
+        const line = getComputedStyle(element.querySelector(".request-card-head")!, "::after");
+        return element.scrollTop > 0 && line.content !== "none" && line.borderBottomWidth === "1px" &&
+          getComputedStyle(element, "::before").borderBottomStyle === "none";
+      })).toBe(true);
+      await card.getByRole("radio", { name: /^Hold/ }).scrollIntoViewIfNeeded();
+      await expect(card.getByRole("radio", { name: /^Hold/ })).toBeChecked();
+      expect(await page.evaluate(() => window.scrollY)).toBe(0);
+
+      if (viewport.keyboard) await page.evaluate(() => window.setAgentQuestionKeyboard(false));
+      await card.getByRole("button", { name: "Collapse Question" }).click();
+      await expect(showFullQuestion(card)).toBeFocused();
+      await expect(page.locator(".detail-main")).toHaveCSS("visibility", "visible");
+      const [slot, column] = [await geometry(page.locator(".chat-reading > .session-notice-slot")), await geometry(page.locator(".chat-reading"))];
+      expect(slot.height).toBeLessThan(column.height);
+      await expect.poll(() => readingPosition(page), { message: "the transcript is where it was" }).toEqual(before);
+      await expect(card.getByRole("radio", { name: /^Hold/ })).toBeChecked();
+      await expect(card.locator(".question-text")).toHaveClass(/is-clamped/);
+    });
+  }
+
+  test("focusing a field with the keyboard's CSS signal keeps the expanded question whole across the column", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto("/agent-questions-e2e.html?set=paragraph&more=1&queued=2");
+    const card = dockedCard(page);
+    await showFullQuestion(card).click();
+    // Something Else… opens a field in the card, as a typed answer does on a phone.
+    await card.getByRole("radio", { name: "Something Else…" }).click();
+    const field = card.locator(".question-input");
+    await field.fill("Merge it after the next review");
+    await expect(field).toBeFocused();
+    await expectReadingMode(page);
+    await expect(card.locator(".request-card-head")).toBeVisible();
+    await expect(card.getByRole("button", { name: "Dismiss", exact: true })).toBeVisible();
+    await card.getByRole("button", { name: "Collapse Question" }).click();
+    await expect(card.locator(".question-input")).toHaveValue("Merge it after the next review");
+  });
+
+  test("reading a question while reading back keeps the dock up and the transcript's place", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto("/agent-questions-e2e.html?set=paragraph&after=60");
+    await expect(dockedCard(page)).toBeVisible();
+    await reader(page).hover();
+    for (let wheel = 0; wheel < 6 && !(await strip(page).isVisible()); wheel += 1) await page.mouse.wheel(0, -1200);
+    await expect(reader(page)).toHaveAttribute("data-follow-tail-state", "paused");
+    await strip(page).getByRole("button", { name: "Expand Request" }).click();
+    const card = dockedCard(page);
+    await expect(card).toBeVisible();
+    const before = await readingPosition(page);
+    expect(before.state).toBe("paused");
+
+    await showFullQuestion(card).click();
+    await expectReadingMode(page);
+    await card.getByRole("button", { name: "Collapse Question" }).click();
+    await expect(card).toBeVisible();
+    await expect(strip(page)).toHaveCount(0);
+    await expect.poll(() => readingPosition(page)).toEqual(before);
+  });
+
+  test("rotating and resizing keep the question expanded across whatever column there is", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto("/agent-questions-e2e.html?set=paragraph&more=1&queued=3");
+    await showFullQuestion(dockedCard(page)).click();
+    await expectReadingMode(page);
+    for (const size of [{ width: 844, height: 390 }, { width: 1440, height: 900 }, { width: 1024, height: 600 }, { width: 390, height: 844 }]) {
+      await page.setViewportSize(size);
+      await expectReadingMode(page);
     }
   });
 });

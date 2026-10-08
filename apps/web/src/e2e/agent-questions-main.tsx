@@ -5,6 +5,7 @@ import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { focusSessionRequest } from "../components/SessionApproval.js";
 import { ComposerQuestionResponse } from "../components/ComposerQuestionResponse.js";
+import { QueuedMessages } from "../components/QueuedMessages.js";
 import { EventTimeline, type TimelineRevealRequest } from "../components/EventTimeline.js";
 import { SessionNoticeSlot } from "../components/SessionNoticeSlot.js";
 import { RequestDock } from "../components/requests/RequestDock.js";
@@ -31,6 +32,7 @@ declare global {
     clearAgentQuestion(): void;
     releaseAgentQuestion(): void;
     setAgentQuestionOnline(online: boolean): void;
+    setAgentQuestionKeyboard(open: boolean): void;
   }
 }
 
@@ -57,6 +59,27 @@ const waitingRequests: PendingApproval[] = params.get("more") === "1" ? [{
   options: [],
   questions: [{ id: "next", question: "Which wave lands next?", options: [{ label: "First" }, { label: "Second" }] }],
 }] : [];
+// `queued=N` lines N messages up in the composer's queue tray, as a session waiting on the question
+// does (#2786).
+const queuedPrompts = Array.from({ length: Number(params.get("queued") ?? 0) }, (_, index) => ({
+  id: `queued-${index + 1}`,
+  text: `Queued follow-up ${index + 1}: run the next check once the question is answered`,
+  steerable: false,
+  liveQueueObserved: true,
+  editable: true,
+  editRevision: "r1",
+}));
+const queuedSteering = {
+  runnerProtocolVersion: 200,
+  runnerOnline: true,
+  sessionStatus: "input_required",
+  activeTurnId: "turn-1",
+  supportsSteering: true,
+  policyPaused: false,
+  inputPending: true,
+  queueHeld: false,
+  stopPending: false,
+} as const;
 // Keycaps are a fine pointer's hints; the session shows them where a keyboard is likely (#2196).
 const showKeyHints = params.get("keys") === "1";
 let shouldHold = params.get("hold") === "1";
@@ -279,6 +302,9 @@ function Fixture() {
   window.releaseAgentQuestion = () => releasePending?.();
   window.clearAgentQuestion = () => setResolved(true);
   window.setAgentQuestionOnline = (online) => setRunnerOnline(online);
+  // The software keyboard opening or closing while the session is shown.
+  const [keyboard, setKeyboard] = useState(keyboardOpen);
+  window.setAgentQuestionKeyboard = (open) => setKeyboard(open);
 
   const client = useMemo(() => ({
     ...api,
@@ -444,7 +470,7 @@ function Fixture() {
                         headTrailing={trailing}
                         onSessionUpdate={() => setResolved(true)}
                         showKeyHints={showKeyHints}
-                        keyboardOpen={keyboardOpen}
+                        keyboardOpen={keyboard}
                         revealRequestId={revealRequestId}
                         followTailState={followTail.state}
                         readerRef={scrollRef}
@@ -456,7 +482,28 @@ function Fixture() {
                   }} />
                 )}
               </div>
-              <div className="composer">{composerContent}</div>
+              <div className="composer">
+                {queuedPrompts.length > 0 && (
+                  <QueuedMessages
+                    sessionId={SESSION_ID}
+                    prompts={queuedPrompts}
+                    queueHeld={false}
+                    agent="Claude Code"
+                    steering={queuedSteering}
+                    requestBusy={false}
+                    refusal={null}
+                    steeringPending={new Set()}
+                    editingPromptId={null}
+                    editOpen={false}
+                    pendingAction={undefined}
+                    onSteer={() => {}}
+                    onEdit={() => {}}
+                    onCancel={() => {}}
+                    onDismiss={() => {}}
+                  />
+                )}
+                {composerContent}
+              </div>
             </div>
           </div>
         </section>

@@ -1534,3 +1534,57 @@ test("the card behind the strip is the same card when it comes back, and its ope
     await view.unmount();
   }
 });
+
+test("a question expanded to read keeps the dock: a request arriving ahead waits, and reading back keeps the card (#2786)", async () => {
+  const long = "A question long enough that its clamped lines hide the end of it until it is expanded.";
+  const question: PendingApproval = {
+    requestId: "question:read",
+    kind: "question",
+    title: "Agent Questions",
+    options: [],
+    questions: [{ id: "q", question: long, options: [{ label: "Yes" }, { label: "No" }] }],
+  };
+  // happy-dom has no layout: the question takes eight 20px lines, three while clamped.
+  const proto = domWindow.HTMLElement.prototype as unknown as Record<string, unknown>;
+  const prior = {
+    scrollHeight: Object.getOwnPropertyDescriptor(proto, "scrollHeight"),
+    clientHeight: Object.getOwnPropertyDescriptor(proto, "clientHeight"),
+  };
+  const lines = (element: HTMLElement) => element.classList?.contains("question-text") ? 8 : 0;
+  Object.defineProperty(proto, "scrollHeight", { configurable: true, get(this: HTMLElement) { return lines(this) * 20; } });
+  Object.defineProperty(proto, "clientHeight", { configurable: true, get(this: HTMLElement) {
+    return (this.classList?.contains("is-clamped") ? Math.min(lines(this), 3) : lines(this)) * 20;
+  } });
+  const dock = (requests: PendingApproval[], state: FollowTailState) => (
+    <RequestDock session={sessionWith(question)} requests={requests} runnerOnline followTailState={state} />
+  );
+  const view = await render(dock([question], "following"));
+  const reading = () => view.container.querySelector(".request-dock-card:not([hidden]) .question-card[data-question-expanded]");
+  const click = async (selector: string) => {
+    await act(async () => { view.container.querySelector<HTMLButtonElement>(selector)!.click(); await tick(); });
+  };
+  try {
+    await click(".question-text-toggle");
+    assert.ok(reading(), "the question is expanded to read");
+
+    await view.rerender(dock([permission(), question], "following"));
+    assert.ok(reading(), "a request that arrives ahead does not take the card");
+    assert.ok(view.container.querySelector(".request-dock-more"), "it waits behind +1 More Request");
+
+    await view.rerender(dock([permission(), question], "paused"));
+    assert.ok(reading(), "reading mode keeps the card up while the reader is away from the tail");
+    assertNoDomNode(view.container.querySelector(".dock-strip"));
+
+    await click('.request-card-head button[aria-label="Collapse Question"]');
+    assertNoDomNode(reading(), "collapsing ends reading mode");
+    assert.equal(view.container.querySelector(".request-dock-card:not([hidden]) .question-text")?.textContent, long,
+      "collapsed, the question keeps its card");
+    assertNoDomNode(view.container.querySelector(".dock-strip"), "and stays up, as an expanded strip does");
+  } finally {
+    await view.unmount();
+    for (const [name, descriptor] of Object.entries(prior)) {
+      if (descriptor) Object.defineProperty(proto, name, descriptor);
+      else delete proto[name];
+    }
+  }
+});
