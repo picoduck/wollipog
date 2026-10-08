@@ -49,6 +49,17 @@ Run the coverage command with a TAP reporter beside the lcov one
 empty `lcov.info`, nothing on stderr, and every test reported passing, which left nothing to
 diagnose; the TAP stream is the record that survives that failure.
 
+If all tests pass but coverage reporting fails, inspect the TAP warning before classifying any
+coverage gaps. One run reported `Could not report code coverage` with an unterminated JSON string
+at position 1310720 and produced an empty lcov file. Retry the same coverage command at most once,
+adding `NODE_V8_COVERAGE=<scratch>/v8` to retain raw V8 coverage for diagnosis. This is a bounded
+diagnostic retry, not a proven fix for the truncation. Preserve both attempts' TAP output, exit
+statuses, and lcov files separately, plus a small diagnostic excerpt identifying the failing raw
+file and its size. Raw coverage can occupy several GiB; after recording that evidence, remove only
+this run's own `<scratch>/v8` directory. If the retry still fails, report coverage as unavailable
+and stop coverage-based triage; passing tests alone do not establish coverage gaps. Never weaken
+tests or repeat the full suite indefinitely to obtain a report.
+
 When a finding rests on a mutation probe (the real module against a copy with one guard removed),
 write the probe files in the run's scratch directory with the `.mts` extension and run them from
 the repository root: `node --import tsx <scratch>/probe.mts`. Two things fail otherwise and cost a

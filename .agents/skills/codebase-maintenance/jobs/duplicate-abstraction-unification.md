@@ -28,6 +28,11 @@ Start mechanically, then verify semantically:
 Mechanical duplication is only the candidate list. For each candidate, read both implementations
 fully and establish whether they mean the same thing, not merely whether they look alike.
 
+Read recent scratch `verdicts.md` records before triage so deliberate boundaries and already tracked
+findings are not rediscovered from scratch. Revalidate each relevant verdict against the current
+source and tracker; an old decision is evidence, not a permanent exclusion, an owned issue draft,
+or publication approval.
+
 ## Gate
 
 A finding qualifies only when:
@@ -44,7 +49,10 @@ A finding qualifies only when:
 
 Test helpers that look alike across packages are usually fine as they are. Two state machines with
 the same shape and different invariants are not duplicates. Generated or schema-derived code will
-duplicate heavily by design.
+duplicate heavily by design. Web-client mirrors of control-plane response types may deliberately
+make fields optional for older peers. Even when their current members match, mixed-version
+compatibility can require separate contracts; check consumers and compatibility fallbacks before
+proposing a shared type.
 
 ## Report
 
@@ -52,3 +60,9 @@ For each finding: both implementations with file and line ranges, a full enumera
 behavioral differences, every call site, and what the unified contract would be. Explicitly state
 the boundary you checked and why crossing it is safe. If you cannot enumerate all call sites, say
 so and drop the finding.
+
+Persist the candidate decisions in `<scratch>/verdicts.md`: record the inspected commit, each
+candidate's accepted, rejected, already-tracked, excluded, or deferred disposition, its concrete
+reason, relevant issue or PR references, and publication state. Include rejected candidates and
+intentional boundaries, not only findings, so later runs can revalidate the decisions efficiently.
+This record does not replace fresh duplicate searches or approval of exact public issue contents.
