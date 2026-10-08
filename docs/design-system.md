@@ -2516,6 +2516,9 @@ follows these rules so it never crowds out the conversation it asks about:
 - **The software keyboard leaves the question and its answer.** While it is open the question card
   drops its head line, its title takes one line, and its footer keeps only Back and Next or Submit
   Answers; a field that takes focus is scrolled into view within the card's body, never the page.
+  Any other control in the card reached from the keyboard (Show Full Question, a failure's Show
+  Details) is scrolled clear of the card's sticky footer and head line too, never left under them
+  (#2801).
 - **Answer Mode is the composer answering a question** (`ComposerQuestionResponse`, #2212). The
   `.answer-head` holds the kind ("Question"), "Question 2 of 3" only when there are several, a
   ghost `.btn.sm` Show Context (Lucide `ChevronsDown`) and an `.icon-btn.sm` × named "Exit Answer
