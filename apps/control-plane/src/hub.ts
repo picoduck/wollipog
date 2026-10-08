@@ -158,6 +158,50 @@ export const MAX_UI_BACKGROUND_OBSERVATIONS_PER_CONNECTION = 1_024;
 export const MAX_UI_BACKGROUND_OBSERVATIONS_PER_WINDOW = 128;
 export const UI_BACKGROUND_OBSERVATION_RATE_WINDOW_MS = 10_000;
 export const INDEFINITE_SESSION_REMINDER_UI_PROTOCOL = 174;
+/** Minimum spacing of a session's streaming-only upserts, so a dashboard receives at most four per
+ * second per session while an agent streams (#2760). Any other change is sent at once. */
+export const SESSION_STREAMING_UPSERT_INTERVAL_MS = 250;
+
+/** View fields that every streamed event moves: activity time, counters, the preview, and live
+ * usage. A change confined to these is paced; anything else (status, attention, requests, the
+ * event epoch, queue overlay, title) is a transition and is never delayed. A republished view with
+ * no change at all is a deliberate resend, such as a changed per-viewer projection, and is sent too. */
+const STREAMING_SESSION_FIELDS = new Set<string>([
+  "updatedAt",
+  "lastEventAt",
+  "messageCount",
+  "preview",
+  "tokensIn",
+  "tokensOut",
+  "contextTokensUsed",
+  "costUsd",
+  "toolCallCount",
+]);
+
+interface SessionPacingKeys {
+  /** Everything but the streaming fields. */
+  transition: string;
+  streaming: string;
+}
+
+function sessionPacingKeys(session: SessionView): SessionPacingKeys {
+  // Top level only: a nested record's own `updatedAt` (a job, a worktree) is a real change.
+  const rest: Record<string, unknown> = { ...session };
+  const streaming: unknown[] = [];
+  for (const field of STREAMING_SESSION_FIELDS) {
+    streaming.push(rest[field]);
+    delete rest[field];
+  }
+  return { transition: JSON.stringify(rest), streaming: JSON.stringify(streaming) };
+}
+
+interface SessionUpsertPacing {
+  /** The view last broadcast. */
+  sent: SessionPacingKeys;
+  sentAt: number;
+  /** Pending trailing flush; it re-reads the session, so it always carries the newest state. */
+  timer?: ReturnType<typeof setTimeout>;
+}
 
 interface OutboundFrame {
   data: string;
@@ -327,6 +371,8 @@ export class Hub {
   private readonly sessionProjectState = new Map<string, string>();
   /** O(1) projection of whether each Session currently occupies a live slot in its parent. */
   private readonly sessionParentCapacityState = new Map<string, boolean>();
+  /** Streaming upsert pacing per session, oldest send first so expired entries prune from the head. */
+  private readonly sessionUpsertPacing = new Map<string, SessionUpsertPacing>();
 
   constructor(private readonly db: ControlPlaneDb, options: HubOptions = {}) {
     this.skillRequestNow = options.skillRequestNow ?? (() => performance.now());
@@ -1019,7 +1065,7 @@ export class Hub {
     const previousParentCapacityState = this.sessionParentCapacityState.get(session.id);
     const nextParentCapacityState = this.occupiesParentCapacity(session);
     this.sessionParentCapacityState.set(session.id, nextParentCapacityState);
-    this.broadcast({ type: "session_upsert", session: this.withQueue(session) });
+    this.publishSessionUpsert(session);
     // A child's creation, restart, terminal state, or archive transition can change its parent's
     // live-capacity projection. Broadcast the direct parent only for those transitions and only
     // when a dashboard can receive it; the cache still advances while no dashboard is connected.
@@ -1029,13 +1075,82 @@ export class Hub {
       this.uiClients.size > 0
     ) {
       const parent = this.db.getSession(session.parentSessionId);
-      if (parent) this.broadcast({ type: "session_upsert", session: this.withQueue(parent) });
+      if (parent) this.publishSessionUpsert(parent);
     }
     if (!refreshProject || previousState === nextState) return;
     const previousProjectId = previousState?.split("\u0000", 1)[0] || null;
     if (previousProjectId !== session.projectId) this.syncSessionProjectMemory(session);
     if (previousProjectId && previousProjectId !== session.projectId) this.projectChangedById(previousProjectId);
     if (session.projectId) this.projectChangedById(session.projectId);
+  }
+
+  /** Broadcast a session's record, pacing streaming-only changes (#2760). Event ingest publishes
+   * only after broadcasting the event that caused the change, synchronously; pacing only ever sends
+   * later, by a flush that re-reads the session. So a paced upsert never reaches a dashboard ahead
+   * of its event, and the per-client queue keeps that order because a replaced upsert moves to the
+   * tail. */
+  private publishSessionUpsert(session: SessionView): void {
+    if (this.uiClients.size === 0) {
+      this.forgetSessionUpsertPacing(session.id);
+      return;
+    }
+    const view = this.withQueue(session);
+    const keys = sessionPacingKeys(view);
+    const now = Date.now();
+    this.pruneSessionUpsertPacing(now);
+    const pacing = this.sessionUpsertPacing.get(view.id);
+    if (pacing?.sent.transition === keys.transition && pacing.sent.streaming !== keys.streaming) {
+      if (pacing.timer) return;
+      // Clamped, so a wall clock stepped backwards cannot hold a paced update past one interval.
+      const wait = Math.min(pacing.sentAt + SESSION_STREAMING_UPSERT_INTERVAL_MS - now, SESSION_STREAMING_UPSERT_INTERVAL_MS);
+      if (wait > 0) {
+        pacing.timer = setTimeout(() => this.flushSessionUpsert(view.id), wait);
+        pacing.timer.unref?.();
+        return;
+      }
+    }
+    this.sendSessionUpsert(view, keys, now);
+  }
+
+  private flushSessionUpsert(sessionId: string): void {
+    const pacing = this.sessionUpsertPacing.get(sessionId);
+    if (!pacing) return;
+    pacing.timer = undefined;
+    try {
+      const session = this.uiClients.size > 0 ? this.db.getSession(sessionId) : null;
+      if (!session) {
+        this.forgetSessionUpsertPacing(sessionId);
+        return;
+      }
+      const view = this.withQueue(session);
+      this.sendSessionUpsert(view, sessionPacingKeys(view), Date.now());
+    } catch {
+      // A timer has no caller to report to, and a throw here would end the process; the database
+      // is closing at shutdown. Forgetting the entry sends the next change of this session at once.
+      this.forgetSessionUpsertPacing(sessionId);
+    }
+  }
+
+  private sendSessionUpsert(view: SessionView, keys: SessionPacingKeys, now: number): void {
+    // The newest view supersedes any pending flush, and re-insertion keeps send order for pruning.
+    this.forgetSessionUpsertPacing(view.id);
+    this.sessionUpsertPacing.set(view.id, { sent: keys, sentAt: now });
+    this.broadcast({ type: "session_upsert", session: view });
+  }
+
+  private forgetSessionUpsertPacing(sessionId: string): void {
+    const pacing = this.sessionUpsertPacing.get(sessionId);
+    if (!pacing) return;
+    if (pacing.timer) clearTimeout(pacing.timer);
+    this.sessionUpsertPacing.delete(sessionId);
+  }
+
+  /** An entry outside its interval no longer paces anything: the next change is sent at once. */
+  private pruneSessionUpsertPacing(now: number): void {
+    for (const [sessionId, pacing] of this.sessionUpsertPacing) {
+      if (now - pacing.sentAt < SESSION_STREAMING_UPSERT_INTERVAL_MS) break;
+      if (!pacing.timer) this.sessionUpsertPacing.delete(sessionId);
+    }
   }
 
   private projectStateKey(session: SessionView): string {
@@ -1130,7 +1245,7 @@ export class Hub {
     if (queue.length || held || activeTurnId) this.queuedBySession.set(sessionId, { queue, held, activeTurnId });
     else this.queuedBySession.delete(sessionId);
     const session = this.db.getSession(sessionId);
-    if (session) this.broadcast({ type: "session_upsert", session: this.withQueue(session) });
+    if (session) this.publishSessionUpsert(session);
   }
 
   /** Authoritative live turn coordinate. Missing means the runner has no interruptible turn. */
@@ -1155,7 +1270,7 @@ export class Hub {
       const s = this.db.getSession(id);
       if (!s || s.runnerId === runnerId) {
         this.queuedBySession.delete(id);
-        if (s) this.broadcast({ type: "session_upsert", session: this.withQueue(s) });
+        if (s) this.publishSessionUpsert(s);
       }
     }
   }
@@ -1166,6 +1281,7 @@ export class Hub {
     this.sessionProjectState.delete(sessionId);
     this.sessionParentCapacityState.delete(sessionId);
     this.queuedBySession.delete(sessionId);
+    this.forgetSessionUpsertPacing(sessionId);
     this.broadcast({ type: "session_removed", sessionId }, (_principal, info) => {
       // Archived rows are omitted from snapshots and enter a dashboard through exact REST lookup,
       // but their authorized stream subscription still proves that client knows the id. Deliver a
