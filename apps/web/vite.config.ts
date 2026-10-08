@@ -51,17 +51,18 @@ function excludePwaAssetsFromDesktop(): Plugin {
  * browsers that accept them (see `precompressed-assets.ts` and the control plane's
  * `web-static.ts`).
  *
- * Not for the desktop bundle: the Tauri webview loads it from disk (and Tauri compresses what it
- * embeds itself), so sidecars would only make the package larger. Not for the Playwright bundle,
- * which `vite preview` serves without them. A watched build uses a faster brotli level so a
- * rebuild does not spend seconds per save; until a sidecar is written, the file is served as is.
+ * The desktop bundle gets them too: the webview ignores them, but the app also ships this
+ * directory as its `web/` resource, which its control-plane sidecar serves to paired phones. Not
+ * for the Playwright bundle, which `vite preview` serves without them. A watched build uses a
+ * faster brotli level so a rebuild does not spend seconds per save; until a sidecar is written,
+ * the file is served as is.
  */
 function precompressAssets(mode: string): Plugin {
   return {
     name: "wollipog-precompress-assets",
     apply: "build",
     async writeBundle(output, bundle) {
-      if (isDesktopBuild(process.env) || mode === "production-e2e" || !output.dir) return;
+      if (mode === "production-e2e" || !output.dir) return;
       await precompressEmittedAssets(output.dir, Object.keys(bundle), this.meta.watchMode ? 9 : 11);
     },
   };
