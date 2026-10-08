@@ -21180,9 +21180,12 @@ export class ControlPlaneDb {
   /** Commits one runner-replayable event transaction under synchronous=NORMAL, so streaming no
    * longer waits for a disk flush per event. An OS crash or power loss can roll the commit back
    * until the next FULL commit or checkpoint flushes the WAL; the runner's retained log refills it
-   * (docs/control-plane-database-durability.md). Outside WAL, NORMAL could corrupt the file. */
-  private replayableCommit<T>(work: () => T): T {
-    if (!this.walJournal || (this.db as DatabaseSync & { isTransaction?: boolean }).isTransaction) {
+   * (docs/control-plane-database-durability.md). Outside WAL, NORMAL could corrupt the file.
+   * Usage stays FULL: after a rollback, the reconnect snapshot would book a lost token_usage as flat
+   * totals before its replay (reconcileUsageSnapshotInTransaction), dropping its cache breakdown. */
+  private replayableCommit<T>(payloads: readonly SessionEventPayload[], work: () => T): T {
+    if (!this.walJournal || payloads.some((payload) => payload.kind === "token_usage") ||
+        (this.db as DatabaseSync & { isTransaction?: boolean }).isTransaction) {
       return work();
     }
     this.db.exec("PRAGMA synchronous = NORMAL;");
@@ -21194,9 +21197,12 @@ export class ControlPlaneDb {
   }
 
   appendEvent(...args: Parameters<ControlPlaneDb["appendEventTransaction"]>): SessionEvent {
-    return args[3]?.runnerSeq === undefined
+    const appended = args[3]?.runnerSeq === undefined
       ? this.appendEventTransaction(...args)
-      : this.replayableCommit(() => this.appendEventTransaction(...args));
+      : this.replayableCommit([args[1]], () => this.appendEventTransaction(...args));
+    // Outside the relaxed commit: usage retention is not replayable from the runner's log.
+    if (args[3]?.accrueUsage) this.maybeMaintainUsageAggregation();
+    return appended;
   }
 
   private appendEventTransaction(
@@ -21330,7 +21336,6 @@ export class ControlPlaneDb {
       this.db.exec("ROLLBACK");
       throw err;
     }
-    if (options?.accrueUsage) this.maybeMaintainUsageAggregation();
     return appended;
   }
 
@@ -21339,7 +21344,12 @@ export class ControlPlaneDb {
   appendHydratedPage(
     ...args: Parameters<ControlPlaneDb["appendHydratedPageTransaction"]>
   ): AppendHydratedPageResult {
-    return this.replayableCommit(() => this.appendHydratedPageTransaction(...args));
+    const result = this.replayableCommit(
+      args[2].map((event) => event.payload),
+      () => this.appendHydratedPageTransaction(...args),
+    );
+    if (result.events.length) this.maybeMaintainUsageAggregation();
+    return result;
   }
 
   private appendHydratedPageTransaction(
@@ -21483,7 +21493,6 @@ export class ControlPlaneDb {
       this.db.exec("ROLLBACK");
       throw error;
     }
-    this.maybeMaintainUsageAggregation();
     return appliedResult;
   }
 

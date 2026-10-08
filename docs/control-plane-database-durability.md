@@ -18,8 +18,9 @@ recovers it.
   control-plane decision is durable once it has been acknowledged.
 - Runner-replayable event ingest is the one exception. `appendEvent` called with a runner sequence
   number and `appendHydratedPage` switch the connection to `synchronous=NORMAL` for their own
-  transaction and back to `FULL` afterwards (`replayableCommit`). They are relaxed only in WAL mode:
-  outside WAL, `NORMAL` can corrupt the file.
+  transaction and back to `FULL` afterwards (`replayableCommit`). They are relaxed only in WAL mode
+  (outside WAL, `NORMAL` can corrupt the file), and never for a transaction that carries a
+  `token_usage` event (see below).
 
 Flushing every streamed event capped ingest near 150 events per second, because each flush blocks
 the control plane's only thread. Measured on a local NVMe SSD with 500 sessions and about 220,000
@@ -28,8 +29,8 @@ events, 10 streaming sessions and 6 dashboards:
 | Measurement                                | Every commit flushed | Event ingest relaxed |
 | ------------------------------------------ | -------------------- | -------------------- |
 | `appendEvent` p50                          | 5.1 ms               | 0.07 ms              |
-| Runner-to-dashboard p50 / p95, 200 events/s | 1.4 s / 2.9 s        | 0.5 ms / 12 ms       |
-| Runner-to-dashboard p50 / p95, 300 events/s | 4.4 s / 8.6 s        | 0.5 ms / 18 ms       |
+| Runner-to-dashboard p50 / p95, 200 events/s | 1.4 s / 2.9 s        | 0.5 ms / 9 ms        |
+| Runner-to-dashboard p50 / p95, 300 events/s | 4.4 s / 8.6 s        | 0.5 ms / 12 ms       |
 
 ## What a Crash Can Lose
 
@@ -51,7 +52,7 @@ A rolled-back ingest transaction takes with it everything it wrote in the same t
 - the event rows and their transcript search entries;
 - the session's hydrated-history cursor;
 - the session preview, last-activity time, and message count;
-- usage accrual, campaign-report rebinding, background-continuation projection, and event-artifact
+- campaign-report rebinding, background-continuation projection, usage coverage, and event-artifact
   links.
 
 Large payloads are published as artifacts in `FULL` commits before their event row. An artifact
@@ -66,7 +67,15 @@ Nothing else is exposed, because every other write still flushes at its commit:
 - runner, device, and agent credentials and their revocation, and transcript-share revocation;
 - settings, governance and audit records, and session status;
 - events the control plane writes itself, which carry no runner sequence number (artifact
-  attachments, runner disconnect and reconnect notices, question attribution).
+  attachments, runner disconnect and reconnect notices, question attribution);
+- `token_usage` events and usage retention maintenance.
+
+Usage events stay `FULL` because replay could not restore them faithfully. On reconnect the
+runner's snapshot reaches the control plane before the lost events are pulled again, and
+`reconcileUsageSnapshotInTransaction` books the missing usage as flat totals and marks it covered.
+The replayed event is then skipped, losing its cache breakdown, and a provider that reports no
+cost would be priced as if nothing were cached. A `FULL` commit flushes every earlier relaxed
+commit too, so a rolled-back run of events never contains a usage event.
 
 Relaxing the whole connection was rejected for this reason. A rolled-back consumption or revocation
 has no other copy, so it would silently re-enable a used approval or a revoked credential.
@@ -93,14 +102,17 @@ events, so after a crash the control plane is consistently behind rather than ho
 4. `hydrateHistory` requests contiguous pages from the cursor (`session_history_page`) and applies
    them with `appendHydratedPage`.
 
-A session's rolled-back rows are always a suffix of runner events: any control-plane write to the
-session would have flushed everything before it. The recovered events therefore get back the same
-per-session sequence numbers they had before the crash.
+A session's rolled-back rows are always a suffix of runner events, because any other write would
+have flushed everything before it. The recovered events take the next free per-session sequence
+numbers. If the control plane writes its own event to the session before they return (a reconnect
+notice, for example), those numbers differ from the ones dashboards saw before the crash. The event
+epoch does not change, so a dashboard that kept the pre-crash transcript open is not told to reload
+it.
 
 Limits:
 
 - Recovery is lazy. A session that receives no new event and is never opened stays behind, so its
-  newest events are missing from search and usage until something reads it.
+  newest events are missing from its transcript, search, and preview until something reads it.
 - The runner must still hold the session. If its history epoch changed, the control plane resets
   and re-pulls the whole log instead.
 - A runner on the same host shares the power loss. It flushes its log on a 250 ms debounce after

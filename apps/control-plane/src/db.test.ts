@@ -353,18 +353,30 @@ test("only runner-replayable event ingest commits without a per-commit WAL flush
     db.createSession(newSession());
     const levels = recordCommitSynchronousLevels(db);
 
-    db.appendEvent("sess-1", { kind: "agent_message", text: "streamed" }, 2, { runnerSeq: 1, historyEpoch: null });
-    db.appendEvent("sess-1", { kind: "stderr", text: "control-plane authored" }, 3);
-    db.reconcileRunnerHistory("sess-1", 7, 2);
-    const page = db.appendHydratedPage(
+    // Due again, so the first accruing append also runs usage retention maintenance.
+    (db as unknown as { lastUsageMaintenance: number }).lastUsageMaintenance = 0;
+    const runnerEvent = { runnerSeq: 1, historyEpoch: null, accrueUsage: true };
+    db.appendEvent("sess-1", { kind: "agent_message", text: "streamed" }, 2, runnerEvent);
+    const usage = { kind: "token_usage", inputTokens: 10, outputTokens: 2, costUsd: 0.01 } as const;
+    db.appendEvent("sess-1", usage, 3, { ...runnerEvent, runnerSeq: 2 });
+    db.appendEvent("sess-1", { kind: "stderr", text: "control-plane authored" }, 4);
+    db.reconcileRunnerHistory("sess-1", 7, 3);
+    const hydrate = (payload: Parameters<ControlPlaneDb["appendEvent"]>[1]) => db!.appendHydratedPage(
       "sess-1",
-      { afterSeq: db.getHydratedSeq("sess-1"), historyEpoch: 7, eventEpoch: 0 },
-      [{ seq: db.getHydratedSeq("sess-1") + 1, ts: 4, payload: { kind: "agent_message", text: "hydrated" } }],
+      { afterSeq: db!.getHydratedSeq("sess-1"), historyEpoch: 7, eventEpoch: 0 },
+      [{ seq: db!.getHydratedSeq("sess-1") + 1, ts: 5, payload }],
     );
-    assert.equal(page.applied, true);
-    // Runner events (live and hydrated) commit under NORMAL; the control-plane event and the
-    // history-state reconciliation between them stay FULL.
-    assert.deepEqual(levels, [1, 2, 2, 1]);
+    assert.equal(hydrate({ kind: "agent_message", text: "hydrated" }).applied, true);
+    assert.equal(hydrate(usage).applied, true);
+    assert.deepEqual(levels, [
+      1, // live runner event
+      2, // usage retention maintenance after it
+      2, // runner token_usage: a lost one could not be re-accounted in detail
+      2, // control-plane event
+      2, // history-state reconciliation
+      1, // hydrated runner event
+      2, // hydrated token_usage
+    ]);
     assert.equal(pragma("synchronous"), 2, "the connection returns to FULL after each relaxed commit");
 
     assert.throws(() => db!.appendEvent("missing-session", { kind: "agent_message", text: "x" }, 5, {
