@@ -282,8 +282,9 @@ for (const viewport of [
 
     test("returning from a session opened from the results keeps the reader's place", async ({ page }) => {
       await openScrolling(page);
-      await search(page, "Session");
-      await expect(grid(page)).toHaveAttribute("aria-rowcount", "29");
+      // A result count the whole list does not share, so the wait cannot pass before the search commits.
+      await search(page, "Build");
+      await expect(grid(page)).toHaveAttribute("aria-rowcount", "15");
       await grid(page).evaluate((list) => { list.scrollTop = 400; });
       const reading = await settled(page);
       expect(reading.scrollTop).toBe(400);
@@ -306,7 +307,7 @@ for (const viewport of [
       await expect(page.getByRole("region", { name: "Session Activity" })).toBeVisible();
       await page.goBack();
       await expect(grid(page)).toBeVisible();
-      await expect(field(page)).toHaveValue("Session");
+      await expect(field(page)).toHaveValue("Build");
       expect(await settled(page)).toMatchObject({ scrollTop: reading.scrollTop, key: reading.key });
     });
   });
