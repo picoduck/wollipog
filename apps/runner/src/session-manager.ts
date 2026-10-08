@@ -11719,7 +11719,11 @@ export class SessionManager {
     recoveryRequestId: string,
     providerAccountId: string,
     expectedProviderAccountId: string,
+    resolvedBy?: unknown,
   ): Promise<{ ok: boolean; code?: ProviderAuthenticationAccountSelectionError; error?: string }> {
+    // Who chose the account (#2783), named on this session's resolution only; a malformed value is
+    // dropped rather than recorded.
+    const decidedBy = permissionResolver(resolvedBy);
     const refuse = (code: ProviderAuthenticationAccountSelectionError, error: string) =>
       ({ ok: false, code, error });
     const controller = this.providerAuthRecovery;
@@ -11880,6 +11884,7 @@ export class SessionManager {
         true,
         "auth:select-account",
         true,
+        decidedBy,
       ).catch((error: unknown) => {
         this.log(`selected-account recovery for ${boundedSessionIdForLog(sessionId)} failed: ${errText(error)}`);
       }).finally(() => {

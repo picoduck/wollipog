@@ -180,6 +180,9 @@ export function registerAuthenticationRecoveryRoutes(
         recoveryRequestId: body.requestId as string,
         providerAccountId: body.providerAccountId,
         expectedProviderAccountId: body.expectedProviderAccountId,
+        // The member who chose it, named on this card's Decision Record (#2783). Only a person
+        // reaches this route.
+        resolvedBy: { kind: "user", userId: principal.userId },
       }, SELECTION_TIMEOUT_MS);
       if (result.type !== "select_provider_authentication_account_result") {
         return reply.code(502).send({ error: "unexpected runner reply" });

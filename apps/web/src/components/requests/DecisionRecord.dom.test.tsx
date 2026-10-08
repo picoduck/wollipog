@@ -398,7 +398,7 @@ test("a permission names who decided it from its own resolution: You, another me
   }
 });
 
-test("a sign-in card names the member who chose its action, and nobody for an automatic recheck (#2742)", async () => {
+test("a sign-in card names the member who chose its action, and nobody for an automatic recheck (#2742, #2783)", async () => {
   const SIGN_IN: PermissionOption[] = [
     { optionId: "auth:login", name: "Start Sign-In", kind: "allow_once" },
     { optionId: "auth:revalidate", name: "Recheck Authentication", kind: "allow_once" },
@@ -412,6 +412,8 @@ test("a sign-in card names the member who chose its action, and nobody for an au
     ...signIn("provider-auth:recheck", "auth:revalidate", { kind: "user", userId: "usr-ada-x7" }),
     ...signIn("provider-auth:login", "auth:login", { kind: "user", userId: "usr-grace-x7" }),
     ...signIn("provider-auth:dismiss", "auth:dismiss", { kind: "user", userId: "usr-departed-x7" }),
+    // Choose Another Account… is a runner outcome a member chose (#2783).
+    ...signIn("provider-auth:select", "auth:select-account", { kind: "user", userId: "usr-grace-x7" }),
     ...signIn("provider-auth:automatic", "auth:automatic-retry"),
     // Never sent by the runner (#2742), and still unnamed if it were.
     ...signIn("provider-auth:automatic-named", "auth:automatic-retry", { kind: "user", userId: "usr-ada-x7" }),
@@ -425,6 +427,7 @@ test("a sign-in card names the member who chose its action, and nobody for an au
       "Allowed Sign In to Claude Code by You",
       "Allowed Sign In to Claude Code by Grace Hopper",
       "Rejected Sign In to Claude Code by Another Member",
+      "Another Account Selected Sign In to Claude Code by Grace Hopper",
       "Rechecked Automatically Sign In to Claude Code",
       "Rechecked Automatically Sign In to Claude Code",
       "Allowed Sign In to Claude Code",
@@ -435,8 +438,8 @@ test("a sign-in card names the member who chose its action, and nobody for an au
       const index = terms.findIndex((term) => term.textContent === "Decided By");
       return index < 0 ? null : row.querySelectorAll("dd")[index]?.textContent;
     });
-    assert.deepEqual(decidedBy, ["You", "Grace Hopper", "Another Member", null, null, null]);
-    for (const row of rows.slice(3)) assertNoDomNode(row.querySelector(".tl-decision-by"));
+    assert.deepEqual(decidedBy, ["You", "Grace Hopper", "Another Member", "Grace Hopper", null, null, null]);
+    for (const row of rows.slice(4)) assertNoDomNode(row.querySelector(".tl-decision-by"));
     assert.doesNotMatch(view.container.textContent ?? "", /x7/, "a user id is never shown");
   } finally {
     await view.unmount();

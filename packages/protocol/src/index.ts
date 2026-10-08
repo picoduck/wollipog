@@ -9381,6 +9381,10 @@ export interface SelectProviderAuthenticationAccountMessage {
   recoveryRequestId: string;
   providerAccountId: string;
   expectedProviderAccountId: string;
+  /** Who chose the account (#2783), recorded on this session's `auth:select-account` resolution
+   * only, as `resolve_permission`'s v211 field is. Absent from older control planes; older runners
+   * ignore it. Such selections name nobody. */
+  resolvedBy?: PermissionResolver;
 }
 
 export interface SelectProviderAuthenticationAccountResultMessage {
