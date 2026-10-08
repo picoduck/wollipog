@@ -4573,6 +4573,10 @@ function settleLegacyChildCharges(db: DatabaseSync): void {
 
 /** The campaign projection names at most this many held children; `children.blocked` counts all. */
 const CAMPAIGN_HELD_CHILDREN_LIMIT = 32;
+/** How long a statement waits for another connection's lock before failing with SQLITE_BUSY. The
+ * wait blocks the event loop, so it only rides out a brief lock; a lock held longer still fails
+ * fast and periodic work defers its tick. */
+export const CONTROL_PLANE_DB_BUSY_TIMEOUT_MS = 250;
 
 /**
  * Admit the `child_blocked` campaign event (#1650). SQLite cannot alter a CHECK constraint, so an
@@ -4698,6 +4702,7 @@ export class ControlPlaneDb {
     private readonly db: DatabaseSync,
     private readonly artifactBlobs: ArtifactBlobStore,
     private readonly controlPlaneInstanceId: string,
+    private readonly walJournal: boolean,
   ) {}
 
   /** Compiled-statement cache. Every hot path (one appendEvent + two sessionViews per streamed
@@ -4868,7 +4873,13 @@ export class ControlPlaneDb {
       ? new MemoryArtifactBlobStore()
       : new FileArtifactBlobStore(options.artifactBlobDir ?? defaultArtifactBlobRoot(location));
     const db = new DatabaseSync(location);
-    db.exec("PRAGMA journal_mode = WAL;");
+    // First, so the journal-mode switch below also waits out a brief lock from another connection.
+    db.exec(`PRAGMA busy_timeout = ${CONTROL_PLANE_DB_BUSY_TIMEOUT_MS};`);
+    const journalMode = (db.prepare("PRAGMA journal_mode = WAL;").get() as { journal_mode: string })
+      .journal_mode;
+    // FULL flushes the WAL at every commit, so control-plane decisions are durable once
+    // acknowledged. Only runner-replayable event ingest relaxes it; see replayableCommit.
+    db.exec("PRAGMA synchronous = FULL;");
     db.exec("PRAGMA secure_delete = ON;");
     db.exec("PRAGMA foreign_keys = ON;");
     // The child-charge triggers carry a settled charge up every ancestor by re-firing on each
@@ -6335,7 +6346,7 @@ export class ControlPlaneDb {
         db.exec(`ALTER TABLE orchestrator_campaign_child_reports ADD COLUMN ${column}`);
       }
     }
-    const controlPlane = new ControlPlaneDb(db, artifactBlobs, instanceId);
+    const controlPlane = new ControlPlaneDb(db, artifactBlobs, instanceId, journalMode === "wal");
     try {
       controlPlane.recoverPendingArtifactBlobs();
       controlPlane.migrateInlineWorkflowArtifacts();
@@ -21166,7 +21177,29 @@ export class ControlPlaneDb {
     }
   }
 
-  appendEvent(
+  /** Commits one runner-replayable event transaction under synchronous=NORMAL, so streaming no
+   * longer waits for a disk flush per event. An OS crash or power loss can roll the commit back
+   * until the next FULL commit or checkpoint flushes the WAL; the runner's retained log refills it
+   * (docs/control-plane-database-durability.md). Outside WAL, NORMAL could corrupt the file. */
+  private replayableCommit<T>(work: () => T): T {
+    if (!this.walJournal || (this.db as DatabaseSync & { isTransaction?: boolean }).isTransaction) {
+      return work();
+    }
+    this.db.exec("PRAGMA synchronous = NORMAL;");
+    try {
+      return work();
+    } finally {
+      this.db.exec("PRAGMA synchronous = FULL;");
+    }
+  }
+
+  appendEvent(...args: Parameters<ControlPlaneDb["appendEventTransaction"]>): SessionEvent {
+    return args[3]?.runnerSeq === undefined
+      ? this.appendEventTransaction(...args)
+      : this.replayableCommit(() => this.appendEventTransaction(...args));
+  }
+
+  private appendEventTransaction(
     sessionId: string,
     payload: SessionEventPayload,
     ts: number,
@@ -21304,6 +21337,12 @@ export class ControlPlaneDb {
   /** Atomically apply one contiguous runner-owned page while retaining independent CP event seq/id
    * allocation. Expectation drift is a normal stale response and applies nothing. */
   appendHydratedPage(
+    ...args: Parameters<ControlPlaneDb["appendHydratedPageTransaction"]>
+  ): AppendHydratedPageResult {
+    return this.replayableCommit(() => this.appendHydratedPageTransaction(...args));
+  }
+
+  private appendHydratedPageTransaction(
     sessionId: string,
     expected: { afterSeq: number; historyEpoch: number; eventEpoch: number },
     events: readonly HydratedRunnerEvent[],
