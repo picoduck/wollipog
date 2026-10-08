@@ -278,6 +278,28 @@ test("a status computed before a flush that latches a history failure does not o
   } finally { h.cleanup(); }
 });
 
+test("a provider exit is still handled when landing its pending text fails", async () => {
+  const h = await harness();
+  try {
+    h.emit(delta("a"));
+    h.emit(delta("pending"));
+    const append = h.store.appendEvent;
+    const patch = h.store.patchMeta;
+    h.store.appendEvent = (() => { throw new Error("disk full"); }) as SessionStore["appendEvent"];
+    h.store.patchMeta = (() => { throw new Error("disk full"); }) as SessionStore["patchMeta"];
+    try {
+      // The ACP driver invokes this from its process-close listener; a throw would reach the
+      // runner's uncaughtException handler and shut down every other session.
+      assert.doesNotThrow(() => h.callbacks().onExit(1));
+    } finally {
+      h.store.appendEvent = append;
+      h.store.patchMeta = patch;
+    }
+    assert.equal((h.manager as unknown as { active: Map<string, unknown> }).active.has(SESSION), false,
+      "the exit releases the session's live ownership");
+  } finally { h.cleanup(); }
+});
+
 test("shutdown disposes every provider even when landing pending text fails", async () => {
   const h = await harness();
   try {

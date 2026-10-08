@@ -16047,28 +16047,17 @@ export class SessionManager {
   }
 
   /** Land a session's pending streamed text. Every event append, status change, turn settlement,
-   * provider exit, and shutdown calls this first, so coalescing never reorders history. Best
-   * effort: an append failure is already latched per session, and a secondary fault must not
-   * abort the caller's own lifecycle step. */
+   * provider exit, and shutdown calls this first, so coalescing never reorders history. A flush
+   * never throws into the caller's lifecycle step; its failure is logged by the coalescer. */
   private flushTextDeltas(sessionId: string): void {
-    try {
-      this.textDeltaCoalescers.get(sessionId)?.flush();
-    } catch (error) {
-      this.log(`streamed text flush failed for ${sessionId}: ${errText(error)}`);
-    }
+    this.textDeltaCoalescers.get(sessionId)?.flush();
   }
 
   /** Flush and detach a session's coalescer once its provider stops being the live owner. Late
    * output from the retiring provider then passes straight through instead of waiting unflushed. */
   private closeTextDeltas(sessionId: string): void {
-    const coalescer = this.textDeltaCoalescers.get(sessionId);
-    if (!coalescer) return;
+    this.textDeltaCoalescers.get(sessionId)?.close();
     this.textDeltaCoalescers.delete(sessionId);
-    try {
-      coalescer.close();
-    } catch (error) {
-      this.log(`streamed text flush failed for ${sessionId}: ${errText(error)}`);
-    }
   }
 
   private emitEvent(

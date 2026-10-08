@@ -51,7 +51,8 @@ export interface TextDeltaCoalescerOptions {
   now?: () => number;
   setTimer?: (callback: () => void, ms: number) => unknown;
   clearTimer?: (timer: unknown) => void;
-  /** A timer-driven flush has no caller to report to; its emit failure is logged here. */
+  /** Receives a failure to emit flushed text. A flush runs on behalf of whatever came next (a timer,
+   * another event, an exit or shutdown), so it must not throw into that caller. */
   onError?: (error: unknown) => void;
 }
 
@@ -82,7 +83,7 @@ export class TextDeltaCoalescer {
       return timer;
     });
     this.clearTimer = options.clearTimer ?? ((timer) => clearTimeout(timer as ReturnType<typeof setTimeout>));
-    this.onError = options.onError ?? (() => {});
+    this.onError = options.onError ?? ((error) => console.warn(`streamed text flush failed: ${String(error)}`));
   }
 
   /** Route one driver event: merge a text delta, or flush pending text and then emit the event. */
@@ -110,16 +111,13 @@ export class TextDeltaCoalescer {
     this.pendingChars = payload.text.length;
     this.timer = this.setTimer(() => {
       this.timer = null;
-      try {
-        this.flush();
-      } catch (error) {
-        this.onError(error);
-      }
+      this.flush();
     }, Math.max(0, this.lastTextEmitAt + this.windowMs - now));
   }
 
   /** Emit pending text now. Call before anything that must observe or follow it: another event,
-   * a status change, turn settlement, interruption, provider exit, or runner shutdown. */
+   * a status change, turn settlement, interruption, provider exit, or runner shutdown. Never
+   * throws: an emit failure goes to `onError`, and the caller's own step still runs. */
   flush(): void {
     if (this.timer !== null) {
       this.clearTimer(this.timer);
@@ -133,7 +131,11 @@ export class TextDeltaCoalescer {
     this.pendingChunks = [];
     this.pendingChars = 0;
     this.lastTextEmitAt = this.now();
-    this.emit({ ...pending, text });
+    try {
+      this.emit({ ...pending, text });
+    } catch (error) {
+      this.onError(error);
+    }
   }
 
   /** Flush, then pass every later event straight through. A retiring or shut-down provider can

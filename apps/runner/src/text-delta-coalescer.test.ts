@@ -212,6 +212,29 @@ test("a timer-driven flush reports an emit failure instead of throwing from the 
   assert.equal(errors.length, 1);
 });
 
+test("a failing flush is reported and never stops the event or callback that triggered it", () => {
+  const errors: unknown[] = [];
+  const order: string[] = [];
+  let failText = false;
+  const routed = coalesceDriverTextDeltas({
+    onEvent: (payload) => {
+      if (failText && payload.kind === "agent_message") throw new Error("append failed");
+      order.push(payload.kind);
+    },
+    onStderr: () => {},
+    onExit: (code) => order.push(`exit:${code}`),
+  }, { windowMs: 60_000, onError: (error) => errors.push(error) });
+  routed.callbacks.onEvent(delta("a"));
+  routed.callbacks.onEvent(delta("b"));
+  failText = true;
+  assert.doesNotThrow(() => routed.callbacks.onEvent({ kind: "turn_interrupted" } as SessionEventPayload));
+  routed.callbacks.onEvent(delta("c"));
+  assert.doesNotThrow(() => routed.callbacks.onExit(1));
+  assert.doesNotThrow(() => routed.coalescer.flush());
+  assert.deepEqual(order, ["agent_message", "turn_interrupted", "exit:1"]);
+  assert.equal(errors.length, 2, "both failed flushes are reported");
+});
+
 test("wrapped driver callbacks flush pending text before every other callback", () => {
   const order: string[] = [];
   const callbacks: DriverCallbacks = {
