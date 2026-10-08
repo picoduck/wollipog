@@ -38,17 +38,34 @@ The legacy whole-history RPC reads the same ordered sources for old control plan
 
 ## Publication and recovery
 
-Compaction runs only while an idle-maintenance owner holds the normal per-session writer lock. It:
+Compaction needs the normal per-session writer lock to plan and to publish. It keeps the event loop
+responsive: no single synchronous step is a bulk copy, a whole-range parse, or an fsync of a large
+file. It:
 
-1. flushes the active event file and pending metadata;
-2. validates the durable tail and derived sparse index;
-3. copies one bounded, newline-aligned prefix and the remaining suffix into new generational files;
-4. fsyncs both files and their directory;
-5. atomically publishes a fsynced manifest that references them;
+1. validates the durable tail and derived sparse index under the lock, and records the epoch and
+   manifest identity it planned against. Idle maintenance then releases the lock, so a turn that
+   starts during the copy is never refused;
+2. finds the newline-aligned cut by parsing bounded slices of the active file, yielding between
+   slices;
+3. copies the prefix into a new segment and the suffix into a new active generation. Reads, writes,
+   and fsyncs run on the libuv pool; only hashing runs on the main thread, one 1 MiB chunk at a
+   time;
+4. catches up with events appended to the old active file during the copy, copying only complete
+   lines, then fsyncs the new files and their directory. It also stages fsynced temp copies of the
+   manifest and, for the first compaction of a legacy log, the fence intent;
+5. takes the lock again and, without yielding, verifies that the epoch, the manifest identity, and
+   the active inode are unchanged. It copies any remaining complete lines and atomically renames
+   the staged files into place, which publishes the manifest. A changed epoch or manifest
+   abandons the copy, as does a remaining torn suffix or a turn that holds the lock;
 6. retires the former `events.ndjson` inode and places a directory at that legacy path.
 
-Until step 5, readers keep using the previous manifest and files. After step 5, readers use the new
-generation. Superseded files remain for one hour so a cross-process reader that captured the prior
+Torn-tail repair only truncates after a file's final newline, and a reset changes the epoch, so
+bytes copied up to an observed newline stay identical. Appends made during compaction are therefore
+copied once, in order, before the manifest switch. Appends made after the switch go to the new
+active generation.
+
+Until step 5 publishes, readers keep using the previous manifest and files. After it, readers use
+the new generation. Superseded files remain for one hour so a cross-process reader that captured the prior
 layout can finish, then bounded orphan collection removes at most 32 files per session/pass.
 Unpublished crash debris is never referenced and follows the same cleanup path. The directory fence
 makes a pre-compaction runner binary fail its legacy read/append closed instead of creating a second
@@ -86,7 +103,8 @@ Default per-session policy:
 - rebuild a missing/malformed derived index while idle, even when compaction is not yet needed;
 - keep superseded reader generations for one hour.
 
-One pass has bounded copy, hash, session, and orphan work. Legacy monolithic logs need no eager
+One pass has bounded copy, hash, session, and orphan work. Rebuilding a missing or malformed index is the
+exception: it still scans that session's history synchronously. Legacy monolithic logs need no eager
 startup migration; repeated maintenance gradually converts an oversized active file.
 
 ## Audit retention

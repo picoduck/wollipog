@@ -1590,7 +1590,7 @@ export class SessionManager {
     );
     this.providerStateReconcileTimer = setInterval(() => void this.reconcileProviderStateStorage(), 60 * 60 * 1000);
     this.providerStateReconcileTimer.unref?.();
-    this.historyMaintenanceTimer = setInterval(() => this.runHistoryMaintenance(), HISTORY_MAINTENANCE_MS);
+    this.historyMaintenanceTimer = setInterval(() => void this.runHistoryMaintenance(), HISTORY_MAINTENANCE_MS);
     this.historyMaintenanceTimer.unref?.();
     this.worktreePullRequestReconcileTimer = setInterval(
       () => void this.reconcileWorktreePullRequests(),
@@ -5035,7 +5035,7 @@ export class SessionManager {
     if (!this.historyMaintenanceKickoff) {
       this.historyMaintenanceKickoff = setTimeout(() => {
         this.historyMaintenanceKickoff = null;
-        this.runHistoryMaintenance();
+        void this.runHistoryMaintenance();
       }, 10_000);
       this.historyMaintenanceKickoff.unref?.();
     }
@@ -5186,11 +5186,11 @@ export class SessionManager {
       .some((entry) => entry.ownership.sessionId === sessionId);
   }
 
-  private runHistoryMaintenance(): void {
+  private async runHistoryMaintenance(): Promise<void> {
     if (this.historyMaintenanceRunning) return;
     this.historyMaintenanceRunning = true;
     try {
-      const result = this.store.maintainHistories(`${this.lockOwner}:history`, 4);
+      const result = await this.store.maintainHistories(`${this.lockOwner}:history`, 4);
       if (result.compacted || result.orphansRemoved) {
         this.log(
           `history maintenance archived ${result.bytesArchived} byte(s) across ${result.compacted} session(s)` +

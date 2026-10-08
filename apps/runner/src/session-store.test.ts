@@ -39,6 +39,7 @@ import {
   writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import { join } from "node:path";
 import {
   HISTORY_PAGE_MAX_BYTES,
@@ -1718,7 +1719,7 @@ test("history pages stop before crossing the serialized byte budget", () => {
   }
 });
 
-test("lossless compaction preserves bytes, sparse-index offsets, frozen cursors, and append sequence", () => {
+test("lossless compaction preserves bytes, sparse-index offsets, frozen cursors, and append sequence", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-store-compact-"));
   const policy = {
     triggerActiveBytes: 1,
@@ -1743,7 +1744,7 @@ test("lossless compaction preserves bytes, sparse-index offsets, frozen cursors,
     const indexBefore = readFileSync(join(sessionDir, "events.idx"));
 
     assert.equal(store.acquireLock("s_abc", "maintenance"), true);
-    const compacted = store.compactHistory("s_abc", "maintenance", true);
+    const compacted = await store.compactHistory("s_abc", "maintenance", true);
     store.releaseLock("s_abc", "maintenance");
     assert.equal(compacted.compacted, true);
     assert.ok(compacted.bytesArchived > 0 && compacted.bytesArchived < beforeBytes.length);
@@ -1794,7 +1795,7 @@ test("lossless compaction preserves bytes, sparse-index offsets, frozen cursors,
   }
 });
 
-test("immutable segment tampering fails paged history closed", () => {
+test("immutable segment tampering fails paged history closed", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-store-compact-integrity-"));
   const policy = {
     triggerActiveBytes: 1,
@@ -1809,7 +1810,7 @@ test("immutable segment tampering fails paged history closed", () => {
     for (let i = 0; i < 20; i++) store.appendEvent("s_abc", { kind: "agent_message", text: `event-${i}` });
     store.flushAll();
     assert.equal(store.acquireLock("s_abc", "maintenance"), true);
-    assert.equal(store.compactHistory("s_abc", "maintenance", true).compacted, true);
+    assert.equal((await store.compactHistory("s_abc", "maintenance", true)).compacted, true);
     store.releaseLock("s_abc", "maintenance");
     const sessionDir = join(root, "s_abc");
     const manifest = JSON.parse(readFileSync(join(sessionDir, "events.manifest.json"), "utf8")) as {
@@ -1824,7 +1825,7 @@ test("immutable segment tampering fails paged history closed", () => {
   }
 });
 
-test("repeated compaction, orphan collection, and reset retain no destructive archive residue", () => {
+test("repeated compaction, orphan collection, and reset retain no destructive archive residue", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-store-compact-reset-"));
   const policy = {
     triggerActiveBytes: Number.MAX_SAFE_INTEGER,
@@ -1839,18 +1840,18 @@ test("repeated compaction, orphan collection, and reset retain no destructive ar
     for (let i = 0; i < 30; i++) store.appendEvent("s_abc", { kind: "agent_message", text: `first-${i}` });
     store.flushAll();
     assert.equal(store.acquireLock("s_abc", "maintenance"), true);
-    assert.equal(store.compactHistory("s_abc", "maintenance", true).compacted, true);
+    assert.equal((await store.compactHistory("s_abc", "maintenance", true)).compacted, true);
     store.releaseLock("s_abc", "maintenance");
     for (let i = 0; i < 30; i++) store.appendEvent("s_abc", { kind: "agent_message", text: `second-${i}` });
     store.flushAll();
     assert.equal(store.acquireLock("s_abc", "maintenance"), true);
-    assert.equal(store.compactHistory("s_abc", "maintenance", true).compacted, true);
+    assert.equal((await store.compactHistory("s_abc", "maintenance", true)).compacted, true);
     store.releaseLock("s_abc", "maintenance");
 
     const sessionDir = join(root, "s_abc");
     const beforeMaintenance = readdirSync(sessionDir);
     assert.ok(beforeMaintenance.some((file) => file === "events.ndjson"), "superseded readers get a grace generation");
-    const maintenance = store.maintainHistories("idle-maintenance", 1);
+    const maintenance = await store.maintainHistories("idle-maintenance", 1);
     assert.ok(maintenance.orphansRemoved >= 1);
     assert.deepEqual(store.readEvents("s_abc").map((event) => event.seq), Array.from({ length: 60 }, (_, i) => i + 1));
 
@@ -1870,7 +1871,7 @@ test("repeated compaction, orphan collection, and reset retain no destructive ar
   }
 });
 
-test("idle maintenance never compacts a session whose writer lock is live", () => {
+test("idle maintenance never compacts a session whose writer lock is live", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-store-compact-lock-"));
   const policy = {
     triggerActiveBytes: 1,
@@ -1885,7 +1886,7 @@ test("idle maintenance never compacts a session whose writer lock is live", () =
     for (let i = 0; i < 10; i++) writer.appendEvent("s_abc", { kind: "agent_message", text: `event-${i}` });
     writer.flushAll();
     assert.equal(writer.acquireLock("s_abc", "live-turn"), true);
-    const maintenance = new SessionStore(root, undefined, policy).maintainHistories("maintenance", 1);
+    const maintenance = await new SessionStore(root, undefined, policy).maintainHistories("maintenance", 1);
     assert.deepEqual(maintenance, { inspected: 0, compacted: 0, bytesArchived: 0, orphansRemoved: 0, errors: 0 });
     assert.equal(existsSync(join(root, "s_abc", "events.manifest.json")), false);
     writer.releaseLock("s_abc", "live-turn");
@@ -1894,7 +1895,7 @@ test("idle maintenance never compacts a session whose writer lock is live", () =
   }
 });
 
-test("idle maintenance rotates fairly and rebuilds missing indexes off the prompt path", () => {
+test("idle maintenance rotates fairly and rebuilds missing indexes off the prompt path", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-store-compact-fair-"));
   const policy = {
     triggerActiveBytes: 1,
@@ -1915,7 +1916,7 @@ test("idle maintenance rotates fairly and rebuilds missing indexes off the promp
       rmSync(join(root, sessionId, "events.idx"), { force: true });
     }
     for (let pass = 0; pass < 3; pass++) {
-      const result = store.maintainHistories("maintenance", 2);
+      const result = await store.maintainHistories("maintenance", 2);
       assert.equal(result.inspected, 2);
       assert.equal(result.errors, 0);
     }
@@ -1943,10 +1944,10 @@ function appendMany(store: SessionStore, count: number, label: string): void {
   for (let i = 0; i < count; i++) store.appendEvent("s_abc", { kind: "agent_message", text: `${label}-${i}` });
 }
 
-function compactOnce(store: SessionStore, owner = "maintenance"): void {
+async function compactOnce(store: SessionStore, owner = "maintenance"): Promise<void> {
   assert.equal(store.acquireLock("s_abc", owner), true);
   try {
-    assert.equal(store.compactHistory("s_abc", owner, true).compacted, true);
+    assert.equal((await store.compactHistory("s_abc", owner, true)).compacted, true);
   } finally {
     store.releaseLock("s_abc", owner);
   }
@@ -1966,7 +1967,7 @@ function coldSeqs(root: string): number[] {
 
 const seqRange = (count: number) => Array.from({ length: count }, (_, i) => i + 1);
 
-test("the append layout follows each compaction this store publishes under the writer lock", () => {
+test("the append layout follows each compaction this store publishes under the writer lock", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-store-layout-own-"));
   try {
     const store = new SessionStore(root, undefined, COMPACT_EVERY_PASS);
@@ -1974,7 +1975,7 @@ test("the append layout follows each compaction this store publishes under the w
     assert.equal(store.acquireLock("s_abc", "turn"), true);
     for (let round = 0; round < 9; round++) {
       appendMany(store, 10, `round-${round}`);
-      assert.equal(store.compactHistory("s_abc", "turn", true).compacted, true);
+      assert.equal((await store.compactHistory("s_abc", "turn", true)).compacted, true);
       const appended = store.appendEvent("s_abc", { kind: "agent_message", text: `after-${round}` });
       const manifest = historyManifest(root);
       assert.equal(manifest.segments.length, round + 1);
@@ -1991,7 +1992,7 @@ test("the append layout follows each compaction this store publishes under the w
   }
 });
 
-test("a warm append layout refetches when another process publishes a compaction", () => {
+test("a warm append layout refetches when another process publishes a compaction", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-store-layout-peer-"));
   try {
     const writer = new SessionStore(root, undefined, COMPACT_EVERY_PASS);
@@ -2005,7 +2006,7 @@ test("a warm append layout refetches when another process publishes a compaction
         ? historyManifest(root).activeFile
         : "events.ndjson";
       const supersededBytes = readFileSync(join(root, "s_abc", superseded));
-      compactOnce(new SessionStore(root, undefined, COMPACT_EVERY_PASS));
+      await compactOnce(new SessionStore(root, undefined, COMPACT_EVERY_PASS));
       const appended = writer.appendEvent("s_abc", { kind: "agent_message", text: `after-peer-${round}` });
       expected += 1;
       assert.equal(appended?.seq, expected);
@@ -2025,7 +2026,7 @@ test("a warm append layout refetches when another process publishes a compaction
   }
 });
 
-test("a warm append layout follows an epoch replacement and a crashed reset from another process", () => {
+test("a warm append layout follows an epoch replacement and a crashed reset from another process", async () => {
   for (const shape of ["reset", "crashed_reset_intent"] as const) {
     const root = mkdtempSync(join(tmpdir(), "wollipog-store-layout-epoch-"));
     try {
@@ -2033,7 +2034,7 @@ test("a warm append layout follows an epoch replacement and a crashed reset from
       writer.create(meta());
       for (let round = 0; round < 3; round++) {
         appendMany(writer, 10, `old-${round}`);
-        compactOnce(writer);
+        await compactOnce(writer);
       }
       appendMany(writer, 3, "old-tail");
       writer.flushAll();
@@ -2059,7 +2060,7 @@ test("a warm append layout follows an epoch replacement and a crashed reset from
   }
 });
 
-test("a restart after compactions and a torn tail recovers from disk with a cold cache", () => {
+test("a restart after compactions and a torn tail recovers from disk with a cold cache", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-store-layout-restart-"));
   try {
     const crashed = new SessionStore(root, undefined, COMPACT_EVERY_PASS);
@@ -2067,7 +2068,7 @@ test("a restart after compactions and a torn tail recovers from disk with a cold
     assert.equal(crashed.acquireLock("s_abc", "turn"), true);
     for (let round = 0; round < 8; round++) {
       appendMany(crashed, 10, `round-${round}`);
-      assert.equal(crashed.compactHistory("s_abc", "turn", true).compacted, true);
+      assert.equal((await crashed.compactHistory("s_abc", "turn", true)).compacted, true);
     }
     appendMany(crashed, 5, "unflushed");
     // Crash mid-append: a partial record on the active generation and a metadata flush that never ran.
@@ -2090,7 +2091,7 @@ test("a restart after compactions and a torn tail recovers from disk with a cold
   }
 });
 
-test("a failed append drops the warm layout and repairs a torn suffix before the next sequence", () => {
+test("a failed append drops the warm layout and repairs a torn suffix before the next sequence", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-store-layout-failed-"));
   try {
     const store = new SessionStore(root, undefined, COMPACT_EVERY_PASS);
@@ -2098,7 +2099,7 @@ test("a failed append drops the warm layout and repairs a torn suffix before the
     assert.equal(store.acquireLock("s_abc", "turn"), true);
     for (let round = 0; round < 2; round++) {
       appendMany(store, 10, `round-${round}`);
-      assert.equal(store.compactHistory("s_abc", "turn", true).compacted, true);
+      assert.equal((await store.compactHistory("s_abc", "turn", true)).compacted, true);
     }
     assert.equal(store.appendEvent("s_abc", { kind: "agent_message", text: "warm" })?.seq, 21);
     assert.throws(() => store.appendEvent("s_abc", { kind: "agent_message", text: 1n } as never));
@@ -2113,13 +2114,13 @@ test("a failed append drops the warm layout and repairs a torn suffix before the
   }
 });
 
-test("a warm append layout never hides a missing active file or outlives session removal", () => {
+test("a warm append layout never hides a missing active file or outlives session removal", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-store-layout-removed-"));
   try {
     const store = new SessionStore(root, undefined, COMPACT_EVERY_PASS);
     store.create(meta());
     appendMany(store, 10, "first");
-    compactOnce(store);
+    await compactOnce(store);
     assert.equal(store.appendEvent("s_abc", { kind: "agent_message", text: "warm" })?.seq, 11);
     const activePath = join(root, "s_abc", historyManifest(root).activeFile);
     const activeBytes = readFileSync(activePath);
@@ -2141,13 +2142,13 @@ test("a warm append layout never hides a missing active file or outlives session
   }
 });
 
-test("an uncommitted legacy fence keeps appends on the uncached path until the fence lands", () => {
+test("an uncommitted legacy fence keeps appends on the uncached path until the fence lands", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-store-layout-fence-"));
   try {
     const writer = new SessionStore(root, undefined, COMPACT_EVERY_PASS);
     writer.create(meta());
     appendMany(writer, 20, "legacy");
-    compactOnce(new SessionStore(root, undefined, COMPACT_EVERY_PASS));
+    await compactOnce(new SessionStore(root, undefined, COMPACT_EVERY_PASS));
     // Reproduce a fence whose retirement rename was refused (an open Windows reader).
     const sessionDir = join(root, "s_abc");
     const retiredFile = readdirSync(sessionDir).find((file) => file.startsWith("events.retired."))!;
@@ -2175,7 +2176,7 @@ test("a warm append layout still fails closed on a damaged cold segment within o
       const store = new SessionStore(root, undefined, COMPACT_EVERY_PASS);
       store.create(meta());
       appendMany(store, 10, "first");
-      compactOnce(store);
+      await compactOnce(store);
       assert.equal(store.appendEvent("s_abc", { kind: "agent_message", text: "warm" })?.seq, 11);
       const { activeFile, segments } = historyManifest(root);
       const segmentPath = join(root, "s_abc", segments[0]!.file);
@@ -2195,7 +2196,7 @@ test("a warm append layout still fails closed on a damaged cold segment within o
   }
 });
 
-test("the post-compaction layout is keyed by the manifest it published, not a later replacement", () => {
+test("the post-compaction layout is keyed by the manifest it published, not a later replacement", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-store-layout-republish-"));
   try {
     const writer = new SessionStore(root, undefined, COMPACT_EVERY_PASS);
@@ -2206,17 +2207,18 @@ test("the post-compaction layout is keyed by the manifest it published, not a la
     const manifestPath = join(sessionDir, "events.manifest.json");
     // A peer that took over a stale lock publishes an identical history on a new active generation
     // in the gap between this store's manifest rename and its cache update.
-    const internals = writer as unknown as { publishHistoryManifest(id: string, manifest: unknown): string };
-    const publish = internals.publishHistoryManifest.bind(writer);
-    internals.publishHistoryManifest = (id, manifest) => {
-      const published = publish(id, manifest);
+    const internals = writer as unknown as { publishHistoryFile(id: string, staged: { path: string }): string };
+    const publish = internals.publishHistoryFile.bind(writer);
+    internals.publishHistoryFile = (id, staged) => {
+      const published = publish(id, staged);
+      if (staged.path !== manifestPath) return published;
       const current = JSON.parse(readFileSync(manifestPath, "utf8")) as { activeFile: string };
       writeFileSync(join(sessionDir, "events.active.peer.ndjson"), readFileSync(join(sessionDir, current.activeFile)));
       writeFileSync(`${manifestPath}.peer.tmp`, JSON.stringify({ ...current, activeFile: "events.active.peer.ndjson" }));
       renameSync(`${manifestPath}.peer.tmp`, manifestPath);
       return published;
     };
-    assert.equal(writer.compactHistory("s_abc", "turn", true).compacted, true);
+    assert.equal((await writer.compactHistory("s_abc", "turn", true)).compacted, true);
     const superseded = readdirSync(sessionDir).find((file) => file.startsWith("events.active.") && !file.includes(".peer."))!;
     const supersededBytes = readFileSync(join(sessionDir, superseded));
     assert.equal(writer.appendEvent("s_abc", { kind: "agent_message", text: "after-peer" })?.seq, 21);
@@ -2230,7 +2232,7 @@ test("the post-compaction layout is keyed by the manifest it published, not a la
   }
 });
 
-test("a symlinked or unreachable manifest fails appends closed instead of reading as missing", () => {
+test("a symlinked or unreachable manifest fails appends closed instead of reading as missing", async () => {
   if (process.platform === "win32") return; // creating symlinks needs elevated rights there
   for (const shape of ["symlink_to_manifest", "symlink_through_file"] as const) {
     const root = mkdtempSync(join(tmpdir(), "wollipog-store-layout-symlink-"));
@@ -2238,7 +2240,7 @@ test("a symlinked or unreachable manifest fails appends closed instead of readin
       const store = new SessionStore(root, undefined, COMPACT_EVERY_PASS);
       store.create(meta());
       appendMany(store, 10, "first");
-      compactOnce(store);
+      await compactOnce(store);
       assert.equal(store.appendEvent("s_abc", { kind: "agent_message", text: "warm" })?.seq, 11, shape);
       const sessionDir = join(root, "s_abc");
       const activePath = join(sessionDir, historyManifest(root).activeFile);
@@ -2254,6 +2256,193 @@ test("a symlinked or unreachable manifest fails appends closed instead of readin
         shape,
       );
       assert.deepEqual(readFileSync(activePath), activeBefore, `${shape}: nothing appended`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+const COMPACT_MEGABYTES = {
+  triggerActiveBytes: 1,
+  retainActiveBytes: 64 * 1024,
+  retainActiveEvents: 10,
+  maxSegmentBytes: 16 * 1024 * 1024,
+  orphanGraceMs: 60 * 60 * 1_000,
+};
+
+/** About 4.4 MB of history: enough for several scan slices and copy chunks. */
+function megabyteSession(root: string): SessionStore {
+  const store = new SessionStore(root, undefined, COMPACT_MEGABYTES);
+  store.create(meta());
+  for (let i = 0; i < 4_000; i++) {
+    store.appendEvent("s_abc", { kind: "agent_message", text: `bulk-${i}-${"x".repeat(1_000)}` });
+  }
+  store.flushAll();
+  return store;
+}
+
+/** Run `onTick` on every event-loop turn until `work` settles; a synchronous compaction gets none. */
+async function duringEachTurn<T>(work: Promise<T>, onTick: (tick: number) => void): Promise<{ result: T; ticks: number }> {
+  let settled = false;
+  const tracked = work.finally(() => { settled = true; });
+  let ticks = 0;
+  while (!settled) {
+    await nextTurn();
+    if (!settled) onTick(++ticks);
+  }
+  return { result: await tracked, ticks };
+}
+
+function compactionDebris(root: string): string[] {
+  return readdirSync(join(root, "s_abc")).filter((file) =>
+    file.startsWith("events.segment.") || file.startsWith("events.active.") || file.endsWith(".tmp"));
+}
+
+test("compaction yields the event loop and keeps appends made during the copy in order", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-store-compact-interleave-"));
+  try {
+    const store = megabyteSession(root);
+    assert.equal(store.acquireLock("s_abc", "turn"), true);
+    let during = 0;
+    const { result, ticks } = await duringEachTurn(store.compactHistory("s_abc", "turn", true), () => {
+      store.appendEvent("s_abc", { kind: "agent_message", text: `during-${during++}` });
+    });
+    assert.equal(result.compacted, true);
+    assert.ok(ticks >= 8, `compaction yielded on ${ticks} turns`);
+    assert.ok(during >= 8);
+    for (let i = 0; i < 5; i++) store.appendEvent("s_abc", { kind: "agent_message", text: `after-${i}` });
+    store.releaseLock("s_abc", "turn");
+    store.flushAll();
+
+    const { activeFile, segments } = historyManifest(root);
+    assert.equal(segments.length, 1);
+    assert.match(readFileSync(join(root, "s_abc", activeFile), "utf8"), new RegExp(`"during-${during - 1}"[^\\n]*\\n.*"after-0"`));
+    const events = new SessionStore(root, undefined, COMPACT_MEGABYTES).readEvents("s_abc");
+    assert.deepEqual(events.map((event) => event.seq), seqRange(4_000 + during + 5));
+    const texts = events.map((event) => (event.payload as { text: string }).text);
+    assert.deepEqual(texts.slice(4_000), [
+      ...Array.from({ length: during }, (_, i) => `during-${i}`),
+      ...Array.from({ length: 5 }, (_, i) => `after-${i}`),
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("idle maintenance frees the writer lock while copying and yields to a turn that keeps it", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-store-compact-yield-"));
+  try {
+    const store = megabyteSession(root);
+    const turn = new SessionStore(root, undefined, COMPACT_MEGABYTES);
+    let turnStarted = false;
+    const { result } = await duringEachTurn(store.maintainHistories("maintenance", 1), (tick) => {
+      if (tick !== 3) return;
+      turnStarted = turn.acquireLock("s_abc", "turn");
+      turn.appendEvent("s_abc", { kind: "agent_message", text: "turn-event" });
+    });
+    assert.equal(turnStarted, true, "a turn must not be refused while maintenance copies");
+    assert.deepEqual(result, { inspected: 1, compacted: 0, bytesArchived: 0, orphansRemoved: 0, errors: 0 });
+    assert.equal(existsSync(join(root, "s_abc", "events.manifest.json")), false);
+    assert.deepEqual(compactionDebris(root), [], "a discarded copy leaves no files behind");
+    assert.equal(turn.appendEvent("s_abc", { kind: "agent_message", text: "turn-event-2" })?.seq, 4_002);
+    turn.releaseLock("s_abc", "turn");
+    turn.flushAll();
+    assert.deepEqual(coldSeqs(root), seqRange(4_002));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a turn that appends and finishes during the copy is carried into the published generation", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-store-compact-carry-"));
+  try {
+    const store = megabyteSession(root);
+    const turn = new SessionStore(root, undefined, COMPACT_MEGABYTES);
+    const { result } = await duringEachTurn(store.maintainHistories("maintenance", 1), (tick) => {
+      if (tick !== 3) return;
+      assert.equal(turn.acquireLock("s_abc", "turn"), true);
+      for (let i = 0; i < 300; i++) turn.appendEvent("s_abc", { kind: "agent_message", text: `turn-${i}-${"y".repeat(1_000)}` });
+      turn.flushAll();
+      turn.releaseLock("s_abc", "turn");
+    });
+    assert.equal(result.compacted, 1);
+    const { activeFile } = historyManifest(root);
+    assert.match(readFileSync(join(root, "s_abc", activeFile), "utf8"), /"turn-299-/);
+    assert.equal(turn.acquireLock("s_abc", "turn"), true);
+    assert.equal(turn.appendEvent("s_abc", { kind: "agent_message", text: "next-turn" })?.seq, 4_301);
+    turn.releaseLock("s_abc", "turn");
+    turn.flushAll();
+    const events = new SessionStore(root, undefined, COMPACT_MEGABYTES).readEvents("s_abc");
+    assert.deepEqual(events.map((event) => event.seq), seqRange(4_301));
+    assert.equal((events[4_000]!.payload as { text: string }).text.startsWith("turn-0-"), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a torn suffix written during the copy postpones publication until the writer repairs it", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-store-compact-torn-"));
+  try {
+    const store = megabyteSession(root);
+    const { result } = await duringEachTurn(store.maintainHistories("maintenance", 1), (tick) => {
+      if (tick === 3) appendFileSync(join(root, "s_abc", "events.ndjson"), '{"seq":4001,"ts":');
+    });
+    assert.equal(result.compacted, 0);
+    assert.equal(existsSync(join(root, "s_abc", "events.manifest.json")), false);
+    assert.deepEqual(compactionDebris(root), []);
+    const writer = new SessionStore(root, undefined, COMPACT_MEGABYTES);
+    assert.equal(writer.acquireLock("s_abc", "turn"), true);
+    assert.equal(writer.appendEvent("s_abc", { kind: "agent_message", text: "repaired" })?.seq, 4_001);
+    writer.releaseLock("s_abc", "turn");
+    writer.flushAll();
+    assert.equal((await store.maintainHistories("maintenance", 1)).compacted, 1);
+    assert.deepEqual(coldSeqs(root), seqRange(4_001));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a reset or competing compaction during the copy aborts publication without losing history", async () => {
+  for (const shape of ["reset", "competing_compaction", "manifest_switch"] as const) {
+    const root = mkdtempSync(join(tmpdir(), "wollipog-store-compact-race-"));
+    try {
+      const store = megabyteSession(root);
+      const peer = new SessionStore(root, undefined, COMPACT_MEGABYTES);
+      let competing: Promise<unknown> | null = null;
+      const { result } = await duringEachTurn(store.maintainHistories("maintenance", 1), (tick) => {
+        if (tick !== 3) return;
+        if (shape === "reset") {
+          peer.resetEvents("s_abc");
+          peer.appendEvent("s_abc", { kind: "agent_message", text: "new-epoch" });
+          peer.flushAll();
+        } else if (shape === "competing_compaction") {
+          assert.equal(peer.acquireLock("s_abc", "peer"), true);
+          competing = peer.compactHistory("s_abc", "peer", true).finally(() => peer.releaseLock("s_abc", "peer"));
+        } else {
+          // A peer publication that completes before this copy publishes: same bytes, new generation.
+          const sessionDir = join(root, "s_abc");
+          writeFileSync(join(sessionDir, "events.active.peer.ndjson"), readFileSync(join(sessionDir, "events.ndjson")));
+          writeFileSync(join(sessionDir, "events.manifest.json"), JSON.stringify({
+            version: 1,
+            logEpoch: 0,
+            activeFile: "events.active.peer.ndjson",
+            segments: [],
+          }));
+        }
+      });
+      if (competing) assert.equal(((await competing) as { compacted: boolean }).compacted, true, shape);
+      assert.equal(result.compacted, 0, shape);
+      // A peer still holding its lock makes publication yield quietly; a finished one is a changed manifest.
+      if (shape !== "competing_compaction") assert.equal(result.errors, 1, shape);
+      const seqs = coldSeqs(root);
+      assert.deepEqual(seqs, shape === "reset" ? [1] : seqRange(4_000), shape);
+      if (shape !== "reset") {
+        const { activeFile, segments } = historyManifest(root);
+        const referenced = new Set([activeFile, ...segments.map((segment) => segment.file)]);
+        assert.deepEqual(compactionDebris(root).filter((file) => !referenced.has(file)), [], shape);
+      } else {
+        assert.deepEqual(compactionDebris(root), [], shape);
+      }
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
