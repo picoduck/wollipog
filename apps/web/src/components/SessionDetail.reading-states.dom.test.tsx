@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type {
   ControlPlaneToUi,
+  GovernanceAuditEntry,
   ProjectView,
   RunnerView,
   SessionEvent,
@@ -129,6 +130,7 @@ async function mountSession({
   mode = "expanded",
   protocolVersion = 200,
   runnerStatus = "online",
+  governance = [],
 }: {
   status?: SessionView["status"];
   archived?: boolean;
@@ -137,6 +139,8 @@ async function mountSession({
   mode?: "expanded" | "preview";
   protocolVersion?: number;
   runnerStatus?: RunnerView["status"];
+  /** Governance audit entries the session's Decision History holds. */
+  governance?: GovernanceAuditEntry[];
 } = {}) {
   sequence += 1;
   const id = `reading-states-${sequence}`;
@@ -160,6 +164,7 @@ async function mountSession({
     session: () => new Promise<never>(() => {}),
     getSessionEventPage: () => new Promise<never>(() => {}),
     getSessionEventTailPage: () => new Promise<SessionEventsResponse>((resolve, reject) => { tail.push({ resolve, reject }); }),
+    governanceAudit: async () => ({ entries: governance, hasMore: false }),
   } as unknown as ApiClient;
   const record = (panel: string) => { shown.push(panel); };
   let actions: StoreActions | undefined;
@@ -209,6 +214,11 @@ async function mountSession({
     async disconnect(conn: "offline" | "unauthorized" = "offline") {
       assert.ok(actions, "store actions are available");
       await act(async () => actions!.dispatch({ type: "conn", conn }));
+      await flushAsyncWork();
+    },
+    /** The session's machine connects or disconnects. */
+    async setRunnerStatus(status: RunnerView["status"]) {
+      await act(async () => socket.push({ type: "runner_upsert", runner: { ...runner, protocolVersion, status } }));
       await flushAsyncWork();
     },
     /** A later recovery of this session's history fails, as a reconnect's would. */
@@ -466,6 +476,24 @@ test("an incomplete history whose machine is offline settles after one read (#27
   }
 });
 
+test("a history that stopped short while its machine was offline reads again when it reconnects (#2773)", async () => {
+  const view = await mountSession({ status: "stopped", messageCount: 3, runnerStatus: "offline" });
+  try {
+    await view.resolveTail({ events: [agentLogEvent(view.id)], nextBefore: 1, cacheComplete: false });
+    await flushAsyncWork(200);
+    assert.equal(view.tailRequests(), 0);
+    assert.equal(view.reader.querySelectorAll(".notice").length, 1, "the history notice says it stopped short");
+    await view.setRunnerStatus("online");
+    assert.equal(view.tailRequests(), 1, "the reconnected machine can fill the cache, so the reader reads again");
+    const events = transcriptEvents(view.id, 2).slice(0, 3);
+    await view.resolveTail({ events, nextBefore: 1 });
+    assertNoDomNode(view.reader.querySelector(".notice"), "the complete history clears the notice");
+    assert.ok(view.scroller.querySelector(".timeline"), "the loaded activity is on screen");
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("a long history still filling from an online machine keeps its loading notice (#2773)", async () => {
   const view = await mountSession({ messageCount: 1240 });
   try {
@@ -491,6 +519,22 @@ test("a history of only hidden Agent Logs is the empty state, not a blank reader
     assert.ok(state, "the empty state stands in for the hidden boot line");
     assert.equal(state.querySelector(".state-title")?.textContent, "No Messages");
     assertNoDomNode(view.reader.querySelector(".notice"), "a complete history has no notice");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a governance decision beside hidden Agent Logs keeps the timeline (#2773)", async () => {
+  const view = await mountSession({ status: "stopped", messageCount: 1, governance: [{
+    auditId: "audit-1", requestId: "hook-1", approvalKind: "policy_hook", stage: "resolution", outcome: "denied",
+    actor: { kind: "human", id: "device-1" }, scope: { sessionId: `reading-states-${sequence + 1}`, runnerId: runner.runnerId },
+    timestamp: 5,
+  }] });
+  try {
+    await view.resolveTail({ events: [agentLogEvent(view.id)], nextBefore: 1 });
+    await flushAsyncWork(50);
+    assertNoDomNode(view.scroller.querySelector(".state"), "a decision row is not an empty history");
+    assert.ok(view.scroller.querySelector(".timeline"), "the timeline renders the decision");
   } finally {
     await view.unmount();
   }

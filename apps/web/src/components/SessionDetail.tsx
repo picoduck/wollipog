@@ -2461,6 +2461,18 @@ function SessionDetailLoaded({
   const machineOfflineRef = useRef(false);
   machineOfflineRef.current = runner?.status === "offline";
   const cacheCannotFill = useCallback(() => machineOfflineRef.current, []);
+  // Once the machine reconnects it can fill the cache again, so a history that stopped short reads
+  // again rather than waiting for Retry.
+  const historyFailedRef = useRef(false);
+  historyFailedRef.current = eventHistory?.error != null;
+  const priorRunnerStatusRef = useRef(runner?.status);
+  useEffect(() => {
+    const prior = priorRunnerStatusRef.current;
+    priorRunnerStatusRef.current = runner?.status;
+    if (prior === "offline" && runner?.status === "online" && historyFailedRef.current) {
+      setHistoryRetry((value) => value + 1);
+    }
+  }, [runner?.status]);
   const acknowledgedOpeningRef = useRef<{
     api: typeof api; instanceScope: string; sessionId: string; eventEpoch: number; generation: number;
   } | null>(null);
@@ -4700,9 +4712,9 @@ function SessionDetailLoaded({
     activeTurnProgress === null && (session.pendingPrompts?.length ?? 0) === 0;
   // With Show Agent Logs off, a transcript of only Agent Logs renders no row, so a whole history of
   // them is empty rather than a blank reader (#2773). A partial window keeps its timeline: earlier
-  // activity can still hold rows.
+  // activity can still hold rows. Governance decisions are rows the timeline adds to these items.
   const historyPartial = isPartialHistory(eventWindow);
-  const shownItemCount = !showAgentLogs && !historyPartial && agentLogOnly(items) ? 0 : items.length;
+  const shownItemCount = !showAgentLogs && !historyPartial && agentLogOnly(timelineItems) ? 0 : items.length;
   const transcript = transcriptPresentation({
     itemCount: shownItemCount,
     hasOptimistic: showOptimistic,
