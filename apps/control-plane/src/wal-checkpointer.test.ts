@@ -46,7 +46,10 @@ function open(t: TestContext, options: WalCheckpointerOptions = {}) {
     if (!closed) db.close();
     closed = true;
   };
+  // Every connection on the file closes before its directory is removed (Windows refuses otherwise).
+  const cleanups: Array<() => void> = [];
   t.after(() => {
+    for (const cleanup of cleanups.reverse()) cleanup();
     close();
     rmSync(root, { recursive: true, force: true });
   });
@@ -65,7 +68,8 @@ function open(t: TestContext, options: WalCheckpointerOptions = {}) {
     }
   };
   const pragma = (name: string) => Object.values(db.raw().prepare(`PRAGMA ${name}`).get()!)[0];
-  return { db, location, wal: `${location}-wal`, events, checkpointer, ingest, pragma, close };
+  const defer = (cleanup: () => void) => cleanups.push(cleanup);
+  return { db, location, wal: `${location}-wal`, events, checkpointer, ingest, pragma, close, defer };
 }
 
 async function until(condition: () => boolean, what: string, timeoutMs = 10_000): Promise<void> {
@@ -106,7 +110,7 @@ test("main-connection readers and writers never wait for the worker", LIVE, asyn
   h.db.raw().exec("PRAGMA busy_timeout = 0");
   // A long-lived reader elsewhere pins part of the log; the worker must skip past it, not wait.
   const reader = new DatabaseSync(h.location);
-  t.after(() => reader.close());
+  h.defer(() => reader.close());
   reader.exec("BEGIN");
   reader.prepare("SELECT COUNT(*) FROM session_events").get();
   for (let round = 0; round < 20; round++) {
@@ -175,7 +179,7 @@ test("a worker that cannot open the database never takes the control plane down"
     restartDelaysMs: [20], onEvent: (event) => events.push(event),
   });
   broken.start();
-  t.after(() => broken.stop());
+  h.defer(() => broken.stop());
   await until(() => events.filter((event) => event.type === "exited").length >= 2, "two failed starts");
   assert.ok(has(events, "failed"));
   h.ingest(10);
@@ -234,9 +238,11 @@ test("the worker runs only on a SQLite with the WAL-reset fix", (t) => {
   for (const [version, fixed] of cases) assert.equal(sqliteHasWalResetFix(version), fixed, String(version));
 
   const root = mkdtempSync(join(tmpdir(), "wollipog-wal-unfixed-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
   const db = ControlPlaneDb.open(join(root, "control-plane.db"));
-  t.after(() => db.close());
+  t.after(() => {
+    db.close();
+    rmSync(root, { recursive: true, force: true });
+  });
   const events: WalCheckpointerEvent[] = [];
   const checkpointer = db.startWalCheckpoints({ sqliteVersion: "3.47.2", onEvent: (event) => events.push(event) });
   assert.equal(checkpointer?.running(), false);
