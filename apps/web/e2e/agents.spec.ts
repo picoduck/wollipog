@@ -90,7 +90,7 @@ test("a worker's long question expanded on its Agents panel card keeps its answe
   await page.getByRole("button", { name: "Audit Storage · Answer Required", exact: true }).click();
   const card = page.getByRole("region", { name: "Selected Worker Request", exact: true }).getByRole("region", { name: "Agent Questions" });
   await card.getByRole("button", { name: "Show Full Question" }).click();
-  await expect(card.getByRole("button", { name: "Show Less" })).toHaveAttribute("aria-expanded", "true");
+  await expect(card.getByRole("button", { name: "Collapse Question" })).toHaveAttribute("aria-expanded", "true");
   const bounds = (locator: typeof card) => locator.evaluate((element) => element.getBoundingClientRect().toJSON() as DOMRect);
   // The capped card scrolls the whole question and its body under its footer; nothing is squeezed away.
   expect((await bounds(card.locator(".request-card-body"))).height).toBeGreaterThan(20);

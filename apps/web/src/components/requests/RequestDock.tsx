@@ -123,6 +123,13 @@ export function RequestDock({
   const focusHeading = useRef(revealRequestId !== undefined);
   const expanded = requests.find((request) => request.requestId === selectedId) ?? requests[0];
   const waiting = requests.filter((request) => request !== expanded);
+  // The question the person expanded to read (#2786). Expanding selects it, as choosing it from "+N
+  // More" does, so a request that arrives ahead of it waits there, before and after it collapses;
+  // while it is read the dock does not shrink to its strip either.
+  const [readingId, setReadingId] = useState<string | null>(null);
+  // Read when the card reports that reading ended, which runs after the render that ended it.
+  const readingIdRef = useRef<string | null>(null);
+  const reading = readingId !== null && expanded?.requestId === readingId;
 
   // Reading back shrinks the dock to its strip, unless the person expanded it since leaving the tail.
   const readingBack = followTailState === "paused";
@@ -132,11 +139,31 @@ export function RequestDock({
     setHeldOpen(false);
     setShrunk(false);
   }
-  const collapsed = readingBack && !heldOpen && shrunk;
+  const collapsed = readingBack && !heldOpen && shrunk && !reading;
+  // A question collapsed after reading stays up, as a card the person expanded from its strip does,
+  // even if the reader left the tail while it was read.
+  // Show Where Asked ends reading first, so the strip it asks for takes the card's place.
+  const readingChange = (requestId: string, next: boolean) => {
+    if (next) {
+      readingIdRef.current = requestId;
+      setReadingId(requestId);
+      setSelectedId(requestId);
+      return;
+    }
+    if (readingIdRef.current === requestId) {
+      readingIdRef.current = null;
+      setHeldOpen(true);
+    }
+    setReadingId((current) => current === requestId ? null : current);
+  };
+  const endReading = () => {
+    readingIdRef.current = null;
+    setReadingId(null);
+  };
   const collapsedRef = useRef(collapsed);
   collapsedRef.current = collapsed;
   const shrinkableRef = useRef(false);
-  shrinkableRef.current = readingBack && !heldOpen && !shrunk;
+  shrinkableRef.current = readingBack && !heldOpen && !shrunk && !reading;
   const restore = () => {
     focusHeading.current = true;
     setHeldOpen(true);
@@ -366,11 +393,13 @@ export function RequestDock({
             keyboardOpen={keyboardOpen}
             intentRef={intentRef}
             topRequest={expanded === requests[0]}
+            onReadingChange={(next) => readingChange(expanded.requestId, next)}
             onAnswer={composerAnswer?.requestId === expanded.requestId ? composerAnswer.onAnswer : undefined}
             whereAsked={whereAsked && {
               // As reading back does: the dock shrinks to its strip once the reader is far enough
               // from the tail, even if the person expanded it since leaving.
               onShow: () => {
+                endReading();
                 setHeldOpen(false);
                 whereAsked.show(expanded.requestId);
               },

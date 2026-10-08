@@ -5,8 +5,9 @@ import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { focusSessionRequest } from "../components/SessionApproval.js";
 import { ComposerQuestionResponse } from "../components/ComposerQuestionResponse.js";
+import { QueuedMessages } from "../components/QueuedMessages.js";
 import { EventTimeline, type TimelineRevealRequest } from "../components/EventTimeline.js";
-import { SessionNoticeSlot } from "../components/SessionNoticeSlot.js";
+import { SESSION_NOTICE_RANK, SessionNoticeSlot, type SessionNoticeEntry } from "../components/SessionNoticeSlot.js";
 import { RequestDock } from "../components/requests/RequestDock.js";
 import { RequestKindIcon, pendingRequestsTitle } from "../components/requests/request-meta.js";
 import { useQuestionWhereAsked } from "../components/requests/where-asked.js";
@@ -31,6 +32,7 @@ declare global {
     clearAgentQuestion(): void;
     releaseAgentQuestion(): void;
     setAgentQuestionOnline(online: boolean): void;
+    setAgentQuestionKeyboard(open: boolean): void;
   }
 }
 
@@ -56,6 +58,35 @@ const waitingRequests: PendingApproval[] = params.get("more") === "1" ? [{
   title: "Workflow Decision",
   options: [],
   questions: [{ id: "next", question: "Which wave lands next?", options: [{ label: "First" }, { label: "Second" }] }],
+}] : [];
+// `queued=N` lines N messages up in the composer's queue tray, as a session waiting on the question
+// does (#2786).
+const queuedPrompts = Array.from({ length: Number(params.get("queued") ?? 0) }, (_, index) => ({
+  id: `queued-${index + 1}`,
+  text: `Queued follow-up ${index + 1}: run the next check once the question is answered`,
+  steerable: false,
+  liveQueueObserved: true,
+  editable: true,
+  editRevision: "r1",
+}));
+const queuedSteering = {
+  runnerProtocolVersion: 200,
+  runnerOnline: true,
+  sessionStatus: "input_required",
+  activeTurnId: "turn-1",
+  supportsSteering: true,
+  policyPaused: false,
+  inputPending: true,
+  queueHeld: false,
+  stopPending: false,
+} as const;
+// `notice=1` gives the session a condition of its own, which waits behind the card's "+1 More".
+const noticeEntries: SessionNoticeEntry[] = params.get("notice") === "1" ? [{
+  key: "archived",
+  severity: "warning",
+  rank: SESSION_NOTICE_RANK.archived,
+  title: "Session Archived",
+  render: () => <p>This session is archived.</p>,
 }] : [];
 // Keycaps are a fine pointer's hints; the session shows them where a keyboard is likely (#2196).
 const showKeyHints = params.get("keys") === "1";
@@ -139,6 +170,13 @@ const longTextQuestions: AgentQuestion[] = [{
   header: "Plan",
   question: Array.from({ length: 30 }, (_, index) => `Paragraph ${index + 1} explains one more part of the plan.`).join("\n\n"),
   options: [{ label: "Proceed" }, { label: "Hold" }],
+}];
+
+// The same question with enough answers that, expanded, the first can scroll up under the head line
+// (#2786).
+const longChoiceQuestions: AgentQuestion[] = [{
+  ...longTextQuestions[0]!,
+  options: ["Proceed", "Hold", "Split the Plan", "Ask Again Later", "Escalate", "Close It"].map((label) => ({ label })),
 }];
 
 // A paragraph-long question with a header and an inline code span: a few lines more than the docked
@@ -249,6 +287,8 @@ function Fixture() {
       ? longQuestions
       : params.get("set") === "long-text"
         ? longTextQuestions
+      : params.get("set") === "long-choices"
+        ? longChoiceQuestions
         : params.get("set") === "long-label"
           ? longLabelQuestions
         : params.get("set") === "paragraph"
@@ -279,6 +319,9 @@ function Fixture() {
   window.releaseAgentQuestion = () => releasePending?.();
   window.clearAgentQuestion = () => setResolved(true);
   window.setAgentQuestionOnline = (online) => setRunnerOnline(online);
+  // The software keyboard opening or closing while the session is shown.
+  const [keyboard, setKeyboard] = useState(keyboardOpen);
+  window.setAgentQuestionKeyboard = (open) => setKeyboard(open);
 
   const client = useMemo(() => ({
     ...api,
@@ -429,7 +472,7 @@ function Fixture() {
                   </div>
                 </div>
                 {request && !answering && (
-                  <SessionNoticeSlot sessionId={SESSION_ID} entries={[]} lead={{
+                  <SessionNoticeSlot sessionId={SESSION_ID} entries={noticeEntries} lead={{
                     key: "request-dock",
                     title: pendingRequestsTitle(1 + waitingRequests.length),
                     icon: <RequestKindIcon request={request} />,
@@ -444,7 +487,7 @@ function Fixture() {
                         headTrailing={trailing}
                         onSessionUpdate={() => setResolved(true)}
                         showKeyHints={showKeyHints}
-                        keyboardOpen={keyboardOpen}
+                        keyboardOpen={keyboard}
                         revealRequestId={revealRequestId}
                         followTailState={followTail.state}
                         readerRef={scrollRef}
@@ -456,7 +499,28 @@ function Fixture() {
                   }} />
                 )}
               </div>
-              <div className="composer">{composerContent}</div>
+              <div className="composer">
+                {queuedPrompts.length > 0 && (
+                  <QueuedMessages
+                    sessionId={SESSION_ID}
+                    prompts={queuedPrompts}
+                    queueHeld={false}
+                    agent="Claude Code"
+                    steering={queuedSteering}
+                    requestBusy={false}
+                    refusal={null}
+                    steeringPending={new Set()}
+                    editingPromptId={null}
+                    editOpen={false}
+                    pendingAction={undefined}
+                    onSteer={() => {}}
+                    onEdit={() => {}}
+                    onCancel={() => {}}
+                    onDismiss={() => {}}
+                  />
+                )}
+                {composerContent}
+              </div>
             </div>
           </div>
         </section>

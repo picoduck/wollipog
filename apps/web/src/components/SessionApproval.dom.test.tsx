@@ -118,6 +118,7 @@ async function renderBanner(
   client: ApiClient = api,
   requestId = "question-1",
   recovery?: { reason: "provider_restart"; action?: "resume_answer" },
+  onReadingChange?: (reading: boolean) => void,
 ) {
   await act(async () => {
     root.render(
@@ -129,6 +130,7 @@ async function renderBanner(
           recoveryReason={recovery?.reason}
           recoveryAction={recovery?.action}
           runnerOnline={runnerOnline}
+          onReadingChange={onReadingChange}
         />
       </ApiProvider>,
     );
@@ -539,7 +541,9 @@ test("the compact Composer Response card measures a long question too, and offer
     assert.equal(toggle?.textContent, "Show Full Question");
     await act(async () => { toggle!.click(); });
     assert.equal(container.querySelector(".question-text")!.classList.contains("is-clamped"), false);
-    assert.equal(container.querySelector(".question-text-toggle")?.textContent, "Show Less");
+    assertNoDomNode(container.querySelector(".question-text-toggle"));
+    assert.ok(container.querySelector('.request-card-head button[aria-label="Collapse Question"]'),
+      "the compact card collapses from its head line too");
   } finally {
     await act(async () => { setQuestionResponseStyle("interactive", domWindow as never); });
     await act(async () => { root.unmount(); });
@@ -549,45 +553,71 @@ test("the compact Composer Response card measures a long question too, and offer
   }
 });
 
-test("a long question shows Show Full Question, expands whole and collapses, keeping the choice and step (#2683)", async () => {
+test("a long question shows Show Full Question, expands whole and collapses, keeping the choice and step (#2683, #2786)", async () => {
   const long = "Campaign scope request epic-initial-scope is still pending, and dispatch waits on it.";
   const questions: AgentQuestion[] = [
     { id: "scope", question: long, options: [{ label: "Approve" }, { label: "Hold" }] },
     { id: "window", question: "Choose a window", options: [{ label: "Morning" }, { label: "Evening" }] },
   ];
-  const layout = stubQuestionLayout({ [long]: 8 });
+  const lineCounts: Record<string, number> = { [long]: 8 };
+  const layout = stubQuestionLayout(lineCounts);
   const { container, root } = mount();
+  const reading: boolean[] = [];
   try {
-    await renderBanner(root, questions, true, api, "question-expand");
+    await renderBanner(root, questions, true, api, "question-expand", undefined, (next) => reading.push(next));
+    const card = () => container.querySelector<HTMLElement>(".question-card")!;
     const title = () => container.querySelector<HTMLElement>(".question-text")!;
     const toggle = () => container.querySelector<HTMLButtonElement>(".question-text-toggle");
+    const collapse = () => container.querySelector<HTMLButtonElement>('.request-card-head button[aria-label="Collapse Question"]');
+    const focused = () => domWindow.document.activeElement as unknown;
     assert.ok(title().classList.contains("is-clamped"));
     assert.equal(toggle()?.textContent, "Show Full Question");
     assert.equal(toggle()?.getAttribute("aria-expanded"), "false");
     assert.equal(toggle()?.getAttribute("aria-controls"), title().id);
+    assertNoDomNode(collapse(), "collapsed, the head line offers nothing to collapse");
+    assert.equal(card().hasAttribute("data-question-expanded"), false);
 
     await act(async () => { row(container, "Approve").click(); });
+    await act(async () => { toggle()!.focus(); });
     await act(async () => { toggle()!.click(); });
     assert.equal(title().classList.contains("is-clamped"), false, "expanded, the whole question shows");
-    assert.equal(toggle()?.textContent, "Show Less");
-    assert.equal(toggle()?.getAttribute("aria-expanded"), "true");
+    assertNoDomNode(toggle(), "Show Full Question gives way to Collapse Question");
+    assert.equal(collapse()?.textContent, "Collapse Question");
+    assert.equal(collapse()?.getAttribute("aria-expanded"), "true");
+    assert.equal(collapse()?.getAttribute("aria-controls"), title().id);
+    assert.ok(focused() === collapse(), "focus moves with the control that was used");
+    assert.equal(card().hasAttribute("data-question-expanded"), true, "the dock reads this as reading mode");
+    assert.equal(card().hasAttribute("data-card-scrolls"), true);
     assert.equal(row(container, "Approve").checked, true, "expanding keeps the choice");
+    assert.deepEqual(reading, [true]);
 
-    await act(async () => { toggle()!.click(); });
+    await act(async () => { collapse()!.click(); });
     assert.ok(title().classList.contains("is-clamped"));
     assert.equal(toggle()?.textContent, "Show Full Question");
+    assert.ok(focused() === toggle(), "focus returns to Show Full Question");
+    assertNoDomNode(collapse());
+    assert.equal(card().hasAttribute("data-question-expanded"), false);
     assert.equal(row(container, "Approve").checked, true, "collapsing keeps the choice");
+    assert.deepEqual(reading, [true, false]);
 
     // A question that fits has no toggle; returning to the expanded one finds it as it was left.
     await act(async () => { toggle()!.click(); });
     await act(async () => { button(container, "next").click(); });
     assert.equal(container.querySelector(".question-step-note")?.firstChild?.textContent, "Question 2 of 2");
     assertNoDomNode(toggle(), "a question that fits has no toggle");
+    assertNoDomNode(collapse());
     assert.ok(title().classList.contains("is-clamped"), "the next question starts clamped");
     await act(async () => { button(container, "back").click(); });
     assert.equal(title().classList.contains("is-clamped"), false);
-    assert.equal(toggle()?.textContent, "Show Less");
+    assert.ok(collapse(), "Collapse Question is back with the expanded question");
     assert.equal(row(container, "Approve").checked, true, "the step keeps its choice");
+
+    // Expanded stays the person's choice when a wider layout no longer needs the clamp.
+    lineCounts[long] = 2;
+    await act(async () => { button(container, "next").click(); });
+    await act(async () => { button(container, "back").click(); });
+    assert.ok(collapse(), "a layout change does not collapse an expanded question");
+    assert.equal(card().hasAttribute("data-question-expanded"), true);
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();

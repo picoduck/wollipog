@@ -18,7 +18,7 @@ import {
 import { useQuestionResponseStyle } from "../question-response-style.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { clearEvidenceReviewDraft } from "../evidence-review-drafts.js";
-import { LocateIcon, QuestionIcon } from "./Icons.js";
+import { ChevronDownIcon, LocateIcon, QuestionIcon } from "./Icons.js";
 import { Notice } from "./Notice.js";
 import { StructuredQuestionText } from "./StructuredQuestionText.js";
 import { BusyButton } from "./ui/BusyButton.js";
@@ -292,8 +292,10 @@ type CardFocus =
  * within the card's body, never the page.
  *
  * A question longer than the card's few clamped lines ends on a whole line and offers Show Full
- * Question (#2683); expanded, the question is shown whole and, on the dock, the card scrolls under
- * its footer within the dock's cap.
+ * Question (#2683). Expanded, the question is shown whole, the head line offers Collapse Question,
+ * and the card scrolls between its head and its footer. On a session's request dock that is a
+ * reading mode (#2786): the card takes the whole reading column over the transcript, which keeps its
+ * place underneath, and the keyboard's compact layout gives way to it.
  */
 export function SessionQuestionBanner({
   sessionId,
@@ -317,6 +319,7 @@ export function SessionQuestionBanner({
   topRequest = true,
   presentation,
   onAnswer,
+  onReadingChange,
 }: {
   sessionId: string;
   requestId: string;
@@ -350,6 +353,8 @@ export function SessionQuestionBanner({
   /** Opens Answer Mode for this question, where the composer can answer it (#2212). In Composer
    * Response the card is then compact; without it the card is always the form. */
   onAnswer?: () => void;
+  /** Whether the person has expanded the question (#2786): the dock then keeps this card up. */
+  onReadingChange?: (reading: boolean) => void;
 }) {
   const api = useApi();
   const storedRefusal = useSessionResponseRefusal(sessionId);
@@ -394,6 +399,9 @@ export function SessionQuestionBanner({
   const [expandedQuestion, setExpandedQuestion] = useState<string | null>(null);
   const [titleTruncates, setTitleTruncates] = useState(false);
   const titleToggleRef = useRef<HTMLButtonElement>(null);
+  const collapseRef = useRef<HTMLButtonElement>(null);
+  // Set while the control that changed the question's state is the one about to be replaced.
+  const toggleFocusPending = useRef(false);
   const cardRef = useRef<HTMLElement>(null);
   const [cardCramped, setCardCramped] = useState(false);
   const previousDraftRequestRef = useRef({ sessionId, requestId: answerKey });
@@ -511,15 +519,43 @@ export function SessionQuestionBanner({
     if (body) observer.observe(body);
     return () => observer.disconnect();
   }, [question?.question, titleExpanded, step, hasBody]);
-  const cardScrolls = (titleExpanded && titleTruncates) || cardCramped;
+  // Expanded is the person's choice, kept until they collapse it: a layout in which the question no
+  // longer needs its clamp keeps it expanded, and Collapse Question stays.
+  const cardScrolls = titleExpanded || cardCramped;
+  // Expanding and collapsing each replace the control that was used: Show Full Question under the
+  // question becomes Collapse Question in the head line, and back. Focus moves with it.
+  useIsomorphicLayoutEffect(() => {
+    if (!toggleFocusPending.current) return;
+    toggleFocusPending.current = false;
+    (titleExpanded ? collapseRef.current : titleToggleRef.current ?? titleRef.current)?.focus({ preventScroll: true });
+  }, [titleExpanded]);
+  const reading = titleExpanded;
+  const onReadingChangeRef = useRef(onReadingChange);
+  onReadingChangeRef.current = onReadingChange;
+  useEffect(() => {
+    if (!reading) return;
+    onReadingChangeRef.current?.(true);
+    return () => onReadingChangeRef.current?.(false);
+  }, [reading]);
+  const toggleQuestion = (event: React.MouseEvent<HTMLButtonElement>) => {
+    if (!question) return;
+    toggleFocusPending.current = event.currentTarget === event.currentTarget.ownerDocument.activeElement;
+    setExpandedQuestion(titleExpanded ? null : question.id);
+  };
   // The whole question is read from its first line: a card scrolled down to reach Show Full Question
-  // brings the question's start back into view, within the card alone.
+  // brings the question's start back into view, within the card alone, below the head line that now
+  // stays at its top edge (#2786).
   useIsomorphicLayoutEffect(() => {
     const title = titleRef.current;
     const card = cardRef.current;
     if (!titleExpanded || !title || !card) return;
-    const padding = parseFloat(card.ownerDocument.defaultView?.getComputedStyle(card).paddingTop ?? "") || 0;
-    const above = card.getBoundingClientRect().top + padding - title.getBoundingClientRect().top;
+    const style = (element: Element) => card.ownerDocument.defaultView?.getComputedStyle(element);
+    const head = card.querySelector<HTMLElement>(":scope > .request-card-head");
+    const padding = parseFloat(style(card)?.paddingTop ?? "") || 0;
+    const edge = head && style(head)?.position === "sticky"
+      ? head.getBoundingClientRect().bottom
+      : card.getBoundingClientRect().top + padding;
+    const above = edge - title.getBoundingClientRect().top;
     if (above > 0) card.scrollTop -= above;
   }, [titleExpanded]);
 
@@ -743,13 +779,17 @@ export function SessionQuestionBanner({
     for (const scroller of [body, card, dock, dock?.parentElement?.closest<HTMLElement>(".session-notice-slot")]) {
       if (!scroller) continue;
       const bounds = scroller.getBoundingClientRect();
-      // The card scrolls under its footer in a short column (styles.css): the field must clear it.
+      // The card scrolls under its footer in a short column (styles.css), and expanded under its head
+      // line too (#2786): the field must clear both.
       const foot = scroller === card ? card.querySelector<HTMLElement>(":scope > .request-card-foot") : null;
+      const head = scroller === card ? card.querySelector<HTMLElement>(":scope > .request-card-head") : null;
       const bottom = foot && getComputedStyle(foot).position === "sticky"
         ? Math.min(bounds.bottom, foot.getBoundingClientRect().top) : bounds.bottom;
+      const top = head && getComputedStyle(head).position === "sticky"
+        ? Math.max(bounds.top, head.getBoundingClientRect().bottom) : bounds.top;
       const rect = field.getBoundingClientRect();
-      if (rect.top < bounds.top) scroller.scrollTop -= bounds.top - rect.top;
-      else if (rect.bottom > bottom) scroller.scrollTop += Math.min(rect.bottom - bottom, rect.top - bounds.top);
+      if (rect.top < top) scroller.scrollTop -= top - rect.top;
+      else if (rect.bottom > bottom) scroller.scrollTop += Math.min(rect.bottom - bottom, rect.top - top);
     }
   };
   // The keyboard opens after the field took focus and lowers the dock's cap, which can hide it again.
@@ -821,6 +861,7 @@ export function SessionQuestionBanner({
       aria-busy={busy !== null}
       data-keyboard-open={keyboardOpen ? "" : undefined}
       data-card-scrolls={cardScrolls ? "" : undefined}
+      data-question-expanded={titleExpanded ? "" : undefined}
       ref={cardRef}
       onKeyDown={onKeyDown}
       onMouseDown={holdFieldFocus}
@@ -829,7 +870,7 @@ export function SessionQuestionBanner({
         kind={<><QuestionIcon />{kindLabel}</>}
         owner={owner}
         time={createdAt}
-        trailing={whereAsked || headTrailing ? <>
+        trailing={whereAsked || titleExpanded || headTrailing ? <>
           {whereAsked && (
             // Icon-only below 760px, under the same name (§15.1).
             <BusyButton
@@ -840,10 +881,30 @@ export function SessionQuestionBanner({
               aria-label={QUESTION_CARD_COPY.showWhereAsked}
               aria-describedby={whereAsked.unavailableReason ? whereAskedId : undefined}
               disabled={whereAsked.unavailableReason !== null}
-              onClick={whereAsked.onShow}
+              // The transcript is what Show Where Asked shows, so an expanded question collapses
+              // first rather than covering it (#2786).
+              onClick={() => {
+                if (titleExpanded) setExpandedQuestion(null);
+                whereAsked.onShow();
+              }}
             >
               <span className="question-where-asked-label">{QUESTION_CARD_COPY.showWhereAsked}</span>
             </BusyButton>
+          )}
+          {titleExpanded && (
+            // Icon-only below 760px, under the same name (§15.1).
+            <button
+              ref={collapseRef}
+              type="button"
+              className="btn sm ghost question-collapse"
+              aria-label={QUESTION_CARD_COPY.collapseQuestion}
+              aria-expanded
+              aria-controls={titleId}
+              onClick={toggleQuestion}
+            >
+              <ChevronDownIcon size={14} />
+              <span className="question-collapse-label">{QUESTION_CARD_COPY.collapseQuestion}</span>
+            </button>
           )}
           {headTrailing}
         </> : undefined}
@@ -868,16 +929,16 @@ export function SessionQuestionBanner({
       >
         {question ? <StructuredQuestionText>{question.question}</StructuredQuestionText> : QUESTION_CARD_COPY.noDetails}
       </div>
-      {question && titleTruncates && (
+      {question && titleTruncates && !titleExpanded && (
         <button
           ref={titleToggleRef}
           type="button"
           className="link question-text-toggle"
-          aria-expanded={titleExpanded}
+          aria-expanded={false}
           aria-controls={titleId}
-          onClick={() => setExpandedQuestion(titleExpanded ? null : question.id)}
+          onClick={toggleQuestion}
         >
-          {titleExpanded ? QUESTION_CARD_COPY.showLess : QUESTION_CARD_COPY.showFullQuestion}
+          {QUESTION_CARD_COPY.showFullQuestion}
         </button>
       )}
       {(!compact || recoveryRequired) && <div className="request-card-body" ref={stepRef} onFocus={(event) => revealField(event.target)}>
