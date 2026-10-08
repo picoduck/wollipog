@@ -15,6 +15,7 @@ const priorActEnvironment = (globalThis as unknown as Record<string, unknown>)["
 const priorElementGlobals = {
   HTMLElement: (globalThis as Record<string, unknown>)["HTMLElement"],
   HTMLButtonElement: (globalThis as Record<string, unknown>)["HTMLButtonElement"],
+  MutationObserver: (globalThis as Record<string, unknown>)["MutationObserver"],
 };
 
 before(() => {
@@ -23,6 +24,7 @@ before(() => {
   Object.defineProperty(globalThis, "navigator", { configurable: true, writable: true, value: domWindow.navigator });
   Object.defineProperty(globalThis, "HTMLElement", { configurable: true, writable: true, value: domWindow.HTMLElement });
   Object.defineProperty(globalThis, "HTMLButtonElement", { configurable: true, writable: true, value: domWindow.HTMLButtonElement });
+  Object.defineProperty(globalThis, "MutationObserver", { configurable: true, writable: true, value: domWindow.MutationObserver });
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, writable: true, value: true });
 });
 
@@ -32,6 +34,7 @@ after(() => {
   Object.defineProperty(globalThis, "navigator", { configurable: true, writable: true, value: priorNavigator });
   Object.defineProperty(globalThis, "HTMLElement", { configurable: true, writable: true, value: priorElementGlobals.HTMLElement });
   Object.defineProperty(globalThis, "HTMLButtonElement", { configurable: true, writable: true, value: priorElementGlobals.HTMLButtonElement });
+  Object.defineProperty(globalThis, "MutationObserver", { configurable: true, writable: true, value: priorElementGlobals.MutationObserver });
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, writable: true, value: priorActEnvironment });
 });
 
@@ -396,11 +399,52 @@ test("a detail bar renders no instance control, and Tab leaves ⋯ from its trig
 });
 
 /**
+ * Stands in for ResizeObserver, counting constructions and recording what each observes. A test fires
+ * the notification the browser would send when an observed element changes size; happy-dom has no
+ * layout, so nothing fires on its own.
+ */
+function installResizeObserver() {
+  const previous = (globalThis as { ResizeObserver?: typeof ResizeObserver }).ResizeObserver;
+  const live = new Set<{ callback: ResizeObserverCallback; targets: Set<Element> }>();
+  const stats = { created: 0, observed: [] as Element[] };
+  class TrackingResizeObserver {
+    #entry: { callback: ResizeObserverCallback; targets: Set<Element> };
+    constructor(callback: ResizeObserverCallback) {
+      stats.created += 1;
+      this.#entry = { callback, targets: new Set() };
+      live.add(this.#entry);
+    }
+    observe(target: Element) {
+      stats.observed.push(target);
+      this.#entry.targets.add(target);
+    }
+    unobserve(target: Element) { this.#entry.targets.delete(target); }
+    disconnect() { live.delete(this.#entry); }
+  }
+  Object.defineProperty(globalThis, "ResizeObserver", { configurable: true, writable: true, value: TrackingResizeObserver });
+  return {
+    stats,
+    /** Notifies every live observer watching `target`, as a resize of it would. */
+    resize: (target: Element) => act(async () => {
+      for (const entry of [...live]) {
+        if (entry.targets.has(target)) entry.callback([{ target } as ResizeObserverEntry], entry as unknown as ResizeObserver);
+      }
+    }),
+    restore() {
+      if (previous === undefined) Reflect.deleteProperty(globalThis, "ResizeObserver");
+      else Object.defineProperty(globalThis, "ResizeObserver", { configurable: true, writable: true, value: previous });
+    },
+  };
+}
+
+const setCompactWidth = (width: number) => act(async () => domWindow.happyDOM.setWindowSize({ width, height: 800 }));
+
+/**
  * The compact tier (#1969, §15.2). happy-dom has no layout, so the title's widths are given; what is
  * under test is the decision and what each state leaves for the reader and the accessibility tree.
  */
 test("in the compact tier a detail bar trades the badge's label for the title's room, and shows icon actions", async () => {
-  const setWidth = (width: number) => domWindow.happyDOM.setWindowSize({ width, height: 800 });
+  const observers = installResizeObserver();
   const bar = (
     <DetailBar
       title="Docs Overhaul Bake-Off With Four Agents and a Very Long Objective"
@@ -411,24 +455,23 @@ test("in the compact tier a detail bar trades the badge's label for the title's 
       primary={{ label: "Resume", onClick: () => undefined }}
     />
   );
-  await act(async () => setWidth(940));
+  await setCompactWidth(940);
   const view = await mount(bar);
-  // A resize re-measures through the heading's ResizeObserver; every render re-measures as well.
-  // A fresh element each time: React skips re-rendering an identical one.
-  const rerender = () => view.rerender(React.cloneElement(bar));
   try {
     const title = view.container.querySelector<HTMLElement>("h1")!;
+    const heading = view.container.querySelector<HTMLElement>(".detail-bar-heading")!;
     const badge = () => view.container.querySelector<HTMLElement>(".detail-bar-status")!;
     let visible = 150;
     Object.defineProperty(title, "scrollWidth", { configurable: true, get: () => 480 });
     Object.defineProperty(title, "clientWidth", { configurable: true, get: () => visible });
-    await rerender();
+    // The title's room changes when the bar's does, which resizes the heading.
+    await observers.resize(heading);
     assert.ok(badge().hasAttribute("data-dot"), "a title truncated to 150px is below a readable width");
     assert.equal(badge().title, "Active", "the label moves to the tooltip");
     assert.equal(badge().textContent, "Active", "and stays in the text, so the accessible name is unchanged");
 
     visible = 260;
-    await rerender();
+    await observers.resize(heading);
     assert.ok(!badge().hasAttribute("data-dot"), "truncated at 260px is still readable, so the label stays");
     assert.equal(badge().getAttribute("title"), null);
 
@@ -440,14 +483,140 @@ test("in the compact tier a detail bar trades the badge's label for the title's 
 
     // Wider than the tier, the same bar keeps its full badge and its text buttons.
     visible = 150;
-    await act(async () => setWidth(1440));
-    await rerender();
+    await observers.resize(heading);
+    assert.ok(badge().hasAttribute("data-dot"));
+    await setCompactWidth(1440);
     assert.ok(!badge().hasAttribute("data-dot"), "the dot is a compact-tier treatment only");
+    assert.equal(badge().getAttribute("title"), null);
     assert.doesNotMatch(view.container.querySelector(".detail-bar-action")!.className, /\bicon-only\b/);
     assert.equal(view.container.querySelector<HTMLButtonElement>(".detail-bar-action")!.getAttribute("title"), null);
   } finally {
-    await act(async () => setWidth(1024));
+    await setCompactWidth(1024);
     await view.unmount();
+    observers.restore();
+  }
+});
+
+test("a detail bar keeps one resize observer, on its heading, across unrelated re-renders", async () => {
+  const observers = installResizeObserver();
+  const bar = (
+    <DetailBar
+      title="Active Collaboration Pod"
+      backLabel="Back to Pods"
+      onBack={() => undefined}
+      status={<span className="status sm t-info">Active</span>}
+      primary={{ label: "Resume", onClick: () => undefined }}
+    />
+  );
+  await setCompactWidth(940);
+  const view = await mount(bar);
+  try {
+    assert.equal(observers.stats.created, 1, "the mounted bar installs one resize observer");
+    const heading = view.container.querySelector(".detail-bar-heading")!;
+    assert.ok(observers.stats.observed.includes(heading), "the heading is observed");
+    // A collapse resizes the title and the badge, so observing either would re-trigger itself; the
+    // heading takes the bar's free space (flex: 1), so its width never depends on the badge.
+    assert.ok(!observers.stats.observed.includes(view.container.querySelector("h1")!), "the title is not observed");
+    assert.ok(!observers.stats.observed.includes(view.container.querySelector(".detail-bar-status")!), "the badge is not observed");
+    const observedOnMount = observers.stats.observed.length;
+    // A fresh element each time: React skips re-rendering an identical one.
+    for (let i = 0; i < 3; i++) await view.rerender(React.cloneElement(bar));
+    assert.equal(observers.stats.created, 1, "unrelated renders must not construct another observer");
+    assert.equal(observers.stats.observed.length, observedOnMount, "or observe anything again");
+  } finally {
+    await setCompactWidth(1024);
+    await view.unmount();
+    observers.restore();
+  }
+});
+
+/** A compact-tier bar whose title has `room()` px and needs 10px per character. */
+async function mountMeasuredBar(props: Partial<React.ComponentProps<typeof DetailBar>>, room: (view: { container: HTMLDivElement }) => number) {
+  const observers = installResizeObserver();
+  const render = (next: Partial<React.ComponentProps<typeof DetailBar>>) => (
+    <DetailBar title="Fix it" backLabel="Back to Projects" onBack={() => undefined} {...props} {...next} />
+  );
+  await setCompactWidth(940);
+  const view = await mount(render({}));
+  const title = view.container.querySelector<HTMLElement>("h1")!;
+  Object.defineProperty(title, "clientWidth", { configurable: true, get: () => room(view) });
+  Object.defineProperty(title, "scrollWidth", { configurable: true, get: () => (title.textContent ?? "").length * 10 });
+  return {
+    view,
+    observers,
+    badge: () => view.container.querySelector<HTMLElement>(".detail-bar-status"),
+    rerender: (next: Partial<React.ComponentProps<typeof DetailBar>>) => view.rerender(render(next)),
+    async cleanUp() {
+      await setCompactWidth(1024);
+      await view.unmount();
+      observers.restore();
+    },
+  };
+}
+
+const LONG_TITLE = "Fix the flaky merge queue retry in the scheduler";
+const activeBadge = <span className="status sm t-info">Active</span>;
+
+test("in the compact tier a renamed title re-measures the dot without a resize", async () => {
+  const bar = await mountMeasuredBar({ status: activeBadge }, () => 150);
+  try {
+    assert.equal(bar.badge()!.hasAttribute("data-dot"), false, "a title that fits keeps the label");
+    // Neither the bar nor the badge changes size, and no resize is reported.
+    await bar.rerender({ title: LONG_TITLE });
+    assert.equal(bar.badge()!.hasAttribute("data-dot"), true, "a title truncated under 200px takes the dot");
+    assert.equal(bar.badge()!.title, "Active");
+    await bar.rerender({ title: "Fix it" });
+    assert.equal(bar.badge()!.hasAttribute("data-dot"), false, "a title that fits again gives the label back");
+    assert.equal(bar.badge()!.hasAttribute("title"), false);
+  } finally {
+    await bar.cleanUp();
+  }
+});
+
+test("in the compact tier a sibling action that changes width re-measures the dot through the heading", async () => {
+  // The heading takes the bar's free space, so a wider action narrows it, and the title with it.
+  const bar = await mountMeasuredBar(
+    { title: LONG_TITLE, status: activeBadge, secondary: { label: "Run", onClick: () => undefined } },
+    ({ container }) => 240 - (container.querySelector(".detail-bar-actions")?.textContent ?? "").length * 10,
+  );
+  try {
+    assert.equal(bar.badge()!.hasAttribute("data-dot"), false, "with a short action the title keeps 210px");
+    await bar.rerender({ title: LONG_TITLE, secondary: { label: "Open Worktree", onClick: () => undefined } });
+    const heading = bar.view.container.querySelector(".detail-bar-heading")!;
+    await bar.observers.resize(heading);
+    assert.equal(bar.badge()!.hasAttribute("data-dot"), true, "a wider action takes the title under 200px");
+    await bar.rerender({ title: LONG_TITLE, secondary: { label: "Run", onClick: () => undefined } });
+    await bar.observers.resize(heading);
+    assert.equal(bar.badge()!.hasAttribute("data-dot"), false, "the narrower action gives the room back");
+  } finally {
+    await bar.cleanUp();
+  }
+});
+
+test("in the compact tier a badge whose label or count changes re-measures the dot without a resize", async () => {
+  // The badge sits beside the title, so every character it shows takes 10px from the title's room.
+  const bar = await mountMeasuredBar(
+    { title: LONG_TITLE },
+    ({ container }) => 270 - (container.querySelector(".detail-bar-status")?.textContent ?? "").length * 10,
+  );
+  try {
+    assertNoDomNode(bar.badge(), "a bar without a status has no badge");
+    await bar.rerender({ title: LONG_TITLE, status: activeBadge });
+    assert.equal(bar.badge()!.hasAttribute("data-dot"), false, "a badge that arrives with a short label leaves 210px");
+
+    await bar.rerender({ title: LONG_TITLE, status: <span className="status sm t-warn">Active<span className="status-count">12</span></span> });
+    assert.equal(bar.badge()!.hasAttribute("data-dot"), true, "a count takes the title under 200px");
+    assert.equal(bar.badge()!.title, "Active12");
+
+    await bar.rerender({ title: LONG_TITLE, status: <span className="status sm t-warn">Waiting on Review</span> });
+    assert.equal(bar.badge()!.hasAttribute("data-dot"), true);
+    assert.equal(bar.badge()!.title, "Waiting on Review", "the tooltip follows the new label");
+
+    await bar.rerender({ title: LONG_TITLE, status: <span className="status sm t-info">Idle</span> });
+    assert.equal(bar.badge()!.hasAttribute("data-dot"), false, "a short label fits again");
+    assert.equal(bar.badge()!.hasAttribute("title"), false);
+  } finally {
+    await bar.cleanUp();
   }
 });
 
