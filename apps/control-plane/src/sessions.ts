@@ -1540,6 +1540,9 @@ export class SessionsService {
     private readonly videoFrameReviewValidationSessionId?: string,
   ) {
     this.promptOutbox = new SessionPromptOutbox(this.db, this.hub, this.log);
+    // Replayed events took new sequence numbers after a crash: the upsert's new epoch makes open
+    // dashboards drop their transcript and recover it again.
+    this.db.onEventEpochAdvanced((sessionId) => this.hub.sessionChangedById(sessionId));
     // A restart can happen after a prompt reached a runner but before the delivery marker was
     // committed. Automatic retry would risk a duplicate turn, so recovery pauses every such cycle
     // for an explicit human restart and marks the uncertain step failed.
@@ -13891,6 +13894,8 @@ export class SessionsService {
           this.rehydrate.add(sessionId);
           return;
         }
+        // A crash-recovery replay can advance the epoch; later pages keep the accumulated ask.
+        eventEpoch = applied.eventEpoch;
         let projectedBackgroundDelivery = false;
         let projectedSteering = false;
         for (let i = 0; i < applied.events.length; i++) {

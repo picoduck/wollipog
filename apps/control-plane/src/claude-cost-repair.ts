@@ -35,7 +35,7 @@ export function exportClaudeRepairCheckpoint(db: ControlPlaneDb, principal: Huma
     runner_history_epoch AS historyEpoch FROM usage_session_state WHERE session_id=?`).get(sessionId);
   if (session.driver !== "claude-code" || !ledger) throw new Error("authoritative accounting checkpoint unavailable");
   const seq = Number(db.raw().prepare("SELECT COALESCE(MAX(runner_seq),0) AS seq FROM session_events WHERE session_id=?").get(sessionId)?.seq);
-  return { sessionId, eventEpoch: session.eventEpoch, historyEpoch: Number(ledger.historyEpoch),
+  return { sessionId, eventEpoch: db.accountingEventEpoch(sessionId), historyEpoch: Number(ledger.historyEpoch),
     correction: reconciliationCoordinate(db, sessionId), ledger: { revision: Number(ledger.revision), costMicrousd: Number(ledger.costMicrousd), remainderPicousd: Number(ledger.remainderPicousd),
       coveredThroughSeq: Number(ledger.coveredThroughSeq), tokensIn: Number(ledger.tokensIn), tokensOut: Number(ledger.tokensOut), historyEpoch: Number(ledger.historyEpoch), seq } };
 }

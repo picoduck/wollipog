@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import type {
   ControlPlaneToRunner,
@@ -633,6 +636,56 @@ test("v54 hydration joins one bounded frozen-tail chain and reconciles an ask ac
     1,
     "indexed hydration records the same minimized transport audit as live ingestion",
   );
+});
+
+test("a crash-recovery epoch advance on the first page keeps the chain and its ask across pages", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-hydrate-reboot-"));
+  const file = join(root, "control-plane.db");
+  try {
+    ControlPlaneDb.open(file, { hostBootId: "boot-before-crash" }).close();
+    const db = ControlPlaneDb.open(file, { hostBootId: "boot-after-crash" });
+    try {
+      db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);
+      const hub = new Hub(db);
+      const svc = new SessionsService(db, hub, NOOP_LOG);
+      svc.hydrateRunnerSessions(RUNNER_ID, [{ ...snapshot(), status: "input_required", seq: 3, historyEpoch: 7 }]);
+      // A control-plane event before the replay: the first page advances the session's epoch.
+      db.appendEvent("s_box1", { kind: "stderr", text: "runner reconnected — session restored" }, 1_000);
+      const events: StoredSessionEvent[] = [
+        { seq: 1, ts: 1_001, payload: { kind: "permission_request", requestId: "perm-page", title: "Continue?",
+          options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }] } },
+        { seq: 2, ts: 1_002, payload: { kind: "agent_message", text: "between pages" } },
+        { seq: 3, ts: 1_003, payload: { kind: "agent_message", text: "last page" } },
+      ];
+      const seen: ControlPlaneToRunner[] = [];
+      hub.attachRunner(RUNNER_ID, {
+        send(data: string) {
+          const msg = JSON.parse(data) as ControlPlaneToRunner;
+          seen.push(msg);
+          if (msg.type !== "session_history_page") return;
+          const pageEvents = events.filter((event) => event.seq > msg.afterSeq).slice(0, 2);
+          const nextAfterSeq = pageEvents.at(-1)?.seq ?? msg.afterSeq;
+          queueMicrotask(() => hub.resolveRunnerRequest({
+            type: "session_history_page_result", requestId: msg.requestId, sessionId: msg.sessionId, ok: true,
+            events: pageEvents, page: { logEpoch: 7, throughSeq: 3, nextAfterSeq, hasMore: nextAfterSeq < 3 },
+          }));
+        },
+      });
+
+      await svc.hydrateHistory("s_box1");
+
+      assert.equal(db.getRunnerHistoryState("s_box1")?.eventEpoch, 1);
+      assert.deepEqual(seen.filter((message) => message.type === "session_history_page")
+        .map((message) => message.afterSeq), [0, 2], "the second page continues in the advanced epoch");
+      assert.equal(db.getRunnerHistoryState("s_box1")?.complete, true);
+      assert.equal(db.getSession("s_box1")?.pendingApproval?.requestId, "perm-page",
+        "the ask from the first page is still restored after the last page");
+    } finally {
+      db.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("legacy hydration records policy transport audit exactly once", async () => {

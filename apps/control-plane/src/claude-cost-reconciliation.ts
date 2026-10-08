@@ -211,9 +211,10 @@ const BUCKET_WHERE = "bucket_ts=? AND organization_id=? AND owner_kind=? AND own
 function plan(db: ControlPlaneDb, principal: HumanPrincipal, evidence: Evidence, recovering = false) {
   authorize(db, principal, evidence.sessionId);
   const sql = db.raw();
-  const session = sql.prepare("SELECT event_epoch, driver, cost_usd, status, runner_id FROM sessions WHERE id=?").get(evidence.sessionId)!;
+  const session = sql.prepare("SELECT event_epoch - recovered_event_epochs AS accounting_epoch, driver, cost_usd, status, runner_id FROM sessions WHERE id=?").get(evidence.sessionId)!;
   const state = sql.prepare("SELECT * FROM usage_session_state WHERE session_id=?").get(evidence.sessionId);
-  if (session.driver !== "claude-code" || session.event_epoch !== evidence.eventEpoch || state?.runner_history_epoch !== evidence.historyEpoch) throw new Error("accounting history scope changed or is unavailable");
+  // Accounting binds to the epoch a crash-recovery renumbering leaves alone (accountingEventEpoch).
+  if (session.driver !== "claude-code" || session.accounting_epoch !== evidence.eventEpoch ||state?.runner_history_epoch !== evidence.historyEpoch) throw new Error("accounting history scope changed or is unavailable");
   const rows: PlannedRow[] = [];
   const dependencies: unknown[] = [session, state];
   let prior: EvidenceRecord | undefined;
@@ -470,9 +471,8 @@ export function reconciliationCoordinate(db: ControlPlaneDb, sessionId: string, 
     FROM usage_cost_reconciliations r LEFT JOIN usage_cost_reconciliation_precision p ON p.digest=r.digest
     WHERE r.session_id=? AND r.revision<=? ORDER BY r.revision`).all(sessionId, revision);
   if (rows.length !== revision || rows.some((row, index) => row.revision !== index + 1)) throw new Error("unavailable correction identity chain");
-  const session = db.getSession(sessionId)!;
   const state = db.raw().prepare("SELECT runner_history_epoch FROM usage_session_state WHERE session_id=?").get(sessionId);
-  const identity = createHash("sha256").update(JSON.stringify({ sessionId, eventEpoch: session.eventEpoch,
+  const identity = createHash("sha256").update(JSON.stringify({ sessionId, eventEpoch: db.accountingEventEpoch(sessionId),
     historyEpoch: state?.runner_history_epoch, rows })).digest("hex");
   const delta = rows.reduce((sum, row) => sum + BigInt(Number(row.delta_microusd)) * PICO_PER_MICRO + BigInt(Number(row.remainder)), 0n);
   return { revision, identity, deltaUsd: Number(delta) / 1e12 };
@@ -637,7 +637,6 @@ function parseRecovery(input: unknown): RecoveryEvidence {
 export function exportClaudeReconciliations(db: ControlPlaneDb, principal: HumanPrincipal, sessionId: string) {
   authorize(db, principal, sessionId);
   const sql = db.raw();
-  const session = db.getSession(sessionId)!;
   const state = sql.prepare("SELECT runner_history_epoch FROM usage_session_state WHERE session_id=?").get(sessionId);
   const rows = sql.prepare(`SELECT r.revision, r.digest, r.delta_microusd, r.evidence_json, r.result_json,
     COALESCE(p.delta_remainder_picousd,0) AS delta_remainder_picousd FROM usage_cost_reconciliations r
@@ -651,7 +650,7 @@ export function exportClaudeReconciliations(db: ControlPlaneDb, principal: Human
   // Deleted/pruned event identities cannot be silently exported as a complete recoverable chain.
   if (revisions.some((r) => !r.eventIds.length)) throw new Error("original corrected event identities are unavailable");
   if (revisions.reduce((sum, row) => sum + row.evidence.records.length, 0) > 1_000) throw new Error("accounting export exceeds the bounded recovery limit");
-  return { sessionId, eventEpoch: session.eventEpoch, historyEpoch: Number(state?.runner_history_epoch), targetRevision: revisions.length, revisions };
+  return { sessionId, eventEpoch: db.accountingEventEpoch(sessionId), historyEpoch: Number(state?.runner_history_epoch), targetRevision: revisions.length, revisions };
 }
 
 function checkedRecoveryPlan(db: ControlPlaneDb, principal: HumanPrincipal, row: RecoveryRevision) {
@@ -693,7 +692,7 @@ function recoverPlan(db: ControlPlaneDb, principal: HumanPrincipal, input: Recov
   const sql = db.raw();
   const session = db.getSession(input.sessionId)!;
   const state = sql.prepare("SELECT * FROM usage_session_state WHERE session_id=?").get(input.sessionId);
-  if (session.driver !== "claude-code" || session.eventEpoch !== input.eventEpoch || state?.runner_history_epoch !== input.historyEpoch) throw new Error("recovery history scope changed or is unavailable");
+  if (session.driver !== "claude-code" || db.accountingEventEpoch(input.sessionId) !== input.eventEpoch || state?.runner_history_epoch !== input.historyEpoch) throw new Error("recovery history scope changed or is unavailable");
   const stored = sql.prepare(`SELECT r.*, COALESCE(p.delta_remainder_picousd,0) AS delta_remainder_picousd
     FROM usage_cost_reconciliations r LEFT JOIN usage_cost_reconciliation_precision p ON p.digest=r.digest WHERE r.session_id=? ORDER BY r.revision`).all(input.sessionId);
   if (stored.length > input.targetRevision) throw new Error("recovery target is older than the current ledger");

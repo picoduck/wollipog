@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ControlPlaneDb } from "./db.js";
 import type { HumanPrincipal } from "./identity.js";
-import { previewClaudeReconciliation, applyClaudeReconciliation, normalizeReconciledSnapshot, correctionFrame, reconciliationCoordinate } from "./claude-cost-reconciliation.js";
+import { previewClaudeReconciliation, applyClaudeReconciliation, normalizeReconciledSnapshot, correctionFrame, reconciliationCoordinate, reconciliationSnapshotAvailable, exportClaudeReconciliations } from "./claude-cost-reconciliation.js";
 import type { SessionSnapshot } from "@wollipog/protocol";
 import Fastify from "fastify";
 import { registerUsageRoutes } from "./usage-routes.js";
@@ -16,8 +16,8 @@ const principal: HumanPrincipal = {
   deviceId: "device", localBootstrap: false,
 };
 
-function fixture(path = ":memory:") {
-  const db = ControlPlaneDb.open(path);
+function fixture(path = ":memory:", hostBootId?: string) {
+  const db = ControlPlaneDb.open(path, hostBootId === undefined ? {} : { hostBootId });
   db.registerRunner({ runnerId: "runner", hostname: "host", os: "linux", version: "test", agents: [], workspaces: [] }, Date.now(), 210);
   const now = Date.now();
   db.createSession({ id: "session", runnerId: "runner", workspaceId: null, agentId: "claude",
@@ -58,6 +58,37 @@ test("Claude reconciliation previews and corrects a verified restored prefix exa
       { kind: "token_usage", model: "claude-test", inputTokens: 200, outputTokens: 20, costUsd: 0.02 },
     ], "original accounting events are immutable");
   } finally { db.close(); }
+});
+
+test("a crash-recovery event epoch advance keeps an applied correction's accounting scope (#2793)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "claude-reconciliation-reboot-"));
+  const path = join(dir, "accounting.sqlite");
+  const { db, now, evidence } = fixture(path, "boot-before-crash");
+  let opened = db;
+  try {
+    applyClaudeReconciliation(db, principal, evidence, previewClaudeReconciliation(db, principal, evidence).digest);
+    const coordinate = reconciliationCoordinate(db, "session");
+    const exported = exportClaudeReconciliations(db, principal, "session");
+    db.close();
+
+    opened = ControlPlaneDb.open(path, { hostBootId: "boot-after-crash" });
+    // A control-plane event lands before the runner's retained events replay, so they renumber.
+    opened.reconcileRunnerHistory("session", 1, 3);
+    opened.appendEvent("session", { kind: "stderr", text: "runner reconnected — session restored" }, now + 10);
+    assert.equal(opened.appendHydratedPage("session", { afterSeq: 2, historyEpoch: 1, eventEpoch: 0 },
+      [{ seq: 3, ts: now + 11, payload: { kind: "agent_message", text: "replayed" } }]).applied, true);
+    assert.equal(opened.getRunnerHistoryState("session")?.eventEpoch, 1, "dashboards see a new epoch");
+    assert.equal(opened.accountingEventEpoch("session"), 0, "accounting keeps the epoch its evidence names");
+
+    assert.deepEqual(reconciliationCoordinate(opened, "session"), coordinate);
+    assert.equal(reconciliationSnapshotAvailable(opened, {
+      id: "session", costReconciliationRevision: 1, costReconciliationIdentity: coordinate.identity,
+      costReconciliationDeltaUsd: coordinate.deltaUsd,
+    } as SessionSnapshot), true, "the runner's acknowledged snapshot is still accepted");
+    assert.deepEqual(exportClaudeReconciliations(opened, principal, "session"), exported,
+      "the correction export keeps its scope and still round-trips through recovery");
+    assert.doesNotThrow(() => previewClaudeReconciliation(opened, principal, evidence));
+  } finally { opened.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("reconciliation uses retained daily receipts and survives reopen and interrupted retry", () => {

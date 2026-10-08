@@ -9,7 +9,8 @@ import { attentionRequestRank } from "@wollipog/protocol";
 import { CLAUDE_RECONCILIATION_SCHEMA, normalizeReconciledSnapshot } from "./claude-cost-reconciliation.js";
 import { priceUsage, resolveCostSource, type RateTable } from "./usage-pricing.js";
 import { collapseAgentSpawnObservations, type StructuredAgentSpawnObservation } from "./child-session-registry.js";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
+import { uptime } from "node:os";
 import { dirname } from "node:path";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import {
@@ -732,6 +733,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   last_event_at  INTEGER,
   hydrated_seq   INTEGER NOT NULL DEFAULT 0,
   event_epoch    INTEGER NOT NULL DEFAULT 0,
+  recovered_event_epochs INTEGER NOT NULL DEFAULT 0,
   retained_attachment_through_seq INTEGER,
   runner_history_epoch INTEGER,
   runner_history_tail_seq INTEGER NOT NULL DEFAULT 0,
@@ -3341,7 +3343,8 @@ export interface HydratedRunnerEvent {
 }
 
 export type AppendHydratedPageResult =
-  | { applied: true; events: SessionEvent[] }
+  /** `eventEpoch` is the session's epoch after the page, which a crash-recovery replay can advance. */
+  | { applied: true; events: SessionEvent[]; eventEpoch: number }
   | { applied: false; events: [] };
 
 export interface CachedEventPage {
@@ -4610,6 +4613,29 @@ const CAMPAIGN_HELD_CHILDREN_LIMIT = 32;
  * fast and periodic work defers its tick. */
 export const CONTROL_PLANE_DB_BUSY_TIMEOUT_MS = 250;
 
+/** How far a boot time derived from uptime may drift with clock adjustments and still name the
+ * same boot. A reboot moves it by at least the previous boot's uptime. */
+const HOST_BOOT_TIME_TOLERANCE_MS = 60_000;
+
+/** Names the running OS boot. Linux identifies each boot; elsewhere the boot time stands in. */
+function currentHostBootId(): string {
+  try {
+    const bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+    if (bootId) return bootId;
+  } catch {
+    // Not Linux.
+  }
+  return `boot-time:${Math.round(Date.now() - uptime() * 1000)}`;
+}
+
+function sameHostBoot(previous: string, current: string): boolean {
+  const bootTime = (id: string) => id.startsWith("boot-time:") ? Number(id.slice("boot-time:".length)) : NaN;
+  const [before, now] = [bootTime(previous), bootTime(current)];
+  return Number.isFinite(before) && Number.isFinite(now)
+    ? Math.abs(now - before) <= HOST_BOOT_TIME_TOLERANCE_MS
+    : previous === current;
+}
+
 /**
  * Admit the `child_blocked` campaign event (#1650). SQLite cannot alter a CHECK constraint, so an
  * older table is rebuilt under the new one. Event sequence numbers are campaign cursors
@@ -4735,7 +4761,35 @@ export class ControlPlaneDb {
     private readonly artifactBlobs: ArtifactBlobStore,
     private readonly controlPlaneInstanceId: string,
     private readonly walJournal: boolean,
-  ) {}
+    hostRebooted: boolean,
+  ) {
+    this.ingestRollback = hostRebooted && walJournal
+      ? { settled: new Set(), runnerTails: new Map(), controlPlaneEvents: new Set() }
+      : null;
+  }
+
+  /** Present when the host rebooted since the database was last opened, so an OS crash may have
+   * rolled back relaxed ingest commits (replayableCommit). Until a session's cache catches up with
+   * its runner, a control-plane event can take a sequence number that a lost event held, and the
+   * replayed events then land at new numbers. The first replayed event after such a control-plane
+   * event gives the session a new event epoch, so dashboards drop what they cached under the old
+   * numbers (docs/control-plane-database-durability.md). */
+  private readonly ingestRollback: {
+    /** Sessions whose cache has caught up with their runner since startup. */
+    settled: Set<string>;
+    /** Each unsettled session's durable runner tail, as reported since startup. */
+    runnerTails: Map<string, number>;
+    /** Unsettled sessions that received a control-plane event since startup. */
+    controlPlaneEvents: Set<string>;
+  } | null;
+  /** Sessions whose event epoch advanced in a committed ingest, not yet published. */
+  private readonly advancedEventEpochs = new Set<string>();
+  private eventEpochAdvancedListener: ((sessionId: string) => void) | null = null;
+
+  /** Called after an ingest commit advances a session's event epoch, so open dashboards learn it. */
+  onEventEpochAdvanced(listener: ((sessionId: string) => void) | null): void {
+    this.eventEpochAdvancedListener = listener;
+  }
 
   /** Compiled-statement cache. Every hot path (one appendEvent + two sessionViews per streamed
    * delta) was re-`prepare()`ing its SQL from text on each call; SQL strings here are static
@@ -4899,7 +4953,7 @@ export class ControlPlaneDb {
     }
   }
 
-  static open(location: string, options: { artifactBlobDir?: string } = {}): ControlPlaneDb {
+  static open(location: string, options: { artifactBlobDir?: string; hostBootId?: string } = {}): ControlPlaneDb {
     if (location !== ":memory:") mkdirSync(dirname(location), { recursive: true });
     const artifactBlobs = location === ":memory:" && !options.artifactBlobDir
       ? new MemoryArtifactBlobStore()
@@ -5295,6 +5349,14 @@ export class ControlPlaneDb {
       db.close();
       throw new Error("control-plane database has an invalid instance identity");
     }
+    // Only an OS crash or power loss rolls back a relaxed ingest commit, and both reboot the host.
+    // A database last opened by a build that recorded no boot cannot tell, so it assumes none.
+    const hostBootId = options.hostBootId ?? currentHostBootId();
+    const previousHostBootId = (db.prepare("SELECT value FROM control_plane_metadata WHERE key='host_boot_id'")
+      .get() as { value: string } | undefined)?.value;
+    db.prepare("INSERT OR REPLACE INTO control_plane_metadata (key, value) VALUES ('host_boot_id', ?)")
+      .run(hostBootId);
+    const hostRebooted = previousHostBootId !== undefined && !sameHostBoot(previousHostBootId, hostBootId);
     // v58 terminal-retention accounting. Keep schema addition, backfill, and trigger creation in
     // one migration transaction so a crash cannot strand pre-existing rows at zero forever.
     db.exec("BEGIN IMMEDIATE");
@@ -5881,6 +5943,9 @@ export class ControlPlaneDb {
       // CP-owned event-log generation. Reprocess increments it so reconnecting dashboards can
       // distinguish a replacement timeline from an append-only history gap.
       "event_epoch INTEGER NOT NULL DEFAULT 0",
+      // How many of those increments only renumbered a crash-recovered suffix (#2793). The rows
+      // stayed, so accounting scopes keep event_epoch minus this (accountingEventEpoch).
+      "recovered_event_epochs INTEGER NOT NULL DEFAULT 0",
       // NULL marks a pre-upgrade reset; its retained prefix is inferred until the next reset.
       "retained_attachment_through_seq INTEGER",
       // Protocol v54 runner-owned log generation. NULL means a migrated/pre-v54 row whose current
@@ -6384,7 +6449,7 @@ export class ControlPlaneDb {
         db.exec(`ALTER TABLE orchestrator_campaign_child_reports ADD COLUMN ${column}`);
       }
     }
-    const controlPlane = new ControlPlaneDb(db, artifactBlobs, instanceId, journalMode === "wal");
+    const controlPlane = new ControlPlaneDb(db, artifactBlobs, instanceId, journalMode === "wal", hostRebooted);
     try {
       controlPlane.recoverPendingArtifactBlobs();
       controlPlane.migrateInlineWorkflowArtifacts();
@@ -14628,6 +14693,11 @@ export class ControlPlaneDb {
       hydrated_seq: number;
       event_epoch: number;
     };
+    // A reset already gave the replacement log a new epoch that no dashboard has cached.
+    if (reset || after.hydrated_seq >= after.runner_history_tail_seq) this.settleIngestRollback(id);
+    else if (this.ingestRollback && !this.ingestRollback.settled.has(id)) {
+      this.ingestRollback.runnerTails.set(id, after.runner_history_tail_seq);
+    }
     return {
       reset,
       historyEpoch: after.runner_history_epoch,
@@ -14637,6 +14707,97 @@ export class ControlPlaneDb {
       complete: after.runner_history_epoch !== null &&
         after.hydrated_seq >= after.runner_history_tail_seq,
     };
+  }
+
+  /** The event epoch that accounting scopes (cost corrections and their evidence) bind to. A
+   * crash-recovery advance renumbers only the cached suffix and keeps every row and id, so it
+   * leaves this unchanged; a history reset or clear still changes it. */
+  accountingEventEpoch(sessionId: string): number {
+    const row = this.stmt("SELECT event_epoch - recovered_event_epochs AS epoch FROM sessions WHERE id=?")
+      .get(sessionId) as { epoch: number } | undefined;
+    return row?.epoch ?? 0;
+  }
+
+  private settleIngestRollback(sessionId: string): void {
+    if (!this.ingestRollback) return;
+    this.ingestRollback.settled.add(sessionId);
+    this.ingestRollback.runnerTails.delete(sessionId);
+    this.ingestRollback.controlPlaneEvents.delete(sessionId);
+  }
+
+  /** Whether this runner event lands after a control-plane event that may have taken the
+   * sequence number of an event the crash rolled back (see ingestRollback). */
+  private ingestReassignsSequence(sessionId: string): boolean {
+    return this.ingestRollback?.controlPlaneEvents.has(sessionId) === true;
+  }
+
+  /** Records a committed event for the rollback watch. A runner event at or past the runner's
+   * reported tail means nothing lost remains to be replayed; with no tail reported, an in-order
+   * runner event shows the same, because a lost suffix would have left a gap before it. */
+  private noteCommittedIngest(sessionId: string, runnerSeq: number | undefined, advancedEpoch: boolean): void {
+    if (advancedEpoch) this.advancedEventEpochs.add(sessionId);
+    const recovery = this.ingestRollback;
+    if (!recovery || recovery.settled.has(sessionId)) return;
+    if (runnerSeq === undefined) {
+      recovery.controlPlaneEvents.add(sessionId);
+      return;
+    }
+    recovery.controlPlaneEvents.delete(sessionId);
+    const tail = recovery.runnerTails.get(sessionId);
+    if (tail === undefined || runnerSeq >= tail) this.settleIngestRollback(sessionId);
+  }
+
+  private publishAdvancedEventEpoch(sessionId: string): void {
+    if (this.advancedEventEpochs.delete(sessionId)) this.eventEpochAdvancedListener?.(sessionId);
+  }
+
+  /** Gives a session a new event epoch while keeping its cached rows, because replayed events
+   * took different sequence numbers than dashboards saw before a crash. A campaign or work-item
+   * report proof whose event kept its number moves to the new epoch; any other follows the replay
+   * rebind rules. Accounting scopes do not move (accountingEventEpoch). */
+  private advanceEventEpochInTransaction(sessionId: string): number {
+    // A legacy proof is only interpretable in a cache that has never left epoch 0.
+    this.captureUnresetLegacyCampaignReports(sessionId);
+    const previousEpoch = (this.stmt("SELECT event_epoch FROM sessions WHERE id=?").get(sessionId) as
+      { event_epoch: number }).event_epoch;
+    const reports = this.stmt(
+      `SELECT campaign_session_id, report_event_seq, report_ts, report_digest
+         FROM orchestrator_campaign_child_reports
+        WHERE child_session_id=? AND report_digest IS NOT NULL AND report_event_epoch=?`,
+    ).all(sessionId, previousEpoch) as Array<{
+      campaign_session_id: string; report_event_seq: number; report_ts: number | null; report_digest: string;
+    }>;
+    const workVerifications = this.stmt(
+      `SELECT id, report_seq, report_ts, report_digest FROM campaign_work_verifications
+        WHERE child_session_id=? AND report_digest IS NOT NULL AND report_event_epoch=?`,
+    ).all(sessionId, previousEpoch) as Array<{
+      id: string; report_seq: number; report_ts: number | null; report_digest: string;
+    }>;
+    this.stmt(
+      "UPDATE sessions SET event_epoch=event_epoch+1, recovered_event_epochs=recovered_event_epochs+1 WHERE id=?",
+    ).run(sessionId);
+    const eventEpoch = previousEpoch + 1;
+    const unchanged = (seq: number, ts: number | null, digest: string) => {
+      const current = this.campaignReportIdentity(sessionId, seq);
+      return current.ts === ts && current.digest === digest;
+    };
+    for (const report of reports) {
+      if (!unchanged(report.report_event_seq, report.report_ts, report.report_digest)) continue;
+      this.stmt(
+        `UPDATE orchestrator_campaign_child_reports SET report_event_epoch=?
+          WHERE campaign_session_id=? AND child_session_id=?`,
+      ).run(eventEpoch, report.campaign_session_id, sessionId);
+    }
+    for (const verification of workVerifications) {
+      if (!unchanged(verification.report_seq, verification.report_ts, verification.report_digest)) continue;
+      this.stmt("UPDATE campaign_work_verifications SET report_event_epoch=? WHERE id=?")
+        .run(eventEpoch, verification.id);
+    }
+    this.stmt(
+      `UPDATE managed_background_deliveries SET projected_event_epoch=?
+        WHERE session_id=? AND projected_event_epoch=?`,
+    ).run(eventEpoch, sessionId, eventEpoch - 1);
+    return eventEpoch;
   }
 
   getRunnerHistoryState(id: string): RunnerHistoryState | null {
@@ -14697,6 +14858,7 @@ export class ControlPlaneDb {
             event_epoch=event_epoch+1, retained_attachment_through_seq=0 WHERE id=?`,
       ).run(id);
       this.db.exec("COMMIT");
+      this.settleIngestRollback(id);
       this.collectWorkflowArtifactBlobs();
     } catch (err) {
       this.db.exec("ROLLBACK");
@@ -21405,6 +21567,7 @@ export class ControlPlaneDb {
     const appended = args[3]?.runnerSeq === undefined
       ? this.appendEventTransaction(...args)
       : this.replayableCommit([args[1]], () => this.appendEventTransaction(...args));
+    this.publishAdvancedEventEpoch(args[0]);
     // Outside the relaxed commit: usage retention is not replayable from the runner's log.
     if (args[3]?.accrueUsage) this.maybeMaintainUsageAggregation();
     return appended;
@@ -21434,8 +21597,10 @@ export class ControlPlaneDb {
     // write path (one call per streamed delta) and was previously 5 separate auto-commit
     // statements — 5 WAL commits per token chunk, and a torn crash could desync seq/counters.
     let appended: SessionEvent;
+    const advanceEpoch = options?.runnerSeq !== undefined && this.ingestReassignsSequence(sessionId);
     this.db.exec("BEGIN");
     try {
+      if (advanceEpoch) this.advanceEventEpochInTransaction(sessionId);
       const seq =
         ((
           this.stmt("SELECT MAX(seq) AS m FROM session_events WHERE session_id=?")
@@ -21534,6 +21699,7 @@ export class ControlPlaneDb {
       }
 
       this.db.exec("COMMIT");
+      this.noteCommittedIngest(sessionId, options?.runnerSeq, advanceEpoch);
       appended = {
         id: Number(info.lastInsertRowid),
         sessionId,
@@ -21557,6 +21723,7 @@ export class ControlPlaneDb {
       args[2].map((event) => event.payload),
       () => this.appendHydratedPageTransaction(...args),
     );
+    this.publishAdvancedEventEpoch(args[0]);
     if (result.events.length) this.maybeMaintainUsageAggregation();
     return result;
   }
@@ -21602,8 +21769,10 @@ export class ControlPlaneDb {
       }
       if (events.length === 0) {
         this.db.exec("COMMIT");
-        return { applied: true, events: [] };
+        return { applied: true, events: [], eventEpoch: state.event_epoch };
       }
+      const advanceEpoch = this.ingestReassignsSequence(sessionId);
+      const eventEpoch = advanceEpoch ? this.advanceEventEpochInTransaction(sessionId) : state.event_epoch;
 
       const usageGeneration = this.stmt(
         "SELECT runner_history_epoch FROM usage_session_state WHERE session_id=?",
@@ -21672,7 +21841,7 @@ export class ControlPlaneDb {
           sessionId,
           event.payload,
           event.ts,
-          state.event_epoch,
+          eventEpoch,
           cpSeq,
           options.armBackgroundStatusSettlement === true,
         );
@@ -21698,7 +21867,8 @@ export class ControlPlaneDb {
       ).run(finalRunnerSeq, finalRunnerSeq, finalRunnerSeq, latestTs, latestTs, events.length, preview, sessionId);
       if (events.some((event) => event.payload.kind === "tool_call")) this.raiseSettledChildToolCallCharge(sessionId);
       this.db.exec("COMMIT");
-      appliedResult = { applied: true, events: inserted };
+      this.noteCommittedIngest(sessionId, finalRunnerSeq, advanceEpoch);
+      appliedResult = { applied: true, events: inserted, eventEpoch };
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;

@@ -105,11 +105,49 @@ events, so after a crash the control plane is consistently behind rather than ho
 A session's rolled-back rows are always a suffix of runner events, because any other write would
 have flushed everything before it. The recovered events take the next free per-session sequence
 numbers. If the control plane writes its own event to the session before they return (a reconnect
-notice, for example), those numbers differ from the ones dashboards saw before the crash. The event
-epoch does not change, so a dashboard that stayed open across the restart keeps its pre-crash copy
-and fetches only events above its old position. That dashboard can show a duplicated, missing, or
-misplaced event until the page is reloaded. Dashboards hold transcripts only in memory, so a reload
-or a newly opened dashboard shows the correct history.
+notice, for example), those numbers differ from the ones dashboards saw before the crash.
+
+## Keeping Open Dashboards Consistent
+
+A dashboard caches each transcript in memory under the session's event epoch and, after a
+reconnect, fetches only events above its old position. Within one epoch a sequence number must
+therefore always name the same event. The control plane keeps that true across a rollback:
+
+1. At startup it compares the host's boot identity with the one stored in `control_plane_metadata`
+   (`host_boot_id`). On Linux that is `/proc/sys/kernel/random/boot_id`; elsewhere it is the boot
+   time derived from the system uptime, compared with a 60-second tolerance. Only an OS crash or
+   power loss can roll a commit back, and both reboot the host. When the boot is unchanged, as on
+   every ordinary control-plane restart, none of the steps below apply.
+2. After a reboot, each session is watched until its cache catches up with the runner's durable
+   tail reported since startup: a runtime snapshot or history page reports the tail, and the session
+   is settled once the hydrated cursor reaches it. A session whose cache is already complete when
+   the tail arrives, or whose history is reset, settles immediately.
+3. If the control plane writes its own event to a session that has not settled, the next runner
+   event committed to that session gives it a new event epoch in the same transaction
+   (`advanceEventEpochInTransaction` in `apps/control-plane/src/db.ts`). The cached rows stay as
+   they are.
+4. The control plane then broadcasts the session, and dashboards treat the new epoch as they treat
+   any history reset. They drop the cached transcript and recover it from the start. A dashboard
+   that reconnects later reads the new epoch from its snapshot.
+
+The epoch advances whenever this order occurs after a reboot, even if nothing was rolled back. For
+example, a runner may have streamed events while the control plane was down. That costs one
+transcript reload for the affected session. A session whose replay continues its surviving history
+in order keeps its epoch, because each event returns to its old number.
+
+Other records bound to the old epoch are kept valid:
+
+- A campaign report verification or a work-item verification moves to the new epoch when its report
+  event still has the same sequence number, timestamp, and digest. The report must already have been
+  durable when it was verified, because verification is a `FULL` commit. Proofs that do not match
+  follow the same replay rebinding rules as a history reset.
+- Background-continuation projections move to the new epoch.
+- Accounting does not move. Claude cost corrections bind their identity, export, and recovery scope
+  to `accountingEventEpoch`: the event epoch minus the session's `recovered_event_epochs`. A recovery
+  advance keeps every row and event id, so it leaves that value unchanged. A history reset or clear
+  still changes it.
+- A history-page chain that advances the epoch on one page continues with the new epoch on the
+  next, so the pending ask it collects across pages is restored.
 
 Limits:
 
@@ -117,6 +155,10 @@ Limits:
   newest events are missing from its transcript, search, and preview until something reads it.
 - The runner must still hold the session. If its history epoch changed, the control plane resets
   and re-pulls the whole log instead.
+- The watch over unsettled sessions lives in memory. If the control plane restarts again on the
+  same boot before a session settles, that session is no longer watched.
+- A database last opened by a build that did not record the boot identity cannot detect a reboot
+  on its first start after the upgrade.
 - A runner on the same host shares the power loss. It flushes its log on a 250 ms debounce after
   appending and at lifecycle points, so it can lose its own last fraction of a second of events.
   Nothing can recover those. This was already true before ingest was relaxed.
@@ -126,6 +168,11 @@ Limits:
 - `db.test.ts`, test "only runner-replayable event ingest commits without a per-commit WAL flush":
   records the `synchronous` level at every commit. It fails if ingest flushes again, or if the
   relaxation leaks to the connection or to control-plane writes.
+- `ingest-rollback-recovery.test.ts` simulates a rolled-back suffix by reopening a copy of the
+  database taken before the relaxed commits on a different host boot. It drives the web store as an
+  open dashboard and checks that the dashboard ends with the server's order without a reload. It
+  also checks that an ordinary restart keeps the epoch and the dashboard's cache, and that a
+  verified campaign report stays verified.
 - `pnpm benchmark:event-ingest [--dir <path>]` measures the real per-event commit cost and fails
   above a 1 ms p50. Point `--dir` at the disk that holds the database: on tmpfs every flush is free,
   which hides a regression.

@@ -123,6 +123,11 @@ replace coordinates and amounts only with verified accounting records:
 }
 ```
 
+`eventEpoch` is the session's accounting epoch, the value the correction export reports. It is
+usually the session's event epoch. A crash-recovery renumbering advances the event epoch for
+dashboards but leaves the accounting epoch alone, because it keeps every event and id
+(see [Control-plane database durability](control-plane-database-durability.md)).
+
 1. POST this evidence to `/api/usage/claude-reconciliation/preview`. Preview is read-only. Inspect
    original/proposed totals, per-model proposals, original event timestamps, source digest,
    unresolved records/reasons, and runner/budget effects.
