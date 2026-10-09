@@ -629,3 +629,114 @@ test("a new result set starts at the top, while a reorder under the same key kee
     Object.assign(breakpointGeometry, { width: 390, rowHeight: 98, viewportHeight: 637 });
   }
 });
+
+test("dropping a reading anchor whose row is in view renders nothing more", async () => {
+  const callbacks = new Map<number, FrameRequestCallback>();
+  let nextFrame = 1;
+  const controlledRequestFrame = ((callback: FrameRequestCallback) => {
+    const id = nextFrame++;
+    callbacks.set(id, callback);
+    return id;
+  }) as unknown as typeof domWindow.requestAnimationFrame;
+  const controlledCancelFrame = ((id: number) => callbacks.delete(id)) as unknown as typeof domWindow.cancelAnimationFrame;
+  domWindow.requestAnimationFrame = controlledRequestFrame;
+  domWindow.cancelAnimationFrame = controlledCancelFrame;
+  Object.defineProperty(globalThis, "requestAnimationFrame", { configurable: true, writable: true, value: controlledRequestFrame });
+  Object.defineProperty(globalThis, "cancelAnimationFrame", { configurable: true, writable: true, value: controlledCancelFrame });
+
+  let renders = 0;
+  function CountingFixture() {
+    const scrollRef = useRef<HTMLDivElement>(null);
+    return (
+      <div ref={scrollRef} data-testid="anchor-recovery-reader" style={{ overflow: "auto", height: 600 }}>
+        <MeasuredVirtualList
+          items={["row-1", "row-2", "saved-row", "row-4"]}
+          getKey={(item) => item}
+          renderItem={(item) => { renders += 1; return item; }}
+          scrollRef={scrollRef}
+          estimateSize={() => 72}
+          overscan={2}
+          className="anchor-recovery-list"
+          getInitialAnchor={() => ({ key: "saved-row", offset: 16, index: 2 })}
+          preserveAnchor
+        />
+      </div>
+    );
+  }
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<CountingFixture />));
+    const settled = renders;
+    for (let round = 0; round < 20 && callbacks.size > 0; round += 1) {
+      await act(async () => {
+        const due = [...callbacks.values()];
+        callbacks.clear();
+        for (const callback of due) callback(0);
+      });
+    }
+    assert.equal(renders, settled, "the restore's settle frames add no render for a row already in range");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    domWindow.requestAnimationFrame = requestFrame;
+    domWindow.cancelAnimationFrame = cancelFrame;
+    Object.defineProperty(globalThis, "requestAnimationFrame", { configurable: true, writable: true, value: requestFrame });
+    Object.defineProperty(globalThis, "cancelAnimationFrame", { configurable: true, writable: true, value: cancelFrame });
+  }
+});
+
+test("a reading anchor relinquished in a settle frame stops keeping its row mounted (#2734)", async () => {
+  const callbacks = new Map<number, FrameRequestCallback>();
+  let nextFrame = 1;
+  const controlledRequestFrame = ((callback: FrameRequestCallback) => {
+    const id = nextFrame++;
+    callbacks.set(id, callback);
+    return id;
+  }) as unknown as typeof domWindow.requestAnimationFrame;
+  const controlledCancelFrame = ((id: number) => callbacks.delete(id)) as unknown as typeof domWindow.cancelAnimationFrame;
+  domWindow.requestAnimationFrame = controlledRequestFrame;
+  domWindow.cancelAnimationFrame = controlledCancelFrame;
+  Object.defineProperty(globalThis, "requestAnimationFrame", { configurable: true, writable: true, value: controlledRequestFrame });
+  Object.defineProperty(globalThis, "cancelAnimationFrame", { configurable: true, writable: true, value: controlledCancelFrame });
+
+  const items = Array.from({ length: 200 }, (_, index) => index === 2 ? "saved-row" : `row-${index}`);
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const savedRow = () => container.querySelector('[data-virtual-key="saved-row"]');
+  try {
+    await act(async () => {
+      root.render(<AnchorRecoveryFixture items={items} recoveryPending={false} />);
+    });
+    const reader = container.querySelector<HTMLElement>("[data-testid='anchor-recovery-reader']")!;
+    assert.ok(savedRow(), "the restored reader row is mounted");
+
+    // The reader scrolls away while the restore's settle frames are still pending: the anchor still
+    // pins its row in the render that follows the scroll.
+    reader.dispatchEvent(new domWindow.WheelEvent("wheel", { bubbles: true, deltaY: 400 }) as never);
+    await act(async () => {
+      reader.scrollTop = 10_000;
+      reader.dispatchEvent(new domWindow.Event("scroll") as never);
+    });
+    assert.ok(reader.scrollTop > 500, `the reader moved far below the anchor (scrollTop=${reader.scrollTop})`);
+
+    // The settle frames see the reader's intent and relinquish the anchor.
+    for (let round = 0; round < 20 && callbacks.size > 0; round += 1) {
+      await act(async () => {
+        const due = [...callbacks.values()];
+        callbacks.clear();
+        for (const callback of due) callback(0);
+      });
+    }
+    assert.equal(savedRow() === null, true, "a relinquished anchor no longer keeps its row mounted");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    domWindow.requestAnimationFrame = requestFrame;
+    domWindow.cancelAnimationFrame = cancelFrame;
+    Object.defineProperty(globalThis, "requestAnimationFrame", { configurable: true, writable: true, value: requestFrame });
+    Object.defineProperty(globalThis, "cancelAnimationFrame", { configurable: true, writable: true, value: cancelFrame });
+  }
+});

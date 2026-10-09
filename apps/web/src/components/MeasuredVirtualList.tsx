@@ -9,6 +9,7 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
+  useReducer,
   useRef,
   useState,
 } from "react";
@@ -393,6 +394,28 @@ function VirtualList<T>({
   const mountAnchorRef = useRef<VirtualScrollAnchor | null | undefined>(undefined);
   if (mountAnchorRef.current === undefined) mountAnchorRef.current = getInitialAnchor?.() ?? null;
   const pendingAnchorRef = useRef<VirtualScrollAnchor | null>(mountAnchorRef.current);
+  /** The pending anchor the last commit pinned a row for, if any. */
+  const committedAnchorPinRef = useRef<string | null>(null);
+  const anchorReleaseFrameRef = useRef<number | null>(null);
+  const [, renderAnchorRelease] = useReducer((count: number) => count + 1, 0);
+  /**
+   * Drop the pending anchor outside render, and release the row the last commit pinned for it with
+   * one more render on the next frame: after the reader's scroll events have run, and never inside
+   * the commit whose correction gave the anchor up.
+   */
+  const releasePendingAnchor = useCallback(() => {
+    pendingAnchorRef.current = null;
+    if (committedAnchorPinRef.current == null) return;
+    committedAnchorPinRef.current = null;
+    if (anchorReleaseFrameRef.current != null) return;
+    anchorReleaseFrameRef.current = requestAnimationFrame(() => {
+      anchorReleaseFrameRef.current = null;
+      renderAnchorRelease();
+    });
+  }, []);
+  useEffect(() => () => {
+    if (anchorReleaseFrameRef.current != null) cancelAnimationFrame(anchorReleaseFrameRef.current);
+  }, []);
   const lostAnchorRef = useRef<VirtualScrollAnchor | null>(null);
   const lostAnchorIsMountRestoreRef = useRef(false);
   const lostAnchorIntentVersionRef = useRef<number | null>(null);
@@ -537,6 +560,17 @@ function VirtualList<T>({
   const initialMeasurementVirtualizerRef = useRef(virtualizer);
   initialMeasurementVirtualizerRef.current = virtualizer;
   const mountedVirtualRows = virtualizer.getVirtualItems();
+  // `pinned` reads the pending anchor in render. Each commit records the anchor whose pin kept a row
+  // mounted outside the viewport range, so dropping that anchor outside render (a settle frame, a
+  // reveal, a reset) renders once more to release the row. Otherwise a reader who scrolled away
+  // leaves it mounted until something else renders (#2734). A pin inside the range changes nothing,
+  // so it costs no extra commit. Declared before every layout effect that can drop the anchor.
+  useLayoutEffect(() => {
+    const index = pendingAnchorKey == null ? undefined : indexByKey.get(pendingAnchorKey);
+    const range = virtualizer.range;
+    committedAnchorPinRef.current = index != null && range != null &&
+      (index < range.startIndex - overscan || index > range.endIndex + overscan) ? pendingAnchorKey : null;
+  });
   // Every external scrollRef host carries `measured-virtual-scroll`, disabling native anchoring.
   // Logical-key corrections and TanStack's measured-row adjustments must be the only scroll
   // owners; native anchoring sees transformed rows as ordinary flow and applies a third correction.
@@ -671,7 +705,7 @@ function VirtualList<T>({
     if (lostAnchorFrameRef.current != null) cancelAnimationFrame(lostAnchorFrameRef.current);
     clearAnchorFrameRef.current = null;
     lostAnchorFrameRef.current = null;
-    pendingAnchorRef.current = null;
+    releasePendingAnchor();
     anchorCorrectionRequiresIntentRef.current = false;
     if (widthAnchorFrameRef.current != null) cancelAnimationFrame(widthAnchorFrameRef.current);
     widthAnchorFrameRef.current = null;
@@ -994,7 +1028,7 @@ function VirtualList<T>({
     widthAnchorFrameRef.current = null;
     widthAnchorRef.current = null;
     lostAnchorFrameRef.current = null;
-    pendingAnchorRef.current = null;
+    releasePendingAnchor();
     anchorCorrectionRequiresIntentRef.current = false;
     initialAnchorAppliedRef.current = true;
     lostAnchorRef.current = null;
@@ -1053,7 +1087,7 @@ function VirtualList<T>({
     })) {
       // A smooth scroll can cause a virtualizer render before the next settle callback. Apply the
       // same ownership rule before this layout correction so that render cannot hide the movement.
-      pendingAnchorRef.current = null;
+      releasePendingAnchor();
       pending = null;
       anchorCorrectionRequiresIntentRef.current = false;
       rekeyedAnchorRef.current = null;
@@ -1146,7 +1180,7 @@ function VirtualList<T>({
           })) {
             // A reader, assistive technology, or programmatic paging operation moved the viewport
             // after our last correction. Relinquish the old anchor instead of snapping it back.
-            pendingAnchorRef.current = null;
+            releasePendingAnchor();
             anchorCorrectionRequiresIntentRef.current = false;
             clearAnchorFrameRef.current = null;
             anchorCorrectionScrollTopRef.current = null;
@@ -1182,7 +1216,7 @@ function VirtualList<T>({
           anchorCorrectionIntentVersionRef.current = viewportIntentVersionRef.current;
           if (frames > 1) clearAfterMeasurements(frames - 1);
           else {
-            pendingAnchorRef.current = null;
+            releasePendingAnchor();
             anchorCorrectionRequiresIntentRef.current = false;
             clearAnchorFrameRef.current = null;
             anchorCorrectionScrollTopRef.current = null;
@@ -1283,7 +1317,7 @@ function VirtualList<T>({
     widthAnchorFrameRef.current = null;
     widthAnchorRef.current = null;
     lostAnchorFrameRef.current = null;
-    pendingAnchorRef.current = null;
+    releasePendingAnchor();
     anchorCorrectionRequiresIntentRef.current = false;
     lostAnchorRef.current = null;
     lostAnchorIsMountRestoreRef.current = false;
