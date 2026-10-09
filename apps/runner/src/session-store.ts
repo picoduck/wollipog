@@ -607,9 +607,10 @@ const LOCK_STALE_MS = 60_000;
 const LOCK_GUARD_WAIT_MS = 25;
 /** A guard this old whose holder pid is alive but started at another time belongs to a reused pid. */
 const LOCK_GUARD_ABANDONED_MS = 10_000;
-/** Numbered claims tried when breaking one abandoned guard; each step needs the previous claim's
- * holder to have died while breaking it. */
-const LOCK_GUARD_BREAK_CLAIMS = 8;
+/** Safety bound on numbered claims for one abandoned guard. Each number is used once while that guard
+ * is installed, so reaching it takes thousands of failed or dead breakers; past it, recovery fails
+ * closed. */
+const LOCK_GUARD_BREAK_CLAIM_LIMIT = 4096;
 /** Guard and claim tokens this process holds right now. Sections are synchronous, so any other guard
  * naming this pid was left behind by an earlier failure. */
 const activeLockGuards = new Set<string>();
@@ -633,10 +634,12 @@ function processStartTime(pid: number): string | null {
 }
 const OWN_PROCESS_START = processStartTime(process.pid);
 
-function parseLockGuard(raw: string): { pid?: unknown; start?: unknown; token?: unknown } | null {
+type LockGuardRecord = { pid?: unknown; start?: unknown; token?: unknown; released?: unknown };
+
+function parseLockGuard(raw: string): LockGuardRecord | null {
   try {
     const parsed = JSON.parse(raw) as unknown;
-    return parsed && typeof parsed === "object" ? parsed as { pid?: unknown; start?: unknown; token?: unknown } : null;
+    return parsed && typeof parsed === "object" ? parsed as LockGuardRecord : null;
   } catch {
     return null;
   }
@@ -3488,10 +3491,8 @@ export class SessionStore {
     return this.breakLockGuard(path, raw);
   }
 
-  private lockGuardHolderGone(
-    holder: { pid?: unknown; start?: unknown; token?: unknown } | null,
-    ageMs: number,
-  ): boolean {
+  private lockGuardHolderGone(holder: LockGuardRecord | null, ageMs: number): boolean {
+    if (holder?.released === true) return true; // a breaker's claim it gave up without moving the guard
     if (!holder || !Number.isSafeInteger(holder.pid) || (holder.pid as number) <= 0 || typeof holder.token !== "string") {
       // Guards are published complete, so this one is damaged rather than being written.
       return ageMs >= LOCK_GUARD_ABANDONED_MS;
@@ -3514,13 +3515,15 @@ export class SessionStore {
   /** Remove the abandoned guard `observed`, if it is still installed. Only the holder of the claim for
    * that exact guard may move it, and it re-reads the guard first: the abandoned guard's holder is gone
    * and creators cannot replace an existing file, so while it is installed nothing else changes the
-   * path. A claim whose holder died is passed over by the next numbered claim. */
+   * path. A claim whose holder died, or that its holder released after failing to move the guard, is
+   * passed over by the next number. Numbers are never reused while the guard is installed: claims are
+   * deleted only once it is gone, and a later breaker then finds it gone on its re-read. */
   private breakLockGuard(path: string, observed: string): boolean {
     const key = createHash("sha256").update(observed).digest("hex").slice(0, 32);
     const claimPrefix = `${path}.break.${key}.`;
     const token = randomUUID();
     const record = JSON.stringify({ pid: process.pid, start: OWN_PROCESS_START, token });
-    for (let attempt = 0; attempt < LOCK_GUARD_BREAK_CLAIMS; attempt++) {
+    for (let attempt = 0; attempt < LOCK_GUARD_BREAK_CLAIM_LIMIT; attempt++) {
       const claim = `${claimPrefix}${attempt}`;
       const created = this.publishExclusive(claim, record);
       if (created === "failed") return false;
@@ -3537,22 +3540,55 @@ export class SessionStore {
         continue;
       }
       activeLockGuards.add(token);
+      let guardGone = false;
       try {
-        if (readFileSync(path, "utf8") !== observed) return false;
+        let current: string;
+        try {
+          current = readFileSync(path, "utf8");
+        } catch (error) {
+          guardGone = (error as NodeJS.ErrnoException).code === "ENOENT";
+          return false;
+        }
+        if (current !== observed) {
+          guardGone = true; // moved by an earlier breaker; it can never come back
+          return false;
+        }
         const aside = `${path}.${process.pid}.${token}.broken`;
         renameSync(path, aside);
+        guardGone = true;
         rmSync(aside, { force: true });
         return true;
       } catch {
         return false;
       } finally {
         activeLockGuards.delete(token);
-        // Claims for this guard, and temp files of breakers that died publishing one, can go now: a
-        // late breaker re-reads the guard before moving anything.
-        this.removeLockGuardClaims(path, claimPrefix);
+        // Once the guard is gone, its claims and the temp files of breakers that died publishing one
+        // can go. While it is still installed (a refused rename), only our claim is given up.
+        if (guardGone) this.removeLockGuardClaims(path, claimPrefix);
+        else this.releaseLockGuardClaim(claim, { pid: process.pid, start: OWN_PROCESS_START, token, released: true });
       }
     }
     return false;
+  }
+
+  /** Mark our own claim given up, in one rename over it, so its number is never reused. */
+  private releaseLockGuardClaim(claim: string, record: LockGuardRecord): void {
+    const tmp = `${claim}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      writeFileSync(tmp, JSON.stringify(record), { flag: "wx" });
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          renameSync(tmp, claim);
+          return;
+        } catch {
+          // Windows refuses while another breaker reads it. A claim left live names this process, so
+          // other processes wait until this process passes over it on its next attempt, or exits.
+          sleepSync(1);
+        }
+      }
+    } catch { /* see above */ } finally {
+      rmSync(tmp, { force: true });
+    }
   }
 
   private removeLockGuardClaims(path: string, claimPrefix: string): void {

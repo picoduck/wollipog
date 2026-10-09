@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import fs, { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -24,21 +25,33 @@ const config = JSON.parse(process.env.LOCK_RACE_CHILD);
 const signal = (name, suffix) => \`\${config.signalDir}/\${name}.\${suffix}\`;
 const realExists = fs.existsSync;
 const cell = new Int32Array(new SharedArrayBuffer(4));
-// Each pause fires once, right after the first matching call, and holds until the test writes <name>.go.
+// Each pause fires once, right after its nth matching call (the first by default), and holds until the
+// test writes <name>.go.
 for (const fn of new Set(config.pauses.map((pause) => pause.fn))) {
   const original = fs[fn];
   const pending = config.pauses.filter((pause) => pause.fn === fn);
   fs[fn] = function (...args) {
     const result = original.apply(this, args);
-    const hit = pending.find((pause) => !pause.fired && (pause.prefix
-      ? String(args[pause.arg]).startsWith(pause.prefix)
-      : String(args[pause.arg]) === pause.path));
-    if (hit) {
-      hit.fired = true;
-      fs.writeFileSync(signal(hit.name, "checked"), "");
-      while (!realExists(signal(hit.name, "go"))) Atomics.wait(cell, 0, 0, 5);
+    for (const pause of pending) {
+      if (pause.fired) continue;
+      const target = String(args[pause.arg]);
+      if (pause.prefix ? !target.startsWith(pause.prefix) : target !== pause.path) continue;
+      pause.seen = (pause.seen ?? 0) + 1;
+      if (pause.seen < (pause.nth ?? 1)) continue;
+      pause.fired = true;
+      fs.writeFileSync(signal(pause.name, "checked"), "");
+      while (!realExists(signal(pause.name, "go"))) Atomics.wait(cell, 0, 0, 5);
+      break;
     }
     return result;
+  };
+}
+if (config.refuseRenameOf) {
+  // Windows-style refusal to move a file another process has open.
+  const rename = fs.renameSync;
+  fs.renameSync = function (...args) {
+    if (String(args[0]) === config.refuseRenameOf) throw Object.assign(new Error("access denied"), { code: "EACCES" });
+    return rename.apply(this, args);
   };
 }
 syncBuiltinESMExports();
@@ -49,6 +62,8 @@ if (config.op === "acquire") result = store.acquireLock(config.id, config.owner)
 else if (config.op === "refresh") result = store.refreshLock(config.id, config.owner);
 else store.releaseLock(config.id, config.owner);
 fs.writeFileSync(signal(config.name, "result"), JSON.stringify(result));
+// Optionally stay alive afterwards, so this process's files name a live pid.
+while (config.stayAlive && !realExists(signal(config.name, "exit"))) Atomics.wait(cell, 0, 0, 5);
 `;
 
 type Pause = {
@@ -59,6 +74,8 @@ type Pause = {
   arg: 0 | 1;
   path?: string;
   prefix?: string;
+  /** Pause after this many matching calls instead of the first. */
+  nth?: number;
 };
 
 type ChildSpec = {
@@ -68,6 +85,10 @@ type ChildSpec = {
   /** Shorthand: pause, under the child's own name, after this call on the lock file. */
   pauseOn?: "readFileSync" | "existsSync";
   pauses?: Pause[];
+  /** Make every rename of this file fail as Windows does while another process has it open. */
+  refuseRenameOf?: string;
+  /** Keep the process alive after its result until the test writes <name>.exit. */
+  stayAlive?: boolean;
 };
 
 class LockRace {
@@ -158,6 +179,7 @@ class LockRace {
   }
 
   async dispose(): Promise<void> {
+    for (const name of this.children.keys()) writeFileSync(join(this.signalDir, `${name}.exit`), "");
     for (const child of this.children.values()) {
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
     }
@@ -376,6 +398,67 @@ test("a guard is never visible empty, so a live creator's old guard is never bro
   }
 });
 
+/** The claim-file prefix for breaking the guard whose exact contents are `guard`. */
+function claimPrefix(guardPath: string, guard: string): string {
+  return `${guardPath}.break.${createHash("sha256").update(guard).digest("hex").slice(0, 32)}.`;
+}
+
+test("a breaker whose rename was refused never lets two later breakers both move the guard", async () => {
+  const race = new LockRace();
+  try {
+    race.writeLock("runner-b", 120_000);
+    const abandoned = JSON.stringify({ pid: await deadPid(), start: "1", token: "abandoned" });
+    writeFileSync(race.guardPath, abandoned);
+    const claims = claimPrefix(race.guardPath, abandoned);
+    writeFileSync(`${claims}0`, JSON.stringify({ pid: await deadPid(), start: "1", token: "dead-breaker" }));
+    // A reads the dead claim 0 and stalls with that observation.
+    await race.start({
+      name: "a", op: "acquire", owner: "runner-a",
+      pauses: [
+        { name: "a-claim", fn: "readFileSync", arg: 0, prefix: claims },
+        { name: "a-section", fn: "readFileSync", arg: 0, path: race.lockPath },
+      ],
+    }, "a-claim");
+    // B takes the next claim but cannot move the guard (Windows refusal), and gives up.
+    await race.start({ name: "b", op: "refresh", owner: "runner-b", refuseRenameOf: race.guardPath });
+    assert.equal(race.result("b"), false);
+    assert.equal(readFileSync(race.guardPath, "utf8"), abandoned, "the abandoned guard is still installed");
+    // C takes a claim, validates the guard, and stalls right before moving it.
+    await race.start({
+      name: "c", op: "acquire", owner: "runner-c",
+      pauses: [{ name: "c-reread", fn: "readFileSync", arg: 0, path: race.guardPath, nth: 2 }],
+    });
+    assert.ok(race.paused("c-reread"));
+    // A resumes from its stale observation of claim 0.
+    await race.resume("a", "a-claim", "a-section");
+    await race.resume("c", "c-reread");
+    if (race.paused("a-section")) await race.resume("a", "a-section");
+    const winners = ["a", "c"].filter((name) => race.result(name) === true);
+    assert.equal(winners.length, 1, "only one breaker moved the abandoned guard and took the lock");
+    assert.equal(race.lockOwner(), `runner-${winners[0]}`);
+    assert.deepEqual(race.sessionFiles(), ["lock"]);
+  } finally {
+    await race.dispose();
+  }
+});
+
+test("a live breaker that could not move the guard does not block the next breaker", async () => {
+  const race = new LockRace();
+  try {
+    race.writeLock("dead-runner", 120_000);
+    const abandoned = JSON.stringify({ pid: await deadPid(), start: "1", token: "abandoned" });
+    writeFileSync(race.guardPath, abandoned);
+    await race.start({ name: "b", op: "acquire", owner: "runner-b", refuseRenameOf: race.guardPath, stayAlive: true });
+    assert.equal(race.result("b"), false);
+    // B is still running, and its claims name its pid; they were given up, so C passes over them.
+    await race.start({ name: "c", op: "acquire", owner: "runner-c" });
+    assert.equal(race.result("c"), true);
+    assert.equal(race.lockOwner(), "runner-c");
+  } finally {
+    await race.dispose();
+  }
+});
+
 test("a breaker killed while holding its claim is passed over", async () => {
   const race = new LockRace();
   try {
@@ -528,6 +611,50 @@ test("a takeover retries a rename Windows refuses, and fails closed when it keep
       syncBuiltinESMExports();
       rmSync(root, { recursive: true, force: true });
     }
+  }
+});
+
+test("any number of dead breakers' claims is passed over", async () => {
+  const { store, root, lock, guard } = storeWithStaleLock();
+  try {
+    const abandoned = JSON.stringify({ pid: await deadPid(), start: "1", token: "abandoned" });
+    writeFileSync(guard, abandoned);
+    const claims = claimPrefix(guard, abandoned);
+    const dead = await deadPid();
+    for (let n = 0; n < 12; n++) writeFileSync(`${claims}${n}`, JSON.stringify({ pid: dead, start: "1", token: `dead-${n}` }));
+    assert.equal(store.acquireLock(ID, "runner-a"), true);
+    assert.equal(readFileSync(lock, "utf8"), "runner-a");
+    assert.deepEqual(readdirSync(join(root, ID)).filter((name) => name.startsWith("lock")), ["lock"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a breaker that cannot move the guard gives up only its own claim", async (t) => {
+  const { store, root, lock, guard } = storeWithStaleLock();
+  try {
+    const abandoned = JSON.stringify({ pid: await deadPid(), start: "1", token: "abandoned" });
+    writeFileSync(guard, abandoned);
+    const rename = fs.renameSync;
+    t.mock.method(fs, "renameSync", (from: fs.PathLike, to: fs.PathLike) => {
+      if (String(from) === guard) throw Object.assign(new Error("access denied"), { code: "EACCES" });
+      return rename(from, to);
+    });
+    syncBuiltinESMExports();
+    assert.equal(store.acquireLock(ID, "runner-a"), false);
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    assert.equal(readFileSync(guard, "utf8"), abandoned);
+    const given = readdirSync(join(root, ID)).filter((name) => name.startsWith("lock.guard.break."));
+    assert.ok(given.length >= 1, "the refused claims stay, so their numbers are not reused");
+    for (const name of given) assert.equal(JSON.parse(readFileSync(join(root, ID, name), "utf8")).released, true);
+    assert.equal(store.acquireLock(ID, "runner-a"), true, "a later breaker passes over the released claims");
+    assert.equal(readFileSync(lock, "utf8"), "runner-a");
+    assert.deepEqual(readdirSync(join(root, ID)).filter((name) => name.startsWith("lock")), ["lock"]);
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
