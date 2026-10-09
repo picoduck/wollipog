@@ -6,7 +6,9 @@
  *   <sessionId>/meta.json      session metadata incl. the resumable agent-session-id + seq high-water
  *   <sessionId>/events.ndjson  initial append-only event log (or legacy-writer directory fence)
  *   <sessionId>/events.manifest.json + events.{segment,active}.*.ndjson after lossless compaction
- *   <sessionId>/lock           best-effort per-session lock so only one runner drives a turn at a time
+ *   <sessionId>/lock           per-session writer lock (owner; mtime = last refresh) so only one
+ *                              process drives a turn at a time; <sessionId>/lock.guard serializes
+ *                              changes to an existing lock across processes (see acquireLock)
  */
 
 import {
@@ -26,8 +28,10 @@ import {
   fsyncSync,
   fstatSync,
   futimesSync,
+  linkSync,
   lstatSync,
   truncateSync,
+  utimesSync,
   writeSync,
 } from "node:fs";
 import { open, rename, type FileHandle } from "node:fs/promises";
@@ -598,6 +602,33 @@ class HistoryStoreError extends Error {
 
 /** A held lock is considered stale (reclaimable) after this long without a refresh. */
 const LOCK_STALE_MS = 60_000;
+/** How long a lock operation waits for another process's guard section (microseconds long) before
+ * failing closed: acquire reports the lock busy, refresh skips one tick, release leaves it to go stale. */
+const LOCK_GUARD_WAIT_MS = 25;
+/** A guard this old whose holder pid is alive but started at another time belongs to a reused pid. */
+const LOCK_GUARD_ABANDONED_MS = 10_000;
+/** Guard tokens this process holds right now. Sections are synchronous, so any other guard naming
+ * this pid was left behind by an earlier failure. */
+const activeLockGuards = new Set<string>();
+const lockGuardSleepCell = new Int32Array(new SharedArrayBuffer(4));
+
+function sleepSync(ms: number): void {
+  Atomics.wait(lockGuardSleepCell, 0, 0, ms);
+}
+
+/** Kernel start time of a process, to tell a live lock-guard holder from a later process that
+ * reused its pid. Only Linux exposes it cheaply; elsewhere this is null and a reused pid fails closed. */
+function processStartTime(pid: number): string | null {
+  if (process.platform !== "linux") return null;
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    // Field 22 (starttime); the fields after the parenthesized command name start at field 3.
+    return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] ?? null;
+  } catch {
+    return null;
+  }
+}
+const OWN_PROCESS_START = processStartTime(process.pid);
 
 /** Meta keys whose churn is per-streamed-delta (noisy). Patches touching ONLY these flush to
  * disk debounced; anything else (status, config, agentSessionId, worktree flags, …) flushes
@@ -3256,35 +3287,201 @@ export class SessionStore {
     }
   }
 
-  /* ---- best-effort per-session lock: only the holder drives turns (appends events) ---- */
+  /* ---- per-session writer lock: only the holder drives turns (appends events) ---- */
+  /*
+   * The lock file holds its owner, and its mtime is the last refresh (#2832). Taking a free lock is one
+   * exclusive create, so of two acquirers exactly one wins. Everything that changes an EXISTING lock
+   * (stale takeover, refresh, release) runs inside a guard section: `lock.guard`, also taken by
+   * exclusive create, recording the holder's pid, process start time and a token, and held only for a
+   * few synchronous file operations. Inside it the lock can change only by a free create, which needs
+   * it absent, so a takeover that saw it stale replaces exactly that lock, in one rename, and a lock
+   * refreshed or released meanwhile is never overwritten. A busy guard is waited on briefly and then
+   * fails closed. A guard is broken only when its holder is gone: its pid no longer exists, its pid is
+   * this process (sections never overlap here), or it is old and its pid now belongs to a process that
+   * started later. A live holder's guard is never broken.
+   *
+   * The data directory is host-local: pids and start times mean nothing to another machine, so a store
+   * shared across hosts would treat a remote guard holder as dead. The runner's data-directory lease
+   * keeps one runner per data directory; other processes on the same host are covered.
+   */
 
   /** Try to take the lock for `owner` (e.g. the runner id). Succeeds if free, stale, or already ours. */
   acquireLock(id: string, owner: string): boolean {
     const p = this.lockPath(id);
     try {
-      let alreadyMine = false;
-      if (existsSync(p)) {
-        const fresh = Date.now() - statSync(p).mtimeMs < LOCK_STALE_MS;
-        const mine = (() => {
-          try {
-            return readFileSync(p, "utf8") === owner;
-          } catch {
-            return false;
-          }
-        })();
-        if (fresh && !mine) return false;
-        alreadyMine = mine;
-      }
-      writeFileSync(p, owner);
-      if (!alreadyMine) {
-        this.seqReconciled.delete(id);
-        this.checkpointCache.delete(id);
-        this.historyLayoutCache.delete(id);
-      }
+      writeFileSync(p, owner, { flag: "wx" });
+      this.forgetLockedHistoryState(id);
       return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") return false;
+    }
+    const outcome = this.withLockGuard(id, (): "taken" | "mine" | "busy" => {
+      let mtimeMs: number;
+      let holder: string;
+      try {
+        mtimeMs = statSync(p).mtimeMs;
+        holder = readFileSync(p, "utf8");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") return "busy";
+        // Released since the create above failed: compete for it like any free acquirer.
+        try {
+          writeFileSync(p, owner, { flag: "wx" });
+          return "taken";
+        } catch {
+          return "busy";
+        }
+      }
+      if (holder === owner) {
+        const now = new Date();
+        utimesSync(p, now, now);
+        return "mine";
+      }
+      if (Date.now() - mtimeMs < LOCK_STALE_MS) return "busy";
+      return this.replaceLockFile(p, owner) ? "taken" : "busy";
+    });
+    if (outcome === "taken") this.forgetLockedHistoryState(id);
+    return outcome === "taken" || outcome === "mine";
+  }
+
+  /** A new holder must re-derive the append state another process may have changed. */
+  private forgetLockedHistoryState(id: string): void {
+    this.seqReconciled.delete(id);
+    this.checkpointCache.delete(id);
+    this.historyLayoutCache.delete(id);
+  }
+
+  /** Replace a stale lock in one rename, so it is never absent for a free acquirer to take meanwhile.
+   * Windows refuses to replace a file another process has open; retry briefly, then fail closed. */
+  private replaceLockFile(p: string, owner: string): boolean {
+    const tmp = `${p}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      writeFileSync(tmp, owner, { flag: "wx" });
+      for (let attempt = 0; ; attempt++) {
+        try {
+          renameSync(tmp, p);
+          return true;
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (attempt >= 4 || (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES")) return false;
+          sleepSync(2);
+        }
+      }
+    } catch {
+      return false;
+    } finally {
+      rmSync(tmp, { force: true });
+    }
+  }
+
+  private lockGuardPath(id: string): string {
+    return join(this.dir(id), "lock.guard");
+  }
+
+  /** Run `section` while holding the session's lock guard, or return undefined when it stays busy. */
+  private withLockGuard<T>(id: string, section: () => T): T | undefined {
+    const path = this.lockGuardPath(id);
+    const token = randomUUID();
+    const record = JSON.stringify({ pid: process.pid, start: OWN_PROCESS_START, token });
+    const deadline = performance.now() + LOCK_GUARD_WAIT_MS;
+    for (;;) {
+      let fd: number | undefined;
+      try {
+        fd = openSync(path, "wx");
+        writeSync(fd, record);
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") return undefined;
+      } finally {
+        if (fd !== undefined) closeSync(fd);
+      }
+      if (this.reclaimAbandonedLockGuard(path)) continue;
+      if (performance.now() >= deadline) return undefined;
+      sleepSync(1);
+    }
+    activeLockGuards.add(token);
+    try {
+      return section();
+    } finally {
+      activeLockGuards.delete(token);
+      this.releaseLockGuard(path, record);
+    }
+  }
+
+  /** Remove our own guard; a guard someone else now holds is left alone. */
+  private releaseLockGuard(path: string, record: string): void {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        if (readFileSync(path, "utf8") !== record) return;
+        rmSync(path);
+        return;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+        // Windows can refuse while another process reads the guard. A guard left behind names this
+        // live process, so other processes fail closed until this process's next section breaks it.
+        sleepSync(1);
+      }
+    }
+  }
+
+  /** True when the guard is gone or was abandoned and has now been broken, so a create can retry. */
+  private reclaimAbandonedLockGuard(path: string): boolean {
+    let raw: string;
+    let ageMs: number;
+    try {
+      raw = readFileSync(path, "utf8");
+      ageMs = Date.now() - statSync(path).mtimeMs;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ENOENT";
+    }
+    let holder: { pid?: unknown; start?: unknown; token?: unknown } | null = null;
+    try {
+      holder = JSON.parse(raw) as typeof holder;
+    } catch { /* a guard still being written, or damaged */ }
+    if (!this.lockGuardHolderGone(holder, ageMs)) return false;
+    return this.breakLockGuard(path, raw);
+  }
+
+  private lockGuardHolderGone(
+    holder: { pid?: unknown; start?: unknown; token?: unknown } | null,
+    ageMs: number,
+  ): boolean {
+    if (!holder || !Number.isSafeInteger(holder.pid) || (holder.pid as number) <= 0 || typeof holder.token !== "string") {
+      return ageMs >= LOCK_GUARD_ABANDONED_MS;
+    }
+    const pid = holder.pid as number;
+    if (pid === process.pid) return !activeLockGuards.has(holder.token);
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ESRCH") return true;
+      // EPERM: the process exists but belongs to someone else. Anything unexpected: assume alive.
+      if (code !== "EPERM") return false;
+    }
+    if (ageMs < LOCK_GUARD_ABANDONED_MS || typeof holder.start !== "string") return false;
+    const start = processStartTime(pid);
+    return start !== null && start !== holder.start;
+  }
+
+  /** Move an abandoned guard aside, then confirm it is the one we judged abandoned. If a live holder
+   * replaced it in between, link it back; that can fail only if a third process created a guard in the
+   * same instant, and the displaced holder then leaves the new guard alone when it finishes. */
+  private breakLockGuard(path: string, observed: string): boolean {
+    const aside = `${path}.${process.pid}.${randomUUID()}.broken`;
+    try {
+      renameSync(path, aside);
     } catch {
       return false;
     }
+    let moved: string | null = null;
+    try {
+      moved = readFileSync(aside, "utf8");
+    } catch { /* treated as not the observed guard */ }
+    if (moved !== observed) {
+      try { linkSync(aside, path); } catch { /* see above */ }
+    }
+    rmSync(aside, { force: true });
+    return moved === observed;
   }
 
   /** Take the lock only if no lock file exists, with an exclusive create. A compaction that let the
@@ -3295,9 +3492,7 @@ export class SessionStore {
     } catch {
       return false;
     }
-    this.seqReconciled.delete(id);
-    this.checkpointCache.delete(id);
-    this.historyLayoutCache.delete(id);
+    this.forgetLockedHistoryState(id);
     return this.ownsLock(id, owner);
   }
 
@@ -3310,29 +3505,35 @@ export class SessionStore {
   }
 
   /** Refresh only while `owner` still holds the lock. A stale holder must not overwrite a lock
-   * that another process legitimately stole after the stale window elapsed. */
+   * that another process legitimately stole after the stale window elapsed. Only the mtime moves. */
   refreshLock(id: string, owner: string): boolean {
-    try {
-      if (readFileSync(this.lockPath(id), "utf8") !== owner) return false;
-      writeFileSync(this.lockPath(id), owner);
-      return true;
-    } catch {
-      return false;
-    }
+    const p = this.lockPath(id);
+    return this.withLockGuard(id, () => {
+      try {
+        if (readFileSync(p, "utf8") !== owner) return false;
+        const now = new Date();
+        utimesSync(p, now, now);
+        return true;
+      } catch {
+        return false;
+      }
+    }) ?? false;
   }
 
   /** Release the lock ONLY if we still own it — a holder whose lock went stale and was stolen
    * (60s without refresh) must not delete the new owner's lock on its way out. */
   releaseLock(id: string, owner: string): void {
-    try {
-      if (readFileSync(this.lockPath(id), "utf8") !== owner) return;
-      rmSync(this.lockPath(id), { force: true });
-      this.seqReconciled.delete(id);
-      this.checkpointCache.delete(id);
-      this.historyLayoutCache.delete(id);
-    } catch {
-      /* ignore — no lock file, or unreadable (racing removal) */
-    }
+    const p = this.lockPath(id);
+    const released = this.withLockGuard(id, () => {
+      try {
+        if (readFileSync(p, "utf8") !== owner) return false;
+        rmSync(p, { force: true });
+        return true;
+      } catch {
+        return false; // no lock file, or unreadable
+      }
+    });
+    if (released) this.forgetLockedHistoryState(id);
   }
 
   /** Cross-process lease for a provider cwd or a cleanup operation. Unlike the turn lock, this is
