@@ -362,9 +362,11 @@ export interface State {
   pods: Map<string, PodView>;
   podContext: Map<string, PodContextEntry[]>;
   events: Map<string, SessionEvent[]>;
-  /** Fixed-size per-session heartbeat rings. Unlike full timelines, these survive view changes. */
+  /** Fixed-size per-session heartbeat rings. Unlike full timelines, these survive view changes.
+   * Updated in place; a batch of socket frames waiting to be published works on its own copy. */
   activity: Map<string, SessionActivity>;
-  /** Shared minute clock and derived stall state; sets/maps are stable and revisioned explicitly. */
+  /** Shared minute clock and derived stall state. The stalled set is replaced only when its
+   * membership moves, together with `stalledRevision`. */
   activityNow: number;
   activityObservationStartedAt: Map<string, number>;
   stalledSessionIds: Set<string>;
@@ -581,52 +583,56 @@ function sessionIsStalled(state: State, session: SessionView, now = state.activi
   );
 }
 
-/** Mutates the stable derived set, publishing scalar revision/count changes only when membership moves. */
+/** Replaces the derived set only when membership moves, with scalar revision/count changes. A
+ * published state keeps the set it was published with while later frames wait (#2763). */
 function updateSessionStall(state: State, sessionId: string, now = state.activityNow): State {
   const session = state.sessions.get(sessionId);
   const stalled = session !== undefined && !session.archived && sessionIsStalled(state, session, now);
   const wasStalled = state.stalledSessionIds.has(sessionId);
   if (stalled === wasStalled) return state;
-  if (stalled) state.stalledSessionIds.add(sessionId);
-  else state.stalledSessionIds.delete(sessionId);
+  const stalledSessionIds = new Set(state.stalledSessionIds);
+  if (stalled) stalledSessionIds.add(sessionId);
+  else stalledSessionIds.delete(sessionId);
   return {
     ...state,
+    stalledSessionIds,
     stalledRevision: state.stalledRevision + 1,
-    stalledCount: state.stalledSessionIds.size,
+    stalledCount: stalledSessionIds.size,
   };
 }
 
 function clearSessionStall(state: State, sessionId: string): State {
-  if (!state.stalledSessionIds.delete(sessionId)) return state;
+  if (!state.stalledSessionIds.has(sessionId)) return state;
+  const stalledSessionIds = new Set(state.stalledSessionIds);
+  stalledSessionIds.delete(sessionId);
   return {
     ...state,
+    stalledSessionIds,
     stalledRevision: state.stalledRevision + 1,
-    stalledCount: state.stalledSessionIds.size,
+    stalledCount: stalledSessionIds.size,
   };
 }
 
 /** Rare lifecycle/minute-clock scan. The session-event hot path never calls this. */
 function scanSessionStalls(state: State, now = state.activityNow): State {
-  let changed = false;
-  for (const sessionId of [...state.stalledSessionIds]) {
-    if (!state.sessions.has(sessionId)) {
-      state.stalledSessionIds.delete(sessionId);
-      changed = true;
-    }
+  let stalledSessionIds: Set<string> | null = null;
+  const writable = () => (stalledSessionIds ??= new Set(state.stalledSessionIds));
+  for (const sessionId of state.stalledSessionIds) {
+    if (!state.sessions.has(sessionId)) writable().delete(sessionId);
   }
   for (const session of state.sessions.values()) {
     const stalled = !session.archived && sessionIsStalled(state, session, now);
-    const wasStalled = state.stalledSessionIds.has(session.id);
+    const wasStalled = (stalledSessionIds ?? state.stalledSessionIds).has(session.id);
     if (stalled === wasStalled) continue;
-    if (stalled) state.stalledSessionIds.add(session.id);
-    else state.stalledSessionIds.delete(session.id);
-    changed = true;
+    if (stalled) writable().add(session.id);
+    else writable().delete(session.id);
   }
-  return changed
+  return stalledSessionIds
     ? {
         ...state,
+        stalledSessionIds,
         stalledRevision: state.stalledRevision + 1,
-        stalledCount: state.stalledSessionIds.size,
+        stalledCount: (stalledSessionIds as Set<string>).size,
       }
     : state;
 }
@@ -826,9 +832,9 @@ function reducer(state: State, action: Action): State {
         authRequired: action.conn === "online" ? false : (action.authRequired ?? state.authRequired),
       };
       if (action.conn !== "online" && state.stalledSessionIds.size > 0) {
-        state.stalledSessionIds.clear();
         next = {
           ...next,
+          stalledSessionIds: new Set<string>(),
           stalledRevision: state.stalledRevision + 1,
           stalledCount: 0,
         };
@@ -1832,6 +1838,11 @@ export class Store {
    * Frames are reduced in arrival order, so publication can only ever show a prefix of them. */
   receiveFrame = (msg: ControlPlaneToUi, now?: number): void => {
     const deferrable = deferrableFrame(msg, this.state);
+    // The reducer updates the activity registry in place. While frames wait, give them their own
+    // copy, so the published state keeps the activity it was published with.
+    if (deferrable && this.publishScheduler && this.state.activity === this.published.activity) {
+      this.state = { ...this.state, activity: new Map(this.state.activity) };
+    }
     this.apply({ type: "msg", msg, now });
     if (!deferrable || !this.publishScheduler) {
       this.publish();

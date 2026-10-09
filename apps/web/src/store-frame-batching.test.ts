@@ -152,6 +152,37 @@ test("snapshots, history resets and epoch changes publish at once, with the fram
   assert.equal(clock.waiting, 0);
 });
 
+test("frames waiting for their animation frame never change the activity or stalls already published", () => {
+  const store = new Store({ name: "board" });
+  store.tickActivity(0);
+  store.dispatch({ type: "conn", conn: "online" });
+  const busy = { ...session("busy"), archived: false, updatedAt: 0, lastEventAt: 0 } as SessionView;
+  store.dispatch({
+    type: "msg", now: 0,
+    msg: { type: "snapshot", runners: [], boxes: [], sessions: [busy], runs: [], pods: [] },
+  });
+  store.tickActivity(600_000);
+  const published = store.getState();
+  const publishedActivity = published.activity.get("busy");
+  assert.equal(published.stalledSessionIds.has("busy"), true, "ten silent minutes stall the session");
+  const clock = frames();
+  store.setPublishScheduler(clock.scheduler);
+
+  store.receiveFrame({ type: "session_event", event: { ...event("busy", 1), ts: 600_000 } }, 600_000);
+  store.receiveFrame({ type: "session_event", event: { ...event("busy", 2), ts: 600_001 } }, 600_001);
+  assert.equal(store.getState(), published);
+  assert.equal(published.stalledSessionIds.has("busy"), true, "the published stall set keeps its member");
+  assert.equal(published.stalledCount, 1, "and agrees with its count");
+  assert.equal(published.activity.get("busy"), publishedActivity, "the published activity has no new event");
+
+  clock.run();
+  const next = store.getState();
+  assert.equal(next.stalledSessionIds.has("busy"), false, "the published frames clear the stall");
+  assert.equal(next.stalledCount, 0);
+  assert.equal(next.activity.get("busy")?.lastEventAt, 600_001);
+  assert.notEqual(next.stalledSessionIds, published.stalledSessionIds, "a membership change is a new set");
+});
+
 test("without a frame scheduler, as in a hidden tab, every frame publishes at once", () => {
   const store = new Store({ name: "session", id: "s1" });
   let notified = 0;
