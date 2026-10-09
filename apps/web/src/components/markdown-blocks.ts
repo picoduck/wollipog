@@ -11,8 +11,10 @@
  *
  * A document is never cut when it contains a line starting with `<` (raw HTML blocks may span blank
  * lines), or `[^` or `]:` anywhere: footnotes and link reference definitions reach across the
- * document, and a definition's label may span lines, escape brackets or sit inside a container. The
- * equivalence tests render the cut and the whole document and compare the markup.
+ * document, and a definition's label may span lines, escape brackets or sit inside a container. Nor
+ * when it contains a carriage return: lines here end at `\n` only. A blank line holds only spaces and
+ * tabs, as in CommonMark. The equivalence tests render the cut and the whole document and compare
+ * the markup.
  *
  * Cuts only ever change which React subtree renders a block. When a later chunk removes a cut (a
  * definition arrives), the blocks after it remount, which resets a code block's Wrap Lines choice.
@@ -24,11 +26,12 @@ const CONTAINER_LINE = /^(?:[ \t]|>)/;
 const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
 const HTML_LINE = /^ {0,3}</m;
+const BLANK_LINE = /^[ \t]*$/;
 
 /** The offsets at which `text`'s blocks start; always begins with 0. */
 export function markdownBlockStarts(text: string): number[] {
   const starts = [0];
-  if (text.includes("[^") || text.includes("]:") || HTML_LINE.test(text)) return starts;
+  if (text.includes("\r") || text.includes("[^") || text.includes("]:") || HTML_LINE.test(text)) return starts;
   let fence: { marker: string; length: number } | null = null;
   let afterBlank = false;
   /** The last non-blank line outside a fence ended a plain block (and there was one). */
@@ -41,7 +44,7 @@ export function markdownBlockStarts(text: string): number[] {
     if (fence) {
       const close = FENCE_CLOSE.exec(line);
       if (close && close[1]![0] === fence.marker && close[1]!.length >= fence.length) fence = null;
-    } else if (line.trim() === "") {
+    } else if (BLANK_LINE.test(line)) {
       afterBlank = true;
     } else {
       const listItem = LIST_MARKER.test(line);

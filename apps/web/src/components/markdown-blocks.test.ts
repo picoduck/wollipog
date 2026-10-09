@@ -44,6 +44,8 @@ const cases: Record<string, string> = {
   "multiline reference label": "See [foo bar].\n\nMiddle.\n\n[foo\nbar]: /target",
   "escaped bracket in a reference label": "See [a\\]b].\n\nMiddle.\n\n[a\\]b]: /target",
   "reference definition in a quote": "See [quoted].\n\nMiddle.\n\n> [quoted]: /target",
+  "fence with CRLF line endings": "Intro.\r\n\r\n~~~ts\r\ncode\r\n\r\nMore\r\n~~~\r\n\r\nAfter.",
+  "a line of non-breaking spaces is not blank": "*first\n\u00a0\nsecond*\n\nNext.",
   "streamed so far": "The quick brown fox jumps over the lazy dog while the agent streams **markdown** with `code`\n\n```ts\nconst x1 = 1;\n```\n\nThe quick brown",
 };
 
@@ -52,7 +54,7 @@ for (const [name, text] of Object.entries(cases)) {
 }
 
 test("documents with raw HTML, definitions or footnotes are never cut", () => {
-  for (const name of ["html", "reference definitions", "footnotes", "multiline reference label",
+  for (const name of ["html", "reference definitions", "footnotes", "multiline reference label", "fence with CRLF line endings",
     "escaped bracket in a reference label", "reference definition in a quote"]) {
     assert.deepEqual(markdownBlockStarts(cases[name]!), [0], name);
   }
@@ -86,7 +88,7 @@ test("generated documents render blockwise exactly as whole", () => {
     fc.constant("| a | b |\n| - | - |"),
     fc.constant(""),
   );
-  const separator = fc.constantFrom("\n", "\n\n", "\n\n\n", "\n \n");
+  const separator = fc.constantFrom("\n", "\n\n", "\n\n\n", "\n \n", "\n\u00a0\n", "\r\n\r\n");
   fc.assert(
     fc.property(fc.array(fc.tuple(block, separator), { minLength: 1, maxLength: 14 }), (parts) => {
       assertSameMarkup(parts.map(([text, gap]) => text + gap).join(""));
