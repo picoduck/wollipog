@@ -1748,6 +1748,9 @@ const STREAM_FRAME_TYPES: ReadonlySet<ControlPlaneToUi["type"]> = new Set([
  * component that reacts to each transition still sees every one of them. */
 function deferrableFrame(msg: ControlPlaneToUi, before: State, after: State): boolean {
   if (!STREAM_FRAME_TYPES.has(msg.type)) return false;
+  // A shell's first output is how a shell dock learns of a shell another dashboard opened, and its
+  // exit may follow within the frame; only output for a shell already shown waits.
+  if (msg.type === "shell_output") return before.shellOutput.has(msg.shellId);
   if (msg.type !== "session_upsert") return true;
   const previous = before.sessions.get(msg.session.id);
   const next = after.sessions.get(msg.session.id);

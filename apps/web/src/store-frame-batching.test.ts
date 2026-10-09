@@ -183,6 +183,20 @@ test("frames waiting for their animation frame never change the activity or stal
   assert.notEqual(next.stalledSessionIds, published.stalledSessionIds, "a membership change is a new set");
 });
 
+test("a shell's first output publishes at once; only its later output waits for the frame", () => {
+  const { store, clock, notified } = liveStore();
+  const output = (data: string, seq: number): ControlPlaneToUi =>
+    ({ type: "shell_output", sessionId: "s1", shellId: "shell-new", stream: "stdout", data, seq });
+  store.receiveFrame(output("first", 1));
+  assert.equal(notified(), 1, "a shell the dock has not seen is published at once, so it can be discovered");
+  assert.equal(store.getState().shellOutput.get("shell-new")?.text, "first");
+  store.receiveFrame(output(" more", 2));
+  assert.equal(notified(), 1, "output for a shell already shown waits for the frame");
+  assert.equal(clock.waiting, 1);
+  clock.run();
+  assert.equal(store.getState().shellOutput.get("shell-new")?.text, "first more");
+});
+
 test("without a frame scheduler, as in a hidden tab, every frame publishes at once", () => {
   const store = new Store({ name: "session", id: "s1" });
   let notified = 0;
