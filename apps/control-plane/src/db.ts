@@ -9,6 +9,7 @@ import { attentionRequestRank } from "@wollipog/protocol";
 import { CLAUDE_RECONCILIATION_SCHEMA, normalizeReconciledSnapshot } from "./claude-cost-reconciliation.js";
 import { priceUsage, resolveCostSource, type RateTable } from "./usage-pricing.js";
 import { collapseAgentSpawnObservations, type StructuredAgentSpawnObservation } from "./child-session-registry.js";
+import { WalCheckpointer, type WalCheckpointerOptions } from "./wal-checkpointer.js";
 import { mkdirSync, readFileSync } from "node:fs";
 import { open as openFile } from "node:fs/promises";
 import { uptime } from "node:os";
@@ -27068,7 +27069,25 @@ export class ControlPlaneDb {
     return this.db;
   }
 
+  private walCheckpointer: WalCheckpointer | null = null;
+
+  /** Checkpoint the write-ahead log from a worker thread for the life of this connection, instead
+   * of inside whichever commit crosses SQLite's threshold (#2761). Only a WAL database file has
+   * one; elsewhere this does nothing. */
+  startWalCheckpoints(options?: WalCheckpointerOptions): WalCheckpointer | null {
+    if (!this.walPath || this.walCheckpointer) return this.walCheckpointer;
+    this.walCheckpointer = new WalCheckpointer(this.db, this.walPath.slice(0, -"-wal".length), options);
+    this.walCheckpointer.start();
+    return this.walCheckpointer;
+  }
+
+  /** Stop the checkpoint worker after its last checkpoint. Idempotent. */
+  stopWalCheckpoints(): void {
+    this.walCheckpointer?.stop();
+  }
+
   close(): void {
+    this.stopWalCheckpoints();
     this.collectWorkflowArtifactBlobs();
     this.db.close();
   }

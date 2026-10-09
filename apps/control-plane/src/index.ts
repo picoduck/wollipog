@@ -426,6 +426,17 @@ const app = Fastify({
     },
   },
 });
+// Checkpoint the write-ahead log off the event loop (#2761). Only failures, and a runtime whose
+// SQLite cannot safely checkpoint from a second connection, are logged.
+db.startWalCheckpoints({
+  onEvent: (event) => {
+    if (event.type === "disabled") app.log.info({ reason: event.reason }, "WAL checkpoint worker disabled");
+    else if (event.type === "failed") app.log.warn({ error: event.message }, "WAL checkpoint worker failed");
+    else if (event.type === "exited") {
+      app.log.warn({ code: event.code, restartInMs: event.restartInMs }, "WAL checkpoint worker exited; restarting");
+    }
+  },
+});
 
 const CHILD_SESSION_REGISTRY_CACHE_LIMIT = 128;
 const CHILD_SESSION_REGISTRY_SCAN_PAGE_SIZE = 1_000;
@@ -6307,6 +6318,8 @@ app.addHook("onClose", async () => {
     await outboundEvents.close();
   } finally {
     orchestrator.shutdown();
+    // One last checkpoint pass, which flushes the log whenever it has frames to copy.
+    db.stopWalCheckpoints();
   }
 });
 // Re-entrancy guard: a second signal (or an uncaughtException raised WHILE app.close() drains)
