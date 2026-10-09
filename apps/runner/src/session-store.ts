@@ -3309,16 +3309,16 @@ export class SessionStore {
    * - Publication. A lock or guard file is written to a private temp file and hard-linked into place
    *   (create-if-absent), so it is never visible empty or partial.
    * - Free acquire. One exclusive publication of `lock`, so of two acquirers exactly one wins. Linking
-   *   keeps the temp file's mtime, so if the new lock is not clearly young the acquirer refreshes it
-   *   inside the guard (or finds it was taken over meanwhile). On a filesystem without hard links the
+   *   keeps the temp file's mtime, so the acquirer then always touches the new lock inside the guard
+   *   (or finds it was taken over meanwhile). On a filesystem without hard links the
    *   free path runs inside the guard instead, where no takeover can see the file before it is written.
    * - Guard section. Stale takeover, refresh, release and same-owner re-acquisition run while holding
    *   `lock.guard`, a published `{pid, start, token}` record, for a few synchronous file operations.
    *   Inside it the lock can change only by a free publication, which needs it absent, so a takeover
    *   replaces exactly the stale lock it inspected, in one rename, and never one that was refreshed,
-   *   released or retaken meanwhile. Every publication inside the guard is touched before the guard is
-   *   released, so a lease starts when it is published, not when its temp file was written. A busy
-   *   guard is waited on briefly and then fails closed.
+   *   released or retaken meanwhile. Every published lock, free or not, is touched inside the guard
+   *   before it is reported taken, so a lease starts after publication, not when its temp file was
+   *   written. A busy guard is waited on briefly and then fails closed.
    * - Breaking. Only the store created with `breakAbandonedLockGuards` (the runner, which holds the
    *   data-directory lease, so one per data directory, and whose sections are synchronous) ever
    *   removes a guard, and only when its holder is gone: its pid has exited (EPERM counts as alive), it
@@ -3338,7 +3338,7 @@ export class SessionStore {
     const published = this.publishExclusive(p, owner);
     if (published === "created") {
       this.forgetLockedHistoryState(id);
-      return this.confirmPublishedLock(id, p, owner);
+      return this.confirmPublishedLock(id, owner);
     }
     if (published === "failed") return false;
     let outcome: "taken" | "mine" | "busy" | undefined;
@@ -3372,26 +3372,14 @@ export class SessionStore {
   }
 
   /**
-   * A lock published outside the guard is ours and young, unless this process stalled while
-   * publishing it: linking keeps the temp file's mtime. A lock under half the stale window old that
-   * still names us cannot have been taken over, since a takeover needs it fully stale. Otherwise,
-   * refresh it inside the guard, where no takeover can interleave, or find that one did.
+   * Linking keeps the temp file's mtime, so a lock published outside the guard carries whatever age
+   * its temp file had. Its lease starts only when it is touched inside the guard, where no takeover
+   * can interleave: one guard section per free acquire, which also finds a takeover that replaced the
+   * lock meanwhile. If the guard stays busy the acquire fails closed, and the published lock goes stale
+   * unless this owner's next acquire keeps it.
    */
-  private confirmPublishedLock(id: string, p: string, owner: string): boolean {
-    try {
-      const ageMs = Date.now() - statSync(p).mtimeMs;
-      if (readFileSync(p, "utf8") !== owner) return false;
-      if (ageMs < LOCK_STALE_MS / 2) return true;
-      return this.withLockGuard(id, () => {
-        try {
-          return readFileSync(p, "utf8") === owner && this.touchLock(p);
-        } catch {
-          return false;
-        }
-      }) ?? false;
-    } catch {
-      return false;
-    }
+  private confirmPublishedLock(id: string, owner: string): boolean {
+    return this.refreshLock(id, owner);
   }
 
   private touchLock(p: string): boolean {
@@ -3574,7 +3562,7 @@ export class SessionStore {
     const published = this.publishExclusive(p, owner);
     if (published === "created") {
       this.forgetLockedHistoryState(id);
-      return this.confirmPublishedLock(id, p, owner);
+      return this.confirmPublishedLock(id, owner);
     }
     if (published !== "unsupported") return false;
     let taken: boolean | undefined;

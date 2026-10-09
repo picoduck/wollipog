@@ -43,10 +43,11 @@ lock unrefreshed for 60 seconds is stale. Lock and guard files are published com
 hard-linking a written temp file into place. Taking a free lock is one exclusive publication; a stale
 takeover, a refresh, and a release each run inside a short guard section (`lock.guard`, recording the
 holder's pid, process start time, and a token), so a takeover replaces exactly the stale lock it
-inspected and never one that was refreshed, released, or retaken meanwhile. Anything published inside
-the guard is touched before the guard is released, so a lease starts when it is published. On a
-filesystem without hard links the free path also runs inside the guard. A busy guard fails the
-operation closed after a brief wait.
+inspected and never one that was refreshed, released, or retaken meanwhile. A linked file keeps its
+temp file's mtime, so every published lock, including a free one, is touched inside the guard before
+it is reported taken, and its lease starts after publication. On a filesystem without hard links the
+free path also runs inside the guard. A busy guard fails the operation closed after a brief wait; a
+free lock published just before that stays until it goes stale or its owner acquires it again.
 
 Only the runner, which holds the data-directory lease, ever removes a guard, and only when its holder
 is gone: its pid has exited, or the guard is old and its pid now belongs to a process that started

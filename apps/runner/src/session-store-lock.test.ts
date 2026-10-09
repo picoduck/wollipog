@@ -196,6 +196,17 @@ class LockRace {
     }
   }
 
+  /** Move the lock's and its temp files' mtimes `ms` into the past, as if that much time went by. */
+  rewindLockFiles(ms: number): void {
+    for (const name of this.sessionFiles()) {
+      if (name === "lock" || (name.endsWith(".tmp") && !name.startsWith("lock.guard"))) {
+        const path = join(this.root, ID, name);
+        const at = (fs.statSync(path).mtimeMs - ms) / 1000;
+        utimesSync(path, at, at);
+      }
+    }
+  }
+
   sessionFiles(): string[] {
     return readdirSync(join(this.root, ID)).filter((name) => name.startsWith("lock")).sort();
   }
@@ -383,6 +394,66 @@ test("an acquirer that stalled while publishing a free lock never owns it alongs
         await race.dispose();
       }
     });
+  }
+});
+
+test("a free lock's lease starts after publication, however short the stall before linking (CR-E2-2.1)", async (t) => {
+  for (const variant of ["second stall after the acquire", "second stall before the confirmation"] as const) {
+    await t.test(variant, async () => {
+      const race = new LockRace();
+      try {
+        // A writes its lock temp file and stalls 29 s: less than half the stale window.
+        await race.start({
+          name: "a", op: "acquire", owner: "runner-a",
+          pauses: [
+            { name: "a-written", fn: "writeFileSync", arg: 0, prefix: `${race.lockPath}.`, exclude: "lock.guard" },
+            ...variant === "second stall before the confirmation"
+              ? [{ name: "a-linked", fn: "linkSync" as const, arg: 1 as const, path: race.lockPath }]
+              : [],
+          ],
+        });
+        assert.ok(race.paused("a-written"));
+        race.rewindLockFiles(29_000);
+        if (variant === "second stall after the acquire") {
+          await race.resume("a", "a-written");
+          assert.equal(race.result("a"), true);
+          // A then stalls 32 s: 61 s after its temp file was written, but only 32 s after it acquired.
+          race.rewindLockFiles(32_000);
+          await race.start({ name: "b", op: "acquire", owner: "runner-b" });
+          assert.equal(race.result("b"), false, "the lease runs 60 s from the acquire, not from the temp file");
+          assert.equal(race.lockOwner(), "runner-a");
+        } else {
+          await race.resume("a", "a-written", "a-linked");
+          assert.ok(race.paused("a-linked"));
+          // A stalls 32 s between linking and confirming: its unconfirmed lock is stale and B takes it.
+          race.rewindLockFiles(32_000);
+          await race.start({ name: "b", op: "acquire", owner: "runner-b" });
+          assert.equal(race.result("b"), true);
+          await race.resume("a", "a-linked");
+          assert.equal(race.result("a"), false, "A finds the takeover and does not claim the lock");
+          assert.equal(race.lockOwner(), "runner-b");
+        }
+      } finally {
+        await race.dispose();
+      }
+    });
+  }
+});
+
+test("a free acquirer stalled while confirming its lock holds the guard, so no takeover interleaves", async () => {
+  const race = new LockRace();
+  try {
+    // A has linked its lock and read it back while confirming; the read is its only check before the touch.
+    await race.start({ name: "a", op: "acquire", owner: "runner-a", pauseOn: "readFileSync" });
+    assert.ok(race.paused("a"));
+    race.ageLockFiles(120_000);
+    await race.start({ name: "b", op: "acquire", owner: "runner-b" });
+    await race.finish("a");
+    const winners = ["a", "b"].filter((name) => race.result(name) === true);
+    assert.deepEqual(winners, ["a"], "B cannot take over between A's check and A's touch");
+    assert.equal(race.lockOwner(), "runner-a");
+  } finally {
+    await race.dispose();
   }
 });
 
