@@ -12,15 +12,20 @@ import type { ProfilerOnRenderCallback } from "react";
  */
 export const SESSION_VIEW_PROBE = "session-view";
 export const TRANSCRIPT_PROBE = "session-transcript";
+/** One transcript row (#2763). Each row reports as `timeline-row:<item id>`; observing the bare
+ * prefix receives every row with its full id, so a test can tell which rows rendered. */
+export const TIMELINE_ROW_PROBE = "timeline-row";
 
-const listeners = new Map<string, Set<() => void>>();
+const listeners = new Map<string, Set<(id: string) => void>>();
 
 export const reportRenderProbe: ProfilerOnRenderCallback = (id) => {
-  for (const listener of [...(listeners.get(id) ?? [])]) listener();
+  for (const listener of [...(listeners.get(id) ?? [])]) listener(id);
+  const prefix = id.indexOf(":");
+  if (prefix > 0) for (const listener of [...(listeners.get(id.slice(0, prefix)) ?? [])]) listener(id);
 };
 
-export function observeRenderProbe(id: string, listener: () => void): () => void {
-  const forId = listeners.get(id) ?? new Set<() => void>();
+export function observeRenderProbe(id: string, listener: (id: string) => void): () => void {
+  const forId = listeners.get(id) ?? new Set<(id: string) => void>();
   forId.add(listener);
   listeners.set(id, forId);
   return () => {

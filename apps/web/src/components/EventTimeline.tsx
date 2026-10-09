@@ -1,7 +1,7 @@
 import { useAccountEmailPrivacy } from "../account-email-privacy.js";
 import { useShowAgentLogs } from "../agent-logs.js";
 import type { AgentDriverKind, WorkflowArtifactView } from "@wollipog/protocol";
-import { createContext, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
+import { Profiler, createContext, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
 import { isWorkspaceReference, normalizeSourcePath, type PlanEntry, type SourceLocation } from "@wollipog/protocol";
 import { type TurnUsage,
   groupTimeline,
@@ -42,6 +42,7 @@ import { diffFileIsPlain, diffMaxLineNumber, hunkLabel, parseUnifiedDiff, type D
 import { markdownPlainText } from "./markdown-plain-text.js";
 import { TranscriptActionMenu, transcriptActionAvailable, type TranscriptAction } from "./TranscriptActions.js";
 import { useIsCoarsePointer } from "./useIsMobile.js";
+import { reportRenderProbe, TIMELINE_ROW_PROBE } from "./render-probe.js";
 import { formatClock, formatTokens, formatCost, formatDuration, formatRecordedRelativeTime, formatRecordedTimestamp, titleCaseLabel } from "../format.js";
 import {
   activitySpanDescription,
@@ -778,13 +779,14 @@ function EventTimelineBody({
         focus: revealRequest.focus,
       }
     : null;
-  const toggle = (key: string, current: boolean) => {
+  // Identity-stable, so a row's memo holds while other rows stream (#2763).
+  const toggle = useCallback((key: string, current: boolean) => {
     setDisclosure((previous) => {
       const next = new Map(previous);
       next.set(key, !current);
       return next;
     });
-  };
+  }, []);
   const renderRow = (row: TimelineRenderRow, state: VirtualRowState) => {
     const footer = turnFooters.get(row.key);
     // A stop's row is only its turn's footer, sitting where the footer would under the row before.
@@ -813,14 +815,7 @@ function EventTimelineBody({
   };
   const renderRowContent = (row: TimelineRenderRow, state: VirtualRowState) => {
   if (row.kind === "work_summary") {
-      return (
-        <WorkLedgerLine
-          ledger={row}
-          live={row.key === liveWorkKey}
-          open={row.open}
-          onToggle={() => toggle(row.key, row.open)}
-        />
-      );
+      return <TimelineWorkLedgerRow ledger={row} live={row.key === liveWorkKey} onToggleDisclosure={toggle} />;
     }
     if (row.kind === "subagent_summary") {
       return (
@@ -854,7 +849,8 @@ function EventTimelineBody({
           attempts={row.attempts}
           highlightEligible={state.visible}
           disclosureOpen={detailsOpen}
-          onDisclosureToggle={() => toggle(detailsKey, detailsOpen)}
+          disclosureKey={detailsKey}
+          onToggleDisclosure={toggle}
           onRewind={onRewind}
           rewindTurn={userRewindTurn}
           rewindUnavailableReason={rewindUnavailableReason}
@@ -916,6 +912,19 @@ function EventTimelineBody({
     </TimelineClockProvider>
   );
 }
+
+/** A run of work's ledger line, memoized like TimelineRow so it holds while a reply streams (#2763). */
+const TimelineWorkLedgerRow = memo(function TimelineWorkLedgerRow({ ledger, live, onToggleDisclosure }: {
+  ledger: Extract<TimelineRenderRow, { kind: "work_summary" }>;
+  live: boolean;
+  onToggleDisclosure: (key: string, current: boolean) => void;
+}) {
+  const onToggle = useCallback(
+    () => onToggleDisclosure(ledger.key, ledger.open),
+    [ledger.key, ledger.open, onToggleDisclosure],
+  );
+  return <WorkLedgerLine ledger={ledger} live={live} open={ledger.open} onToggle={onToggle} />;
+});
 
 /** A row inside an open work group: a step, a subagent summary, a subagent's nested step or its
  * output. */
@@ -2108,25 +2117,31 @@ export function automaticSubagentOpenAfterChange(
 
 /** Memoized on item identity: the builder clones-on-write, so only the row whose item actually
  * changed re-renders on a streamed chunk — the rest of a long transcript is skipped entirely. */
+/** A transcript row. Its props are identity-stable for a row whose data did not change, so the
+ * memo skips it while another row streams (#2763); the render probe lets tests prove that. */
 const TimelineRow = memo(function TimelineRow({
-  item,
-  attempts,
-  onRewind,
-  rewindTurn,
-  rewindUnavailableReason,
-  onEditAndResend,
-  editAndResendUnavailableReason,
-  onEditInFork,
-  onOpenSourceLocation,
-  editInForkAvailability,
-  standaloneCopy = false,
-  inTurnMenu = false,
-  failedTurnPrompt,
-  highlightEligible = true,
+  disclosureKey,
+  onToggleDisclosure,
   disclosureOpen = false,
-  onDisclosureToggle,
-  questionContext,
-}: {
+  ...props
+}: Omit<TimelineRowContentProps, "onDisclosureToggle"> & {
+  disclosureKey?: string;
+  onToggleDisclosure?: (key: string, current: boolean) => void;
+}) {
+  const onDisclosureToggle = useMemo(
+    () => disclosureKey !== undefined && onToggleDisclosure
+      ? () => onToggleDisclosure(disclosureKey, disclosureOpen)
+      : undefined,
+    [disclosureKey, disclosureOpen, onToggleDisclosure],
+  );
+  return (
+    <Profiler id={`${TIMELINE_ROW_PROBE}:${props.item.id}`} onRender={reportRenderProbe}>
+      <TimelineRowContent {...props} disclosureOpen={disclosureOpen} onDisclosureToggle={onDisclosureToggle} />
+    </Profiler>
+  );
+});
+
+interface TimelineRowContentProps {
   item: TimelineItem;
   /** A folded retry's attempts, oldest first, when `item` is its latest. */
   attempts?: readonly ToolItem[];
@@ -2149,7 +2164,27 @@ const TimelineRow = memo(function TimelineRow({
   disclosureOpen?: boolean;
   onDisclosureToggle?: () => void;
   questionContext?: TimelineQuestionContext;
-}) {
+}
+
+function TimelineRowContent({
+  item,
+  attempts,
+  onRewind,
+  rewindTurn,
+  rewindUnavailableReason,
+  onEditAndResend,
+  editAndResendUnavailableReason,
+  onEditInFork,
+  onOpenSourceLocation,
+  editInForkAvailability,
+  standaloneCopy = false,
+  inTurnMenu = false,
+  failedTurnPrompt,
+  highlightEligible = true,
+  disclosureOpen = false,
+  onDisclosureToggle,
+  questionContext,
+}: TimelineRowContentProps) {
   const sessionActive = useContext(TimelineActivityContext);
   const mediaSettled = timelineMediaSettled(item, sessionActive);
   switch (item.kind) {
@@ -2322,7 +2357,7 @@ const TimelineRow = memo(function TimelineRow({
       );
     }
   }
-});
+}
 
 /** A Decision Record in the transcript: the timeline's live clock for its relative time while the
  * session runs, and its parent session link where the transcript can navigate. */

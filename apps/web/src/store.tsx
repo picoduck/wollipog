@@ -42,6 +42,8 @@ import {
   type SessionActivity,
 } from "./activity.js";
 import { BrowserNavigation, sameView, viewFromNotificationMessage, type View, type ViewNavigation } from "./navigation.js";
+import { defaultPublishScheduler, type StorePublishScheduler } from "./store-publish-scheduler.js";
+export { animationFramePublishScheduler, setDefaultPublishScheduler, type StorePublishScheduler } from "./store-publish-scheduler.js";
 import {
   INBOX_SELECTION_STORAGE_KEY,
   INBOX_SPLIT_RATIO_STORAGE_KEY,
@@ -463,6 +465,45 @@ type Action =
  * (tail identity) would wrongly keep its incrementally-folded prefix. Tagged here; the hook
  * rebuilds whenever it encounters a tagged array it hasn't folded from scratch. */
 const rebuiltArrays = new WeakSet<SessionEvent[]>();
+/** Session fields every streamed event moves: activity time, counters, the preview and live usage.
+ * The control plane paces changes confined to these (#2760); kept in step with
+ * `STREAMING_SESSION_FIELDS` in the control plane's hub. */
+const STREAMING_SESSION_FIELDS: ReadonlySet<string> = new Set([
+  "updatedAt", "lastEventAt", "messageCount", "preview", "tokensIn", "tokensOut", "contextTokensUsed",
+  "costUsd", "toolCallCount",
+]);
+
+function sameSessionExceptStreaming(a: SessionView, b: SessionView): boolean {
+  const left = a as unknown as Record<string, unknown>;
+  const right = b as unknown as Record<string, unknown>;
+  for (const key of new Set([...Object.keys(left), ...Object.keys(right)])) {
+    if (STREAMING_SESSION_FIELDS.has(key) || left[key] === right[key]) continue;
+    // Each upsert is freshly parsed, so an unchanged nested record is equal but not identical.
+    if (JSON.stringify(left[key]) !== JSON.stringify(right[key])) return false;
+  }
+  return true;
+}
+
+/**
+ * Whether two session maps differ only in streaming fields (#2763). A selector using it keeps the
+ * previous map while an agent streams, so a component that never shows live counters or previews
+ * (the app shell's rail counts and titles) does not re-render four times a second per streaming
+ * session. Such a component must not read a streaming field from the map it selected.
+ */
+export function sessionsEqualIgnoringStreaming(
+  a: ReadonlyMap<string, SessionView>,
+  b: ReadonlyMap<string, SessionView>,
+): boolean {
+  if (a === b) return true;
+  if (a.size !== b.size) return false;
+  for (const [id, session] of a) {
+    const other = b.get(id);
+    if (other === session) continue;
+    if (!other || !sameSessionExceptStreaming(session, other)) return false;
+  }
+  return true;
+}
+
 export function isRebuiltEventsArray(arr: SessionEvent[]): boolean {
   return rebuiltArrays.has(arr);
 }
@@ -1687,9 +1728,36 @@ interface StoreValue extends State {
  * Components now subscribe to exactly the slice they render via useStoreSelector; the context
  * carries only this stable handle.
  */
+/** High-volume socket frames whose publication may wait for the next animation frame (#2763).
+ * Every other frame (a snapshot, a history reset, removals, subscription acknowledgements) is
+ * published at once, together with whatever earlier frames are still waiting. */
+function deferrableFrame(msg: ControlPlaneToUi, state: State): boolean {
+  switch (msg.type) {
+    case "session_event":
+    case "shell_output":
+    case "pod_context_entry":
+      return true;
+    case "session_upsert":
+      // A changed history epoch replaces the transcript; it is never held back.
+      return sessionEventEpoch(msg.session) === sessionEventEpoch(state.sessions.get(msg.session.id));
+    default:
+      return false;
+  }
+}
+
 export class Store {
+  /** The newest state. Every reducer step, Store method and transition observer works on it, so
+   * socket frames are reduced one at a time, in arrival order, exactly as they arrive. */
   private state: State;
+  /** What `getState` and subscribers see: `state` as of the last publication. Socket frames are
+   * published at most once per animation frame (#2763); everything else publishes at once. */
+  private published: State;
   private readonly listeners = new Set<() => void>();
+  /** Told synchronously of every state change, before publication, so a transition that is
+   * superseded within one animation frame (a notification, a backfill fence) is never skipped. */
+  private readonly transitionObservers = new Set<(previous: State, next: State) => void>();
+  private publishScheduler: StorePublishScheduler | null = null;
+  private cancelScheduledPublish: (() => void) | null = null;
   private inboxPersistenceEnabled = true;
   private attentionActivation = 0;
   private reconnectHandler: (() => boolean) | null = null;
@@ -1723,12 +1791,15 @@ export class Store {
       loadInboxState(instanceScope, inboxStorage),
       loadSessionFilters(instanceScope, inboxStorage),
     );
+    this.published = this.state;
     // A new Store owns no retained rows, even if a previous mount left a position in the shared
     // hook cache. Do not let that stale position force a cold first open through the full log.
     for (const sessionId of relevantSessions(this.state)) expireFollowTailAnchor(instanceScope, sessionId);
   }
 
-  getState = (): State => this.state;
+  /** The published state. Between a deferred socket frame and its animation frame this is the
+   * state before that frame, whole, so a render in between never sees half of a batch. */
+  getState = (): State => this.published;
 
   subscribe = (fn: () => void): (() => void) => {
     this.listeners.add(fn);
@@ -1737,7 +1808,58 @@ export class Store {
     };
   };
 
+  /** Observe every state change synchronously, including socket frames not yet published. */
+  observeTransitions = (fn: (previous: State, next: State) => void): (() => void) => {
+    this.transitionObservers.add(fn);
+    return () => {
+      this.transitionObservers.delete(fn);
+    };
+  };
+
+  /** How socket frames wait for the next animation frame; null publishes each frame at once. */
+  setPublishScheduler = (scheduler: StorePublishScheduler | null): void => {
+    this.publishScheduler = scheduler;
+    if (!scheduler) this.publish();
+  };
+
+  /** Apply an action and publish at once, together with any socket frames still waiting. */
   dispatch = (action: Action): void => {
+    this.apply(action);
+    this.publish();
+  };
+
+  /** Apply one socket frame now and publish it with the others received in this animation frame.
+   * Frames are reduced in arrival order, so publication can only ever show a prefix of them. */
+  receiveFrame = (msg: ControlPlaneToUi, now?: number): void => {
+    const deferrable = deferrableFrame(msg, this.state);
+    this.apply({ type: "msg", msg, now });
+    if (!deferrable || !this.publishScheduler) {
+      this.publish();
+      return;
+    }
+    if (this.cancelScheduledPublish || this.published === this.state) return;
+    const cancel = this.publishScheduler(this.publish);
+    if (cancel) this.cancelScheduledPublish = cancel;
+    else this.publish();
+  };
+
+  /** Publish the newest state to subscribers. Safe to call at any time; does nothing when current. */
+  publish = (): void => {
+    const cancel = this.cancelScheduledPublish;
+    this.cancelScheduledPublish = null;
+    cancel?.();
+    if (this.published === this.state) return;
+    this.published = this.state;
+    for (const l of [...this.listeners]) l();
+  };
+
+  private commit(next: State): void {
+    const previous = this.state;
+    this.state = next;
+    for (const observer of [...this.transitionObservers]) observer(previous, next);
+  }
+
+  private apply(action: Action): void {
     // A removal speaks for a session even when this client never held it (#2803).
     if (action.type === "msg" && action.msg.type === "session_removed") {
       for (const spoken of this.backfillFences) spoken.add(action.msg.sessionId);
@@ -1770,13 +1892,12 @@ export class Store {
     next = this.pruneDeferredTails(next);
     const inboxChanged = next.inbox !== this.state.inbox;
     const filtersChanged = next.filters !== this.state.filters;
-    this.state = next;
+    this.commit(next);
     if (inboxChanged && this.inboxPersistenceEnabled && (!("persist" in action) || action.persist !== false)) {
       saveInboxState(next.inbox, this.instanceScope, this.inboxStorage);
     }
     if (filtersChanged) saveSessionFilters(next.filters, this.instanceScope, this.inboxStorage);
-    for (const l of [...this.listeners]) l();
-  };
+  }
 
   /** Prepending older history extends the same window and keeps its forward boundary valid.
    * Any authoritative window replacement explicitly revokes ownership, including equal bases. */
@@ -2028,8 +2149,8 @@ export class Store {
       ...this.state,
       inbox: loadInboxState(this.instanceScope, this.inboxStorage),
     });
-    this.state = this.reconcileReaderCache(this.state, next);
-    for (const listener of [...this.listeners]) listener();
+    this.commit(this.reconcileReaderCache(this.state, next));
+    this.publish();
   };
   setInboxSelection = (
     sessionId: string | null,
@@ -2104,13 +2225,12 @@ export class Store {
   beginSessionsBackfill = (): { apply: (sessions: readonly SessionView[]) => void; cancel: () => void } => {
     const revision = this.state.snapshotRevision;
     const spoken = new Set<string>();
-    let previous = this.state.sessions;
-    const unsubscribe = this.subscribe(() => {
-      const next = this.state.sessions;
+    const unsubscribe = this.observeTransitions((before, after) => {
+      const previous = before.sessions;
+      const next = after.sessions;
       if (next === previous) return;
       for (const [sessionId, session] of previous) if (next.get(sessionId) !== session) spoken.add(sessionId);
       for (const sessionId of next.keys()) if (!previous.has(sessionId)) spoken.add(sessionId);
-      previous = next;
     });
     this.backfillFences.add(spoken);
     const cancel = () => {
@@ -2452,6 +2572,25 @@ export function StoreProvider({
   const reconnectRef = useRef<number | null>(null);
   const wsRef = useRef<UiSocket | null>(null);
 
+  // Socket frames received within one animation frame publish as one store update (#2763). A
+  // hidden tab gets no animation frames, so it publishes each frame at once, and anything still
+  // waiting is published as the tab is hidden or the page is left.
+  useEffect(() => {
+    const scheduler = defaultPublishScheduler();
+    if (!scheduler || typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") return;
+    store.setPublishScheduler(scheduler);
+    const publishWhenHidden = () => {
+      if (document.visibilityState === "hidden") store.publish();
+    };
+    document.addEventListener("visibilitychange", publishWhenHidden);
+    window.addEventListener("pagehide", store.publish);
+    return () => {
+      document.removeEventListener("visibilitychange", publishWhenHidden);
+      window.removeEventListener("pagehide", store.publish);
+      store.setPublishScheduler(null);
+    };
+  }, [store]);
+
   useEffect(() => {
     const dispatch = store.dispatch;
     let closed = false;
@@ -2533,7 +2672,7 @@ export function StoreProvider({
         }
         try {
           const msg = JSON.parse(ev.data as string) as ControlPlaneToUi;
-          dispatch({ type: "msg", msg, now: Date.now() });
+          store.receiveFrame(msg, Date.now());
           const sessions: readonly SessionView[] = msg.type === "snapshot"
             ? msg.sessions
             : msg.type === "session_upsert"
@@ -2633,13 +2772,14 @@ export function StoreProvider({
     };
   }, [store]);
 
-  // Desktop notifications: clicking one jumps to the session. The transition diff runs as a
-  // plain store subscription — no React re-render involved, and no full-map walk unless the
-  // sessions map actually changed.
+  // Desktop notifications: clicking one jumps to the session. The transition diff observes every
+  // state change, including socket frames still waiting for their animation frame, so a status
+  // that lasts less than a frame is still notified — no React re-render involved, and no full-map
+  // walk unless the sessions map actually changed.
   useEffect(() => {
-    let prev = store.getState().sessions;
-    const unsub = store.subscribe(() => {
-      const cur = store.getState().sessions;
+    const unsub = store.observeTransitions((previous, next) => {
+      const prev = previous.sessions;
+      const cur = next.sessions;
       if (cur === prev) return;
       for (const [id, s] of cur) {
         const show = (payload: NotifyPayload) => notifier.show(payload, {
@@ -2654,7 +2794,6 @@ export function StoreProvider({
         if (statusPayload) show(statusPayload);
         for (const payload of backgroundDeliveryNotifyDecisions(prev.get(id), s)) show(payload);
       }
-      prev = cur;
     });
     return () => {
       unsub();

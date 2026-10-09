@@ -1,4 +1,4 @@
-import React, { type SVGProps, useId } from "react";
+import React, { memo, type SVGProps, useId } from "react";
 import {
   AlarmClock as LucideAlarmClock,
   AlarmClockOff as LucideAlarmClockOff,
@@ -172,8 +172,9 @@ function warnIfOffScale(size: number): void {
   );
 }
 
-/** Keep Lucide glyphs on Wollipog's size, stroke, class, and accessibility contract. */
-function LibraryIcon({ glyph: Glyph, size = 16, className, children: _children, ...props }: LibraryIconProps) {
+/** Keep Lucide glyphs on Wollipog's size, stroke, class, and accessibility contract. Memoized: an
+ * icon's props rarely change, and a streamed event re-renders the controls around many (#2763). */
+const LibraryIcon = memo(function LibraryIcon({ glyph: Glyph, size = 16, className, children: _children, ...props }: LibraryIconProps) {
   warnIfOffScale(size);
   return (
     <Glyph
@@ -185,7 +186,7 @@ function LibraryIcon({ glyph: Glyph, size = 16, className, children: _children, 
       {...props}
     />
   );
-}
+});
 
 /** Shared rendering contract for the documented product-mark exceptions below. */
 function IconBase({ size = 16, children, className, ...props }: IconProps) {

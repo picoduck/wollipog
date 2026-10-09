@@ -1,4 +1,5 @@
 import { afterEach } from "node:test";
+import { setDefaultPublishScheduler } from "./store-publish-scheduler.js";
 
 /**
  * Minimal shape of the happy-dom window these tests build. Typed structurally rather than imported
@@ -187,12 +188,18 @@ export async function runDomTestCleanup(
  * viewport flag. It belongs here rather than in the file's own `afterEach`, because Node SKIPS every
  * later `afterEach` once one throws: a reset registered separately would be silently dropped in
  * exactly the failure this helper exists to survive.
+ *
+ * It also makes a `StoreProvider` publish each socket frame at once (#2763): happy-dom runs
+ * animation frames on a Node queue that `act` does not wait for in a fixed order, so a frame a fake
+ * socket delivers would otherwise appear only sometimes before the next assertion. A test of the
+ * batching itself calls `setDefaultPublishScheduler(animationFramePublishScheduler)` afterwards.
  */
 export function installDomTestCleanup(
   domWindow: DomTestWindow,
   options: { reset?: () => void } = {},
 ): { cleanup: (dispose: () => void | Promise<void>) => void } {
   const disposers: Array<() => void | Promise<void>> = [];
+  setDefaultPublishScheduler(null);
 
   afterEach(async () => {
     const failures = await runDomTestCleanup(domWindow, disposers, options);

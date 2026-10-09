@@ -8,7 +8,7 @@ import {
   useState,
 } from "react";
 import { pendingRequests, runnerSupportsProtocol } from "@wollipog/protocol";
-import { useStoreActions, useStoreSelector, type View } from "./store.js";
+import { sessionsEqualIgnoringStreaming, useStoreActions, useStoreSelector, type View } from "./store.js";
 import { useApi } from "./api-context.js";
 import { notifier } from "./notify.js";
 import { CONTROL_PLANE_HTTP, CONTROL_PLANE_WS } from "./config.js";
@@ -325,7 +325,8 @@ export function Shell() {
     }
   }, [activeInstanceKind, activeInstanceLabel, authRequired, conn, desktopMultiInstance, reportActiveStatus]);
   const runners = useStoreSelector((s) => s.runners);
-  const sessions = useStoreSelector((s) => s.sessions);
+  // The shell shows no live counter or preview, so a streaming-only upsert does not render it (#2763).
+  const sessions = useStoreSelector((s) => s.sessions, sessionsEqualIgnoringStreaming);
   const reminders = useStoreSelector((s) => s.reminders);
   const stalledSessionIds = useStoreSelector((s) => s.stalledSessionIds);
   const stalledRevision = useStoreSelector((s) => s.stalledRevision);
