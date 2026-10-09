@@ -945,6 +945,8 @@ export class CodexAppServerDriver implements Driver {
         }
         res = await this.peer!.request<Json>("thread/resume", {
           threadId: resumeId,
+          // The runner owns transcript history; full turn hydration can exceed the RPC frame limit.
+          excludeTurns: true,
           ...configuredServiceTier(this.config, this.opts.capabilities),
         });
       } else {
