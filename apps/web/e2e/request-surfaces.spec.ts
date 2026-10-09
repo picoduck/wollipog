@@ -268,7 +268,8 @@ for (const viewport of [
     const geometry = await dockGeometry(page);
     expect(geometry.slot).toBeLessThanOrEqual(geometry.reading * viewport.cap + 1);
     expect(geometry.dock).toBeLessThanOrEqual(geometry.reading * viewport.cap + 1);
-    expect(geometry.transcript).toBeGreaterThanOrEqual(geometry.reading * 0.5 - 1);
+    // The transcript keeps half of the reading column, or 40% of a column under 480px (#2828).
+    expect(geometry.transcript).toBeGreaterThanOrEqual(geometry.reading * (geometry.reading <= 480 ? 0.4 : 0.5) - 1);
     // Only the body scrolls: the head, title and footer stay inside the dock.
     expect(geometry.bodyOverflow).toBe("auto");
     expect(geometry.bodyScrolls).toBe(true);
@@ -402,7 +403,8 @@ for (const viewport of [
     const transcript = page.getByRole("region", { name: "Session Activity" });
     await expect(transcript).toBeVisible();
     const geometry = await dockGeometry(page);
-    expect(geometry.transcript).toBeGreaterThanOrEqual(geometry.reading * 0.5 - 1);
+    // The transcript keeps half of the reading column, or 40% of a column under 480px (#2828).
+    expect(geometry.transcript).toBeGreaterThanOrEqual(geometry.reading * (geometry.reading <= 480 ? 0.4 : 0.5) - 1);
     await expect(page.getByRole("complementary", { name: "Requests" })).toHaveCount(0);
     await expect(card(page).locator(".ev-progress")).toHaveText("0 of 8 reviewed");
     const approve = card(page).locator(".request-card-foot").getByRole("button", { name: /^Approve/u });
@@ -498,7 +500,8 @@ for (const viewport of [
     await page.goto("/request-surfaces-e2e.html?scenario=standalone");
 
     const geometry = await dockGeometry(page);
-    expect(geometry.transcript).toBeGreaterThanOrEqual(geometry.reading * 0.5 - 1);
+    // The transcript keeps half of the reading column, or 40% of a column under 480px (#2828).
+    expect(geometry.transcript).toBeGreaterThanOrEqual(geometry.reading * (geometry.reading <= 480 ? 0.4 : 0.5) - 1);
     const requestRow = page.locator(".tl-perm");
     await expect(requestRow).toHaveCount(1);
     await expect(requestRow).toContainText("Trust Worktree Setup Configuration?");

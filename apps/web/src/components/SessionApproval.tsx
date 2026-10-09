@@ -880,6 +880,8 @@ export function SessionQuestionBanner({
       data-keyboard-open={keyboardOpen ? "" : undefined}
       data-card-scrolls={cardScrolls ? "" : undefined}
       data-question-expanded={titleExpanded ? "" : undefined}
+      // The clamp hides some of the question, so Show Full Question is there to show it all (#2828).
+      data-question-clamped={titleTruncates && !titleExpanded ? "" : undefined}
       ref={cardRef}
       onKeyDown={onKeyDown}
       onMouseDown={holdFieldFocus}

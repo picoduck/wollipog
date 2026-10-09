@@ -373,10 +373,11 @@ for (const viewport of [
     await expect(page.locator(".request-dock").getByRole("region", { name: "Agent Questions" })).toBeVisible();
     await expect(page.getByRole("radio")).toHaveCount(5);
     await expect(page.getByRole("checkbox")).toHaveCount(0);
-    // The dock never takes more than half of the reading column (§13.2), whatever the card holds.
+    // The dock never takes more than half of the reading column (§13.2), whatever the card holds,
+    // or 60% of a column under 480px (#2828).
     const slot = await geometry(page.locator(".chat-reading > .session-notice-slot"));
     const reading = await geometry(page.locator(".chat-reading"));
-    expect(slot.height).toBeLessThanOrEqual(reading.height * 0.5 + 1);
+    expect(slot.height).toBeLessThanOrEqual(reading.height * (reading.height <= 480 ? 0.6 : 0.5) + 1);
     // The dock is in view; a card taller than it scrolls inside it (in landscape, the whole card does).
     await expectInsideViewport(page.locator(".request-dock"), page);
 
@@ -1578,5 +1579,93 @@ test.describe("a control reached from the keyboard is never left under the card'
       const hit = element.ownerDocument.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
       return box.top >= edge - 0.5 && (hit === element || element.contains(hit));
     })).toBe(true);
+  });
+});
+
+test.describe("a collapsed question shows its first lines in a short reading column (#2828)", () => {
+  /**
+   * The collapsed card as a reader sees it without scrolling it: how many whole lines of the
+   * question sit between the card's top edge and its footer, and each region's share of the column.
+   */
+  const shortColumnLayout = (page: Page) => dockedCard(page).evaluate((element) => {
+    const card = element.getBoundingClientRect();
+    const foot = element.querySelector(":scope > .request-card-foot")!.getBoundingClientRect();
+    const edge = getComputedStyle(element, "::before").position === "sticky"
+      ? element.clientTop + parseFloat(getComputedStyle(element).paddingTop) : 0;
+    const top = card.top + edge;
+    const walker = document.createTreeWalker(element.querySelector(".question-text")!, NodeFilter.SHOW_TEXT);
+    const lines = new Set<number>();
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      for (const rect of range.getClientRects()) {
+        if (rect.height > 0 && rect.top >= top - 0.5 && rect.bottom <= foot.top + 0.5) lines.add(Math.round(rect.top));
+      }
+    }
+    const column = document.querySelector(".chat-reading")!.getBoundingClientRect().height;
+    const slot = document.querySelector(".chat-reading > .session-notice-slot")!.getBoundingClientRect().height;
+    const eyebrow = element.querySelector<HTMLElement>(".question-eyebrow");
+    return {
+      questionLines: lines.size,
+      slotShare: slot / column,
+      eyebrowShown: eyebrow !== null && getComputedStyle(eyebrow).display !== "none",
+    };
+  });
+
+  // A landscape phone over 760px wide showed none of the question (two lines now); at 667×375 the
+  // column is 15px shorter and a paragraph break can push the second line partly under the footer.
+  for (const { width, height, lines } of [
+    { width: 844, height: 390, lines: 2 },
+    { width: 932, height: 430, lines: 2 },
+    { width: 667, height: 375, lines: 1 },
+  ]) {
+    for (const set of ["long-text", "paragraph"]) {
+      test(`at ${width}×${height} behind +1 More Request a ${set} question shows ${lines === 1 ? "a line" : `${lines} lines`} above its footer`, async ({ page }) => {
+        await page.setViewportSize({ width, height });
+        await page.goto(`/agent-questions-e2e.html?set=${set}&more=1`);
+        const card = dockedCard(page);
+        await expect(page.locator(".request-dock-more")).toContainText("+1 More Request");
+        const layout = await shortColumnLayout(page);
+        expect(layout.questionLines, "whole lines of the question above the footer").toBeGreaterThanOrEqual(lines);
+        expect(layout.slotShare, "the transcript keeps at least 40% of the column").toBeLessThanOrEqual(0.6 + 0.01);
+        // The eyebrow gives way only where Show Full Question can bring it back.
+        const clamped = await showFullQuestion(card).count() > 0;
+        expect(layout.eyebrowShown, "the eyebrow gives way only to a clamped question").toBe(!clamped);
+        for (const name of ["Dismiss", "Submit Answers"]) await expectInsideViewport(card.getByRole("button", { name, exact: true }), page);
+        // Expanded, the question is shown whole, eyebrow and all (#2786). A paragraph fits the
+        // clamp above 760px, so it has nothing to expand there.
+        if (await showFullQuestion(card).count() === 0) return;
+        await showFullQuestion(card).click();
+        expect((await shortColumnLayout(page)).eyebrowShown).toBe(true);
+      });
+    }
+  }
+
+  for (const { width, height, share } of [{ width: 390, height: 844, share: 0.5 }, { width: 1440, height: 900, share: 0.4 }]) {
+    test(`at ${width}×${height} the column is tall enough that the dock keeps its ${share * 100}% and the eyebrow`, async ({ page }) => {
+      await page.setViewportSize({ width, height });
+      await page.goto("/agent-questions-e2e.html?set=long-text&more=1");
+      const layout = await shortColumnLayout(page);
+      expect(layout.slotShare).toBeLessThanOrEqual(share + 0.01);
+      expect(layout.eyebrowShown).toBe(true);
+    });
+  }
+
+  test("a short question that fits keeps its eyebrow in a short column, since nothing would bring it back", async ({ page }) => {
+    await page.setViewportSize({ width: 844, height: 390 });
+    await page.goto("/agent-questions-e2e.html?more=1");
+    const card = dockedCard(page);
+    await expect(card.locator(".question-text")).toHaveText("Which language should the example use?");
+    await expect(showFullQuestion(card)).toHaveCount(0);
+    await expect(card.locator(".question-eyebrow")).toBeVisible();
+    await expect(card.locator(".question-eyebrow")).toContainText("Language");
+    expect((await shortColumnLayout(page)).questionLines).toBeGreaterThanOrEqual(1);
+  });
+
+  test("with the software keyboard open a short column still caps the dock at 40%", async ({ page }) => {
+    await page.setViewportSize({ width: 844, height: 390 });
+    await page.goto("/agent-questions-e2e.html?set=long-text&more=1&keyboard=1");
+    await expect(dockedCard(page)).toHaveAttribute("data-keyboard-open", "");
+    expect((await shortColumnLayout(page)).slotShare).toBeLessThanOrEqual(0.4 + 0.01);
   });
 });
