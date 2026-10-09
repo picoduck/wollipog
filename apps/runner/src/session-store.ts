@@ -607,9 +607,13 @@ const LAZY_META_KEYS = new Set<string>([
   "preview", "seq", "tokensIn", "tokensOut", "contextTokensUsed", "contextWindow", "costUsd", "updatedAt",
 ]);
 const META_FLUSH_MS = 250;
-/** A warm append layout skips cold-segment checks, so a streaming session still re-validates the full
- * layout from disk (segment presence and size) at least this often, as the uncached path did. */
+/** A warm append layout skips cold-segment checks, so a streaming session still re-validates its
+ * segments' presence and size at least this often, as the uncached path did. */
 const HISTORY_LAYOUT_REVALIDATE_MS = META_FLUSH_MS;
+/** Between those cheap checks the manifest is trusted by identity. A full read at least this often
+ * bounds how long an in-place rewrite that preserved inode, mtime, and size could go unnoticed. It is
+ * kept rare: at 30 events/s a 5 s bound put full reads on 1.4% of appends, which is the p99 tail. */
+const HISTORY_LAYOUT_FULL_REVALIDATE_MS = 30_000;
 
 export class SessionStore {
   /**
@@ -663,7 +667,7 @@ export class SessionStore {
    * HISTORY_LAYOUT_REVALIDATE_MS is re-validated so external segment damage still fails appends. */
   private readonly historyLayoutCache = new Map<
     string,
-    { epoch: number; manifestKey: string | null; layout: HistoryLayout; validatedAt: number }
+    { epoch: number; manifestKey: string | null; layout: HistoryLayout; validatedAt: number; fullyValidatedAt: number }
   >();
   private historyMaintenanceCursor: string | null = null;
   /** Tokens of compactions this process is preparing. Their files are unreferenced until publication,
@@ -880,7 +884,10 @@ export class SessionStore {
    * uncached path so every append retries the fence exactly as before. */
   private cacheHistoryLayout(id: string, epoch: number, manifestKey: string | null, layout: HistoryLayout): void {
     if (existsSync(this.historyLegacyFencePath(id))) this.historyLayoutCache.delete(id);
-    else this.historyLayoutCache.set(id, { epoch, manifestKey, layout, validatedAt: performance.now() });
+    else {
+      const now = performance.now();
+      this.historyLayoutCache.set(id, { epoch, manifestKey, layout, validatedAt: now, fullyValidatedAt: now });
+    }
   }
 
   /** The append target without re-reading the manifest or touching cold segments. The manifest is
@@ -890,7 +897,7 @@ export class SessionStore {
     const cached = this.historyLayoutCache.get(id);
     if (
       !cached || cached.epoch !== epoch || cached.manifestKey !== manifestKey ||
-      performance.now() - cached.validatedAt >= HISTORY_LAYOUT_REVALIDATE_MS
+      !this.coldSegmentsStillValid(id, cached)
     ) {
       this.historyLayoutCache.delete(id);
       const layout = this.historyLayout(id, epoch);
@@ -901,6 +908,33 @@ export class SessionStore {
     layout.active.bytes = this.activeHistoryBytes(layout.active.path);
     layout.totalBytes = layout.coldBytes + layout.active.bytes;
     return layout;
+  }
+
+  /** Periodic revalidation of a cached layout whose manifest identity is unchanged (#2831). That
+   * manifest names the same immutable segments, so only their presence and size can have changed:
+   * one lstat per segment replaces re-reading and re-parsing the manifest. A pending legacy-fence
+   * intent, any segment that is damaged or cannot be inspected, or an overdue full read falls back to
+   * the full read, which reports damage exactly as before. */
+  private coldSegmentsStillValid(
+    id: string,
+    cached: { layout: HistoryLayout; validatedAt: number; fullyValidatedAt: number },
+  ): boolean {
+    const now = performance.now();
+    if (now - cached.fullyValidatedAt >= HISTORY_LAYOUT_FULL_REVALIDATE_MS) return false;
+    if (now - cached.validatedAt < HISTORY_LAYOUT_REVALIDATE_MS) return true;
+    if (existsSync(this.historyLegacyFencePath(id))) return false;
+    for (const source of cached.layout.sources) {
+      if (!source.segment) continue;
+      let stat;
+      try {
+        stat = lstatSync(source.path, { throwIfNoEntry: false });
+      } catch {
+        return false; // EACCES, EIO, ENOTDIR: the full read turns these into history_corrupt
+      }
+      if (!stat?.isFile() || stat.size !== source.segment.bytes) return false;
+    }
+    cached.validatedAt = now;
+    return true;
   }
 
   has(id: string): boolean {

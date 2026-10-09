@@ -2541,8 +2541,115 @@ test("an uncommitted legacy fence keeps appends on the uncached path until the f
   }
 });
 
+test("revalidating a warm layout under an unchanged manifest lstats its segments instead of re-reading it", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-store-layout-revalidate-"));
+  try {
+    const store = new SessionStore(root, undefined, COMPACT_EVERY_PASS);
+    store.create(meta());
+    for (let pass = 0; pass < 3; pass++) {
+      appendMany(store, 10, `pass${pass}`);
+      await compactOnce(store);
+    }
+    assert.equal(historyManifest(root).segments.length, 3);
+    store.appendEvent("s_abc", { kind: "agent_message", text: "warm" });
+    const internals = store as unknown as {
+      historyLayoutCache: Map<string, { validatedAt: number }>;
+      readHistoryManifest: (...args: unknown[]) => unknown;
+    };
+    const readHistoryManifest = internals.readHistoryManifest.bind(store);
+    let manifestReads = 0;
+    internals.readHistoryManifest = (...args: unknown[]) => { manifestReads++; return readHistoryManifest(...args); };
+    const expire = () => { internals.historyLayoutCache.get("s_abc")!.validatedAt = -Infinity; };
+    for (let i = 0; i < 5; i++) {
+      expire();
+      store.appendEvent("s_abc", { kind: "agent_message", text: `revalidated ${i}` });
+      assert.notEqual(internals.historyLayoutCache.get("s_abc")!.validatedAt, -Infinity, "revalidated in place");
+    }
+    assert.equal(manifestReads, 0, "an unchanged manifest is not re-read or re-parsed");
+    // Overdue for the full read while the cheap check is still fresh: the full read is not postponed.
+    (internals.historyLayoutCache.get("s_abc") as { fullyValidatedAt: number }).fullyValidatedAt = -Infinity;
+    store.appendEvent("s_abc", { kind: "agent_message", text: "periodic full read" });
+    assert.equal(manifestReads, 1, "the full read still runs at least every few seconds");
+    manifestReads = 0;
+
+    // Doubt goes back to the full read: a pending legacy-fence intent is retried there, as before.
+    writeFileSync(join(root, "s_abc", "events.legacy-fence.json"), "{");
+    expire();
+    assert.throws(
+      () => store.appendEvent("s_abc", { kind: "agent_message", text: "fenced" }),
+      /legacy-fence intent is malformed/,
+    );
+    assert.equal(manifestReads, 1);
+    rmSync(join(root, "s_abc", "events.legacy-fence.json"));
+    const seq = store.appendEvent("s_abc", { kind: "agent_message", text: "after" })?.seq;
+    assert.deepEqual(coldSeqs(root).at(-1), seq, "appends continue from the full read");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a manifest rewritten in place with its identity preserved is caught by the periodic full read", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-store-layout-inplace-"));
+  try {
+    const store = new SessionStore(root, undefined, COMPACT_EVERY_PASS);
+    store.create(meta());
+    appendMany(store, 10, "first");
+    await compactOnce(store);
+    const manifestPath = join(root, "s_abc", "events.manifest.json");
+    // Whole-second timestamps survive a restore exactly, so the rewrite below keeps inode, mtime and size.
+    utimesSync(manifestPath, 1_700_000_000, 1_700_000_000);
+    store.appendEvent("s_abc", { kind: "agent_message", text: "warm" });
+    const before = statSync(manifestPath, { bigint: true });
+    const text = readFileSync(manifestPath, "utf8");
+    assert.match(text, /"logEpoch":0/);
+    writeFileSync(manifestPath, text.replace('"logEpoch":0', '"logEpoch":7'));
+    utimesSync(manifestPath, 1_700_000_000, 1_700_000_000);
+    const after = statSync(manifestPath, { bigint: true });
+    assert.deepEqual([after.ino, after.mtimeNs, after.size], [before.ino, before.mtimeNs, before.size]);
+    const cached = (store as unknown as {
+      historyLayoutCache: Map<string, { validatedAt: number; fullyValidatedAt: number }>;
+    }).historyLayoutCache.get("s_abc")!;
+    // Only the full-read deadline has passed; the cheap check alone would still trust the identity.
+    cached.fullyValidatedAt = -Infinity;
+    assert.throws(
+      () => store.appendEvent("s_abc", { kind: "agent_message", text: "after rewrite" }),
+      /manifest is invalid/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a cold segment that cannot be inspected falls back to the full read and fails closed", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-store-layout-eacces-"));
+  try {
+    const store = new SessionStore(root, undefined, COMPACT_EVERY_PASS);
+    store.create(meta());
+    appendMany(store, 10, "first");
+    await compactOnce(store);
+    store.appendEvent("s_abc", { kind: "agent_message", text: "warm" });
+    const segmentPath = join(root, "s_abc", historyManifest(root).segments[0]!.file);
+    const lstat = fs.lstatSync;
+    t.mock.method(fs, "lstatSync", ((path: fs.PathLike, options?: fs.StatSyncOptions) => {
+      if (String(path) === segmentPath) throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+      return lstat(path, options);
+    }) as typeof fs.lstatSync);
+    syncBuiltinESMExports();
+    t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+    (store as unknown as { historyLayoutCache: Map<string, { validatedAt: number }> })
+      .historyLayoutCache.get("s_abc")!.validatedAt = -Infinity;
+    assert.throws(
+      () => store.appendEvent("s_abc", { kind: "agent_message", text: "after" }),
+      (error: Error & { code?: string }) => error.code === "history_corrupt" && /missing or truncated/.test(error.message),
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a warm append layout still fails closed on a damaged cold segment within one flush interval", async () => {
-  for (const damage of ["deleted", "truncated"] as const) {
+  for (const damage of ["deleted", "truncated", "symlinked"] as const) {
+    if (damage === "symlinked" && process.platform === "win32") continue; // creating symlinks needs elevated rights there
     const root = mkdtempSync(join(tmpdir(), "wollipog-store-layout-damage-"));
     try {
       const store = new SessionStore(root, undefined, COMPACT_EVERY_PASS);
@@ -2553,7 +2660,12 @@ test("a warm append layout still fails closed on a damaged cold segment within o
       const { activeFile, segments } = historyManifest(root);
       const segmentPath = join(root, "s_abc", segments[0]!.file);
       if (damage === "deleted") rmSync(segmentPath);
-      else writeFileSync(segmentPath, readFileSync(segmentPath).subarray(0, 10));
+      else if (damage === "truncated") writeFileSync(segmentPath, readFileSync(segmentPath).subarray(0, 10));
+      else {
+        // Same bytes and size, but no longer the regular file the manifest names.
+        renameSync(segmentPath, join(root, "segment-elsewhere.ndjson"));
+        symlinkSync(join(root, "segment-elsewhere.ndjson"), segmentPath);
+      }
       const activeBefore = readFileSync(join(root, "s_abc", activeFile));
       await new Promise((resolve) => setTimeout(resolve, 300));
       assert.throws(
