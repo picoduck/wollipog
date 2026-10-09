@@ -630,8 +630,10 @@ export class SessionStore {
    */
   private readonly cache = new Map<string, { meta: SessionMeta; key: string }>();
   /** Unflushed noisy-key deltas + the log epoch they were recorded under (stale-epoch deltas
-   * are dropped at overlay/flush time — see SessionMeta.logEpoch). */
-  private readonly pending = new Map<string, { delta: Partial<SessionMeta>; epoch: number }>();
+   * are dropped at overlay/flush time — see SessionMeta.logEpoch). `batch` identifies one run of
+   * merged deltas: it survives later merges and is replaced once a write consumes or drops them, so a
+   * debounced flush can tell its snapshot is still covered by the newest deltas. */
+  private readonly pending = new Map<string, { delta: Partial<SessionMeta>; epoch: number; batch: object }>();
   private readonly flushTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** Debounced flushes whose fsyncs are running on the libuv pool, one per session. */
   private readonly backgroundFlushes = new Map<string, Promise<void>>();
@@ -1759,10 +1761,11 @@ export class SessionStore {
   private patchMetaLazy(id: string, delta: Partial<SessionMeta>): void {
     const epoch = this.readDiskMeta(id)?.logEpoch ?? 0;
     const prev = this.pending.get(id);
-    const cur = prev && prev.epoch === epoch ? prev.delta : {};
+    const continued = prev && prev.epoch === epoch ? prev : undefined;
+    const cur = continued?.delta ?? {};
     const merged: Partial<SessionMeta> = { ...cur, ...delta };
     if (cur.seq != null || delta.seq != null) merged.seq = Math.max(cur.seq ?? 0, delta.seq ?? 0);
-    this.pending.set(id, { delta: merged, epoch });
+    this.pending.set(id, { delta: merged, epoch, batch: continued?.batch ?? {} });
     this.armFlushTimer(id);
   }
 
@@ -1806,10 +1809,11 @@ export class SessionStore {
    * The debounced flush with every fsync and the temp write on the libuv pool (#2833). The deltas
    * are snapshotted before the event log's fsync starts, so the metadata never names a seq whose
    * event line the fsync did not cover, which is the ordering the synchronous flush gives. The
-   * rename publishes only if meta.json is still the exact file the merge read and the deltas are
-   * still pending in this epoch, checked without yielding. An explicit flush(), a critical patch,
-   * or a reset that lands meanwhile has already made them durable or dropped them; the merge is
-   * then retried against the new file or abandoned.
+   * rename publishes only if meta.json is still the exact file the merge read and the snapshot's
+   * batch is still the pending one, checked without yielding. An explicit flush(), a critical patch,
+   * or a reset that lands meanwhile has already made the batch durable or dropped it. Later deltas
+   * then start a new batch, and republishing the older snapshot over them would roll back fields such
+   * as usage totals, so it is abandoned. A peer process's write is merged again.
    */
   private async flushInBackground(id: string): Promise<void> {
     const entry = this.pending.get(id);
@@ -1818,8 +1822,7 @@ export class SessionStore {
     if (events) await this.fsyncFileInBackground(events);
     const p = this.metaPath(id);
     for (let attempt = 0; attempt < 3; attempt++) {
-      const current = this.pending.get(id);
-      if (!current || current.epoch !== entry.epoch) return;
+      if (this.pending.get(id)?.batch !== entry.batch) return;
       let next: SessionMeta;
       let identity: string | null;
       try {
@@ -1839,7 +1842,7 @@ export class SessionStore {
       let renamed = false;
       try {
         await this.writeSyncedFileInBackground(tmp, JSON.stringify(next, null, 2));
-        if (this.pending.get(id)?.epoch !== entry.epoch) return; // landed or dropped meanwhile
+        if (this.pending.get(id)?.batch !== entry.batch) return; // consumed or dropped meanwhile
         if (this.metaFileIdentity(p) !== identity) continue;
         renameSync(tmp, p);
         renamed = true;

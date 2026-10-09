@@ -1397,6 +1397,47 @@ test("a debounced flush in flight never rolls back a newer seq or resurrects a r
   });
 });
 
+test("a debounced flush never republishes a snapshot whose deltas another write already consumed", async (t) => {
+  const consumers = {
+    "explicit flush": (store: SessionStore) => store.flush("s_abc"),
+    "critical patch": (store: SessionStore) => store.patchMeta("s_abc", { status: "running" }),
+  };
+  for (const step of ["fsyncFileInBackground", "writeSyncedFileInBackground"] as const) {
+    for (const [name, consume] of Object.entries(consumers)) {
+      await t.test(`${name} while held in ${step}`, async () => {
+        const { store, root } = tmpStore();
+        try {
+          store.create(meta());
+          store.appendEvent("s_abc", { kind: "agent_message", text: "c0" });
+          store.patchMeta("s_abc", { tokensOut: 10, costUsd: 1 });
+          const held = holdFirstCall(store, step);
+          const flushed = fireDebouncedFlush(store, "s_abc");
+          await held.reached;
+          store.patchMeta("s_abc", { tokensOut: 20, costUsd: 2 });
+          consume(store);
+          assert.equal(diskMeta(root).tokensOut, 20);
+          const internals = store as unknown as Record<string, (...args: unknown[]) => Promise<void>>;
+          const write = internals.writeSyncedFileInBackground!.bind(store);
+          let writes = 0;
+          internals.writeSyncedFileInBackground = (...args: unknown[]) => { writes++; return write(...args); };
+          // A new batch of deltas in the same epoch that carries no usage of its own.
+          store.appendEvent("s_abc", { kind: "agent_message", text: "c1" });
+          held.release();
+          await flushed;
+          store.flushAll();
+          const final = diskMeta(root);
+          assert.equal(final.tokensOut, 20, "the older snapshot's usage never overwrites newer totals");
+          assert.equal(final.costUsd, 2);
+          assert.equal(final.seq, 2);
+          if (step === "fsyncFileInBackground") assert.equal(writes, 0, "a consumed snapshot is not even written");
+        } finally {
+          rmSync(root, { recursive: true, force: true });
+        }
+      });
+    }
+  }
+});
+
 test("a debounced flush whose deltas were dropped meanwhile does not publish them", async () => {
   const { store, root } = tmpStore();
   try {
@@ -1407,9 +1448,10 @@ test("a debounced flush whose deltas were dropped meanwhile does not publish the
     await write.reached;
     // As reset recovery does when meta.json already names the new epoch: deltas go, the file stays.
     (store as unknown as { pending: Map<string, unknown> }).pending.delete("s_abc");
+    store.appendEvent("s_abc", { kind: "agent_message", text: "c1" }); // a new batch, same epoch
     write.release();
     await flushed;
-    assert.equal(diskMeta(root).seq, 0);
+    assert.equal(diskMeta(root).seq, 0, "the dropped snapshot is not published");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
