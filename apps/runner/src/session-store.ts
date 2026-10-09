@@ -607,10 +607,9 @@ const LOCK_STALE_MS = 60_000;
 const LOCK_GUARD_WAIT_MS = 25;
 /** A guard this old whose holder pid is alive but started at another time belongs to a reused pid. */
 const LOCK_GUARD_ABANDONED_MS = 10_000;
-/** Safety bound on numbered claims for one abandoned guard. Each number is used once while that guard
- * is installed, so reaching it takes thousands of failed or dead breakers; past it, recovery fails
- * closed. */
-const LOCK_GUARD_BREAK_CLAIM_LIMIT = 4096;
+/** Claim numbers one breaking attempt walks up from the highest existing claim before giving up for
+ * now. Numbers themselves are unbounded, so a later attempt continues from wherever this one stopped. */
+const LOCK_GUARD_BREAK_STEPS = 64;
 /** Guard and claim tokens this process holds right now. Sections are synchronous, so any other guard
  * naming this pid was left behind by an earlier failure. */
 const activeLockGuards = new Set<string>();
@@ -3305,11 +3304,13 @@ export class SessionStore {
   /* ---- per-session writer lock: only the holder drives turns (appends events) ---- */
   /*
    * The lock file holds its owner, and its mtime is the last refresh (#2832). Taking a free lock is one
-   * exclusive create, so of two acquirers exactly one wins. Everything that changes an EXISTING lock
+   * exclusive create, so of two acquirers exactly one wins; like the guard below it is published
+   * complete, so a stalled creator's empty lock can never look stale and be taken over. Everything that changes an EXISTING lock
    * (stale takeover, refresh, release) runs inside a guard section: `lock.guard`, recording the
    * holder's pid, process start time and a token, and held only for a few synchronous file operations.
    * The guard is published complete, by hard-linking a fully written temp file into place, so it is
-   * never seen empty. Inside a section the lock can change only by a free create, which needs it
+   * never seen empty; an empty or malformed guard is never broken automatically (see
+   * lockGuardHolderGone). Inside a section the lock can change only by a free create, which needs it
    * absent, so a takeover that saw it stale replaces exactly that lock, in one rename, and a lock
    * refreshed or released meanwhile is never overwritten. A busy guard is waited on briefly and then
    * fails closed.
@@ -3329,13 +3330,12 @@ export class SessionStore {
   /** Try to take the lock for `owner` (e.g. the runner id). Succeeds if free, stale, or already ours. */
   acquireLock(id: string, owner: string): boolean {
     const p = this.lockPath(id);
-    try {
-      writeFileSync(p, owner, { flag: "wx" });
+    const created = this.publishExclusive(p, owner);
+    if (created === "created") {
       this.forgetLockedHistoryState(id);
       return true;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") return false;
     }
+    if (created === "failed") return false;
     let outcome: "taken" | "mine" | "busy" | undefined;
     try {
       outcome = this.withLockGuard(id, () => this.takeExistingLock(p, owner));
@@ -3356,12 +3356,7 @@ export class SessionStore {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") return "busy";
       // Released since the create above failed: compete for it like any free acquirer.
-      try {
-        writeFileSync(p, owner, { flag: "wx" });
-        return "taken";
-      } catch {
-        return "busy";
-      }
+      return this.publishExclusive(p, owner) === "created" ? "taken" : "busy";
     }
     if (holder === owner) {
       try {
@@ -3402,7 +3397,7 @@ export class SessionStore {
     } catch {
       return false;
     } finally {
-      rmSync(tmp, { force: true });
+      try { rmSync(tmp, { force: true }); } catch { /* a stray temp file is inert */ }
     }
   }
 
@@ -3447,7 +3442,7 @@ export class SessionStore {
       if (code === "EEXIST") return "exists";
       if (code !== "EPERM" && code !== "ENOTSUP" && code !== "EOPNOTSUPP" && code !== "ENOSYS") return "failed";
     } finally {
-      rmSync(tmp, { force: true });
+      try { rmSync(tmp, { force: true }); } catch { /* a stray temp file is inert */ }
     }
     let fd: number | undefined;
     try {
@@ -3457,7 +3452,7 @@ export class SessionStore {
     } catch (error) {
       return (error as NodeJS.ErrnoException).code === "EEXIST" ? "exists" : "failed";
     } finally {
-      if (fd !== undefined) closeSync(fd);
+      try { if (fd !== undefined) closeSync(fd); } catch { /* the record is written */ }
     }
   }
 
@@ -3494,8 +3489,10 @@ export class SessionStore {
   private lockGuardHolderGone(holder: LockGuardRecord | null, ageMs: number): boolean {
     if (holder?.released === true) return true; // a breaker's claim it gave up without moving the guard
     if (!holder || !Number.isSafeInteger(holder.pid) || (holder.pid as number) <= 0 || typeof holder.token !== "string") {
-      // Guards are published complete, so this one is damaged rather than being written.
-      return ageMs >= LOCK_GUARD_ABANDONED_MS;
+      // Never judged abandoned. Guards are published complete, so this is damage, or a creator on a
+      // filesystem without hard links that is (or was) between its create and its write. Breaking it
+      // could admit a second holder; leaving it fails closed until the file is deleted by hand.
+      return false;
     }
     const pid = holder.pid as number;
     if (pid === process.pid) return !activeLockGuards.has(holder.token);
@@ -3523,7 +3520,9 @@ export class SessionStore {
     const claimPrefix = `${path}.break.${key}.`;
     const token = randomUUID();
     const record = JSON.stringify({ pid: process.pid, start: OWN_PROCESS_START, token });
-    for (let attempt = 0; attempt < LOCK_GUARD_BREAK_CLAIM_LIMIT; attempt++) {
+    // Every claim below the highest existing one was already passed over as gone, so start there.
+    const first = this.highestLockGuardClaim(path, claimPrefix);
+    for (let attempt = first; attempt < first + LOCK_GUARD_BREAK_STEPS; attempt++) {
       const claim = `${claimPrefix}${attempt}`;
       const created = this.publishExclusive(claim, record);
       if (created === "failed") return false;
@@ -3571,6 +3570,20 @@ export class SessionStore {
     return false;
   }
 
+  /** Highest numbered claim for one abandoned guard, or 0 when there is none. */
+  private highestLockGuardClaim(path: string, claimPrefix: string): number {
+    const prefix = basename(claimPrefix);
+    let highest = 0;
+    try {
+      for (const name of readdirSync(join(path, ".."))) {
+        if (!name.startsWith(prefix)) continue;
+        const number = name.slice(prefix.length);
+        if (/^\d+$/.test(number)) highest = Math.max(highest, Number(number));
+      }
+    } catch { /* start from 0; existing claims are still checked one by one */ }
+    return highest;
+  }
+
   /** Mark our own claim given up, in one rename over it, so its number is never reused. */
   private releaseLockGuardClaim(claim: string, record: LockGuardRecord): void {
     const tmp = `${claim}.${process.pid}.${randomUUID()}.tmp`;
@@ -3587,7 +3600,7 @@ export class SessionStore {
         }
       }
     } catch { /* see above */ } finally {
-      rmSync(tmp, { force: true });
+      try { rmSync(tmp, { force: true }); } catch { /* a stray temp file is inert */ }
     }
   }
 
@@ -3603,11 +3616,7 @@ export class SessionStore {
   /** Take the lock only if no lock file exists, with an exclusive create. A compaction that let the
    * lock go for its copy must never take it back by overwriting or by stale takeover. */
   private acquireFreeLock(id: string, owner: string): boolean {
-    try {
-      writeFileSync(this.lockPath(id), owner, { flag: "wx" });
-    } catch {
-      return false;
-    }
+    if (this.publishExclusive(this.lockPath(id), owner) !== "created") return false;
     this.forgetLockedHistoryState(id);
     return this.ownsLock(id, owner);
   }
