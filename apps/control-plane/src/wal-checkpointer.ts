@@ -1,3 +1,5 @@
+import { stat } from "node:fs";
+import { performance } from "node:perf_hooks";
 import { Worker } from "node:worker_threads";
 
 /**
@@ -11,7 +13,9 @@ import { Worker } from "node:worker_threads";
  * the next pass. The main connection keeps an automatic checkpoint as a backstop, at a threshold
  * high enough that it fires only when the worker is not keeping up, so the log stays bounded when
  * the worker falls behind, stops checkpointing or dies. Only a checkpoint hung inside the kernel
- * holds the checkpoint lock against it. See docs/control-plane-database-durability.md.
+ * holds the checkpoint lock against it, so the worker counts its completed passes in shared memory
+ * and the main thread reports a worker that stays alive without completing one (#2834). See
+ * docs/control-plane-database-durability.md.
  */
 
 /** Pages the log may hold before the main connection checkpoints it itself (64 MiB at 4 KiB). */
@@ -24,23 +28,34 @@ const RESTART_DELAYS_MS = [1_000, 5_000, 30_000];
 const HEALTHY_AFTER_MS = 60_000;
 /** How long a clean stop waits for the worker's last checkpoint and close. */
 const STOP_TIMEOUT_MS = 2_000;
+/** How long a running worker may go without completing a pass before it is reported stalled. */
+export const WAL_CHECKPOINT_STALL_MS = 30_000;
 
 export type WalCheckpointerEvent =
   | { type: "online" }
   | { type: "disabled"; reason: string }
   | { type: "checkpoint"; busy: number; log: number; checkpointed: number }
   | { type: "failed"; message: string }
-  | { type: "exited"; code: number; restartInMs: number | null };
+  | { type: "exited"; code: number; restartInMs: number | null }
+  /** No pass has completed for `sinceLastPassMs` while the worker runs: reported once per stall.
+   * `walBytes` is the log's size from the latest reading taken during the stall, if any. */
+  | { type: "stalled"; sinceLastPassMs: number; walBytes: number | null }
+  /** A pass completed again after a reported stall. */
+  | { type: "recovered"; stalledMs: number };
 
 export interface WalCheckpointerOptions {
   intervalMs?: number;
   backstopPages?: number;
   restartDelaysMs?: readonly number[];
   healthyAfterMs?: number;
+  stallAfterMs?: number;
   /** The SQLite library version; defaults to the one Node bundles. */
   sqliteVersion?: string;
   /** Observes the worker; it must not throw. */
   onEvent?: (event: WalCheckpointerEvent) => void;
+  /** Test-only: while its first element is 1, the worker blocks before each pass, as one hung
+   * inside the kernel would. */
+  holdPasses?: Int32Array;
 }
 
 /** Runs in the worker. Plain CommonJS so it also loads from the bundled single-file sidecar. */
@@ -48,13 +63,18 @@ const WORKER_SOURCE = /* js */ `
 const { parentPort, workerData } = require("node:worker_threads");
 const { DatabaseSync } = require("node:sqlite");
 const done = new Int32Array(workerData.done);
+const passes = new Int32Array(workerData.passes);
+const hold = workerData.hold ? new Int32Array(workerData.hold) : null;
 const db = new DatabaseSync(workerData.location);
 // A checkpoint that copies frames flushes the log first and the database after. Set explicitly: it
 // is what makes such a pass end the exposure of commits relaxed to synchronous=NORMAL.
 db.exec("PRAGMA synchronous = FULL");
 const checkpoint = db.prepare("PRAGMA wal_checkpoint(PASSIVE)");
 const pass = () => {
+  if (hold) Atomics.wait(hold, 0, 1);
   const row = checkpoint.get();
+  // The heartbeat: the main thread reads it without a message round trip.
+  Atomics.add(passes, 0, 1);
   if (row.log > 0) parentPort.postMessage({ type: "checkpoint", busy: row.busy, log: row.log, checkpointed: row.checkpointed });
 };
 // Online only once a pass has succeeded, so a worker that cannot checkpoint keeps backing off.
@@ -84,10 +104,21 @@ export class WalCheckpointer {
   private failures = 0;
   private onlineAt: number | null = null;
   private stopped = false;
+  /** The running worker's completed passes, and what the main thread last saw of them. */
+  private passes: Int32Array | null = null;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private seenPasses = 0;
+  private seenPassAt = 0;
+  private checksWithoutPass = 0;
+  private stalled = false;
+  private sizingWal = false;
+  private walBytes: number | null = null;
   private readonly intervalMs: number;
   private readonly backstopPages: number;
   private readonly restartDelaysMs: readonly number[];
   private readonly healthyAfterMs: number;
+  private readonly stallAfterMs: number;
+  private readonly holdPasses: Int32Array | undefined;
   private readonly sqliteVersion: string | undefined;
   private readonly onEvent: (event: WalCheckpointerEvent) => void;
 
@@ -100,6 +131,8 @@ export class WalCheckpointer {
     this.backstopPages = options.backstopPages ?? WAL_CHECKPOINT_BACKSTOP_PAGES;
     this.restartDelaysMs = options.restartDelaysMs ?? RESTART_DELAYS_MS;
     this.healthyAfterMs = options.healthyAfterMs ?? HEALTHY_AFTER_MS;
+    this.stallAfterMs = options.stallAfterMs ?? WAL_CHECKPOINT_STALL_MS;
+    this.holdPasses = options.holdPasses;
     this.sqliteVersion = "sqliteVersion" in options ? options.sqliteVersion : process.versions.sqlite;
     this.onEvent = options.onEvent ?? (() => {});
   }
@@ -131,6 +164,7 @@ export class WalCheckpointer {
     this.stopped = true;
     if (this.restartTimer) clearTimeout(this.restartTimer);
     this.restartTimer = null;
+    this.stopHeartbeat();
     const worker = this.worker;
     const done = this.done;
     this.worker = null;
@@ -152,11 +186,15 @@ export class WalCheckpointer {
 
   private spawn(): void {
     const done = new Int32Array(new SharedArrayBuffer(4));
+    const passes = new Int32Array(new SharedArrayBuffer(4));
     let worker: Worker;
     try {
       worker = new Worker(WORKER_SOURCE, {
         eval: true,
-        workerData: { location: this.location, intervalMs: this.intervalMs, done: done.buffer },
+        workerData: {
+          location: this.location, intervalMs: this.intervalMs, done: done.buffer, passes: passes.buffer,
+          hold: this.holdPasses?.buffer,
+        },
       });
     } catch (error) {
       this.report({ type: "failed", message: error instanceof Error ? error.message : String(error) });
@@ -166,6 +204,7 @@ export class WalCheckpointer {
     worker.unref();
     this.worker = worker;
     this.done = done;
+    this.startHeartbeat(passes);
     worker.on("message", (message: WalCheckpointerEvent) => {
       if (message.type === "online") this.onlineAt = Date.now();
       this.report(message);
@@ -177,6 +216,7 @@ export class WalCheckpointer {
       if (this.worker !== worker) return;
       this.worker = null;
       this.done = null;
+      this.stopHeartbeat();
       if (this.onlineAt !== null && Date.now() - this.onlineAt >= this.healthyAfterMs) this.failures = 0;
       this.onlineAt = null;
       this.scheduleRestart(code);
@@ -194,6 +234,64 @@ export class WalCheckpointer {
       this.spawn();
     }, delay);
     this.restartTimer.unref?.();
+  }
+
+  /** Watch a new worker's heartbeat. The clock starts at spawn, so a first pass that hangs counts. */
+  private startHeartbeat(passes: Int32Array): void {
+    this.passes = passes;
+    this.seenPasses = 0;
+    this.seenPassAt = performance.now();
+    this.checksWithoutPass = 0;
+    this.stalled = false;
+    this.walBytes = null;
+    this.heartbeatTimer = setInterval(() => this.checkHeartbeat(), Math.max(1, Math.floor(this.stallAfterMs / 6)));
+    this.heartbeatTimer.unref?.();
+  }
+
+  /** A worker that exited or was stopped is no longer stalled: the restart policy owns it now. */
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = null;
+    this.passes = null;
+    this.stalled = false;
+  }
+
+  /** One shared-memory read per check: it never waits, and it never throws into the event loop. */
+  private checkHeartbeat(): void {
+    try {
+      if (!this.passes) return;
+      const now = performance.now();
+      const passes = Atomics.load(this.passes, 0);
+      if (passes !== this.seenPasses) {
+        if (this.stalled) this.report({ type: "recovered", stalledMs: Math.round(now - this.seenPassAt) });
+        this.seenPasses = passes;
+        this.seenPassAt = now;
+        this.checksWithoutPass = 0;
+        this.stalled = false;
+        this.walBytes = null;
+        return;
+      }
+      this.checksWithoutPass++;
+      this.sampleWalSize();
+      // Two checks without a pass, not only elapsed time: a clock that ran on while the process was
+      // suspended must not report a stall that no check observed.
+      if (this.stalled || this.checksWithoutPass < 2 || now - this.seenPassAt < this.stallAfterMs) return;
+      this.stalled = true;
+      this.report({ type: "stalled", sinceLastPassMs: Math.round(now - this.seenPassAt), walBytes: this.walBytes });
+    } catch {
+      // Observation must never affect checkpointing.
+    }
+  }
+
+  /** Read the log's size off the event loop while no pass completes, so a stall can report it
+   * without a blocking call on the storage that may be hanging. One reading at a time. */
+  private sampleWalSize(): void {
+    if (this.sizingWal) return;
+    this.sizingWal = true;
+    stat(`${this.location}-wal`, (error, stats) => {
+      this.sizingWal = false;
+      if (this.checksWithoutPass > 0) this.walBytes = error ? null : stats.size;
+    });
   }
 
   private report(event: WalCheckpointerEvent): void {
@@ -215,4 +313,23 @@ export function sqliteHasWalResetFix(version: string | undefined): boolean {
   if (minor === 44) return patch >= 6;
   if (minor === 50) return patch >= 7;
   return minor > 51 || (minor === 51 && patch >= 3);
+}
+
+interface CheckpointLogger {
+  info(fields: object, message: string): void;
+  warn(fields: object, message: string): void;
+}
+
+/** How the control plane logs the worker: failures and stalls, a recovery, and a disabled runtime. */
+export function logWalCheckpointerEvent(log: CheckpointLogger, event: WalCheckpointerEvent): void {
+  if (event.type === "disabled") log.info({ reason: event.reason }, "WAL checkpoint worker disabled");
+  else if (event.type === "failed") log.warn({ error: event.message }, "WAL checkpoint worker failed");
+  else if (event.type === "exited") {
+    log.warn({ code: event.code, restartInMs: event.restartInMs }, "WAL checkpoint worker exited; restarting");
+  } else if (event.type === "stalled") {
+    log.warn({ sinceLastPassMs: event.sinceLastPassMs, walBytes: event.walBytes },
+      "WAL checkpoint worker stalled; no checkpoint pass has completed");
+  } else if (event.type === "recovered") {
+    log.info({ stalledMs: event.stalledMs }, "WAL checkpoint worker recovered");
+  }
 }

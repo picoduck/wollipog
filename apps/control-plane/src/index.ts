@@ -183,6 +183,7 @@ import { CampaignForgeObserver } from "./campaign-forge-observations.js";
 import { APP_RELEASE_VERSION, RUNNER_RELEASE_TAG } from "./release-version.js";
 import { readSshConfigHosts } from "./ssh-config.js";
 import { ControlPlaneDb, GOVERNANCE_AUDIT_RETENTION_MS } from "./db.js";
+import { logWalCheckpointerEvent } from "./wal-checkpointer.js";
 import { registerSessionLookupRoute } from "./session-lookup-route.js";
 import { registerVisibleCampaignChildrenHook } from "./visible-campaign-children-hook.js";
 import {
@@ -426,17 +427,9 @@ const app = Fastify({
     },
   },
 });
-// Checkpoint the write-ahead log off the event loop (#2761). Only failures, and a runtime whose
-// SQLite cannot safely checkpoint from a second connection, are logged.
-db.startWalCheckpoints({
-  onEvent: (event) => {
-    if (event.type === "disabled") app.log.info({ reason: event.reason }, "WAL checkpoint worker disabled");
-    else if (event.type === "failed") app.log.warn({ error: event.message }, "WAL checkpoint worker failed");
-    else if (event.type === "exited") {
-      app.log.warn({ code: event.code, restartInMs: event.restartInMs }, "WAL checkpoint worker exited; restarting");
-    }
-  },
-});
+// Checkpoint the write-ahead log off the event loop (#2761). Only failures, a stalled worker
+// (#2834), and a runtime whose SQLite cannot safely checkpoint from a second connection are logged.
+db.startWalCheckpoints({ onEvent: (event) => logWalCheckpointerEvent(app.log, event) });
 
 const CHILD_SESSION_REGISTRY_CACHE_LIMIT = 128;
 const CHILD_SESSION_REGISTRY_SCAN_PAGE_SIZE = 1_000;

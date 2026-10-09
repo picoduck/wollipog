@@ -9,7 +9,9 @@ import { ControlPlaneDb } from "./db.js";
 import {
   DEFAULT_WAL_AUTOCHECKPOINT_PAGES,
   WAL_CHECKPOINT_BACKSTOP_PAGES,
+  WAL_CHECKPOINT_STALL_MS,
   WalCheckpointer,
+  logWalCheckpointerEvent,
   sqliteHasWalResetFix,
   type WalCheckpointerEvent,
   type WalCheckpointerOptions,
@@ -36,7 +38,10 @@ function runnerMeta(): RunnerMetadata {
   };
 }
 
-function open(t: TestContext, options: WalCheckpointerOptions = {}) {
+/** Every scenario watches the heartbeat at a short threshold and fails on a stall it did not expect
+ * (#2834): a worker passing every 20 ms or faster never goes a second without completing one. */
+function open(t: TestContext, options: WalCheckpointerOptions = {}, { expectStalls = false } = {}) {
+  if ((options.intervalMs ?? 250) <= 20) options = { stallAfterMs: 1_000, ...options };
   const root = mkdtempSync(join(tmpdir(), "wollipog-wal-checkpointer-"));
   const location = join(root, "control-plane.db");
   const db = ControlPlaneDb.open(location);
@@ -52,6 +57,7 @@ function open(t: TestContext, options: WalCheckpointerOptions = {}) {
     for (const cleanup of cleanups.reverse()) cleanup();
     close();
     rmSync(root, { recursive: true, force: true });
+    if (!expectStalls) assert.deepEqual(events.filter((event) => event.type === "stalled"), [], "no stall was reported");
   });
   db.registerRunner(runnerMeta(), 1_000);
   db.createSession({ id: "s-1", runnerId: RUNNER_ID, workspaceId: "ws", agentId: "agent", title: "WAL",
@@ -268,4 +274,147 @@ test("restart backoff advances until a worker stays up long enough to count as h
   const healthy = open(t, { intervalMs: 20, restartDelaysMs: [10, 50, 100], healthyAfterMs: 0 });
   for (let started = 1; started <= 3; started++) await kill(healthy, started);
   assert.deepEqual(delays(healthy), [10, 10, 10], "a worker that stayed healthy restarts at the first delay");
+});
+
+// #2834: a checkpoint hung inside the kernel holds the checkpoint lock against the backstop, so the
+// main thread watches the worker's completed-pass count and reports a worker that stops completing.
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const ofType = <T extends WalCheckpointerEvent["type"]>(events: WalCheckpointerEvent[], type: T) =>
+  events.filter((event): event is Extract<WalCheckpointerEvent, { type: T }> => event.type === type);
+
+test("a worker that completes no pass is reported stalled once per stall, then recovered, and logged", LIVE, async (t) => {
+  const stallAfterMs = 300;
+  const hold = new Int32Array(new SharedArrayBuffer(4));
+  const release = () => {
+    Atomics.store(hold, 0, 0);
+    Atomics.notify(hold, 0);
+  };
+  const h = open(t, { intervalMs: 20, stallAfterMs, holdPasses: hold }, { expectStalls: true });
+  h.defer(release);
+  await until(() => has(h.events, "online"), "the worker to start");
+  h.ingest(100);
+
+  for (let stall = 1; stall <= 2; stall++) {
+    // The worker blocks inside a pass, as one waiting on a flush that never completes would.
+    Atomics.store(hold, 0, 1);
+    const heldAt = Date.now();
+    await until(() => ofType(h.events, "stalled").length === stall, `stall ${stall}`);
+    assert.ok(Date.now() - heldAt >= stallAfterMs - 20, "not before the threshold");
+    const stalled = ofType(h.events, "stalled").at(-1)!;
+    assert.ok(stalled.sinceLastPassMs >= stallAfterMs, `${stalled.sinceLastPassMs} ms since the last pass`);
+    assert.ok(stalled.walBytes !== null && stalled.walBytes > 0, "the log's size is reported");
+    await sleep(stallAfterMs * 3);
+    assert.equal(ofType(h.events, "stalled").length, stall, "one report per stall, not one per check");
+    assert.equal(h.checkpointer.running(), true, "the worker is not restarted: terminate cannot interrupt a hang");
+
+    release();
+    await until(() => ofType(h.events, "recovered").length === stall, `recovery ${stall}`);
+    assert.ok(ofType(h.events, "recovered").at(-1)!.stalledMs >= stallAfterMs);
+    await sleep(stallAfterMs * 2);
+    assert.equal(ofType(h.events, "stalled").length, stall, "a completed pass clears the stall");
+    assert.equal(ofType(h.events, "recovered").length, stall, "recovery is reported once");
+  }
+
+  const logged: Array<[level: string, fields: object, message: string]> = [];
+  const log = {
+    info: (fields: object, message: string) => logged.push(["info", fields, message]),
+    warn: (fields: object, message: string) => logged.push(["warn", fields, message]),
+  };
+  for (const event of h.events) logWalCheckpointerEvent(log, event);
+  const stalls = logged.filter(([, , message]) => message.includes("stalled"));
+  assert.equal(stalls.length, 2);
+  assert.equal(stalls[0]![0], "warn");
+  assert.deepEqual(Object.keys(stalls[0]![1]), ["sinceLastPassMs", "walBytes"]);
+  assert.deepEqual(logged.filter(([, , message]) => message.includes("recovered")).map(([level]) => level), ["info", "info"]);
+});
+
+test("a sustained workload with idle stretches and a long reader reports no stall, nor does a clean shutdown", LIVE, async (t) => {
+  const stallAfterMs = 300;
+  const h = open(t, { intervalMs: 20, stallAfterMs });
+  await until(() => has(h.events, "online"), "the worker to start");
+  for (let round = 0; round < 10; round++) {
+    h.ingest(100);
+    await sleep(20);
+  }
+  // An empty, idle log: every pass finds no frames at all, reports nothing, and still counts.
+  await until(() => {
+    const row = h.db.raw().prepare("PRAGMA wal_checkpoint(TRUNCATE)").get() as { busy: number; log: number };
+    return row.busy === 0 && row.log === 0;
+  }, "an empty log");
+  const reports = h.events.length;
+  await sleep(stallAfterMs * 2);
+  assert.equal(h.events.length, reports, "passes over an empty log report nothing");
+  // Busy passes: a reader pins the log, so passes skip the frames it still uses.
+  const reader = new DatabaseSync(h.location);
+  h.defer(() => reader.close());
+  reader.exec("BEGIN");
+  reader.prepare("SELECT COUNT(*) FROM session_events").get();
+  for (let round = 0; round < 10; round++) {
+    h.ingest(100);
+    await sleep(stallAfterMs / 5);
+  }
+  assert.ok(h.events.some((event) => event.type === "checkpoint" && event.checkpointed < event.log),
+    "passes ran beside the reader without copying everything");
+  reader.exec("COMMIT");
+  h.db.stopWalCheckpoints();
+  await sleep(stallAfterMs * 2);
+  assert.deepEqual(ofType(h.events, "stalled"), []);
+});
+
+test("a stopped, disabled or restarting worker never reports a stall", async (t) => {
+  const stallAfterMs = 100;
+  await t.test("stopped", LIVE, async (t) => {
+    const h = open(t, { intervalMs: 20, stallAfterMs });
+    await until(() => has(h.events, "online"), "the worker to start");
+    h.db.stopWalCheckpoints();
+    await sleep(stallAfterMs * 5);
+    assert.deepEqual(ofType(h.events, "stalled"), []);
+  });
+  await t.test("restarting", LIVE, async (t) => {
+    const h = open(t, { intervalMs: 20, stallAfterMs, restartDelaysMs: [60_000] });
+    await until(() => has(h.events, "online"), "the worker to start");
+    await (h.checkpointer as unknown as { worker: { terminate(): Promise<number> } }).worker.terminate();
+    await until(() => has(h.events, "exited"), "the exit to be observed");
+    await sleep(stallAfterMs * 5);
+    assert.equal(h.checkpointer.running(), false);
+    assert.deepEqual(ofType(h.events, "stalled"), []);
+  });
+  await t.test("disabled", async (t) => {
+    const root = mkdtempSync(join(tmpdir(), "wollipog-wal-unfixed-"));
+    const db = ControlPlaneDb.open(join(root, "control-plane.db"));
+    t.after(() => {
+      db.close();
+      rmSync(root, { recursive: true, force: true });
+    });
+    const events: WalCheckpointerEvent[] = [];
+    db.startWalCheckpoints({ sqliteVersion: "3.47.2", stallAfterMs, onEvent: (event) => events.push(event) });
+    await sleep(stallAfterMs * 5);
+    assert.deepEqual(events.map((event) => event.type), ["disabled"]);
+  });
+});
+
+test("the control plane logs failures, stalls and recoveries, and nothing for routine passes", () => {
+  const logged: Array<[level: string, message: string]> = [];
+  const log = {
+    info: (_fields: object, message: string) => logged.push(["info", message]),
+    warn: (_fields: object, message: string) => logged.push(["warn", message]),
+  };
+  const events: WalCheckpointerEvent[] = [
+    { type: "online" },
+    { type: "checkpoint", busy: 0, log: 10, checkpointed: 10 },
+    { type: "stalled", sinceLastPassMs: WAL_CHECKPOINT_STALL_MS, walBytes: null },
+    { type: "recovered", stalledMs: 45_000 },
+    { type: "failed", message: "boom" },
+    { type: "exited", code: 1, restartInMs: 1_000 },
+    { type: "disabled", reason: "old" },
+  ];
+  for (const event of events) logWalCheckpointerEvent(log, event);
+  assert.deepEqual(logged, [
+    ["warn", "WAL checkpoint worker stalled; no checkpoint pass has completed"],
+    ["info", "WAL checkpoint worker recovered"],
+    ["warn", "WAL checkpoint worker failed"],
+    ["warn", "WAL checkpoint worker exited; restarting"],
+    ["info", "WAL checkpoint worker disabled"],
+  ]);
 });
