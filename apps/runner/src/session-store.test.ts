@@ -2566,10 +2566,10 @@ test("revalidating a warm layout under an unchanged manifest lstats its segments
       assert.notEqual(internals.historyLayoutCache.get("s_abc")!.validatedAt, -Infinity, "revalidated in place");
     }
     assert.equal(manifestReads, 0, "an unchanged manifest is not re-read or re-parsed");
-    internals.historyLayoutCache.get("s_abc")!.validatedAt = -Infinity;
+    // Overdue for the full read while the cheap check is still fresh: the full read is not postponed.
     (internals.historyLayoutCache.get("s_abc") as { fullyValidatedAt: number }).fullyValidatedAt = -Infinity;
     store.appendEvent("s_abc", { kind: "agent_message", text: "periodic full read" });
-    assert.equal(manifestReads, 1, "the full read still runs periodically");
+    assert.equal(manifestReads, 1, "the full read still runs at least every few seconds");
     manifestReads = 0;
 
     // Doubt goes back to the full read: a pending legacy-fence intent is retried there, as before.
@@ -2609,7 +2609,7 @@ test("a manifest rewritten in place with its identity preserved is caught by the
     const cached = (store as unknown as {
       historyLayoutCache: Map<string, { validatedAt: number; fullyValidatedAt: number }>;
     }).historyLayoutCache.get("s_abc")!;
-    cached.validatedAt = -Infinity;
+    // Only the full-read deadline has passed; the cheap check alone would still trust the identity.
     cached.fullyValidatedAt = -Infinity;
     assert.throws(
       () => store.appendEvent("s_abc", { kind: "agent_message", text: "after rewrite" }),

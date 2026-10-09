@@ -919,8 +919,8 @@ export class SessionStore {
     cached: { layout: HistoryLayout; validatedAt: number; fullyValidatedAt: number },
   ): boolean {
     const now = performance.now();
-    if (now - cached.validatedAt < HISTORY_LAYOUT_REVALIDATE_MS) return true;
     if (now - cached.fullyValidatedAt >= HISTORY_LAYOUT_FULL_REVALIDATE_MS) return false;
+    if (now - cached.validatedAt < HISTORY_LAYOUT_REVALIDATE_MS) return true;
     if (existsSync(this.historyLegacyFencePath(id))) return false;
     for (const source of cached.layout.sources) {
       if (!source.segment) continue;
