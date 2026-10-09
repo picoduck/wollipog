@@ -5593,17 +5593,17 @@ textarea {
 /* A short reading column (#2828): a phone in landscape is wider than a phone's 760px, so it took the
    desktop 40% of a column already under 480px, and a collapsed question showed its head line and
    footer with none of the question between them. Under 480px of column the dock takes up to 60%, and
-   a collapsed question leaves out its eyebrow (its header and "Choose one") and keeps 4px between its
-   parts and above its footer's buttons, so its first lines show above the footer; its rows still say
-   how to answer, and expanding it shows everything. The keyboard's 40% (below) still applies while it
-   is open. */
+   a collapsed question keeps 4px between its parts and above its footer's buttons. One the clamp cuts
+   short also leaves out its eyebrow (its header and "Choose one"), which Show Full Question brings back
+   with the rest; a question that fits keeps it, since nothing would bring it back. Its first lines then
+   show above the footer. The keyboard's 40% (below) still applies while it is open. */
 @container chat-reading (max-height: 480px) {
   .chat-reading > .session-notice-slot { max-height: 60cqh; }
   .request-dock .question-card:not([data-question-expanded]) { row-gap: var(--space-1); }
   /* The scrolling card's top edge cancels the gap after it, so it cancels the smaller one. */
   .request-dock .question-card:not([data-question-expanded])::before { margin-bottom: calc(-1 * var(--space-1)); }
   .request-dock .question-card:not([data-question-expanded]) > .request-card-foot { padding-top: var(--space-1); }
-  .request-dock .question-card:not([data-question-expanded]) > .question-eyebrow { display: none; }
+  .request-dock .question-card[data-question-clamped] > .question-eyebrow { display: none; }
 }
 .chat-reading > .session-notice-slot:has(> .request-dock[data-keyboard-open]) { max-height: 40cqh; }
 /* Reading mode (#2786): a question the person expanded takes the whole reading column, with the

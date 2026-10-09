@@ -2339,8 +2339,9 @@ follows these rules so it never crowds out the conversation it asks about:
   card may scroll as a whole under its footer instead, below). The one exception is a question the
   person expanded with Show Full Question: reading mode (#2786, below) holds nothing back.
 - **A short column gives the dock more** (#2828). Under 480px of column (a phone in landscape, a
-  short window) the dock takes up to 60%, keyboard aside, and a collapsed question leaves out its
-  eyebrow and keeps 4px between its parts and above its footer's buttons, so its first lines show
+  short window) the dock takes up to 60%, keyboard aside, and a collapsed question keeps 4px between
+  its parts and above its footer's buttons. One the clamp cuts short also leaves out its eyebrow,
+  which Show Full Question brings back; a question that fits keeps it. Its first lines then show
   above the footer rather than its head line alone. The transcript keeps 40%.
 - **One "more below" signal for every kind** (#2715). While a card's body scrolls, each edge it can
   still scroll past shows a `--border` hairline (`useClipEdges()`, `data-clip-start` and

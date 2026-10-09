@@ -1628,7 +1628,9 @@ test.describe("a collapsed question shows its first lines in a short reading col
         const layout = await shortColumnLayout(page);
         expect(layout.questionLines, "whole lines of the question above the footer").toBeGreaterThanOrEqual(lines);
         expect(layout.slotShare, "the transcript keeps at least 40% of the column").toBeLessThanOrEqual(0.6 + 0.01);
-        expect(layout.eyebrowShown, "the collapsed card leaves its eyebrow out").toBe(false);
+        // The eyebrow gives way only where Show Full Question can bring it back.
+        const clamped = await showFullQuestion(card).count() > 0;
+        expect(layout.eyebrowShown, "the eyebrow gives way only to a clamped question").toBe(!clamped);
         for (const name of ["Dismiss", "Submit Answers"]) await expectInsideViewport(card.getByRole("button", { name, exact: true }), page);
         // Expanded, the question is shown whole, eyebrow and all (#2786). A paragraph fits the
         // clamp above 760px, so it has nothing to expand there.
@@ -1648,6 +1650,17 @@ test.describe("a collapsed question shows its first lines in a short reading col
       expect(layout.eyebrowShown).toBe(true);
     });
   }
+
+  test("a short question that fits keeps its eyebrow in a short column, since nothing would bring it back", async ({ page }) => {
+    await page.setViewportSize({ width: 844, height: 390 });
+    await page.goto("/agent-questions-e2e.html?more=1");
+    const card = dockedCard(page);
+    await expect(card.locator(".question-text")).toHaveText("Which language should the example use?");
+    await expect(showFullQuestion(card)).toHaveCount(0);
+    await expect(card.locator(".question-eyebrow")).toBeVisible();
+    await expect(card.locator(".question-eyebrow")).toContainText("Language");
+    expect((await shortColumnLayout(page)).questionLines).toBeGreaterThanOrEqual(1);
+  });
 
   test("with the software keyboard open a short column still caps the dock at 40%", async ({ page }) => {
     await page.setViewportSize({ width: 844, height: 390 });
