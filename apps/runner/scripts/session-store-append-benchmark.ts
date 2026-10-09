@@ -4,10 +4,12 @@ import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { SessionStore, type SessionMeta } from "../src/session-store.js";
 
-// Per-event append cost must not grow with the number of compacted history segments (#2774).
+// Per-event append cost must not grow with the number of compacted history segments, and
+// compaction must not hold the event loop for long at any one time (#2774).
 const SAMPLE_APPENDS = 2_000;
 const SEGMENTS = 16;
 const MAX_SEGMENTED_TO_FRESH_P50 = 1.5;
+const MAX_COMPACTION_BLOCK_MS = 20;
 const SESSION_ID = "s_benchmark";
 const OWNER = "benchmark";
 
@@ -48,21 +50,47 @@ try {
   const appends: Record<string, ReturnType<typeof sampleAppends>> = { fresh: sampleAppends() };
   toolOutput("t", 48_000);
   appends.after50kEvents = sampleAppends();
-  const compactionMs: number[] = [];
+  const compactions: Array<{ wallMs: number; longestBlockMs: number }> = [];
   for (let segment = 1; segment <= SEGMENTS; segment++) {
     toolOutput(`u${segment}_`, 3_000);
+    // Land the debounced metadata flush first: it fsyncs on the append path, not in compaction.
+    store.flush(SESSION_ID);
+    // A 1 ms timer measures its own lateness: the longest gap is the longest main-thread block.
+    let last = performance.now();
+    let longestBlockMs = 0;
+    const probe = setInterval(() => {
+      const now = performance.now();
+      longestBlockMs = Math.max(longestBlockMs, now - last - 1);
+      last = now;
+    }, 1);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    last = performance.now();
+    longestBlockMs = 0;
     const started = performance.now();
-    if (!store.compactHistory(SESSION_ID, OWNER, true).compacted) throw new Error("forced compaction did not compact");
-    compactionMs.push(Number((performance.now() - started).toFixed(1)));
+    const result = await store.compactHistory(SESSION_ID, OWNER, true);
+    const wallMs = performance.now() - started;
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    clearInterval(probe);
+    if (!result.compacted) throw new Error("forced compaction did not compact");
+    compactions.push({ wallMs: Number(wallMs.toFixed(1)), longestBlockMs: Number(longestBlockMs.toFixed(1)) });
     if (segment === 8 || segment === SEGMENTS) appends[`after${segment}Segments`] = sampleAppends();
   }
   store.releaseLock(SESSION_ID, OWNER);
   store.flushAll();
 
   const ratio = appends[`after${SEGMENTS}Segments`]!.p50 / appends.fresh!.p50;
-  console.log(JSON.stringify({ appends, compactionMs, segmentedToFreshP50: Number(ratio.toFixed(2)) }, null, 2));
+  const longestBlockMs = Math.max(...compactions.map((compaction) => compaction.longestBlockMs));
+  console.log(JSON.stringify({
+    appends,
+    compactions,
+    segmentedToFreshP50: Number(ratio.toFixed(2)),
+    longestCompactionBlockMs: longestBlockMs,
+  }, null, 2));
   if (ratio > MAX_SEGMENTED_TO_FRESH_P50) {
     throw new Error(`append p50 after ${SEGMENTS} segments is ${ratio.toFixed(2)}x a fresh log`);
+  }
+  if (longestBlockMs > MAX_COMPACTION_BLOCK_MS) {
+    throw new Error(`a compaction held the event loop for ${longestBlockMs} ms`);
   }
 } finally {
   rmSync(root, { recursive: true, force: true });

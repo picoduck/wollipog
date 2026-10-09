@@ -24,14 +24,17 @@ import {
   readSync,
   closeSync,
   fsyncSync,
+  fstatSync,
   futimesSync,
   lstatSync,
   truncateSync,
   writeSync,
 } from "node:fs";
+import { open, rename, type FileHandle } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import { TextDecoder } from "node:util";
 import {
   PROTOCOL_VERSION,
@@ -481,6 +484,15 @@ const HISTORY_INDEX_RECORD_BYTES = 16;
 const HISTORY_INDEX_EVENT_STRIDE = 128;
 const HISTORY_INDEX_BYTE_STRIDE = 1024 * 1024;
 const HISTORY_SCAN_CHUNK_BYTES = 64 * 1024;
+/** Compaction work per event-loop turn: parse at most one slice of the cut range, and move bulk
+ * bytes through the libuv pool in chunks small enough to hash in about a millisecond. */
+const HISTORY_COMPACTION_SCAN_SLICE_BYTES = 512 * 1024;
+const HISTORY_COMPACTION_COPY_CHUNK_BYTES = 1024 * 1024;
+/** Appends made during the copy are caught up off the lock until at most this much remains for the
+ * synchronous publish step. */
+const HISTORY_COMPACTION_LOCKED_CATCH_UP_BYTES = 256 * 1024;
+const HISTORY_COMPACTION_CATCH_UP_ROUNDS = 8;
+const HISTORY_COMPACTION_PUBLISH_ATTEMPTS = 4;
 const HISTORY_UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 const HISTORY_RESET_VERSION = 1;
 const HISTORY_MANIFEST_VERSION = 1;
@@ -528,6 +540,13 @@ interface HistorySource {
   virtualStart: number;
   bytes: number;
   segment?: HistorySegment;
+}
+
+interface StagedHistoryFile {
+  tmp: string;
+  path: string;
+  /** Identity of the staged inode, which the rename into `path` preserves. */
+  key: string;
 }
 
 interface HistoryLayout {
@@ -643,6 +662,9 @@ export class SessionStore {
     { epoch: number; manifestKey: string | null; layout: HistoryLayout; validatedAt: number }
   >();
   private historyMaintenanceCursor: string | null = null;
+  /** Tokens of compactions this process is preparing. Their files are unreferenced until publication,
+   * so orphan collection must leave them alone even with a zero grace period. */
+  private readonly compactionsInFlight = new Set<string>();
   constructor(
     private readonly root: string = join(homedir(), ".agent-manager", "sessions"),
     private readonly historyScanObserver?: (startOffset: number, endOffset: number) => void,
@@ -1141,6 +1163,18 @@ export class SessionStore {
     try { fsyncSync(fd); } finally { closeSync(fd); }
   }
 
+  private async fsyncDirectoryAsync(path: string): Promise<void> {
+    let handle: FileHandle | undefined;
+    try {
+      handle = await open(path, "r");
+      await handle.sync();
+    } catch (error) {
+      if (process.platform !== "win32") throw error;
+    } finally {
+      await handle?.close();
+    }
+  }
+
   private fsyncDirectory(path: string): void {
     let fd: number | undefined;
     try {
@@ -1299,15 +1333,17 @@ export class SessionStore {
 
   /** Stream complete NDJSON lines with a hard carry ceiling. At most one bounded record plus one
    * 64 KiB read chunk is retained; an attacker-controlled missing newline cannot grow memory with
-   * file size. Returning false stops after the current complete line. */
+   * file size. Returning false stops after the current complete line. A `pinned` layout is scanned as
+   * captured instead of the current one, so a concurrent manifest switch cannot pull other sources in. */
   private scanHistoryLines(
     id: string,
     startOffset: number,
     endOffset: number,
     visit: (line: Buffer, offset: number) => boolean | void,
+    pinned?: HistoryLayout,
   ): { completeBytes: number; trailingBytes: number; stopped: boolean } {
     this.historyScanObserver?.(startOffset, endOffset);
-    const layout = this.historyLayout(id);
+    const layout = pinned ?? this.historyLayout(id);
     if (
       !Number.isSafeInteger(startOffset) || !Number.isSafeInteger(endOffset) ||
       startOffset < 0 || endOffset < startOffset || endOffset > layout.totalBytes
@@ -1935,38 +1971,31 @@ export class SessionStore {
     }
   }
 
-  /** Returns the identity of the exact manifest inode published. Rename keeps inode, mtime, and size,
-   * so a later stat that differs means another publication replaced this one. */
-  private publishHistoryManifest(id: string, manifest: HistoryManifest): string {
-    const path = this.historyManifestPath(id);
-    const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  /** Write and fsync a small control file beside its target without blocking the event loop. */
+  private async stageHistoryFile(path: string, token: string, contents: string): Promise<StagedHistoryFile> {
+    const tmp = `${path}.${process.pid}.${token}.tmp`;
     try {
-      writeFileSync(tmp, JSON.stringify(manifest));
-      this.fsyncFile(tmp);
-      const published = this.manifestKeyOf(tmp);
-      renameSync(tmp, path);
-      this.fsyncDirectory(this.dir(id));
-      return published;
-    } finally {
+      const handle = await open(tmp, "wx");
+      try {
+        await handle.writeFile(contents);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      return { tmp, path, key: this.manifestKeyOf(tmp) };
+    } catch (error) {
       rmSync(tmp, { force: true });
+      throw error;
     }
   }
 
-  private writeLegacyFenceIntent(id: string, activeFile: string, retiredFile: string): void {
-    const path = this.historyLegacyFencePath(id);
-    const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
-    try {
-      writeFileSync(tmp, JSON.stringify({
-        version: HISTORY_LEGACY_FENCE_VERSION,
-        activeFile,
-        retiredFile,
-      }));
-      this.fsyncFile(tmp);
-      renameSync(tmp, path);
-      this.fsyncDirectory(this.dir(id));
-    } finally {
-      rmSync(tmp, { force: true });
-    }
+  /** Atomically publish a staged file and make the rename durable. Returns the identity of the exact
+   * inode published: rename keeps inode, mtime, and size, so a later stat that differs means another
+   * publication replaced this one. */
+  private publishHistoryFile(id: string, staged: StagedHistoryFile): string {
+    renameSync(staged.tmp, staged.path);
+    this.fsyncDirectory(this.dir(id));
+    return staged.key;
   }
 
   /** Once a manifest owns the real active generation, turn the legacy monolithic pathname into a
@@ -2012,20 +2041,231 @@ export class SessionStore {
   /** Move one bounded, newline-aligned prefix of the mutable active log into a content-addressed,
    * immutable segment. Logical bytes and seqs do not change, so sparse-index offsets and frozen
    * pagination chains remain valid across the atomic manifest switch. The caller must own the
-   * per-session writer lock; ordinary history reads remain lock-free. */
-  compactHistory(id: string, owner: string, force = false): { compacted: boolean; bytesArchived: number } {
-    if (!this.ownsLock(id, owner)) return { compacted: false, bytesArchived: 0 };
-    this.flush(id);
+   * per-session writer lock when it calls and still own it when the copy is ready to publish;
+   * ordinary history reads remain lock-free.
+   *
+   * Only planning and publication run synchronously. The cut search parses bounded slices and the
+   * bulk copy, hash, and fsync run on the libuv pool, so neither blocks the event loop for long.
+   * Events appended while the copy runs land in the old active file after the copied prefix; they
+   * are copied in order, complete lines only, and the remainder is copied under the lock
+   * immediately before the manifest switch. */
+  compactHistory(id: string, owner: string, force = false): Promise<{ compacted: boolean; bytesArchived: number }> {
+    return this.runHistoryCompaction(id, owner, force, false);
+  }
+
+  /** `yieldLock` releases the writer lock for the copy and takes it back only to publish, so a turn
+   * that starts meanwhile is never refused. A turn still holding the lock at publication wins; the
+   * copy is discarded and a later maintenance pass retries. */
+  private async runHistoryCompaction(
+    id: string,
+    owner: string,
+    force: boolean,
+    yieldLock: boolean,
+  ): Promise<{ compacted: boolean; bytesArchived: number }> {
+    const notCompacted = { compacted: false, bytesArchived: 0 };
+    const plan = this.planHistoryCompaction(id, owner, force);
+    if (!plan) return notCompacted;
+    const { epoch, manifestKey, layout } = plan;
+    if (yieldLock) this.releaseLock(id, owner);
+
+    const activeStart = layout.active.virtualStart;
+    let firstSeq = 0;
+    let lastSeq = 0;
+    let cutBytes = 0;
+    let sliceStart = activeStart;
+    let sliceBytes = HISTORY_COMPACTION_SCAN_SLICE_BYTES;
+    const scanEnd = activeStart + plan.maxCutBytes;
+    while (sliceStart < scanEnd) {
+      const sliceEnd = Math.min(scanEnd, sliceStart + sliceBytes);
+      // The cut lies inside the planned active file. Scanning the pinned layout keeps a peer's newly
+      // published segment (which a fresh layout would verify by hashing it whole) out of the scan.
+      const scanned = this.scanHistoryLines(id, sliceStart, sliceEnd, (line, offset) => {
+        const event = this.parseStoredEvent(line);
+        if (firstSeq === 0) firstSeq = event.seq;
+        if (event.seq > plan.maxCutSeq) return false;
+        lastSeq = event.seq;
+        cutBytes = offset + line.length + 1 - activeStart;
+      }, layout);
+      if (scanned.stopped || sliceEnd === scanEnd) break;
+      if (scanned.completeBytes === sliceStart) {
+        sliceBytes *= 2; // one record wider than the slice; scanHistoryLines bounds its size
+      } else {
+        sliceStart = scanned.completeBytes;
+        sliceBytes = HISTORY_COMPACTION_SCAN_SLICE_BYTES;
+      }
+      await yieldToEventLoop();
+      if (this.historyManifestKey(id) !== manifestKey || (this.readDiskMetaRaw(id)?.logEpoch ?? 0) !== epoch) {
+        throw new HistoryStoreError("history_epoch_changed", "session history changed during compaction");
+      }
+    }
+    const expectedFirstSeq = (layout.manifest?.segments.at(-1)?.lastSeq ?? 0) + 1;
+    if (cutBytes <= 0 || firstSeq !== expectedFirstSeq || lastSeq >= plan.tailSeq) return notCompacted;
+
+    const token = `${epoch}.${firstSeq}-${lastSeq}.${randomUUID()}`;
+    const segmentTmp = join(this.dir(id), `events.segment.${token}.ndjson.tmp`);
+    // The new active generation is written under its final name. Until the manifest names it, it is
+    // unreferenced debris that the finally block or orphan collection removes.
+    const activeFile = `events.active.${token}.ndjson`;
+    const activePath = join(this.dir(id), activeFile);
+    const retiredFile = `events.retired.${token}.ndjson`;
+    let segmentPath: string | null = null;
+    let source: FileHandle | null = null;
+    let activeOut: FileHandle | null = null;
+    const staged: StagedHistoryFile[] = [];
+    let committed = false;
+    this.compactionsInFlight.add(token);
+    try {
+      source = await open(layout.active.path, "r");
+      const sourceIdentity = await source.stat({ bigint: true });
+      const sha256 = await this.copyHistoryRangeAsync(source, 0, cutBytes, segmentTmp);
+      const segmentFile = `events.segment.${token}.${sha256.slice(0, 16)}.ndjson`;
+      segmentPath = join(this.dir(id), segmentFile);
+      await rename(segmentTmp, segmentPath);
+      activeOut = await open(activePath, "wx");
+      let copiedThrough = await this.appendCompleteHistoryLines(source, cutBytes, layout.active.bytes, activeOut);
+      if (copiedThrough !== layout.active.bytes) {
+        throw new HistoryStoreError("history_corrupt", "session history changed during compaction");
+      }
+      // Stage the control files too, so publication is only renames plus one directory fsync.
+      const manifest: HistoryManifest = {
+        version: HISTORY_MANIFEST_VERSION,
+        logEpoch: epoch,
+        activeFile,
+        segments: [
+          ...(layout.manifest?.segments ?? []),
+          { file: segmentFile, firstSeq, lastSeq, bytes: cutBytes, sha256 },
+        ],
+      };
+      const legacy = layout.active.file === "events.ndjson";
+      if (legacy) {
+        staged.push(await this.stageHistoryFile(this.historyLegacyFencePath(id), token, JSON.stringify({
+          version: HISTORY_LEGACY_FENCE_VERSION,
+          activeFile,
+          retiredFile,
+        })));
+      }
+      const stagedManifest = await this.stageHistoryFile(this.historyManifestPath(id), token, JSON.stringify(manifest));
+      staged.push(stagedManifest);
+
+      // Appends keep arriving while this awaits. Catch up off the lock until the remainder fits the
+      // synchronous bound; a burst that lands just before the lock is taken sends it back for another
+      // asynchronous round instead of being copied while every session waits.
+      let remainder = 0;
+      for (let attempt = 1; ; attempt++) {
+        for (let round = 0; round < HISTORY_COMPACTION_CATCH_UP_ROUNDS; round++) {
+          const size = Number((await source.stat({ bigint: true })).size);
+          if (size - copiedThrough <= HISTORY_COMPACTION_LOCKED_CATCH_UP_BYTES) break;
+          copiedThrough = await this.appendCompleteHistoryLines(source, copiedThrough, size, activeOut);
+        }
+        await activeOut.sync();
+        if (attempt === 1) await this.fsyncDirectoryAsync(this.dir(id));
+
+        if (!(yieldLock ? this.acquireFreeLock(id, owner) : this.ownsLock(id, owner))) return notCompacted;
+        // Everything from here to the cache update runs without yielding: no append from this process
+        // can interleave, and other processes are fenced by the writer lock. Handles close afterward.
+        const beforePublish = this.readDiskMeta(id);
+        let current;
+        try { current = lstatSync(layout.active.path, { bigint: true }); } catch { current = null; }
+        if (
+          !beforePublish || (beforePublish.logEpoch ?? 0) !== epoch ||
+          this.historyManifestKey(id) !== manifestKey ||
+          !current?.isFile() || current.ino !== sourceIdentity.ino || current.dev !== sourceIdentity.dev ||
+          Number(current.size) < copiedThrough
+        ) {
+          throw new HistoryStoreError("history_epoch_changed", "session history changed during compaction");
+        }
+        remainder = Number(current.size) - copiedThrough;
+        if (remainder <= HISTORY_COMPACTION_LOCKED_CATCH_UP_BYTES) break;
+        if (yieldLock) this.releaseLock(id, owner);
+        if (attempt >= HISTORY_COMPACTION_PUBLISH_ATTEMPTS) return notCompacted;
+      }
+      if (remainder > 0) {
+        const tail = Buffer.alloc(remainder);
+        const read = readSync(source.fd, tail, 0, remainder, copiedThrough);
+        // A torn suffix belongs to a writer that has not repaired it yet; let it, then retry.
+        if (read !== remainder || tail[remainder - 1] !== 0x0a) return notCompacted;
+        this.writeAll(activeOut.fd, tail);
+        fsyncSync(activeOut.fd);
+      }
+      // While the lock was free, another store's orphan collection may have removed the prepared files.
+      // Writes to an unlinked active file still succeed, so check the names before committing to them.
+      let preparedSegment;
+      let preparedActive;
+      try {
+        preparedSegment = lstatSync(segmentPath);
+        preparedActive = lstatSync(activePath, { bigint: true });
+      } catch {
+        preparedSegment = preparedActive = null;
+      }
+      const written = fstatSync(activeOut.fd, { bigint: true });
+      if (
+        !preparedSegment?.isFile() || preparedSegment.size !== cutBytes ||
+        !preparedActive?.isFile() || preparedActive.ino !== written.ino || preparedActive.dev !== written.dev ||
+        staged.some((file) => !existsSync(file.tmp))
+      ) {
+        throw new HistoryStoreError("history_epoch_changed", "prepared compaction files were removed before publication");
+      }
+      // The session lock is best effort: another acquirer can overwrite it. Re-read it last.
+      if (!this.ownsLock(id, owner)) return notCompacted;
+      // The fence intent must be durable before the manifest that commits it.
+      for (const file of staged) this.publishHistoryFile(id, file);
+      committed = true;
+      // Extend the append layout in place of a full refetch: the new segment was just written,
+      // fsynced, and published, so only the new active file needs reading. Keying the entry by the
+      // published inode, not a fresh stat, makes any later replacement miss.
+      try {
+        this.cacheHistoryLayout(id, epoch, stagedManifest.key, this.layoutFromManifest(id, manifest));
+      } catch {
+        this.historyLayoutCache.delete(id); // the next append refetches and reports any damage
+      }
+      if (legacy) {
+        // Retiring the legacy file is its own durable step (rename, mkdir, directory fsync). The committed
+        // intent makes any layout read finish it, even after a crash, so let other work run first. This
+        // continuation resumed from I/O, so one immediate would still run in this loop iteration; the
+        // second waits for the next one, after its timers and I/O.
+        await yieldToEventLoop();
+        await yieldToEventLoop();
+        this.recoverLegacyFence(id, manifest);
+      }
+      // Logical history is byte-identical. Only source-file topology changed; keep the derived
+      // index/checkpoint caches and frozen cursor boundaries intact.
+      return { compacted: true, bytesArchived: cutBytes };
+    } finally {
+      this.compactionsInFlight.delete(token);
+      await Promise.all([source?.close(), activeOut?.close()]).catch(() => undefined);
+      rmSync(segmentTmp, { force: true });
+      for (const file of staged) rmSync(file.tmp, { force: true });
+      if (!committed) {
+        if (segmentPath) rmSync(segmentPath, { force: true });
+        rmSync(activePath, { force: true });
+      }
+    }
+  }
+
+  /** Validate the durable tail under the writer lock and bound the cut. Returns null when there is
+   * nothing to archive. */
+  private planHistoryCompaction(id: string, owner: string, force: boolean): {
+    epoch: number;
+    manifestKey: string | null;
+    layout: HistoryLayout;
+    tailSeq: number;
+    maxCutBytes: number;
+    maxCutSeq: number;
+  } | null {
+    if (!this.ownsLock(id, owner)) return null;
+    // No flush(): the new segment and active generation are fsynced before the manifest names them,
+    // so the old active file's durability is irrelevant, and pending metadata keeps its own flush.
     const meta = this.readDiskMeta(id);
-    if (!meta) return { compacted: false, bytesArchived: 0 };
+    if (!meta) return null;
     const epoch = meta.logEpoch ?? 0;
+    const manifestKey = this.historyManifestKey(id);
     const layout = this.historyLayout(id, epoch);
     const policy = this.historyCompactionPolicy;
     if (!force && layout.active.bytes <= policy.triggerActiveBytes) {
       if (!this.readHistoryIndexInfo(id, epoch)) {
         this.ensureHistoryIndex(id, epoch, this.historyTail(id));
       }
-      return { compacted: false, bytesArchived: 0 };
+      return null;
     }
     const tail = this.ensureHistoryIndex(id, epoch, this.historyTail(id));
     if (tail.completeBytes !== tail.fileBytes) {
@@ -2036,79 +2276,66 @@ export class SessionStore {
       Math.max(0, layout.active.bytes - policy.retainActiveBytes),
     );
     const maxCutSeq = tail.seq - policy.retainActiveEvents;
-    if (maxCutBytes <= 0 || maxCutSeq < 1) return { compacted: false, bytesArchived: 0 };
+    if (maxCutBytes <= 0 || maxCutSeq < 1) return null;
+    return { epoch, manifestKey, layout, tailSeq: tail.seq, maxCutBytes, maxCutSeq };
+  }
 
-    const activeStart = layout.active.virtualStart;
-    let firstSeq = 0;
-    let lastSeq = 0;
-    let cutBytes = 0;
-    this.scanHistoryLines(id, activeStart, activeStart + maxCutBytes, (line, offset) => {
-      const event = this.parseStoredEvent(line);
-      if (firstSeq === 0) firstSeq = event.seq;
-      if (event.seq > maxCutSeq) return false;
-      lastSeq = event.seq;
-      cutBytes = offset + line.length + 1 - activeStart;
-    });
-    const expectedFirstSeq = (layout.manifest?.segments.at(-1)?.lastSeq ?? 0) + 1;
-    if (cutBytes <= 0 || firstSeq !== expectedFirstSeq || lastSeq >= tail.seq) {
-      return { compacted: false, bytesArchived: 0 };
-    }
-
-    const token = `${epoch}.${firstSeq}-${lastSeq}.${randomUUID()}`;
-    const segmentTmp = join(this.dir(id), `events.segment.${token}.ndjson.tmp`);
-    const activeTmp = join(this.dir(id), `events.active.${token}.ndjson.tmp`);
-    let segmentPath: string | null = null;
-    let activePath: string | null = null;
-    let committed = false;
+  /** Copy `bytes` from `start` into a new fsynced file and return its SHA-256. */
+  private async copyHistoryRangeAsync(source: FileHandle, start: number, bytes: number, target: string): Promise<string> {
+    const output = await open(target, "wx");
+    const hash = createHash("sha256");
     try {
-      const sha256 = this.copyHistoryRange(layout.active.path, 0, cutBytes, segmentTmp);
-      this.copyHistoryRange(layout.active.path, cutBytes, layout.active.bytes - cutBytes, activeTmp);
-      const segmentFile = `events.segment.${token}.${sha256.slice(0, 16)}.ndjson`;
-      const activeFile = `events.active.${token}.ndjson`;
-      segmentPath = join(this.dir(id), segmentFile);
-      activePath = join(this.dir(id), activeFile);
-      renameSync(segmentTmp, segmentPath);
-      renameSync(activeTmp, activePath);
-      this.fsyncDirectory(this.dir(id));
-
-      const beforePublish = this.readDiskMeta(id);
-      if (!beforePublish || (beforePublish.logEpoch ?? 0) !== epoch || !this.ownsLock(id, owner)) {
-        throw new HistoryStoreError("history_epoch_changed", "session history changed during compaction");
+      const chunk = Buffer.alloc(HISTORY_COMPACTION_COPY_CHUNK_BYTES);
+      let copied = 0;
+      while (copied < bytes) {
+        const wanted = Math.min(chunk.length, bytes - copied);
+        const { bytesRead } = await source.read(chunk, 0, wanted, start + copied);
+        if (bytesRead === 0) throw new HistoryStoreError("history_corrupt", "session history changed during compaction");
+        const contents = chunk.subarray(0, bytesRead);
+        hash.update(contents);
+        await this.writeAllAsync(output, contents);
+        copied += bytesRead;
       }
-      const manifest: HistoryManifest = {
-        version: HISTORY_MANIFEST_VERSION,
-        logEpoch: epoch,
-        activeFile,
-        segments: [
-          ...(layout.manifest?.segments ?? []),
-          { file: segmentFile, firstSeq, lastSeq, bytes: cutBytes, sha256 },
-        ],
-      };
-      const retiredFile = `events.retired.${token}.ndjson`;
-      if (layout.active.file === "events.ndjson") {
-        this.writeLegacyFenceIntent(id, activeFile, retiredFile);
-      }
-      const publishedKey = this.publishHistoryManifest(id, manifest);
-      committed = true;
-      if (layout.active.file === "events.ndjson") this.recoverLegacyFence(id, manifest);
-      // Extend the append layout in place of a full refetch: the new segment was just written,
-      // fsynced, and published, so only the new active file needs reading. Keying the entry by the
-      // published inode, not a fresh stat, makes any later replacement miss.
-      try {
-        this.cacheHistoryLayout(id, epoch, publishedKey, this.layoutFromManifest(id, manifest));
-      } catch {
-        this.historyLayoutCache.delete(id); // the next append refetches and reports any damage
-      }
-      // Logical history is byte-identical. Only source-file topology changed; keep the derived
-      // index/checkpoint caches and frozen cursor boundaries intact.
-      return { compacted: true, bytesArchived: cutBytes };
+      await output.sync();
     } finally {
-      rmSync(segmentTmp, { force: true });
-      rmSync(activeTmp, { force: true });
-      if (!committed) {
-        if (segmentPath) rmSync(segmentPath, { force: true });
-        if (activePath) rmSync(activePath, { force: true });
+      await output.close();
+    }
+    return hash.digest("hex");
+  }
+
+  /** Append source bytes `[start, end)` through their last newline and return the new copy cursor.
+   * Torn-tail repair truncates only after a file's final newline, so bytes ending at an observed
+   * newline never change again within one log epoch. */
+  private async appendCompleteHistoryLines(source: FileHandle, start: number, end: number, target: FileHandle): Promise<number> {
+    let completeEnd = end;
+    const probe = Buffer.alloc(HISTORY_SCAN_CHUNK_BYTES);
+    while (completeEnd > start) {
+      const probeStart = Math.max(start, completeEnd - probe.length);
+      const { bytesRead } = await source.read(probe, 0, completeEnd - probeStart, probeStart);
+      const newline = probe.subarray(0, bytesRead).lastIndexOf(0x0a);
+      if (newline >= 0) {
+        completeEnd = probeStart + newline + 1;
+        break;
       }
+      completeEnd = probeStart;
+    }
+    const chunk = Buffer.alloc(HISTORY_COMPACTION_COPY_CHUNK_BYTES);
+    let position = start;
+    while (position < completeEnd) {
+      const wanted = Math.min(chunk.length, completeEnd - position);
+      const { bytesRead } = await source.read(chunk, 0, wanted, position);
+      if (bytesRead === 0) throw new HistoryStoreError("history_corrupt", "session history changed during compaction");
+      await this.writeAllAsync(target, chunk.subarray(0, bytesRead));
+      position += bytesRead;
+    }
+    return completeEnd;
+  }
+
+  private async writeAllAsync(target: FileHandle, contents: Buffer): Promise<void> {
+    let written = 0;
+    while (written < contents.length) {
+      const result = await target.write(contents, written, contents.length - written);
+      written += result.bytesWritten;
     }
   }
 
@@ -2120,9 +2347,11 @@ export class SessionStore {
     try {
       for (const entry of readdirSync(this.dir(id), { withFileTypes: true })) {
         if (removed >= limit || !entry.isFile() || referenced.has(entry.name)) continue;
+        if ([...this.compactionsInFlight].some((token) => entry.name.includes(token))) continue;
         if (
           !this.isHistoryFileName(entry.name) &&
           !/^events\.(active|segment)\..+\.ndjson\.tmp$/.test(entry.name) &&
+          !/^events\.(manifest|legacy-fence)\.json\..+\.tmp$/.test(entry.name) &&
           !/^events\.retired\..+\.ndjson$/.test(entry.name)
         ) continue;
         const path = join(this.dir(id), entry.name);
@@ -2145,8 +2374,9 @@ export class SessionStore {
   }
 
   /** Bounded idle maintenance. It never steals a fresh writer lock and processes only `limit`
-   * sessions per pass, keeping fleet startup and command completion independent of archive work. */
-  maintainHistories(owner: string, limit = 4): HistoryMaintenanceResult {
+   * sessions per pass, keeping fleet startup and command completion independent of archive work.
+   * The lock is released while a compaction copies, so a turn may start at any point. */
+  async maintainHistories(owner: string, limit = 4): Promise<HistoryMaintenanceResult> {
     const result: HistoryMaintenanceResult = {
       inspected: 0,
       compacted: 0,
@@ -2168,10 +2398,12 @@ export class SessionStore {
       if (!this.acquireLock(meta.sessionId, owner)) continue;
       result.inspected += 1;
       try {
-        const compacted = this.compactHistory(meta.sessionId, owner);
+        const compacted = await this.runHistoryCompaction(meta.sessionId, owner, false, true);
         if (compacted.compacted) result.compacted += 1;
         result.bytesArchived += compacted.bytesArchived;
-        result.orphansRemoved += this.cleanupHistoryOrphans(meta.sessionId);
+        if (this.ownsLock(meta.sessionId, owner)) {
+          result.orphansRemoved += this.cleanupHistoryOrphans(meta.sessionId);
+        }
       } catch {
         result.errors += 1;
       } finally {
@@ -2888,6 +3120,20 @@ export class SessionStore {
     } catch {
       return false;
     }
+  }
+
+  /** Take the lock only if no lock file exists, with an exclusive create. A compaction that let the
+   * lock go for its copy must never take it back by overwriting or by stale takeover. */
+  private acquireFreeLock(id: string, owner: string): boolean {
+    try {
+      writeFileSync(this.lockPath(id), owner, { flag: "wx" });
+    } catch {
+      return false;
+    }
+    this.seqReconciled.delete(id);
+    this.checkpointCache.delete(id);
+    this.historyLayoutCache.delete(id);
+    return this.ownsLock(id, owner);
   }
 
   ownsLock(id: string, owner: string): boolean {
