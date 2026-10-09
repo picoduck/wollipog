@@ -1,22 +1,15 @@
-import { useMemo, useRef } from "react";
 import type { SessionEvent } from "@wollipog/protocol";
-import { useStoreSelector } from "../store.js";
-import {
-  continueStreamingText,
-  publishTimelineSnapshotDelta,
-  timelineItemIsStreaming,
-  timelineSnapshotDelta,
-  type TimelineItem,
-} from "../timeline.js";
+import { continueStreamingText, timelineItemIsStreaming, type TimelineItem } from "../timeline.js";
 
 /**
  * Most streamed events only lengthen the reply or reasoning the transcript already ends with. The
- * session view derives everything else it shows from the transcript, but none of it depends on
- * that text, so it is not rendered for such an event (#2763). Only the transcript is, through
- * `useLiveTimelineTail`, which folds those chunks onto the item the session view derived.
+ * session view and the timeline derive everything they show from the transcript, but none of it
+ * depends on that text, so neither renders for such an event (#2763). Only the streaming row does:
+ * it folds the chunks onto the item it was given with `foldLiveText`.
  */
 
 type AgentTextPayload = Extract<SessionEvent["payload"], { kind: "agent_message" | "agent_thought" }>;
+type AgentTextItem = Extract<TimelineItem, { kind: "agent_message" | "agent_thought" }>;
 
 function openTopLevelText(event: SessionEvent): AgentTextPayload | null {
   const payload = event.payload;
@@ -24,6 +17,20 @@ function openTopLevelText(event: SessionEvent): AgentTextPayload | null {
   // Only an absent parent is top-level: the builder tells an empty one apart from none.
   if (payload.final || payload.parentToolUseId !== undefined || typeof payload.text !== "string") return null;
   return payload;
+}
+
+/** A provider message id; the builder treats an empty one as none. */
+const streamId = (messageId: string | undefined) => messageId || undefined;
+
+/**
+ * Whether `event` is one more chunk of the stream `last` belongs to, after `previous` in sequence
+ * and time. A chunk timed earlier than the one before it can move a governance decision anchored
+ * by time; the session view derives that itself.
+ */
+function continuesStream(last: SessionEvent, stream: AgentTextPayload, previous: SessionEvent, event: SessionEvent): boolean {
+  const chunk = openTopLevelText(event);
+  return chunk !== null && chunk.kind === stream.kind && streamId(chunk.messageId) === streamId(stream.messageId) &&
+    event.sessionId === last.sessionId && event.seq > previous.seq && event.ts >= previous.ts;
 }
 
 /**
@@ -42,99 +49,39 @@ export function onlyContinuesTrailingText(
   if (next[0] !== previous[0] || next[previous.length - 1] !== last) return false;
   const stream = openTopLevelText(last);
   if (!stream) return false;
-  let seq = last.seq;
-  let ts = last.ts;
   for (let index = previous.length; index < next.length; index += 1) {
-    const event = next[index]!;
-    const chunk = openTopLevelText(event);
-    // A chunk timed earlier than the one before it can move a governance decision anchored by time;
-    // the session view derives that itself.
-    if (!chunk || chunk.kind !== stream.kind || chunk.messageId !== stream.messageId ||
-        event.sessionId !== last.sessionId || event.seq <= seq || !(event.ts >= ts)) return false;
-    seq = event.seq;
-    ts = event.ts;
+    if (!continuesStream(last, stream, next[index - 1]!, next[index]!)) return false;
   }
   return true;
 }
 
-/** Two generations of one item with the same fields and the same streaming state. */
-function sameItem(previous: TimelineItem | undefined, next: TimelineItem): boolean {
-  if (!previous || previous.kind !== next.kind || timelineItemIsStreaming(previous) !== timelineItemIsStreaming(next)) return false;
-  const left = previous as unknown as Record<string, unknown>;
-  const right = next as unknown as Record<string, unknown>;
-  const keys = Object.keys(left);
-  return keys.length === Object.keys(right).length && keys.every((key) => left[key] === right[key]);
-}
-
-/** `items` with the chunks `live` adds to `derivedFrom` folded onto the streaming item they continue,
- * or null when that item is not among them. */
-function foldTrailingText(
-  items: TimelineItem[],
-  derivedFrom: readonly SessionEvent[],
-  live: readonly SessionEvent[],
-): TimelineItem[] | null {
-  const last = derivedFrom[derivedFrom.length - 1]!;
-  for (let index = items.length - 1; index >= 0; index -= 1) {
-    const candidate = items[index]!;
-    if ((candidate.kind !== "agent_message" && candidate.kind !== "agent_thought") ||
-        candidate.kind !== last.payload.kind || candidate.sourceEndId !== last.seq ||
-        candidate.parentToolUseId || !timelineItemIsStreaming(candidate)) continue;
-    let item = candidate;
-    for (let next = derivedFrom.length; next < live.length; next += 1) {
-      const event = live[next]!;
-      item = continueStreamingText(item, event.seq, (event.payload as AgentTextPayload).text, event.ts);
-    }
-    const folded = items.slice();
-    folded[index] = item;
-    return folded;
-  }
-  return null;
-}
-
 /**
- * The transcript's items: the session view's `items`, derived from `derivedFrom`, plus the chunks
- * the session's live events have added to its trailing reply since. Each result carries a snapshot
- * delta against the previous one, so the row projector updates only the rows that changed.
+ * A streaming top-level reply or reasoning item with the chunks `live` holds after the last one it
+ * was derived from, or the item itself when there are none (or when anything else followed, which
+ * the session view derives itself).
  */
-export function useLiveTimelineTail(
-  sessionId: string,
-  derivedFrom: SessionEvent[] | undefined,
-  items: TimelineItem[],
-): TimelineItem[] {
-  const live = useStoreSelector((state) => state.events.get(sessionId));
-  const previousRef = useRef<TimelineItem[] | null>(null);
-  return useMemo(() => {
-    const previous = previousRef.current;
-    const folded = live !== derivedFrom && onlyContinuesTrailingText(derivedFrom, live)
-      ? foldTrailingText(items, derivedFrom!, live!)
-      : null;
-    // Without chunks to add, the session view's items pass through, unless the transcript last
-    // showed its own generation: the projector then needs a delta against that one.
-    if (!folded && (!previous || previous === items || timelineSnapshotDelta(items)?.previous === previous)) {
-      previousRef.current = items;
-      return items;
-    }
-    const next = folded ?? items.slice();
-    if (previous) {
-      const dirtyIndexes: number[] = [];
-      let dirtyHasParentItems = false;
-      for (let index = 0; index < Math.max(previous.length, next.length); index += 1) {
-        if (previous[index] === next[index]) continue;
-        // The session view re-deriving chunks the transcript already folded yields an equal item;
-        // keep the one the row already shows, so it does not render (or parse) again.
-        if (index < next.length && sameItem(previous[index], next[index]!)) {
-          next[index] = previous[index]!;
-          continue;
-        }
-        dirtyIndexes.push(index);
-        for (const item of [previous[index], next[index]]) {
-          if (item && "parentToolUseId" in item && item.parentToolUseId) dirtyHasParentItems = true;
-        }
-      }
-      if (dirtyIndexes.length === 0) return previous;
-      publishTimelineSnapshotDelta(next, { previous, dirtyFrom: dirtyIndexes[0]!, dirtyIndexes, dirtyHasParentItems });
-    }
-    previousRef.current = next;
-    return next;
-  }, [derivedFrom, items, live]);
+export function foldLiveText(item: TimelineItem, live: readonly SessionEvent[] | undefined): TimelineItem {
+  if (!live || !readsLiveText(item)) return item;
+  const text = item as AgentTextItem;
+  const end = text.sourceEndId;
+  if (end === undefined) return item;
+  let index = live.length - 1;
+  while (index >= 0 && live[index]!.seq > end) index -= 1;
+  const last = live[index];
+  if (!last || last.seq !== end || index === live.length - 1) return item;
+  const stream = openTopLevelText(last);
+  if (!stream || stream.kind !== text.kind || streamId(stream.messageId) !== streamId(text.messageId)) return item;
+  let folded: AgentTextItem = text;
+  for (let next = index + 1; next < live.length; next += 1) {
+    const event = live[next]!;
+    if (!continuesStream(last, stream, live[next - 1]!, event)) return item;
+    folded = continueStreamingText(folded, event.seq, (event.payload as AgentTextPayload).text, event.ts);
+  }
+  return folded;
+}
+
+/** Top-level reply or reasoning that can still gain chunks: the rows that read live text. */
+export function readsLiveText(item: TimelineItem): boolean {
+  return (item.kind === "agent_message" || item.kind === "agent_thought") && item.parentToolUseId === undefined &&
+    timelineItemIsStreaming(item);
 }

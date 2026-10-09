@@ -85,7 +85,7 @@ import {
   type TimelineItem,
 } from "../timeline.js";
 import { useTimeline } from "./useTimeline.js";
-import { onlyContinuesTrailingText, useLiveTimelineTail } from "./live-timeline-tail.js";
+import { onlyContinuesTrailingText } from "./live-timeline-tail.js";
 import type { SessionActivity } from "../activity.js";
 import {
   Modal,
@@ -992,16 +992,12 @@ function sameComposerTriggers(left: ComposerTriggers, right: ComposerTriggers): 
 
 /**
  * The transcript behind the timeline's own props compare, with the render probe inside that
- * boundary, so the probe counts the timeline's renders rather than its parent's (#2764). It also
- * shows the chunks streamed into the trailing reply since `items` was derived from
- * `itemsDerivedFrom`, which render the transcript without the session view around it (#2763).
+ * boundary, so the probe counts the timeline's renders rather than its parent's (#2764).
  */
-const ProfiledEventTimeline = memo(function ProfiledEventTimeline({ liveSessionId, itemsDerivedFrom, items, ...props }:
-  ComponentProps<typeof EventTimeline> & { liveSessionId: string; itemsDerivedFrom: SessionEvent[] | undefined }) {
-  const liveItems = useLiveTimelineTail(liveSessionId, itemsDerivedFrom, items);
+const ProfiledEventTimeline = memo(function ProfiledEventTimeline(props: ComponentProps<typeof EventTimeline>) {
   return (
     <Profiler id={TRANSCRIPT_PROBE} onRender={reportRenderProbe}>
-      <EventTimeline {...props} items={liveItems} />
+      <EventTimeline {...props} />
     </Profiler>
   );
 });
@@ -1129,8 +1125,8 @@ function SessionDetailLoaded({
   const openSession = useCallback((id: string) => navigate({ name: "session", id }), [navigate]);
   const recoveryEventEpoch = useStoreSelector((s) => s.sessions.get(sessionId)?.eventEpoch ?? 0);
   const recoveryGeneration = useStoreSelector((s) => s.snapshotRevision);
-  // A chunk that only lengthens the trailing reply renders the transcript alone (`ProfiledEventTimeline`
-  // folds it in); this view reads it the next time it renders for anything else (#2763).
+  // A chunk that only lengthens the trailing reply renders that reply's row alone (it reads the
+  // chunk itself; see `liveTextSessionId`); this view reads it the next time it renders (#2763).
   const evs = useStoreSelectorUnlessQuiet((s) => s.events.get(sessionId), onlyContinuesTrailingText);
   // Read inside the recovery effect without becoming one of its dependencies: that effect must run
   // once per open, not once per streamed event.
@@ -6840,8 +6836,7 @@ function SessionDetailLoaded({
                       <ProfiledEventTimeline
                         driver={session.driver}
                         items={timelineItems}
-                        itemsDerivedFrom={evs}
-                        liveSessionId={sessionId}
+                        liveTextSessionId={sessionId}
                         sessionActive={isTimelineSessionActive(session.status)}
                         onOpenSubagent={mode === "expanded" ? openSubagent : undefined}
                         onOpenSourceLocation={openSourceLocation}

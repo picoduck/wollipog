@@ -15,6 +15,9 @@ export const TRANSCRIPT_PROBE = "session-transcript";
 /** The session view itself, not the transcript inside it: the view renders it whenever the view
  * renders, and a streamed chunk that renders only the transcript does not (#2763). */
 export const SESSION_DETAIL_PROBE = "session-detail";
+/** The timeline's own body: it renders it whenever the body renders, and a streamed chunk that
+ * renders only the reply's row does not (#2763). `TRANSCRIPT_PROBE` reports that row too. */
+export const TIMELINE_BODY_PROBE = "timeline-body";
 /** One transcript row (#2763). Each row reports as `timeline-row:<item id>`; observing the bare
  * prefix receives every row with its full id, so a test can tell which rows rendered. */
 export const TIMELINE_ROW_PROBE = "timeline-row";

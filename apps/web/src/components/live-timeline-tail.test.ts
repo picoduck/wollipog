@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import fc from "fast-check";
 import type { SessionEvent } from "@wollipog/protocol";
-import { continueStreamingText, TimelineBuilder, timelineItemIsStreaming, type TimelineItem } from "../timeline.js";
-import { onlyContinuesTrailingText } from "./live-timeline-tail.js";
+import { TimelineBuilder, timelineItemIsStreaming, type TimelineItem } from "../timeline.js";
+import { foldLiveText, onlyContinuesTrailingText, readsLiveText } from "./live-timeline-tail.js";
 
 /**
- * The session view is not rendered for a chunk that only lengthens the trailing reply (#2763); the
- * transcript folds it in with `continueStreamingText`. These tests pin which chunks qualify, and
- * hold the fold to exactly what `TimelineBuilder` derives from the same events.
+ * Neither the session view nor the timeline renders for a chunk that only lengthens the trailing
+ * reply (#2763); the reply's row folds it in with `foldLiveText`. These tests pin which chunks
+ * qualify, and hold the fold to exactly what `TimelineBuilder` derives from the same events.
  */
 
 let nextSeq = 0;
@@ -83,13 +83,37 @@ test("folding chunks onto the derived reply equals deriving them, for any split"
       const expected = derive(live);
       const items = derive(derivedFrom);
       const index = items.length - 1;
-      let folded = items[index] as Extract<TimelineItem, { kind: "agent_message" | "agent_thought" }>;
-      for (const event of chunks.slice(split)) {
-        folded = continueStreamingText(folded, event.seq, (event.payload as { text: string }).text, event.ts);
+      assert.equal(readsLiveText(items[index]!), true);
+      const folded = foldLiveText(items[index]!, live);
+      if (!forward) {
+        assert.equal(folded, items[index], "the row leaves backward-timed chunks to the session view");
+        return;
       }
       assert.deepEqual(folded, expected[index]);
       assert.equal(timelineItemIsStreaming(folded), timelineItemIsStreaming(expected[index]!));
       assert.deepEqual(items.slice(0, index), expected.slice(0, index), "nothing before the reply changes");
     },
   ), { numRuns: 500 });
+});
+
+test("a row shows only chunks of its own stream that follow what it was derived from", () => {
+  nextSeq = 0;
+  const prompt = at({ kind: "user_message", text: "Go", images: [] });
+  const first = chunk("One ");
+  const reply = derive([prompt, first])[1]!;
+  const more = chunk("two");
+  assert.equal(foldLiveText(reply, [prompt, first]), reply, "nothing new: the item itself");
+  assert.equal(foldLiveText(reply, undefined), reply);
+  assert.equal((foldLiveText(reply, [prompt, first, more]) as { text: string }).text, "One two");
+  const tool = at({ kind: "tool_call", toolCallId: "t", title: "Read", status: "completed" });
+  assert.equal(foldLiveText(reply, [prompt, first, more, tool]), reply,
+    "anything else after it is the session view's to derive");
+  assert.equal(foldLiveText(reply, [prompt, first, chunk("x", { kind: "agent_thought" })]), reply);
+  assert.equal(foldLiveText(reply, [prompt, chunk("rebuilt history")]), reply, "its last chunk must be there");
+
+  const settled = derive([prompt, first, at({ kind: "agent_response_completed" })])[1]!;
+  assert.equal(readsLiveText(settled), false, "a settled reply reads nothing live");
+  assert.equal(foldLiveText(settled, [prompt, first, chunk("late")]), settled);
+  const subagent = derive([prompt, chunk("sub", { parentToolUseId: "tool-1" })]).find((item) => item.kind === "agent_message")!;
+  assert.equal(readsLiveText(subagent), false, "a subagent's text is the session view's to derive");
 });

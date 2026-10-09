@@ -13,7 +13,7 @@ import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-t
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
 import { SessionDetail } from "./SessionDetail.js";
-import { observeRenderProbe, SESSION_DETAIL_PROBE, TIMELINE_ROW_PROBE } from "./render-probe.js";
+import { observeRenderProbe, SESSION_DETAIL_PROBE, TIMELINE_BODY_PROBE, TIMELINE_ROW_PROBE } from "./render-probe.js";
 
 /**
  * While an agent streams, only the transcript row whose data changed renders (#2763).
@@ -229,31 +229,36 @@ test("streaming a reply renders only its own transcript row", async () => {
     assert.ok((rendered.get(replyRow) ?? 0) > 0, `the streaming reply renders (${[...rendered.keys()].join(", ")})`);
     const others = [...rendered].filter(([id]) => id !== replyRow);
     assert.deepEqual(others, [], "no row whose data did not change renders while the reply streams");
-    assert.ok((rendered.get(replyRow) ?? 0) <= words.length, "and the reply renders at most once per frame");
+    // Twelve frames of chunks and one of the upsert.
+    assert.ok((rendered.get(replyRow) ?? 0) <= words.length + 1, "and the reply renders at most once per frame");
   } finally {
     stop();
     await view.unmount();
   }
 });
 
-test("a chunk that only lengthens the reply renders the transcript, not the session view", async () => {
+test("a chunk that only lengthens the reply renders its row alone, not the timeline or the session view", async () => {
   const view = await mount();
   let sessionViewRenders = 0;
+  let timelineRenders = 0;
   const transcriptRows = new Map<string, number>();
   const stops = [
     observeRenderProbe(SESSION_DETAIL_PROBE, () => { sessionViewRenders += 1; }),
+    observeRenderProbe(TIMELINE_BODY_PROBE, () => { timelineRenders += 1; }),
     observeRenderProbe(TIMELINE_ROW_PROBE, (id) => transcriptRows.set(id, (transcriptRows.get(id) ?? 0) + 1)),
   ];
   try {
     const words = "Each chunk folds into the reply the session view already derived".split(" ");
     await view.append({ kind: "agent_message", text: `${words[0]} ` });
     const afterFirst = sessionViewRenders;
+    const timelineAfterFirst = timelineRenders;
     assert.ok(afterFirst > 0, "the reply's first chunk is a new transcript item, which the session view derives");
     for (const word of words.slice(1)) await view.append({ kind: "agent_message", text: `${word} ` });
     const reply = words.join(" ");
     const text = () => view.container.textContent ?? "";
     assert.ok(text().includes(reply), "every chunk is shown");
     assert.equal(sessionViewRenders, afterFirst, "and none of the later chunks rendered the session view");
+    assert.equal(timelineRenders, timelineAfterFirst, "or the timeline around the reply");
     const replyRow = `${TIMELINE_ROW_PROBE}:${history.length + 1}`;
     assert.ok((transcriptRows.get(replyRow) ?? 0) >= words.length - 1, "the reply's row rendered for each of them");
 

@@ -42,7 +42,9 @@ import { diffFileIsPlain, diffMaxLineNumber, hunkLabel, parseUnifiedDiff, type D
 import { markdownPlainText } from "./markdown-plain-text.js";
 import { TranscriptActionMenu, transcriptActionAvailable, type TranscriptAction } from "./TranscriptActions.js";
 import { useIsCoarsePointer } from "./useIsMobile.js";
-import { reportRenderProbe, TIMELINE_ROW_PROBE } from "./render-probe.js";
+import { reportRenderProbe, TIMELINE_BODY_PROBE, TIMELINE_ROW_PROBE } from "./render-probe.js";
+import { foldLiveText, readsLiveText } from "./live-timeline-tail.js";
+import { useOptionalStoreSelector } from "../store.js";
 import { formatClock, formatTokens, formatCost, formatDuration, formatRecordedRelativeTime, formatRecordedTimestamp, titleCaseLabel } from "../format.js";
 import {
   activitySpanDescription,
@@ -561,6 +563,7 @@ export const EventTimeline = memo(function EventTimeline({
   questionContext,
   workspaceRoot,
   onOpenSession,
+  liveTextSessionId,
 }: {
   handoff?: { open: (turn: number) => void; reason?: string };
   /** Retry Turn on a failed turn's notice; absent where a transcript cannot start a turn. */
@@ -605,11 +608,17 @@ export const EventTimeline = memo(function EventTimeline({
   workspaceRoot?: string;
   /** Open another session, such as a fork's source; must be identity-stable. */
   onOpenSession?: (sessionId: string) => void;
+  /**
+   * The live session these items were derived from. A still-streaming reply's row then reads the
+   * chunks that only lengthen it from the store itself, so they render that row alone (#2763).
+   */
+  liveTextSessionId?: string;
 }) {
   const effectiveHistoryKey = historyKey ?? "timeline";
   const scopedRevealRequest = revealRequest?.historyKey === effectiveHistoryKey ? revealRequest : null;
   return (
     <HandoffContext.Provider value={handoff}>
+    <LiveTextSessionContext.Provider value={liveTextSessionId}>
     <TimelineSessionLinkContext.Provider value={onOpenSession}>
     <TurnRetryContext.Provider value={turnRetry}>
     <TranscriptImageCacheProvider key={effectiveHistoryKey} enabled={historyKey !== undefined}>
@@ -644,6 +653,7 @@ export const EventTimeline = memo(function EventTimeline({
     </TranscriptImageCacheProvider>
     </TurnRetryContext.Provider>
     </TimelineSessionLinkContext.Provider>
+    </LiveTextSessionContext.Provider>
     </HandoffContext.Provider>
   );
 });
@@ -906,6 +916,7 @@ function EventTimelineBody({
   );
   return (
     <TimelineClockProvider enabled={sessionActive} sessionActive={sessionActive} driver={driver}>
+      <Profiler id={TIMELINE_BODY_PROBE} onRender={reportRenderProbe} />
       <WorkspaceRootContext.Provider value={workspaceRoot}>
         <OpenInReviewContext.Provider value={onOpenInReview}>{timeline}</OpenInReviewContext.Provider>
       </WorkspaceRootContext.Provider>
@@ -970,6 +981,9 @@ const OpenInReviewContext = createContext<((path: string) => void) | undefined>(
 
 /** Opens another session in the app; absent where the transcript cannot navigate (a shared page). */
 const TimelineSessionLinkContext = createContext<((sessionId: string) => void) | undefined>(undefined);
+
+/** The live session a still-streaming reply reads its chunks from; absent outside a live session. */
+const LiveTextSessionContext = createContext<string | undefined>(undefined);
 
 function TimelineClockProvider({ enabled, sessionActive, driver, children }: {
   enabled: boolean;
@@ -2134,12 +2148,29 @@ const TimelineRow = memo(function TimelineRow({
       : undefined,
     [disclosureKey, disclosureOpen, onToggleDisclosure],
   );
+  const liveTextSessionId = useContext(LiveTextSessionContext);
   return (
     <Profiler id={`${TIMELINE_ROW_PROBE}:${props.item.id}`} onRender={reportRenderProbe}>
-      <TimelineRowContent {...props} disclosureOpen={disclosureOpen} onDisclosureToggle={onDisclosureToggle} />
+      {liveTextSessionId !== undefined && readsLiveText(props.item) ? (
+        <LiveTextRowContent
+          {...props}
+          sessionId={liveTextSessionId}
+          disclosureOpen={disclosureOpen}
+          onDisclosureToggle={onDisclosureToggle}
+        />
+      ) : (
+        <TimelineRowContent {...props} disclosureOpen={disclosureOpen} onDisclosureToggle={onDisclosureToggle} />
+      )}
     </Profiler>
   );
 });
+
+/** A still-streaming reply's row, showing the chunks streamed into it since its item was derived. */
+function LiveTextRowContent({ sessionId, item, ...props }: TimelineRowContentProps & { sessionId: string }) {
+  const live = useOptionalStoreSelector((state) => state.events.get(sessionId));
+  const shown = useMemo(() => foldLiveText(item, live), [item, live]);
+  return <TimelineRowContent {...props} item={shown} />;
+}
 
 interface TimelineRowContentProps {
   item: TimelineItem;
