@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { beforeEach, test } from "node:test";
+import { beforeEach, mock, test } from "node:test";
 import {
   PANEL_SCRATCH_CLEARED_SCOPE_LIMIT,
   PANEL_SCRATCH_PERSIST_CHAR_LIMIT,
@@ -7,12 +7,23 @@ import {
   clearPanelScratch,
   clearPanelScratchIf,
   dropPanelScratchMemory,
+  flushPanelScratch,
   panelScratchRevision,
   panelScratchScopeCount,
   panelScratchScopeKey,
   readPanelScratch,
-  writePanelScratch,
+  writePanelScratch as writePanelScratchLater,
 } from "./right-panel-scratch.js";
+
+/**
+ * A write that has reached storage. Writes are mirrored after a short pause (#2764); the cases here
+ * are about what is stored once they have been, so each one waits out that pause. The pause itself
+ * is covered in right-panel-scratch.debounce.test.ts.
+ */
+function writePanelScratch(...args: Parameters<typeof writePanelScratchLater>): void {
+  writePanelScratchLater(...args);
+  flushPanelScratch();
+}
 
 /** Where one scope's record lives, spelled the way the module writes it. */
 const RECORD_PREFIX = "wollipog.right-panel-scratch.v2:";
@@ -244,6 +255,10 @@ test("a sent draft releases its scope to the bound on the spot", () => {
   assert.equal(readPanelScratch(scopes[1]!, "files.directory"), undefined,
     "the least recently used released scope is the one the bound takes");
   assert.equal(readPanelScratch(scopes[0]!, "files.directory"), "apps/web");
+  // Storage obeys the same bound at once. A removal always sweeps, even though a write to an
+  // existing record otherwise skips the origin-wide sweep (#2764).
+  assert.equal(storedRecordKeys().length, PANEL_SCRATCH_SESSION_LIMIT,
+    "the stored records are held to the bound by the send too");
 });
 
 test("blank text is not a draft, so an untouched composer cannot pin a scope", () => {
@@ -715,6 +730,27 @@ test("the key a mutation moved wins over a stored value stamped in the future", 
     "what the user just chose is what a reload restores");
 });
 
+test("a draft sent before its edit reached storage does not bring back a copy stamped ahead (#2764)", () => {
+  // The edit is still waiting for storage when it is sent. The stored copy it replaced is stamped
+  // past this page's clock (a clock corrected after running two minutes ahead), so the send's
+  // marker has to be stamped past it too, which only settling the edit first gives it.
+  const scope = panelScratchScopeKey("session-1");
+  backing.set(`${RECORD_PREFIX}${scope}`, JSON.stringify({
+    version: 2,
+    writer: "a-page-two-minutes-ahead",
+    touchedAt: Date.now() + 120_000,
+    values: { "sidechat.draft": { value: "old draft", retention: "draft", updatedAt: Date.now() + 120_000 } },
+    cleared: {},
+  }));
+  assert.equal(readPanelScratch(scope, "sidechat.draft"), "old draft");
+
+  writePanelScratchLater(scope, "sidechat.draft", "edited and sent", "draft");
+  clearPanelScratchIf(scope, "sidechat.draft", "edited and sent", panelScratchRevision(scope, "sidechat.draft"));
+
+  reload();
+  assert.equal(readPanelScratch(scope, "sidechat.draft"), undefined, "the send stays sent");
+});
+
 test("the whole-map record is kept until its contents are stored somewhere else", () => {
   // Cross-model review, CR-1.3. Removing the only durable copy before the replacement writes land
   // destroys the unsent text the import exists to rescue, whenever storage refuses those writes.
@@ -773,4 +809,96 @@ test("a whole-map record that could not be removed cannot overwrite newer edits"
     "the replayed import does not take the edit back");
   assert.equal(readPanelScratch(scope, "sidechat.draft"), undefined,
     "nor does it resurrect what was sent");
+});
+
+/**
+ * Records the build before #2764 wrote: its stamps counted past the clock in bursts, so a draft
+ * written at clock N could read N + 2. By the time a debounced edit typed over it at N is mirrored,
+ * the clock has passed that stamp, and it reads like a newer edit unless the page knows it saw it.
+ */
+for (const kind of ["a value", "a deletion marker"] as const) {
+  test(`an edit replaces ${kind} an older build stamped ahead of the clock (#2764)`, () => {
+    // A day apart per case, past every stamp an earlier case minted.
+    mock.timers.enable({ apis: ["Date"], now: Date.now() + (kind === "a value" ? 365 : 367) * 24 * 60 * 60 * 1000 });
+    try {
+      const scope = panelScratchScopeKey("session-1");
+      const ahead = Date.now() + 2;
+      backing.set(`${RECORD_PREFIX}${scope}`, JSON.stringify({
+        version: 2,
+        writer: "a-page-of-the-previous-build",
+        touchedAt: ahead,
+        values: kind === "a value"
+          ? { "review.requestBody": { value: "old draft", retention: "draft", updatedAt: ahead } }
+          : { "files.directory": { value: "apps/web", retention: "disposable", updatedAt: ahead } },
+        cleared: kind === "a value" ? {} : { "review.requestBody": ahead },
+      }));
+      readPanelScratch(scope, "files.directory");
+
+      writePanelScratchLater(scope, "review.requestBody", "new text", "draft");
+      mock.timers.tick(300);
+      flushPanelScratch();
+
+      reload();
+      assert.equal(readPanelScratch(scope, "review.requestBody"), "new text");
+    } finally {
+      mock.timers.reset();
+    }
+  });
+}
+
+test("sending a replacement of a value an older build stamped ahead does not bring it back (#2764)", () => {
+  mock.timers.enable({ apis: ["Date"], now: Date.now() + 369 * 24 * 60 * 60 * 1000 });
+  try {
+    const scope = panelScratchScopeKey("session-1");
+    const ahead = Date.now() + 2;
+    backing.set(`${RECORD_PREFIX}${scope}`, JSON.stringify({
+      version: 2,
+      writer: "a-page-of-the-previous-build",
+      touchedAt: ahead,
+      values: { "sidechat.draft": { value: "old draft", retention: "draft", updatedAt: ahead } },
+      cleared: {},
+    }));
+    assert.equal(readPanelScratch(scope, "sidechat.draft"), "old draft");
+
+    writePanelScratchLater(scope, "sidechat.draft", "edited and sent", "draft");
+    mock.timers.tick(300);
+    clearPanelScratchIf(scope, "sidechat.draft", "edited and sent", panelScratchRevision(scope, "sidechat.draft"));
+
+    reload();
+    assert.equal(readPanelScratch(scope, "sidechat.draft"), undefined, "the send stays sent");
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("a collection storage refused is swept again rather than counted as done (#2764)", () => {
+  // A write to an existing record skips the origin-wide sweep while the last measurement says the
+  // ceiling holds. A removal the sweep made but storage refused must not count in that measurement.
+  const first = panelScratchScopeKey("session-1");
+  const second = panelScratchScopeKey("session-2");
+  writePanelScratch(first, "review.requestBody", `1:${"a".repeat(150_000)}`, "draft");
+  denyRemovals = true;
+  writePanelScratch(second, "review.requestBody", `2:${"b".repeat(150_000)}`, "draft");
+  assert.ok(storedChars() > PANEL_SCRATCH_PERSIST_CHAR_LIMIT, "the collection was refused");
+
+  denyRemovals = false;
+  writePanelScratch(second, "review.requestBody", `2:${"b".repeat(150_001)}`, "draft");
+  assert.ok(storedChars() <= PANEL_SCRATCH_PERSIST_CHAR_LIMIT,
+    `stored ${storedChars()} characters, ceiling ${PANEL_SCRATCH_PERSIST_CHAR_LIMIT}`);
+});
+
+test("an emptied record storage refused to remove is swept again rather than counted as gone (#2764)", () => {
+  // A record whose values no longer fit is emptied and removed. Refused, it stays stored, and the
+  // measurement a later write trusts to skip the sweep must not count it as gone.
+  const first = panelScratchScopeKey("session-1");
+  const second = panelScratchScopeKey("session-2");
+  writePanelScratch(first, "review.requestBody", `1:${"a".repeat(150_000)}`, "draft");
+  writePanelScratch(second, "review.requestBody", `2:${"b".repeat(100_000)}`, "draft");
+  denyRemovals = true;
+  writePanelScratch(first, "review.requestBody", `1:${"a".repeat(300_000)}`, "draft");
+  denyRemovals = false;
+
+  writePanelScratch(second, "review.requestBody", `2:${"b".repeat(150_000)}`, "draft");
+  assert.ok(storedChars() <= PANEL_SCRATCH_PERSIST_CHAR_LIMIT,
+    `stored ${storedChars()} characters, ceiling ${PANEL_SCRATCH_PERSIST_CHAR_LIMIT}`);
 });

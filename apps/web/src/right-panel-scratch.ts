@@ -181,6 +181,106 @@ function forgetScope(scope: string): void {
 }
 
 /**
+ * How long a write waits for the next one before it is mirrored, and the longest a run of writes can
+ * hold it back (#2764).
+ *
+ * Mirroring reads, merges and rewrites the scope's record, and every keystroke in a panel draft used
+ * to pay that, plus a read of every scratch record on the origin to check the bounds. Memory stays
+ * authoritative, so a value not yet mirrored is still shown, restored on remount and consumed
+ * exactly as before; only the copy a reload would read waits. That copy is flushed when the page is
+ * hidden or unloaded, when a body holding the value unmounts or moves to another session, before a
+ * scope is evicted, and before a value is removed, so what is at risk is a crash inside the pause.
+ *
+ * A flush is exactly the mirroring every mutation used to do at once (`persistScope`, unchanged),
+ * run once per key that was written, when the pause ends. The one thing that moves is when: two
+ * tabs editing the same key within one pause are ordered by which flushes last rather than by which
+ * was typed last. One person types in one tab at a time, so that takes two tabs edited at the same
+ * moment; sends, deletion markers and skewed stamps keep exactly the semantics they had, because
+ * each flush is the write they were designed around. Accepted by design for #2764.
+ */
+export const PANEL_SCRATCH_PERSIST_DELAY_MS = 300;
+export const PANEL_SCRATCH_PERSIST_MAX_DELAY_MS = 1_000;
+
+/** Scope → keys written since the scope was last mirrored, in the order they were written. */
+const pendingWrites = new Map<string, Set<string>>();
+let flushTimer: ReturnType<typeof setTimeout> | null = null;
+let firstPendingAt = 0;
+
+function schedulePersist(scope: string, key: string): void {
+  const keys = pendingWrites.get(scope) ?? new Set<string>();
+  keys.delete(key);
+  keys.add(key);
+  pendingWrites.set(scope, keys);
+  listenToPage();
+  const now = Date.now();
+  if (flushTimer === null) firstPendingAt = now;
+  else clearTimeout(flushTimer);
+  const delay = Math.max(0, Math.min(PANEL_SCRATCH_PERSIST_DELAY_MS,
+    firstPendingAt + PANEL_SCRATCH_PERSIST_MAX_DELAY_MS - now));
+  flushTimer = setTimeout(() => {
+    flushTimer = null;
+    flushPanelScratch();
+  }, delay);
+}
+
+function cancelFlushTimer(): void {
+  if (flushTimer !== null) clearTimeout(flushTimer);
+  flushTimer = null;
+}
+
+/**
+ * Mirror every write still waiting for storage, or only one scope's: each written key exactly as its
+ * mutation used to be mirrored at once.
+ *
+ * Bodies call this as they let go of a scope, and the page calls it as it is hidden or unloaded, so
+ * nothing typed waits on a timer that will never fire.
+ */
+export function flushPanelScratch(scope?: string): void {
+  const scopes = scope === undefined ? [...pendingWrites.keys()] : pendingWrites.has(scope) ? [scope] : [];
+  for (const pending of scopes) {
+    const keys = pendingWrites.get(pending);
+    pendingWrites.delete(pending);
+    persistScope(pending, [...keys ?? []].map((key) => ({ key, removed: false })));
+  }
+  if (pendingWrites.size === 0) cancelFlushTimer();
+}
+
+/**
+ * A sweep after another tab's change, which this page learns of only afterwards. Waiting for this
+ * page's next write would leave the origin over a bound for as long as nobody here types, so the
+ * change itself schedules the sweep, coalesced like the writes are.
+ */
+let sweepTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleSweep(): void {
+  if (sweepTimer !== null) return;
+  sweepTimer = setTimeout(() => {
+    sweepTimer = null;
+    enforceRecordBounds(null);
+  }, PANEL_SCRATCH_PERSIST_DELAY_MS);
+}
+
+/** The window this page's listeners are registered on, so a swapped test window gets its own. */
+let listeningTo: Window | null = null;
+
+function listenToPage(): void {
+  if (typeof window === "undefined" || listeningTo === window) return;
+  listeningTo = window;
+  const flushAll = () => flushPanelScratch();
+  window.addEventListener("pagehide", flushAll);
+  // Mobile browsers can discard a backgrounded page without a pagehide, so being hidden flushes too.
+  window.document?.addEventListener?.("visibilitychange", () => {
+    if (window.document.visibilityState === "hidden") flushAll();
+  });
+  // Another tab changed scratch storage, so what this page measured no longer describes it.
+  window.addEventListener("storage", (event: StorageEvent) => {
+    if (event.key !== null && !event.key.startsWith(RECORD_PREFIX)) return;
+    storedCharsEstimate = null;
+    scheduleSweep();
+  });
+}
+
+/**
  * Whether a scope is holding text the user wrote and has not sent.
  *
  * Blank is not held text: a composer whose message was sent keeps writing back the empty string it
@@ -215,6 +315,8 @@ function evictDisposableScopes(keep: string): void {
   for (const [candidate, values] of scratch) {
     if (scratch.size <= PANEL_SCRATCH_SESSION_LIMIT) return;
     if (candidate === keep || holdsUnsentText(values)) continue;
+    // Whatever it still owes storage goes first: storage is collected by its own sweep, not here.
+    flushPanelScratch(candidate);
     forgetScope(candidate);
   }
 }
@@ -468,6 +570,7 @@ function hydrate(): void {
   if (hydrated) return;
   // Set before reading: a parse that throws must not re-run on every subsequent read.
   hydrated = true;
+  listenToPage();
   const imported = importWholeMapRecord();
   const now = Date.now();
   // The markers each record carried when this page read it, which is later than the moment the
@@ -592,7 +695,7 @@ function importWholeMapRecord(): Array<{ scope: string; values: Map<string, Pers
     // Reporting the raw import instead would hand the reader a draft the markers just retired — a
     // message already sent, back in the box, which is the whole thing those markers are for.
     imported.push({ scope, values: new Map(merged) });
-    allStored = writeRecord(scope, stamp(), merged, markers) && allStored;
+    allStored = writeRecord(scope, stamp(), merged, markers) !== null && allStored;
   }
   // Only once every scope is somewhere else. A removal that is itself refused simply replays a
   // now-harmless import on the next load.
@@ -604,10 +707,15 @@ function importWholeMapRecord(): Array<{ scope: string; values: Map<string, Pers
  * Mirror one scope into storage, applying this mutation's own deletions to whatever is there.
  *
  * Read, apply, write rather than overwrite: the record may hold keys another tab set and this one
- * has never seen, and dropping those is the whole-map failure this replaced. `mutated` is the key
- * this mutation actually moved — removed, and it becomes the marker that keeps another tab's live
+ * has never seen, and dropping those is the whole-map failure this replaced. Each of `mutations` is a
+ * key a mutation actually moved — removed, and it becomes the marker that keeps another tab's live
  * copy from writing the value back; set, and it is stamped against what is stored so the page that
  * just wrote is the page that wins.
+ *
+ * A flush passes every key written since the last one, so the scope is read, stamped and written in
+ * one step (#2764). Mirroring them one call at a time would write all of them at the first call,
+ * and a later call would re-stamp a value another tab had read and consumed in between, putting
+ * the sent text back over its marker.
  *
  * Every other key this page holds keeps the stamp it was written under and can lose to a newer
  * stored copy, which is the point: this page's map is no longer entitled to speak for the scope.
@@ -616,35 +724,38 @@ function importWholeMapRecord(): Array<{ scope: string; values: Map<string, Pers
  * otherwise write to storage. What is at stake is only which scope a later sweep collects first,
  * and `scopeTouchedAt` already carries that without spending a write.
  */
-function persistScope(scope: string, mutated: Mutation | null): void {
+function persistScope(scope: string, mutations: readonly Mutation[]): void {
   const now = Date.now();
-  const stored = readRecord(scope);
+  const storedRaw = readRaw(recordKey(scope));
+  const stored = storedRaw === null ? null : parseRecord(storedRaw);
   if (stored !== null) observeStamps(stored, now);
   const values = new Map<string, PersistedValue>(stored?.values);
   const cleared = new Map<string, number>(stored?.cleared);
-  if (mutated?.removed === true) {
-    // Stamped with the value that was actually removed, never with "now". A marker's job is to
-    // retire one copy of one value, and a marker stamped now would also retire a replacement
-    // another tab typed while this page's send was in flight — text nobody else has, destroyed by
-    // a deletion that was never about it. Another tab's stale copy carries the same stamp as the
-    // value removed here, so it is still suppressed, which is all the marker was ever for.
-    const previous = cleared.get(mutated.key) ?? 0;
-    cleared.set(mutated.key, Math.max(previous, mutated.removedAt));
-  }
-  if (mutated?.removed === false) {
-    // Re-stamped now that what is stored has been seen, so this page's mutation outranks the copy
-    // it replaces. A page whose clock sits behind another tab's — or behind a stored stamp too far
-    // ahead for `observeStamps` to adopt — would otherwise write the value the user just typed
-    // under a stamp that reads older than what it replaces, and silently lose to it.
-    //
-    // Strictly past the rival, never level with it. Two pages both forced up to the same
-    // unreachable stamp would otherwise write successive values that all read as simultaneous, and
-    // a marker for the first of them — stamped with the value it removed, which is that same
-    // number — would retire every later one: the replacement another tab typed, destroyed by a
-    // send it was never part of.
-    const rival = values.get(mutated.key)?.updatedAt ?? 0;
-    const held = scratch.get(scope)?.get(mutated.key);
-    if (held !== undefined) held.updatedAt = Math.max(stamp(), rival + 1);
+  for (const mutated of mutations) {
+    if (mutated.removed) {
+      // Stamped with the value that was actually removed, never with "now". A marker's job is to
+      // retire one copy of one value, and a marker stamped now would also retire a replacement
+      // another tab typed while this page's send was in flight — text nobody else has, destroyed by
+      // a deletion that was never about it. Another tab's stale copy carries the same stamp as the
+      // value removed here, so it is still suppressed, which is all the marker was ever for.
+      const previous = cleared.get(mutated.key) ?? 0;
+      cleared.set(mutated.key, Math.max(previous, mutated.removedAt));
+    }
+    if (!mutated.removed) {
+      // Re-stamped now that what is stored has been seen, so this page's mutation outranks the copy
+      // it replaces. A page whose clock sits behind another tab's — or behind a stored stamp too far
+      // ahead for `observeStamps` to adopt — would otherwise write the value the user just typed
+      // under a stamp that reads older than what it replaces, and silently lose to it.
+      //
+      // Strictly past the rival, never level with it. Two pages both forced up to the same
+      // unreachable stamp would otherwise write successive values that all read as simultaneous, and
+      // a marker for the first of them — stamped with the value it removed, which is that same
+      // number — would retire every later one: the replacement another tab typed, destroyed by a
+      // send it was never part of.
+      const rival = values.get(mutated.key)?.updatedAt ?? 0;
+      const held = scratch.get(scope)?.get(mutated.key);
+      if (held !== undefined) held.updatedAt = Math.max(stamp(), rival + 1);
+    }
   }
   for (const [key, held] of scratch.get(scope) ?? []) {
     const rival = values.get(key);
@@ -654,9 +765,33 @@ function persistScope(scope: string, mutated: Mutation | null): void {
     }
   }
   applyClearedMarkers(values, cleared);
-  writeRecord(scope, scopeTouchedAt.get(scope) ?? stamp(), values, cleared);
+  const written = writeRecord(scope, scopeTouchedAt.get(scope) ?? stamp(), values, cleared);
+  // An existing record rewritten within the measured bounds cannot have broken either of them, so
+  // the sweep, which reads every record on the origin, is skipped and this write touched one key
+  // (#2764). A removal always sweeps: a scope that stops holding unsent text can become the one to
+  // collect.
+  const before = storedRaw === null ? 0 : recordKey(scope).length + storedRaw.length;
+  if (written !== null && storedRaw !== null && storedCharsEstimate !== null &&
+      now - storedCharsMeasuredAt < PANEL_SCRATCH_SWEEP_MAX_AGE_MS) {
+    storedCharsEstimate += written - before;
+    if (written === 0) storedRecordsEstimate -= 1;
+    if (mutations.every((mutated) => !mutated.removed) &&
+        storedCharsEstimate <= PANEL_SCRATCH_PERSIST_CHAR_LIMIT &&
+        storedRecordsEstimate <= PANEL_SCRATCH_SESSION_LIMIT) return;
+  }
   enforceRecordBounds(scope);
 }
+
+/**
+ * What the last sweep measured stored, plus this page's own writes since; null until a sweep has
+ * run, and again whenever another tab changes a scratch record (its `storage` event) or a removal
+ * the sweep made was refused. Another tab's writes are not in it, so the event discards it, and so
+ * does age, for a page that missed the event.
+ */
+let storedCharsEstimate: number | null = null;
+let storedRecordsEstimate = 0;
+let storedCharsMeasuredAt = 0;
+const PANEL_SCRATCH_SWEEP_MAX_AGE_MS = 30_000;
 
 /**
  * What one mutation did to one key.
@@ -686,13 +821,16 @@ function serializeRecord(
  * The record carries its own ceiling: a scope whose values will not fit sheds them largest first,
  * and never its markers. The markers are the only part another tab depends on, and they are what
  * keeps a send from coming back — scratch is recoverable by asking again, a sent message is not.
+ *
+ * Returns the characters the scope now holds in storage, key included (0 once it is removed), or null
+ * when storage refused the write or the removal.
  */
 function writeRecord(
   scope: string,
   touchedAt: number,
   values: Map<string, PersistedValue>,
   cleared: Map<string, number>,
-): boolean {
+): number | null {
   const storageKey = recordKey(scope);
   const budget = PANEL_SCRATCH_PERSIST_CHAR_LIMIT - storageKey.length;
   let serialized = serializeRecord(touchedAt, values, cleared);
@@ -709,11 +847,12 @@ function writeRecord(
     // and this mutation added nothing to it.
     deleteRaw(storageKey);
     hydratedRaw.delete(scope);
-    return true;
+    // A refused removal leaves the record stored, so it must not be counted as gone (#2764).
+    return readRaw(storageKey) === null ? 0 : null;
   }
   if (writeRaw(storageKey, serialized)) {
     hydratedRaw.delete(scope);
-    return true;
+    return storageKey.length + serialized.length;
   }
   // A refusal (private mode, a full quota, a restricted webview) is not an error here — but a record
   // this page left behind is now a lie. It describes a scope this page has moved past, so a reload
@@ -721,7 +860,7 @@ function writeRecord(
   // Degrading to no restore is the honest failure; the next mutation that is allowed through puts
   // the scope back, so the exposure is one mutation wide.
   retractOwnRecord(scope);
-  return false;
+  return null;
 }
 
 /**
@@ -758,6 +897,21 @@ function recordWriter(raw: string): string | null {
 }
 
 /**
+ * Remove a record the sweep collects, and take it off the measurement only once it is gone. A
+ * refused removal leaves it stored, so the measurement no longer describes storage and is
+ * discarded: the next write sweeps again instead of trusting a total that counts it as collected.
+ */
+function forgetMeasured(storageKey: string, bytes: number): void {
+  deleteRaw(storageKey);
+  if (readRaw(storageKey) !== null) {
+    storedCharsEstimate = null;
+    return;
+  }
+  if (storedCharsEstimate !== null) storedCharsEstimate -= bytes;
+  storedRecordsEstimate -= 1;
+}
+
+/**
  * Hold the origin's records under the scope bound and the character ceiling.
  *
  * The bounds belong here rather than to any one map, because the records are the union of every
@@ -765,7 +919,9 @@ function recordWriter(raw: string): string | null {
  * touched, spared for the same reason the in-memory eviction spares it — it is by definition the
  * most recently used, which is never what least-recently-used collection takes.
  *
- * Under both bounds this costs an enumeration and no parsing, which is what a keystroke pays.
+ * Under both bounds this costs an enumeration and no parsing. A keystroke no longer pays even that
+ * (#2764): writes are mirrored after a pause, and a write to an existing record skips the sweep
+ * while the last measurement says no bound can bind (see `persistScope`).
  */
 function enforceRecordBounds(keep: string | null): void {
   const raws: Array<{ scope: string; storageKey: string; raw: string; bytes: number }> = [];
@@ -777,6 +933,9 @@ function enforceRecordBounds(keep: string | null): void {
     total += bytes;
     raws.push({ scope: storageKey.slice(RECORD_PREFIX.length), storageKey, raw, bytes });
   }
+  storedCharsEstimate = total;
+  storedRecordsEstimate = raws.length;
+  storedCharsMeasuredAt = Date.now();
   // The marker bounds cannot bind while the scope bound holds, since a marker-only record is still
   // a record and the marker bound is the larger of the two.
   if (raws.length <= PANEL_SCRATCH_SESSION_LIMIT && total <= PANEL_SCRATCH_PERSIST_CHAR_LIMIT) return;
@@ -794,7 +953,7 @@ function enforceRecordBounds(keep: string | null): void {
   for (const { scope, storageKey, raw, bytes } of raws) {
     const record = parseRecord(raw);
     if (record === null || scope === "") {
-      deleteRaw(storageKey);
+      forgetMeasured(storageKey, bytes);
       continue;
     }
     let unsent = false;
@@ -817,7 +976,7 @@ function enforceRecordBounds(keep: string | null): void {
   candidates.sort((left, right) => left.recency - right.recency);
   const kept = new Set(candidates);
   const collect = (candidate: Candidate): void => {
-    deleteRaw(candidate.storageKey);
+    forgetMeasured(candidate.storageKey, candidate.bytes);
     kept.delete(candidate);
   };
 
@@ -889,6 +1048,9 @@ export function writePanelScratch(
   const values = scratch.get(scope);
   if (value === null) {
     if (!values) return;
+    // Writes still waiting are mirrored first, each as it would have been at once, so the removal
+    // below is mirrored after them, in the order they happened.
+    flushPanelScratch(scope);
     // Only a value that was actually there is a deletion. A body mounting reports that it owns
     // nothing under keys it never wrote, and recording a marker for each of those would retire
     // values other tabs are still holding — and spend the marker budget on nothing.
@@ -901,14 +1063,14 @@ export function writePanelScratch(
     if (values.size === 0) forgetScope(scope);
     else touch(scope, values);
     evictDisposableScopes(scope);
-    persistScope(scope, { key, removed: true, removedAt: removed.updatedAt });
+    persistScope(scope, [{ key, removed: true, removedAt: removed.updatedAt }]);
     return;
   }
   const next = values ?? new Map<string, ScratchValue>();
   next.set(key, { value, revision: nextRevision++, retention, updatedAt: stamp() });
   touch(scope, next);
   evictDisposableScopes(scope);
-  persistScope(scope, { key, removed: false });
+  schedulePersist(scope, key);
 }
 
 /**
@@ -1001,6 +1163,10 @@ function syncPanelScratch(
 
 /** Forget everything, persisted included. Test-only: state would otherwise leak between cases. */
 export function clearPanelScratch(): void {
+  pendingWrites.clear();
+  cancelFlushTimer();
+  if (sweepTimer !== null) clearTimeout(sweepTimer);
+  sweepTimer = null;
   dropPanelScratchMemory();
   for (const storageKey of listRecordKeys()) deleteRaw(storageKey);
   deleteRaw(WHOLE_MAP_KEY);
@@ -1012,6 +1178,9 @@ export function clearPanelScratch(): void {
  * would. Test-only.
  */
 export function dropPanelScratchMemory(): void {
+  // A real reload hides the page first, and hiding it flushes what was still waiting for storage.
+  flushPanelScratch();
+  storedCharsEstimate = null;
   scratch.clear();
   consumedRevisions.clear();
   scopeTouchedAt.clear();
@@ -1185,6 +1354,11 @@ function usePanelScratchValue<T extends string>(
     }
     syncPanelScratch(liveScope, liveKey, dirty ? value : null, retention);
   }, [dirty, liveKey, liveScope, restoredRevision, retention, value]);
+
+  // Letting go of a scope (unmounting, or moving to another session) mirrors what it typed there
+  // now, rather than leaving it to a timer. Declared after the write above, so its cleanup runs
+  // after that effect has recorded the last value.
+  useEffect(() => () => flushPanelScratch(liveScope), [liveScope]);
 
   // A value consumed elsewhere — a send that landed after this body remounted — must leave the box
   // as well as the store. Only while the box still holds exactly what was consumed: anything the
