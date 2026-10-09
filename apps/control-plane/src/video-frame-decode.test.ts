@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { webmHeaderCorpus } from "@wollipog/test-support/webm-header-corpus";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -52,6 +53,15 @@ test("the full 16-frame, 640×360 profile is complete and remains inside derived
     Array.from({ length: SHORT_VIDEO_PROFILE.frames }, (_, index) => index * 250));
   assert.ok(decoded.frames.reduce((sum, frame) => sum + frame.bytes.length, 0)
     <= SHORT_VIDEO_PROFILE.totalFrameBytes);
+});
+
+test("invalid WebM headers fail before invoking the isolated decoder", async () => {
+  for (const { name, bytes, accepted } of webmHeaderCorpus()) {
+    if (accepted || !bytes.length) continue;
+    assert.deepEqual(await decodeShortSilentWebm(bytes), {
+      ok: false, reason: "Only WebM video is supported for delegated review.",
+    }, name);
+  }
 });
 
 test("the source-byte limit fails before a decoder or artifact write", async () => {
