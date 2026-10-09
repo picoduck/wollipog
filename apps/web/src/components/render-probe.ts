@@ -12,6 +12,9 @@ import type { ProfilerOnRenderCallback } from "react";
  */
 export const SESSION_VIEW_PROBE = "session-view";
 export const TRANSCRIPT_PROBE = "session-transcript";
+/** The session view itself, not the transcript inside it: the view renders it whenever the view
+ * renders, and a streamed chunk that renders only the transcript does not (#2763). */
+export const SESSION_DETAIL_PROBE = "session-detail";
 /** One transcript row (#2763). Each row reports as `timeline-row:<item id>`; observing the bare
  * prefix receives every row with its full id, so a test can tell which rows rendered. */
 export const TIMELINE_ROW_PROBE = "timeline-row";

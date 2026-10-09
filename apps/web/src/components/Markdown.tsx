@@ -1,4 +1,5 @@
 import React, {
+  Fragment,
   createContext,
   isValidElement,
   memo,
@@ -6,6 +7,7 @@ import React, {
   useEffect,
   useId,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
@@ -26,6 +28,7 @@ import {
   type HighlightNode,
 } from "../markdown-highlight.js";
 import { CopyButton } from "./common.js";
+import { markdownBlockStarts } from "./markdown-blocks.js";
 import { CheckIcon, ImageIcon, ImageOffIcon, WrapLinesIcon } from "./Icons.js";
 
 type MarkdownComponents = NonNullable<ComponentProps<typeof ReactMarkdown>["components"]>;
@@ -681,6 +684,10 @@ export const Markdown = memo(function Markdown({
   }, [eligible, highlighter]);
 
   const inline = profile === "inline";
+  // A document that starts out streaming renders block by block for as long as it is mounted, so a
+  // chunk re-parses only its last block and its earlier blocks keep their state (#2763). A settled
+  // document renders whole, as it always has; the two produce the same markup.
+  const [blockwise] = useState(() => !settled && !inline);
   // Settlement is monotonic for one streamed document: a later session-active transition must not
   // hide or refetch media that already loaded. An unrelated replacement starts its own lifecycle.
   const [mediaActivation, setMediaActivation] = useState({ text: children, enabled: settled });
@@ -700,19 +707,36 @@ export const Markdown = memo(function Markdown({
   // ReactMarkdown uses each renderer function as the React element type. Keep these identities
   // stable across scroll-driven highlightEligible changes so loaded media is updated in place
   // instead of remounting, collapsing its row, and issuing another remote request.
+  const context = useMemo<MarkdownRenderContext>(() => ({
+    inlineMedia: inlineMedia && !inline,
+    mediaSettled: activeMedia.enabled,
+    compactUrls,
+    highlight: eligible && settled,
+    highlighter,
+  }), [activeMedia.enabled, compactUrls, eligible, highlighter, inline, inlineMedia, settled]);
+  const plugins = inline ? INLINE_PLUGINS : DOCUMENT_PLUGINS;
   return (
     <div className="md">
-      <MarkdownContext.Provider value={{
-        inlineMedia: inlineMedia && !inline,
-        mediaSettled: activeMedia.enabled,
-        compactUrls,
-        highlight: eligible && settled,
-        highlighter,
-      }}>
-        <ReactMarkdown remarkPlugins={inline ? INLINE_PLUGINS : DOCUMENT_PLUGINS} components={MARKDOWN_COMPONENTS}>
-          {children}
-        </ReactMarkdown>
+      <MarkdownContext.Provider value={context}>
+        {blockwise ? (
+          markdownBlockStarts(children).map((start, index, starts) => (
+            // A whole document separates its top-level blocks with a newline text node; keep it.
+            <Fragment key={start}>
+              {index > 0 ? "\n" : null}
+              <MarkdownBlock plugins={plugins}>{children.slice(start, starts[index + 1])}</MarkdownBlock>
+            </Fragment>
+          ))
+        ) : (
+          <ReactMarkdown remarkPlugins={plugins} components={MARKDOWN_COMPONENTS}>
+            {children}
+          </ReactMarkdown>
+        )}
       </MarkdownContext.Provider>
     </div>
   );
+});
+
+/** One block of a blockwise document, parsed again only when its own text changes. */
+const MarkdownBlock = memo(function MarkdownBlock({ children, plugins }: { children: string; plugins: RemarkPlugins }) {
+  return <ReactMarkdown remarkPlugins={plugins} components={MARKDOWN_COMPONENTS}>{children}</ReactMarkdown>;
 });

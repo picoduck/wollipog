@@ -1,5 +1,6 @@
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useRef,
@@ -2865,6 +2866,33 @@ export function useStoreSelector<T>(selector: (s: State) => T, isEqual: (a: T, b
     return next;
   };
   return useSyncExternalStore(store.subscribe, getSnapshot);
+}
+
+/**
+ * Like `useStoreSelector`, but a published change for which `quiet(previous, next)` holds does not
+ * render the component (#2763). Whenever it renders for another reason, it reads the current value.
+ * `quiet` must be transitive: a run of quiet changes is quiet as a whole.
+ */
+export function useStoreSelectorUnlessQuiet<T>(
+  selector: (s: State) => T,
+  quiet: (previous: T, next: T) => boolean,
+): T {
+  const store = useStoreHandle();
+  const selectorRef = useRef(selector);
+  selectorRef.current = selector;
+  const quietRef = useRef(quiet);
+  quietRef.current = quiet;
+  const subscribe = useCallback((onChange: () => void) => {
+    let seen = selectorRef.current(store.getState());
+    return store.subscribe(() => {
+      const next = selectorRef.current(store.getState());
+      if (Object.is(next, seen)) return;
+      const silent = quietRef.current(seen, next);
+      seen = next;
+      if (!silent) onChange();
+    });
+  }, [store]);
+  return useSyncExternalStore(subscribe, () => selectorRef.current(store.getState()));
 }
 
 /** The store's `navigate`, or undefined where no store is mounted (a shared page, a harness): for

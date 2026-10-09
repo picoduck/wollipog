@@ -321,6 +321,23 @@ export function timelineItemIsStreaming(item: TimelineItem): boolean {
   return (item.kind === "agent_message" || item.kind === "agent_thought") && streamingTimelineItems.has(item);
 }
 
+/**
+ * A streaming reply or reasoning item after one more non-final chunk of its own stream, folded
+ * exactly as `TimelineBuilder` folds it. The transcript uses it to show chunks the session view has
+ * not derived yet (#2763); a property test holds it to the builder.
+ */
+export function continueStreamingText(item: AgentTextItem, seq: number, text: string, ts: number): AgentTextItem {
+  const activityAt = Number.isFinite(ts) ? latestTimelineTimestamp(item.lastActivityAt ?? item.createdAt, ts) : undefined;
+  const updated: AgentTextItem = {
+    ...item,
+    sourceEndId: seq,
+    text: item.text + text,
+    ...(activityAt != null ? { lastActivityAt: activityAt } : {}),
+  };
+  streamingTimelineItems.add(updated);
+  return updated;
+}
+
 export interface TimelineSnapshotDelta {
   previous: TimelineItem[];
   dirtyFrom: number;

@@ -44,6 +44,7 @@ import {
   type SessionHoldView,
   type SessionReminderView,
   sessionRole,
+  type SessionEvent,
   type SessionView,
   type SourceLocation,
   type WorkspaceReference,
@@ -53,7 +54,7 @@ import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { outstandingSessionResult } from "../session-follow-up.js";
 import { SkillsUnavailableNotice, skillsUnavailableSentence, useSessionSkillsUnavailable, useSkillsNoticeDismissal } from "./SkillsUnavailableNotice.js";
-import { isPartialHistory, isRebuiltEventsArray, useStoreActions, useStoreSelector } from "../store.js";
+import { isPartialHistory, isRebuiltEventsArray, useStoreActions, useStoreSelector, useStoreSelectorUnlessQuiet } from "../store.js";
 import { useShowAgentLogs } from "../agent-logs.js";
 import { agentLogOnly } from "../work-steps.js";
 import { shortenPath, titleCaseLabel } from "../format.js";
@@ -84,6 +85,8 @@ import {
   type TimelineItem,
 } from "../timeline.js";
 import { useTimeline } from "./useTimeline.js";
+import { onlyContinuesTrailingText, useLiveTimelineTail } from "./live-timeline-tail.js";
+import type { SessionActivity } from "../activity.js";
 import {
   Modal,
   Spinner,
@@ -126,7 +129,7 @@ import {
   useRecoveryAnnouncement,
 } from "./TranscriptTailControl.js";
 import { ApprovalsControl, ComposerButton, ModelEffortControl, useModelSettingsAvailable } from "./ComposerControls.js";
-import { reportRenderProbe, SESSION_VIEW_PROBE, TRANSCRIPT_PROBE } from "./render-probe.js";
+import { reportRenderProbe, SESSION_DETAIL_PROBE, SESSION_VIEW_PROBE, TRANSCRIPT_PROBE } from "./render-probe.js";
 import {
   ComposerIdlePreview,
   ComposerTextarea,
@@ -989,15 +992,25 @@ function sameComposerTriggers(left: ComposerTriggers, right: ComposerTriggers): 
 
 /**
  * The transcript behind the timeline's own props compare, with the render probe inside that
- * boundary, so the probe counts the timeline's renders rather than its parent's (#2764).
+ * boundary, so the probe counts the timeline's renders rather than its parent's (#2764). It also
+ * shows the chunks streamed into the trailing reply since `items` was derived from
+ * `itemsDerivedFrom`, which render the transcript without the session view around it (#2763).
  */
-const ProfiledEventTimeline = memo(function ProfiledEventTimeline(props: ComponentProps<typeof EventTimeline>) {
+const ProfiledEventTimeline = memo(function ProfiledEventTimeline({ liveSessionId, itemsDerivedFrom, items, ...props }:
+  ComponentProps<typeof EventTimeline> & { liveSessionId: string; itemsDerivedFrom: SessionEvent[] | undefined }) {
+  const liveItems = useLiveTimelineTail(liveSessionId, itemsDerivedFrom, items);
   return (
     <Profiler id={TRANSCRIPT_PROBE} onRender={reportRenderProbe}>
-      <EventTimeline {...props} />
+      <EventTimeline {...props} items={liveItems} />
     </Profiler>
   );
 });
+
+/** Heartbeats within one busy period of one history: the same for everything but the transcript. */
+function sameActivityPeriod(previous: SessionActivity | undefined, next: SessionActivity | undefined): boolean {
+  return previous !== undefined && next !== undefined && previous.eventEpoch === next.eventEpoch &&
+    previous.busySince === next.busySince;
+}
 
 /**
  * Whether a node belongs to the composer: inside its box, or inside a menu one of its controls
@@ -1108,7 +1121,9 @@ function SessionDetailLoaded({
   const openSession = useCallback((id: string) => navigate({ name: "session", id }), [navigate]);
   const recoveryEventEpoch = useStoreSelector((s) => s.sessions.get(sessionId)?.eventEpoch ?? 0);
   const recoveryGeneration = useStoreSelector((s) => s.snapshotRevision);
-  const evs = useStoreSelector((s) => s.events.get(sessionId));
+  // A chunk that only lengthens the trailing reply renders the transcript alone (`ProfiledEventTimeline`
+  // folds it in); this view reads it the next time it renders for anything else (#2763).
+  const evs = useStoreSelectorUnlessQuiet((s) => s.events.get(sessionId), onlyContinuesTrailingText);
   // Read inside the recovery effect without becoming one of its dependencies: that effect must run
   // once per open, not once per streamed event.
   const evsRef = useRef(evs);
@@ -1216,7 +1231,8 @@ function SessionDetailLoaded({
     (conn === "online" && eventHistory?.everComplete !== true && eventHistory?.error == null && !eventWindow?.laterGap);
   const recoveryRevision = useStoreSelector((s) =>
     subscriptionRecoveryRevision(s.streamSubscriptions, [sessionId]));
-  const activity = useStoreSelector((s) => s.activity.get(sessionId));
+  // Every event moves the heartbeat; only a new busy period or history is worth a render of its own.
+  const activity = useStoreSelectorUnlessQuiet((s) => s.activity.get(sessionId), sameActivityPeriod);
   // The draft lives outside this component's state, so typing renders the composer alone (#2764).
   const composerText = useComposerTextStore();
   const composerHasText = useComposerTextSelector(composerText, composerHoldsText);
@@ -6509,6 +6525,8 @@ function SessionDetailLoaded({
 
   return (
     <div className={`session-detail ${mode}`} data-session-surface-id={session.id}>
+      {/* Reports each render of this view itself, never one of the transcript alone (#2763). */}
+      <Profiler id={SESSION_DETAIL_PROBE} onRender={reportRenderProbe} />
       {mode === "expanded" ? (
         <>
         <SessionHeader
@@ -6814,6 +6832,8 @@ function SessionDetailLoaded({
                       <ProfiledEventTimeline
                         driver={session.driver}
                         items={timelineItems}
+                        itemsDerivedFrom={evs}
+                        liveSessionId={sessionId}
                         sessionActive={isTimelineSessionActive(session.status)}
                         onOpenSubagent={mode === "expanded" ? openSubagent : undefined}
                         onOpenSourceLocation={openSourceLocation}
