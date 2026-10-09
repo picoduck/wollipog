@@ -299,11 +299,10 @@ test("a worker that completes no pass is reported stalled once per stall, then r
   for (let stall = 1; stall <= 2; stall++) {
     // The worker blocks inside a pass, as one waiting on a flush that never completes would.
     Atomics.store(hold, 0, 1);
-    const heldAt = Date.now();
     await until(() => ofType(h.events, "stalled").length === stall, `stall ${stall}`);
-    assert.ok(Date.now() - heldAt >= stallAfterMs - 20, "not before the threshold");
     const stalled = ofType(h.events, "stalled").at(-1)!;
-    assert.ok(stalled.sinceLastPassMs >= stallAfterMs, `${stalled.sinceLastPassMs} ms since the last pass`);
+    // Measured, like the stall itself, from the last check that saw a pass complete.
+    assert.ok(stalled.sinceLastPassMs >= stallAfterMs, `not before the threshold: ${stalled.sinceLastPassMs} ms`);
     assert.ok(stalled.walBytes !== null && stalled.walBytes > 0, "the log's size is reported");
     await sleep(stallAfterMs * 3);
     assert.equal(ofType(h.events, "stalled").length, stall, "one report per stall, not one per check");
