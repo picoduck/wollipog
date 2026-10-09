@@ -222,8 +222,9 @@ Limits:
   the file never affects the control plane; restart backoff advances until a worker stays healthy;
   the worker never starts on a SQLite without the WAL-reset fix; and a clean shutdown checkpoints
   once more, leaves no log, and holds no lock. For the stall warning: a worker blocked so that no
-  pass completes is reported stalled exactly once per stall, with the log's size, and recovered
-  once when it resumes; a sustained workload with an idle log, passes skipped beside a reader, and
+  pass completes is reported stalled exactly once per stall and recovered once when it resumes;
+  the watchdog, driven one check at a time, reports the log's size and discards a size reading that
+  returns after its stall ended; a sustained workload with an idle log, passes skipped beside a reader, and
   a clean shutdown reports no stall, and neither does a stopped, disabled, or restarting worker.
   Every other scenario in the file also fails on any stall report.
 - `ingest-rollback-recovery.test.ts` simulates a rolled-back suffix by reopening a copy of the

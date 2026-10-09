@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
-import fs, { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import fs, { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -279,13 +279,105 @@ test("restart backoff advances until a worker stays up long enough to count as h
 
 // #2834: a checkpoint hung inside the kernel holds the checkpoint lock against the backstop, so the
 // main thread watches the worker's completed-pass count and reports a worker that stops completing.
+// The stall clock starts when a worker spawns, so every test with a live worker allows a full
+// second: ten times a worker's startup, even on a loaded machine.
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const ofType = <T extends WalCheckpointerEvent["type"]>(events: WalCheckpointerEvent[], type: T) =>
   events.filter((event): event is Extract<WalCheckpointerEvent, { type: T }> => event.type === type);
 
+/** The watchdog driven one check at a time: no worker and no timer, so no timing to race. With a
+ * threshold of 0, the second check in a row without a pass reports the stall. */
+function watchdog(location: string) {
+  const events: WalCheckpointerEvent[] = [];
+  const checkpointer = new WalCheckpointer({ exec: () => {} }, location, {
+    stallAfterMs: 0, onEvent: (event) => events.push(event),
+  });
+  const passes = new Int32Array(new SharedArrayBuffer(4));
+  const internals = checkpointer as unknown as { passes: Int32Array | null; sizingWal: boolean; checkHeartbeat(): void };
+  internals.passes = passes;
+  return {
+    checkpointer, events,
+    check: () => internals.checkHeartbeat(),
+    pass: () => Atomics.add(passes, 0, 1),
+    sizing: () => internals.sizingWal,
+    walBytes: () => ofType(events, "stalled").map((event) => event.walBytes),
+  };
+}
+
+test("the watchdog reports one stall per stretch without a pass, with the log's size, and one recovery", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-wal-watchdog-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const location = join(root, "control-plane.db");
+  writeFileSync(`${location}-wal`, Buffer.alloc(4_096));
+  const w = watchdog(location);
+  w.check(); // the first check without a pass reads the log's size, off the event loop
+  await until(() => !w.sizing(), "the size reading");
+  w.check();
+  assert.deepEqual(w.walBytes(), [4_096], "the stall reports the log's size");
+  w.check();
+  w.check();
+  assert.equal(ofType(w.events, "stalled").length, 1, "one report per stall, not one per check");
+  w.pass();
+  w.check();
+  w.pass();
+  w.check();
+  assert.equal(ofType(w.events, "recovered").length, 1, "only a reported stall recovers, once");
+  w.check();
+  w.check();
+  assert.equal(ofType(w.events, "stalled").length, 2, "a new stretch without a pass is a new stall");
+  w.checkpointer.stop();
+  w.pass();
+  w.check();
+  w.check();
+  w.check();
+  assert.deepEqual(w.events.map((event) => event.type), ["stalled", "recovered", "stalled"],
+    "a stopped checkpointer reports nothing more");
+
+  const missing = watchdog(join(root, "missing.db"));
+  missing.check();
+  await until(() => !missing.sizing(), "the failed size reading");
+  missing.check();
+  assert.deepEqual(missing.walBytes(), [null], "no size when the log cannot be read");
+});
+
+test("a size reading that returns after its stall ended never reaches a later stall's report", (t) => {
+  // Readings of the log's size wait until the test answers them, as on storage slow to return.
+  type StatCallback = (error: Error | null, stats: { size: number }) => void;
+  const readings: StatCallback[] = [];
+  const original = fs.stat;
+  const statMock = t.mock.method(fs, "stat", ((path: string, ...rest: unknown[]) => {
+    if (String(path).endsWith("-wal")) readings.push(rest.at(-1) as StatCallback);
+    else (original as (...args: unknown[]) => void)(path, ...rest);
+  }) as typeof fs.stat);
+  syncBuiltinESMExports();
+  t.after(() => {
+    statMock.mock.restore();
+    syncBuiltinESMExports();
+  });
+  const w = watchdog(join(tmpdir(), "wollipog-wal-watchdog.db"));
+  w.check();
+  w.check();
+  assert.deepEqual(w.walBytes(), [null], "the stall is reported without waiting for the reading");
+  w.pass();
+  w.check();
+  w.check(); // a new stretch without a pass, while the first stall's reading is still out
+  assert.equal(readings.length, 1, "one reading at a time");
+  readings[0]!(null, { size: 123 });
+  w.check();
+  assert.deepEqual(w.walBytes(), [null, null], "the earlier stall's reading is discarded");
+  assert.equal(readings.length, 2, "the second stall asked for its own reading");
+  readings[1]!(null, { size: 456 });
+  w.pass();
+  w.check();
+  w.check();
+  readings[2]!(null, { size: 789 });
+  w.check();
+  assert.deepEqual(w.walBytes(), [null, null, 789], "a stall's own reading is reported");
+});
+
 test("a worker that completes no pass is reported stalled once per stall, then recovered, and logged", LIVE, async (t) => {
-  const stallAfterMs = 300;
+  const stallAfterMs = 1_000;
   const hold = new Int32Array(new SharedArrayBuffer(4));
   const release = () => {
     Atomics.store(hold, 0, 0);
@@ -303,15 +395,16 @@ test("a worker that completes no pass is reported stalled once per stall, then r
     const stalled = ofType(h.events, "stalled").at(-1)!;
     // Measured, like the stall itself, from the last check that saw a pass complete.
     assert.ok(stalled.sinceLastPassMs >= stallAfterMs, `not before the threshold: ${stalled.sinceLastPassMs} ms`);
-    assert.ok(stalled.walBytes !== null && stalled.walBytes > 0, "the log's size is reported");
-    await sleep(stallAfterMs * 3);
+    // The size is read off the event loop and may still be on its way; the driven tests pin it.
+    assert.ok(stalled.walBytes === null || stalled.walBytes > 0, `the log's size: ${stalled.walBytes}`);
+    await sleep(stallAfterMs * 2);
     assert.equal(ofType(h.events, "stalled").length, stall, "one report per stall, not one per check");
     assert.equal(h.checkpointer.running(), true, "the worker is not restarted: terminate cannot interrupt a hang");
 
     release();
     await until(() => ofType(h.events, "recovered").length === stall, `recovery ${stall}`);
     assert.ok(ofType(h.events, "recovered").at(-1)!.stalledMs >= stallAfterMs);
-    await sleep(stallAfterMs * 2);
+    await sleep(stallAfterMs);
     assert.equal(ofType(h.events, "stalled").length, stall, "a completed pass clears the stall");
     assert.equal(ofType(h.events, "recovered").length, stall, "recovery is reported once");
   }
@@ -329,49 +422,8 @@ test("a worker that completes no pass is reported stalled once per stall, then r
   assert.deepEqual(logged.filter(([, , message]) => message.includes("recovered")).map(([level]) => level), ["info", "info"]);
 });
 
-test("a size reading that returns after its stall ended never reaches a later stall's report", LIVE, async (t) => {
-  const stallAfterMs = 600;
-  // Readings of the log's size wait until the test answers them, as on storage slow to return.
-  type StatCallback = (error: Error | null, stats: { size: number }) => void;
-  const readings: StatCallback[] = [];
-  const original = fs.stat;
-  const statMock = t.mock.method(fs, "stat", ((path: string, ...rest: unknown[]) => {
-    if (String(path).endsWith("-wal")) readings.push(rest.at(-1) as StatCallback);
-    else (original as (...args: unknown[]) => void)(path, ...rest);
-  }) as typeof fs.stat);
-  syncBuiltinESMExports();
-  t.after(() => {
-    statMock.mock.restore();
-    syncBuiltinESMExports();
-  });
-  const hold = new Int32Array(new SharedArrayBuffer(4));
-  const release = () => {
-    Atomics.store(hold, 0, 0);
-    Atomics.notify(hold, 0);
-  };
-  const h = open(t, { intervalMs: 20, stallAfterMs, holdPasses: hold }, { expectStalls: true });
-  h.defer(release);
-  await until(() => has(h.events, "online"), "the worker to start");
-  h.ingest(50);
-
-  Atomics.store(hold, 0, 1);
-  await until(() => ofType(h.events, "stalled").length === 1, "the first stall");
-  assert.equal(ofType(h.events, "stalled")[0]!.walBytes, null, "no reading has returned");
-  assert.equal(readings.length, 1, "one reading at a time");
-  release();
-  await until(() => has(h.events, "recovered"), "the recovery");
-
-  Atomics.store(hold, 0, 1);
-  // Midway through the next stretch without a pass, the first stall's reading finally returns.
-  await sleep(stallAfterMs / 2);
-  readings[0]!(null, { size: 123 });
-  await until(() => ofType(h.events, "stalled").length === 2, "the second stall");
-  assert.equal(ofType(h.events, "stalled")[1]!.walBytes, null, "the earlier stall's reading is discarded");
-  assert.ok(readings.length >= 2, "the second stall asked for its own reading");
-});
-
 test("a sustained workload with idle stretches and a long reader reports no stall, nor does a clean shutdown", LIVE, async (t) => {
-  const stallAfterMs = 300;
+  const stallAfterMs = 1_000;
   const h = open(t, { intervalMs: 20, stallAfterMs });
   await until(() => has(h.events, "online"), "the worker to start");
   for (let round = 0; round < 10; round++) {
@@ -404,12 +456,12 @@ test("a sustained workload with idle stretches and a long reader reports no stal
 });
 
 test("a stopped, disabled or restarting worker never reports a stall", async (t) => {
-  const stallAfterMs = 100;
+  const stallAfterMs = 1_000;
   await t.test("stopped", LIVE, async (t) => {
     const h = open(t, { intervalMs: 20, stallAfterMs });
     await until(() => has(h.events, "online"), "the worker to start");
     h.db.stopWalCheckpoints();
-    await sleep(stallAfterMs * 5);
+    await sleep(stallAfterMs * 2.5);
     assert.deepEqual(ofType(h.events, "stalled"), []);
   });
   await t.test("restarting", LIVE, async (t) => {
@@ -417,7 +469,7 @@ test("a stopped, disabled or restarting worker never reports a stall", async (t)
     await until(() => has(h.events, "online"), "the worker to start");
     await (h.checkpointer as unknown as { worker: { terminate(): Promise<number> } }).worker.terminate();
     await until(() => has(h.events, "exited"), "the exit to be observed");
-    await sleep(stallAfterMs * 5);
+    await sleep(stallAfterMs * 2.5);
     assert.equal(h.checkpointer.running(), false);
     assert.deepEqual(ofType(h.events, "stalled"), []);
   });
@@ -429,8 +481,9 @@ test("a stopped, disabled or restarting worker never reports a stall", async (t)
       rmSync(root, { recursive: true, force: true });
     });
     const events: WalCheckpointerEvent[] = [];
-    db.startWalCheckpoints({ sqliteVersion: "3.47.2", stallAfterMs, onEvent: (event) => events.push(event) });
-    await sleep(stallAfterMs * 5);
+    // No worker spawns, so nothing is watched: even a threshold of 0 reports nothing.
+    db.startWalCheckpoints({ sqliteVersion: "3.47.2", stallAfterMs: 0, onEvent: (event) => events.push(event) });
+    await sleep(500);
     assert.deepEqual(events.map((event) => event.type), ["disabled"]);
   });
 });
