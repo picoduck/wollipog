@@ -21,7 +21,8 @@ type AgentTextPayload = Extract<SessionEvent["payload"], { kind: "agent_message"
 function openTopLevelText(event: SessionEvent): AgentTextPayload | null {
   const payload = event.payload;
   if (payload.kind !== "agent_message" && payload.kind !== "agent_thought") return null;
-  if (payload.final || payload.parentToolUseId || typeof payload.text !== "string") return null;
+  // Only an absent parent is top-level: the builder tells an empty one apart from none.
+  if (payload.final || payload.parentToolUseId !== undefined || typeof payload.text !== "string") return null;
   return payload;
 }
 

@@ -6908,6 +6908,7 @@ function SessionDetailLoaded({
                   onRevealCurrentOperation={revealCurrentOperation}
                   onOpenSubagent={mode === "expanded" ? openSubagent : undefined}
                   onReviewPendingRequest={reviewPendingRequest}
+                  liveActivitySessionId={sessionId}
                 />
               )}
             </div>

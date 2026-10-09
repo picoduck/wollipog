@@ -40,6 +40,10 @@ const cases: Record<string, string> = {
   "quote after indented code": "    alpha\n\n> *\n\n# alpha",
   // Found by the generator: a fence indented into a list item is not closed by an unindented one.
   "fence in a list item, then an unindented fence": "+\n  ``` alpha\n```\n| a | b |\n| - | - |\n\n\n```\n\nText.",
+  // Found in review: definitions the guard must see however their label is written or placed.
+  "multiline reference label": "See [foo bar].\n\nMiddle.\n\n[foo\nbar]: /target",
+  "escaped bracket in a reference label": "See [a\\]b].\n\nMiddle.\n\n[a\\]b]: /target",
+  "reference definition in a quote": "See [quoted].\n\nMiddle.\n\n> [quoted]: /target",
   "streamed so far": "The quick brown fox jumps over the lazy dog while the agent streams **markdown** with `code`\n\n```ts\nconst x1 = 1;\n```\n\nThe quick brown",
 };
 
@@ -48,7 +52,8 @@ for (const [name, text] of Object.entries(cases)) {
 }
 
 test("documents with raw HTML, definitions or footnotes are never cut", () => {
-  for (const name of ["html", "reference definitions", "footnotes"]) {
+  for (const name of ["html", "reference definitions", "footnotes", "multiline reference label",
+    "escaped bracket in a reference label", "reference definition in a quote"]) {
     assert.deepEqual(markdownBlockStarts(cases[name]!), [0], name);
   }
   assert.deepEqual(markdownBlockStarts(cases.paragraphs!).length, 3, "ordinary paragraphs are cut");

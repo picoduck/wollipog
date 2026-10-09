@@ -10,8 +10,12 @@
  * - comes after a last non-blank line that was not part of a blockquote, a list or indented code.
  *
  * A document is never cut when it contains a line starting with `<` (raw HTML blocks may span blank
- * lines), a link reference definition or a footnote (both reach across the document). The
+ * lines), or `[^` or `]:` anywhere: footnotes and link reference definitions reach across the
+ * document, and a definition's label may span lines, escape brackets or sit inside a container. The
  * equivalence tests render the cut and the whole document and compare the markup.
+ *
+ * Cuts only ever change which React subtree renders a block. When a later chunk removes a cut (a
+ * definition arrives), the blocks after it remount, which resets a code block's Wrap Lines choice.
  */
 
 const LIST_MARKER = /^(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$)/;
@@ -19,13 +23,12 @@ const PLAIN_BLOCK_START = /^(?:[A-Za-z0-9#`~[!("'_]|\*(?![ \t]))/;
 const CONTAINER_LINE = /^(?:[ \t]|>)/;
 const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
-const REFERENCE_DEFINITION = /^ {0,3}\[[^\]\n]+\]:/m;
 const HTML_LINE = /^ {0,3}</m;
 
 /** The offsets at which `text`'s blocks start; always begins with 0. */
 export function markdownBlockStarts(text: string): number[] {
   const starts = [0];
-  if (text.includes("[^") || REFERENCE_DEFINITION.test(text) || HTML_LINE.test(text)) return starts;
+  if (text.includes("[^") || text.includes("]:") || HTML_LINE.test(text)) return starts;
   let fence: { marker: string; length: number } | null = null;
   let afterBlank = false;
   /** The last non-blank line outside a fence ended a plain block (and there was one). */

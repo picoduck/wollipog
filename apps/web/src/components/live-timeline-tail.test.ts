@@ -36,6 +36,8 @@ test("only more chunks of the reply the history ends with continue its trailing 
     ["an identified chunk after an anonymous one", base, [...base, chunk("D", { messageId: "m1" })]],
     ["a final message", base, [...base, chunk("done", { final: true })]],
     ["a subagent's chunk", base, [...base, chunk("sub", { parentToolUseId: "tool-1" })]],
+    // The builder tells an explicitly empty parent apart from none, and starts a new item for it.
+    ["a chunk with an empty parent", base, [...base, { ...chunk("x"), payload: { kind: "agent_message", text: "x", parentToolUseId: "" } }]],
     ["a tool call", base, [...base, at({ kind: "tool_call", toolCallId: "t", title: "Read", status: "completed" })]],
     ["a chunk after a tool call", [...base, at({ kind: "tool_call", toolCallId: "t", title: "Read", status: "completed" })],
       [...base, at({ kind: "tool_call", toolCallId: "t2", title: "Read", status: "completed" }), chunk("x")]],

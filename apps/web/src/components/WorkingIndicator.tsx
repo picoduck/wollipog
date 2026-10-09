@@ -2,6 +2,7 @@ import { useEffect, useId, useState } from "react";
 import { formatDuration } from "../format.js";
 import { statusMeta } from "../status-meta.js";
 import type { ActiveTurnProgress } from "../turn-progress.js";
+import { useOptionalStoreSelector } from "../store.js";
 import { StatusBadge } from "./StatusBadge.js";
 
 export const ACTIVE_TURN_CLOCK_INTERVAL_MS = 1_000;
@@ -38,6 +39,7 @@ export function WorkingIndicator({
   onOpenSubagent,
   onReviewPendingRequest,
   now: nowOverride,
+  liveActivitySessionId,
 }: {
   label?: string;
   progress?: ActiveTurnProgress | null;
@@ -47,14 +49,23 @@ export function WorkingIndicator({
   onReviewPendingRequest?: (requestId: string) => void;
   /** Deterministic rendering for focused component coverage; production uses the shared clock. */
   now?: number;
+  /** The live session whose heartbeat also counts as activity. A chunk that only lengthens the
+   * reply does not render the view that computes `progress`, so silence reads it here (#2763). */
+  liveActivitySessionId?: string;
 }) {
   const clockNow = useActiveTurnClock(nowOverride == null);
+  const liveActivityAt = useOptionalStoreSelector((state) => liveActivitySessionId === undefined
+    ? undefined
+    : state.activity.get(liveActivitySessionId)?.lastEventAt ?? undefined);
+  const lastActivityAt = progress && liveActivityAt != null
+    ? Math.max(progress.lastActivityAt ?? Number.NEGATIVE_INFINITY, liveActivityAt)
+    : progress?.lastActivityAt;
   const [mountedAt] = useState(() => Date.now());
   const tooltipId = useId();
   const now = Math.max(
     nowOverride ?? clockNow,
     progress?.turnStartedAt ?? Number.NEGATIVE_INFINITY,
-    progress?.lastActivityAt ?? Number.NEGATIVE_INFINITY,
+    lastActivityAt ?? Number.NEGATIVE_INFINITY,
   );
   // The turn start is authoritative when observed; the mount clock is only the pre-event fallback,
   // and it stays quiet for the first moments so an instant turn does not flash "0s".
@@ -71,7 +82,7 @@ export function WorkingIndicator({
   const failed = progress?.failedTools ?? 0;
   const retry = progress?.retryGroup;
   // Waiting on the person is not silence: the agent has nothing to say until they answer.
-  const quietSince = progress?.lastActivityAt ?? progress?.turnStartedAt;
+  const quietSince = lastActivityAt ?? progress?.turnStartedAt;
   const silentMs = !waiting && quietSince != null ? now - quietSince : 0;
   const silence = silentMs >= ACTIVE_TURN_SILENCE_MS ? `No new output for ${silenceLabel(silentMs)}` : null;
   const stepDetails = [
