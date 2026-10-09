@@ -740,3 +740,132 @@ test("a reading anchor relinquished in a settle frame stops keeping its row moun
     Object.defineProperty(globalThis, "cancelAnimationFrame", { configurable: true, writable: true, value: cancelFrame });
   }
 });
+
+function FollowedFixture({ items, preserveAnchor, onVisibleAnchorChange }: {
+  items: string[];
+  preserveAnchor: boolean;
+  onVisibleAnchorChange?: (anchor: { key: string; offset: number; index?: number }) => void;
+}) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  return (
+    <div ref={scrollRef} data-testid="initial-offset-reader" style={{ overflow: "auto", height: 600 }}>
+      <MeasuredVirtualList
+        items={items}
+        getKey={(item) => item}
+        renderItem={(item) => item}
+        scrollRef={scrollRef}
+        estimateSize={() => 72}
+        overscan={2}
+        className="initial-offset-list"
+        preserveAnchor={preserveAnchor}
+        onVisibleAnchorChange={onVisibleAnchorChange}
+      />
+    </div>
+  );
+}
+
+test("a followed list reads no layout in its commits, and the commit that stops following reads its own row (#2840)", async () => {
+  // While follow-tail owns the viewport nothing preserves a reader row, so a streamed commit has
+  // nothing to correct; reading the visible row there forced a synchronous layout in every one.
+  const prototype = domWindow.Element.prototype as unknown as { getBoundingClientRect: () => DOMRect };
+  const measure = prototype.getBoundingClientRect;
+  let reads = 0;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const visible: Array<{ key: string; offset: number }> = [];
+  const onVisibleAnchorChange = (anchor: { key: string; offset: number }) => visible.push(anchor);
+  try {
+    await act(async () => {
+      root.render(<FollowedFixture items={["row-1", "row-2"]} preserveAnchor={false} onVisibleAnchorChange={onVisibleAnchorChange} />);
+    });
+    assert.equal(container.querySelector(".initial-offset-list")?.getAttribute("data-virtual-measurements"), "ready");
+    const reader = container.querySelector<HTMLElement>("[data-testid='initial-offset-reader']")!;
+
+    Object.defineProperty(prototype, "getBoundingClientRect", {
+      configurable: true,
+      value(this: Element) {
+        reads += 1;
+        return measure.call(this);
+      },
+    });
+    visible.length = 0;
+    for (const items of [["row-1", "row-2", "row-3"], ["row-1", "row-2", "row-3", "row-4"]]) {
+      await act(async () => {
+        root.render(<FollowedFixture items={items} preserveAnchor={false} onVisibleAnchorChange={onVisibleAnchorChange} />);
+      });
+    }
+    await act(async () => { reader.dispatchEvent(new domWindow.Event("scroll") as never); });
+    assert.equal(reads, 0, "neither streamed commits nor follow pins read row geometry while following");
+    assert.equal(visible.length, 0, "a followed tail reports no reading position");
+
+    // The reader pauses in the same render that brings another row: the last recorded position is
+    // out of date, so that render reads the row on screen and reports it.
+    await act(async () => {
+      root.render(<FollowedFixture items={["row-1", "row-2", "row-3", "row-4", "row-5"]} preserveAnchor onVisibleAnchorChange={onVisibleAnchorChange} />);
+    });
+    assert.ok(reads > 0, "the render that starts preserving reads its rows");
+    assert.equal(visible[0]?.key, "row-1");
+    assert.equal(visible[0]?.offset, 120);
+  } finally {
+    Object.defineProperty(prototype, "getBoundingClientRect", { configurable: true, value: measure });
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+function PrependFixture({ items, preserveAnchor, onVisibleAnchorChange }: {
+  items: string[];
+  preserveAnchor: boolean;
+  onVisibleAnchorChange?: (anchor: { key: string; offset: number; index?: number }) => void;
+}) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  return (
+    <div ref={scrollRef} data-testid="anchor-recovery-reader" style={{ overflow: "auto", height: 600 }}>
+      <MeasuredVirtualList
+        items={items}
+        getKey={(item) => item}
+        renderItem={(item) => item}
+        scrollRef={scrollRef}
+        estimateSize={() => 72}
+        overscan={2}
+        className="anchor-recovery-list"
+        preserveAnchor={preserveAnchor}
+        onVisibleAnchorChange={onVisibleAnchorChange}
+      />
+    </div>
+  );
+}
+
+test("pausing in the render that prepends history holds the row the reader was on (#2840)", async () => {
+  // Rows sit at 120 + 72 x index - scrollTop in this geometry, so prepending moves every kept row.
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const live = Array.from({ length: 16 }, (_, index) => `row-${index + 5}`);
+  const visible: Array<{ key: string; offset: number }> = [];
+  const onVisibleAnchorChange = (anchor: { key: string; offset: number }) => visible.push(anchor);
+  try {
+    await act(async () => {
+      root.render(<PrependFixture items={live} preserveAnchor={false} onVisibleAnchorChange={onVisibleAnchorChange} />);
+    });
+    const reader = container.querySelector<HTMLElement>("[data-testid='anchor-recovery-reader']")!;
+    await act(async () => {
+      reader.scrollTop = 300;
+      reader.dispatchEvent(new domWindow.Event("scroll") as never);
+    });
+    // While following, row-7 (index 2) is the first row on screen, 36px above the reader's top.
+    visible.length = 0;
+    const history = ["row-0", "row-1", "row-2", "row-3", "row-4"];
+    await act(async () => {
+      root.render(<PrependFixture items={[...history, ...live]} preserveAnchor onVisibleAnchorChange={onVisibleAnchorChange} />);
+    });
+    assert.deepEqual(visible[0], { key: "row-7", offset: -36, index: 2 },
+      "the reader's row is read before the prepend moves it");
+    assert.ok(Math.abs(reader.scrollTop - (300 + history.length * 72)) < 1,
+      `the prepend is compensated so row-7 stays put; scrollTop=${reader.scrollTop}`);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});

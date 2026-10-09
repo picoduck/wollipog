@@ -15,7 +15,7 @@ import {
 } from "react";
 import { defaultRangeExtractor, type Range, useVirtualizer } from "@tanstack/react-virtual";
 import { flushSync } from "react-dom";
-import { VIRTUAL_VIEWPORT_INTENT_EVENT } from "../viewport-intent.js";
+import { dispatchVirtualRowResize, VIRTUAL_VIEWPORT_INTENT_EVENT } from "../viewport-intent.js";
 
 type CancelVirtualMeasurementCommit = () => void;
 type VirtualMeasurementCommit = (commit: () => void) => CancelVirtualMeasurementCommit | void;
@@ -297,6 +297,23 @@ export function reanchorAtLogicalIndex(
   return key == null ? null : { ...anchor, key, index: nearestIndex };
 }
 
+/** The first row the reader can see, read from the committed DOM. This is a layout read. */
+function readFirstVisibleAnchor(
+  root: Pick<ParentNode, "querySelectorAll"> | null,
+  scroll: Element | null,
+): VirtualScrollAnchor | null {
+  if (!root || !scroll) return null;
+  const viewport = scroll.getBoundingClientRect();
+  const row = [...root.querySelectorAll<HTMLElement>("[data-virtual-row]")]
+    .find((candidate) => {
+      const rect = candidate.getBoundingClientRect();
+      return rect.bottom > viewport.top && rect.top < viewport.bottom;
+    });
+  return row?.dataset.virtualKey
+    ? { key: row.dataset.virtualKey, offset: row.getBoundingClientRect().top - viewport.top, index: Number(row.dataset.index) }
+    : null;
+}
+
 /**
  * Shared variable-height list adapter. It keeps logical ordering/accessibility in React while
  * TanStack Virtual owns measurement, resize correction, and viewport range selection. Focused and
@@ -391,6 +408,13 @@ function VirtualList<T>({
   const [revealedLocationKey, setRevealedLocationKey] = useState<string | null>(null);
   const previousItemsRef = useRef(items);
   const visibleAnchorRef = useRef<VirtualScrollAnchor | null>(null);
+  /**
+   * While nothing preserves a logical row (follow-tail owns the viewport), commits and scrolls do not
+   * read the visible row, so the last one recorded may be out of date.
+   */
+  const visibleAnchorStaleRef = useRef(false);
+  /** A visible row read in render, for the commit to report once it is current. */
+  const unreportedVisibleAnchorRef = useRef<VirtualScrollAnchor | null>(null);
   const mountAnchorRef = useRef<VirtualScrollAnchor | null | undefined>(undefined);
   if (mountAnchorRef.current === undefined) mountAnchorRef.current = getInitialAnchor?.() ?? null;
   const pendingAnchorRef = useRef<VirtualScrollAnchor | null>(mountAnchorRef.current);
@@ -451,6 +475,17 @@ function VirtualList<T>({
   // a render React discards (a deferred search render interrupted by typing) cannot consume a change.
   const committedResultSetKeyRef = useRef(resultSetKey);
   const resultSetChanged = committedResultSetKeyRef.current !== resultSetKey;
+  if (preserveAnchor && visibleAnchorStaleRef.current) {
+    // The first render that preserves a row again. The DOM still shows the last commit, so this is
+    // where the reader is; once this render commits, a prepend or a remeasure may already have
+    // moved the rows. Reading it costs one layout, only at this transition.
+    const anchor = readFirstVisibleAnchor(rootRef.current, scrollRef.current);
+    visibleAnchorStaleRef.current = false;
+    if (anchor) {
+      visibleAnchorRef.current = anchor;
+      unreportedVisibleAnchorRef.current = anchor;
+    }
+  }
   if (preserveAnchor && !resultSetChanged &&
       (previousItemsRef.current !== items || previousItemsVersionRef.current !== itemsVersion) &&
       pendingAnchorRef.current == null && lostAnchorRef.current == null) {
@@ -583,6 +618,11 @@ function VirtualList<T>({
   // TanStack's row observer can report rewrapped rows before the viewport observer below records
   // the new width, so a width reflow is also pending while the live width differs from that record.
   virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) => {
+    // TanStack consults this for every measured size change, so it is where a followed tail learns
+    // that a row grew, at a point where reading the scroll geometry is free. It runs before TanStack
+    // applies its own compensation, which moves scrollTop by the same delta from the offset it last
+    // saw, so a tail pinned here stays pinned.
+    dispatchVirtualRowResize(scrollRef.current);
     const scrollOffset = instance.scrollOffset ?? 0;
     const anchorPending = pendingAnchorRef.current != null;
     anchoredResizeCommitRef.current = !measuringInCommitRef.current &&
@@ -905,6 +945,11 @@ function VirtualList<T>({
     update(false);
     const recordVisibleAnchor = () => {
       if (!initialMeasurementsReadyRef.current || pendingAnchorRef.current != null) return;
+      if (!preserveAnchorRef.current) {
+        // A followed tail scrolls on every pin; reading the visible row here would force a layout.
+        visibleAnchorStaleRef.current = true;
+        return;
+      }
       const lostIntent = lostAnchorIntentVersionRef.current;
       if (lostAnchorRef.current != null &&
           (lostIntent == null || lostIntent === viewportIntentVersionRef.current)) return;
@@ -921,6 +966,7 @@ function VirtualList<T>({
           index: Number(row.dataset.index),
         };
         visibleAnchorRef.current = anchor;
+        visibleAnchorStaleRef.current = false;
         onVisibleAnchorChangeRef.current?.(anchor);
       }
     };
@@ -1047,6 +1093,20 @@ function VirtualList<T>({
     const root = rootRef.current;
     const scroll = scrollRef.current;
     if (!root || !scroll) return;
+    if (!preserveAnchorRef.current) {
+      // Nothing preserves a logical row, so this commit has nothing to correct, and reading the
+      // visible row would force a synchronous layout in every streamed commit. Follow-tail owns the
+      // viewport and pins it from the row-resize report, once layout has run.
+      visibleAnchorStaleRef.current = true;
+      previousItemsRef.current = items;
+      previousItemsVersionRef.current = itemsVersion;
+      return;
+    }
+
+    const unreported = unreportedVisibleAnchorRef.current;
+    unreportedVisibleAnchorRef.current = null;
+    // The reader's row as this render first read it, before any correction below can hold it.
+    if (unreported) onVisibleAnchorChangeRef.current?.(unreported);
 
     const viewport = scroll.getBoundingClientRect();
     const findRow = (key: string) => [...root.querySelectorAll<HTMLElement>("[data-virtual-row]")]
@@ -1133,6 +1193,7 @@ function VirtualList<T>({
         index: Number(firstVisible.dataset.index),
       };
       visibleAnchorRef.current = anchor;
+      visibleAnchorStaleRef.current = false;
       const lostIntent = lostAnchorIntentVersionRef.current;
       const waitingForLostAnchor = lostAnchorRef.current != null &&
         (lostIntent == null || lostIntent === viewportIntentVersionRef.current);

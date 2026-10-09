@@ -1,6 +1,6 @@
 import { useCallback, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import type { VirtualScrollAnchor } from "./components/MeasuredVirtualList.js";
-import { dispatchVirtualViewportIntent } from "./viewport-intent.js";
+import { dispatchVirtualViewportIntent, VIRTUAL_ROW_RESIZE_EVENT } from "./viewport-intent.js";
 
 export const FOLLOW_TAIL_THRESHOLD_PX = 48;
 export const FOLLOW_TAIL_RESUME_THRESHOLD_PX = 2;
@@ -215,6 +215,10 @@ export function useFollowTail({
   const previousSessionIdRef = useRef(sessionId);
   const followFrameRef = useRef<number | null>(null);
   const followFramesRemainingRef = useRef(0);
+  /** Settle frames left that re-pin unconditionally, rather than only for a change no pin covered. */
+  const followConvergeFramesRef = useRef(0);
+  /** A change has landed since the last bottom pin, and a settle frame should pin for it. */
+  const followDirtyRef = useRef(false);
   const resizeFollowOwnsScrollRef = useRef(false);
   const scrollIntentTimerRef = useRef<number | null>(null);
   const viewportGeometryRef = useRef<{ scrollTop: number; scrollHeight: number; clientHeight: number } | null>(null);
@@ -312,11 +316,14 @@ export function useFollowTail({
   const scrollToBottom = useCallback(() => {
     const element = scrollRef.current;
     if (!element) return;
+    followDirtyRef.current = false;
     element.scrollTo({ top: element.scrollHeight });
   }, [scrollRef]);
 
   const cancelScheduledFollow = useCallback(() => {
     followFramesRemainingRef.current = 0;
+    followConvergeFramesRef.current = 0;
+    followDirtyRef.current = false;
     resizeFollowOwnsScrollRef.current = false;
     if (followFrameRef.current != null) {
       window.cancelAnimationFrame(followFrameRef.current);
@@ -350,30 +357,46 @@ export function useFollowTail({
     }
   }, [cancelProgrammaticScroll, scrollRef, transition]);
 
-  const scheduleFollow = useCallback((ownsResizeScroll = false) => {
+  /**
+   * Keeps a bounded settle window of animation frames alive after a pin; each later mutation or
+   * resize refreshes it, and explicit reader intent cancels it synchronously through pause().
+   *
+   * Reading `scrollHeight` forces a synchronous layout whenever anything has changed since the
+   * last one, and while a reply streams, something always has: the next chunk, a keystroke in the
+   * composer. So growth is pinned where it is observed, before paint: in the commit, in the list's
+   * row-resize report, or in the resize delivery. Settle frames then pin only for a change that no
+   * pin has covered yet. Opening a session or returning to the tail `converge`s instead: for one
+   * window of its own, every settle frame re-pins while the rows measure in. Later refreshes do not
+   * extend it, so a session opened mid-stream does not keep re-reading layout.
+   */
+  const scheduleFollow = useCallback(({ ownsResizeScroll = false, converge = false } = {}) => {
     if (stateRef.current !== "following") return;
-    // A virtualized streaming row can finish measuring several frames after the content commit.
-    // Keep a bounded convergence window alive; every later mutation/resize refreshes that window.
-    // Explicit reader intent cancels it synchronously through pause().
     followFramesRemainingRef.current = FOLLOW_TAIL_SETTLE_FRAMES;
     if (ownsResizeScroll) resizeFollowOwnsScrollRef.current = true;
+    if (converge) followConvergeFramesRef.current = FOLLOW_TAIL_SETTLE_FRAMES;
     if (followFrameRef.current != null) return;
     const advance = () => {
       followFrameRef.current = null;
       if (stateRef.current !== "following") {
         followFramesRemainingRef.current = 0;
+        followConvergeFramesRef.current = 0;
         resizeFollowOwnsScrollRef.current = false;
         return;
       }
       if (scrollIntentTimerRef.current != null) {
         if (!resizeFollowOwnsScrollRef.current) return;
+        // A measured geometry change explains the bare scroll that started this timer; the
+        // scroll it explains left the tail, so it needs a pin.
         cancelScheduledScrollIntent();
+        followDirtyRef.current = true;
       }
-      scrollToBottom();
+      if (followConvergeFramesRef.current > 0 || followDirtyRef.current) scrollToBottom();
+      if (followConvergeFramesRef.current > 0) followConvergeFramesRef.current -= 1;
       followFramesRemainingRef.current -= 1;
       if (followFramesRemainingRef.current > 0) {
         followFrameRef.current = window.requestAnimationFrame(advance);
       } else {
+        followConvergeFramesRef.current = 0;
         resizeFollowOwnsScrollRef.current = false;
       }
     };
@@ -405,7 +428,7 @@ export function useFollowTail({
     transition("resume");
     dispatchVirtualViewportIntent(scrollRef.current, "down");
     scrollToBottom();
-    scheduleFollow();
+    scheduleFollow({ converge: true });
   }, [cancelProgrammaticScroll, scheduleFollow, scrollRef, scrollToBottom, transition]);
 
   const onWheel = useCallback((event: Pick<WheelEvent, "deltaY">) => {
@@ -568,7 +591,7 @@ export function useFollowTail({
     setState(stateRef.current);
     if (stateRef.current === "following") {
       scrollToBottom();
-      scheduleFollow();
+      scheduleFollow({ converge: true });
     }
   }, [scheduleFollow, scrollToBottom, sessionId]);
 
@@ -580,8 +603,8 @@ export function useFollowTail({
 
   // Virtualized rows are measured after React commits. The first content-revision scroll can
   // therefore target the OLD scrollHeight; observe the rendered transcript's actual size and
-  // follow again once those late measurements land. Character-data observation also covers a
-  // streaming chunk whose existing row grows before the virtualizer publishes its new height.
+  // follow again once those late measurements land. A streaming chunk that grows an existing row
+  // arrives as the list's row-resize report; mutations only keep the settle window open.
   useLayoutEffect(() => {
     const element = scrollRef.current;
     if (!element || typeof ResizeObserver === "undefined") return;
@@ -598,7 +621,7 @@ export function useFollowTail({
       // Re-pin in this same pre-paint delivery: this frame's animation callbacks already ran, so
       // deferring the first correction would paint one frame off the tail (the composer bounce).
       if (stateRef.current === "following") scrollToBottom();
-      scheduleFollow(true);
+      scheduleFollow({ ownsResizeScroll: true });
     });
     // Panel and window resizing changes the reader border box before every virtual row necessarily
     // publishes a new height. Observe the viewport itself so following owns the complete reflow
@@ -617,15 +640,27 @@ export function useFollowTail({
       scheduleFollow();
     });
     mutationObserver?.observe(element, { childList: true, subtree: true, characterData: true });
+    // A virtual row is positioned out of flow, so a streamed chunk that grows it changes no observed
+    // child's size; the list reports the row's new height instead. That report comes after layout,
+    // so pin there, before paint, without a layout read of its own. A pending bare scroll may still
+    // turn out to be the reader's, so leave that change to the settle frames.
+    const onRowResize = () => {
+      if (stateRef.current !== "following") return;
+      if (scrollIntentTimerRef.current == null) scrollToBottom();
+      else followDirtyRef.current = true;
+      scheduleFollow();
+    };
+    element.addEventListener(VIRTUAL_ROW_RESIZE_EVENT, onRowResize);
     // A nested scroller's own scroll never reaches the reader's onScroll, but it is still the reader
     // reading under a held finger: such a press is not a tap.
     const onNestedScroll = (event: Event) => {
       if (event.target !== element && pressRef.current) pressRef.current.scrolled = true;
     };
     element.addEventListener("scroll", onNestedScroll, true);
-    scheduleFollow();
+    scheduleFollow({ converge: true });
     return () => {
       mutationObserver?.disconnect();
+      element.removeEventListener(VIRTUAL_ROW_RESIZE_EVENT, onRowResize);
       element.removeEventListener("scroll", onNestedScroll, true);
       resizeObserver.disconnect();
     };
