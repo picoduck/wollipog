@@ -287,6 +287,28 @@ test("the character ceiling holds when both tabs grow records that already exist
     `stored ${storedChars()} characters, ceiling ${tabA.PANEL_SCRATCH_PERSIST_CHAR_LIMIT}`);
 });
 
+test("a flush of several keys does not put back a draft another tab consumed during it (#2764)", () => {
+  // Tab A's pause ends with a title and a body waiting. Tab B reads the body as soon as it is
+  // stored and submits it; tab A's flush must not then stamp the body back over B's marker.
+  const scope = tabA.panelScratchScopeKey("session-1");
+  openOnEmptyOrigin(tabB);
+  tabA.writePanelScratch(scope, "review.requestTitle", "A title", "draft");
+  tabA.writePanelScratch(scope, "review.requestBody", "Already submitted body", "draft");
+  onNextWrite = () => {
+    tabB.dropPanelScratchMemory();
+    assert.equal(tabB.readPanelScratch(scope, "review.requestBody"), "Already submitted body");
+    tabB.clearPanelScratchIf(scope, "review.requestBody", "Already submitted body",
+      tabB.panelScratchRevision(scope, "review.requestBody"));
+  };
+  tabA.flushPanelScratch();
+
+  tabA.dropPanelScratchMemory();
+  tabB.dropPanelScratchMemory();
+  assert.equal(tabA.readPanelScratch(scope, "review.requestBody"), undefined, "the submitted body stays submitted");
+  assert.equal(tabB.readPanelScratch(scope, "review.requestBody"), undefined);
+  assert.equal(tabA.readPanelScratch(scope, "review.requestTitle"), "A title", "and the title is kept");
+});
+
 test("a draft one tab sends is not written back by the tab still holding it", () => {
   // Per-scope records alone would not do this: tab B's copy of the scope is live, it knows nothing
   // about the send, and its next write would put the message back. The deletion marker is what
