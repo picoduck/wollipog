@@ -607,9 +607,12 @@ const LAZY_META_KEYS = new Set<string>([
   "preview", "seq", "tokensIn", "tokensOut", "contextTokensUsed", "contextWindow", "costUsd", "updatedAt",
 ]);
 const META_FLUSH_MS = 250;
-/** A warm append layout skips cold-segment checks, so a streaming session still re-validates the full
- * layout from disk (segment presence and size) at least this often, as the uncached path did. */
+/** A warm append layout skips cold-segment checks, so a streaming session still re-validates its
+ * segments' presence and size at least this often, as the uncached path did. */
 const HISTORY_LAYOUT_REVALIDATE_MS = META_FLUSH_MS;
+/** Between those cheap checks the manifest is trusted by identity. A full read at least this often
+ * bounds how long an in-place rewrite that preserved inode, mtime, and size could go unnoticed. */
+const HISTORY_LAYOUT_FULL_REVALIDATE_MS = 5_000;
 
 export class SessionStore {
   /**
@@ -663,7 +666,7 @@ export class SessionStore {
    * HISTORY_LAYOUT_REVALIDATE_MS is re-validated so external segment damage still fails appends. */
   private readonly historyLayoutCache = new Map<
     string,
-    { epoch: number; manifestKey: string | null; layout: HistoryLayout; validatedAt: number }
+    { epoch: number; manifestKey: string | null; layout: HistoryLayout; validatedAt: number; fullyValidatedAt: number }
   >();
   private historyMaintenanceCursor: string | null = null;
   /** Tokens of compactions this process is preparing. Their files are unreferenced until publication,
@@ -880,7 +883,10 @@ export class SessionStore {
    * uncached path so every append retries the fence exactly as before. */
   private cacheHistoryLayout(id: string, epoch: number, manifestKey: string | null, layout: HistoryLayout): void {
     if (existsSync(this.historyLegacyFencePath(id))) this.historyLayoutCache.delete(id);
-    else this.historyLayoutCache.set(id, { epoch, manifestKey, layout, validatedAt: performance.now() });
+    else {
+      const now = performance.now();
+      this.historyLayoutCache.set(id, { epoch, manifestKey, layout, validatedAt: now, fullyValidatedAt: now });
+    }
   }
 
   /** The append target without re-reading the manifest or touching cold segments. The manifest is
@@ -906,19 +912,27 @@ export class SessionStore {
   /** Periodic revalidation of a cached layout whose manifest identity is unchanged (#2831). That
    * manifest names the same immutable segments, so only their presence and size can have changed:
    * one lstat per segment replaces re-reading and re-parsing the manifest. A pending legacy-fence
-   * intent or any damaged segment falls back to the full read, which reports it exactly as before. */
+   * intent, any segment that is damaged or cannot be inspected, or an overdue full read falls back to
+   * the full read, which reports damage exactly as before. */
   private coldSegmentsStillValid(
     id: string,
-    cached: { layout: HistoryLayout; validatedAt: number },
+    cached: { layout: HistoryLayout; validatedAt: number; fullyValidatedAt: number },
   ): boolean {
-    if (performance.now() - cached.validatedAt < HISTORY_LAYOUT_REVALIDATE_MS) return true;
+    const now = performance.now();
+    if (now - cached.validatedAt < HISTORY_LAYOUT_REVALIDATE_MS) return true;
+    if (now - cached.fullyValidatedAt >= HISTORY_LAYOUT_FULL_REVALIDATE_MS) return false;
     if (existsSync(this.historyLegacyFencePath(id))) return false;
     for (const source of cached.layout.sources) {
       if (!source.segment) continue;
-      const stat = lstatSync(source.path, { throwIfNoEntry: false });
+      let stat;
+      try {
+        stat = lstatSync(source.path, { throwIfNoEntry: false });
+      } catch {
+        return false; // EACCES, EIO, ENOTDIR: the full read turns these into history_corrupt
+      }
       if (!stat?.isFile() || stat.size !== source.segment.bytes) return false;
     }
-    cached.validatedAt = performance.now();
+    cached.validatedAt = now;
     return true;
   }
 
