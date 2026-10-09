@@ -75,7 +75,15 @@ test("every prefix of a streamed reply renders blockwise exactly as whole", () =
 });
 
 test("generated documents render blockwise exactly as whole", () => {
-  const word = fc.constantFrom("alpha", "**bold**", "`code`", "_em_", "[link](https://example.com)", "1.", "-", "*", ">", "|", "x");
+  // Beside ordinary Markdown, the character classes the cut scanner must not misread: carriage
+  // returns, Unicode line and paragraph separators, a byte-order mark, non-breaking spaces, HTML,
+  // reference definitions and footnotes, and fence markers with info strings.
+  const word = fc.constantFrom(
+    "alpha", "**bold**", "`code`", "_em_", "[link](https://example.com)", "1.", "-", "*", ">", "|", "x",
+    "```", "~~~", "```ts", "~~~lang\u2028meta", "#", "***", "___", "    ", "\t", "2)", "+", "!", "(", "=",
+    "\\", "\r", "\u2028", "\u2029", "\uFEFF", "\u00a0", "<div>", "<!--", "-->", "[a]", "[a]: /target",
+    "[^1]", "[^1]: note",
+  );
   const line = fc.array(word, { minLength: 1, maxLength: 5 }).map((words) => words.join(" "));
   const block = fc.oneof(
     line,
@@ -90,6 +98,9 @@ test("generated documents render blockwise exactly as whole", () => {
     fc.constant("---"),
     fc.constant("==="),
     fc.constant("| a | b |\n| - | - |"),
+    fc.constant("<details>\n\ninside\n\n</details>"),
+    fc.constant("[ref]:\n  /multiline-destination"),
+    fc.constant("\uFEFF~~~\nbom fence"),
     fc.constant(""),
   );
   const separator = fc.constantFrom("\n", "\n\n", "\n\n\n", "\n \n", "\n\u00a0\n", "\r\n\r\n");
@@ -97,6 +108,6 @@ test("generated documents render blockwise exactly as whole", () => {
     fc.property(fc.array(fc.tuple(block, separator), { minLength: 1, maxLength: 14 }), (parts) => {
       assertSameMarkup(parts.map(([text, gap]) => text + gap).join(""));
     }),
-    { numRuns: 1500 },
+    { numRuns: 2000 },
   );
 });
