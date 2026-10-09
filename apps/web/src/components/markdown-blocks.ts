@@ -12,8 +12,8 @@
  * A document is never cut when it contains a line starting with `<` (raw HTML blocks may span blank
  * lines), or `[^` or `]:` anywhere: footnotes and link reference definitions reach across the
  * document, and a definition's label may span lines, escape brackets or sit inside a container. Nor
- * when it contains a carriage return: lines here end at `\n` only. A blank line holds only spaces and
- * tabs, as in CommonMark. The equivalence tests render the cut and the whole document and compare
+ * when it contains a carriage return or a Unicode line or paragraph separator: lines here end at `\n`
+ * only. A blank line holds only spaces and tabs, as in CommonMark. The equivalence tests render the cut and the whole document and compare
  * the markup.
  *
  * Cuts only ever change which React subtree renders a block. When a later chunk removes a cut (a
@@ -27,11 +27,13 @@ const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
 const HTML_LINE = /^ {0,3}</m;
 const BLANK_LINE = /^[ \t]*$/;
+/** Carriage returns and Unicode line and paragraph separators, which these patterns don't model. */
+const UNUSUAL_LINE_BREAK = /[\r\u2028\u2029]/;
 
 /** The offsets at which `text`'s blocks start; always begins with 0. */
 export function markdownBlockStarts(text: string): number[] {
   const starts = [0];
-  if (text.includes("\r") || text.includes("[^") || text.includes("]:") || HTML_LINE.test(text)) return starts;
+  if (UNUSUAL_LINE_BREAK.test(text) || text.includes("[^") || text.includes("]:") || HTML_LINE.test(text)) return starts;
   let fence: { marker: string; length: number } | null = null;
   let afterBlank = false;
   /** The last non-blank line outside a fence ended a plain block (and there was one). */
