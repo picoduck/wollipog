@@ -28,3 +28,18 @@ export function virtualViewportIntentDirection(event: Event): VirtualViewportInt
   const detail = (event as Partial<CustomEvent<VirtualViewportIntentDetail>>).detail;
   return detail?.direction ?? null;
 }
+
+export const VIRTUAL_ROW_RESIZE_EVENT = "wollipog:virtual-row-resize";
+
+/** Report that a virtual row's measured height changed. It is dispatched where the row is measured:
+ * in the ResizeObserver delivery that follows layout, or in the commit that mounts the row, right
+ * after reading it. Either way layout is current, so a listener can read scroll geometry without
+ * forcing another synchronous layout. */
+export function dispatchVirtualRowResize(
+  target: Partial<Pick<EventTarget, "dispatchEvent">> | null | undefined,
+): void {
+  if (!target?.dispatchEvent) return;
+  const view = (target as Partial<Node>).ownerDocument?.defaultView;
+  const EventConstructor = view?.Event ?? Event;
+  target.dispatchEvent(new EventConstructor(VIRTUAL_ROW_RESIZE_EVENT));
+}

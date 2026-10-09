@@ -15,7 +15,7 @@ import {
   useFollowTail,
   type FollowTailApi,
 } from "./useFollowTail.js";
-import { VIRTUAL_VIEWPORT_INTENT_EVENT } from "./viewport-intent.js";
+import { VIRTUAL_ROW_RESIZE_EVENT, VIRTUAL_VIEWPORT_INTENT_EVENT } from "./viewport-intent.js";
 
 test("new rows are the ones after the detach point, never prepended history", () => {
   const rows = [{ id: 4 }, { id: 5 }, { id: 9 }, { id: 10 }];
@@ -1233,5 +1233,111 @@ test("a saved reading position is reported for load-shape decisions without dist
     assert.equal(api.state, "paused");
   } finally {
     await act(async () => { root.unmount(); });
+  }
+});
+
+const nextFrame = () => new Promise<void>((resolve) => domWindow.requestAnimationFrame(() => resolve()));
+
+/** A transcript whose scrollTo lands on the clamped request, counting each `scrollHeight` read: in a
+ * browser every one forces a synchronous layout once anything has changed since the last. */
+function instrumentTranscript(transcript: HTMLElement, metrics: FollowTailTestMetrics) {
+  const counts = { heightReads: 0, scrolls: [] as number[] };
+  let height = metrics.scrollHeight;
+  setScrollMetrics(transcript, { scrollTop: metrics.scrollTop, scrollHeight: 0, clientHeight: metrics.clientHeight });
+  Object.defineProperty(transcript, "scrollHeight", {
+    configurable: true,
+    get: () => { counts.heightReads += 1; return height; },
+    set: (value: number) => { height = value; },
+  });
+  transcript.scrollTo = (({ top }: ScrollToOptions) => {
+    counts.scrolls.push(top ?? Number.NaN);
+    Object.defineProperty(transcript, "scrollTop", {
+      configurable: true, writable: true, value: Math.min(top ?? 0, height - transcript.clientHeight),
+    });
+  }) as typeof transcript.scrollTo;
+  return counts;
+}
+
+test("a row-resize report pins a following reader at once, and settle frames read no layout without a change (#2840)", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(<Harness sessionId="row-resize" revision={0} mode="expanded" scope="row-resize" />);
+    });
+    const transcript = container.firstElementChild as HTMLElement;
+    const counts = instrumentTranscript(transcript, { scrollTop: 800, scrollHeight: 1_000, clientHeight: 200 });
+    // Let the mount's converging window run out.
+    await act(async () => { for (let frame = 0; frame < 10; frame += 1) await nextFrame(); });
+
+    counts.heightReads = 0;
+    counts.scrolls.length = 0;
+    (transcript as unknown as { scrollHeight: number }).scrollHeight = 1_080;
+    await act(async () => { transcript.dispatchEvent(new domWindow.Event(VIRTUAL_ROW_RESIZE_EVENT) as never); });
+    assert.deepEqual(counts.scrolls, [1_080], "the grown row is pinned in the delivery that reports it, before paint");
+
+    // A streamed chunk mutates the transcript; nothing else changes, so no settle frame re-reads.
+    counts.heightReads = 0;
+    counts.scrolls.length = 0;
+    await act(async () => {
+      for (let frame = 0; frame < 4; frame += 1) {
+        transcript.append(domWindow.document.createTextNode("chunk") as never);
+        await nextFrame();
+      }
+      for (let frame = 0; frame < 10; frame += 1) await nextFrame();
+    });
+    assert.equal(counts.heightReads, 0, "settle frames make no layout read for a change already pinned");
+    assert.deepEqual(counts.scrolls, []);
+    assert.equal(transcript.dataset.state, "following");
+
+    // A paused reader is never moved by a row that grows.
+    await act(async () => {
+      transcript.dispatchEvent(new domWindow.WheelEvent("wheel", { deltaY: -1, bubbles: true }) as never);
+    });
+    assert.equal(transcript.dataset.state, "paused");
+    await act(async () => {
+      transcript.dispatchEvent(new domWindow.Event(VIRTUAL_ROW_RESIZE_EVENT) as never);
+      await nextFrame();
+    });
+    assert.deepEqual(counts.scrolls, [], "a row resize must not yank a paused reader");
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
+test("returning to the tail converges for one settle window, which streamed mutations do not extend (#2840)", async () => {
+  const apis: FollowTailApi[] = [];
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(<Harness sessionId="converge" revision={0} mode="expanded" scope="converge" onApi={(api) => { apis.push(api); }} />);
+    });
+    const transcript = container.firstElementChild as HTMLElement;
+    const counts = instrumentTranscript(transcript, { scrollTop: 300, scrollHeight: 1_000, clientHeight: 200 });
+    await act(async () => {
+      transcript.dispatchEvent(new domWindow.WheelEvent("wheel", { deltaY: -1, bubbles: true }) as never);
+    });
+    assert.equal(transcript.dataset.state, "paused");
+
+    counts.scrolls.length = 0;
+    await act(async () => {
+      apis.at(-1)!.follow();
+      // Output keeps streaming in, mutating the transcript every frame for longer than one window.
+      for (let frame = 0; frame < 24; frame += 1) {
+        transcript.append(domWindow.document.createTextNode("chunk") as never);
+        await nextFrame();
+      }
+    });
+    assert.equal(transcript.dataset.state, "following");
+    // One pin from follow() itself, then one per frame of its converging window, and no more.
+    assert.ok(counts.scrolls.length >= 2, `returning to the tail re-pins while rows measure in (${counts.scrolls.length})`);
+    assert.ok(counts.scrolls.length <= 9, `the converging window stays bounded while output streams (${counts.scrolls.length})`);
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
   }
 });
