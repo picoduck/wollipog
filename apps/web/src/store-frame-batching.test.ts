@@ -208,7 +208,23 @@ test("without a frame scheduler, as in a hidden tab, every frame publishes at on
   assert.deepEqual(seqs(store.getState(), "s1"), [1, 2, 3, 4]);
 });
 
-test("a status transition superseded within one frame still reaches transition observers", () => {
+test("a session transition publishes at once; only a streaming-only upsert waits for the frame", () => {
+  const { store, clock, notified } = liveStore();
+  const seen: string[] = [];
+  store.subscribe(() => seen.push(store.getState().sessions.get("s1")?.status ?? ""));
+  store.receiveFrame({ type: "session_upsert", session: session("s1", { status: "idle" }) });
+  store.receiveFrame({ type: "session_upsert", session: session("s1", { status: "running" }) });
+  assert.deepEqual(seen, ["idle", "running"], "each transition is published on its own, as before");
+  assert.equal(clock.waiting, 0);
+
+  store.receiveFrame({ type: "session_upsert", session: session("s1", { status: "running", messageCount: 3, preview: "more" }) });
+  assert.equal(notified(), 2, "live counters and the preview wait for the frame");
+  assert.equal(clock.waiting, 1);
+  clock.run();
+  assert.equal(notified(), 3);
+});
+
+test("a status transition reaches transition observers even inside a batch", () => {
   const { store, clock } = liveStore();
   const notifications: string[] = [];
   store.observeTransitions((previous, next) => {
@@ -218,11 +234,12 @@ test("a status transition superseded within one frame still reaches transition o
       if (payload) notifications.push(payload.title);
     }
   });
+  store.receiveFrame({ type: "session_event", event: event("s1", 1) });
   store.receiveFrame({ type: "session_upsert", session: session("s1", { status: "idle" }) });
   store.receiveFrame({ type: "session_upsert", session: session("s1", { status: "running" }) });
   clock.run();
-  assert.equal(store.getState().sessions.get("s1")?.status, "running", "subscribers see only the last state");
-  assert.deepEqual(notifications, ["s1 is awaiting a prompt"], "the turn that ended in between is still notified");
+  assert.equal(store.getState().sessions.get("s1")?.status, "running");
+  assert.deepEqual(notifications, ["s1 is awaiting a prompt"], "the turn that ended in between is notified");
 });
 
 test("a session map differing only in streaming fields counts as unchanged for the shell", () => {

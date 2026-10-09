@@ -1734,21 +1734,23 @@ interface StoreValue extends State {
  * Components now subscribe to exactly the slice they render via useStoreSelector; the context
  * carries only this stable handle.
  */
-/** High-volume socket frames whose publication may wait for the next animation frame (#2763).
- * Every other frame (a snapshot, a history reset, removals, subscription acknowledgements) is
- * published at once, together with whatever earlier frames are still waiting. */
-function deferrableFrame(msg: ControlPlaneToUi, state: State): boolean {
-  switch (msg.type) {
-    case "session_event":
-    case "shell_output":
-    case "pod_context_entry":
-      return true;
-    case "session_upsert":
-      // A changed history epoch replaces the transcript; it is never held back.
-      return sessionEventEpoch(msg.session) === sessionEventEpoch(state.sessions.get(msg.session.id));
-    default:
-      return false;
-  }
+/** Socket frame types whose publication may wait for the next animation frame (#2763). Every other
+ * frame (a snapshot, a history reset, removals, subscription acknowledgements) is published at once,
+ * together with whatever earlier frames are still waiting. */
+const STREAM_FRAME_TYPES: ReadonlySet<ControlPlaneToUi["type"]> = new Set([
+  "session_event", "session_upsert", "shell_output", "pod_context_entry",
+]);
+
+/** Whether a frame, now reduced from `before` to `after`, may wait for the next animation frame. A
+ * session upsert waits only when it moved nothing but streaming fields. A transition (status,
+ * attention, requests, the history epoch, …) is published at once, as each frame was before, so a
+ * component that reacts to each transition still sees every one of them. */
+function deferrableFrame(msg: ControlPlaneToUi, before: State, after: State): boolean {
+  if (!STREAM_FRAME_TYPES.has(msg.type)) return false;
+  if (msg.type !== "session_upsert") return true;
+  const previous = before.sessions.get(msg.session.id);
+  const next = after.sessions.get(msg.session.id);
+  return previous !== undefined && next !== undefined && sameSessionExceptStreaming(previous, next);
 }
 
 export class Store {
@@ -1837,14 +1839,14 @@ export class Store {
   /** Apply one socket frame now and publish it with the others received in this animation frame.
    * Frames are reduced in arrival order, so publication can only ever show a prefix of them. */
   receiveFrame = (msg: ControlPlaneToUi, now?: number): void => {
-    const deferrable = deferrableFrame(msg, this.state);
     // The reducer updates the activity registry in place. While frames wait, give them their own
     // copy, so the published state keeps the activity it was published with.
-    if (deferrable && this.publishScheduler && this.state.activity === this.published.activity) {
+    if (STREAM_FRAME_TYPES.has(msg.type) && this.publishScheduler && this.state.activity === this.published.activity) {
       this.state = { ...this.state, activity: new Map(this.state.activity) };
     }
+    const before = this.state;
     this.apply({ type: "msg", msg, now });
-    if (!deferrable || !this.publishScheduler) {
+    if (!this.publishScheduler || !deferrableFrame(msg, before, this.state)) {
       this.publish();
       return;
     }

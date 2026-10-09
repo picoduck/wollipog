@@ -224,6 +224,35 @@ test("a frame whose animation frame never comes is published by the fallback tim
   }
 });
 
+test("an effect watching session status sees a transition that the next one follows within a frame", async () => {
+  visibility = "visible";
+  const statuses: string[] = [];
+  function StatusEffect() {
+    const status = useStoreSelector((state) => state.sessions.get("s1")?.status);
+    React.useEffect(() => { if (status) statuses.push(status); }, [status]);
+    return null;
+  }
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "batching-status", runtimeKey: `batching-status:${Math.random()}`, createSocket: () => socket, close() {},
+  };
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<StoreProvider connection={connection}><StatusEffect /></StoreProvider>));
+    await act(async () => socket.push({ type: "snapshot", runners: [], boxes: [], sessions: [session()], runs: [], pods: [] }));
+    // A stopped turn settles and the queued prompt starts at once: two transitions inside one frame.
+    await act(async () => socket.push({ type: "session_event", event: event(1) }));
+    await act(async () => socket.push({ type: "session_upsert", session: session({ status: "idle" }) }));
+    await act(async () => socket.push({ type: "session_upsert", session: session({ status: "running" }) }));
+    assert.deepEqual(statuses, ["running", "idle", "running"], "every transition renders on its own, as before");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 test("a status that lasts less than one frame still raises its desktop notification", async () => {
   visibility = "visible";
   const shown: string[] = [];
