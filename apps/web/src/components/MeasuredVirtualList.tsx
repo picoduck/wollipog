@@ -533,13 +533,6 @@ function VirtualList<T>({
     if (navigationTarget != null && !next.includes(navigationTarget)) next.push(navigationTarget);
     return next;
   }, [focusedKey, draggedKey, pendingAnchorKey, pinnedKey, revealPinnedKey, indexByKey, itemsVersion]);
-  // `pinned` reads the pending anchor in render. Each commit records the anchor it pinned, so an
-  // anchor dropped outside render (a settle frame, a reveal, a reset) renders once more to release
-  // its row. Otherwise a reader who scrolled away leaves that row mounted until something else
-  // renders (#2734). Declared before every layout effect that can drop the anchor.
-  useLayoutEffect(() => {
-    committedAnchorPinRef.current = pendingAnchorKey;
-  });
   const rangeExtractor = useCallback((range: Range) => pinnedRangeExtractor(range, pinned), [pinned]);
 
   const gapAt = (index: number) => typeof rowGap === "function" ? rowGap(items[index]!, index) : rowGap;
@@ -567,6 +560,17 @@ function VirtualList<T>({
   const initialMeasurementVirtualizerRef = useRef(virtualizer);
   initialMeasurementVirtualizerRef.current = virtualizer;
   const mountedVirtualRows = virtualizer.getVirtualItems();
+  // `pinned` reads the pending anchor in render. Each commit records the anchor whose pin kept a row
+  // mounted outside the viewport range, so dropping that anchor outside render (a settle frame, a
+  // reveal, a reset) renders once more to release the row. Otherwise a reader who scrolled away
+  // leaves it mounted until something else renders (#2734). A pin inside the range changes nothing,
+  // so it costs no extra commit. Declared before every layout effect that can drop the anchor.
+  useLayoutEffect(() => {
+    const index = pendingAnchorKey == null ? undefined : indexByKey.get(pendingAnchorKey);
+    const range = virtualizer.range;
+    committedAnchorPinRef.current = index != null && range != null &&
+      (index < range.startIndex - overscan || index > range.endIndex + overscan) ? pendingAnchorKey : null;
+  });
   // Every external scrollRef host carries `measured-virtual-scroll`, disabling native anchoring.
   // Logical-key corrections and TanStack's measured-row adjustments must be the only scroll
   // owners; native anchoring sees transformed rows as ordinary flow and applies a third correction.
