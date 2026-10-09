@@ -48,6 +48,7 @@ const cases: Record<string, string> = {
   "a line of non-breaking spaces is not blank": "*first\n\u00a0\nsecond*\n\nNext.",
   "line separator in a fence's info string": "Intro.\n\n~~~lang\u2028meta\ncode\n\nmore\n~~~\n\nAfter.",
   "paragraph separator in a fence's info string": "Intro.\n\n~~~lang\u2029meta\ncode\n\nmore\n~~~\n\nAfter.",
+  "leading byte-order mark": "\uFEFF~~~\nalpha\n\nbeta\n~~~\n\nAfter.",
   "streamed so far": "The quick brown fox jumps over the lazy dog while the agent streams **markdown** with `code`\n\n```ts\nconst x1 = 1;\n```\n\nThe quick brown",
 };
 
@@ -57,7 +58,7 @@ for (const [name, text] of Object.entries(cases)) {
 
 test("documents with raw HTML, definitions or footnotes are never cut", () => {
   for (const name of ["html", "reference definitions", "footnotes", "multiline reference label", "fence with CRLF line endings",
-    "line separator in a fence's info string", "paragraph separator in a fence's info string",
+    "line separator in a fence's info string", "paragraph separator in a fence's info string", "leading byte-order mark",
     "escaped bracket in a reference label", "reference definition in a quote"]) {
     assert.deepEqual(markdownBlockStarts(cases[name]!), [0], name);
   }

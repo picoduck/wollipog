@@ -1006,6 +1006,14 @@ const ProfiledEventTimeline = memo(function ProfiledEventTimeline({ liveSessionI
   );
 });
 
+/** The history notice, counting the loaded events itself: a chunk that only lengthens the reply
+ * does not render the session view around it (#2763). */
+function LiveTranscriptHistoryNotice({ sessionId, ...props }:
+  Omit<ComponentProps<typeof TranscriptHistoryNotice>, "loaded"> & { sessionId: string }) {
+  const loaded = useStoreSelector((state) => state.events.get(sessionId)?.length ?? 0);
+  return <TranscriptHistoryNotice {...props} loaded={loaded} />;
+}
+
 /** Heartbeats within one busy period of one history: the same for everything but the transcript. */
 function sameActivityPeriod(previous: SessionActivity | undefined, next: SessionActivity | undefined): boolean {
   return previous !== undefined && next !== undefined && previous.eventEpoch === next.eventEpoch &&
@@ -6700,10 +6708,10 @@ function SessionDetailLoaded({
                 the reader is at the tail. */}
             {(transcript.notice === "stale" || transcript.notice === "error") && (
               <div className="transcript-history-band">
-                <TranscriptHistoryNotice
+                <LiveTranscriptHistoryNotice
+                  sessionId={sessionId}
                   kind={transcript.notice}
                   error={transcript.error}
-                  loaded={evs?.length ?? 0}
                   total={session.messageCount > 0 ? session.messageCount : undefined}
                   machine={runnerDisp.name || undefined}
                   machineOffline={runner?.status === "offline"}
