@@ -630,9 +630,13 @@ export class SessionStore {
    */
   private readonly cache = new Map<string, { meta: SessionMeta; key: string }>();
   /** Unflushed noisy-key deltas + the log epoch they were recorded under (stale-epoch deltas
-   * are dropped at overlay/flush time — see SessionMeta.logEpoch). */
-  private readonly pending = new Map<string, { delta: Partial<SessionMeta>; epoch: number }>();
+   * are dropped at overlay/flush time — see SessionMeta.logEpoch). `batch` identifies one run of
+   * merged deltas: it survives later merges and is replaced once a write consumes or drops them, so a
+   * debounced flush can tell its snapshot is still covered by the newest deltas. */
+  private readonly pending = new Map<string, { delta: Partial<SessionMeta>; epoch: number; batch: object }>();
   private readonly flushTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Debounced flushes whose fsyncs are running on the libuv pool, one per session. */
+  private readonly backgroundFlushes = new Map<string, Promise<void>>();
   /** Reconcile once per lock-held append burst, not once per streamed delta. releaseLock clears it
    * so another process's completed turn is observed before this process writes again. */
   private readonly seqReconciled = new Set<string>();
@@ -1757,22 +1761,145 @@ export class SessionStore {
   private patchMetaLazy(id: string, delta: Partial<SessionMeta>): void {
     const epoch = this.readDiskMeta(id)?.logEpoch ?? 0;
     const prev = this.pending.get(id);
-    const cur = prev && prev.epoch === epoch ? prev.delta : {};
+    const continued = prev && prev.epoch === epoch ? prev : undefined;
+    const cur = continued?.delta ?? {};
     const merged: Partial<SessionMeta> = { ...cur, ...delta };
     if (cur.seq != null || delta.seq != null) merged.seq = Math.max(cur.seq ?? 0, delta.seq ?? 0);
-    this.pending.set(id, { delta: merged, epoch });
+    this.pending.set(id, { delta: merged, epoch, batch: continued?.batch ?? {} });
+    this.armFlushTimer(id);
+  }
+
+  private armFlushTimer(id: string): void {
     if (this.flushTimers.has(id)) return;
     const t = setTimeout(() => {
       this.flushTimers.delete(id);
-      this.flush(id);
+      this.startBackgroundFlush(id);
     }, META_FLUSH_MS);
     t.unref?.();
     this.flushTimers.set(id, t);
   }
 
+  /** The debounced flush runs at most once at a time per session. A timer that fires while one is
+   * in flight re-arms, so its deltas stay pending for the next pass. */
+  private startBackgroundFlush(id: string): void {
+    if (this.backgroundFlushes.has(id)) {
+      this.armFlushTimer(id);
+      return;
+    }
+    const run = this.flushInBackground(id).then(
+      () => { this.backgroundFlushes.delete(id); },
+      () => new Promise<void>((resolve) => {
+        // Any I/O failure retries synchronously in its own task. A persistent one then throws out of
+        // a timer-like task, exactly as the synchronous debounced flush did, rather than being
+        // swallowed as a promise rejection.
+        setImmediate(() => {
+          try {
+            this.flush(id);
+          } finally {
+            this.backgroundFlushes.delete(id);
+            resolve();
+          }
+        });
+      }),
+    );
+    this.backgroundFlushes.set(id, run);
+  }
+
+  /**
+   * The debounced flush with every fsync and the temp write on the libuv pool (#2833). The deltas
+   * are snapshotted before the event log's fsync starts, so the metadata never names a seq whose
+   * event line the fsync did not cover, which is the ordering the synchronous flush gives. The
+   * rename publishes only if meta.json is still the exact file the merge read and the snapshot's
+   * batch is still the pending one, checked without yielding. An explicit flush(), a critical patch,
+   * or a reset that lands meanwhile has already made the batch durable or dropped it. Later deltas
+   * then start a new batch, and republishing the older snapshot over them would roll back fields such
+   * as usage totals, so it is abandoned. A peer process's write is merged again.
+   */
+  private async flushInBackground(id: string): Promise<void> {
+    const entry = this.pending.get(id);
+    if (!entry) return;
+    const events = this.flushTarget(id, entry.epoch);
+    if (events) await this.fsyncFileInBackground(events);
+    const p = this.metaPath(id);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (this.pending.get(id)?.batch !== entry.batch) return;
+      let next: SessionMeta;
+      let identity: string | null;
+      try {
+        // Taken before the read: a file replaced after it never matches at the rename.
+        identity = this.metaFileIdentity(p);
+        const disk = this.readDiskMeta(id);
+        if (!disk || entry.epoch !== (disk.logEpoch ?? 0)) {
+          this.pending.delete(id);
+          return;
+        }
+        next = this.mergeDelta(disk, entry.delta);
+      } catch {
+        this.pending.delete(id); // removed or reset beyond repair by another process
+        return;
+      }
+      const tmp = `${p}.${process.pid}.${randomUUID()}.tmp`;
+      let renamed = false;
+      try {
+        await this.writeSyncedFileInBackground(tmp, JSON.stringify(next, null, 2));
+        if (this.pending.get(id)?.batch !== entry.batch) return; // consumed or dropped meanwhile
+        if (this.metaFileIdentity(p) !== identity) continue;
+        renameSync(tmp, p);
+        renamed = true;
+      } finally {
+        if (!renamed) rmSync(tmp, { force: true });
+      }
+      // Deltas recorded during the write are a superset of this snapshot and stay pending.
+      if (this.pending.get(id) === entry) this.pending.delete(id);
+      this.cache.set(id, { meta: next, key: this.statKey(p) ?? "" });
+      await this.fsyncDirectoryAsync(this.dir(id));
+      return;
+    }
+    // meta.json kept changing under the merge; the deltas stay pending for the next pass.
+    if (this.pending.has(id)) this.armFlushTimer(id);
+  }
+
+  /** The active file the debounced flush makes durable. The append path keeps its layout current
+   * for every event it writes, so the cached path is the file those events went to. */
+  private flushTarget(id: string, epoch: number): string | null {
+    const cached = this.historyLayoutCache.get(id);
+    if (cached && cached.epoch === epoch) return cached.layout.active.path;
+    try { return this.historyLayout(id).active.path; } catch { return null; }
+  }
+
+  private async fsyncFileInBackground(path: string): Promise<void> {
+    let handle: FileHandle;
+    try {
+      handle = await open(path, "r+");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return; // removed: nothing to make durable
+      throw error;
+    }
+    try { await handle.sync(); } finally { await handle.close(); }
+  }
+
+  private async writeSyncedFileInBackground(path: string, contents: string): Promise<void> {
+    const handle = await open(path, "w");
+    try {
+      await handle.writeFile(contents);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  }
+
+  /** Exact identity of meta.json: every write renames a new inode over it. */
+  private metaFileIdentity(p: string): string | null {
+    const s = statSync(p, { bigint: true, throwIfNoEntry: false });
+    return s ? `${s.ino}:${s.mtimeNs}:${s.size}` : null;
+  }
+
   /** Flush a session's pending deltas by merging into a FRESH disk read — another runner may
    * have written newer critical fields meanwhile (lock-steal recovery, healing); overwriting
-   * the whole meta with our stale copy would undo that. Session gone ⇒ deltas are dropped. */
+   * the whole meta with our stale copy would undo that. Session gone ⇒ deltas are dropped.
+   * This stays synchronous: when it returns, the event log and pending metadata are durable, even
+   * if a debounced flush is still in flight (that one then finds its deltas gone or meta.json
+   * replaced, and does not publish). */
   flush(id: string): void {
     const timer = this.flushTimers.get(id);
     if (timer) {
@@ -1789,7 +1916,11 @@ export class SessionStore {
       this.fsyncFile(events);
     }
     const entry = this.pending.get(id);
-    if (!entry) return;
+    if (!entry) {
+      // A debounced flush may have renamed its meta.json and still be waiting on the directory fsync.
+      if (this.backgroundFlushes.has(id) && existsSync(this.dir(id))) this.fsyncDirectory(this.dir(id));
+      return;
+    }
     try {
       const disk = this.readDiskMeta(id);
       if (!disk || entry.epoch !== (disk.logEpoch ?? 0)) {
@@ -1806,7 +1937,7 @@ export class SessionStore {
 
   /** Flush every pending delta to disk now (shutdown path). */
   flushAll(): void {
-    for (const id of [...this.pending.keys()]) this.flush(id);
+    for (const id of new Set([...this.pending.keys(), ...this.backgroundFlushes.keys()])) this.flush(id);
   }
 
   patchMeta(id: string, patch: Partial<SessionMeta>): SessionMeta | null {

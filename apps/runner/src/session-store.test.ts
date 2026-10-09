@@ -38,7 +38,9 @@ import {
   symlinkSync,
   writeSync,
 } from "node:fs";
+import fs from "node:fs";
 import { createHash } from "node:crypto";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { join } from "node:path";
@@ -1144,6 +1146,375 @@ test("a stale pending delta from ANOTHER process cannot resurrect a reset seq (l
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+/* ---- the debounced metadata flush runs its I/O off the event loop (#2833) ---- */
+
+type FlushInternals = {
+  flushTimers: Map<string, ReturnType<typeof setTimeout>>;
+  backgroundFlushes: Map<string, Promise<void>>;
+  startBackgroundFlush(id: string): void;
+} & Record<string, (...args: never[]) => unknown>;
+
+/** Fire a session's debounced flush now, as its 250 ms timer would, and return its completion. */
+function fireDebouncedFlush(store: SessionStore, id: string): Promise<void> {
+  const internals = store as unknown as FlushInternals;
+  const timer = internals.flushTimers.get(id);
+  assert.ok(timer, "appends arm the debounced flush");
+  clearTimeout(timer);
+  internals.flushTimers.delete(id);
+  internals.startBackgroundFlush(id);
+  return internals.backgroundFlushes.get(id) ?? Promise.resolve();
+}
+
+/** Hold the first call of one of the store's async I/O steps until released. */
+function holdFirstCall(store: SessionStore, method: string): { reached: Promise<void>; release: () => void } {
+  const internals = store as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
+  const original = internals[method]!.bind(store);
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let entered!: () => void;
+  const reached = new Promise<void>((resolve) => { entered = resolve; });
+  let held = false;
+  internals[method] = async (...args: unknown[]) => {
+    if (!held) {
+      held = true;
+      entered();
+      await gate;
+    }
+    return original(...args);
+  };
+  return { reached, release };
+}
+
+/** Count synchronous fsyncs from the store's own module, which imports them from node:fs. */
+function countSyncFsyncs(t: { after(fn: () => void): void; mock: { method: Function; restoreAll(): void } }): { count: number } {
+  const counter = { count: 0 };
+  const original = fs.fsyncSync;
+  t.mock.method(fs, "fsyncSync", (fd: number) => {
+    counter.count++;
+    original(fd);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  return counter;
+}
+
+function diskMeta(root: string, id = "s_abc"): SessionMeta {
+  return JSON.parse(readFileSync(join(root, id, "meta.json"), "utf8")) as SessionMeta;
+}
+
+test("the debounced metadata flush of several streaming sessions never fsyncs on the event loop", async (t) => {
+  const { store, root } = tmpStore();
+  try {
+    const ids = ["s_a", "s_b", "s_c", "s_d"];
+    for (const id of ids) store.create(meta({ sessionId: id }));
+    const fsyncs = countSyncFsyncs(t);
+    const internals = store as unknown as FlushInternals;
+    const backgroundFsyncs: string[] = [];
+    const fsyncFileInBackground = internals.fsyncFileInBackground!.bind(store) as (path: string) => Promise<void>;
+    (internals as Record<string, unknown>).fsyncFileInBackground = (path: string) => {
+      backgroundFsyncs.push(path);
+      return fsyncFileInBackground(path);
+    };
+    for (let i = 0; i < 20; i++) {
+      for (const id of ids) store.appendEvent(id, { kind: "agent_message", text: `chunk ${i}` });
+    }
+    // The real 250 ms timers fire; wait on the durable result rather than a count of turns.
+    const deadline = Date.now() + 10_000;
+    while (
+      (internals.flushTimers.size > 0 || internals.backgroundFlushes.size > 0 ||
+        ids.some((id) => diskMeta(root, id).seq !== 20)) &&
+      Date.now() < deadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    for (const id of ids) assert.equal(diskMeta(root, id).seq, 20, `${id}'s seq reaches meta.json`);
+    assert.equal(fsyncs.count, 0, "every fsync of the debounced flush runs on the libuv pool");
+    assert.deepEqual(
+      [...new Set(backgroundFsyncs)].sort(),
+      ids.map((id) => join(root, id, "events.ndjson")),
+      "each session's event log is made durable before its metadata",
+    );
+    assert.deepEqual(readdirSync(join(root, "s_a")).filter((name) => name.endsWith(".tmp")), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the debounced flush publishes only seqs appended before its event-log fsync began", async () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta());
+    for (let i = 0; i < 3; i++) store.appendEvent("s_abc", { kind: "agent_message", text: `c${i}` });
+    const fsync = holdFirstCall(store, "fsyncFileInBackground");
+    const flushed = fireDebouncedFlush(store, "s_abc");
+    await fsync.reached;
+    // These lines may not be covered by the fsync already under way.
+    store.appendEvent("s_abc", { kind: "agent_message", text: "late 1" });
+    store.appendEvent("s_abc", { kind: "agent_message", text: "late 2" });
+    fsync.release();
+    await flushed;
+    assert.equal(diskMeta(root).seq, 3, "meta never names a seq the event-log fsync may have missed");
+    assert.equal(store.readMeta("s_abc")!.seq, 5, "the later deltas stay pending");
+    await fireDebouncedFlush(store, "s_abc");
+    assert.equal(diskMeta(root).seq, 5, "the next pass lands them");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an explicit flush is a durability barrier while a debounced flush is in flight", async (t) => {
+  for (const step of ["fsyncFileInBackground", "writeSyncedFileInBackground"] as const) {
+    await t.test(step, async (t) => {
+      const { store, root } = tmpStore();
+      try {
+        store.create(meta());
+        for (let i = 0; i < 3; i++) store.appendEvent("s_abc", { kind: "agent_message", text: `c${i}` });
+        const held = holdFirstCall(store, step);
+        const flushed = fireDebouncedFlush(store, "s_abc");
+        await held.reached;
+        store.appendEvent("s_abc", { kind: "agent_message", text: "c3" });
+        const fsyncs = countSyncFsyncs(t);
+        store.flush("s_abc");
+        // Event log, temp meta file and directory: all synchronous before flush() returns.
+        assert.equal(fsyncs.count, 3);
+        const published = statSync(join(root, "s_abc", "meta.json"), { bigint: true });
+        assert.equal(diskMeta(root).seq, 4);
+        held.release();
+        await flushed;
+        const after = statSync(join(root, "s_abc", "meta.json"), { bigint: true });
+        assert.equal(after.ino, published.ino, "the superseded debounced flush does not publish");
+        assert.equal(diskMeta(root).seq, 4);
+        assert.deepEqual(readdirSync(join(root, "s_abc")).filter((name) => name.endsWith(".tmp")), []);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+test("an explicit flush fsyncs the directory of a debounced flush that renamed but has not synced it", async () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta());
+    store.appendEvent("s_abc", { kind: "agent_message", text: "c0" });
+    const dirSync = holdFirstCall(store, "fsyncDirectoryAsync");
+    const flushed = fireDebouncedFlush(store, "s_abc");
+    await dirSync.reached;
+    assert.equal(diskMeta(root).seq, 1, "renamed into place");
+    const synced: string[] = [];
+    const internals = store as unknown as Record<string, (path: string) => void>;
+    const fsyncDirectory = internals.fsyncDirectory!.bind(store);
+    internals.fsyncDirectory = (path: string) => { synced.push(path); fsyncDirectory(path); };
+    store.flush("s_abc");
+    assert.deepEqual(synced, [join(root, "s_abc")], "flush() makes the pending rename durable itself");
+    synced.length = 0;
+    store.flushAll();
+    assert.deepEqual(synced, [join(root, "s_abc")], "so does the shutdown flush");
+    dirSync.release();
+    await flushed;
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a debounced flush re-merges when another process replaces meta.json during its write", async () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta());
+    for (let i = 0; i < 4; i++) store.appendEvent("s_abc", { kind: "agent_message", text: `c${i}` });
+    const write = holdFirstCall(store, "writeSyncedFileInBackground");
+    const flushed = fireDebouncedFlush(store, "s_abc");
+    await write.reached;
+    const peer = new SessionStore(root);
+    peer.patchMeta("s_abc", { status: "failed", agentSessionId: "peer-owns-this" });
+    write.release();
+    await flushed;
+    const final = diskMeta(root);
+    assert.equal(final.status, "failed", "the peer's critical write survives");
+    assert.equal(final.agentSessionId, "peer-owns-this");
+    assert.equal(final.seq, 4, "and the debounced seq still lands");
+    assert.equal(store.readMeta("s_abc")!.status, "failed");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a debounced flush in flight never rolls back a newer seq or resurrects a reset epoch", async (t) => {
+  await t.test("newer seq from another process", async () => {
+    const { store, root } = tmpStore();
+    try {
+      store.create(meta());
+      for (let i = 0; i < 2; i++) store.appendEvent("s_abc", { kind: "agent_message", text: `c${i}` });
+      const write = holdFirstCall(store, "writeSyncedFileInBackground");
+      const flushed = fireDebouncedFlush(store, "s_abc");
+      await write.reached;
+      writeFileSync(join(root, "s_abc", "meta.json"), JSON.stringify({ ...diskMeta(root), seq: 9 }));
+      write.release();
+      await flushed;
+      assert.equal(diskMeta(root).seq, 9);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+  await t.test("reset by another process", async () => {
+    const { store, root } = tmpStore();
+    try {
+      store.create(meta());
+      for (let i = 0; i < 5; i++) store.appendEvent("s_abc", { kind: "agent_message", text: `c${i}` });
+      const fsync = holdFirstCall(store, "fsyncFileInBackground");
+      const flushed = fireDebouncedFlush(store, "s_abc");
+      await fsync.reached;
+      const peer = new SessionStore(root);
+      peer.resetEvents("s_abc");
+      peer.appendEvent("s_abc", { kind: "agent_message", text: "new generation" });
+      peer.flushAll();
+      fsync.release();
+      await flushed;
+      assert.equal(diskMeta(root).seq, 1, "the stale epoch's deltas are dropped");
+      assert.equal(diskMeta(root).logEpoch, 1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+  await t.test("reset in this process", async () => {
+    const { store, root } = tmpStore();
+    try {
+      store.create(meta());
+      for (let i = 0; i < 5; i++) store.appendEvent("s_abc", { kind: "agent_message", text: `c${i}` });
+      const write = holdFirstCall(store, "writeSyncedFileInBackground");
+      const flushed = fireDebouncedFlush(store, "s_abc");
+      await write.reached;
+      store.resetEvents("s_abc");
+      write.release();
+      await flushed;
+      assert.equal(diskMeta(root).seq, 0);
+      assert.equal(diskMeta(root).logEpoch, 1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+test("a debounced flush never republishes a snapshot whose deltas another write already consumed", async (t) => {
+  const consumers = {
+    "explicit flush": (store: SessionStore) => store.flush("s_abc"),
+    "critical patch": (store: SessionStore) => store.patchMeta("s_abc", { status: "running" }),
+  };
+  for (const step of ["fsyncFileInBackground", "writeSyncedFileInBackground"] as const) {
+    for (const [name, consume] of Object.entries(consumers)) {
+      await t.test(`${name} while held in ${step}`, async () => {
+        const { store, root } = tmpStore();
+        try {
+          store.create(meta());
+          store.appendEvent("s_abc", { kind: "agent_message", text: "c0" });
+          store.patchMeta("s_abc", { tokensOut: 10, costUsd: 1 });
+          const held = holdFirstCall(store, step);
+          const flushed = fireDebouncedFlush(store, "s_abc");
+          await held.reached;
+          store.patchMeta("s_abc", { tokensOut: 20, costUsd: 2 });
+          consume(store);
+          assert.equal(diskMeta(root).tokensOut, 20);
+          const internals = store as unknown as Record<string, (...args: unknown[]) => Promise<void>>;
+          const write = internals.writeSyncedFileInBackground!.bind(store);
+          let writes = 0;
+          internals.writeSyncedFileInBackground = (...args: unknown[]) => { writes++; return write(...args); };
+          // A new batch of deltas in the same epoch that carries no usage of its own.
+          store.appendEvent("s_abc", { kind: "agent_message", text: "c1" });
+          held.release();
+          await flushed;
+          store.flushAll();
+          const final = diskMeta(root);
+          assert.equal(final.tokensOut, 20, "the older snapshot's usage never overwrites newer totals");
+          assert.equal(final.costUsd, 2);
+          assert.equal(final.seq, 2);
+          if (step === "fsyncFileInBackground") assert.equal(writes, 0, "a consumed snapshot is not even written");
+        } finally {
+          rmSync(root, { recursive: true, force: true });
+        }
+      });
+    }
+  }
+});
+
+test("a debounced flush whose deltas were dropped meanwhile does not publish them", async () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta());
+    store.appendEvent("s_abc", { kind: "agent_message", text: "c0" });
+    const write = holdFirstCall(store, "writeSyncedFileInBackground");
+    const flushed = fireDebouncedFlush(store, "s_abc");
+    await write.reached;
+    // As reset recovery does when meta.json already names the new epoch: deltas go, the file stays.
+    (store as unknown as { pending: Map<string, unknown> }).pending.delete("s_abc");
+    store.appendEvent("s_abc", { kind: "agent_message", text: "c1" }); // a new batch, same epoch
+    write.release();
+    await flushed;
+    assert.equal(diskMeta(root).seq, 0, "the dropped snapshot is not published");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a debounced flush that keeps losing the race to other writers leaves its deltas pending and re-arms", async () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta());
+    store.appendEvent("s_abc", { kind: "agent_message", text: "c0" });
+    const internals = store as unknown as Record<string, (path: string, contents: string) => Promise<void>>;
+    const write = internals.writeSyncedFileInBackground!.bind(store);
+    const peer = new SessionStore(root);
+    let writes = 0;
+    internals.writeSyncedFileInBackground = async (path: string, contents: string) => {
+      writes++;
+      await write(path, contents);
+      peer.patchMeta("s_abc", { title: `peer write ${writes}` });
+    };
+    await fireDebouncedFlush(store, "s_abc");
+    assert.equal(writes, 3, "bounded retries");
+    assert.equal(diskMeta(root).seq, 0);
+    assert.equal(diskMeta(root).title, "peer write 3");
+    assert.ok((store as unknown as FlushInternals).flushTimers.has("s_abc"), "the next pass is scheduled");
+    store.flush("s_abc");
+    assert.equal(diskMeta(root).seq, 1);
+    assert.equal(diskMeta(root).title, "peer write 3");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a failed debounced flush retries synchronously, and a removed session is left alone", async (t) => {
+  await t.test("failed background write", async () => {
+    const { store, root } = tmpStore();
+    try {
+      store.create(meta());
+      store.appendEvent("s_abc", { kind: "agent_message", text: "c0" });
+      const internals = store as unknown as Record<string, () => Promise<void>>;
+      internals.writeSyncedFileInBackground = async () => { throw new Error("EIO"); };
+      await fireDebouncedFlush(store, "s_abc");
+      assert.equal(diskMeta(root).seq, 1, "the synchronous fallback made the delta durable");
+      assert.equal((store as unknown as FlushInternals).backgroundFlushes.size, 0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+  await t.test("session removed mid-flush", async () => {
+    const { store, root } = tmpStore();
+    try {
+      store.create(meta());
+      store.appendEvent("s_abc", { kind: "agent_message", text: "c0" });
+      const write = holdFirstCall(store, "writeSyncedFileInBackground");
+      const flushed = fireDebouncedFlush(store, "s_abc");
+      await write.reached;
+      store.remove("s_abc");
+      write.release();
+      await flushed;
+      assert.equal(existsSync(join(root, "s_abc")), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 test("releaseLock is owner-aware: a stale ex-holder cannot delete the new owner's lock", () => {
