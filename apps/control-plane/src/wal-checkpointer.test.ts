@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import fs, { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -327,6 +328,47 @@ test("a worker that completes no pass is reported stalled once per stall, then r
   assert.equal(stalls[0]![0], "warn");
   assert.deepEqual(Object.keys(stalls[0]![1]), ["sinceLastPassMs", "walBytes"]);
   assert.deepEqual(logged.filter(([, , message]) => message.includes("recovered")).map(([level]) => level), ["info", "info"]);
+});
+
+test("a size reading that returns after its stall ended never reaches a later stall's report", LIVE, async (t) => {
+  const stallAfterMs = 600;
+  // Readings of the log's size wait until the test answers them, as on storage slow to return.
+  type StatCallback = (error: Error | null, stats: { size: number }) => void;
+  const readings: StatCallback[] = [];
+  const original = fs.stat;
+  const statMock = t.mock.method(fs, "stat", ((path: string, ...rest: unknown[]) => {
+    if (String(path).endsWith("-wal")) readings.push(rest.at(-1) as StatCallback);
+    else (original as (...args: unknown[]) => void)(path, ...rest);
+  }) as typeof fs.stat);
+  syncBuiltinESMExports();
+  t.after(() => {
+    statMock.mock.restore();
+    syncBuiltinESMExports();
+  });
+  const hold = new Int32Array(new SharedArrayBuffer(4));
+  const release = () => {
+    Atomics.store(hold, 0, 0);
+    Atomics.notify(hold, 0);
+  };
+  const h = open(t, { intervalMs: 20, stallAfterMs, holdPasses: hold }, { expectStalls: true });
+  h.defer(release);
+  await until(() => has(h.events, "online"), "the worker to start");
+  h.ingest(50);
+
+  Atomics.store(hold, 0, 1);
+  await until(() => ofType(h.events, "stalled").length === 1, "the first stall");
+  assert.equal(ofType(h.events, "stalled")[0]!.walBytes, null, "no reading has returned");
+  assert.equal(readings.length, 1, "one reading at a time");
+  release();
+  await until(() => has(h.events, "recovered"), "the recovery");
+
+  Atomics.store(hold, 0, 1);
+  // Midway through the next stretch without a pass, the first stall's reading finally returns.
+  await sleep(stallAfterMs / 2);
+  readings[0]!(null, { size: 123 });
+  await until(() => ofType(h.events, "stalled").length === 2, "the second stall");
+  assert.equal(ofType(h.events, "stalled")[1]!.walBytes, null, "the earlier stall's reading is discarded");
+  assert.ok(readings.length >= 2, "the second stall asked for its own reading");
 });
 
 test("a sustained workload with idle stretches and a long reader reports no stall, nor does a clean shutdown", LIVE, async (t) => {

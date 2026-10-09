@@ -113,6 +113,9 @@ export class WalCheckpointer {
   private stalled = false;
   private sizingWal = false;
   private walBytes: number | null = null;
+  /** Counts completed passes seen and workers started, so a size reading that returns late is
+   * kept only for the stretch without a pass that requested it. */
+  private generation = 0;
   private readonly intervalMs: number;
   private readonly backstopPages: number;
   private readonly restartDelaysMs: readonly number[];
@@ -239,11 +242,7 @@ export class WalCheckpointer {
   /** Watch a new worker's heartbeat. The clock starts at spawn, so a first pass that hangs counts. */
   private startHeartbeat(passes: Int32Array): void {
     this.passes = passes;
-    this.seenPasses = 0;
-    this.seenPassAt = performance.now();
-    this.checksWithoutPass = 0;
-    this.stalled = false;
-    this.walBytes = null;
+    this.progressed(0, performance.now());
     this.heartbeatTimer = setInterval(() => this.checkHeartbeat(), Math.max(1, Math.floor(this.stallAfterMs / 6)));
     this.heartbeatTimer.unref?.();
   }
@@ -264,11 +263,7 @@ export class WalCheckpointer {
       const passes = Atomics.load(this.passes, 0);
       if (passes !== this.seenPasses) {
         if (this.stalled) this.report({ type: "recovered", stalledMs: Math.round(now - this.seenPassAt) });
-        this.seenPasses = passes;
-        this.seenPassAt = now;
-        this.checksWithoutPass = 0;
-        this.stalled = false;
-        this.walBytes = null;
+        this.progressed(passes, now);
         return;
       }
       this.checksWithoutPass++;
@@ -283,14 +278,25 @@ export class WalCheckpointer {
     }
   }
 
+  /** A pass completed, or a worker started: what follows is a new stretch, with its own stall. */
+  private progressed(passes: number, now: number): void {
+    this.seenPasses = passes;
+    this.seenPassAt = now;
+    this.checksWithoutPass = 0;
+    this.stalled = false;
+    this.walBytes = null;
+    this.generation++;
+  }
+
   /** Read the log's size off the event loop while no pass completes, so a stall can report it
    * without a blocking call on the storage that may be hanging. One reading at a time. */
   private sampleWalSize(): void {
     if (this.sizingWal) return;
     this.sizingWal = true;
+    const generation = this.generation;
     stat(`${this.location}-wal`, (error, stats) => {
       this.sizingWal = false;
-      if (this.checksWithoutPass > 0) this.walBytes = error ? null : stats.size;
+      if (generation === this.generation) this.walBytes = error ? null : stats.size;
     });
   }
 
