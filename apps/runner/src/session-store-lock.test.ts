@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import fs, { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
-import { createHash } from "node:crypto";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,9 +9,10 @@ import { fileURLToPath } from "node:url";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 
 /* The per-session writer lock across processes (#2832). Each race runs real child processes against
- * one store directory. A child pauses inside the lock operation right after the last read of the lock
- * file that its decision depends on, and continues only when the test releases it, so check-then-write
- * interleavings are deterministic instead of timing luck. */
+ * one store directory. A child pauses inside the lock operation right after a chosen file operation
+ * (for example the last read of the lock its decision depends on) and continues only when the test
+ * releases it, so check-then-write interleavings are deterministic instead of timing luck. Children
+ * created with `breaker` act as the runner: the one store allowed to break an abandoned guard. */
 
 const REPO_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const STORE_MODULE = new URL("./session-store.ts", import.meta.url).href;
@@ -36,6 +36,7 @@ for (const fn of new Set(config.pauses.map((pause) => pause.fn))) {
       if (pause.fired) continue;
       const target = String(args[pause.arg]);
       if (pause.prefix ? !target.startsWith(pause.prefix) : target !== pause.path) continue;
+      if (pause.exclude && target.includes(pause.exclude)) continue;
       pause.seen = (pause.seen ?? 0) + 1;
       if (pause.seen < (pause.nth ?? 1)) continue;
       pause.fired = true;
@@ -61,7 +62,7 @@ if (config.refuseRenameOf) {
 }
 syncBuiltinESMExports();
 const { SessionStore } = await import(config.storeModule);
-const store = new SessionStore(config.root);
+const store = new SessionStore(config.root, undefined, undefined, config.breaker === true);
 let result = null;
 if (config.op === "acquire") result = store.acquireLock(config.id, config.owner);
 else if (config.op === "refresh") result = store.refreshLock(config.id, config.owner);
@@ -81,6 +82,8 @@ type Pause = {
   prefix?: string;
   /** Pause after this many matching calls instead of the first. */
   nth?: number;
+  /** Skip calls whose file name contains this. */
+  exclude?: string;
 };
 
 type ChildSpec = {
@@ -96,6 +99,8 @@ type ChildSpec = {
   stayAlive?: boolean;
   /** Behave like a filesystem without hard links. */
   noHardLinks?: boolean;
+  /** Act as the runner: the one store allowed to break an abandoned guard. */
+  breaker?: boolean;
 };
 
 class LockRace {
@@ -181,6 +186,16 @@ class LockRace {
     utimesSync(this.lockPath, at, at);
   }
 
+  /** Age the lock and any lock temp files (not guard files) by `ageMs`. */
+  ageLockFiles(ageMs: number): void {
+    for (const name of this.sessionFiles()) {
+      if (name === "lock" || (name.endsWith(".tmp") && !name.startsWith("lock.guard"))) {
+        const at = (Date.now() - ageMs) / 1000;
+        utimesSync(join(this.root, ID, name), at, at);
+      }
+    }
+  }
+
   sessionFiles(): string[] {
     return readdirSync(join(this.root, ID)).filter((name) => name.startsWith("lock")).sort();
   }
@@ -231,6 +246,8 @@ function startTimeOf(pid: number): string | null {
   }
 }
 
+/* ---- races between processes ---- */
+
 test("of two processes taking a free lock, exactly one wins", async () => {
   const race = new LockRace();
   try {
@@ -250,7 +267,6 @@ test("of two processes taking a free lock, exactly one wins", async () => {
 test("a newly taken lock is never visible empty", async () => {
   const race = new LockRace();
   try {
-    // A stalls right after its lock file appears; a lock that could look empty and old could be taken over.
     await race.start({
       name: "a", op: "acquire", owner: "runner-a",
       pauses: [
@@ -263,47 +279,6 @@ test("a newly taken lock is never visible empty", async () => {
     assert.equal(race.result("a"), true);
   } finally {
     await race.dispose();
-  }
-});
-
-test("an acquirer that stalled while publishing its lock never owns it alongside a later taker", async (t) => {
-  for (const variant of ["linked", "fallback"] as const) {
-    await t.test(variant, async () => {
-      const race = new LockRace();
-      try {
-        // A stalls mid-publication long enough for its lock to look stale once it lands.
-        await race.start(variant === "linked"
-          ? {
-            name: "a", op: "acquire", owner: "runner-a",
-            pauses: [{ name: "a-written", fn: "writeFileSync", arg: 0, prefix: `${race.lockPath}.` }],
-          }
-          : {
-            name: "a", op: "acquire", owner: "runner-a", noHardLinks: true,
-            pauses: [{ name: "a-written", fn: "openSync", arg: 0, path: race.lockPath }],
-          });
-        assert.ok(race.paused("a-written"));
-        for (const name of race.sessionFiles()) {
-          if (name === "lock" || (name.startsWith("lock.") && name.endsWith(".tmp") && !name.startsWith("lock.guard"))) {
-            const at = (Date.now() - 120_000) / 1000;
-            utimesSync(join(race.root, ID, name), at, at);
-          }
-        }
-        if (variant === "fallback") {
-          // B finds the empty lock stale and takes it over before A writes its owner.
-          await race.start({ name: "b", op: "acquire", owner: "runner-b", noHardLinks: true });
-          await race.resume("a", "a-written");
-        } else {
-          // A publishes its old temp file; B arrives right after A reports.
-          await race.resume("a", "a-written");
-          await race.start({ name: "b", op: "acquire", owner: "runner-b" });
-        }
-        const winners = ["a", "b"].filter((name) => race.result(name) === true);
-        assert.equal(winners.length, 1, "a lock is never held by both");
-        assert.equal(race.lockOwner(), `runner-${winners[0]}`);
-      } finally {
-        await race.dispose();
-      }
-    });
   }
 });
 
@@ -358,81 +333,140 @@ test("a takeover is never removed by the stale owner releasing in the meantime",
     await race.finish("o");
     assert.equal(race.result("t"), true);
     assert.equal(race.lockOwner(), "runner-t", "the new owner's lock survives the old owner's release");
-    // And the next acquirer does not get it as a free lock.
     await race.start({ name: "f", op: "acquire", owner: "runner-f" });
-    assert.equal(race.result("f"), false);
+    assert.equal(race.result("f"), false, "and the next acquirer does not get it as a free lock");
   } finally {
     await race.dispose();
   }
 });
 
-test("a guard holder killed mid-section is recovered, and the takeover race still has one winner", async () => {
+/* ---- a lease starts when it is published (CR-4.1, CR-5.2) ---- */
+
+test("an acquirer that stalled while publishing a free lock never owns it alongside a later taker", async (t) => {
+  for (const variant of ["linked", "no hard links", "no hard links, takeover pending"] as const) {
+    await t.test(variant, async () => {
+      const race = new LockRace();
+      try {
+        // A stalls mid-publication long enough for its lock to look stale once it lands.
+        await race.start(variant === "linked"
+          ? {
+            name: "a", op: "acquire", owner: "runner-a",
+            pauses: [{ name: "a-written", fn: "writeFileSync", arg: 0, prefix: `${race.lockPath}.`, exclude: "lock.guard" }],
+          }
+          : {
+            name: "a", op: "acquire", owner: "runner-a", noHardLinks: true,
+            pauses: [{ name: "a-written", fn: "openSync", arg: 0, path: race.lockPath }],
+          });
+        assert.ok(race.paused("a-written"));
+        race.ageLockFiles(120_000);
+        if (variant === "no hard links") {
+          // A holds the guard while its lock is still empty, so B cannot take it over.
+          await race.start({ name: "b", op: "acquire", owner: "runner-b", noHardLinks: true });
+          await race.resume("a", "a-written");
+        } else if (variant === "no hard links, takeover pending") {
+          // B gets as far as reading the empty lock as stale, then A finishes writing and confirming.
+          await race.start({
+            name: "b", op: "acquire", owner: "runner-b", noHardLinks: true,
+            pauses: [{ name: "b-read", fn: "readFileSync", arg: 0, path: race.lockPath }],
+          });
+          await race.resume("a", "a-written");
+          if (race.paused("b-read")) await race.resume("b", "b-read");
+        } else {
+          // A publishes its old temp file; B arrives right after A reports.
+          await race.resume("a", "a-written");
+          await race.start({ name: "b", op: "acquire", owner: "runner-b" });
+        }
+        const winners = ["a", "b"].filter((name) => race.result(name) === true);
+        assert.equal(winners.length, 1, "a lock is never held by both");
+        assert.equal(race.lockOwner(), `runner-${winners[0]}`);
+      } finally {
+        await race.dispose();
+      }
+    });
+  }
+});
+
+test("an acquirer that stalled right after publishing finds a takeover instead of claiming the lock", async () => {
+  const race = new LockRace();
+  try {
+    await race.start({
+      name: "a", op: "acquire", owner: "runner-a",
+      pauses: [{ name: "a-linked", fn: "linkSync", arg: 1, path: race.lockPath }],
+    });
+    assert.ok(race.paused("a-linked"));
+    race.ageLockFiles(120_000);
+    // While A is stalled, its lock goes stale and B takes it over with a fresh lease.
+    await race.start({ name: "b", op: "acquire", owner: "runner-b" });
+    assert.equal(race.result("b"), true);
+    await race.resume("a", "a-linked");
+    assert.equal(race.result("a"), false, "A sees B's young lock and does not claim it");
+    assert.equal(race.lockOwner(), "runner-b");
+  } finally {
+    await race.dispose();
+  }
+});
+
+test("a takeover that stalled before its rename publishes a fresh lease", async () => {
+  const race = new LockRace();
+  try {
+    race.writeLock("dead-runner", 120_000);
+    // A's second lock temp file is its replacement (the first was its free attempt).
+    await race.start({
+      name: "a", op: "acquire", owner: "runner-a",
+      pauses: [{ name: "a-replacement", fn: "writeFileSync", arg: 0, prefix: `${race.lockPath}.`, exclude: "lock.guard", nth: 2 }],
+    });
+    assert.ok(race.paused("a-replacement"));
+    race.ageLockFiles(120_000);
+    await race.resume("a", "a-replacement");
+    assert.equal(race.result("a"), true);
+    await race.start({ name: "b", op: "acquire", owner: "runner-b" });
+    assert.equal(race.result("b"), false, "the replacement's lease starts when it is published");
+    assert.equal(race.lockOwner(), "runner-a");
+  } finally {
+    await race.dispose();
+  }
+});
+
+/* ---- guards abandoned by a dead process; only the runner breaks them ---- */
+
+test("a guard holder killed mid-section is recovered by the runner, and the race still has one winner", async () => {
   const race = new LockRace();
   try {
     race.writeLock("dead-runner", 120_000);
     await race.start({ name: "k", op: "acquire", owner: "runner-k", pauseOn: "readFileSync" });
     await race.kill("k");
-    await race.start({ name: "a", op: "acquire", owner: "runner-a", pauseOn: "readFileSync" });
-    await race.start({ name: "b", op: "acquire", owner: "runner-b", pauseOn: "readFileSync" });
+    // Any other process fails closed on the abandoned guard.
+    await race.start({ name: "n", op: "acquire", owner: "tool-n" });
+    assert.equal(race.result("n"), false);
+    assert.ok(existsSync(race.guardPath));
+    // The runner recovers it; a non-runner racing it still loses.
+    await race.start({ name: "a", op: "acquire", owner: "runner-a", breaker: true, pauseOn: "readFileSync" });
+    await race.start({ name: "b", op: "acquire", owner: "tool-b", pauseOn: "readFileSync" });
     await race.finish("a");
     await race.finish("b");
     const winners = ["a", "b"].filter((name) => race.result(name) === true);
     assert.equal(winners.length, 1);
-    assert.equal(race.lockOwner(), `runner-${winners[0]}`);
+    assert.equal(race.lockOwner(), { a: "runner-a", b: "tool-b" }[winners[0] as "a" | "b"]);
     assert.deepEqual(race.sessionFiles(), ["lock"], "the dead holder's guard is gone");
   } finally {
     await race.dispose();
   }
 });
 
-test("a stale guard left by a dead pid is broken, and the takeover race still has one winner", async () => {
+test("a stale guard left by a dead pid is broken only by the runner", async () => {
   const race = new LockRace();
   try {
     race.writeLock("dead-runner", 120_000);
     writeFileSync(race.guardPath, JSON.stringify({ pid: await deadPid(), start: "1", token: "dead" }));
-    await race.start({ name: "a", op: "acquire", owner: "runner-a", pauseOn: "readFileSync" });
+    await race.start({ name: "n", op: "acquire", owner: "tool-n" });
+    assert.equal(race.result("n"), false, "a non-runner process fails closed");
+    await race.start({ name: "a", op: "acquire", owner: "runner-a", breaker: true, pauseOn: "readFileSync" });
     await race.start({ name: "b", op: "acquire", owner: "runner-b", pauseOn: "readFileSync" });
     await race.finish("a");
     await race.finish("b");
     const winners = ["a", "b"].filter((name) => race.result(name) === true);
     assert.equal(winners.length, 1);
     assert.equal(race.lockOwner(), `runner-${winners[0]}`);
-    assert.deepEqual(race.sessionFiles(), ["lock"]);
-  } finally {
-    await race.dispose();
-  }
-});
-
-test("a breaker that observed an abandoned guard never moves the newer guard installed after it", async () => {
-  const race = new LockRace();
-  try {
-    race.writeLock("runner-b", 120_000);
-    writeFileSync(race.guardPath, JSON.stringify({ pid: await deadPid(), start: "1", token: "abandoned" }));
-    // A reads the abandoned guard, then stalls.
-    await race.start({
-      name: "a", op: "acquire", owner: "runner-a",
-      pauses: [
-        { name: "a-read", fn: "readFileSync", arg: 0, path: race.guardPath },
-        { name: "a-moved", fn: "renameSync", arg: 0, path: race.guardPath },
-      ],
-    });
-    // B breaks the abandoned guard itself, takes the guard, and pauses inside its refresh.
-    await race.start({
-      name: "b", op: "refresh", owner: "runner-b",
-      pauses: [{ name: "b-lock", fn: "readFileSync", arg: 0, path: race.lockPath }],
-    });
-    // A resumes with its stale observation. It must not move B's guard aside.
-    await race.resume("a", "a-read", "a-moved");
-    // A takeover that ran in that window would overlap B's section.
-    await race.start({ name: "c", op: "acquire", owner: "runner-c" });
-    if (race.paused("a-moved")) await race.resume("a", "a-moved");
-    await race.resume("b", "b-lock");
-    const refreshed = race.result("b") === true;
-    const tookOver = race.result("c") === true;
-    assert.ok(!(refreshed && tookOver), "the live holder's refresh and a takeover never both succeed");
-    assert.equal(refreshed, true, "the live holder finishes its section");
-    assert.equal(race.lockOwner(), "runner-b");
-    assert.equal(race.result("a"), false);
     assert.deepEqual(race.sessionFiles(), ["lock"]);
   } finally {
     await race.dispose();
@@ -443,7 +477,6 @@ test("a guard is never visible empty, so a live creator's old guard is never bro
   const race = new LockRace();
   try {
     race.writeLock("runner-o", 120_000);
-    // O stalls right after its guard appears.
     await race.start({
       name: "o", op: "refresh", owner: "runner-o",
       pauses: [
@@ -451,11 +484,10 @@ test("a guard is never visible empty, so a live creator's old guard is never bro
         { name: "o-opened", fn: "openSync", arg: 0, path: race.guardPath },
       ],
     });
-    assert.ok(race.paused("o-created") || race.paused("o-opened"));
     assert.notEqual(readFileSync(race.guardPath, "utf8"), "", "the guard is complete as soon as it exists");
     const at = (Date.now() - 60_000) / 1000;
     utimesSync(race.guardPath, at, at);
-    await race.start({ name: "t", op: "acquire", owner: "runner-t" });
+    await race.start({ name: "t", op: "acquire", owner: "runner-t", breaker: true });
     for (const pause of ["o-created", "o-opened"]) if (race.paused(pause)) await race.resume("o", pause);
     assert.equal(race.result("t"), false, "the live creator's guard is respected however old it looks");
     assert.equal(race.result("o"), true);
@@ -465,72 +497,10 @@ test("a guard is never visible empty, so a live creator's old guard is never bro
   }
 });
 
-/** The claim-file prefix for breaking the guard whose exact contents are `guard`. */
-function claimPrefix(guardPath: string, guard: string): string {
-  return `${guardPath}.break.${createHash("sha256").update(guard).digest("hex").slice(0, 32)}.`;
-}
-
-test("a breaker whose rename was refused never lets two later breakers both move the guard", async () => {
-  const race = new LockRace();
-  try {
-    race.writeLock("runner-b", 120_000);
-    const abandoned = JSON.stringify({ pid: await deadPid(), start: "1", token: "abandoned" });
-    writeFileSync(race.guardPath, abandoned);
-    const claims = claimPrefix(race.guardPath, abandoned);
-    writeFileSync(`${claims}0`, JSON.stringify({ pid: await deadPid(), start: "1", token: "dead-breaker" }));
-    // A reads the dead claim 0 and stalls with that observation.
-    await race.start({
-      name: "a", op: "acquire", owner: "runner-a",
-      pauses: [
-        { name: "a-claim", fn: "readFileSync", arg: 0, prefix: claims },
-        { name: "a-section", fn: "readFileSync", arg: 0, path: race.lockPath },
-      ],
-    }, "a-claim");
-    // B takes the next claim but cannot move the guard (Windows refusal), and gives up.
-    await race.start({ name: "b", op: "refresh", owner: "runner-b", refuseRenameOf: race.guardPath });
-    assert.equal(race.result("b"), false);
-    assert.equal(readFileSync(race.guardPath, "utf8"), abandoned, "the abandoned guard is still installed");
-    // C takes a claim, validates the guard, and stalls right before moving it.
-    await race.start({
-      name: "c", op: "acquire", owner: "runner-c",
-      pauses: [{ name: "c-reread", fn: "readFileSync", arg: 0, path: race.guardPath, nth: 2 }],
-    });
-    assert.ok(race.paused("c-reread"));
-    // A resumes from its stale observation of claim 0.
-    await race.resume("a", "a-claim", "a-section");
-    await race.resume("c", "c-reread");
-    if (race.paused("a-section")) await race.resume("a", "a-section");
-    const winners = ["a", "c"].filter((name) => race.result(name) === true);
-    assert.equal(winners.length, 1, "only one breaker moved the abandoned guard and took the lock");
-    assert.equal(race.lockOwner(), `runner-${winners[0]}`);
-    assert.deepEqual(race.sessionFiles(), ["lock"]);
-  } finally {
-    await race.dispose();
-  }
-});
-
-test("a live breaker that could not move the guard does not block the next breaker", async () => {
-  const race = new LockRace();
-  try {
-    race.writeLock("dead-runner", 120_000);
-    const abandoned = JSON.stringify({ pid: await deadPid(), start: "1", token: "abandoned" });
-    writeFileSync(race.guardPath, abandoned);
-    await race.start({ name: "b", op: "acquire", owner: "runner-b", refuseRenameOf: race.guardPath, stayAlive: true });
-    assert.equal(race.result("b"), false);
-    // B is still running, and its claims name its pid; they were given up, so C passes over them.
-    await race.start({ name: "c", op: "acquire", owner: "runner-c" });
-    assert.equal(race.result("c"), true);
-    assert.equal(race.lockOwner(), "runner-c");
-  } finally {
-    await race.dispose();
-  }
-});
-
 test("without hard links, a creator stalled before writing its guard is never broken", async () => {
   const race = new LockRace();
   try {
     race.writeLock("dead-runner", 120_000);
-    // A creates its guard the fallback way and stalls before writing it.
     await race.start({
       name: "a", op: "acquire", owner: "runner-a", noHardLinks: true,
       pauses: [{ name: "a-opened", fn: "openSync", arg: 0, path: race.guardPath }],
@@ -539,7 +509,7 @@ test("without hard links, a creator stalled before writing its guard is never br
     const at = (Date.now() - 60_000) / 1000;
     utimesSync(race.guardPath, at, at);
     await race.start({
-      name: "b", op: "acquire", owner: "runner-b", noHardLinks: true,
+      name: "b", op: "acquire", owner: "runner-b", noHardLinks: true, breaker: true,
       pauses: [{ name: "b-lock", fn: "readFileSync", arg: 0, path: race.lockPath }],
     });
     await race.resume("a", "a-opened");
@@ -552,31 +522,11 @@ test("without hard links, a creator stalled before writing its guard is never br
   }
 });
 
-test("a breaker killed while holding its claim is passed over", async () => {
-  const race = new LockRace();
-  try {
-    race.writeLock("dead-runner", 120_000);
-    writeFileSync(race.guardPath, JSON.stringify({ pid: await deadPid(), start: "1", token: "abandoned" }));
-    await race.start({
-      name: "x", op: "acquire", owner: "runner-x",
-      pauses: [{ name: "x-claimed", fn: "linkSync", arg: 1, prefix: `${race.guardPath}.break.` }],
-    });
-    assert.ok(race.paused("x-claimed"));
-    await race.kill("x");
-    await race.start({ name: "y", op: "acquire", owner: "runner-y" });
-    assert.equal(race.result("y"), true);
-    assert.equal(race.lockOwner(), "runner-y");
-    assert.deepEqual(race.sessionFiles(), ["lock"], "the abandoned guard and both claims are gone");
-  } finally {
-    await race.dispose();
-  }
-});
-
 /* ---- guard liveness, in one process ---- */
 
-function storeWithStaleLock(): { store: SessionStore; root: string; lock: string; guard: string } {
+function storeWithStaleLock(breaker = true): { store: SessionStore; root: string; lock: string; guard: string } {
   const root = mkdtempSync(join(tmpdir(), "wollipog-lock-guard-"));
-  const store = new SessionStore(root);
+  const store = new SessionStore(root, undefined, undefined, breaker);
   store.create(sessionMeta());
   const lock = join(root, ID, "lock");
   writeFileSync(lock, "dead-runner");
@@ -640,15 +590,17 @@ test("an old guard whose pid now belongs to a later process is broken", { skip: 
   }
 });
 
-test("a guard this process left behind is broken at once", () => {
-  const { store, root, lock, guard } = storeWithStaleLock();
-  try {
-    writeFileSync(guard, JSON.stringify({ pid: process.pid, start: startTimeOf(process.pid), token: "leftover" }));
-    assert.equal(store.acquireLock(ID, "runner-a"), true);
-    assert.equal(readFileSync(lock, "utf8"), "runner-a");
-    assert.equal(existsSync(guard), false);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
+test("a guard this process left behind is broken by the runner store, and only by it", () => {
+  for (const breaker of [false, true]) {
+    const { store, root, lock, guard } = storeWithStaleLock(breaker);
+    try {
+      writeFileSync(guard, JSON.stringify({ pid: process.pid, start: startTimeOf(process.pid), token: "leftover" }));
+      assert.equal(store.acquireLock(ID, "runner-a"), breaker);
+      assert.equal(readFileSync(lock, "utf8"), breaker ? "runner-a" : "dead-runner");
+      assert.equal(existsSync(guard), !breaker);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 });
 
@@ -669,17 +621,40 @@ test("an empty or malformed guard is never broken automatically, however old", (
   }
 });
 
-test("breaking a guard that a live holder replaced in between hands it back", () => {
+test("breaking re-reads the guard and leaves a different one alone", () => {
   const { store, root, guard } = storeWithStaleLock();
   try {
     const abandoned = JSON.stringify({ pid: 1, start: "1", token: "abandoned" });
     const live = JSON.stringify({ pid: process.ppid, start: startTimeOf(process.ppid), token: "live" });
-    writeFileSync(guard, live); // replaced after the caller read `abandoned`
+    writeFileSync(guard, live);
     const internals = store as unknown as { breakLockGuard(path: string, observed: string): boolean };
     assert.equal(internals.breakLockGuard(guard, abandoned), false);
     assert.equal(readFileSync(guard, "utf8"), live);
-    assert.deepEqual(readdirSync(join(root, ID)).filter((name) => name.includes("broken")), []);
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a break that Windows refuses leaves the abandoned guard for a later attempt", async (t) => {
+  const { store, root, lock, guard } = storeWithStaleLock();
+  try {
+    writeFileSync(guard, JSON.stringify({ pid: await deadPid(), start: "1", token: "abandoned" }));
+    const rename = fs.renameSync;
+    t.mock.method(fs, "renameSync", (from: fs.PathLike, to: fs.PathLike) => {
+      if (String(from) === guard) throw Object.assign(new Error("access denied"), { code: "EACCES" });
+      return rename(from, to);
+    });
+    syncBuiltinESMExports();
+    assert.equal(store.acquireLock(ID, "runner-a"), false);
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    assert.ok(existsSync(guard));
+    assert.equal(store.acquireLock(ID, "runner-a"), true);
+    assert.equal(readFileSync(lock, "utf8"), "runner-a");
+    assert.deepEqual(readdirSync(join(root, ID)).filter((name) => name.startsWith("lock")), ["lock"]);
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -712,89 +687,24 @@ test("a takeover retries a rename Windows refuses, and fails closed when it keep
   }
 });
 
-test("thousands of given-up claims neither wedge recovery nor are walked one by one", async () => {
-  const { store, root, lock, guard } = storeWithStaleLock();
-  try {
-    const abandoned = JSON.stringify({ pid: await deadPid(), start: "1", token: "abandoned" });
-    writeFileSync(guard, abandoned);
-    const claims = claimPrefix(guard, abandoned);
-    const released = JSON.stringify({ pid: process.ppid, start: "1", token: "gave-up", released: true });
-    for (let n = 0; n < 5_000; n++) writeFileSync(`${claims}${n}`, released);
-    const internals = store as unknown as Record<string, (...args: unknown[]) => unknown>;
-    const lockGuardHolderGone = internals.lockGuardHolderGone!.bind(store);
-    let inspected = 0;
-    internals.lockGuardHolderGone = (...args: unknown[]) => { inspected++; return lockGuardHolderGone(...args); };
-    assert.equal(store.acquireLock(ID, "runner-a"), true);
-    assert.ok(inspected < 10, `inspected ${inspected} claims`);
-    assert.equal(readFileSync(lock, "utf8"), "runner-a");
-    assert.deepEqual(readdirSync(join(root, ID)).filter((name) => name.startsWith("lock")), ["lock"]);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("any number of dead breakers' claims is passed over", async () => {
-  const { store, root, lock, guard } = storeWithStaleLock();
-  try {
-    const abandoned = JSON.stringify({ pid: await deadPid(), start: "1", token: "abandoned" });
-    writeFileSync(guard, abandoned);
-    const claims = claimPrefix(guard, abandoned);
-    const dead = await deadPid();
-    for (let n = 0; n < 12; n++) writeFileSync(`${claims}${n}`, JSON.stringify({ pid: dead, start: "1", token: `dead-${n}` }));
-    assert.equal(store.acquireLock(ID, "runner-a"), true);
-    assert.equal(readFileSync(lock, "utf8"), "runner-a");
-    assert.deepEqual(readdirSync(join(root, ID)).filter((name) => name.startsWith("lock")), ["lock"]);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("a breaker that cannot move the guard gives up only its own claim", async (t) => {
-  const { store, root, lock, guard } = storeWithStaleLock();
-  try {
-    const abandoned = JSON.stringify({ pid: await deadPid(), start: "1", token: "abandoned" });
-    writeFileSync(guard, abandoned);
-    const rename = fs.renameSync;
-    t.mock.method(fs, "renameSync", (from: fs.PathLike, to: fs.PathLike) => {
-      if (String(from) === guard) throw Object.assign(new Error("access denied"), { code: "EACCES" });
-      return rename(from, to);
-    });
-    syncBuiltinESMExports();
-    assert.equal(store.acquireLock(ID, "runner-a"), false);
-    t.mock.restoreAll();
-    syncBuiltinESMExports();
-    assert.equal(readFileSync(guard, "utf8"), abandoned);
-    const given = readdirSync(join(root, ID)).filter((name) => name.startsWith("lock.guard.break."));
-    assert.ok(given.length >= 1, "the refused claims stay, so their numbers are not reused");
-    for (const name of given) assert.equal(JSON.parse(readFileSync(join(root, ID, name), "utf8")).released, true);
-    assert.equal(store.acquireLock(ID, "runner-a"), true, "a later breaker passes over the released claims");
-    assert.equal(readFileSync(lock, "utf8"), "runner-a");
-    assert.deepEqual(readdirSync(join(root, ID)).filter((name) => name.startsWith("lock")), ["lock"]);
-  } finally {
-    t.mock.restoreAll();
-    syncBuiltinESMExports();
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("without hard links the guard falls back to an exclusive create", (t) => {
-  const { store, root, lock } = storeWithStaleLock();
-  try {
-    const link = fs.linkSync;
-    t.mock.method(fs, "linkSync", (existing: fs.PathLike, target: fs.PathLike) => {
-      if (String(target).includes("lock.guard")) throw Object.assign(new Error("not supported"), { code: "ENOTSUP" });
-      return link(existing, target);
-    });
-    syncBuiltinESMExports();
-    assert.equal(store.acquireLock(ID, "runner-a"), true);
-    t.mock.restoreAll();
-    syncBuiltinESMExports();
-    assert.equal(readFileSync(lock, "utf8"), "runner-a");
-    assert.deepEqual(readdirSync(join(root, ID)).filter((name) => name.startsWith("lock")), ["lock"]);
-  } finally {
-    t.mock.restoreAll();
-    syncBuiltinESMExports();
-    rmSync(root, { recursive: true, force: true });
+test("without hard links, free and stale locks are taken inside the guard", (t) => {
+  for (const stale of [false, true]) {
+    const { store, root, lock } = storeWithStaleLock();
+    try {
+      if (!stale) rmSync(lock);
+      t.mock.method(fs, "linkSync", () => { throw Object.assign(new Error("not supported"), { code: "ENOTSUP" }); });
+      syncBuiltinESMExports();
+      assert.equal(store.acquireLock(ID, "runner-a"), true);
+      t.mock.restoreAll();
+      syncBuiltinESMExports();
+      assert.equal(readFileSync(lock, "utf8"), "runner-a");
+      assert.ok(Date.now() - fs.statSync(lock).mtimeMs < 10_000);
+      assert.deepEqual(readdirSync(join(root, ID)).filter((name) => name.startsWith("lock")), ["lock"]);
+    } finally {
+      t.mock.restoreAll();
+      syncBuiltinESMExports();
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 });
 
@@ -808,11 +718,24 @@ test("lock operations report failure instead of throwing when the filesystem ref
     assert.equal(store.refreshLock(ID, "dead-runner"), false);
     assert.doesNotThrow(() => store.releaseLock(ID, "dead-runner"));
     assert.equal(readFileSync(lock, "utf8"), "dead-runner");
-    // A takeover whose temp-file cleanup fails still took the lock, and says so.
-    assert.equal(store.acquireLock(ID, "runner-x"), true);
-    assert.equal(readFileSync(lock, "utf8"), "runner-x");
     t.mock.restoreAll();
     syncBuiltinESMExports();
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a takeover whose temp-file cleanup fails still reports that it took the lock", (t) => {
+  const { store, root, lock } = storeWithStaleLock();
+  try {
+    t.mock.method(fs, "rmSync", () => { throw Object.assign(new Error("denied"), { code: "EPERM" }); });
+    syncBuiltinESMExports();
+    assert.equal(store.acquireLock(ID, "runner-x"), true);
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    assert.equal(readFileSync(lock, "utf8"), "runner-x");
     // The guard this process could not remove is its own leftover, broken by its next operation.
     assert.equal(store.refreshLock(ID, "runner-x"), true);
   } finally {
