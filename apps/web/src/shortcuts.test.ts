@@ -433,3 +433,35 @@ test("modal and popover layers isolate background application chords", () => {
   window.document.body.append(menu);
   assert.equal(shortcutLayerActive(window.document, true), false);
 });
+
+test("every listener of one keydown shares a single layer query (#2840)", () => {
+  const window = new Window();
+  const document = window.document as unknown as Document;
+  let queries = 0;
+  const query = document.querySelector.bind(document);
+  document.querySelector = ((selectors: string) => {
+    queries += 1;
+    return query(selectors);
+  }) as typeof document.querySelector;
+  const answers: boolean[] = [];
+  for (let listener = 0; listener < 6; listener += 1) {
+    window.addEventListener("keydown", (event) => answers.push(shortcutLayerActive(document, false, event as unknown as Event)));
+  }
+  window.addEventListener("keydown", (event) => answers.push(shortcutLayerActive(document, true, event as unknown as Event)));
+
+  window.document.body.dispatchEvent(new window.KeyboardEvent("keydown", { key: "a", bubbles: true }));
+  assert.deepEqual(answers, [false, false, false, false, false, false, false]);
+  assert.equal(queries, 2, "one query per kind of layer for the whole keydown");
+
+  // The next keydown asks afresh, and so does a check outside any event.
+  const menu = window.document.createElement("div");
+  menu.setAttribute("role", "menu");
+  window.document.body.append(menu);
+  answers.length = 0;
+  window.document.body.dispatchEvent(new window.KeyboardEvent("keydown", { key: "b", bubbles: true }));
+  assert.deepEqual(answers, [true, true, true, true, true, true, false]);
+  assert.equal(queries, 4);
+  menu.remove();
+  assert.equal(shortcutLayerActive(document), false);
+  assert.equal(queries, 5);
+});

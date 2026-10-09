@@ -25,7 +25,7 @@ export function useSessionsViewToggleKey(
   useEffect(() => {
     if (!enabled) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || shortcutLayerActive(document) || xtermOwnsKey(event.target)) return;
+      if (event.defaultPrevented || shortcutLayerActive(document, false, event) || xtermOwnsKey(event.target)) return;
       if (!matchesShortcut(event, "toggle-sessions-view")) return;
       const current = viewRef.current.name;
       if (current !== "inbox" && current !== "board") return;

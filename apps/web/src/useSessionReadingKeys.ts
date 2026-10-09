@@ -120,7 +120,7 @@ export function useSessionReadingKeys({
     }
 
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || shortcutLayerActive(document) || terminalOwnsFocus(document) ||
+      if (event.defaultPrevented || shortcutLayerActive(document, false, event) || terminalOwnsFocus(document) ||
         (questionCardOwnsFocus(document) && !matchesShortcut(event, "session-reading-reply"))) {
         sequenceRef.current = null;
         return;
