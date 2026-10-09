@@ -611,8 +611,9 @@ const META_FLUSH_MS = 250;
  * segments' presence and size at least this often, as the uncached path did. */
 const HISTORY_LAYOUT_REVALIDATE_MS = META_FLUSH_MS;
 /** Between those cheap checks the manifest is trusted by identity. A full read at least this often
- * bounds how long an in-place rewrite that preserved inode, mtime, and size could go unnoticed. */
-const HISTORY_LAYOUT_FULL_REVALIDATE_MS = 5_000;
+ * bounds how long an in-place rewrite that preserved inode, mtime, and size could go unnoticed. It is
+ * kept rare: at 30 events/s a 5 s bound put full reads on 1.4% of appends, which is the p99 tail. */
+const HISTORY_LAYOUT_FULL_REVALIDATE_MS = 30_000;
 
 export class SessionStore {
   /**

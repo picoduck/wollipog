@@ -85,7 +85,7 @@ the full layout. A streaming session also revalidates it at least every 250 ms, 
 truncated cold segment still fails appends closed within one metadata flush interval. While the
 manifest's identity is unchanged it names the same segments, so that revalidation is one `lstat` per
 segment (a regular file of the recorded size) rather than a manifest re-read; any doubt, and at least
-every five seconds regardless, falls back to the full read. Compaction in
+every 30 seconds regardless, falls back to the full read. Compaction in
 this process extends the cached layout with the segment it just published. That layout is keyed by
 the identity of the exact manifest inode it renamed into place, so a later replacement always
 misses. Reset, lock hand-off, session removal, and a failed append drop the cached layout. A
