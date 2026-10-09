@@ -33,8 +33,17 @@ recovers it.
   completing flushes, keeps SQLite's checkpoint lock, so the backstop's own checkpoints return busy
   and the log grows until the flush completes. No checkpoint can make progress then. Before the
   worker, the same hang froze the event loop inside the commit that ran the checkpoint; now
-  ingest continues. A worker that exits or fails to
-  start is logged and restarted after 1, 5, then 30 seconds (back to 1 second once a worker has
+  ingest continues, so the hang is reported instead. The worker counts each pass it completes in
+  shared memory, whether or not the pass copied anything, and the main thread reads that count
+  about every 5 seconds without a message round trip. If a running worker completes no pass for
+  30 seconds, the control plane logs one warning, `WAL checkpoint worker stalled; no checkpoint pass
+  has completed`, with the time since its last completed pass (`sinceLastPassMs`) and the log's
+  size in bytes (`walBytes`, read off the event loop during the stall; `null` if no reading
+  arrived). It warns once per stall, not on every check. When a pass completes again it logs
+  `WAL checkpoint worker recovered` once, with `stalledMs`. A worker that is stopped, disabled, or
+  waiting to restart is never reported, and the check never blocks or throws into the event loop.
+  The warning only reports the hang: nothing in the control plane can end it. A worker that exits
+  or fails to start is logged and restarted after 1, 5, then 30 seconds (back to 1 second once a worker has
   stayed up for a minute); the control plane never depends on it. A clean shutdown stops the
   worker after one last checkpoint pass. The main connection's commits are unchanged by any of
   this: `journal_mode` and `synchronous` are exactly as above. Tools and tests that open the
@@ -212,7 +221,12 @@ Limits:
   the backstop while every commit succeeds; a crashed worker restarts; a worker that cannot open
   the file never affects the control plane; restart backoff advances until a worker stays healthy;
   the worker never starts on a SQLite without the WAL-reset fix; and a clean shutdown checkpoints
-  once more, leaves no log, and holds no lock.
+  once more, leaves no log, and holds no lock. For the stall warning: a worker blocked so that no
+  pass completes is reported stalled exactly once per stall and recovered once when it resumes;
+  the watchdog, driven one check at a time, reports the log's size and discards a size reading that
+  returns after its stall ended; a sustained workload with an idle log, passes skipped beside a reader, and
+  a clean shutdown reports no stall, and neither does a stopped, disabled, or restarting worker.
+  Every other scenario in the file also fails on any stall report.
 - `ingest-rollback-recovery.test.ts` simulates a rolled-back suffix by reopening a copy of the
   database taken before the relaxed commits on a different host boot. It drives the web store as an
   open dashboard and checks that the dashboard ends with the server's order without a reload. It
