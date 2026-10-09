@@ -38,6 +38,16 @@ The legacy whole-history RPC reads the same ordered sources for old control plan
 
 ## Publication and recovery
 
+The per-session writer lock is a `lock` file naming its owner; its mtime is the last refresh, and a
+lock unrefreshed for 60 seconds is stale. Taking a free lock is one exclusive create. A stale
+takeover, a refresh, and a release each run inside a short guard section (`lock.guard`, also an
+exclusive create, recording the holder's pid, process start time, and a token), so a takeover
+replaces exactly the stale lock it inspected and never one that was refreshed, released, or retaken
+meanwhile. A busy guard fails the operation closed after a brief wait. A guard is broken only when its
+holder is gone: its pid has exited, or the guard is old and its pid now belongs to a process that
+started later. Pids and start times are host-local, so the data directory must not be shared across
+machines; the runner's data-directory lease already keeps one runner per data directory.
+
 Compaction needs the normal per-session writer lock to plan and to publish. It keeps the event loop
 responsive: no single synchronous step is a bulk copy, a whole-range parse, or an fsync of a large
 file. It:
