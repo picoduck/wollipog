@@ -21,37 +21,53 @@ const CHILD_SOURCE = `
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 const config = JSON.parse(process.env.LOCK_RACE_CHILD);
-const signal = (suffix) => \`\${config.signalDir}/\${config.name}.\${suffix}\`;
-const real = { readFileSync: fs.readFileSync, existsSync: fs.existsSync };
+const signal = (name, suffix) => \`\${config.signalDir}/\${name}.\${suffix}\`;
+const realExists = fs.existsSync;
 const cell = new Int32Array(new SharedArrayBuffer(4));
-let paused = false;
-if (config.pauseOn) {
-  fs[config.pauseOn] = function (path, ...rest) {
-    const result = real[config.pauseOn].call(this, path, ...rest);
-    if (!paused && String(path) === config.lockPath) {
-      paused = true;
-      fs.writeFileSync(signal("checked"), "");
-      while (!real.existsSync(signal("go"))) Atomics.wait(cell, 0, 0, 5);
+// Each pause fires once, right after the first matching call, and holds until the test writes <name>.go.
+for (const fn of new Set(config.pauses.map((pause) => pause.fn))) {
+  const original = fs[fn];
+  const pending = config.pauses.filter((pause) => pause.fn === fn);
+  fs[fn] = function (...args) {
+    const result = original.apply(this, args);
+    const hit = pending.find((pause) => !pause.fired && (pause.prefix
+      ? String(args[pause.arg]).startsWith(pause.prefix)
+      : String(args[pause.arg]) === pause.path));
+    if (hit) {
+      hit.fired = true;
+      fs.writeFileSync(signal(hit.name, "checked"), "");
+      while (!realExists(signal(hit.name, "go"))) Atomics.wait(cell, 0, 0, 5);
     }
     return result;
   };
-  syncBuiltinESMExports();
 }
+syncBuiltinESMExports();
 const { SessionStore } = await import(config.storeModule);
 const store = new SessionStore(config.root);
 let result = null;
 if (config.op === "acquire") result = store.acquireLock(config.id, config.owner);
 else if (config.op === "refresh") result = store.refreshLock(config.id, config.owner);
 else store.releaseLock(config.id, config.owner);
-fs.writeFileSync(signal("result"), JSON.stringify(result));
+fs.writeFileSync(signal(config.name, "result"), JSON.stringify(result));
 `;
+
+type Pause = {
+  /** Pause name; the test releases it by name. */
+  name: string;
+  fn: "readFileSync" | "existsSync" | "renameSync" | "linkSync";
+  /** Which argument names the file: 0 for reads and a rename's source, 1 for a link's destination. */
+  arg: 0 | 1;
+  path?: string;
+  prefix?: string;
+};
 
 type ChildSpec = {
   name: string;
   op: "acquire" | "refresh" | "release";
   owner: string;
-  /** The lock-file call after which the child waits for the test to release it. */
+  /** Shorthand: pause, under the child's own name, after this call on the lock file. */
   pauseOn?: "readFileSync" | "existsSync";
+  pauses?: Pause[];
 };
 
 class LockRace {
@@ -68,14 +84,15 @@ class LockRace {
     new SessionStore(this.root).create(sessionMeta());
   }
 
-  /** Start a child and wait until it is paused inside the operation or has finished it. */
-  async start(spec: ChildSpec): Promise<void> {
+  /** Start a child and wait until it reaches `waitFor` (any of its pauses by default) or finishes. */
+  async start(spec: ChildSpec, waitFor?: string): Promise<void> {
+    const pauses = spec.pauses ?? (spec.pauseOn ? [{ name: spec.name, fn: spec.pauseOn, arg: 0, path: this.lockPath }] : []);
     const child = spawn(process.execPath, ["--import", "tsx", this.childScript], {
       cwd: REPO_ROOT,
       env: {
         ...process.env,
         LOCK_RACE_CHILD: JSON.stringify({
-          ...spec, id: ID, root: this.root, lockPath: this.lockPath, signalDir: this.signalDir, storeModule: STORE_MODULE,
+          ...spec, pauses, id: ID, root: this.root, signalDir: this.signalDir, storeModule: STORE_MODULE,
         }),
       },
       stdio: ["ignore", "ignore", "pipe"],
@@ -84,18 +101,34 @@ class LockRace {
     child.stderr!.on("data", (chunk) => { stderr += chunk; });
     const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
     this.children.set(spec.name, child);
-    await this.until(() => this.has(spec.name, "checked") || this.has(spec.name, "result") || child.exitCode !== null, `${spec.name} started`);
+    const names = waitFor ? [waitFor] : pauses.map((pause) => pause.name);
+    await this.until(
+      () => names.some((name) => this.has(name, "checked")) || this.has(spec.name, "result") || child.exitCode !== null,
+      `${spec.name} started`,
+    );
     if (child.exitCode !== null && !this.has(spec.name, "result")) {
       await exited;
       throw new Error(`${spec.name} exited without a result: ${stderr}`);
     }
   }
 
-  /** Let a paused child finish, and wait for it. */
-  async finish(name: string): Promise<void> {
-    writeFileSync(join(this.signalDir, `${name}.go`), "");
+  /** Release pause `pause` of child `name`, then wait until it reaches `next` or finishes. */
+  async resume(name: string, pause: string, next?: string): Promise<void> {
+    writeFileSync(join(this.signalDir, `${pause}.go`), "");
     const child = this.children.get(name)!;
-    await this.until(() => this.has(name, "result") || child.exitCode !== null, `${name} finished`);
+    await this.until(
+      () => (next !== undefined && this.has(next, "checked")) || this.has(name, "result") || child.exitCode !== null,
+      `${name} resumed`,
+    );
+  }
+
+  /** Let a child paused under its own name finish, and wait for it. */
+  async finish(name: string): Promise<void> {
+    await this.resume(name, name);
+  }
+
+  paused(pause: string): boolean {
+    return this.has(pause, "checked");
   }
 
   async kill(name: string): Promise<void> {
@@ -281,6 +314,88 @@ test("a stale guard left by a dead pid is broken, and the takeover race still ha
   }
 });
 
+test("a breaker that observed an abandoned guard never moves the newer guard installed after it", async () => {
+  const race = new LockRace();
+  try {
+    race.writeLock("runner-b", 120_000);
+    writeFileSync(race.guardPath, JSON.stringify({ pid: await deadPid(), start: "1", token: "abandoned" }));
+    // A reads the abandoned guard, then stalls.
+    await race.start({
+      name: "a", op: "acquire", owner: "runner-a",
+      pauses: [
+        { name: "a-read", fn: "readFileSync", arg: 0, path: race.guardPath },
+        { name: "a-moved", fn: "renameSync", arg: 0, path: race.guardPath },
+      ],
+    });
+    // B breaks the abandoned guard itself, takes the guard, and pauses inside its refresh.
+    await race.start({
+      name: "b", op: "refresh", owner: "runner-b",
+      pauses: [{ name: "b-lock", fn: "readFileSync", arg: 0, path: race.lockPath }],
+    });
+    // A resumes with its stale observation. It must not move B's guard aside.
+    await race.resume("a", "a-read", "a-moved");
+    // A takeover that ran in that window would overlap B's section.
+    await race.start({ name: "c", op: "acquire", owner: "runner-c" });
+    if (race.paused("a-moved")) await race.resume("a", "a-moved");
+    await race.resume("b", "b-lock");
+    const refreshed = race.result("b") === true;
+    const tookOver = race.result("c") === true;
+    assert.ok(!(refreshed && tookOver), "the live holder's refresh and a takeover never both succeed");
+    assert.equal(refreshed, true, "the live holder finishes its section");
+    assert.equal(race.lockOwner(), "runner-b");
+    assert.equal(race.result("a"), false);
+    assert.deepEqual(race.sessionFiles(), ["lock"]);
+  } finally {
+    await race.dispose();
+  }
+});
+
+test("a guard is never visible empty, so a live creator's old guard is never broken", async () => {
+  const race = new LockRace();
+  try {
+    race.writeLock("runner-o", 120_000);
+    // O stalls right after its guard appears.
+    await race.start({
+      name: "o", op: "refresh", owner: "runner-o",
+      pauses: [
+        { name: "o-created", fn: "linkSync", arg: 1, path: race.guardPath },
+        { name: "o-opened", fn: "openSync" as Pause["fn"], arg: 0, path: race.guardPath },
+      ],
+    });
+    assert.ok(race.paused("o-created") || race.paused("o-opened"));
+    assert.notEqual(readFileSync(race.guardPath, "utf8"), "", "the guard is complete as soon as it exists");
+    const at = (Date.now() - 60_000) / 1000;
+    utimesSync(race.guardPath, at, at);
+    await race.start({ name: "t", op: "acquire", owner: "runner-t" });
+    for (const pause of ["o-created", "o-opened"]) if (race.paused(pause)) await race.resume("o", pause);
+    assert.equal(race.result("t"), false, "the live creator's guard is respected however old it looks");
+    assert.equal(race.result("o"), true);
+    assert.equal(race.lockOwner(), "runner-o");
+  } finally {
+    await race.dispose();
+  }
+});
+
+test("a breaker killed while holding its claim is passed over", async () => {
+  const race = new LockRace();
+  try {
+    race.writeLock("dead-runner", 120_000);
+    writeFileSync(race.guardPath, JSON.stringify({ pid: await deadPid(), start: "1", token: "abandoned" }));
+    await race.start({
+      name: "x", op: "acquire", owner: "runner-x",
+      pauses: [{ name: "x-claimed", fn: "linkSync", arg: 1, prefix: `${race.guardPath}.break.` }],
+    });
+    assert.ok(race.paused("x-claimed"));
+    await race.kill("x");
+    await race.start({ name: "y", op: "acquire", owner: "runner-y" });
+    assert.equal(race.result("y"), true);
+    assert.equal(race.lockOwner(), "runner-y");
+    assert.deepEqual(race.sessionFiles(), ["lock"], "the abandoned guard and both claims are gone");
+  } finally {
+    await race.dispose();
+  }
+});
+
 /* ---- guard liveness, in one process ---- */
 
 function storeWithStaleLock(): { store: SessionStore; root: string; lock: string; guard: string } {
@@ -413,6 +528,46 @@ test("a takeover retries a rename Windows refuses, and fails closed when it keep
       syncBuiltinESMExports();
       rmSync(root, { recursive: true, force: true });
     }
+  }
+});
+
+test("without hard links the guard falls back to an exclusive create", (t) => {
+  const { store, root, lock } = storeWithStaleLock();
+  try {
+    const link = fs.linkSync;
+    t.mock.method(fs, "linkSync", (existing: fs.PathLike, target: fs.PathLike) => {
+      if (String(target).includes("lock.guard")) throw Object.assign(new Error("not supported"), { code: "ENOTSUP" });
+      return link(existing, target);
+    });
+    syncBuiltinESMExports();
+    assert.equal(store.acquireLock(ID, "runner-a"), true);
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    assert.equal(readFileSync(lock, "utf8"), "runner-a");
+    assert.deepEqual(readdirSync(join(root, ID)).filter((name) => name.startsWith("lock")), ["lock"]);
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("lock operations report failure instead of throwing when the filesystem refuses", (t) => {
+  const { store, root, lock } = storeWithStaleLock();
+  try {
+    t.mock.method(fs, "utimesSync", () => { throw Object.assign(new Error("denied"), { code: "EPERM" }); });
+    t.mock.method(fs, "rmSync", () => { throw Object.assign(new Error("denied"), { code: "EPERM" }); });
+    syncBuiltinESMExports();
+    assert.equal(store.acquireLock(ID, "dead-runner"), false, "a same-owner refresh that cannot write fails closed");
+    assert.equal(store.refreshLock(ID, "dead-runner"), false);
+    assert.doesNotThrow(() => store.releaseLock(ID, "dead-runner"));
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    assert.equal(readFileSync(lock, "utf8"), "dead-runner");
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
