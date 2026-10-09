@@ -47,10 +47,8 @@ for (const fn of new Set(config.pauses.map((pause) => pause.fn))) {
   };
 }
 if (config.noHardLinks) {
-  const link = fs.linkSync;
-  fs.linkSync = function (...args) {
-    if (String(args[1]).includes("lock.guard")) throw Object.assign(new Error("not supported"), { code: "ENOTSUP" });
-    return link.apply(this, args);
+  fs.linkSync = function () {
+    throw Object.assign(new Error("not supported"), { code: "ENOTSUP" });
   };
 }
 if (config.refuseRenameOf) {
@@ -76,7 +74,7 @@ while (config.stayAlive && !realExists(signal(config.name, "exit"))) Atomics.wai
 type Pause = {
   /** Pause name; the test releases it by name. */
   name: string;
-  fn: "readFileSync" | "existsSync" | "renameSync" | "linkSync" | "openSync";
+  fn: "readFileSync" | "existsSync" | "renameSync" | "linkSync" | "openSync" | "writeFileSync";
   /** Which argument names the file: 0 for reads and a rename's source, 1 for a link's destination. */
   arg: 0 | 1;
   path?: string;
@@ -265,6 +263,47 @@ test("a newly taken lock is never visible empty", async () => {
     assert.equal(race.result("a"), true);
   } finally {
     await race.dispose();
+  }
+});
+
+test("an acquirer that stalled while publishing its lock never owns it alongside a later taker", async (t) => {
+  for (const variant of ["linked", "fallback"] as const) {
+    await t.test(variant, async () => {
+      const race = new LockRace();
+      try {
+        // A stalls mid-publication long enough for its lock to look stale once it lands.
+        await race.start(variant === "linked"
+          ? {
+            name: "a", op: "acquire", owner: "runner-a",
+            pauses: [{ name: "a-written", fn: "writeFileSync", arg: 0, prefix: `${race.lockPath}.` }],
+          }
+          : {
+            name: "a", op: "acquire", owner: "runner-a", noHardLinks: true,
+            pauses: [{ name: "a-written", fn: "openSync", arg: 0, path: race.lockPath }],
+          });
+        assert.ok(race.paused("a-written"));
+        for (const name of race.sessionFiles()) {
+          if (name === "lock" || (name.startsWith("lock.") && name.endsWith(".tmp") && !name.startsWith("lock.guard"))) {
+            const at = (Date.now() - 120_000) / 1000;
+            utimesSync(join(race.root, ID, name), at, at);
+          }
+        }
+        if (variant === "fallback") {
+          // B finds the empty lock stale and takes it over before A writes its owner.
+          await race.start({ name: "b", op: "acquire", owner: "runner-b", noHardLinks: true });
+          await race.resume("a", "a-written");
+        } else {
+          // A publishes its old temp file; B arrives right after A reports.
+          await race.resume("a", "a-written");
+          await race.start({ name: "b", op: "acquire", owner: "runner-b" });
+        }
+        const winners = ["a", "b"].filter((name) => race.result(name) === true);
+        assert.equal(winners.length, 1, "a lock is never held by both");
+        assert.equal(race.lockOwner(), `runner-${winners[0]}`);
+      } finally {
+        await race.dispose();
+      }
+    });
   }
 });
 
