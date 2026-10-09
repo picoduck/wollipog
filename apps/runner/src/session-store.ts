@@ -3490,7 +3490,7 @@ export class SessionStore {
     let fd: number | undefined;
     try {
       fd = openSync(path, "wx");
-      writeSync(fd, record);
+      writeFileSync(fd, record); // loops until every byte is written; a short write never counts
       return "created";
     } catch (error) {
       return (error as NodeJS.ErrnoException).code === "EEXIST" ? "exists" : "failed";

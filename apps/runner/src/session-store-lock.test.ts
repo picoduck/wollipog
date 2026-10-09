@@ -708,6 +708,45 @@ test("without hard links, free and stale locks are taken inside the guard", (t) 
   }
 });
 
+test("without hard links, a short write never publishes a truncated owner", (t) => {
+  const { store, root, lock } = storeWithStaleLock();
+  try {
+    rmSync(lock);
+    const owner = "runner-a:history";
+    t.mock.method(fs, "linkSync", () => { throw Object.assign(new Error("not supported"), { code: "ENOTSUP" }); });
+    // Shorten the first single write to the lock file itself (not to temp files or the guard). A
+    // publication that issues one write and trusts it is cut short here; writeFileSync keeps writing
+    // until every byte is out, as its contract requires.
+    const open = fs.openSync;
+    let lockFd: number | undefined;
+    t.mock.method(fs, "openSync", (...args: unknown[]) => {
+      const fd = (open as (...a: unknown[]) => number)(...args);
+      if (String(args[0]) === lock) lockFd = fd;
+      return fd;
+    });
+    const write = fs.writeSync;
+    let shortened = false;
+    t.mock.method(fs, "writeSync", (fd: number, data: string | NodeJS.ArrayBufferView, ...rest: unknown[]) => {
+      if (!shortened && fd === lockFd) {
+        shortened = true;
+        const bytes = typeof data === "string" ? Buffer.from(data) : Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+        const offset = typeof data === "string" ? 0 : (rest[0] as number | undefined) ?? 0;
+        return write(fd, bytes, offset, 6); // the kernel accepted only part of it
+      }
+      return (write as (...args: unknown[]) => number)(fd, data, ...rest);
+    });
+    syncBuiltinESMExports();
+    assert.equal(store.acquireLock(ID, owner), true);
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    assert.equal(readFileSync(lock, "utf8"), owner, "the whole owner is published");
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("lock operations report failure instead of throwing when the filesystem refuses", (t) => {
   const { store, root, lock } = storeWithStaleLock();
   try {
