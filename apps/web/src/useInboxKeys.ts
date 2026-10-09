@@ -64,7 +64,7 @@ export function useInboxKeys(enabled: boolean, actions: InboxKeyActions): void {
   useEffect(() => {
     if (!enabled) return;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || shortcutLayerActive(document) || inTypingContext(document)) return;
+      if (event.defaultPrevented || shortcutLayerActive(document, false, event) || inTypingContext(document)) return;
       const active = document.activeElement;
       const zone = active instanceof Element ? focusZoneForElement(active) : null;
       if (zone !== null && zone !== "list" && zone !== "main") return;

@@ -3778,7 +3778,7 @@ function SessionDetailLoaded({
     const onStopTurnShortcut = (event: globalThis.KeyboardEvent) => {
       if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
       const target = event.target instanceof Element ? event.target : null;
-      if (target?.closest(".xterm") || shortcutLayerActive(document)) return;
+      if (target?.closest(".xterm") || shortcutLayerActive(document, false, event)) return;
       if (!matchesShortcut(event, "stop-turn")) return;
       event.preventDefault();
       void stopTurn();
@@ -6205,7 +6205,7 @@ function SessionDetailLoaded({
     // navigation, dismissal, or history. Arrow and Escape are part of candidate selection too.
     const composing = e.nativeEvent.isComposing || e.keyCode === 229;
     if (composing) return;
-    if (canStopTurn && cancelTurnRefusal === null && !shortcutLayerActive(document) && matchesShortcut(e, "stop-turn")) {
+    if (canStopTurn && cancelTurnRefusal === null && !shortcutLayerActive(document, false, e.nativeEvent) && matchesShortcut(e, "stop-turn")) {
       e.preventDefault();
       void stopTurn();
       return;
@@ -6225,7 +6225,7 @@ function SessionDetailLoaded({
     // Steering owns exact Ctrl+Enter before slash-palette selection. The composed slash text is
     // steering content; it is not dispatched as an app or provider slash command, and an unknown
     // one is not sent at all (#2176).
-    if (!shortcutLayerActive(document) && matchesShortcut(e, "steer-turn")) {
+    if (!shortcutLayerActive(document, false, e.nativeEvent) && matchesShortcut(e, "steer-turn")) {
       e.preventDefault();
       void steerDraft();
       return;

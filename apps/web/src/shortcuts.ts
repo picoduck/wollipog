@@ -803,9 +803,31 @@ export function shortcutReferenceGroups({
   return groups;
 }
 
-export function shortcutLayerActive(document: Document, exceptPalette = false): boolean {
+/** Each event's layer answers, one per `exceptPalette` value, once they have been asked. */
+const layerAnswers = new WeakMap<Event, [boolean | undefined, boolean | undefined]>();
+
+/**
+ * Whether a modal, menu or popover layer owns the keyboard.
+ *
+ * Every global key listener asks this, so one keydown asked it six or seven times, each a
+ * document-wide query that costs most while a long transcript is mounted (#2840). A listener that
+ * passes the event it is handling shares one answer with every other listener of that event.
+ * Listeners that open a layer prevent the event's default, and the ones after them check that
+ * before asking, so no listener acts on an answer a layer opened earlier in the dispatch made stale.
+ */
+export function shortcutLayerActive(document: Document, exceptPalette = false, event?: Event): boolean {
+  const answers = event ? layerAnswers.get(event) : undefined;
+  const slot = exceptPalette ? 1 : 0;
+  const known = answers?.[slot];
+  if (known !== undefined) return known;
   const modal = exceptPalette ? '[aria-modal="true"]:not(.palette)' : '[aria-modal="true"]';
-  return Boolean(document.querySelector(exceptPalette ? modal : `${modal}, [role="menu"], .menu[role="dialog"], .popover[role="dialog"]`));
+  const active = Boolean(document.querySelector(exceptPalette ? modal : `${modal}, [role="menu"], .menu[role="dialog"], .popover[role="dialog"]`));
+  if (event) {
+    const next = answers ?? [undefined, undefined];
+    next[slot] = active;
+    layerAnswers.set(event, next);
+  }
+  return active;
 }
 
 export function isEditableShortcutTarget(target: EventTarget | null): boolean {

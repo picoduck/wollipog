@@ -10,7 +10,7 @@ export function useNewSessionShortcut(enabled: boolean, onNewSession: () => void
   useEffect(() => {
     if (!enabled) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || shortcutLayerActive(document) || terminalOwnsKey(event.target)) return;
+      if (event.defaultPrevented || shortcutLayerActive(document, false, event) || terminalOwnsKey(event.target)) return;
       if (!matchesShortcut(event, "new-session")) return;
       event.preventDefault();
       onNewSession();

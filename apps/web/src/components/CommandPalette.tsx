@@ -71,7 +71,7 @@ function xtermOwnsKey(target: EventTarget | null): boolean {
 export function useSearchShortcut(toggle: () => void): void {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.defaultPrevented || shortcutLayerActive(document, true)) return;
+      if (e.defaultPrevented || shortcutLayerActive(document, true, e)) return;
       if (matchesShortcut(e, "search")) {
         if (xtermOwnsKey(e.target)) return;
         e.preventDefault();

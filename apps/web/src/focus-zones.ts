@@ -197,7 +197,7 @@ export function escapeOwner(
   },
 ): EscapeOwner {
   if (event.key !== "Escape" || event.defaultPrevented) return null;
-  if (shortcutLayerActive(targetDocument)) return "layer";
+  if (shortcutLayerActive(targetDocument, false, event instanceof Event ? event : undefined)) return "layer";
 
   const active = targetDocument.activeElement;
   if (active instanceof Element && active.closest(".xterm")) {

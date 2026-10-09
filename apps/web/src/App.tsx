@@ -594,7 +594,7 @@ export function Shell() {
   useEffect(() => {
     if (isMobile) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || shortcutLayerActive(document) || xtermOwnsKey(event.target)) return;
+      if (event.defaultPrevented || shortcutLayerActive(document, false, event) || xtermOwnsKey(event.target)) return;
       const digit = bareDigitPressed(event);
       if (digit !== null) {
         // Digits derive solely from the visible rail order (#385): a hidden or experiment-off
@@ -644,7 +644,7 @@ export function Shell() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!matchesShortcut(e, "shortcut-reference") || e.defaultPrevented || isEditableShortcutTarget(e.target)) return;
-      if (shortcutLayerActive(document)) return;
+      if (shortcutLayerActive(document, false, e)) return;
       e.preventDefault();
       openShortcutReference();
     };
@@ -657,7 +657,7 @@ export function Shell() {
   // mode toggle's "same mode → close" check reading fresh state.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.defaultPrevented || shortcutLayerActive(document) || xtermOwnsKey(e.target) || view.name !== "session") return;
+      if (e.defaultPrevented || shortcutLayerActive(document, false, e) || xtermOwnsKey(e.target) || view.name !== "session") return;
       if (matchesShortcut(e, "open-files")) {
         e.preventDefault();
         if (filesSupported) rightPanel.openMode("files");

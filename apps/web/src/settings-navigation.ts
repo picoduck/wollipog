@@ -17,7 +17,7 @@ type SettingsNavigationOptions = {
 /** Shift+, is global navigation, but never text input, an IME keystroke, or a nested layer key. */
 export function settingsShortcutShouldOpen(event: KeyboardEvent, targetDocument: Document): boolean {
   if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return false;
-  if (shortcutLayerActive(targetDocument)) return false;
+  if (shortcutLayerActive(targetDocument, false, event)) return false;
   if (inTypingContext(targetDocument) || isEditableShortcutTarget(event.target)) return false;
   return matchesShortcut(event, "open-settings", targetDocument);
 }
