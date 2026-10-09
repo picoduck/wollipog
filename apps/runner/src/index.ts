@@ -822,7 +822,9 @@ const providerLoginSupervisor: ProviderLoginSupervisor = new ProviderLoginSuperv
   },
 });
 // The box's on-disk session store (source of truth, shared across runner instances on this box).
-const store = new SessionStore(resolve(config.dataDir, "sessions"));
+// This process holds the data-directory lease, so it is the one store allowed to recover a writer-lock
+// guard abandoned by a process that died inside its guard section.
+const store = new SessionStore(resolve(config.dataDir, "sessions"), undefined, undefined, true);
 store.scrubLegacyAgentEnv();
 const durableCommands = new DurableCommandStore(resolve(config.dataDir, "command-receipts"));
 durableCommands.prune();
