@@ -289,7 +289,8 @@ type CardFocus =
  * On the request dock (#2205) the head line ends with Show Where Asked, and while the software
  * keyboard is open the card keeps only the question and its answer: no head line, a one-line title,
  * and Back and Next or Submit Answers in the footer. A field that takes focus is scrolled into view
- * within the card's body, never the page.
+ * within the card's body, never the page, as is any other control in the card reached from the
+ * keyboard, clear of a sticky head line and footer (#2801).
  *
  * A question longer than the card's few clamped lines ends on a whole line and offers Show Full
  * Question (#2683). Expanded, the question is shown whole, the head line offers Collapse Question,
@@ -766,17 +767,30 @@ export function SessionQuestionBanner({
   // body, and in a column too short for the body to scroll, the dock and its slot. Scrolling every
   // ancestor would move the transcript or the page under a software keyboard.
   const revealField = (focused: Element | null) => {
+    const card = cardRef.current;
+    if (!card || !(focused instanceof HTMLElement) || !card.contains(focused)) return;
     const body = stepRef.current;
-    if (!body || !(focused instanceof HTMLElement) || !body.contains(focused)) return;
-    // A text field, or a choice row reached from the keyboard. A tapped row is left where it is: a
-    // scroll between the press and the click would move it out from under the finger.
-    const choice = focused.matches("input[type=radio], input[type=checkbox]");
-    if (!choice && !focused.matches("input, textarea")) return;
-    if (choice && !focused.matches(":focus-visible")) return;
-    const field = choice ? focused.closest<HTMLElement>(".choice-row") ?? focused : focused;
-    const card = body.parentElement;
-    const dock = body.closest<HTMLElement>(".request-dock");
-    for (const scroller of [body, card, dock, dock?.parentElement?.closest<HTMLElement>(".session-notice-slot")]) {
+    const inBody = body?.contains(focused) === true;
+    let field = focused;
+    if (inBody) {
+      // A text field, or a choice row reached from the keyboard. A tapped row is left where it is: a
+      // scroll between the press and the click would move it out from under the finger.
+      const choice = focused.matches("input[type=radio], input[type=checkbox]");
+      if (!choice && !focused.matches("input, textarea")) return;
+      if (choice && !focused.matches(":focus-visible")) return;
+      if (choice) field = focused.closest<HTMLElement>(".choice-row") ?? focused;
+    } else {
+      // Any other control in the card reached from the keyboard (Show Full Question, a failure's Show
+      // Details), which the browser scrolls only to the nearest edge, under a sticky footer (#2801).
+      // The head line and the footer hold their place, so their own controls are always in view, and
+      // a landing place focused on purpose (the question, tabIndex -1) keeps its own scroll.
+      const edges = card.querySelectorAll(":scope > :is(.request-card-head, .request-card-foot)");
+      if ([...edges].some((edge) => edge.contains(focused)) || focused.tabIndex < 0 ||
+          !focused.matches(":focus-visible")) return;
+    }
+    const dock = card.closest<HTMLElement>(".request-dock");
+    const scrollers = [inBody ? body : null, card, dock, dock?.parentElement?.closest<HTMLElement>(".session-notice-slot")];
+    for (const scroller of scrollers) {
       if (!scroller) continue;
       const bounds = scroller.getBoundingClientRect();
       // The card scrolls under its footer in a short column (styles.css), and expanded under its head
@@ -785,8 +799,12 @@ export function SessionQuestionBanner({
       const head = scroller === card ? card.querySelector<HTMLElement>(":scope > .request-card-head") : null;
       const bottom = foot && getComputedStyle(foot).position === "sticky"
         ? Math.min(bounds.bottom, foot.getBoundingClientRect().top) : bounds.bottom;
+      // A card that scrolls keeps its top padding as an edge that content passes under (styles.css),
+      // so what is revealed clears that band as well.
+      const padTop = scroller === card && getComputedStyle(card, "::before").position === "sticky"
+        ? card.clientTop + (parseFloat(getComputedStyle(card).paddingTop) || 0) : 0;
       const top = head && getComputedStyle(head).position === "sticky"
-        ? Math.max(bounds.top, head.getBoundingClientRect().bottom) : bounds.top;
+        ? Math.max(bounds.top + padTop, head.getBoundingClientRect().bottom) : bounds.top + padTop;
       const rect = field.getBoundingClientRect();
       if (rect.top < top) scroller.scrollTop -= top - rect.top;
       else if (rect.bottom > bottom) scroller.scrollTop += Math.min(rect.bottom - bottom, rect.top - top);
@@ -865,6 +883,7 @@ export function SessionQuestionBanner({
       ref={cardRef}
       onKeyDown={onKeyDown}
       onMouseDown={holdFieldFocus}
+      onFocus={(event) => revealField(event.target)}
     >
       <RequestCardHead
         kind={<><QuestionIcon />{kindLabel}</>}
@@ -941,7 +960,7 @@ export function SessionQuestionBanner({
           {QUESTION_CARD_COPY.showFullQuestion}
         </button>
       )}
-      {(!compact || recoveryRequired) && <div className="request-card-body" ref={stepRef} onFocus={(event) => revealField(event.target)}>
+      {(!compact || recoveryRequired) && <div className="request-card-body" ref={stepRef}>
         {recoveryRequired && (
           <p className="question-recovery" id={recoveryId}>
             {recoveryCanResume ? QUESTION_CARD_COPY.recoveryResume : QUESTION_CARD_COPY.recoveryDismiss}

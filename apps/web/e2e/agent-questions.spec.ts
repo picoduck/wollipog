@@ -1493,3 +1493,90 @@ test.describe("an expanded question reads across the whole reading column (#2786
     }
   });
 });
+
+test.describe("a control reached from the keyboard is never left under the card's sticky footer (#2801)", () => {
+  /**
+   * Whether the control is wholly between the card's sticky top edge (its padding, which content
+   * passes under) and its footer, and is what a click there hits.
+   */
+  const clearOfFooter = (control: Locator) => control.evaluate((element) => {
+    const card = element.closest<HTMLElement>(".question-card")!;
+    const edge = getComputedStyle(card, "::before").position === "sticky"
+      ? card.clientTop + parseFloat(getComputedStyle(card).paddingTop) : 0;
+    const foot = card.querySelector(":scope > .request-card-foot")!.getBoundingClientRect();
+    const box = element.getBoundingClientRect();
+    const hit = element.ownerDocument.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+    return box.top >= card.getBoundingClientRect().top + edge - 0.5 && box.bottom <= foot.top + 0.5 &&
+      (hit === element || element.contains(hit));
+  });
+
+  for (const { width, height, more } of [
+    { width: 844, height: 390, more: false },
+    { width: 667, height: 375, more: true },
+    { width: 667, height: 375, more: false },
+    { width: 932, height: 430, more: true },
+  ]) {
+    const viewport = { width, height };
+    {
+      test(`Tab to Show Full Question at ${viewport.width}×${viewport.height}${more ? " behind +1 More Request" : ""}`, async ({ page }) => {
+        await page.setViewportSize(viewport);
+        await page.goto(`/agent-questions-e2e.html?set=long-text${more ? "&more=1" : ""}`);
+        const card = dockedCard(page);
+        await expect(card).toHaveAttribute("data-card-scrolls", "");
+        // From the question, where the dock lands focus, to the next control: Show Full Question.
+        await card.locator(".question-text").evaluate((title) => (title as HTMLElement).focus({ preventScroll: true }));
+        await page.keyboard.press("Tab");
+        const toggle = showFullQuestion(card);
+        await expect(toggle).toBeFocused();
+        await expect.poll(() => clearOfFooter(toggle)).toBe(true);
+        // Activating it from there still works.
+        await page.keyboard.press("Enter");
+        await expect(card.getByRole("button", { name: "Collapse Question" })).toBeFocused();
+      });
+    }
+  }
+
+  // At 844×390 behind "+1 More Request" the capped dock leaves the card 12px between its top edge and
+  // its footer, less than the control's own height: it lands at the top, in view and clickable.
+  test("Tab to Show Full Question at 844×390 behind +1 More Request, where the card is shorter than it", async ({ page }) => {
+    await page.setViewportSize({ width: 844, height: 390 });
+    await page.goto("/agent-questions-e2e.html?set=long-text&more=1");
+    const card = dockedCard(page);
+    await card.locator(".question-text").evaluate((title) => (title as HTMLElement).focus({ preventScroll: true }));
+    await page.keyboard.press("Tab");
+    const toggle = showFullQuestion(card);
+    await expect(toggle).toBeFocused();
+    await expect.poll(() => toggle.evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      const foot = element.closest(".question-card")!.querySelector(":scope > .request-card-foot")!.getBoundingClientRect();
+      const hit = element.ownerDocument.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+      return box.top < foot.top && (hit === element || element.contains(hit));
+    })).toBe(true);
+  });
+
+  // At 932×430 the card has 27px above its footer for this 28px button: it lands at the top edge,
+  // below the band content passes under, and a click there hits it.
+  test("Tab to a failure notice's Show Details at 932×430", async ({ page }) => {
+    await page.setViewportSize({ width: 932, height: 430 });
+    await page.goto("/agent-questions-e2e.html?set=long-text&more=1&failure=1");
+    const card = dockedCard(page);
+    const hold = card.getByRole("radio", { name: /^Hold/ });
+    await hold.scrollIntoViewIfNeeded();
+    await hold.click();
+    await card.getByRole("button", { name: "Submit Answers" }).click();
+    const showDetails = card.getByRole("button", { name: "Show Details" });
+    await expect(showDetails).toHaveCount(1);
+    // Back at the top of the card, Tab from the answers to the notice below them.
+    await card.evaluate((element) => { element.scrollTop = 0; });
+    await hold.evaluate((radio) => (radio as HTMLElement).focus({ preventScroll: true }));
+    await page.keyboard.press("Tab");
+    await expect(showDetails).toBeFocused();
+    await expect.poll(() => showDetails.evaluate((element) => {
+      const card = element.closest<HTMLElement>(".question-card")!;
+      const edge = card.getBoundingClientRect().top + card.clientTop + parseFloat(getComputedStyle(card).paddingTop);
+      const box = element.getBoundingClientRect();
+      const hit = element.ownerDocument.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+      return box.top >= edge - 0.5 && (hit === element || element.contains(hit));
+    })).toBe(true);
+  });
+});
