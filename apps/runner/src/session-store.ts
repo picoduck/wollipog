@@ -3333,7 +3333,7 @@ export class SessionStore {
     const created = this.publishExclusive(p, owner);
     if (created === "created") {
       this.forgetLockedHistoryState(id);
-      return true;
+      return this.confirmPublishedLock(id, p, owner);
     }
     if (created === "failed") return false;
     let outcome: "taken" | "mine" | "busy" | undefined;
@@ -3369,6 +3369,33 @@ export class SessionStore {
     }
     if (Date.now() - mtimeMs < LOCK_STALE_MS) return "busy";
     return this.replaceLockFile(p, owner) ? "taken" : "busy";
+  }
+
+  /**
+   * A freshly published lock is ours and young, unless this process stalled while publishing it:
+   * linking keeps the temp file's mtime, and a lock created empty on a filesystem without hard links
+   * can be taken over before its owner is written. Either way, a lock less than half the stale window
+   * old that still names us cannot have been taken over, since a takeover needs it fully stale.
+   * Otherwise, refresh it inside the guard, where no takeover can interleave, or find that one did.
+   */
+  private confirmPublishedLock(id: string, p: string, owner: string): boolean {
+    try {
+      const ageMs = Date.now() - statSync(p).mtimeMs;
+      if (readFileSync(p, "utf8") !== owner) return false;
+      if (ageMs < LOCK_STALE_MS / 2) return true;
+      return this.withLockGuard(id, () => {
+        try {
+          if (readFileSync(p, "utf8") !== owner) return false;
+          const now = new Date();
+          utimesSync(p, now, now);
+          return true;
+        } catch {
+          return false;
+        }
+      }) ?? false;
+    } catch {
+      return false;
+    }
   }
 
   /** A new holder must re-derive the append state another process may have changed. */
@@ -3489,9 +3516,10 @@ export class SessionStore {
   private lockGuardHolderGone(holder: LockGuardRecord | null, ageMs: number): boolean {
     if (holder?.released === true) return true; // a breaker's claim it gave up without moving the guard
     if (!holder || !Number.isSafeInteger(holder.pid) || (holder.pid as number) <= 0 || typeof holder.token !== "string") {
-      // Never judged abandoned. Guards are published complete, so this is damage, or a creator on a
-      // filesystem without hard links that is (or was) between its create and its write. Breaking it
-      // could admit a second holder; leaving it fails closed until the file is deleted by hand.
+      // Never judged abandoned. Guards and claims are published complete, so this is damage, or a
+      // creator on a filesystem without hard links that is (or was) between its create and its write.
+      // Breaking it could admit a second holder; leaving it fails closed until the file is deleted by
+      // hand (`lock.guard`, or the `lock.guard.break.*` claim).
       return false;
     }
     const pid = holder.pid as number;
@@ -3616,9 +3644,10 @@ export class SessionStore {
   /** Take the lock only if no lock file exists, with an exclusive create. A compaction that let the
    * lock go for its copy must never take it back by overwriting or by stale takeover. */
   private acquireFreeLock(id: string, owner: string): boolean {
-    if (this.publishExclusive(this.lockPath(id), owner) !== "created") return false;
+    const p = this.lockPath(id);
+    if (this.publishExclusive(p, owner) !== "created") return false;
     this.forgetLockedHistoryState(id);
-    return this.ownsLock(id, owner);
+    return this.confirmPublishedLock(id, p, owner);
   }
 
   ownsLock(id: string, owner: string): boolean {
