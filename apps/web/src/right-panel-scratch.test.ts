@@ -886,3 +886,19 @@ test("a collection storage refused is swept again rather than counted as done (#
   assert.ok(storedChars() <= PANEL_SCRATCH_PERSIST_CHAR_LIMIT,
     `stored ${storedChars()} characters, ceiling ${PANEL_SCRATCH_PERSIST_CHAR_LIMIT}`);
 });
+
+test("an emptied record storage refused to remove is swept again rather than counted as gone (#2764)", () => {
+  // A record whose values no longer fit is emptied and removed. Refused, it stays stored, and the
+  // measurement a later write trusts to skip the sweep must not count it as gone.
+  const first = panelScratchScopeKey("session-1");
+  const second = panelScratchScopeKey("session-2");
+  writePanelScratch(first, "review.requestBody", `1:${"a".repeat(150_000)}`, "draft");
+  writePanelScratch(second, "review.requestBody", `2:${"b".repeat(100_000)}`, "draft");
+  denyRemovals = true;
+  writePanelScratch(first, "review.requestBody", `1:${"a".repeat(300_000)}`, "draft");
+  denyRemovals = false;
+
+  writePanelScratch(second, "review.requestBody", `2:${"b".repeat(150_000)}`, "draft");
+  assert.ok(storedChars() <= PANEL_SCRATCH_PERSIST_CHAR_LIMIT,
+    `stored ${storedChars()} characters, ceiling ${PANEL_SCRATCH_PERSIST_CHAR_LIMIT}`);
+});

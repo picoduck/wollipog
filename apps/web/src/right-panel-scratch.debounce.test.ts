@@ -49,6 +49,8 @@ const {
   clearPanelScratch,
   clearPanelScratchIf,
   dropPanelScratchMemory,
+  flushPanelScratch,
+  PANEL_SCRATCH_SESSION_LIMIT,
   panelScratchRevision,
   panelScratchScopeKey,
   readPanelScratch,
@@ -168,4 +170,74 @@ test("a removal is written at once, together with what the scope still owed", ()
   writes = [];
   mock.timers.tick(PANEL_SCRATCH_PERSIST_MAX_DELAY_MS);
   assert.equal(writes.length, 0, "nothing is left on the timer to write the scope again");
+});
+
+/**
+ * What a flush stores, with the parts that differ between two runs by design taken out: the page's
+ * writer id and the stamps, which count the mutations a run made. The values, their retention and
+ * which keys carry a deletion marker are what a reload and another tab read.
+ */
+function storedShape(scope: string): unknown {
+  const raw = backing.get(`${RECORD_PREFIX}${scope}`);
+  if (raw === undefined) return undefined;
+  const record = JSON.parse(raw) as {
+    values: Record<string, { value: string; retention: string }>;
+    cleared: Record<string, number>;
+  };
+  return {
+    values: Object.fromEntries(Object.entries(record.values)
+      .map(([key, held]) => [key, { value: held.value, retention: held.retention }])),
+    cleared: Object.keys(record.cleared).sort(),
+  };
+}
+
+test("a pause stores exactly what mirroring every mutation at once stores", () => {
+  // A flush is the mirroring each mutation used to do at once (`persistScope`, unchanged), run once
+  // per written key; flushing after every mutation is that per-mutation path. Over one sequence of
+  // edits, sends and replacements, both leave the same record.
+  const scope = panelScratchScopeKey("session-1");
+  const run = (afterEach: () => void) => {
+    clearPanelScratch();
+    backing.clear();
+    writePanelScratch(scope, "review.requestBody", "a description", "draft");
+    afterEach();
+    writePanelScratch(scope, "files.directory", "apps/web");
+    afterEach();
+    writePanelScratch(scope, "sidechat.draft", "on its way", "draft");
+    afterEach();
+    writePanelScratch(scope, "review.requestBody", "a longer description", "draft");
+    afterEach();
+    clearPanelScratchIf(scope, "sidechat.draft", "on its way", panelScratchRevision(scope, "sidechat.draft"));
+    afterEach();
+    writePanelScratch(scope, "sidechat.draft", "a second thought", "draft");
+    afterEach();
+    writePanelScratch(scope, "files.directory", "apps/web/src");
+    afterEach();
+    mock.timers.tick(PANEL_SCRATCH_PERSIST_MAX_DELAY_MS);
+    return storedShape(scope);
+  };
+  const perMutation = run(() => flushPanelScratch());
+  const debounced = run(() => mock.timers.tick(10));
+  assert.deepEqual(debounced, perMutation);
+  assert.deepEqual(perMutation, {
+    values: {
+      "review.requestBody": { value: "a longer description", retention: "draft" },
+      "files.directory": { value: "apps/web/src", retention: "disposable" },
+      "sidechat.draft": { value: "a second thought", retention: "draft" },
+    },
+    cleared: [],
+  });
+});
+
+test("a scope evicted from memory first writes what it still owed storage", () => {
+  // Eviction drops a scope that holds nothing the user wrote. Its last value still reaches storage
+  // before it goes, as it did when every write was mirrored at once.
+  const oldest = panelScratchScopeKey("session-oldest");
+  writePanelScratch(oldest, "files.directory", "apps/web/src");
+  assert.equal(stored(oldest, "files.directory"), undefined, "still waiting for the pause");
+  for (let index = 0; index < PANEL_SCRATCH_SESSION_LIMIT; index += 1) {
+    writePanelScratch(panelScratchScopeKey(`session-${index}`), "files.directory", "apps/web");
+  }
+  assert.equal(stored(oldest, "files.directory"), "apps/web/src",
+    "it was written when memory let it go, before any pause ended");
 });
