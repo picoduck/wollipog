@@ -39,21 +39,22 @@ The legacy whole-history RPC reads the same ordered sources for old control plan
 ## Publication and recovery
 
 The per-session writer lock is a `lock` file naming its owner; its mtime is the last refresh, and a
-lock unrefreshed for 60 seconds is stale. Taking a free lock is one exclusive create. A stale
-takeover, a refresh, and a release each run inside a short guard section (`lock.guard`, recording
-the holder's pid, process start time, and a token, and published complete by hard-linking a written
-temp file into place), so a takeover replaces exactly the stale lock it inspected and never one that
-was refreshed, released, or retaken meanwhile. A busy guard fails the operation closed after a brief
-wait. A guard is broken only when its holder is gone: its pid has exited, or the guard is old and its
-pid now belongs to a process that started later. Breaking is itself exclusive: the breaker first takes
-a claim named after that exact guard and re-reads it, so it never moves a newer guard. An empty or
-malformed `lock.guard` or `lock.guard.break.*` claim (damage, or a crash mid-write on a filesystem
-without hard links) is never broken automatically; the session's lock then stays unavailable until
-those files are deleted by hand while no runner is using the session. An acquirer that stalled while
-publishing a lock confirms, inside the guard, that it is still the owner before reporting success.
-Pids and start
-times are host-local, so the data directory must not be shared across machines; the runner's
-data-directory lease already keeps one runner per data directory.
+lock unrefreshed for 60 seconds is stale. Lock and guard files are published complete, by
+hard-linking a written temp file into place. Taking a free lock is one exclusive publication; a stale
+takeover, a refresh, and a release each run inside a short guard section (`lock.guard`, recording the
+holder's pid, process start time, and a token), so a takeover replaces exactly the stale lock it
+inspected and never one that was refreshed, released, or retaken meanwhile. Anything published inside
+the guard is touched before the guard is released, so a lease starts when it is published. On a
+filesystem without hard links the free path also runs inside the guard. A busy guard fails the
+operation closed after a brief wait.
+
+Only the runner, which holds the data-directory lease, ever removes a guard, and only when its holder
+is gone: its pid has exited, or the guard is old and its pid now belongs to a process that started
+later. Any other process fails closed on an abandoned guard. An empty or malformed `lock.guard`
+(damage, or a crash mid-write on a filesystem without hard links) is never removed automatically; the
+session's lock then stays unavailable until that file is deleted by hand while no runner is using the
+session. Pids and start times are host-local, so the data directory must not be shared across
+machines.
 
 Compaction needs the normal per-session writer lock to plan and to publish. It keeps the event loop
 responsive: no single synchronous step is a bulk copy, a whole-range parse, or an fsync of a large
