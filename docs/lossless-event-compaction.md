@@ -46,7 +46,9 @@ temp file into place), so a takeover replaces exactly the stale lock it inspecte
 was refreshed, released, or retaken meanwhile. A busy guard fails the operation closed after a brief
 wait. A guard is broken only when its holder is gone: its pid has exited, or the guard is old and its
 pid now belongs to a process that started later. Breaking is itself exclusive: the breaker first takes
-a claim named after that exact guard and re-reads it, so it never moves a newer guard. Pids and start
+a claim named after that exact guard and re-reads it, so it never moves a newer guard. An empty or
+malformed `lock.guard` (damage, or a crash mid-write on a filesystem without hard links) is never
+broken automatically; the session's lock then stays unavailable until that file is deleted. Pids and start
 times are host-local, so the data directory must not be shared across machines; the runner's
 data-directory lease already keeps one runner per data directory.
 
