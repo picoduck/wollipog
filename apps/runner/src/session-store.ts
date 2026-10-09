@@ -890,7 +890,7 @@ export class SessionStore {
     const cached = this.historyLayoutCache.get(id);
     if (
       !cached || cached.epoch !== epoch || cached.manifestKey !== manifestKey ||
-      performance.now() - cached.validatedAt >= HISTORY_LAYOUT_REVALIDATE_MS
+      !this.coldSegmentsStillValid(id, cached)
     ) {
       this.historyLayoutCache.delete(id);
       const layout = this.historyLayout(id, epoch);
@@ -901,6 +901,25 @@ export class SessionStore {
     layout.active.bytes = this.activeHistoryBytes(layout.active.path);
     layout.totalBytes = layout.coldBytes + layout.active.bytes;
     return layout;
+  }
+
+  /** Periodic revalidation of a cached layout whose manifest identity is unchanged (#2831). That
+   * manifest names the same immutable segments, so only their presence and size can have changed:
+   * one lstat per segment replaces re-reading and re-parsing the manifest. A pending legacy-fence
+   * intent or any damaged segment falls back to the full read, which reports it exactly as before. */
+  private coldSegmentsStillValid(
+    id: string,
+    cached: { layout: HistoryLayout; validatedAt: number },
+  ): boolean {
+    if (performance.now() - cached.validatedAt < HISTORY_LAYOUT_REVALIDATE_MS) return true;
+    if (existsSync(this.historyLegacyFencePath(id))) return false;
+    for (const source of cached.layout.sources) {
+      if (!source.segment) continue;
+      const stat = lstatSync(source.path, { throwIfNoEntry: false });
+      if (!stat?.isFile() || stat.size !== source.segment.bytes) return false;
+    }
+    cached.validatedAt = performance.now();
+    return true;
   }
 
   has(id: string): boolean {

@@ -2541,8 +2541,50 @@ test("an uncommitted legacy fence keeps appends on the uncached path until the f
   }
 });
 
+test("revalidating a warm layout under an unchanged manifest lstats its segments instead of re-reading it", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-store-layout-revalidate-"));
+  try {
+    const store = new SessionStore(root, undefined, COMPACT_EVERY_PASS);
+    store.create(meta());
+    for (let pass = 0; pass < 3; pass++) {
+      appendMany(store, 10, `pass${pass}`);
+      await compactOnce(store);
+    }
+    assert.equal(historyManifest(root).segments.length, 3);
+    store.appendEvent("s_abc", { kind: "agent_message", text: "warm" });
+    const internals = store as unknown as {
+      historyLayoutCache: Map<string, { validatedAt: number }>;
+      readHistoryManifest: (...args: unknown[]) => unknown;
+    };
+    const readHistoryManifest = internals.readHistoryManifest.bind(store);
+    let manifestReads = 0;
+    internals.readHistoryManifest = (...args: unknown[]) => { manifestReads++; return readHistoryManifest(...args); };
+    const expire = () => { internals.historyLayoutCache.get("s_abc")!.validatedAt = -Infinity; };
+    for (let i = 0; i < 5; i++) {
+      expire();
+      store.appendEvent("s_abc", { kind: "agent_message", text: `revalidated ${i}` });
+      assert.notEqual(internals.historyLayoutCache.get("s_abc")!.validatedAt, -Infinity, "revalidated in place");
+    }
+    assert.equal(manifestReads, 0, "an unchanged manifest is not re-read or re-parsed");
+
+    // Doubt goes back to the full read: a pending legacy-fence intent is retried there, as before.
+    writeFileSync(join(root, "s_abc", "events.legacy-fence.json"), "{");
+    expire();
+    assert.throws(
+      () => store.appendEvent("s_abc", { kind: "agent_message", text: "fenced" }),
+      /legacy-fence intent is malformed/,
+    );
+    assert.equal(manifestReads, 1);
+    rmSync(join(root, "s_abc", "events.legacy-fence.json"));
+    const seq = store.appendEvent("s_abc", { kind: "agent_message", text: "after" })?.seq;
+    assert.deepEqual(coldSeqs(root).at(-1), seq, "appends continue from the full read");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a warm append layout still fails closed on a damaged cold segment within one flush interval", async () => {
-  for (const damage of ["deleted", "truncated"] as const) {
+  for (const damage of ["deleted", "truncated", "symlinked"] as const) {
     const root = mkdtempSync(join(tmpdir(), "wollipog-store-layout-damage-"));
     try {
       const store = new SessionStore(root, undefined, COMPACT_EVERY_PASS);
@@ -2553,7 +2595,12 @@ test("a warm append layout still fails closed on a damaged cold segment within o
       const { activeFile, segments } = historyManifest(root);
       const segmentPath = join(root, "s_abc", segments[0]!.file);
       if (damage === "deleted") rmSync(segmentPath);
-      else writeFileSync(segmentPath, readFileSync(segmentPath).subarray(0, 10));
+      else if (damage === "truncated") writeFileSync(segmentPath, readFileSync(segmentPath).subarray(0, 10));
+      else {
+        // Same bytes and size, but no longer the regular file the manifest names.
+        renameSync(segmentPath, join(root, "segment-elsewhere.ndjson"));
+        symlinkSync(join(root, "segment-elsewhere.ndjson"), segmentPath);
+      }
       const activeBefore = readFileSync(join(root, "s_abc", activeFile));
       await new Promise((resolve) => setTimeout(resolve, 300));
       assert.throws(
