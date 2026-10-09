@@ -45,6 +45,7 @@ test("only more chunks of the reply the history ends with continue its trailing 
     ["a shorter history", base, base.slice(0, 1)],
     ["another session's chunk", base, [...base, chunk("x", {}), { ...chunk("y"), sessionId: "s2" }]],
     ["an out-of-order chunk", base, [...base, { ...chunk("x"), seq: base[1]!.seq }]],
+    ["a chunk timed before the last one", base, [...base, { ...chunk("x"), ts: base[1]!.ts - 1 }]],
     ["no history yet", [], [chunk("x")]],
   ];
   for (const [name, previous, next] of refused) assert.equal(onlyContinuesTrailingText(previous, next), false, name);
@@ -75,7 +76,9 @@ test("folding chunks onto the derived reply equals deriving them, for any split"
       const split = 1 + (splitSeed % (chunks.length - 1));
       const derivedFrom = [prompt, ...chunks.slice(0, split)];
       const live = [prompt, ...chunks];
-      assert.equal(onlyContinuesTrailingText(derivedFrom, live), true);
+      const forward = chunks.slice(split - 1).every((event, index, all) => index === 0 || event.ts >= all[index - 1]!.ts);
+      assert.equal(onlyContinuesTrailingText(derivedFrom, live), forward,
+        "a chunk timed before the one it follows is left to the session view");
 
       const expected = derive(live);
       const items = derive(derivedFrom);

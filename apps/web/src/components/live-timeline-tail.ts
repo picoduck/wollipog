@@ -28,8 +28,9 @@ function openTopLevelText(event: SessionEvent): AgentTextPayload | null {
 
 /**
  * Whether `next` is `previous` with only more non-final chunks of the top-level reply or reasoning
- * stream `previous` ends with: same kind, same provider message id, no subagent. `TimelineBuilder`
- * folds each such chunk into the item that stream already has, and changes nothing else.
+ * stream `previous` ends with: same kind, same provider message id, no subagent, in sequence and time
+ * order. `TimelineBuilder` folds each such chunk into the item that stream already has, and changes
+ * nothing else.
  */
 export function onlyContinuesTrailingText(
   previous: readonly SessionEvent[] | undefined,
@@ -42,12 +43,16 @@ export function onlyContinuesTrailingText(
   const stream = openTopLevelText(last);
   if (!stream) return false;
   let seq = last.seq;
+  let ts = last.ts;
   for (let index = previous.length; index < next.length; index += 1) {
     const event = next[index]!;
     const chunk = openTopLevelText(event);
+    // A chunk timed earlier than the one before it can move a governance decision anchored by time;
+    // the session view derives that itself.
     if (!chunk || chunk.kind !== stream.kind || chunk.messageId !== stream.messageId ||
-        event.sessionId !== last.sessionId || event.seq <= seq) return false;
+        event.sessionId !== last.sessionId || event.seq <= seq || !(event.ts >= ts)) return false;
     seq = event.seq;
+    ts = event.ts;
   }
   return true;
 }
