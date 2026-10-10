@@ -123,12 +123,15 @@ test("a step reads as what the worker is doing, did, or waits to do", () => {
   assert.equal(stepActivity("Edit: /repo/src/a.ts", "wait", "/repo"), "Waiting to edit src/a.ts");
   assert.equal(stepActivity("Run Parser Tests?", "wait"), "Run Parser Tests?", "an unknown verb reads as written");
   assert.equal(stepActivity("Agent: Write Parser Tests", "now"), "Waiting on Write Parser Tests", "a worker waits on the one it spawned");
+  assert.equal(stepActivity("$ npm test", "seen"), "Last seen running npm test");
+  assert.equal(stepActivity("Read Schema", "seen"), "Last seen: Read Schema");
 });
 
 test("offline workers stay current as Unverified; settled ones move to History", () => {
   const offline = workerRoster(session, [{ ...child, availability: "recorded" }], [], () => false);
   assert.deepEqual(offline.map((row) => row.state), ["unverified", "unverified"]);
   assert.equal(offline.filter(isCurrentWorker).length, 2);
+  assert.equal(offline[0]!.activity, "Last seen running npm test", "an unverified step is never reported as done");
   assert.equal(offline.filter(isLiveWorker).length, 0, "the session header counts only verifiably live workers");
   assert.equal(isLiveWorker({ state: "attention" }), true, "a worker waiting on the user is still in flight");
   const completed = workerRoster(session, [{ ...child, lifecycle: "completed", latestTool: { title: "$ npm test", active: false } }], [], () => true)[0]!;

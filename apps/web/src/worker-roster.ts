@@ -187,14 +187,17 @@ const STEP_PHRASES: Record<string, { now: string; done: string; wait: string }> 
 };
 
 /**
- * One step as a sentence: "Running npm test", "Ran npm test" or "Waiting to edit src/a.ts". A title
+ * One step as a sentence: "Running npm test", "Ran npm test", "Waiting to edit src/a.ts", or, for a
+ * step that was in flight when its runner stopped answering, "Last seen running npm test". A title
  * whose verb is not one of these reads as the provider wrote it.
  */
-export function stepActivity(title: string, mode: "now" | "done" | "wait", workspaceRoot?: string): string {
+export function stepActivity(title: string, mode: "now" | "done" | "wait" | "seen", workspaceRoot?: string): string {
   const { verb, object } = splitStepTitle(title, workspaceRoot);
   const phrase = object ? STEP_PHRASES[verb] : undefined;
-  if (!phrase) return title;
-  return mode === "wait" ? `Waiting to ${phrase.wait} ${object}` : `${phrase[mode]} ${object}`;
+  if (!phrase) return mode === "seen" ? `Last seen: ${title}` : title;
+  if (mode === "wait") return `Waiting to ${phrase.wait} ${object}`;
+  if (mode === "seen") return `Last seen ${phrase.now.charAt(0).toLowerCase()}${phrase.now.slice(1)} ${object}`;
+  return `${phrase[mode]} ${object}`;
 }
 
 const LAUNCH_NOUNS: Record<ManagedBackgroundJobView["launchType"], string> = {
@@ -226,9 +229,11 @@ export function workerRoster(
       name: agent.title,
       group: SUBAGENT_GROUP,
       ...status,
+      // An Unverified worker's step may still be running, so it reads as last seen, never as done.
       activity: status.state === "attention" && request ? stepActivity(request.title, "wait", root)
-        : latest ? stepActivity(latest.title, latestActive ? "now" : "done", root)
-        : ACTIVE_LIFECYCLES.has(agent.lifecycle) ? "Starting its first step" : "No steps recorded",
+        : latest ? stepActivity(latest.title, latestActive ? "now"
+          : latest.active && status.state === "unverified" ? "seen" : "done", root)
+        : status.state === "running" ? "Starting its first step" : "No steps recorded",
       ...(agent.role ? { role: agent.role } : {}),
       target: { kind: "subagent", id: agent.id },
       ...(agent.parentId && subagentIds.has(agent.parentId) ? { parentId: `subagent:${agent.parentId}` } : {}),
