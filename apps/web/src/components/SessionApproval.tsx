@@ -802,12 +802,18 @@ export function SessionQuestionBanner({
     } else {
       // Any other control in the card reached from the keyboard (Show Full Question, a failure's Show
       // Details), which the browser scrolls only to the nearest edge, under a sticky footer (#2801).
-      // The head line and the footer hold their place, so their own controls are always in view, and
-      // a landing place focused on purpose (the question, tabIndex -1) keeps its own scroll.
+      // Only a sticky head holds its place: the collapsed head scrolls under the top padding band
+      // (#2885). A landing place focused on purpose (the question, tabIndex -1) keeps its own scroll.
       const edges = card.querySelectorAll(":scope > :is(.request-card-head, .request-card-foot)");
-      if ([...edges].some((edge) => edge.contains(focused)) || focused.tabIndex < 0 ||
+      if ([...edges].some((edge) => edge.contains(focused) &&
+          (edge.classList.contains("request-card-foot") || getComputedStyle(edge).position === "sticky")) || focused.tabIndex < 0 ||
           !focused.matches(":focus-visible")) return;
     }
+    // The outside focus ring needs the same clearance as the control's rectangle. Choice rows
+    // retain their own geometry because the input, rather than its enclosing row, owns focus.
+    const style = getComputedStyle(field);
+    const outline = field.matches(":focus-visible")
+      ? Math.max(0, (parseFloat(style.outlineWidth) || 0) + (parseFloat(style.outlineOffset) || 0)) : 0;
     const dock = card.closest<HTMLElement>(".request-dock");
     const scrollers = [inBody ? body : null, card, dock, dock?.parentElement?.closest<HTMLElement>(".session-notice-slot")];
     for (const scroller of scrollers) {
@@ -826,8 +832,8 @@ export function SessionQuestionBanner({
       const top = head && getComputedStyle(head).position === "sticky"
         ? Math.max(bounds.top + padTop, head.getBoundingClientRect().bottom) : bounds.top + padTop;
       const rect = field.getBoundingClientRect();
-      if (rect.top < top) scroller.scrollTop -= top - rect.top;
-      else if (rect.bottom > bottom) scroller.scrollTop += Math.min(rect.bottom - bottom, rect.top - top);
+      if (rect.top - outline < top) scroller.scrollTop -= top - (rect.top - outline);
+      else if (rect.bottom + outline > bottom) scroller.scrollTop += Math.min(rect.bottom + outline - bottom, rect.top - outline - top);
     }
   };
   // The keyboard opens after the field took focus and lowers the dock's cap, which can hide it again.

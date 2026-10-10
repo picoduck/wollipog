@@ -14490,6 +14490,11 @@ button.review-finding-location {
   flex: none;
   overflow: visible;
 }
+/* At scroll start the collapsed head has no room above it for an outside ring (#2885). Inset the
+   controls' outlines as in other clipped scrollers, keeping the question's whole lines in reach. */
+.question-card[data-card-scrolls]:not([data-question-expanded]) > .request-card-head :focus-visible {
+  outline-offset: calc(-1 * var(--focus-width));
+}
 .question-card[data-card-scrolls]::before {
   content: "";
   position: sticky;
