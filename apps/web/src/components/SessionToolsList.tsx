@@ -226,9 +226,17 @@ function SessionToolsListView({
     });
     const unresolved = new Set(mergeCompactAttentionOwners(registry?.attentionOwners ?? [], session.attentionOwners ?? [])
       .filter((owner) => !owner.resolved).map((owner) => owner.toolCallId));
-    const agents = registry
-      ? mergeDurableAgents(durableAgentDescriptors(registry.children, session.status, runnerOnline), projection.descriptors, unresolved)
-      : projection.descriptors.filter((agent) => !unresolved.has(agent.id));
+    const loaded = projection.descriptors.filter((agent) => !unresolved.has(agent.id));
+    let agents = loaded;
+    if (registry) {
+      const durable = mergeDurableAgents(durableAgentDescriptors(registry.children, session.status, runnerOnline),
+        projection.descriptors, unresolved);
+      // The registry is read when the list opens and after git status reads, which pause during a
+      // turn; an agent launched since then is in the transcript only, and is listed from there until
+      // the next read (the Agents panel re-reads its registry instead).
+      const listed = new Set(durable.map((agent) => agent.id));
+      agents = [...durable, ...loaded.filter((agent) => !listed.has(agent.id))];
+    }
     return workerRoster(session, agents, [], () => runnerOnline)
       .filter((row) => row.target.kind === "subagent");
   }, [items, registry, runnerOnline, session]);

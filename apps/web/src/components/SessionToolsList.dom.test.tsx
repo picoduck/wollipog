@@ -387,6 +387,24 @@ test("Agents counts the durable registry's subagents, as the Agents panel does, 
   try {
     assert.equal(fact(panel.container, "subagents"), "1 subagent in this session");
     assert.match(row(panel.container, "subagents")?.querySelector(".status")?.textContent ?? "", /^1 Working$/);
+    // A subagent launched after the registry was read, mid-turn, with no new git status read: the
+    // transcript has it, and the list counts it at once.
+    await panel.setProps({ items: runningAgent });
+    assert.equal(fact(panel.container, "subagents"), "2 subagents in this session");
+    assert.match(row(panel.container, "subagents")?.querySelector(".status")?.textContent ?? "", /^2 Working$/);
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("Agents counts a subagent launched after an empty registry read (#2844)", async () => {
+  registry = { children: [], attentionOwners: [], unidentifiedChildren: 0, eventEpoch: 1, nextAfter: null, truncated: false };
+  const panel = await mount({ git: gitWith(0), items: [] });
+  try {
+    assert.equal(fact(panel.container, "subagents"), "No subagents in this session");
+    await panel.setProps({ items: runningAgent });
+    assert.equal(fact(panel.container, "subagents"), "1 subagent in this session");
+    assert.match(row(panel.container, "subagents")?.querySelector(".status")?.textContent ?? "", /^1 Working$/);
   } finally {
     await panel.dispose();
   }
