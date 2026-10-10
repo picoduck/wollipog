@@ -250,6 +250,8 @@ test("Web Preview starts with its one security sentence and no hint or notice", 
     const form = container.querySelector(".browser-address") as HTMLFormElement;
     assert.ok(form.noValidate, "no native validation bubbles (§8.5)");
     assert.ok(form.classList.contains("toolbar"));
+    assert.ok(form.parentElement?.classList.contains("rpanel-toolbar"), "the row is the panel's toolbar slot (§4.9)");
+    assert.ok(container.querySelector(".rpanel-scroll > #browser-web-panel"), "the page or its state is in the one scroller");
     assert.equal(buttonNamed(form, "Open")?.getAttribute("type"), "submit");
     assertNoDomNode(buttonNamed(form, "Reload"), "nothing to reload yet");
   });

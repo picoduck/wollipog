@@ -5110,52 +5110,37 @@ textarea {
   flex-direction: column;
   gap: var(--space-3);
 }
-/* The Browser tool (#2854): the Artifacts and Web Preview tabs over one pane that fills the rest of
-   the panel. The body gives up its own scroll and padding: the Artifacts pane scrolls, and a web page
-   reaches the panel's edges. */
-.rpanel-body:has(> .browser-panel) {
-  overflow: hidden;
-  padding: 0;
-}
-.browser-panel,
-.browser-web {
-  flex: 1;
-  min-width: 0;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
+/* The Browser tool (#2854): the Artifacts and Web Preview tabs over the panel's slots (§4.9), on the
+   hairline the slots start under. Web Preview's address row is the toolbar slot's row; an open page
+   takes the whole scroller, edge to edge, and never scrolls it. */
 .browser-tabs {
   flex: none;
   padding: 0 var(--space-4);
   border-bottom: 1px solid var(--border);
 }
 .browser-artifacts {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  padding: var(--space-3) var(--space-4);
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
 }
 /* The address row is one line at every panel width: the field gives up width, never the buttons. */
-.browser-address {
-  flex: none;
-  padding: var(--space-2) var(--space-4);
-}
 .browser-address > :not(.browser-address-field) { flex: none; }
 .browser-address-field { flex: 1; }
-.browser-address-error { padding: 0 var(--space-4) var(--space-2); }
-.browser-web > .state { padding-inline: var(--space-4); }
+.browser-address-error { padding-top: var(--space-2); }
+.rpanel-scroll:has(> .browser-web > .browser-web-view) {
+  overflow: hidden;
+  padding: 0;
+}
+.browser-web,
 .browser-web-view {
-  position: relative;
   flex: 1;
+  min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  border-top: 1px solid var(--border);
 }
+.browser-web-view { position: relative; }
 .browser-web-view > .notice { margin: var(--space-3) var(--space-4); }
 .browser-web-frame,
 .artifact-preview-frame {

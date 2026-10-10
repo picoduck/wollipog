@@ -4,6 +4,7 @@ import { Notice } from "./Notice.js";
 import { TabList } from "./Tabs.js";
 import { State } from "./State.js";
 import { ListFoot } from "./ListFoot.js";
+import { PanelToolLayout } from "./PanelToolLayout.js";
 import { FieldError } from "./FieldError.js";
 import { Skeleton } from "./common.js";
 import { BusyButton } from "./ui/BusyButton.js";
@@ -113,8 +114,11 @@ export function BrowserPanel({ session }: { session: SessionView }) {
   const firstPageLoaded = !(listBusy && artifacts.length === 0) && !(listError && artifacts.length === 0);
   const count = firstPageLoaded ? `${artifacts.length}${cursor ? "+" : ""}` : null;
 
+  // The tabs sit directly above the panel's slots, so their underline rests on a hairline (§10.1);
+  // each tab's content is a PanelToolLayout of its own: Web Preview puts its address row in the
+  // toolbar slot, and both scroll in the one scroller.
   return (
-    <div className="browser-panel">
+    <>
       <TabList label="Browser" className="browser-tabs" onKeyDown={(event) => handleRovingChoiceKeyDown(event, "tab")}>
         <button
           id="browser-artifacts-tab"
@@ -143,76 +147,76 @@ export function BrowserPanel({ session }: { session: SessionView }) {
       </TabList>
 
       {mode === "web" ? (
-        <div id="browser-web-panel" role="tabpanel" aria-labelledby="browser-web-tab" className="browser-web">
-          <WebPreview
-            urlInput={urlInput}
-            setUrlInput={setUrlInput}
-            url={openUrl || null}
-            setUrl={setOpenUrl}
-          />
-        </div>
+        <WebPreview
+          urlInput={urlInput}
+          setUrlInput={setUrlInput}
+          url={openUrl || null}
+          setUrl={setOpenUrl}
+        />
       ) : (
-        <div id="browser-artifacts-panel" role="tabpanel" aria-labelledby="browser-artifacts-tab" className="browser-artifacts">
-          {selected ? (
-            <div className="browser-artifact-detail">
-              {/* #2855 replaces this head with the shared artifact preview header. */}
-              <div className="browser-artifact-head">
-                <button className="icon-btn" type="button" aria-label="Back to Artifact List" onClick={() => setSelectedId("")}>‹</button>
-                <strong>{selected.name}</strong>
+        <PanelToolLayout>
+          <div id="browser-artifacts-panel" role="tabpanel" aria-labelledby="browser-artifacts-tab" className="browser-artifacts">
+            {selected ? (
+              <div className="browser-artifact-detail">
+                {/* #2855 replaces this head with the shared artifact preview header. */}
+                <div className="browser-artifact-head">
+                  <button className="icon-btn" type="button" aria-label="Back to Artifact List" onClick={() => setSelectedId("")}>‹</button>
+                  <strong>{selected.name}</strong>
+                </div>
+                <ArtifactPreview artifact={selected} />
               </div>
-              <ArtifactPreview artifact={selected} />
-            </div>
-          ) : (
-            <>
-              <ArtifactUploadNotice />
-              {listBusy && artifacts.length === 0 ? (
-                <Skeleton rows={3} announce="Loading artifacts…" />
-              ) : listError && artifacts.length === 0 ? (
-                <State
-                  variant="error"
-                  compact
-                  title="Couldn't Load Artifacts"
-                  actions={<button type="button" className="btn" onClick={() => setListAttempt((attempt) => attempt + 1)}>Retry</button>}
-                  details={listError}
-                >
-                  The session's artifact list didn't load. Retry to ask for it again.
-                </State>
-              ) : artifacts.length === 0 ? (
-                <State
-                  compact
-                  icon={<ReportIcon size={24} />}
-                  title="No Artifacts Yet"
-                  actions={<button type="button" className="btn" onClick={() => setMode("web")}>Open Web Preview</button>}
-                >
-                  Reports, screenshots and logs the agent saves appear here.
-                </State>
-              ) : (
-                <>
-                  <ArtifactList artifacts={artifacts} onOpen={setSelectedId} />
-                  {listError && (
-                    <Notice
-                      tone="danger"
-                      compact
-                      role="alert"
-                      title="Couldn't Load More Artifacts"
-                      actions={<button type="button" className="btn sm" onClick={() => void loadMore()}>Retry</button>}
-                      details={listError}
-                    />
-                  )}
-                  {cursor && !listError && (
-                    <ListFoot>
-                      <BusyButton className="btn ghost sm" busy={listBusy} progress="Loading more artifacts…" onClick={() => void loadMore()}>
-                        Show More
-                      </BusyButton>
-                    </ListFoot>
-                  )}
-                </>
-              )}
-            </>
-          )}
-        </div>
+            ) : (
+              <>
+                <ArtifactUploadNotice />
+                {listBusy && artifacts.length === 0 ? (
+                  <Skeleton rows={3} announce="Loading artifacts…" />
+                ) : listError && artifacts.length === 0 ? (
+                  <State
+                    variant="error"
+                    compact
+                    title="Couldn't Load Artifacts"
+                    actions={<button type="button" className="btn" onClick={() => setListAttempt((attempt) => attempt + 1)}>Retry</button>}
+                    details={listError}
+                  >
+                    The session's artifact list didn't load. Retry to ask for it again.
+                  </State>
+                ) : artifacts.length === 0 ? (
+                  <State
+                    compact
+                    icon={<ReportIcon size={24} />}
+                    title="No Artifacts Yet"
+                    actions={<button type="button" className="btn" onClick={() => setMode("web")}>Open Web Preview</button>}
+                  >
+                    Reports, screenshots and logs the agent saves appear here.
+                  </State>
+                ) : (
+                  <>
+                    <ArtifactList artifacts={artifacts} onOpen={setSelectedId} />
+                    {listError && (
+                      <Notice
+                        tone="danger"
+                        compact
+                        role="alert"
+                        title="Couldn't Load More Artifacts"
+                        actions={<button type="button" className="btn sm" onClick={() => void loadMore()}>Retry</button>}
+                        details={listError}
+                      />
+                    )}
+                    {cursor && !listError && (
+                      <ListFoot>
+                        <BusyButton className="btn ghost sm" busy={listBusy} progress="Loading more artifacts…" onClick={() => void loadMore()}>
+                          Show More
+                        </BusyButton>
+                      </ListFoot>
+                    )}
+                  </>
+                )}
+              </>
+            )}
+          </div>
+        </PanelToolLayout>
       )}
-    </div>
+    </>
   );
 }
 
@@ -315,7 +319,7 @@ function WebPreview({ urlInput, setUrlInput, url, setUrl }: {
     </a>
   );
 
-  return (
+  const addressRow = (
     <>
       <form className="toolbar browser-address" noValidate onSubmit={navigate}>
         {loaded && (
@@ -347,33 +351,40 @@ function WebPreview({ urlInput, setUrlInput, url, setUrl }: {
         {loaded ? openInNewTab("icon-btn sm") : <button className="btn" type="submit">Open</button>}
       </form>
       {urlError && <FieldError id="browser-url-error" className="browser-address-error">{urlError}</FieldError>}
-      {url ? (
-        <div className="browser-web-view">
-          {phase === "loading" && <div className="browser-load-bar" role="progressbar" aria-label="Loading Page" />}
-          {phase === "blocked" && (
-            <Notice tone="warning" compact role="status" actions={openInNewTab("btn sm", "Open in New Tab")}>
-              This page can't be shown inside Wollipog.
-            </Notice>
-          )}
-          <iframe
-            key={frameKey}
-            className="browser-web-frame"
-            hidden={phase === "blocked"}
-            title={`Web preview of ${url}`}
-            src={url}
-            sandbox="allow-forms allow-scripts"
-            referrerPolicy="no-referrer"
-            onLoad={(event) => {
-              const next: FramePhase = frameIsEmpty(event.currentTarget) ? "blocked" : "loaded";
-              setFrameState({ key: frameKey, phase: next });
-            }}
-          />
-        </div>
-      ) : (
-        <State compact icon={<GlobeIcon size={24} />} title="Preview a Web Page">
-          Pages open in an isolated frame with no access to your session, device token or cookies.
-        </State>
-      )}
     </>
+  );
+
+  return (
+    <PanelToolLayout toolbar={addressRow}>
+      <div id="browser-web-panel" role="tabpanel" aria-labelledby="browser-web-tab" className="browser-web">
+        {url ? (
+          <div className="browser-web-view">
+            {phase === "loading" && <div className="browser-load-bar" role="progressbar" aria-label="Loading Page" />}
+            {phase === "blocked" && (
+              <Notice tone="warning" compact role="status" actions={openInNewTab("btn sm", "Open in New Tab")}>
+                This page can't be shown inside Wollipog.
+              </Notice>
+            )}
+            <iframe
+              key={frameKey}
+              className="browser-web-frame"
+              hidden={phase === "blocked"}
+              title={`Web preview of ${url}`}
+              src={url}
+              sandbox="allow-forms allow-scripts"
+              referrerPolicy="no-referrer"
+              onLoad={(event) => {
+                const next: FramePhase = frameIsEmpty(event.currentTarget) ? "blocked" : "loaded";
+                setFrameState({ key: frameKey, phase: next });
+              }}
+            />
+          </div>
+        ) : (
+          <State compact icon={<GlobeIcon size={24} />} title="Preview a Web Page">
+            Pages open in an isolated frame with no access to your session, device token or cookies.
+          </State>
+        )}
+      </div>
+    </PanelToolLayout>
   );
 }
