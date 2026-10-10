@@ -130,7 +130,18 @@ export function TerminalSearch({
   }
   const canStep = term !== "" && (results?.count ?? 0) > 0;
   return (
-    <div className="shell-search" role="group" aria-label="Search Output">
+    <div
+      className="shell-search"
+      role="group"
+      aria-label="Search Output"
+      onKeyDown={(event) => {
+        // Escape closes search from any of its controls, ahead of the app's Escape ladder, which
+        // would otherwise leave the session.
+        if (event.key !== "Escape" || event.defaultPrevented) return;
+        event.preventDefault();
+        onClose();
+      }}
+    >
       <label className="input-affix shell-search-field">
         <span className="input-affix-text" aria-hidden="true"><SearchIcon size={14} /></span>
         <input
@@ -143,15 +154,10 @@ export function TerminalSearch({
           spellCheck={false}
           onChange={(event) => onTermChange(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              if (event.shiftKey) onPrevious();
-              else onNext();
-            } else if (event.key === "Escape") {
-              // Ahead of the app's Escape ladder, which would otherwise leave the session.
-              event.preventDefault();
-              onClose();
-            }
+            if (event.key !== "Enter") return;
+            event.preventDefault();
+            if (event.shiftKey) onPrevious();
+            else onNext();
           }}
         />
       </label>

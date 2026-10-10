@@ -160,6 +160,16 @@ test.describe("at 1440px with a fine pointer", () => {
     await field.press("Escape");
     await expect(dock.locator(".xterm-helper-textarea")).toBeFocused();
     await expect(dock.getByRole("button", { name: "Search Output" })).toBeVisible();
+
+    // Escape closes search from any of its controls, not only the field.
+    for (const control of ["Next Match", "Previous Match", "Close Search"]) {
+      await dock.getByRole("button", { name: "Search Output" }).click();
+      await dock.getByRole("textbox", { name: "Search Output" }).fill("test");
+      await dock.getByRole("button", { name: control }).focus();
+      await page.keyboard.press("Escape");
+      await expect(dock.getByRole("group", { name: "Search Output" }), control).toHaveCount(0);
+      await expect(dock.locator(".xterm-helper-textarea"), control).toBeFocused();
+    }
   });
 
   test("Hide Terminal is named Hide Terminal, and no name says Detach", async ({ page }) => {
