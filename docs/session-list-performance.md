@@ -21,6 +21,15 @@ resumes, plus one authorized aggregate read for campaign child-request counts wh
 Reminders use one authorized bulk query. Query count is independent of session
 count, with audience predicates applied in SQL.
 
+The same 2,000-session inventory includes one campaign root and a child request. After connect
+measurements, four distinct authorized principals receive 20 root broadcasts, each immediately
+after a database write. The benchmark asserts both the synchronous broadcast and its continuously
+measured event-loop gap stay below 50 ms. It then archives the inventory and measures one archived
+root's request facts. Those facts use two indexed, root-scoped SQL reads (bounded ancestry and
+authorized descendant/controller requests), never the serialized live/archive list cache. Tests
+pin the two-query count with 2,000 unrelated archived rows and preserve audience/token/64-row
+ancestry semantics. List and detail aggregate the same request classifications and identities.
+
 REST caches the serialized authorized list for the exact principal and archived filter. Both local
 writes and other SQLite connections invalidate it. Dashboard connects share an in-flight and
 serialized snapshot for the same exact principal and protocol; hydration yields every 128 rows and

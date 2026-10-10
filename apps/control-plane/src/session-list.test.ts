@@ -321,6 +321,8 @@ test("summary audiences, ownership verdicts, result acknowledgments and delegate
       { human: 2,orchestrator: 1 });
     assert.equal(memberRequests.humanRequestTokens!.length,1);
     assert.equal(ownerRequests.humanRequestTokens!.length,2);
+    assert.deepEqual(db.campaignRequestsForPrincipal(member,"parent"),memberRequests);
+    assert.deepEqual(db.campaignRequestsForPrincipal(sessionListPrincipal,"parent"),ownerRequests);
     db.raw().prepare("UPDATE workflow_decisions SET occurrence_id='replacement' WHERE request_id='gate'").run();
     const replacement=db.listSessionSummaries(member).find((row) => row.id === "parent")!.campaignRequests!;
     assert.equal(replacement.human,memberRequests.human);
@@ -330,6 +332,11 @@ test("summary audiences, ownership verdicts, result acknowledgments and delegate
         organizationId: PERSONAL_ORGANIZATION_ID,owner: { kind: "user",userId: LOCAL_OWNER_USER_ID } } };
     for (const row of db.listSessionsForPrincipal(agent)) assert.deepEqual(row.commandPermissions,
       withSessionCommandPermissions(db,agent,db.getSession(row.id)!).commandPermissions);
+    assert.equal(db.campaignRequestsForPrincipal(agent,"parent"),undefined,"a user-scoped credential cannot read an organization-owned root");
+    const organizationAgent: AgentPrincipal = { ...agent,delegatedScope: {
+      organizationId: PERSONAL_ORGANIZATION_ID,owner: { kind: "organization",organizationId: PERSONAL_ORGANIZATION_ID } } };
+    assert.deepEqual(db.campaignRequestsForPrincipal(organizationAgent,"parent"),
+      db.listSessionSummaries(organizationAgent).find((row) => row.id === "parent")!.campaignRequests);
     assert.equal(db.listSessionsForPrincipal({ ...agent,organizationId: "other-org" }).length,0);
   } finally { db.close(); }
 });
@@ -456,4 +463,78 @@ test("campaign summaries, lookup, mutation responses and live rows keep one view
     assert.deepEqual(sessionCampaignRequests(archived), sessionCampaignRequests(summaryFor(viewers[1]!)),
       "authorized archived detail keeps the same scoped request facts");
   } finally { await app.close(); db.close(); }
+});
+
+test("one campaign's counts use two scoped reads regardless of unrelated archive size", () => {
+  const db=ControlPlaneDb.open(":memory:");
+  try {
+    seedSessionList(db,1);
+    db.createSession({ id: "root",runnerId: "r",workspaceId: null,agentId: null,title: "Root",useWorktree: false,
+      driver: "codex-app-server",config: {},now: 2,role: "orchestrator",
+      orchestratorPolicy: resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS,"system_default") });
+    db.raw().prepare("UPDATE sessions SET parent_session_id='root' WHERE id='s-0'").run();
+    db.setPendingApproval("s-0",{ requestId: "visible",kind: "authentication",title: "Sign In",options: [] });
+    const expected=db.listSessionSummaries(sessionListPrincipal).find((row) => row.id === "root")!.campaignRequests;
+    const source=db as unknown as { stmt(sql: string): unknown; listSessionSummaries: typeof db.listSessionSummaries };
+    const original=source.stmt.bind(db);
+    let queries=0;
+    source.stmt=(sql) => { queries++;return original(sql); };
+    source.listSessionSummaries=() => { assert.fail("a campaign read must not hydrate or encode the installation's list"); };
+    assert.deepEqual(db.campaignRequestsForPrincipal(sessionListPrincipal,"root"),expected);
+    assert.equal(queries,2);
+    for (let index=0;index<2000;index++) db.createSession({ id: `archive-${index}`,runnerId: "r",workspaceId: null,
+      agentId: null,title: "Unrelated",useWorktree: false,driver: "codex-app-server",config: {},now: 3+index });
+    db.raw().prepare("UPDATE sessions SET archived=1 WHERE id LIKE 'archive-%' OR id='root'").run();
+    queries=0;
+    assert.deepEqual(db.campaignRequestsForPrincipal(sessionListPrincipal,"root",true),expected);
+    assert.equal(queries,2,"an archived root cannot read the unrelated live/archive inventory");
+    queries=0;
+    assert.equal(db.campaignRequestsForPrincipal(sessionListPrincipal,"root"),undefined);
+    assert.equal(queries,1,"the live-only filter still excludes an archived root");
+    queries=0;
+    assert.equal(db.campaignRequestsForPrincipal({ ...sessionListPrincipal,role: "operator" as const,organizationId: "other" },"root",true),undefined);
+    assert.equal(queries,1,"authorization happens before reading campaign requests");
+  } finally { db.close(); }
+});
+
+test("scoped campaign requests preserve outermost ownership and the 64-row ancestry refusal", () => {
+  const db=ControlPlaneDb.open(":memory:");
+  try {
+    seedSessionList(db,65);
+    const policy=resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS,"system_default");
+    db.createSession({ id: "root",runnerId: "r",workspaceId: null,agentId: null,title: "Root",useWorktree: false,
+      driver: "codex-app-server",config: {},now: 100,role: "orchestrator",orchestratorPolicy: policy });
+    for (let index=0;index<65;index++) db.raw().prepare("UPDATE sessions SET parent_session_id=? WHERE id=?")
+      .run(index===0 ? "root" : `s-${index-1}`,`s-${index}`);
+    db.setPendingApproval("s-62",{ requestId: "at-bound",kind: "authentication",title: "Sign In",options: [] });
+    db.setPendingApproval("s-63",{ requestId: "over-bound",kind: "authentication",title: "Sign In",options: [] });
+    const compare=() => assert.deepEqual(db.campaignRequestsForPrincipal(sessionListPrincipal,"root"),
+      db.listSessionSummaries(sessionListPrincipal).find((row) => row.id === "root")!.campaignRequests);
+    compare();
+    assert.equal(db.campaignRequestsForPrincipal(sessionListPrincipal,"root")!.human,1);
+    db.raw().prepare("UPDATE sessions SET session_role='orchestrator',orchestrator_policy=? WHERE id='s-1'").run(JSON.stringify(policy));
+    compare();
+    assert.equal(db.campaignRequestsForPrincipal(sessionListPrincipal,"s-1"),undefined,"nested roots do not own a second aggregate");
+    // Exercise a malformed read in a rolled-back transaction; never commit invalid foreign keys.
+    db.raw().exec("BEGIN; PRAGMA defer_foreign_keys=ON");
+    try {
+      db.raw().prepare("UPDATE sessions SET parent_session_id='missing' WHERE id='root'").run();
+      compare();
+      assert.equal(db.campaignRequestsForPrincipal(sessionListPrincipal,"root"),undefined);
+    } finally { db.raw().exec("ROLLBACK"); }
+    db.raw().prepare("UPDATE sessions SET parent_session_id='s-64' WHERE id='root'").run();
+    compare();
+    assert.equal(db.campaignRequestsForPrincipal(sessionListPrincipal,"root"),undefined,"a cycle refuses the entire boundary");
+    // Put the root below 63 ordinary ancestors: it is valid, but any child would be row65.
+    db.raw().prepare("UPDATE sessions SET session_role='normal',orchestrator_policy=NULL WHERE id LIKE 's-%'").run();
+    for (let index=0;index<65;index++) db.raw().prepare("UPDATE sessions SET parent_session_id=? WHERE id=?")
+      .run(index<62 ? `s-${index+1}` : index===62 ? null : "root",`s-${index}`);
+    db.raw().prepare("UPDATE sessions SET parent_session_id='s-0' WHERE id='root'").run();
+    compare();
+    assert.equal(db.campaignRequestsForPrincipal(sessionListPrincipal,"root")!.human,0);
+    db.raw().prepare("UPDATE sessions SET parent_session_id='s-63' WHERE id='s-62'").run();
+    db.raw().prepare("UPDATE sessions SET parent_session_id=NULL WHERE id='s-63'").run();
+    compare();
+    assert.equal(db.campaignRequestsForPrincipal(sessionListPrincipal,"root"),undefined,"65 ancestors refuse instead of naming a partial root");
+  } finally { db.close(); }
 });

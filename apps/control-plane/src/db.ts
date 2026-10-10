@@ -2938,6 +2938,40 @@ interface SessionSummaryContext {
   campaignRequests: Map<string,NonNullable<SessionView["campaignRequests"]>>;
 }
 
+interface CampaignRequestSummaryRow {
+  type: "generic" | "typed";
+  session_id: string;
+  runner_id: string | null;
+  pending_approval: string | null;
+  controlling_session_id: string | null;
+  authority: "human" | "orchestrator" | null;
+  occurrence_id: string | null;
+}
+
+function addCampaignRequestSummary(
+  counts: NonNullable<SessionView["campaignRequests"]>,
+  request: CampaignRequestSummaryRow,
+  parentControl: string | null,
+  runnerProtocol: number | null,
+): void {
+  if (request.type === "typed") {
+    if (request.authority !== "human" && request.authority !== "orchestrator") return;
+    counts[request.authority]++;
+    if (request.authority === "human") counts.humanRequestTokens!.push(createHash("sha256")
+      .update(`typed:${request.session_id}:${request.occurrence_id}`).digest("hex"));
+    return;
+  }
+  const mode = parentControl === "questions" || parentControl === "questions_and_approvals" ? parentControl : "off";
+  const supported = runnerSupportsProtocol(runnerProtocol, "delegatedParentControl");
+  for (const pending of pendingRequests(parseJson<PendingApproval>(request.pending_approval))) {
+    if (pending.kind === "workflow_decision") continue;
+    const authority = supported && parentControlRequestEligible(mode, pending) ? "orchestrator" : "human";
+    counts[authority]++;
+    if (authority === "human") counts.humanRequestTokens!.push(createHash("sha256")
+      .update(`generic:${request.session_id}:${pending.occurrenceId ?? pending.requestId}`).digest("hex"));
+  }
+}
+
 interface SessionStopIntentRow {
   session_id: string;
   runner_id: string;
@@ -10534,7 +10568,45 @@ export class ControlPlaneDb {
 
   /** Detail and live rows carry the same audience-scoped list facts as their summary. */
   campaignRequestsForPrincipal(principal: AuthPrincipal, sessionId: string, includeArchived = false): SessionView["campaignRequests"] {
-    return this.sessionSummaryRead(principal,includeArchived).sessions.find((session) => session.id === sessionId)?.campaignRequests;
+    const authorization = this.sessionAuthorizationSql(principal);
+    // Read only this root's bounded ancestry, not the installation's live/archive inventory.
+    const ancestors = this.stmt(`WITH RECURSIVE ancestors AS (
+      SELECT session.id,session.parent_session_id,session.session_role,session.permission_mode,
+        session.orchestrator_policy,session.parent_control,1 AS depth
+      FROM sessions session JOIN session_ownership ownership ON ownership.session_id=session.id
+      WHERE session.id=? AND (? OR session.archived=0) AND ${authorization.sql}
+      UNION ALL SELECT parent.id,parent.parent_session_id,parent.session_role,parent.permission_mode,
+        parent.orchestrator_policy,parent.parent_control,ancestor.depth+1
+      FROM sessions parent JOIN ancestors ancestor ON parent.id=ancestor.parent_session_id
+      WHERE ancestor.depth<64
+    ) SELECT * FROM ancestors ORDER BY depth`).all(sessionId,includeArchived ? 1 : 0,...authorization.params) as unknown as
+      Array<Pick<SessionRow,"id" | "parent_session_id" | "session_role" | "permission_mode" | "orchestrator_policy" | "parent_control">>;
+    // A missing parent, cycle or truncated chain has no trustworthy campaign boundary.
+    if (!ancestors.length || ancestors.at(-1)!.parent_session_id !== null) return undefined;
+    const root = ancestors.filter((row) => sessionRole({ role: row.session_role as SessionRole | null,
+      permissionMode: row.permission_mode }) === "orchestrator").at(-1);
+    if (root?.id !== sessionId || !orchestratorCampaignPolicyFromJson(root.orchestrator_policy)) return undefined;
+    const counts: NonNullable<SessionView["campaignRequests"]> = { human: 0,orchestrator: 0,humanRequestTokens: [] };
+    // Descendants plus the root's ancestors must fit the same 64-row ancestry bound as lists.
+    // Typed gates are already keyed to their exact controller; preserve that existing contract.
+    const requests = this.stmt(`WITH RECURSIVE descendants(id,depth) AS (
+      SELECT ?,1 UNION ALL SELECT child.id,ancestor.depth+1 FROM sessions child
+      JOIN descendants ancestor ON child.parent_session_id=ancestor.id WHERE ancestor.depth<?
+    ) SELECT 'generic' AS type,session.id AS session_id,session.runner_id,session.pending_approval,
+      NULL AS controlling_session_id,NULL AS authority,NULL AS occurrence_id,runner.protocol_version
+      FROM descendants descendant JOIN sessions session ON session.id=descendant.id
+      JOIN session_ownership ownership ON ownership.session_id=session.id
+      LEFT JOIN runners runner ON runner.runner_id=session.runner_id
+      WHERE session.id!=? AND session.pending_approval IS NOT NULL AND ${authorization.sql}
+      UNION ALL SELECT 'typed',decision.session_id,NULL,NULL,decision.controlling_session_id,
+        decision.authority,decision.occurrence_id,NULL
+      FROM workflow_decisions decision JOIN session_ownership ownership ON ownership.session_id=decision.session_id
+      WHERE decision.controlling_session_id=? AND decision.status='pending' AND ${authorization.sql}`)
+      .all(sessionId,65-ancestors.length,sessionId,...authorization.params,sessionId,...authorization.params) as unknown as
+      Array<CampaignRequestSummaryRow & { protocol_version: number | null }>;
+    for (const request of requests) addCampaignRequestSummary(counts,request,root.parent_control,request.protocol_version);
+    counts.humanRequestTokens!.sort();
+    return counts;
   }
 
   private readonly sessionSummaryReads = new Map<string,{ revision: string; sessions: SessionView[]; json: string; bytes: number }>();
@@ -10728,18 +10800,11 @@ export class ControlPlaneDb {
         UNION ALL SELECT 'typed',decision.session_id,NULL,NULL,decision.controlling_session_id,decision.authority,decision.occurrence_id
         FROM workflow_decisions decision JOIN session_ownership ownership ON ownership.session_id=decision.session_id
         WHERE decision.status='pending' AND ${authorization.sql}`)
-        .all(...authorization.params,...authorization.params) as unknown as Array<{
-          type: "generic" | "typed"; session_id: string; runner_id: string | null; pending_approval: string | null;
-          controlling_session_id: string | null; authority: "human" | "orchestrator" | null; occurrence_id: string | null;
-        }>;
+        .all(...authorization.params,...authorization.params) as unknown as CampaignRequestSummaryRow[];
       for (const request of requests) {
         if (request.type === "typed") {
           const counts=context.campaignRequests.get(request.controlling_session_id!);
-          if (counts) {
-            counts[request.authority!]+=1;
-            if (request.authority === "human") counts.humanRequestTokens!.push(createHash("sha256")
-              .update(`typed:${request.session_id}:${request.occurrence_id}`).digest("hex"));
-          }
+          if (counts) addCampaignRequestSummary(counts,request,null,null);
           continue;
         }
         const rootId=campaignRoot(request.session_id);
@@ -10747,15 +10812,7 @@ export class ControlPlaneDb {
         const counts=context.campaignRequests.get(rootId);
         if (!counts) continue;
         const root=context.rows.get(rootId)!;
-        const mode=root.parent_control === "questions" || root.parent_control === "questions_and_approvals" ? root.parent_control : "off";
-        const supported=runnerSupportsProtocol(context.runnerProtocols.get(request.runner_id!) ?? null,"delegatedParentControl");
-        for (const pending of pendingRequests(parseJson<PendingApproval>(request.pending_approval))) {
-          if (pending.kind === "workflow_decision") continue;
-          const authority=supported && parentControlRequestEligible(mode,pending) ? "orchestrator" : "human";
-          counts[authority]+=1;
-          if (authority === "human") counts.humanRequestTokens!.push(createHash("sha256")
-            .update(`generic:${request.session_id}:${pending.occurrenceId ?? pending.requestId}`).digest("hex"));
-        }
+        addCampaignRequestSummary(counts,request,root.parent_control,context.runnerProtocols.get(request.runner_id!) ?? null);
       }
     }
     for (const counts of context.campaignRequests.values()) counts.humanRequestTokens!.sort();
