@@ -6,6 +6,7 @@ import { Window } from "happy-dom";
 import type {
   ControlPlaneToUi,
   GovernanceAuditEntry,
+  PendingApproval,
   ProjectView,
   RunnerView,
   SessionEvent,
@@ -131,6 +132,7 @@ async function mountSession({
   protocolVersion = 200,
   runnerStatus = "online",
   governance = [],
+  pendingApproval = null,
 }: {
   status?: SessionView["status"];
   archived?: boolean;
@@ -141,6 +143,7 @@ async function mountSession({
   runnerStatus?: RunnerView["status"];
   /** Governance audit entries the session's Decision History holds. */
   governance?: GovernanceAuditEntry[];
+  pendingApproval?: PendingApproval | null;
 } = {}) {
   sequence += 1;
   const id = `reading-states-${sequence}`;
@@ -149,7 +152,7 @@ async function mountSession({
     projectName: project.name, agentId: "claude", agentName: "Claude Code", title: "Reading States",
     status, column: "review", runId: null, useWorktree: false, worktreePath: null, archived,
     createdAt: 1, updatedAt: 1, lastEventAt: null, messageCount, eventEpoch: 0, preview: null,
-    pendingApproval: null, driver: "claude-code", model: null, effort: null, permissionMode: null,
+    pendingApproval, driver: "claude-code", model: null, effort: null, permissionMode: null,
     tokensIn: 0, tokensOut: 0, costUsd: 0, adopted: false,
   } as SessionView;
   const tail: Array<{ resolve: (value: SessionEventsResponse) => void; reject: (reason: Error) => void }> = [];
@@ -254,6 +257,22 @@ async function mountSession({
 }
 
 const emptyHistory = { events: [] };
+
+test("workflow decision reading is offered in the full session and omitted from its preview (#2874)", async () => {
+  const decision: PendingApproval = {
+    requestId: "reading-decision", kind: "workflow_decision", title: "Review the Campaign Scope",
+    options: [{ optionId: "approve", name: "Approve", kind: "allow_once" }],
+  } as PendingApproval;
+  for (const mode of ["expanded", "preview"] as const) {
+    const view = await mountSession({ mode, status: "input_required", pendingApproval: decision });
+    try {
+      assert.ok(view.container.querySelector(".request-dock .request-card"), `${mode} renders the waiting decision`);
+      assert.equal(view.container.querySelectorAll('[aria-label="Expand Decision"]').length, mode === "expanded" ? 1 : 0);
+    } finally {
+      await view.unmount();
+    }
+  }
+});
 
 test("a session awaiting its first prompt says where the agent is ready and opens Files", async () => {
   const view = await mountSession();

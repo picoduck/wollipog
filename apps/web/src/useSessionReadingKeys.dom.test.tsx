@@ -354,6 +354,24 @@ test("a question card owns its keys while focus is on its heading, leaving R to 
   fixture.container.remove();
 });
 
+test("an expanded workflow decision owns focus without moving the hidden transcript (#2874)", async () => {
+  const fixture = await renderHarness();
+  const request = fixture.container.querySelector<HTMLElement>(".question-card")!;
+  request.classList.remove("question-card");
+  request.setAttribute("data-decision-expanded", "");
+  request.querySelector<HTMLElement>("[role=heading]")!.focus();
+  for (const key of ["j", "k", "PageDown", "PageUp", "End", "g", "g", "a", "d"]) {
+    assert.equal(dispatchKey(key).defaultPrevented, false, key);
+  }
+  assert.deepEqual(fixture.scrollCalls, []);
+  assert.deepEqual(fixture.calls, []);
+  request.removeAttribute("data-decision-expanded");
+  assert.equal(dispatchKey("j").defaultPrevented, true);
+  assert.deepEqual(fixture.scrollCalls, [{ kind: "by", top: SESSION_READING_LINE_PX }]);
+  await act(async () => fixture.root.unmount());
+  fixture.container.remove();
+});
+
 test("composition, repeat, mismatch, and session changes reset the gg sequence", async () => {
   const fixture = await renderHarness();
 

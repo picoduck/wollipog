@@ -41,6 +41,30 @@ async function expectReadingMode(page: Page) {
 
 test.describe("workflow decision reading mode (#2874)", () => {
   test.use({ hasTouch: true });
+  test("a keyboard-resized landscape column can still read the decision and reach its controls", async ({ page }) => {
+    await page.setViewportSize({ width: 844, height: 260 });
+    await page.goto("/request-surfaces-e2e.html?scenario=issue-scope&tall=1&keyboard=1");
+    await card(page).getByRole("button", { name: "Expand Decision" }).click();
+    await expect(page.locator(".request-dock")).toHaveAttribute("data-reading", "");
+    const geometry = await page.evaluate(() => ({
+      column: document.querySelector(".chat-reading")!.getBoundingClientRect().height,
+      body: document.querySelector(".request-card-body")!.getBoundingClientRect().height,
+    }));
+    expect(geometry.column).toBeLessThan(300);
+    expect(geometry.body).toBeGreaterThan(20);
+    const lastItem = card(page).getByText(/Review scope item 12:/);
+    await lastItem.scrollIntoViewIfNeeded();
+    await expect(lastItem).toBeInViewport();
+    const approve = card(page).getByRole("button", { name: "Approve", exact: true });
+    await approve.focus();
+    await expect(approve).toBeInViewport();
+    const collapse = card(page).getByRole("button", { name: "Collapse Decision" });
+    await collapse.focus();
+    await expect(collapse).toBeInViewport();
+    await collapse.click();
+    await expect.poll(() => submissions(page)).toEqual([]);
+  });
+
   test("a short expanded question still fills a 300–480px reading column", async ({ page }) => {
     await page.setViewportSize({ width: 740, height: 530 });
     await page.goto("/agent-questions-e2e.html?set=paragraph&style=composer");

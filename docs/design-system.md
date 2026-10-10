@@ -2435,7 +2435,9 @@ follows these rules so it never crowds out the conversation it asks about:
   `aria-expanded` and `aria-controls` naming the title and details. Expansion takes the whole
   reading column under the same rules as an expanded question: the transcript keeps its place
   underneath and new requests wait. The head, title and decision actions stay in reach while the
-  details scroll, including in a short column or with the keyboard open. Collapsing restores the
+  details scroll, including with the keyboard open. Below 200px of reading-column height the whole
+  decision scrolls instead, so its body and controls remain reachable. Reading shortcuts while
+  focus is in an expanded decision leave the hidden transcript alone. Collapsing restores the
   compact card and the transcript. Both transitions keep the review mounted, preserving selections,
   entered text and evidence progress; neither resolves the decision or changes who may answer it.
   The Sessions preview keeps its capped presentation; reading mode is available in the full session.

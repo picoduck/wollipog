@@ -5883,9 +5883,16 @@ textarea {
   }
 }
 .request-card .request-card-body > * { margin: 0; }
-/* An expanded workflow decision keeps its head and actions still, including in a short column.
+/* An expanded workflow decision keeps its head and actions still while there is room for them.
    Only the details scroll; its review component stays mounted through every toggle. */
 .request-dock .request-card[data-decision-expanded] > .request-card-body { flex: 1 1 auto; overflow-y: auto; }
+@container chat-reading (max-height: 200px) {
+  /* A keyboard can leave less room than the frame alone needs. Scroll the whole decision so
+     its rationale and every control remain reachable instead of shrinking the body to nothing. */
+  .request-dock[data-reading] > .request-dock-card:has(> .request-card[data-decision-expanded]),
+  .request-dock[data-reading] > .request-dock-card > .request-card[data-decision-expanded] { flex: none; }
+  .request-dock .request-card[data-decision-expanded] > .request-card-body { flex: none; overflow-y: visible; }
+}
 @media (max-width: 760px) {
   .btn.decision-reading-toggle { min-width: var(--control-h-sm); padding-inline: var(--space-1); }
   .decision-reading-toggle-label { display: none; }
