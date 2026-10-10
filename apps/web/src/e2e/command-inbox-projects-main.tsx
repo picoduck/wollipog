@@ -12,6 +12,7 @@ import {
   type ControlPlaneToUi,
   type DescendantRequestView,
   type TeamView,
+  type GitDiffScope,
   type GitStatusInfo,
   type GitSummaryInfo,
   type InvokeSessionCommandRequest,
@@ -70,6 +71,7 @@ import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-t
 import { useNewSessionShortcut } from "../useNewSessionShortcut.js";
 import "../styles.css";
 import { staticPinnedSummary } from "../components/pinned-summary-state.js";
+import { DIFF_SECTIONS_STATUS_FILES, diffSectionsDiff } from "./diff-sections-fixture.js";
 
 const FIXTURE_QUERY = new URLSearchParams(window.location.search);
 const SCENARIO = FIXTURE_QUERY.get("scenario");
@@ -81,6 +83,8 @@ const TARGETED_READER_STREAMS = READER_RECOVERY_SCENARIO;
 const STATIC_SUMMARY_OPEN = SCENARIO === "git-visibility" || SCENARIO === "worktree-identity" ||
   SCENARIO === "unsafe-worktree-pr";
 const REVIEW_READY = FIXTURE_QUERY.get("reviewReady") === "1";
+/** Alpha's Review holds the file-section fixture's uncommitted changes (#2848). */
+const REVIEW_DIFF = FIXTURE_QUERY.get("reviewDiff") === "1";
 const INCLUDE_SESSION_SHELL = FIXTURE_QUERY.get("sessionShell") === "1";
 const LEGACY_WORKSPACES = FIXTURE_QUERY.get("legacyWorkspaces") === "1";
 const UNFILED_WORKSPACE = FIXTURE_QUERY.get("unfiledWorkspace") === "1";
@@ -702,7 +706,7 @@ type GitFixtureAction = "status" | "summary";
 const longGitBranch = "feature/session-alpha-with-a-deliberately-long-branch-name-for-narrow-layout-validation";
 const defaultGitStatus = (id: string): GitStatusInfo => ({
   branch: id === "session-no-project" ? "HEAD" : id === "session-alpha" ? longGitBranch : "main",
-  files: [],
+  files: id === "session-alpha" && REVIEW_DIFF ? DIFF_SECTIONS_STATUS_FILES : [],
   hasChanges: id === "session-alpha",
   ahead: id === "session-alpha" && REVIEW_READY ? 2 : 0,
   remoteUrl: "https://github.com/example/wollipog.git",
@@ -1860,6 +1864,13 @@ const listNoticeSkills = ["orchestrate-issues", "using-wollipog"].map((name) => 
 const client = {
   ...api,
   ...shellSkillsApi,
+  ...(REVIEW_DIFF ? {
+    gitDiff: async (_id: string, scope: GitDiffScope) => ({ diff: { ...diffSectionsDiff(), scope } }),
+    reviewFindings: async () => ({
+      findings: [],
+      summary: { total: 0, unresolved: 0, requiredUnresolved: 0, sent: 0, resolved: 0, dismissed: 0, completion: "complete" as const },
+    }),
+  } : {}),
   ...(LIST_NOTICES.has("skills") ? {
     listSkills: async () => ({ skills: structuredClone(listNoticeSkills) }),
     setSkillRecommendationDismissed: async (id: string, dismissed: boolean) => {

@@ -29,10 +29,12 @@ import { formatClock, titleCaseLabel } from "../format.js";
 import {
   GitDiffViewer,
   type DiffFileFocus,
+  type DiffFileNotice,
   type DiffLayout,
   type DiffPane,
   type StagingControls,
 } from "./GitDiffViewer.js";
+import { SPLIT_MIN_PANEL_PX, usePanelAtLeast } from "./usePanelWidth.js";
 import type { GitStatus } from "./useGitStatus.js";
 import {
   changeSetSignature,
@@ -69,6 +71,10 @@ import {
 
 /** No diff on screen means nothing is anchored; one shared empty set keeps that allocation-free. */
 const NO_ANCHORED_FINDINGS: ReadonlySet<string> = new Set<string>();
+const NO_COLLAPSED_FILES: ReadonlySet<string> = new Set<string>();
+
+/** The last segment of a path, which a stage race notice names. */
+const fileNameOf = (path: string) => path.slice(path.lastIndexOf("/") + 1);
 
 /**
  * How often the diff re-reads itself while a turn is running. The status reader deliberately stops
@@ -290,6 +296,20 @@ export function ReviewPanel({
   const [layout, setLayout] = usePanelScratchChoice<DiffLayout>(
     panelScratch, "review.diffLayout", "unified", (raw) => raw === "unified" || raw === "split",
   );
+  // View Options' Wrap Long Lines and Collapse All Files (#2848). Side by Side is offered only while
+  // the panel can hold its two columns; narrower, the stored choice waits and Unified renders.
+  const [wrapChoice, setWrapChoice] = usePanelScratchChoice<"wrap" | "scroll">(
+    panelScratch, "review.wrapLines", "scroll", (raw) => raw === "wrap" || raw === "scroll",
+  );
+  const [scrollElement, setScrollElement] = useState<HTMLDivElement | null>(null);
+  const splitFits = usePanelAtLeast(scrollElement, SPLIT_MIN_PANEL_PX);
+  const shownLayout: DiffLayout = splitFits ? layout : "unified";
+  // Collapsed files by path, so a refresh with the same files keeps them; another session starts open.
+  const [collapsed, setCollapsed] = useState<{ sessionId: string; paths: ReadonlySet<string> }>(
+    () => ({ sessionId: session.id, paths: new Set<string>() }),
+  );
+  const collapsedPaths = collapsed.sessionId === session.id ? collapsed.paths : NO_COLLAPSED_FILES;
+  const setCollapsedPaths = (paths: ReadonlySet<string>) => setCollapsed({ sessionId: session.id, paths });
   const [diff, setDiff] = useState<GitDiffInfo | null>(null);
   /** Completed diff reads, so a request can tell a read that landed after it from one before. */
   const [diffReads, setDiffReads] = useState(0);
@@ -300,9 +320,11 @@ export function ReviewPanel({
   const [refreshing, setRefreshing] = useState(false);
   const [diffError, setDiffError] = useState<string | null>(null);
   // Per-hunk staging (PR-B): the in-flight mutation's `${path}#${index}` key, and the amber
-  // non-fatal notice shown when a stage raced the worktree/index (GIT_STALE / GIT_APPLY_FAILED).
+  // non-fatal notice shown when a commit raced the index (GIT_STALE).
   const [hunkBusy, setHunkBusy] = useState<string | null>(null);
   const [stageNotice, setStageNotice] = useState<string | null>(null);
+  // The newest stage race, at the top of its file's section (#2848): one at a time, the newest wins.
+  const [fileNotice, setFileNotice] = useState<{ sessionId: string; path: string; message: string } | null>(null);
   // An automatic reload (#1204) never hijacks the error surface — but it must not fail silently
   // either, or the diff below would keep contradicting the header with nothing to say why. This
   // drives the manual refresh affordance instead.
@@ -701,18 +723,18 @@ export function ReviewPanel({
   const doStageHunk = async (direction: "stage" | "unstage", filePath: string, hunkIndex: number) => {
     if (!diff || diff.scope !== "uncommitted" || gitRefusal !== null) return;
     setHunkBusy(`${filePath}#${hunkIndex}`);
-    setStageNotice(null);
+    setFileNotice(null);
     try {
       const d = await api.gitStageHunk(session.id, { direction, filePath, hunkIndex, diffHash: diff.diffHash });
       installMutationRead(d);
     } catch (e) {
       if (e instanceof ApiError && (e.code === "GIT_STALE" || e.code === "GIT_APPLY_FAILED")) {
-        // A race, not a failure: the worktree or index moved. Tell the user and refetch.
-        setStageNotice(
-          e.code === "GIT_STALE"
-            ? "The changes on disk moved under this diff — refreshed it; check the hunk and try again."
-            : `${e.message} — the diff has been refreshed.`,
-        );
+        // A race, not a failure: the worktree or index moved. Say so on the file, and refetch.
+        setFileNotice({
+          sessionId: session.id,
+          path: filePath,
+          message: `${fileNameOf(filePath)} changed after this diff loaded, so the hunk wasn't ${direction === "stage" ? "staged" : "unstaged"}.`,
+        });
         void loadDiff();
         void loadStatus();
       } else {
@@ -732,7 +754,7 @@ export function ReviewPanel({
   ) => {
     if (!diff?.fineDiffHash || diff.scope !== "uncommitted" || gitRefusal !== null) return;
     setHunkBusy(`${filePath}#${hunkIndex}:lines`);
-    setStageNotice(null);
+    setFileNotice(null);
     try {
       const d = await api.gitStageLines(session.id, {
         direction, filePath, hunkIndex, lineIndices, diffHash: diff.fineDiffHash,
@@ -740,7 +762,11 @@ export function ReviewPanel({
       installMutationRead(d);
     } catch (e) {
       if (e instanceof ApiError && (e.code === "GIT_STALE" || e.code === "GIT_APPLY_FAILED")) {
-        setStageNotice(`${e.message} — the canonical panes were refreshed; check the selected lines and try again.`);
+        setFileNotice({
+          sessionId: session.id,
+          path: filePath,
+          message: `${fileNameOf(filePath)} changed after this diff loaded, so the lines weren't ${direction === "stage" ? "staged" : "unstaged"}.`,
+        });
         void loadDiff();
         void loadStatus();
       } else setDiffError((e as Error).message);
@@ -749,24 +775,42 @@ export function ReviewPanel({
     }
   };
 
-  /** Restore a reviewed tracked file to HEAD. Confirmation is intentionally file-specific. */
-  const doDiscardFile = async (filePath: string) => {
+  /**
+   * Restore a reviewed tracked file to its last commit, or delete a file this change adds (§7.4).
+   * The confirmation names the file as a row, and says which of the two will happen (#2848).
+   */
+  const doDiscardFile = async (filePath: string, newFile: boolean) => {
     if (!diff?.fineDiffHash || diff.scope !== "uncommitted" || gitRefusal !== null) return;
-    if (!await confirm({
-      title: "Discard Changes",
-      message: `All staged and unstaged changes to ${filePath} will be restored to HEAD. This cannot be undone.`,
-      confirmLabel: "Discard Changes",
-      tone: "danger",
-    })) return;
+    const detailRows = [{ label: filePath, labelStyle: "mono" as const }];
+    const confirmed = newFile
+      ? await confirm({
+          title: "Discard New File",
+          message: "This file isn't in any commit yet, so discarding it deletes it. This can't be undone.",
+          detailRows,
+          confirmLabel: "Discard New File",
+          tone: "danger",
+        })
+      : await confirm({
+          title: "Discard Changes",
+          message: "All staged and unstaged changes to this file go back to its last commit. This can't be undone.",
+          detailRows,
+          confirmLabel: "Discard Changes",
+          tone: "danger",
+        });
+    if (!confirmed) return;
     if (gitRefusalRef.current !== null) return;
     setHunkBusy(`${filePath}:discard`);
-    setStageNotice(null);
+    setFileNotice(null);
     try {
       const d = await api.gitDiscardFile(session.id, { filePath, diffHash: diff.fineDiffHash });
       installMutationRead(d);
     } catch (e) {
       if (e instanceof ApiError && (e.code === "GIT_STALE" || e.code === "GIT_APPLY_FAILED")) {
-        setStageNotice(`${e.message} — the diff was refreshed; review the file before retrying.`);
+        setFileNotice({
+          sessionId: session.id,
+          path: filePath,
+          message: `${fileNameOf(filePath)} changed after this diff loaded, so ${newFile ? "it wasn't deleted" : "its changes weren't discarded"}.`,
+        });
         void loadDiff();
         void loadStatus();
       } else setDiffError((e as Error).message);
@@ -952,6 +996,15 @@ export function ReviewPanel({
   // An older runner limits Review in nested steps; only the most limiting one is worth saying.
   const runnerLimit = !diffSupported ? diffHint : !stagingSupported ? stagingHint : !fineDiffSupported ? fineDiffHint : null;
   const readAt = Math.max(diffReadAt ?? 0, git.observedAt ?? 0) || null;
+  const fileNoticeShown: DiffFileNotice | null = fileNotice?.sessionId !== session.id ? null : {
+    path: fileNotice.path,
+    message: fileNotice.message,
+    refreshing: refreshBusy,
+    onRefresh: () => {
+      setFileNotice(null);
+      void refreshReview();
+    },
+  };
   const paneShown: DiffPane = scope === "uncommitted" && fineDiffSupported ? pane : "combined";
 
   // Review is meaningless without a working directory to diff (§12.1).
@@ -1003,6 +1056,7 @@ export function ReviewPanel({
         </button>
       </PanelHeaderActions>
       <PanelToolLayout
+        scrollRef={setScrollElement}
         toolbar={(
           <ReviewToolbar
             scope={scope}
@@ -1013,6 +1067,15 @@ export function ReviewPanel({
             onPaneChange={setPane}
             layout={layout}
             onLayoutChange={setLayout}
+            splitUnavailableReason={splitFits ? null : "Expand the panel to compare side by side."}
+            wrap={wrapChoice === "wrap"}
+            onWrapChange={(wrap) => setWrapChoice(wrap ? "wrap" : "scroll")}
+            files={shownDiff && shownDiff.files.length > 0 ? {
+              collapsed: shownDiff.files.every((file) => collapsedPaths.has(file.path)),
+              onCollapseAll: (collapse) => setCollapsedPaths(
+                collapse ? new Set(shownDiff.files.map((file) => file.path)) : NO_COLLAPSED_FILES,
+              ),
+            } : null}
             refusal={gitRefusal === null ? null : { reason: gitRefusal, id: gitRefusalId }}
           />
         )}
@@ -1102,7 +1165,11 @@ export function ReviewPanel({
                   <GitDiffViewer
                     diff={shownDiff}
                     staging={staging}
-                    layout={layout}
+                    layout={shownLayout}
+                    wrap={wrapChoice === "wrap"}
+                    collapsedPaths={collapsedPaths}
+                    onCollapsedPathsChange={setCollapsedPaths}
+                    fileNotice={fileNoticeShown}
                     onOpenSourceLocation={onOpenSourceLocation}
                     onAttachWorkspaceReference={onAttachWorkspaceReference}
                     focus={focus}

@@ -20,21 +20,26 @@ import {
   type DiffHunkRow,
   type DiffWordSegment,
   type DisplayFile,
+  type SplitDiffRow,
 } from "../diff-view.js";
 import { diffAnchorKey, diffHunkContentKey, type DiffAnchor } from "../review-anchors.js";
 import { titleCaseLabel } from "../format.js";
 import { Spinner } from "./common.js";
+import { DiffFileActions, type DiffFileAction } from "./DiffFileActions.js";
+import { CheckIcon, ChevronRightIcon } from "./Icons.js";
+import { Notice } from "./Notice.js";
 import { Checkbox } from "./ui/ChoiceControls.js";
 
 export type DiffLayout = "unified" | "split";
 export type DiffPane = "combined" | "unstaged" | "staged";
 
 /**
- * Rich-diff pane (Phase 2). Renders a parsed {@link GitDiffInfo} as a stack of per-file cards:
- * a status badge + path header with an expand/collapse toggle, then the file's hunks as a
- * monospace body with an old/new line-number gutter and +/- coloring. The first few hunks of a
- * file show expanded; the rest sit behind a "N more hunks" row. Binary and untracked files
- * render a short note instead of a patch.
+ * Rich-diff pane (Phase 2). Renders a parsed {@link GitDiffInfo} as flush file sections (#2848):
+ * a sticky head with the disclosure chevron, the status letter, the path, the diffstat and the
+ * file's actions menu, then the file's hunks as a monospace body with an old/new line-number
+ * gutter and +/- coloring. The first few hunks of a file show expanded; the rest sit behind a
+ * "N more hunks" row. Binary and untracked files render a short note instead of a patch.
+ * Collapsed, the sections are the file index: one dense row each.
  *
  * When the optional `staging` prop is present (uncommitted scope, quiescent session), each
  * eligible hunk header carries a Stage/Unstage control; without it the viewer is read-only.
@@ -44,7 +49,8 @@ export type DiffPane = "combined" | "unstaged" | "staged";
 export interface StagingControls {
   onHunk: (direction: "stage" | "unstage", filePath: string, hunkIndex: number) => void;
   onLines: (direction: "stage" | "unstage", filePath: string, hunkIndex: number, lineIndices: number[]) => void;
-  onDiscard: (filePath: string) => void;
+  /** `newFile` is a file this change adds: discarding it deletes it. */
+  onDiscard: (filePath: string, newFile: boolean) => void;
   pane: DiffPane;
   fineGrained: boolean;
   /** `${filePath}#${hunkIndex}` of the in-flight mutation, or null. One at a time. */
@@ -151,13 +157,14 @@ function stageEligible(file: GitDiffFile): boolean {
 /** How many hunks per file render expanded before the rest collapse behind a "N more" row. */
 const COLLAPSE_THRESHOLD = 3;
 
-/** Short badge letter + class suffix for each change kind (drives the badge color in CSS). */
-const BADGE: Record<GitDiffFile["status"], { label: string; kind: string }> = {
-  added: { label: "A", kind: "added" },
-  modified: { label: "M", kind: "modified" },
-  deleted: { label: "D", kind: "deleted" },
-  renamed: { label: "R", kind: "renamed" },
-  untracked: { label: "??", kind: "untracked" },
+/** Each change kind's status letter and the word that names it (#2848). Added and Deleted sit in a
+ * green and a red wash; the rest are neutral. */
+const STATUS: Record<GitDiffFile["status"], { letter: string; word: string }> = {
+  added: { letter: "A", word: "Added" },
+  modified: { letter: "M", word: "Modified" },
+  deleted: { letter: "D", word: "Deleted" },
+  renamed: { letter: "R", word: "Renamed" },
+  untracked: { letter: "U", word: "Untracked" },
 };
 
 /** A request to bring one file's card into view: a transcript edit's Open in Review (#2187). */
@@ -167,6 +174,33 @@ export interface DiffFileFocus {
   request: number;
 }
 
+/**
+ * The newest stage race (#2848): a stage, unstage or discard the runner refused with `GIT_STALE` or
+ * `GIT_APPLY_FAILED`. Shown at the top of the affected file's section; one at a time.
+ */
+export interface DiffFileNotice {
+  path: string;
+  message: string;
+  onRefresh: () => void;
+  /** The diff is reloading, so Refresh waits. */
+  refreshing?: boolean;
+}
+
+const NO_COLLAPSED: ReadonlySet<string> = new Set<string>();
+
+/** Added and removed line counts for one file's diffstat. */
+function fileStat(file: GitDiffFile): { added: number; removed: number } {
+  let added = 0;
+  let removed = 0;
+  for (const hunk of file.hunks) {
+    for (const line of hunk.lines) {
+      if (line.status === "+") added += 1;
+      else if (line.status === "-") removed += 1;
+    }
+  }
+  return { added, removed };
+}
+
 export function GitDiffViewer({
   diff,
   staging,
@@ -174,6 +208,10 @@ export function GitDiffViewer({
   onOpenSourceLocation,
   onAttachWorkspaceReference,
   layout = "unified",
+  wrap = false,
+  collapsedPaths,
+  onCollapsedPathsChange,
+  fileNotice = null,
   focus,
   focusSettled = true,
   onFocusHandled,
@@ -185,6 +223,16 @@ export function GitDiffViewer({
   onOpenSourceLocation?: (location: SourceLocation) => void;
   onAttachWorkspaceReference?: (target: CreateWorkspaceReferenceRequest) => Promise<void>;
   layout?: DiffLayout;
+  /** Wrap Long Lines: code wraps inside its column instead of scrolling sideways. */
+  wrap?: boolean;
+  /**
+   * Which files are collapsed, by path, when the host owns that choice (Review's Collapse All Files).
+   * Keyed by path, so the choice survives a refresh with the same files. Without it the viewer keeps
+   * its own.
+   */
+  collapsedPaths?: ReadonlySet<string>;
+  onCollapsedPathsChange?: (next: ReadonlySet<string>) => void;
+  fileNotice?: DiffFileNotice | null;
   focus?: DiffFileFocus | null;
   /** This diff was read after the focus request, so a file missing from it is really absent. */
   focusSettled?: boolean;
@@ -204,6 +252,19 @@ export function GitDiffViewer({
   useEffect(() => {
     if (focus && !focusedPath && focusSettled) onFocusHandled?.();
   }, [focus, focusedPath, focusSettled, onFocusHandled]);
+  const [ownCollapsed, setOwnCollapsed] = useState<ReadonlySet<string>>(NO_COLLAPSED);
+  const collapsed = collapsedPaths ?? ownCollapsed;
+  const collapsedRef = useRef(collapsed);
+  collapsedRef.current = collapsed;
+  const setCollapsed = onCollapsedPathsChange ?? setOwnCollapsed;
+  const setFileExpanded = (path: string, expanded: boolean) => {
+    const prior = collapsedRef.current;
+    if (prior.has(path) !== expanded) return;
+    const next = new Set(prior);
+    if (expanded) next.delete(path); else next.add(path);
+    collapsedRef.current = next;
+    setCollapsed(next);
+  };
 
   const lineage = review?.lineage ?? "";
   // Anchored findings grouped by their anchor, once per diff instead of a scan per rendered row.
@@ -274,17 +335,23 @@ export function GitDiffViewer({
     );
   }
 
+  // A notice whose file is no longer in this diff still has to be read: it goes above the sections.
+  const orphanNotice = fileNotice && !files.some((display) => display.file.path === fileNotice.path) ? fileNotice : null;
   return (
-    <div className="diff-view">
+    <div className={wrap ? "diff-view is-wrapped" : "diff-view"}>
+      {orphanNotice && <StageRaceNotice notice={orphanNotice} />}
       {files.map((display) => (
-        // Key on the path alone, not the whole-change-set `diffHash`: a card must keep its collapse
-        // state and "show all hunks" toggle across a refresh it did not cause (#1203), and neither
-        // depends on content — `hiddenCount` is recomputed every render, so a carried `showAll`
+        // Key on the path alone, not the whole-change-set `diffHash`: a section must keep its
+        // "show all hunks" toggle across a refresh it did not cause (#1203), and that does not
+        // depend on content — `hiddenCount` is recomputed every render, so a carried `showAll`
         // stays meaningful whatever the hunk count becomes. The state that genuinely must reset when
         // content moves is per-hunk, and `HunkView` is keyed for exactly that.
-        <DiffFileCard
+        <DiffFileSection
           key={display.file.path}
           display={display}
+          expanded={!collapsed.has(display.file.path)}
+          onExpandedChange={setFileExpanded}
+          notice={fileNotice?.path === display.file.path ? fileNotice : null}
           staging={staging}
           review={review}
           findingsByAnchor={findingsByAnchor}
@@ -294,6 +361,7 @@ export function GitDiffViewer({
           diffHash={diff.diffHash}
           scope={diff.scope}
           layout={layout}
+          wrap={wrap}
           focusRequest={display.file.path === focusedPath ? focus?.request : undefined}
           onFocusHandled={onFocusHandled}
         />
@@ -302,8 +370,41 @@ export function GitDiffViewer({
   );
 }
 
-function DiffFileCard({
+/** A stage race, compact, with Refresh (#2848). An alert: the action the person just took failed. */
+function StageRaceNotice({ notice }: { notice: DiffFileNotice }) {
+  return (
+    <Notice
+      tone="warning"
+      compact
+      role="alert"
+      className="dfile-notice"
+      actions={(
+        <button type="button" className="btn sm" disabled={notice.refreshing} onClick={notice.onRefresh}>
+          Refresh
+        </button>
+      )}
+    >
+      {notice.message}
+    </Notice>
+  );
+}
+
+/** The path in mono, its folder faint and its file name whole: the folder gives way first (§11.3). */
+function FilePath({ path }: { path: string }) {
+  const slash = path.lastIndexOf("/");
+  return (
+    <span className="dfile-path" title={path}>
+      {slash >= 0 && <span className="dfile-dir">{path.slice(0, slash + 1)}</span>}
+      <span className="dfile-name">{path.slice(slash + 1)}</span>
+    </span>
+  );
+}
+
+function DiffFileSection({
   display,
+  expanded,
+  onExpandedChange,
+  notice,
   staging,
   review,
   findingsByAnchor,
@@ -313,10 +414,14 @@ function DiffFileCard({
   diffHash,
   scope,
   layout,
+  wrap,
   focusRequest,
   onFocusHandled,
 }: {
   display: DisplayFile;
+  expanded: boolean;
+  onExpandedChange: (path: string, expanded: boolean) => void;
+  notice: DiffFileNotice | null;
   staging?: StagingControls;
   review?: DiffReviewControls;
   findingsByAnchor: ReadonlyMap<string, ReviewFinding[]>;
@@ -326,94 +431,112 @@ function DiffFileCard({
   diffHash: string;
   scope: GitDiffInfo["scope"];
   layout: DiffLayout;
+  wrap: boolean;
   focusRequest?: number;
   onFocusHandled?: () => void;
 }) {
   const { file, hunks, hiddenCount } = display;
-  const cardRef = useRef<HTMLDivElement>(null);
+  const sectionRef = useRef<HTMLElement>(null);
   const headRef = useRef<HTMLButtonElement>(null);
   const stagedCount = file.hunks.filter((h) => h.staged).length;
-  const [expanded, setExpanded] = useState(true);
-  // A per-file "show the collapsed tail" toggle, separate from the whole-file collapse above.
+  // A per-file "show the collapsed tail" toggle, separate from the whole-file collapse.
   const [showAll, setShowAll] = useState(false);
-  // `?? modified` only satisfies noUncheckedIndexedAccess — BADGE is exhaustive over the status union.
-  const badge = BADGE[file.status] ?? BADGE.modified;
+  // `?? modified` only satisfies noUncheckedIndexedAccess — STATUS is exhaustive over the status union.
+  const status = STATUS[file.status] ?? STATUS.modified;
+  const stat = fileStat(file);
   const sourcePath = normalizeSourcePath(file.path);
   const focusHandledRef = useRef(onFocusHandled);
   focusHandledRef.current = onFocusHandled;
   // Open in Review: open this file, scroll it to the top and focus its head, once per request.
   useLayoutEffect(() => {
     if (focusRequest === undefined) return;
-    setExpanded(true);
-    cardRef.current?.scrollIntoView?.({ block: "start" });
+    onExpandedChange(file.path, true);
+    sectionRef.current?.scrollIntoView?.({ block: "start" });
     headRef.current?.focus({ preventScroll: true });
     focusHandledRef.current?.();
+    // Once per request: `onExpandedChange` is rebuilt with every render of the viewer.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusRequest]);
+  // Choosing a collapsed file opens it at the top of the scroller, which is what makes the collapsed
+  // sections an index (#2848). Only the person's own choice scrolls, once it has rendered open.
+  const scrollOnOpen = useRef(false);
+  useLayoutEffect(() => {
+    if (!expanded || !scrollOnOpen.current) return;
+    scrollOnOpen.current = false;
+    sectionRef.current?.scrollIntoView?.({ block: "start" });
+  }, [expanded]);
+  const toggle = () => {
+    scrollOnOpen.current = !expanded;
+    onExpandedChange(file.path, !expanded);
+  };
+
+  // The file's actions (#2848). An action that cannot run on this file stays listed with its reason.
+  const gone = file.status === "deleted" ? "The file was deleted." : undefined;
+  const openInFiles: DiffFileAction | undefined = onOpenSourceLocation && sourcePath
+    ? { label: "Open in Files", run: () => onOpenSourceLocation({ path: sourcePath }), unavailableReason: gone }
+    : undefined;
+  const attach: DiffFileAction | undefined = onAttachWorkspaceReference
+    ? { label: "Attach File to Prompt", run: () => void onAttachWorkspaceReference({ path: file.path, kind: "file" }), unavailableReason: gone }
+    : undefined;
+  // Discard returns a tracked file to its last commit, or deletes a file this change adds. An
+  // untracked file has no state to return to and its content is not shown, so it is never offered.
+  const newFile = file.status === "added";
+  const discard: DiffFileAction | undefined = staging?.fineGrained && staging.pane === "combined" && file.status !== "untracked"
+    ? {
+        label: newFile ? "Discard New File…" : "Discard Changes…",
+        run: () => staging.onDiscard(file.path, newFile),
+        unavailableReason: staging.refusal?.reason
+          ?? (staging.busyKey != null ? "Wait for the current change to finish." : undefined),
+      }
+    : undefined;
 
   return (
-    <div className="diff-file" ref={cardRef} data-path={file.path}>
-      <div className="diff-file-head-row">
+    <section className="dfile" ref={sectionRef} data-path={file.path} aria-label={file.path}>
+      <div className="dfile-head">
         <button
           ref={headRef}
-          className="diff-file-head"
-          onClick={() => setExpanded((e) => !e)}
+          type="button"
+          className="dfile-toggle"
+          onClick={toggle}
           aria-expanded={expanded}
-          title={expanded ? "Collapse file" : "Expand file"}
         >
-          <span className="chev">{expanded ? "▾" : "▸"}</span>
-          <span className={`diff-badge diff-badge-${badge.kind}`}>{badge.label}</span>
-          <span className="diff-file-path">
-            {file.status === "renamed" && file.oldPath ? (
-              <>
-                <span className="diff-oldpath">{file.oldPath}</span>
-                <span className="diff-arrow"> → </span>
-                {file.path}
-              </>
-            ) : (
-              file.path
-            )}
+          <ChevronRightIcon className="disclosure-chevron" aria-hidden="true" />
+          <span
+            className={file.status === "added" ? "dfile-status is-added" : file.status === "deleted" ? "dfile-status is-deleted" : "dfile-status"}
+            title={status.word}
+          >
+            <span aria-hidden="true">{status.letter}</span>
+            <span className="sr-only">{status.word}</span>
           </span>
+          <FilePath path={file.path} />
+          {file.status === "renamed" && file.oldPath && (
+            <span className="dfile-from" title={file.oldPath}>from {file.oldPath}</span>
+          )}
           {stagedCount > 0 && (
-            <span className="diff-staged-count muted">
-              {stagedCount}/{file.hunks.length} Staged
+            <span className="dfile-staged">{stagedCount}/{file.hunks.length} Staged</span>
+          )}
+          {(stat.added > 0 || stat.removed > 0) && (
+            <span className="dfile-stat">
+              <span className="diff-ins" aria-hidden="true">+{stat.added}</span>
+              <span className="diff-del" aria-hidden="true">−{stat.removed}</span>
+              <span className="sr-only">{stat.added} added, {stat.removed} removed</span>
             </span>
           )}
         </button>
-        {onOpenSourceLocation && sourcePath && file.status !== "deleted" && (
-          <button
-            type="button"
-            className="diff-open-source"
-            title={`Open ${file.path}`}
-            aria-label={`Open ${file.path}`}
-            onClick={() => onOpenSourceLocation({ path: sourcePath })}
-          >
-            ↗
-          </button>
-        )}
-        {staging?.fineGrained && staging.pane === "combined" && file.status !== "untracked" && (
-          <button
-            type="button"
-            className="diff-discard"
-            disabled={staging.busyKey != null || Boolean(staging.refusal)}
-            title={staging.refusal?.reason ?? "Discard all staged and unstaged changes to this tracked file"}
-            aria-describedby={staging.refusal?.id}
-            onClick={() => staging.onDiscard(file.path)}
-          >
-            Discard
-          </button>
-        )}
+        <DiffFileActions path={file.path} openInFiles={openInFiles} attach={attach} discard={discard} />
       </div>
+      {notice && <StageRaceNotice notice={notice} />}
 
       {expanded && (
-        <div className="diff-file-body">
+        <div className="dfile-body">
           {file.binary ? (
-            <div className="diff-note muted">Binary — Not Patchable</div>
+            <p className="diff-note">Binary file, so there is no text to show.</p>
           ) : file.status === "untracked" ? (
-            <div className="diff-note muted">untracked file — included by Commit all, or by Commit when nothing is staged</div>
+            <p className="diff-note">New file, not tracked yet. Commit All Changes includes it.</p>
           ) : hunks.length === 0 ? (
-            <div className="diff-note muted">
-              {file.status === "renamed" ? "renamed — stage/unstage isn't available for renames yet" : "no textual changes"}
-            </div>
+            <p className="diff-note">
+              {file.status === "renamed" ? "Renamed. Staging isn't available for renames yet." : "No text changes."}
+            </p>
           ) : (
             <>
               {hunks
@@ -440,10 +563,11 @@ function DiffFileCard({
                     diffHash={diffHash}
                     scope={scope}
                     layout={layout}
+                    wrap={wrap}
                   />
                 ))}
               {hiddenCount > 0 && !showAll && (
-                <button className="diff-more" onClick={() => setShowAll(true)}>
+                <button type="button" className="diff-more" onClick={() => setShowAll(true)}>
                   {hiddenCount} More Hunk{hiddenCount === 1 ? "" : "s"}
                 </button>
               )}
@@ -451,7 +575,7 @@ function DiffFileCard({
           )}
         </div>
       )}
-    </div>
+    </section>
   );
 }
 
@@ -604,6 +728,7 @@ function HunkView({
   diffHash,
   scope,
   layout,
+  wrap,
 }: {
   hunk: GitHunk;
   filePath: string;
@@ -618,6 +743,7 @@ function HunkView({
   diffHash: string;
   scope: GitDiffInfo["scope"];
   layout: DiffLayout;
+  wrap: boolean;
 }) {
   const rows = buildDiffHunkRows(hunk);
   const key = `${filePath}#${index}`;
@@ -796,46 +922,124 @@ function HunkView({
       </button>
     ) : <span className={className}>{value}</span>;
 
+  const rowKind = (row: DiffHunkRow) => row.status === "+" ? "add" : row.status === "-" ? "del" : "ctx";
+  // Whether an anchor carries a finding or an open editor, which renders full width under its row.
+  const hasExtras = (target: { side: "left" | "right"; line: number }) =>
+    findingsByAnchor.has(diffAnchorKey({ filePath, ...target })) || drafts.open.has(drafts.keyFor({ filePath, ...target }));
+  const splitCell = (row: DiffHunkRow | null, sideIndex: 0 | 1, key: number) => row ? (
+    <div className={`diff-split-cell diff-line-${rowKind(row)}`} key={key}>
+      <span className="diff-line-select">
+        {referenceCheckbox(row)}
+        {lineCheckbox(row)}
+      </span>
+      {sourceGutter(row, sideIndex === 0 ? row.oldNo : row.newNo, "diff-gutter")}
+      <span className="diff-sign">{row.status === " " ? "" : row.status}</span>
+      <span className="diff-text">{lineText(row)}</span>
+      {(row.status !== " " || sideIndex === 1) && commentButton(row)}
+    </div>
+  ) : <div className="diff-split-cell diff-split-empty" key={key} />;
+  /* No `status !== " "` guard: `buildSplitDiffRows` gives a context row a left anchor at its old line
+     number, and that anchor can hold a carried finding or draft. */
+  const pairExtras = (pair: SplitDiffRow, pairIndex: number) => (
+    <>
+      {pair.left && reviewExtras(pair.left.anchor, pair.left.text, `split-left-${pairIndex}`)}
+      {pair.right && reviewExtras(pair.right.anchor, pair.right.text, `split-right-${pairIndex}`)}
+    </>
+  );
+  /**
+   * Side by Side (#2848): two columns that each scroll sideways (`.dsplit` > `.side`), so a long line
+   * on one side never pushes the other out of the panel. Rows stay level because every row is one
+   * line high. A finding or an open editor spans both columns under its row, so the columns break
+   * there and resume below it. Each run is keyed by the row it ends on, so opening an editor above
+   * another never rebuilds the one below. Wrapped lines differ in height, so with Wrap Long Lines on
+   * each pair is a row of its own instead.
+   */
+  const splitRuns = () => {
+    const pairs = buildSplitDiffRows(hunk);
+    if (wrap) {
+      return (
+        <div className="dsplit is-wrapped">
+          {pairs.map((pair, pairIndex) => (
+            <Fragment key={pairIndex}>
+              <div className="dsplit-pair">
+                {splitCell(pair.left, 0, 0)}
+                {splitCell(pair.right, 1, 1)}
+              </div>
+              {pairExtras(pair, pairIndex)}
+            </Fragment>
+          ))}
+        </div>
+      );
+    }
+    const runs: { pairs: { pair: SplitDiffRow; index: number }[]; end: number | null }[] = [];
+    let run: { pair: SplitDiffRow; index: number }[] = [];
+    pairs.forEach((pair, index) => {
+      run.push({ pair, index });
+      if ((pair.left && hasExtras(pair.left.anchor)) || (pair.right && hasExtras(pair.right.anchor))) {
+        runs.push({ pairs: run, end: index });
+        run = [];
+      }
+    });
+    if (run.length > 0) runs.push({ pairs: run, end: null });
+    return runs.map(({ pairs: runPairs, end }) => (
+      <Fragment key={end ?? "tail"}>
+        <div className="dsplit">
+          <div className="side">{runPairs.map(({ pair, index }) => splitCell(pair.left, 0, index))}</div>
+          <div className="side">{runPairs.map(({ pair, index }) => splitCell(pair.right, 1, index))}</div>
+        </div>
+        {end !== null && pairExtras(runPairs[runPairs.length - 1]!.pair, end)}
+      </Fragment>
+    ));
+  };
+
   return (
     <div className="diff-hunk">
       <div className="diff-hunk-header">
-        <span className="diff-hunk-header-text">{hunk.header}</span>
-        {onAttachWorkspaceReference && (
-          <button
-            className="hunk-act"
-            type="button"
-            disabled={attachBusy || referenceLineList.length === 0 || !referenceSelectionContiguous}
-            title={!referenceSelectionContiguous ? "Select a contiguous range on one diff side" : "Attach Selected Lines to Prompt"}
-            onClick={() => void attachSelectedLines()}
-          >
-            {attachBusy ? <Spinner /> : `Attach Selected (${referenceLineList.length})`}
-          </button>
-        )}
-        {staging && (
+        <span className="diff-hunk-header-text" title={hunk.header}>{hunk.header}</span>
+        {(staging || (onAttachWorkspaceReference && referenceLineList.length > 0)) && (
           <span className="hunk-actions">
-            {staging.pane === "combined" ? (
+            {/* Attach Selected and Stage Selected appear once there is a selection: at rest the header
+                is the range and one action, on one line at every panel width (#2848). */}
+            {onAttachWorkspaceReference && referenceLineList.length > 0 && (
+              <button
+                className="btn sm ghost"
+                type="button"
+                disabled={attachBusy || !referenceSelectionContiguous}
+                title={!referenceSelectionContiguous ? "Select a contiguous range on one diff side" : "Attach Selected Lines to Prompt"}
+                onClick={() => void attachSelectedLines()}
+              >
+                {attachBusy ? <Spinner /> : `Attach Selected (${referenceLineList.length})`}
+              </button>
+            )}
+            {staging?.pane === "combined" ? (
               <>
-                {hunk.staged && <span className="hunk-staged-chip">Staged ✓</span>}
+                {hunk.staged && (
+                  <span className="hunk-staged"><CheckIcon size={14} aria-hidden="true" />Staged</span>
+                )}
                 <button
                   type="button"
-                  className="hunk-act"
+                  className="btn sm ghost hunk-stage"
                   disabled={disabled}
+                  aria-busy={inFlight || undefined}
                   title={refusal?.reason ?? (hunk.staged && fileStatus === "added" ? "Unstage (the file becomes untracked)" : undefined)}
                   aria-describedby={refusal?.id}
                   onClick={() => staging.onHunk(hunk.staged ? "unstage" : "stage", filePath, index)}
                 >
-                  {inFlight ? <Spinner /> : hunk.staged ? "Unstage" : "Stage"}
+                  {inFlight ? <Spinner /> : hunk.staged ? "Unstage Hunk" : "Stage Hunk"}
                 </button>
               </>
-            ) : lineDirection && (
+            ) : staging && lineDirection && (
               <>
-                <button className="hunk-act" type="button" disabled={disabled} title={refusal?.reason}
+                {selectedLines.size > 0 && (
+                  <button className="btn sm ghost" type="button" disabled={disabled} title={refusal?.reason}
+                    aria-describedby={refusal?.id} onClick={() => mutateLines([...selectedLines].sort((a, b) => a - b))}>
+                    {lineDirection === "stage" ? "Stage" : "Unstage"} Selected ({selectedLines.size})
+                  </button>
+                )}
+                <button className="btn sm ghost hunk-stage" type="button" disabled={disabled} title={refusal?.reason}
+                  aria-busy={inFlight || undefined}
                   aria-describedby={refusal?.id} onClick={() => mutateLines(changeIndices)}>
                   {inFlight ? <Spinner /> : `${lineDirection === "stage" ? "Stage" : "Unstage"} Hunk`}
-                </button>
-                <button className="hunk-act" type="button" disabled={disabled || selectedLines.size === 0} title={refusal?.reason}
-                  aria-describedby={refusal?.id} onClick={() => mutateLines([...selectedLines].sort((a, b) => a - b))}>
-                  {lineDirection === "stage" ? "Stage" : "Unstage"} Selected ({selectedLines.size})
                 </button>
               </>
             )}
@@ -845,7 +1049,7 @@ function HunkView({
       <div className={`diff-hunk-lines diff-layout-${layout}`}>
         {layout === "unified" ? rows.map((row, i) => (
           <Fragment key={i}>
-            <div className={`diff-line diff-line-${row.status === "+" ? "add" : row.status === "-" ? "del" : "ctx"}`}>
+            <div className={`diff-line diff-line-${rowKind(row)}`}>
               <span className="diff-line-select">
                 {referenceCheckbox(row)}
                 {lineCheckbox(row)}
@@ -861,28 +1065,7 @@ function HunkView({
                 sit there — see `buildDiffAnchorIndex`, which indexes exactly this anchor. */}
             {row.status === " " && reviewExtras({ side: "left", line: Number(row.oldNo) }, row.text, `unified-${i}-left`)}
           </Fragment>
-        )) : buildSplitDiffRows(hunk).map((pair, pairIndex) => (
-          <Fragment key={pairIndex}>
-            <div className="diff-split-row">
-              {[pair.left, pair.right].map((row, sideIndex) => row ? (
-                <div className={`diff-split-cell diff-line-${row.status === "+" ? "add" : row.status === "-" ? "del" : "ctx"}`} key={sideIndex}>
-                  <span className="diff-line-select">
-                    {referenceCheckbox(row)}
-                    {lineCheckbox(row)}
-                  </span>
-                  {sourceGutter(row, sideIndex === 0 ? row.oldNo : row.newNo, "diff-gutter")}
-                  <span className="diff-sign">{row.status === " " ? "" : row.status}</span>
-                  <span className="diff-text">{lineText(row)}</span>
-                  {(row.status !== " " || sideIndex === 1) && commentButton(row)}
-                </div>
-              ) : <div className="diff-split-cell diff-split-empty" key={sideIndex} />)}
-            </div>
-            {/* No `status !== " "` guard: `buildSplitDiffRows` gives a context row a left anchor at
-                its old line number, and that anchor can hold a carried finding or draft. */}
-            {pair.left && reviewExtras(pair.left.anchor, pair.left.text, `split-left-${pairIndex}`)}
-            {pair.right && reviewExtras(pair.right.anchor, pair.right.text, `split-right-${pairIndex}`)}
-          </Fragment>
-        ))}
+        )) : splitRuns()}
         {hunk.noNewlineAtEof && <div className="diff-line diff-nonl muted">\ No newline at end of file</div>}
       </div>
     </div>

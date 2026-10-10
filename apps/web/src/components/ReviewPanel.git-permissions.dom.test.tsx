@@ -16,6 +16,7 @@ import type {
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { FeedbackContext } from "./FeedbackProvider.js";
 import { ReviewPanel } from "./ReviewPanel.js";
 import { PanelActionSlotContext } from "./RightPanel.js";
@@ -234,7 +235,7 @@ async function mountPanel(initial: SessionView) {
   );
   await act(async () => { root.render(tree(initial)); });
   const container = host as unknown as HTMLElement;
-  assert.ok(container.querySelector(".diff-file"), "the diff has loaded");
+  assert.ok(container.querySelector(".dfile"), "the diff has loaded");
   return {
     container,
     calls,
@@ -269,10 +270,21 @@ async function chooseViewOption(container: HTMLElement, label: "All Changes" | "
   await act(async () => { fireDomEvent.click(item); });
 }
 
-/** The Git actions on the All Changes pane: the panel's own, then the diff's hunk Stage and Discard. */
+/** The Git actions on the All Changes pane: the panel's own, then the diff's Stage Hunk. */
 function combinedControls(container: HTMLElement): Array<[string, HTMLButtonElement]> {
-  return ["Commit Staged", "More Commit Options", "Open Pull Request…", "Sync GitHub", "Stage", "Discard"]
+  return ["Commit Staged", "More Commit Options", "Open Pull Request…", "Sync GitHub", "Stage Hunk"]
     .map((label) => [label, onlyButton(container, label)]);
+}
+
+/** Discard Changes… in the file's actions menu (#2848), opened for the test; the menu is portalled. */
+async function discardItem(container: HTMLElement): Promise<HTMLElement> {
+  const trigger = container.querySelector<HTMLButtonElement>('button[aria-label="src/a.ts Actions"]');
+  assert.ok(trigger, "the file has an actions menu");
+  if (trigger.getAttribute("aria-expanded") !== "true") await act(async () => { fireDomEvent.click(trigger); });
+  const item = [...(domWindow.document as unknown as Document).querySelectorAll<HTMLElement>('[role="menuitem"]')]
+    .find((node) => node.getAttribute("data-menu-label") === "Discard Changes…");
+  assert.ok(item, "the menu offers Discard Changes…");
+  return item;
 }
 
 /** The Git actions on the Unstaged pane: line staging and the selection boxes that feed it. */
@@ -282,7 +294,6 @@ function lineControls(container: HTMLElement): Array<[string, HTMLButtonElement 
   assert.equal(boxes.length, 2, "each changed line can be selected");
   return [
     ["Stage Hunk", onlyButton(container, "Stage Hunk")],
-    ["Stage Selected (0)", onlyButton(container, "Stage Selected (0)")],
     ...boxes.map((box) => [box.getAttribute("aria-label")!, box] as [string, HTMLInputElement]),
   ];
 }
@@ -314,6 +325,11 @@ test("a refused person sees every Git action disabled with the reason, and nothi
     for (const [, button] of combined) {
       await act(async () => { fireDomEvent.click(button); await Promise.resolve(); });
     }
+    // Discard stays listed in the file's menu, unavailable with the reason as its second line.
+    const discard = await discardItem(harness.container);
+    assert.equal(discard.getAttribute("aria-disabled"), "true", "Discard is unavailable");
+    assert.equal(discard.querySelector(".menu-desc")?.textContent, VIEWER, "Discard says why");
+    await act(async () => { fireDomEvent.click(discard); await Promise.resolve(); });
     assert.equal(harness.confirmations.length, 0, "Discard opens no confirmation");
 
     await chooseViewOption(harness.container, "Unstaged Only");
@@ -322,11 +338,11 @@ test("a refused person sees every Git action disabled with the reason, and nothi
     for (const [, control] of lines) {
       await act(async () => { fireDomEvent.click(control); await Promise.resolve(); });
     }
-    assert.equal(onlyButton(harness.container, "Stage Selected (0)").disabled, true, "no line could be selected");
+    assert.equal(harness.container.textContent?.includes("Stage Selected"), false, "no line could be selected");
 
     // The side-by-side layout renders its own line selection boxes.
     await chooseViewOption(harness.container, "Side by Side");
-    assert.ok(harness.container.querySelector(".diff-split-row"), "the diff is side by side");
+    assert.ok(harness.container.querySelector(".dsplit"), "the diff is side by side");
     for (const [name, control] of lineControls(harness.container)) assertRefused(harness.container, `split ${name}`, control);
 
     assert.deepEqual(harness.calls, []);
@@ -340,11 +356,12 @@ test("a refused person sees every Git action disabled with the reason, and nothi
 test("a refusal that arrives while Discard's confirmation is open sends nothing (#1870)", async () => {
   const harness = await mountPanel(sessionWith({ allowed: true }));
   try {
-    await act(async () => { fireDomEvent.click(onlyButton(harness.container, "Discard")); });
+    const discard = await discardItem(harness.container);
+    await act(async () => { fireDomEvent.click(discard); });
     assert.equal(harness.confirmations.length, 1, "the confirmation is open");
 
     await harness.render(sessionWith({ allowed: false, reason: VIEWER }));
-    assertRefused(harness.container, "Discard", onlyButton(harness.container, "Discard"));
+    assertRefused(harness.container, "Stage Hunk", onlyButton(harness.container, "Stage Hunk"));
     await act(async () => { harness.confirmations[0]!(true); await Promise.resolve(); });
     assert.deepEqual(harness.calls, [], "confirming after the refusal arrived sends nothing");
   } finally {
@@ -363,12 +380,13 @@ test("an allowed or absent verdict leaves every Git action as it was (#1870)", a
         assert.equal(button.disabled, false, `${name} is enabled`);
         assert.equal(button.getAttribute("aria-describedby"), null, `${name} has no refusal description`);
       }
-      assert.equal(onlyButton(harness.container, "Discard").getAttribute("title"),
-        "Discard all staged and unstaged changes to this tracked file", "Discard keeps its own title");
+      const discard = await discardItem(harness.container);
+      assert.equal(discard.getAttribute("aria-disabled"), null, "Discard is available");
+      assertNoDomNode(discard.querySelector(".menu-desc"), "with no reason under it");
+      await act(async () => { fireDomEvent.click(discard); });
 
       await act(async () => { fireDomEvent.click(onlyButton(harness.container, "Sync GitHub")); });
-      await act(async () => { fireDomEvent.click(onlyButton(harness.container, "Stage")); });
-      await act(async () => { fireDomEvent.click(onlyButton(harness.container, "Discard")); });
+      await act(async () => { fireDomEvent.click(onlyButton(harness.container, "Stage Hunk")); });
       await act(async () => { harness.confirmations[0]!(true); await Promise.resolve(); });
       await act(async () => { fireDomEvent.click(onlyButton(harness.container, "Commit Staged")); });
       await act(async () => { fireDomEvent.click(onlyButton(harness.container, "More Commit Options")); });
@@ -380,7 +398,7 @@ test("an allowed or absent verdict leaves every Git action as it was (#1870)", a
       await act(async () => { fireDomEvent.click(onlyButton(dialog, "Open Pull Request")); });
       await chooseViewOption(harness.container, "Unstaged Only");
       for (const [name, control] of lineControls(harness.container)) {
-        assert.equal(control.disabled, name === "Stage Selected (0)", `${name} is enabled unless nothing is selected`);
+        assert.equal(control.disabled, false, `${name} is enabled`);
         assert.equal(control.getAttribute("aria-describedby"), null, `${name} has no refusal description`);
       }
       await act(async () => { fireDomEvent.click(onlyButton(harness.container, "Stage Hunk")); });

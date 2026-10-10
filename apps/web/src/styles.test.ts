@@ -819,8 +819,8 @@ test("no viewport rule at 600px or 640px styles diff, finding, review or browser
     });
   });
   assert.deepEqual(moved[".review-finding-row"], ["grid-template-columns: 22px minmax(0, 1fr)"]);
-  for (const selector of [".diff-file-head-row", ".diff-hunk-header", ".hunk-actions",
-    ".diff-comment-editor,\n  .diff-inline-finding", ".review-findings-head"]) {
+  for (const selector of [".diff-line:not(.diff-line-del) > .diff-gutter-old,\n  .diff-line-del > .diff-gutter-old + .diff-gutter",
+    ".dfile-staged", ".diff-comment-editor,\n  .diff-inline-finding", ".review-findings-head"]) {
     assert.ok(moved[selector], `${selector} answers to the rp container`);
   }
 });
