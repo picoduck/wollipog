@@ -1,1 +1,0 @@
-|.diff-note|padding|8px

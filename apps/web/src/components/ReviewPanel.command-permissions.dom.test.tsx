@@ -266,7 +266,7 @@ async function mountPanel(initial: SessionView) {
   );
   await act(async () => { root.render(tree(initial)); });
   const container = host as unknown as HTMLElement;
-  assert.ok(container.querySelector(".diff-file"), "the diff has loaded");
+  assert.ok(container.querySelector(".dfile"), "the diff has loaded");
   return {
     container,
     calls,

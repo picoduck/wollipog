@@ -113,7 +113,7 @@ test("a branch with only committed work opens on Branch and reads only the Branc
   await page.setViewportSize({ width: 1440, height: 900 });
   await openReview(page, "scenario=branch");
   await expect(page.getByRole("radio", { name: "Branch" })).toHaveAttribute("aria-checked", "true");
-  await expect(page.locator(".diff-file").first()).toBeVisible();
+  await expect(page.locator(".dfile").first()).toBeVisible();
   expect(await page.evaluate(() => window.__REVIEW_LAYOUT_E2E__.reads().filter((read) => read.startsWith("diff:"))))
     .toEqual(["diff:all_branch"]);
 });
@@ -121,7 +121,7 @@ test("a branch with only committed work opens on Branch and reads only the Branc
 test("the header Refresh reloads status, diff and findings together", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await openReview(page, "scenario=uncommitted");
-  await expect(page.locator(".diff-file").first()).toBeVisible();
+  await expect(page.locator(".dfile").first()).toBeVisible();
   const before = await page.evaluate(() => window.__REVIEW_LAYOUT_E2E__.reads());
   await page.locator(".rpanel-head").getByRole("button", { name: "Refresh Review" }).click();
   await expect.poll(async () => (await page.evaluate(() => window.__REVIEW_LAYOUT_E2E__.reads())).length).toBe(before.length + 3);

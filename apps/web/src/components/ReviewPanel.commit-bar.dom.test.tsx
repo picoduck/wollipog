@@ -608,7 +608,7 @@ test("Try Again waits on the same gates as the bar: not while a hunk stage is in
     assert.equal(retry().disabled, false);
 
     const release = harness.hold();
-    await click(named(harness.container, "Stage")[0]);
+    await click(named(harness.container, "Stage Hunk")[0]);
     assert.equal(retry().disabled, true, "a stage RPC holds Try Again, as it holds Commit Staged");
     await click(retry());
     assert.deepEqual(harness.sent.map((request) => request.action), ["commit"], "nothing more is sent");

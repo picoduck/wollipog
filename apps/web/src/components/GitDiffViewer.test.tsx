@@ -7,7 +7,7 @@ import { GitDiffViewer, type DiffPane, type StagingControls } from "./GitDiffVie
 
 (globalThis as typeof globalThis & { React: typeof React }).React = React;
 
-test("diff source links expose current-file headers and right-side line coordinates only", () => {
+test("diff source links expose right-side line coordinates only", () => {
   const diff: GitDiffInfo = {
     scope: "uncommitted",
     diffHash: "a".repeat(64),
@@ -45,10 +45,11 @@ test("diff source links expose current-file headers and right-side line coordina
     diff,
     onOpenSourceLocation: () => undefined,
   }));
-  assert.match(html, /aria-label="Open src\/app\.ts"/);
+  // The file itself opens from its actions menu (GitDiffViewer.sections.dom.test.tsx), not a head link.
+  assert.doesNotMatch(html, /aria-label="Open src\/app\.ts"/);
   assert.match(html, /aria-label="Open src\/app\.ts line 20"/);
   assert.doesNotMatch(html, /aria-label="Open src\/app\.ts line 10"/);
-  assert.doesNotMatch(html, /aria-label="Open src\/deleted\.ts"/);
+  assert.doesNotMatch(html, /aria-label="Open src\/deleted\.ts/);
 });
 
 test("diff source links fail closed for noncanonical paths", () => {
@@ -87,10 +88,10 @@ test("diff source links fail closed for noncanonical paths", () => {
  * below asserts the COMPLETE set of notes the render produced, which pins both the note and the
  * arms it has to beat.
  */
-const BINARY_NOTE = "Binary — Not Patchable";
-const UNTRACKED_NOTE = "untracked file — included by Commit all, or by Commit when nothing is staged";
-const RENAMED_NOTE = "renamed — stage/unstage isn't available for renames yet";
-const UNCHANGED_NOTE = "no textual changes";
+const BINARY_NOTE = "Binary file, so there is no text to show.";
+const UNTRACKED_NOTE = "New file, not tracked yet. Commit All Changes includes it.";
+const RENAMED_NOTE = "Renamed. Staging isn't available for renames yet.";
+const UNCHANGED_NOTE = "No text changes.";
 
 /** React escapes apostrophes in text nodes, and the rename note contains one. */
 function decodeEntities(text: string): string {
@@ -142,23 +143,7 @@ function elementsWithClass(
 
 /** Every rendered `.diff-note`, entity-decoded, in document order. */
 function notesIn(html: string): string[] {
-  return elementsWithClass(html, "div", "diff-note").map(({ text }) => text);
-}
-
-/** The file's status badge, or null. Class ORDER is not asserted; membership and label are. */
-function badgeIn(html: string): { tokens: string[]; text: string } | null {
-  return elementsWithClass(html, "span", "diff-badge")[0] ?? null;
-}
-
-/**
- * Whether the Discard control is offered.
- *
- * Token-matched because the absence assertions below are the load-bearing ones: against
- * `class="diff-discard"` as an exact attribute, adding any second class to the button would render
- * Discard for untracked files while those assertions still passed.
- */
-function offersDiscard(html: string): boolean {
-  return elementsWithClass(html, "button", "diff-discard").length > 0;
+  return elementsWithClass(html, "p", "diff-note").map(({ text }) => text);
 }
 
 const TEXT_HUNK: GitHunk = {
@@ -199,10 +184,6 @@ test("a binary file renders only the Binary note, and outranks the untracked arm
   // pair reaches the chain together and only the arm ORDER decides which note a user sees.
   const both = renderDiff({ path: "blob.bin", status: "untracked", binary: true, hunks: [] }, STAGING);
   assert.deepEqual(notesIn(both), [BINARY_NOTE], "binary must win over untracked, the arm directly below it");
-  // Rendered WITH staging on purpose. Suppression must key on untracked alone: relaxing the guard
-  // to `file.status !== "untracked" || file.binary` offers Discard for a file with no HEAD state to
-  // restore, and every other test here stays green through it.
-  assert.equal(offersDiscard(both), false);
   // Git reports a changed binary that it detected as a rename with BOTH `rename from/to` and
   // `Binary files ... differ`, and git-ops.ts sets `status` and `binary` on independent branches —
   // so this shape is real, and only arm order keeps it on the binary note.
@@ -213,55 +194,91 @@ test("a binary file renders only the Binary note, and outranks the untracked arm
   );
 });
 
-test("an untracked file renders its note and the ?? badge, and offers no Discard", () => {
+test("an untracked file renders its note in a sentence", () => {
   const html = renderDiff({ path: "new.txt", status: "untracked", binary: false, hunks: [] }, STAGING);
   assert.deepEqual(notesIn(html), [UNTRACKED_NOTE]);
-  const badge = badgeIn(html);
-  assert.ok(badge?.tokens.includes("diff-badge-untracked"), "the untracked badge class is load-bearing");
-  assert.equal(badge?.text, "??");
-  // Discard resets a tracked file to HEAD; an untracked file has no HEAD state to return to, so
-  // the control is withheld rather than offered and failed.
-  assert.equal(offersDiscard(html), false);
 });
 
-test("the Discard suppression is specific to untracked files, not blanket", () => {
-  // Every tracked class, because `discardFile` handles each of them — it has dedicated `added` and
-  // `renamed` branches (apps/runner/src/git-ops.ts:1955-1963). A guard narrowed to `modified`, or
-  // one that also excluded binaries, would silently strip Discard from the rest.
-  const tracked: GitDiffFile[] = [
-    { path: "src/app.ts", status: "modified", binary: false, hunks: [TEXT_HUNK] },
-    { path: "src/new.ts", status: "added", binary: false, hunks: [TEXT_HUNK] },
-    { path: "src/gone.ts", status: "deleted", binary: false, hunks: [TEXT_HUNK] },
-    { path: "src/moved.ts", status: "renamed", binary: false, hunks: [TEXT_HUNK] },
-    { path: "logo.png", status: "modified", binary: true, hunks: [] },
-  ];
-  for (const file of tracked) {
-    assert.ok(offersDiscard(renderDiff(file, STAGING)), `${file.status}/${file.binary}`);
+/** The file's status letter: its tokens, the visible letter and the word that names it. */
+function statusIn(html: string): { tokens: string[]; letter: string; word: string; title: string } | null {
+  const open = /<span([^>]*)><span aria-hidden="true">([^<]*)<\/span><span class="sr-only">([^<]*)<\/span><\/span>/.exec(html);
+  if (!open || !classTokens(open[1]!).includes("dfile-status")) return null;
+  return {
+    tokens: classTokens(open[1]!),
+    letter: open[2]!,
+    word: open[3]!,
+    title: /\stitle="([^"]*)"/.exec(open[1]!)?.[1] ?? "",
+  };
+}
+
+test("each change kind shows its letter, named by its word, and only Added and Deleted are tinted (#2848)", () => {
+  const expected = [
+    ["added", "A", "Added", "is-added"],
+    ["modified", "M", "Modified", null],
+    ["deleted", "D", "Deleted", "is-deleted"],
+    ["renamed", "R", "Renamed", null],
+    // Never "??": an untracked file is U, like every other letter.
+    ["untracked", "U", "Untracked", null],
+  ] as const;
+  for (const [status, letter, word, tint] of expected) {
+    const html = renderDiff({ path: "src/file.ts", status, binary: false, hunks: [] });
+    const shown = statusIn(html);
+    assert.ok(shown, status);
+    assert.equal(shown.letter, letter, status);
+    assert.equal(shown.word, word, `${status} is named by its word`);
+    assert.equal(shown.title, word, `${status}'s tooltip is its word`);
+    assert.deepEqual(shown.tokens.filter((token) => token.startsWith("is-")), tint ? [tint] : [], status);
+    assert.doesNotMatch(html, /\?\?/, "no ?? anywhere");
   }
-  assert.deepEqual(
-    notesIn(renderDiff(tracked[0]!, STAGING)),
-    [],
-    "a file with hunks renders a patch, not a note",
-  );
 });
 
-test("Discard renders only inside the file head row, the surface its contrast is measured on", () => {
-  // light-theme.test.ts measures the transparent `.diff-discard` on --bg-elev alone, because
-  // `.diff-file-head-row` paints that surface. Rendered anywhere else, its --red text would sit on
-  // a surface the contrast check no longer measures.
-  const html = renderDiff({ path: "src/app.ts", status: "modified", binary: false, hunks: [TEXT_HUNK] }, STAGING);
-  const row = html.match(/<div class="diff-file-head-row">([\s\S]*?)<\/div>/);
-  assert.ok(row, "the file head row renders");
-  assert.equal(elementsWithClass(row[1]!, "button", "diff-discard").length, 1, "Discard sits in the head row");
-  assert.equal(elementsWithClass(html, "button", "diff-discard").length, 1, "and nowhere else");
+test("a path keeps its file name whole beside a faint folder, with the full path as its tooltip", () => {
+  const html = renderDiff({ path: "apps/shop/src/checkout/CheckoutPage.tsx", status: "modified", binary: false, hunks: [] });
+  assert.match(html, /<span class="dfile-path" title="apps\/shop\/src\/checkout\/CheckoutPage\.tsx"><span class="dfile-dir">apps\/shop\/src\/checkout\/<\/span><span class="dfile-name">CheckoutPage\.tsx<\/span><\/span>/);
+  // A root-level file has no folder part to give way.
+  assert.match(renderDiff({ path: "README.md", status: "modified", binary: false, hunks: [] }),
+    /<span class="dfile-path" title="README\.md"><span class="dfile-name">README\.md<\/span><\/span>/);
 });
 
-test("line staging names a hunk's buttons in Title Case on both index panes (#2096)", () => {
+test("a rename names its old path as quiet from text, with no arrow", () => {
+  const html = renderDiff({ path: "src/cart/cart-totals.ts", oldPath: "src/cart/totals.ts", status: "renamed", binary: false, hunks: [] });
+  assert.deepEqual(elementsWithClass(html, "span", "dfile-from").map(({ text }) => text), ["from src/cart/totals.ts"]);
+  assert.doesNotMatch(html, /→/);
+});
+
+test("no text glyph stands in for an icon in the diff (#2848)", () => {
+  const staged: GitHunk = { ...TEXT_HUNK, staged: true };
+  const html = [
+    renderDiff({ path: "src/app.ts", status: "modified", binary: false, hunks: [staged, TEXT_HUNK] }, STAGING),
+    renderDiff({ path: "src/moved.ts", oldPath: "src/old.ts", status: "renamed", binary: false, hunks: [] }, STAGING),
+    renderDiff({ path: "notes.md", status: "untracked", binary: false, hunks: [] }, STAGING),
+  ].join("");
+  for (const glyph of ["↗", "??", "▾", "▸", "→", "✓"]) assert.ok(!html.includes(glyph), `no ${glyph}`);
+  assert.doesNotMatch(html, />Discard</, "no Discard button on the file");
+});
+
+/** The hunk header's buttons, in order, with React's text separators removed. */
+function hunkActions(html: string): string[] {
+  return elementsWithClass(html, "button", "btn").map(({ text }) => text.replace(/<!-- -->/g, ""));
+}
+
+test("line staging names a hunk's one button in Title Case on both index panes (#2096, #2848)", () => {
   const file: GitDiffFile = { path: "src/app.ts", status: "modified", binary: false, hunks: [TEXT_HUNK] };
-  const actions = (pane: DiffPane) => elementsWithClass(renderDiff(file, { ...STAGING, pane }), "button", "hunk-act")
-    .map(({ text }) => text.replace(/<!-- -->/g, ""));
-  assert.deepEqual(actions("unstaged"), ["Stage Hunk", "Stage Selected (0)"]);
-  assert.deepEqual(actions("staged"), ["Unstage Hunk", "Unstage Selected (0)"]);
+  // Stage Selected appears once there is a selection, so the header is one line at rest.
+  assert.deepEqual(hunkActions(renderDiff(file, { ...STAGING, pane: "unstaged" })), ["Stage Hunk"]);
+  assert.deepEqual(hunkActions(renderDiff(file, { ...STAGING, pane: "staged" })), ["Unstage Hunk"]);
+});
+
+test("All Changes stages a hunk with Stage Hunk, and a staged hunk says Staged beside Unstage Hunk", () => {
+  const staged: GitHunk = { ...TEXT_HUNK, staged: true };
+  const html = renderDiff({ path: "src/app.ts", status: "modified", binary: false, hunks: [TEXT_HUNK, staged] }, STAGING);
+  assert.deepEqual(hunkActions(html), ["Stage Hunk", "Unstage Hunk"]);
+  const chip = elementsWithClass(html, "span", "hunk-staged");
+  assert.equal(chip.length, 1);
+  assert.match(chip[0]!.text, /<svg[^>]*class="[^"]*lucide-check[^"]*"[\s\S]*Staged$/, "a check icon, then Staged");
+  // Both are the one ghost button the header reveals with a mouse.
+  assert.equal(elementsWithClass(html, "button", "hunk-stage").length, 2);
+  assert.ok(elementsWithClass(html, "button", "hunk-stage").every(({ tokens }) => tokens.includes("ghost") && tokens.includes("sm")));
 });
 
 test("a renamed file that also changed content renders its patch, not the rename note", () => {

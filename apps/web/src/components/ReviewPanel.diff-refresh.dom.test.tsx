@@ -414,15 +414,15 @@ async function mountPanel(options: {
 /* -------------------------------------------------------------------------- */
 
 function card(container: HTMLElement, path: string): HTMLElement {
-  for (const file of container.querySelectorAll<HTMLElement>(".diff-file")) {
-    if (file.querySelector(".diff-file-path")?.textContent?.includes(path)) return file;
+  for (const file of container.querySelectorAll<HTMLElement>(".dfile")) {
+    if (file.dataset.path === path) return file;
   }
   throw new Error(`no diff card for ${path}`);
 }
 
 function stageButton(container: HTMLElement, path: string): HTMLElement {
-  const found = [...card(container, path).querySelectorAll<HTMLElement>("button.hunk-act")]
-    .find((button) => (button.textContent ?? "").trim() === "Stage");
+  const found = [...card(container, path).querySelectorAll<HTMLElement>("button.hunk-stage")]
+    .find((button) => (button.textContent ?? "").trim() === "Stage Hunk");
   if (!found) throw new Error(`no Stage control on ${path}`);
   return found;
 }
@@ -444,7 +444,7 @@ async function chooseViewOption(container: HTMLElement, label: string): Promise<
 /** How many lines the visible hunks report as selected, read off the Stage/Unstage Selected labels. */
 function selectedCount(container: HTMLElement): number {
   let total = 0;
-  for (const button of container.querySelectorAll<HTMLElement>("button.hunk-act")) {
+  for (const button of container.querySelectorAll<HTMLElement>(".hunk-actions button")) {
     const found = /Selected \((\d+)\)/.exec(button.textContent ?? "");
     if (found) total += Number(found[1]);
   }
@@ -517,7 +517,7 @@ test("Open in Review re-reads the diff and waits for a file the diff on screen p
     harness.serveDiff(diffOf("2", [fileA(), fileB(), { ...fileA(), path: "src/c.ts" }]));
     await release();
     assert.equal(harness.focusHandled(), 1);
-    assert.equal(card(harness.container, "src/c.ts").querySelector(".diff-file-head"), domWindow.document.activeElement as unknown);
+    assert.equal(card(harness.container, "src/c.ts").querySelector(".dfile-toggle"), domWindow.document.activeElement as unknown);
   } finally {
     await harness.unmount();
   }
@@ -535,7 +535,7 @@ test("a second Open in Review after a met one still waits for its own fresh read
     harness.serveDiff(diffOf("3", [fileA(), fileB(), { ...fileA(), path: "src/c.ts" }]));
     await release();
     assert.equal(harness.focusHandled(), 2);
-    assert.equal(card(harness.container, "src/c.ts").querySelector(".diff-file-head"), domWindow.document.activeElement as unknown);
+    assert.equal(card(harness.container, "src/c.ts").querySelector(".dfile-toggle"), domWindow.document.activeElement as unknown);
   } finally {
     await harness.unmount();
   }
@@ -622,13 +622,13 @@ test("an unsent draft survives a refresh that rewrites its own file around it", 
 });
 
 const collapseState = (container: HTMLElement, path: string) =>
-  field<HTMLElement>(card(container, path), "button.diff-file-head").getAttribute("aria-expanded");
+  field<HTMLElement>(card(container, path), "button.dfile-toggle").getAttribute("aria-expanded");
 
 test("a collapsed file stays collapsed when another file's change reloads the diff", async () => {
   const harness = await mountPanel();
   try {
     await act(async () => {
-      fireDomEvent.click(field<HTMLElement>(card(harness.container, "src/a.ts"), "button.diff-file-head"));
+      fireDomEvent.click(field<HTMLElement>(card(harness.container, "src/a.ts"), "button.dfile-toggle"));
     });
     assert.equal(collapseState(harness.container, "src/a.ts"), "false");
     assert.equal(collapseState(harness.container, "src/b.ts"), "true");
@@ -1373,7 +1373,7 @@ test("a failed background reload keeps the diff on screen and offers a manual re
     await harness.render({ status: statusOf({ addedLines: 7 }) });
 
     assert.deepEqual(harness.diffCalls, ["uncommitted", "uncommitted"]);
-    assert.ok(harness.container.querySelector(".diff-file"), "the diff the reviewer was reading is still there");
+    assert.ok(harness.container.querySelector(".dfile"), "the diff the reviewer was reading is still there");
     assertNoDomNode(harness.container.querySelector(".composer-error"),
       "a background failure does not hijack the error surface");
     assert.ok(lagNotice(harness.container), "but it is not silent either");

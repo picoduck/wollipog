@@ -173,5 +173,6 @@ test("Review exposes selectable added, removed, and both context sides with immu
   assert.match(html, /Select Worktree Line 10 for Prompt/);
   assert.match(html, /Select Base Line 11 for Prompt/);
   assert.match(html, /Select Worktree Line 11 for Prompt/);
-  assert.match(html, /Attach Selected \(0\)/);
+  // Attach Selected appears once lines are chosen (#2848), so an unselected hunk header stays one line.
+  assert.doesNotMatch(html, /Attach Selected/);
 });

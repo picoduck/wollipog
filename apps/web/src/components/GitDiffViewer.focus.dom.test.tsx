@@ -54,7 +54,7 @@ test("Open in Review expands its file, scrolls it into view and focuses its head
     <GitDiffViewer diff={diff} focus={focus} onFocusHandled={() => { handled += 1; }} />,
   );
   await act(async () => render(null));
-  const head = (path: string) => container.querySelector<HTMLButtonElement>(`.diff-file[data-path="${path}"] .diff-file-head`)!;
+  const head = (path: string) => container.querySelector<HTMLButtonElement>(`.dfile[data-path="${path}"] .dfile-toggle`)!;
   await act(async () => head("src/b.ts").click());
   assert.equal(head("src/b.ts").getAttribute("aria-expanded"), "false", "the reader collapsed it");
 
@@ -82,7 +82,7 @@ test("a diff read before the request waits for the file instead of giving up", a
   const fresh: GitDiffInfo = { ...diff, diffHash: "e".repeat(64), files: [file("src/a.ts"), file("src/new.ts")] };
   await act(async () => render(fresh, true));
   assert.equal(handled, 1);
-  assert.equal(container.querySelector(".diff-file[data-path='src/new.ts'] .diff-file-head"), domWindow.document.activeElement as unknown,
+  assert.equal(container.querySelector(".dfile[data-path='src/new.ts'] .dfile-toggle"), domWindow.document.activeElement as unknown,
     "the file that arrived with the fresh read is the one focused");
 });
 

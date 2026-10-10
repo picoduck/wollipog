@@ -58,7 +58,7 @@ for (const pointer of ["fine", "coarse"] as const) {
 
       // Review's file sections are its list (#2846): the 12-row changed-file list is gone.
       await page.goto("/review-anchor-reload-e2e.html");
-      await expect(page.locator(".diff-file").first()).toBeVisible();
+      await expect(page.locator(".dfile").first()).toBeVisible();
       await expect(page.locator(".git-files")).toHaveCount(0);
     });
   });

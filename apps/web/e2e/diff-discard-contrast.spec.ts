@@ -3,8 +3,9 @@ import { motionSettled } from "./dialog-motion.js";
 
 /**
  * Discard's label against what is actually painted behind it: its own fill composited over the
- * nearest opaque ancestor, which is the file head row. The canvas does the compositing, so a
- * `color-mix(…, transparent)` hover tint is measured as Chromium blends it, not as declared.
+ * nearest opaque ancestor, which is the file actions menu since #2848 moved Discard there. The canvas
+ * does the compositing, so a `color-mix(…, transparent)` hover tint is measured as Chromium blends it,
+ * not as declared.
  */
 async function paint(locator: Locator) {
   // Buttons ease color and background over 130ms, so a reading taken mid-transition is neither
@@ -44,7 +45,8 @@ for (const theme of ["dark", "light"] as const) {
     await page.setViewportSize({ width: 900, height: 400 });
     for (const scheme of ["wollipog", "github", "one-dark", "dracula", "monokai"] as const) {
       await page.goto(`/diff-discard-e2e.html?scheme=${scheme}&theme=${theme}`);
-      const discard = page.getByRole("button", { name: "Discard" });
+      await page.getByRole("button", { name: "src/session.ts Actions" }).click();
+      const discard = page.getByRole("menuitem", { name: "Discard Changes…" });
       await expect(discard).toBeEnabled();
 
       await page.mouse.move(0, 0);
@@ -58,8 +60,9 @@ for (const theme of ["dark", "light"] as const) {
         const [r, g, b] = measured.ink;
         expect(r > g && r > b, `${context} ${state} ink rgb(${r} ${g} ${b}) must stay red`).toBe(true);
       }
-      // The fix changes the label, not the feedback: hover still tints the button.
-      expect(hover.ground, `${context} hover must still repaint the button`).not.toEqual(rest.ground);
+      // The fix changes the label, not the feedback: hover still tints the item.
+      expect(hover.ground, `${context} hover must still repaint the item`).not.toEqual(rest.ground);
+      await page.keyboard.press("Escape");
     }
   });
 }

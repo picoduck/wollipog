@@ -289,11 +289,9 @@ const ICON_ONLY = new Set([
  * wherever the parent goes. The parent's fill is asserted below, and the component test pins the
  * nesting, so neither half of the claim can drift silently.
  */
-const KNOWN_SURFACE: ReadonlyMap<string, { surface: (typeof SURFACES)[number]; paintedBy: string }> = new Map([
-  // `var(--red)` is a fill hue, not a text token, and clears 4.5:1 on --bg-elev but not on
-  // --bg-elev-3. Discard renders only in the file head row (GitDiffViewer.test.tsx).
-  [".diff-discard", { surface: "--bg-elev", paintedBy: ".diff-file-head-row" }],
-]);
+// None today: the one pinned rule, the diff's transparent red Discard button, became a danger item
+// in the file actions menu (#2848), whose ink is a text token measured like any other.
+const KNOWN_SURFACE: ReadonlyMap<string, { surface: (typeof SURFACES)[number]; paintedBy: string }> = new Map();
 
 /**
  * Properties that repaint glyphs after `color` has been resolved.

@@ -2946,6 +2946,7 @@ button.status { cursor: pointer; }
 }
 .disclosure[open] > summary > .disclosure-chevron,
 .disclosure-trigger[aria-expanded="true"] > .disclosure-chevron,
+.dfile-toggle[aria-expanded="true"] > .disclosure-chevron,
 .inbox-thread-toggle[aria-expanded="true"] > .disclosure-chevron { transform: rotate(90deg); }
 .disclosure-body {
   display: flex;
@@ -10716,6 +10717,11 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   padding: 0;
   list-style: none;
 }
+/* A path or an id among the rows (Discard's file, #2848). */
+.confirmation-rows .row-title.mono {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
 .confirmation-rows-more {
   margin: calc(var(--space-2) - var(--space-4)) 0 0;
   color: var(--text-dim);
@@ -13170,7 +13176,9 @@ body.shell-dock-dragging * {
   margin: 0;
 }
 
-/* Phase 2: diff viewer — scope selector, per-file cards, +/- line coloring, gutter. */
+/* Phase 2: diff viewer. Each changed file is a flush section (#2848): a top hairline, a sticky
+   head, then its hunks. The sections span the scroller's side padding, so code starts near the
+   panel's edge. */
 .git-diff-section {
   display: flex;
   flex-direction: column;
@@ -13179,180 +13187,172 @@ body.shell-dock-dragging * {
 .diff-view {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  margin: 0 calc(-1 * var(--space-4));
+  border-bottom: 1px solid var(--border);
 }
 .diff-empty {
   font-size: 12.5px;
   padding: 6px 2px;
 }
-
-/* Per-file card. */
-.diff-file {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg);
-  overflow: hidden;
-}
-.diff-file-head-row {
-  display: flex;
-  align-items: stretch;
-  background: var(--bg-elev);
-}
-.diff-file-head {
+.dfile { border-top: 1px solid var(--border); }
+/* The head stays at the top of the panel's scroller while its file scrolls under it, at the
+   scroller's edge rather than under its top padding (`.rpanel-scroll`). Collapsed, the heads are the
+   file index: one dense row each (§2.8: 32px, 44px on touch). */
+.dfile-head {
+  position: sticky;
+  top: calc(-1 * var(--space-3));
+  z-index: var(--z-sticky);
   display: flex;
   align-items: center;
-  gap: 8px;
-  flex: 1;
+  gap: var(--space-1);
+  padding-inline: var(--space-2);
+  background: var(--bg);
+}
+.dfile-toggle {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: var(--space-2);
   min-width: 0;
+  min-height: var(--row-h-dense);
+  padding: 0 var(--space-2);
   border: 0;
-  background: var(--bg-elev);
+  border-radius: var(--radius-sm);
+  background: transparent;
   color: var(--text);
-  padding: 6px 10px;
-  cursor: pointer;
+  font: var(--type-body);
   text-align: left;
-  font-size: 12.5px;
-}
-.diff-discard {
-  flex: none;
-  border: 0;
-  border-left: 1px solid var(--border);
-  background: transparent;
-  color: var(--red);
-  padding: 0 10px;
-  font-size: 11px;
   cursor: pointer;
 }
-.diff-open-source {
-  flex: none;
-  border: 0;
-  border-left: 1px solid var(--border);
-  background: transparent;
-  color: var(--text-dim);
-  padding: 0 10px;
-  cursor: pointer;
-}
-.diff-open-source:hover {
-  background: var(--bg-elev-2);
-  color: var(--accent);
-}
-/* The red tint costs the bare --red label its AA margin (4.09:1 in one-dark:dark), so the hover
-   names the on-tint ink calibrated for it (#1889). */
-.diff-discard:hover:not(:disabled) {
-  color: var(--red-on-tint);
-  background: color-mix(in srgb, var(--red) 10%, transparent);
-}
-.diff-discard:disabled { opacity: 0.45; cursor: default; }
-.diff-file-head:hover {
-  background: var(--bg-elev-2);
-}
-.diff-file-head .chev {
-  color: var(--text-faint);
-  width: 12px;
-}
-.diff-file-path {
-  font-family: "Cascadia Code", "Consolas", ui-monospace, monospace;
-  word-break: break-all;
-}
-.diff-oldpath {
-  color: var(--text-faint);
-  text-decoration: line-through;
-}
-.diff-arrow {
-  color: var(--text-faint);
-}
-
-/* Status badge. */
-.diff-badge {
+.dfile-toggle:hover { background: var(--bg-elev-2); }
+.dfile-toggle > .disclosure-chevron { color: var(--text-dim); }
+/* The status letter: its word is the tooltip and the accessible name. Added and Deleted sit in a
+   green and a red wash, in the inks calibrated for them; the rest are neutral. */
+.dfile-status {
   display: inline-flex;
+  flex: none;
   align-items: center;
   justify-content: center;
-  min-width: 20px;
-  padding: 1px 5px;
-  border-radius: 4px;
-  font-family: "Cascadia Code", "Consolas", ui-monospace, monospace;
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--bg);
+  min-width: var(--icon-lg);
+  height: var(--icon-lg);
+  border-radius: var(--radius-xs);
+  background: var(--bg-elev-2);
+  color: var(--text-dim);
+  font: var(--type-micro);
+  font-family: var(--font-mono);
 }
-.diff-badge-added {
-  background: var(--green);
+.dfile-status.is-added {
+  background: color-mix(in srgb, var(--green) 14%, transparent);
+  color: var(--green-on-tint);
 }
-.diff-badge-modified {
-  background: var(--amber);
+.dfile-status.is-deleted {
+  background: color-mix(in srgb, var(--red) 14%, transparent);
+  color: var(--red-on-tint);
 }
-.diff-badge-deleted {
-  background: var(--red);
+/* A path in mono, its folder faint and its file name whole: short of room, the folder gives way
+   first (§11.3); the whole path is the tooltip. */
+.dfile-path {
+  display: flex;
+  min-width: 0;
+  font: var(--type-small);
+  font-family: var(--font-mono);
+  white-space: nowrap;
 }
-.diff-badge-renamed {
-  background: var(--blue);
+.dfile-dir,
+.dfile-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.diff-badge-untracked {
-  background: var(--text-faint);
+.dfile-dir {
+  flex: 0 1 auto;
+  color: var(--text-dim);
 }
-
-.diff-file-body {
+.dfile-name {
+  flex: 0 0 auto;
+  max-width: 100%;
+}
+/* A rename's old path, quiet, and the first to go when the head is short of room. */
+.dfile-from {
+  flex: 0 100 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-dim);
+  font: var(--type-small);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dfile-staged,
+.dfile-stat {
+  flex: none;
+  font: var(--type-small);
+  font-variant-numeric: tabular-nums;
+}
+.dfile-staged { color: var(--text-dim); }
+.dfile-stat {
+  display: inline-flex;
+  gap: var(--space-1);
+}
+.dfile-toggle > :is(.dfile-staged, .dfile-stat) { margin-left: auto; }
+.dfile-staged + .dfile-stat { margin-left: 0; }
+.dfile-stat > .diff-ins { color: var(--positive-text); }
+.dfile-stat > .diff-del { color: var(--danger-text); }
+.dfile-actions { flex: none; }
+/* A stage race on this file, at the top of its section (#2848). */
+.dfile-notice { margin: 0 var(--space-4) var(--space-2); }
+.diff-view > .dfile-notice { margin-top: var(--space-2); }
+.dfile-body {
   display: flex;
   flex-direction: column;
 }
 .diff-note {
-  padding: 8px 12px;
-  font-size: 12px;
-  font-style: italic;
+  margin: 0;
+  padding: var(--space-2) var(--space-4);
+  color: var(--text-dim);
+  font: var(--type-small);
 }
 
 /* Hunk. */
 .diff-hunk {
   border-top: 1px solid var(--border);
 }
+/* One line at every width (#2848): the range truncates, and the hunk's one action is a ghost button.
+   With a mouse it shows while the hunk is hovered or holds focus; on touch it is always there. */
 .diff-hunk-header {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 3px 12px;
-  background: var(--bg-elev-2);
-  color: var(--accent);
-  font-family: "Cascadia Code", "Consolas", ui-monospace, monospace;
-  font-size: 11.5px;
+  gap: var(--space-2);
+  min-height: var(--control-h);
+  padding: 0 var(--space-2) 0 var(--space-4);
+  background: var(--bg-elev);
+  color: var(--text-dim);
+  font: var(--type-small);
+  font-family: var(--font-mono);
 }
 .diff-hunk-header-text {
-  flex: 1;
+  flex: 1 1 auto;
   min-width: 0;
-  white-space: pre-wrap;
-  word-break: break-all;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .hunk-actions {
   display: inline-flex;
+  flex: none;
   align-items: center;
-  gap: 8px;
-  flex: none;
+  gap: var(--space-1);
+  font-family: var(--font-ui);
 }
-.hunk-staged-chip {
-  font-size: 11px;
-  color: var(--green);
-  font-family: inherit;
+.hunk-staged {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--positive-text);
+  font: var(--type-small);
 }
-.hunk-act {
-  border: 1px solid var(--border-strong);
-  background: var(--bg-elev);
-  color: var(--text-dim);
-  border-radius: 6px;
-  padding: 1px 9px;
-  font-size: 11px;
-  cursor: pointer;
-}
-.hunk-act:hover:not(:disabled) {
-  color: var(--text);
-  border-color: var(--accent);
-}
-.hunk-act:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-.diff-staged-count {
-  flex: none;
-  font-size: 11px;
-  margin-left: auto;
-  padding-right: 2px;
+@media (hover: hover) and (pointer: fine) {
+  .hunk-stage:not([aria-busy="true"]) { opacity: 0; }
+  .diff-hunk:is(:hover, :focus-within) .hunk-stage { opacity: 1; }
 }
 .diff-hunk-lines {
   font-family: "Cascadia Code", "Consolas", ui-monospace, monospace;
@@ -13380,7 +13380,6 @@ body.shell-dock-dragging * {
 .diff-split-row {
   display: grid;
   grid-template-columns: minmax(360px, 1fr) minmax(360px, 1fr);
-  min-width: 720px;
   border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
 }
 .diff-split-cell {
@@ -13389,7 +13388,47 @@ body.shell-dock-dragging * {
   align-items: baseline;
   white-space: pre;
 }
-.diff-split-cell:first-child { border-right: 1px solid var(--border); }
+.diff-split-row > .diff-split-cell:first-child { border-right: 1px solid var(--border); }
+/* Side by Side (#2848): two columns that each scroll sideways, so a long line stays in its own
+   column. A column is as wide as its longest row, and at least as wide as itself, so every row's
+   wash reaches the far edge. Every row is one line high, which keeps the two columns level. */
+.dsplit {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+.dsplit > .side {
+  display: grid;
+  grid-template-columns: minmax(100%, max-content);
+  min-width: 0;
+  overflow-x: auto;
+}
+.dsplit > .side + .side { border-left: 1px solid var(--border); }
+/* One line high: the 22px of the comment button every row carries (`.diff-comment-add`). */
+.dsplit > .side > .diff-split-cell {
+  height: 22px;
+  align-items: center;
+}
+/* Wrapped, rows differ in height, so each pair is a row of its own instead. */
+.dsplit.is-wrapped { display: block; }
+.dsplit-pair {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+.dsplit-pair > .diff-split-cell + .diff-split-cell { border-left: 1px solid var(--border); }
+/* Wrap Long Lines: code wraps inside its own column; the gutters keep the first line's baseline. */
+.diff-view.is-wrapped :is(.diff-line, .diff-split-cell) {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.diff-view.is-wrapped .diff-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+/* The row's boxes stay on its first line, beside its number. */
+.diff-view.is-wrapped .diff-line-select {
+  align-self: flex-start;
+  height: 1.5em;
+}
 .diff-split-empty { background: color-mix(in srgb, var(--bg-elev) 55%, transparent); }
 .diff-split-cell .diff-comment-add {
   position: static;
@@ -15017,9 +15056,6 @@ body.shell-dock-dragging * {
 /* The diff and the findings answer to the side panel's width, not the window's (§2.10; #2843): a
    400px panel on a desktop gets the narrow layout, and a single-column finding row. */
 @container rp (max-width: 640px) {
-  .diff-file-head-row { align-items: stretch; }
-  .diff-hunk-header { align-items: flex-start; flex-direction: column; }
-  .hunk-actions { width: 100%; flex-wrap: wrap; }
   .diff-comment-editor,
   .diff-inline-finding { margin-left: 10px; }
   .review-findings-head { align-items: flex-start; flex-direction: column; }
@@ -15027,13 +15063,24 @@ body.shell-dock-dragging * {
   .review-finding-row { grid-template-columns: 22px minmax(0, 1fr); }
   .review-finding-row-actions { grid-column: 2; }
 }
-/* The diff's touch affordances, which the narrow window stood in for: a comment button with no
-   hover to reveal it, and taller Discard and hunk actions. In a 400px desktop panel they keep their
-   hover reveal and mouse sizes (#2843). */
+/* A narrow panel has room for one line-number column (#2848): the new number, or the old one on a
+   deletion. */
+@container rp (max-width: 479px) {
+  .diff-line:not(.diff-line-del) > .diff-gutter-old,
+  .diff-line-del > .diff-gutter-old + .diff-gutter { display: none; }
+}
+/* At the panel's narrowest the file name needs the head; each hunk still says it is staged. */
+@container rp (max-width: 379px) {
+  .dfile-staged { display: none; }
+}
+/* In forced colors the file head's chevron follows its words. */
+@media (forced-colors: active) {
+  .dfile-toggle > .disclosure-chevron { color: inherit; }
+}
+/* The diff's touch affordance, which the narrow window stood in for: a comment button with no hover
+   to reveal it. In a 400px desktop panel it keeps its hover reveal (#2843). */
 @media (pointer: coarse) {
   .diff-comment-add { opacity: 1; }
-  .diff-discard { min-height: 36px; }
-  .hunk-act { min-height: 32px; }
 }
 
 /* ------------------------------ Agent skills ------------------------------ */

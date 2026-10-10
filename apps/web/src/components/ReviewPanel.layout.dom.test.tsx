@@ -418,7 +418,7 @@ test("a session with no uncommitted files and one commit ahead opens Review on B
   try {
     assert.deepEqual(harness.calls.diff, ["all_branch"], "the first and only read is the Branch diff");
     assert.equal(scopeOption(harness.container, "Branch")?.getAttribute("aria-checked"), "true");
-    assert.ok(harness.container.querySelector(".diff-file"), "the branch's changes are on screen");
+    assert.ok(harness.container.querySelector(".dfile"), "the branch's changes are on screen");
   } finally {
     await harness.unmount();
   }
@@ -553,7 +553,7 @@ test("offline keeps the last-known review visible and dimmed under a compact war
     assert.ok(offline!.classList.contains("t-warning") && offline!.classList.contains("compact"));
     assert.match(offline!.textContent ?? "", /is offline\. This review is from .+\./);
     const stale = harness.container.querySelector(".is-stale");
-    assert.ok(stale?.querySelector(".diff-file"), "the last-known diff stays on screen, dimmed");
+    assert.ok(stale?.querySelector(".dfile"), "the last-known diff stays on screen, dimmed");
     assert.ok(stale?.querySelector(".review-summary"), "and so does the summary");
     assert.ok(!stale?.contains(offline!), "the notice itself is not dimmed");
 

@@ -24,6 +24,8 @@ export interface ConfirmationDetailRow {
   /** The affected object's name, such as a session title. One line, truncated, with the full text in
    * a tooltip. */
   label: string;
+  /** `mono` sets the label in the monospace face, for a path or an id (§11.3). */
+  labelStyle?: "mono";
   /** A short neutral fact, trailing in `--text-faint` (§11.3). */
   meta?: string;
   /** Drawn as the shared inline status badge, normally `statusMeta(domain, value)` (§11.1). */
@@ -121,7 +123,7 @@ function confirmationFingerprint(options: ConfirmationOptions): string {
     options.confirmLabel,
     options.tone ?? "",
     typeof options.details === "string" ? options.details : "",
-    JSON.stringify((options.detailRows ?? []).map((row) => [row.label, row.meta ?? "", row.status?.label ?? "", row.status?.tone ?? ""])),
+    JSON.stringify((options.detailRows ?? []).map((row) => [row.label, row.labelStyle ?? "", row.meta ?? "", row.status?.label ?? "", row.status?.tone ?? ""])),
     String(options.detailRowsOverflow ?? 0),
     options.cancelLabel ?? "",
     options.secondaryAction?.label ?? "",
@@ -723,7 +725,7 @@ function ConfirmationDialog({ request, onSettle }: {
           {shownRows.map((row, index) => (
             <li className="row dense" key={index}>
               <span className="row-body">
-                <span className="row-title" title={row.label}>{row.label}</span>
+                <span className={row.labelStyle === "mono" ? "row-title mono" : "row-title"} title={row.label}>{row.label}</span>
               </span>
               {row.meta && <span className="row-trail">{row.meta}</span>}
               {row.status && <StatusBadge meta={row.status} inline />}

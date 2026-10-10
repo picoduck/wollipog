@@ -1,1 +1,0 @@
-|.diff-staged-count|font-size|11
