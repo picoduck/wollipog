@@ -56,10 +56,62 @@ before the assertions.
 | Base + Width Ref Fix | 30 | 838 → 821 | 344 → 344 | 0 | 11.20 → 13.75 |
 
 All 31 fixed-run samples have zero retired weak roots. Native node count stays between 821 and
-838 and listener count is exactly 344. The heap still grows, with ten-cycle slopes declining from
-143,220 to 85,494 to 38,709 bytes per cycle. This observation does not prove a heap plateau or
-identify the remaining allocations; the DOM release claim is supported by the distinct-root
-snapshot, weak-reference probe and raw DOM/listener measurements, not a heap-counter reset.
+838 and listener count is exactly 344. The normal V8 heap still grows, with ten-cycle slopes
+declining from 143,220 to 85,494 to 38,709 bytes per cycle. This series alone does not prove a heap
+plateau. The subsequent allocation diagnosis below separates compilation and inspection from
+session-resource retention; the failed reference runs and this raw series remain intact.
+
+## Remaining Heap Allocation Diagnosis
+
+A second run captures forced-GC snapshots after the two warm-up cycles and after 60 measured
+cycles in the **same browser process**, comparing node IDs rather than treating every late object
+as newly retained. DOM stays at 821–838 nodes, listeners at 344, and detached previews at zero.
+`JSHeapUsedSize` goes from 11,736,636 to 15,085,372 bytes. Its ten-cycle points are 13,157,808,
+14,014,396, 14,390,328, 14,494,428, 14,713,224 and 15,085,372 bytes: ordinary V8 compilation has
+not finished warming up even at this duration.
+
+The snapshot's new-minus-lost **shallow** bytes identify the owners:
+
+| Group | Net Shallow Bytes | Strong Owner Path / Evidence |
+| --- | ---: | --- |
+| V8 `InstructionStream` | 1,929,280 | Live module function → `Code` → `instruction_stream` |
+| V8 `TrustedByteArray` | 615,276 | Live module function → `Code` → `deoptimization_data` → `ProtectedFixedArray` |
+| V8 `ProtectedFixedArray` | 260,436 | Compiled function deoptimization metadata |
+| Native V8 `WeakArrayList` | 240,336 | Strong root list → `no_undetectable_objects_protector` → `PropertyCell.dependent_code` |
+| Blink network resource records | 461,088 | C++ persistent root → `DevToolsSession` → `InspectorNetworkAgent` → `NetworkResourcesData` |
+| `PerformanceResourceTiming` | 26,384 | `Performance` → native performance-entry buffer |
+| Plain JS `Object` | 28,604 | Representative React hook state is reachable from a live Inbox row's fiber; old fork/focus contexts retain JS state with cleared DOM refs |
+| Probe `WeakRef` | 8,640 | `Window.__retiredPreviews`; 540 additional weak references, with no strong retired root |
+
+Source maps resolve the largest new instruction stream (snapshot ID 674593, 181,824 shallow bytes)
+to `InboxView` (`InboxView.tsx:191`, minified `Iwe`). Its function closure ID 157187 exists in both
+snapshots. The same function's 71,812-byte `TrustedByteArray` is deoptimization data, not a session
+transcript. Another 35,392-byte instruction stream belongs to `useFollowTail`
+(`useFollowTail.ts:195`, `ate`); its closure ID 196361 also predates the measured cycles. The V8 code
+category grows by 2,994,560 shallow bytes overall. These are compiled code/metadata attached to
+existing functions, not hundreds of surviving SessionDetail render contexts.
+
+The 1,601 net additional network records are explicitly owned by the inspector, not application
+response caches. Performance timing entries increase from 57 to 251 native snapshot objects.
+Neither native Blink group should be added to `JSHeapUsedSize`. Snapshot shallow sizes also differ
+from retained sizes and the performance counter's accounting; the table is an allocation/owner
+diagnosis, not a byte-for-byte reconciliation of that counter.
+
+Application object shallow totals are 809,704 bytes early and 858,168 bytes late; closures increase
+by 7,656 bytes. In the separate 30-cycle snapshot, those totals are 864,072 and 433,968 bytes,
+versus 858,168 and 432,636 at 60 cycles. Large SessionDetail render contexts number 9 early, 12
+in that 30-cycle run, and 13 at 60, rather than growing once per navigation. These small differences
+include live/alternate React state and bounded surviving action contexts. The width ref releases
+their DOM ownership; this change does not discard memoized session data or selectors.
+
+A causal control uses the identical production bundle with Chromium `--js-flags=--jitless`, keeping
+the same sessions, navigation, GC, weak-root recording and DOM assertions. After 30 measured cycles,
+heap is 7,016,648 → 7,132,876 bytes, with cycle 10/20/30 at 7,131,008 / 7,124,884 / 7,132,876 bytes.
+The last 20 cycles add only 1,868 bytes, while DOM/listeners remain 821–838/344 and roots remain zero.
+V8 code shallow growth falls to 34,472 bytes; inspector network/native records still grow. This
+isolates compilation as the normal-run heap-growth driver and shows a stable application-resource
+level after warm-up. It does **not** claim that the normal-V8 raw heap series already plateaued.
+The control supplements the ordinary production run; it never replaces or relaxes its assertions.
 
 The aggregate SHA-256 of the fixed production JavaScript assets is
 `cc8b8a84dc50c99040de9c779d73576ab550a1b4d228b088f7c8cb36875383b2`. The archived historical,
@@ -73,6 +125,11 @@ SESSION_RETENTION_EVIDENCE_DIR=/absolute/private/path \
 
 # Optional longer measurement; accepted values are 10 through 100.
 SESSION_RETENTION_CYCLES=30 SESSION_RETENTION_EVIDENCE_DIR=/absolute/private/path \
+  pnpm exec playwright test --config playwright.retention.config.ts
+
+# Causal control after diagnosing V8 compiled-code ownership; the bundle stays identical.
+SESSION_RETENTION_JITLESS=1 SESSION_RETENTION_CYCLES=30 \
+SESSION_RETENTION_EVIDENCE_DIR=/absolute/private/jitless-evidence \
   pnpm exec playwright test --config playwright.retention.config.ts
 
 # Compare browser source from an isolated reference checkout/archive.
@@ -96,9 +153,10 @@ reader frames; it is test instrumentation, not a product delay. Two warm-up cycl
 measurement. Playwright tracing is disabled because its DOM snapshots/observers introduce an
 additional owner.
 
-`measurements.json` records source revision/dirty state, asset fingerprint, every sample, heap
-trend and a shortest strong GC-root path when detached previews exist. `final.heapsnapshot` keeps
-the full raw graph, and `desktop.png` shows the synthetic surface. The heap analyzer uses only
+`measurements.json` records source revision/dirty state, engine mode, asset fingerprint, every sample,
+heap trend and a shortest strong GC-root path when detached previews exist. `early.heapsnapshot`
+and `final.heapsnapshot` keep the raw before/after graphs when an evidence directory is configured,
+and `desktop.png` shows the synthetic surface. The heap analyzer uses only
 the graph's primitive node/edge arrays outside the browser and excludes weak edges. The in-page
 probe holds only a WeakSet and unique WeakRefs, returns scalar counts and never holds a remote
 DOM handle. It does not reset counters or delete retired refs to hide growth.

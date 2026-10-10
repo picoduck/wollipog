@@ -8,5 +8,9 @@ export default defineConfig({
   workers: 1,
   retries: 0,
   reporter: process.env.CI ? "github" : "list",
-  use: { trace: "off", screenshot: "only-on-failure" },
+  use: { trace: "off", screenshot: "only-on-failure",
+    // Causal diagnostic only: keep the ordinary probe on the production V8 defaults.
+    ...(process.env.SESSION_RETENTION_JITLESS === "1" ?
+      { launchOptions: { args: ["--js-flags=--jitless"] } } : {}),
+  },
 });

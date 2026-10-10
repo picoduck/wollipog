@@ -135,6 +135,10 @@ test("ten nine-session production cycles release detached previews and keep DOM/
   };
   await navigateCycle();
   await navigateCycle();
+  if (evidenceDir) {
+    mkdirSync(evidenceDir, { recursive: true });
+    writeFileSync(join(evidenceDir, "early.heapsnapshot"), await snapshot(cdp));
+  }
   for (let cycle = 0; cycle <= cycles; cycle++) {
     if (cycle > 0) await navigateCycle();
     const counters = await cdp.send("Memory.getDOMCounters");
@@ -152,7 +156,9 @@ test("ten nine-session production cycles release detached previews and keep DOM/
     { cwd: referenceRoot, encoding: "utf8" }).stdout.trim() || "source-archive";
   const gitStatus = spawnSync("git", ["status", "--porcelain"], { cwd: referenceRoot, encoding: "utf8" });
   const sourceDirty = gitStatus.status === 0 ? Boolean(gitStatus.stdout.trim()) : null;
-  const report = { sourceRevision, sourceDirty, assetSha256, sessions: RETENTION_SESSION_COUNT, warmupCycles: 2, measuredCycles: cycles,
+  const report = { sourceRevision, sourceDirty, assetSha256,
+    engineMode: process.env.SESSION_RETENTION_JITLESS === "1" ? "jitless" : "default",
+    sessions: RETENTION_SESSION_COUNT, warmupCycles: 2, measuredCycles: cycles,
     samples, ...retainers, heapTrendBytesPerCycle: (samples.at(-1)!.heapBytes - samples[0]!.heapBytes) / cycles };
   await info.attach("session-retention.json", { body: JSON.stringify(report, null, 2), contentType: "application/json" });
   // Preserve before assertions, including when the reference build intentionally fails.
