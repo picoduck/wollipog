@@ -174,6 +174,15 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
     const working = parent.locator(width < 600 ? ".inbox-thread-working" : ".inbox-thread-family-text");
     await expect(working).toBeVisible();
     await expect(working).toContainText("1 Working");
+    await parent.hover();
+    const actions = parent.locator(".inbox-row-actions");
+    await expect(actions).toBeVisible();
+    const workingBox = await working.boundingBox();
+    const actionsBox = await actions.boundingBox();
+    expect(workingBox).not.toBeNull();
+    expect(actionsBox).not.toBeNull();
+    expect(workingBox!.x + workingBox!.width).toBeLessThanOrEqual(actionsBox!.x);
+    expect(await working.evaluate((label) => label.scrollWidth <= label.clientWidth)).toBe(true);
     await expect(parent.locator(".inbox-thread-family")).toHaveAttribute("aria-label", /1 Working/);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.emulateMedia({ forcedColors: "active" });

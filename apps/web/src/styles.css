@@ -12893,6 +12893,10 @@ body.shell-dock-dragging * {
 .icon-btn.inbox-row-more { width: var(--control-h-sm); height: var(--control-h-sm); }
 @media (pointer: fine) {
   :is(.inbox-row-shell:hover, .inbox-row-shell:focus-within) .inbox-row-actions { display: inline-flex; }
+  @container list (max-width: 879px) {
+    /* Keep the family rollup readable when the action tray covers the title line. */
+    .inbox-row-shell.thread-parent:is(:hover, :focus-within) .inbox-row-copy { padding-right: var(--inbox-row-col-actions); }
+  }
   /* The row keeps its hover fill while the pointer is on its actions, which are beside its button. */
   .inbox-row-shell:is(:hover, :focus-within):not(.selected, .stacked) .inbox-row { background: var(--bg-elev-2); }
 }
