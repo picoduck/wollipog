@@ -1589,7 +1589,7 @@ test("workflow decision expansion is limited to docked cards and available to re
       stop: { allowed: true }, restart: { allowed: true }, stopBackgroundJob: { allowed: true },
       respond: { allowed: false, reason: "Your Viewer role is read-only." },
     } } as SessionView;
-    const view = await render(<RequestCard session={session} request={request} runnerOnline presentation={presentation} />);
+    const view = await render(<RequestCard session={session} request={request} runnerOnline presentation={presentation} onReadingChange={() => {}} />);
     try {
       assert.equal(view.container.querySelectorAll('[aria-label="Expand Decision"]').length, presentation === "dock" ? 1 : 0);
       if (presentation === "dock") {
@@ -1601,6 +1601,15 @@ test("workflow decision expansion is limited to docked cards and available to re
       }
     } finally { await view.unmount(); }
   }
+});
+
+test("a Sessions preview does not offer a workflow reading mode outside the full reading column (#2874)", async () => {
+  const request = { ...permission(), kind: "workflow_decision" as const };
+  const view = await render(<RequestDock session={sessionWith(request)} requests={[request]} runnerOnline readingAvailable={false} />);
+  try {
+    assertNoDomNode(view.container.querySelector('[aria-label="Expand Decision"]'));
+    assertNoDomNode(view.container.querySelector("[data-reading]"));
+  } finally { await view.unmount(); }
 });
 
 test("a question expanded to read keeps the dock: a request arriving ahead waits, and reading back keeps the card (#2786)", async () => {

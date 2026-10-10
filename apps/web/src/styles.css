@@ -5621,7 +5621,7 @@ textarea {
   visibility: hidden;
 }
 .chat-reading > .session-notice-slot > .request-dock[data-reading],
-.request-dock[data-reading] > .request-dock-card,
+.request-dock[data-reading] > .request-dock-card:has(> .request-card),
 .request-dock[data-reading] > .request-dock-card > .request-card {
   flex: 1 1 auto;
   min-height: 0;

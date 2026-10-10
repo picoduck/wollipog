@@ -129,7 +129,7 @@ export function RequestCard({
   // and this one comes back; a second decision for the same occurrence is refused until it settles.
   const flightKey = decisionKey(session.id, request.requestId, request.occurrenceId);
   const [readingKey, setReadingKey] = useState<string | null>(null);
-  const canExpandDecision = request.kind === "workflow_decision" && presentation === "dock";
+  const canExpandDecision = request.kind === "workflow_decision" && presentation === "dock" && onReadingChange !== undefined;
   const reading = canExpandDecision && readingKey === flightKey;
   const onReadingChangeRef = useRef(onReadingChange);
   onReadingChangeRef.current = onReadingChange;

@@ -2438,6 +2438,7 @@ follows these rules so it never crowds out the conversation it asks about:
   details scroll, including in a short column or with the keyboard open. Collapsing restores the
   compact card and the transcript. Both transitions keep the review mounted, preserving selections,
   entered text and evidence progress; neither resolves the decision or changes who may answer it.
+  The Sessions preview keeps its capped presentation; reading mode is available in the full session.
   While content is under the footer or above the top padding, that edge shows a `--border`
   hairline, as a sticky header does (§2.6), so answers under the footer read as more to come
   (#2698); neither line takes room. Where only the body scrolls, the body's edges carry the same

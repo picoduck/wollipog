@@ -41,6 +41,22 @@ async function expectReadingMode(page: Page) {
 
 test.describe("workflow decision reading mode (#2874)", () => {
   test.use({ hasTouch: true });
+  test("a short expanded question still fills a 300–480px reading column", async ({ page }) => {
+    await page.setViewportSize({ width: 740, height: 530 });
+    await page.goto("/agent-questions-e2e.html?set=paragraph&style=composer");
+    await page.getByRole("button", { name: "Exit Answer Mode", exact: true }).click();
+    const question = page.locator(".request-dock .question-card");
+    await question.getByRole("button", { name: "Show Full Question" }).click();
+    await expect(page.locator(".request-dock")).toHaveAttribute("data-reading", "");
+    const geometry = await page.evaluate(() => ({
+      column: document.querySelector(".chat-reading")!.getBoundingClientRect().height,
+      dock: document.querySelector(".request-dock")!.getBoundingClientRect().height,
+      wrapper: document.querySelector(".request-dock-card")!.getBoundingClientRect().height,
+    }));
+    expect(geometry.column).toBeGreaterThanOrEqual(300);
+    expect(geometry.column).toBeLessThanOrEqual(480);
+    expect(geometry.wrapper).toBeGreaterThanOrEqual(geometry.dock - 1);
+  });
   for (const viewport of [
     { name: "phone", width: 390, height: 844, keyboard: false },
     { name: "phone keyboard", width: 390, height: 600, keyboard: true },
