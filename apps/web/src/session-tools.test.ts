@@ -45,3 +45,9 @@ test("an unavailable tool is listed with its reason; Campaign Status is listed o
     campaignAvailability: { kind: "unavailable", campaignSessionId: "c", reason: "The campaign could not be loaded." },
   }), { listed: true, unavailableReason: "The campaign could not be loaded." });
 });
+
+test("each tool with a chord names it, for the keycap the switcher and Session Tools show (#2862)", () => {
+  assert.deepEqual(SESSION_TOOLS.filter((tool) => tool.shortcut).map((tool) => [tool.name, tool.shortcut]), [
+    ["Review", "open-review"], ["Files", "open-files"], ["Terminal", "toggle-terminal"], ["Side Chat", "open-side-chat"],
+  ]);
+});

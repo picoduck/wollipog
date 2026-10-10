@@ -5440,16 +5440,13 @@ textarea {
   background: var(--bg-elev-2);
 }
 .sidechat-boundary strong { font-size: 12px; }
-.sidechat-boundary span,
-.sidechat-shortcut { color: var(--text-dim); font-size: 11px; }
+.sidechat-boundary span { color: var(--text-dim); font-size: var(--text-xs); }
 .sidechat-timeline {
   min-height: 180px;
   flex: 1;
   overflow: auto;
   padding: 2px;
 }
-.sidechat-boundary .sidechat-open-child { align-self: flex-start; margin-top: 4px; }
-.sidechat-insert,
 .sidechat-restart { align-self: stretch; }
 .sidechat-composer { display: flex; align-items: flex-end; gap: 8px; }
 .sidechat-composer textarea {
@@ -5464,12 +5461,24 @@ textarea {
   font: inherit;
   line-height: 1.4;
 }
-.sidechat-shortcut { text-align: right; }
 
 @media (max-width: 600px) {
   .artifact-preview-frame { min-height: 55vh; }
   .sidechat-composer { flex-wrap: wrap; }
   .sidechat-composer textarea { flex-basis: 100%; min-height: 88px; }
+}
+
+/* ------------------------------ Session Companions ------------------------------
+   Agents, Background Work, Side Chat and Terminal (#2871), one block per component. */
+
+/* Side Chat: Open Session links to the side chat's own session, with a trailing arrow (#2862). */
+.sidechat-open-session {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+  font: var(--type-small);
 }
 
 .detail-main {

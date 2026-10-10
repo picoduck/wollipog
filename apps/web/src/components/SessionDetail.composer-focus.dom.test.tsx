@@ -4726,8 +4726,7 @@ test("SessionDetail inserts a side-chat response with the shared end-safe focus 
     await focusRequestedComposer(fixture);
     await resolveDraft(draft, "existing draft");
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
-    const insert = [...fixture.container.querySelectorAll("button")]
-      .find((button) => button.textContent === "Insert Latest Response into Primary Draft") as HTMLButtonElement;
+    const insert = fixture.container.querySelector('button[aria-label="Insert into Draft"]') as HTMLButtonElement;
     assert.ok(insert, "the real Side Chat panel exposes its explicit draft insertion action");
     await act(async () => {
       insert.focus();
@@ -4744,6 +4743,102 @@ test("SessionDetail inserts a side-chat response with the shared end-safe focus 
       start: fixture.composer.value.length,
       end: fixture.composer.value.length,
     });
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("Insert into Draft on an earlier side-chat reply inserts that reply, and Undo restores the draft exactly (#2862)", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const child = session("side-chat-undo-child");
+  const relation: SideChatView = { parentSessionId: "unused-by-panel", session: child, createdAt: 1 };
+  const event = (seq: number, payload: SessionEvent["payload"]): SessionEvent => ({ id: seq, sessionId: child.id, seq, ts: seq, payload });
+  const fixture = await mountFixture(draft, {
+    rightPanelMode: "sidechat",
+    client: {
+      sideChat: async () => ({ sideChat: relation }),
+      session: async (id: string) => ({ session: id === child.id ? child : session(id) }),
+      getSessionEventPage: async () => ({
+        events: [
+          event(1, { kind: "user_message", text: "first", images: [] }),
+          event(2, { kind: "agent_message", text: "earlier answer", final: true }),
+          event(3, { kind: "user_message", text: "second", images: [] }),
+          event(4, { kind: "agent_message", text: "latest answer", final: true }),
+        ],
+        eventEpoch: 0,
+        nextAfter: 4,
+        cacheComplete: true,
+      }),
+    },
+  });
+  try {
+    // Trailing spaces and a second line: Undo must give back these exact characters.
+    const previous = "my draft\nsecond line  ";
+    await resolveDraft(draft, previous);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
+    const inserts = [...fixture.container.querySelectorAll<HTMLButtonElement>('button[aria-label="Insert into Draft"]')];
+    assert.equal(inserts.length, 2);
+    const mainTranscript = fixture.container.querySelector(".detail-scroll");
+    assert.ok(mainTranscript);
+    assertNoDomNode(mainTranscript.querySelector('button[aria-label="Insert into Draft"]'),
+      "the main session's transcript never offers the action");
+
+    await act(async () => { inserts[0]!.click(); });
+    await act(async () => { flushFrames(); });
+    assert.equal(fixture.composer.value, "my draft\nsecond line earlier answer", "the earlier reply, not the latest");
+
+    const toast = [...domWindow.document.querySelectorAll(".toast")]
+      .find((candidate) => candidate.textContent?.includes("Inserted into your session draft.")) as unknown as HTMLElement | undefined;
+    assert.ok(toast, "a toast says where the text went");
+    const undo = [...toast.querySelectorAll("button")].find((button) => button.textContent === "Undo")!;
+    await act(async () => {
+      undo.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () => { flushFrames(); });
+    assert.equal(fixture.composer.value, previous, "Undo restores the previous draft exactly");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("Undo after Insert into Draft gives back the draft's attachments too (#2862)", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const child = session("side-chat-undo-attachment-child");
+  const relation: SideChatView = { parentSessionId: "unused-by-panel", session: child, createdAt: 1 };
+  const response: SessionEvent = {
+    id: 1, sessionId: child.id, seq: 1, ts: 2, payload: { kind: "agent_message", text: "side-chat answer", final: true },
+  };
+  const fixture = await mountFixture(draft, {
+    rightPanelMode: "sidechat",
+    client: {
+      sideChat: async () => ({ sideChat: relation }),
+      session: async (id: string) => ({ session: id === child.id ? child : session(id) }),
+      getSessionEventPage: async () => ({ events: [response], eventEpoch: 0, nextAfter: 1, cacheComplete: true }),
+    },
+  });
+  try {
+    await resolveComposerDraft(draft, { text: "with a picture", images: [{ mimeType: "image/png", data: "bWluZQ==" }], updatedAt: 1 });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
+    const thumbs = () => [...fixture.container.querySelectorAll(".composer .attach-thumb")].length;
+    assert.equal(thumbs(), 1);
+
+    await act(async () => { fixture.container.querySelector<HTMLButtonElement>('button[aria-label="Insert into Draft"]')!.click(); });
+    await act(async () => { flushFrames(); });
+    assert.equal(fixture.composer.value, "with a picture side-chat answer");
+    // The person then removes the attachment before thinking better of the insert.
+    await act(async () => { fixture.container.querySelector<HTMLButtonElement>('button[aria-label="Remove Attached Image 1"]')!.click(); });
+    assert.equal(thumbs(), 0);
+
+    const toast = [...domWindow.document.querySelectorAll(".toast")]
+      .find((candidate) => candidate.textContent?.includes("Inserted into your session draft.")) as unknown as HTMLElement;
+    await act(async () => {
+      [...toast.querySelectorAll("button")].find((button) => button.textContent === "Undo")!.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () => { flushFrames(); });
+    assert.equal(fixture.composer.value, "with a picture");
+    assert.equal(thumbs(), 1, "the draft as it was includes its attachment");
   } finally {
     await unmountFixture(fixture);
   }
@@ -4788,8 +4883,7 @@ test("inserting a side-chat response exits Answer Mode and reveals the ordinary 
     await act(async () => { flushFrames(); });
     assert.ok(fixture.container.querySelector(".composer-answer-input"));
 
-    const insert = [...fixture.container.querySelectorAll("button")]
-      .find((button) => button.textContent === "Insert Latest Response into Primary Draft") as HTMLButtonElement;
+    const insert = fixture.container.querySelector('button[aria-label="Insert into Draft"]') as HTMLButtonElement;
     assert.ok(insert);
     await act(async () => {
       insert.focus();
@@ -6956,8 +7050,7 @@ test("inserting a side-chat response restores an expanded side panel so the draf
     await resolveDraft(draft, "");
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
     assert.equal(fixture.container.querySelector<HTMLElement>("#right-panel")?.dataset.presentation, "expanded");
-    const insert = [...fixture.container.querySelectorAll("button")]
-      .find((button) => button.textContent === "Insert Latest Response into Primary Draft") as HTMLButtonElement;
+    const insert = fixture.container.querySelector('button[aria-label="Insert into Draft"]') as HTMLButtonElement;
     assert.ok(insert);
     await act(async () => insert.click());
     assert.deepEqual(expanded.calls, [false], "Insert restores the panel beside the chat");

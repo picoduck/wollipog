@@ -29,7 +29,7 @@ import {
 import { FilesBrowser, requestGoToFileFocus } from "./FilesPanel.js";
 import { Notice } from "./Notice.js";
 import { BrowserPanel } from "./BrowserPanel.js";
-import { SideChatPanel } from "./SideChatPanel.js";
+import { SideChatPanel, requestSideChatFocus } from "./SideChatPanel.js";
 import { ReviewPanel } from "./ReviewPanel.js";
 import type { DiffFileFocus } from "./GitDiffViewer.js";
 import type { VisibleForgeFacts } from "../pinned-summary.js";
@@ -171,6 +171,15 @@ export interface RightPanelState {
 export function openGoToFile(state: Pick<RightPanelState, "show">): void {
   state.show("files");
   requestGoToFileFocus();
+}
+
+/**
+ * Ctrl/⌘+; (#2862): the panel on Side Chat, with focus in its message field (or Start Side Chat when
+ * there is none). Like Go to File it never closes the panel, so a second press only puts focus back.
+ */
+export function openSideChat(state: Pick<RightPanelState, "show">): void {
+  state.show("sidechat");
+  requestSideChatFocus();
 }
 
 export function useRightPanelState(navigationScope: string | null = null, attentionNavigation = false): RightPanelState {
@@ -1165,6 +1174,7 @@ function Launcher({
       />
       <LauncherRow
         label="Side Chat"
+        kbd={shortcutDisplay("open-side-chat")}
         onClick={() => onPick("sidechat")}
         icon={
           <QuestionIcon size={14} />

@@ -493,3 +493,24 @@ test("the Side Panel chord toggles from a session, is in the reference, and no b
   assert.deepEqual(session.rows.filter((row) => row.id === "toggle-side-panel").map((row) => [row.label, row.keys, row.reason]),
     [["Side Panel", "Ctrl+\\", null]]);
 });
+
+test("Ctrl/⌘+; opens the Side Chat Panel from a session, is in the reference, and no browser claims it (#2862)", () => {
+  const definition = shortcut("open-side-chat");
+  assert.equal(definition.label, "Side Chat Panel");
+  assert.equal(definition.group, "Session");
+  assert.equal(definition.scope, "Session");
+  for (const mac of [false, true]) {
+    const keys = shortcutDisplay("open-side-chat", mac);
+    assert.equal(BROWSER_RESERVED.has(keys), false, `${keys} is a browser's own chord`);
+  }
+  assert.equal(shortcutDisplay("open-side-chat", false), "Ctrl+;");
+  assert.equal(shortcutDisplay("open-side-chat", true), "⌘;");
+  assert.equal(matchesShortcut(key(";", { ctrlKey: true }), "open-side-chat"), true);
+  assert.equal(matchesShortcut(key(";", { metaKey: true }), "open-side-chat"), true);
+  assert.equal(matchesShortcut(key(";"), "open-side-chat"), false, "a typed semicolon is text");
+  assert.equal(matchesShortcut(key(";", { ctrlKey: true, altKey: true }), "open-side-chat"), false);
+  const session = shortcutReferenceGroups({ scope: "Session", availability: AVAILABLE, keys: referenceKeys })
+    .find((group) => group.group === "Session")!;
+  assert.deepEqual(session.rows.filter((row) => row.id === "open-side-chat").map((row) => [row.label, row.keys, row.reason]),
+    [["Side Chat Panel", "Ctrl+;", null]]);
+});

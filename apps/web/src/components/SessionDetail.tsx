@@ -2084,13 +2084,31 @@ function SessionDetailLoaded({
     const next = appendTranscript(draftState.current.text, phrase);
     setProgrammaticComposerText(next);
   });
+  // Side Chat's Insert into Draft, with Undo putting back the draft exactly as it was (#2862). Undo
+  // writes only into the session the reply went into, while it is still the one on screen; anywhere
+  // else it fails visibly rather than overwrite another session's draft.
+  const sideChatUndoTargetRef = useRef<string | null>(sessionId);
+  useEffect(() => {
+    sideChatUndoTargetRef.current = sessionId;
+    return () => { sideChatUndoTargetRef.current = null; };
+  }, [sessionId]);
   const insertSideChatDraft = useCallback((response: string) => {
     restoreExpandedPanel();
     revealOrdinaryComposerRef.current("always");
     markDraftDirty();
-    const next = appendTranscript(draftState.current.text, response);
-    setProgrammaticComposerText(next);
-  }, [markDraftDirty, restoreExpandedPanel, setProgrammaticComposerText]);
+    // The whole draft, attachments included: Undo gives back exactly this.
+    const previous = draftState.current;
+    setProgrammaticComposerText(appendTranscript(previous.text, response));
+    const target = sessionId;
+    showUndo("Inserted into your session draft.", () => {
+      if (sideChatUndoTargetRef.current !== target) throw new Error("This session's draft is no longer open.");
+      restoreExpandedPanel();
+      revealOrdinaryComposerRef.current("always");
+      markDraftDirty();
+      setProgrammaticComposerText(previous.text);
+      replace(previous.images);
+    });
+  }, [markDraftDirty, replace, restoreExpandedPanel, sessionId, setProgrammaticComposerText, showUndo]);
   // Shared git status: the composer branch chip + the right panel's Review mode read one
   // fetch. Called before the !session guard — hooks must run unconditionally.
   // Inbox previews render neither the composer Git chip, pinned summary, nor Review panel. Do not

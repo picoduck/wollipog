@@ -9,8 +9,11 @@ import { api } from "../api.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime } from "../ui-transport.js";
-import type { View, ViewNavigation } from "../navigation.js";
-import { SideChatPanel, sideChatComposerUnavailable } from "./SideChatPanel.js";
+import { viewPath, type View, type ViewNavigation } from "../navigation.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
+import { ENTER_KEY_STORAGE_KEY } from "../enter-key.js";
+import { TOUCH_PHONE_MEDIA } from "../mobile-viewport.js";
+import { SideChatPanel, requestSideChatFocus, sideChatComposerUnavailable } from "./SideChatPanel.js";
 import {
   clearPanelScratch,
   clearPanelScratchIf,
@@ -144,9 +147,8 @@ test("side chat starts separately, prompts only the child, and inserts output ex
     });
     assert.deepEqual(prompted, [{ id: child.id, text: "independent question" }]);
 
-    const insert = Array.from(container.querySelectorAll("button"))
-      .find((button) => button.textContent === "Insert Latest Response into Primary Draft")!;
-    await act(async () => { (insert as HTMLButtonElement).click(); });
+    const insert = container.querySelector<HTMLButtonElement>('button[aria-label="Insert into Draft"]')!;
+    await act(async () => { insert.click(); });
     assert.deepEqual(inserted, ["Selected side-chat answer"]);
     assert.deepEqual(prompted, [{ id: child.id, text: "independent question" }], "insertion never auto-submits primary text");
   } finally {
@@ -212,7 +214,10 @@ test("a terminal side chat offers a working replacement and a link to the ended 
     assert.match(container.textContent ?? "", /This side chat's session was stopped/,
       "the disabled composer explains that the child ended, not that the runner is offline");
 
-    await act(async () => { button("Open Side Chat Session")!.click(); });
+    const link = container.querySelector<HTMLAnchorElement>("a.sidechat-open-session")!;
+    assert.equal(link.textContent, "Open Session");
+    assert.equal(link.getAttribute("href"), viewPath({ name: "session", id: ended.id }));
+    await act(async () => { link.click(); });
     assert.deepEqual(pushed, [{ name: "session", id: ended.id }],
       "the ended child's own session view stays reachable");
 
@@ -327,8 +332,7 @@ test("the panel still renders where no store is mounted, minus the store-backed 
       await new Promise((resolve) => setTimeout(resolve, 25));
     });
     assert.match(container.textContent ?? "", /separate worktree and transcript/);
-    assert.equal(Array.from(container.querySelectorAll("button"))
-      .some((button) => button.textContent === "Open Side Chat Session"), false);
+    assertNoDomNode(container.querySelector("a.sidechat-open-session"));
     assert.equal(Array.from(container.querySelectorAll("button"))
       .some((button) => button.textContent === "Start a New Side Chat"), true,
       "the recovery action needs no store and stays available");
@@ -342,7 +346,7 @@ test("the panel still renders where no store is mounted, minus the store-backed 
 /**
  * Cross-model review CR-2.1. Switching children used to commit the new child while `events` still
  * held the old one's, so for one render the retired transcript sat under the new child's header —
- * and its "Insert Latest Response into Primary Draft" was live, which is the one action that crosses
+ * and its insert action was live, which is the one action that crosses
  * back into the primary composer. The fix resets the transcript in the same commit as the switch;
  * that sub-frame window is not observable from happy-dom (a MutationObserver batches its records and
  * reports only the settled text), so this test pins the settled outcome and the insert boundary,
@@ -381,7 +385,7 @@ test("a replaced child carries neither the retired transcript nor its insert act
       await new Promise((resolve) => setTimeout(resolve, 25));
     });
     assert.match(container.textContent ?? "", /Selected side-chat answer/, "the retired transcript is loaded");
-    assert.ok(button("Insert Latest Response into Primary Draft"));
+    assert.ok(container.querySelector('button[aria-label="Insert into Draft"]'));
 
     await act(async () => {
       button("Start a New Side Chat")!.click();
@@ -391,7 +395,7 @@ test("a replaced child carries neither the retired transcript nor its insert act
     assert.match(container.textContent ?? "", /idle · separate worktree and transcript/);
     assert.doesNotMatch(container.textContent ?? "", /Selected side-chat answer/,
       "the fresh child does not inherit the retired child's transcript");
-    assert.equal(button("Insert Latest Response into Primary Draft"), undefined,
+    assertNoDomNode(container.querySelector('button[aria-label="Insert into Draft"]'),
       "nor its route back into the primary composer");
     assert.deepEqual(inserted, []);
   } finally {
@@ -556,6 +560,295 @@ test("a draft consumed before the remounted panel's effects run is not written b
     dropPanelScratchMemory();
     assert.equal(readPanelScratch(scope, "sidechat.draft"), undefined, "nor restored by a reload");
   } finally {
+    await act(async () => { root.unmount(); });
+    Object.assign(api, originals);
+    container.remove();
+  }
+});
+
+/** A live side chat with a fixed transcript, mounted with a store; returns its controls. */
+async function mountLive(options: {
+  events?: SessionEvent[];
+  prompted?: string[];
+  inserted?: string[];
+  related?: SideChatView | null;
+} = {}) {
+  const originals = {
+    sideChat: api.sideChat, session: api.session, getSessionEventPage: api.getSessionEventPage, prompt: api.prompt,
+  };
+  api.sideChat = async () => ({ sideChat: options.related === undefined ? relation : options.related });
+  api.session = async () => ({ session: child });
+  api.getSessionEventPage = async () => ({
+    events: options.events ?? [], eventEpoch: 0, nextAfter: options.events?.length ?? 0, cacheComplete: true,
+  });
+  api.prompt = async (_id: string, text: string) => {
+    options.prompted?.push(text);
+    return child;
+  };
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(mount(<SideChatPanel session={parent} runnerOnline
+      onInsertDraft={(text) => options.inserted?.push(text)} />, []));
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  });
+  return {
+    container,
+    textarea: () => container.querySelector("textarea") as HTMLTextAreaElement,
+    sendButton: () => Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent === "Send" || button.textContent === "Sending…") as HTMLButtonElement,
+    async dispose() {
+      await act(async () => { root.unmount(); });
+      Object.assign(api, originals);
+      container.remove();
+    },
+  };
+}
+
+/** Stubs the touch-phone media query for the lifetime of `run`. */
+async function asTouchPhone(run: () => Promise<void>) {
+  const priorMatchMedia = domWindow.matchMedia;
+  domWindow.matchMedia = ((query: string) => ({
+    matches: query === TOUCH_PHONE_MEDIA, media: query, onchange: null,
+    addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {},
+    dispatchEvent: () => false,
+  })) as never;
+  try {
+    await run();
+  } finally {
+    domWindow.matchMedia = priorMatchMedia;
+  }
+}
+
+test("Side Chat sends with the composer's Enter setting and never with Ctrl/⌘+Enter (#2862)", async () => {
+  const prompted: string[] = [];
+  const panel = await mountLive({ prompted });
+  /** Types `text`, presses Enter with the given modifiers, and reports whether a send went out. */
+  const press = async (text: string, modifiers: { shiftKey?: boolean; ctrlKey?: boolean; metaKey?: boolean; isComposing?: boolean }) => {
+    await act(async () => fireDomEvent.change(panel.textarea(), { target: { value: text } }));
+    const before = prompted.length;
+    let defaultPrevented = false;
+    await act(async () => {
+      const event = new domWindow.KeyboardEvent("keydown", {
+        key: "Enter", bubbles: true, cancelable: true, ...modifiers,
+      });
+      panel.textarea().dispatchEvent(event as never);
+      defaultPrevented = event.defaultPrevented;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    return { sent: prompted.length > before, defaultPrevented };
+  };
+  try {
+    domWindow.localStorage.setItem(ENTER_KEY_STORAGE_KEY, "send");
+    assert.deepEqual(await press("send mode, shift", { shiftKey: true }), { sent: false, defaultPrevented: false },
+      "send mode: Shift+Enter is the newline");
+    assert.deepEqual(await press("send mode, ctrl", { ctrlKey: true }), { sent: false, defaultPrevented: false },
+      "Ctrl+Enter is the main composer's steering key and does nothing here");
+    assert.deepEqual(await press("send mode, meta", { metaKey: true }), { sent: false, defaultPrevented: false });
+    assert.deepEqual(await press("send mode, composing", { isComposing: true }), { sent: false, defaultPrevented: false },
+      "an IME composition never sends");
+    assert.deepEqual(await press("send mode, enter", {}), { sent: true, defaultPrevented: true },
+      "send mode: Enter sends");
+
+    domWindow.localStorage.setItem(ENTER_KEY_STORAGE_KEY, "newline");
+    assert.deepEqual(await press("newline mode, enter", {}), { sent: false, defaultPrevented: false },
+      "newline mode: Enter is the newline");
+    assert.deepEqual(await press("newline mode, ctrl", { ctrlKey: true }), { sent: false, defaultPrevented: false });
+    assert.deepEqual(await press("newline mode, shift", { shiftKey: true }), { sent: true, defaultPrevented: true },
+      "newline mode: Shift+Enter sends");
+
+    assert.deepEqual(prompted, ["send mode, enter", "newline mode, shift"]);
+  } finally {
+    domWindow.localStorage.removeItem(ENTER_KEY_STORAGE_KEY);
+    await panel.dispose();
+  }
+});
+
+test("Send's tooltip and key shortcut follow the Enter setting, and no Ctrl/⌘+Enter hint remains (#2862)", async () => {
+  domWindow.localStorage.setItem(ENTER_KEY_STORAGE_KEY, "send");
+  let panel = await mountLive();
+  try {
+    assert.equal(panel.sendButton().title, "Send (Enter)");
+    assert.equal(panel.sendButton().getAttribute("aria-keyshortcuts"), "Enter");
+    assert.equal(panel.textarea().placeholder, "Ask a side question…");
+    assert.doesNotMatch(panel.container.textContent ?? "", /Ctrl|⌘|to send/);
+    assertNoDomNode(panel.container.querySelector(".sidechat-shortcut"));
+  } finally {
+    await panel.dispose();
+  }
+
+  domWindow.localStorage.setItem(ENTER_KEY_STORAGE_KEY, "newline");
+  panel = await mountLive();
+  try {
+    assert.equal(panel.sendButton().title, "Send (Shift+Enter)");
+    assert.equal(panel.sendButton().getAttribute("aria-keyshortcuts"), "Shift+Enter");
+  } finally {
+    await panel.dispose();
+  }
+
+  // An untouched touch phone derives newline, and its software keyboard has no Shift+Enter.
+  domWindow.localStorage.removeItem(ENTER_KEY_STORAGE_KEY);
+  await asTouchPhone(async () => {
+    const phone = await mountLive();
+    try {
+      assert.equal(phone.sendButton().title, "Send");
+      assert.equal(phone.sendButton().hasAttribute("aria-keyshortcuts"), false);
+    } finally {
+      await phone.dispose();
+    }
+  });
+});
+
+test("every reply offers Insert into Draft, and an earlier one inserts its own text (#2862)", async () => {
+  const reply = (seq: number, text: string): SessionEvent => ({
+    id: seq, sessionId: child.id, seq, ts: seq, payload: { kind: "agent_message", text, final: true },
+  });
+  const question = (seq: number, text: string): SessionEvent => ({
+    id: seq, sessionId: child.id, seq, ts: seq, payload: { kind: "user_message", text, images: [] },
+  });
+  const inserted: string[] = [];
+  const prompted: string[] = [];
+  const panel = await mountLive({
+    inserted,
+    prompted,
+    events: [question(1, "first question"), reply(2, "Earlier answer"), question(3, "second question"), reply(4, "Latest answer")],
+  });
+  try {
+    const inserts = [...panel.container.querySelectorAll<HTMLButtonElement>('button[aria-label="Insert into Draft"]')];
+    assert.equal(inserts.length, 2, "both replies carry the action");
+    for (const insert of inserts) {
+      assert.equal(insert.title, "Insert into Draft", "the tooltip matches the name");
+      assert.ok(insert.classList.contains("icon-btn") && insert.classList.contains("sm"));
+      const group = insert.closest('[role="group"]')!;
+      assert.ok(group.querySelector('button[aria-label="Copy Response"]'), "it sits beside Copy Response");
+    }
+    await act(async () => { inserts[0]!.click(); });
+    assert.deepEqual(inserted, ["Earlier answer"], "the earlier reply's text, not the latest");
+    await act(async () => { inserts[1]!.click(); });
+    assert.deepEqual(inserted, ["Earlier answer", "Latest answer"]);
+    assert.deepEqual(prompted, [], "inserting never sends");
+    assert.doesNotMatch(panel.container.textContent ?? "", /Insert Latest Response/,
+      "the full-width latest-reply bar is gone");
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("a Side Chat focus request lands in the message field once the panel loads (#2862)", async () => {
+  // Requested before the panel mounts, as Ctrl/⌘+; does when it opens the panel.
+  requestSideChatFocus();
+  const panel = await mountLive();
+  try {
+    assert.equal(domWindow.document.activeElement, panel.textarea() as never);
+    // Mounted already: focus returns to the field at once.
+    await act(async () => { (domWindow.document.body as unknown as HTMLElement).focus(); panel.textarea().blur(); });
+    assert.notEqual(domWindow.document.activeElement, panel.textarea() as never);
+    await act(async () => { requestSideChatFocus(); });
+    assert.equal(domWindow.document.activeElement, panel.textarea() as never);
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("with no side chat yet, a focus request lands on Start Side Chat (#2862)", async () => {
+  requestSideChatFocus();
+  const panel = await mountLive({ related: null });
+  try {
+    const start = Array.from(panel.container.querySelectorAll("button"))
+      .find((button) => button.textContent === "Start Side Chat")!;
+    assert.equal(domWindow.document.activeElement, start as never);
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("a stale focus request is not taken by a later visit (#2862)", async () => {
+  const priorNow = Date.now;
+  requestSideChatFocus();
+  Date.now = () => priorNow() + 1_500;
+  let panel: Awaited<ReturnType<typeof mountLive>> | undefined;
+  try {
+    panel = await mountLive();
+    assert.notEqual(domWindow.document.activeElement, panel.textarea() as never);
+  } finally {
+    Date.now = priorNow;
+    await panel?.dispose();
+  }
+});
+
+test("Open Session opens in a new tab on a modified click and navigates in place on a plain one (#2862)", async () => {
+  const originals = { sideChat: api.sideChat, session: api.session, getSessionEventPage: api.getSessionEventPage };
+  api.sideChat = async () => ({ sideChat: relation });
+  api.session = async () => ({ session: child });
+  api.getSessionEventPage = async () => ({ events: [], eventEpoch: 0, nextAfter: 0, cacheComplete: true });
+  const pushed: View[] = [];
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(mount(<SideChatPanel session={parent} runnerOnline onInsertDraft={() => {}} />, pushed));
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    });
+    const link = container.querySelector<HTMLAnchorElement>("a.sidechat-open-session")!;
+    assert.ok(link.classList.contains("link"));
+    assert.equal(link.getAttribute("href"), viewPath({ name: "session", id: child.id }));
+    assert.ok(link.querySelector("svg"), "a trailing arrow");
+    const click = (init: { ctrlKey?: boolean; metaKey?: boolean; shiftKey?: boolean; button?: number }) => {
+      const event = new domWindow.MouseEvent("click", { bubbles: true, cancelable: true, ...init });
+      // A real browser would follow the href itself; keep happy-dom from navigating.
+      link.addEventListener("click", (fired) => fired.preventDefault(), { once: true });
+      link.dispatchEvent(event as never);
+      return event;
+    };
+    for (const modifier of [{ ctrlKey: true }, { metaKey: true }, { shiftKey: true }, { button: 1 }]) {
+      await act(async () => { click(modifier); });
+    }
+    assert.deepEqual(pushed, [], "a modified or middle click is left to the browser, which opens a new tab");
+    await act(async () => { click({}); });
+    assert.deepEqual(pushed, [{ name: "session", id: child.id }], "a plain click navigates in place");
+  } finally {
+    await act(async () => { root.unmount(); });
+    Object.assign(api, originals);
+    container.remove();
+  }
+});
+
+test("a focus request that settles after a dialog opened leaves focus in the dialog (#2862)", async () => {
+  const originals = { sideChat: api.sideChat, session: api.session, getSessionEventPage: api.getSessionEventPage };
+  let resolveSideChat!: (value: { sideChat: SideChatView | null }) => void;
+  api.sideChat = () => new Promise((resolve) => { resolveSideChat = resolve; });
+  api.session = async () => ({ session: child });
+  api.getSessionEventPage = async () => ({ events: [], eventEpoch: 0, nextAfter: 0, cacheComplete: true });
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  // Opened while the panel is still loading: a modal layer now owns the keyboard.
+  const dialog = domWindow.document.createElement("div");
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
+  const inside = domWindow.document.createElement("button");
+  dialog.append(inside);
+  try {
+    requestSideChatFocus();
+    await act(async () => {
+      root.render(mount(<SideChatPanel session={parent} runnerOnline onInsertDraft={() => {}} />, []));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    domWindow.document.body.append(dialog);
+    inside.focus();
+    await act(async () => {
+      resolveSideChat({ sideChat: relation });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    });
+    assert.ok(container.querySelector("textarea"), "the panel loaded");
+    assert.equal(domWindow.document.activeElement, inside, "focus stays in the dialog");
+  } finally {
+    dialog.remove();
     await act(async () => { root.unmount(); });
     Object.assign(api, originals);
     container.remove();

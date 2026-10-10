@@ -1,1 +1,0 @@
-|.sidechat-boundary span,.sidechat-shortcut|font-size|11

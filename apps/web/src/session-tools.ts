@@ -30,7 +30,7 @@ export const SESSION_TOOLS: readonly SessionTool[] = [
   { id: "browser", name: "Browser", group: "Code" },
   { id: "terminal", name: "Terminal", group: "Code", shortcut: "toggle-terminal" },
   { id: "subagents", name: "Agents", group: "Work" },
-  { id: "sidechat", name: "Side Chat", group: "Work" },
+  { id: "sidechat", name: "Side Chat", group: "Work", shortcut: "open-side-chat" },
   { id: "background", name: "Background Work", group: "Work" },
   { id: "campaign", name: "Campaign Status", group: "Work" },
   { id: "requests", name: "Requests", group: "Decisions" },

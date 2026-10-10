@@ -6,6 +6,7 @@ import {
   ArrowDown as LucideArrowDown,
   ArrowRightLeft as LucideArrowRightLeft,
   ArrowUp as LucideArrowUp,
+  ArrowUpRight as LucideArrowUpRight,
   AtSign as LucideAtSign,
   Ban as LucideBan,
   BookOpen as LucideBookOpen,
@@ -128,6 +129,7 @@ import {
   SquareTerminal as LucideSquareTerminal,
   Tag as LucideTag,
   Terminal as LucideTerminal,
+  TextCursorInput as LucideTextCursorInput,
   TextSelection as LucideTextSelection,
   TimerOff as LucideTimerOff,
   Trash2 as LucideTrash2,
@@ -424,6 +426,11 @@ export function EditIcon(props: IconProps) {
 
 export function CopyIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideCopy} {...props} />;
+}
+
+/** Insert into Draft: put a reply's text into the session's composer draft (#2862). */
+export function InsertIntoDraftIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideTextCursorInput} {...props} />;
 }
 
 export function CheckIcon(props: IconProps) {
@@ -798,6 +805,11 @@ export function PlanIcon(props: IconProps) {
 
 export function ArrowUpIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideArrowUp} {...props} />;
+}
+
+/** The trailing arrow of a link to another page, such as Side Chat's Open Session (#2862). */
+export function ArrowUpRightIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideArrowUpRight} {...props} />;
 }
 
 export function ArrowDownIcon(props: IconProps) {

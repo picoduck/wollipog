@@ -87,6 +87,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `TeamIcon` | Lucide | `Users` | Team or access group. |
 | `EditIcon` | Lucide | `Pencil` | Generic edit action. |
 | `CopyIcon` | Lucide | `Copy` | Generic copy action. |
+| `InsertIntoDraftIcon` | Lucide | `TextCursorInput` | Insert into Draft on a Side Chat reply, which puts its text into the session's draft (#2862). |
 | `CheckIcon` | Lucide | `Check` | Generic success state; a completed transcript step. |
 | `SelectLinesIcon` | Lucide | `TextSelection` | Review's Select Lines toggle, which turns line selection on in the diff (#2849). |
 | `WrapLinesIcon` | Lucide | `WrapText` | The Wrap Lines toggle in a markdown code block's header. |
@@ -146,6 +147,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `ShieldCheckIcon` | Lucide | `ShieldCheck` | An Orchestrator's fixed permission mode in the composer bar. |
 | `PlanIcon` | Lucide | `ListTodo` | A plan: the composer bar's Plan toggle and a transcript plan card's head; `ListChecks` already means the background job list. |
 | `ArrowUpIcon` | Lucide | `ArrowUp` | Generic upward action. |
+| `ArrowUpRightIcon` | Lucide | `ArrowUpRight` | The trailing arrow of a link to another Wollipog page, such as Side Chat's Open Session (#2862). |
 | `ArrowDownIcon` | Lucide | `ArrowDown` | Generic downward action; Jump to Question on a pending question's transcript marker, down to the request dock. |
 | `StopTurnIcon` | Lucide | `Square` | Filled and optically scaled to preserve its send-arrow balance; also a stopped turn's footer mark. |
 | `TuningIcon` | Lucide | `SlidersHorizontal` | Model or effort tuning. |

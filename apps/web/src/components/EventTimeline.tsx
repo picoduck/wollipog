@@ -37,7 +37,7 @@ import {
   type DecisionRecordModel,
 } from "../decision-record.js";
 import { DecisionRecord } from "./requests/DecisionRecord.js";
-import { AccountIcon, AgentLogIcon, BotIcon, ChevronRightIcon, CompactedIcon, CopyIcon, EditIcon, EditInForkIcon, FileEditIcon, HandOffIcon, NewFileIcon, PlanIcon, PlanInProgressIcon, PlanPendingIcon, RewindFilesIcon, ShieldIcon, StopTurnIcon, SuccessIcon, ThoughtIcon, ThreadForkIcon } from "./Icons.js";
+import { AccountIcon, AgentLogIcon, BotIcon, ChevronRightIcon, CompactedIcon, CopyIcon, EditIcon, EditInForkIcon, FileEditIcon, HandOffIcon, InsertIntoDraftIcon, NewFileIcon, PlanIcon, PlanInProgressIcon, PlanPendingIcon, RewindFilesIcon, ShieldIcon, StopTurnIcon, SuccessIcon, ThoughtIcon, ThreadForkIcon } from "./Icons.js";
 import { diffFileIsPlain, diffMaxLineNumber, hunkLabel, parseUnifiedDiff, type DiffFile } from "../unified-diff.js";
 import { markdownPlainText } from "./markdown-plain-text.js";
 import { TranscriptActionMenu, transcriptActionAvailable, type TranscriptAction } from "./TranscriptActions.js";
@@ -79,6 +79,8 @@ import type { ConversationForkAvailability, EditInForkAvailability } from "../se
 
 type ToolItem = Extract<TimelineItem, { kind: "tool_call" }>;
 type UserMessageItem = Extract<TimelineItem, { kind: "user_message" }>;
+/** A reply in the transcript: one agent message, which Side Chat's Insert into Draft takes (#2862). */
+export type AgentReplyItem = Extract<TimelineItem, { kind: "agent_message" }>;
 
 function TranscriptArtifact({ artifact }: { artifact: WorkflowArtifactView }) {
   const [load, setLoad] = useState(false);
@@ -561,6 +563,7 @@ export const EventTimeline = memo(function EventTimeline({
   questionContext,
   workspaceRoot,
   onOpenSession,
+  onInsertReply,
 }: {
   handoff?: { open: (turn: number) => void; reason?: string };
   /** Retry Turn on a failed turn's notice; absent where a transcript cannot start a turn. */
@@ -605,12 +608,18 @@ export const EventTimeline = memo(function EventTimeline({
   workspaceRoot?: string;
   /** Open another session, such as a fork's source; must be identity-stable. */
   onOpenSession?: (sessionId: string) => void;
+  /**
+   * Insert into Draft beside Copy Response on every top-level reply: Side Chat only, where it puts
+   * the reply's text into the session's draft and never sends it. Must be identity-stable.
+   */
+  onInsertReply?: (item: AgentReplyItem) => void;
 }) {
   const effectiveHistoryKey = historyKey ?? "timeline";
   const scopedRevealRequest = revealRequest?.historyKey === effectiveHistoryKey ? revealRequest : null;
   return (
     <HandoffContext.Provider value={handoff}>
     <TimelineSessionLinkContext.Provider value={onOpenSession}>
+    <InsertReplyContext.Provider value={onInsertReply}>
     <TurnRetryContext.Provider value={turnRetry}>
     <TranscriptImageCacheProvider key={effectiveHistoryKey} enabled={historyKey !== undefined}>
     <EventTimelineBody
@@ -643,6 +652,7 @@ export const EventTimeline = memo(function EventTimeline({
     />
     </TranscriptImageCacheProvider>
     </TurnRetryContext.Provider>
+    </InsertReplyContext.Provider>
     </TimelineSessionLinkContext.Provider>
     </HandoffContext.Provider>
   );
@@ -970,6 +980,9 @@ const OpenInReviewContext = createContext<((path: string) => void) | undefined>(
 
 /** Opens another session in the app; absent where the transcript cannot navigate (a shared page). */
 const TimelineSessionLinkContext = createContext<((sessionId: string) => void) | undefined>(undefined);
+
+/** Side Chat's Insert into Draft on every top-level reply (#2862); absent in the main transcript. */
+const InsertReplyContext = createContext<((item: AgentReplyItem) => void) | undefined>(undefined);
 
 function TimelineClockProvider({ enabled, sessionActive, driver, children }: {
   enabled: boolean;
@@ -2186,6 +2199,7 @@ function TimelineRowContent({
   questionContext,
 }: TimelineRowContentProps) {
   const sessionActive = useContext(TimelineActivityContext);
+  const onInsertReply = useContext(InsertReplyContext);
   const mediaSettled = timelineMediaSettled(item, sessionActive);
   switch (item.kind) {
     case "artifact_attached":
@@ -2249,19 +2263,28 @@ function TimelineRowContent({
           </div>
         </div>
       );
-    case "agent_message":
+    case "agent_message": {
       // Codex-style: the model response is full-width document flow, not a chat bubble. Its time,
-      // usage and actions live once in the turn's footer.
+      // usage and actions live once in the turn's footer. Side Chat adds Insert into Draft to every
+      // top-level reply, so an earlier reply can come back as well as the latest (#2862).
+      const insertable = onInsertReply !== undefined && !item.parentToolUseId && item.text.trim() !== "";
       return (
         <div className="tl-agent-msg">
           <Markdown highlightEligible={highlightEligible} inlineMedia settled={mediaSettled}>{item.text}</Markdown>
-          {standaloneCopy && item.text && (
+          {(standaloneCopy || insertable) && item.text && (
             <div className="tl-message-actions tl-reply-actions" role="group" aria-label="Message Actions">
               <CopyButton text={item.text} format={markdownPlainText} iconOnly ariaLabel="Copy Response" className="icon-btn sm" />
+              {insertable && onInsertReply && (
+                <button type="button" className="icon-btn sm" onClick={() => onInsertReply(item)}
+                  title="Insert into Draft" aria-label="Insert into Draft">
+                  <InsertIntoDraftIcon size={16} />
+                </button>
+              )}
             </div>
           )}
         </div>
       );
+    }
     case "agent_thought":
       return (
         <ThoughtStep
