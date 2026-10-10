@@ -184,6 +184,58 @@ test.describe("on a phone with a coarse pointer", () => {
     await page.evaluate(() => document.documentElement.style.setProperty("--keyboard-inset", "300px"));
     expect(await bottom()).toBe(544);
   });
+
+  test("what the sheet covers is inert: Tab stays in the sheet and the tab bar, and Back restores it (#2888)", async ({ page }) => {
+    await openSession(page, 390, 844);
+    await page.getByRole("button", { name: "Side Panel", exact: true }).click();
+    await expect(panel(page)).toBeVisible();
+    // Focusable, rendered controls outside the sheet and the tab bar.
+    const outside = () => page.evaluate(() => {
+      const sheet = document.querySelector("#right-panel")!;
+      return [...document.querySelectorAll<HTMLElement>("button, a[href], input, textarea, select, [tabindex]")]
+        .filter((element) => element.tabIndex >= 0 && !sheet.contains(element) && !element.closest(".app-rail") &&
+          element.getClientRects().length > 0 && !element.closest("[inert]"))
+        .map((element) => element.getAttribute("aria-label") ?? element.textContent?.trim() ?? element.tagName);
+    });
+    expect(await outside()).toEqual([]);
+    await expect(page.locator("header.session-bar")).toHaveAttribute("inert", "");
+    await expect(page.locator(".detail-body")).toHaveAttribute("inert", "");
+    // Nothing covered is in the browser's accessibility tree. Playwright's role locators do not model
+    // `inert`, so this reads Chromium's own tree.
+    const exposedButtons = async () => {
+      const cdp = await page.context().newCDPSession(page);
+      const { nodes } = await cdp.send("Accessibility.getFullAXTree") as {
+        nodes: { ignored: boolean; role?: { value: string }; name?: { value: string } }[];
+      };
+      await cdp.detach();
+      return nodes.filter((node) => !node.ignored && node.role?.value === "button").map((node) => node.name?.value ?? "");
+    };
+    const exposedWhileOpen = await exposedButtons();
+    expect(exposedWhileOpen.filter((name) => /^Session Status|^Share$|^More Actions$|^Browse Files$/.test(name))).toEqual([]);
+    expect(exposedWhileOpen).toContain("Back to Session");
+
+    // Shift+Tab and Tab from the sheet land only in the sheet or the tab bar.
+    const switcher = panel(page).locator(".rpanel-switcher");
+    for (const key of ["Shift+Tab", "Tab"]) {
+      await switcher.focus();
+      for (let step = 0; step < 4; step += 1) {
+        await page.keyboard.press(key);
+        const where = await page.evaluate(() => {
+          const active = document.activeElement;
+          return active?.closest("#right-panel") ? "sheet" : active?.closest(".app-rail") ? "tab bar" : active === document.body ? "body" : "covered";
+        });
+        expect(where, `${key} ×${step + 1}`).not.toBe("covered");
+      }
+    }
+
+    await panel(page).getByRole("button", { name: "Back to Session" }).tap();
+    await expect(panel(page)).toHaveCount(0);
+    await expect(page.locator("header.session-bar")).not.toHaveAttribute("inert");
+    await expect(page.locator(".detail-body")).not.toHaveAttribute("inert");
+    await expect(page.getByRole("button", { name: /^Session Status/ })).toBeVisible();
+    await expect(page.locator(".detail-scroll")).toBeFocused();
+    expect((await exposedButtons()).filter((name) => /^Session Status|^Share$/.test(name))).toHaveLength(2);
+  });
 });
 
 test("in a 400px desktop panel a finding row is single-column, and in a wide one it is not (#2843)", async ({ page }) => {

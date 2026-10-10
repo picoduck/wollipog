@@ -6893,3 +6893,33 @@ test("a draft that changed under a phone's side panel sheet is grown to fit when
     }
   }
 });
+
+test("a phone's side panel sheet makes the session bar and the transcript column inert while it is open (#2888)", { timeout: 5_000 }, async () => {
+  const priorMatchMedia = domWindow.matchMedia;
+  let phone = true;
+  domWindow.matchMedia = ((query: string) => ({
+    get matches() { return phone && query.includes("max-width: 760px"); },
+    media: query, onchange: null,
+    addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {},
+    dispatchEvent: () => false,
+  })) as never;
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft, { rightPanelMode: "launcher" });
+  const covered = () => ["header.session-bar", ".detail-body"].map((selector) =>
+    fixture.container.querySelector(selector)?.hasAttribute("inert"));
+  try {
+    await resolveDraft(draft, "");
+    assert.deepEqual(covered(), [true, true], "both are inert under the open sheet");
+
+    await fixture.setRightPanelOpen(false);
+    assert.deepEqual(covered(), [false, false], "closing the sheet restores them");
+
+    // A desktop panel sits beside the session or overlays it under a visible scrim: nothing is inert.
+    phone = false;
+    await fixture.setRightPanelOpen(true);
+    assert.deepEqual(covered(), [false, false]);
+  } finally {
+    await unmountFixture(fixture);
+    domWindow.matchMedia = priorMatchMedia;
+  }
+});

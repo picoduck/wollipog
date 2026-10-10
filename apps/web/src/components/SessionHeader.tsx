@@ -95,6 +95,7 @@ export function SessionHeader({
   onOpenBackgroundWork,
   onOpenAttention,
   titleId,
+  covered = false,
   developmentBuild = DEVELOPMENT_BUILD,
   restartBlockedReason,
   onRestartPendingChange,
@@ -161,6 +162,9 @@ export function SessionHeader({
   onOpenAttention?: () => void;
   /** Set when this bar owns the page heading (`page-title` focus-rescue anchor). */
   titleId?: string;
+  /** A phone's side panel sheet covers the bar (#2888): it is inert, so neither focus nor a screen
+   * reader reaches controls nobody can see. */
+  covered?: boolean;
   /** Contributor hints (the dashboard-origin build variable) appear only in development builds. */
   developmentBuild?: boolean;
 }) {
@@ -666,7 +670,7 @@ export function SessionHeader({
   return (
     // On a phone this is the second line under the app bar, which already takes the safe area, so
     // it does not take `.detail-bar`'s phone geometry.
-    <header className={isMobile ? "session-bar" : "detail-bar session-bar"} {...windowDragRegion()}>
+    <header className={isMobile ? "session-bar" : "detail-bar session-bar"} inert={covered || undefined} {...windowDragRegion()}>
       {!isMobile && (
         <>
           <button type="button" className="icon-btn detail-bar-back" onClick={onBack} title={backLabel("inbox")} aria-label={backLabel("inbox")}>
