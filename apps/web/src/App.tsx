@@ -501,7 +501,11 @@ export function Shell() {
     if (previousPath.current === path) return;
     previousPath.current = path;
     pendingRouteTitleFocus.current = routeFocusIsLost();
-    if (pendingRouteTitleFocus.current) document.getElementById("page-title")?.focus();
+    if (pendingRouteTitleFocus.current) {
+      // The old route's hidden heading can precede the fallback with the same title id.
+      const title = document.querySelector<HTMLElement>("[data-route-loading] #page-title") ?? document.getElementById("page-title");
+      title?.focus();
+    }
   }, [path]);
 
   // And when the routed session loads or goes (deleted or hidden from another client): a missing

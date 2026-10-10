@@ -1,4 +1,4 @@
-import { useEffect, useRef, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useRef, type RefObject } from "react";
 import { shortcutScopeForFocus } from "./focus-zones.js";
 import { dispatchVirtualViewportIntent } from "./viewport-intent.js";
 import {
@@ -119,7 +119,8 @@ export function useSessionReadingKeys({
     sequenceRef.current = null;
   }, [sessionId]);
 
-  useEffect(() => {
+  // A reader hidden by Suspense keeps passive effects, but must release its keyboard scope.
+  useLayoutEffect(() => {
     if (!enabled) {
       sequenceRef.current = null;
       return;
