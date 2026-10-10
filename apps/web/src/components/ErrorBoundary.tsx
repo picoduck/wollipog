@@ -39,6 +39,8 @@ type ErrorBoundaryProps = {
     body?: string;
     /** The route's page header, redrawn above the notice because the crashed route drew its own. */
     pageTitle?: string;
+    /** Keep a failed dialog in its dismissible surface while retaining the standard notice. */
+    wrapError?: (notice: ReactNode) => ReactNode;
   }
 );
 
@@ -126,6 +128,7 @@ export class ErrorBoundary extends Component<
         {this.props.body ?? "Part of this page failed to display. Nothing was changed."}
       </Notice>
     );
+    if (this.props.wrapError) return this.props.wrapError(notice);
     if (this.props.pageTitle === undefined) return notice;
     return (
       <div className="page">
