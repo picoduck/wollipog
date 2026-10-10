@@ -279,10 +279,12 @@ test("Attach Selected in an expanded Review restores the panel so its chip shows
     lines: [line(" ", "const a = 1;"), line("+", "const b = 2;"), line(" ", "export { a };")],
   }] };
   await page.route("**/api/sessions/*/git", async (route) => {
-    const body = route.request().postDataJSON() as { action: string };
+    const body = route.request().postDataJSON() as { action: string; scope?: string };
     if (body.action !== "diff") return route.fallback();
+    const uncommitted = body.scope === "uncommitted";
     await route.fulfill({ json: { diff: {
-      scope: "uncommitted", diffHash: "d".repeat(64), files: [file], unstagedFiles: [file], stagedFiles: [],
+      scope: body.scope, diffHash: "d".repeat(64), files: [file],
+      ...(uncommitted ? { unstagedFiles: [file], stagedFiles: [] } : {}),
       stats: { filesChanged: 1, insertions: 1, deletions: 0 },
     } } });
   });
@@ -293,6 +295,8 @@ test("Attach Selected in an expanded Review restores the panel so its chip shows
   await openTool(page, "Review");
   await headButton(page, "Expand Panel").click();
   await expectExpanded(page, "expanded");
+  // Review opens on Branch while the branch is ahead (#2846); the worktree's lines are under Uncommitted.
+  await panel(page).getByRole("radio", { name: "Uncommitted", exact: true }).click();
   await panel(page).getByRole("checkbox", { name: "Select Worktree Line 2 for Prompt" }).check();
   await panel(page).getByRole("button", { name: "Attach Selected (1)" }).click();
   await expect(panel(page)).toHaveAttribute("data-presentation", "docked");
