@@ -3984,6 +3984,33 @@ textarea {
   display: flex;
   flex-direction: column;
 }
+/* A tool laid out on the frame's slots (#2846, §4.9, `PanelToolLayout`): a fixed toolbar, one
+   scroller and an optional fixed foot, as the body's own children. The body hands its scroll and
+   padding to them, so the scroller is the only one. */
+.rpanel-body:has(> .rpanel-scroll) {
+  overflow: hidden;
+  padding: 0;
+}
+/* Only the place above the scroller; the row inside it is the shared `.toolbar` (§4.7). */
+.rpanel-toolbar {
+  flex: none;
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+.rpanel-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-3) var(--space-4);
+  display: flex;
+  flex-direction: column;
+}
+.rpanel-foot {
+  flex: none;
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+}
 /* The Requests panel (#2206; docs/design-system.md §6, §6.2): a list that opens each child request in
    a detail in its place, at every width. Each view is one scroller below the panel head. */
 .rpanel-body:has(> .request-panel) {
@@ -4948,11 +4975,98 @@ textarea {
     background: var(--bg-elev-2);
   }
 }
-/* Review (Git/PR) hosted in the panel. */
-.review-panel {
+/* Review (Git/PR) hosted in the panel (#2846): the scroller's blocks, 12px apart. The last-known
+   content (`StaleContent`) keeps the same rhythm inside its wrapper. */
+.review-panel,
+.review-content {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-3);
+}
+/* The toolbar row (§4.7): Scope at its content width, View Options at the row's end. The viewer
+   gate's reason, when there is one, sits under the row. */
+.review-toolbar > .seg { min-width: 0; }
+.review-view-options { margin-left: auto; }
+/* At the panel's narrowest the three equal Scope options and View Options need about 322px of a
+   287px row; at their content widths they need about 270px, so they keep one line (§10.2). */
+@container rp (max-width: 359px) {
+  .review-toolbar > .seg { grid-auto-columns: auto; }
+}
+.review-toolbar-reason {
+  margin: var(--space-1) 0 0;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+/* The summary (§11.3): the branch in mono with the diffstat, a meta line whose facts sit 12px apart
+   with no middle dots (§5.2), then the pull request's title over its state, checks and actions. */
+.review-summary {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.review-summary-line,
+.review-pr-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.review-summary-icon {
+  flex: none;
+  color: var(--text-dim);
+}
+/* In forced colors the summary's icons follow their words. */
+@media (forced-colors: active) {
+  .review-summary-icon { color: inherit; }
+}
+.review-branch,
+.review-pr-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.review-branch { font: var(--type-body); font-family: var(--font-mono); }
+.review-pr-title { font: var(--type-body-strong); }
+.review-diffstat {
+  display: inline-flex;
+  flex: none;
+  gap: var(--space-1);
+  margin-left: auto;
+  font: var(--type-small);
+  font-variant-numeric: tabular-nums;
+}
+.review-diffstat > .diff-ins { color: var(--green); }
+.review-diffstat > .diff-del { color: var(--red); }
+.review-summary-meta,
+.review-pr-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: var(--space-3);
+  row-gap: var(--space-1);
+  padding-left: calc(var(--icon-sm) + var(--space-2));
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.review-pr { display: grid; gap: var(--space-1); margin-top: var(--space-2); }
+.review-pr-refusal {
+  margin: 0;
+  padding-left: calc(var(--icon-sm) + var(--space-2));
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+/* Loading (§12.3): three file sections' heads, a title bar over a meta bar each. */
+.skeleton.review-skeleton {
+  min-height: 0;
+  padding: 0;
+}
+.review-skeleton-file {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--border);
 }
 /* Files browser hosted in the panel: let the listing fill the column instead of the
    inline panel's 320px cap. */
@@ -11626,8 +11740,8 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   gap: 12px;
   flex-wrap: wrap;
 }
-/* The Review and Files panels' file lists: dense rows (§5.2), 32px on a fine pointer and 44px on
-   touch, with no gap between them. */
+/* The Files panel's file list: dense rows (§5.2), 32px on a fine pointer and 44px on touch, with
+   no gap between them. */
 .git-files {
   list-style: none;
   margin: 0;
@@ -11639,12 +11753,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   overflow: auto;
   display: flex;
   flex-direction: column;
-}
-.gfs {
-  flex: none;
-  min-width: 22px;
-  color: var(--amber);
-  font-family: var(--font-mono);
 }
 /* ------------------------- Files panel (session browser) ------------------------ */
 .files-list {
@@ -12997,35 +13105,12 @@ body.shell-dock-dragging * {
 .git-diff-section {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-}
-.git-diff-controls {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-.git-diff-view-controls {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  flex-wrap: wrap;
+  gap: var(--space-2);
 }
 .diff-view {
   display: flex;
   flex-direction: column;
   gap: 8px;
-}
-.diff-summary {
-  font-size: 12px;
-}
-.diff-summary .diff-ins {
-  color: var(--green);
-}
-.diff-summary .diff-del {
-  color: var(--red);
 }
 .diff-empty {
   font-size: 12.5px;
@@ -14863,8 +14948,6 @@ body.shell-dock-dragging * {
 /* The diff and the findings answer to the side panel's width, not the window's (§2.10; #2843): a
    400px panel on a desktop gets the narrow layout, and a single-column finding row. */
 @container rp (max-width: 640px) {
-  .git-diff-view-controls { align-items: flex-start; flex-direction: column; }
-  .git-diff-view-controls .seg { overflow-x: auto; }
   .diff-file-head-row { align-items: stretch; }
   .diff-hunk-header { align-items: flex-start; flex-direction: column; }
   .hunk-actions { width: 100%; flex-wrap: wrap; }

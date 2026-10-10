@@ -1,8 +1,9 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Notice } from "./Notice.js";
-import { Checkbox, SegmentedControl } from "./ui/ChoiceControls.js";
+import { Checkbox } from "./ui/ChoiceControls.js";
 import { StatusBadge } from "./StatusBadge.js";
 import {
+  isPolicyApproval,
   isTerminal,
   normalizeSourcePath,
   runnerCapabilityRequirement,
@@ -15,6 +16,8 @@ import {
   type GitForgeInfo,
   type GitPrInfo,
   type GitStatusInfo,
+  type GitChecksSummary,
+  type GitPrSummary,
   type ReviewFinding,
   type ReviewFindingSummary,
   type SessionView,
@@ -22,7 +25,7 @@ import {
 } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
-import { titleCaseLabel } from "../format.js";
+import { formatClock, titleCaseLabel } from "../format.js";
 import {
   GitDiffViewer,
   type DiffFileFocus,
@@ -41,10 +44,22 @@ import { useFeedback } from "./FeedbackProvider.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { safeExternalHref } from "../external-href.js";
 import { sourceKind } from "../pinned-summary.js";
+import { runnerDisplay } from "../runners.js";
 import { sessionCommandRefusal } from "../session-command-permissions.js";
+import { useOptionalStoreSelector } from "../store.js";
+import { Spinner } from "./common.js";
+import { DiffIcon, FolderIcon, RefreshIcon } from "./Icons.js";
+// RightPanel renders this module too; the slot is only read at render time, so the cycle is inert.
+import { PanelHeaderActions } from "./RightPanel.js";
+import { PanelToolLayout } from "./PanelToolLayout.js";
+import { ReviewSummary } from "./ReviewSummary.js";
+import { ReviewToolbar } from "./ReviewToolbar.js";
+import { StaleContent } from "./StaleContent.js";
+import { State } from "./State.js";
 import {
   clearPanelScratchIf,
   panelScratchRevision,
+  readPanelScratch,
   usePanelScratchChoice,
   usePanelScratchDraft,
   usePanelScratchScope,
@@ -65,6 +80,7 @@ const COMMIT_MESSAGE_KEY = "review.commitMessage";
 const REQUEST_TITLE_KEY = "review.requestTitle";
 const REQUEST_BODY_KEY = "review.requestBody";
 const BRANCH_KEY = "review.branch";
+const DIFF_SCOPE_KEY = "review.diffScope";
 
 /** The drafts a submit sent, as they stood when it was sent. */
 interface SubmittedDrafts {
@@ -99,11 +115,30 @@ function releaseSubmitted({ scope, drafts }: SubmittedDrafts): void {
   }
 }
 
+/** File-section placeholders while the first diff of a scope loads (§12.3). */
+function DiffSkeleton() {
+  return (
+    <div className="skeleton review-skeleton" role="status" aria-live="polite">
+      <span className="sr-only">Loading changes…</span>
+      {[0, 1, 2].map((index) => (
+        <div className="review-skeleton-file" key={index} aria-hidden="true">
+          <span className="skeleton-bar title" />
+          <span className="skeleton-bar" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /**
  * Git / PR workflow for a worktree session: review the worktree status, commit the
  * agent's changes, and push a branch + open a PR — all run on the session's runner.
  * Hosted by the right side panel's "Review" mode (Ctrl+Shift+G). Status is the app-wide
  * shared read (useGitStatus); the diff and its staging state are owned here.
+ *
+ * Laid out on the panel's slots (#2846): the toolbar fixed above, one scroller holding the notices,
+ * the summary, the diff, the findings and (until #2847 moves them to the foot) the commit and pull
+ * request forms. Its one Refresh is in the panel header.
  */
 export function ReviewPanel({
   session,
@@ -111,6 +146,7 @@ export function ReviewPanel({
   runnerProtocolVersion,
   git,
   forge,
+  forgeFacts,
   onOpenSourceLocation,
   onAttachWorkspaceReference,
   focus,
@@ -121,6 +157,8 @@ export function ReviewPanel({
   runnerProtocolVersion: number | null | undefined;
   git: GitStatus;
   forge?: GitForgeInfo | null;
+  /** The branch's pull request and its checks, from the forge summary (`visibleForgeFacts`). */
+  forgeFacts?: { pr: GitPrSummary | null; checks: GitChecksSummary | null } | null;
   onOpenSourceLocation: (location: SourceLocation) => void;
   onAttachWorkspaceReference?: (target: CreateWorkspaceReferenceRequest) => Promise<void>;
   /** A file to bring into view: a transcript edit's Open in Review (#2187). */
@@ -149,12 +187,30 @@ export function ReviewPanel({
   // Rich-diff pane (Phase 2, PR-A). Branch-relative scopes only make sense for worktree sessions;
   // a WSL in-place session has no session branch to diff, so it gets Uncommitted only — which is
   // also why restoring a remembered scope re-checks that this session still offers it.
-  const [scope, setScope] = usePanelScratchChoice<GitDiffScope>(
+  const [chosenScope, setChosenScope] = usePanelScratchChoice<GitDiffScope>(
     panelScratch,
-    "review.diffScope",
+    DIFF_SCOPE_KEY,
     "uncommitted",
     (raw) => raw === "uncommitted" || (session.useWorktree === true && (raw === "all_branch" || raw === "last_turn")),
   );
+  // Review opens where the work is (#2846): with nothing uncommitted and the branch ahead, the first
+  // scope is Branch. Only a choice the reviewer made is remembered; the opening scope is decided
+  // once, from the first status read, and never written to scratch, so the next visit decides again.
+  const [scopeChosen, setScopeChosen] = useState(
+    () => session.useWorktree !== true || readPanelScratch(panelScratch, DIFF_SCOPE_KEY) !== undefined,
+  );
+  const [openingScope, setOpeningScope] = useState<GitDiffScope | null>(null);
+  useLayoutEffect(() => {
+    if (scopeChosen || openingScope !== null) return;
+    if (!status && !git.settled) return;
+    setOpeningScope(status && status.files.length === 0 && status.ahead > 0 ? "all_branch" : "uncommitted");
+  }, [git.settled, openingScope, scopeChosen, status]);
+  const scope: GitDiffScope = scopeChosen ? chosenScope : openingScope ?? "uncommitted";
+  const scopeDecided = scopeChosen || openingScope !== null;
+  const setScope = (next: GitDiffScope) => {
+    setScopeChosen(true);
+    setChosenScope(next);
+  };
   const [pane, setPane] = usePanelScratchChoice<DiffPane>(
     panelScratch, "review.indexPane", "combined",
     (raw) => raw === "combined" || raw === "unstaged" || raw === "staged",
@@ -166,6 +222,10 @@ export function ReviewPanel({
   /** Completed diff reads, so a request can tell a read that landed after it from one before. */
   const [diffReads, setDiffReads] = useState(0);
   const [diffBusy, setDiffBusy] = useState(false);
+  /** When the diff on screen was read, for the offline notice's "This review is from". */
+  const [diffReadAt, setDiffReadAt] = useState<number | null>(null);
+  /** The header Refresh's own reload of status, diff and findings together. */
+  const [refreshing, setRefreshing] = useState(false);
   const [diffError, setDiffError] = useState<string | null>(null);
   // Per-hunk staging (PR-B): the in-flight mutation's `${path}#${index}` key, and the amber
   // non-fatal notice shown when a stage raced the worktree/index (GIT_STALE / GIT_APPLY_FAILED).
@@ -235,7 +295,7 @@ export function ReviewPanel({
   const diffHint = runnerCapabilityRequirement(runnerProtocolVersion, "richDiff", "rich diff loading");
   const stagingHint = runnerCapabilityRequirement(runnerProtocolVersion, "hunkStaging", "hunk staging");
   const fineDiffHint = runnerCapabilityRequirement(runnerProtocolVersion, "fineGrainedDiff", "staged panes, line staging, and discard");
-  const diffEnabled = runnerOnline && !!session.worktreePath && diffSupported;
+  const diffEnabled = runnerOnline && !!session.worktreePath && diffSupported && scopeDecided;
   // Every Git action below is refused to a person the server would refuse (#1870). The ref is read
   // after Discard's confirmation closes, so a refusal that arrives while it is open sends nothing.
   const gitRefusal = sessionCommandRefusal(session, "gitActions");
@@ -276,6 +336,7 @@ export function ReviewPanel({
       if (diffReqRef.current !== reqId) return; // superseded by a newer scope/refresh
       diffSignatureRef.current = observed;
       setDiff(d);
+      setDiffReadAt(Date.now());
       setDiffReads((reads) => reads + 1);
       setDiffError(null);
       setAutoReloadFailed(false);
@@ -318,6 +379,7 @@ export function ReviewPanel({
     busyOwnerRef.current = null;
     setDiffBusy(false);
     setDiff(payload.diff);
+    setDiffReadAt(Date.now());
     setDiffReads((reads) => reads + 1);
     setDiffError(null);
     // This reply IS a successful paired read of both halves, so any earlier warning that the diff
@@ -746,345 +808,367 @@ export function ReviewPanel({
   const gitActionDisabled = disabled || gitRefusal !== null;
   const gitRefusalProps = gitRefusal === null ? {} : { title: gitRefusal, "aria-describedby": gitRefusalId };
 
-  // Review is meaningless without a working directory to diff — non-worktree chats get a hint.
+  const refreshReview = async () => {
+    setRefreshing(true);
+    try {
+      await Promise.all([runnerOnline ? git.refresh() : null, loadDiff(), loadFindings()]);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+  // Busy for its own reload and for any read someone asked for (a scope switch, the out-of-date
+  // notice's Refresh); a background reload never shows here.
+  const refreshBusy = refreshing || diffBusy;
+  const machineName = useOptionalStoreSelector((state) => runnerDisplay(
+    state.runners.get(session.runnerId),
+    [...state.boxes.values()].find((box) => box.runnerId === session.runnerId),
+    session.runnerId,
+  ).name) || "The machine";
+  const canPrompt = runnerOnline && !isTerminal(session.status) && !isPolicyApproval(session.pendingApproval);
+  // An older runner limits Review in nested steps; only the most limiting one is worth saying.
+  const runnerLimit = !diffSupported ? diffHint : !stagingSupported ? stagingHint : !fineDiffSupported ? fineDiffHint : null;
+  const readAt = Math.max(diffReadAt ?? 0, git.observedAt ?? 0) || null;
+  const paneShown: DiffPane = scope === "uncommitted" && fineDiffSupported ? pane : "combined";
+
+  // Review is meaningless without a working directory to diff (§12.1).
   if (!session.worktreePath) {
-    return <div className="hint">This session has no working directory — git review is unavailable.</div>;
+    return (
+      <PanelToolLayout>
+        <State compact icon={<FolderIcon />} title="No Working Folder">
+          This session has no folder to compare, so there is nothing to review.
+        </State>
+      </PanelToolLayout>
+    );
   }
 
+  // The scope's own state when its diff is empty (§12.1), each with the sentence that says why.
+  const emptyState = scope === "all_branch"
+    ? <State compact icon={<DiffIcon />} title="No Changes on This Branch">Nothing on this branch differs from its base.</State>
+    : scope === "last_turn"
+      ? <State compact icon={<DiffIcon />} title="No Changes in the Last Turn">The agent didn't change any files in its last turn.</State>
+      : paneShown === "staged"
+        ? <State compact icon={<DiffIcon />} title="No Staged Changes">Nothing is staged yet.</State>
+        : paneShown === "unstaged"
+          ? <State compact icon={<DiffIcon />} title="No Unstaged Changes">Every change is staged.</State>
+          : (
+            <State
+              compact
+              icon={<DiffIcon />}
+              title="No Uncommitted Changes"
+              actions={session.useWorktree && (status?.ahead ?? 0) > 0 && (
+                <button type="button" className="btn sm" onClick={() => setScope("all_branch")}>Show Branch Changes</button>
+              )}
+            >
+              Everything is committed.
+            </State>
+          );
+
   return (
-    <div className="review-panel">
-      {!runnerOnline && <div className="hint warn">Runner is offline — git actions are unavailable.</div>}
-      {gitRefusal !== null && <p id={gitRefusalId} className="hint">{gitRefusal}</p>}
-      {!diffSupported && (
-        <div className="hint warn" role="status">
-          {diffHint}
-        </div>
-      )}
-      {diffSupported && !stagingSupported && (
-        <div className="hint warn" role="status">
-          {stagingHint}
-        </div>
-      )}
-      {diffSupported && stagingSupported && !fineDiffSupported && (
-        <div className="hint warn" role="status">
-          {fineDiffHint}
-        </div>
-      )}
-      {error && <Notice tone="danger" compact>{error}</Notice>}
-      {/* A failed status refresh keeps the last-known numbers on screen — say so, or the
-          stale branch/file count reads as current. */}
-      {git.error && (
-        <Notice tone="danger" details={<div className="code-well"><pre>{git.error}</pre></div>}>
-          {status
-            ? "Git status could not be read. The status shown below is the last known result and may be out of date."
-            : "Git status could not be read. The current status is unknown."}
-        </Notice>
-      )}
-
-      <div className="git-status-row">
-        <button className="btn ghost sm" onClick={loadStatus} disabled={disabled}>
-          {git.busy ? "Updating Git Status" : "Refresh Git Status"}
+    <>
+      <PanelHeaderActions>
+        <button
+          type="button"
+          className="icon-btn"
+          aria-label="Refresh Review"
+          title="Refresh Review"
+          aria-busy={refreshBusy || undefined}
+          disabled={refreshBusy}
+          onClick={() => void refreshReview()}
+        >
+          {refreshBusy ? <Spinner decorative /> : <RefreshIcon aria-hidden="true" />}
         </button>
-        {status && (
-          <span className="muted">
-            Branch <code>{status.branch}</code> · {status.files.length} Changed · {status.ahead} Commit
-            {status.ahead === 1 ? "" : "s"} Ahead
-          </span>
-        )}
-      </div>
-
-      {status && status.files.length > 0 && (
-        <ul className="git-files">
-          {status.files.slice(0, 12).map((f) => (
-            <li key={f.path} className="row dense">
-              <span className="gfs">{f.status || "·"}</span>
-              <span className="row-title">{f.path}</span>
-            </li>
-          ))}
-          {status.files.length > 12 && <li className="row dense muted">+{status.files.length - 12} More…</li>}
-        </ul>
-      )}
-
-      <div className="git-diff-section" role="group" aria-label="Review Changes">
-        <div className="git-diff-controls">
-          <SegmentedControl
-            className="sm"
-            label="Diff Scope"
-            value={scope}
-            options={[
-              { value: "uncommitted", label: "Uncommitted", disabled: !diffSupported },
-              ...(session.useWorktree ? [
-                { value: "all_branch" as const, label: "Branch", disabled: !diffSupported },
-                { value: "last_turn" as const, label: "Last Turn", disabled: !diffSupported },
-              ] : []),
-            ]}
-            onChange={setScope}
-          />
-          <button className="btn ghost sm" onClick={() => void loadDiff()} disabled={diffBusy || !runnerOnline || !diffSupported}>
-            {diffBusy ? "Loading…" : "↻ Refresh"}
-          </button>
-        </div>
-        <div className="git-diff-view-controls">
-          {scope === "uncommitted" && fineDiffSupported && (
-            <SegmentedControl<DiffPane>
-              className="sm"
-              label="Index Pane"
-              value={pane}
-              options={[
-                { value: "combined", label: "All Changes" },
-                { value: "unstaged", label: "Unstaged" },
-                { value: "staged", label: "Staged" },
-              ]}
-              onChange={setPane}
-            />
-          )}
-          <SegmentedControl<DiffLayout>
-            className="sm"
-            label="Diff Layout"
-            value={layout}
-            options={[{ value: "unified", label: "Unified" }, { value: "split", label: "Side by Side" }]}
-            onChange={setLayout}
-          />
-        </div>
-        {diffError && <Notice tone="danger" compact>{diffError}</Notice>}
-        {stageNotice && <div className="hint warn">{stageNotice}</div>}
-        {diffLagsStatus && (
-          // Amber only for the failure: it persists until the user acts, while a deferred reload
-          // heals itself the moment the mutation settles and must not flash a warning to say so.
-          <div className={autoReloadFailed ? "hint warn" : "hint"} role="status">
-            {autoReloadFailed
-              ? "The last automatic refresh of this diff did not land, so it may be older than the file list above."
-              : "The changes on disk moved since this diff was read — it reloads once the action in progress finishes."}{" "}
-            <button className="btn ghost sm" onClick={() => void loadDiff()} disabled={diffBusy || !runnerOnline || !diffSupported}>
-              ↻ Refresh Diff
-            </button>
-          </div>
-        )}
-        {/* Keyed off !shownDiff (not diffBusy): after a tab click there is one paint before
-            the load effect sets busy, and the pane must not flash blank in between. Gated on
-            diffEnabled — with loading intentionally disabled (runner offline), an indefinite
-            "Loading…" would be a lie; say what's actually happening. */}
-        {!shownDiff && !diffError && diffEnabled && <div className="muted">Loading diff…</div>}
-        {!shownDiff && !diffError && diffSupported && !diffEnabled && (
-          <div className="muted">Diff unavailable while the runner is offline — it reloads on reconnect.</div>
-        )}
-        {shownDiff && (
-          <GitDiffViewer
-            diff={shownDiff}
-            staging={staging}
+      </PanelHeaderActions>
+      <PanelToolLayout
+        toolbar={(
+          <ReviewToolbar
+            scope={scope}
+            onScopeChange={setScope}
+            branchScopes={session.useWorktree === true}
+            unavailableReason={diffSupported ? null : diffHint}
+            pane={scope === "uncommitted" && fineDiffSupported ? pane : null}
+            onPaneChange={setPane}
             layout={layout}
-            onOpenSourceLocation={onOpenSourceLocation}
-            onAttachWorkspaceReference={onAttachWorkspaceReference}
-            focus={focus}
-            focusSettled={focusSettled}
-            onFocusHandled={onFocusHandled}
-            review={{
-              findings,
-              anchoredFindingIds,
-              lineage: diffLineage,
-              creating: creatingFinding,
-              busyFindingId: findingBusyId,
-              onCreate: createFinding,
-              onStatus: updateFinding,
-              refusal: findingRefusal === null ? null : { reason: findingRefusal, id: findingRefusalId },
-            }}
+            onLayoutChange={setLayout}
+            refusal={gitRefusal === null ? null : { reason: gitRefusal, id: gitRefusalId }}
           />
         )}
-      </div>
-
-      <section className="review-findings" aria-label="Inline Review Findings">
-        <div className="review-findings-head">
-          <div>
-            <strong>Review Findings</strong>
-            {findingSummary && (
-              <span className={`review-state review-state-${findingSummary.completion}`}>
-                {findingSummary.completion === "blocked"
-                  ? `${findingSummary.requiredUnresolved} required unresolved`
-                  : findingSummary.completion === "in_review"
-                    ? `${findingSummary.unresolved} optional unresolved`
-                    : "complete"}
-              </span>
-            )}
-          </div>
-          <div className="review-findings-actions">
-            <button className="btn ghost sm" disabled={bundlingFindings} onClick={() => void loadFindings()}>↻ Refresh</button>
-            <button
-              className="btn ghost sm"
-              disabled={bundlingFindings || syncingGitHub || !runnerOnline || !session.worktreePath || !reviewSyncSupported ||
-                gitRefusal !== null}
-              title={gitRefusal ?? (reviewSyncSupported
-                ? `Import the current ${requestName}'s ${mergeRequest ? "GitLab" : "GitHub"} review threads (read-only)`
-                : runnerCapabilityRequirement(runnerProtocolVersion, mergeRequest ? "forgeIntegration" : "githubReviewReconciliation", `${mergeRequest ? "GitLab" : "GitHub"} review reconciliation`))}
-              aria-describedby={gitRefusal !== null ? gitRefusalId : undefined}
-              onClick={() => void syncForgeFindings()}
-            >
-              {syncingGitHub ? `Syncing ${mergeRequest ? "GitLab" : "GitHub"}…` : `Sync ${mergeRequest ? "GitLab" : "GitHub"}`}
-            </button>
-            <button
-              className="btn sm"
-              disabled={bundlingFindings || selectedFindings.size === 0 || !runnerOnline || isTerminal(session.status) ||
-                findingRefusal !== null}
-              title={findingRefusal ?? undefined}
-              aria-describedby={findingRefusal !== null ? findingRefusalId : undefined}
-              onClick={() => void bundleFindings()}
-            >
-              {bundlingFindings ? "Sending…" : `Send Selected (${selectedFindings.size})`}
-            </button>
-          </div>
-        </div>
-        {findingRefusal !== null && <p id={findingRefusalId} className="muted review-findings-refusal">{findingRefusal}</p>}
-        {findingError && <Notice tone="danger" compact>Review findings: {findingError}</Notice>}
-        {findingNotice && <div className="git-ok">✓ {findingNotice}</div>}
-        {findings.filter((finding) => finding.status === "open" || finding.status === "sent").length === 0 ? (
-          <div className="muted review-findings-empty">Add a comment from any exact diff line to start a review.</div>
-        ) : (
-          <div className="review-findings-list">
-            {findings.filter((finding) => finding.status === "open" || finding.status === "sent").map((finding) => {
-              // Stale means the anchored content actually moved — not merely that the change-set
-              // hash advanced, which every unrelated stage and agent edit does (#1203).
-              const stale = !anchoredFindingIds.has(finding.findingId);
-              const remoteOnly = finding.remote?.subjectType === "remote";
-              const sourcePath = remoteOnly ? null : normalizeSourcePath(finding.filePath);
-              const sourceLocation = sourcePath ? {
-                path: sourcePath,
-                ...(finding.remote?.subjectType === "file" || finding.side !== "right" ? {} : { line: finding.line }),
-              } : null;
-              const findingLocation = remoteOnly
-                ? "Remote Discussion"
-                : `${finding.filePath}${finding.remote?.subjectType === "file" ? " (file comment)" : `:${finding.line}`}`;
-              return (
-                <article className="review-finding-row" key={finding.findingId}>
-                  <Checkbox
-                    labelHidden
-                    label={remoteOnly
-                      ? "Select Remote Discussion"
-                      : finding.remote?.subjectType === "file"
-                      ? `Select File-Level Finding on ${finding.filePath}`
-                      : `Select Finding on ${finding.filePath} Line ${finding.line}`}
-                    checked={selectedFindings.has(finding.findingId)}
-                    disabled={bundlingFindings}
-                    onChange={(checked) => setSelectedFindings((prior) => {
-                      const next = new Set(prior);
-                      if (checked) next.add(finding.findingId); else next.delete(finding.findingId);
-                      return next;
-                    })}
-                  />
-                  <div className="review-finding-main">
-                    <div className="review-finding-meta">
-                      {sourceLocation ? (
-                        <button type="button" className="source-path-link" onClick={() => onOpenSourceLocation(sourceLocation)}>
-                          <code>{findingLocation}</code>
-                        </button>
-                      ) : (
-                        <code>{findingLocation}</code>
-                      )}
-                      <span className={`review-severity review-severity-${finding.severity}`}>{titleCaseLabel(finding.severity)}</span>
-                      {finding.required && <StatusBadge tone="neutral" noDot label="Required" />}
-                      {finding.status === "sent" && <span>Sent</span>}
-                      {stale && <span className="review-stale">Stale Diff Anchor</span>}
-                    </div>
-                    <div>{finding.body}</div>
-                    <div className="review-finding-provenance">{finding.source === "gitlab" ? "GitLab" : titleCaseLabel(finding.source)} · {finding.author.id ?? titleCaseLabel(finding.author.kind)} · {titleCaseLabel(finding.scope.replaceAll("_", " "))} · {titleCaseLabel(finding.side)}</div>
-                    {finding.remote && (
-                      <div className="review-finding-provenance">
-                        {finding.remote.provider === "gitlab" ? "MR" : "PR"} #{finding.remote.pullRequestNumber}{finding.remote.outdated ? " · Outdated" : ""}{" · "}
-                        <a className="link" href={finding.remote.url} target="_blank" rel="noreferrer">Open on {finding.remote.provider === "gitlab" ? "GitLab" : "GitHub"}</a>
-                      </div>
-                    )}
-                  </div>
-                  <div className="review-finding-row-actions">
-                    {finding.remote ? (
-                      <span className="muted">Remote-Owned</span>
-                    ) : (
-                      <>
-                        <button className="btn ghost sm" disabled={findingBusyId === finding.findingId || findingRefusal !== null}
-                          title={findingRefusal ?? undefined} aria-describedby={findingRefusal !== null ? findingRefusalId : undefined}
-                          onClick={() => void updateFinding(finding, "resolved")}>Resolve</button>
-                        <button className="btn ghost sm" disabled={findingBusyId === finding.findingId || findingRefusal !== null}
-                          title={findingRefusal ?? undefined} aria-describedby={findingRefusal !== null ? findingRefusalId : undefined}
-                          onClick={() => void updateFinding(finding, "dismissed")}>Dismiss</button>
-                      </>
-                    )}
-                  </div>
-                </article>
-              );
-            })}
-          </div>
-        )}
-      </section>
-
-      <div className="git-action">
-        <label htmlFor={commitId}>Commit Message</label>
-        <div className="git-inline">
-          <input
-            id={commitId}
-            value={commitMsg}
-            onChange={(e) => setCommitMsg(e.target.value)}
-            placeholder="Describe the change"
-          />
-          <button className="btn sm" onClick={() => doCommit(false)} disabled={gitActionDisabled} {...gitRefusalProps}>
-            {busy === "commit" ? "Committing…" : stagedCount > 0 ? "Commit Staged" : "Commit"}
-          </button>
-          {stagedCount > 0 && (
-            <button
-              className="btn ghost sm"
-              onClick={() => doCommit(true)}
-              disabled={gitActionDisabled}
-              title="Ignore the staged selection and commit every change in the worktree"
-              {...gitRefusalProps}
-            >
-              Commit All
-            </button>
+      >
+        <div className="review-panel">
+          {/* Notices first, at the top of the scroller (§13.2): each is one compact line. */}
+          {!runnerOnline && (
+            <Notice tone="warning" compact role="status">
+              {readAt
+                ? `${machineName} is offline. This review is from ${formatClock(readAt)}.`
+                : `${machineName} is offline. Review loads when it reconnects.`}
+            </Notice>
           )}
-        </div>
-        {stagedCount > 0 && (
-          <div className="hint">
-            {stagedCount} file{stagedCount === 1 ? " has" : "s have"} staged changes — Commit commits only those; unstaged
-            edits stay in the worktree.
-          </div>
-        )}
-        {commit && (
-          <div className="git-ok">
-            ✓ Committed <code>{commit.sha}</code> ({commit.filesChanged} File{commit.filesChanged === 1 ? "" : "s"}
-            {commit.stagedOnly ? ", Staged Only" : ""})
-          </div>
-        )}
-      </div>
+          {runnerLimit && <Notice tone="neutral" compact role="status">{runnerLimit}</Notice>}
+          {error && <Notice tone="danger" compact>{error}</Notice>}
+          {/* A failed status refresh keeps the last-known numbers on screen — say so, or the
+              stale branch/file count reads as current. */}
+          {git.error && (
+            <Notice tone="danger" details={<div className="code-well"><pre>{git.error}</pre></div>}>
+              {status
+                ? "Git status could not be read. The status shown below is the last known result and may be out of date."
+                : "Git status could not be read. The current status is unknown."}
+            </Notice>
+          )}
+          {diffError && <Notice tone="danger" compact>{diffError}</Notice>}
+          {stageNotice && <Notice tone="warning" compact role="status">{stageNotice}</Notice>}
+          {diffLagsStatus && (
+            // Warning only for the failure: it persists until the reviewer acts, while a deferred
+            // reload heals itself the moment the mutation settles and must not flash a warning.
+            <Notice
+              tone={autoReloadFailed ? "warning" : "neutral"}
+              compact
+              role="status"
+              actions={(
+                <button type="button" className="btn sm" onClick={() => void loadDiff()} disabled={diffBusy || !runnerOnline || !diffSupported}>
+                  Refresh
+                </button>
+              )}
+            >
+              These changes may be out of date.
+            </Notice>
+          )}
 
-      <div className="git-action" role="group" aria-label={`Open a ${requestName}`}>
-        <label>Open a {requestName}</label>
-        <input value={prTitle} onChange={(e) => setPrTitle(e.target.value)} placeholder={mergeRequest ? "MR title" : "PR title"} aria-label={`${requestShortName} Title`} />
-        <textarea
-          value={prBody}
-          onChange={(e) => setPrBody(e.target.value)}
-          placeholder={mergeRequest ? "MR description (optional)" : "PR description (optional)"}
-          aria-label={`${requestShortName} Description`}
-          rows={2}
-        />
-        <div className="git-inline">
-          <input
-            value={branch}
-            onChange={(e) => setBranch(e.target.value)}
-            placeholder="branch name (optional — defaults to the agent branch)"
-            aria-label="Branch Name"
-          />
-          <button className="btn primary sm" onClick={doPr} disabled={gitActionDisabled} {...gitRefusalProps}>
-            {busy === "pr" ? "Opening…" : `Push & Open ${requestName}`}
-          </button>
-        </div>
-        <div className="hint">Commits any pending changes, pushes the branch, and opens a {requestName.toLowerCase()} (falls back to a validated prefilled link when authenticated forge tooling is unavailable). If you've staged hunks selectively, use Commit first — Push &amp; Open {requestName} won't guess at a partial stage.</div>
-        {pr && (
-          <div className="git-ok">
-            ✓ {(pr.created ?? pr.createdWithGh) ? `${pr.kind === "merge_request" ? "Merge Request" : "Pull Request"} opened` : `Branch pushed — click to open the ${pr.kind === "merge_request" ? "Merge Request" : "Pull Request"}`}:{" "}
-            {prHref ? (
-              <a className="link" href={prHref} target="_blank" rel="noreferrer">{pr.url}</a>
+          {/* While the runner is offline the last-known review stays readable, dimmed (§12.5). */}
+          <StaleContent stale={!runnerOnline} className="review-content">
+            <ReviewSummary
+              session={session}
+              status={status}
+              stats={shownDiff?.stats ?? null}
+              pr={forgeFacts?.pr ?? null}
+              checks={forgeFacts?.checks ?? null}
+              canPrompt={canPrompt}
+            />
+            <div className="git-diff-section" role="group" aria-label="Changes">
+              {/* Keyed off !shownDiff (not diffBusy): after a scope switch there is one paint before
+                  the load effect sets busy, and the pane must not flash blank in between. Nothing
+                  loads while the runner is offline or too old, and their notices say so. */}
+              {shownDiff
+                ? shownDiff.files.length === 0
+                  ? emptyState
+                  : (
+                    <GitDiffViewer
+                      diff={shownDiff}
+                      staging={staging}
+                      layout={layout}
+                      onOpenSourceLocation={onOpenSourceLocation}
+                      onAttachWorkspaceReference={onAttachWorkspaceReference}
+                      focus={focus}
+                      focusSettled={focusSettled}
+                      onFocusHandled={onFocusHandled}
+                      review={{
+                        findings,
+                        anchoredFindingIds,
+                        lineage: diffLineage,
+                        creating: creatingFinding,
+                        busyFindingId: findingBusyId,
+                        onCreate: createFinding,
+                        onStatus: updateFinding,
+                        refusal: findingRefusal === null ? null : { reason: findingRefusal, id: findingRefusalId },
+                      }}
+                    />
+                  )
+                : !diffError && runnerOnline && diffSupported && <DiffSkeleton />}
+            </div>
+          </StaleContent>
+
+          <section className="review-findings" aria-label="Inline Review Findings">
+            <div className="review-findings-head">
+              <div>
+                <strong>Review Findings</strong>
+                {findingSummary && (
+                  <span className={`review-state review-state-${findingSummary.completion}`}>
+                    {findingSummary.completion === "blocked"
+                      ? `${findingSummary.requiredUnresolved} required unresolved`
+                      : findingSummary.completion === "in_review"
+                        ? `${findingSummary.unresolved} optional unresolved`
+                        : "complete"}
+                  </span>
+                )}
+              </div>
+              <div className="review-findings-actions">
+                <button
+                  className="btn ghost sm"
+                  disabled={bundlingFindings || syncingGitHub || !runnerOnline || !session.worktreePath || !reviewSyncSupported ||
+                    gitRefusal !== null}
+                  title={gitRefusal ?? (reviewSyncSupported
+                    ? `Import the current ${requestName}'s ${mergeRequest ? "GitLab" : "GitHub"} review threads (read-only)`
+                    : runnerCapabilityRequirement(runnerProtocolVersion, mergeRequest ? "forgeIntegration" : "githubReviewReconciliation", `${mergeRequest ? "GitLab" : "GitHub"} review reconciliation`))}
+                  aria-describedby={gitRefusal !== null ? gitRefusalId : undefined}
+                  onClick={() => void syncForgeFindings()}
+                >
+                  {syncingGitHub ? `Syncing ${mergeRequest ? "GitLab" : "GitHub"}…` : `Sync ${mergeRequest ? "GitLab" : "GitHub"}`}
+                </button>
+                <button
+                  className="btn sm"
+                  disabled={bundlingFindings || selectedFindings.size === 0 || !runnerOnline || isTerminal(session.status) ||
+                    findingRefusal !== null}
+                  title={findingRefusal ?? undefined}
+                  aria-describedby={findingRefusal !== null ? findingRefusalId : undefined}
+                  onClick={() => void bundleFindings()}
+                >
+                  {bundlingFindings ? "Sending…" : `Send Selected (${selectedFindings.size})`}
+                </button>
+              </div>
+            </div>
+            {findingRefusal !== null && <p id={findingRefusalId} className="muted review-findings-refusal">{findingRefusal}</p>}
+            {findingError && <Notice tone="danger" compact>Review findings: {findingError}</Notice>}
+            {findingNotice && <div className="git-ok">✓ {findingNotice}</div>}
+            {findings.filter((finding) => finding.status === "open" || finding.status === "sent").length === 0 ? (
+              <div className="muted review-findings-empty">Add a comment from any exact diff line to start a review.</div>
             ) : (
-              <code>{pr.url}</code>
+              <div className="review-findings-list">
+                {findings.filter((finding) => finding.status === "open" || finding.status === "sent").map((finding) => {
+                  // Stale means the anchored content actually moved — not merely that the change-set
+                  // hash advanced, which every unrelated stage and agent edit does (#1203).
+                  const stale = !anchoredFindingIds.has(finding.findingId);
+                  const remoteOnly = finding.remote?.subjectType === "remote";
+                  const sourcePath = remoteOnly ? null : normalizeSourcePath(finding.filePath);
+                  const sourceLocation = sourcePath ? {
+                    path: sourcePath,
+                    ...(finding.remote?.subjectType === "file" || finding.side !== "right" ? {} : { line: finding.line }),
+                  } : null;
+                  const findingLocation = remoteOnly
+                    ? "Remote Discussion"
+                    : `${finding.filePath}${finding.remote?.subjectType === "file" ? " (file comment)" : `:${finding.line}`}`;
+                  return (
+                    <article className="review-finding-row" key={finding.findingId}>
+                      <Checkbox
+                        labelHidden
+                        label={remoteOnly
+                          ? "Select Remote Discussion"
+                          : finding.remote?.subjectType === "file"
+                          ? `Select File-Level Finding on ${finding.filePath}`
+                          : `Select Finding on ${finding.filePath} Line ${finding.line}`}
+                        checked={selectedFindings.has(finding.findingId)}
+                        disabled={bundlingFindings}
+                        onChange={(checked) => setSelectedFindings((prior) => {
+                          const next = new Set(prior);
+                          if (checked) next.add(finding.findingId); else next.delete(finding.findingId);
+                          return next;
+                        })}
+                      />
+                      <div className="review-finding-main">
+                        <div className="review-finding-meta">
+                          {sourceLocation ? (
+                            <button type="button" className="source-path-link" onClick={() => onOpenSourceLocation(sourceLocation)}>
+                              <code>{findingLocation}</code>
+                            </button>
+                          ) : (
+                            <code>{findingLocation}</code>
+                          )}
+                          <span className={`review-severity review-severity-${finding.severity}`}>{titleCaseLabel(finding.severity)}</span>
+                          {finding.required && <StatusBadge tone="neutral" noDot label="Required" />}
+                          {finding.status === "sent" && <span>Sent</span>}
+                          {stale && <span className="review-stale">Stale Diff Anchor</span>}
+                        </div>
+                        <div>{finding.body}</div>
+                        <div className="review-finding-provenance">{finding.source === "gitlab" ? "GitLab" : titleCaseLabel(finding.source)} · {finding.author.id ?? titleCaseLabel(finding.author.kind)} · {titleCaseLabel(finding.scope.replaceAll("_", " "))} · {titleCaseLabel(finding.side)}</div>
+                        {finding.remote && (
+                          <div className="review-finding-provenance">
+                            {finding.remote.provider === "gitlab" ? "MR" : "PR"} #{finding.remote.pullRequestNumber}{finding.remote.outdated ? " · Outdated" : ""}{" · "}
+                            <a className="link" href={finding.remote.url} target="_blank" rel="noreferrer">Open on {finding.remote.provider === "gitlab" ? "GitLab" : "GitHub"}</a>
+                          </div>
+                        )}
+                      </div>
+                      <div className="review-finding-row-actions">
+                        {finding.remote ? (
+                          <span className="muted">Remote-Owned</span>
+                        ) : (
+                          <>
+                            <button className="btn ghost sm" disabled={findingBusyId === finding.findingId || findingRefusal !== null}
+                              title={findingRefusal ?? undefined} aria-describedby={findingRefusal !== null ? findingRefusalId : undefined}
+                              onClick={() => void updateFinding(finding, "resolved")}>Resolve</button>
+                            <button className="btn ghost sm" disabled={findingBusyId === finding.findingId || findingRefusal !== null}
+                              title={findingRefusal ?? undefined} aria-describedby={findingRefusal !== null ? findingRefusalId : undefined}
+                              onClick={() => void updateFinding(finding, "dismissed")}>Dismiss</button>
+                          </>
+                        )}
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+
+          <div className="git-action">
+            <label htmlFor={commitId}>Commit Message</label>
+            <div className="git-inline">
+              <input
+                id={commitId}
+                value={commitMsg}
+                onChange={(e) => setCommitMsg(e.target.value)}
+                placeholder="Describe the change"
+              />
+              <button className="btn sm" onClick={() => doCommit(false)} disabled={gitActionDisabled} {...gitRefusalProps}>
+                {busy === "commit" ? "Committing…" : stagedCount > 0 ? "Commit Staged" : "Commit"}
+              </button>
+              {stagedCount > 0 && (
+                <button
+                  className="btn ghost sm"
+                  onClick={() => doCommit(true)}
+                  disabled={gitActionDisabled}
+                  title="Ignore the staged selection and commit every change in the worktree"
+                  {...gitRefusalProps}
+                >
+                  Commit All
+                </button>
+              )}
+            </div>
+            {stagedCount > 0 && (
+              <div className="hint">
+                {stagedCount} file{stagedCount === 1 ? " has" : "s have"} staged changes — Commit commits only those; unstaged
+                edits stay in the worktree.
+              </div>
+            )}
+            {commit && (
+              <div className="git-ok">
+                ✓ Committed <code>{commit.sha}</code> ({commit.filesChanged} File{commit.filesChanged === 1 ? "" : "s"}
+                {commit.stagedOnly ? ", Staged Only" : ""})
+              </div>
             )}
           </div>
-        )}
-        {pr?.notice && <div className="hint warn">{pr.notice}</div>}
-      </div>
-    </div>
+
+          <div className="git-action" role="group" aria-label={`Open a ${requestName}`}>
+            <label>Open a {requestName}</label>
+            <input value={prTitle} onChange={(e) => setPrTitle(e.target.value)} placeholder={mergeRequest ? "MR title" : "PR title"} aria-label={`${requestShortName} Title`} />
+            <textarea
+              value={prBody}
+              onChange={(e) => setPrBody(e.target.value)}
+              placeholder={mergeRequest ? "MR description (optional)" : "PR description (optional)"}
+              aria-label={`${requestShortName} Description`}
+              rows={2}
+            />
+            <div className="git-inline">
+              <input
+                value={branch}
+                onChange={(e) => setBranch(e.target.value)}
+                placeholder="branch name (optional — defaults to the agent branch)"
+                aria-label="Branch Name"
+              />
+              <button className="btn primary sm" onClick={doPr} disabled={gitActionDisabled} {...gitRefusalProps}>
+                {busy === "pr" ? "Opening…" : `Push & Open ${requestName}`}
+              </button>
+            </div>
+            <div className="hint">Commits any pending changes, pushes the branch, and opens a {requestName.toLowerCase()} (falls back to a validated prefilled link when authenticated forge tooling is unavailable). If you've staged hunks selectively, use Commit first — Push &amp; Open {requestName} won't guess at a partial stage.</div>
+            {pr && (
+              <div className="git-ok">
+                ✓ {(pr.created ?? pr.createdWithGh) ? `${pr.kind === "merge_request" ? "Merge Request" : "Pull Request"} opened` : `Branch pushed — click to open the ${pr.kind === "merge_request" ? "Merge Request" : "Pull Request"}`}:{" "}
+                {prHref ? (
+                  <a className="link" href={prHref} target="_blank" rel="noreferrer">{pr.url}</a>
+                ) : (
+                  <code>{pr.url}</code>
+                )}
+              </div>
+            )}
+            {pr?.notice && <div className="hint warn">{pr.notice}</div>}
+          </div>
+        </div>
+      </PanelToolLayout>
+    </>
   );
 }

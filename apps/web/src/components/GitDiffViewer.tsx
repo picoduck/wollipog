@@ -271,11 +271,6 @@ export function GitDiffViewer({
 
   return (
     <div className="diff-view">
-      <div className="diff-summary muted">
-        {diff.stats.filesChanged} File{diff.stats.filesChanged === 1 ? "" : "s"} Changed
-        {diff.stats.insertions > 0 && <span className="diff-ins"> +{diff.stats.insertions}</span>}
-        {diff.stats.deletions > 0 && <span className="diff-del"> −{diff.stats.deletions}</span>}
-      </div>
       {files.map((display) => (
         // Key on the path alone, not the whole-change-set `diffHash`: a card must keep its collapse
         // state and "show all hunks" toggle across a refresh it did not cause (#1203), and neither

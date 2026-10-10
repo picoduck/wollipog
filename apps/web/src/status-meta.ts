@@ -198,6 +198,12 @@ const VOCABULARY = {
     delivery_failed: danger("Delivery Failed"),
     pending: neutral("Delivery Pending"),
   },
+  /** A pull request's check rollup, badged in Review's summary only when it needs attention (#2846);
+   * passing checks are not a status worth a chip. */
+  checks: {
+    failing: danger("Checks Failing"),
+    pending: info("Checks Running", { pulse: true }),
+  },
   /** A background result's push notification receipt. */
   notification: {
     pending: neutral("Push Pending"),

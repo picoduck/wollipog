@@ -28,6 +28,7 @@ import { BrowserPanel } from "./BrowserPanel.js";
 import { SideChatPanel } from "./SideChatPanel.js";
 import { ReviewPanel } from "./ReviewPanel.js";
 import type { DiffFileFocus } from "./GitDiffViewer.js";
+import type { VisibleForgeFacts } from "../pinned-summary.js";
 import type { GitStatus } from "./useGitStatus.js";
 import { shortcutDisplay } from "../shortcuts.js";
 import type { TimelineItem } from "../timeline.js";
@@ -356,6 +357,7 @@ export function RightPanel({
   runnerProtocolVersion,
   git,
   forge,
+  forgeFacts,
   onOpenTerminal,
   onInsertSideChatDraft,
   onAttachWorkspaceReference,
@@ -395,6 +397,8 @@ export function RightPanel({
   runnerProtocolVersion: number | null | undefined;
   git: GitStatus;
   forge?: GitForgeInfo | null;
+  /** The branch's pull request and its checks, for Review's summary (#2846). */
+  forgeFacts?: Pick<VisibleForgeFacts, "pr" | "checks"> | null;
   /** The Terminal launcher row opens the bottom dock — the app's single terminal surface. */
   onOpenTerminal: () => void;
   /** Explicitly prepares the primary composer; never sends it. */
@@ -739,6 +743,7 @@ export function RightPanel({
             runnerProtocolVersion={runnerProtocolVersion}
             git={git}
             forge={forge}
+            forgeFacts={forgeFacts}
             onOpenSourceLocation={onOpenSourceLocation}
             onAttachWorkspaceReference={onAttachWorkspaceReference}
             focus={reviewFocus}

@@ -18,6 +18,7 @@ import { ApiProvider } from "../api-context.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { ReviewPanel } from "./ReviewPanel.js";
+import { PanelActionSlotContext } from "./RightPanel.js";
 import type { DiffFileFocus } from "./GitDiffViewer.js";
 import { clearPanelScratch } from "../right-panel-scratch.js";
 import type { GitStatus } from "./useGitStatus.js";
@@ -38,6 +39,7 @@ const globals: Record<string, unknown> = {
   localStorage: domWindow.localStorage,
   navigator: domWindow.navigator,
   HTMLElement: domWindow.HTMLElement,
+  HTMLButtonElement: domWindow.HTMLButtonElement,
   Node: domWindow.Node,
   Event: domWindow.Event,
   InputEvent: domWindow.InputEvent,
@@ -297,9 +299,14 @@ async function mountPanel(options: {
   findings?: ReviewFinding[];
   sessionStatus?: SessionView["status"];
 } = {}): Promise<Harness> {
+  // The panel header's action slot sits beside the body, as in RightPanel, so the header Refresh is
+  // inside the container the queries read.
   const host = domWindow.document.createElement("div");
+  const slot = domWindow.document.createElement("div");
+  const body = domWindow.document.createElement("div");
+  host.append(slot, body);
   domWindow.document.body.appendChild(host);
-  const root = createRoot(host as unknown as Element);
+  const root = createRoot(body as unknown as Element);
 
   let served: GitDiffInfo | null = options.diff ?? diffOf("1", [fileA(), fileB()]);
   let failure: string | null = null;
@@ -348,15 +355,17 @@ async function mountPanel(options: {
     };
     return (
       <ApiProvider client={client}>
-        <ReviewPanel
-          session={{ ...session, status: currentSessionStatus }}
-          runnerOnline
-          runnerProtocolVersion={157}
-          git={git}
-          onOpenSourceLocation={() => {}}
-          focus={currentFocus}
-          onFocusHandled={() => { focusHandled += 1; currentFocus = null; }}
-        />
+        <PanelActionSlotContext.Provider value={slot as unknown as HTMLElement}>
+          <ReviewPanel
+            session={{ ...session, status: currentSessionStatus }}
+            runnerOnline
+            runnerProtocolVersion={157}
+            git={git}
+            onOpenSourceLocation={() => {}}
+            focus={currentFocus}
+            onFocusHandled={() => { focusHandled += 1; currentFocus = null; }}
+          />
+        </PanelActionSlotContext.Provider>
       </ApiProvider>
     );
   };
@@ -418,24 +427,18 @@ function stageButton(container: HTMLElement, path: string): HTMLElement {
   return found;
 }
 
-/** One option of the layout segmented control ("Unified" / "Side by Side"). */
-function layoutButton(container: HTMLElement, label: string): HTMLElement {
-  const group = container.querySelector<HTMLElement>('[aria-label="Diff Layout"]');
-  if (!group) throw new Error("the layout control is not rendered");
-  const found = [...group.querySelectorAll<HTMLElement>("button")]
-    .find((button) => (button.textContent ?? "").trim() === label);
-  if (!found) throw new Error(`no layout option labelled ${label}`);
-  return found;
-}
-
-/** One option of the index-pane segmented control ("All Changes" / "Unstaged" / "Staged"). */
-function paneButton(container: HTMLElement, label: string): HTMLElement {
-  const group = container.querySelector<HTMLElement>('[aria-label="Index Pane"]');
-  if (!group) throw new Error("the index-pane control is not rendered");
-  const found = [...group.querySelectorAll<HTMLElement>("button")]
-    .find((button) => (button.textContent ?? "").trim() === label);
-  if (!found) throw new Error(`no pane option labelled ${label}`);
-  return found;
+/**
+ * Choose one View Options item: a Show pane ("All Changes" / "Unstaged Only" / "Staged Only") or a
+ * Layout ("Unified" / "Side by Side"). The menu is portalled to the document body.
+ */
+async function chooseViewOption(container: HTMLElement, label: string): Promise<void> {
+  const trigger = container.querySelector<HTMLElement>('button[aria-label="View Options"]');
+  if (!trigger) throw new Error("the View Options button is not rendered");
+  await act(async () => { fireDomEvent.click(trigger); });
+  const found = [...domWindow.document.querySelectorAll('[role="menuitemradio"]')]
+    .find((item) => (item.textContent ?? "").trim() === label) as unknown as HTMLElement | undefined;
+  if (!found) throw new Error(`no View Options item labelled ${label}`);
+  await act(async () => { fireDomEvent.click(found); });
 }
 
 /** How many lines the visible hunks report as selected, read off the Stage/Unstage Selected labels. */
@@ -448,12 +451,17 @@ function selectedCount(container: HTMLElement): number {
   return total;
 }
 
-/** The diff pane's refresh control, matched on its current label so busy state is asserted, not assumed. */
-function refreshDiffButton(container: HTMLElement, label: string): HTMLElement {
-  const found = [...container.querySelectorAll<HTMLElement>(".git-diff-controls button")]
-    .find((button) => (button.textContent ?? "").trim() === label);
-  if (!found) throw new Error(`no diff refresh control labelled ${label}`);
+/** Review's one Refresh, in the panel header's action slot. */
+function refreshButton(container: HTMLElement): HTMLElement {
+  const found = container.querySelector<HTMLElement>('button[aria-label="Refresh Review"]');
+  if (!found) throw new Error("no Refresh Review control");
   return found;
+}
+
+/** The notice that says the diff may be behind the status, or null. Its tone says why. */
+function lagNotice(container: HTMLElement): HTMLElement | null {
+  return [...container.querySelectorAll<HTMLElement>(".notice")]
+    .find((notice) => (notice.textContent ?? "").includes("These changes may be out of date.")) ?? null;
 }
 
 function commentButton(container: HTMLElement, label: string): HTMLElement {
@@ -982,7 +990,7 @@ test("per-hunk line selections do not survive a pane switch, even where the file
   // Attach would emit the other pane's `diffHash` for it.
   const harness = await mountPanel({ diff: panedDiff("1") });
   try {
-    await act(async () => { fireDomEvent.click(paneButton(harness.container, "Unstaged")); });
+    await chooseViewOption(harness.container, "Unstaged Only");
     const selectable = harness.container.querySelectorAll<HTMLInputElement>(
       'input[type="checkbox"][aria-label^="Select Removed Line"], input[type="checkbox"][aria-label^="Select Added Line"]',
     );
@@ -990,7 +998,7 @@ test("per-hunk line selections do not survive a pane switch, even where the file
     await act(async () => { fireDomEvent.change(selectable[0]!, { target: { checked: true } }); });
     assert.ok(selectedCount(harness.container) > 0, "a line is selected");
 
-    await act(async () => { fireDomEvent.click(paneButton(harness.container, "Staged")); });
+    await chooseViewOption(harness.container, "Staged Only");
     assert.equal(selectedCount(harness.container), 0, "the other pane starts from no selection");
   } finally {
     await harness.unmount();
@@ -1054,7 +1062,7 @@ test("the split layout renders extras for an old-side context anchor too", async
   });
   try {
     assert.deepEqual(inlineFindingBodies(harness.container), ["old-side note"], "unified");
-    await act(async () => { fireDomEvent.click(layoutButton(harness.container, "Side by Side")); });
+    await chooseViewOption(harness.container, "Side by Side");
     assert.deepEqual(inlineFindingBodies(harness.container), ["old-side note"], "side by side");
   } finally {
     await harness.unmount();
@@ -1149,32 +1157,37 @@ test("a diff read against no observation is verified by the first real one, not 
   }
 });
 
-test("a background reload that supersedes a manual refresh still releases the busy control", async () => {
+test("a background reload that supersedes a requested read still releases the busy control", async () => {
   // The stuck-forever bug: the background request takes the request token, so the superseded
   // foreground read is barred from clearing `diffBusy`, and the background winner never sets it.
-  // Refresh then sits disabled on "Loading…" for the life of the panel.
+  // The header Refresh, busy for any requested read, would then sit disabled for the life of the
+  // panel. A scope switch is the requested read here: the Refresh's own reload has a busy state of
+  // its own that lasts until every part of it returns.
   const harness = await mountPanel();
   try {
     const releaseForeground = harness.holdDiff();
-    await act(async () => { fireDomEvent.click(refreshDiffButton(harness.container, "↻ Refresh")); });
-    assert.equal(refreshDiffButton(harness.container, "Loading…").hasAttribute("disabled"), true);
+    const branchButton = [...harness.container.querySelectorAll<HTMLElement>('[aria-label="Scope"] button')]
+      .find((button) => (button.textContent ?? "").trim() === "Branch");
+    if (!branchButton) throw new Error("no Branch scope option");
+    await act(async () => { fireDomEvent.click(branchButton); });
+    assert.equal(refreshButton(harness.container).hasAttribute("disabled"), true);
 
     // A status observation lands while that read is still out, triggering a background reload that
     // takes the request token — so the foreground read's result will be discarded.
     await harness.render({ status: statusOf({ addedLines: 5 }) });
-    // Mount, the manual refresh, then the background reload that supersedes it.
-    assert.equal(harness.diffCalls.length, 3, "the background reload superseded the manual one");
-    // Released at supersession, not at the discarded response: the manual read can no longer render
-    // anything, so leaving the control on "Loading…" would be reporting work that is already void.
+    // Mount, the Branch read, then the background reload that supersedes it.
+    assert.equal(harness.diffCalls.length, 3, "the background reload superseded the requested one");
+    // Released at supersession, not at the discarded response: the requested read can no longer
+    // render anything, so leaving the control busy would be reporting work that is already void.
     assert.equal(
-      refreshDiffButton(harness.container, "↻ Refresh").hasAttribute("disabled"),
+      refreshButton(harness.container).hasAttribute("disabled"),
       false,
       "ownership of the busy flag moves with the request token",
     );
 
     await releaseForeground();
     assert.equal(
-      refreshDiffButton(harness.container, "↻ Refresh").hasAttribute("disabled"),
+      refreshButton(harness.container).hasAttribute("disabled"),
       false,
       "and it certainly must not stay disabled once both reads have landed",
     );
@@ -1209,7 +1222,7 @@ test("a successful stage reply answers an earlier failed-refresh warning", async
   try {
     harness.failDiff("runner is unreachable");
     await harness.render({ status: statusOf({ addedLines: 7 }) });
-    assert.ok(harness.container.textContent?.includes("The last automatic refresh of this diff did not land"));
+    assert.ok(lagNotice(harness.container)?.classList.contains("t-warning"), "a failed reload is a warning");
 
     // The reply carries BOTH halves of a fresh read, and its status is the observation already on
     // screen — so nothing else will re-read, and only the reply itself can answer the warning. A
@@ -1223,8 +1236,7 @@ test("a successful stage reply answers an earlier failed-refresh warning", async
     await resolveStage({ diff: diffOf("2", [fileA({ staged: true }), fileB()]), status: settled });
 
     assert.equal(harness.diffCalls.length, before, "no further read happened, so the reply is what answered it");
-    assert.ok(!harness.container.textContent?.includes("The last automatic refresh of this diff did not land"),
-      "a stale warning must not outlive the read that answered it");
+    assertNoDomNode(lagNotice(harness.container), "a stale warning must not outlive the read that answered it");
   } finally {
     await harness.unmount();
   }
@@ -1241,12 +1253,10 @@ test("a reload never lands under an in-flight stage, and the panel says the diff
     await harness.render({ status: statusOf({ stagedCount: 1, addedLines: 5 }) });
     assert.deepEqual(harness.diffCalls, ["uncommitted"],
       "the observation is deferred rather than clobbering the stage reply");
+    const deferred = lagNotice(harness.container);
+    assert.ok(deferred?.classList.contains("t-neutral"), "and the deferral is visible, not silent, and not a warning");
     assert.ok(
-      harness.container.textContent?.includes("The changes on disk moved since this diff was read"),
-      "and the deferral is visible, not silent",
-    );
-    assert.ok(
-      [...harness.container.querySelectorAll("button")].some((b) => (b.textContent ?? "").includes("Refresh Diff")),
+      [...deferred!.querySelectorAll("button")].some((b) => (b.textContent ?? "").trim() === "Refresh"),
       "with a one-click read",
     );
 
@@ -1322,7 +1332,7 @@ test("a stage reply that lands after a scope switch leaves the new scope's read 
     await act(async () => { fireDomEvent.click(stageButton(harness.container, "src/a.ts")); });
 
     const releaseBranch = harness.holdDiff();
-    const branchButton = [...harness.container.querySelectorAll<HTMLElement>('[aria-label="Diff Scope"] button')]
+    const branchButton = [...harness.container.querySelectorAll<HTMLElement>('[aria-label="Scope"] button')]
       .find((button) => (button.textContent ?? "").trim() === "Branch");
     if (!branchButton) throw new Error("no Branch scope option");
     await act(async () => { fireDomEvent.click(branchButton); });
@@ -1336,7 +1346,7 @@ test("a stage reply that lands after a scope switch leaves the new scope's read 
     await releaseBranch();
     assert.equal(harness.diffCalls.length, 3, "no further read, so the pending Branch read is what rendered");
     assert.ok(harness.container.textContent?.includes("branch-only"), "the Branch read rendered");
-    assert.ok(!harness.container.textContent?.includes("Loading diff…"), "and the pane is not wedged loading");
+    assertNoDomNode(harness.container.querySelector(".review-skeleton"), "and the pane is not wedged loading");
   } finally {
     await harness.unmount();
   }
@@ -1366,13 +1376,10 @@ test("a failed background reload keeps the diff on screen and offers a manual re
     assert.ok(harness.container.querySelector(".diff-file"), "the diff the reviewer was reading is still there");
     assertNoDomNode(harness.container.querySelector(".composer-error"),
       "a background failure does not hijack the error surface");
-    assert.ok(
-      harness.container.textContent?.includes("The last automatic refresh of this diff did not land"),
-      "but it is not silent either",
-    );
-    assert.ok(harness.container.querySelector(".hint.warn"), "a persistent lag warrants the amber hint");
-    assert.ok(!harness.container.textContent?.includes("Amber only"),
-      "the rationale beside that class is a comment, not rendered copy");
+    assert.ok(lagNotice(harness.container), "but it is not silent either");
+    assert.ok(lagNotice(harness.container)?.classList.contains("t-warning"), "a persistent lag warrants the warning tone");
+    assert.ok(!harness.container.textContent?.includes("Warning only"),
+      "the rationale beside that tone is a comment, not rendered copy");
   } finally {
     await harness.unmount();
   }

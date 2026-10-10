@@ -151,6 +151,9 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   // are §9.1 radio-like MenuItem rows with the trailing check, as the page header's view switch
   // and Snoozed toggle fold into it. Choosing one navigates or filters; none sets a form value.
   ["components/SessionsAppBar.tsx", "raw-radiogroup", 3],
+  // Review's View Options menu (#2846): Show and Layout are §9.1 radio-like MenuItem rows with the
+  // trailing check. They switch how the same diff is shown; none sets a form value.
+  ["components/ReviewToolbar.tsx", "raw-radiogroup", 2],
   ["components/EditorSelect.tsx", "raw-radiogroup", 1],
   ["components/InstanceSelector.tsx", "raw-radiogroup", 1],
   ["components/PodsView.tsx", "raw-radiogroup", 1],
