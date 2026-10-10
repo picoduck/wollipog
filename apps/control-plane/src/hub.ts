@@ -285,6 +285,11 @@ interface UiClientInfo {
   preparingSnapshot?: boolean;
   snapshotAccessRevision?: number;
   snapshotSessionIds?: readonly string[];
+  snapshotVisibilityChanges?: {
+    sessions: Map<string,boolean>;
+    runners: Map<string,boolean>;
+    projects: Map<string,boolean>;
+  };
   lastSubscriptionRevision?: number;
   observedBackgroundDeliveryKeys?: Set<string>;
   /** Pending Someday sessions omitted from a legacy UI's compatibility projection. */
@@ -820,12 +825,14 @@ export class Hub {
     const preparing=this.preparingSnapshots.get(cacheKey);
     if (paged && preparing?.revision===revision) {
       info.preparingSnapshot=true;
+      info.snapshotVisibilityChanges = { sessions: new Map(),runners: new Map(),projects: new Map() };
       this.uiClients.set(client,info);
       preparing.clients.push({ client,info });
       return true;
     }
     if (paged) {
       info.preparingSnapshot = true;
+      info.snapshotVisibilityChanges = { sessions: new Map(),runners: new Map(),projects: new Map() };
       this.uiClients.set(client, info);
       const pending = { revision, clients: [{ client, info }] };
       this.preparingSnapshots.set(cacheKey, pending);
@@ -945,7 +952,24 @@ export class Hub {
     info.visibleSessionIds = new Set(snapshot.sessions.map((session) => session.id));
     info.visibleProjectIds = new Set((snapshot.projects ?? []).map((project) => project.id));
     info.hiddenIndefiniteReminderSessionIds = new Set(hiddenIds);
-    if (info.principal) info.sentCommandPermissions = new Map(snapshot.sessions.map((session) => [session.id, permissionsKey(session)]));
+    if (info.principal) info.sentCommandPermissions = new Map([
+      ...snapshot.sessions.map((session) => [session.id,permissionsKey(session)] as const),
+      ...(info.sentCommandPermissions ?? []),
+    ]);
+    for (const [changes,visible] of [
+      [info.snapshotVisibilityChanges?.sessions,info.visibleSessionIds],
+      [info.snapshotVisibilityChanges?.runners,info.visibleRunnerIds],
+      [info.snapshotVisibilityChanges?.projects,info.visibleProjectIds],
+    ] as const) {
+      for (const [id,present] of changes ?? []) {
+        if (present) visible.add(id);
+        else visible.delete(id);
+      }
+    }
+    for (const [id,present] of info.snapshotVisibilityChanges?.sessions ?? []) {
+      if (!present) info.sentCommandPermissions?.delete(id);
+    }
+    info.snapshotVisibilityChanges = undefined;
     info.initialFrames = frames;
     info.snapshotSessionIds = [...new Set([...snapshot.sessions.map((session) => session.id),
       ...(snapshot.reminders ?? []).map((reminder) => reminder.sessionId)])];
@@ -966,6 +990,7 @@ export class Hub {
     info.sending = false;
     info.initialFrames = undefined;
     info.snapshotSessionIds = undefined;
+    info.snapshotVisibilityChanges = undefined;
     info.visibleSessionIds?.clear();
     info.visibleRunnerIds?.clear();
     info.visibleProjectIds?.clear();
@@ -1216,6 +1241,7 @@ export class Hub {
     this.broadcast({ type: "runner_removed", runnerId }, (_principal, info) => {
       const visible = info.visibleRunnerIds?.has(runnerId) ?? true;
       info.visibleRunnerIds?.delete(runnerId);
+      info.snapshotVisibilityChanges?.runners.set(runnerId,false);
       return visible;
     });
   }
@@ -1375,6 +1401,7 @@ export class Hub {
     this.broadcast({ type: "project_removed", projectId }, (_principal, info) => {
       const visible = info.visibleProjectIds?.has(projectId) ?? true;
       info.visibleProjectIds?.delete(projectId);
+      info.snapshotVisibilityChanges?.projects.set(projectId,false);
       return visible;
     });
   }
@@ -1470,6 +1497,7 @@ export class Hub {
       const visible = (info.visibleSessionIds?.has(sessionId) ?? true) ||
         (info.subscribedSessionIds?.has(sessionId) ?? false);
       info.visibleSessionIds?.delete(sessionId);
+      info.snapshotVisibilityChanges?.sessions.set(sessionId,false);
       info.hiddenIndefiniteReminderSessionIds?.delete(sessionId);
       return visible;
     });
@@ -1690,9 +1718,18 @@ export class Hub {
           (info.sentCommandPermissions ??= new Map()).set(session.id, permissionsKey(session));
         }
         if (projected.type === "session_removed") info.sentCommandPermissions?.delete(projected.sessionId);
-        if (projected.type === "session_upsert") info.visibleSessionIds?.add(projected.session.id);
-        if (projected.type === "runner_upsert") info.visibleRunnerIds?.add(projected.runner.runnerId);
-        if (projected.type === "project_upsert") info.visibleProjectIds?.add(projected.project.id);
+        if (projected.type === "session_upsert") {
+          info.visibleSessionIds?.add(projected.session.id);
+          info.snapshotVisibilityChanges?.sessions.set(projected.session.id,true);
+        }
+        if (projected.type === "runner_upsert") {
+          info.visibleRunnerIds?.add(projected.runner.runnerId);
+          info.snapshotVisibilityChanges?.runners.set(projected.runner.runnerId,true);
+        }
+        if (projected.type === "project_upsert") {
+          info.visibleProjectIds?.add(projected.project.id);
+          info.snapshotVisibilityChanges?.projects.set(projected.project.id,true);
+        }
         this.sendRaw(client, clientData, this.coalesceKey(projected));
       }
     }

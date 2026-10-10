@@ -1352,7 +1352,16 @@ function reducer(state: State, action: Action): State {
               && JSON.stringify(pendingRequests(previous.pendingApproval).map((request) => [request.requestId,request.occurrenceId]))
                 === JSON.stringify(pendingRequests(session.pendingApproval).map((request) => [request.requestId,request.occurrenceId]));
             sessions.set(session.id, retainedDetail
-              ? { ...previous,...session,projection: undefined,pendingApproval: previous.pendingApproval }
+              ? { ...session,projection: undefined,pendingApproval: previous.pendingApproval,
+                parentControlPolicy: previous.parentControlPolicy,
+                orchestratorCampaign: previous.orchestratorCampaign,campaignMembership: previous.campaignMembership,
+                providerAccountSwitchFailure: previous.providerAccountSwitchFailure,
+                agentCapabilities: previous.agentCapabilities,worktrees: previous.worktrees,
+                executionTarget: previous.executionTarget,executionHandoff: previous.executionHandoff,
+                backgroundJobs: previous.backgroundJobs,backgroundJobsTruncated: previous.backgroundJobsTruncated,
+                queued: previous.queued,pendingPrompts: previous.pendingPrompts,queueHeld: previous.queueHeld,
+                activeTurnId: previous.activeTurnId,steeringAttempts: previous.steeringAttempts,
+                commandInvocations: previous.commandInvocations,threadType: previous.threadType }
               : session);
             state.activity.set(session.id,reconcileSessionActivity(state.activity.get(session.id),previous,session));
             const epoch = sessionEventEpoch(session);

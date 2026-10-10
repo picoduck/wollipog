@@ -110,6 +110,27 @@ test("ordinary session writes between snapshot pages do not interrupt a reconnec
   } finally { db.close(); }
 });
 
+test("live rows queued during snapshot preparation retain visibility for later removals", async () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    seedSessionList(db,2000);
+    const frames: string[] = [];
+    const hub = new Hub(db);
+    let complete=false;
+    hub.addUiClient({ send(data) { frames.push(data); if (JSON.parse(data).complete) complete=true; } }, {
+      principal: sessionListPrincipal,deviceId: null,uiProtocolVersion: PROTOCOL_VERSION,
+      close() { assert.fail("closed"); },
+    });
+    db.createSession({ id: "new",runnerId: "r",workspaceId: null,agentId: null,title: "New",
+      useWorktree: false,driver: "codex-app-server",config: {},now: 3000 });
+    hub.sessionChanged(db.getSession("new")!,false);
+    while (!complete) await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.ok(frames.some((frame) => { const msg=JSON.parse(frame); return msg.type === "session_upsert" && msg.session.id === "new"; }));
+    hub.sessionRemoved("new",false);
+    assert.ok(frames.some((frame) => { const msg=JSON.parse(frame); return msg.type === "session_removed" && msg.sessionId === "new"; }));
+  } finally { db.close(); }
+});
+
 test("reminder inventories use one authorized read and preserve archived and team boundaries", async () => {
   const db = ControlPlaneDb.open(":memory:");
   try {
