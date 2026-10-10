@@ -630,7 +630,7 @@ export function FilesBrowser({
               id={optionId(index)}
               role="option"
               aria-selected={index === activeIndex}
-              className={`row dense files-goto-option${index === activeIndex ? " is-selected" : ""}`}
+              className={`row dense files-goto-option${index === activeIndex ? " is-active" : ""}`}
               title={match.path}
               // Keep focus in the field, so the listbox stays its popup.
               onMouseDown={(event) => event.preventDefault()}

@@ -36,6 +36,27 @@ for (const pointer of ["fine", "coarse"] as const) {
   });
 }
 
+test.describe("on a phone", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  test("the active Go to File result stays visibly marked", async ({ page }) => {
+    await open(page);
+    await goToFile(page).fill("check");
+    await expect(page.getByRole("option").first()).toBeVisible();
+    await goToFile(page).press("ArrowDown");
+    const active = page.locator(`#${await goToFile(page).getAttribute("aria-activedescendant")}`);
+    await expect(active).toHaveAttribute("aria-selected", "true");
+    const look = (locator: typeof active) => locator.evaluate((element) => ({
+      background: getComputedStyle(element).backgroundColor,
+      edge: getComputedStyle(element).boxShadow,
+    }));
+    const marked = await look(active);
+    const plain = await look(page.locator('[role="option"][aria-selected="false"]').first());
+    expect(marked.edge).not.toBe("none");
+    expect(marked.background).not.toBe(plain.background);
+  });
+});
+
 test.describe("at 400px", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
