@@ -6,7 +6,7 @@ work time, the latest live result revision and its owner, and the receiving user
 acknowledgment. Sorting never loads transcripts. Lifecycle, unread state, stalls, and board placement
 remain independent.
 
-The default order is Needs Your Input, Ready for Review, Working, then Quiet. Requests use canonical
+The default order is Needs Your Input, Result Available, Working, then Quiet. Requests use canonical
 priority and oldest occurrence first; results use newest result first; Working and Quiet use newest
 meaningful work time and session ID. Pins lead within a group. Families stay parent first and use
 their strongest human follow-up; due reminders surface below concrete human input. Existing snooze
