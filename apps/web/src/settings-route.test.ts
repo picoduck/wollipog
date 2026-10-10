@@ -313,8 +313,13 @@ test("a view change rescues focus too", () => {
   // round-two rescues fires. A view transition is its own event.
   assert.match(app, /const path = viewPath\(view\);\s*const previousPath = useRef\(path\);/,
     "the canonical path is what changes when a view transition removes the focused element");
-  assert.match(app, /if \(previousPath\.current === path\) return;[\s\S]{0,120}\}, \[path\]\)/,
-    "and only a real change counts, for the same reason the other two rescues are gated");
+  // Lazy-route rescue also tracks a pending heading and prefers the visible fallback over the
+  // old hidden heading. Its length is not the contract: the guard, update and dependency are.
+  const rescue = app.match(/useEffect\(\(\) => \{(\s*if \(previousPath\.current === path\) return;[\s\S]*?)\}, \[([^\]]*)\]\);/);
+  assert.ok(rescue, "the view-change effect starts by declining an unchanged path");
+  assert.match(rescue[1]!, /^\s*if \(previousPath\.current === path\) return;\s*previousPath\.current = path;/,
+    "a real change updates its guard before rescuing focus");
+  assert.equal(rescue[2]!.trim(), "path", "only a canonical path change triggers the rescue");
 });
 
 test("a modal opened before a breakpoint crossing still returns focus somewhere", () => {
