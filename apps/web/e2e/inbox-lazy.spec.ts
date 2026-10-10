@@ -43,12 +43,41 @@ test("lazy New Session can be cancelled before its script arrives and opened aga
   }
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
+  await expect(page.getByRole("button", { name: "New Session", exact: true })).toBeFocused();
   release();
   await page.getByRole("button", { name: "New Session", exact: true }).click();
   await expect(dialog.getByRole("status").filter({ hasText: "Loading…" })).toBeHidden();
   await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeVisible();
   await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(page.getByRole("button", { name: "New Session", exact: true })).toBeFocused();
+});
+
+test("an offline New Session import stays dismissible without reloading the inbox @production", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await installInboxFixture(page);
+  await page.route("**/assets/NewSessionDialog-*.js", (route) => route.abort("internetdisconnected"));
+  await page.goto("/index.html");
+  await expect(page.getByText("Synthetic Session 1", { exact: true })).toBeVisible();
+  const trigger = page.getByRole("button", { name: "New Session", exact: true });
+  await trigger.click();
+  const dialog = page.getByRole("dialog", { name: "New Session", exact: true });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("alert")).toContainText("This Dialog Couldn't Be Shown");
+  if (process.env.EVIDENCE_DIR) {
+    await page.evaluate(() => Promise.all(document.getAnimations()
+      .filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity)
+      .map((animation) => animation.finished.catch(() => {}))));
+    await page.screenshot({ path: `${process.env.EVIDENCE_DIR}/new-session-offline-error-390.png` });
+  }
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(trigger).toBeFocused();
+  await expect(page.getByText("Synthetic Session 1", { exact: true })).toBeVisible();
+  // The cached import rejection remains recoverable with Close on another attempted open.
+  await trigger.click();
+  await expect(dialog.getByRole("alert")).toBeVisible();
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(dialog).toBeHidden();
 });
 
 test("a delayed search palette focuses its input and returns focus to its opener @production", async ({ page }) => {

@@ -969,9 +969,8 @@ export function Shell() {
         )}
       </main>
 
-      <ErrorBoundary name="This Dialog" resetKey={dialogKey}>
       {dialogKey !== "closed" && <LazyDialogBoundary key={dialogKey} title={dialogTitle}
-        onClose={() => { setDialog(null); setPalette(null); closeShortcutReference(); }}>
+        onClose={() => { setDialog(null); setPalette(null); if (shortcutReferenceOpen) closeShortcutReference(); }}>
       {dialog?.kind === "session" && (
         <NewSessionDialog
           onClose={() => setDialog(null)}
@@ -998,7 +997,6 @@ export function Shell() {
         />
       )}
       </LazyDialogBoundary>}
-      </ErrorBoundary>
     </div>
   );
   // The rail tile and the Instances card read the banner's truth from here, so they never disagree.
