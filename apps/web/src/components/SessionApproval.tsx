@@ -152,7 +152,11 @@ function enabledRequestControl(
     // A question's choice rows are native inputs that stay reachable while they refuse a choice
     // (`aria-disabled`), so they are no landing place then.
     'button:not(:disabled):not([aria-disabled="true"]), input:not(:disabled):not([aria-disabled="true"])',
-  ) ?? []];
+  ) ?? []].filter((control) => !control.matches(
+    // Reading controls stay reachable by Tab, but replacing a request keeps the established
+    // heading/composer destination instead of making expansion the next Enter target.
+    ".question-reading-toggle, .question-text-toggle, .decision-reading-toggle",
+  ));
   // Composer Response owns entry outside this request region. On replacement, do not turn the
   // card's destructive Dismiss action, or Answer, into the implicit focus target for the user's next
   // Enter: focus falls back to the composer.
