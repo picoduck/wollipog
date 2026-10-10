@@ -108,29 +108,6 @@ export function PanelHeaderActions({ children }: { children: ReactNode }) {
   return slot ? createPortal(children, slot) : null;
 }
 
-/**
- * A tool's own Escape layer on its body (§16.2): a selection such as Review's Select Lines (#2849).
- * While one is registered, Escape inside the panel goes to it instead of restoring or closing the
- * panel; menus, popovers and dialogs above the panel still take it first.
- */
-export const PanelEscapeLayerContext = createContext<{ current: (() => void) | null } | null>(null);
-
-/** Take Escape inside the side panel while `onEscape` is set. Outside the panel it does nothing. */
-export function usePanelEscapeLayer(onEscape: (() => void) | null): void {
-  const layer = useContext(PanelEscapeLayerContext);
-  const handlerRef = useRef(onEscape);
-  handlerRef.current = onEscape;
-  const active = onEscape !== null;
-  useLayoutEffect(() => {
-    if (!layer || !active) return;
-    const take = () => handlerRef.current?.();
-    layer.current = take;
-    return () => {
-      if (layer.current === take) layer.current = null;
-    };
-  }, [layer, active]);
-}
-
 /** What a tool's Back does from the phone panel's header, and its Title Case name. */
 export interface PanelBack {
   label: string;
@@ -170,6 +147,29 @@ export function usePanelBack(back: PanelBack | null): { carried: boolean; focus:
     return () => slot.set((current) => (current === entry ? null : current));
   }, [slot, label]);
   return { carried, focus: () => slot?.focus() };
+}
+
+/**
+ * A tool's own Escape layer on its body (§16.2): a selection such as Review's Select Lines (#2849).
+ * While one is registered, Escape inside the panel goes to it instead of restoring or closing the
+ * panel; menus, popovers and dialogs above the panel still take it first.
+ */
+export const PanelEscapeLayerContext = createContext<{ current: (() => void) | null } | null>(null);
+
+/** Take Escape inside the side panel while `onEscape` is set. Outside the panel it does nothing. */
+export function usePanelEscapeLayer(onEscape: (() => void) | null): void {
+  const layer = useContext(PanelEscapeLayerContext);
+  const handlerRef = useRef(onEscape);
+  handlerRef.current = onEscape;
+  const active = onEscape !== null;
+  useLayoutEffect(() => {
+    if (!layer || !active) return;
+    const take = () => handlerRef.current?.();
+    layer.current = take;
+    return () => {
+      if (layer.current === take) layer.current = null;
+    };
+  }, [layer, active]);
 }
 
 /**
