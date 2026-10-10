@@ -31,6 +31,7 @@ const connection: UiConnectionRuntime = {
 let required = 0;
 /** The durable child-session registry the Agents panel reads; null is a control plane without one. */
 let registry: ChildSessionRegistryPage | null = null;
+let registryReads = 0;
 let findingReads = 0;
 const summary = (): ReviewFindingSummary => ({
   total: required, unresolved: required, requiredUnresolved: required, sent: 0, resolved: 0, dismissed: 0,
@@ -39,7 +40,7 @@ const summary = (): ReviewFindingSummary => ({
 const notHere = () => Promise.reject(new ApiError("This fixture has no control plane.", 404));
 const client = {
   ...api,
-  childSessions: () => registry ? Promise.resolve(registry) : notHere(),
+  childSessions: () => { registryReads += 1; return registry ? Promise.resolve(registry) : notHere(); },
   workflowInstances: notHere,
   reviewFindings: async () => {
     findingReads += 1;
@@ -96,6 +97,7 @@ beforeEach(() => {
   required = 0;
   findingReads = 0;
   registry = null;
+  registryReads = 0;
 });
 
 after(() => {
@@ -374,37 +376,58 @@ test("Side Chat and Decision History use their new icons in the list and the swi
   }
 });
 
+/** A registry page, as the control plane returns it. */
+function registryPage(children: ChildSessionRegistryPage["children"], unidentifiedChildren = 0): ChildSessionRegistryPage {
+  return { children, attentionOwners: [], unidentifiedChildren, eventEpoch: 1, nextAfter: null, truncated: false };
+}
+const registryAgent = (toolCallId: string, sourceSeq: number): ChildSessionRegistryPage["children"][number] => ({
+  toolCallId, name: "Audit Agent", status: "in_progress", lifecycle: "running", sourceSeq, startedAt: 1, lastActivityAt: 2, toolCount: 3,
+});
+
 test("Agents counts the durable registry's subagents, as the Agents panel does, beyond the loaded transcript (#2844)", async () => {
-  registry = {
-    children: [{
-      toolCallId: "durable-agent", name: "Audit Agent", status: "in_progress", lifecycle: "running",
-      sourceSeq: 1, startedAt: 1, lastActivityAt: 2, toolCount: 3,
-    }],
-    attentionOwners: [], unidentifiedChildren: 0, eventEpoch: 1, nextAfter: null, truncated: false,
-  };
+  registry = registryPage([registryAgent("durable-agent", 1)]);
   // The transcript window holds no launch at all.
   const panel = await mount({ git: gitWith(0), items: [] });
   try {
     assert.equal(fact(panel.container, "subagents"), "1 subagent in this session");
     assert.match(row(panel.container, "subagents")?.querySelector(".status")?.textContent ?? "", /^1 Working$/);
-    // A subagent launched after the registry was read, mid-turn, with no new git status read: the
-    // transcript has it, and the list counts it at once.
-    await panel.setProps({ items: runningAgent });
-    assert.equal(fact(panel.container, "subagents"), "2 subagents in this session");
-    assert.match(row(panel.container, "subagents")?.querySelector(".status")?.textContent ?? "", /^2 Working$/);
   } finally {
     await panel.dispose();
   }
 });
 
-test("Agents counts a subagent launched after an empty registry read (#2844)", async () => {
-  registry = { children: [], attentionOwners: [], unidentifiedChildren: 0, eventEpoch: 1, nextAfter: null, truncated: false };
+test("a subagent launched while the list is open reads the registry again and is counted, with no git status read (#2844)", async () => {
+  registry = registryPage([]);
   const panel = await mount({ git: gitWith(0), items: [] });
   try {
     assert.equal(fact(panel.container, "subagents"), "No subagents in this session");
+    const reads = registryReads;
+    // Mid-turn: the transcript gains the launch and the control plane's registry has it too.
+    registry = registryPage([registryAgent("agent", 2)]);
     await panel.setProps({ items: runningAgent });
+    assert.ok(registryReads > reads, "the new identity reads the registry again");
     assert.equal(fact(panel.container, "subagents"), "1 subagent in this session");
     assert.match(row(panel.container, "subagents")?.querySelector(".status")?.textContent ?? "", /^1 Working$/);
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("Agents leaves out an identity the registry cannot list safely, and shows an ambiguous one as Unverified (#2844)", async () => {
+  // A provider re-stated one agent id three times: the transcript folds it into one row, and the
+  // registry leaves it out as an unidentified child, as the Agents panel then lists no child.
+  registry = registryPage([], 1);
+  const folded: TimelineItem[] = [{ ...runningAgent[0]!, statementCount: 3 } as TimelineItem];
+  const panel = await mount({ git: gitWith(0), items: folded });
+  try {
+    assert.equal(fact(panel.container, "subagents"), "No subagents in this session");
+    assertNoDomNode(row(panel.container, "subagents")?.querySelector(".status") ?? null, "no badge for an agent nobody can list");
+    // Two transcript rows claim one id: the registry keeps the agent, and the panel shows it Unverified.
+    registry = registryPage([registryAgent("agent", 1)]);
+    const duplicate: TimelineItem[] = [runningAgent[0]!, { ...runningAgent[0]!, id: 9, title: "Another Agent" } as TimelineItem];
+    await panel.setProps({ items: duplicate });
+    assert.equal(fact(panel.container, "subagents"), "1 subagent in this session");
+    assertNoDomNode(row(panel.container, "subagents")?.querySelector(".status") ?? null, "an Unverified agent is not counted as working");
   } finally {
     await panel.dispose();
   }

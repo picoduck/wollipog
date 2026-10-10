@@ -155,10 +155,11 @@ function useArtifactCount(sessionId: string, observation: number): { count: numb
 
 /**
  * The first page of the session's durable child-session registry, the Agents panel's authority for
- * subagents whose launch is outside the loaded transcript. Null until read, and on a control plane
- * that has none, where the list counts the transcript's agents as the panel then does.
+ * subagents, including those whose launch is outside the loaded transcript. Read again whenever
+ * `readKey` changes. Null until read, and on a control plane that has none, where the list counts
+ * the transcript's agents as the panel then does.
  */
-function useChildRegistry(session: Pick<SessionView, "id" | "eventEpoch">, observation: number): ChildSessionRegistryPage | null {
+function useChildRegistry(session: Pick<SessionView, "id" | "eventEpoch">, readKey: string): ChildSessionRegistryPage | null {
   const api = useApi();
   const generation = `${session.id}:${session.eventEpoch ?? 0}`;
   const [read, setRead] = useState<{ generation: string; page: ChildSessionRegistryPage | null } | null>(null);
@@ -170,7 +171,7 @@ function useChildRegistry(session: Pick<SessionView, "id" | "eventEpoch">, obser
     );
     return () => { current = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api, generation, observation]);
+  }, [api, generation, readKey]);
   return read?.generation === generation ? read.page : null;
 }
 const CHILD_REGISTRY_PAGE = 50;
@@ -215,31 +216,29 @@ function SessionToolsListView({
   const requiredFindings = useRequiredFindings(session.id, git.observation);
   const artifacts = useArtifactCount(session.id, git.observation);
 
-  const registry = useChildRegistry(session, git.observation);
-
   // The Agents panel's own agents and roster rules (AgentsPanel.tsx, worker-roster.ts), limited to
-  // subagents: the transcript's projection joined with the durable registry when it has one.
+  // subagents: the transcript's projection joined with the durable registry when it has one. The
+  // registry is the authority, as in the panel: it leaves out identities it cannot list safely (a
+  // provider re-using one id), so it is read again whenever the transcript's agents change identity
+  // (a launch, a re-statement), and their states then follow the transcript through the merge.
   const projector = useRef(new IncrementalSubagentProjector());
+  const projection = useMemo(() => projector.current.project(items, {
+    sessionStatus: session.status, runnerOnline, availability: runnerOnline ? "live" : "recorded",
+  }), [items, runnerOnline, session.status]);
+  const identities = projection.descriptors.map((agent) => `${agent.id}:${agent.statementCount ?? 1}`).join(" ");
+  const registry = useChildRegistry(session, `${git.observation}|${identities}`);
   const subagents = useMemo(() => {
-    const projection = projector.current.project(items, {
-      sessionStatus: session.status, runnerOnline, availability: runnerOnline ? "live" : "recorded",
-    });
     const unresolved = new Set(mergeCompactAttentionOwners(registry?.attentionOwners ?? [], session.attentionOwners ?? [])
       .filter((owner) => !owner.resolved).map((owner) => owner.toolCallId));
-    const loaded = projection.descriptors.filter((agent) => !unresolved.has(agent.id));
-    let agents = loaded;
-    if (registry) {
-      const durable = mergeDurableAgents(durableAgentDescriptors(registry.children, session.status, runnerOnline),
-        projection.descriptors, unresolved);
-      // The registry is read when the list opens and after git status reads, which pause during a
-      // turn; an agent launched since then is in the transcript only, and is listed from there until
-      // the next read (the Agents panel re-reads its registry instead).
-      const listed = new Set(durable.map((agent) => agent.id));
-      agents = [...durable, ...loaded.filter((agent) => !listed.has(agent.id))];
-    }
-    return workerRoster(session, agents, [], () => runnerOnline)
+    const agents = registry
+      ? mergeDurableAgents(durableAgentDescriptors(registry.children, session.status, runnerOnline), projection.descriptors, unresolved)
+      : projection.descriptors.filter((agent) => !unresolved.has(agent.id));
+    // An id the transcript cannot attribute to one agent is Unverified, as the panel shows it.
+    const unambiguous = agents.map((agent) => projection.ambiguousIds.has(agent.id)
+      ? { ...agent, lifecycle: "unknown" as const, availability: "recorded" as const } : agent);
+    return workerRoster(session, unambiguous, [], () => runnerOnline)
       .filter((row) => row.target.kind === "subagent");
-  }, [items, registry, runnerOnline, session]);
+  }, [projection, registry, runnerOnline, session]);
   const urgent = AGENT_URGENCY.find((state) => subagents.some((row) => isCurrentWorker(row) && row.state === state));
   const agentsBadge = urgent && (() => {
     const meta = statusMeta("job", urgent);
