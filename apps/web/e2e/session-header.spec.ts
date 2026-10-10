@@ -565,7 +565,7 @@ test("managed background indicators open a responsive inspectable inventory and 
   await expect(header.locator(".session-status-button")).not.toHaveAccessibleName(/Waiting on External Job/);
   await expect(header.locator('[data-live="background-work"]')).toHaveText("");
   await expect(jobRow.locator(".status")).toHaveText("Completed");
-  await expect(jobRow.locator(".row-sub")).toHaveText(/^Result returned \d+s ago$/u);
+  await expect(jobRow.locator(".row-sub")).toHaveText(/^Result returned (just now|\d+s ago)$/u);
   await expect(panel.locator(".background-work-turn-head .status")).toHaveText("Result Returned");
   await expect(panel).not.toContainText("private-continuation-id");
   await capture(page, "background-mobile-settled");

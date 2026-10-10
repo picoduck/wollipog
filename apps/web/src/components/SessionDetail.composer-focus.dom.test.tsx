@@ -7177,15 +7177,17 @@ test("choosing Background Work from Session Tools while the inventory loads keep
     // renders it (#2872 leaves streaming-only changes such as updatedAt quiet).
     await fixture.pushSession({ title: "Composer Focus Fixture, Renamed" });
     await flushAsyncWork();
-    assert.match(fixture.container.textContent ?? "", /Loading Background Work/);
+    // Loading shows nothing new for 300ms, then skeleton rows; never the empty state (#2858).
+    assert.ok(fixture.container.querySelector(".background-work-panel"), "Background Work is shown");
+    assert.doesNotMatch(fixture.container.textContent ?? "", /No Background Work/);
     assert.equal(requests.length, 1, "moving to Background Work keeps the load in flight rather than starting another");
     await act(async () => {
       requests[0]!.resolve({ session: detailedBackgroundSession(fixture.sessionId) });
       await requests[0]!.promise;
     });
     await flushAsyncWork();
-    assert.match(fixture.container.textContent ?? "", /Agent Job 1/, "the answer that was in flight lands");
-    assert.doesNotMatch(fixture.container.textContent ?? "", /Loading Background Work/);
+    assert.match(fixture.container.textContent ?? "", /Agent Job 04d2e1/, "the answer that was in flight lands");
+    assertNoDomNode(fixture.container.querySelector(".background-work-skeleton"));
   } finally {
     await unmountFixture(fixture);
   }
