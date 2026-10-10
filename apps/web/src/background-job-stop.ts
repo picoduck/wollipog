@@ -72,9 +72,23 @@ export function stoppableJobState(state: BackgroundJobCurrentState): boolean {
   return state === "running" || state === "stalled";
 }
 
-/** A job's name in the Background Work panel: its launch type and its place in its parent turn. */
-export function backgroundJobLabel(job: Pick<ManagedBackgroundJobView, "launchType">, index: number): string {
-  return `${titleCaseLabel(job.launchType === "unknown" ? "Background Job" : `${job.launchType} Job`)} ${index + 1}`;
+/** A job's kind, the first part of its name: "Shell Job", "Monitor Job", "Background Job". */
+export function backgroundJobKind(job: Pick<ManagedBackgroundJobView, "launchType">): string {
+  return titleCaseLabel(job.launchType === "unknown" ? "Background Job" : `${job.launchType} Job`);
+}
+
+/** The last six characters of a job's id, which tell two jobs of one kind apart in every turn (#2858). */
+export function backgroundJobShortId(job: Pick<ManagedBackgroundJobView, "id">): string {
+  return job.id.slice(-6);
+}
+
+/**
+ * A job's name everywhere it is shown (#2858): its kind and the end of its id, "Shell Job a1f3c9".
+ * The id makes it unique across turns, so two jobs never share a name. A row sets the id in `.mono`
+ * `--text-faint` from the two parts; a sentence, a page title or a dialog title uses this whole.
+ */
+export function backgroundJobLabel(job: Pick<ManagedBackgroundJobView, "launchType" | "id">): string {
+  return `${backgroundJobKind(job)} ${backgroundJobShortId(job)}`;
 }
 
 /** What Stop Job does, as its confirmation says it. */
@@ -89,7 +103,7 @@ export type BackgroundJobStopResult =
   | { state: "already_terminal" }
   | { state: "error"; message: string };
 
-/** Stop Job's one request (#1780), shared by the Background Work panel and the Session Status popover. */
+/** Stop Job's one request (#1780), shared by the Job Detail page (#2858) and the Session Status popover. */
 export function requestBackgroundJobStop(
   api: Pick<ApiClient, "stopBackgroundJob">,
   sessionId: string,
@@ -131,13 +145,9 @@ export function blockedDeliveryStopTarget(
     return null;
   }
   const inventorySupported = runnerSupportsProtocol(runnerProtocolVersion, "managedBackgroundInventory");
-  // The panel's order within a parent turn, so the job keeps the name the panel gives it.
-  const turnJobs = (session.backgroundJobs ?? [])
-    .filter((job) => job.parentTurnId === delivery.parentTurnId)
-    .sort((left, right) => left.registeredAt - right.registeredAt || left.id.localeCompare(right.id));
-  const stoppable = turnJobs.filter((job) => stoppableJobState(
-    backgroundJobCurrentState(job, session.backgroundWorkState, runnerOnline, inventorySupported)));
+  const stoppable = (session.backgroundJobs ?? []).filter((job) => job.parentTurnId === delivery.parentTurnId &&
+    stoppableJobState(backgroundJobCurrentState(job, session.backgroundWorkState, runnerOnline, inventorySupported)));
   if (stoppable.length !== 1) return null;
   const job = stoppable[0]!;
-  return { jobId: job.id, jobLabel: backgroundJobLabel(job, turnJobs.indexOf(job)) };
+  return { jobId: job.id, jobLabel: backgroundJobLabel(job) };
 }

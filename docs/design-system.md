@@ -782,7 +782,7 @@ extending the settled one-bar session chrome app-wide.
 - It opens the Session Status popover (§9.2, 340px; a bottom sheet on phones): the title, then one
   row per condition with its badge, one sentence and the action that resolves it where one exists
   (Review Request, Answer, Sign In…, Open for Background Work, Open Agents, Open Requests). Result
-  Blocked offers Stop Job… (the Background Work panel's danger confirmation) when Stop Job is
+  Blocked offers Stop Job… (the Job Detail page's danger confirmation, §4.10) when Stop Job is
   available and exactly one job of the blocked turn is still running, and Result Missing offers
   Acknowledge Missing Result; otherwise either opens Background Work. The step closes the popover and
   leaves focus on the Session Status control; reopened while its request runs, the row's button is
@@ -960,6 +960,41 @@ Requests, Decision History, and Terminal once #2868 moves it) opens in one frame
   returns focus to the control that opened the panel if it is still on screen, else to the
   conversation (the app bar's toggle went with the bar).
 
+### 4.10 Background Work
+
+Background Work (`BackgroundWorkPanel`, #2858) lists the jobs the agent left running after a turn
+and whether their result came back. It is one list of turn groups, never a card per turn:
+
+- **Turn groups.** One §5.2 `.group-label` per turn that started jobs, most recent first: the
+  transcript's own turn number as its footer shows it ("Turn 4"; "Earlier Turn" while the turn is
+  outside the loaded window, "Unknown Turn" where the runner could not name it), the group's
+  `jobGroup` status as the inline badge (§11.2), and a `.btn.sm.ghost` **View Turn** that scrolls the
+  transcript to the turn, loading earlier activity a page at a time until it is there. An unknown
+  turn, or one the fully loaded transcript does not hold, has no View Turn. The heading never wraps
+  View Turn under its label; the label gives way first.
+- **Job rows.** `.row.row-2`: line 1 is the job's name, its kind and the last six characters of its
+  id in mono `--text-faint` ("Shell Job a1f3c9", `backgroundJobLabel()`, the same name everywhere),
+  and its `job` badge; line 2 is one sentence about its result ("Started 10m ago", "Result waits for
+  the other job", "Result returned 50m ago", "Last seen 12m ago") with the duration trailing, then a
+  chevron. A row pushes the job's **Job Detail** page (§4.9 Pages). A turn with only a retained
+  receipt lists one "Result Receipt" row per receipt, which opens nothing.
+- **Job Detail** (`JobDetail`, shared with the Agents tab's job page): the job's name as the page
+  title, its badge, then a §5.4 `.facts` list: Started (its age and clock time), Running For or
+  Duration, Finished, Last Activity, Result (a sentence), Notification, Started By (the turn, with
+  View Turn) and, for a job Wollipog ended, Ended By and Reason. Raw delivery stages stay off it.
+  **Stop Job…** (`.btn.sm`) follows the facts while the job can be stopped and opens the §7.4 danger
+  confirmation titled "Stop <job name>", Cancel focused. While the request runs the button is busy;
+  then a sentence under it says what happened, or a compact danger notice says why it failed.
+  Unavailable, the button stays disabled with its reason as visible text it is described by.
+- **States**, each one notice or one compact state, in this order: machine offline (a warning in the
+  panel notice slot naming the machine, over the last-known list), loading (skeleton rows at the row
+  height after 300ms), a failed load (§12.4, Retry and Show Details), not tracked ("Background Work
+  Isn't Tracked", with Open Terminal), an older runner (Open Machine), the list, then empty ("No
+  Background Work"). A list cut at its bound ends in a §5.6 `ListFoot`: "Showing the 128 most recent
+  jobs."
+- **About Background Work** (`InfoPopover`) says what the list shows and that commands, file paths,
+  credentials and output stay on the machine. There is no privacy footnote under the list.
+
 ---
 
 ## 5. Lists, Rows and Cards
@@ -1069,8 +1104,7 @@ One recipe for every read-only label and value list. It is the §19.4 merge of t
   pairs side by side between two hairlines, separated by vertical hairlines, the value in
   `--type-title` with tabular figures. Under 760px the strip becomes rows, label left and value
   right. It is a modifier, not a second class.
-- A region may set the list's spacing or size (the background work panel uses `--type-small`) but
-  not its structure.
+- A region may set the list's spacing or size but not its structure.
 - Replaces `.agent-details-grid`, `.background-work-job-meta`, `.usage-totals`,
   `.subscription-buckets`, `.skills-orphan-facts` and `.settings-about`. Ten more `<dl>` recipes
   remain (§19.4); each area moves its own onto `.facts` when it is redesigned.
@@ -1796,6 +1830,7 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Tool call | Running: info · Completed: success (inline, no pill) · Failed: danger |
 | Session family rollup chip | "N Awaiting Input" when a child waits on the user: warning. Otherwise neutral. The settled design's "tints orange" is implemented as the warning tone; `--accent-2` keeps no UI role. |
 | Subagent / background job | Queued, Canceled: neutral · Running: info (pulse) · Stalled: warning (still listed by its runner with no result past the stall bound) · Completed: success · Failed: danger · Unverified: neutral, hollow dot (its runner is offline) · Lost: danger (replaces Orphaned) · Result Missing: warning (finished, but the result never arrived) |
+| Background Work turn group (`jobGroup`, the group's inline badge, #2858) | Waiting for 1 Job, Waiting for N Jobs: info · N of M Finished: neutral · Returning Result: info · Result Returned: success (inline) · Result Missing: warning · Missing Result Acknowledged: neutral · Unverified: neutral, hollow dot |
 | Session header, background work | "Background Work Lost": danger (was "Background Work Orphaned") |
 | Delivery receipt | Delivered: success (inline, no pill) · Delivery Failed: danger |
 | Queued message (`queuedMessage`: the composer queue) | Pending, Queued, Canceled: neutral · Sending, Starting, Steering…: info (pulse) · Accepted, Pending Delivery: info · Held, Delivery Uncertain: warning · Delivery Failed, Not Sent: danger. Rendered as the inline badge. |

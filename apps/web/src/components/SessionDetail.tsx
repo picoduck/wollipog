@@ -102,6 +102,7 @@ import { sessionArchivedAtRest } from "../status-meta.js";
 import {
   EventTimeline,
   TranscriptErrorAlert,
+  transcriptTurnsById,
   userRewindTurns,
   type TimelineQuestionContext,
   type TimelineRevealRequest,
@@ -338,6 +339,7 @@ import {
 import { materializePromptImages } from "../prompt-image-materialization.js";
 import { holdRecoveryActionFor, sessionArchiveActionRefusal, sessionCommandRefusal } from "../session-command-permissions.js";
 import { sessionReadingTarget } from "../focus-zones.js";
+import type { BackgroundParentTurn } from "../background-work.js";
 
 const NO_IMAGE_MIME_TYPES: readonly string[] = [];
 /** The side panel tools that show the job inventory a compact session view omits; Session Tools
@@ -807,6 +809,7 @@ export const DESCENDANT_REQUEST_POLL_TIMEOUT_MS = 10_000;
 const EMPTY_DESCENDANT_REQUESTS: readonly DescendantRequestView[] = Object.freeze([]);
 const EMPTY_BLOCKED_CHILDREN: readonly DescendantBlockedChildView[] = Object.freeze([]);
 const EMPTY_HELD_CHILDREN: readonly CampaignHeldChild[] = Object.freeze([]);
+const EMPTY_BACKGROUND_TURNS: ReadonlyMap<string, BackgroundParentTurn> = new Map();
 
 function sameStrings(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
@@ -3442,10 +3445,11 @@ function SessionDetailLoaded({
       return member ? [member] : [];
     }), (id) => rosterRunners.get(id)?.status === "online").filter(isCurrentWorker).length,
   [session, activeSubagents, rosterSessions, rosterRuns, rosterRunners]);
-  const backgroundParentTurnEventIds = useMemo(() => new Map(items
-    .filter((item): item is Extract<TimelineItem, { kind: "user_message" }> =>
-      item.kind === "user_message" && Boolean(item.turnId))
-    .map((item) => [item.turnId!, item.id] as const)), [items]);
+  // The turns that started background jobs, numbered as their footers number them (#2858). Only a
+  // session with background history pays for the pass over its items.
+  const backgroundHistoryShown = (session.backgroundJobs?.length ?? 0) > 0 || (session.backgroundDeliveries?.length ?? 0) > 0;
+  const backgroundParentTurns = useMemo(() => backgroundHistoryShown ? transcriptTurnsById(items) : EMPTY_BACKGROUND_TURNS,
+    [items, backgroundHistoryShown]);
 
   // Prior user prompts for ↑ history recall (chronological; recall walks from newest backward).
   const timelineUserPrompts = useMemo(
@@ -4144,6 +4148,49 @@ function SessionDetailLoaded({
     else restoreExpandedPanel();
     revealCurrentOperation(eventId);
   }, [isMobile, restoreExpandedPanel, revealCurrentOperation]);
+  // View Turn from Background Work (#2858). A turn outside the loaded window loads earlier activity a
+  // page at a time until its prompt arrives, then lands there; it gives up when history runs out or
+  // a page fails to load (whose error the transcript's head shows), or when the history is rebuilt.
+  const [pendingTurnView, setPendingTurnView] = useState<{
+    turnId: string;
+    historyKey: string;
+    requestedBase: number | null;
+  } | null>(null);
+  const viewBackgroundTurn = useCallback((turnId: string) => {
+    const loaded = backgroundParentTurns.get(turnId);
+    if (loaded) {
+      setPendingTurnView(null);
+      revealTranscriptItemFromPanel(loaded.eventId);
+      return;
+    }
+    if (isMobile) rightPanelRef.current.close();
+    else restoreExpandedPanel();
+    setPendingTurnView({ turnId, historyKey: timelineHistoryKey, requestedBase: null });
+  }, [backgroundParentTurns, isMobile, restoreExpandedPanel, revealTranscriptItemFromPanel, timelineHistoryKey]);
+  useEffect(() => {
+    if (!pendingTurnView) return;
+    if (pendingTurnView.historyKey !== timelineHistoryKey) {
+      setPendingTurnView(null);
+      return;
+    }
+    const loaded = backgroundParentTurns.get(pendingTurnView.turnId);
+    if (loaded) {
+      setPendingTurnView(null);
+      revealCurrentOperation(loaded.eventId);
+      return;
+    }
+    if (olderInFlightRef.current) return;
+    const base = eventWindow?.baseSeq;
+    // A page that settled without moving the window's base failed; history without older events
+    // has no such turn to show.
+    if (base === undefined || eventWindow?.hasOlder !== true || base <= 1 || pendingTurnView.requestedBase === base ||
+        !loadOlder()) {
+      setPendingTurnView(null);
+      return;
+    }
+    setPendingTurnView({ ...pendingTurnView, requestedBase: base });
+  }, [pendingTurnView, backgroundParentTurns, eventWindow?.baseSeq, eventWindow?.hasOlder, olderRequestSettled,
+    timelineHistoryKey, loadOlder, revealCurrentOperation]);
   const previewNavigationControls = useMemo<PreviewNavigationControls>(() => ({
     beginProgrammaticScroll: followTail.beginProgrammaticScroll,
     follow: followTail.follow,
@@ -7706,8 +7753,10 @@ function SessionDetailLoaded({
               },
             });
           }}
-          parentTurnEventIds={backgroundParentTurnEventIds}
-          onOpenParentTurn={revealTranscriptItemFromPanel}
+          parentTurns={backgroundParentTurns}
+          onViewTurn={viewBackgroundTurn}
+          machineName={runnerDisp.name || undefined}
+          onOpenMachine={() => navigate({ name: "runners", section: "machines" })}
           backgroundInventoryError={backgroundInventoryError}
           onRetryBackgroundInventory={retryBackgroundInventory}
         />}

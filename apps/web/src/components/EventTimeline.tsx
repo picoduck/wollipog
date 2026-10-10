@@ -410,6 +410,31 @@ export function summarizeTimelineTurns(
   return { segments, segmentOf };
 }
 
+/**
+ * Each loaded turn a prompt opened, by its runner turn id (#2858): the prompt to scroll to and the
+ * number its footer shows. A turn id seen only on a message that did not open a turn (steering)
+ * still names that message, without a number.
+ */
+export function transcriptTurnsById(
+  items: readonly TimelineItem[],
+): Map<string, { eventId: number; turn?: number; startedAt?: number }> {
+  const turns = new Map<string, { eventId: number; turn?: number; startedAt?: number }>();
+  for (const segment of summarizeTimelineTurns(items, new Map()).segments) {
+    const prompt = segment.prompt;
+    if (!prompt?.turnId || turns.has(prompt.turnId)) continue;
+    turns.set(prompt.turnId, {
+      eventId: prompt.id,
+      ...(segment.turn !== undefined ? { turn: segment.turn } : {}),
+      ...(Number.isFinite(prompt.createdAt) ? { startedAt: prompt.createdAt } : {}),
+    });
+  }
+  for (const item of items) {
+    if (item.kind !== "user_message" || !item.turnId || turns.has(item.turnId)) continue;
+    turns.set(item.turnId, { eventId: item.id, ...(Number.isFinite(item.createdAt) ? { startedAt: item.createdAt } : {}) });
+  }
+  return turns;
+}
+
 /** The item that places a row in a turn. A nested subagent row follows its parent, wherever its own
  * event landed. */
 function rowItemId(row: TimelineRenderRow): number | undefined {

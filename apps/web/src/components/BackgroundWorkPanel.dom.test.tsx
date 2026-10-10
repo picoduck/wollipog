@@ -2,16 +2,20 @@ import assert from "node:assert/strict";
 import { statusMeta } from "../status-meta.js";
 import { after, before, test } from "node:test";
 import React, { act } from "react";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import { PROTOCOL_VERSION, type BackgroundJobStopResponse, type ManagedBackgroundJobView, type SessionView } from "@wollipog/protocol";
+import { PROTOCOL_VERSION, type ManagedBackgroundJobView, type SessionView } from "@wollipog/protocol";
 import type { ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import {
+  BACKGROUND_WORK_SKELETON_DELAY_MS,
   BackgroundWorkPanel,
   backgroundJobCurrentState,
-  backgroundJobDeliveryStage,
+  type BackgroundWorkPanelProps,
 } from "./BackgroundWorkPanel.js";
+import { PanelActionSlotContext } from "./RightPanel.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -49,7 +53,7 @@ const baseJob: ManagedBackgroundJobView = {
   sourcePresent: true,
 };
 
-test("job and delivery presentation keep current lifecycle separate from delivery", () => {
+test("a job's current state keeps its lifecycle separate from where its result is", () => {
   // States are keys of the shared job vocabulary; `statusMeta("job", …)` owns their words.
   assert.equal(backgroundJobCurrentState(baseJob, "running", true, true), "running");
   assert.equal(backgroundJobCurrentState(baseJob, "running", false, true), "unverified");
@@ -67,15 +71,6 @@ test("job and delivery presentation keep current lifecycle separate from deliver
   assert.equal(backgroundJobCurrentState(baseJob, "running", true, true, 1_000 + 3_599_000), "running");
   assert.equal(backgroundJobCurrentState({ ...baseJob, stalledSince: 3_601_000 }, "running", false, true), "unverified",
     "an offline runner cannot confirm a stalled job any more than a running one");
-  assert.equal(backgroundJobDeliveryStage(baseJob), "Not Started");
-  assert.equal(backgroundJobDeliveryStage({ ...baseJob, terminalObservedAt: 3_000, continuationRequired: true }), "Continuation Pending");
-  assert.equal(backgroundJobDeliveryStage({ ...baseJob, continuationAcceptedAt: 4_000 }), "Continuation In Flight");
-  assert.equal(backgroundJobDeliveryStage({
-    ...baseJob,
-    continuationAcceptedAt: 4_000,
-    continuationMissingResultAt: 4_500,
-  }), "Result Missing");
-  assert.equal(backgroundJobDeliveryStage({ ...baseJob, assistantResultPersistedAt: 5_000 }), "Result Delivered");
 });
 
 test("every watchdog highlights its delivery and explains completion, recovery, and user action", async () => {
@@ -108,11 +103,10 @@ test("every watchdog highlights its delivery and explains completion, recovery, 
           } as unknown as SessionView}
           runnerOnline
           runnerProtocolVersion={PROTOCOL_VERSION}
-          parentTurnEventIds={new Map([["turn-1", 42]])}
-          onOpenParentTurn={() => undefined}
+          parentTurns={new Map()}
         />,
       ));
-      const highlighted = container.querySelector<HTMLElement>(".background-work-group-watchdog");
+      const highlighted = container.querySelector<HTMLElement>(".background-work-turn[data-watchdog-highlighted]");
       assert.equal(highlighted?.dataset["watchdogState"], watchdogState);
       assert.equal(highlighted?.dataset["watchdogHighlighted"], "true");
       const summary = highlighted?.querySelector<HTMLElement>(".background-delivery-summary");
@@ -161,19 +155,17 @@ test("only the group holding the watchdog delivery is highlighted, and none with
       } as SessionView}
       runnerOnline
       runnerProtocolVersion={PROTOCOL_VERSION}
-      parentTurnEventIds={new Map([["turn-1", 41], ["turn-2", 42], ["turn-3", 43]])}
-      onOpenParentTurn={() => undefined}
+      parentTurns={new Map()}
     />,
   ));
-  const groups = () => [...container.querySelectorAll<HTMLElement>(".background-work-group")];
+  const groups = () => [...container.querySelectorAll<HTMLElement>(".background-work-turn")];
   // Plain values per group, so a failure reports markers instead of inspecting DOM nodes.
   const markers = () => groups().map((group) => ({
-    watchdogClass: group.classList.contains("background-work-group-watchdog"),
     watchdogHighlighted: group.getAttribute("data-watchdog-highlighted"),
     ariaCurrent: group.getAttribute("aria-current"),
     watchdogState: group.getAttribute("data-watchdog-state"),
   }));
-  const unmarked = { watchdogClass: false, watchdogHighlighted: null, ariaCurrent: null, watchdogState: null };
+  const unmarked = { watchdogHighlighted: null, ariaCurrent: null, watchdogState: null };
   try {
     await render([]);
     assert.deepEqual(markers(), [unmarked, unmarked, unmarked],
@@ -194,7 +186,6 @@ test("only the group holding the watchdog delivery is highlighted, and none with
       terminalCount: 1,
     }]);
     assert.deepEqual(markers(), [unmarked, {
-      watchdogClass: true,
       watchdogHighlighted: "true",
       ariaCurrent: "true",
       watchdogState: "result_not_projected",
@@ -203,7 +194,7 @@ test("only the group holding the watchdog delivery is highlighted, and none with
     // #2329: the control plane lists retained deliveries before Result Blocked ones, so a pending
     // delivery can come first; the highlight follows the one that waits on the person.
     const highlighted = (watchdogState: string) => ({
-      watchdogClass: true, watchdogHighlighted: "true", ariaCurrent: "true", watchdogState,
+      watchdogHighlighted: "true", ariaCurrent: "true", watchdogState,
     });
     const passive = (watchdogState: string) => ({ ...unmarked, watchdogState });
     await render([{
@@ -290,8 +281,7 @@ test("terminal missing continuations show age and acknowledge independently with
           } as unknown as SessionView}
           runnerOnline
           runnerProtocolVersion={PROTOCOL_VERSION}
-          parentTurnEventIds={new Map()}
-          onOpenParentTurn={() => undefined}
+          parentTurns={new Map()}
         />
       </ApiProvider>,
     ));
@@ -353,8 +343,7 @@ test("missing-result feedback stays with its session across same-id rerenders an
         } as unknown as SessionView}
         runnerOnline
         runnerProtocolVersion={PROTOCOL_VERSION}
-        parentTurnEventIds={new Map()}
-        onOpenParentTurn={() => undefined}
+        parentTurns={new Map()}
       />
     </ApiProvider>
   );
@@ -451,8 +440,7 @@ test("terminal missing history remains actionable without a watchdog but yields 
         } as unknown as SessionView}
         runnerOnline
         runnerProtocolVersion={PROTOCOL_VERSION}
-        parentTurnEventIds={new Map()}
-        onOpenParentTurn={() => undefined}
+        parentTurns={new Map()}
       />
     </ApiProvider>
   );
@@ -467,14 +455,14 @@ test("terminal missing history remains actionable without a watchdog but yields 
       await Promise.resolve();
     });
     assert.equal(
-      container.querySelector(".background-work-barrier strong")?.textContent,
+      container.querySelector(".background-work-turn-head .status")?.textContent,
       "Missing Result Acknowledged",
-      "the barrier follows the successful optimistic acknowledgement",
+      "the group's status follows the successful optimistic acknowledgement",
     );
     await act(async () => render({ ...missingDelivery, runnerResultPersistedAt: 30_000 }));
     assert.doesNotMatch(container.textContent ?? "", /Acknowledgement Required/);
     assert.doesNotMatch(container.textContent ?? "", /Result Missing/);
-    assert.match(container.textContent ?? "", /Result Delivered/);
+    assert.equal(container.querySelector(".background-work-turn-head .status")?.textContent, "Result Returned");
     assert.equal(container.querySelectorAll<HTMLButtonElement>("button").length, 0,
       "late delivery proof is authoritative and needs no acknowledgement");
   } finally {
@@ -483,671 +471,408 @@ test("terminal missing history remains actionable without a watchdog but yields 
   }
 });
 
-test("the panel renders individual jobs, their parent barrier, durable times, and a transcript action", async () => {
+const MINUTE = 60_000;
+
+/** Renders the panel alone (outside the side panel, so it keeps its own page stack) and cleans up. */
+async function mountBackgroundWork(props: Partial<BackgroundWorkPanelProps> & { session: SessionView }, client = {} as ApiClient) {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
   const container = happyContainer as unknown as HTMLDivElement;
   const root = createRoot(container);
-  const opened: number[] = [];
-  const session = {
-    id: "session",
-    runnerId: "runner",
-    backgroundWorkTracking: "managed",
-    backgroundJobs: [{
-      ...baseJob,
-      terminalStatus: "completed",
-      terminalObservedAt: 3_000,
-      continuationRequired: true,
-      continuationId: "continuation",
-      continuationQueuedAt: 3_100,
-      assistantResultPersistedAt: 4_000,
-    }, {
-      ...baseJob,
-      id: "second-private-id",
-      launchType: "shell",
-      registeredAt: 1_100,
-      terminalStatus: "failed",
-      terminalObservedAt: 3_200,
-      continuationRequired: true,
-      continuationId: "continuation",
-      continuationQueuedAt: 3_100,
-    }],
-    backgroundDeliveries: [{
-      continuationId: "continuation",
-      parentTurnId: "turn-1",
-      jobCount: 2,
-      terminalCount: 2,
-      notificationQueuedAt: 4_100,
-    }],
-  } as SessionView;
-  try {
-    await act(async () => root.render(
-      <BackgroundWorkPanel
-        session={session}
-        runnerOnline
-        runnerProtocolVersion={PROTOCOL_VERSION}
-        parentTurnEventIds={new Map([["turn-1", 42]])}
-        onOpenParentTurn={(eventId) => opened.push(eventId)}
-      />,
-    ));
-    assert.equal(container.querySelectorAll(".background-work-job").length, 2);
-    assert.match(container.textContent ?? "", /2 of 2 jobs terminal · 1 delivered/);
-    assert.match(container.textContent ?? "", /Delivery Pending/);
-    assert.match(container.textContent ?? "", /Notification Queued/);
-    assert.match(container.textContent ?? "", /Agent Job 1/);
-    assert.match(container.textContent ?? "", /Shell Job 2/);
-    assert.doesNotMatch(container.textContent ?? "", /opaque-job-id|second-private-id|continuation|\/tmp/);
-    assert.ok(container.querySelectorAll("time[datetime]").length >= 6);
-    await act(async () => container.querySelector<HTMLButtonElement>("button")!.click());
-    assert.deepEqual(opened, [42]);
-  } finally {
-    await act(async () => root.unmount());
-    container.remove();
-  }
-});
-
-test("a killed job says who ended it and why, and a job that ended on its own says nothing (#1849)", async () => {
-  const happyContainer = domWindow.document.createElement("div");
-  domWindow.document.body.append(happyContainer);
-  const container = happyContainer as unknown as HTMLDivElement;
-  const root = createRoot(container);
-  const killed = (id: string, registeredAt: number, endedBy?: ManagedBackgroundJobView["endedBy"]): ManagedBackgroundJobView => ({
-    ...baseJob, id, launchType: "monitor", registeredAt, terminalStatus: "killed", terminalObservedAt: 3_000,
-    continuationRequired: false, ...(endedBy ? { endedBy } : {}),
-  });
-  const session = {
-    id: "session",
-    runnerId: "runner",
-    backgroundWorkTracking: "managed",
-    backgroundJobs: [
-      killed("owner", 1_000, { actor: { kind: "user" }, reason: "stop_request", endedAt: 3_000 }),
-      killed("orchestrator", 1_001, { actor: { kind: "orchestrator", sessionId: "s_parent_orchestrator" }, reason: "stop_request", endedAt: 3_000 }),
-      killed("bound", 1_002, { actor: { kind: "runner" }, reason: "handoff_wait_bound", endedAt: 3_000 }),
-      killed("restart", 1_003, { actor: { kind: "runner" }, reason: "session_restart", endedAt: 3_000 }),
-      killed("on-its-own", 1_004),
-    ],
-    backgroundDeliveries: [],
-  } as unknown as SessionView;
-  try {
-    await act(async () => root.render(
-      <BackgroundWorkPanel session={session} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION}
-        parentTurnEventIds={new Map()} onOpenParentTurn={() => {}} />,
-    ));
-    const rows = new Map([...container.querySelectorAll<HTMLElement>(".background-work-job")].map((row) => {
-      const terms = Object.fromEntries([...row.querySelectorAll("dl > div")].map((entry) =>
-        [entry.querySelector("dt")?.textContent, entry.querySelector("dd")?.textContent]));
-      return [row.querySelector("strong")?.textContent, [terms["Ended By"], terms.Reason]];
-    }));
-    assert.deepEqual([...rows.values()], [
-      ["Session Owner", "Stop Job Request"],
-      ["Controlling Orchestrator s_parent_orchestrator", "Stop Job Request"],
-      ["Wollipog", "Handoff Waited Past Its Bound"],
-      ["Wollipog", "Session Restarted"],
-      [undefined, undefined],
-    ]);
-    assert.equal([...container.querySelectorAll(".background-work-job-title .status")]
-      .filter((badge) => badge.textContent === "Killed").length, 5,
-      "every job still reads Killed");
-  } finally {
-    await act(async () => root.unmount());
-    container.remove();
-  }
-});
-
-test("bounded history uses authoritative barrier totals and discloses omitted jobs", async () => {
-  const happyContainer = domWindow.document.createElement("div");
-  domWindow.document.body.append(happyContainer);
-  const container = happyContainer as unknown as HTMLDivElement;
-  const root = createRoot(container);
-  try {
-    await act(async () => root.render(
-      <BackgroundWorkPanel
-        session={{
-          id: "session",
-          runnerId: "runner",
-          backgroundWorkTracking: "managed",
-          backgroundJobsTruncated: true,
-          backgroundJobs: [{
-            ...baseJob,
-            terminalStatus: "completed",
-            terminalObservedAt: 3_000,
-            continuationRequired: true,
-            continuationId: "continuation",
-            assistantResultPersistedAt: 4_000,
-          }],
-          backgroundDeliveries: [{
-            continuationId: "continuation",
-            parentTurnId: "turn-1",
-            jobCount: 200,
-            terminalCount: 199,
-          }],
-        } as SessionView}
-        runnerOnline
-        runnerProtocolVersion={PROTOCOL_VERSION}
-        parentTurnEventIds={new Map()}
-        onOpenParentTurn={() => undefined}
-      />,
-    ));
-    assert.match(container.textContent ?? "", /Showing the 128 most relevant jobs/);
-    assert.match(container.textContent ?? "", /199 of 200 jobs terminal · 1 shown/);
-    assert.match(container.textContent ?? "", /Waiting for Jobs/);
-    assert.doesNotMatch(container.textContent ?? "", /BarrierDelivered/);
-  } finally {
-    await act(async () => root.unmount());
-    container.remove();
-  }
-});
-
-test("delivery-only history remains inspectable without inventing job lifecycle rows", async () => {
-  const happyContainer = domWindow.document.createElement("div");
-  domWindow.document.body.append(happyContainer);
-  const container = happyContainer as unknown as HTMLDivElement;
-  const root = createRoot(container);
-  const opened: number[] = [];
-  try {
-    await act(async () => root.render(
-      <BackgroundWorkPanel
-        session={{
-          id: "session",
-          runnerId: "runner",
-          backgroundWorkTracking: "managed",
-          backgroundJobs: [],
-          backgroundJobsTruncated: true,
-          backgroundDeliveries: [{
-            continuationId: "private-continuation",
-            parentTurnId: "retained-parent",
-            jobCount: 3,
-            terminalCount: 3,
-            queuedAt: 3_000,
-            acceptedAt: 3_100,
-            runnerResultPersistedAt: 3_200,
-            notificationQueuedAt: 3_300,
-            notifications: [{
-              deliveryId: "private-delivery",
-              endpointKey: "private-endpoint",
-              state: "clicked",
-              attemptCount: 1,
-              clickedAt: 3_400,
-            }],
-          }],
-        } as unknown as SessionView}
-        runnerOnline
-        runnerProtocolVersion={PROTOCOL_VERSION}
-        parentTurnEventIds={new Map([["retained-parent", 77]])}
-        onOpenParentTurn={(eventId) => opened.push(eventId)}
-      />,
-    ));
-    assert.equal(container.querySelectorAll(".background-work-group").length, 1);
-    assert.equal(container.querySelectorAll(".background-work-job").length, 0);
-    assert.equal(container.querySelectorAll(".background-work-delivery").length, 1);
-    assert.match(container.textContent ?? "", /Delivery receipt retained for 3 jobs/);
-    assert.match(container.textContent ?? "", /Per-job lifecycle history is outside the bounded inventory/);
-    assert.match(container.textContent ?? "", /Delivery ReceiptResult Delivered · Notification Opened/);
-    assert.match(container.textContent ?? "", /Delivery Receipt 1Result Delivered/);
-    assert.match(container.textContent ?? "", /Recorded Job Count3Recorded Terminal Count3/);
-    assert.doesNotMatch(container.textContent ?? "", /Running|Completed|Failed|Killed|Orphaned|Lost/);
-    assert.doesNotMatch(container.textContent ?? "", /private-continuation|private-delivery|private-endpoint|retained-parent/);
-    const receipt = container.querySelector('[role="group"][aria-label="Delivery Receipt Status"]');
-    assert.ok(receipt, "screen readers receive a delivery-specific status group");
-    const parentButton = container.querySelector<HTMLButtonElement>("button");
-    assert.equal(parentButton?.textContent, "View Parent Turn");
-    await act(async () => parentButton!.click());
-    assert.deepEqual(opened, [77]);
-  } finally {
-    await act(async () => root.unmount());
-    container.remove();
-  }
-});
-
-test("multiple delivery rounds under one parent use their combined authoritative totals", async () => {
-  const happyContainer = domWindow.document.createElement("div");
-  domWindow.document.body.append(happyContainer);
-  const container = happyContainer as unknown as HTMLDivElement;
-  const root = createRoot(container);
-  try {
-    await act(async () => root.render(
-      <BackgroundWorkPanel
-        session={{
-          id: "session",
-          runnerId: "runner",
-          backgroundWorkTracking: "managed",
-          backgroundJobs: [{
-            ...baseJob,
-            terminalStatus: "completed",
-            terminalObservedAt: 3_000,
-            continuationRequired: true,
-            continuationId: "continuation-1",
-            assistantResultPersistedAt: 4_000,
-          }, {
-            ...baseJob,
-            id: "job-2",
-            registeredAt: 5_000,
-            terminalStatus: "completed",
-            terminalObservedAt: 6_000,
-            continuationRequired: true,
-            continuationId: "continuation-2",
-            assistantResultPersistedAt: 7_000,
-          }],
-          backgroundDeliveries: [{
-            continuationId: "continuation-1",
-            parentTurnId: "turn-1",
-            jobCount: 1,
-            terminalCount: 1,
-            runnerResultPersistedAt: 4_000,
-          }, {
-            continuationId: "continuation-2",
-            parentTurnId: "turn-1",
-            jobCount: 1,
-            terminalCount: 1,
-            runnerResultPersistedAt: 7_000,
-          }],
-        } as SessionView}
-        runnerOnline
-        runnerProtocolVersion={PROTOCOL_VERSION}
-        parentTurnEventIds={new Map()}
-        onOpenParentTurn={() => undefined}
-      />,
-    ));
-    assert.match(container.textContent ?? "", /2 of 2 jobs terminal · 2 delivered/);
-    assert.match(container.textContent ?? "", /BarrierDelivered/);
-    assert.doesNotMatch(container.textContent ?? "", /Waiting for Jobs/);
-  } finally {
-    await act(async () => root.unmount());
-    container.remove();
-  }
-});
-
-test("unknown parent sentinels stay separate and aggregate-only states explain missing evidence", async () => {
-  const happyContainer = domWindow.document.createElement("div");
-  domWindow.document.body.append(happyContainer);
-  const container = happyContainer as unknown as HTMLDivElement;
-  const root = createRoot(container);
-  try {
-    await act(async () => root.render(
-      <BackgroundWorkPanel
-        session={{
-          id: "session",
-          runnerId: "runner",
-          backgroundWorkTracking: "managed",
-          backgroundJobs: [
-            { ...baseJob, id: "unknown-1", parentTurnId: "unknown" },
-            { ...baseJob, id: "unknown-2", parentTurnId: "unknown", registeredAt: 3_000 },
-          ],
-        } as SessionView}
-        runnerOnline
-        runnerProtocolVersion={PROTOCOL_VERSION}
-        parentTurnEventIds={new Map()}
-        onOpenParentTurn={() => undefined}
-      />,
-    ));
-    assert.equal(container.querySelectorAll(".background-work-group").length, 2);
-    assert.equal(container.querySelectorAll(".background-work-group h3")[0]?.textContent, "Unknown Parent Turn");
-    assert.equal(container.querySelectorAll(".background-work-link-unavailable")[0]?.textContent,
-      "Parent Turn Unknown");
-    assert.equal(container.querySelectorAll(".background-work-barrier strong")[0]?.textContent,
-      "Unverified");
-
-    await act(async () => root.render(
-      <BackgroundWorkPanel
-        session={{
-          id: "session",
-          runnerId: "runner",
-          backgroundJobsAvailable: true,
-          backgroundWorkTracking: "managed",
-        } as SessionView}
-        runnerOnline
-        runnerProtocolVersion={PROTOCOL_VERSION}
-        parentTurnEventIds={new Map()}
-        onOpenParentTurn={() => undefined}
-      />,
-    ));
-    assert.match(container.textContent ?? "", /Loading Background Work/);
-    assert.doesNotMatch(container.textContent ?? "", /No Background Work Recorded/);
-
-    let retries = 0;
-    await act(async () => root.render(
-      <BackgroundWorkPanel
-        session={{
-          id: "session",
-          runnerId: "runner",
-          backgroundJobsAvailable: true,
-          backgroundWorkTracking: "managed",
-        } as SessionView}
-        runnerOnline
-        runnerProtocolVersion={PROTOCOL_VERSION}
-        parentTurnEventIds={new Map()}
-        onOpenParentTurn={() => undefined}
-        inventoryError="offline"
-        onRetryInventory={() => { retries += 1; }}
-      />,
-    ));
-    assert.match(container.textContent ?? "", /Background Work Unavailable/);
-    await act(async () => container.querySelector<HTMLButtonElement>("button")!.click());
-    assert.equal(retries, 1);
-
-    await act(async () => root.render(
-      <BackgroundWorkPanel
-        session={{
-          id: "session",
-          runnerId: "runner",
-          backgroundWorkTracking: "managed",
-        } as SessionView}
-        runnerOnline
-        runnerProtocolVersion={PROTOCOL_VERSION}
-        parentTurnEventIds={new Map()}
-        onOpenParentTurn={() => undefined}
-      />,
-    ));
-    assert.match(container.textContent ?? "", /Background Work Unverified/);
-    assert.match(container.textContent ?? "", /control plane does not expose/);
-    assert.doesNotMatch(container.textContent ?? "", /No Background Work Recorded/);
-
-    await act(async () => root.render(
-      <BackgroundWorkPanel
-        session={{
-          id: "session",
-          runnerId: "runner",
-          backgroundWorkState: "orphaned",
-          backgroundWorkTracking: "managed",
-        } as SessionView}
-        runnerOnline
-        runnerProtocolVersion={PROTOCOL_VERSION}
-        parentTurnEventIds={new Map()}
-        onOpenParentTurn={() => undefined}
-      />,
-    ));
-    assert.match(container.textContent ?? "", /Background Work Lost/);
-    assert.match(container.textContent ?? "", /per-job lifecycle evidence is unavailable/);
-    assert.doesNotMatch(container.textContent ?? "", /No Background Work Recorded/);
-  } finally {
-    await act(async () => root.unmount());
-    container.remove();
-  }
-});
-
-test("offline current work and older untracked providers receive truthful capability copy", async () => {
-  const happyContainer = domWindow.document.createElement("div");
-  domWindow.document.body.append(happyContainer);
-  const container = happyContainer as unknown as HTMLDivElement;
-  const root = createRoot(container);
-  try {
-    await act(async () => root.render(
-      <BackgroundWorkPanel
-        session={{
-          id: "session",
-          runnerId: "runner",
-          backgroundWorkState: "running",
-          backgroundWorkTracking: "untracked",
-          backgroundJobs: [baseJob],
-        } as SessionView}
-        runnerOnline={false}
-        runnerProtocolVersion={81}
-        parentTurnEventIds={new Map()}
-        onOpenParentTurn={() => undefined}
-      />,
-    ));
-    assert.match(container.textContent ?? "", /predates inspectable background work/);
-    assert.match(container.textContent ?? "", /does not expose a durable detached-work lifecycle/);
-    assert.match(container.textContent ?? "", /Unverified/);
-    assert.doesNotMatch(container.textContent ?? "", /Status Unverified/);
-    assert.match(container.textContent ?? "", /Parent Turn Not Loaded/);
-  } finally {
-    await act(async () => root.unmount());
-    container.remove();
-  }
-});
-
-/** The Stop Job control of the job row whose title starts with `title` (#1780). */
-function stopJobButton(container: HTMLElement, title: string): HTMLButtonElement | null {
-  const row = [...container.querySelectorAll<HTMLElement>(".background-work-job")]
-    .find((candidate) => candidate.querySelector("strong")?.textContent?.startsWith(title));
-  return row?.querySelector<HTMLButtonElement>(".background-work-job-actions > button") ?? null;
+  const render = (next: Partial<BackgroundWorkPanelProps> & { session: SessionView }) => act(async () => root.render(
+    <ApiProvider client={client}>
+      <BackgroundWorkPanel runnerOnline runnerProtocolVersion={PROTOCOL_VERSION} parentTurns={new Map()} {...next} />
+    </ApiProvider>,
+  ));
+  await render(props);
+  return {
+    container,
+    render,
+    async dispose() {
+      await act(async () => root.unmount());
+      container.remove();
+    },
+  };
 }
 
-function describedBy(element: Element): string {
-  return (element.getAttribute("aria-describedby") ?? "").split(" ")
-    .map((id) => domWindow.document.getElementById(id)?.textContent ?? "").join(" ");
-}
-
-/** A Result Blocked turn: a monitor that never fires beside a finished subagent (#1780). */
-function resultBlockedSession(overrides: Partial<SessionView> = {}): SessionView {
+function managedSession(overrides: Partial<SessionView> = {}): SessionView {
   return {
     id: "session",
     runnerId: "runner",
     driver: "claude-code",
     backgroundWorkTracking: "managed",
     backgroundWorkState: "running",
-    backgroundJobs: [
-      { ...baseJob, id: "monitor-1", launchType: "monitor" },
-      {
-        ...baseJob, id: "agent-1", launchType: "agent", terminalStatus: "completed",
-        terminalObservedAt: 3_000, continuationRequired: true,
-      },
-    ],
-    backgroundDeliveries: [{
-      parentTurnId: "turn-1", jobCount: 2, terminalCount: 1,
-      watchdogState: "continuation_blocked", unfinishedSiblingJobs: 1,
-    }],
+    backgroundJobs: [],
+    backgroundDeliveries: [],
     ...overrides,
   } as unknown as SessionView;
 }
 
-test("Result Blocked offers Stop Job, which stops only the unfinished job after confirmation (#1780)", async () => {
-  const happyContainer = domWindow.document.createElement("div");
-  domWindow.document.body.append(happyContainer);
-  const container = happyContainer as unknown as HTMLDivElement;
-  const root = createRoot(container);
-  const stops: Array<[string, string]> = [];
-  let finish!: (value: BackgroundJobStopResponse) => void;
-  const client = {
-    stopBackgroundJob: (sessionId: string, jobId: string) => {
-      stops.push([sessionId, jobId]);
-      return new Promise<BackgroundJobStopResponse>((resolve) => { finish = resolve; });
-    },
-  } as unknown as ApiClient;
-  const render = (session: SessionView) => act(async () => root.render(
-    <ApiProvider client={client}>
-      <BackgroundWorkPanel session={session} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION}
-        parentTurnEventIds={new Map()} onOpenParentTurn={() => undefined} />
-    </ApiProvider>,
-  ));
-  try {
-    await render(resultBlockedSession());
-    const summary = container.querySelector<HTMLElement>(".background-delivery-summary");
-    assert.match(summary?.textContent ?? "", /Result Blocked/);
-    assert.match(summary?.textContent ?? "", /Use Stop Job on the unfinished job below: only that job ends/);
-    assert.doesNotMatch(summary?.textContent ?? "", /Ask the session to stop/);
-    // Only the unfinished job offers the action.
-    const stopButtons = [...container.querySelectorAll<HTMLButtonElement>("button")]
-      .filter((button) => button.textContent === "Stop Job");
-    assert.equal(stopButtons.length, 1);
-    assert.equal(stopButtons[0], stopJobButton(container, "Monitor Job"));
-    assert.equal(stopButtons[0]!.getAttribute("aria-label"), null, "the accessible name is the visible label");
-    assert.match(describedBy(stopButtons[0]!), /^Stops Monitor Job \d\.$/);
+const headings = (container: HTMLElement) => [...container.querySelectorAll<HTMLElement>(".background-work-turn-head")]
+  .map((head) => ({
+    title: head.querySelector("h3")?.textContent,
+    status: head.querySelector(".status.inline")?.textContent,
+    viewTurn: head.querySelector("button")?.textContent ?? null,
+  }));
 
-    await act(async () => stopButtons[0]!.click());
-    assert.deepEqual(stops, [], "nothing is stopped before confirmation");
-    const confirm = container.querySelector<HTMLElement>("[aria-label^='Confirm Stopping Monitor Job']");
-    assert.match(confirm?.textContent ?? "", /Only this job ends, and it is recorded as killed\. The session, its conversation, and its other jobs keep running\./);
-    const keep = [...confirm!.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Keep Running")!;
-    await act(async () => keep.click());
-    assertNoDomNode(container.querySelector("[aria-label^='Confirm Stopping Monitor Job']"));
-    assert.deepEqual(stops, []);
-
-    await act(async () => stopJobButton(container, "Monitor Job")!.click());
-    const confirmStop = [...container.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent === "Confirm Stop")!;
-    assert.ok(confirmStop.classList.contains("danger"));
-    await act(async () => confirmStop.click());
-    assert.deepEqual(stops, [["session", "monitor-1"]]);
-    const pending = stopJobButton(container, "Monitor Job")!;
-    assert.equal(pending.textContent, "Stopping…");
-    assert.equal(pending.disabled, true);
-    await act(async () => {
-      finish({ sessionId: "session", jobId: "monitor-1", outcome: "stopped", terminalStatus: "killed" });
-      await Promise.resolve();
-    });
-    assert.match(container.textContent ?? "", /The job was stopped\. Its status updates here shortly\./);
-
-    // The inventory update arrives: the job is killed and the control is gone.
-    await render(resultBlockedSession({
+test("groups are the transcript's turns, newest first, each with its status and View Turn (#2858)", async () => {
+  const now = Date.now();
+  const viewed: string[] = [];
+  const panel = await mountBackgroundWork({
+    session: managedSession({
       backgroundJobs: [
-        { ...baseJob, id: "monitor-1", launchType: "monitor", terminalStatus: "killed", terminalObservedAt: 4_000, continuationRequired: false },
-        { ...baseJob, id: "agent-1", launchType: "agent", terminalStatus: "completed", terminalObservedAt: 3_000, continuationRequired: true },
+        { ...baseJob, id: "job-turn-2", parentTurnId: "turn-2", launchType: "shell", registeredAt: now - 30 * MINUTE,
+          terminalStatus: "completed", terminalObservedAt: now - 29 * MINUTE, continuationRequired: true,
+          assistantResultPersistedAt: now - 28 * MINUTE },
+        { ...baseJob, id: "job-turn-4", parentTurnId: "turn-4", launchType: "monitor", registeredAt: now - 5 * MINUTE },
+        { ...baseJob, id: "job-earlier", parentTurnId: "turn-1", launchType: "shell", registeredAt: now - 60 * MINUTE,
+          terminalStatus: "completed", terminalObservedAt: now - 59 * MINUTE, continuationRequired: false },
+        { ...baseJob, id: "job-unknown", parentTurnId: "unknown", launchType: "agent", registeredAt: now - 90 * MINUTE },
       ],
-      backgroundDeliveries: [],
-    }));
-    assertNoDomNode(stopJobButton(container, "Monitor Job"));
-    assert.match(container.textContent ?? "", /Killed/);
+    }),
+    parentTurns: new Map([["turn-2", { eventId: 20, turn: 2 }], ["turn-4", { eventId: 40, turn: 4 }]]),
+    earlierActivityUnloaded: true,
+    onViewTurn: (turnId) => viewed.push(turnId),
+  });
+  try {
+    assert.deepEqual(headings(panel.container), [
+      { title: "Turn 4", status: "Waiting for 1 Job", viewTurn: "View Turn" },
+      { title: "Turn 2", status: "Result Returned", viewTurn: "View Turn" },
+      { title: "Earlier Turn", status: "Result Returned", viewTurn: "View Turn" },
+      { title: "Unknown Turn", status: "Unverified", viewTurn: null },
+    ]);
+    const viewButtons = [...panel.container.querySelectorAll<HTMLButtonElement>(".background-work-view-turn")];
+    assert.ok(viewButtons.every((button) => button.classList.contains("btn") && button.classList.contains("sm") &&
+      button.classList.contains("ghost")));
+    // Each View Turn is described by its own turn's heading, so a reader hears which turn it opens.
+    assert.equal(domWindow.document.getElementById(viewButtons[0]!.getAttribute("aria-describedby")!)?.textContent, "Turn 4");
+    for (const button of viewButtons) await act(async () => button.click());
+    assert.deepEqual(viewed, ["turn-4", "turn-2", "turn-1"], "an unloaded turn is still viewable while earlier activity can load");
+
+    // With the whole transcript loaded, a turn that is not in it cannot be viewed.
+    await panel.render({
+      session: managedSession({ backgroundJobs: [{ ...baseJob, id: "job-earlier", parentTurnId: "turn-1" }] }),
+      parentTurns: new Map(),
+      onViewTurn: (turnId) => viewed.push(turnId),
+    });
+    assert.deepEqual(headings(panel.container), [{ title: "Earlier Turn", status: "Waiting for 1 Job", viewTurn: null }]);
   } finally {
-    await act(async () => root.unmount());
-    happyContainer.remove();
+    await panel.dispose();
   }
 });
 
-test("Stop Job reports a refusal and a job that had already ended without claiming a stop (#1780)", async () => {
+test("a job row is its name with a six-character id, its badge, one sentence and its duration (#2858)", async () => {
+  const now = Date.now();
+  const panel = await mountBackgroundWork({
+    session: managedSession({
+      backgroundJobs: [
+        { ...baseJob, id: "job-shell-a1f3c9", parentTurnId: "turn-2", launchType: "shell", registeredAt: now - 10 * MINUTE },
+        { ...baseJob, id: "job-shell-7be210", parentTurnId: "turn-2", launchType: "shell", registeredAt: now - 12 * MINUTE,
+          terminalStatus: "completed", terminalObservedAt: now - 11 * MINUTE, continuationRequired: true },
+        { ...baseJob, id: "job-agent-04d2e1", parentTurnId: "turn-1", launchType: "agent", registeredAt: now - 60 * MINUTE,
+          terminalStatus: "completed", terminalObservedAt: now - 55 * MINUTE, continuationRequired: true,
+          assistantResultPersistedAt: now - 50 * MINUTE },
+        { ...baseJob, id: "job-shell-0aa111", parentTurnId: "turn-1", launchType: "shell", registeredAt: now - 61 * MINUTE,
+          terminalStatus: "completed", terminalObservedAt: now - 58 * MINUTE, continuationRequired: true,
+          assistantResultPersistedAt: now - 50 * MINUTE },
+      ],
+    }),
+    parentTurns: new Map([["turn-1", { eventId: 10, turn: 1 }], ["turn-2", { eventId: 20, turn: 2 }]]),
+  });
+  try {
+    const rows = [...panel.container.querySelectorAll<HTMLButtonElement>("button.background-job-row")];
+    const read = (row: HTMLElement) => ({
+      title: row.querySelector(".row-title")?.textContent,
+      id: row.querySelector(".row-title .mono")?.textContent,
+      badge: row.querySelector(".status")?.textContent,
+      sentence: row.querySelector(".row-sub")?.textContent,
+      duration: row.querySelector(".row-trail")?.textContent,
+    });
+    assert.deepEqual(rows.map(read), [
+      { title: "Shell Job 7be210", id: "7be210", badge: "Completed", sentence: "Result waits for the other job", duration: "1m 0s" },
+      { title: "Shell Job a1f3c9", id: "a1f3c9", badge: "Running", sentence: "Started 10m ago", duration: "10m 0s" },
+      { title: "Shell Job 0aa111", id: "0aa111", badge: "Completed", sentence: "Result returned 50m ago", duration: "3m 0s" },
+      { title: "Agent Job 04d2e1", id: "04d2e1", badge: "Completed", sentence: "Result returned 50m ago", duration: "5m 0s" },
+    ]);
+    assert.equal(new Set(rows.map((row) => row.querySelector(".row-title")?.textContent)).size, rows.length,
+      "no two jobs share a name, even of one kind in different turns");
+    for (const row of rows) {
+      assert.ok(row.classList.contains("row") && row.classList.contains("row-2"), "the §5.2 two-line row");
+      assert.equal(row.dataset["panelPageKey"], `background:${rows.indexOf(row) === 0 ? "job-shell-7be210"
+        : rows.indexOf(row) === 1 ? "job-shell-a1f3c9" : rows.indexOf(row) === 2 ? "job-shell-0aa111" : "job-agent-04d2e1"}`);
+    }
+
+    // Offline, a job the runner cannot vouch for reads when it was last seen.
+    await panel.render({
+      session: managedSession({
+        backgroundJobs: [{ ...baseJob, id: "job-shell-a1f3c9", parentTurnId: "turn-2", launchType: "shell",
+          registeredAt: now - 20 * MINUTE, lastObservedAt: now - 12 * MINUTE }],
+      }),
+      runnerOnline: false,
+      parentTurns: new Map([["turn-2", { eventId: 20, turn: 2 }]]),
+    });
+    const offline = panel.container.querySelector<HTMLElement>("button.background-job-row")!;
+    assert.equal(read(offline).badge, "Unverified");
+    assert.equal(read(offline).sentence, "Last seen 12m ago");
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("selecting a job opens its Job Detail page in place of the list, which waits hidden (#2858)", async () => {
+  const now = Date.now();
+  const panel = await mountBackgroundWork({
+    session: managedSession({
+      backgroundJobs: [{ ...baseJob, id: "job-shell-a1f3c9", parentTurnId: "turn-4", launchType: "shell", registeredAt: now - 10 * MINUTE }],
+    }),
+    parentTurns: new Map([["turn-4", { eventId: 40, turn: 4 }]]),
+  });
+  try {
+    assertNoDomNode(panel.container.querySelector(".job-detail"));
+    await act(async () => panel.container.querySelector<HTMLButtonElement>("button.background-job-row")!.click());
+    assert.ok(panel.container.querySelector<HTMLElement>(".background-work-panel")!.hidden, "the list stays mounted, hidden");
+    const page = panel.container.querySelector<HTMLElement>(".background-work-page .job-detail");
+    assert.equal(page?.getAttribute("aria-label"), "Shell Job a1f3c9");
+    const facts = Object.fromEntries([...page!.querySelectorAll(".facts > div")].map((entry) =>
+      [entry.querySelector("dt")?.textContent, entry.querySelector("dd")?.textContent]));
+    assert.deepEqual(Object.keys(facts), ["Started", "Running For", "Last Activity", "Result", "Started By"]);
+    assert.match(facts.Started ?? "", /^10m ago at \d{1,2}:\d{2}/u);
+    assert.equal(facts.Result, "Returns to this conversation when the job finishes");
+    assert.equal(facts["Started By"], "Turn 4");
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("the list's copy has no barrier, terminal, continuation, parent-turn or evidence words, and labels are Title Case (#2858)", async () => {
+  const now = Date.now();
+  const panel = await mountBackgroundWork({
+    session: managedSession({
+      backgroundJobsTruncated: true,
+      backgroundJobs: [
+        { ...baseJob, id: "job-c0ffe1", parentTurnId: "turn-1", launchType: "shell", registeredAt: now - 9 * MINUTE },
+        { ...baseJob, id: "job-c0ffe2", parentTurnId: "turn-1", launchType: "monitor", registeredAt: now - 8 * MINUTE,
+          terminalStatus: "completed", terminalObservedAt: now - 7 * MINUTE, continuationRequired: true },
+        { ...baseJob, id: "job-c0ffe3", parentTurnId: "turn-2", launchType: "workflow", registeredAt: now - 6 * MINUTE,
+          terminalStatus: "failed", terminalObservedAt: now - 5 * MINUTE, continuationRequired: true,
+          continuationQueuedAt: now - 4 * MINUTE },
+        { ...baseJob, id: "job-c0ffe4", parentTurnId: "unknown", launchType: "unknown", registeredAt: now - 3 * MINUTE },
+      ],
+      backgroundDeliveries: [
+        { parentTurnId: "turn-3", jobCount: 2, terminalCount: 2, runnerResultPersistedAt: now - 2 * MINUTE },
+      ],
+    }),
+    parentTurns: new Map([["turn-1", { eventId: 10, turn: 1 }], ["turn-2", { eventId: 20, turn: 2 }]]),
+    onViewTurn: () => undefined,
+  });
+  try {
+    const text = panel.container.textContent ?? "";
+    assert.doesNotMatch(text, /barrier|terminal|continuation|parent turn|evidence|delivery|lifecycle/iu);
+    assert.match(text, /Showing the 128 most recent jobs\./u);
+    assert.equal(panel.container.querySelector(".list-foot")?.textContent, "Showing the 128 most recent jobs.");
+    const minor = new Set(["a", "an", "and", "as", "at", "by", "for", "from", "in", "into", "of", "on", "or", "the", "to", "with"]);
+    const labels = [
+      ...panel.container.querySelectorAll(".background-work-turn-head h3, .status, button.btn, .row-title"),
+    ].map((element) => element.textContent ?? "");
+    for (const label of labels) {
+      for (const word of label.split(/\s+/u).filter(Boolean)) {
+        if (minor.has(word) || /^[0-9a-f]{6}$/u.test(word) || /^\d/u.test(word)) continue;
+        assert.match(word, /^[A-Z]/u, `"${word}" in "${label}" is Title Case`);
+      }
+    }
+    for (const sentence of [...panel.container.querySelectorAll(".row-sub")].map((element) => element.textContent ?? "")) {
+      assert.match(sentence, /^[A-Z0-9][^A-Z]*$/u, `"${sentence}" is sentence case`);
+    }
+    assert.deepEqual([...panel.container.querySelectorAll(".row-title")].map((title) => title.textContent),
+      ["Result Receipt", "Background Job c0ffe4", "Workflow Job c0ffe3", "Shell Job c0ffe1", "Monitor Job c0ffe2"]);
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("receipt-only turns list one Result Receipt row per receipt with its stage (#2858)", async () => {
+  const panel = await mountBackgroundWork({
+    session: managedSession({
+      backgroundJobsTruncated: true,
+      backgroundDeliveries: [{
+        continuationId: "private-continuation",
+        parentTurnId: "retained-parent",
+        jobCount: 3,
+        terminalCount: 3,
+        queuedAt: 3_000,
+        acceptedAt: 3_100,
+        runnerResultPersistedAt: 3_200,
+        notificationQueuedAt: 3_300,
+      }, {
+        parentTurnId: "retained-parent",
+        jobCount: 1,
+        terminalCount: 1,
+        queuedAt: 4_000,
+      }],
+    } as Partial<SessionView>),
+    parentTurns: new Map([["retained-parent", { eventId: 77, turn: 3 }]]),
+  });
+  try {
+    assert.equal(panel.container.querySelectorAll(".background-work-turn").length, 1);
+    assert.deepEqual(headings(panel.container), [{ title: "Turn 3", status: "Result Returned", viewTurn: null }]);
+    const receipts = [...panel.container.querySelectorAll<HTMLElement>(".background-job-row")];
+    assert.deepEqual(receipts.map((row) => [row.tagName, row.querySelector(".row-title")?.textContent,
+      row.querySelector(".status")?.textContent, row.querySelector(".row-sub")?.textContent]), [
+      ["DIV", "Result Receipt", "Result Returned", "3 of 3 jobs finished"],
+      ["DIV", "Result Receipt", "Returning Result", "1 of 1 job finished"],
+    ], "a receipt is not a job, so it opens no page");
+    assert.doesNotMatch(panel.container.textContent ?? "", /Running|Completed|Failed|Killed|Lost|private-continuation|retained-parent/u);
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("a turn's status: waiting, some finished, partly listed, returned (#2858)", async () => {
+  const panel = await mountBackgroundWork({
+    session: managedSession({
+      backgroundJobsTruncated: true,
+      backgroundJobs: [{ ...baseJob, terminalStatus: "completed", terminalObservedAt: 3_000, continuationRequired: true,
+        continuationId: "continuation", assistantResultPersistedAt: 4_000 }],
+      backgroundDeliveries: [{ continuationId: "continuation", parentTurnId: "turn-1", jobCount: 200, terminalCount: 199 }],
+    }),
+  });
+  try {
+    assert.deepEqual(headings(panel.container).map((heading) => heading.status), ["199 of 200 Finished"],
+      "counts include the jobs outside the bounded list");
+    await panel.render({
+      session: managedSession({
+        backgroundJobs: [
+          { ...baseJob, terminalStatus: "completed", terminalObservedAt: 3_000, continuationRequired: true,
+            continuationId: "continuation-1", assistantResultPersistedAt: 4_000 },
+          { ...baseJob, id: "job-2", registeredAt: 5_000, terminalStatus: "completed", terminalObservedAt: 6_000,
+            continuationRequired: true, continuationId: "continuation-2", assistantResultPersistedAt: 7_000 },
+        ],
+        backgroundDeliveries: [
+          { continuationId: "continuation-1", parentTurnId: "turn-1", jobCount: 1, terminalCount: 1, runnerResultPersistedAt: 4_000 },
+          { continuationId: "continuation-2", parentTurnId: "turn-1", jobCount: 1, terminalCount: 1, runnerResultPersistedAt: 7_000 },
+        ],
+      }),
+    });
+    assert.deepEqual(headings(panel.container).map((heading) => heading.status), ["Result Returned"],
+      "two rounds under one turn use their combined totals");
+    await panel.render({
+      session: managedSession({
+        backgroundJobs: [
+          { ...baseJob, id: "a" }, { ...baseJob, id: "b", registeredAt: 1_100 },
+        ],
+      }),
+    });
+    assert.deepEqual(headings(panel.container).map((heading) => heading.status), ["Waiting for 2 Jobs"]);
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("each state is one notice or one compact state, in priority order (#2858)", async () => {
+  const panel = await mountBackgroundWork({
+    session: managedSession({ backgroundJobs: [{ ...baseJob, id: "job-shell-a1f3c9", launchType: "shell" }] }),
+    runnerOnline: false,
+    machineName: "Studio Workstation",
+  });
+  const text = () => panel.container.textContent ?? "";
+  try {
+    // Offline: one notice names the machine, over the last-known list, and nothing else warns.
+    const notices = [...panel.container.querySelectorAll(".notice")];
+    assert.equal(notices.length, 1);
+    assert.match(notices[0]!.textContent ?? "", /Studio Workstation is offline\. Finished jobs are shown; running jobs can't be checked\./u);
+    assert.equal(panel.container.querySelectorAll(".hint.warn, [role='alert']").length, 0, "no second warning in the list");
+    assert.equal(panel.container.querySelectorAll("button.background-job-row").length, 1);
+
+    // Loading: nothing for 300ms, then skeleton rows at the row height.
+    await panel.render({ session: managedSession({ backgroundJobsAvailable: true, backgroundJobs: undefined }) });
+    assertNoDomNode(panel.container.querySelector(".background-work-skeleton"), "nothing new under 300ms");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, BACKGROUND_WORK_SKELETON_DELAY_MS + 50)); });
+    const skeleton = panel.container.querySelector(".background-work-skeleton");
+    assert.ok(skeleton, "skeleton rows after 300ms");
+    assert.equal(skeleton!.querySelectorAll(".row.row-2").length, 3);
+    assert.match(skeleton!.textContent ?? "", /Loading background work…/u);
+
+    // A failed load: one danger state with Retry and the response behind Show Details.
+    let retries = 0;
+    await panel.render({
+      session: managedSession({ backgroundJobsAvailable: true, backgroundJobs: undefined }),
+      inventoryError: "502 Bad Gateway from runner",
+      onRetryInventory: () => { retries += 1; },
+    });
+    assert.match(text(), /Couldn't Load Background Work/u);
+    assert.match(text(), /The machine's list of background jobs didn't load\./u);
+    assert.doesNotMatch(text(), /502 Bad Gateway/u, "the response waits behind Show Details");
+    const buttons = () => [...panel.container.querySelectorAll<HTMLButtonElement>("button")];
+    await act(async () => buttons().find((button) => button.textContent === "Retry")!.click());
+    assert.equal(retries, 1);
+    await act(async () => buttons().find((button) => button.textContent === "Show Details")!.click());
+    assert.match(text(), /502 Bad Gateway from runner/u);
+
+    // Not tracked: one message with Open Terminal, and no promise that jobs will appear.
+    let terminals = 0;
+    await panel.render({
+      session: managedSession({ driver: "codex", backgroundWorkTracking: "untracked", backgroundWorkState: undefined } as Partial<SessionView>),
+      onOpenTerminal: () => { terminals += 1; },
+      runnerOnline: false,
+    });
+    assert.match(text(), /Background Work Isn't Tracked/u);
+    assert.match(text(), /Codex CLI doesn't report background jobs, so Wollipog can't list them or tell when they finish\./u);
+    assert.doesNotMatch(text(), /will appear here|show up here/u);
+    assert.equal(panel.container.querySelectorAll(".notice").length, 0, "an untracked session has no offline notice to show");
+    await act(async () => buttons().find((button) => button.textContent === "Open Terminal")!.click());
+    assert.equal(terminals, 1);
+
+    // An older runner: one state naming the machine, with Open Machine.
+    let machines = 0;
+    await panel.render({
+      session: managedSession(),
+      runnerProtocolVersion: 81,
+      machineName: "Studio Workstation",
+      onOpenMachine: () => { machines += 1; },
+    });
+    assert.match(text(), /Studio Workstation's runner is too old to list individual jobs\./u);
+    await act(async () => buttons().find((button) => button.textContent === "Open Machine")!.click());
+    assert.equal(machines, 1);
+
+    // Empty.
+    await panel.render({ session: managedSession({ backgroundJobsAvailable: true, backgroundWorkState: undefined }) });
+    assert.match(text(), /No Background Work/u);
+    assert.match(text(), /Jobs the agent leaves running after a turn show up here, grouped by the turn that started them\./u);
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("About Background Work holds the privacy text, and no privacy footnote or card chrome remains (#2858)", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
   const container = happyContainer as unknown as HTMLDivElement;
+  const happySlot = domWindow.document.createElement("div");
+  domWindow.document.body.append(happySlot);
+  const slot = happySlot as unknown as HTMLElement;
   const root = createRoot(container);
-  const answers: Array<() => Promise<BackgroundJobStopResponse>> = [
-    async () => { throw new Error("the provider did not confirm in time that the job ended, so it is left running"); },
-    async () => ({ sessionId: "session", jobId: "monitor-1", outcome: "already_terminal", terminalStatus: "completed" }),
-  ];
-  const client = { stopBackgroundJob: () => answers.shift()!() } as unknown as ApiClient;
   try {
     await act(async () => root.render(
-      <ApiProvider client={client}>
-        <BackgroundWorkPanel session={resultBlockedSession()} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION}
-          parentTurnEventIds={new Map()} onOpenParentTurn={() => undefined} />
-      </ApiProvider>,
+      <PanelActionSlotContext.Provider value={slot}>
+        <BackgroundWorkPanel session={managedSession()} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION}
+          parentTurns={new Map()} machineName="Studio Workstation" />
+      </PanelActionSlotContext.Provider>,
     ));
-    const confirmAndStop = async () => {
-      await act(async () => stopJobButton(container, "Monitor Job")!.click());
-      await act(async () => {
-        [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Confirm Stop")!.click();
-        await Promise.resolve();
-        await Promise.resolve();
-      });
-    };
-    await confirmAndStop();
-    assert.equal(container.querySelector("[role='alert']")?.textContent,
-      "the provider did not confirm in time that the job ended, so it is left running");
-    const retry = stopJobButton(container, "Monitor Job")!;
-    assert.equal(retry.disabled, false, "a refused stop can be tried again");
-    await confirmAndStop();
-    assert.match(container.textContent ?? "", /This job had already ended, so nothing was changed\./);
-    assertNoDomNode(container.querySelector("[role='alert']"));
+    assertNoDomNode(container.querySelector(".background-work-privacy"));
+    const about = slot.querySelector<HTMLButtonElement>('button[aria-label="About Background Work"]');
+    assert.ok(about, "the About popover's button is in the panel header's action slot");
+    await act(async () => about!.click());
+    const popover = domWindow.document.querySelector('[role="dialog"][aria-label="About Background Work"]');
+    assert.match(popover?.textContent ?? "", /Jobs the agent leaves running after a turn, grouped by the turn that started them\. When they finish, their result returns to this conversation\./u);
+    assert.match(popover?.textContent ?? "", /Commands, file paths, credentials and output stay on Studio Workstation\. Wollipog only shows timing and status\./u);
+    const css = readFileSync(fileURLToPath(new URL("../styles.css", import.meta.url)), "utf8");
+    for (const retired of [".background-work-privacy", ".background-work-barrier", ".background-work-group",
+      ".background-work-job-confirm", ".background-work-link-unavailable"]) {
+      assert.equal(css.includes(retired), false, `${retired} is gone from styles.css`);
+    }
   } finally {
     await act(async () => root.unmount());
-    happyContainer.remove();
-  }
-});
-
-test("Stop Job is shown as unavailable on an older runner, and Result Blocked says why (#1780)", async () => {
-  const happyContainer = domWindow.document.createElement("div");
-  domWindow.document.body.append(happyContainer);
-  const container = happyContainer as unknown as HTMLDivElement;
-  const root = createRoot(container);
-  let called = false;
-  const client = { stopBackgroundJob: async () => { called = true; } } as unknown as ApiClient;
-  const render = (session: SessionView, version: number, online = true) => act(async () => root.render(
-    <ApiProvider client={client}>
-      <BackgroundWorkPanel session={session} runnerOnline={online} runnerProtocolVersion={version}
-        parentTurnEventIds={new Map()} onOpenParentTurn={() => undefined} />
-    </ApiProvider>,
-  ));
-  try {
-    await render(resultBlockedSession(), 189);
-    const button = stopJobButton(container, "Monitor Job")!;
-    assert.equal(button.disabled, true);
-    assert.equal(button.textContent, "Stop Job");
-    const reason = domWindow.document.getElementById(button.getAttribute("aria-describedby")!);
-    assert.match(reason?.textContent ?? "", /Stop Job is unavailable: This machine needs a newer runner for stopping a background job\./);
-    const summary = container.querySelector<HTMLElement>(".background-delivery-summary");
-    assert.match(summary?.textContent ?? "", /Stop Job is unavailable: This machine needs a newer runner for stopping a background job\. Update and restart the runner\. Ask the session to stop the unfinished job/);
-    await act(async () => button.click());
-    assert.equal(called, false);
-
-    // Another harness has no managed jobs to stop, so nothing is offered or promised.
-    await render(resultBlockedSession({ driver: "codex" } as Partial<SessionView>), PROTOCOL_VERSION);
-    assertNoDomNode(stopJobButton(container, "Monitor Job"));
-    assert.match(container.querySelector(".background-delivery-summary")?.textContent ?? "", /Ask the session to stop the unfinished job/);
-  } finally {
-    await act(async () => root.unmount());
-    happyContainer.remove();
-  }
-});
-
-test("Stop Job is unavailable to a person the server would refuse, and Result Blocked says why (#1843)", async () => {
-  const happyContainer = domWindow.document.createElement("div");
-  domWindow.document.body.append(happyContainer);
-  const container = happyContainer as unknown as HTMLDivElement;
-  const root = createRoot(container);
-  let called = false;
-  const client = { stopBackgroundJob: async () => { called = true; } } as unknown as ApiClient;
-  const reason = "Only the session owner or its controlling Orchestrator can stop its background jobs.";
-  const render = (session: SessionView) => act(async () => root.render(
-    <ApiProvider client={client}>
-      <BackgroundWorkPanel session={session} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION}
-        parentTurnEventIds={new Map()} onOpenParentTurn={() => undefined} />
-    </ApiProvider>,
-  ));
-  try {
-    await render(resultBlockedSession({
-      commandPermissions: {
-        stop: { allowed: true },
-        restart: { allowed: true },
-        stopBackgroundJob: { allowed: false, reason },
-      },
-    }));
-    const button = stopJobButton(container, "Monitor Job")!;
-    assert.equal(button.disabled, true);
-    assert.equal(button.title, reason);
-    assert.match(describedBy(button), /^Stops Monitor Job \d+\. Stop Job is unavailable: /u);
-    assert.ok(describedBy(button).endsWith(reason));
-    const summary = container.querySelector<HTMLElement>(".background-delivery-summary")?.textContent ?? "";
-    assert.doesNotMatch(summary, /Use Stop Job/, "Result Blocked does not direct this person to Stop Job");
-    assert.ok(summary.includes(`Stop Job is unavailable: ${reason} Ask the session to stop the unfinished job`), summary);
-    await act(async () => button.click());
-    assertNoDomNode(container.querySelector(".background-work-job-confirm"), "no confirmation opens");
-    assert.equal(called, false, "no request is sent");
-
-    // The session owner keeps Stop Job exactly as before.
-    await render(resultBlockedSession({
-      commandPermissions: {
-        stop: { allowed: true },
-        restart: { allowed: true },
-        stopBackgroundJob: { allowed: true },
-      },
-    }));
-    assert.equal(stopJobButton(container, "Monitor Job")!.disabled, false);
-    assert.match(container.querySelector(".background-delivery-summary")?.textContent ?? "", /Use Stop Job on the unfinished job below/);
-  } finally {
-    await act(async () => root.unmount());
-    happyContainer.remove();
-  }
-});
-
-test("Result Blocked in a view focused on the finished sibling says where Stop Job is (#1780)", async () => {
-  const happyContainer = domWindow.document.createElement("div");
-  domWindow.document.body.append(happyContainer);
-  const container = happyContainer as unknown as HTMLDivElement;
-  const root = createRoot(container);
-  try {
-    await act(async () => root.render(
-      <ApiProvider client={{} as ApiClient}>
-        <BackgroundWorkPanel session={resultBlockedSession()} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION}
-          parentTurnEventIds={new Map()} onOpenParentTurn={() => undefined} selectedJobId="agent-1" />
-      </ApiProvider>,
-    ));
-    const summary = container.querySelector<HTMLElement>(".background-delivery-summary");
-    assert.match(summary?.textContent ?? "", /Result Blocked/);
-    assert.match(summary?.textContent ?? "", /Use Stop Job on the unfinished job from the same turn, listed in Background Work: only that job ends/);
-    assert.doesNotMatch(summary?.textContent ?? "", /job below/);
-    assertNoDomNode(stopJobButton(container, "Monitor Job"));
-  } finally {
-    await act(async () => root.unmount());
-    happyContainer.remove();
+    container.remove();
+    happySlot.remove();
   }
 });

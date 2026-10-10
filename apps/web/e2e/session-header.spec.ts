@@ -524,12 +524,15 @@ test("managed background indicators open a responsive inspectable inventory and 
   await page.getByRole("dialog", { name: "Session Status" }).getByRole("button", { name: "Open Background Work" }).click();
   const panel = page.locator("#right-panel");
   await expect(panel.locator(".rpanel-switcher")).toHaveText("Background Work");
-  await expect(panel.getByText("Shell Job 1", { exact: true })).toBeVisible();
-  await expect(panel.getByText("Running", { exact: true })).toBeVisible();
-  await expect(panel.getByText("Not Started", { exact: true })).toBeVisible();
-  await expect(panel.getByRole("button", { name: "View Parent Turn" })).toBeVisible();
+  // #2858: a turn group with its status and View Turn, and a two-line row named by its kind and id.
+  const jobRow = panel.locator("button.background-job-row");
+  await expect(jobRow.locator(".row-title")).toHaveText("Shell Job ask-id");
+  await expect(jobRow.locator(".status")).toHaveText("Running");
+  await expect(jobRow.locator(".row-sub")).toHaveText(/^Started \d+[sm] ago$/u);
+  await expect(panel.locator(".background-work-turn-head .status")).toHaveText("Waiting for 1 Job");
+  await expect(panel.getByRole("button", { name: "View Turn" })).toBeVisible();
   await expect(panel).not.toContainText("private-task-id");
-  await panel.getByRole("button", { name: "View Parent Turn" }).click();
+  await panel.getByRole("button", { name: "View Turn" }).click();
   await expect(panel).toBeVisible();
   await capture(page, "background-desktop-running");
 
@@ -561,8 +564,9 @@ test("managed background indicators open a responsive inspectable inventory and 
   });
   await expect(header.locator(".session-status-button")).not.toHaveAccessibleName(/Waiting on External Job/);
   await expect(header.locator('[data-live="background-work"]')).toHaveText("");
-  await expect(panel.getByText("Completed", { exact: true })).toBeVisible();
-  await expect(panel.getByText("Result Delivered", { exact: true })).toBeVisible();
+  await expect(jobRow.locator(".status")).toHaveText("Completed");
+  await expect(jobRow.locator(".row-sub")).toHaveText(/^Result returned \d+s ago$/u);
+  await expect(panel.locator(".background-work-turn-head .status")).toHaveText("Result Returned");
   await expect(panel).not.toContainText("private-continuation-id");
   await capture(page, "background-mobile-settled");
 
@@ -587,12 +591,15 @@ test("managed background indicators open a responsive inspectable inventory and 
       }],
     });
   });
-  await expect(panel.getByRole("group", { name: "Delivery Receipt Status" })).toContainText("Result Delivered");
-  await expect(panel.getByRole("list", { name: "Retained Delivery Receipts" })).toContainText("Notification Opened");
-  await expect(panel.locator(".background-work-job")).toHaveCount(0);
-  await expect(panel.locator(".background-work-delivery")).toHaveCount(1);
+  await expect(panel.locator(".background-work-turn-head .status")).toHaveText("Result Returned");
+  await expect(panel.locator("button.background-job-row")).toHaveCount(0);
+  const receipt = panel.locator(".background-job-row");
+  await expect(receipt).toHaveCount(1);
+  await expect(receipt.locator(".row-title")).toHaveText("Result Receipt");
+  await expect(receipt.locator(".row-sub")).toHaveText("2 of 2 jobs finished");
+  await expect(panel.locator(".list-foot")).toHaveText("Showing the 128 most recent jobs.");
   await expect(panel).not.toContainText(/private-retained-(continuation|delivery|endpoint)/);
-  const retainedParent = panel.getByRole("button", { name: "View Parent Turn" });
+  const retainedParent = panel.getByRole("button", { name: "View Turn" });
   await retainedParent.focus();
   await expect(retainedParent).toBeFocused();
   await capture(page, "background-mobile-delivery-only");

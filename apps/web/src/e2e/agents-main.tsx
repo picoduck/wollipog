@@ -38,7 +38,7 @@ const initial: SessionView = {
     }],
   },
   backgroundWorkState: "running", backgroundWorkTracking: "managed", backgroundJobsAvailable: true,
-  backgroundJobs: [{ id: "job-monitor", parentTurnId: "turn-1", launchType: "monitor", registeredAt: now - 60_000,
+  backgroundJobs: [{ id: "job-monitor-7be210", parentTurnId: "turn-1", launchType: "monitor", registeredAt: now - 60_000,
     lastObservedAt: now, sourcePresent: true }],
 };
 if (params.has("primary-question")) {
@@ -118,7 +118,7 @@ function Fixture() {
       <AgentsPanel session={session} items={items} runnerOnline={online}
         onOpenPrimaryRequest={params.has("primary-question") ? (requestId) => focusSessionRequest(session.id, requestId) : undefined}
         runnerProtocolVersion={PROTOCOL_VERSION} requestedId={selected} onSelect={setSelected}
-        parentTurnEventIds={new Map()} onOpenParentTurn={() => {}} />
+        parentTurns={new Map()} onViewTurn={() => {}} />
     </main>}
   </StoreProvider></FeedbackProvider></ApiProvider>;
 }
@@ -157,7 +157,7 @@ function NavigationFixture({ session, onSession, online }: {
         runnerOnline={online} runnerProtocolVersion={PROTOCOL_VERSION} requestedId={selected} onSelect={setSelected}
         attentionTarget={view.attention}
         onOpenPrimaryRequest={(requestId) => focusSessionRequest(session.id, requestId)}
-        parentTurnEventIds={new Map()} onOpenParentTurn={() => {}} />
+        parentTurns={new Map()} onViewTurn={() => {}} />
     </>}
   </main>;
 }

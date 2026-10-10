@@ -1,11 +1,8 @@
-import { useId, useMemo, useState } from "react";
-import { State } from "./State.js";
+import { useEffect, useId, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 import {
   MANAGED_BACKGROUND_JOB_VIEW_LIMIT,
   runnerSupportsProtocol,
   type BackgroundDeliveryView,
-  type ManagedBackgroundJobEnd,
-  type ManagedBackgroundJobView,
   type SessionView,
 } from "@wollipog/protocol";
 import { formatDuration, formatRecordedRelativeTime, formatRecordedTimestamp } from "../format.js";
@@ -17,67 +14,79 @@ import {
   shownWatchdogDelivery,
 } from "../background-delivery-status.js";
 import {
-  STOP_JOB_ALREADY_ENDED,
-  STOP_JOB_OUTCOME,
   backgroundJobCurrentState,
+  backgroundJobKind,
   backgroundJobLabel,
+  backgroundJobShortId,
   backgroundJobStopAvailability,
-  requestBackgroundJobStop,
   stoppableJobState,
   type BackgroundJobStopAvailability,
 } from "../background-job-stop.js";
+import {
+  UNKNOWN_PARENT_TURN,
+  backgroundJobGroupBadge,
+  backgroundJobGroupCounts,
+  backgroundJobGroupStatus,
+  backgroundJobRowSentence,
+  backgroundTurnLabel,
+  deliveryReceiptStatus,
+  deliveryTimestamp,
+  groupBackgroundHistory,
+  type BackgroundJobGroup,
+  type BackgroundParentTurn,
+} from "../background-work.js";
 import { useApi } from "../api-context.js";
 import { statusMeta } from "../status-meta.js";
+import { driverLabel } from "../usage-view-model.js";
+import { ChevronRightIcon } from "./Icons.js";
+import { InfoPopover } from "./InfoPopover.js";
+import { JobDetail } from "./JobDetail.js";
+import { ListFoot } from "./ListFoot.js";
+import { Notice } from "./Notice.js";
+import { PanelNoticeSlot } from "./PanelNoticeSlot.js";
+import { PanelPageTitle, usePanelPages } from "./PanelPages.js";
+import { PanelHeaderActions } from "./RightPanel.js";
+import { PANEL_NOTICE_RANK, type SessionNoticeEntry } from "./SessionNoticeSlot.js";
+import { State } from "./State.js";
 import { StatusBadge } from "./StatusBadge.js";
 
 export { backgroundJobCurrentState, type BackgroundJobCurrentState } from "../background-job-stop.js";
 
-export function backgroundJobDeliveryStage(job: ManagedBackgroundJobView): string {
-  if (job.assistantResultPersistedAt != null) return "Result Delivered";
-  if (job.continuationMissingResultAt != null) return "Result Missing";
-  if (job.continuationAcceptedAt != null) return "Continuation In Flight";
-  if (job.continuationSubmittedAt != null) return "Continuation Submitted";
-  if (job.continuationQueuedAt != null || (job.terminalObservedAt != null && job.continuationRequired)) {
-    return "Continuation Pending";
-  }
-  if (job.terminalObservedAt != null && job.continuationRequired === false) return "No Continuation Required";
-  return "Not Started";
+/** How long loading waits before its skeleton rows show (§12.3). */
+export const BACKGROUND_WORK_SKELETON_DELAY_MS = 300;
+
+/** A job's page key, shared with the Agents tab's job rows. */
+export const backgroundJobPageKey = (jobId: string) => `background:${jobId}`;
+
+export interface BackgroundWorkPanelProps {
+  session: SessionView;
+  runnerOnline: boolean;
+  runnerProtocolVersion: number | null | undefined;
+  /** Each loaded turn by its id: its number for the group heading and its prompt for View Turn. */
+  parentTurns: ReadonlyMap<string, BackgroundParentTurn>;
+  /** The transcript has earlier activity to load, so a turn outside it can still be viewed. */
+  earlierActivityUnloaded?: boolean;
+  /** Scroll the transcript to a turn, loading earlier activity first when it is not loaded. */
+  onViewTurn?: (parentTurnId: string) => void;
+  /** The session's machine, as the person named it. */
+  machineName?: string;
+  onOpenTerminal?: () => void;
+  onOpenMachine?: () => void;
+  inventoryError?: string | null;
+  onRetryInventory?: () => void;
 }
 
-/** Who ended a job Wollipog ended (#1849). A person is named by role, as the timeline names them. */
-export function backgroundJobEndedByLabel(end: ManagedBackgroundJobEnd): string {
-  if (end.actor.kind === "orchestrator") return "Controlling Orchestrator";
-  if (end.actor.kind === "user") return "Session Owner";
-  return "Wollipog";
-}
-
-export function backgroundJobEndReasonLabel(end: ManagedBackgroundJobEnd): string {
-  if (end.reason === "stop_request") return "Stop Job Request";
-  if (end.reason === "handoff_wait_bound") return "Handoff Waited Past Its Bound";
-  return "Session Restarted";
-}
-
-function recordedTime(timestamp: number | undefined, now: number) {
-  const exact = formatRecordedTimestamp(timestamp);
-  if (!exact) return <span>Unavailable</span>;
-  return <time dateTime={exact.dateTime} title={exact.title}>{formatRecordedRelativeTime(timestamp, now)}</time>;
-}
-
-function notificationStage(deliveries: readonly BackgroundDeliveryView[]): string | null {
-  const receipts = deliveries.flatMap((delivery) => delivery.notifications ?? []);
-  if (receipts.some((receipt) => receipt.clickedAt != null)) return "Notification Opened";
-  if (receipts.some((receipt) => receipt.shownAt != null)) return "Notification Shown";
-  if (receipts.some((receipt) => receipt.serviceAcceptedAt != null)) return "Notification Accepted";
-  if (deliveries.some((delivery) => delivery.notificationQueuedAt != null)) return "Notification Queued";
-  return null;
-}
-
-interface BackgroundJobGroup {
-  key: string;
-  parentTurnId: string;
-  parentTurnKnown: boolean;
-  jobs: ManagedBackgroundJobView[];
-  deliveries: BackgroundDeliveryView[];
+function useDelayedFlag(active: boolean, delayMs: number): boolean {
+  const [shown, setShown] = useState(false);
+  useEffect(() => {
+    if (!active) {
+      setShown(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setShown(true), delayMs);
+    return () => window.clearTimeout(timer);
+  }, [active, delayMs]);
+  return active && shown;
 }
 
 type AcknowledgementFeedback = {
@@ -89,518 +98,356 @@ type AcknowledgementFeedback = {
   message: string;
 };
 
-/** A retained delivery receipt's stage. Its words are the delivery pipeline's own; the tone says
- * whether it finished, needs you, or cannot be verified while the runner is offline. */
-function DeliveryStageBadge({ stage }: { stage: string }) {
-  return stage === "Result Delivered"
-    ? <StatusBadge tone="success" label={stage} />
-    : stage === "Result Missing"
-      ? <StatusBadge meta={statusMeta("job", "result_missing")} />
-      : stage === "Unverified"
-        ? <StatusBadge meta={statusMeta("job", "unverified")} />
-        : <StatusBadge tone="neutral" label={stage} />;
-}
-
-type JobStopFeedback =
-  | { state: "confirming" }
-  | { state: "pending" }
-  | { state: "stopped" }
-  | { state: "already_terminal" }
-  | { state: "error"; message: string };
-
-/**
- * Stop Job for one unfinished managed job (#1780). The runner ends only that job; the session, its
- * conversation, and its other jobs keep running. It asks for confirmation first, because the job's
- * own work is lost, and on a runner that cannot do it the control stays visible but unavailable.
- */
-function BackgroundJobStopControl({ sessionId, jobId, jobLabel, availability }: {
-  sessionId: string;
-  jobId: string;
-  jobLabel: string;
-  availability: BackgroundJobStopAvailability;
-}) {
-  const api = useApi();
-  const descriptionId = useId();
-  const [feedback, setFeedback] = useState<JobStopFeedback | null>(null);
-  if (!availability.available) {
-    return (
-      <div className="background-work-job-actions">
-        <button type="button" className="btn ghost sm" disabled aria-describedby={descriptionId}
-          title={availability.reason}>
-          Stop Job
-        </button>
-        <span id={descriptionId} className="sr-only">
-          Stops {jobLabel}. Stop Job is unavailable: {availability.reason}
-        </span>
-      </div>
-    );
-  }
-  const stop = () => {
-    setFeedback({ state: "pending" });
-    void requestBackgroundJobStop(api, sessionId, jobId).then(setFeedback);
-  };
-  return (
-    <div className="background-work-job-actions">
-      {feedback?.state === "confirming" ? (
-        <div className="background-work-job-confirm" role="group" aria-label={`Confirm Stopping ${jobLabel}`}>
-          <p>Stop this job? {STOP_JOB_OUTCOME}</p>
-          <div className="background-work-job-confirm-actions">
-            <button type="button" className="btn danger sm" onClick={stop}>Confirm Stop</button>
-            <button type="button" className="btn ghost sm" onClick={() => setFeedback(null)}>Keep Running</button>
-          </div>
-        </div>
-      ) : (
-        <button type="button" className="btn ghost sm" aria-describedby={descriptionId}
-          disabled={feedback?.state === "pending" || feedback?.state === "stopped" || feedback?.state === "already_terminal"}
-          onClick={() => setFeedback({ state: "confirming" })}>
-          {feedback?.state === "pending" ? "Stopping…" : feedback?.state === "stopped" ? "Stopped" : "Stop Job"}
-        </button>
-      )}
-      <span id={descriptionId} className="sr-only">Stops {jobLabel}.</span>
-      {feedback?.state === "stopped" && (
-        <p className="hint" role="status">The job was stopped. Its status updates here shortly.</p>
-      )}
-      {feedback?.state === "already_terminal" && (
-        <p className="hint" role="status">{STOP_JOB_ALREADY_ENDED}</p>
-      )}
-      {feedback?.state === "error" && <p className="hint warn" role="alert">{feedback.message}</p>}
-    </div>
-  );
-}
-
 function acknowledgementKey(sessionId: string, continuationId: string): string {
   return JSON.stringify([sessionId, continuationId]);
 }
 
-function deliveryTimestamp(delivery: BackgroundDeliveryView): number {
-  return Math.max(
-    delivery.queuedAt ?? 0,
-    delivery.submittedAt ?? 0,
-    delivery.acceptedAt ?? 0,
-    delivery.missingResultAt ?? 0,
-    delivery.missingResultAcknowledgedAt ?? 0,
-    delivery.runnerResultPersistedAt ?? 0,
-    delivery.transcriptProjectedAt ?? 0,
-    delivery.notificationQueuedAt ?? 0,
-    delivery.dashboardObservedAt ?? 0,
-    delivery.statusSettledAt ?? 0,
-    ...(delivery.notifications ?? []).flatMap((receipt) => [
-      receipt.serviceAcceptedAt ?? 0,
-      receipt.shownAt ?? 0,
-      receipt.clickedAt ?? 0,
-    ]),
-  );
+function recordedTime(timestamp: number | undefined, now: number) {
+  const exact = formatRecordedTimestamp(timestamp);
+  if (!exact) return <span>Unavailable</span>;
+  return <time dateTime={exact.dateTime} title={exact.title}>{formatRecordedRelativeTime(timestamp, now)}</time>;
 }
 
-function deliveryStage(
-  deliveries: readonly BackgroundDeliveryView[],
-  locallyAcknowledged: (delivery: BackgroundDeliveryView) => boolean = () => false,
-): string {
-  if (deliveries.some((delivery) => delivery.runnerResultPersistedAt != null)) return "Result Delivered";
-  if (deliveries.some((delivery) => delivery.missingResultAt != null &&
-      delivery.missingResultAcknowledgedAt == null && !locallyAcknowledged(delivery))) return "Result Missing";
-  if (deliveries.some((delivery) => delivery.missingResultAcknowledgedAt != null ||
-      locallyAcknowledged(delivery))) return "Missing Result Acknowledged";
-  if (deliveries.some((delivery) => delivery.acceptedAt != null)) return "Continuation In Flight";
-  if (deliveries.some((delivery) => delivery.submittedAt != null)) return "Continuation Submitted";
-  if (deliveries.some((delivery) => delivery.queuedAt != null)) return "Continuation Pending";
-  return "Unverified";
-}
-
-function groupBackgroundHistory(
-  jobs: readonly ManagedBackgroundJobView[],
-  deliveries: readonly BackgroundDeliveryView[],
-): BackgroundJobGroup[] {
-  const groups = new Map<string, BackgroundJobGroup>();
-  for (const job of jobs) {
-    // `unknown` is a runner sentinel, not a shared barrier identity. Keep those jobs separate so
-    // unrelated discoveries can never be presented as one fabricated parent-turn barrier.
-    const key = job.parentTurnId === "unknown" ? `unknown:${job.id}` : job.parentTurnId;
-    const group = groups.get(key) ?? {
-      key,
-      parentTurnId: job.parentTurnId,
-      parentTurnKnown: job.parentTurnId !== "unknown",
-      jobs: [],
-      deliveries: [],
-    };
-    group.jobs.push(job);
-    groups.set(key, group);
-  }
-  deliveries.forEach((delivery, index) => {
-    const parentTurnKnown = delivery.parentTurnId !== "unknown";
-    const key = parentTurnKnown ? delivery.parentTurnId : `delivery:unknown:${index}`;
-    const group = groups.get(key) ?? {
-      key,
-      parentTurnId: delivery.parentTurnId,
-      parentTurnKnown,
-      jobs: [],
-      deliveries: [],
-    };
-    group.deliveries.push(delivery);
-    groups.set(key, group);
+/**
+ * A turn's recovery deliveries: a result that is blocked, missing or still on its way. They keep
+ * their present summary until the recovery notices replace it (#2859).
+ */
+function RecoverySummaries({
+  session,
+  group,
+  groupIndex,
+  now,
+  jobStop,
+  stoppableJobListed,
+  restartReportsResult,
+  locallyAcknowledged,
+  onAcknowledged,
+  acknowledgementFeedback,
+  setAcknowledgementFeedback,
+}: {
+  session: SessionView;
+  group: BackgroundJobGroup;
+  groupIndex: number;
+  now: number;
+  jobStop: BackgroundJobStopAvailability | null;
+  stoppableJobListed: boolean;
+  restartReportsResult: boolean;
+  locallyAcknowledged: (delivery: BackgroundDeliveryView) => boolean;
+  onAcknowledged: (key: string) => void;
+  /** Per session and continuation, held by the panel so a request outlives the group it started in. */
+  acknowledgementFeedback: ReadonlyMap<string, AcknowledgementFeedback>;
+  setAcknowledgementFeedback: Dispatch<SetStateAction<ReadonlyMap<string, AcknowledgementFeedback>>>;
+}) {
+  const api = useApi();
+  const recoveryDeliveries = group.deliveries.filter((delivery) =>
+    delivery.watchdogState || (delivery.missingResultAt != null && delivery.runnerResultPersistedAt == null));
+  return recoveryDeliveries.map((delivery, deliveryIndex) => {
+    const recoveryState = delivery.watchdogState;
+    const continuationId = delivery.continuationId;
+    const localAcknowledgementKey = continuationId == null ? null : acknowledgementKey(session.id, continuationId);
+    const feedback = localAcknowledgementKey == null ? undefined : acknowledgementFeedback.get(localAcknowledgementKey);
+    const acknowledging = feedback?.state === "pending";
+    const acknowledged = delivery.missingResultAcknowledgedAt != null || locallyAcknowledged(delivery);
+    const isMissing = delivery.missingResultAt != null;
+    const status = recoveryState
+      ? BACKGROUND_DELIVERY_STATUS[recoveryState]
+      : isMissing ? BACKGROUND_DELIVERY_STATUS.accepted_without_result : null;
+    const summaryId = `background-delivery-summary-${groupIndex}-${deliveryIndex}`;
+    return (
+      <div className="background-delivery-summary" role="group" key={continuationId ?? summaryId}
+        aria-labelledby={summaryId} data-recovery-state={acknowledged
+          ? "missing-result-acknowledged"
+          : recoveryState ?? (isMissing ? "accepted_without_result" : undefined)}>
+        <strong id={summaryId}>{acknowledged ? "Missing Result Acknowledged" : status?.label}</strong>
+        <p>{acknowledged
+          ? "You acknowledged that this continuation ended without a durable result. Its delivery history remains available."
+          : status?.description}</p>
+        <dl>
+          {status && !acknowledged && <>
+            <div><dt>Completed</dt><dd>{status.completed}</dd></div>
+            <div><dt>Still Pending</dt><dd>{status.outstanding}</dd></div>
+            <div><dt>Recovery</dt><dd>{status.recovery}</dd></div>
+            <div><dt>Your Action</dt><dd>{recoveryState
+              ? backgroundDeliveryAction(recoveryState, jobStop, stoppableJobListed, restartReportsResult)
+              : status.action}</dd></div>
+          </>}
+          {isMissing && <div><dt>Missing Since</dt><dd>{recordedTime(delivery.missingResultAt, now)}</dd></div>}
+          {isMissing && (
+            <div><dt>Recovery State</dt><dd>{acknowledged
+              ? delivery.missingResultAcknowledgedAt != null
+                ? <>Acknowledged {recordedTime(delivery.missingResultAcknowledgedAt, now)}</>
+                : "Acknowledged"
+              : "Acknowledgement Required"}</dd></div>
+          )}
+        </dl>
+        {!acknowledged && isMissing && delivery.runnerResultPersistedAt == null && continuationId && (
+          <button type="button" className="btn ghost sm"
+            disabled={acknowledging}
+            onClick={() => {
+              const key = localAcknowledgementKey!;
+              const token = Symbol("missing-result-acknowledgement");
+              setAcknowledgementFeedback((current) => new Map(current).set(key, { token, state: "pending" }));
+              void requestMissingResultAcknowledgement(api, session.id, continuationId).then((failure) => {
+                if (failure === null) onAcknowledged(key);
+                setAcknowledgementFeedback((current) => {
+                  const settled = current.get(key);
+                  if (settled?.token !== token || settled.state !== "pending") return current;
+                  const next = new Map(current);
+                  if (failure === null) next.delete(key);
+                  else next.set(key, { token, state: "error", message: failure });
+                  return next;
+                });
+              });
+            }}>
+            {acknowledging
+              ? "Acknowledging…"
+              : "Acknowledge Missing Result"}
+          </button>
+        )}
+        {feedback?.state === "error" && !acknowledged && isMissing && delivery.runnerResultPersistedAt == null && (
+          <p className="hint warn" role="alert">{feedback.message}</p>
+        )}
+        <details>
+          <summary>Technical Details</summary>
+          <dl>
+            <div><dt>Pipeline State</dt><dd><code>{acknowledged
+              ? "missing_result_acknowledged"
+              : recoveryState ?? (isMissing ? "accepted_without_result" : undefined)}</code></dd></div>
+            {status && !acknowledged && <div><dt>Diagnostic</dt><dd>{status.diagnostic}</dd></div>}
+          </dl>
+        </details>
+      </div>
+    );
   });
-  return [...groups.values()]
-    .map((group) => ({
-      ...group,
-      jobs: group.jobs.sort((left, right) => left.registeredAt - right.registeredAt || left.id.localeCompare(right.id)),
-    }))
-    .sort((left, right) => {
-      const latest = (group: BackgroundJobGroup) => Math.max(
-        0,
-        ...group.jobs.map((job) => job.registeredAt),
-        ...group.deliveries.map(deliveryTimestamp),
-      );
-      return latest(right) - latest(left);
-    });
 }
 
+/**
+ * Background Work (#2858): the jobs the agent left running after a turn, as one group per turn
+ * (§5.2 group headers: "Turn 4", the group's status, View Turn) of two-line job rows. A row opens
+ * the job's page (`JobDetail`), where Stop Job lives. What the panel is and what stays on the
+ * machine are its About popover; machine offline is its one notice; loading, a failed load, an
+ * untracked provider, an older runner and an empty history are each one state, in that order.
+ */
 export function BackgroundWorkPanel({
   session,
   runnerOnline,
   runnerProtocolVersion,
-  parentTurnEventIds,
-  onOpenParentTurn,
+  parentTurns,
+  earlierActivityUnloaded = false,
+  onViewTurn,
+  machineName,
+  onOpenTerminal,
+  onOpenMachine,
   inventoryError,
   onRetryInventory,
-  selectedJobId,
-}: {
-  session: SessionView;
-  runnerOnline: boolean;
-  runnerProtocolVersion: number | null | undefined;
-  parentTurnEventIds: ReadonlyMap<string, number>;
-  onOpenParentTurn: (eventId: number) => void;
-  inventoryError?: string | null;
-  onRetryInventory?: () => void;
-  selectedJobId?: string;
-}) {
-  const api = useApi();
+}: BackgroundWorkPanelProps) {
+  const pages = usePanelPages();
+  const headingPrefix = useId();
   const [locallyAcknowledged, setLocallyAcknowledged] = useState<ReadonlySet<string>>(() => new Set());
   const [acknowledgementFeedback, setAcknowledgementFeedback] =
     useState<ReadonlyMap<string, AcknowledgementFeedback>>(() => new Map());
   const inventorySupported = runnerSupportsProtocol(runnerProtocolVersion, "managedBackgroundInventory");
   const jobStop = backgroundJobStopAvailability(session, runnerProtocolVersion, runnerOnline);
   const restartReportsResult = runnerSupportsProtocol(runnerProtocolVersion, "restartKeepsQueuedWork");
-  const jobs = useMemo(() => (session.backgroundJobs ?? []).filter((job) =>
-    selectedJobId === undefined || job.id === selectedJobId), [session.backgroundJobs, selectedJobId]);
-  const deliveries = useMemo(() => (session.backgroundDeliveries ?? []).filter((delivery) =>
-    selectedJobId === undefined || jobs.some((job) => job.parentTurnId !== "unknown" && job.parentTurnId === delivery.parentTurnId)),
-  [session.backgroundDeliveries, selectedJobId, jobs]);
+  const jobs = useMemo(() => session.backgroundJobs ?? [], [session.backgroundJobs]);
+  const deliveries = useMemo(() => session.backgroundDeliveries ?? [], [session.backgroundDeliveries]);
   const groups = useMemo(() => groupBackgroundHistory(jobs, deliveries), [deliveries, jobs]);
   const highlightedWatchdogDelivery = shownWatchdogDelivery(deliveries);
   // Every visible relative timestamp ages, including settled history left open for inspection.
   const now = useTimelineClock(jobs.length > 0 || deliveries.length > 0);
-  const aggregateState = session.backgroundWorkState === "resumed"
-    ? undefined
-    : session.backgroundWorkState;
+  const aggregateState = session.backgroundWorkState === "resumed" ? undefined : session.backgroundWorkState;
   const inventoryPending = session.backgroundJobsAvailable === true && session.backgroundJobs === undefined;
   const inventoryProjectionUnknown = session.backgroundJobsAvailable === undefined &&
     session.backgroundWorkTracking === "managed" && aggregateState === undefined;
+  const untracked = session.backgroundWorkTracking === "untracked";
+  // An unknown runner version is not proof of an old runner.
+  const runnerTooOld = runnerProtocolVersion != null && !inventorySupported;
+  const showSkeleton = useDelayedFlag(inventoryPending && !inventoryError, BACKGROUND_WORK_SKELETON_DELAY_MS);
+  const machine = machineName?.trim() || null;
+  const locallyAcknowledgedDelivery = (delivery: BackgroundDeliveryView) =>
+    delivery.continuationId != null && locallyAcknowledged.has(acknowledgementKey(session.id, delivery.continuationId));
 
-  return (
-    <div className="background-work-panel">
-      {!inventorySupported && (
-        <div className="hint warn" role="status">
-          This runner predates inspectable background work. Aggregate status may be available, but per-job lifecycle evidence is not.
-        </div>
-      )}
-      {session.backgroundWorkTracking === "untracked" && (
-        <div className="hint warn" role="status">
-          This provider does not expose a durable detached-work lifecycle. Wollipog cannot verify running work, completion, cancellation, or recovery.
-        </div>
-      )}
-      {session.backgroundJobsTruncated && (
-        <div className="hint" role="status">
-          Showing the {MANAGED_BACKGROUND_JOB_VIEW_LIMIT} most relevant jobs. Older job history is not shown.
-        </div>
-      )}
-      {inventorySupported && session.backgroundWorkTracking !== "untracked" && !runnerOnline && jobs.some((job) => !job.terminalStatus) && (
-        <div className="hint warn" role="status">
-          The runner is offline. Durable terminal outcomes remain available, but current non-terminal status is unverified.
-        </div>
-      )}
+  const pageJobId = pages.current?.startsWith("background:") ? pages.current.slice("background:".length) : null;
+  const pageJob = pageJobId === null ? undefined : jobs.find((job) => job.id === pageJobId);
 
-      {groups.length === 0 ? (
-        inventoryPending && inventoryError ? (
-          <State variant="error" compact title="Background Work Unavailable"
-            actions={onRetryInventory && <button type="button" className="btn sm" onClick={onRetryInventory}>Retry Loading</button>}>
-            The durable per-job history could not be loaded.
-          </State>
-        ) : inventoryPending ? (
-          <State variant="loading" compact title="Loading Background Work">
-            Loading the durable per-job history for this session.
-          </State>
-        ) : (
-          <State compact title={inventoryProjectionUnknown
-            ? "Background Work Unverified"
-            : aggregateState
-              ? aggregateState === "orphaned" ? "Background Work Lost" : "Background Work Status Available"
-              : "No Background Work Recorded"}>
-            {inventoryProjectionUnknown
-              ? "This control plane does not expose whether durable per-job history is available."
-              : aggregateState
-                ? "The runner reports current background work, but per-job lifecycle evidence is unavailable."
-                : inventorySupported
-                  ? "Managed jobs will appear here when the runner reports them."
-                  : "Update the runner to inspect individual jobs."}
-          </State>
-        )
-      ) : (
-        <div className="background-work-groups" role="list" aria-label="Background Work History">
-          {groups.map((group, groupIndex) => {
-            const deliveryOnly = group.jobs.length === 0;
-            const shownTerminalCount = group.jobs.filter((job) => job.terminalStatus).length;
-            const shownDeliveredCount = group.jobs.filter((job) => job.assistantResultPersistedAt != null ||
-              (job.terminalObservedAt != null && job.continuationRequired === false)).length;
-            const groupDeliveries = group.deliveries;
-            const watchdogDelivery = shownWatchdogDelivery(groupDeliveries);
-            const watchdogState = watchdogDelivery?.watchdogState;
-            // With no watchdog anywhere both sides are undefined; that must not highlight every group.
-            const watchdogHighlighted = watchdogDelivery !== undefined &&
-              watchdogDelivery === highlightedWatchdogDelivery;
-            const recoveryDeliveries = groupDeliveries.filter((delivery) =>
-              delivery.watchdogState || (delivery.missingResultAt != null &&
-                delivery.runnerResultPersistedAt == null));
-            const recordedJobCount = groupDeliveries.reduce((total, delivery) => total + delivery.jobCount, 0);
-            const recordedTerminalCount = groupDeliveries.reduce(
-              (total, delivery) => total + delivery.terminalCount,
-              0,
-            );
-            const jobCount = Math.max(group.jobs.length, recordedJobCount);
-            const terminalCount = Math.min(jobCount, Math.max(shownTerminalCount, recordedTerminalCount));
-            const groupTruncated = !group.parentTurnKnown || jobCount > group.jobs.length ||
-              (session.backgroundJobsTruncated === true && recordedJobCount <= group.jobs.length);
-            const locallyAcknowledgedDelivery = (delivery: BackgroundDeliveryView) =>
-              delivery.continuationId != null && locallyAcknowledged.has(
-                acknowledgementKey(session.id, delivery.continuationId),
-              );
-            const deliveryComplete = (groupDeliveries.length > 0 &&
-              groupDeliveries.every((delivery) => delivery.runnerResultPersistedAt != null)) ||
-              (!groupTruncated && shownDeliveredCount === group.jobs.length);
-            const incompleteDeliveryStage = groupDeliveries.some((delivery) =>
-              delivery.runnerResultPersistedAt == null && delivery.missingResultAt != null &&
-              delivery.missingResultAcknowledgedAt == null && !locallyAcknowledgedDelivery(delivery))
-              ? "Result Missing"
-              : groupDeliveries.some((delivery) =>
-                delivery.runnerResultPersistedAt == null &&
-                (delivery.missingResultAcknowledgedAt != null || locallyAcknowledgedDelivery(delivery)))
-                ? "Missing Result Acknowledged"
-                : groupDeliveries.some((delivery) =>
-                  delivery.runnerResultPersistedAt == null && delivery.acceptedAt != null)
-                  ? "Continuation In Flight"
-                  : "Delivery Pending";
-            const parentEventId = parentTurnEventIds.get(group.parentTurnId);
-            const stoppableJobListed = group.jobs.some((job) => stoppableJobState(backgroundJobCurrentState(
-              job, session.backgroundWorkState, runnerOnline, inventorySupported, now)));
-            return (
-              <section className={`background-work-group${watchdogHighlighted ? " background-work-group-watchdog" : ""}`}
-                role="listitem" key={group.key} data-watchdog-state={watchdogState}
-                data-watchdog-highlighted={watchdogHighlighted || undefined}
-                aria-current={watchdogHighlighted ? "true" : undefined}
-                aria-labelledby={`background-work-group-${groupIndex}`}>
-                <div className="background-work-group-head">
-                  <div>
-                    <h3 id={`background-work-group-${groupIndex}`}>{group.parentTurnKnown
-                      ? `Parent Turn ${groupIndex + 1}`
-                      : "Unknown Parent Turn"}</h3>
-                    <p>{deliveryOnly
-                      ? `Delivery receipt retained for ${jobCount} ${jobCount === 1 ? "job" : "jobs"}. Per-job lifecycle history is outside the bounded inventory.`
-                      : <>{terminalCount} of {jobCount} jobs terminal · {groupTruncated
-                        ? `${group.jobs.length} shown`
-                        : `${shownDeliveredCount} delivered`}</>}</p>
-                  </div>
-                  {group.parentTurnKnown && parentEventId != null ? (
-                    <button type="button" className="btn ghost sm" onClick={() => onOpenParentTurn(parentEventId)}>
-                      View Parent Turn
-                    </button>
-                  ) : !group.parentTurnKnown ? (
-                    <span className="background-work-link-unavailable" title="The runner could not associate this job with a parent turn.">
-                      Parent Turn Unknown
-                    </span>
-                  ) : (
-                    <span className="background-work-link-unavailable" title="The parent turn is outside the loaded transcript window.">
-                      Parent Turn Not Loaded
-                    </span>
-                  )}
-                </div>
-                {recoveryDeliveries.map((delivery, deliveryIndex) => {
-                  const recoveryState = delivery.watchdogState;
-                  const continuationId = delivery.continuationId;
-                  const localAcknowledgementKey = continuationId == null
-                    ? null
-                    : acknowledgementKey(session.id, continuationId);
-                  const feedback = localAcknowledgementKey == null
-                    ? undefined
-                    : acknowledgementFeedback.get(localAcknowledgementKey);
-                  const acknowledging = feedback?.state === "pending";
-                  const acknowledged = delivery.missingResultAcknowledgedAt != null ||
-                    locallyAcknowledgedDelivery(delivery);
-                  const isMissing = delivery.missingResultAt != null;
-                  const status = recoveryState
-                    ? BACKGROUND_DELIVERY_STATUS[recoveryState]
-                    : isMissing ? BACKGROUND_DELIVERY_STATUS.accepted_without_result : null;
-                  const summaryId = `background-delivery-summary-${groupIndex}-${deliveryIndex}`;
-                  return (
-                    <div className="background-delivery-summary" role="group" key={continuationId ?? summaryId}
-                      aria-labelledby={summaryId} data-recovery-state={acknowledged
-                        ? "missing-result-acknowledged"
-                        : recoveryState ?? (isMissing ? "accepted_without_result" : undefined)}>
-                      <strong id={summaryId}>{acknowledged ? "Missing Result Acknowledged" : status?.label}</strong>
-                      <p>{acknowledged
-                        ? "You acknowledged that this continuation ended without a durable result. Its delivery history remains available."
-                        : status?.description}</p>
-                      <dl>
-                        {status && !acknowledged && <>
-                          <div><dt>Completed</dt><dd>{status.completed}</dd></div>
-                          <div><dt>Still Pending</dt><dd>{status.outstanding}</dd></div>
-                          <div><dt>Recovery</dt><dd>{status.recovery}</dd></div>
-                          <div><dt>Your Action</dt><dd>{recoveryState
-                            ? backgroundDeliveryAction(recoveryState, jobStop, stoppableJobListed, restartReportsResult)
-                            : status.action}</dd></div>
-                        </>}
-                        {isMissing && (
-                          <div><dt>Missing Since</dt><dd>{recordedTime(delivery.missingResultAt, now)}</dd></div>
-                        )}
-                        {isMissing && (
-                          <div><dt>Recovery State</dt><dd>{acknowledged
-                            ? delivery.missingResultAcknowledgedAt != null
-                              ? <>Acknowledged {recordedTime(delivery.missingResultAcknowledgedAt, now)}</>
-                              : "Acknowledged"
-                            : "Acknowledgement Required"}</dd></div>
-                        )}
-                      </dl>
-                      {!acknowledged && isMissing && delivery.runnerResultPersistedAt == null && continuationId && (
-                        <button type="button" className="btn ghost sm"
-                          disabled={acknowledging}
-                          onClick={() => {
-                            const token = Symbol("missing-result-acknowledgement");
-                            setAcknowledgementFeedback((current) => {
-                              const next = new Map(current);
-                              next.set(localAcknowledgementKey!, { token, state: "pending" });
-                              return next;
-                            });
-                            void requestMissingResultAcknowledgement(api, session.id, continuationId).then((failure) => {
-                              if (failure === null) {
-                                setLocallyAcknowledged((current) => new Set(current).add(localAcknowledgementKey!));
-                              }
-                              setAcknowledgementFeedback((current) => {
-                                const settled = current.get(localAcknowledgementKey!);
-                                if (settled?.token !== token || settled.state !== "pending") return current;
-                                const next = new Map(current);
-                                if (failure === null) next.delete(localAcknowledgementKey!);
-                                else next.set(localAcknowledgementKey!, { token, state: "error", message: failure });
-                                return next;
-                              });
-                            });
-                          }}>
-                          {acknowledging
-                            ? "Acknowledging…"
-                            : "Acknowledge Missing Result"}
-                        </button>
-                      )}
-                      {feedback?.state === "error" && !acknowledged && isMissing &&
-                        delivery.runnerResultPersistedAt == null && (
-                        <p className="hint warn" role="alert">{feedback.message}</p>
-                      )}
-                      <details>
-                        <summary>Technical Details</summary>
-                        <dl>
-                          <div><dt>Pipeline State</dt><dd><code>{acknowledged
-                            ? "missing_result_acknowledged"
-                            : recoveryState ?? (isMissing ? "accepted_without_result" : undefined)}</code></dd></div>
-                          {status && !acknowledged && <div><dt>Diagnostic</dt><dd>{status.diagnostic}</dd></div>}
-                        </dl>
-                      </details>
+  const notices: SessionNoticeEntry[] = !runnerOnline && !untracked ? [{
+    key: "background-work-runner-offline",
+    severity: "warning",
+    rank: PANEL_NOTICE_RANK.runnerOffline,
+    title: "Machine Offline",
+    render: ({ trailing }) => (
+      <Notice tone="warning" title="Machine Offline" trailing={trailing}>
+        {machine ? `${machine} is offline.` : "The machine is offline."} Finished jobs are shown; running jobs can't be checked.
+      </Notice>
+    ),
+  }] : [];
+
+  const turnViewable = (parentTurnId: string) => onViewTurn !== undefined && parentTurnId !== UNKNOWN_PARENT_TURN &&
+    (parentTurns.has(parentTurnId) || earlierActivityUnloaded);
+
+  const list = (
+    <>
+      <div className="background-work-turns">
+        {groups.map((group, groupIndex) => {
+          const headingId = `${headingPrefix}-turn-${groupIndex}`;
+          const status = backgroundJobGroupStatus(group, session.backgroundJobsTruncated === true, locallyAcknowledgedDelivery);
+          const counts = backgroundJobGroupCounts(group, session.backgroundJobsTruncated === true);
+          const watchdogDelivery = shownWatchdogDelivery(group.deliveries);
+          // With no watchdog anywhere both sides are undefined; that must not highlight every group.
+          const watchdogHighlighted = watchdogDelivery !== undefined && watchdogDelivery === highlightedWatchdogDelivery;
+          const states = new Map(group.jobs.map((job) => [job.id, backgroundJobCurrentState(
+            job, session.backgroundWorkState, runnerOnline, inventorySupported, now)] as const));
+          const stoppableJobListed = [...states.values()].some(stoppableJobState);
+          return (
+            <section className="background-work-turn" key={group.key} aria-labelledby={headingId}
+              data-watchdog-state={watchdogDelivery?.watchdogState}
+              data-watchdog-highlighted={watchdogHighlighted || undefined}
+              aria-current={watchdogHighlighted ? "true" : undefined}>
+              <div className="group-label background-work-turn-head">
+                <h3 id={headingId} className="background-work-turn-title">
+                  {backgroundTurnLabel(group.parentTurnId, parentTurns.get(group.parentTurnId))}
+                </h3>
+                <StatusBadge meta={backgroundJobGroupBadge(status)} inline />
+                {turnViewable(group.parentTurnId) && (
+                  <button type="button" className="btn sm ghost background-work-view-turn" aria-describedby={headingId}
+                    onClick={() => onViewTurn!(group.parentTurnId)}>
+                    View Turn
+                  </button>
+                )}
+              </div>
+              <RecoverySummaries session={session} group={group} groupIndex={groupIndex} now={now} jobStop={jobStop}
+                stoppableJobListed={stoppableJobListed} restartReportsResult={restartReportsResult}
+                locallyAcknowledged={locallyAcknowledgedDelivery}
+                onAcknowledged={(key) => setLocallyAcknowledged((current) => new Set(current).add(key))}
+                acknowledgementFeedback={acknowledgementFeedback} setAcknowledgementFeedback={setAcknowledgementFeedback} />
+              <ul className="background-work-rows" aria-labelledby={headingId}>
+                {group.jobs.length === 0 ? group.deliveries.map((delivery, deliveryIndex) => (
+                  <li key={delivery.continuationId ?? `${group.key}:${deliveryIndex}`}>
+                    <div className="row row-2 background-job-row">
+                      <span className="row-body">
+                        <span className="row-line">
+                          <span className="row-title">Result Receipt</span>
+                          <StatusBadge meta={backgroundJobGroupBadge(deliveryReceiptStatus([delivery], locallyAcknowledgedDelivery))} />
+                        </span>
+                        <span className="row-line">
+                          <span className="row-sub">
+                            {delivery.terminalCount} of {delivery.jobCount} {delivery.jobCount === 1 ? "job" : "jobs"} finished
+                          </span>
+                          <span className="row-trail">{formatRecordedRelativeTime(deliveryTimestamp(delivery) || undefined, now)}</span>
+                        </span>
+                      </span>
                     </div>
+                  </li>
+                )) : group.jobs.map((job) => {
+                  const state = states.get(job.id)!;
+                  const running = state === "running" || state === "stalled";
+                  const end = job.terminalObservedAt ?? (running ? now : job.lastObservedAt);
+                  const unfinishedSiblings = Math.max(0, counts.total - counts.finished - (job.terminalStatus ? 0 : 1));
+                  const pageKey = backgroundJobPageKey(job.id);
+                  return (
+                    <li key={job.id}>
+                      <button type="button" className="row row-2 background-job-row" data-panel-page-key={pageKey}
+                        onClick={() => pages.push(pageKey)}>
+                        <span className="row-body">
+                          <span className="row-line">
+                            <span className="row-title">
+                              {backgroundJobKind(job)} <span className="mono background-job-id">{backgroundJobShortId(job)}</span>
+                            </span>
+                            <StatusBadge meta={statusMeta("job", state)} />
+                          </span>
+                          <span className="row-line">
+                            <span className="row-sub">{backgroundJobRowSentence(job, state, unfinishedSiblings, now)}</span>
+                            <span className="row-trail">{formatDuration(Math.max(0, end - job.registeredAt))}</span>
+                          </span>
+                        </span>
+                        <ChevronRightIcon size={16} className="background-job-chevron" aria-hidden="true" />
+                      </button>
+                    </li>
                   );
                 })}
-                <div className="background-work-barrier" role="group"
-                  aria-label={deliveryOnly ? "Delivery Receipt Status" : "Barrier Status"}>
-                  <span>{deliveryOnly ? "Delivery Receipt" : "Barrier"}</span>
-                  <strong>{deliveryOnly
-                    ? deliveryStage(groupDeliveries, locallyAcknowledgedDelivery)
-                    : !group.parentTurnKnown
-                      ? "Unverified"
-                      : terminalCount < jobCount
-                        ? "Waiting for Jobs"
-                        : groupTruncated && !deliveryComplete
-                        ? "Unverified"
-                        : deliveryComplete ? "Delivered" : incompleteDeliveryStage}</strong>
-                  {notificationStage(groupDeliveries) && <span> · {notificationStage(groupDeliveries)}</span>}
-                </div>
-                {deliveryOnly ? (
-                  <ol className="background-work-jobs" aria-label="Retained Delivery Receipts">
-                    {groupDeliveries.map((delivery, deliveryIndex) => (
-                      <li className="background-work-delivery" key={delivery.continuationId ?? `${group.key}:${deliveryIndex}`}>
-                        <div className="background-work-job-title">
-                          <strong>Delivery Receipt {deliveryIndex + 1}</strong>
-                          <DeliveryStageBadge stage={deliveryStage([delivery], locallyAcknowledgedDelivery)} />
-                        </div>
-                        <dl className="facts">
-                          <div><dt>Recorded Job Count</dt><dd>{delivery.jobCount}</dd></div>
-                          <div><dt>Recorded Terminal Count</dt><dd>{delivery.terminalCount}</dd></div>
-                          <div><dt>Notification</dt><dd>{notificationStage([delivery]) ?? "Not Requested"}</dd></div>
-                          <div><dt>Latest Receipt</dt><dd>{recordedTime(deliveryTimestamp(delivery) || undefined, now)}</dd></div>
-                        </dl>
-                      </li>
-                    ))}
-                  </ol>
-                ) : <ol className="background-work-jobs">
-                  {group.jobs.map((job, jobIndex) => {
-                    const state = backgroundJobCurrentState(
-                      job,
-                      session.backgroundWorkState,
-                      runnerOnline,
-                      inventorySupported,
-                      now,
-                    );
-                    const end = job.terminalObservedAt ?? (state === "running" || state === "stalled" ? now : job.lastObservedAt);
-                    const duration = formatDuration(Math.max(0, end - job.registeredAt));
-                    const jobLabel = backgroundJobLabel(job, jobIndex);
-                    return (
-                      <li className="background-work-job" key={job.id}>
-                        <div className="background-work-job-title">
-                          <strong>{jobLabel}</strong>
-                          <StatusBadge meta={statusMeta("job", state)} />
-                        </div>
-                        <dl className="facts">
-                          <div><dt>Started</dt><dd>{recordedTime(job.registeredAt, now)}</dd></div>
-                          <div><dt>Elapsed</dt><dd>{duration || "Unavailable"}</dd></div>
-                          <div><dt>Latest Activity</dt><dd>{recordedTime(job.lastObservedAt, now)}</dd></div>
-                          {job.terminalObservedAt != null && (
-                            <div><dt>Terminal Time</dt><dd>{recordedTime(job.terminalObservedAt, now)}</dd></div>
-                          )}
-                          {job.endedBy && (
-                            <>
-                              <div>
-                                <dt>Ended By</dt>
-                                <dd>
-                                  {backgroundJobEndedByLabel(job.endedBy)}
-                                  {job.endedBy.actor.kind === "orchestrator" && (
-                                    <> <code>{job.endedBy.actor.sessionId}</code></>
-                                  )}
-                                </dd>
-                              </div>
-                              <div><dt>Reason</dt><dd>{backgroundJobEndReasonLabel(job.endedBy)}</dd></div>
-                            </>
-                          )}
-                          <div><dt>Continuation</dt><dd>{backgroundJobDeliveryStage(job)}</dd></div>
-                        </dl>
-                        {jobStop && stoppableJobState(state) && (
-                          <BackgroundJobStopControl sessionId={session.id} jobId={job.id} jobLabel={jobLabel}
-                            availability={jobStop} />
-                        )}
-                      </li>
-                    );
-                  })}
-                </ol>}
-              </section>
-            );
-          })}
+              </ul>
+            </section>
+          );
+        })}
+      </div>
+      {session.backgroundJobsTruncated && (
+        <ListFoot>Showing the {MANAGED_BACKGROUND_JOB_VIEW_LIMIT} most recent jobs.</ListFoot>
+      )}
+    </>
+  );
+
+  const body = inventoryPending && !inventoryError ? (
+    showSkeleton ? (
+      <div className="skeleton background-work-skeleton" role="status" aria-live="polite">
+        <span className="sr-only">Loading background work…</span>
+        {[0, 1, 2].map((index) => (
+          <div className="row row-2" aria-hidden="true" key={index}>
+            <span className="row-body">
+              <span className="skeleton-bar title" />
+              <span className="skeleton-bar" />
+            </span>
+          </div>
+        ))}
+      </div>
+    ) : null
+  ) : inventoryPending ? (
+    <State variant="error" compact title="Couldn't Load Background Work" details={inventoryError}
+      actions={onRetryInventory && <button type="button" className="btn sm" onClick={onRetryInventory}>Retry</button>}>
+      The machine's list of background jobs didn't load.
+    </State>
+  ) : untracked ? (
+    <State compact title="Background Work Isn't Tracked"
+      actions={onOpenTerminal && <button type="button" className="btn sm" onClick={onOpenTerminal}>Open Terminal</button>}>
+      {driverLabel(session.driver)} doesn't report background jobs, so Wollipog can't list them or tell when they finish.
+    </State>
+  ) : runnerTooOld ? (
+    <State compact title="Runner Update Required"
+      actions={onOpenMachine && <button type="button" className="btn sm" onClick={onOpenMachine}>Open Machine</button>}>
+      {machine ? `${machine}'s runner` : "This machine's runner"} is too old to list individual jobs.
+    </State>
+  ) : groups.length > 0 ? list : inventoryProjectionUnknown ? (
+    <State compact title="Jobs Aren't Listed">
+      This version of Wollipog doesn't list individual background jobs.
+    </State>
+  ) : aggregateState === "orphaned" ? (
+    <State compact title="Background Work Lost">
+      A background job was lost, and its details aren't available.
+    </State>
+  ) : aggregateState ? (
+    <State compact title="Background Work Running">
+      A background job is running, but its details aren't available yet.
+    </State>
+  ) : (
+    <State compact title="No Background Work">
+      Jobs the agent leaves running after a turn show up here, grouped by the turn that started them.
+    </State>
+  );
+
+  return (
+    <>
+      <PanelHeaderActions>
+        <InfoPopover tool="Background Work">
+          <p>
+            Jobs the agent leaves running after a turn, grouped by the turn that started them. When they finish,
+            their result returns to this conversation.
+          </p>
+          <p>
+            Commands, file paths, credentials and output stay on {machine ?? "this machine"}. Wollipog only shows
+            timing and status.
+          </p>
+        </InfoPopover>
+      </PanelHeaderActions>
+      <PanelNoticeSlot sessionId={session.id} entries={notices} />
+      {/* The list stays mounted under a page, so its rows and scroll are there on Back. */}
+      <div className="background-work-panel" hidden={pageJobId !== null}>{body}</div>
+      {pageJobId !== null && (
+        <div className="background-work-page" key={pageJobId}>
+          <PanelPageTitle>{pageJob ? backgroundJobLabel(pageJob) : "Background Job"}</PanelPageTitle>
+          <JobDetail session={session} jobId={pageJobId} runnerOnline={runnerOnline}
+            runnerProtocolVersion={runnerProtocolVersion} parentTurns={parentTurns}
+            earlierActivityUnloaded={earlierActivityUnloaded} onViewTurn={onViewTurn} />
         </div>
       )}
-      <p className="background-work-privacy">
-        Commands, local paths, credentials, and raw output stay runner-local.
-      </p>
-    </div>
+    </>
   );
 }
