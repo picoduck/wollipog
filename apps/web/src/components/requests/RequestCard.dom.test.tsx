@@ -1535,6 +1535,83 @@ test("the card behind the strip is the same card when it comes back, and its ope
   }
 });
 
+test("a workflow decision stays selected while reading and preserves its review through toggles (#2874)", async () => {
+  const request = {
+    requestId: "workflow:read", occurrenceId: "workflow:read", kind: "workflow_decision",
+    title: "Review the Proposed Change", context: { input: "Full decision details" },
+    options: [{ optionId: "approve", name: "Approve", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "reject_once" }],
+    workflowDecision: {
+      requestId: "workflow:read", occurrenceId: "workflow:read", sessionId: "session-dock", controllingSessionId: "parent",
+      category: "implementation_question", resourceKey: "question", resourceSnapshot: {
+        category: "implementation_question", question: "Which approach?", options: [{ optionId: "one", label: "First Approach" }],
+      }, resourceDigest: "e".repeat(64), policyRevision: 1, authority: "human", status: "pending", createdAt: 1,
+    },
+  } as PendingApproval;
+  const decisions: unknown[] = [];
+  const dock = (requests: PendingApproval[], state: FollowTailState) => (
+    <RequestDock session={sessionWith(request)} requests={requests} runnerOnline followTailState={state} />
+  );
+  const view = await render(dock([request], "following"), {
+    approve: async (_id, payload) => { decisions.push(payload); return sessionWith(null); },
+  });
+  try {
+    const card = view.container.querySelector(".request-card")!;
+    const details = card.querySelector<HTMLDetailsElement>("details")!;
+    details.open = true;
+    const toggle = card.querySelector<HTMLButtonElement>('[aria-label="Expand Decision"]')!;
+    await act(async () => { toggle.focus(); toggle.click(); await tick(); });
+    assert.equal(toggle.getAttribute("aria-label"), "Collapse Decision");
+    assert.equal(toggle.getAttribute("aria-expanded"), "true");
+    assert.equal(domWindow.document.activeElement, toggle, "the same control keeps keyboard focus");
+    for (const id of toggle.getAttribute("aria-controls")!.split(" ")) assert.ok(domWindow.document.getElementById(id));
+    assert.ok(view.container.querySelector(".request-dock[data-reading]"));
+    await view.rerender(dock([permission(), request], "paused"));
+    assert.equal(view.container.querySelector(".request-card"), card, "a new request waits without remounting the review");
+    assert.ok(card.hasAttribute("data-decision-expanded"));
+    assertNoDomNode(view.container.querySelector(".dock-strip"));
+    await act(async () => { toggle.click(); await tick(); });
+    assertNoDomNode(view.container.querySelector(".request-dock[data-reading]"));
+    assert.equal(view.container.querySelector(".request-card"), card);
+    assert.equal(details.open, true, "review disclosures stay open");
+    assert.equal(toggle.getAttribute("aria-label"), "Expand Decision");
+    assertNoDomNode(view.container.querySelector(".dock-strip"), "the collapsed decision stays up while reading back");
+    assert.deepEqual(decisions, [], "reading never resolves a decision");
+    await act(async () => { toggle.click(); await tick(); });
+    await view.rerender(dock([permission()], "following"));
+    assertNoDomNode(view.container.querySelector(".request-dock[data-reading]"), "resolution ends reading mode");
+  } finally { await view.unmount(); }
+});
+
+test("workflow decision expansion is limited to docked cards and available to read-only readers (#2874)", async () => {
+  const request = { ...permission(), kind: "workflow_decision" as const };
+  for (const presentation of ["dock", "panel"] as const) {
+    const session = { ...sessionWith(request), commandPermissions: {
+      stop: { allowed: true }, restart: { allowed: true }, stopBackgroundJob: { allowed: true },
+      respond: { allowed: false, reason: "Your Viewer role is read-only." },
+    } } as SessionView;
+    const view = await render(<RequestCard session={session} request={request} runnerOnline presentation={presentation} onReadingChange={() => {}} />);
+    try {
+      assert.equal(view.container.querySelectorAll('[aria-label="Expand Decision"]').length, presentation === "dock" ? 1 : 0);
+      if (presentation === "dock") {
+        const toggle = view.container.querySelector<HTMLButtonElement>('[aria-label="Expand Decision"]')!;
+        assert.equal(toggle.disabled, false);
+        await act(async () => { toggle.click(); await tick(); });
+        assert.ok(view.container.querySelector("[data-decision-expanded]"));
+        assert.ok(view.container.querySelector<HTMLButtonElement>(".request-card-foot .primary")!.disabled);
+      }
+    } finally { await view.unmount(); }
+  }
+});
+
+test("a Sessions preview does not offer a workflow reading mode outside the full reading column (#2874)", async () => {
+  const request = { ...permission(), kind: "workflow_decision" as const };
+  const view = await render(<RequestDock session={sessionWith(request)} requests={[request]} runnerOnline readingAvailable={false} />);
+  try {
+    assertNoDomNode(view.container.querySelector('[aria-label="Expand Decision"]'));
+    assertNoDomNode(view.container.querySelector("[data-reading]"));
+  } finally { await view.unmount(); }
+});
+
 test("a question expanded to read keeps the dock: a request arriving ahead waits, and reading back keeps the card (#2786)", async () => {
   const long = "A question long enough that its clamped lines hide the end of it until it is expanded.";
   const question: PendingApproval = {

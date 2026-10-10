@@ -77,6 +77,7 @@ export function RequestDock({
   whereAsked,
   onAnswerInSession,
   composerAnswer,
+  readingAvailable = true,
 }: {
   session: SessionView;
   /** In priority order (`prioritizedPendingRequests`), already limited by `dockRequests`. */
@@ -89,6 +90,8 @@ export function RequestDock({
   showKeyHints?: boolean;
   /** The software keyboard is open, so the dock gives the transcript more room (§13.2). */
   keyboardOpen?: boolean;
+  /** The full session reading column is available. A Sessions preview has its own capped dock. */
+  readingAvailable?: boolean;
   /** A request to expand and focus as the dock mounts: it was asked for while a notice held its place. */
   revealRequestId?: string;
   /** The transcript's follow-tail state: while it is "paused" the dock shows its strip. */
@@ -123,8 +126,8 @@ export function RequestDock({
   const focusHeading = useRef(revealRequestId !== undefined);
   const expanded = requests.find((request) => request.requestId === selectedId) ?? requests[0];
   const waiting = requests.filter((request) => request !== expanded);
-  // The question the person expanded to read (#2786). Expanding selects it, as choosing it from "+N
-  // More" does, so a request that arrives ahead of it waits there, before and after it collapses;
+  // The question or workflow decision the person expanded to read (#2786, #2874). Expanding selects
+  // it, as choosing it from "+N More" does, so a request that arrives ahead waits there before and after it collapses;
   // while it is read the dock does not shrink to its strip either.
   const [readingId, setReadingId] = useState<string | null>(null);
   // Read when the card reports that reading ended, which runs after the render that ended it.
@@ -281,6 +284,7 @@ export function RequestDock({
       aria-label={REQUEST_CARD_COPY.pendingRequests}
       data-keyboard-open={keyboardOpen ? "" : undefined}
       data-collapsed={collapsed ? "" : undefined}
+      data-reading={reading ? "" : undefined}
     >
       {collapsed && (
         // The whole strip is the pointer target; Expand is its keyboard and assistive-technology
@@ -393,7 +397,7 @@ export function RequestDock({
             keyboardOpen={keyboardOpen}
             intentRef={intentRef}
             topRequest={expanded === requests[0]}
-            onReadingChange={(next) => readingChange(expanded.requestId, next)}
+            onReadingChange={readingAvailable ? (next) => readingChange(expanded.requestId, next) : undefined}
             onAnswer={composerAnswer?.requestId === expanded.requestId ? composerAnswer.onAnswer : undefined}
             whereAsked={whereAsked && {
               // As reading back does: the dock shrinks to its strip once the reader is far enough
@@ -422,6 +426,7 @@ export function RequestDock({
             intentRef={intentRef}
             headingRef={headingRef}
             concealed={collapsed}
+            onReadingChange={readingAvailable ? (next) => readingChange(expanded.requestId, next) : undefined}
           />
         )}
       </div>

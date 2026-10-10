@@ -5894,7 +5894,7 @@ textarea {
    container, so the dock's cap is a share of the column, never of the page: at most 40% on desktop,
    50% on a phone and 40% again while the software keyboard is open, which keeps at least half of the
    column for the transcript. A column under 480px tall gives the dock up to 60% (#2828, below), and a
-   question the person expanded is the exception (reading mode, below). */
+   question or workflow decision the person expanded is the exception (reading mode, below). */
 .chat-reading {
   position: relative;
   display: flex;
@@ -5935,23 +5935,23 @@ textarea {
   .request-dock .question-card[data-question-clamped] > .question-eyebrow { display: none; }
 }
 .chat-reading > .session-notice-slot:has(> .request-dock[data-keyboard-open]) { max-height: 40cqh; }
-/* Reading mode (#2786): a question the person expanded takes the whole reading column, with the
-   keyboard open or not. The slot covers the transcript rather than squeezing it, so the transcript
+/* Reading mode (#2786, #2874): a question or workflow decision the person expanded takes the whole
+   reading column, with the keyboard open or not. The slot covers the transcript rather than squeezing it, so the transcript
    keeps its size and its reading position underneath and is as it was when the question collapses.
    Hidden, it takes no pointer, no focus and no screen reader. The card fills the slot and scrolls
    between its head line and its footer (SessionApproval.tsx). Behind the dock's strip the card is
    hidden, and reading mode ends with it. */
-.chat-reading > .session-notice-slot:has(> .request-dock > .request-dock-card:not([hidden]) > .question-card[data-question-expanded]) {
+.chat-reading > .session-notice-slot:has(> .request-dock[data-reading]) {
   position: absolute;
   inset: 0;
   max-height: none;
 }
-.chat-reading:has(> .session-notice-slot > .request-dock > .request-dock-card:not([hidden]) > .question-card[data-question-expanded]) > .detail-main {
+.chat-reading:has(> .session-notice-slot > .request-dock[data-reading]) > .detail-main {
   visibility: hidden;
 }
-.chat-reading > .session-notice-slot:has(> .request-dock > .request-dock-card:not([hidden]) > .question-card[data-question-expanded]) > .request-dock,
-.request-dock .request-dock-card:has(> .question-card[data-question-expanded]),
-.request-dock .question-card[data-question-expanded] {
+.chat-reading > .session-notice-slot > .request-dock[data-reading],
+.request-dock[data-reading] > .request-dock-card:has(> .request-card),
+.request-dock[data-reading] > .request-dock-card > .request-card {
   flex: 1 1 auto;
   min-height: 0;
 }
@@ -6212,6 +6212,20 @@ textarea {
   }
 }
 .request-card .request-card-body > * { margin: 0; }
+/* An expanded workflow decision keeps its head and actions still while there is room for them.
+   Only the details scroll; its review component stays mounted through every toggle. */
+.request-dock .request-card[data-decision-expanded] > .request-card-body { flex: 1 1 auto; overflow-y: auto; }
+@container chat-reading (max-height: 200px) {
+  /* A keyboard can leave less room than the frame alone needs. Scroll the whole decision so
+     its rationale and every control remain reachable instead of shrinking the body to nothing. */
+  .request-dock[data-reading] > .request-dock-card:has(> .request-card[data-decision-expanded]),
+  .request-dock[data-reading] > .request-dock-card > .request-card[data-decision-expanded] { flex: none; }
+  .request-dock .request-card[data-decision-expanded] > .request-card-body { flex: none; overflow-y: visible; }
+}
+@media (max-width: 760px) {
+  .btn.decision-reading-toggle { min-width: var(--control-h-sm); padding-inline: var(--space-1); }
+  .decision-reading-toggle-label { display: none; }
+}
 /* Every Request Card's one "more below" signal (#2715, §13.2): while a body scrolls, each edge it can
    still scroll past shows a `--border` hairline (clip-edges.ts marks them), as a question card that
    scrolls whole marks its own edges (#2698) and a sticky header does once content scrolls under it
@@ -14425,17 +14439,17 @@ button.review-finding-location {
   max-height: none;
   margin: 0;
 }
-/* Show Where Asked, after the time, and Collapse Question while the question is expanded; each
+/* Show Where Asked, after the time, and the question's expand/collapse toggle; each
    icon-only in a card narrower than 600px (a phone, a column beside the right panel) under the same
    name (§15.1). */
 @container question-card (max-width: 599px) {
   /* Square: `.btn.sm`'s padding and `.btn`'s max-content cap would size it by its label. */
-  .btn:is(.question-where-asked, .question-collapse) {
+  .btn:is(.question-where-asked, .question-reading-toggle) {
     width: var(--control-h-sm);
     max-width: none;
     padding: 0;
   }
-  :is(.question-where-asked-label, .question-collapse-label) { display: none; }
+  :is(.question-where-asked-label, .question-reading-toggle-label) { display: none; }
 }
 /* Expanded (#2786), the head line stays at the card's top edge as the footer stays at its bottom,
    so Collapse Question is in reach however long the question is. What scrolls passes under it, and
@@ -14878,7 +14892,7 @@ button.review-finding-location {
       input:focus:not([readonly], [type="button"], [type="checkbox"], [type="color"],
         [type="file"], [type="image"], [type="radio"], [type="range"], [type="reset"],
         [type="submit"])
-    ) .chat-reading > .session-notice-slot:not(:has(> .request-dock > .request-dock-card:not([hidden]) > .question-card[data-question-expanded])) {
+    ) .chat-reading > .session-notice-slot:not(:has(> .request-dock[data-reading])) {
       max-height: 40cqh;
     }
     /* And compacts a docked question card as the visual-viewport signal does (#2205), for the same

@@ -738,7 +738,7 @@ test("the pending-question marker's labels are Title Case (#2205)", () => {
 
 test("the Request Card's labels and names are Title Case, and its foot-notes are sentences (#2179)", () => {
   const titles = ["moreChoices", "copyDetails", "requestDetails", "policyMatch", "pendingRequests", "waitingRequests",
-    "pendingRequestTitle", "expand", "expandRequest"] as const;
+    "pendingRequestTitle", "expand", "expandRequest", "expandDecision", "collapseDecision"] as const;
   const sentences = ["runnerOffline", "signInOwner", "notSent", "sending"] as const;
   assert.deepEqual([...titles, ...sentences].sort(), Object.keys(REQUEST_CARD_COPY).sort(), "every string is classified");
   for (const key of titles) {
@@ -792,7 +792,7 @@ test("the Requests panel's labels are Title Case, and its notice and state sente
 test("the question card's labels and buttons are Title Case, and its hints and errors are sentences (#2196)", () => {
   const titles = ["agentQuestions", "question", "asyncQuestion", "recoveryRequired", "dismiss", "dismissAndContinue",
     "back", "next", "submitAnswers", "tryAgain", "somethingElse", "somethingElseField", "showWhereAsked",
-    "showFullQuestion", "collapseQuestion", "answer", "exitAnswerMode", "showContext", "showAnswer"] as const;
+    "showFullQuestion", "expandQuestion", "collapseQuestion", "answer", "exitAnswerMode", "showContext", "showAnswer"] as const;
   // "Choose one", "Choose any" and "Optional" are the dim line above a question, Answer Mode's summary
   // ("Nothing chosen yet") and placeholders say what to type: sentence fragments (#2212).
   const fragments = ["chooseOne", "chooseAny", "optional", "nothingChosen", "answerEntered", "typeAnswer", "typeChoice",

@@ -66,6 +66,12 @@ function questionCardOwnsFocus(targetDocument: Document): boolean {
   return active instanceof Element && Boolean(active.closest(".question-card"));
 }
 
+/** Text clicks can focus the notice slot or page body. The expanded decision in this reader's
+ * own column owns reading keys regardless of that focus, leaving the hidden transcript alone. */
+function expandedDecisionIsReading(scroll: HTMLElement | null): boolean {
+  return Boolean(scroll?.closest(".chat-reading")?.querySelector(".request-card[data-decision-expanded]"));
+}
+
 function nativeControlOwnsFocus(targetDocument: Document): boolean {
   const active = targetDocument.activeElement;
   if (!(active instanceof HTMLElement)) return false;
@@ -121,6 +127,7 @@ export function useSessionReadingKeys({
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented || shortcutLayerActive(document, false, event) || terminalOwnsFocus(document) ||
+        expandedDecisionIsReading(scrollRef.current) ||
         (questionCardOwnsFocus(document) && !matchesShortcut(event, "session-reading-reply"))) {
         sequenceRef.current = null;
         return;

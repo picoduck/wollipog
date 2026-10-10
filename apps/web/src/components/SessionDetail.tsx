@@ -6481,6 +6481,7 @@ function SessionDetailLoaded({
         questionsFor={dockQuestions}
         whereAsked={mode === "expanded" ? dockWhereAsked : undefined}
         onAnswerInSession={mode === "preview" ? onOpenRequest : undefined}
+        readingAvailable={mode === "expanded"}
         composerAnswer={dockComposerAnswer}
       />
     ),

@@ -195,6 +195,8 @@ export function formatRequestCountdown(remainingMs: number): string {
  * names are Title Case, foot-notes and progress are sentences.
  */
 export const REQUEST_CARD_COPY = {
+  expandDecision: "Expand Decision",
+  collapseDecision: "Collapse Decision",
   moreChoices: "More Choices",
   copyDetails: "Copy Request Details",
   requestDetails: "Request Details",
