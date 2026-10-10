@@ -55,7 +55,7 @@ import { DiffIcon, FolderIcon, RefreshIcon } from "./Icons.js";
 import { PanelHeaderActions } from "./RightPanel.js";
 import { PanelToolLayout } from "./PanelToolLayout.js";
 import { FindingSelectionBar, ReviewFindings, type FindingSyncControl } from "./ReviewFindings.js";
-import { forgeName, isOpenFinding } from "../review-finding-copy.js";
+import { isOpenFinding } from "../review-finding-copy.js";
 import { ReviewSummary } from "./ReviewSummary.js";
 import { ReviewToolbar } from "./ReviewToolbar.js";
 import { StaleContent } from "./StaleContent.js";
@@ -1061,7 +1061,7 @@ export function ReviewPanel({
       : runnerCapabilityRequirement(
         runnerProtocolVersion,
         syncForge === "gitlab" ? "forgeIntegration" : "githubReviewReconciliation",
-        `${forgeName(syncForge)} review sync`,
+        `${syncForge === "gitlab" ? "GitLab" : "GitHub"} review sync`,
       ),
     refusal: gitRefusal === null ? null : { reason: gitRefusal, id: gitRefusalId },
     onSync: () => void syncForgeFindings(),
