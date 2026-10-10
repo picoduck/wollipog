@@ -2096,17 +2096,19 @@ function SessionDetailLoaded({
     restoreExpandedPanel();
     revealOrdinaryComposerRef.current("always");
     markDraftDirty();
-    const previous = draftState.current.text;
-    setProgrammaticComposerText(appendTranscript(previous, response));
+    // The whole draft, attachments included: Undo gives back exactly this.
+    const previous = draftState.current;
+    setProgrammaticComposerText(appendTranscript(previous.text, response));
     const target = sessionId;
     showUndo("Inserted into your session draft.", () => {
       if (sideChatUndoTargetRef.current !== target) throw new Error("This session's draft is no longer open.");
       restoreExpandedPanel();
       revealOrdinaryComposerRef.current("always");
       markDraftDirty();
-      setProgrammaticComposerText(previous);
+      setProgrammaticComposerText(previous.text);
+      replace(previous.images);
     });
-  }, [markDraftDirty, restoreExpandedPanel, sessionId, setProgrammaticComposerText, showUndo]);
+  }, [markDraftDirty, replace, restoreExpandedPanel, sessionId, setProgrammaticComposerText, showUndo]);
   // Shared git status: the composer branch chip + the right panel's Review mode read one
   // fetch. Called before the !session guard — hooks must run unconditionally.
   // Inbox previews render neither the composer Git chip, pinned summary, nor Review panel. Do not

@@ -4802,6 +4802,48 @@ test("Insert into Draft on an earlier side-chat reply inserts that reply, and Un
   }
 });
 
+test("Undo after Insert into Draft gives back the draft's attachments too (#2862)", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const child = session("side-chat-undo-attachment-child");
+  const relation: SideChatView = { parentSessionId: "unused-by-panel", session: child, createdAt: 1 };
+  const response: SessionEvent = {
+    id: 1, sessionId: child.id, seq: 1, ts: 2, payload: { kind: "agent_message", text: "side-chat answer", final: true },
+  };
+  const fixture = await mountFixture(draft, {
+    rightPanelMode: "sidechat",
+    client: {
+      sideChat: async () => ({ sideChat: relation }),
+      session: async (id: string) => ({ session: id === child.id ? child : session(id) }),
+      getSessionEventPage: async () => ({ events: [response], eventEpoch: 0, nextAfter: 1, cacheComplete: true }),
+    },
+  });
+  try {
+    await resolveComposerDraft(draft, { text: "with a picture", images: [{ mimeType: "image/png", data: "bWluZQ==" }], updatedAt: 1 });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
+    const thumbs = () => [...fixture.container.querySelectorAll(".composer .attach-thumb")].length;
+    assert.equal(thumbs(), 1);
+
+    await act(async () => { fixture.container.querySelector<HTMLButtonElement>('button[aria-label="Insert into Draft"]')!.click(); });
+    await act(async () => { flushFrames(); });
+    assert.equal(fixture.composer.value, "with a picture side-chat answer");
+    // The person then removes the attachment before thinking better of the insert.
+    await act(async () => { fixture.container.querySelector<HTMLButtonElement>('button[aria-label="Remove Attached Image 1"]')!.click(); });
+    assert.equal(thumbs(), 0);
+
+    const toast = [...domWindow.document.querySelectorAll(".toast")]
+      .find((candidate) => candidate.textContent?.includes("Inserted into your session draft.")) as unknown as HTMLElement;
+    await act(async () => {
+      [...toast.querySelectorAll("button")].find((button) => button.textContent === "Undo")!.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () => { flushFrames(); });
+    assert.equal(fixture.composer.value, "with a picture");
+    assert.equal(thumbs(), 1, "the draft as it was includes its attachment");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("inserting a side-chat response exits Answer Mode and reveals the ordinary draft", { timeout: 5_000 }, async () => {
   setQuestionResponseStyle("composer", domWindow as never);
   const draft = deferred<ComposerDraft | null>();

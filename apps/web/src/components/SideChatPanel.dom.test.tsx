@@ -816,3 +816,41 @@ test("Open Session opens in a new tab on a modified click and navigates in place
     container.remove();
   }
 });
+
+test("a focus request that settles after a dialog opened leaves focus in the dialog (#2862)", async () => {
+  const originals = { sideChat: api.sideChat, session: api.session, getSessionEventPage: api.getSessionEventPage };
+  let resolveSideChat!: (value: { sideChat: SideChatView | null }) => void;
+  api.sideChat = () => new Promise((resolve) => { resolveSideChat = resolve; });
+  api.session = async () => ({ session: child });
+  api.getSessionEventPage = async () => ({ events: [], eventEpoch: 0, nextAfter: 0, cacheComplete: true });
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  // Opened while the panel is still loading: a modal layer now owns the keyboard.
+  const dialog = domWindow.document.createElement("div");
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
+  const inside = domWindow.document.createElement("button");
+  dialog.append(inside);
+  try {
+    requestSideChatFocus();
+    await act(async () => {
+      root.render(mount(<SideChatPanel session={parent} runnerOnline onInsertDraft={() => {}} />, []));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    domWindow.document.body.append(dialog);
+    inside.focus();
+    await act(async () => {
+      resolveSideChat({ sideChat: relation });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    });
+    assert.ok(container.querySelector("textarea"), "the panel loaded");
+    assert.equal(domWindow.document.activeElement, inside, "focus stays in the dialog");
+  } finally {
+    dialog.remove();
+    await act(async () => { root.unmount(); });
+    Object.assign(api, originals);
+    container.remove();
+  }
+});

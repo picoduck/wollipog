@@ -6,6 +6,7 @@ import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { useHasStore, useStoreActions } from "../store.js";
 import { viewPath } from "../navigation.js";
+import { shortcutLayerActive } from "../shortcuts.js";
 import { enterKeystrokeSends, useEnterKeyBehavior } from "../enter-key.js";
 import { EventTimeline, type AgentReplyItem } from "./EventTimeline.js";
 import { ArrowUpRightIcon } from "./Icons.js";
@@ -150,6 +151,8 @@ export function SideChatPanel({
   const settleFocusRequest = useCallback(() => {
     if (!focusPendingRef.current || !loadedRef.current) return;
     focusPendingRef.current = false;
+    // A dialog, menu or popover opened while the panel loaded owns the keyboard now; it keeps focus.
+    if (shortcutLayerActive(document)) return;
     const target = [textareaRef.current, startRef.current, restartRef.current]
       .find((candidate) => candidate?.isConnected && !candidate.disabled);
     target?.focus();
