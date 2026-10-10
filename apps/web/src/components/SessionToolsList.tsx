@@ -11,11 +11,10 @@ import { backgroundJobCurrentState } from "../background-job-stop.js";
 import { workspaceFolderName } from "../files-panel.js";
 import { runnerDisplay } from "../runners.js";
 import { shortcutDisplay } from "../shortcuts.js";
-import { statusMeta } from "../status-meta.js";
 import { useOptionalStoreSelector } from "../store.js";
 import { IncrementalSubagentProjector } from "../subagents.js";
 import type { TimelineItem } from "../timeline.js";
-import { isCurrentWorker, workerRoster, type WorkerState } from "../worker-roster.js";
+import { workerRoster, workerStatusMeta, type WorkerState } from "../worker-roster.js";
 import {
   SESSION_TOOL_GROUPS,
   SESSION_TOOLS,
@@ -186,8 +185,9 @@ const OLDER_RUNNER_REASONS: Partial<Record<SessionToolId, string>> = {
   terminal: "Needs a newer runner to open a terminal",
 };
 
-/** The most urgent current state first, for the Agents row's one status badge (§11.1). */
-const AGENT_URGENCY: readonly WorkerState[] = ["input_required", "working", "waiting"];
+/** The most urgent live state first, for the Agents row's one status badge (§11.1). An Unverified
+ * agent is not live, so it never takes the badge. */
+const AGENT_URGENCY: readonly WorkerState[] = ["attention", "running"];
 
 interface RowFact {
   text: string;
@@ -239,10 +239,12 @@ function SessionToolsListView({
     return workerRoster(session, unambiguous, [], () => runnerOnline)
       .filter((row) => row.target.kind === "subagent");
   }, [projection, registry, runnerOnline, session]);
-  const urgent = AGENT_URGENCY.find((state) => subagents.some((row) => isCurrentWorker(row) && row.state === state));
+  // The roster's own word for the most urgent agent (#2857): "1 Running", or its attention label,
+  // counting the agents that read the same word.
+  const urgent = AGENT_URGENCY.map((state) => subagents.find((row) => row.state === state)).find(Boolean);
   const agentsBadge = urgent && (() => {
-    const meta = statusMeta("job", urgent);
-    const n = subagents.filter((row) => row.state === urgent).length;
+    const meta = workerStatusMeta(urgent);
+    const n = subagents.filter((row) => row.state === urgent.state && row.attention === urgent.attention).length;
     return <StatusBadge meta={meta} label={`${n} ${meta.label}`} />;
   })();
 
