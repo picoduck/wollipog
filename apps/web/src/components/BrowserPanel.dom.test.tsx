@@ -364,49 +364,77 @@ test("a page that never fires load within 8 seconds shows Page Blocked with Open
   });
 });
 
-describe("an open artifact in the Browser (#2855)", () => {
-  test("its 48px header is the toolbar slot's row, with one back control and the title from the leading edge", async () => {
-    const log = artifact("first", "first body");
+/**
+ * The panel's page stack, its header Back and the page title are RightPanel's, covered with the real
+ * panel in BrowserPanel.panel-back.dom.test.tsx (#2914). Alone, the Browser keeps a stack of its own.
+ */
+describe("an open artifact in the Browser is a page (#2855, #2914)", () => {
+  test("its bar is the toolbar slot's row, with Download and no back or title of its own, over the hidden list", async () => {
+    const first = artifact("first", "first body");
+    const second = artifact("second", "second body");
     const priorExport = api.artifactExport;
-    api.artifactExport = async () => new Blob(["first body"], { type: "text/plain" });
+    const exported: string[] = [];
+    api.artifactExport = async (id: string) => {
+      exported.push(id);
+      return new Blob([id === "first" ? "first body" : "second body"], { type: "text/plain" });
+    };
     try {
-      await withPanel(async () => ({ artifacts: [log] }), async (container) => {
-        await act(async () => { (container.querySelector(".browser-artifact-list .row") as HTMLButtonElement).click(); });
+      await withPanel(async () => ({ artifacts: [first, second] }), async (container) => {
+        const rows = () => [...container.querySelectorAll<HTMLButtonElement>(".browser-artifact-list .row")];
+        assert.deepEqual(rows().map((row) => row.dataset.panelPageKey), ["first", "second"], "each row carries its page key, the artifact's id");
+        await act(async () => { rows()[1]!.click(); });
         await waitForPreviewToSettle(container);
+        assert.deepEqual(exported, ["second"]);
         const bar = container.querySelector(".rpanel-toolbar > .toolbar.art-bar");
-        assert.ok(bar, "the header sits in the toolbar slot, above the one scroller");
-        assert.equal(bar.querySelector(".art-title")?.textContent, "first.log");
+        assert.ok(bar, "the bar sits in the toolbar slot, above the one scroller");
+        assert.deepEqual([...bar.querySelectorAll(":scope > button")].map((button) => button.textContent?.trim()), ["Download"]);
+        assertNoDomNode(bar.querySelector("h2"), "the title is the panel header's");
         const backs = [...container.querySelectorAll("button")].filter((button) =>
           /^Back/u.test(button.getAttribute("aria-label") ?? button.textContent ?? ""));
-        assert.deepEqual(backs.map((button) => button.getAttribute("aria-label")), ["Back to Artifacts"], "exactly one back control");
-        assert.ok(bar.firstElementChild === backs[0], "Back leads the header");
-        assertNoDomNode(container.querySelector(".browser-artifact-head"), "the old head is gone");
+        assert.equal(backs.length, 0, "the panel header's Back is the only back control");
         assert.doesNotMatch(container.textContent ?? "", /‹/u);
+        assertNoDomNode(container.querySelector('[role="tablist"]'), "the tabs give way to the page");
+        assert.equal(rows().length, 2, "the list stays mounted under the page");
+        assert.ok(rows()[1]!.closest("[hidden]"), "hidden");
+        assert.equal(container.querySelectorAll(".rpanel-scroll").length, 1, "the list and the page share the one scroller");
         assert.match(container.querySelector(".rpanel-scroll .art-meta")?.textContent ?? "", /Test log/u, "the meta line scrolls with the body");
+        assert.equal(container.querySelector("pre")?.textContent, "second body");
       });
     } finally {
       api.artifactExport = priorExport;
     }
   });
 
-  test("opening an artifact focuses Back to Artifacts, and Back returns focus to the row it was opened from", async () => {
+  test("a page whose artifact the next session's list doesn't carry gives way to that list", async () => {
     const first = artifact("first", "first body");
-    const second = artifact("second", "second body");
+    const other = artifact("other", "other body");
+    const priorList = api.sessionWorkflowArtifacts;
     const priorExport = api.artifactExport;
-    api.artifactExport = async (id: string) => new Blob([id === "first" ? "first body" : "second body"], { type: "text/plain" });
+    api.sessionWorkflowArtifacts = async (sessionId: string) => ({ artifacts: sessionId === "session_1" ? [first] : [other] });
+    api.artifactExport = async () => new Blob(["first body"], { type: "text/plain" });
+    const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+    domWindow.document.body.append(container as never);
+    const root = createRoot(container);
+    const settle = async () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
     try {
-      await withPanel(async () => ({ artifacts: [first, second] }), async (container) => {
-        const rows = () => [...container.querySelectorAll<HTMLButtonElement>(".browser-artifact-list .row")];
-        await act(async () => { rows()[1]!.click(); });
-        await waitForPreviewToSettle(container);
-        const back = buttonNamed(container, "Back to Artifacts")!;
-        // Booleans, not nodes: a failed comparison of two happy-dom elements inspects their graphs.
-        assert.ok(Object.is(domWindow.document.activeElement, back), "focus lands on Back as the row goes away");
-        await act(async () => back.click());
-        assert.equal(rows().length, 2);
-        assert.ok(Object.is(domWindow.document.activeElement, rows()[1]), "focus returns to the second row");
-      });
+      await act(async () => root.render(<BrowserPanel session={{ id: "session_1" } as SessionView} />));
+      await settle();
+      await act(async () => { container.querySelector<HTMLButtonElement>(".browser-artifact-list .row")!.click(); });
+      await waitForPreviewToSettle(container);
+      await act(async () => root.render(<BrowserPanel session={{ id: "session_2" } as SessionView} />));
+      await settle();
+      await settle();
+      assertNoDomNode(container.querySelector(".art-bar"), "no preview of another session's artifact");
+      const rows = [...container.querySelectorAll<HTMLButtonElement>(".browser-artifact-list .row")];
+      assert.deepEqual(rows.map((row) => row.dataset.panelPageKey), ["other"]);
+      assert.ok(!rows[0]!.closest("[hidden]"), "the list shows");
+      // Opening the new session's artifact still works: the stale page is gone, not stacked under it.
+      await act(async () => rows[0]!.click());
+      assert.ok(container.querySelector(".art-bar"));
     } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      api.sessionWorkflowArtifacts = priorList;
       api.artifactExport = priorExport;
     }
   });

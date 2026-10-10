@@ -5646,6 +5646,8 @@ body.shell-dock-dragging * {
   flex-direction: column;
   gap: var(--space-3);
 }
+/* Under an open artifact's page (#2914) the list stays mounted, hidden, as every tool's does (§4.9). */
+.browser-artifacts[hidden] { display: none; }
 /* The address row is one line at every panel width: the field gives up width, never the buttons. */
 .browser-address > :not(.browser-address-field) { flex: none; }
 .browser-address-field { flex: 1; }
@@ -5733,20 +5735,15 @@ body.shell-dock-dragging * {
   flex: none;
   max-width: none;
 }
-/* The preview (#2855): one 48px header (§4.4) with the title from its leading edge, a plain meta line
-   (§11.3), then the body. In the Browser the header is the toolbar slot's one row. */
+/* The preview (#2855): a plain meta line (§11.3), then the body. In the Browser it is a page of the
+   panel (#2914), whose header carries its Back and title; its one 48px bar is the toolbar slot's row,
+   with Enlarge and Download at the trailing edge. */
 .rpanel-toolbar:has(> .art-bar) { padding-block: 0; }
-.art-bar { height: var(--bar-h); }
-.art-bar > :not(.art-title) { flex: none; }
-.art-title {
-  flex: 1;
-  min-width: 0;
-  margin: 0;
-  overflow: hidden;
-  font: var(--type-section);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.art-bar {
+  justify-content: flex-end;
+  height: var(--bar-h);
 }
+.art-bar > * { flex: none; }
 .art-meta {
   display: flex;
   flex-wrap: wrap;

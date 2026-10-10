@@ -2149,16 +2149,19 @@ value is not in the DOM.
 One anatomy for a workflow artifact, in the Browser tool and in Run detail (#2855,
 `components/ArtifactPreview.tsx`): a header, a meta line and the body.
 
-- **Header.** `.art-bar`, a 48px `.toolbar` (§4.4): in the Browser, **Back to Artifacts** (an
-  `.icon-btn` with `ChevronLeft`), then the title in `--type-section`,
-  left-aligned and truncating, **Enlarge** (`Maximize2`) for an image or HTML preview once shown, and
-  **Download**. The Browser places it in the panel's toolbar slot (§4.9), so it stays put while the
-  meta line and the body scroll. There is one back control at every width: on a phone, whose panel
-  header leads with Back (§4.9), that Back becomes Back to Artifacts while a preview is open and the
-  bar draws none (`usePanelBack`, a tool's back override that #2856's page stack can absorb); on the
-  list it is Back to Session again. Run detail opens the same preview in a `Modal` of size `lg` (a sheet
-  on phones, §7.5), whose title is the artifact's name, with Enlarge before Close and Download and
-  **Done** in the footer.
+- **Header.** In the Browser an open artifact is a page on the panel's stack (§4.9, #2914), keyed by
+  the artifact's id: the panel header's **Back to Browser** and the artifact's name as the page title
+  (`PanelPageTitle`) take the switcher's place, and that Back is the one back control at every width,
+  a 400px panel and a 390px phone alike. The Artifacts and Web Preview tabs give way to the page, and
+  the list waits mounted and hidden under it. Escape pops the page as Back does; focus returns to the
+  artifact's row (`data-panel-page-key`) with the list scrolled where it was. Under the header, the
+  panel's toolbar slot holds `.art-bar`, a 48px `.toolbar` (§4.4) of **Enlarge** (`Maximize2`, for an
+  image or HTML preview once shown) and **Download** at its trailing edge, with no back and no title
+  of its own, so it stays put while the meta line and the body scroll. Being a page, an open artifact
+  clears on a tool switch or when the panel closes, and the Browser reopens on its list; the tab, the
+  address and the open page stay in panel scratch (#1202). Run detail opens the same preview in a
+  `Modal` of size `lg` (a sheet on phones, §7.5), whose title is the artifact's name, with Enlarge
+  before Close and Download and **Done** in the footer.
 - **Meta line.** `.art-meta` (§11.3): the kind (`labelFor`), the size (`formatBytes`), who saved it
   by name ("Claude", "You", a member's name or Wollipog; never a session or user id) and, once the
   bytes match their checksum, `ShieldCheck` **Verified**. The MIME type and the hash are not shown.
