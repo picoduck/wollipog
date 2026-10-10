@@ -149,7 +149,7 @@ export const ComposerTextarea = memo(function ComposerTextarea({
 });
 
 /**
- * The idle phone composer's one-line stand-in: the draft's first words, or the placeholder when
+ * The idle phone composer's one-line stand-in: the draft's first non-empty line, or the placeholder when
  * there is no draft. It shows the text, so it subscribes to it rather than its owner doing so.
  */
 export const ComposerIdlePreview = memo(function ComposerIdlePreview({
@@ -161,7 +161,7 @@ export const ComposerIdlePreview = memo(function ComposerIdlePreview({
   placeholder: string;
   onClick: MouseEventHandler<HTMLButtonElement>;
 }) {
-  const draft = useComposerText(store).trim();
+  const draft = useComposerText(store).trim().split(/\r?\n/, 1)[0]?.trim() ?? "";
   return (
     <ComposerButton
       variant="plain"
