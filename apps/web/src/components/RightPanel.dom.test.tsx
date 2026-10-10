@@ -160,6 +160,7 @@ function PanelHarness({
   selectedRequestKey,
   git: harnessGit = git,
   onState,
+  onOpenTerminal = () => {},
 }: {
   initialSession?: SessionView;
   initialRunnerOnline?: boolean;
@@ -171,6 +172,7 @@ function PanelHarness({
   selectedRequestKey?: string | null;
   git?: GitStatus;
   onState: (state: RightPanelState) => void;
+  onOpenTerminal?: () => void;
 }) {
   const state = useRightPanelState();
   const [session, setSession] = useState(initialSession);
@@ -215,7 +217,7 @@ function PanelHarness({
         onLoadOlderDecisions={() => {}}
         onOpenSourceLocation={() => {}}
         onClearSourceLocation={() => {}}
-        onOpenTerminal={() => {}}
+        onOpenTerminal={onOpenTerminal}
         onInsertSideChatDraft={() => {}}
       /></StoreProvider></ApiProvider>
     </>
@@ -1014,6 +1016,34 @@ test("a Background Work job opens its Job Detail page with Back to Background Wo
     assert.ok(!aside.querySelector<HTMLElement>(".background-work-panel")!.hidden);
     assert.ok(focused() === (row as unknown as Element), "Back returns focus to the job's row");
   } finally {
+    await panel.dispose();
+  }
+});
+
+test("Background Work's Open Terminal closes a phone's panel, which would cover the terminal, and restores an expanded one (#2858)", async () => {
+  let state!: RightPanelState;
+  let terminals = 0;
+  const untracked = { ...liveSession, driver: "codex", backgroundWorkTracking: "untracked" } as unknown as SessionView;
+  const panel = await mountPanel(<PanelHarness initialSession={untracked} onState={(next) => { state = next; }}
+    onOpenTerminal={() => { terminals += 1; }} />);
+  const openTerminal = () => [...panel.container.querySelectorAll<HTMLButtonElement>("#right-panel button")]
+    .find((button) => button.textContent === "Open Terminal")!;
+  try {
+    phoneViewport = true;
+    await act(async () => state.show("background"));
+    await act(async () => openTerminal().click());
+    assert.equal(terminals, 1);
+    assert.equal(state.open, false, "the phone's panel closes so the terminal is on screen");
+
+    phoneViewport = false;
+    await act(async () => state.show("background"));
+    await act(async () => state.setExpanded(true));
+    await act(async () => openTerminal().click());
+    assert.equal(terminals, 2);
+    assert.equal(state.open, true, "a desktop panel stays open");
+    assert.equal(state.expanded, false, "but an expanded one restores, so the chat column and its dock show");
+  } finally {
+    phoneViewport = false;
     await panel.dispose();
   }
 });

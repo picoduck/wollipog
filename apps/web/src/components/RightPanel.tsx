@@ -1042,7 +1042,13 @@ export function RightPanel({
             earlierActivityUnloaded={earlierActivityUnloaded}
             onViewTurn={onViewTurn}
             machineName={machineName}
-            onOpenTerminal={onOpenTerminal}
+            onOpenTerminal={() => {
+              // The terminal docks under the chat column, which a phone's panel covers and an
+              // expanded one replaces, so the panel gives way first (#2858).
+              if (phone) state.close();
+              else if (expanded) state.setExpanded(false);
+              onOpenTerminal();
+            }}
             onOpenMachine={onOpenMachine}
             inventoryError={backgroundInventoryError}
             onRetryInventory={onRetryBackgroundInventory}
