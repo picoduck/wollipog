@@ -2,6 +2,93 @@ import { expect, test } from "@playwright/test";
 import { installInboxFixture } from "./inbox-production-fixture.js";
 import { encodeResourceId } from "../src/navigation.js";
 
+test("a failed lazy reader keeps the desktop Sessions grid and navigation operable @production", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await installInboxFixture(page);
+  let navigations = 0;
+  page.on("request", (request) => {
+    if (request.isNavigationRequest() && request.frame() === page.mainFrame()) navigations++;
+  });
+  let release!: () => void;
+  const pending = new Promise<void>((done) => { release = done; });
+  await page.route("**/assets/SessionDetail-*.js", async (route) => {
+    await pending;
+    await route.abort("internetdisconnected");
+  });
+  await page.goto("/index.html");
+  await page.locator(".inbox-preview-skeleton").focus();
+  await expect(page.locator(".inbox-preview-skeleton")).toBeFocused();
+  release();
+  const notice = page.getByRole("alert").filter({ hasText: "This Session Couldn't Be Shown" });
+  await expect(page.getByRole("alert")).toBeVisible();
+  const grid = page.getByRole("grid", { name: "Sessions", exact: true });
+  await expect(grid).toBeVisible();
+  await expect(notice).toBeVisible();
+  await expect(page.locator(".detail-scroll")).toBeFocused();
+  await expect(grid).toHaveAttribute("aria-rowcount", "20");
+  await expect(page.locator("#page-title")).toHaveText("Sessions");
+  await page.getByRole("button", { name: /Synthetic Session 2\b/ }).click();
+  await expect(grid).toHaveAttribute("aria-activedescendant", `inbox-session-${encodeResourceId("synthetic-2")}`);
+  await grid.focus();
+  await page.keyboard.press("ArrowDown");
+  await expect(grid).toBeFocused();
+  // Titles sort lexically in this deterministic fixture: Session 20 follows Session 2.
+  await expect(grid).toHaveAttribute("aria-activedescendant", `inbox-session-${encodeResourceId("synthetic-20")}`);
+  await expect(notice).toBeVisible();
+  await page.getByRole("radio", { name: "Board", exact: true }).click();
+  await expect(page.locator(".board-wrap")).toBeVisible();
+  await page.getByRole("radio", { name: "List", exact: true }).click();
+  await expect(grid).toBeVisible();
+  await expect(notice).toBeVisible();
+  // Neither selecting another reader nor navigating the shell triggers an automatic reload.
+  expect(navigations).toBe(1);
+  await page.unroute("**/assets/SessionDetail-*.js");
+  await notice.getByRole("button", { name: "Reload Page", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Open Session", exact: true })).toBeVisible();
+  await expect(grid).toBeVisible();
+  await expect(notice).toBeHidden();
+  expect(navigations).toBe(2);
+});
+
+for (const width of [1440, 390]) {
+  test(`a failed expanded reader keeps its heading and Back navigation at ${width}px @production`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await installInboxFixture(page);
+    let release!: () => void;
+    const pending = new Promise<void>((done) => { release = done; });
+    await page.route("**/assets/SessionDetail-*.js", async (route) => {
+      await pending;
+      await route.abort("internetdisconnected");
+    });
+    await page.goto(`/sessions/~${encodeResourceId("synthetic-1")}`);
+    const title = page.locator("#page-title");
+    await expect(title).toBeAttached();
+    await title.focus();
+    await expect(title).toBeFocused();
+    release();
+    const notice = page.getByRole("alert").filter({ hasText: "This Session Couldn't Be Shown" });
+    await expect(page.getByRole("alert")).toBeVisible();
+    await expect(title).toHaveCount(1);
+    await expect(title).toBeFocused();
+    await expect(page.getByRole("grid", { name: "Sessions", exact: true })).toBeHidden();
+    await page.getByRole("button", { name: "Back to Sessions", exact: true }).click();
+    const grid = page.getByRole("grid", { name: "Sessions", exact: true });
+    await expect(grid).toBeVisible();
+    await expect(grid).toBeFocused();
+    await expect(page.locator("#page-title")).toHaveText("Sessions");
+    const secondSession = page.getByRole("button", { name: /Synthetic Session 2\b/ });
+    if (width === 390) await secondSession.click();
+    else await secondSession.dblclick();
+    await expect(notice).toBeVisible();
+    await expect(title).toHaveCount(1);
+    await page.unroute("**/assets/SessionDetail-*.js");
+    await notice.getByRole("button", { name: "Reload Page", exact: true }).click();
+    await expect(page.locator(".session-detail")).toHaveAttribute("data-session-surface-id", "synthetic-2");
+    await expect(page.locator(".composer-input")).toBeAttached();
+    await expect(notice).toBeHidden();
+  });
+}
+
 for (const origin of ["Sessions", "Session", "Stop Turn"] as const) {
   test(`a suspended ${origin} cannot mutate its Session while another route loads @production`, async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
