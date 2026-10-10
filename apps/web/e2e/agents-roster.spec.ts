@@ -110,7 +110,9 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 834, height: 1112
     test.use({ viewport, ...(viewport.width < 1000 ? { hasTouch: true, isMobile: true } : {}) });
     for (const theme of ["dark", "light"]) test(`captures every scene in ${theme}`, async ({ page }) => {
       for (const scene of ["pod", "run", "nested", "offline", "empty"]) {
-        await open(page, scene, theme);
+        await page.goto(`/agents-roster-e2e.html?scene=${scene}&theme=${theme}`);
+        // Also matches the roster before #2857, so the same capture runs against the base commit.
+        await expect(page.locator(".agents-panel :is([role=listitem], .state, p[role=status])").first()).toBeVisible();
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
         await shot(page, `${scene}-${viewport.width}-${theme}`);
       }
