@@ -220,6 +220,7 @@ import { RequestKindIcon, pendingRequestsTitle } from "./requests/request-meta.j
 import { useSoftwareKeyboardOpen } from "./requests/software-keyboard.js";
 import { decideDockedRequest, registerRequestRevealer } from "./requests/request-reveal.js";
 import { useRemovedFocus } from "./useRemovedFocus.js";
+import { useBodyWidth } from "./useBodyWidth.js";
 import { CampaignHeldChildren, type CampaignHeldChild } from "./CampaignHeldChildren.js";
 import { ComposerQuestionResponse } from "./ComposerQuestionResponse.js";
 import { useGovernanceAudit, useGovernanceTimeline } from "./useGovernanceAudit.js";
@@ -2139,22 +2140,7 @@ function SessionDetailLoaded({
   // The summary docks while the session body leaves the reader 560px beside it. The stylesheet's
   // container query lays that out; this mirrors it, so the toggle, focus and scrim agree. A body
   // with no layout (width 0) reports nothing.
-  const [detailBody, setDetailBody] = useState<HTMLDivElement | null>(null);
-  const reportSummaryBodyWidth = pinnedSummary?.reportBodyWidth;
-  useLayoutEffect(() => {
-    if (!detailBody || !reportSummaryBodyWidth) return;
-    const report = (width: number) => {
-      if (width > 0) reportSummaryBodyWidth(width);
-    };
-    report(detailBody.getBoundingClientRect().width);
-    if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver((entries) => {
-      const entry = entries.at(-1);
-      if (entry) report(entry.contentRect.width);
-    });
-    observer.observe(detailBody);
-    return () => observer.disconnect();
-  }, [detailBody, reportSummaryBodyWidth]);
+  const setDetailBody = useBodyWidth(pinnedSummary?.reportBodyWidth);
   const git = useGitStatus(
     gitConsumerSession,
     runnerOnline,
