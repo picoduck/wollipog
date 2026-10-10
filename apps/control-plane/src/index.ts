@@ -3823,15 +3823,12 @@ app.delete("/api/boxes/:id", async (req, reply) => {
   return reply.code(204).send();
 });
 
-app.get("/api/sessions", async (req) => {
+app.get("/api/sessions", async (req,reply) => {
   const includeArchived = (req.query as { archived?: string })?.archived === "true";
   const principal = requestPrincipal(req);
-  return {
-    sessions: principal
-      ? db.listSessionsForPrincipal(principal, includeArchived)
-        .map((session) => withSessionCommandPermissions(db, principal, session))
-      : [],
-  };
+  return reply.type("application/json").send(principal
+    ? db.sessionListJsonForPrincipal(principal,includeArchived)
+    : '{"sessions":[]}');
 });
 
 app.get("/api/sessions/archive-page", async (req, reply) => {

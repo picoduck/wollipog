@@ -36,6 +36,7 @@
     "test:e2e:production": "playwright test --config playwright.production.config.ts",
     "benchmark:admission": "node --import tsx apps/runner/scripts/admission-diagnostics-benchmark.ts",
     "benchmark:event-ingest": "node --import tsx apps/control-plane/scripts/event-ingest-benchmark.ts",
+    "benchmark:session-list": "node --import tsx apps/control-plane/scripts/session-list-benchmark.ts",
     "benchmark:session-store": "node --import tsx apps/runner/scripts/session-store-append-benchmark.ts",
     "benchmark:event-payload": "node --expose-gc --import tsx apps/control-plane/scripts/event-payload-benchmark.ts",
     "probe:claude-mcp-image": "node --import tsx apps/runner/scripts/claude-mcp-image-probe.ts",

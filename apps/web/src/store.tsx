@@ -333,6 +333,8 @@ export interface State {
   snapshotLoaded: boolean;
   /** Monotonic reconnect generation used to revalidate REST-only routed resources. */
   snapshotRevision: number;
+  /** Session ids received in this connection's incomplete initial inventory. */
+  pendingSnapshotSessionIds?: Set<string>;
   /** True only when the connected control plane advertises an authoritative Project inventory.
    * PR 2 uses false to retain exact runner/workspace grouping against older control planes. */
   projectsSupported: boolean;
@@ -1163,11 +1165,11 @@ function reducer(state: State, action: Action): State {
           // detail mounted across reconnect; SessionDetail revalidates it against the exact REST
           // endpoint for this snapshot generation and removes it on an authoritative 404.
           const routedSession = state.view.name === "session" ? state.sessions.get(state.view.id) : undefined;
-          if (routedSession?.archived && !sessions.has(routedSession.id)) {
+          if ((routedSession?.archived || msg.sessionsComplete === false && routedSession) && !sessions.has(routedSession.id)) {
             sessions.set(routedSession.id, routedSession);
           }
           const activity = state.activity;
-          for (const sessionId of [...activity.keys()]) {
+          for (const sessionId of msg.sessionsComplete === false ? [] : [...activity.keys()]) {
             if (!sessions.has(sessionId)) activity.delete(sessionId);
           }
           for (const session of sessions.values()) {
@@ -1185,6 +1187,7 @@ function reducer(state: State, action: Action): State {
           const eventHistory = new Map(state.eventHistory);
           for (const sessionId of new Set([...events.keys(), ...eventEpochs.keys(), ...eventHistory.keys()])) {
             const session = sessions.get(sessionId);
+            if (!session && msg.sessionsComplete === false) continue;
             if (!session) {
               events.delete(sessionId);
               eventEpochs.delete(sessionId);
@@ -1232,9 +1235,10 @@ function reducer(state: State, action: Action): State {
             activityObservationStartedAt: new Map<string, number>(),
             streamRecoveryCursors: new Map(),
             pendingStreamRecovery: null,
-            snapshotLoaded: true,
+            snapshotLoaded: msg.sessionsComplete !== false,
             currentTurnOpeningSupported: msg.capabilities?.currentTurnOpening === true,
             snapshotRevision: state.snapshotRevision + 1,
+            pendingSnapshotSessionIds: msg.sessionsComplete === false ? new Set(msg.sessions.map((session) => session.id)) : undefined,
             projectsSupported: msg.capabilities?.projects === true || msg.projects !== undefined,
             projectLocationCreationSupported: msg.capabilities?.createProjectLocations === true,
             accessScopeManagementSupported: msg.capabilities?.accessScopeManagement === true,
@@ -1326,6 +1330,43 @@ function reducer(state: State, action: Action): State {
           const projects = new Map(state.projects);
           projects.delete(msg.projectId);
           return { ...state, projects };
+        }
+        case "session_snapshot_page": {
+          if (!state.pendingSnapshotSessionIds) return state;
+          const received = new Set(state.pendingSnapshotSessionIds);
+          const sessions = new Map(state.sessions);
+          const events = new Map(state.events);
+          const eventEpochs = new Map(state.eventEpochs);
+          const eventHistory = new Map(state.eventHistory);
+          const eventWindows = new Map(state.eventWindows);
+          for (const session of msg.sessions) {
+            received.add(session.id);
+            const previous = sessions.get(session.id);
+            sessions.set(session.id,session);
+            state.activity.set(session.id,reconcileSessionActivity(state.activity.get(session.id),previous,session));
+            const epoch = sessionEventEpoch(session);
+            if ((eventEpochs.get(session.id) ?? eventHistory.get(session.id)?.eventEpoch ?? 0) !== epoch) {
+              events.delete(session.id);
+              eventHistory.delete(session.id);
+              eventWindows.delete(session.id);
+            }
+            eventEpochs.set(session.id,epoch);
+          }
+          if (msg.complete) {
+            for (const [id,session] of sessions) {
+              if (!received.has(id) && !session.archived) sessions.delete(id);
+            }
+            for (const id of new Set([...events.keys(),...eventHistory.keys(),...eventEpochs.keys(),...state.activity.keys()])) {
+              if (sessions.has(id)) continue;
+              events.delete(id);
+              eventHistory.delete(id);
+              eventEpochs.delete(id);
+              eventWindows.delete(id);
+              state.activity.delete(id);
+            }
+          }
+          return pruneViewStreams({ ...state,sessions,events,eventEpochs,eventHistory,eventWindows,
+            snapshotLoaded: msg.complete,pendingSnapshotSessionIds: msg.complete ? undefined : received });
         }
         case "session_upsert": {
           const sessions = new Map(state.sessions);
@@ -2801,12 +2842,15 @@ export function StoreProvider({
         try {
           const msg = JSON.parse(ev.data as string) as ControlPlaneToUi;
           store.receiveFrame(msg, Date.now());
-          const sessions: readonly SessionView[] = msg.type === "snapshot"
+          const sessions: readonly SessionView[] = msg.type === "snapshot" || msg.type === "session_snapshot_page"
             ? msg.sessions
             : msg.type === "session_upsert"
               ? [msg.session]
               : [];
-          sendDueBackgroundObservations(sessions, msg.type === "snapshot");
+          const completeInventory = msg.type === "snapshot" && msg.sessionsComplete !== false ||
+            msg.type === "session_snapshot_page" && msg.complete;
+          sendDueBackgroundObservations(msg.type === "session_snapshot_page" && msg.complete
+            ? [...store.getState().sessions.values()] : sessions, completeInventory);
         } catch {
           /* ignore malformed */
         }

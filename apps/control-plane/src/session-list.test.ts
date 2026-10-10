@@ -1,0 +1,202 @@
+import assert from "node:assert/strict";
+import { DatabaseSync } from "node:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+import { PROTOCOL_VERSION, DEFAULT_ORCHESTRATOR_DEFAULTS } from "@wollipog/protocol";
+import { ControlPlaneDb } from "./db.js";
+import { Hub, MAX_UI_BUFFERED_BYTES, serializeUiSnapshot, type Socket } from "./hub.js";
+import { LOCAL_OWNER_USER_ID, PERSONAL_ORGANIZATION_ID, type HumanPrincipal, type AgentPrincipal } from "./identity.js";
+import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
+import { withSessionCommandPermissions } from "./session-command-permissions.js";
+
+export const sessionListPrincipal: HumanPrincipal = {
+  kind: "human", actorId: LOCAL_OWNER_USER_ID, userId: LOCAL_OWNER_USER_ID, userName: "Synthetic Owner",
+  organizationId: PERSONAL_ORGANIZATION_ID, organizationName: "Synthetic", role: "owner",
+  deviceId: null, localBootstrap: true,
+};
+
+export function seedSessionList(db: ControlPlaneDb, count: number): void {
+  db.registerRunner({ runnerId: "r", hostname: "synthetic", os: "linux", version: "test", workspaces: [], agents: [] },1,PROTOCOL_VERSION);
+  for (let index=0; index<count; index++) db.createSession({
+      id: `s-${index}`, runnerId: "r", workspaceId: null, agentId: null, title: `Synthetic Session ${index}`,
+      useWorktree: false, driver: "codex-app-server", config: {}, now: index+1,
+  });
+}
+
+test("summary SQL count stays constant and heavy fields remain on detail", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    seedSessionList(db,2000);
+    db.raw().prepare("UPDATE sessions SET agent_capabilities=?, worktrees=? WHERE id='s-0'")
+      .run(JSON.stringify({ slashCommands: [{ name: "large",description: "x".repeat(1_000_000) }] }),"[]");
+    const source = db as unknown as { stmt(sql: string): unknown };
+    const original = source.stmt.bind(db);
+    let queries=0;
+    source.stmt = (sql) => { queries++; return original(sql); };
+    const summaries = db.listSessionSummaries(sessionListPrincipal);
+    assert.equal(queries,7);
+    assert.equal(summaries.length,2000);
+    const row = summaries.find((session) => session.id === "s-0")!;
+    assert.equal(row.projection,"summary");
+    assert.equal(row.agentCapabilities,undefined);
+    assert.equal(row.worktrees,undefined);
+    assert.ok(JSON.stringify(row).length < 4000);
+    assert.equal(db.getSession("s-0")!.agentCapabilities?.slashCommands?.[0]?.description?.length,1_000_000);
+  } finally { db.close(); }
+});
+
+test("team membership changes invalidate cached REST JSON, including other SQLite connections", () => {
+  const directory = mkdtempSync(join(tmpdir(), "session-summary-access-"));
+  const path = join(directory, "sessions.db");
+  const db = ControlPlaneDb.open(path);
+  const external = new DatabaseSync(path);
+  try {
+    seedSessionList(db, 1);
+    db.createIdentityTeam({ teamId: "team", organizationId: PERSONAL_ORGANIZATION_ID,
+      name: "Synthetic Team", memberUserIds: [LOCAL_OWNER_USER_ID], now: 1 });
+    db.raw().prepare("UPDATE session_ownership SET owner_kind='team',owner_id='team' WHERE session_id='s-0'").run();
+    const member = { ...sessionListPrincipal, role: "operator" as const };
+    assert.equal(JSON.parse(db.sessionListJsonForPrincipal(member)).sessions.length, 1);
+    external.prepare("DELETE FROM identity_team_members WHERE team_id='team'").run();
+    assert.equal(JSON.parse(db.sessionListJsonForPrincipal(member)).sessions.length, 0);
+    db.updateIdentityTeamMembers({ teamId: "team", organizationId: PERSONAL_ORGANIZATION_ID,
+      memberUserIds: [LOCAL_OWNER_USER_ID], now: 2 });
+    assert.equal(JSON.parse(db.sessionListJsonForPrincipal(member)).sessions.length, 1);
+    assert.equal(JSON.parse(db.sessionListJsonForPrincipal({ ...member, userId: "outsider" })).sessions.length, 0);
+  } finally { external.close(); db.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("access loss between snapshot pages closes the stream before sending private rows", async () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    seedSessionList(db, 2);
+    const frames: string[] = [];
+    let next: (() => void) | undefined;
+    let closed: number | undefined;
+    const hub = new Hub(db);
+    hub.addUiClient({ asyncDelivery: true, send(data, done) { frames.push(data); next = done; } }, {
+      principal: { ...sessionListPrincipal, role: "operator" }, deviceId: null,
+      uiProtocolVersion: PROTOCOL_VERSION, close(code) { closed = code; },
+    });
+    while (!frames.length && closed === undefined) await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(JSON.parse(frames[0]!).type, "snapshot");
+    db.raw().prepare("UPDATE session_ownership SET owner_id='outsider' WHERE session_id='s-0'").run();
+    next?.();
+    assert.equal(closed, 1012);
+    assert.equal(frames.length, 1, "no captured authorized page is sent after access loss");
+  } finally { db.close(); }
+});
+
+test("summary child owners preserve ambiguous and duplicate request identity", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    seedSessionList(db, 1);
+    for (const [now, parentToolUseId] of [[2, "parent-a"], [3, "parent-b"]] as const) {
+      db.appendEvent("s-0", { kind: "tool_call", toolCallId: "duplicate", parentToolUseId,
+        title: "Task", toolKind: "agent", status: "running", subagentName: "Unsafe" }, now);
+    }
+    db.setPendingApproval("s-0", { requestId: "first", ownerToolUseId: "duplicate", title: "Allow?", options: [],
+      additionalRequests: [{ requestId: "second", ownerToolUseId: "duplicate", title: "Allow?", options: [] }] });
+    assert.deepEqual(db.listSessionSummaries(sessionListPrincipal)[0]!.attentionOwners,
+      db.getSession("s-0")!.attentionOwners);
+  } finally { db.close(); }
+});
+
+test("background summary recovery and observation metadata match the detail's actionable deliveries", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    seedSessionList(db, 1);
+    db.updateSessionFromSnapshot("s-0", { ...db.getSession("s-0")!, config: {}, seq: 0,
+      backgroundWorkState: "running", backgroundJobs: [
+        { id: "shell", parentTurnId: "turn", runnerId: "r", workspaceId: null, launchType: "shell",
+          registeredAt: 100, terminalStatus: "completed", terminalObservedAt: 110, continuationRequired: true },
+        { id: "monitor", parentTurnId: "turn", runnerId: "r", workspaceId: null, launchType: "monitor", registeredAt: 100 },
+      ] }, 200);
+    const summary = db.listSessionSummaries(sessionListPrincipal)[0]!;
+    const detail = db.getSession("s-0")!;
+    assert.deepEqual(summary.backgroundDeliveries, detail.backgroundDeliveries);
+    assert.deepEqual(summary.attention?.humanActions, detail.attention?.humanActions);
+    const legacyFrames: string[] = [];
+    new Hub(db).addUiClient({ send(data) { legacyFrames.push(data); } }, {
+      principal: sessionListPrincipal, deviceId: null, uiProtocolVersion: PROTOCOL_VERSION - 1, close() { assert.fail("legacy closed"); },
+    });
+    assert.equal(legacyFrames.length, 1);
+    assert.equal(JSON.parse(legacyFrames[0]!).sessions[0].projection, undefined);
+  } finally { db.close(); }
+});
+
+test("summary audiences, ownership verdicts, result acknowledgments and delegated requests match detail", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    seedSessionList(db,3);
+    db.raw().prepare("INSERT INTO session_role_conversions(session_id,conversion_id,command,state,created_at) VALUES ('s-1','conversion',?,'preparing',1)")
+      .run(JSON.stringify({ targetRole: "orchestrator" }));
+    assert.deepEqual(db.listSessionSummaries(sessionListPrincipal).find((session) => session.id === "s-1")!.roleConversion,
+      { targetRole: "orchestrator", phase: "preparing" });
+    db.raw().prepare("UPDATE session_ownership SET owner_kind='user',owner_id='other' WHERE session_id='s-2'").run();
+    const member = { ...sessionListPrincipal,role: "operator" as const };
+    assert.deepEqual(db.listSessionsForPrincipal(member).map((s) => s.id),["s-1","s-0"]);
+    for (const row of db.listSessionsForPrincipal(sessionListPrincipal)) {
+      assert.deepEqual(row.commandPermissions,withSessionCommandPermissions(db,sessionListPrincipal,db.getSession(row.id)!).commandPermissions);
+    }
+    db.appendEvent("s-0",{ kind: "agent_message", text: "Result",final: true },10);
+    db.appendEvent("s-0",{ kind: "agent_response_completed" },11);
+    const revision = db.getSession("s-0")!.attention!.result!.revision;
+    db.acknowledgeSessionResult("s-0",LOCAL_OWNER_USER_ID,revision,12);
+    assert.deepEqual(db.listSessionsForPrincipal(member).find((s) => s.id === "s-0")!.attention,
+      db.sessionAttentionForUser(db.getSession("s-0")!,LOCAL_OWNER_USER_ID).attention);
+    db.createSession({ id: "parent", runnerId: "r", workspaceId: null, agentId: null,title: "Parent",useWorktree: false,
+      driver: "codex-app-server",config: {},now: 13,role: "orchestrator",
+      orchestratorPolicy: resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS,"system_default") });
+    db.raw().prepare("UPDATE sessions SET parent_session_id='parent' WHERE id='s-0'").run();
+    db.raw().prepare("UPDATE sessions SET parent_control='questions_and_approvals' WHERE id='parent'").run();
+    db.setPendingApproval("s-0",{ requestId: "q",kind: "question", title: "Question",options: [],
+      questions: [{ id: "q",question: "Which implementation?",options: [] }] });
+    const summary = db.listSessionsForPrincipal(member).find((s) => s.id === "s-0")!;
+    assert.deepEqual(summary.pendingRequestOwners,db.getSession("s-0")!.pendingRequestOwners);
+    assert.equal(summary.pendingApproval?.requestId,"q");
+    assert.equal(summary.pendingApproval?.questions,undefined);
+    assert.equal(summary.attention?.result?.owner,"orchestrator");
+    const agent: AgentPrincipal = { kind: "agent",actorId: "agent",organizationId: PERSONAL_ORGANIZATION_ID,
+      credentialSessionId: "parent",orchestrator: true,delegatedScope: {
+        organizationId: PERSONAL_ORGANIZATION_ID,owner: { kind: "user",userId: LOCAL_OWNER_USER_ID } } };
+    for (const row of db.listSessionsForPrincipal(agent)) assert.deepEqual(row.commandPermissions,
+      withSessionCommandPermissions(db,agent,db.getSession(row.id)!).commandPermissions);
+    assert.equal(db.listSessionsForPrincipal({ ...agent,organizationId: "other-org" }).length,0);
+  } finally { db.close(); }
+});
+
+test("dashboard frames are byte bounded, share a principal snapshot, and invalidate after writes", async () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    seedSessionList(db,2000);
+    const hub = new Hub(db);
+    let reads=0;
+    const original = db.listSessionSummaries.bind(db);
+    const originalAsync = db.listSessionSummariesAsync.bind(db);
+    db.listSessionSummariesAsync = (...args) => { reads++; return originalAsync(...args); };
+    const callbacks: Array<() => void> = [];
+    const frames: string[][] = [];
+    for (let index=0; index<4; index++) {
+      frames.push([]);
+      const socket: Socket = { asyncDelivery: true,send(data,done) { frames[index]!.push(data); if (done) callbacks.push(() => done()); } };
+      assert.equal(hub.addUiClient(socket,{ principal: sessionListPrincipal,deviceId: null,uiProtocolVersion: PROTOCOL_VERSION,close: () => assert.fail("unexpected close") }),true);
+    }
+    while (!frames[0]!.length) await new Promise<void>((resolve) => setImmediate(resolve));
+    while (callbacks.length) callbacks.shift()!();
+    assert.equal(reads,1);
+    for (const sent of frames) {
+      assert.deepEqual(sent,frames[0]);
+      assert.ok(sent.every((frame) => Buffer.byteLength(frame)<=MAX_UI_BUFFERED_BYTES));
+      assert.equal(sent.flatMap((frame) => JSON.parse(frame).sessions ?? []).length,2000);
+    }
+    db.raw().prepare("UPDATE sessions SET title='Updated' WHERE id='s-0'").run();
+    hub.addUiClient({ send() {} },{ principal: sessionListPrincipal,deviceId: null,uiProtocolVersion: PROTOCOL_VERSION,close() {} });
+    assert.equal(reads,2);
+    const huge = { type: "snapshot" as const,runners: [],boxes: [],sessions: [{ ...original()[0]!,title: "x".repeat(MAX_UI_BUFFERED_BYTES) }],runs: [] };
+    assert.equal(serializeUiSnapshot(huge,true),null);
+    assert.equal(serializeUiSnapshot(huge,false),null);
+  } finally { db.close(); }
+});

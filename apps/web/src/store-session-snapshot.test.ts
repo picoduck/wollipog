@@ -1,0 +1,43 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import type { SessionView } from "@wollipog/protocol";
+import { Store } from "./store.js";
+
+const session=(id: string,eventEpoch=1): SessionView => ({ id,eventEpoch,status: "idle",title: id } as SessionView);
+test("paged snapshots retain the routed history until its row arrives and reconcile inventory at completion", () => {
+  const store=new Store({ name: "session",id: "active" });
+  store.dispatch({ type: "msg",msg: { type: "snapshot",capabilities: { sessionSubscriptions: true },
+    runners: [],boxes: [],sessions: [session("active"),session("removed")],runs: [] } });
+  store.dispatch({ type: "msg",msg: { type: "session_event",event: {
+    id: 1,sessionId: "active",seq: 1,ts: 1,payload: { kind: "agent_message",text: "Retained" },
+  } } });
+  store.dispatch({ type: "msg",msg: { type: "snapshot",sessionsComplete: false,
+    capabilities: { sessionSubscriptions: true },runners: [],boxes: [],sessions: [],runs: [] } });
+  assert.equal(store.getState().snapshotLoaded,false);
+  assert.equal(store.getState().events.get("active")?.[0]?.seq,1);
+  store.dispatch({ type: "msg",msg: { type: "session_snapshot_page",sessions: [session("other")],complete: false } });
+  assert.equal(store.getState().snapshotLoaded,false);
+  store.dispatch({ type: "msg",msg: { type: "session_snapshot_page",sessions: [{ ...session("active"),projection: "summary" }],complete: true } });
+  assert.equal(store.getState().snapshotLoaded,true);
+  assert.deepEqual([...store.getState().sessions.keys()].sort(),["active","other"]);
+  assert.equal(store.getState().events.get("active")?.[0]?.seq,1);
+  assert.equal(store.getState().sessions.get("active")?.projection,"summary");
+});
+
+test("a page invalidates a replaced timeline and final absence removes a stale routed session", () => {
+  const store=new Store({ name: "session",id: "active" });
+  const header={ type: "snapshot" as const,capabilities: { sessionSubscriptions: true },runners: [],boxes: [],sessions: [session("active")],runs: [] };
+  store.dispatch({ type: "msg",msg: header });
+  store.dispatch({ type: "msg",msg: { type: "session_event",event: {
+    id: 1,sessionId: "active",seq: 1,ts: 1,payload: { kind: "agent_message",text: "Old" },
+  } } });
+  store.dispatch({ type: "msg",msg: { ...header,sessions: [],sessionsComplete: false } });
+  store.dispatch({ type: "msg",msg: { type: "session_snapshot_page",sessions: [session("active",2)],complete: true } });
+  assert.equal(store.getState().events.has("active"),false);
+  store.dispatch({ type: "msg",msg: { ...header,sessions: [],sessionsComplete: false } });
+  store.dispatch({ type: "msg",msg: { type: "session_snapshot_page",sessions: [session("other")],complete: true } });
+  assert.equal(store.getState().sessions.has("active"),false);
+  assert.equal(store.getState().eventEpochs.has("active"),false);
+  store.dispatch({ type: "msg",msg: { type: "session_snapshot_page",sessions: [session("stale")],complete: true } });
+  assert.equal(store.getState().sessions.has("stale"),false,"pages outside an initial inventory are ignored");
+});

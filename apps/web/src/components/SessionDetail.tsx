@@ -726,6 +726,7 @@ export function SessionDetail(props: SessionDetailProps) {
   // children four times a second while an agent streams (#2872). The parts that show one of those
   // fields read it through `useLiveSession`.
   const session = useStoreSelector((s) => s.sessions.get(sessionId), sessionEqualIgnoringStreaming);
+  const needsDetail = !session || session.projection === "summary" || Boolean(session.archived);
   const conn = useStoreSelector((s) => s.conn);
   const snapshotRevision = useStoreSelector((s) => s.snapshotRevision);
   const snapshotLoaded = useStoreSelector((s) => s.snapshotLoaded);
@@ -743,7 +744,7 @@ export function SessionDetail(props: SessionDetailProps) {
   // new snapshot generation so a deletion missed while offline still becomes authoritative.
   useEffect(() => {
     if (!shouldHydrateRoutedSession(session, snapshotRevision, conn)) return;
-    const lookupKey = JSON.stringify([sessionId, snapshotRevision, conn, lookupAttempt]);
+    const lookupKey = JSON.stringify([sessionId, snapshotRevision, conn, lookupAttempt, needsDetail]);
     if (lastLookupKeyRef.current === lookupKey) return;
     lastLookupKeyRef.current = lookupKey;
     let current = true;
@@ -757,15 +758,20 @@ export function SessionDetail(props: SessionDetailProps) {
       .catch((cause: unknown) => {
         if (!current) return;
         const notFound = cause instanceof ApiError && cause.status === 404;
-        if (notFound && session) {
+        if (notFound) {
           dispatch({ type: "msg", msg: { type: "session_removed", sessionId } });
         }
         setRoutedSessionLookup({ sessionId, complete: true, error: notFound ? null : (cause as Error).message });
       });
-    return () => { current = false; };
-  }, [api, sessionId, session, loadSession, dispatch, conn, snapshotRevision, lookupAttempt]);
+    return () => {
+      current = false;
+      if (lastLookupKeyRef.current === lookupKey) lastLookupKeyRef.current = null;
+    };
+  // Summary pages and live list updates can replace a row during its lookup. They must not cancel
+  // that in-flight detail read unless whether the row needs hydration actually changed.
+  }, [api, sessionId, needsDetail, loadSession, dispatch, conn, snapshotRevision, lookupAttempt]);
 
-  if (!session) {
+  if (!session || session.projection === "summary") {
     return (
       <SessionPlaceholder
         sessionId={sessionId}

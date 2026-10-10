@@ -1311,7 +1311,8 @@ export function InboxView({
   const openTopRequest = useCallback((sessionId: string) => {
     const targetSession = sessions.get(sessionId);
     if (!targetSession) return;
-    const top = prioritizedPendingRequests(targetSession.pendingApproval)[0];
+    const top = prioritizedPendingRequests(targetSession.pendingApproval)[0] ??
+      [...(targetSession.attention?.humanActions ?? [])].sort((a,b) => a.rank-b.rank)[0];
     if (top) openRequest(targetSession, top.requestId);
     else expand(sessionId);
   }, [expand, openRequest, sessions]);
@@ -1319,7 +1320,11 @@ export function InboxView({
   // One-key triage acts on the TOP-PRIORITY request, not the first to arrive (#896): a session
   // with several pending requests used to be untouchable from the keyboard.
   const decide = useCallback(async (sessionId: string, intent: InboxApprovalIntent) => {
-    const targetSession = sessions.get(sessionId);
+    let targetSession = sessions.get(sessionId);
+    if (targetSession?.projection === "summary") {
+      targetSession = (await api.session(sessionId)).session;
+      loadSession(targetSession);
+    }
     const approval = targetSession ? prioritizedPendingRequests(targetSession.pendingApproval)[0] : undefined;
     if (!targetSession || !approval) return;
     // Opening a question to read it stays available; answering and deciding do not (#1857).

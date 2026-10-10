@@ -1126,6 +1126,14 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   const { socket: ui, inbox: uiInbox } = await openSocketWithInbox(authenticatedUiUrl(wsBase, ownerToken));
   sockets.add(ui);
   const snapshot = await uiInbox.take((message) => message.type === "snapshot");
+  if (snapshot.sessionsComplete === false) {
+    const sessions = snapshot.sessions as JsonObject[];
+    for (;;) {
+      const page = await uiInbox.take((message) => message.type === "session_snapshot_page");
+      sessions.push(...page.sessions as JsonObject[]);
+      if (page.complete) break;
+    }
+  }
   assert.doesNotMatch(
     output,
     /ServerResponse has an already assigned socket|websocket upgrade failed/u,

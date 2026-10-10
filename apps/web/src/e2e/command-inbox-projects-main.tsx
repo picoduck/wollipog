@@ -75,6 +75,8 @@ import { DIFF_SECTIONS_STATUS_FILES, diffSectionsDiff } from "./diff-sections-fi
 import { checkoutFindings, inMemoryReviewFindings } from "./review-findings-fixture.js";
 
 const FIXTURE_QUERY = new URLSearchParams(window.location.search);
+const SESSION_SUMMARIES = FIXTURE_QUERY.get("sessionSummaries") === "1";
+let sessionDetailLookups = 0;
 const SCENARIO = FIXTURE_QUERY.get("scenario");
 // Reader restoration exercises the current protocol; unrelated fixtures retain legacy delivery.
 const SYNTHETIC_HISTORY_GAP = SCENARIO === "paused-history-gap";
@@ -1207,7 +1209,20 @@ class FixtureSocket implements UiSocket {
   constructor() {
     window.setTimeout(() => {
       this.onopen?.();
-      this.push(snapshot());
+      const initial = snapshot();
+      if (SESSION_SUMMARIES) {
+        this.push({ ...initial, sessions: [], sessionsComplete: false });
+        const sessions = initial.sessions.map((session): SessionView => ({
+          ...session, projection: "summary", agentCapabilities: undefined, worktrees: undefined,
+          queued: undefined, pendingPrompts: undefined, steeringAttempts: undefined,
+          pendingApproval: session.pendingApproval ? {
+            requestId: session.pendingApproval.requestId, kind: session.pendingApproval.kind,
+            title: session.pendingApproval.title, options: [],
+          } : null,
+        }));
+        this.push({ type: "session_snapshot_page", sessions: sessions.slice(0, 1), complete: false });
+        this.push({ type: "session_snapshot_page", sessions: sessions.slice(1), complete: true });
+      } else this.push(initial);
     }, 0);
   }
   send(data: string): void {
@@ -2068,6 +2083,10 @@ const client = {
     return structuredClone(created);
   },
   session: async (id: string) => {
+    sessionDetailLookups++;
+    if (FIXTURE_QUERY.has("detailDelay")) {
+      await new Promise((resolve) => window.setTimeout(resolve, Number(FIXTURE_QUERY.get("detailDelay"))));
+    }
     if (SESSION_LOOKUP_MODE === "pending") return new Promise<never>(() => {});
     if (SESSION_LOOKUP_MODE === "error" && !sessionLookupFailed) {
       sessionLookupFailed = true;
@@ -2813,6 +2832,7 @@ declare global {
     /** Raises toasts through the real provider, for the placement and stacking specs. */
     __WOLLIPOG_TOASTS_E2E__?: { show(message: string, options?: Omit<ToastOptions, "action"> & { actionLabel?: string }): number };
     __WOLLIPOG_PROJECT_INBOX_E2E__: {
+      sessionDetailLookups(): number;
       failOfflineAttempt(): void;
       failNextProjectUpdate(message?: string): void;
       updateProject(id: string, patch: Partial<Pick<ProjectView, "name" | "hidden" | "childSessionDefaults" | "memorySharing">>): void;
@@ -2934,6 +2954,7 @@ declare global {
 }
 
 window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
+  sessionDetailLookups: () => sessionDetailLookups,
   failOfflineAttempt() { offlineBannerSocket?.onclose?.({ code: 1006 }); },
   workspaceMoveCount: () => workspaceMoveCount,
   setIdentityTeams(teams) {

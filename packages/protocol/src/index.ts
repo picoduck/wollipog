@@ -661,7 +661,9 @@
 //      exactly that request, so a Decision Record names its decider per occurrence. Additive +
 //      optional: older runners ignore the field and older control planes send none; such
 //      resolutions name nobody, as before.
-export const PROTOCOL_VERSION = 211;
+// 212: lightweight session summaries and byte-bounded dashboard snapshot pages (#2769).
+export const PROTOCOL_VERSION = 212;
+export const SESSION_SUMMARY_UI_PROTOCOL = 212;
 export const SKILL_REPORT_REQUEST_LIFETIME_MS = 30_000;
 export const MAX_SKILL_REPORT_REQUESTS = 64;
 export { boundedIssueNumbers, epicChecklistMembers, normalizeCampaignIssueScopeSnapshot } from "./campaign-issue-scope.js";
@@ -6695,6 +6697,9 @@ export interface SessionAttentionSummary {
 
 /** Denormalised session record for the UI (board cards + lists). */
 export interface SessionView {
+  /** Lightweight list projection. Open the authorized detail endpoint before rendering controls
+   * that depend on request bodies, provider capabilities, queues, or campaign inventories. */
+  projection?: "summary";
   /** Omitted by older peers. Absence never implies an outstanding result. */
   attention?: SessionAttentionSummary;
   id: string;
@@ -10414,6 +10419,8 @@ export type ControlPlaneToRunner =
 
 export interface UiSnapshotMessage {
   type: "snapshot";
+  /** False while session_snapshot_page messages complete this connection's initial inventory. */
+  sessionsComplete?: boolean;
   /** Additive UI-channel capabilities. Absent on older control planes. */
   capabilities?: {
     sessionSubscriptions?: boolean;
@@ -10457,6 +10464,12 @@ export interface UiSnapshotMessage {
   runs: RunView[];
   /** Optional only for compatibility with pre-pod control planes. */
   pods?: PodView[];
+}
+
+export interface UiSessionSnapshotPageMessage {
+  type: "session_snapshot_page";
+  sessions: SessionView[];
+  complete: boolean;
 }
 
 export interface UiRunnerUpsertMessage {
@@ -10598,6 +10611,7 @@ export interface UiSessionSubscriptionsAppliedMessage {
 
 export type ControlPlaneToUi =
   | UiSnapshotMessage
+  | UiSessionSnapshotPageMessage
   | UiRunnerUpsertMessage
   | UiRunnerRemovedMessage
   | UiBoxUpsertMessage
