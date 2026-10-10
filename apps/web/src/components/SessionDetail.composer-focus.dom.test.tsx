@@ -217,8 +217,11 @@ interface FixtureOptions {
   client?: Partial<ApiClient>;
   mainEventPayloads?: SessionEvent["payload"][];
   rightPanelMode?: "launcher" | "sidechat" | "background";
-  /** The side panel is expanded over the chat column (#2845); Restore Panel calls are recorded. */
-  rightPanelExpanded?: { calls: boolean[] };
+  /**
+   * The side panel is expanded over the chat column (#2845); Restore Panel calls are recorded. `value`
+   * (default true) can change between renders.
+   */
+  rightPanelExpanded?: { calls: boolean[]; value?: boolean };
   composerDraftCleanup?: typeof deleteComposerDraftIfMatches;
   sessionCapabilities?: SessionView["agentCapabilities"];
   sessionPatch?: Partial<SessionView>;
@@ -317,7 +320,7 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
     show() {},
     setMode() {},
     setWidth() {},
-    expanded: options.rightPanelExpanded != null,
+    get expanded() { return options.rightPanelExpanded ? options.rightPanelExpanded.value ?? true : false; },
     setExpanded(value: boolean) { options.rightPanelExpanded?.calls.push(value); },
     setDragging() {},
     close() {},
@@ -6988,4 +6991,33 @@ test("the reader's keys are off while an expanded side panel hides the reader (#
       await unmountFixture(fixture);
     }
   }
+});
+
+test("expanding the side panel over the composer ends dictation (#2845)", async () => {
+  await withTrackedRecognition(async () => {
+    const draft = deferred<ComposerDraft | null>();
+    const expanded = { calls: [] as boolean[], value: false };
+    const fixture = await mountFixture(draft, {
+      sessionCapabilities: PAUSED_LOOK_CAPABILITIES,
+      rightPanelMode: "launcher",
+      rightPanelExpanded: expanded,
+    });
+    try {
+      await resolveComposerDraft(draft, { text: "", images: [], updatedAt: 1 });
+      const mic = micButton(fixture);
+      await act(async () => fixture.composer.focus());
+      await pointer(mic, "pointerdown");
+      await pointer(mic, "pointerup");
+      assert.deepEqual(TrackedRecognition.log, ["start"]);
+      assert.equal(mic.getAttribute("aria-pressed"), "true");
+
+      expanded.value = true;
+      await fixture.setMode("expanded");
+      assert.deepEqual(TrackedRecognition.log.slice(0, 1), ["start"]);
+      assert.ok(TrackedRecognition.log.length > 1, "dictation ends when the panel hides the composer");
+      assert.equal(micButton(fixture).getAttribute("aria-pressed"), "false");
+    } finally {
+      await unmountFixture(fixture);
+    }
+  });
 });

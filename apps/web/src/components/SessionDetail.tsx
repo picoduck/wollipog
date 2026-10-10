@@ -1074,6 +1074,14 @@ function SessionDetailLoaded({
   const isMobile = useIsMobile();
   const isMobileRef = useRef(isMobile);
   isMobileRef.current = isMobile;
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
+  // False once this view has been left, so a late callback cannot reach the shell's shared state.
+  const detailMountedRef = useRef(true);
+  useEffect(() => {
+    detailMountedRef.current = true;
+    return () => { detailMountedRef.current = false; };
+  }, []);
   const isCompact = useIsCompact();
   const isCompactRef = useRef(isCompact);
   isCompactRef.current = isCompact;
@@ -1363,16 +1371,19 @@ function SessionDetailLoaded({
   const showComposerError = useCallback((source: ComposerErrorSource, next: ComposerError | null) => {
     // An expanded side panel hides the notice slot with the chat column (#2845). What an action could
     // not do is never left unseen: its failure restores the panel. Clearing one leaves the panel be.
-    // A Sessions preview shares the panel's state but never shows the panel.
+    // Read through refs, since callers can hold an older copy of this callback: a Sessions preview
+    // shares the panel's state but never shows the panel, and a view that has been left (a late
+    // failure after navigating away) must not change the panel of the session now shown.
     const panel = rightPanelRef.current;
-    if (next && mode === "expanded" && !isMobileRef.current && panel.open && panel.expanded) panel.setExpanded(false);
+    if (next && detailMountedRef.current && modeRef.current === "expanded" && !isMobileRef.current &&
+        panel.open && panel.expanded) panel.setExpanded(false);
     setComposerErrors((current) => {
       if (next) return { ...current, [source]: next };
       if (!current[source]) return current;
       const { [source]: _cleared, ...rest } = current;
       return rest;
     });
-  }, [mode]);
+  }, []);
   const clearComposerErrors = useCallback(() => {
     setComposerErrors((current) => Object.keys(current).length ? {} : current);
   }, []);
@@ -5478,10 +5489,12 @@ function SessionDetailLoaded({
   // other one.
   const queuedEditPromptId = queuedEdit?.promptId ?? null;
   useEffect(() => cancelDictation, [queuedEditPromptId, cancelDictation]);
-  // A phone's side panel sheet hides the composer, mic included (#2843), so it ends dictation too.
+  // A phone's side panel sheet hides the composer, mic included (#2843), and so does an expanded
+  // panel on desktop (#2845): either ends dictation, so no phrase lands in a draft nobody can see.
+  const composerHiddenByPanel = phonePanelOpen || (mode === "expanded" && rightPanel.open && rightPanel.expanded);
   useEffect(() => {
-    if (phonePanelOpen) cancelDictation();
-  }, [phonePanelOpen, cancelDictation]);
+    if (composerHiddenByPanel) cancelDictation();
+  }, [composerHiddenByPanel, cancelDictation]);
   // Live context and cost sit in the composer bar's trailing cluster, or in Model Settings when the
   // bar has no room for them (#2166).
   const [composerBoxRef, composerColumnNarrow] = useNarrowerThanRem<HTMLDivElement>(COMPOSER_USAGE_MIN_COLUMN_REM);
