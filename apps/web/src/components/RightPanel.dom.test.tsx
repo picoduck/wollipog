@@ -189,6 +189,9 @@ function PanelHarness({
       >
         Switch Generation
       </button>
+      <button type="button" id="next-epoch" onClick={() => {
+        setSession((current) => ({ ...current, eventEpoch: (current.eventEpoch ?? 0) + 1 }));
+      }}>Next Epoch</button>
       <button type="button" id="recorded" onClick={() => {
         setRunnerOnline(false);
         setSession((current) => ({ ...current, adopted: true, status: "completed" }));
@@ -956,7 +959,7 @@ test("a row opens its page in the switcher's place, and Back and Escape return t
       assert.ok(focused() === (title as unknown as Element), "the page's title takes focus");
       assert.equal(body.scrollTop, 0, "the page opens at its top");
       assert.ok(aside.querySelector<HTMLElement>(".agents-panel")!.hidden, "the list waits, hidden, under the page");
-      assert.ok(aside.querySelector('.agents-page[aria-label="Worker 30"] .subagent-detail'), "the page shows the worker");
+      assert.ok(aside.querySelector('.agents-page .subagent-detail[aria-label="Worker 30"]'), "the page shows the worker");
 
       if (leave === "Back") await act(async () => head.querySelector<HTMLButtonElement>('[aria-label="Back to Agents"]')!.click());
       else await keydown(title, "Escape");
@@ -1069,6 +1072,22 @@ test("a subagent opened from the transcript lands on its page, and Back goes to 
     const row = panel.container.querySelector<HTMLElement>('[data-panel-page-key="subagent:agent"]')!;
     assert.ok(focused() === (row as unknown as Element), "the transcript's Open is outside the panel, so Back lands on the worker's row");
     assert.equal(state.open, true);
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("a new session generation clears the pages, since their keys name the old generation's items (#2856)", async () => {
+  let state!: RightPanelState;
+  const panel = await mountPanel(<PanelHarness items={workerItems} onState={(next) => { state = next; }} />);
+  try {
+    await act(async () => state.show("subagents"));
+    await act(async () => panel.container.querySelector<HTMLButtonElement>(".agents-list button")!.click());
+    assert.ok(!panel.container.querySelector<HTMLElement>(".rpanel-page-title")!.hidden);
+    await act(async () => panel.container.querySelector<HTMLButtonElement>("#next-epoch")!.click());
+    assert.ok(panel.container.querySelector<HTMLElement>(".rpanel-page-title")!.hidden, "the page is gone");
+    assert.ok(panel.container.querySelector(".rpanel-switcher"));
+    assert.ok(!panel.container.querySelector<HTMLElement>(".agents-panel")!.hidden, "and the roster is shown");
   } finally {
     await panel.dispose();
   }

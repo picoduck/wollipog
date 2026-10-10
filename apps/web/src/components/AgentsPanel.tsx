@@ -820,13 +820,13 @@ export function AgentsPanel(props: Props) {
       {/* A worker's request is answered in Worker Attention, with that worker's activity beside it
           for context, until the worker page carries its request (#2860). */}
       {attentionOwnerId && <SubagentsPanel {...props} detailOnly requestedId={attentionOwnerId}
-        focusRequest={undefined} onFocusRequestHandled={undefined} />}
+        focusRequest={undefined} onFocusRequestHandled={undefined} onSelect={openSubagentPage} />}
     </div>
     {page && (
-      <section key={page.key} className="agents-page" aria-label={page.title}>
+      <div key={page.key} className="agents-page">
         <PanelPageTitle>{page.title}</PanelPageTitle>
         {page.body}
-      </section>
+      </div>
     )}
     </>
   );

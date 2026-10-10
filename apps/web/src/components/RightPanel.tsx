@@ -72,7 +72,7 @@ interface PanelPageEntry {
   opener: HTMLElement | null;
   scrollTop: number;
 }
-const NO_PAGES: { tool: RightPanelMode; pages: readonly PanelPageEntry[] } = { tool: "launcher", pages: [] };
+const NO_PAGES: { scope: string; pages: readonly PanelPageEntry[] } = { scope: "", pages: [] };
 
 /** The tool's one vertical scroller: its `.rpanel-scroll` on the frame's slots, else the body. */
 function panelScroller(aside: HTMLElement | null): HTMLElement | null {
@@ -636,14 +636,17 @@ export function RightPanel({
   /** Escape's step for the panel itself: Restore Panel while expanded, then Close Panel (#2845). */
   const dismiss = expanded ? () => state.setExpanded(false) : state.close;
 
-  // The current tool's pushed pages (#2856). They belong to the tool that pushed them, so a switch
-  // never shows another tool's page, and switching tools or closing the panel clears them. The
-  // update is functional: a tool's first effect can push before this one runs for the same switch.
+  // The current tool's pushed pages (#2856). They belong to the tool that pushed them and to the
+  // session generation whose items they name, so a switch never shows another tool's page or a page
+  // from before the session's history was rebuilt; switching tools, a new generation or closing the
+  // panel clears them. The update is functional: a tool's first effect can push before this one
+  // runs for the same switch.
+  const pageScope = `${state.mode}:${session.eventEpoch ?? 0}`;
   const [pageStack, setPageStack] = useState(NO_PAGES);
   useEffect(() => {
-    setPageStack((current) => !state.open || (current.tool !== state.mode && current.pages.length > 0) ? NO_PAGES : current);
-  }, [state.open, state.mode]);
-  const pages = state.open && pageStack.tool === state.mode ? pageStack.pages : NO_PAGES.pages;
+    setPageStack((current) => !state.open || (current.scope !== pageScope && current.pages.length > 0) ? NO_PAGES : current);
+  }, [state.open, pageScope]);
+  const pages = state.open && pageStack.scope === pageScope ? pageStack.pages : NO_PAGES.pages;
   const page = pages.at(-1) ?? null;
   // The header's page title: the focus target on push, and the element the tool's PanelPageTitle
   // portals into. It stays mounted, hidden with no page, so a page's title is there in the very
@@ -667,25 +670,26 @@ export function RightPanel({
       const scrollTop = options?.root && pages[0] ? pages[0].scrollTop : panelScroller(aside)?.scrollTop ?? 0;
       const entry = { key, opener, scrollTop };
       pageFocus.current = { kind: "title" };
-      setPageStack({ tool: state.mode, pages: options?.root ? [entry] : [...pages, entry] });
+      setPageStack({ scope: pageScope, pages: options?.root ? [entry] : [...pages, entry] });
     },
     pop: () => {
       const top = pages.at(-1);
       if (!top) return;
       pageFocus.current = { kind: "return", entry: top };
-      setPageStack({ tool: state.mode, pages: pages.slice(0, -1) });
+      setPageStack({ scope: pageScope, pages: pages.slice(0, -1) });
     },
     clear: () => {
       pageFocus.current = null;
       setPageStack(NO_PAGES);
     },
-  }), [pages, state.mode]);
+  }), [pages, pageScope]);
   /** The bar's first focus target: the switcher, or a pushed page's title in its place. */
   const focusHead = () => (switcherRef.current ?? pageTitleRef.current)?.focus();
   // A push lands on the page's title with the page at its top. A pop restores the scroll the page
   // was opened from and returns focus to the control that opened it, else to the row that carries
   // its key (an entry point outside the panel, or an opener that went with an earlier page), else
-  // to the bar.
+  // to the bar: the switcher, or the title of the page now on top. Only a control on screen counts;
+  // the list waits hidden under a page.
   useLayoutEffect(() => {
     const pending = pageFocus.current;
     if (!pending) return;
@@ -699,12 +703,13 @@ export function RightPanel({
     }
     if (scroller) scroller.scrollTop = pending.entry.scrollTop;
     const { opener, key } = pending.entry;
-    if (opener?.isConnected && aside?.contains(opener)) {
+    const shown = (element: HTMLElement) => element.isConnected && aside?.contains(element) && !element.closest("[hidden]");
+    if (opener && shown(opener)) {
       opener.focus({ preventScroll: true });
       return;
     }
     const row = [...(aside?.querySelectorAll<HTMLElement>("[data-panel-page-key]") ?? [])]
-      .find((candidate) => candidate.dataset.panelPageKey === key);
+      .find((candidate) => candidate.dataset.panelPageKey === key && shown(candidate));
     if (row) row.focus();
     else focusHead();
     // eslint-disable-next-line react-hooks/exhaustive-deps

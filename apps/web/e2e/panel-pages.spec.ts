@@ -96,6 +96,27 @@ for (const viewport of VIEWPORTS) for (const theme of ["dark", "light"] as const
   });
 }
 
+test("a nested worker opened from a page is a page on top, and Back returns to the outer page's title", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/panel-pages-e2e.html?nested=1");
+  const panel = page.getByRole("complementary", { name: "Side Panel" });
+  await panel.locator('[data-panel-page-key="subagent:worker-30"]').click();
+  const title = panel.locator(".rpanel-page-title");
+  await expect(title).toHaveText("Profile Payouts 30");
+  const disclosure = panel.locator(".agents-page .tl-work > .disclosure-trigger");
+  if (await disclosure.count() && await disclosure.getAttribute("aria-expanded") === "false") await disclosure.click();
+  await panel.locator(".agents-page .tl-agent > .btn").click();
+  await expect(title).toHaveText("Check Payout Fixtures");
+  await expect(title).toBeFocused();
+  // The Open that pushed it went with the outer page, and the nested worker's row waits hidden
+  // under the pages, so focus lands on the outer page's title.
+  await panel.getByRole("button", { name: "Back to Agents", exact: true }).click();
+  await expect(title).toHaveText("Profile Payouts 30");
+  await expect(title).toBeFocused();
+  await panel.getByRole("button", { name: "Back to Agents", exact: true }).click();
+  await expect(panel.locator('[data-panel-page-key="subagent:worker-30"]')).toBeFocused();
+});
+
 test("the transcript's Open lands on that worker's page with its title focused", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/panel-pages-e2e.html");

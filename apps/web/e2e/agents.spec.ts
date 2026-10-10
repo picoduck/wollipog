@@ -113,6 +113,19 @@ test("a selected child request promoted to primary moves focus to its canonical 
   await expect(page.getByRole("button", { name: "Allow", exact: true })).toHaveCount(1);
 });
 
+test("a nested worker opened from the activity beside a worker's request opens as a page (#2856)", async ({ page }) => {
+  await page.goto("/agents-e2e.html");
+  await page.getByRole("button", { name: "Audit Storage · Approval Required", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Selected Worker Request", exact: true })).toBeFocused();
+  // Audit Storage's activity sits under its request, with its nested worker's Open.
+  const activity = page.getByRole("region", { name: "Worker Roster" }).locator(".subagent-output");
+  const disclosure = activity.locator(".tl-work > .disclosure-trigger");
+  if (await disclosure.count() && await disclosure.getAttribute("aria-expanded") === "false") await disclosure.click();
+  await activity.locator(".tl-agent > .btn").click();
+  await expect(page.getByRole("region", { name: "Inspect Parser", exact: true })).toBeVisible();
+  await expect(page.locator(".agents-page .subagent-detail")).toBeVisible();
+});
+
 test("an active-tail conflict on initial registry load retries against the current generation", async ({ page }) => {
   await page.goto("/agents-e2e.html?registry-retry=initial");
   await expect(page.getByText("Durable First", { exact: true })).toBeVisible();

@@ -48,6 +48,13 @@ const items: TimelineItem[] = Array.from({ length: 30 }, (_, index) => ({
   kind: "agent_message", id: index * 2 + 2, parentToolUseId: `worker-${index + 1}`, createdAt: NOW - (20 - index) * MINUTE,
   text: `Checked ${index + 3} files in the ${AREAS[index % AREAS.length]!.toLowerCase()} module; two need a migration step.`,
 } as TimelineItem]);
+// `nested=1`: the last worker started one of its own, whose Open sits in its activity.
+if (params.get("nested") === "1") items.push(
+  { kind: "tool_call", id: 100, toolCallId: "worker-31", parentToolUseId: "worker-30", title: "Check Payout Fixtures",
+    text: "", toolKind: "agent", status: "in_progress", startedAt: NOW - 5 * MINUTE } as TimelineItem,
+  { kind: "agent_message", id: 101, parentToolUseId: "worker-31", createdAt: NOW - MINUTE,
+    text: "Fixtures for refunds are stale." } as TimelineItem,
+);
 
 const client = {
   ...api,
