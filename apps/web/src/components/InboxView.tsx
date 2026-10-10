@@ -227,6 +227,7 @@ export function InboxView({
   const {
     navigate,
     loadSession,
+    beginSessionDetailLoad,
     beginSessionsBackfill,
     setInboxPersistenceEnabled,
     setInboxSelection,
@@ -1319,7 +1320,14 @@ export function InboxView({
   // One-key triage acts on the TOP-PRIORITY request, not the first to arrive (#896): a session
   // with several pending requests used to be untouchable from the keyboard.
   const decide = useCallback(async (sessionId: string, intent: InboxApprovalIntent) => {
-    const targetSession = sessions.get(sessionId);
+    let targetSession = sessions.get(sessionId);
+    if (targetSession?.projection === "summary") {
+      const detailLoad=beginSessionDetailLoad(sessionId);
+      try {
+        targetSession = (await api.session(sessionId)).session;
+        if (!detailLoad.apply(targetSession)) return;
+      } finally { detailLoad.cancel(); }
+    }
     const approval = targetSession ? prioritizedPendingRequests(targetSession.pendingApproval)[0] : undefined;
     if (!targetSession || !approval) return;
     // Opening a question to read it stays available; answering and deciding do not (#1857).
@@ -1360,7 +1368,7 @@ export function InboxView({
     } finally {
       endBusy(targetSession.id);
     }
-  }, [api, beginBusy, endBusy, loadSession, openRequest, sessions, showToast]);
+  }, [api, beginBusy, endBusy, loadSession, beginSessionDetailLoad, openRequest, sessions, showToast]);
 
   const hopExpanded = useCallback((direction: "next" | "previous") => {
     if (!expandedSessionId) return;

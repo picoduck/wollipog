@@ -1,3 +1,4 @@
+import { sessionCampaignRequests } from "@wollipog/protocol";
 import {
   campaignHumanAttentionAdded,
   pendingRequests,
@@ -34,8 +35,8 @@ function newlySettledBackgroundDelivery(prev: SessionView, next: SessionView): b
  */
 export function notifyDecision(prev: SessionView | undefined, next: SessionView): NotifyPayload | null {
   if (!prev) return null;
-  const previousCampaignRequests = prev.orchestratorCampaign?.pendingRequests;
-  const nextCampaignRequests = next.orchestratorCampaign?.pendingRequests;
+  const previousCampaignRequests = sessionCampaignRequests(prev);
+  const nextCampaignRequests = sessionCampaignRequests(next);
   const campaignAttentionAdded = campaignHumanAttentionAdded(previousCampaignRequests, nextCampaignRequests);
   const replacedAttention = next.status === "input_required" && prev.status === "input_required" &&
     prev.pendingApproval?.requestId !== next.pendingApproval?.requestId;

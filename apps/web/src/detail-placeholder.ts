@@ -32,12 +32,13 @@ export interface RoutedSessionLookup {
 }
 
 export function shouldHydrateRoutedSession(
-  session: { archived?: boolean } | undefined,
+  session: { archived?: boolean; projection?: "summary" } | undefined,
   snapshotRevision: number,
   conn: ConnState,
+  summarySnapshot = false,
 ): boolean {
   if (conn !== "online") return false;
-  return !session || (Boolean(session.archived) && snapshotRevision > 0);
+  return !session || session.projection === "summary" || ((Boolean(session.archived) || summarySnapshot) && snapshotRevision > 0);
 }
 
 const RESOURCE_NOUN = { Session: "session", Run: "run", Pod: "pod" } as const;

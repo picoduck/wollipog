@@ -26,6 +26,7 @@ import type {
   ShellStatus,
   UiToControlPlane,
 } from "@wollipog/protocol";
+import { pendingRequests } from "@wollipog/protocol";
 import { CONTROL_PLANE_WS } from "./config.js";
 import { expireFollowTailAnchor } from "./useFollowTail.js";
 import { DEVICE_TOKEN_CHANGED_EVENT, deviceToken } from "./device-token.js";
@@ -331,8 +332,11 @@ export interface State {
   authRequired: boolean;
   /** True after an authoritative UI snapshot has populated the resource maps. */
   snapshotLoaded: boolean;
+  sessionSummarySnapshots: boolean;
   /** Monotonic reconnect generation used to revalidate REST-only routed resources. */
   snapshotRevision: number;
+  /** Session ids received in this connection's incomplete initial inventory. */
+  pendingSnapshotSessionIds?: Set<string>;
   /** True only when the connected control plane advertises an authoritative Project inventory.
    * PR 2 uses false to retain exact runner/workspace grouping against older control planes. */
   projectsSupported: boolean;
@@ -1158,16 +1162,18 @@ function reducer(state: State, action: Action): State {
           const messageNow = Number.isSafeInteger(action.now) && action.now! >= 0 ? action.now! : state.activityNow;
           const targeted = msg.capabilities?.sessionSubscriptions === true;
           const pods = new Map((msg.pods ?? []).map((pod) => [pod.id, pod]));
-          const sessions = new Map(msg.sessions.map((session) => [session.id, session]));
+          const sessions = msg.sessionsComplete === false ? new Map(state.sessions)
+            : new Map<string, SessionView>();
+          for (const session of msg.sessions) sessions.set(session.id,session);
           // Live snapshots deliberately omit archived rows. Keep the currently rendered archived
           // detail mounted across reconnect; SessionDetail revalidates it against the exact REST
           // endpoint for this snapshot generation and removes it on an authoritative 404.
           const routedSession = state.view.name === "session" ? state.sessions.get(state.view.id) : undefined;
-          if (routedSession?.archived && !sessions.has(routedSession.id)) {
+          if ((routedSession?.archived || msg.sessionsComplete === false && routedSession) && !sessions.has(routedSession.id)) {
             sessions.set(routedSession.id, routedSession);
           }
           const activity = state.activity;
-          for (const sessionId of [...activity.keys()]) {
+          for (const sessionId of msg.sessionsComplete === false ? [] : [...activity.keys()]) {
             if (!sessions.has(sessionId)) activity.delete(sessionId);
           }
           for (const session of sessions.values()) {
@@ -1185,6 +1191,7 @@ function reducer(state: State, action: Action): State {
           const eventHistory = new Map(state.eventHistory);
           for (const sessionId of new Set([...events.keys(), ...eventEpochs.keys(), ...eventHistory.keys()])) {
             const session = sessions.get(sessionId);
+            if (!session && msg.sessionsComplete === false) continue;
             if (!session) {
               events.delete(sessionId);
               eventEpochs.delete(sessionId);
@@ -1232,9 +1239,11 @@ function reducer(state: State, action: Action): State {
             activityObservationStartedAt: new Map<string, number>(),
             streamRecoveryCursors: new Map(),
             pendingStreamRecovery: null,
-            snapshotLoaded: true,
+            snapshotLoaded: msg.sessionsComplete !== false,
             currentTurnOpeningSupported: msg.capabilities?.currentTurnOpening === true,
+            sessionSummarySnapshots: msg.sessionsComplete !== undefined,
             snapshotRevision: state.snapshotRevision + 1,
+            pendingSnapshotSessionIds: msg.sessionsComplete === false ? new Set(msg.sessions.map((session) => session.id)) : undefined,
             projectsSupported: msg.capabilities?.projects === true || msg.projects !== undefined,
             projectLocationCreationSupported: msg.capabilities?.createProjectLocations === true,
             accessScopeManagementSupported: msg.capabilities?.accessScopeManagement === true,
@@ -1326,6 +1335,61 @@ function reducer(state: State, action: Action): State {
           const projects = new Map(state.projects);
           projects.delete(msg.projectId);
           return { ...state, projects };
+        }
+        case "session_snapshot_page": {
+          if (!state.pendingSnapshotSessionIds) return state;
+          const received = new Set(state.pendingSnapshotSessionIds);
+          const sessions = new Map(state.sessions);
+          const events = new Map(state.events);
+          const eventEpochs = new Map(state.eventEpochs);
+          const eventHistory = new Map(state.eventHistory);
+          const eventWindows = new Map(state.eventWindows);
+          for (const session of msg.sessions) {
+            received.add(session.id);
+            const previous = sessions.get(session.id);
+            // A paged reconnect must not unmount an open detail view or discard its request bodies.
+            // Mounted detail views revalidate once per snapshot generation through authorized REST.
+            const retainedDetail = session.projection === "summary" && previous && previous.projection !== "summary"
+              && sessionEventEpoch(previous) === sessionEventEpoch(session)
+              && JSON.stringify(pendingRequests(previous.pendingApproval).map((request) => [request.requestId,request.occurrenceId]))
+                === JSON.stringify(pendingRequests(session.pendingApproval).map((request) => [request.requestId,request.occurrenceId]));
+            sessions.set(session.id, retainedDetail
+              ? { ...session,projection: undefined,pendingApproval: previous.pendingApproval,
+                parentControlPolicy: previous.parentControlPolicy,
+                orchestratorCampaign: previous.orchestratorCampaign,campaignMembership: previous.campaignMembership,
+                providerAccountSwitchFailure: previous.providerAccountSwitchFailure,
+                agentCapabilities: previous.agentCapabilities,
+                executionTarget: previous.executionTarget,executionHandoff: previous.executionHandoff,
+                backgroundJobs: previous.backgroundJobs,backgroundJobsTruncated: previous.backgroundJobsTruncated,
+                queued: previous.queued,pendingPrompts: previous.pendingPrompts,
+                steeringAttempts: previous.steeringAttempts,
+                commandInvocations: previous.commandInvocations,threadType: previous.threadType }
+              : session);
+            state.activity.set(session.id,reconcileSessionActivity(state.activity.get(session.id),previous,session));
+            const epoch = sessionEventEpoch(session);
+            if ((eventEpochs.get(session.id) ?? eventHistory.get(session.id)?.eventEpoch ?? 0) !== epoch) {
+              events.delete(session.id);
+              eventHistory.delete(session.id);
+              eventWindows.delete(session.id);
+            }
+            eventEpochs.set(session.id,epoch);
+          }
+          if (msg.complete) {
+            for (const [id,session] of sessions) {
+              const routedArchive = session.archived && state.view.name === "session" && state.view.id === id;
+              if (!received.has(id) && !routedArchive) sessions.delete(id);
+            }
+            for (const id of new Set([...events.keys(),...eventHistory.keys(),...eventEpochs.keys(),...state.activity.keys()])) {
+              if (sessions.has(id)) continue;
+              events.delete(id);
+              eventHistory.delete(id);
+              eventEpochs.delete(id);
+              eventWindows.delete(id);
+              state.activity.delete(id);
+            }
+          }
+          return pruneViewStreams({ ...state,sessions,events,eventEpochs,eventHistory,eventWindows,
+            snapshotLoaded: msg.complete,pendingSnapshotSessionIds: msg.complete ? undefined : received });
         }
         case "session_upsert": {
           const sessions = new Map(state.sessions);
@@ -1637,6 +1701,7 @@ function initialState(
     authRequired: false,
     snapshotLoaded: false,
     currentTurnOpeningSupported: false,
+    sessionSummarySnapshots: false,
     snapshotRevision: 0,
     projectsSupported: false,
     projectLocationCreationSupported: false,
@@ -1712,6 +1777,7 @@ interface StoreValue extends State {
   failOlderEventsLoad: (sessionId: string, error: string, requestedBase: number, eventEpoch?: number) => void;
   eventWindowBase: (sessionId: string) => number;
   loadSession: (session: SessionView) => void;
+  beginSessionDetailLoad: Store["beginSessionDetailLoad"];
   getSession: (sessionId: string) => SessionView | undefined;
   beginEventHistoryLoad: (
     sessionId: string,
@@ -2318,6 +2384,27 @@ export class Store {
   getSession = (sessionId: string): SessionView | undefined => this.state.sessions.get(sessionId);
   loadSession = (session: SessionView): void =>
     this.dispatch({ type: "msg", msg: { type: "session_upsert", session } });
+  /** Fence detail hydration against live changes, removal, and newer snapshot generations. */
+  beginSessionDetailLoad = (sessionId: string) => {
+    const previous=this.state.sessions.get(sessionId);
+    const revision=this.state.snapshotRevision;
+    let active=true;
+    const isCurrent=() => active && this.state.snapshotRevision === revision && this.state.sessions.get(sessionId) === previous;
+    return {
+      isCurrent,
+      cancel: () => { active=false; },
+      apply: (detail: SessionView): boolean => {
+        if (detail.id !== sessionId || !isCurrent()) return false;
+        active=false;
+        // Older lookup endpoints omit Hub-only state. Keep the live snapshot's queue until a
+        // current server explicitly reports queueHeld (including false) or the epoch changes.
+        const preserveLive=previous && sessionEventEpoch(previous) === sessionEventEpoch(detail) && detail.queueHeld === undefined;
+        this.loadSession(preserveLive ? { ...detail,queued: previous.queued ?? detail.queued,
+          queueHeld: previous.queueHeld,activeTurnId: previous.activeTurnId } : detail);
+        return true;
+      },
+    };
+  };
   /**
    * Fences a session list read outside the live stream (#2803). The returned `apply` adds only the
    * sessions the stream has not spoken for since the read began: none this client holds, none that
@@ -2730,7 +2817,9 @@ export function StoreProvider({
       const state = store.getState();
       const msg: UiToControlPlane | null = subscriptionSync.nextMessage(
         state,
-        state.streamSubscriptions.mode === "targeted",
+        // A paged header and partial rows are not an authoritative selection. Sending each
+        // growing inventory wastes the principal's shared admission window on every connect.
+        state.streamSubscriptions.mode === "targeted" && state.snapshotLoaded,
       );
       if (!msg || msg.type !== "session_subscriptions") return;
       // Freeze the durable recovery cursor before the server can apply this replacement. A live
@@ -2801,12 +2890,15 @@ export function StoreProvider({
         try {
           const msg = JSON.parse(ev.data as string) as ControlPlaneToUi;
           store.receiveFrame(msg, Date.now());
-          const sessions: readonly SessionView[] = msg.type === "snapshot"
+          const sessions: readonly SessionView[] = msg.type === "snapshot" || msg.type === "session_snapshot_page"
             ? msg.sessions
             : msg.type === "session_upsert"
               ? [msg.session]
               : [];
-          sendDueBackgroundObservations(sessions, msg.type === "snapshot");
+          const completeInventory = msg.type === "snapshot" && msg.sessionsComplete !== false ||
+            msg.type === "session_snapshot_page" && msg.complete;
+          sendDueBackgroundObservations(msg.type === "session_snapshot_page" && msg.complete
+            ? [...store.getState().sessions.values()] : sessions, completeInventory);
         } catch {
           /* ignore malformed */
         }
@@ -2960,7 +3052,7 @@ export function useHasStore(): boolean {
 }
 
 /** Stable action handles (never cause re-renders). */
-export function useStoreActions(): Pick<Store, "dispatch" | "navigate" | "setInboxPersistenceEnabled" | "setInboxSelection" | "setInboxSplit" | "setInboxRatio" | "setFilters" | "loadEvents" | "loadTurnStartWindow" | "loadOlderEvents" | "beginOlderEventsLoad" | "failOlderEventsLoad" | "eventWindowBase" | "loadSession" | "getSession" | "beginSessionsBackfill" | "beginEventHistoryLoad" | "failEventHistoryLoad" | "isEventGapRecoveryCurrent" | "beginEventGapRecovery" | "cancelEventGapRecovery" | "finishEventGapRecovery" | "loadEventGapWindow" | "deferEventTail" | "beginLaterEventsLoad" | "loadLaterEvents" | "failLaterEventsLoad" | "promoteDeferredEventTail" | "loadPodContext" | "eventHighWater" | "recoveryAfter" | "recoveryReadAfter" | "eventEpoch" | "reconcileShellOutputs" | "loadShellHistory" | "removeShellOutput" | "reconnectNow"> {
+export function useStoreActions(): Pick<Store, "dispatch" | "navigate" | "setInboxPersistenceEnabled" | "setInboxSelection" | "setInboxSplit" | "setInboxRatio" | "setFilters" | "loadEvents" | "loadTurnStartWindow" | "loadOlderEvents" | "beginOlderEventsLoad" | "failOlderEventsLoad" | "eventWindowBase" | "loadSession" | "beginSessionDetailLoad" | "getSession" | "beginSessionsBackfill" | "beginEventHistoryLoad" | "failEventHistoryLoad" | "isEventGapRecoveryCurrent" | "beginEventGapRecovery" | "cancelEventGapRecovery" | "finishEventGapRecovery" | "loadEventGapWindow" | "deferEventTail" | "beginLaterEventsLoad" | "loadLaterEvents" | "failLaterEventsLoad" | "promoteDeferredEventTail" | "loadPodContext" | "eventHighWater" | "recoveryAfter" | "recoveryReadAfter" | "eventEpoch" | "reconcileShellOutputs" | "loadShellHistory" | "removeShellOutput" | "reconnectNow"> {
   return useStoreHandle();
 }
 
@@ -3093,6 +3185,7 @@ export function useStore(): StoreValue {
     failOlderEventsLoad: store.failOlderEventsLoad,
     eventWindowBase: store.eventWindowBase,
     loadSession: store.loadSession,
+    beginSessionDetailLoad: store.beginSessionDetailLoad,
     getSession: store.getSession,
     beginEventHistoryLoad: store.beginEventHistoryLoad,
     failEventHistoryLoad: store.failEventHistoryLoad,

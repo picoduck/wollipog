@@ -75,19 +75,23 @@ test.afterAll(async () => {
 });
 
 async function signIn(page: Page) {
-  await page.goto(`${base}/#pair=${token}`);
+  // Warm a fixed different session. The Inbox can select and fetch the measured session's
+  // preview before navigation, turning a cold-opening measurement into a cached one.
+  await page.goto(`${base}${viewPath({ name: "session", id: "opening-welcome" })}#pair=${token}`);
   await expect(page.getByText("Opening Benchmark Ready").first()).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText("Warm the application before measuring navigation.", { exact: true })).toBeVisible();
 }
 
 for (const rate of [1, 4]) test(`a 10,503-event production opening starts at the current turn at ${rate}x CPU`, async ({ page }, info) => {
   await page.setViewportSize({ width: 1280, height: 900 });
-  await signIn(page);
-  const cdp = await page.context().newCDPSession(page);
-  await cdp.send("Emulation.setCPUThrottlingRate", { rate });
   const requests: string[] = [];
   page.on("request", request => {
     if (new URL(request.url()).pathname === `/api/sessions/${LONG_TURN_SESSION_ID}/events`) requests.push(request.url());
   });
+  await signIn(page);
+  expect(requests).toHaveLength(0);
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Emulation.setCPUThrottlingRate", { rate });
   await page.evaluate((path) => {
     const state = { started: performance.now(), interactiveMs: 0, firstVisibleKey: "", frames: [] as string[], longTasks: [] as number[] };
     (window as unknown as { __openingMeasurement: typeof state }).__openingMeasurement = state;

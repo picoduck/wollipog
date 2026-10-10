@@ -8,7 +8,7 @@
  * The DB is the source of truth; the hub broadcasts deltas built from it.
  */
 
-import { MAX_SKILL_REPORT_REQUESTS, SKILL_REPORT_REQUEST_LIFETIME_MS, runnerSupportsProtocol, PROJECT_MEMORY_MIN_PROTOCOL, isTerminal, isTerminalDurableDeliveryState } from "@wollipog/protocol";
+import { MAX_SKILL_REPORT_REQUESTS, SKILL_REPORT_REQUEST_LIFETIME_MS, runnerSupportsProtocol, PROJECT_MEMORY_MIN_PROTOCOL, SESSION_SUMMARY_UI_PROTOCOL, isTerminal, isTerminalDurableDeliveryState } from "@wollipog/protocol";
 import type {
   ControlPlaneToRunner,
   ControlPlaneToUi,
@@ -66,6 +66,7 @@ import type {
   SessionReminderView,
   SessionReminderWakeReason,
   SessionView,
+  UiSnapshotMessage,
   SubscriptionUsageRefreshResultMessage,
   SteerSessionResultMessage,
 } from "@wollipog/protocol";
@@ -144,6 +145,60 @@ export interface Socket {
 }
 
 export const MAX_UI_BUFFERED_BYTES = 8 * 1024 * 1024;
+export const MAX_UI_SNAPSHOT_PAGE_BYTES = 128 * 1024;
+const MAX_SHARED_SNAPSHOT_BYTES = 32 * 1024 * 1024;
+
+/** Every initial frame is checked before socket admission. Session pages share serialized bytes
+ * across dashboards and are drained one at a time, rather than filling the outbound buffer. */
+function* uiSnapshotFrames(snapshot: UiSnapshotMessage, paged: boolean): Generator<string, boolean> {
+  if (!paged) {
+    const data = JSON.stringify(snapshot);
+    if (Buffer.byteLength(data) > MAX_UI_BUFFERED_BYTES) return false;
+    yield data;
+    return true;
+  }
+  const header = JSON.stringify({ ...snapshot, sessions: [], sessionsComplete: snapshot.sessions.length === 0 });
+  if (Buffer.byteLength(header) > MAX_UI_BUFFERED_BYTES) return false;
+  yield header;
+  let items: string[] = [];
+  let bytes = 80;
+  const page = (complete: boolean) =>
+    `{"type":"session_snapshot_page","sessions":[${items.join(",")}],"complete":${complete}}`;
+  for (const session of snapshot.sessions) {
+    const item = JSON.stringify(session);
+    const size = Buffer.byteLength(item) + 1;
+    if (size + 80 > MAX_UI_BUFFERED_BYTES) return false;
+    if (items.length && bytes + size > MAX_UI_SNAPSHOT_PAGE_BYTES) {
+      yield page(false);
+      items = [];
+      bytes = 80;
+    }
+    items.push(item);
+    bytes += size;
+  }
+  if (items.length) yield page(true);
+  return true;
+}
+
+export function serializeUiSnapshot(snapshot: UiSnapshotMessage, paged: boolean): string[] | null {
+  const iterator = uiSnapshotFrames(snapshot, paged);
+  const frames: string[] = [];
+  let result = iterator.next();
+  while (!result.done) { frames.push(result.value); result = iterator.next(); }
+  return result.value ? frames : null;
+}
+
+async function serializeUiSnapshotAsync(snapshot: UiSnapshotMessage): Promise<string[] | null> {
+  const iterator = uiSnapshotFrames(snapshot, true);
+  const frames: string[] = [];
+  let result = iterator.next();
+  while (!result.done) {
+    frames.push(result.value);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    result = iterator.next();
+  }
+  return result.value ? frames : null;
+}
 export const MAX_UI_QUEUED_MESSAGES = 512;
 export const MAX_UI_SUBSCRIPTION_UPDATES_PER_WINDOW = 32;
 export const UI_SUBSCRIPTION_RATE_WINDOW_MS = 10_000;
@@ -225,6 +280,16 @@ interface UiClientInfo {
   outbound?: OutboundFrame[];
   queuedBytes?: number;
   sending?: boolean;
+  initialFrames?: readonly string[];
+  initialFrameIndex?: number;
+  preparingSnapshot?: boolean;
+  snapshotAccessRevision?: number;
+  snapshotSessionIds?: readonly string[];
+  snapshotVisibilityChanges?: {
+    sessions: Map<string,boolean>;
+    runners: Map<string,boolean>;
+    projects: Map<string,boolean>;
+  };
   lastSubscriptionRevision?: number;
   observedBackgroundDeliveryKeys?: Set<string>;
   /** Pending Someday sessions omitted from a legacy UI's compatibility projection. */
@@ -352,6 +417,11 @@ function permissionsKey(session: SessionView): string {
 export class Hub {
   private readonly skillRequestNow: () => number;
   private readonly uiClients = new Map<Socket, UiClientInfo>();
+  private readonly snapshotCache = new Map<string, { snapshot: UiSnapshotMessage; frames: readonly string[]; bytes: number; hiddenIds: Set<string> }>();
+  private snapshotCacheRevision: string | undefined;
+  private snapshotCacheBytes = 0;
+  private snapshotQueueRevision = 0;
+  private readonly preparingSnapshots = new Map<string,{ revision: string | undefined; clients: Array<{ client: Socket; info: UiClientInfo }> }>();
   /** Process-lifetime admission state. Keeping it outside UiClientInfo prevents reconnects or
    * parallel sockets from replenishing one authenticated caller's authorization-query budget. */
   private readonly uiSubscriptionAdmissions = new Map<string, UiSubscriptionAdmission>();
@@ -417,6 +487,7 @@ export class Hub {
    * the runner. It is kept for the life of this socket, so per-event capability checks need not
    * reload the runner record (#2761). */
   attachRunner(runnerId: string, socket: Socket, protocolVersion?: number | null): void {
+    this.snapshotQueueRevision++;
     const previous = this.runnerSockets.get(runnerId);
     this.runnerSockets.set(runnerId, socket);
     if (protocolVersion !== undefined) this.runnerProtocolVersions.set(socket, protocolVersion);
@@ -454,6 +525,7 @@ export class Hub {
    */
   detachRunner(runnerId: string, socket: Socket): boolean {
     if (this.runnerSockets.get(runnerId) !== socket) return false;
+    this.snapshotQueueRevision++;
     this.runnerSockets.delete(runnerId);
     // Fail any in-flight requests waiting on this runner instead of letting them hang
     // until their timeout fires.
@@ -738,14 +810,86 @@ export class Hub {
       if (matchingClients >= this.maxUiClientsPerAdmissionKey) return false;
     }
     if (!this.admitUiConnectionStart(info, now)) return false;
+    const revision = this.db.sessionListRevision?.();
+    if (revision === undefined || revision !== this.snapshotCacheRevision) {
+      this.snapshotCache.clear();
+      this.snapshotCacheBytes = 0;
+      this.snapshotCacheRevision = revision;
+    }
+    const paged = (info.uiProtocolVersion ?? 0) >= SESSION_SUMMARY_UI_PROTOCOL && typeof this.db.listSessionSummaries === "function";
+    info.snapshotAccessRevision=this.db.sessionAccessRevision?.();
+    const cacheKey = JSON.stringify([info.principal ?? null, info.uiProtocolVersion ?? null, this.snapshotQueueRevision]);
+    const cached = revision === undefined ? undefined : this.snapshotCache.get(cacheKey);
+    if (cached) {
+      this.installUiSnapshot(client, info, cached.snapshot, cached.frames, cached.hiddenIds);
+      return true;
+    }
+    const preparing=this.preparingSnapshots.get(cacheKey);
+    if (paged && preparing?.revision===revision) {
+      info.preparingSnapshot=true;
+      info.snapshotVisibilityChanges = { sessions: new Map(),runners: new Map(),projects: new Map() };
+      this.uiClients.set(client,info);
+      preparing.clients.push({ client,info });
+      return true;
+    }
+    if (paged) {
+      info.preparingSnapshot = true;
+      info.snapshotVisibilityChanges = { sessions: new Map(),runners: new Map(),projects: new Map() };
+      this.uiClients.set(client, info);
+      const pending = { revision, clients: [{ client, info }] };
+      this.preparingSnapshots.set(cacheKey, pending);
+      void (async () => {
+        try {
+          const sessions = info.principal ? this.db.cachedSessionSummariesForPrincipal?.(info.principal) : undefined;
+          const summaries = sessions ?? await this.db.listSessionSummariesAsync(info.principal);
+          const snapshot = this.buildUiSnapshot(info, true, summaries);
+          const frames = await serializeUiSnapshotAsync(snapshot);
+          const hiddenIds = info.hiddenIndefiniteReminderSessionIds!;
+          for (const target of pending.clients) {
+            if (this.uiClients.get(target.client) !== target.info) continue;
+            if (!frames) this.evictUiClient(target.client, target.info, 1009, "dashboard inventory is too large; open a session directly");
+            else this.installUiSnapshot(target.client, target.info, snapshot, frames, hiddenIds);
+          }
+          if (frames && revision !== undefined && this.db.sessionListRevision?.() === revision) {
+            this.cacheUiSnapshot(cacheKey, snapshot, frames, hiddenIds);
+          }
+        } catch {
+          for (const target of pending.clients) {
+            if (this.uiClients.get(target.client) === target.info) this.evictUiClient(target.client, target.info, 1011, "dashboard snapshot failed");
+          }
+        } finally {
+          if (this.preparingSnapshots.get(cacheKey) === pending) this.preparingSnapshots.delete(cacheKey);
+        }
+      })();
+      return true;
+    }
+    const snapshot = this.buildUiSnapshot(info, false);
+    const frames = serializeUiSnapshot(snapshot, paged);
+    if (!frames) {
+      info.close(1009, "dashboard inventory is too large; update the dashboard or open a session directly");
+      return false;
+    }
+    if (revision!==undefined) this.cacheUiSnapshot(cacheKey,snapshot,frames,info.hiddenIndefiniteReminderSessionIds!);
+    this.installUiSnapshot(client,info,snapshot,frames,info.hiddenIndefiniteReminderSessionIds!);
+    return true;
+  }
+
+  private buildUiSnapshot(info: UiClientInfo, paged: boolean, summarySessions?: SessionView[]): UiSnapshotMessage {
     const runners = info.principal ? this.db.listRunnersForPrincipal(info.principal) : this.db.listRunners();
-    const allSessions = info.principal ? this.db.listSessionsForPrincipal(info.principal) : this.db.listSessions();
+    const allSessions = summarySessions ?? (paged && this.db.listSessionSummaries
+      ? info.principal ? this.db.cachedSessionSummariesForPrincipal?.(info.principal) ?? this.db.listSessionSummaries(info.principal) : this.db.listSessionSummaries()
+      : info.principal && this.db.listSessionDetailsForPrincipal
+        ? this.db.listSessionDetailsForPrincipal(info.principal)
+        : info.principal ? this.db.listSessionsForPrincipal(info.principal) : this.db.listSessions());
     const projects = info.principal ? this.db.listProjectsForPrincipal(info.principal, true) : this.db.listProjects(true);
     const globalAdmin = info.principal === undefined || this.isGlobalAdmin(info.principal);
     const reminderUserId = info.principal === undefined ? LOCAL_OWNER_USER_ID
       : info.principal.kind === "human" ? info.principal.userId : null;
-    const allReminders = reminderUserId === null ? [] : this.db.listSessionReminders(reminderUserId)
-      .filter((reminder) => info.principal === undefined || this.db.canAccessSession(info.principal, reminder.sessionId));
+    const allReminders = reminderUserId === null ? []
+      : info.principal && this.db.listSessionRemindersForPrincipal
+        ? this.db.listSessionRemindersForPrincipal(reminderUserId, info.principal)
+        : this.db.listSessionReminders(reminderUserId)
+          .filter((reminder) => info.principal === undefined || this.db.canAccessSession(info.principal, reminder.sessionId));
     const supportsIndefiniteReminders = this.supportsIndefiniteReminders(info);
     info.hiddenIndefiniteReminderSessionIds = new Set(supportsIndefiniteReminders ? [] : allReminders
       .filter((reminder) => reminder.scheduleKind === "someday" && reminder.state === "pending")
@@ -756,15 +900,9 @@ export class Hub {
       : allReminders.filter((reminder) => reminder.scheduleKind !== "someday");
     const worktreeSetupNoticeDismissals = reminderUserId === null
       ? [] : this.db.worktreeSetupNoticeDismissals(reminderUserId);
-    info.visibleRunnerIds = new Set(runners.map((runner) => runner.runnerId));
-    info.visibleSessionIds = new Set(sessions.map((session) => session.id));
-    const snapshotSessions = sessions.map((s) => withSessionCommandPermissions(this.db, info.principal, this.withQueue(s)));
-    if (info.principal) {
-      info.sentCommandPermissions = new Map(snapshotSessions.map((session) => [session.id, permissionsKey(session)]));
-    }
-    info.visibleProjectIds = new Set(projects.map((project) => project.id));
-    this.uiClients.set(client, info);
-    const snapshot: ControlPlaneToUi = {
+    const snapshotSessions = sessions.map((s) => s.projection === "summary" ? this.withQueue(s,true) :
+      withSessionCommandPermissions(this.db, info.principal, this.withQueue(s)));
+    const snapshot: UiSnapshotMessage = {
       type: "snapshot",
       capabilities: {
         sessionSubscriptions: true,
@@ -793,8 +931,54 @@ export class Hub {
       runs: globalAdmin ? this.db.listRuns() : [],
       pods: globalAdmin ? this.db.listPods() : [],
     };
-    this.safeSend(client, snapshot);
-    return true;
+    return snapshot;
+  }
+
+  private cacheUiSnapshot(cacheKey: string,snapshot: UiSnapshotMessage,frames: readonly string[],hiddenIds: Set<string>): void {
+    const bytes=frames.reduce((total,frame) => total+Buffer.byteLength(frame),0);
+    if (bytes <= MAX_SHARED_SNAPSHOT_BYTES) {
+      while (this.snapshotCache.size >= 4 || this.snapshotCacheBytes+bytes > MAX_SHARED_SNAPSHOT_BYTES) {
+        const key = this.snapshotCache.keys().next().value;
+        if (key === undefined) break;
+        this.snapshotCacheBytes -= this.snapshotCache.get(key)!.bytes;
+        this.snapshotCache.delete(key);
+      }
+      this.snapshotCache.set(cacheKey, { snapshot, frames, bytes, hiddenIds });
+      this.snapshotCacheBytes += bytes;
+    }
+  }
+
+  private installUiSnapshot(client: Socket, info: UiClientInfo, snapshot: UiSnapshotMessage,
+    frames: readonly string[], hiddenIds: Set<string>): void {
+    info.visibleRunnerIds = new Set(snapshot.runners.map((runner) => runner.runnerId));
+    info.visibleSessionIds = new Set(snapshot.sessions.map((session) => session.id));
+    info.visibleProjectIds = new Set((snapshot.projects ?? []).map((project) => project.id));
+    info.hiddenIndefiniteReminderSessionIds = new Set(hiddenIds);
+    if (info.principal) info.sentCommandPermissions = new Map([
+      ...snapshot.sessions.map((session) => [session.id,permissionsKey(session)] as const),
+      ...(info.sentCommandPermissions ?? []),
+    ]);
+    for (const [changes,visible] of [
+      [info.snapshotVisibilityChanges?.sessions,info.visibleSessionIds],
+      [info.snapshotVisibilityChanges?.runners,info.visibleRunnerIds],
+      [info.snapshotVisibilityChanges?.projects,info.visibleProjectIds],
+    ] as const) {
+      for (const [id,present] of changes ?? []) {
+        if (present) visible.add(id);
+        else visible.delete(id);
+      }
+    }
+    for (const [id,present] of info.snapshotVisibilityChanges?.sessions ?? []) {
+      if (!present) info.sentCommandPermissions?.delete(id);
+    }
+    info.snapshotVisibilityChanges = undefined;
+    info.initialFrames = frames;
+    info.snapshotSessionIds = [...new Set([...snapshot.sessions.map((session) => session.id),
+      ...(snapshot.reminders ?? []).map((reminder) => reminder.sessionId)])];
+    info.initialFrameIndex = 0;
+    info.preparingSnapshot=false;
+    this.uiClients.set(client,info);
+    this.pumpUiClient(client,info);
   }
 
   removeUiClient(client: Socket): void {
@@ -806,6 +990,9 @@ export class Hub {
     info.outbound = [];
     info.queuedBytes = 0;
     info.sending = false;
+    info.initialFrames = undefined;
+    info.snapshotSessionIds = undefined;
+    info.snapshotVisibilityChanges = undefined;
     info.visibleSessionIds?.clear();
     info.visibleRunnerIds?.clear();
     info.visibleProjectIds?.clear();
@@ -1056,6 +1243,7 @@ export class Hub {
     this.broadcast({ type: "runner_removed", runnerId }, (_principal, info) => {
       const visible = info.visibleRunnerIds?.has(runnerId) ?? true;
       info.visibleRunnerIds?.delete(runnerId);
+      info.snapshotVisibilityChanges?.runners.set(runnerId,false);
       return visible;
     });
   }
@@ -1215,6 +1403,7 @@ export class Hub {
     this.broadcast({ type: "project_removed", projectId }, (_principal, info) => {
       const visible = info.visibleProjectIds?.has(projectId) ?? true;
       info.visibleProjectIds?.delete(projectId);
+      info.snapshotVisibilityChanges?.projects.set(projectId,false);
       return visible;
     });
   }
@@ -1247,21 +1436,22 @@ export class Hub {
   /** Overlay a session's ephemeral prompt queue onto its DB-built view. Suppressed when the runner
    * is offline — a queue left over from a since-disconnected runner is meaningless (its in-memory
    * turns are gone). */
-  private withQueue(session: SessionView): SessionView {
+  withQueue(session: SessionView, authoritative = false): SessionView {
     const state = this.queuedBySession.get(session.id);
     if (state && this.isRunnerOnline(session.runnerId)) {
       return {
         ...session,
-        ...(state.queue.length ? { queued: overlayLiveQueue(session.queued, state.queue) } : {}),
-        ...(state.held ? { queueHeld: true } : {}),
-        ...(state.activeTurnId ? { activeTurnId: state.activeTurnId } : {}),
+        ...(session.projection !== "summary" && state.queue.length ? { queued: overlayLiveQueue(session.queued, state.queue) } : {}),
+        ...(authoritative ? { queueHeld: state.held,activeTurnId: state.activeTurnId }
+          : { ...(state.held ? { queueHeld: true } : {}),...(state.activeTurnId ? { activeTurnId: state.activeTurnId } : {}) }),
       };
     }
-    return session;
+    return authoritative ? { ...session,queueHeld: false,activeTurnId: undefined } : session;
   }
 
   /** Runner reported a session's not-yet-started prompt queue (ephemeral); relay to dashboards. */
   setSessionQueue(sessionId: string, queue: QueuedPromptView[], held = false, activeTurnId?: string): void {
+    this.snapshotQueueRevision++;
     if (queue.length || held || activeTurnId) this.queuedBySession.set(sessionId, { queue, held, activeTurnId });
     else this.queuedBySession.delete(sessionId);
     const session = this.db.getSession(sessionId);
@@ -1309,6 +1499,7 @@ export class Hub {
       const visible = (info.visibleSessionIds?.has(sessionId) ?? true) ||
         (info.subscribedSessionIds?.has(sessionId) ?? false);
       info.visibleSessionIds?.delete(sessionId);
+      info.snapshotVisibilityChanges?.sessions.set(sessionId,false);
       info.hiddenIndefiniteReminderSessionIds?.delete(sessionId);
       return visible;
     });
@@ -1467,6 +1658,7 @@ export class Hub {
       case "pod_context_entry":
         return this.isGlobalAdmin(principal);
       case "snapshot":
+      case "session_snapshot_page":
         return false;
       case "session_subscriptions_applied":
         return true;
@@ -1499,8 +1691,8 @@ export class Hub {
     // O(clients × payload) on the streamed-delta hot path.
     if (this.uiClients.size === 0) return;
     const data = JSON.stringify(msg);
-    // A session view carries the receiving principal's command permissions (#1843). Most clients
-    // share one verdict, so serialize once per distinct verdict rather than once per client.
+    // Reuse a projected session only for the same principal and verdict: campaign request
+    // visibility and personal attention can differ even when command permissions match.
     const sessionDataByPermissions = new Map<string, string>();
     for (const [client, info] of this.uiClients) {
       if (!this.isSubscribed(info, msg)) continue;
@@ -1521,16 +1713,25 @@ export class Hub {
         }
         if (projected.type === "session_upsert" && info.principal !== undefined) {
           const session = withSessionCommandPermissions(this.db, info.principal, projected.session);
-          const key = permissionsKey(session) + JSON.stringify(session.attention);
+          const key = JSON.stringify(info.principal) + permissionsKey(session) + JSON.stringify(session.attention);
           const shared = projected === msg ? sessionDataByPermissions.get(key) : undefined;
           clientData = shared ?? JSON.stringify({ ...projected, session } satisfies ControlPlaneToUi);
           if (projected === msg && shared === undefined) sessionDataByPermissions.set(key, clientData);
           (info.sentCommandPermissions ??= new Map()).set(session.id, permissionsKey(session));
         }
         if (projected.type === "session_removed") info.sentCommandPermissions?.delete(projected.sessionId);
-        if (projected.type === "session_upsert") info.visibleSessionIds?.add(projected.session.id);
-        if (projected.type === "runner_upsert") info.visibleRunnerIds?.add(projected.runner.runnerId);
-        if (projected.type === "project_upsert") info.visibleProjectIds?.add(projected.project.id);
+        if (projected.type === "session_upsert") {
+          info.visibleSessionIds?.add(projected.session.id);
+          info.snapshotVisibilityChanges?.sessions.set(projected.session.id,true);
+        }
+        if (projected.type === "runner_upsert") {
+          info.visibleRunnerIds?.add(projected.runner.runnerId);
+          info.snapshotVisibilityChanges?.runners.set(projected.runner.runnerId,true);
+        }
+        if (projected.type === "project_upsert") {
+          info.visibleProjectIds?.add(projected.project.id);
+          info.snapshotVisibilityChanges?.projects.set(projected.project.id,true);
+        }
         this.sendRaw(client, clientData, this.coalesceKey(projected));
       }
     }
@@ -1643,10 +1844,31 @@ export class Hub {
   }
 
   private pumpUiClient(client: Socket, info: UiClientInfo): void {
-    if (info.sending || this.uiClients.get(client) !== info) return;
-    const frame = info.outbound?.shift();
+    if (info.preparingSnapshot || info.sending || this.uiClients.get(client) !== info) return;
+    const initial = info.initialFrames?.[info.initialFrameIndex ?? 0];
+    if (initial!==undefined && info.snapshotAccessRevision!==undefined) {
+      const revision = this.db.sessionAccessRevision?.();
+      if (revision !== info.snapshotAccessRevision) {
+        if (info.principal && !this.db.canAccessCapturedSessions(info.principal, info.snapshotSessionIds ?? [])) {
+          this.evictUiClient(client,info,1012,"access changed; reconnect for fresh state");
+          return;
+        }
+        info.snapshotAccessRevision = revision;
+      }
+    }
+    const frame = initial === undefined ? info.outbound?.shift() : { data: initial, bytes: Buffer.byteLength(initial) };
     if (!frame) return;
-    info.queuedBytes = Math.max(0, (info.queuedBytes ?? 0) - frame.bytes);
+    if (initial !== undefined) {
+      info.initialFrameIndex = (info.initialFrameIndex ?? 0)+1;
+      if (info.initialFrameIndex === info.initialFrames?.length) {
+        info.initialFrames = undefined;
+        info.snapshotSessionIds = undefined;
+      }
+    } else info.queuedBytes = Math.max(0, (info.queuedBytes ?? 0) - frame.bytes);
+    if ((client.bufferedAmount ?? 0)+frame.bytes > MAX_UI_BUFFERED_BYTES) {
+      this.evictUiClient(client,info,1013,"client is too slow; reconnect for fresh state");
+      return;
+    }
     info.sending = true;
     const complete = (error?: Error) => {
       if (this.uiClients.get(client) !== info) return;

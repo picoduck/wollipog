@@ -239,6 +239,7 @@ export function withHoldAdviceFor<T extends Pick<SessionView, "holds" | "queueHo
 /** The ownership lookups `withSessionCommandPermissions` needs from the database. */
 export interface SessionCommandPermissionSource {
   sessionAttentionForUser?(session: SessionView, userId: string | null): SessionView;
+  campaignRequestsForPrincipal?(principal: AuthPrincipal, sessionId: string, includeArchived?: boolean): SessionView["campaignRequests"];
   isSessionOwner(principal: HumanPrincipal, sessionId: string): boolean;
   isSessionDescendant(ancestorId: string, targetId: string): boolean;
   /** Whether `principal` may read the session at all; a campaign lists only such held children. */
@@ -395,7 +396,7 @@ export function withVisibleHeldChildren<T extends Pick<OrchestratorCampaignProje
  * (`{ session }`, `{ sessions }`, `{ sideChat }`, `{ campaign }`). A route that returns the view it
  * changed does not write it for the requester, so this is applied to every response. */
 export function withVisibleCampaignChildren(
-  source: Pick<SessionCommandPermissionSource, "canAccessSession">,
+  source: Pick<SessionCommandPermissionSource, "canAccessSession" | "campaignRequestsForPrincipal">,
   principal: AuthPrincipal | null | undefined,
   payload: unknown,
 ): unknown {
@@ -405,10 +406,13 @@ export function withVisibleCampaignChildren(
     if (Array.isArray((value as Partial<OrchestratorCampaignProjection>).heldChildren)) {
       return withVisibleHeldChildren(source, principal, value as Pick<OrchestratorCampaignProjection, "heldChildren">);
     }
-    const campaign = (value as Partial<SessionView>).orchestratorCampaign;
-    if (!campaign?.heldChildren?.length) return value;
+    const view = typeof (value as Partial<SessionView>).id === "string"
+      ? withCampaignRequestsFor(source, principal, value as SessionView)
+      : value;
+    const campaign = (view as Partial<SessionView>).orchestratorCampaign;
+    if (!campaign?.heldChildren?.length) return view;
     const visible = withVisibleHeldChildren(source, principal, campaign);
-    return visible === campaign ? value : { ...value, orchestratorCampaign: visible };
+    return visible === campaign ? view : { ...view, orchestratorCampaign: visible };
   };
   const narrow = (value: unknown): unknown => {
     if (!Array.isArray(value)) return narrowView(value);
@@ -481,8 +485,23 @@ export function withSessionCommandPermissions<T extends SessionView>(
 ): T {
   if (!principal) return session;
   session = (source.sessionAttentionForUser?.(session, principal.kind === "human" ? principal.userId : null) ?? session) as T;
+  session = withCampaignRequestsFor(source, principal, session);
   session = withCampaignWorkFor(source, principal, session);
   const commandPermissions = sessionCommandPermissions(principal, session, permissionFacts(source, principal, session.id));
   return withSessionHoldAdviceFor(source, principal, { ...session, commandPermissions },
     session.holds?.length ? holdAdviceReader(commandPermissions) : undefined);
+}
+
+/** A root's full campaign retains its inventory, while list facts keep the reader's audience. */
+function withCampaignRequestsFor<T extends SessionView>(
+  source: Pick<SessionCommandPermissionSource, "campaignRequestsForPrincipal">,
+  principal: AuthPrincipal,
+  session: T,
+): T {
+  if (!session.orchestratorCampaign?.pendingRequests || !source.campaignRequestsForPrincipal) return session;
+  return {
+    ...session,
+    campaignRequests: source.campaignRequestsForPrincipal(principal, session.id, session.archived === true) ??
+      { human: 0, orchestrator: 0, humanRequestTokens: [] },
+  };
 }

@@ -177,6 +177,98 @@ test("background delivery observation retries are deduplicated and self-healing"
   assert.equal(tracker.nextRetryAt(), undefined);
 });
 
+test("paged snapshots acknowledge background deliveries as their authorized rows arrive", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const sockets: FakeSocket[] = [];
+  await act(async () => {
+    root.render(<StoreProvider connection={runtime("paged-delivery", "paged-delivery:1", sockets)}><div /></StoreProvider>);
+  });
+  const frame = JSON.parse(snapshot("session-1", "Background Delivery"));
+  const sessions = frame.sessions;
+  sessions[0].projection = "summary";
+  sessions[0].backgroundDeliveries = [{ continuationId: "bgcont-1", parentTurnId: "turn-1",
+    jobCount: 1, terminalCount: 1, notificationQueuedAt: 100 }];
+  await act(async () => {
+    sockets[0]!.onmessage?.({ data: JSON.stringify({ ...frame, sessions: [], sessionsComplete: false }) });
+    sockets[0]!.onmessage?.({ data: JSON.stringify({ type: "session_snapshot_page", sessions, complete: true }) });
+  });
+  assert.deepEqual(sockets[0]!.sent.map((data) => JSON.parse(data)), [{
+    type: "background_delivery_observed", sessionId: "session-1", continuationId: "bgcont-1",
+  }]);
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("paged loading sends one complete stream selection, then reacts to live changes", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const sockets: FakeSocket[] = [];
+  try {
+    await act(async () => {
+      root.render(<StoreProvider connection={runtime("paged-subscriptions", "paged-subscriptions:1", sockets)}
+        navigation={{ current: () => ({ name: "board" }), push() {}, listen: () => () => {} }}><div /></StoreProvider>);
+    });
+    const socket = sockets[0]!;
+    Object.defineProperty(socket, "readyState", { value: 1 });
+    const messages = () => socket.sent.map((data) => JSON.parse(data)).filter((msg) => msg.type === "session_subscriptions");
+    const frame = JSON.parse(snapshot("busy-1", "First"));
+    const first = { ...frame.sessions[0], projection: "summary", status: "running" };
+    const second = { ...first, id: "busy-2", title: "Second" };
+    await act(async () => {
+      socket.onmessage?.({ data: JSON.stringify({ ...frame, sessions: [], sessionsComplete: false,
+        capabilities: { sessionSubscriptions: true } }) });
+    });
+    assert.deepEqual(messages(), [], "an empty header cannot spend subscription admission");
+    await act(async () => {
+      socket.onmessage?.({ data: JSON.stringify({ type: "session_snapshot_page", sessions: [first], complete: false }) });
+    });
+    assert.deepEqual(messages(), [], "partial inventory cannot send repeated growing selections");
+    await act(async () => {
+      socket.onmessage?.({ data: JSON.stringify({ type: "session_snapshot_page", sessions: [second], complete: true }) });
+    });
+    assert.deepEqual(messages(), [{ type: "session_subscriptions", revision: 1, sessionIds: ["busy-1", "busy-2"], podIds: [] }]);
+    await act(async () => {
+      socket.onmessage?.({ data: JSON.stringify({ type: "session_subscriptions_applied", revision: 1,
+        sessionIds: ["busy-1", "busy-2"], podIds: [] }) });
+      socket.onmessage?.({ data: JSON.stringify({ type: "session_upsert", session: { ...second, status: "idle" } }) });
+    });
+    assert.deepEqual(messages()[1], { type: "session_subscriptions", revision: 2, sessionIds: ["busy-1"], podIds: [] },
+      "post-snapshot live changes still update acknowledged streams");
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
+test("a legacy full snapshot sends its targeted stream selection immediately", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const sockets: FakeSocket[] = [];
+  try {
+    await act(async () => {
+      root.render(<StoreProvider connection={runtime("full-subscriptions", "full-subscriptions:1", sockets)}
+        navigation={{ current: () => ({ name: "board" }), push() {}, listen: () => () => {} }}><div /></StoreProvider>);
+    });
+    const socket = sockets[0]!;
+    Object.defineProperty(socket, "readyState", { value: 1 });
+    const frame = JSON.parse(snapshot("busy-1", "First"));
+    frame.sessions[0].status = "running";
+    await act(async () => {
+      socket.onmessage?.({ data: JSON.stringify({ ...frame, capabilities: { sessionSubscriptions: true } }) });
+    });
+    assert.deepEqual(socket.sent.map((data) => JSON.parse(data)), [{
+      type: "session_subscriptions", revision: 1, sessionIds: ["busy-1"], podIds: [],
+    }]);
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
 test("a new generation remounts the same profile while an equivalent runtime key stays connected", async () => {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);

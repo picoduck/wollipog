@@ -856,6 +856,7 @@ test("list_sessions -> GET /api/sessions (+?archived=true), mapped with pendingA
       sessions: [
         {
           id: "s_1",
+          projection: "summary",
           title: "work",
           status: "input_required",
           runnerId: "r1",
@@ -892,6 +893,7 @@ test("list_sessions -> GET /api/sessions (+?archived=true), mapped with pendingA
   assert.equal(s.orchestratorPolicy.behavior.childModel, "sol",
     "the active campaign can inspect its immutable-at-creation policy and sources");
   assert.equal(s.preview, undefined);
+  assert.equal(s.orchestratorCampaign, undefined,"campaign inventories are detail-only; get_session exposes them");
 
   result = await callTool(deps, "list_sessions", { archived: true });
   assert.equal(calls[1]!.url, `${CP_URL}/api/sessions?archived=true`);

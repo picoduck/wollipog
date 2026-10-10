@@ -661,7 +661,9 @@
 //      exactly that request, so a Decision Record names its decider per occurrence. Additive +
 //      optional: older runners ignore the field and older control planes send none; such
 //      resolutions name nobody, as before.
-export const PROTOCOL_VERSION = 211;
+// 212: lightweight session summaries and byte-bounded dashboard snapshot pages (#2769).
+export const PROTOCOL_VERSION = 212;
+export const SESSION_SUMMARY_UI_PROTOCOL = 212;
 export const SKILL_REPORT_REQUEST_LIFETIME_MS = 30_000;
 export const MAX_SKILL_REPORT_REQUESTS = 64;
 export { boundedIssueNumbers, epicChecklistMembers, normalizeCampaignIssueScopeSnapshot } from "./campaign-issue-scope.js";
@@ -2571,6 +2573,10 @@ export function campaignHumanAttentionAdded(
   return (next?.human ?? 0) > (previous?.human ?? 0);
 }
 
+export function sessionCampaignRequests(session: Pick<SessionView,"campaignRequests" | "orchestratorCampaign">) {
+  return session.campaignRequests ?? session.orchestratorCampaign?.pendingRequests;
+}
+
 export interface RecordOrchestratorFollowUpRequest {
   originSessionId: string;
   repository: string;
@@ -3706,7 +3712,7 @@ export interface ChildSessionRegistryPage {
 /** Canonical, compatibility-safe projection of the concrete action a person must take. */
 export function sessionAttentionStatus(
   session: Pick<SessionView, "status" | "pendingApproval" | "attentionOwners"> &
-    Partial<Pick<SessionView, "orchestratorCampaign" | "pendingRequestOwners">>,
+    Partial<Pick<SessionView, "orchestratorCampaign" | "campaignRequests" | "pendingRequestOwners">>,
 ): SessionAttentionStatus | null {
   const result = singleSessionAttentionStatus(session);
   if (!result || !session.pendingApproval?.ownerToolUseId || session.pendingApproval.additionalRequests?.length) return result;
@@ -3753,7 +3759,7 @@ function humanOwnsPendingRequest(
  */
 export function sessionAttentionBreakdown(
   session: Pick<SessionView, "status" | "pendingApproval" | "attentionOwners"> &
-    Partial<Pick<SessionView, "orchestratorCampaign" | "pendingRequestOwners">>,
+    Partial<Pick<SessionView, "orchestratorCampaign" | "campaignRequests" | "pendingRequestOwners">>,
 ): SessionAttentionGroup[] {
   const requests = prioritizedPendingRequests(session.pendingApproval)
     .filter((request) => humanOwnsPendingRequest(session.pendingRequestOwners, request));
@@ -3762,6 +3768,7 @@ export function sessionAttentionBreakdown(
       status: session.status,
       pendingApproval: null,
       orchestratorCampaign: session.orchestratorCampaign,
+      campaignRequests: session.campaignRequests,
     });
     return fallback ? [{ ...fallback, count: 0, requests: [], owners: [] }] : [];
   }
@@ -3793,9 +3800,9 @@ export function sessionAttentionBreakdown(
 
 function singleSessionAttentionStatus(
   session: Pick<SessionView, "status" | "pendingApproval"> &
-    Partial<Pick<SessionView, "orchestratorCampaign" | "pendingRequestOwners">>,
+    Partial<Pick<SessionView, "orchestratorCampaign" | "campaignRequests" | "pendingRequestOwners">>,
 ): SessionAttentionStatus | null {
-  const humanCampaignRequests = session.orchestratorCampaign?.pendingRequests?.human ?? 0;
+  const humanCampaignRequests = sessionCampaignRequests(session)?.human ?? 0;
   const requests = pendingRequests(session.pendingApproval)
     .filter((request) => humanOwnsPendingRequest(session.pendingRequestOwners, request));
   if (requests.length === 0 && session.pendingApproval) {
@@ -6695,6 +6702,9 @@ export interface SessionAttentionSummary {
 
 /** Denormalised session record for the UI (board cards + lists). */
 export interface SessionView {
+  /** Lightweight list projection. Open the authorized detail endpoint before rendering controls
+   * that depend on request bodies, provider capabilities, queues, or campaign inventories. */
+  projection?: "summary";
   /** Omitted by older peers. Absence never implies an outstanding result. */
   attention?: SessionAttentionSummary;
   id: string;
@@ -6717,6 +6727,9 @@ export interface SessionView {
   orchestratorPolicy?: OrchestratorCampaignPolicy;
   /** Current effective campaign state. Omitted by older control planes and non-Orchestrators. */
   orchestratorCampaign?: OrchestratorCampaignProjection;
+  /** Audience-scoped child-request counts, consistent across summary, detail and live rows.
+   * Full campaign inventory remains detail-only. */
+  campaignRequests?: { human: number; orchestrator: number; humanRequestTokens?: string[] };
   /** v196 membership of a campaign descendant in its root campaign's work ledger (#2417), filled by
    * the Read API slice. Omitted for non-members and by older control planes. */
   campaignMembership?: CampaignMembershipView;
@@ -10414,6 +10427,8 @@ export type ControlPlaneToRunner =
 
 export interface UiSnapshotMessage {
   type: "snapshot";
+  /** False while session_snapshot_page messages complete this connection's initial inventory. */
+  sessionsComplete?: boolean;
   /** Additive UI-channel capabilities. Absent on older control planes. */
   capabilities?: {
     sessionSubscriptions?: boolean;
@@ -10457,6 +10472,12 @@ export interface UiSnapshotMessage {
   runs: RunView[];
   /** Optional only for compatibility with pre-pod control planes. */
   pods?: PodView[];
+}
+
+export interface UiSessionSnapshotPageMessage {
+  type: "session_snapshot_page";
+  sessions: SessionView[];
+  complete: boolean;
 }
 
 export interface UiRunnerUpsertMessage {
@@ -10598,6 +10619,7 @@ export interface UiSessionSubscriptionsAppliedMessage {
 
 export type ControlPlaneToUi =
   | UiSnapshotMessage
+  | UiSessionSnapshotPageMessage
   | UiRunnerUpsertMessage
   | UiRunnerRemovedMessage
   | UiBoxUpsertMessage

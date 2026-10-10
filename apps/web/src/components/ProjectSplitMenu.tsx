@@ -1,3 +1,4 @@
+import { sessionCampaignRequests } from "@wollipog/protocol";
 import { Fragment, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import {
   runnerCapabilityRequirement,
@@ -90,7 +91,7 @@ export interface ProjectSplitActions {
 export function archiveRowStatus(session: SessionView): StatusMeta {
   const attention = sessionAttentionStatus(session);
   const legacyInput = attention?.kind === "input_required" && !session.pendingApproval &&
-    !session.orchestratorCampaign?.pendingRequests?.human;
+    !sessionCampaignRequests(session)?.human;
   if (attention && !legacyInput) return statusMeta("attention", attention.kind);
   return sessionLifecycleMeta(session.status, {
     archiveStatus: session.archiveStatus,

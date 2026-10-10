@@ -6,6 +6,7 @@
 
 import { DatabaseSync } from "node:sqlite";
 import { attentionRequestRank } from "@wollipog/protocol";
+import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
 import { CLAUDE_RECONCILIATION_SCHEMA, normalizeReconciledSnapshot } from "./claude-cost-reconciliation.js";
 import { priceUsage, resolveCostSource, type RateTable } from "./usage-pricing.js";
 import { collapseAgentSpawnObservations, type StructuredAgentSpawnObservation } from "./child-session-registry.js";
@@ -2904,6 +2905,71 @@ interface SessionRow {
   runner_history_tail_seq: number;
   runner_snapshot_fingerprint: string | null;
   runner_registration_snapshot_fingerprint: string | null;
+}
+
+interface SessionSummaryRow extends SessionRow {
+  summary_workspace_name: string | null;
+  summary_agent_name: string | null;
+  summary_project_name: string | null;
+  summary_audience: SessionView["audience"];
+  summary_owns: number;
+  summary_children: number;
+  summary_jobs: number;
+  summary_tool_calls: number;
+  summary_conversion: string | null;
+  summary_worktree: string | null;
+  summary_attention_revision: number | null;
+  summary_meaningful_at: number | null;
+  summary_result_revision: string | null;
+  summary_result_at: number | null;
+  summary_handoff_revision: string | null;
+  summary_ack_revision: string | null;
+  summary_ack_counter: number | null;
+}
+
+interface SessionSummaryContext {
+  rows: Map<string, SessionRow>;
+  runnerProtocols: Map<string, number | null>;
+  policyRequestedAt: Map<string, number>;
+  costSources: Map<string, UsageCostSource | undefined>;
+  backgroundDeliveries: Map<string,BackgroundDeliveryView[]>;
+  childObservations: Map<string,Array<{ payload: string }>>;
+  heldResumes: Map<string,HeldSessionResumeView[]>;
+  campaignRequests: Map<string,NonNullable<SessionView["campaignRequests"]>>;
+}
+
+interface CampaignRequestSummaryRow {
+  type: "generic" | "typed";
+  session_id: string;
+  runner_id: string | null;
+  pending_approval: string | null;
+  controlling_session_id: string | null;
+  authority: "human" | "orchestrator" | null;
+  occurrence_id: string | null;
+}
+
+function addCampaignRequestSummary(
+  counts: NonNullable<SessionView["campaignRequests"]>,
+  request: CampaignRequestSummaryRow,
+  parentControl: string | null,
+  runnerProtocol: number | null,
+): void {
+  if (request.type === "typed") {
+    if (request.authority !== "human" && request.authority !== "orchestrator") return;
+    counts[request.authority]++;
+    if (request.authority === "human") counts.humanRequestTokens!.push(createHash("sha256")
+      .update(`typed:${request.session_id}:${request.occurrence_id}`).digest("hex"));
+    return;
+  }
+  const mode = parentControl === "questions" || parentControl === "questions_and_approvals" ? parentControl : "off";
+  const supported = runnerSupportsProtocol(runnerProtocol, "delegatedParentControl");
+  for (const pending of pendingRequests(parseJson<PendingApproval>(request.pending_approval))) {
+    if (pending.kind === "workflow_decision") continue;
+    const authority = supported && parentControlRequestEligible(mode, pending) ? "orchestrator" : "human";
+    counts[authority]++;
+    if (authority === "human") counts.humanRequestTokens!.push(createHash("sha256")
+      .update(`generic:${request.session_id}:${pending.occurrenceId ?? pending.requestId}`).digest("hex"));
+  }
 }
 
 interface SessionStopIntentRow {
@@ -10497,7 +10563,401 @@ export class ControlPlaneDb {
   }
 
   listSessionsForPrincipal(principal: AuthPrincipal, includeArchived = false): SessionView[] {
-    return this.listSessions({ includeArchived }).filter((session) => this.canAccessSession(principal, session.id));
+    return this.sessionSummaryRead(principal,includeArchived).sessions;
+  }
+
+  /** Detail and live rows carry the same audience-scoped list facts as their summary. */
+  campaignRequestsForPrincipal(principal: AuthPrincipal, sessionId: string, includeArchived = false): SessionView["campaignRequests"] {
+    const authorization = this.sessionAuthorizationSql(principal);
+    // Read only this root's bounded ancestry, not the installation's live/archive inventory.
+    const ancestors = this.stmt(`WITH RECURSIVE ancestors AS (
+      SELECT session.id,session.parent_session_id,session.session_role,session.permission_mode,
+        session.orchestrator_policy,session.parent_control,1 AS depth
+      FROM sessions session JOIN session_ownership ownership ON ownership.session_id=session.id
+      WHERE session.id=? AND (? OR session.archived=0) AND ${authorization.sql}
+      UNION ALL SELECT parent.id,parent.parent_session_id,parent.session_role,parent.permission_mode,
+        parent.orchestrator_policy,parent.parent_control,ancestor.depth+1
+      FROM sessions parent JOIN ancestors ancestor ON parent.id=ancestor.parent_session_id
+      WHERE ancestor.depth<64
+    ) SELECT * FROM ancestors ORDER BY depth`).all(sessionId,includeArchived ? 1 : 0,...authorization.params) as unknown as
+      Array<Pick<SessionRow,"id" | "parent_session_id" | "session_role" | "permission_mode" | "orchestrator_policy" | "parent_control">>;
+    // A missing parent, cycle or truncated chain has no trustworthy campaign boundary.
+    if (!ancestors.length || ancestors.at(-1)!.parent_session_id !== null) return undefined;
+    const root = ancestors.filter((row) => sessionRole({ role: row.session_role as SessionRole | null,
+      permissionMode: row.permission_mode }) === "orchestrator").at(-1);
+    if (root?.id !== sessionId || !orchestratorCampaignPolicyFromJson(root.orchestrator_policy)) return undefined;
+    const counts: NonNullable<SessionView["campaignRequests"]> = { human: 0,orchestrator: 0,humanRequestTokens: [] };
+    // Descendants plus the root's ancestors must fit the same 64-row ancestry bound as lists.
+    // Typed gates are already keyed to their exact controller; preserve that existing contract.
+    const requests = this.stmt(`WITH RECURSIVE descendants(id,depth) AS (
+      SELECT ?,1 UNION ALL SELECT child.id,ancestor.depth+1 FROM sessions child
+      JOIN descendants ancestor ON child.parent_session_id=ancestor.id WHERE ancestor.depth<?
+    ) SELECT 'generic' AS type,session.id AS session_id,session.runner_id,session.pending_approval,
+      NULL AS controlling_session_id,NULL AS authority,NULL AS occurrence_id,runner.protocol_version
+      FROM descendants descendant JOIN sessions session ON session.id=descendant.id
+      JOIN session_ownership ownership ON ownership.session_id=session.id
+      LEFT JOIN runners runner ON runner.runner_id=session.runner_id
+      WHERE session.id!=? AND session.pending_approval IS NOT NULL AND ${authorization.sql}
+      UNION ALL SELECT 'typed',decision.session_id,NULL,NULL,decision.controlling_session_id,
+        decision.authority,decision.occurrence_id,NULL
+      FROM workflow_decisions decision JOIN session_ownership ownership ON ownership.session_id=decision.session_id
+      WHERE decision.controlling_session_id=? AND decision.status='pending' AND ${authorization.sql}`)
+      .all(sessionId,65-ancestors.length,sessionId,...authorization.params,sessionId,...authorization.params) as unknown as
+      Array<CampaignRequestSummaryRow & { protocol_version: number | null }>;
+    for (const request of requests) addCampaignRequestSummary(counts,request,root.parent_control,request.protocol_version);
+    counts.humanRequestTokens!.sort();
+    return counts;
+  }
+
+  private readonly sessionSummaryReads = new Map<string,{ revision: string; sessions: SessionView[]; json: string; bytes: number }>();
+  private sessionSummaryReadBytes = 0;
+
+  /** REST and dashboard connects share the exact authorized serialized list until a DB write. */
+  sessionListJsonForPrincipal(principal: AuthPrincipal, includeArchived = false): string {
+    return this.sessionSummaryRead(principal,includeArchived).json;
+  }
+
+  cachedSessionSummariesForPrincipal(principal: AuthPrincipal): SessionView[] | undefined {
+    const cached=this.sessionSummaryReads.get(JSON.stringify([principal,false]));
+    return cached?.revision===this.sessionListRevision() ? cached.sessions : undefined;
+  }
+
+  private sessionSummaryRead(principal: AuthPrincipal,includeArchived: boolean) {
+    const revision=this.sessionListRevision();
+    const key=JSON.stringify([principal,includeArchived]);
+    const cached=this.sessionSummaryReads.get(key);
+    if (cached?.revision===revision) return cached;
+    // A write invalidates every audience, not only whichever caller notices it first.
+    if ([...this.sessionSummaryReads.values()].some((entry) => entry.revision!==revision)) {
+      this.sessionSummaryReads.clear();
+      this.sessionSummaryReadBytes=0;
+    }
+    const sessions=this.listSessionSummaries(principal,includeArchived);
+    const json=JSON.stringify({ sessions });
+    const bytes=Buffer.byteLength(json);
+    const entry={ revision,sessions,json,bytes };
+    const limit=32*1024*1024;
+    if (bytes<=limit) {
+      while (this.sessionSummaryReads.size>=4 || this.sessionSummaryReadBytes+bytes>limit) {
+        const oldest=this.sessionSummaryReads.keys().next().value;
+        if (oldest===undefined) break;
+        this.sessionSummaryReadBytes-=this.sessionSummaryReads.get(oldest)!.bytes;
+        this.sessionSummaryReads.delete(oldest);
+      }
+      this.sessionSummaryReads.set(key,entry);
+      this.sessionSummaryReadBytes+=bytes;
+    }
+    return entry;
+  }
+
+  /** Rolling compatibility for dashboards that cannot hydrate or receive summary pages. */
+  listSessionDetailsForPrincipal(principal: AuthPrincipal): SessionView[] {
+    const authorization = this.sessionAuthorizationSql(principal);
+    const rows = this.stmt(`SELECT session.* FROM sessions session
+      JOIN session_ownership ownership ON ownership.session_id=session.id
+      WHERE session.archived=0 AND ${authorization.sql} ORDER BY session.created_at DESC`)
+      .all(...authorization.params) as unknown as SessionRow[];
+    const targets = new Map<string,ExecutionTargetDefinition[] | undefined>();
+    const stops = this.sessionStopIntents();
+    return rows.map((row) => this.sessionView(row,targets,stops.get(row.id),false,this.childSessionAllocations(row.id).liveCount));
+  }
+
+  /** All content and audience writes invalidate the shared connect projection, including writes
+   * by other SQLite connections. No timed authorization cache is involved. */
+  sessionListRevision(): string {
+    const changes = (this.stmt("SELECT total_changes() AS changes").get() as { changes: number }).changes;
+    const version = (this.stmt("PRAGMA data_version").get() as { data_version: number }).data_version;
+    return `${changes}:${version}`;
+  }
+
+  /** A fixed set of SQL reads, with audience filtering before hydration. Large provider and
+   * campaign inventories, queue/command bodies and worktrees remain on getSession. */
+  listSessionSummaries(principal?: AuthPrincipal, includeArchived = false): SessionView[] {
+    return [...this.sessionSummaries(principal, includeArchived)];
+  }
+
+  /** Dashboard hydration yields between bounded batches, including on an uncached connect. */
+  async listSessionSummariesAsync(principal?: AuthPrincipal): Promise<SessionView[]> {
+    const sessions: SessionView[] = [];
+    for (const session of this.sessionSummaries(principal)) {
+      sessions.push(session);
+      if (sessions.length % 128 === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    return sessions;
+  }
+
+  private *sessionSummaries(principal?: AuthPrincipal, includeArchived = false): Generator<SessionView> {
+    const authorization = principal ? this.sessionAuthorizationSql(principal) : { sql: "1", params: [] };
+    const userId = principal?.kind === "human" ? principal.userId : null;
+    const columns = `id runner_id workspace_id project_id project_location_id agent_id
+      provider_account_id provider_account_label provider_account_automatically_selected
+      title title_source provider_updated_at background_work_state background_work_tracking
+      history_quarantine worktree_recovery queue_hold capacity_wait status board_column run_id
+      use_worktree worktree_path archived preview pending_approval parent_control
+      parent_control_policy parent_control_policy_revision orchestrator_policy session_role
+      driver model resolved_model effort service_tier permission_mode input_tokens output_tokens
+      context_tokens_used context_window cost_usd adopted cost_budget_usd parent_session_id
+      max_child_sessions cost_budget_step_usd cost_checkpoints_usd cost_checkpoint_approved_usd
+      cost_unpriced_ack max_tool_calls max_tool_calls_step workspace_path message_count
+      created_at updated_at last_event_at event_epoch`.split(/\s+/).filter(Boolean);
+    const rowSql = `SELECT ${columns.map((name) => `session.${name}`).join(",")},
+      COALESCE(workspace_override.display_name, workspace.name, extra.name, session.workspace_id) AS summary_workspace_name,
+      COALESCE(agent.name, session.agent_id) AS summary_agent_name, project.name AS summary_project_name,
+      ownership.owner_kind AS summary_audience,
+      CASE WHEN ownership.organization_id=? AND (
+        (ownership.owner_kind='organization' AND ownership.owner_id=?) OR
+        (ownership.owner_kind='user' AND ownership.owner_id=?) OR
+        (ownership.owner_kind='team' AND EXISTS (SELECT 1 FROM identity_teams team
+          JOIN identity_team_members member ON member.team_id=team.team_id
+          WHERE team.team_id=ownership.owner_id AND team.organization_id=ownership.organization_id AND member.user_id=?))
+      ) THEN 1 ELSE 0 END AS summary_owns,
+      COALESCE(children.occupied,0) AS summary_children,
+      EXISTS(SELECT 1 FROM managed_background_jobs job WHERE job.session_id=session.id) AS summary_jobs,
+      COALESCE(tool.tool_calls,0) AS summary_tool_calls,
+      CASE WHEN conversion.state!='applied' THEN json_object('targetRole', json_extract(conversion.command,'$.targetRole'), 'phase',conversion.state) END AS summary_conversion,
+      CASE WHEN session.worktree_path IS NOT NULL THEN (SELECT json_object(
+        'id',json_extract(tree.value,'$.id'),'path',json_extract(tree.value,'$.path'),
+        'branch',json_extract(tree.value,'$.branch'),'source',json_extract(tree.value,'$.source'),
+        'baseRef',json_extract(tree.value,'$.baseRef'),'defaultBranch',json_extract(tree.value,'$.defaultBranch'),
+        'pullRequest',json_extract(tree.value,'$.pullRequest'))
+        FROM json_each(CASE WHEN json_valid(session.worktrees) THEN session.worktrees ELSE '[]' END) tree
+        WHERE json_extract(tree.value,'$.path')=session.worktree_path LIMIT 1) END AS summary_worktree,
+      attention.revision AS summary_attention_revision, attention.meaningful_at AS summary_meaningful_at,
+      attention.result_revision AS summary_result_revision, attention.result_at AS summary_result_at,
+      attention.human_handoff_revision AS summary_handoff_revision,
+      ack.result_revision AS summary_ack_revision, ack.revision AS summary_ack_counter
+      FROM sessions session JOIN session_ownership ownership ON ownership.session_id=session.id
+      LEFT JOIN workspace_overrides workspace_override ON workspace_override.runner_id=session.runner_id AND workspace_override.workspace_id=session.workspace_id
+      LEFT JOIN workspaces workspace ON workspace.runner_id=session.runner_id AND workspace.id=session.workspace_id
+      LEFT JOIN workspace_extras extra ON extra.runner_id=session.runner_id AND extra.id=session.workspace_id
+      LEFT JOIN agent_definitions agent ON agent.id=session.agent_id
+      LEFT JOIN projects project ON project.id=session.project_id
+      LEFT JOIN session_attention attention ON attention.session_id=session.id
+      LEFT JOIN session_result_acknowledgments ack ON ack.session_id=session.id AND ack.user_id=?
+      LEFT JOIN session_tool_call_counts tool ON tool.session_id=session.id
+      LEFT JOIN session_role_conversions conversion ON conversion.session_id=session.id
+      LEFT JOIN (SELECT parent_session_id, COUNT(*) AS occupied FROM sessions
+        WHERE parent_session_id IS NOT NULL AND archived=0 AND status NOT IN ('completed','failed','stopped')
+        GROUP BY parent_session_id) children ON children.parent_session_id=session.id
+      WHERE ${authorization.sql} ${includeArchived ? "" : "AND session.archived=0"}
+      ORDER BY session.created_at DESC,session.id`;
+    const summaryFields = [...columns, ...`summary_workspace_name summary_agent_name summary_project_name
+      summary_audience summary_owns summary_children summary_jobs summary_tool_calls summary_conversion summary_worktree
+      summary_attention_revision summary_meaningful_at summary_result_revision summary_result_at
+      summary_handoff_revision summary_ack_revision summary_ack_counter`.split(/\s+/).filter(Boolean)];
+    // Transfer one JSON value per row across SQLite's native boundary, rather than dozens of
+    // separately boxed columns. The selected content and SQL authorization are unchanged.
+    const rows = (this.stmt(`SELECT json_object(${summaryFields.map((field) => `'${field}',${field}`).join(",")}) AS row_json
+      FROM (${rowSql})`).all(
+        principal?.organizationId ?? null, principal?.organizationId ?? null, userId, userId, userId,
+        ...authorization.params,
+      ) as Array<{ row_json: string }>).map((row) => JSON.parse(row.row_json) as SessionSummaryRow);
+    const ancestry = this.stmt(`SELECT id,parent_session_id,session_role,permission_mode,orchestrator_policy,parent_control
+      FROM sessions`).all() as unknown as SessionRow[];
+    const context: SessionSummaryContext = {
+      rows: new Map(ancestry.map((row) => [row.id,row])),
+      runnerProtocols: new Map((this.stmt("SELECT runner_id,protocol_version FROM runners").all() as
+        Array<{ runner_id: string; protocol_version: number | null }>).map((row) => [row.runner_id,row.protocol_version])),
+      policyRequestedAt: new Map((this.stmt(`SELECT hook.session_id,hook.request_id,hook.created_at
+        FROM policy_hook_approvals hook JOIN session_ownership ownership ON ownership.session_id=hook.session_id
+        WHERE ${authorization.sql}`).all(...authorization.params) as
+        Array<{ session_id: string; request_id: string; created_at: number }>).map((row) =>
+        [JSON.stringify([row.session_id,row.request_id]),row.created_at])),
+      costSources: new Map(),
+      backgroundDeliveries: new Map(),
+      childObservations: new Map(),
+      heldResumes: new Map(),
+      campaignRequests: new Map(),
+    };
+    // Resolve the same outermost campaign boundary from the preloaded ancestry, with its existing
+    // 64-row/cycle/missing-parent refusal. No per-session ancestry SQL is needed.
+    const campaignRoots = new Map<string,string | null>();
+    const campaignRoot = (sessionId: string): string | null => {
+      if (campaignRoots.has(sessionId)) return campaignRoots.get(sessionId)!;
+      let current=context.rows.get(sessionId);
+      let root: SessionRow | undefined;
+      const seen=new Set<string>();
+      while (current) {
+        if (seen.size>=64 || seen.has(current.id)) { root=undefined; break; }
+        seen.add(current.id);
+        if (sessionRole({ role: current.session_role as SessionRole | null,permissionMode: current.permission_mode }) === "orchestrator") root=current;
+        if (!current.parent_session_id) break;
+        current=context.rows.get(current.parent_session_id);
+        if (!current) root=undefined;
+      }
+      const id=root && orchestratorCampaignPolicyFromJson(root.orchestrator_policy) ? root.id : null;
+      campaignRoots.set(sessionId,id);
+      return id;
+    };
+    for (const row of rows) {
+      if (row.orchestrator_policy && campaignRoot(row.id) === row.id) context.campaignRequests.set(row.id,{ human: 0,orchestrator: 0,humanRequestTokens: [] });
+    }
+    if (context.campaignRequests.size) {
+      const requests=this.stmt(`SELECT 'generic' AS type,session.id AS session_id,session.runner_id,
+        session.pending_approval,NULL AS controlling_session_id,NULL AS authority,NULL AS occurrence_id
+        FROM sessions session JOIN session_ownership ownership ON ownership.session_id=session.id
+        WHERE session.pending_approval IS NOT NULL AND ${authorization.sql}
+        UNION ALL SELECT 'typed',decision.session_id,NULL,NULL,decision.controlling_session_id,decision.authority,decision.occurrence_id
+        FROM workflow_decisions decision JOIN session_ownership ownership ON ownership.session_id=decision.session_id
+        WHERE decision.status='pending' AND ${authorization.sql}`)
+        .all(...authorization.params,...authorization.params) as unknown as CampaignRequestSummaryRow[];
+      for (const request of requests) {
+        if (request.type === "typed") {
+          const counts=context.campaignRequests.get(request.controlling_session_id!);
+          if (counts) addCampaignRequestSummary(counts,request,null,null);
+          continue;
+        }
+        const rootId=campaignRoot(request.session_id);
+        if (!rootId || rootId===request.session_id) continue;
+        const counts=context.campaignRequests.get(rootId);
+        if (!counts) continue;
+        const root=context.rows.get(rootId)!;
+        addCampaignRequestSummary(counts,request,root.parent_control,context.runnerProtocols.get(request.runner_id!) ?? null);
+      }
+    }
+    for (const counts of context.campaignRequests.values()) counts.humanRequestTokens!.sort();
+    const heldIds = rows.filter((row) => row.worktree_recovery || !isTerminal(row.status as SessionStatus) && row.queue_hold)
+      .map((row) => row.id);
+    if (heldIds.length) {
+      const resumes = this.stmt(`SELECT decision.session_id,decision.occurrence_id,decision.resume_updated_at
+        FROM workflow_decisions decision
+        LEFT JOIN session_prompt_commands command ON command.command_id=decision.resume_command_id
+        WHERE decision.session_id IN (SELECT value FROM json_each(?)) AND (decision.resume_state='held'
+          OR (decision.resume_state='delivering' AND command.state IN ('pending','sent','accepted','queued')))
+        ORDER BY decision.resolved_at,decision.occurrence_id`).all(JSON.stringify(heldIds)) as unknown as
+        Array<{ session_id: string; occurrence_id: string; resume_updated_at: number | null }>;
+      for (const resume of resumes) {
+        const list = context.heldResumes.get(resume.session_id) ?? [];
+        list.push({ kind: "workflow_decision_resolution", occurrenceId: resume.occurrence_id, since: resume.resume_updated_at ?? 0 });
+        context.heldResumes.set(resume.session_id,list);
+      }
+    }
+    const ownedRequestCandidates=rows.flatMap((row) => pendingRequests(parseJson<PendingApproval>(row.pending_approval)).flatMap((request) =>
+      request.ownerToolUseId ? [{ sessionId: row.id,toolCallId: request.ownerToolUseId }] : []));
+    const ownedRequests=[...new Map(ownedRequestCandidates.map((request) => [JSON.stringify(request),request])).values()];
+    if (ownedRequests.length) {
+      const observations=this.stmt(`SELECT session_id,tool_id,payload FROM (
+        SELECT event.session_id,json_extract(event.payload,'$.toolCallId') AS tool_id,
+          json_object('kind','tool_call','toolCallId',json_extract(event.payload,'$.toolCallId'),
+            'toolKind',json_extract(event.payload,'$.toolKind'),'status',json_extract(event.payload,'$.status'),
+            'parentToolUseId',json_extract(event.payload,'$.parentToolUseId'),
+            'subagentLifecycle',json_extract(event.payload,'$.subagentLifecycle'),
+            'subagentName',json_extract(event.payload,'$.subagentName'),'subagentRole',json_extract(event.payload,'$.subagentRole')) AS payload,
+          ROW_NUMBER() OVER (PARTITION BY event.session_id,json_extract(event.payload,'$.toolCallId') ORDER BY event.seq) AS position
+        FROM session_events event JOIN session_ownership ownership ON ownership.session_id=event.session_id
+        JOIN json_each(?) request ON event.session_id=json_extract(request.value,'$.sessionId')
+          AND json_extract(event.payload,'$.toolCallId')=json_extract(request.value,'$.toolCallId')
+        WHERE event.kind='tool_call' AND ${authorization.sql}
+      ) WHERE position<=${AGENT_SPAWN_OBSERVATION_CAP}`).all(JSON.stringify(ownedRequests),...authorization.params) as
+        Array<{ session_id: string; tool_id: string; payload: string }>;
+      for (const observation of observations) {
+        const key=JSON.stringify([observation.session_id,observation.tool_id]);
+        const items=context.childObservations.get(key) ?? [];
+        items.push({ payload: observation.payload });
+        context.childObservations.set(key,items);
+      }
+    }
+    const deliveries=this.stmt(`WITH candidates AS (
+      SELECT delivery.session_id,delivery.continuation_id,delivery.parent_turn_id,delivery.queued_at,
+        delivery.accepted_at,delivery.missing_result_at,delivery.notification_queued_at,delivery.dashboard_observed_at,
+        COALESCE(delivery.notification_queued_at,delivery.updated_at) AS sort_at,COUNT(job.job_id) AS job_count,
+        SUM(CASE WHEN job.terminal_observed_at IS NOT NULL THEN 1 ELSE 0 END) AS terminal_count,
+        0 AS unfinished_sibling_count,
+        CASE WHEN SUM(job.source_present)>0 AND delivery.missing_result_at IS NOT NULL AND
+            delivery.missing_result_acknowledged_at IS NULL AND delivery.runner_result_persisted_at IS NULL
+          THEN 'accepted_without_result'
+          WHEN SUM(job.source_present)>0 AND delivery.runner_result_persisted_at IS NOT NULL AND delivery.transcript_projected_at IS NULL
+          THEN 'result_not_projected'
+          WHEN delivery.notification_queued_at IS NOT NULL AND delivery.dashboard_observed_at IS NULL
+          THEN 'dashboard_observation_pending' END AS watchdog_state
+      FROM managed_background_deliveries delivery
+      JOIN sessions session ON session.id=delivery.session_id
+      JOIN session_ownership ownership ON ownership.session_id=session.id
+      LEFT JOIN managed_background_jobs job ON job.session_id=delivery.session_id AND job.continuation_id=delivery.continuation_id
+      WHERE ${authorization.sql} AND session.status!='stopped'
+      GROUP BY delivery.session_id,delivery.continuation_id HAVING watchdog_state IS NOT NULL
+      UNION ALL
+      SELECT job.session_id,NULL,job.parent_turn_id,NULL,NULL,NULL,NULL,NULL,NULL,COUNT(*) AS job_count,
+        SUM(CASE WHEN job.terminal_observed_at IS NOT NULL THEN 1 ELSE 0 END) AS terminal_count,
+        (SELECT COUNT(*) FROM managed_background_jobs sibling WHERE sibling.session_id=job.session_id
+          AND sibling.parent_turn_id=job.parent_turn_id AND sibling.source_present=1 AND sibling.terminal_observed_at IS NULL) AS unfinished_sibling_count,
+        CASE WHEN (SELECT COUNT(*) FROM managed_background_jobs sibling WHERE sibling.session_id=job.session_id
+          AND sibling.parent_turn_id=job.parent_turn_id AND sibling.source_present=1 AND sibling.terminal_observed_at IS NULL)>0
+          THEN 'continuation_blocked' ELSE 'terminal_without_continuation' END AS watchdog_state
+      FROM managed_background_jobs job JOIN sessions session ON session.id=job.session_id
+      JOIN session_ownership ownership ON ownership.session_id=session.id
+      WHERE ${authorization.sql} AND session.status!='stopped' AND job.source_present=1
+        AND job.continuation_required=1 AND job.terminal_observed_at IS NOT NULL AND job.continuation_id IS NULL
+      GROUP BY job.session_id,job.parent_turn_id
+      ) SELECT * FROM (SELECT candidates.*,
+        ROW_NUMBER() OVER (PARTITION BY session_id,continuation_id IS NULL ORDER BY sort_at DESC,COALESCE(continuation_id,parent_turn_id)) AS position
+        FROM candidates) WHERE position<=32 ORDER BY session_id,continuation_id IS NULL,sort_at DESC,COALESCE(continuation_id,parent_turn_id)`).all(...authorization.params,...authorization.params) as Array<{
+        session_id: string; continuation_id: string | null; parent_turn_id: string; queued_at: number | null;
+        accepted_at: number | null; missing_result_at: number | null; job_count: number; terminal_count: number;
+        notification_queued_at: number | null; dashboard_observed_at: number | null;
+        unfinished_sibling_count: number; watchdog_state: BackgroundDeliveryWatchdogState;
+      }>;
+    for (const entry of deliveries) {
+      const items=context.backgroundDeliveries.get(entry.session_id) ?? [];
+      if (items.length>=64) continue;
+      items.push({ parentTurnId: entry.parent_turn_id,jobCount: entry.job_count,terminalCount: entry.terminal_count,
+        ...(entry.continuation_id ? { continuationId: entry.continuation_id } : {}),
+        ...(entry.queued_at!=null ? { queuedAt: entry.queued_at } : {}),
+        ...(entry.accepted_at!=null ? { acceptedAt: entry.accepted_at } : {}),
+        ...(entry.missing_result_at!=null ? { missingResultAt: entry.missing_result_at } : {}),
+        ...(entry.notification_queued_at!=null ? { notificationQueuedAt: entry.notification_queued_at } : {}),
+        ...(entry.dashboard_observed_at!=null ? { dashboardObservedAt: entry.dashboard_observed_at } : {}),
+        ...(entry.unfinished_sibling_count ? { unfinishedSiblingJobs: entry.unfinished_sibling_count } : {}),
+        watchdogState: entry.watchdog_state });
+      context.backgroundDeliveries.set(entry.session_id,items);
+    }
+    const usage = this.stmt(`SELECT usage.session_id,
+      SUM(provider_reported_records) AS provider_reported_records,
+      SUM(model_priced_records) AS model_priced_records, SUM(unpriced_records) AS unpriced_records,
+      SUM(CASE WHEN driver IN ('codex','codex-app-server') THEN input_tokens+cache_creation_tokens+output_tokens
+        ELSE input_tokens+cached_input_tokens+cache_creation_tokens+output_tokens END) AS processed_tokens
+      FROM usage_session_models usage JOIN session_ownership ownership ON ownership.session_id=usage.session_id
+      WHERE ${authorization.sql} GROUP BY usage.session_id`).all(...authorization.params) as
+      Array<{ session_id: string; provider_reported_records: number; model_priced_records: number;
+        unpriced_records: number; processed_tokens: number }>;
+    const usageBySession = new Map(usage.map((entry) => [entry.session_id,entry]));
+    for (const row of rows) {
+      const source = usageBySession.get(row.id);
+      context.costSources.set(row.id, source?.unpriced_records ? "unpriced" : source && source.processed_tokens > 0 &&
+        source.processed_tokens >= row.input_tokens+row.output_tokens ? resolveCostSource({
+          providerReported: source.provider_reported_records, modelPriced: source.model_priced_records,
+          unpriced: source.unpriced_records,
+        }) : undefined);
+    }
+    const stopIntents = this.sessionStopIntents();
+    // Human verdicts depend only on this principal's role and exact ownership. Share the two
+    // possible immutable verdict objects rather than repeating every route gate for every row.
+    const humanPermissions = new Map<number,SessionView["commandPermissions"]>();
+    for (const row of rows) {
+      let view = this.sessionSummaryView(row, stopIntents.get(row.id), context);
+      if (!principal) { yield view; continue; }
+      let descendant = false;
+      if (principal.kind === "agent" && row.parent_session_id) {
+        let parentId: string | null = row.parent_session_id;
+        const seen = new Set<string>([row.id]);
+        while (parentId && !seen.has(parentId)) {
+          if (parentId === principal.credentialSessionId) { descendant = true; break; }
+          seen.add(parentId);
+          parentId = context.rows.get(parentId)?.parent_session_id ?? null;
+        }
+      }
+      const permissions = principal.kind === "human" && humanPermissions.get(row.summary_owns) ||
+        sessionCommandPermissions(principal, view, { ownsSession: row.summary_owns === 1, isDescendant: descendant });
+      if (principal.kind === "human") humanPermissions.set(row.summary_owns, permissions);
+      // This row has not escaped the generator yet; avoid copying its projection just to add
+      // requester-owned verdicts. Only held rows need the advice rewrite.
+      view.commandPermissions = permissions;
+      if (view.holds?.length) view = withHoldAdviceFor(view, {
+        canStopJobs: permissions.stopBackgroundJob.allowed, canRestart: permissions.restart.allowed,
+        canManageWorktrees: permissions.manageWorktrees?.allowed === true,
+      });
+      yield view;
+    }
   }
 
   private sessionAuthorizationSql(principal: AuthPrincipal): { sql: string; params: string[] } {
@@ -10534,6 +10994,17 @@ export class ControlPlaneDb {
         delegated.kind === "user" ? delegated.userId : delegated.teamId,
       ],
     };
+  }
+
+  /** One audience check for an in-flight inventory after any access-cache invalidation. Deleted
+   * rows cannot disclose private content; their queued removal follows the captured snapshot. */
+  canAccessCapturedSessions(principal: AuthPrincipal, sessionIds: readonly string[]): boolean {
+    const authorization = this.sessionAuthorizationSql(principal);
+    return !this.stmt(`SELECT 1 FROM sessions session
+      LEFT JOIN session_ownership ownership ON ownership.session_id=session.id
+      WHERE session.id IN (SELECT value FROM json_each(?))
+        AND (${authorization.sql}) IS NOT TRUE LIMIT 1`)
+      .get(JSON.stringify(sessionIds), ...authorization.params);
   }
 
   /** Principal-scoped archive page candidates. Authorization, filters, transcript matching,
@@ -15319,6 +15790,18 @@ export class ControlPlaneDb {
                 CASE schedule_kind WHEN 'timed' THEN 0 ELSE 1 END,
                 scheduled_for, session_id`,
     ).all(userId) as unknown as SessionReminderRow[];
+    return rows.map((row) => this.sessionReminderView(row));
+  }
+
+  listSessionRemindersForPrincipal(userId: string, principal: AuthPrincipal): SessionReminderView[] {
+    const authorization = this.sessionAuthorizationSql(principal);
+    const rows = this.stmt(`SELECT reminder.* FROM session_reminders reminder
+      JOIN session_ownership ownership ON ownership.session_id=reminder.session_id
+      WHERE reminder.user_id=? AND ${authorization.sql}
+      ORDER BY CASE reminder.state WHEN 'pending' THEN 0 ELSE 1 END,
+               CASE reminder.schedule_kind WHEN 'timed' THEN 0 ELSE 1 END,
+               reminder.scheduled_for, reminder.session_id`)
+      .all(userId, ...authorization.params) as unknown as SessionReminderRow[];
     return rows.map((row) => this.sessionReminderView(row));
   }
 
@@ -21053,15 +21536,15 @@ export class ControlPlaneDb {
   }
 
   /** The outermost durable Orchestrator owns descendant results, including nested helpers. */
-  sessionResultOrchestrator(sessionId: string): string | null {
+  sessionResultOrchestrator(sessionId: string, summary?: SessionSummaryContext): string | null {
     const seen = new Set<string>([sessionId]);
-    let parentId = (this.stmt("SELECT parent_session_id FROM sessions WHERE id=?").get(sessionId) as
+    let parentId = (summary ? summary.rows.get(sessionId) : this.stmt("SELECT parent_session_id FROM sessions WHERE id=?").get(sessionId) as
       { parent_session_id: string | null } | undefined)?.parent_session_id;
     let controller: string | null = null;
     for (let depth = 0; parentId && depth < 64 && !seen.has(parentId); depth++) {
       seen.add(parentId);
-      const parent = this.stmt("SELECT parent_session_id,session_role,permission_mode,orchestrator_policy FROM sessions WHERE id=?")
-        .get(parentId) as { parent_session_id: string | null; session_role: SessionRole | null; permission_mode: string | null;
+      const parent = (summary ? summary.rows.get(parentId) : this.stmt("SELECT parent_session_id,session_role,permission_mode,orchestrator_policy FROM sessions WHERE id=?")
+        .get(parentId)) as { parent_session_id: string | null; session_role: SessionRole | null; permission_mode: string | null;
           orchestrator_policy: string | null } | undefined;
       if (!parent) return null;
       if (sessionRole({ role: parent.session_role, permissionMode: parent.permission_mode }) === "orchestrator" &&
@@ -21206,6 +21689,100 @@ export class ControlPlaneDb {
         ? (parseJson<RunnerView["runtime"]>(runner.runtime) ?? undefined)
         : undefined,
     }, this.boxIdForRunner(runnerId) !== null);
+  }
+
+  private sessionSummaryView(row: SessionSummaryRow, stopIntent: SessionStopIntentRecord | undefined,
+    context: SessionSummaryContext): SessionView {
+    const pending = parseJson<PendingApproval>(row.pending_approval);
+    const requests = pendingRequests(pending);
+    const owners = this.pendingRequestOwners(row, pending, context);
+    const attentionOwners = requests.length ? this.childAttentionOwners(row.id, pending, context) : [];
+    const controller = row.parent_session_id ? this.sessionResultOrchestrator(row.id, context) : null;
+    const status = row.status as SessionStatus;
+    const worktreeRecovery = row.worktree_recovery ? parseWorktreeRecovery(row.worktree_recovery) : undefined;
+    const queueHold = !isTerminal(status) && row.queue_hold ? parseQueueHold(row.queue_hold) : undefined;
+    const compactRequests = requests.map((request): PendingApproval => ({
+      requestId: request.requestId, occurrenceId: request.occurrenceId, kind: request.kind,
+      title: request.title.slice(0, 256), options: [], requestedAt: request.requestedAt,
+      ownerToolUseId: request.ownerToolUseId, async: request.async,
+      recoveryReason: request.recoveryReason, recoveryAction: request.recoveryAction,
+    }));
+    const deliveries = context.backgroundDeliveries.get(row.id);
+    const view: SessionView = {
+      projection: "summary", id: row.id, runnerId: row.runner_id,
+      workspaceId: row.workspace_id, workspaceName: row.summary_workspace_name,
+      projectId: row.project_id, projectName: row.summary_project_name, projectLocationId: row.project_location_id,
+      audience: row.summary_audience, agentId: row.agent_id, agentName: row.summary_agent_name,
+      providerAccountId: row.provider_account_id ?? undefined, providerAccountLabel: row.provider_account_label ?? undefined,
+      providerAccountAutomaticallySelected: row.provider_account_automatically_selected === 1 || undefined,
+      title: row.title, titleSource: (row.title_source as SessionTitleSource | null) ?? "generated",
+      providerUpdatedAt: row.provider_updated_at ?? undefined,
+      backgroundWorkState: row.background_work_state ? parseBackgroundWorkState(row.background_work_state) : undefined,
+      backgroundWorkTracking: row.background_work_tracking ? parseBackgroundWorkTracking(row.background_work_tracking) : undefined,
+      historyQuarantine: row.history_quarantine ? parseHistoryQuarantine(row.history_quarantine) : undefined,
+      worktreeRecovery, queueHold,
+      holds: worktreeRecovery || queueHold ? sessionHolds({ worktreeRecovery, queueHold },context.heldResumes.get(row.id)) : undefined,
+      backgroundDeliveries: deliveries?.length ? deliveries : undefined,
+      backgroundJobsAvailable: row.summary_jobs === 1,
+      status, column: (row.board_column as BoardColumn | null) ?? columnForStatus(status),
+      capacityWait: status === "queued" ? parseJson<SessionView["capacityWait"]>(row.capacity_wait) ?? undefined : undefined,
+      runId: row.run_id, parentSessionId: row.parent_session_id ?? null,
+      roleConversion: row.summary_conversion ? JSON.parse(row.summary_conversion) as SessionView["roleConversion"] : undefined,
+      maxChildSessions: row.max_child_sessions ?? undefined,
+      liveChildCapacity: { limit: row.max_child_sessions ?? DEFAULT_LIVE_CHILD_LIMIT, occupied: row.summary_children,
+        remaining: Math.max(0, (row.max_child_sessions ?? DEFAULT_LIVE_CHILD_LIMIT)-row.summary_children) },
+      parentControl: row.parent_control === "questions" || row.parent_control === "questions_and_approvals" ? row.parent_control : "off",
+      role: sessionRole({ role: row.session_role as SessionRole | null, permissionMode: row.permission_mode }),
+      orchestratorPolicy: row.orchestrator_policy ? orchestratorCampaignPolicyFromJson(row.orchestrator_policy) ?? undefined : undefined,
+      campaignRequests: context.campaignRequests.get(row.id),
+      useWorktree: row.use_worktree === 1, worktreePath: row.worktree_path,
+      worktrees: row.summary_worktree ? [JSON.parse(row.summary_worktree) as SessionWorktreeView] : undefined,
+      archived: row.archived === 1,
+      archiveStatus: stopIntent?.archiveAfterStop ? stopIntent.operation.status : undefined,
+      archiveOperation: stopIntent?.archiveAfterStop ? stopIntent.operation : undefined, stopOperation: stopIntent?.operation,
+      createdAt: row.created_at, updatedAt: row.updated_at, lastEventAt: row.last_event_at,
+      messageCount: row.message_count ?? 0, eventEpoch: row.event_epoch ?? 0, preview: row.preview,
+      pendingApproval: compactRequests[0] ? { ...compactRequests[0],
+        ...(compactRequests.length > 1 ? { additionalRequests: compactRequests.slice(1) } : {}) } : null,
+      pendingRequestOwners: owners, attentionOwners: attentionOwners.length ? attentionOwners : undefined,
+      attention: {
+        version: 1, revision: row.summary_attention_revision ?? 0,
+        humanActions: requests.filter((request) => owners?.requests?.find((owner) => owner.requestId === request.requestId)?.owner !== "orchestrator")
+          .map((request) => ({ requestId: request.requestId, rank: attentionRequestRank(request),
+            requestedAt: request.requestedAt ?? request.workflowDecision?.createdAt ??
+              (isPolicyApproval(request) ? context.policyRequestedAt.get(JSON.stringify([row.id, request.requestId])) : undefined) ?? row.created_at })),
+        meaningfulAt: row.summary_meaningful_at ?? row.created_at,
+        acknowledgedRevision: row.summary_ack_revision ?? null, acknowledgmentRevision: row.summary_ack_counter ?? 0,
+        result: row.summary_result_revision ? { revision: row.summary_result_revision, at: row.summary_result_at!,
+          owner: controller && row.summary_handoff_revision !== row.summary_result_revision ? "orchestrator" : "human" } : null,
+      },
+      driver: (row.driver as AgentDriverKind) ?? "acp", model: row.model, resolvedModel: row.resolved_model ?? undefined,
+      effort: row.effort, serviceTier: row.service_tier ?? undefined, permissionMode: row.permission_mode,
+      tokensIn: row.input_tokens ?? 0, tokensOut: row.output_tokens ?? 0,
+      contextTokensUsed: row.context_tokens_used ?? undefined, contextWindow: row.context_window ?? undefined,
+      costUsd: row.cost_usd ?? 0, costSource: context.costSources.get(row.id), adopted: row.adopted === 1,
+      importLocationReady: row.adopted === 1 ? Boolean(row.workspace_path?.trim()) : undefined,
+      costBudgetUsd: row.cost_budget_usd ?? undefined, costBudgetStepUsd: row.cost_budget_step_usd ?? row.cost_budget_usd ?? undefined,
+      costCheckpointsUsd: row.cost_checkpoints_usd ? ControlPlaneDb.parseCheckpoints(row.cost_checkpoints_usd) : undefined,
+      costCheckpointApprovedUsd: row.cost_checkpoint_approved_usd ?? undefined,
+      costUnpricedAcknowledged: row.cost_unpriced_ack === 1 || undefined,
+      maxToolCalls: row.max_tool_calls ?? undefined, maxToolCallsStep: row.max_tool_calls_step ?? row.max_tool_calls ?? undefined,
+      toolCallCount: row.max_tool_calls != null ? row.summary_tool_calls : undefined,
+    };
+    if (!controller) {
+      const actions = view.attention!.humanActions;
+      if (view.historyQuarantine) actions.push({ requestId: "history-recovery", rank: 0, requestedAt: view.historyQuarantine.detectedAt });
+      if (worktreeRecovery) actions.push({ requestId: `worktree-recovery:${worktreeRecovery.recoveryId}`, rank: 0, requestedAt: worktreeRecovery.detectedAt });
+      if (view.stopOperation?.status === "stop_failed") actions.push({ requestId: `stop-recovery:${view.stopOperation.operationId}`, rank: 0,
+        requestedAt: view.stopOperation.failure?.failedAt ?? view.stopOperation.requestedAt });
+      for (const delivery of deliveries ?? []) {
+        if (delivery.watchdogState === "continuation_blocked" || delivery.watchdogState === "accepted_without_result") {
+          actions.push({ requestId: `background-recovery:${delivery.parentTurnId}`, rank: 0,
+            requestedAt: delivery.missingResultAt ?? delivery.acceptedAt ?? delivery.queuedAt ?? row.created_at });
+        }
+      }
+    }
+    return view;
   }
 
   private sessionView(
@@ -21482,6 +22059,7 @@ export class ControlPlaneDb {
   private parentedRequestOwner(
     row: SessionRow,
     request: PendingApproval,
+    summary?: SessionSummaryContext,
   ): WorkflowDecisionAuthority | undefined {
     if (!row.parent_session_id) return undefined;
     const seen = new Set<string>([row.id]);
@@ -21491,10 +22069,10 @@ export class ControlPlaneDb {
     > | null = null;
     for (let depth = 0; parentId && depth < 64 && !seen.has(parentId); depth += 1) {
       seen.add(parentId);
-      const parent = this.stmt(
+      const parent = (summary ? summary.rows.get(parentId) : this.stmt(
         `SELECT id, parent_session_id, permission_mode, session_role, orchestrator_policy, parent_control
          FROM sessions WHERE id=?`,
-      ).get(parentId) as unknown as Pick<SessionRow,
+      ).get(parentId)) as unknown as Pick<SessionRow,
         "id" | "parent_session_id" | "permission_mode" | "session_role" | "orchestrator_policy" | "parent_control"
       > | undefined;
       if (!parent) return undefined;
@@ -21509,7 +22087,7 @@ export class ControlPlaneDb {
       ? controller.parent_control
       : "off";
     return runnerSupportsProtocol(
-      this.getRunner(row.runner_id)?.protocolVersion,
+      summary ? summary.runnerProtocols.get(row.runner_id) : this.getRunner(row.runner_id)?.protocolVersion,
       "delegatedParentControl",
     ) && parentControlRequestEligible(mode, request) ? "orchestrator" : "human";
   }
@@ -21517,6 +22095,7 @@ export class ControlPlaneDb {
   private pendingRequestOwners(
     row: SessionRow,
     pending: PendingApproval | null,
+    summary?: SessionSummaryContext,
   ): NonNullable<SessionView["pendingRequestOwners"]> | undefined {
     const requests = pendingRequests(pending);
     if (!row.parent_session_id || requests.length === 0) return undefined;
@@ -21524,7 +22103,7 @@ export class ControlPlaneDb {
     let orchestrator = 0;
     const owners: NonNullable<NonNullable<SessionView["pendingRequestOwners"]>["requests"]> = [];
     for (const request of requests) {
-      const owner = this.parentedRequestOwner(row, request);
+      const owner = this.parentedRequestOwner(row, request, summary);
       if (!owner) return undefined;
       if (owner === "orchestrator") orchestrator += 1;
       else human += 1;
@@ -21537,14 +22116,14 @@ export class ControlPlaneDb {
     return { human, orchestrator, requests: owners };
   }
 
-  private childAttentionOwners(sessionId: string, pending: PendingApproval | null): ChildSessionAttentionOwner[] {
+  private childAttentionOwners(sessionId: string, pending: PendingApproval | null,summary?: SessionSummaryContext): ChildSessionAttentionOwner[] {
     return pendingRequests(pending).flatMap((request): ChildSessionAttentionOwner[] => {
       const toolCallId = request.ownerToolUseId;
       if (!toolCallId) return [];
       // Read exactly as far as the registry itself retains: one observation past the collapsible
       // pair is all this projection needs in order to see that the id became ambiguous, and
       // reading fewer than the cap would resolve an owner the registry already calls unsafe.
-      const rows = this.stmt(
+      const rows = summary ? summary.childObservations.get(JSON.stringify([sessionId,toolCallId])) ?? [] : this.stmt(
         `SELECT payload FROM session_events
          WHERE session_id=? AND kind='tool_call' AND json_extract(payload,'$.toolCallId')=?
          ORDER BY seq LIMIT ${AGENT_SPAWN_OBSERVATION_CAP}`,
