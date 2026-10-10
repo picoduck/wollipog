@@ -226,10 +226,12 @@ async function mount({
   initial,
   sessions = [initial],
   client,
+  summarySnapshot = false,
 }: {
   initial: SessionView;
   sessions?: SessionView[];
   client: ApiClient;
+  summarySnapshot?: boolean;
 }) {
   const host = domWindow.document.createElement("div");
   domWindow.document.body.append(host);
@@ -244,15 +246,20 @@ async function mount({
     await Promise.resolve();
   });
   await act(async () => {
-    socket.push({
+    const snapshot = {
       type: "snapshot",
       capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false },
       runners: [], boxes: [], projects: [], sessions, runs: [], pods: [],
-    } as unknown as UiSnapshotMessage);
+    } as unknown as UiSnapshotMessage;
+    if (summarySnapshot) {
+      socket.push({ ...snapshot, sessions: [], sessionsComplete: false });
+      socket.push({ type: "session_snapshot_page", sessions, complete: true });
+    } else socket.push(snapshot);
     await Promise.resolve();
   });
   return {
     container,
+    socket,
     get state() { return state; },
     setSession: async (next: SessionView) => { await act(async () => { setSession(next); }); await settle(); },
     async dispose() {
@@ -659,6 +666,29 @@ test("a member sees its campaign and its current assignment highlighted", async 
   } finally {
     await panel.dispose();
   }
+});
+
+test("a member hydrates a summary root and refreshes retained campaign detail after paged reconnect", async () => {
+  let currentRoot = rootSession;
+  let rootReads = 0;
+  const { client } = fakeClient(() => ({ revision: 1, items: [item("cwi_1")],nextCursor: null }));
+  client.session = async () => { rootReads++; return { session: currentRoot }; };
+  const compact = { ...rootSession, projection: "summary" as const, orchestratorCampaign: undefined };
+  const panel = await mount({ initial: childSession, sessions: [compact, childSession], client, summarySnapshot: true });
+  try {
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    assert.match(panel.container.querySelector(".campaign-status-summary")?.textContent ?? "", /1 of 3 Delivered/);
+    assert.equal(rootReads, 1, "holding a summary does not suppress the authorized detail read");
+    currentRoot = { ...rootSession, orchestratorCampaign: campaign(workSummary({ counts: { ...workSummary().counts, delivered: 2 } })) };
+    await act(async () => {
+      panel.socket.push({ type: "snapshot", runners: [], boxes: [], sessions: [], runs: [], sessionsComplete: false });
+      panel.socket.push({ type: "session_snapshot_page", sessions: [compact, childSession], complete: true });
+    });
+    await settle();
+    assert.equal(rootReads, 2, "summary reconnect refreshes a previously hydrated root");
+    assert.match(panel.container.querySelector(".campaign-status-summary")?.textContent ?? "", /2 of 3 Delivered/);
+  } finally { await panel.dispose(); }
 });
 
 test("a new ledger revision reloads the list, and a stale cursor restarts from the first page", async () => {

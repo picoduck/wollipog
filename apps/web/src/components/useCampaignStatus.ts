@@ -10,7 +10,7 @@ import {
 } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
-import { useStoreSelector } from "../store.js";
+import { useStoreActions, useStoreSelector } from "../store.js";
 import {
   campaignStatusAvailability,
   campaignWorkItemsQuery,
@@ -136,6 +136,9 @@ export function useCampaignStatus({
   const online = useStoreSelector((s) => s.conn === "online");
   const ownView = availability.campaignSessionId === session.id;
   const storedRoot = useStoreSelector((s) => ownView ? null : s.sessions.get(availability.campaignSessionId) ?? null);
+  const summaryGeneration = useStoreSelector((s) => s.sessionSummarySnapshots ? s.snapshotRevision : 0);
+  const snapshotReady = useStoreSelector((s) => s.snapshotLoaded);
+  const { beginSessionDetailLoad } = useStoreActions();
 
   // Reconnecting reloads everything fetched: events missed while offline may have moved the ledger
   // without this browser seeing the revision change.
@@ -149,9 +152,9 @@ export function useCampaignStatus({
 
   /* ---------------------------------------------------------------- summary */
   const [fetchedRoot, setFetchedRoot] = useState<{ id: string; session: SessionView | null; error: string | null } | null>(null);
-  const needsFetchedRoot = !ownView && storedRoot === null;
+  const needsFetchedRoot = !ownView && (summaryGeneration > 0 || storedRoot === null || storedRoot.projection === "summary");
   useEffect(() => {
-    if (!needsFetchedRoot || !online) return;
+    if (!needsFetchedRoot || !online || (summaryGeneration > 0 && !snapshotReady)) return;
     const rootId = availability.campaignSessionId;
     let cancelled = false;
     // Polls can overlap when one outlives the interval. Only a response newer than the last one
@@ -160,14 +163,17 @@ export function useCampaignStatus({
     let applied = 0;
     const load = () => {
       const sequence = ++issued;
+      const detailLoad = beginSessionDetailLoad(rootId);
       const current = () => !cancelled && sequence > applied;
       api.session(rootId).then(({ session: root }) => {
         if (!current()) return;
         applied = sequence;
+        if (summaryGeneration > 0 && !detailLoad.apply(root)) return;
         setFetchedRoot({ id: rootId, session: root, error: null });
       }).catch((cause: unknown) => {
         if (!current()) return;
         applied = sequence;
+        if (summaryGeneration > 0 && !detailLoad.isCurrent()) return;
         setFetchedRoot((current) => ({
           id: rootId,
           session: current?.id === rootId ? current.session : null,
@@ -181,12 +187,13 @@ export function useCampaignStatus({
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [api, availability.campaignSessionId, needsFetchedRoot, online, reconnects, retries]);
+  }, [api, availability.campaignSessionId, needsFetchedRoot, online, reconnects, retries, summaryGeneration, snapshotReady, beginSessionDetailLoad]);
 
-  const root = ownView ? session : storedRoot ?? (fetchedRoot?.id === availability.campaignSessionId ? fetchedRoot.session : null);
+  const root = ownView ? session : (storedRoot?.projection !== "summary" ? storedRoot : null) ??
+    (fetchedRoot?.id === availability.campaignSessionId ? fetchedRoot.session : null);
   const projection = root?.orchestratorCampaign ?? null;
   // A fetched root that later fails to refresh keeps its last summary, with the failure beside it.
-  const refreshError = !ownView && storedRoot === null && fetchedRoot?.id === availability.campaignSessionId
+  const refreshError = needsFetchedRoot && fetchedRoot?.id === availability.campaignSessionId
     ? fetchedRoot.error
     : null;
   const summary: CampaignSummaryState = projection?.work
