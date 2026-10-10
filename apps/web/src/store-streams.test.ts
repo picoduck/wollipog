@@ -151,6 +151,23 @@ test("an acknowledged opening preserves reader-driven pages and staged live fram
   assert.equal(store.getState().eventWindows.get("s1")!.laterGap, undefined);
 });
 
+test("reusing an opening preserves explicitly loaded earlier rows and their boundary", () => {
+  const store = new Store({ name: "session", id: "s1" });
+  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [] });
+  store.beginEventHistoryLoad("s1", 0, -1);
+  const opening = { events: [userEvent("s1", 10)], eventEpoch: 0, turnStartSeq: 10,
+    nextAfter: 10, tailSeq: 1_000, hasMoreLater: true, hasMoreOlder: true, cacheComplete: true };
+  store.loadTurnStartWindow("s1", opening, -1);
+  store.beginOlderEventsLoad("s1", 10);
+  store.loadOlderEvents("s1", Array.from({ length: 9 }, (_, i) => event("s1", i + 1)), false, 10);
+  store.beginEventHistoryLoad("s1", 0, 1);
+  assert.equal(store.loadTurnStartWindow("s1", opening, 1), true);
+  assert.deepEqual(store.getState().events.get("s1")!.map(row => row.seq), Array.from({ length: 10 }, (_, i) => i + 1));
+  assert.equal(store.getState().eventWindows.get("s1")!.baseSeq, 1);
+  assert.equal(store.getState().eventWindows.get("s1")!.hasOlder, false);
+  assert.equal(store.getState().eventWindows.get("s1")!.laterGap!.afterSeq, 10);
+});
+
 test("an empty opening keeps a racing distant live frame behind an explicit gap", () => {
   const store = new Store({ name: "session", id: "s1" });
   message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [] });

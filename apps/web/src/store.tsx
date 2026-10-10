@@ -2239,8 +2239,9 @@ export class Store {
     // the same opening must preserve that contiguous range and the live frames staged beside it.
     let reading = page.events;
     if (reuse && start > 0) {
-      const retained = (this.state.events.get(sessionId) ?? []).filter(event => event.seq >= start);
-      const through = contiguousEventHighWater(retained, start - 1);
+      const base = priorWindow.baseSeq;
+      const retained = (this.state.events.get(sessionId) ?? []).filter(event => event.seq >= base);
+      const through = contiguousEventHighWater(retained, base - 1);
       reading = mergeEvents(page.events, retained.filter(event => event.seq <= through));
       end = reading.at(-1)?.seq ?? end;
     }
@@ -2252,7 +2253,8 @@ export class Store {
     const before = this.state;
     this.apply({ type: "events_loaded", sessionId, events: reading, eventEpoch: epoch,
       recoveryRevision, recoveryGeneration, recoveryComplete: page.cacheComplete === true && tailSeq <= end,
-      windowHasOlder: page.hasMoreOlder === true, windowTurnAligned: page.turnAligned,
+      windowHasOlder: reuse ? priorWindow.hasOlder : page.hasMoreOlder === true,
+      windowTurnAligned: reuse ? priorWindow.turnAligned : page.turnAligned,
       windowThroughSeq: end });
     if (this.state === before) return false;
     const window = this.state.eventWindows.get(sessionId)!;

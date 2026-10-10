@@ -253,6 +253,96 @@ test("reconnecting a paused turn-start reader preserves its slice when a new pro
   } finally { await unmountFixture(fixture); }
 });
 
+test("REST metadata before the first snapshot opens at the turn start", async () => {
+  const pages = pageController();
+  let calls = 0;
+  const fixture = await mountFixture(pages, 0, { initialSnapshot: false, client: {
+    session: async id => ({ session: session(id) }),
+    getSessionTurnStartPage: async id => {
+      calls++;
+      return { events: [{ id: 10, seq: 10, sessionId: id, ts: 1,
+        payload: { kind: "user_message", text: "First visible prompt" } }],
+        eventEpoch: 0, turnStartSeq: 10, nextAfter: 10, tailSeq: 10_000,
+        hasMoreLater: true, hasMoreOlder: true, cacheComplete: true };
+    },
+  } });
+  try {
+    assert.equal(calls, 1);
+    assert.equal(pages.tailCalls.length, 0);
+    assert.equal(fixture.readLoadedEvents()![0]!.seq, 10);
+    assert.equal(followState(fixture), "paused");
+  } finally { await unmountFixture(fixture); }
+});
+
+test("acknowledgement reuse preserves rows explicitly loaded above the opening", async () => {
+  const pages = pageController();
+  let calls = 0;
+  const fixture = await mountFixture(pages, 0, { acknowledgeSubscription: false, client: {
+    getSessionTurnStartPage: async id => {
+      calls++;
+      return { events: [{ id: 10, seq: 10, sessionId: id, ts: 1,
+        payload: { kind: "user_message", text: "Saved prompt" } }],
+        eventEpoch: 0, turnStartSeq: 10, nextAfter: 10, tailSeq: 1_000,
+        hasMoreLater: true, hasMoreOlder: true, cacheComplete: true };
+    },
+  } });
+  try {
+    const earlier = fixture.container.querySelector(".tl-earlier button") as HTMLButtonElement;
+    assert.ok(earlier);
+    await act(async () => earlier.click());
+    await act(async () => pages.releaseTail({ events: Array.from({ length: 9 }, (_, i) => ({
+      id: i + 1, seq: i + 1, sessionId: fixture.sessionId, ts: 1,
+      payload: { kind: "agent_message", text: `Earlier row ${i + 1}`, final: true },
+    })), eventEpoch: 0, nextBefore: 1, hasMoreOlder: false, cacheComplete: true }));
+    await flushAsyncWork();
+    assert.equal(fixture.readLoadedEvents()![0]!.seq, 1);
+    await act(async () => fixture.socket.push({ type: "session_upsert",
+      session: { ...session(`${fixture.sessionId}-busy`), status: "running" } }));
+    await flushAsyncWork();
+    const revision = fixture.socket.sent.filter(message => message.type === "session_subscriptions").at(-1)!.revision!;
+    await act(async () => fixture.socket.push({ type: "session_subscriptions_applied", revision,
+      sessionIds: [fixture.sessionId], podIds: [] }));
+    await flushAsyncWork();
+    assert.equal(calls, 1);
+    assert.deepEqual(fixture.readLoadedEvents()!.map(event => event.seq), [1,2,3,4,5,6,7,8,9,10]);
+    assert.equal(followState(fixture), "paused");
+    assert.equal(pages.tailCalls.length, 1, "reuse never jumps to the tail");
+  } finally { await unmountFixture(fixture); }
+});
+
+test("Jump resumes with the new owner when acknowledgement replaces a pending tail fence", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages, 0, { acknowledgeSubscription: false, client: {
+    getSessionTurnStartPage: async id => ({ events: [{ id: 10, seq: 10, sessionId: id, ts: 1,
+      payload: { kind: "user_message", text: "Saved prompt" } }], eventEpoch: 0,
+      turnStartSeq: 10, nextAfter: 10, tailSeq: 1_000,
+      hasMoreLater: true, hasMoreOlder: true, cacheComplete: true }),
+  } });
+  try {
+    const jump = [...fixture.container.querySelectorAll("[data-later-activity-gap] button")]
+      .find(button => button.textContent === "Jump to Latest") as HTMLButtonElement;
+    assert.ok(jump);
+    await act(async () => jump.click());
+    await flushAsyncWork();
+    assert.equal(pages.tailCalls.length, 1);
+    const revision = fixture.socket.sent.filter(message => message.type === "session_subscriptions").at(-1)!.revision!;
+    await act(async () => fixture.socket.push({ type: "session_subscriptions_applied", revision,
+      sessionIds: [fixture.sessionId], podIds: [] }));
+    await flushAsyncWork();
+    const tail: SessionEventsResponse = { events: [{ id: 1_000, seq: 1_000,
+      sessionId: fixture.sessionId, ts: 1, payload: { kind: "agent_message", text: "Current tail", final: true } }],
+      eventEpoch: 0, cacheComplete: true, hasMoreOlder: true, nextBefore: 1_000 };
+    await act(async () => pages.releaseTail(tail));
+    await flushAsyncWork();
+    assert.equal(pages.tailCalls.length, 2, "releasing the obsolete request resumes the current gap owner");
+    await act(async () => pages.releaseTail(tail));
+    await flushAsyncWork();
+    assert.equal(fixture.readLoadedEvents()!.at(-1)!.seq, 1_000);
+    assert.equal(followState(fixture), "following");
+    assert.equal(Boolean(fixture.container.querySelector("[data-later-activity-gap]")), false);
+  } finally { await unmountFixture(fixture); }
+});
+
 function EventSeeder({ sessionId, events }: { sessionId: string; events: SessionEvent[] }) {
   const ready = useStoreSelector((state) => state.sessions.has(sessionId));
   const { dispatch } = useStoreActions();
@@ -357,6 +447,7 @@ async function mountFixture(
     client: clientOverrides,
     acknowledgeSubscription = true,
     strictMode = false,
+    initialSnapshot = true,
   }: {
     pinnedOpen?: boolean;
     pendingQuestion?: boolean;
@@ -368,6 +459,7 @@ async function mountFixture(
     client?: Partial<ApiClient>;
     acknowledgeSubscription?: boolean;
     strictMode?: boolean;
+    initialSnapshot?: boolean;
   } = {},
 ): Promise<Fixture> {
   fixtureSequence += 1;
@@ -420,6 +512,7 @@ async function mountFixture(
     session: () => new Promise<never>(() => {}),
     getSessionEventPage: pages.fetchPage,
     getSessionEventTailPage: pages.fetchTailPage,
+    getSessionTurnStartPage: undefined,
     ...clientOverrides,
   } as unknown as ApiClient;
   const rightPanel = {
@@ -485,7 +578,7 @@ async function mountFixture(
     await act(async () => root.render(strictMode ? <React.StrictMode>{content}</React.StrictMode> : content));
   };
   await renderMode(mode);
-  await act(async () => {
+  if (initialSnapshot) await act(async () => {
     socket.push({
       type: "snapshot",
       capabilities: {
@@ -503,6 +596,7 @@ async function mountFixture(
       pods: [],
     });
   });
+  if (!initialSnapshot) await act(async () => connectionSetter("online"));
   await flushAsyncWork();
   const scroller = container.querySelector(".detail-scroll") as HTMLElement | null;
   assert.ok(scroller, "the transcript reader is mounted");

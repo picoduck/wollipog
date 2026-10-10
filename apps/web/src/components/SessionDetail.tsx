@@ -1161,6 +1161,9 @@ function SessionDetailLoaded({
     : undefined;
   const runnerOnline = runner?.status === "online";
   const snapshotLoaded = useStoreSelector((s) => s.snapshotLoaded);
+  // Routed REST metadata can mount this reader before socket capabilities arrive. Try the
+  // additive opening read while capability is unknown; an old server uses the existing fallback.
+  const turnStartOpeningAvailable = currentTurnOpeningSupported || !snapshotLoaded;
   const stopBeforeArchiveSupported = useStoreSelector((s) => s.stopBeforeArchiveSupported);
   const sessionRoleConversionSupported = useStoreSelector((s) => s.sessionRoleConversionSupported);
   const unarchiveAndRestartSupported = useStoreSelector((s) => s.unarchiveAndRestartSupported);
@@ -2679,13 +2682,13 @@ function SessionDetailLoaded({
         return true;
       };
       beginEventHistoryLoad(sessionId, epoch, revision, generation);
-      if (currentTurnOpeningSupported) turnStartReadKeyRef.current = openingReadKey;
+      if (turnStartOpeningAvailable) turnStartReadKeyRef.current = openingReadKey;
       void recoverSessionTurnStartWindow(
         { sessionId, eventEpoch: epoch, recoveryRevision: revision },
         {
           scope: openingReadScope.current,
           readKey: openingReadKey,
-          fetchOpening: currentTurnOpeningSupported ? api.getSessionTurnStartPage : undefined,
+          fetchOpening: turnStartOpeningAvailable ? api.getSessionTurnStartPage : undefined,
           onUnsupported: () => { if (!cancelled) setUnsupportedOpeningKey(openingReadKey); },
           applyOpening: (page) => canApply() && loadTurnStartWindow(sessionId, page, revision, generation),
           fetchTailPage: api.getSessionEventTailPage,
@@ -2741,7 +2744,7 @@ function SessionDetailLoaded({
       if (metadataRetryTimer !== undefined) window.clearTimeout(metadataRetryTimer);
     };
   }, [api, instanceScope, sessionId, conn, recoveryRevision, recoveryEventEpoch, recoveryGeneration,
-    historyRetry, beginEventHistoryLoad, failEventHistoryLoad, loadEvents, loadTurnStartWindow, loadSession, getSession, cacheCannotFill, openingReadKey, currentTurnOpeningSupported]);
+    historyRetry, beginEventHistoryLoad, failEventHistoryLoad, loadEvents, loadTurnStartWindow, loadSession, getSession, cacheCannotFill, openingReadKey, turnStartOpeningAvailable]);
 
   // Opening a session reads a bounded prefix at the current turn's start. Reopening after an
   // outage instead backfills only the gap
@@ -2794,13 +2797,13 @@ function SessionDetailLoaded({
       hasSavedReadingPosition: !canReplaceWithWindow(),
     });
     beginEventHistoryLoad(sessionId, epoch, recoveryRevision, generation);
-    if (openWindow && currentTurnOpeningSupported) turnStartReadKeyRef.current = openingReadKey;
-    const gapFence = openWindow && currentTurnOpeningSupported ? null : beginEventGapRecovery(sessionId, epoch, recoveryRevision, generation,
+    if (openWindow && turnStartOpeningAvailable) turnStartReadKeyRef.current = openingReadKey;
+    const gapFence = openWindow && turnStartOpeningAvailable ? null : beginEventGapRecovery(sessionId, epoch, recoveryRevision, generation,
       () => hasSavedFollowTailAnchor(instanceScope, sessionId));
     const load = openWindow
       ? recoverSessionTurnStartWindow(request, { ...windowOptions,
         scope: openingReadScope.current, readKey: openingReadKey,
-        fetchOpening: currentTurnOpeningSupported ? api.getSessionTurnStartPage : undefined,
+        fetchOpening: turnStartOpeningAvailable ? api.getSessionTurnStartPage : undefined,
         onUnsupported: () => { if (isCurrent()) setUnsupportedOpeningKey(openingReadKey); },
         applyOpening: (page) => isCurrent() && loadTurnStartWindow(sessionId, page, recoveryRevision, generation),
       })
@@ -2831,7 +2834,7 @@ function SessionDetailLoaded({
       if (gapFence) cancelEventGapRecovery(gapFence);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api, sessionId, loadEvents, loadTurnStartWindow, conn, recoveryRevision, recoveryReadAfter, recoveryEventEpoch, recoveryGeneration, historyRetry, beginEventHistoryLoad, failEventHistoryLoad, isEventGapRecoveryCurrent, beginEventGapRecovery, cancelEventGapRecovery, finishEventGapRecovery, loadEventGapWindow, deferEventTail, cacheCannotFill, openingReadKey, currentTurnOpeningSupported]);
+  }, [api, sessionId, loadEvents, loadTurnStartWindow, conn, recoveryRevision, recoveryReadAfter, recoveryEventEpoch, recoveryGeneration, historyRetry, beginEventHistoryLoad, failEventHistoryLoad, isEventGapRecoveryCurrent, beginEventGapRecovery, cancelEventGapRecovery, finishEventGapRecovery, loadEventGapWindow, deferEventTail, cacheCannotFill, openingReadKey, turnStartOpeningAvailable]);
 
   const loadLater = useCallback(() => {
     const request = beginLaterEventsLoad(sessionId);
@@ -3824,6 +3827,7 @@ function SessionDetailLoaded({
   }, [followTail.state]);
   const acknowledgedFollowRef = useRef({ key: timelineHistoryKey, state: followTail.state });
   const jumpTailInFlightRef = useRef<symbol | null>(null);
+  const [jumpTailSettled, setJumpTailSettled] = useState(0);
   useEffect(() => {
     const previous = acknowledgedFollowRef.current;
     acknowledgedFollowRef.current = { key: timelineHistoryKey, state: followTail.state };
@@ -3854,7 +3858,13 @@ function SessionDetailLoaded({
               failJump();
             }
           }).catch(failJump)
-          .finally(() => { if (jumpTailInFlightRef.current === attempt) jumpTailInFlightRef.current = null; });
+          .finally(() => {
+            if (jumpTailInFlightRef.current !== attempt) return;
+            jumpTailInFlightRef.current = null;
+            // A newer acknowledgement can transfer the gap while this request is pending. Its
+            // stale response cannot apply, but releasing the guard must resume the current owner.
+            setJumpTailSettled(value => value + 1);
+          });
       }
     } else if (previous.key === timelineHistoryKey && previous.state !== "following" &&
         recoveryRevision != null && eventHistory?.error != null) {
@@ -3862,7 +3872,7 @@ function SessionDetailLoaded({
       // Explicitly returning to live may now replace it with a bounded current window.
       setHistoryRetry((value) => value + 1);
     }
-  }, [followTail.state, followTail.pause, timelineHistoryKey, eventWindow?.laterGap, eventHistory?.error,
+  }, [followTail.state, followTail.pause, jumpTailSettled, timelineHistoryKey, eventWindow?.laterGap, eventHistory?.error,
     recoveryRevision, promoteDeferredEventTail, api, sessionId, isEventGapRecoveryCurrent, deferEventTail, failEventHistoryLoad]);
 
   // A 200-event opening window is a transport budget, not a visual one: hundreds of streamed
@@ -4907,7 +4917,7 @@ function SessionDetailLoaded({
   const shownItemCount = !showAgentLogs && !historyPartial && agentLogOnly(timelineItems) ? 0 : items.length;
   // Socket delivery can race ahead of the opening read. A cold reader must not paint those tail
   // rows before it has the turn start; a warm reading slice keeps its existing content.
-  const awaitingTurnStart = currentTurnOpeningSupported && eventWindow === undefined &&
+  const awaitingTurnStart = turnStartOpeningAvailable && eventWindow === undefined &&
     eventHistory?.everComplete !== true && unsupportedOpeningKey !== openingReadKey;
   const transcript = transcriptPresentation({
     itemCount: awaitingTurnStart ? 0 : shownItemCount,
