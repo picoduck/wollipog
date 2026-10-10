@@ -32,7 +32,7 @@ import {
   type DiffPane,
   type StagingControls,
 } from "./GitDiffViewer.js";
-import { SPLIT_MIN_PANEL_PX, usePanelAtLeast } from "./usePanelWidth.js";
+import { SELECT_LINES_TOOLBAR_MIN_PANEL_PX, SPLIT_MIN_PANEL_PX, usePanelAtLeast } from "./usePanelWidth.js";
 import type { GitStatus } from "./useGitStatus.js";
 import {
   changeSetSignature,
@@ -42,6 +42,7 @@ import {
 } from "../review-anchors.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { CommitBar, type CommitBarBusy, type CommitBarNotice, type RequestLink } from "./CommitBar.js";
+import { LineSelectionBar, useDiffLineSelection, type LineStageControls } from "./DiffLineSelection.js";
 import { OpenRequestDialog } from "./OpenRequestDialog.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { safeExternalHref } from "../external-href.js";
@@ -304,6 +305,7 @@ export function ReviewPanel({
   const [scrollElement, setScrollElement] = useState<HTMLDivElement | null>(null);
   const splitFits = usePanelAtLeast(scrollElement, SPLIT_MIN_PANEL_PX);
   const shownLayout: DiffLayout = splitFits ? layout : "unified";
+  const selectLinesFits = usePanelAtLeast(scrollElement, SELECT_LINES_TOOLBAR_MIN_PANEL_PX);
   // Collapsed files by path, so a refresh with the same files keeps them; another session starts open.
   const [collapsed, setCollapsed] = useState<{ sessionId: string; paths: ReadonlySet<string> }>(
     () => ({ sessionId: session.id, paths: new Set<string>() }),
@@ -603,9 +605,11 @@ export function ReviewPanel({
     }
   };
   const selectFinding = (findingId: string, checked: boolean) => {
-    // A new selection is a new action: the last send's result goes.
+    // A new selection is a new action: the last send's result goes, and so do selected lines, whose
+    // bar this one replaces (#2849).
     setSentNotice(null);
     setSendError(null);
+    if (checked) lineSelection.clear();
     setSelectedFindings((prior) => {
       const next = new Set(prior);
       if (checked) next.add(findingId); else next.delete(findingId);
@@ -981,6 +985,17 @@ export function ReviewPanel({
   // lineage even at the same line number: pane-local anchor identities exist so a finding authored
   // against the staged pane is never re-attached to the unstaged one.
   const diffLineage = `${scope}:${scope === "uncommitted" && fineDiffSupported ? pane : "combined"}`;
+  // Select Lines (#2849): a selection is of one change set as shown, so the layout is part of it.
+  const viewOptionsRef = useRef<HTMLButtonElement | null>(null);
+  const lineSelection = useDiffLineSelection({
+    diff: shownDiff, sessionId: session.id, view: `${diffLineage}\u0000${shownLayout}`, fallbackRef: viewOptionsRef,
+    // A line picked takes the foot from the findings bar: its selection and last result go with it.
+    onPick: () => {
+      setSelectedFindings((prior) => prior.size === 0 ? prior : new Set());
+      setSentNotice(null);
+      setSendError(null);
+    },
+  });
   // Derived during render and committed with `setState`, the sanctioned way to adjust state when
   // the inputs change: React discards this render and re-runs it immediately, so no frame of
   // wrongly-stale findings is ever painted — and because it is state rather than a ref, an
@@ -1051,6 +1066,21 @@ export function ReviewPanel({
     },
   };
   const paneShown: DiffPane = scope === "uncommitted" && fineDiffSupported ? pane : "combined";
+  // Stage Lines in the selection bar (#2849): the same per-hunk line staging, offered in the
+  // Uncommitted scope and saying why whenever it cannot run.
+  const lineVerb = paneShown === "staged" ? "unstage" : "stage";
+  const lineStage: LineStageControls | null = scope !== "uncommitted" ? null : {
+    direction: lineVerb,
+    unavailable: !fineDiffSupported ? fineDiffHint ?? "This machine can't stage single lines."
+      : paneShown === "combined" ? "Show Unstaged Only to stage single lines."
+      : !runnerOnline ? `Reconnect to ${lineVerb} lines.`
+      : !stagingSupported ? stagingHint ?? `This machine can't ${lineVerb} lines.`
+      : turnActive ? `Wait for the agent's turn to end to ${lineVerb} lines.`
+      : busy !== null || hunkBusy !== null ? "Wait for the current change to finish."
+      : null,
+    refusal: gitRefusal === null ? null : { reason: gitRefusal, id: gitRefusalId },
+    onLines: (direction, filePath, hunkIndex, lineIndices) => void doStageLines(direction, filePath, hunkIndex, lineIndices),
+  };
 
   const syncControl: FindingSyncControl | null = syncForge === null ? null : {
     forge: syncForge,
@@ -1130,6 +1160,12 @@ export function ReviewPanel({
             splitUnavailableReason={splitFits ? null : "Expand the panel to compare side by side."}
             wrap={wrapChoice === "wrap"}
             onWrapChange={(wrap) => setWrapChoice(wrap ? "wrap" : "scroll")}
+            selectLines={shownDiff && shownDiff.files.length > 0 ? {
+              on: lineSelection.selecting,
+              onChange: lineSelection.setSelecting,
+              placement: selectLinesFits ? "toolbar" : "menu",
+              buttonRef: lineSelection.toggleRef,
+            } : null}
             files={shownDiff && shownDiff.files.length > 0 ? {
               collapsed: shownDiff.files.every((file) => collapsedPaths.has(file.path)),
               onCollapseAll: (collapse) => setCollapsedPaths(
@@ -1137,13 +1173,25 @@ export function ReviewPanel({
               ),
             } : null}
             refusal={gitRefusal === null ? null : { reason: gitRefusal, id: gitRefusalId }}
+            viewOptionsRef={viewOptionsRef}
           />
         )}
-        // Selecting findings hands the foot to the selection bar (#2850). It replaces the commit bar
-        // rather than stacking on it, so the foot never takes two bars' height from the diff; the
-        // commit bar's message, notice and running action live in this panel and are all still
-        // there when it comes back.
-        foot={selectionBarShown ? (
+        // One selection bar at a time hands the foot over (#2849, #2850): selected lines, else selected
+        // findings, else the commit bar. It replaces the commit bar rather than stacking on it, so the
+        // foot never takes two bars' height from the diff; the commit bar's message, notice and running
+        // action live in this panel and are all still there when it comes back. Picking a line clears
+        // the findings selection and picking a finding clears the lines, so no bar's actions can run
+        // on a selection hidden behind the other.
+        foot={shownDiff && lineSelection.placed.length > 0 ? (
+          <LineSelectionBar
+            placed={lineSelection.placed}
+            diff={shownDiff}
+            onAttach={onAttachWorkspaceReference}
+            stage={lineStage}
+            onClear={lineSelection.clear}
+            onRemove={lineSelection.remove}
+          />
+        ) : selectionBarShown ? (
           <FindingSelectionBar
             count={bundlingFindings ? sendingCount : selectedFindings.size}
             busy={bundlingFindings}
@@ -1264,6 +1312,8 @@ export function ReviewPanel({
                   <GitDiffViewer
                     diff={shownDiff}
                     staging={staging}
+                    selection={lineSelection.controls}
+                    focusFallback={() => lineSelection.toggleRef.current ?? viewOptionsRef.current}
                     layout={shownLayout}
                     wrap={wrapChoice === "wrap"}
                     collapsedPaths={collapsedPaths}

@@ -442,13 +442,9 @@ async function chooseViewOption(container: HTMLElement, label: string): Promise<
 }
 
 /** How many lines the visible hunks report as selected, read off the Stage/Unstage Selected labels. */
+/** Lines picked in Select Lines (#2849): the pressed line-number buttons. */
 function selectedCount(container: HTMLElement): number {
-  let total = 0;
-  for (const button of container.querySelectorAll<HTMLElement>(".hunk-actions button")) {
-    const found = /Selected \((\d+)\)/.exec(button.textContent ?? "");
-    if (found) total += Number(found[1]);
-  }
-  return total;
+  return container.querySelectorAll('button.diff-num[aria-pressed="true"]').length;
 }
 
 /** Review's one Refresh, in the panel header's action slot. */
@@ -464,9 +460,10 @@ function lagNotice(container: HTMLElement): HTMLElement | null {
     .find((notice) => (notice.textContent ?? "").includes("These changes may be out of date.")) ?? null;
 }
 
-function commentButton(container: HTMLElement, label: string): HTMLElement {
-  const found = container.querySelector<HTMLElement>(`button[aria-label="${label}"]`);
-  if (!found) throw new Error(`no comment control labelled ${label}`);
+/** A file's Add Finding "+" for one line (#2849), named as the line's number button names it. */
+function commentButton(container: HTMLElement, path: string, label: string): HTMLElement {
+  const found = card(container, path).querySelector<HTMLElement>(`button[aria-label="${label}"]`);
+  if (!found) throw new Error(`no comment control labelled ${label} on ${path}`);
   return found;
 }
 
@@ -555,7 +552,7 @@ test("staging a hunk in one file leaves an unsent draft in another intact", asyn
   const harness = await mountPanel();
   try {
     await act(async () => {
-      fireDomEvent.click(commentButton(harness.container, "Comment on src/b.ts right line 10"));
+      fireDomEvent.click(commentButton(harness.container, "src/b.ts", "Add Finding on Line 10"));
     });
     const editor = requiredEditor(harness.container, "src/b.ts");
     await act(async () => {
@@ -599,7 +596,7 @@ test("an unsent draft survives a refresh that rewrites its own file around it", 
   const harness = await mountPanel();
   try {
     await act(async () => {
-      fireDomEvent.click(commentButton(harness.container, "Comment on src/b.ts right line 10"));
+      fireDomEvent.click(commentButton(harness.container, "src/b.ts", "Add Finding on Line 10"));
     });
     await act(async () => {
       const body = field<HTMLTextAreaElement>(requiredEditor(harness.container, "src/b.ts"), "textarea");
@@ -704,7 +701,7 @@ test("a draft editor in an untouched hunk is not rebuilt when another hunk of it
   const harness = await mountPanel({ diff: diffOf("1", [fileA(), fileB({ extraHunks: 1 })]) });
   try {
     await act(async () => {
-      fireDomEvent.click(commentButton(harness.container, "Comment on src/b.ts right line 10"));
+      fireDomEvent.click(commentButton(harness.container, "src/b.ts", "Add Finding on Line 10"));
     });
     const textarea = field<HTMLTextAreaElement>(requiredEditor(harness.container, "src/b.ts"), "textarea");
     await act(async () => {
@@ -734,7 +731,7 @@ test("a draft that outlived the line it targets says so instead of submitting si
   const harness = await mountPanel();
   try {
     await act(async () => {
-      fireDomEvent.click(commentButton(harness.container, "Comment on src/b.ts right line 10"));
+      fireDomEvent.click(commentButton(harness.container, "src/b.ts", "Add Finding on Line 10"));
     });
     await act(async () => {
       const body = field<HTMLTextAreaElement>(requiredEditor(harness.container, "src/b.ts"), "textarea");
@@ -773,7 +770,7 @@ test("Cancel keeps the whole draft for the next open, while submitting it starts
   };
   const open = async () => {
     await act(async () => {
-      fireDomEvent.click(commentButton(harness.container, "Comment on src/b.ts right line 10"));
+      fireDomEvent.click(commentButton(harness.container, "src/b.ts", "Add Finding on Line 10"));
     });
   };
   try {
@@ -827,7 +824,7 @@ test("a rebuilt draft editor puts the caret back where the reviewer left it", as
   const harness = await mountPanel();
   try {
     await act(async () => {
-      fireDomEvent.click(commentButton(harness.container, "Comment on src/b.ts right line 10"));
+      fireDomEvent.click(commentButton(harness.container, "src/b.ts", "Add Finding on Line 10"));
     });
     const before = field<HTMLTextAreaElement>(requiredEditor(harness.container, "src/b.ts"), "textarea");
     await act(async () => {
@@ -859,7 +856,7 @@ test("a rebuilt draft editor restores a whole selection, not just a collapsed ca
   const harness = await mountPanel();
   try {
     await act(async () => {
-      fireDomEvent.click(commentButton(harness.container, "Comment on src/b.ts right line 10"));
+      fireDomEvent.click(commentButton(harness.container, "src/b.ts", "Add Finding on Line 10"));
     });
     const before = field<HTMLTextAreaElement>(requiredEditor(harness.container, "src/b.ts"), "textarea");
     await act(async () => {
@@ -898,7 +895,7 @@ for (const { direction, start, end, why } of [
     const harness = await mountPanel();
     try {
       await act(async () => {
-        fireDomEvent.click(commentButton(harness.container, "Comment on src/b.ts right line 10"));
+        fireDomEvent.click(commentButton(harness.container, "src/b.ts", "Add Finding on Line 10"));
       });
       const before = field<HTMLTextAreaElement>(requiredEditor(harness.container, "src/b.ts"), "textarea");
       await act(async () => {
@@ -930,7 +927,7 @@ test("a submitted draft leaves no caret behind for the next finding written on i
   const harness = await mountPanel();
   try {
     await act(async () => {
-      fireDomEvent.click(commentButton(harness.container, "Comment on src/b.ts right line 10"));
+      fireDomEvent.click(commentButton(harness.container, "src/b.ts", "Add Finding on Line 10"));
     });
     const first = field<HTMLTextAreaElement>(requiredEditor(harness.container, "src/b.ts"), "textarea");
     await act(async () => {
@@ -944,7 +941,7 @@ test("a submitted draft leaves no caret behind for the next finding written on i
     assertNoDomNode(editorIn(harness.container, "src/b.ts"), "submitting closed the editor");
 
     await act(async () => {
-      fireDomEvent.click(commentButton(harness.container, "Comment on src/b.ts right line 10"));
+      fireDomEvent.click(commentButton(harness.container, "src/b.ts", "Add Finding on Line 10"));
     });
     const reopened = field<HTMLTextAreaElement>(requiredEditor(harness.container, "src/b.ts"), "textarea");
     assert.equal(reopened.value, "", "the new draft starts empty");
@@ -960,7 +957,7 @@ test("a draft that was cancelled reopens with its caret intact", async () => {
   const harness = await mountPanel();
   try {
     await act(async () => {
-      fireDomEvent.click(commentButton(harness.container, "Comment on src/b.ts right line 10"));
+      fireDomEvent.click(commentButton(harness.container, "src/b.ts", "Add Finding on Line 10"));
     });
     const before = field<HTMLTextAreaElement>(requiredEditor(harness.container, "src/b.ts"), "textarea");
     await act(async () => {
@@ -974,7 +971,7 @@ test("a draft that was cancelled reopens with its caret intact", async () => {
     assertNoDomNode(editorIn(harness.container, "src/b.ts"), "cancel closed the editor");
 
     await act(async () => {
-      fireDomEvent.click(commentButton(harness.container, "Comment on src/b.ts right line 10"));
+      fireDomEvent.click(commentButton(harness.container, "src/b.ts", "Add Finding on Line 10"));
     });
     const reopened = field<HTMLTextAreaElement>(requiredEditor(harness.container, "src/b.ts"), "textarea");
     assert.equal(reopened.value, "paused mid-thought");
@@ -984,18 +981,19 @@ test("a draft that was cancelled reopens with its caret intact", async () => {
   }
 });
 
-test("per-hunk line selections do not survive a pane switch, even where the file is identical", async () => {
+test("line selections do not survive a pane switch, even where the file is identical", async () => {
   // Pane-local anchor identity: a selection made against the unstaged pane must not be reusable in
   // the staged pane, where the same line numbers carry a different anchor identity — and where
   // Attach would emit the other pane's `diffHash` for it.
   const harness = await mountPanel({ diff: panedDiff("1") });
   try {
     await chooseViewOption(harness.container, "Unstaged Only");
-    const selectable = harness.container.querySelectorAll<HTMLInputElement>(
-      'input[type="checkbox"][aria-label^="Select Removed Line"], input[type="checkbox"][aria-label^="Select Added Line"]',
-    );
-    assert.ok(selectable.length > 0, "the unstaged pane offers line staging");
-    await act(async () => { fireDomEvent.change(selectable[0]!, { target: { checked: true } }); });
+    await act(async () => {
+      fireDomEvent.click(harness.container.querySelector<HTMLButtonElement>('button[aria-label="Select Lines"]')!);
+    });
+    const selectable = harness.container.querySelectorAll<HTMLButtonElement>("button.diff-num[aria-pressed]");
+    assert.ok(selectable.length > 0, "Select Lines makes every line pickable");
+    await act(async () => { fireDomEvent.click(selectable[0]!); });
     assert.ok(selectedCount(harness.container) > 0, "a line is selected");
 
     await chooseViewOption(harness.container, "Staged Only");
@@ -1034,7 +1032,7 @@ test("a draft on an old-side line that became context is still reachable", async
   const harness = await mountPanel({ diff: diffOf("1", [fileA(), fileBOldSide("deleted")]) });
   try {
     await act(async () => {
-      fireDomEvent.click(commentButton(harness.container, "Comment on src/b.ts left line 11"));
+      fireDomEvent.click(commentButton(harness.container, "src/b.ts", "Add Finding on Removed Line 11"));
     });
     await act(async () => {
       const body = field<HTMLTextAreaElement>(requiredEditor(harness.container, "src/b.ts"), "textarea");

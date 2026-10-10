@@ -100,7 +100,7 @@ test("known placeholders read as hint text, not labels", () => {
  * Title-Cased them, which was a straight misreading of the rule.
  */
 const EXPECTED_TOOLTIPS: ReadonlyArray<[string, string]> = [
-  ["./components/GitDiffViewer.tsx", "Add inline review finding"],
+  ["./components/GitDiffViewer.tsx", "Add a finding on this line"],
   ["./components/RunnersView.tsx", "Reconnect this machine"],
   ["./components/ShellDock.tsx", "Close shell"],
 ];

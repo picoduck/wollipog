@@ -818,7 +818,7 @@ test("no viewport rule at 600px or 640px styles diff, finding, review or browser
       moved[rule.selector] = rule.nodes.flatMap((node) => (node.type === "decl" ? [`${node.prop}: ${node.value}`] : []));
     });
   });
-  for (const selector of [".diff-line:not(.diff-line-del) > .diff-gutter-old,\n  .diff-line-del > .diff-gutter-old + .diff-gutter",
+  for (const selector of [".diff-line:not(.diff-line-del) > .diff-num > .diff-gutter-old,\n  .diff-line-del > .diff-num > .diff-gutter-new",
     ".dfile-staged", ".diff-comment-editor,\n  .diff-inline-finding"]) {
     assert.ok(moved[selector], `${selector} answers to the rp container`);
   }

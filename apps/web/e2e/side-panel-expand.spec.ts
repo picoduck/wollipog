@@ -272,7 +272,7 @@ test("F6 lands on the expanded panel's switcher, and on the transcript once rest
   await expect(page.locator(".detail-scroll")).toBeFocused();
 });
 
-test("Attach Selected in an expanded Review restores the panel so its chip shows in the composer (#2845)", async ({ page }) => {
+test("Attach to Prompt in an expanded Review restores the panel so its chip shows in the composer (#2845)", async ({ page }) => {
   const line = (status: " " | "+", text: string) => ({ status, text });
   const file = { path: "src/app.ts", status: "modified", binary: false, hunks: [{
     header: "@@ -1,2 +1,3 @@", oldStart: 1, oldCount: 2, newStart: 1, newCount: 3,
@@ -297,8 +297,9 @@ test("Attach Selected in an expanded Review restores the panel so its chip shows
   await expectExpanded(page, "expanded");
   // Review opens on Branch while the branch is ahead (#2846); the worktree's lines are under Uncommitted.
   await panel(page).getByRole("radio", { name: "Uncommitted", exact: true }).click();
-  await panel(page).getByRole("checkbox", { name: "Select Worktree Line 2 for Prompt" }).check();
-  await panel(page).getByRole("button", { name: "Attach Selected (1)" }).click();
+  await panel(page).getByRole("button", { name: "Select Lines" }).click();
+  await panel(page).getByRole("button", { name: "Select Line 2", exact: true }).click();
+  await panel(page).getByRole("region", { name: "Selected Lines" }).getByRole("button", { name: "Attach to Prompt" }).click();
   await expect(panel(page)).toHaveAttribute("data-presentation", "docked");
   await expect(page.locator(".composer-input")).toBeVisible();
   await expect(page.locator(".composer").getByText("app.ts", { exact: false }).first()).toBeVisible();

@@ -566,10 +566,9 @@ test("consent checkbox labels are sentences, and every other checkbox label is T
   // (Manage Groups' one consent checkbox became per-change confirmations in #1985.)
   assert.ok(consents >= 7, `found ${consents} consent labels`);
   assert.ok(labels - consents >= 8, `found ${labels - consents} ordinary checkbox labels`);
-  // An icon-only box's label is its accessible name, held to the same convention (#2044): the diff's
-  // line selectors and the review findings' selectors.
+  // An icon-only box's label is its accessible name, held to the same convention (#2044): the review
+  // findings' selectors. Diff lines carry no box since Select Lines (#2849).
   for (const name of [
-    "Select Added Line #", "Select Removed Line #",
     "Select Finding on # Line #", "Select File-Level Finding on #", "Select Remote Discussion",
   ]) {
     assert.ok(scanned.has(name), `${name} is one of the scanned checkbox labels`);

@@ -1,1 +1,0 @@
-|.diff-comment-add|border-radius|5

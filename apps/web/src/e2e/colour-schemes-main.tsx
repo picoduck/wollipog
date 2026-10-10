@@ -201,25 +201,37 @@ function Sample() {
 
           <div className="diff-view">
             <div className="diff-line diff-line-add">
-              <span className="diff-line-select" />
-              <span className="diff-gutter diff-gutter-old">41</span>
-              <span className="diff-gutter diff-gutter-new">42</span>
+              <button type="button" className="diff-num">
+                <span className="diff-gutter diff-gutter-old">41</span>
+                <span className="diff-gutter diff-gutter-new">42</span>
+              </button>
               <span className="diff-sign">+</span>
               <span className="diff-text">const added = true; <span className="diff-syntax-comment">// added</span></span>
             </div>
             <div className="diff-line diff-line-del">
-              <span className="diff-line-select" />
-              <span className="diff-gutter diff-gutter-old">41</span>
-              <span className="diff-gutter diff-gutter-new" />
+              <button type="button" className="diff-num">
+                <span className="diff-gutter diff-gutter-old">41</span>
+                <span className="diff-gutter diff-gutter-new" />
+              </button>
               <span className="diff-sign">-</span>
               <span className="diff-text">const removed = false; <span className="diff-syntax-comment">// removed</span></span>
             </div>
             <div className="diff-line diff-line-ctx">
-              <span className="diff-line-select" />
-              <span className="diff-gutter diff-gutter-old">42</span>
-              <span className="diff-gutter diff-gutter-new">43</span>
+              <button type="button" className="diff-num">
+                <span className="diff-gutter diff-gutter-old">42</span>
+                <span className="diff-gutter diff-gutter-new">43</span>
+              </button>
               <span className="diff-sign" />
               <span className="diff-text">const same = 1;</span>
+            </div>
+            {/* A line picked in Select Lines (#2849): the selected fill under an added line's inks. */}
+            <div className="diff-line diff-line-add is-selected">
+              <button type="button" className="diff-num">
+                <span className="diff-gutter diff-gutter-old" />
+                <span className="diff-gutter diff-gutter-new">44</span>
+              </button>
+              <span className="diff-sign">+</span>
+              <span className="diff-text">const picked = true; <span className="diff-syntax-comment">// selected</span></span>
             </div>
           </div>
 

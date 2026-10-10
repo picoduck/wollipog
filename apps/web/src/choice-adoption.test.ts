@@ -111,6 +111,11 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   // The Board's Machine, Agent and Filters menu buttons (#2201) are pressed while their filter is
   // set, as the issue specifies: one on/off state per button. The choice itself is in their menus.
   ["components/BoardFilters.tsx", "aria-pressed", 1],
+  // Review's Select Lines (#2849), as the issue specifies: the toolbar's one on/off mode toggle, and
+  // while it is on each line's number button, pressed while its line is selected. Lines are picked
+  // one by one or as a range, never one of N options.
+  ["components/ReviewToolbar.tsx", "aria-pressed", 1],
+  ["components/GitDiffViewer.tsx", "aria-pressed", 1],
   /* Raw choice markup, found only once the inventory started counting semantics rather than
      class names. These are bespoke controls phase 6 has not reached yet.
      SettingsView used to be the one exception — a hand-rolled radiogroup wrapping RadioRow
@@ -156,8 +161,9 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   ["components/SessionsAppBar.tsx", "raw-radiogroup", 3],
   // Review's View Options menu (#2846): Show and Layout are §9.1 radio-like MenuItem rows with the
   // trailing check, and Wrap Long Lines (#2848) the one checkbox item. They switch how the same diff
-  // is shown; none sets a form value.
-  ["components/ReviewToolbar.tsx", "raw-radiogroup", 3],
+  // is shown; none sets a form value. Select Lines (#2849) is a second checkbox item, there only in a
+  // panel too narrow for its toolbar toggle.
+  ["components/ReviewToolbar.tsx", "raw-radiogroup", 4],
   ["components/EditorSelect.tsx", "raw-radiogroup", 1],
   ["components/InstanceSelector.tsx", "raw-radiogroup", 1],
   ["components/PodsView.tsx", "raw-radiogroup", 1],

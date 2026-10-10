@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { CreateWorkspaceReferenceRequest, GitDiffInfo, PromptImageInput, WorkspaceReference } from "@wollipog/protocol";
 import { GitDiffViewer } from "../components/GitDiffViewer.js";
+import { LineSelectionBar, useDiffLineSelection } from "../components/DiffLineSelection.js";
 import { WorkspaceReferencePicker } from "../components/WorkspaceReferencePicker.js";
 import { ComposerAttachments } from "../components/images.js";
 import "../styles.css";
@@ -17,6 +18,25 @@ const PICKER_RESULTS = [
   { path: "apps/web/src/components/session/index.ts", isDirectory: false },
   { path: "packages/protocol/src/session/nested/directory/with/a/long/name/session-index.ts", isDirectory: false },
 ];
+
+/**
+ * The diff as Review shows it (#2849): lines are picked with Select Lines, here entered from a line
+ * number's Select Line, and attached from the selection bar under it.
+ */
+function SelectableDiff({ diff, onAttach }: {
+  diff: GitDiffInfo;
+  onAttach?: (target: CreateWorkspaceReferenceRequest) => Promise<void>;
+}) {
+  const lines = useDiffLineSelection({ diff, sessionId: "workspace-references", view: "unified" });
+  return (
+    <>
+      <GitDiffViewer diff={diff} selection={lines.controls} onAttachWorkspaceReference={onAttach} />
+      {lines.placed.length > 0 && (
+        <LineSelectionBar placed={lines.placed} diff={diff} onAttach={onAttach} stage={null} onClear={lines.clear} onRemove={lines.remove} />
+      )}
+    </>
+  );
+}
 
 function pickerProps() {
   const base = {
@@ -117,7 +137,7 @@ function Fixture() {
       </section>
       <section className="card" style={{ padding: 16, minWidth: 0 }}>
         <strong>Review</strong>
-        <GitDiffViewer diff={diff} onAttachWorkspaceReference={after ? attach : undefined} />
+        <SelectableDiff diff={diff} onAttach={after ? attach : undefined} />
       </section>
     </main>
   );

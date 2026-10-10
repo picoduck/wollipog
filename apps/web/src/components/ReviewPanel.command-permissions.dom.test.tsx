@@ -36,6 +36,7 @@ const globals: Record<string, unknown> = {
   localStorage: domWindow.localStorage,
   navigator: domWindow.navigator,
   HTMLElement: domWindow.HTMLElement,
+  HTMLButtonElement: domWindow.HTMLButtonElement,
   Node: domWindow.Node,
   Event: domWindow.Event,
   InputEvent: domWindow.InputEvent,
@@ -319,10 +320,16 @@ function inlineFinding(container: HTMLElement, body: string): HTMLElement {
   return found;
 }
 
+/** The gutter's Add Finding "+" on each line (#2849). */
 function commentButtons(container: HTMLElement): HTMLButtonElement[] {
-  const found = [...container.querySelectorAll<HTMLButtonElement>("button[aria-label]")]
-    .filter((button) => button.getAttribute("aria-label")!.startsWith("Comment on"));
-  assert.ok(found.length > 0, "the diff offers per-line comment controls");
+  return [...container.querySelectorAll<HTMLButtonElement>("button[aria-label]")]
+    .filter((button) => button.getAttribute("aria-label")!.startsWith("Add Finding on "));
+}
+
+/** src/b.ts's "+" on line 11. */
+function commentOnB11(container: HTMLElement): HTMLButtonElement {
+  const found = container.querySelector<HTMLButtonElement>('.dfile[data-path="src/b.ts"] button[aria-label="Add Finding on Line 11"]');
+  assert.ok(found, "line 11 offers Add Finding");
   return found;
 }
 
@@ -344,7 +351,6 @@ function findingControls(container: HTMLElement): Array<[string, HTMLButtonEleme
     ["inline Resolve", onlyButton(open, "Resolve")],
     ["inline Dismiss", onlyButton(open, "Dismiss")],
     ["inline Reopen", onlyButton(resolved, "Reopen")],
-    ...commentButtons(container).map((button) => [button.getAttribute("aria-label")!, button] as [string, HTMLButtonElement]),
   ];
 }
 
@@ -384,9 +390,7 @@ test("a refused person sees every finding control disabled with the reason, and 
 test("a draft left open when the refusal arrives cannot be submitted (#1864)", async () => {
   const harness = await mountPanel(sessionWith({ allowed: true }));
   try {
-    const comment = harness.container.querySelector<HTMLButtonElement>('button[aria-label="Comment on src/b.ts right line 11"]');
-    assert.ok(comment);
-    await act(async () => { fireDomEvent.click(comment); });
+    await act(async () => { fireDomEvent.click(commentOnB11(harness.container)); });
     await act(async () => {
       const body = editor(harness.container).querySelector<HTMLTextAreaElement>("textarea")!;
       body.value = "a finding written before the role changed";
@@ -419,9 +423,8 @@ test("an allowed or absent verdict leaves every finding control as it was (#1864
       await act(async () => { fireDomEvent.click(sendSelected(harness.container)); });
       await act(async () => { fireDomEvent.click(onlyButton(findingsList(harness.container), "Resolve")); });
       await act(async () => { fireDomEvent.click(onlyButton(inlineFinding(harness.container, "already handled"), "Reopen")); });
-      const comment = harness.container.querySelector<HTMLButtonElement>('button[aria-label="Comment on src/b.ts right line 11"]');
-      assert.ok(comment);
-      await act(async () => { fireDomEvent.click(comment); });
+      assert.ok(commentButtons(harness.container).length > 0, "every line offers Add Finding");
+      await act(async () => { fireDomEvent.click(commentOnB11(harness.container)); });
       await act(async () => {
         const body = editor(harness.container).querySelector<HTMLTextAreaElement>("textarea")!;
         body.value = "new finding";
@@ -437,5 +440,25 @@ test("an allowed or absent verdict leaves every finding control as it was (#1864
     } finally {
       await harness.unmount();
     }
+  }
+});
+
+test("a refused person gets no +, and the line menu lists Add Finding… unavailable with the reason (#2849)", async () => {
+  const harness = await mountPanel(sessionWith({ allowed: false, reason: VIEWER }));
+  try {
+    assert.deepEqual(commentButtons(harness.container), [], "no line offers the + to a refused person");
+    const number = harness.container.querySelector<HTMLButtonElement>('.dfile[data-path="src/b.ts"] button[aria-label="Line 11 Actions"]');
+    assert.ok(number, "line 11's number opens its menu");
+    await act(async () => { fireDomEvent.click(number); });
+    const item = [...(domWindow.document as unknown as Document).querySelectorAll<HTMLElement>('[role="menuitem"]')]
+      .find((node) => node.getAttribute("data-menu-label") === "Add Finding…");
+    assert.ok(item, "the line menu lists Add Finding…");
+    assert.equal(item.getAttribute("aria-disabled"), "true", "Add Finding… is unavailable");
+    assert.equal(item.querySelector(".menu-desc")?.textContent, VIEWER, "and says why");
+    await act(async () => { fireDomEvent.click(item); await Promise.resolve(); });
+    assertNoDomNode(harness.container.querySelector(".diff-comment-editor"), "no draft editor opened");
+    assert.deepEqual(harness.calls, []);
+  } finally {
+    await harness.unmount();
   }
 });

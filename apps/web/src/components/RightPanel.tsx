@@ -108,6 +108,29 @@ export function PanelHeaderActions({ children }: { children: ReactNode }) {
 }
 
 /**
+ * A tool's own Escape layer on its body (§16.2): a selection such as Review's Select Lines (#2849).
+ * While one is registered, Escape inside the panel goes to it instead of restoring or closing the
+ * panel; menus, popovers and dialogs above the panel still take it first.
+ */
+export const PanelEscapeLayerContext = createContext<{ current: (() => void) | null } | null>(null);
+
+/** Take Escape inside the side panel while `onEscape` is set. Outside the panel it does nothing. */
+export function usePanelEscapeLayer(onEscape: (() => void) | null): void {
+  const layer = useContext(PanelEscapeLayerContext);
+  const handlerRef = useRef(onEscape);
+  handlerRef.current = onEscape;
+  const active = onEscape !== null;
+  useLayoutEffect(() => {
+    if (!layer || !active) return;
+    const take = () => handlerRef.current?.();
+    layer.current = take;
+    return () => {
+      if (layer.current === take) layer.current = null;
+    };
+  }, [layer, active]);
+}
+
+/**
  * The right side panel's app-level state. Lives in App.tsx (NOT inside the per-session-keyed
  * SessionDetail) so mode/width preferences and panel drafts survive navigation. Agents visibility
  * is limited to the current visit, even when old browser storage says it was open.
@@ -586,6 +609,8 @@ export function RightPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.open]);
 
+  // The tool's own Escape layer, when it has one (`usePanelEscapeLayer`).
+  const escapeLayerRef = useRef<(() => void) | null>(null);
   /** Escape's step for the panel itself: Restore Panel while expanded, then Close Panel (#2845). */
   const dismiss = expanded ? () => state.setExpanded(false) : state.close;
 
@@ -687,7 +712,8 @@ export function RightPanel({
    * Escape closes the panel from any tool while focus is inside it (§16.2; #1260), once nothing
    * above the panel takes it: an open menu, popover or dialog, then whatever the tool itself layers
    * on its body (a selection, a pushed page, an expanded state). Such a tool layer handles Escape
-   * first and calls `preventDefault()`, which this respects. An expanded panel restores before it
+   * first and calls `preventDefault()`, which this respects, or registers itself with
+   * `usePanelEscapeLayer` (Review's Select Lines, #2849). An expanded panel restores before it
    * closes (#2845). A terminal keeps Escape for its shell;
    * Ctrl+Esc leaves it first. React delivers this before the shell's window listener, so the session
    * never reads the press as "leave the session".
@@ -698,7 +724,9 @@ export function RightPanel({
     if (event.target instanceof Element && event.target.closest(".xterm")) return;
     if (escapeTakenAbovePanel()) return;
     event.preventDefault();
-    dismiss();
+    const layer = escapeLayerRef.current;
+    if (layer) layer();
+    else dismiss();
   };
 
   // The session's own requests are on its request dock (#2179); this panel lists its descendants'.
@@ -975,7 +1003,9 @@ export function RightPanel({
               campaignAvailability={campaignAvailability}
             />
           ) : (
-            <div className="rpanel-body">{modeBody(state.mode)}</div>
+            <PanelEscapeLayerContext.Provider value={escapeLayerRef}>
+              <div className="rpanel-body">{modeBody(state.mode)}</div>
+            </PanelEscapeLayerContext.Provider>
           )}
         </PanelActionSlotContext.Provider>
       </aside>
