@@ -664,7 +664,9 @@ function rehypeCachedTree(options: CachedParseOptions) {
     if (options.tree !== undefined) return structuredClone(options.tree);
     // react-markdown's final pass mutates URLs and raw nodes. Retain a private clone before that
     // pass, then let the original go through exactly the same security policy as before.
-    markdownContentCache.render(options.profile, options.source, () => structuredClone(tree), options.admit);
+    markdownContentCache.render(options.profile, options.source,
+      () => markdownContentCache.canAdmit(options.profile, options.source, options.admit) ? structuredClone(tree) : tree,
+      options.admit);
     return tree;
   };
 }
@@ -682,7 +684,9 @@ const ParsedMarkdown = memo(function ParsedMarkdown({ source, profile, admit }: 
     [remarkCachedParser as unknown as RemarkPlugins[number], options] as RemarkPlugins[number]];
   return <ReactMarkdown remarkPlugins={plugins}
     rehypePlugins={[[rehypeCachedTree, options]]} components={MARKDOWN_COMPONENTS}>{source}</ReactMarkdown>;
-});
+// Admission is a resource policy, not rendered content. A tail becoming stable must not parse
+// identical text again just to populate the LRU; its next natural render/remount may admit it.
+}, (previous, next) => previous.source === next.source && previous.profile === next.profile);
 
 /**
  * Markdown renderer for agent messages, reasoning, user messages and markdown previews. GFM

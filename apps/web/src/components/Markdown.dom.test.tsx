@@ -21,15 +21,15 @@ async function renderMarkdown(
   markdown: string,
   inlineMedia = false,
   mediaSettled = true,
+  onRender?: React.ProfilerProps["onRender"],
 ): Promise<{ container: HTMLDivElement; root: Root }> {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
   const container = happyContainer as unknown as HTMLDivElement;
   const root = createRoot(container);
   await act(async () => {
-    root.render(
-      <Markdown highlightEligible={false} inlineMedia={inlineMedia} settled={mediaSettled}>{markdown}</Markdown>,
-    );
+    const content = <Markdown highlightEligible={false} inlineMedia={inlineMedia} settled={mediaSettled}>{markdown}</Markdown>;
+    root.render(onRender ? <React.Profiler id="markdown" onRender={onRender}>{content}</React.Profiler> : content);
   });
   return { container, root };
 }
@@ -67,6 +67,33 @@ test("a remounted markdown row reuses parsed content but owns fresh code and med
   } finally { await cleanup(second.container, second.root); }
 });
 
+test("streaming tails avoid discarded clones and do not reparse only to change admission", async () => {
+  const originalClone = structuredClone;
+  let clones = 0;
+  globalThis.structuredClone = ((value: unknown, options?: StructuredSerializeOptions) => {
+    clones++;
+    return originalClone(value, options);
+  }) as typeof structuredClone;
+  const prefix = "Unique streaming admission fixture 2771.\n\n";
+  let mounted: Awaited<ReturnType<typeof renderMarkdown>> | undefined;
+  try {
+    const before = markdownContentCache.snapshot();
+    mounted = await renderMarkdown(prefix, false, false);
+    assert.equal(clones, 0, "an unadmitted tail has no retained tree to clone");
+    assert.equal(markdownContentCache.snapshot().parses, before.parses + 1);
+    const content = `${prefix}New streaming tail 2771.`;
+    await act(async () => { mounted!.root.render(<Markdown highlightEligible={false} settled={false}>{content}</Markdown>); });
+    assert.equal(markdownContentCache.snapshot().parses, before.parses + 2,
+      "only the new tail parses when the identical previous block becomes stable");
+    await act(async () => { mounted!.root.render(<Markdown highlightEligible={false} settled>{content}</Markdown>); });
+    assert.equal(markdownContentCache.snapshot().parses, before.parses + 2, "settling identical text does not parse again");
+    assert.equal(clones, 0);
+  } finally {
+    if (mounted) await cleanup(mounted.container, mounted.root);
+    globalThis.structuredClone = originalClone;
+  }
+});
+
 test("table geometry is first read on observer delivery and responds to scrolling and resizing", async () => {
   const descriptors = new Map<string, PropertyDescriptor | undefined>();
   let reads = 0;
@@ -95,7 +122,8 @@ test("table geometry is first read on observer delivery and responds to scrollin
   }
   let mounted: Awaited<ReturnType<typeof renderMarkdown>> | undefined;
   try {
-    mounted = await renderMarkdown("| Deferred Table | Result |\n| --- | --- |\n| synthetic | preserved |");
+    let commits = 0;
+    mounted = await renderMarkdown("| Deferred Table | Result |\n| --- | --- |\n| synthetic | preserved |", false, true, () => { commits++; });
     const wrap = mounted.container.querySelector<HTMLElement>(".md-table-wrap")!;
     assert.equal(reads, 0, "mount and effect registration do not force geometry reads");
     assert.equal(observers.length, 1);
@@ -103,12 +131,14 @@ test("table geometry is first read on observer delivery and responds to scrollin
     await act(async () => { observers[0]!.callback(); });
     assert.equal(wrap.tabIndex, 0);
     assert.equal(wrap.dataset.fadeEnd, "true");
+    const measuredCommits = commits;
     const changes: MutationRecord[] = [];
     const mutations = new domWindow.MutationObserver(records => changes.push(...records as unknown as MutationRecord[]));
     mutations.observe(wrap as never, { attributes: true });
     await act(async () => { observers[0]!.callback(); });
     await domWindow.happyDOM.waitUntilComplete();
     assert.equal(changes.length, 0, "unchanged geometry does not update attributes");
+    assert.equal(commits, measuredCommits, "unchanged geometry does not schedule another React commit");
     scrollLeft = 200;
     await act(async () => { wrap.dispatchEvent(new domWindow.Event("scroll") as unknown as Event); });
     assert.equal(wrap.dataset.fadeEnd, undefined);

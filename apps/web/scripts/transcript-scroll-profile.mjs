@@ -7,11 +7,25 @@ const require = createRequire(import.meta.url);
 const { SourceMapConsumer } = createRequire(require.resolve("postcss/package.json"))("source-map-js");
 const directory = resolve(process.argv[2]);
 const consumers = new Map();
+const tableRanges = new Map();
 const sourcePosition = (frame) => {
   if (!frame.url || frame.lineNumber < 0) return null;
   const name = basename(frame.url);
   if (!consumers.has(name)) {
-    try { consumers.set(name, new SourceMapConsumer(JSON.parse(readFileSync(resolve(directory, "dist/assets", `${name}.map`), "utf8")))); }
+    try {
+      const map = JSON.parse(readFileSync(resolve(directory, "dist/assets", `${name}.map`), "utf8"));
+      consumers.set(name, new SourceMapConsumer(map));
+      const index = map.sources.findIndex(source => /components\/Markdown\.tsx$/.test(source));
+      const text = map.sourcesContent[index];
+      if (text) {
+        const start = text.indexOf("function MarkdownTable(");
+        const end = text.indexOf("\ntype CellProps", start);
+        if (start >= 0 && end > start) tableRanges.set(map.sources[index], {
+          start: text.slice(0, start).split("\n").length,
+          end: text.slice(0, end).split("\n").length,
+        });
+      }
+    }
     catch { consumers.set(name, null); }
   }
   return consumers.get(name)?.originalPositionFor({ line: frame.lineNumber + 1, column: frame.columnNumber }) ?? null;
@@ -41,7 +55,8 @@ for (const name of readdirSync(directory).filter(name => name.endsWith(".cpuprof
       const original = positions.get(ancestor);
       const source = original?.source ?? "";
       if (/micromark|mdast-util|remark-|react-markdown|unified/.test(source)) categories.add("parserPipeline");
-      if (/components\/Markdown\.tsx$/.test(source) && original.line >= 179 && original.line <= 219) categories.add("table");
+      const table = tableRanges.get(source);
+      if (table && original.line >= table.start && original.line <= table.end) categories.add("table");
       if (/markdown-content-cache/.test(source)) categories.add("cache");
     }
     for (const category of categories) inclusive[category] += time;

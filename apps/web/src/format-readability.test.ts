@@ -85,7 +85,7 @@ test("repeated timestamp formatting reuses instances instead of constructing Int
 test("implicit time-zone changes refresh without freezing the earlier environment", () => {
   const previousZone = process.env.TZ;
   const originalNow = Date.now;
-  let now = originalNow();
+  let now = Date.UTC(2026, 0, 15, 12);
   Date.now = () => now;
   clearTimestampFormatterCache();
   try {
@@ -107,6 +107,25 @@ test("implicit time-zone changes refresh without freezing the earlier environmen
     if (previousZone === undefined) delete process.env.TZ;
     else process.env.TZ = previousZone;
     Date.now = originalNow;
+    clearTimestampFormatterCache();
+  }
+});
+
+test("unknown host default zone remains implicit while explicit invalid zones still throw", () => {
+  const previousZone = process.env.TZ;
+  clearTimestampFormatterCache();
+  try {
+    process.env.TZ = "Etc/Unknown";
+    const timestamp = Date.UTC(2026, 6, 13, 18);
+    const date = new Date(timestamp);
+    assert.equal(formatClock(timestamp, "en-US"), new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit" }).format(date));
+    assert.equal(formatRecordedTimestamp(timestamp, "en-US")?.label,
+      new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit", second: "2-digit" }).format(date));
+    assert.throws(() => formatClock(timestamp, "en-US", "Etc/Unknown"), RangeError,
+      "an implicit cached formatter must not mask an invalid explicit zone");
+  } finally {
+    if (previousZone === undefined) delete process.env.TZ;
+    else process.env.TZ = previousZone;
     clearTimestampFormatterCache();
   }
 });

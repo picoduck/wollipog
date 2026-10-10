@@ -27,7 +27,9 @@ test("cache hits preserve GFM, raw HTML and URL security, and separate the inlin
   }));
   const cold = render("document");
   const first = markdownContentCache.snapshot();
+  const canonical = structuredClone(markdownContentCache.get("document", source));
   assert.equal(render("document"), cold);
+  assert.deepEqual(markdownContentCache.get("document", source), canonical, "hot URL/raw processing never mutates the stored tree");
   assert.equal(markdownContentCache.snapshot().parses, first.parses);
   assert.match(cold, /<table>/);
   assert.match(cold, /<h1>/);

@@ -119,6 +119,8 @@ export function clearTimestampFormatterCache() {
 export function timestampFormatterCacheSize() { return timestampFormatters.size; }
 
 function timestampFormatter(style: "clock" | "recorded" | "title", locale?: string, timeZone?: string) {
+  const callerLocale = locale;
+  const callerZone = timeZone;
   // The implicit locale/time zone can change while a long-lived tab is open. Use actual resolved
   // defaults, refresh on a changed language/UTC offset, and recheck at least once per second of
   // active formatting for zone changes sharing an offset. The refresh also drops old instances.
@@ -137,7 +139,9 @@ function timestampFormatter(style: "clock" | "recorded" | "title", locale?: stri
     locale ??= defaultFormatEnvironment.locale;
     timeZone ||= defaultFormatEnvironment.timeZone;
   }
-  const key = JSON.stringify([locale, timeZone, style]);
+  // Keep implicit and explicit environments distinct: some hosts report Etc/Unknown as their
+  // default but reject that name as an explicit zone. Pass the original arguments to Intl.
+  const key = JSON.stringify([locale, timeZone, style, callerLocale === undefined, !callerZone]);
   const cached = timestampFormatters.get(key);
   if (cached) {
     timestampFormatters.delete(key);
@@ -145,9 +149,9 @@ function timestampFormatter(style: "clock" | "recorded" | "title", locale?: stri
     return cached;
   }
   const options: Intl.DateTimeFormatOptions = style === "title"
-    ? { dateStyle: "medium", timeStyle: "medium", timeZone }
-    : { hour: "numeric", minute: "2-digit", ...(style === "recorded" ? { second: "2-digit" } : {}), timeZone };
-  const formatter = new Intl.DateTimeFormat(locale, options);
+    ? { dateStyle: "medium", timeStyle: "medium", ...(callerZone ? { timeZone: callerZone } : {}) }
+    : { hour: "numeric", minute: "2-digit", ...(style === "recorded" ? { second: "2-digit" } : {}), ...(callerZone ? { timeZone: callerZone } : {}) };
+  const formatter = new Intl.DateTimeFormat(callerLocale, options);
   if (timestampFormatters.size >= TIMESTAMP_FORMATTER_LIMIT) timestampFormatters.delete(timestampFormatters.keys().next().value!);
   timestampFormatters.set(key, formatter);
   return formatter;

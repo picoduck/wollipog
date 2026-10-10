@@ -21,13 +21,18 @@ Current-turn opening and anchoring from #474/#2224/#2770 are unchanged.
 - The LRU holds at most 256 entries and 524,288 source-key characters; keys longer than 65,536
   characters bypass admission. These are input/entry bounds, not a claim about exact heap bytes.
   Evicted and oversized content still renders normally and can parse again. Streaming tails bypass
-  admission; stable earlier blocks and settled documents can be reused.
+  admission and avoid cloning discarded trees. Admission alone never reparses identical text;
+  a former tail may first enter the LRU on its next natural render or remount. Blocks first
+  rendered as stable and settled documents can be reused.
 - A separate 32-entry LRU stores Intl.DateTimeFormat instances keyed by locale, time zone and
   style, without storing timestamp values. Explicit environments retain exact output, including
   DST. Implicit defaults are resolved and checked when language hints/current UTC offset change,
   or after one second of active formatting. A default-zone/locale change without a changed hint
   can therefore take up to one second to invalidate cached defaults; it is not frozen for the
-  lifetime of a tab. Invalid dates, locale errors and invalid-zone errors retain their behavior.
+  lifetime of a tab. Resolved defaults identify cache entries, while the original caller arguments
+  construct Intl instances; even a host reporting `Etc/Unknown` retains implicit-default behavior.
+  Implicit and explicit entries remain distinct so cached defaults cannot mask invalid arguments.
+  Invalid dates, locale errors and invalid-zone errors retain their behavior.
 
 ## Reproduction
 
@@ -85,7 +90,8 @@ not the sum of traversal steps.
 
 Profiles are mapped through the emitted source maps. Parser-pipeline attribution is inclusive of
 micromark/mdast/remark/unified/react-markdown stacks. Table attribution covers MarkdownTable's
-render/measurement code. These categories can overlap and are percentages of all sampled time,
+render/measurement code, with boundaries derived independently from each build's source-map content.
+These categories can overlap and are percentages of all sampled time,
 including idle/native work; they are not independent causal estimates or browser paint timings.
 
 ## Measurements
@@ -109,7 +115,9 @@ At display precision, p95 has zero between-trial spread. Mean traversal time was
 threshold. Baseline maximums ranged 66.7–233.4 ms; final maximums ranged 33.4–33.5 ms.
 
 The baseline parser pipeline occupied 18.0–18.4% of sampled time, versus 12.2–12.4% after;
-table code fell from 6.46–6.77% to 0.079–0.146%. Timestamp formatting fell from about 24%
+table code fell from 6.43–6.75% to 0.079–0.146%. The original fixed-line attribution reported
+6.46–6.77% for the baseline; deriving the actual function range removes adjacent cell code.
+Timestamp formatting fell from about 24%
 self time to about 2%. The parser still does cold work; lower total traversal time changes these
 percentages, so they should be read alongside raw profiles and wall-clock durations.
 
@@ -152,6 +160,12 @@ and these source comparisons. The second final build additionally records a clea
 Asset changes between final builds include fixture capture instrumentation; the production source
 fingerprints above are identical. Raw reports, original build snapshots, source fingerprints,
 profiles and frame arrays remain separate records rather than being rewritten into one result.
+
+The first cross-model review of head `ba1b78a35e16d9da5ab8a4dc53d3da292e0a2d51` upvoted
+the change and identified nonblocking compatibility, avoidable clone/reparse and test-attribution
+observations. Independent reproduction confirmed the implicit `Etc/Unknown` constructor failure,
+discarded streaming clones and admission-only reparsing. Those small fixes and stronger tests
+follow the builds above, so those measurements remain evidence for their original sources.
 
 All exploratory runs are reported separately: the first baseline series had p95
 83.2/66.6/66.7/66.7/66.6 ms, and Markdown/table-only changes had

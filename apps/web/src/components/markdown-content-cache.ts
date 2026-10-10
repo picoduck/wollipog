@@ -21,6 +21,11 @@ export class MarkdownContentCache<T> {
 
   constructor(private readonly limits: { entries: number; sourceCharacters: number; entryCharacters: number } = MARKDOWN_CACHE_LIMITS) {}
 
+  canAdmit(profile: MarkdownContentProfile, source: string, admit = true): boolean {
+    const characters = profile.length + 1 + source.length;
+    return admit && this.limits.entries >= 1 && characters <= this.limits.entryCharacters && characters <= this.limits.sourceCharacters;
+  }
+
   get(profile: MarkdownContentProfile, source: string): T | undefined {
     const key = `${profile}:${source}`;
     const cached = this.entries.get(key);
@@ -40,7 +45,7 @@ export class MarkdownContentCache<T> {
     this.parses++;
     const value = parse();
     const characters = key.length;
-    if (!admit || this.limits.entries < 1 || characters > this.limits.entryCharacters || characters > this.limits.sourceCharacters) return value;
+    if (!this.canAdmit(profile, source, admit)) return value;
     while (this.entries.size >= this.limits.entries || this.characters + characters > this.limits.sourceCharacters) {
       const oldest = this.entries.keys().next().value!;
       this.characters -= this.entries.get(oldest)!.characters;
