@@ -1,1 +1,0 @@
-|.browser-artifact-row>span:first-child|gap|2px

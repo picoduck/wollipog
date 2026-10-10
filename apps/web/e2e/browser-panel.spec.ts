@@ -1,0 +1,192 @@
+import { expect, test, type Page } from "@playwright/test";
+
+/**
+ * The Browser tool (#2854; docs/design-system.md §10.1, §5.2, §4.7, §8.5, §12): Artifacts and Web
+ * Preview as tabs, two-line artifact rows, an address row that stays one line, and a page that
+ * loads, reloads or turns out to be blocked.
+ */
+const PAGE = "http://preview.test/dashboard";
+const BLOCKED = "http://blocked.test/refuses-framing";
+
+async function openBrowser(page: Page, width: number, query = "") {
+  await page.setViewportSize({ width, height: 800 });
+  await page.goto(`/browser-panel-e2e.html${query}`);
+  await page.evaluate(() => localStorage.clear());
+  await page.reload();
+  await expect(page.getByRole("tablist", { name: "Browser" })).toBeVisible();
+}
+
+const tab = (page: Page, name: string) => page.getByRole("tablist", { name: "Browser" }).getByRole("tab", { name });
+const address = (page: Page) => page.locator(".browser-address");
+
+async function openWebPreview(page: Page) {
+  await tab(page, "Web Preview").click();
+  await expect(tab(page, "Web Preview")).toHaveAttribute("aria-selected", "true");
+}
+
+/** Every visible control in the address row sits on one line: one vertical centre, inside the row. */
+async function addressRowIsOneLine(page: Page) {
+  const boxes = await address(page).evaluate((form) => [...form.children]
+    .filter((child) => child.getClientRects().length > 0 && getComputedStyle(child).position !== "absolute")
+    .map((child) => {
+      const box = child.getBoundingClientRect();
+      return { name: child.getAttribute("aria-label") ?? child.textContent?.trim() ?? child.tagName, middle: box.top + box.height / 2, right: box.right };
+    }));
+  const form = (await address(page).boundingBox())!;
+  for (const box of boxes) {
+    expect(box.middle, `${box.name} shares the row's line`).toBeCloseTo(boxes[0]!.middle, 0);
+    expect(box.right, `${box.name} stays inside the row`).toBeLessThanOrEqual(form.x + form.width + 0.5);
+  }
+  return boxes.map((box) => box.name);
+}
+
+test.describe("on a desktop", () => {
+  test("the tabs switch between Artifacts and Web Preview and nothing reads Web URL", async ({ page }) => {
+    await openBrowser(page, 1440);
+    await expect(tab(page, "Artifacts")).toHaveAttribute("aria-selected", "true");
+    await expect(tab(page, "Artifacts").locator(".count")).toHaveText("5+");
+    await expect(page.getByRole("radio")).toHaveCount(0);
+    await expect(page.getByText("Web URL")).toHaveCount(0);
+
+    await tab(page, "Artifacts").focus();
+    await page.keyboard.press("ArrowRight");
+    await expect(tab(page, "Web Preview")).toHaveAttribute("aria-selected", "true");
+    await expect(tab(page, "Web Preview")).toBeFocused();
+    await expect(page.getByRole("tabpanel")).toHaveAttribute("aria-labelledby", "browser-web-tab");
+    await expect(page.locator(".browser-web .state-title")).toHaveText("Preview a Web Page");
+
+    await page.keyboard.press("ArrowLeft");
+    await expect(tab(page, "Artifacts")).toHaveAttribute("aria-selected", "true");
+    await expect(page.locator(".browser-artifact-list .row")).toHaveCount(5);
+  });
+
+  test("artifact rows are 56px, name their kind, keep the size on one line, and Show More loads the rest", async ({ page }) => {
+    await openBrowser(page, 1440);
+    const rows = page.locator(".browser-artifact-list .row");
+    await expect(rows).toHaveCount(5);
+    for (const height of await rows.evaluateAll((all) => all.map((row) => row.getBoundingClientRect().height))) {
+      expect(height).toBe(56);
+    }
+    const html = rows.filter({ hasText: "Dashboard preview" });
+    await expect(html.locator(".browser-artifact-meta > span")).toHaveText("HTML preview");
+    const size = html.locator(".browser-artifact-size");
+    await expect(size).toHaveText("1.7 KB");
+    const lineHeight = await size.evaluate((element) => Number.parseFloat(getComputedStyle(element).lineHeight));
+    expect((await size.boundingBox())!.height).toBeLessThanOrEqual(lineHeight + 1);
+    expect(await rows.first().locator(".browser-artifact-kind").evaluate((tile) => {
+      const box = tile.getBoundingClientRect();
+      return [box.width, box.height];
+    })).toEqual([32, 32]);
+
+    await page.locator(".list-foot").getByRole("button", { name: "Show More" }).click();
+    await expect(rows).toHaveCount(7);
+    await expect(page.locator(".list-foot")).toHaveCount(0);
+    await expect(tab(page, "Artifacts").locator(".count")).toHaveText("7");
+  });
+
+  test("the artifact list shows its loading, empty and error states", async ({ page }) => {
+    await openBrowser(page, 1440, "?artifacts=loading");
+    await expect(page.locator(".browser-artifacts .skeleton .skeleton-row")).toHaveCount(3);
+
+    await openBrowser(page, 1440, "?artifacts=empty");
+    await expect(page.locator(".browser-artifacts .state-title")).toHaveText("No Artifacts Yet");
+    await page.getByRole("button", { name: "Open Web Preview" }).click();
+    await expect(tab(page, "Web Preview")).toHaveAttribute("aria-selected", "true");
+
+    await openBrowser(page, 1440, "?artifacts=error");
+    const error = page.locator(".browser-artifacts .state-error");
+    await expect(error).toContainText("Couldn't Load Artifacts");
+    await expect(error.getByRole("button", { name: "Retry" })).toBeVisible();
+    await error.getByRole("button", { name: "Show Details" }).click();
+    await expect(error).toContainText("503 Service Unavailable");
+  });
+
+  test("an address without a scheme is a field error under the row and no notice", async ({ page }) => {
+    await openBrowser(page, 1440);
+    await openWebPreview(page);
+    const field = page.getByLabel("Web Preview URL");
+    await field.fill("localhost:3000");
+    await field.press("Enter");
+    await expect(page.locator("#browser-url-error")).toBeVisible();
+    await expect(field).toHaveAttribute("aria-invalid", "true");
+    await expect(page.locator(".browser-web .notice")).toHaveCount(0);
+    await expect(page.locator(".browser-web-frame")).toHaveCount(0);
+  });
+
+  test("a page shows the load bar until it loads, then Reload and Open in New Tab", async ({ page }) => {
+    let release: () => void = () => undefined;
+    const served = new Promise<void>((resolve) => { release = resolve; });
+    await page.route(`${PAGE}*`, async (route) => {
+      await served;
+      await route.fulfill({ contentType: "text/html", body: "<!doctype html><title>Dashboard</title><h1>Dashboard</h1>" });
+    });
+    await openBrowser(page, 1440);
+    await openWebPreview(page);
+    await page.getByLabel("Web Preview URL").fill(PAGE);
+    await page.getByRole("button", { name: "Open", exact: true }).click();
+
+    const bar = page.locator(".browser-load-bar");
+    await expect(bar).toBeVisible();
+    expect((await bar.boundingBox())!.height).toBe(2);
+    await expect(address(page).getByRole("button", { name: "Reload" })).toHaveCount(0);
+
+    release();
+    await expect(bar).toHaveCount(0);
+    await expect(address(page).getByRole("button", { name: "Reload" })).toBeVisible();
+    const external = address(page).getByRole("link", { name: "Open in New Tab" });
+    await expect(external).toHaveAttribute("href", PAGE);
+    await expect(external).toHaveAttribute("rel", "noopener noreferrer");
+    await expect(address(page).getByRole("button", { name: "Open", exact: true })).toHaveCount(0);
+    await expect(page.frameLocator(".browser-web-frame").getByRole("heading", { name: "Dashboard" })).toBeVisible();
+
+    // The frame fills the rest of the panel.
+    const frame = (await page.locator(".browser-web-frame").boundingBox())!;
+    const panel = (await page.locator("#right-panel").boundingBox())!;
+    expect(frame.y + frame.height).toBeCloseTo(panel.y + panel.height, 0);
+    expect(frame.width).toBeCloseTo(panel.width - 1, 0);
+  });
+
+  test("a page that never loads within 8 seconds shows Page Blocked with Open in New Tab", async ({ page }) => {
+    await page.clock.install();
+    await page.route(`${BLOCKED}*`, () => undefined);
+    await openBrowser(page, 1440);
+    await openWebPreview(page);
+    await page.getByLabel("Web Preview URL").fill(BLOCKED);
+    await page.getByLabel("Web Preview URL").press("Enter");
+    await expect(page.locator(".browser-load-bar")).toBeVisible();
+
+    await page.clock.fastForward(8_000);
+    const notice = page.locator(".browser-web-view .notice");
+    await expect(notice).toContainText("This page can't be shown inside Wollipog.");
+    await expect(notice.getByRole("link", { name: "Open in New Tab" })).toHaveAttribute("href", BLOCKED);
+    await expect(page.locator(".browser-web-frame")).toBeHidden();
+    await expect(page.locator(".browser-load-bar")).toHaveCount(0);
+  });
+});
+
+test.describe("on a phone", () => {
+  test.use({ hasTouch: true, isMobile: true });
+
+  test("artifact rows are 64px on touch", async ({ page }) => {
+    await openBrowser(page, 390);
+    const rows = page.locator(".browser-artifact-list .row");
+    await expect(rows).toHaveCount(5);
+    for (const height of await rows.evaluateAll((all) => all.map((row) => row.getBoundingClientRect().height))) {
+      expect(height).toBe(64);
+    }
+  });
+
+  test("at a 320px panel the address row is one line before and after a page loads", async ({ page }) => {
+    await page.route(`${PAGE}*`, (route) => route.fulfill({ contentType: "text/html", body: "<!doctype html><h1>Dashboard</h1>" }));
+    await openBrowser(page, 320);
+    expect((await page.locator("#right-panel").boundingBox())!.width).toBe(320);
+    await openWebPreview(page);
+    await page.getByLabel("Web Preview URL").fill("https://a-rather-long-host-name.preview.test:3000/dashboard/settings");
+    expect(await addressRowIsOneLine(page)).toEqual([expect.anything(), "Open"]);
+
+    await page.getByLabel("Web Preview URL").fill(PAGE);
+    await page.getByLabel("Web Preview URL").press("Enter");
+    await expect(address(page).getByRole("button", { name: "Reload" })).toBeVisible();
+    expect(await addressRowIsOneLine(page)).toEqual(["Reload", expect.anything(), "Open in New Tab"]);
+  });
+});

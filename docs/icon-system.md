@@ -125,8 +125,13 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `QuestionIcon` | Lucide | `MessageCircleQuestion` | A question: an agent's question row and pending-question marker in the transcript; Side Chat's launcher; the Request Card's Question kind. |
 | `LocateIcon` | Lucide | `Locate` | Show Where Asked: scrolls the transcript to a docked question's marker. |
 | `MicIcon` | Lucide | `Mic` | Dictation action. |
-| `ImageIcon` | Lucide | `Image` | Image attachment; the Request Card's UI Evidence kind. |
+| `ImageIcon` | Lucide | `Image` | Image attachment; the Request Card's UI Evidence kind; a screenshot artifact's kind tile in the Browser (#2854). |
 | `ImageOffIcon` | Lucide | `ImageOff` | Transcript media that could not load; an attached or sent image that could not be shown; the composer's refused drop target when the model can't read images. |
+| `ReportIcon` | Lucide | `ClipboardList` | A review report artifact's kind tile in the Browser (#2854). |
+| `HtmlIcon` | Lucide | `CodeXml` | An HTML preview artifact's kind tile in the Browser (#2854). |
+| `LogIcon` | Lucide | `Logs` | A test log artifact's kind tile in the Browser (#2854). |
+| `JsonIcon` | Lucide | `Braces` | A JSON artifact's kind tile, such as a verdict, in the Browser (#2854). |
+| `VideoIcon` | Lucide | `Film` | A video artifact's kind tile in the Browser (#2854). |
 | `PaperclipIcon` | Lucide | `Paperclip` | A message that carries images: a row of the composer's queue tray. |
 | `AtSignIcon` | Lucide | `AtSign` | Reference a workspace file: the + menu's Reference a File… row, which opens the @ picker. |
 | `ChainIcon` | Lucide | `GitCommitVertical` | Worktree or context-chain relationship. |
@@ -154,7 +159,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `HandOffIcon` | Lucide | `ArrowRightLeft` | Hand a conversation off to another provider. |
 | `DialIcon` | Lucide | `CircleGauge` | Model or effort setting. |
 | `PullRequestIcon` | Lucide | `GitPullRequest` | Pull request. |
-| `DiffIcon` | Lucide | `FileDiff` | Changed files in the Review panel. |
+| `DiffIcon` | Lucide | `FileDiff` | Changed files in the Review panel; a patch artifact's kind tile in the Browser (#2854). |
 | `TranscriptHitIcon` | Lucide | `FileText` | A transcript search hit in the command palette. |
 | `JobsIcon` | Lucide | `ListChecks` | Background job list with per-job state. |
 | `CampaignIcon` | Lucide | `ChartGantt` | An issue campaign's work items: Campaign Status in the right panel. |

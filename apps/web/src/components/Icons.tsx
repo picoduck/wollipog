@@ -10,6 +10,7 @@ import {
   Ban as LucideBan,
   BookOpen as LucideBookOpen,
   Bot as LucideBot,
+  Braces as LucideBraces,
   Brain as LucideBrain,
   ChartNoAxesColumn as LucideChartNoAxesColumn,
   Check as LucideCheck,
@@ -27,8 +28,10 @@ import {
   CircleDot as LucideCircleDot,
   CircleGauge as LucideCircleGauge,
   CirclePause as LucideCirclePause,
+  ClipboardList as LucideClipboardList,
   CloudOff as LucideCloudOff,
   Code as LucideCode,
+  CodeXml as LucideCodeXml,
   Columns3 as LucideColumns3,
   Copy as LucideCopy,
   DollarSign as LucideDollarSign,
@@ -48,6 +51,7 @@ import {
   FileSearch as LucideFileSearch,
   FileText as LucideFileText,
   Files as LucideFiles,
+  Film as LucideFilm,
   Fence as LucideFence,
   FlaskConical as LucideFlaskConical,
   Folder as LucideFolder,
@@ -82,6 +86,7 @@ import {
   Route as LucideRoute,
   Locate as LucideLocate,
   Lock as LucideLock,
+  Logs as LucideLogs,
   LockKeyhole as LucideLockKeyhole,
   MapPinOff as LucideMapPinOff,
   Mail as LucideMail,
@@ -601,6 +606,32 @@ export function ImageIcon(props: IconProps) {
 
 export function ImageOffIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideImageOff} {...props} />;
+}
+
+/** A session artifact's kind on its row's tile (#2854): a review report. A patch is `DiffIcon`, a
+ * screenshot `ImageIcon`. */
+export function ReportIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideClipboardList} {...props} />;
+}
+
+/** An HTML preview artifact (#2854). */
+export function HtmlIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideCodeXml} {...props} />;
+}
+
+/** A test log artifact (#2854). */
+export function LogIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideLogs} {...props} />;
+}
+
+/** A JSON artifact, such as a verdict (#2854). */
+export function JsonIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideBraces} {...props} />;
+}
+
+/** A video artifact (#2854). */
+export function VideoIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideFilm} {...props} />;
 }
 
 /** A message that carries images: a row of the composer's queue tray (#2178). */

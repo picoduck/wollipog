@@ -172,7 +172,7 @@ test.describe("on a phone with a coarse pointer", () => {
     const rail = page.locator(".app-rail");
     const railTop = (await rail.boundingBox())!.y;
     expect(Math.round((await panel(page).boundingBox())!.y + (await panel(page).boundingBox())!.height)).toBe(Math.round(railTop));
-    await panel(page).getByRole("radio", { name: "Web URL" }).tap();
+    await panel(page).getByRole("tab", { name: "Web Preview" }).tap();
     await panel(page).getByLabel("Web Preview URL").focus();
     await expect(rail).toBeHidden();
     const bottom = async () => {
