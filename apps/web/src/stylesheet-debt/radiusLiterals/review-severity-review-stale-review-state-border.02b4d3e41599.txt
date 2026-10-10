@@ -1,1 +1,0 @@
-|.review-severity,.review-stale,.review-state|border-radius|999

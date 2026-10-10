@@ -299,11 +299,17 @@ function findingsList(container: HTMLElement): HTMLElement {
   return list;
 }
 
+/** Select the list's open finding, which hands the panel's foot to the selection bar (#2850). */
+async function selectOpenFinding(container: HTMLElement) {
+  const box = findingsList(container).querySelector<HTMLInputElement>('input[type="checkbox"]');
+  assert.ok(box, "the open finding can be selected");
+  await act(async () => { fireDomEvent.click(box); });
+}
+
 function sendSelected(container: HTMLElement): HTMLButtonElement {
-  const found = [...container.querySelectorAll<HTMLButtonElement>(".review-findings-actions button")]
-    .find((button) => (button.textContent ?? "").startsWith("Send Selected"));
-  assert.ok(found, "Send Selected is rendered");
-  return found;
+  const bar = container.querySelector<HTMLElement>(".finding-selection-bar");
+  assert.ok(bar, "the selection bar is rendered");
+  return onlyButton(bar, "Send to Agent");
 }
 
 function inlineFinding(container: HTMLElement, body: string): HTMLElement {
@@ -332,7 +338,7 @@ function findingControls(container: HTMLElement): Array<[string, HTMLButtonEleme
   const open = inlineFinding(container, "this guard is missing");
   const resolved = inlineFinding(container, "already handled");
   return [
-    ["Send Selected", sendSelected(container)],
+    ["Send to Agent", sendSelected(container)],
     ["list Resolve", onlyButton(list, "Resolve")],
     ["list Dismiss", onlyButton(list, "Dismiss")],
     ["inline Resolve", onlyButton(open, "Resolve")],
@@ -359,9 +365,10 @@ function assertRefused(container: HTMLElement, name: string, button: HTMLButtonE
 test("a refused person sees every finding control disabled with the reason, and nothing is sent (#1864)", async () => {
   const harness = await mountPanel(sessionWith({ allowed: false, reason: VIEWER }));
   try {
+    await selectOpenFinding(harness.container);
     const controls = findingControls(harness.container);
-    assert.match(sendSelected(harness.container).textContent ?? "", /Send Selected \(1\)/u,
-      "the open finding is selected, so only the refusal disables Send Selected");
+    assert.match(harness.container.querySelector(".finding-selection-count")?.textContent ?? "", /^1 finding selected$/u,
+      "the open finding is selected, so only the refusal disables Send to Agent");
     for (const [name, button] of controls) assertRefused(harness.container, name, button);
 
     for (const [, button] of controls) {
@@ -403,14 +410,15 @@ test("an allowed or absent verdict leaves every finding control as it was (#1864
     const harness = await mountPanel(sessionWith(verdict));
     try {
       assertNoDomNode(harness.container.querySelector(`#${REFUSAL_ID}`), "no refusal is shown");
+      await selectOpenFinding(harness.container);
       for (const [name, button] of findingControls(harness.container)) {
         assert.equal(button.disabled, false, `${name} is enabled`);
         assert.equal(button.getAttribute("aria-describedby"), null, `${name} has no refusal description`);
       }
 
+      await act(async () => { fireDomEvent.click(sendSelected(harness.container)); });
       await act(async () => { fireDomEvent.click(onlyButton(findingsList(harness.container), "Resolve")); });
       await act(async () => { fireDomEvent.click(onlyButton(inlineFinding(harness.container, "already handled"), "Reopen")); });
-      await act(async () => { fireDomEvent.click(sendSelected(harness.container)); });
       const comment = harness.container.querySelector<HTMLButtonElement>('button[aria-label="Comment on src/b.ts right line 11"]');
       assert.ok(comment);
       await act(async () => { fireDomEvent.click(comment); });
@@ -421,9 +429,9 @@ test("an allowed or absent verdict leaves every finding control as it was (#1864
       });
       await act(async () => { fireDomEvent.click(onlyButton(editor(harness.container), "Add Finding")); });
       assert.deepEqual(harness.calls, [
+        "bundle",
         "update:finding-open:resolved",
         "update:finding-resolved:open",
-        "bundle",
         "create",
       ]);
     } finally {

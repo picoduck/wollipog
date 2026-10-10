@@ -1,1 +1,0 @@
-|.review-findings-empty|padding|6px

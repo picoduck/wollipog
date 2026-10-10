@@ -238,17 +238,25 @@ test.describe("on a phone with a coarse pointer", () => {
   });
 });
 
-test("in a 400px desktop panel a finding row is single-column, and in a wide one it is not (#2843)", async ({ page }) => {
+test("a finding row is single-column at every panel width, its body spanning the row (#2843, #2850)", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/review-anchor-reload-e2e.html?theme=dark&stored=0");
   const row = page.locator(".review-finding-row").first();
   await expect(row).toBeVisible();
-  const columns = () => row.evaluate((element) => getComputedStyle(element).gridTemplateColumns.split(" ").length);
-  const wide = await columns();
-  expect(wide).toBeGreaterThan(2);
-  await page.locator("section.rpanel").evaluate((element) => { (element as HTMLElement).style.width = "400px"; });
-  await expect.poll(columns).toBe(2);
-  const actions = (await row.locator(".review-finding-row-actions").boundingBox())!;
-  const body = (await row.locator(":scope > :nth-child(2)").boundingBox())!;
-  expect(actions.y).toBeGreaterThanOrEqual(body.y + body.height - 1);
+  // The findings come before the first file section.
+  const findingsTop = (await page.locator("section.review-findings").boundingBox())!.y;
+  const diffTop = (await page.locator(".git-diff-section").boundingBox())!.y;
+  expect(findingsTop).toBeLessThan(diffTop);
+  for (const width of [null, "400px"]) {
+    if (width) await page.locator("section.rpanel").evaluate((element, value) => { (element as HTMLElement).style.width = value; }, width);
+    const box = (await row.boundingBox())!;
+    const padding = await row.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return Number.parseFloat(style.paddingLeft) + Number.parseFloat(style.paddingRight);
+    });
+    const body = (await row.locator(".review-finding-body").boundingBox())!;
+    expect(Math.abs(body.width - (box.width - padding)), `the body spans the row at ${width ?? "the fixture's width"}`).toBeLessThan(1);
+    const actions = (await row.locator(".review-finding-row-actions").boundingBox())!;
+    expect(actions.y, "the actions sit on the last line").toBeGreaterThanOrEqual(body.y + body.height - 1);
+  }
 });
