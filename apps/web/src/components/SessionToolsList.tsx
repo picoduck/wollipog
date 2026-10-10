@@ -23,6 +23,7 @@ import {
   TERMINAL_FACT,
   agentsFact,
   backgroundFact,
+  backgroundInventoryGap,
   browserFact,
   campaignFact,
   decisionsFact,
@@ -252,10 +253,10 @@ function SessionToolsListView({
       case "subagents": return { text: agentsFact(subagents.length, registry?.nextAfter != null), badge: agentsBadge || undefined };
       case "sidechat": return { text: SIDE_CHAT_FACT };
       case "background": {
-        // Job history the compact session view leaves out until SessionDetail loads it.
-        if (session.backgroundJobs === undefined && session.backgroundJobsAvailable === true) {
-          return { text: backgroundFact(backgroundInventoryError ? "error" : "loading") };
-        }
+        // No jobs to count: an inventory still loading, a server that does not report one, or only
+        // the runner's aggregate state, as the Background Work panel says. Never "nothing has run".
+        const gap = backgroundInventoryGap(session, backgroundInventoryError);
+        if (gap) return { text: backgroundFact(gap) };
         // The Background Work panel's own job states, so only a verified job counts as running.
         const inventorySupported = runnerSupportsProtocol(runnerProtocolVersion, "managedBackgroundInventory");
         const states = (session.backgroundJobs ?? []).map((job) => backgroundJobCurrentState(

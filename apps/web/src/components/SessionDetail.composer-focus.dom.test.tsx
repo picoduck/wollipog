@@ -43,6 +43,7 @@ import { loadComposerEditCopy, saveComposerEditCopy } from "../composer-edit-cop
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { withCapturedAnimationFrames, withScopedClockOverrides } from "./test-clock-overrides.js";
+import type { RightPanelMode } from "../right-panel.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
@@ -217,6 +218,8 @@ interface FixtureOptions {
   client?: Partial<ApiClient>;
   mainEventPayloads?: SessionEvent["payload"][];
   rightPanelMode?: "launcher" | "sidechat" | "background";
+  /** The panel's `setMode` takes effect at the next render, as choosing a tool does (#2844). */
+  rightPanelFollowsSetMode?: boolean;
   /**
    * The side panel is expanded over the chat column (#2845); Restore Panel calls are recorded. `value`
    * (default true) can change between renders.
@@ -311,14 +314,14 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
   } as unknown as ApiClient;
   const rightPanel = {
     open: options.rightPanelMode != null,
-    mode: options.rightPanelMode ?? "launcher",
+    mode: (options.rightPanelMode ?? "launcher") as RightPanelMode,
     width: 360,
     dragging: false,
     subagentTarget: null,
     toggle() {},
     openMode() {},
     show() {},
-    setMode() {},
+    setMode(mode: RightPanelMode) { if (options.rightPanelFollowsSetMode) rightPanel.mode = mode; },
     setWidth() {},
     get expanded() { return options.rightPanelExpanded ? options.rightPanelExpanded.value ?? true : false; },
     setExpanded(value: boolean) { options.rightPanelExpanded?.calls.push(value); },
@@ -7141,6 +7144,46 @@ test("Session Tools loads the job inventory a compact session leaves out, and co
     });
     await flushAsyncWork();
     assert.equal(fact(), "0 of 1 job running");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("choosing Background Work from Session Tools while the inventory loads keeps that load and shows it (#2844)", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const requests: Array<Deferred<{ session: SessionView }>> = [];
+  const fixture = await mountFixture(draft, {
+    rightPanelMode: "launcher",
+    rightPanelFollowsSetMode: true,
+    runnerProtocolVersion: 99,
+    sessionPatch: { backgroundWorkTracking: "managed", backgroundJobsAvailable: true },
+    client: {
+      session: async () => {
+        const request = deferred<{ session: SessionView }>();
+        requests.push(request);
+        return request.promise;
+      },
+    },
+  });
+  try {
+    await flushAsyncWork();
+    assert.equal(requests.length, 1, "Session Tools asks for the inventory once");
+    const row = fixture.container.querySelector<HTMLButtonElement>('.session-tools [data-tool="background"]');
+    assert.ok(row, "the list offers Background Work");
+    await act(async () => row.click());
+    // The fixture's panel state takes the mode when the session view next renders; a title change
+    // renders it (#2872 leaves streaming-only changes such as updatedAt quiet).
+    await fixture.pushSession({ title: "Composer Focus Fixture, Renamed" });
+    await flushAsyncWork();
+    assert.match(fixture.container.textContent ?? "", /Loading Background Work/);
+    assert.equal(requests.length, 1, "moving to Background Work keeps the load in flight rather than starting another");
+    await act(async () => {
+      requests[0]!.resolve({ session: detailedBackgroundSession(fixture.sessionId) });
+      await requests[0]!.promise;
+    });
+    await flushAsyncWork();
+    assert.match(fixture.container.textContent ?? "", /Agent Job 1/, "the answer that was in flight lands");
+    assert.doesNotMatch(fixture.container.textContent ?? "", /Loading Background Work/);
   } finally {
     await unmountFixture(fixture);
   }

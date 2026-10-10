@@ -1610,15 +1610,18 @@ function SessionDetailLoaded({
     if (backgroundInventoryRequestRef.current === requestKey) return;
     backgroundInventoryRequestRef.current = requestKey;
     setBackgroundInventoryError(null);
-    let current = true;
+    // The load belongs to its request key, not to this run of the effect: moving between the tools
+    // that show the inventory (Session Tools to Background Work, #2844) re-runs the effect with the
+    // same key, which must not discard the answer. Leaving them, or another session or recovery
+    // generation, clears or replaces the key, and then a late answer is dropped.
+    const current = () => backgroundInventoryRequestRef.current === requestKey;
     void api.session(session.id)
       .then(({ session: loaded }) => {
-        if (current) loadSession(loaded);
+        if (current()) loadSession(loaded);
       })
       .catch((cause: unknown) => {
-        if (current) setBackgroundInventoryError((cause as Error).message);
+        if (current()) setBackgroundInventoryError((cause as Error).message);
       });
-    return () => { current = false; };
   }, [api, backgroundInventoryAttempt, loadSession, mode, recoveryGeneration,
     rightPanel.mode, rightPanel.open, session.backgroundJobs, session.backgroundJobsAvailable, session.id]);
   const composerComposingRef = useRef(false);

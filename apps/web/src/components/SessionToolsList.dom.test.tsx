@@ -407,3 +407,22 @@ test("Background Work counts only jobs the Background Work panel shows as runnin
     await panel.dispose();
   }
 });
+
+test("Background Work never reads as empty history when a server omits the inventory (#2844)", async () => {
+  // An older control plane sends neither the jobs nor whether any exist, only the runner's state.
+  const panel = await mount({ git: gitWith(0), session: { ...session, backgroundWorkState: "running" } });
+  try {
+    assert.equal(fact(panel.container, "background"), "The runner reports background work");
+    await panel.setProps({ session: { ...session, backgroundWorkState: "orphaned" } });
+    assert.equal(fact(panel.container, "background"), "Background work was lost");
+    await panel.setProps({ session: { ...session, backgroundWorkTracking: "managed" } });
+    assert.equal(fact(panel.container, "background"), "This server doesn't say whether jobs have run");
+    // Known empty history is the one case that says nothing has run.
+    await panel.setProps({
+      session: { ...session, backgroundWorkTracking: "managed", backgroundJobsAvailable: false, backgroundJobs: [] },
+    });
+    assert.equal(fact(panel.container, "background"), "Nothing has run in the background");
+  } finally {
+    await panel.dispose();
+  }
+});

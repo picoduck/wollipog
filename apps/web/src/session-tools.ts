@@ -1,4 +1,4 @@
-import type { DescendantRequestView, PendingApproval } from "@wollipog/protocol";
+import type { DescendantRequestView, PendingApproval, SessionView } from "@wollipog/protocol";
 import type { CampaignStatusAvailability } from "./campaign-status.js";
 import type { RightPanelMode } from "./right-panel.js";
 import type { ShortcutId } from "./shortcuts.js";
@@ -138,14 +138,42 @@ export function agentsFact(subagents: number, more = false): string {
   return subagents === 0 ? "No subagents in this session" : `${count(subagents, "subagent", "subagents")} in this session`;
 }
 
+/** Why Background Work has no jobs to count, in the Background Work panel's terms. */
+export type BackgroundInventoryGap = "loading" | "error" | "unverified" | "reported" | "lost";
+
+/**
+ * With no jobs listed, which of the Background Work panel's states the session is in (null when it
+ * has truly run nothing): the inventory loading or failed to load, a server that does not say whether
+ * per-job history exists, or only the runner's aggregate state. Mirrors BackgroundWorkPanel.tsx.
+ */
+export function backgroundInventoryGap(
+  session: Pick<SessionView, "backgroundJobs" | "backgroundJobsAvailable" | "backgroundWorkState" | "backgroundWorkTracking">,
+  inventoryError: string | null,
+): BackgroundInventoryGap | null {
+  if ((session.backgroundJobs?.length ?? 0) > 0) return null;
+  if (session.backgroundJobsAvailable === true && session.backgroundJobs === undefined) return inventoryError ? "error" : "loading";
+  const aggregate = session.backgroundWorkState === "resumed" ? undefined : session.backgroundWorkState;
+  if (session.backgroundJobsAvailable === undefined && session.backgroundWorkTracking === "managed" && aggregate === undefined) {
+    return "unverified";
+  }
+  if (aggregate === "orphaned") return "lost";
+  return aggregate ? "reported" : null;
+}
+
 /**
  * Background Work: of the jobs the session lists, those the Background Work panel shows as Running
  * (`backgroundJobCurrentState`), so an unverified, lost or stalled job is never counted as running.
  */
-export function backgroundFact(states: readonly string[] | "loading" | "error"): string {
-  // A compact session view says job history exists without carrying it until it is loaded.
-  if (states === "loading") return "Checking background jobs…";
-  if (states === "error") return "Background jobs can't be loaded right now";
+export function backgroundFact(states: readonly string[] | BackgroundInventoryGap): string {
+  switch (states) {
+    // A compact session view says job history exists without carrying it until it is loaded.
+    case "loading": return "Checking background jobs…";
+    case "error": return "Background jobs can't be loaded right now";
+    // The Background Work panel's own states when it has no jobs to list.
+    case "unverified": return "This server doesn't say whether jobs have run";
+    case "reported": return "The runner reports background work";
+    case "lost": return "Background work was lost";
+  }
   if (states.length === 0) return "Nothing has run in the background";
   const running = states.filter((state) => state === "running").length;
   return `${running} of ${count(states.length, "job", "jobs")} running`;

@@ -10,6 +10,7 @@ import {
   TERMINAL_FACT,
   agentsFact,
   backgroundFact,
+  backgroundInventoryGap,
   browserFact,
   campaignFact,
   decisionsFact,
@@ -102,6 +103,26 @@ test("the other tools' facts read in sentence case (#2844)", () => {
   // Known history whose inventory is not loaded yet is never "nothing has run".
   assert.equal(backgroundFact("loading"), "Checking background jobs…");
   assert.equal(backgroundFact("error"), "Background jobs can't be loaded right now");
+  assert.equal(backgroundFact("unverified"), "This server doesn't say whether jobs have run");
+  assert.equal(backgroundFact("reported"), "The runner reports background work");
+  assert.equal(backgroundFact("lost"), "Background work was lost");
+});
+
+test("with no jobs to count, Background Work takes the Background Work panel's own state (#2844)", () => {
+  const job = { id: "j", parentTurnId: "t", launchType: "shell" as const, registeredAt: 1, lastObservedAt: 1, sourcePresent: true };
+  // Jobs listed: counted, whatever else is set.
+  assert.equal(backgroundInventoryGap({ backgroundJobs: [job], backgroundWorkState: "orphaned" }, null), null);
+  // A compact view's omitted inventory.
+  assert.equal(backgroundInventoryGap({ backgroundJobsAvailable: true }, null), "loading");
+  assert.equal(backgroundInventoryGap({ backgroundJobsAvailable: true }, "offline"), "error");
+  // An older control plane that omits both the inventory and whether it exists.
+  assert.equal(backgroundInventoryGap({ backgroundWorkTracking: "managed" }, null), "unverified");
+  assert.equal(backgroundInventoryGap({ backgroundWorkState: "running" }, null), "reported");
+  assert.equal(backgroundInventoryGap({ backgroundWorkState: "continuation_pending", backgroundJobs: [] }, null), "reported");
+  assert.equal(backgroundInventoryGap({ backgroundWorkState: "orphaned" }, null), "lost");
+  // Truly nothing: known empty history, or resumed work with nothing listed.
+  assert.equal(backgroundInventoryGap({ backgroundJobs: [], backgroundJobsAvailable: false }, null), null);
+  assert.equal(backgroundInventoryGap({ backgroundJobs: [], backgroundWorkState: "resumed", backgroundJobsAvailable: false }, null), null);
   assert.equal(campaignFact({ counts: { delivered: 3, committed: 7 } }), "3 of 7 delivered");
   assert.equal(campaignFact(null), "Progress of this session's campaign");
   assert.equal(decisionsFact(0, false, "ready"), "No decisions recorded yet");
