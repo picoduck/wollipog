@@ -271,6 +271,9 @@ export function FilesBrowser({
 
   const openFile = useCallback(async (p: string, requested?: SourceLocation) => {
     const reqId = ++reqRef.current;
+    // A listing this read supersedes (Go to File can open a file while the folder still loads) will
+    // never clear its own busy state; nothing is listing any more.
+    setBusy(false);
     setFileBusy(p);
     setError(null);
     try {

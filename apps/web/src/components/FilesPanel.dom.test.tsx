@@ -94,6 +94,8 @@ let searches: string[];
 let reads: string[];
 let heldListing: (() => void) | null;
 let holdListings: boolean;
+/** When set, the next file read fails with this message. */
+let failRead: string | null;
 let changedFiles: GitStatusInfo["files"];
 /** When set, answers each search instead of the fixed results: to hold, vary or fail one. */
 let searchAnswer: ((query: string) => Promise<{ results: WorkspaceReferenceCandidate[]; truncated: boolean }>) | null;
@@ -129,6 +131,7 @@ beforeEach(() => {
   heldListing = null;
   holdListings = false;
   searchAnswer = null;
+  failRead = null;
   changedFiles = [
     { status: "M", path: "src/precheck.ts" },
     { status: "M", path: "README.md" },
@@ -146,6 +149,7 @@ const client = {
   },
   readSessionFile: async (_id: string, path: string) => {
     reads.push(path);
+    if (failRead) throw new Error(failRead);
     return { path, content: `// ${path}\n`, size: 12 };
   },
   searchWorkspaceReferences: async (_id: string, query: string) => {
@@ -511,6 +515,31 @@ test("an empty folder is a compact state that offers the way up", async () => {
     assert.deepEqual(crumbTexts(mounted), ["wollipog-fix"]);
   } finally {
     await mounted.dispose();
+  }
+});
+
+test("opening a result while the folder still loads leaves nothing busy, even when the read fails", async () => {
+  for (const failure of [null, "read failed: 500"]) {
+    holdListings = true;
+    failRead = failure;
+    reads.length = 0;
+    const mounted = await mount();
+    try {
+      await pressGoToFile();
+      assert.ok(mounted.container.querySelector(".files-skeleton"), "the first listing is still pending");
+      await typeQuery(mounted, "check");
+      await key(mounted, "Enter");
+      await act(async () => heldListing?.());
+      await settle();
+      assert.equal(reads.length, 1, "Enter opened the first result");
+      const refresh = mounted.container.querySelector<HTMLButtonElement>('button[aria-label="Refresh Files"]')!;
+      assert.equal(refresh.disabled, false, `Refresh is available again (${failure ?? "read succeeded"})`);
+      assert.equal(refresh.getAttribute("aria-busy"), null);
+      assertNoDomNode(mounted.container.querySelector(".files-skeleton"), "no skeleton is left waiting");
+    } finally {
+      holdListings = false;
+      await mounted.dispose();
+    }
   }
 });
 
