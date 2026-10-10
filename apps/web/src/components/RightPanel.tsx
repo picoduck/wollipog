@@ -317,8 +317,10 @@ function ToolSwitcher({
         onClick={(event) => {
           if (reason) return;
           menu.close(true);
-          // A click from Enter or Space carries no pointer press count.
-          if (id !== current) onChoose(id, event.detail === 0);
+          // A click from Enter or Space carries no pointer press count. Files chosen again by keyboard
+          // still lands in Go to File (#2852).
+          const keyboard = event.detail === 0;
+          if (id !== current || (id === "files" && keyboard)) onChoose(id, keyboard);
         }}
       >
         {entry.name}

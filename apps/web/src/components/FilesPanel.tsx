@@ -233,10 +233,15 @@ export function FilesBrowser({
   const [search, setSearch] = useState<{ query: string; results: WorkspaceReferenceCandidate[]; truncated: boolean } | null>(null);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [active, setActive] = useState(0);
+  // Enter pressed before the answer for what is typed arrived: open its first match when it does.
+  const [openOnAnswer, setOpenOnAnswer] = useState(false);
   const searchRef = useRef(0);
   const searchSupported = runnerSupportsProtocol(runnerProtocolVersion, "workspaceReferences");
   const trimmedQuery = query.trim();
   const searching = trimmedQuery !== "";
+  // The rows on screen answer what is typed. Until the next answer lands, the previous rows stay
+  // (§12.3), but nothing can be opened from them: they may not match the query any more.
+  const answered = search !== null && search.query === trimmedQuery;
 
   /** Reports the outcome so a caller can react to a listing that failed rather than one it lost. */
   const loadDir = useCallback(async (dir: string): Promise<"listed" | "failed" | "superseded"> => {
@@ -326,20 +331,22 @@ export function FilesBrowser({
   // Ask the runner's bounded search once typing pauses. Only the latest query's answer lands.
   useEffect(() => {
     const id = ++searchRef.current;
+    setSearchError(null);
     if (!trimmedQuery || !searchSupported) {
       setSearch(null);
-      setSearchError(null);
       return;
     }
     const timer = window.setTimeout(() => {
       api.searchWorkspaceReferences(session.id, trimmedQuery).then((result) => {
         if (searchRef.current !== id) return;
         setSearch({ query: trimmedQuery, results: result.results, truncated: result.truncated });
-        setSearchError(null);
         setActive(0);
       }, (cause: unknown) => {
         if (searchRef.current !== id) return;
+        // No rows outlive a failed search, so none can be opened or named as active.
+        setSearch(null);
         setSearchError((cause as Error).message);
+        setOpenOnAnswer(false);
       });
     }, GO_TO_FILE_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
@@ -351,7 +358,8 @@ export function FilesBrowser({
     const recent = new Set(recentFiles.get(session.id) ?? []);
     return rankGoToFileResults(search.results, search.query, (candidate) => markers.has(candidate) || recent.has(candidate));
   }, [markers, search, session.id]);
-  const activeIndex = matches.length ? Math.min(active, matches.length - 1) : -1;
+  const activeIndex = answered && matches.length ? Math.min(active, matches.length - 1) : -1;
+  const listShown = searching && search !== null && searchError === null && matches.length > 0;
   const optionId = (index: number) => `${goToFileId}-option-${index}`;
 
   useEffect(() => {
@@ -363,23 +371,34 @@ export function FilesBrowser({
   const clearQuery = () => {
     setQuery("");
     setActive(0);
+    setOpenOnAnswer(false);
   };
   const openMatch = (match: GoToFileMatch) => {
     clearQuery();
     onOpenLocation({ path: match.path });
   };
+  useEffect(() => {
+    if (!openOnAnswer || !answered) return;
+    setOpenOnAnswer(false);
+    if (matches[0]) openMatch(matches[0]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [answered, matches, openOnAnswer]);
   const onFieldKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
     if (event.nativeEvent.isComposing) return;
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-      if (!matches.length) return;
+      if (!answered || !matches.length) return;
       event.preventDefault();
       const step = event.key === "ArrowDown" ? 1 : -1;
       setActive((Math.max(0, activeIndex) + step + matches.length) % matches.length);
     } else if (event.key === "Enter") {
-      const match = matches[activeIndex];
-      if (!searching || !match) return;
+      if (!searching || searchError !== null || !searchSupported) return;
       event.preventDefault();
-      openMatch(match);
+      if (!answered) {
+        setOpenOnAnswer(true);
+        return;
+      }
+      const match = matches[activeIndex];
+      if (match) openMatch(match);
     } else if (event.key === "Escape" && query !== "") {
       // Escape clears the field first; with the field empty it falls through to the panel's own
       // ladder (§16.2, #2843): restore an expanded panel, then close it.
@@ -527,9 +546,9 @@ export function FilesBrowser({
           role="combobox"
           aria-label="Go to File"
           aria-autocomplete="list"
-          aria-expanded={searching && matches.length > 0}
-          aria-controls={`${goToFileId}-results`}
-          aria-activedescendant={searching && activeIndex >= 0 ? optionId(activeIndex) : undefined}
+          aria-expanded={listShown}
+          aria-controls={listShown ? `${goToFileId}-results` : undefined}
+          aria-activedescendant={listShown && activeIndex >= 0 ? optionId(activeIndex) : undefined}
           title="Finds files whose name or path contains the text."
           placeholder="Go to file"
           value={query}
@@ -539,6 +558,7 @@ export function FilesBrowser({
           onChange={(event) => {
             setQuery(event.target.value);
             setActive(0);
+            setOpenOnAnswer(false);
           }}
           onKeyDown={onFieldKeyDown}
         />
@@ -600,7 +620,7 @@ export function FilesBrowser({
           {search.truncated ? "Showing the first matches only. Type more to narrow them." : matchCount}
         </p>
         {/* Options are not tab stops: the field keeps focus and names the active one (§16.2). */}
-        <ul className="files-list" role="listbox" id={`${goToFileId}-results`} aria-label="Matching Files">
+        <ul className="files-list" role="listbox" id={`${goToFileId}-results`} aria-label="Matching Files" aria-busy={!answered || undefined}>
           {matches.map((match, index) => (
             <li
               key={match.path}

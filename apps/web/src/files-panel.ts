@@ -74,31 +74,55 @@ export const GIT_MARKER_LABEL: Record<GitMarker, string> = { A: "Added", M: "Mod
 
 /**
  * The marker for each changed path in a git status read, keyed by root-relative path. Porcelain codes
- * arrive trimmed ("M", "MM", "A", "AM", "??", "R"); a rename's path is "old -> new" and marks the new
- * path as added. A deleted file is not in the listing, so it has no marker.
+ * arrive trimmed ("M", "MM", "A", "AM", "??", "R"); only a rename or copy's path is "old -> new", and
+ * it marks the new path as added. A deleted file is not in the listing, so it has no marker.
  */
 export function gitMarkers(files: readonly { status: string; path: string }[] | null | undefined): Map<string, GitMarker> {
   const markers = new Map<string, GitMarker>();
   for (const { status, path } of files ?? []) {
     const code = status.trim();
-    const target = unquotePorcelainPath(path.includes(" -> ") ? path.slice(path.lastIndexOf(" -> ") + 4) : path);
+    const moved = code.includes("R") || code.includes("C");
+    const arrow = moved ? path.lastIndexOf(" -> ") : -1;
+    const target = unquotePorcelainPath(arrow >= 0 ? path.slice(arrow + 4) : path);
     if (!target) continue;
     if (code === "??") markers.set(target, "U");
-    else if (code.includes("A") || code.includes("R") || code.includes("C")) markers.set(target, "A");
+    else if (code.includes("A") || moved) markers.set(target, "A");
     else if (code === "D" || code === "DD") continue;
     else markers.set(target, "M");
   }
   return markers;
 }
 
-/** Git quotes a porcelain path holding unusual characters; the listing has the plain name. */
-function unquotePorcelainPath(path: string): string {
+const C_ESCAPES: Record<string, number> = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, "\"": 34, "\\": 92 };
+
+/**
+ * Git C-quotes a porcelain path that holds a control character, a quote, a backslash or (with the
+ * default `core.quotePath`) any non-ASCII byte, which it writes as octal escapes of the UTF-8 bytes:
+ * `"caf\303\251.ts"` is `café.ts`. The listing has the plain name, so decode it the same way.
+ */
+export function unquotePorcelainPath(path: string): string {
   if (!(path.length >= 2 && path.startsWith("\"") && path.endsWith("\""))) return path;
-  try {
-    return JSON.parse(path) as string;
-  } catch {
-    return path.slice(1, -1);
+  const bytes: number[] = [];
+  const body = path.slice(1, -1);
+  for (let index = 0; index < body.length; index += 1) {
+    const char = body[index]!;
+    if (char !== "\\") {
+      bytes.push(...new TextEncoder().encode(char));
+      continue;
+    }
+    const octal = /^[0-7]{3}/.exec(body.slice(index + 1));
+    if (octal) {
+      bytes.push(Number.parseInt(octal[0], 8));
+      index += 3;
+      continue;
+    }
+    const next = body[index + 1];
+    const escaped = next === undefined ? undefined : C_ESCAPES[next];
+    if (escaped === undefined) return path;
+    bytes.push(escaped);
+    index += 1;
   }
+  return new TextDecoder().decode(new Uint8Array(bytes));
 }
 
 /** One Go to File result, ranked and split for display. */

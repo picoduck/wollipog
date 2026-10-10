@@ -11,6 +11,7 @@ import {
   parentPath,
   rankGoToFileResults,
   resolveSourceTarget,
+  unquotePorcelainPath,
   workspaceFolderName,
 } from "./files-panel.js";
 
@@ -111,6 +112,11 @@ test("git markers: untracked U, added or renamed A, everything else changed M, d
     { status: "D", path: "gone.ts" },
     { status: "UU", path: "conflict.ts" },
     { status: "??", path: "\"with space\\ttab.txt\"" },
+    // Git's default quoting writes non-ASCII as octal escapes of the UTF-8 bytes.
+    { status: "M", path: "\"src/caf\\303\\251.ts\"" },
+    { status: "R", path: "\"old \\303\\251.ts\" -> \"docs/r\\303\\251sum\\303\\251.md\"" },
+    // Only a rename or copy has an arrow; an ordinary name may contain one.
+    { status: "M", path: "old -> new.ts" },
   ]);
   assert.deepEqual(Object.fromEntries(markers), {
     "src/a.ts": "M",
@@ -120,8 +126,14 @@ test("git markers: untracked U, added or renamed A, everything else changed M, d
     "src/moved.ts": "A",
     "conflict.ts": "M",
     "with space\ttab.txt": "U",
+    "src/café.ts": "M",
+    "docs/résumé.md": "A",
+    "old -> new.ts": "M",
   });
   assert.equal(gitMarkers(null).size, 0);
+  assert.equal(unquotePorcelainPath("\"a\\\"b\\\\c\""), "a\"b\\c");
+  assert.equal(unquotePorcelainPath("plain.ts"), "plain.ts");
+  assert.equal(unquotePorcelainPath("\"bad\\q\""), "\"bad\\q\"", "an unknown escape leaves the path as written");
 });
 
 test("Go to File: files only, changed or recent first, then name matches before path matches", () => {

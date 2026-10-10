@@ -95,6 +95,8 @@ let reads: string[];
 let heldListing: (() => void) | null;
 let holdListings: boolean;
 let changedFiles: GitStatusInfo["files"];
+/** When set, answers each search instead of the fixed results: to hold, vary or fail one. */
+let searchAnswer: ((query: string) => Promise<{ results: WorkspaceReferenceCandidate[]; truncated: boolean }>) | null;
 
 beforeEach(() => {
   domWindow.localStorage.clear();
@@ -126,6 +128,7 @@ beforeEach(() => {
   reads = [];
   heldListing = null;
   holdListings = false;
+  searchAnswer = null;
   changedFiles = [
     { status: "M", path: "src/precheck.ts" },
     { status: "M", path: "README.md" },
@@ -147,6 +150,7 @@ const client = {
   },
   searchWorkspaceReferences: async (_id: string, query: string) => {
     searches.push(query);
+    if (searchAnswer) return searchAnswer(query);
     return { results: searchResults, truncated: searchTruncated };
   },
   sessionWorkflowArtifacts: async () => ({ artifacts: [] }),
@@ -315,6 +319,12 @@ test("Files chosen from the switcher by keyboard focuses Go to File; by pointer 
     await chooseFiles(0);
     assert.equal(mounted.controls.state.mode, "files");
     assert.ok(focused(goToFile(mounted)), "a keyboard choice lands in Go to File");
+
+    // Choosing Files again while it is the tool lands there too.
+    await act(async () => mounted.container.querySelector<HTMLButtonElement>(".rpanel-switcher")!.focus());
+    assert.ok(!focused(goToFile(mounted)));
+    await chooseFiles(0);
+    assert.ok(focused(goToFile(mounted)), "the current tool chosen by keyboard focuses the field");
   } finally {
     await mounted.dispose();
   }
@@ -361,6 +371,45 @@ test("typing lists matching files, changed ones first; Down then Enter opens the
 
     await key(mounted, "Escape");
     assert.equal(mounted.controls.state.open, false, "a second Escape follows the panel's ladder and closes it");
+  } finally {
+    await mounted.dispose();
+  }
+});
+
+test("Enter opens only what answers the typed text: never an earlier query's rows or a failed search's", async () => {
+  const pending = new Map<string, (results: WorkspaceReferenceCandidate[]) => void>();
+  searchAnswer = (query) => new Promise((resolve) => {
+    pending.set(query, (results) => resolve({ results, truncated: false }));
+  });
+  const mounted = await mount();
+  try {
+    await pressGoToFile();
+    await typeQuery(mounted, "old");
+    await act(async () => pending.get("old")!([{ path: "old.ts", isDirectory: false }]));
+    assert.deepEqual(options(mounted).map((option) => option.getAttribute("title")), ["old.ts"]);
+
+    // A new query: the old rows stay on screen while its answer is pending, but are not choosable.
+    await act(async () => fireDomEvent.change(goToFile(mounted)!, { target: { value: "new" } }));
+    assert.deepEqual(options(mounted).map((option) => option.getAttribute("title")), ["old.ts"]);
+    assert.equal(goToFile(mounted)!.getAttribute("aria-activedescendant"), null, "no stale row is active");
+    await key(mounted, "ArrowDown");
+    await key(mounted, "Enter");
+    assert.deepEqual(reads, [], "Enter does not open the earlier query's row");
+    await settle(GO_TO_FILE_DEBOUNCE_MS + 30);
+    await act(async () => pending.get("new")!([{ path: "src/new.ts", isDirectory: false }]));
+    await settle();
+    assert.deepEqual(reads, ["src/new.ts"], "it opens the first match for what was typed once that arrives");
+    assert.equal(goToFile(mounted)!.value, "");
+
+    // A failed search leaves nothing to open and names no row.
+    searchAnswer = async () => { throw new Error("search failed: 503"); };
+    await typeQuery(mounted, "gone");
+    assert.match(mounted.container.querySelector(".notice")?.textContent ?? "", /search failed: 503/u);
+    assertNoDomNode(mounted.container.querySelector('[role="listbox"]'));
+    assert.equal(goToFile(mounted)!.getAttribute("aria-expanded"), "false");
+    assert.equal(goToFile(mounted)!.getAttribute("aria-activedescendant"), null);
+    await key(mounted, "Enter");
+    assert.deepEqual(reads, ["src/new.ts"], "Enter after a failure opens nothing");
   } finally {
     await mounted.dispose();
   }
