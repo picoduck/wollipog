@@ -6,6 +6,9 @@
  * - `expanded=1` opens the panel expanded.
  * - `theme=light` switches the palette.
  * - `stale=1` makes every stage, unstage and discard fail with `GIT_STALE`, as a race would.
+ * - `findings=1` holds findings in memory, seeded with an open and a resolved one (#2851).
+ * - `rewrite=1` makes a Stage Hunk reply rewrite the checkout file's new line 21, as the agent
+ *   editing a line under an open draft would (#2851's Line Changed notice).
  */
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -27,6 +30,7 @@ import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { DIFF_SECTIONS_STATUS_FILES, diffSectionsDiff } from "./diff-sections-fixture.js";
+import { checkoutFindings, inMemoryReviewFindings } from "./review-findings-fixture.js";
 import "../styles.css";
 
 declare global {
@@ -78,16 +82,28 @@ const calls: string[] = [];
 const attached: CreateWorkspaceReferenceRequest[] = [];
 const opened: string[] = [];
 const race = () => new ApiError("the diff is out of date — the index or worktree changed since it was loaded", 409, "GIT_STALE");
+const rewrite = params.get("rewrite") === "1";
+let rewritten = false;
+/** The fixture diff, with line 21 rewritten once a `rewrite=1` stage has run. */
+function currentDiff() {
+  const diff = diffSectionsDiff();
+  if (!rewritten) return diff;
+  const file = diff.files[0]!;
+  const hunk = file.hunks[0]!;
+  const lines = hunk.lines.map((line) => line.text === "    [items, discounts]," ? { ...line, text: "    [items, discountIds]," } : line);
+  return { ...diff, diffHash: "e".repeat(64), files: [{ ...file, hunks: [{ ...hunk, lines }, ...file.hunks.slice(1)] }, ...diff.files.slice(1)] };
+}
 const client = {
   ...api,
   gitDiff: async (_id: string, scope: GitDiffScope) => {
     calls.push(`diff:${scope}`);
-    return { diff: { ...diffSectionsDiff(), scope } };
+    return { diff: { ...currentDiff(), scope } };
   },
   gitStageHunk: async (_id: string, body: { filePath: string; hunkIndex: number }) => {
     calls.push(`stage:${body.filePath}#${body.hunkIndex}`);
     if (stale) throw race();
-    return { status, diff: diffSectionsDiff() };
+    if (rewrite) rewritten = true;
+    return { status, diff: currentDiff() };
   },
   gitStageLines: async (_id: string, body: { filePath: string; hunkIndex: number }) => {
     calls.push(`lines:${body.filePath}#${body.hunkIndex}`);
@@ -103,6 +119,7 @@ const client = {
     findings: [],
     summary: { total: 0, unresolved: 0, requiredUnresolved: 0, sent: 0, resolved: 0, dismissed: 0, completion: "complete" as const },
   }),
+  ...(params.get("findings") === "1" ? inMemoryReviewFindings(checkoutFindings(session.id, diffSectionsDiff().diffHash)) : {}),
 } as unknown as ApiClient;
 
 class FixtureSocket implements UiSocket {

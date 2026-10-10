@@ -1,1 +1,0 @@
-|.diff-inline-finding-head|margin-top

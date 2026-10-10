@@ -1334,6 +1334,7 @@ export function ReviewPanel({
                       onCreate: createFinding,
                       onStatus: updateFinding,
                       refusal: findingRefusal === null ? null : { reason: findingRefusal, id: findingRefusalId },
+                      agentLabel,
                     }}
                   />
                 )

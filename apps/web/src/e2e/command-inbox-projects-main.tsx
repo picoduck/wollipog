@@ -72,6 +72,7 @@ import { useNewSessionShortcut } from "../useNewSessionShortcut.js";
 import "../styles.css";
 import { staticPinnedSummary } from "../components/pinned-summary-state.js";
 import { DIFF_SECTIONS_STATUS_FILES, diffSectionsDiff } from "./diff-sections-fixture.js";
+import { checkoutFindings, inMemoryReviewFindings } from "./review-findings-fixture.js";
 
 const FIXTURE_QUERY = new URLSearchParams(window.location.search);
 const SCENARIO = FIXTURE_QUERY.get("scenario");
@@ -85,6 +86,8 @@ const STATIC_SUMMARY_OPEN = SCENARIO === "git-visibility" || SCENARIO === "workt
 const REVIEW_READY = FIXTURE_QUERY.get("reviewReady") === "1";
 /** Alpha's Review holds the file-section fixture's uncommitted changes (#2848). */
 const REVIEW_DIFF = FIXTURE_QUERY.get("reviewDiff") === "1";
+/** With `reviewDiff=1`, findings are held in memory, seeded with an open and a resolved one (#2851). */
+const REVIEW_FINDINGS = FIXTURE_QUERY.get("findings") === "1";
 const INCLUDE_SESSION_SHELL = FIXTURE_QUERY.get("sessionShell") === "1";
 const LEGACY_WORKSPACES = FIXTURE_QUERY.get("legacyWorkspaces") === "1";
 const UNFILED_WORKSPACE = FIXTURE_QUERY.get("unfiledWorkspace") === "1";
@@ -1876,6 +1879,7 @@ const client = {
       findings: [],
       summary: { total: 0, unresolved: 0, requiredUnresolved: 0, sent: 0, resolved: 0, dismissed: 0, completion: "complete" as const },
     }),
+    ...(REVIEW_FINDINGS ? inMemoryReviewFindings(checkoutFindings("session-alpha", diffSectionsDiff().diffHash)) : {}),
   } : {}),
   ...(LIST_NOTICES.has("skills") ? {
     listSkills: async () => ({ skills: structuredClone(listNoticeSkills) }),

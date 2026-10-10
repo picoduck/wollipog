@@ -13560,42 +13560,111 @@ body.shell-dock-dragging * {
   height: 1.5em;
 }
 .diff-split-empty { background: color-mix(in srgb, var(--bg-elev) 55%, transparent); }
-.diff-comment-editor,
-.diff-inline-finding {
+/* A finding in the diff (#2851; docs/design-system.md §8.1, §8.4, §8.5, §11.1, §11.3): the editor
+   (`.dedit`) and an open finding (`.dfinding`) are one neutral card under their line, aligned with
+   the code column; under a 480px panel it moves to 12px from the edge. Nothing on the card itself
+   marks focus: the textarea's own edge does. */
+.dedit,
+.dfinding {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
   min-width: 0;
-  margin: 6px 10px 8px 96px;
-  padding: 9px;
-  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border));
-  border-radius: 7px;
-  background: var(--bg-elev-2);
-  font-family: var(--font-ui);
-  font-size: 12px;
-  line-height: 1.4;
+  margin: var(--space-2) var(--space-3) var(--space-2) 96px;
+  padding: var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-elev);
+  box-shadow: var(--elev-1);
+  color: var(--text);
+  font: var(--type-body);
   white-space: normal;
 }
-.diff-comment-editor textarea { width: 100%; resize: vertical; }
-.diff-comment-editor-controls,
-.diff-inline-finding-head,
-.diff-inline-finding-actions {
+.dedit textarea { width: 100%; }
+/* Severity and Required share a row; the helper sits 4px under it (§8.1). */
+.dedit-options {
   display: flex;
-  align-items: center;
-  gap: 8px;
   flex-wrap: wrap;
-  margin-top: 7px;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
 }
-.diff-comment-editor-controls label { display: inline-flex; align-items: center; gap: 6px; }
-.diff-inline-finding-head { margin-top: 0; color: var(--text-dim); }
-.diff-inline-finding-body { margin-top: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
-.diff-inline-finding-resolved,
-/* De-emphasised by SURFACE and border, not by subtree opacity. `opacity: 0.68` fades the severity
-   badge inside the card along with everything else, taking it to about 2.8:1 in light — and no
-   arithmetic check on the badge's own declarations can see that, because the badge's declarations
-   are unchanged. Whole-subtree opacity is how a certified colour becomes an uncertified one. */
-.diff-inline-finding-dismissed {
-  border-color: var(--border);
-  background: color-mix(in srgb, var(--bg-elev) 60%, transparent);
+.dedit-helper {
+  margin: calc(var(--space-1) - var(--space-3)) 0 0;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+/* Cancel, then Add Finding last, on their own row at the card's end like a dialog footer (§3.2). */
+.dedit-actions,
+.dfinding-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+.dfinding-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.dfinding-meta {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: var(--space-3);
+  min-width: 0;
+  margin: 0;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.dfinding-body {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* A resolved or dismissed finding is one quiet line until it is opened: no card, its words in
+   --text-dim. Quieted by colour and surface, never by opacity, which would fade its badges below
+   their certified contrast once it opens. Opened, it takes the card's edge and fill; its side
+   padding is the card's either way, so the line does not move. */
+.dfinding.is-settled {
+  gap: 0;
+  padding-block: 0;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
   color: var(--text-dim);
 }
+.dfinding.is-settled.is-expanded {
+  gap: var(--space-2);
+  padding-block: var(--space-2) var(--space-3);
+  border-color: var(--border);
+  background: var(--bg-elev);
+}
+.dfinding-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.dfinding-toggle {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-left: calc(-1 * var(--space-1));
+  font: var(--type-small);
+}
+.dfinding-summary {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dfinding-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  color: var(--text);
+}
+.dfinding-detail[hidden] { display: none; }
 /* Review's findings (#2850; docs/design-system.md §5.2, §5.5, §11.1, §11.3, §11.4): one flush section
    between the summary and the diff, with a bottom hairline only. Its head is a disclosure with the
    open count and one summary status; Sync, when the repository has a forge remote, sits at its end. */
@@ -15250,10 +15319,11 @@ button.review-finding-location {
   .workflow-node-grid { grid-template-columns: 1fr; }
 }
 /* The diff answers to the side panel's width, not the window's (§2.10; #2843): a 400px panel on a
-   desktop gets the narrow layout. Finding rows are single-column at every width (#2850). */
-@container rp (max-width: 640px) {
-  .diff-comment-editor,
-  .diff-inline-finding { margin-left: 10px; }
+   desktop gets the narrow layout. Finding rows are single-column at every width (#2850); the
+   finding cards in the diff leave the code column's indent (#2851). */
+@container rp (max-width: 480px) {
+  .dedit,
+  .dfinding { margin-left: var(--space-3); }
 }
 /* A narrow panel has room for one line-number column (#2848): the new number, or the old one on a
    deletion. */

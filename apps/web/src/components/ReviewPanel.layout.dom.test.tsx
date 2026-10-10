@@ -631,14 +631,14 @@ test("an unsent comment draft survives a visit to an empty pane", async () => {
       fireDomEvent.click(harness.container.querySelector<HTMLElement>('.dfile[data-path="src/checkout.ts"] button[aria-label="Add Finding on Line 2"]')!);
     });
     await act(async () => {
-      const body = harness.container.querySelector<HTMLTextAreaElement>(".diff-comment-editor textarea")!;
+      const body = harness.container.querySelector<HTMLTextAreaElement>(".dedit textarea")!;
       fireDomEvent.change(body, { target: { value: "half-written finding" } });
     });
     await chooseViewOption(harness.container, "Staged Only");
     assert.deepEqual(stateTitles(harness.container), ["No Staged Changes"]);
     await chooseViewOption(harness.container, "All Changes");
     assert.equal(
-      harness.container.querySelector<HTMLTextAreaElement>(".diff-comment-editor textarea")?.value,
+      harness.container.querySelector<HTMLTextAreaElement>(".dedit textarea")?.value,
       "half-written finding",
       "the draft is still there",
     );
