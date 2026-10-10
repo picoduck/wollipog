@@ -1,4 +1,5 @@
 import React, { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { flushSync } from "react-dom";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuSurface } from "./Menu.js";
 import { ToneIcon } from "./Notice.js";
@@ -153,6 +154,20 @@ function dismissInfo(sessionId: string, key: string): void {
   for (const listener of [...dismissalListeners]) listener();
 }
 
+type NoticeRevealer = (key: string, focus: boolean) => boolean;
+const noticeRevealers = new Map<string, NoticeRevealer[]>();
+
+/**
+ * Shows one condition in a mounted slot of the session, ahead of any "+N More" choice, and with
+ * `focus` moves focus to the slot. It is how a failure that arrived while the side panel hid the
+ * chat column comes into view (#2894). A pending request keeps its place: the dock holds an unsent
+ * answer only while it is mounted, so the condition waits behind its "+N More" instead (§13.2).
+ * False when no slot has the key.
+ */
+export function revealSessionNotice(sessionId: string, key: string, focus: boolean): boolean {
+  return (noticeRevealers.get(sessionId) ?? []).some((revealer) => revealer(key, focus));
+}
+
 export function SessionNoticeSlot({ sessionId, entries, lead, label = "Session Notices", className, onFocusLost }: {
   /** Whose info dismissals these are. The Sessions list's slot passes its own fixed scope. */
   sessionId: string;
@@ -204,6 +219,24 @@ export function SessionNoticeSlot({ sessionId, entries, lead, label = "Session N
       return true;
     });
   }, [leadHidden, sessionId]);
+
+  const revealState = useRef({ keys: [] as string[], signature, leadShown: false });
+  revealState.current = { keys: candidates.map(keyOf), signature, leadShown: shown !== undefined && "lead" in shown };
+  useEffect(() => {
+    const revealer: NoticeRevealer = (key, focus) => {
+      const { keys, signature: current, leadShown } = revealState.current;
+      if (!keys.includes(key)) return false;
+      if (!leadShown) flushSync(() => setChoice({ key, signature: current }));
+      if (focus) slotRef.current?.focus();
+      return true;
+    };
+    noticeRevealers.set(sessionId, [revealer, ...(noticeRevealers.get(sessionId) ?? [])]);
+    return () => {
+      const rest = (noticeRevealers.get(sessionId) ?? []).filter((candidate) => candidate !== revealer);
+      if (rest.length) noticeRevealers.set(sessionId, rest);
+      else noticeRevealers.delete(sessionId);
+    };
+  }, [sessionId]);
 
   // The trigger belongs to whichever notice is shown, so after a choice it is a new button. Focus
   // follows it, rather than falling to <body> with the menu.
@@ -292,7 +325,8 @@ export function SessionNoticeSlot({ sessionId, entries, lead, label = "Session N
   );
 
   return (
-    <div ref={slotRef} className={className ? `session-notice-slot ${className}` : "session-notice-slot"} data-notice-key={keyOf(shown)} tabIndex={-1}>
+    <div ref={slotRef} className={className ? `session-notice-slot ${className}` : "session-notice-slot"} data-notice-key={keyOf(shown)} tabIndex={-1}
+      data-session-condition-focus>
       {"lead" in shown ? shown.lead.render({ trailing, revealRequestId, concealTrailing: () => {
         setMenuOpen(false);
         return menuOpen;
