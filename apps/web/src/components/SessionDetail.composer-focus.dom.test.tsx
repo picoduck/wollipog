@@ -869,7 +869,7 @@ function detailedBackgroundSession(id: string): SessionView {
     backgroundWorkTracking: "managed",
     backgroundJobsAvailable: true,
     backgroundJobs: [{
-      id: "managed-job",
+      id: "managed-job-04d2e1",
       parentTurnId: "parent-turn",
       launchType: "agent",
       registeredAt: 1_000,
@@ -902,7 +902,9 @@ test("same-session replacement preserves one in-flight background inventory load
   });
   try {
     await flushAsyncWork();
-    assert.match(fixture.container.textContent ?? "", /Loading Background Work/);
+    // Loading shows nothing new for 300ms, then skeleton rows; never the empty state (#2858).
+    assert.ok(fixture.container.querySelector(".background-work-panel"));
+    assert.doesNotMatch(fixture.container.textContent ?? "", /No Background Work/);
     const requestsBeforeReplacement = requests.length;
     assert.ok(requestsBeforeReplacement >= 1, "the lazy inventory request is in flight");
 
@@ -916,8 +918,8 @@ test("same-session replacement preserves one in-flight background inventory load
       await Promise.all(requests.map((request) => request.promise));
     });
     await flushAsyncWork();
-    assert.match(fixture.container.textContent ?? "", /Agent Job 1/);
-    assert.doesNotMatch(fixture.container.textContent ?? "", /Loading Background Work/);
+    assert.match(fixture.container.textContent ?? "", /Agent Job 04d2e1/);
+    assertNoDomNode(fixture.container.querySelector(".background-work-skeleton"));
   } finally {
     await unmountFixture(fixture);
   }
@@ -950,9 +952,9 @@ test("failed background inventory loads expose a working retry", async () => {
       await Promise.allSettled(initialRequests.map((request) => request.promise));
     });
     await flushAsyncWork();
-    assert.match(fixture.container.textContent ?? "", /Background Work Unavailable/);
-    const retry = [...fixture.container.querySelectorAll("button")]
-      .find((button) => button.textContent === "Retry Loading") as HTMLButtonElement | undefined;
+    assert.match(fixture.container.textContent ?? "", /Couldn't Load Background Work/);
+    const retry = [...fixture.container.querySelectorAll(".background-work-panel button")]
+      .find((button) => button.textContent === "Retry") as HTMLButtonElement | undefined;
     assert.ok(retry, "the failed inventory load exposes an accessible button");
 
     await act(async () => retry.click());
@@ -964,8 +966,8 @@ test("failed background inventory loads expose a working retry", async () => {
       await retried.promise;
     });
     await flushAsyncWork();
-    assert.match(fixture.container.textContent ?? "", /Agent Job 1/);
-    assert.doesNotMatch(fixture.container.textContent ?? "", /Background Work Unavailable/);
+    assert.match(fixture.container.textContent ?? "", /Agent Job 04d2e1/);
+    assert.doesNotMatch(fixture.container.textContent ?? "", /Couldn't Load Background Work/);
   } finally {
     await unmountFixture(fixture);
   }

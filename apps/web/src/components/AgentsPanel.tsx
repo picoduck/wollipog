@@ -11,7 +11,8 @@ import { useTimelineClock } from "../timeline-clock.js";
 import { isCurrentWorker, isLiveWorker, workerRoster, workerStatusMeta, type WorkerGroup, type WorkerMemberMetadata,
   type WorkerRow } from "../worker-roster.js";
 import { SubagentsPanel } from "./SubagentsPanel.js";
-import { BackgroundWorkPanel } from "./BackgroundWorkPanel.js";
+import type { BackgroundWorkPanelProps } from "./BackgroundWorkPanel.js";
+import { JobDetail } from "./JobDetail.js";
 import { SessionQuestionBanner } from "./SessionApproval.js";
 import { RequestCard } from "./requests/RequestCard.js";
 import { PanelPageTitle, usePanelPages } from "./PanelPages.js";
@@ -458,8 +459,8 @@ export function memberMetadata(
   return metadata;
 }
 
-type Props = ComponentProps<typeof SubagentsPanel> & Pick<ComponentProps<typeof BackgroundWorkPanel>,
-  "runnerProtocolVersion" | "parentTurnEventIds" | "onOpenParentTurn" | "inventoryError" | "onRetryInventory"> & {
+type Props = ComponentProps<typeof SubagentsPanel> & Pick<BackgroundWorkPanelProps,
+  "runnerProtocolVersion" | "parentTurns" | "onViewTurn" | "inventoryError" | "onRetryInventory"> & {
     onOpenPrimaryRequest?: (requestId: string) => void;
     attentionTarget?: import("../navigation.js").AttentionTarget;
   };
@@ -830,7 +831,9 @@ export function AgentsPanel(props: Props) {
     const row = rows.find((candidate) => candidate.id === key);
     if (kind === "background") {
       return { key, title: row?.name ?? "Background Job",
-        body: <BackgroundWorkPanel {...props} selectedJobId={id} /> };
+        body: <JobDetail session={session} jobId={id} runnerOnline={runnerOnline}
+          runnerProtocolVersion={props.runnerProtocolVersion} parentTurns={props.parentTurns}
+          earlierActivityUnloaded={props.earlierActivityUnloaded} onViewTurn={props.onViewTurn} /> };
     }
     const title = row?.name ?? (!projection.ambiguousIds.has(id) ? agents.find((agent) => agent.id === id)?.title : undefined) ?? "Subagent";
     return { key, title, body: <SubagentsPanel {...props} detailOnly titled={false} requestedId={id}

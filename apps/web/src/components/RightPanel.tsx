@@ -46,6 +46,7 @@ import { dockRequests } from "./requests/RequestDock.js";
 import { RequestKindIcon } from "./requests/request-meta.js";
 import { CountBadge } from "./CountBadge.js";
 import { BackgroundWorkPanel } from "./BackgroundWorkPanel.js";
+import type { BackgroundParentTurn } from "../background-work.js";
 import { SessionRequestPanel, sessionRequestPanelKey, type DescendantRequestStatus } from "./SessionRequestPanel.js";
 import { CampaignStatusPanel } from "./CampaignStatusPanel.js";
 import { useIsCoarsePointer, useIsMobile } from "./useIsMobile.js";
@@ -64,7 +65,7 @@ import {
   type SessionToolId,
 } from "../session-tools.js";
 
-const EMPTY_PARENT_TURN_EVENTS: ReadonlyMap<string, number> = new Map();
+const EMPTY_PARENT_TURNS: ReadonlyMap<string, BackgroundParentTurn> = new Map();
 const EMPTY_GOVERNANCE_DECISIONS: readonly GovernanceDecision[] = [];
 const HIDDEN_CAMPAIGN: CampaignStatusAvailability = { kind: "hidden" };
 
@@ -280,8 +281,10 @@ export function RightPanel({
   transcriptItemForDecision,
   onShowDecisionInTranscript,
   earlierActivityUnloaded = false,
-  parentTurnEventIds = EMPTY_PARENT_TURN_EVENTS,
-  onOpenParentTurn = () => undefined,
+  parentTurns = EMPTY_PARENT_TURNS,
+  onViewTurn,
+  machineName,
+  onOpenMachine,
   backgroundInventoryError = null,
   onRetryBackgroundInventory,
   descendantRequests = [],
@@ -329,9 +332,13 @@ export function RightPanel({
   onShowDecisionInTranscript?: (itemId: number) => void;
   /** The transcript is showing a bounded window with older turns still unloaded. */
   earlierActivityUnloaded?: boolean;
-  /** Loaded parent turns that can be revealed directly in the virtual transcript. */
-  parentTurnEventIds?: ReadonlyMap<string, number>;
-  onOpenParentTurn?: (eventId: number) => void;
+  /** The loaded turns that started background jobs, by turn id: their number and their prompt. */
+  parentTurns?: ReadonlyMap<string, BackgroundParentTurn>;
+  /** Scroll the transcript to a turn, loading earlier activity first when it is not loaded. */
+  onViewTurn?: (parentTurnId: string) => void;
+  /** The session's machine, as its people named it. */
+  machineName?: string;
+  onOpenMachine?: () => void;
   backgroundInventoryError?: string | null;
   onRetryBackgroundInventory?: () => void;
   descendantRequests?: readonly DescendantRequestView[];
@@ -803,8 +810,8 @@ export function RightPanel({
               window.requestAnimationFrame(() => focusSessionRequest(session.id, requestId));
             }}
             runnerProtocolVersion={runnerProtocolVersion}
-            parentTurnEventIds={parentTurnEventIds}
-            onOpenParentTurn={onOpenParentTurn}
+            parentTurns={parentTurns}
+            onViewTurn={onViewTurn}
             inventoryError={backgroundInventoryError}
             onRetryInventory={onRetryBackgroundInventory}
             session={session}
@@ -831,8 +838,12 @@ export function RightPanel({
             session={session}
             runnerOnline={runnerOnline}
             runnerProtocolVersion={runnerProtocolVersion}
-            parentTurnEventIds={parentTurnEventIds}
-            onOpenParentTurn={onOpenParentTurn}
+            parentTurns={parentTurns}
+            earlierActivityUnloaded={earlierActivityUnloaded}
+            onViewTurn={onViewTurn}
+            machineName={machineName}
+            onOpenTerminal={onOpenTerminal}
+            onOpenMachine={onOpenMachine}
             inventoryError={backgroundInventoryError}
             onRetryInventory={onRetryBackgroundInventory}
           />
