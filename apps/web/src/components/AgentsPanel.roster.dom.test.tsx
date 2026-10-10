@@ -72,7 +72,7 @@ async function mount(items: TimelineItem[], options: { session?: SessionView; ru
   await act(async () => root.render(<ApiProvider client={client}><FeedbackProvider><StoreProvider connection={connection}>
     <AgentsPanel session={options.session ?? session} items={items} runnerOnline={options.runnerOnline ?? true}
       runnerProtocolVersion={PROTOCOL_VERSION} requestedId={null} onSelect={() => {}}
-      parentTurnEventIds={new Map()} onOpenParentTurn={() => {}} />
+      parentTurns={new Map()} onViewTurn={() => {}} />
   </StoreProvider></FeedbackProvider></ApiProvider>));
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
   return {
