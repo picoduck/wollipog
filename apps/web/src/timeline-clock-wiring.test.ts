@@ -6,7 +6,7 @@ const componentsUrl = new URL("./components/", import.meta.url);
 const expectedCallSites = new Map<string, RegExp>([
   ["PodsView.tsx", /sessionActive=\{isTimelineSessionActive\(status\)\}/],
   ["RunsView.tsx", /sessionActive=\{isTimelineSessionActive\(session\.status\)\}/],
-  ["SessionDetail.tsx", /sessionActive=\{isTimelineSessionActive\(session\.status\)\}/],
+  ["SessionDetail.tsx", /sessionActive=\{isTimelineSessionActive\(session\.status\)\s*\|\|\s*\(eventWindow\?\.openingStartSeq !== undefined && eventWindow\.laterGap !== undefined\)\}/],
   ["SideChatPanel.tsx", /sessionActive=\{isTimelineSessionActive\(sideChat\.session\.status\)\}/],
   ["SubagentsPanel.tsx", /sessionActive=\{\["starting", "running", "waiting"\]\.includes\(selected\.lifecycle\)\}/],
 ]);

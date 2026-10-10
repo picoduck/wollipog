@@ -61,6 +61,8 @@ export interface UseFollowTailOptions {
   rows?: readonly FollowTailRow[];
   /** The rows' id space (the session's event epoch). A new one restarts the count from its rows. */
   rowGeneration?: unknown;
+  /** A cold current-turn opening owns its first position before any content can paint. */
+  openingAnchor?: VirtualScrollAnchor | null;
 }
 
 export interface FollowTailApi {
@@ -197,6 +199,7 @@ export function useFollowTail({
   persistenceScope = "default",
   rows,
   rowGeneration,
+  openingAnchor,
 }: UseFollowTailOptions): FollowTailApi {
   const initialKey = snapshotKey(persistenceScope, sessionId);
   const initialSnapshotRef = useRef<FollowTailSnapshot | undefined>(undefined);
@@ -235,6 +238,7 @@ export function useFollowTail({
   } | null>(null);
 
   const currentKey = snapshotKey(persistenceScope, sessionId);
+  const openingPositionRef = useRef<string | null>(null);
   if (activeKeyRef.current !== currentKey) {
     const restored = loadSnapshot(currentKey);
     activeKeyRef.current = currentKey;
@@ -251,6 +255,14 @@ export function useFollowTail({
     detachBaselineRef.current = null;
   }
   rowGenerationRef.current = rowGeneration;
+  const openingPositionKey = `${currentKey}:${String(rowGeneration)}`;
+  if (openingAnchor && openingPositionRef.current !== openingPositionKey) {
+    openingPositionRef.current = openingPositionKey;
+    if (stateRef.current === "following" && anchorRef.current === null) {
+      stateRef.current = "paused";
+      anchorRef.current = openingAnchor;
+    }
+  }
   const snapshotGeneration = snapshotGenerationRef.current;
 
   const persist = useCallback(() => {

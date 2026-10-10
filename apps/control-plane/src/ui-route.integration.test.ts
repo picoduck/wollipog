@@ -1135,6 +1135,7 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     sessionSubscriptions: true,
     boundedDelivery: true,
     paginatedSessionHistory: true,
+    currentTurnOpening: true,
     projects: true,
     createProjectLocations: true,
     accessScopeManagement: true,
@@ -1610,6 +1611,22 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   assert.equal((await ownerFetch(
     "/api/sessions/session-target/events?align=turn&after=0&limit=1&eventEpoch=0",
   )).status, 400);
+
+  const openingResponse = await ownerFetch("/api/sessions/session-target/events?opening=current-turn&limit=1&eventEpoch=0");
+  assert.equal(openingResponse.status, 200);
+  const openingPage = await openingResponse.json() as {
+    events: Array<{ seq: number }>; turnStartSeq: number; tailSeq: number; hasMoreLater: boolean; turnAligned: boolean;
+  };
+  assert.deepEqual(openingPage.events.map(event => event.seq), [1]);
+  assert.equal(openingPage.turnStartSeq, 1);
+  assert.equal(openingPage.tailSeq, 2);
+  assert.equal(openingPage.hasMoreLater, true);
+  assert.equal(openingPage.turnAligned, false);
+  for (const suffix of ["&after=0", "&before=2", "&direction=backward", "&align=turn"]) {
+    assert.equal((await ownerFetch(`/api/sessions/session-target/events?opening=current-turn&limit=1&eventEpoch=0${suffix}`)).status, 400);
+  }
+  assert.equal((await ownerFetch("/api/sessions/session-target/events?opening=current-turn&limit=1&eventEpoch=99")).status, 409);
+  assert.equal((await fetch(`${httpBase}/api/sessions/session-target/events?opening=current-turn&limit=1&eventEpoch=0`)).status, 401);
 
   const createProjectResponse = await ownerFetch("/api/projects", {
     method: "POST",

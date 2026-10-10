@@ -8,6 +8,7 @@ import {
   recoverSessionHistory,
   recoverSessionHistoryGap,
   recoverSessionHistoryWindow,
+  recoverSessionTurnStartWindow,
   sessionHistoryEpochKey,
   shouldReadOpeningWindow,
 } from "./history-recovery.js";
@@ -18,6 +19,50 @@ const event = (seq: number): SessionEvent => ({
   seq,
   ts: seq,
   payload: { kind: "agent_message", text: String(seq) },
+});
+
+test("provisional and acknowledged turn-start owners issue one opening request", async () => {
+  const scope = {};
+  let calls = 0;
+  let release!: (page: SessionEventsResponse) => void;
+  const pending = new Promise<SessionEventsResponse>(resolve => { release = resolve; });
+  const applied: number[] = [];
+  const options = { scope, readKey: "s1:3:generation1", fetchOpening: async () => { calls++; return pending; },
+    fetchTailPage: async () => { throw new Error("must not read the tail"); },
+    applyWindow: () => { throw new Error("must not apply the tail"); },
+    applyOpening: (page: SessionEventsResponse) => { applied.push(page.turnStartSeq!); return true; }, isCurrent: () => true };
+  const first = recoverSessionTurnStartWindow({ sessionId: "s1", eventEpoch: 3, recoveryRevision: -1 }, options);
+  const second = recoverSessionTurnStartWindow({ sessionId: "s1", eventEpoch: 3, recoveryRevision: 7 }, options);
+  release({ events: [event(501)], eventEpoch: 3, turnStartSeq: 501, tailSeq: 3_000,
+    nextAfter: 501, hasMoreLater: true, cacheComplete: true });
+  await Promise.all([first, second]);
+  assert.equal(calls, 1);
+  assert.deepEqual(applied, [501, 501]);
+});
+
+test("turn-start recovery waits for hydration, fences epochs, and falls back on old servers", async () => {
+  let openingCalls = 0;
+  let tailCalls = 0;
+  let applied = 0;
+  const options = { scope: {}, readKey: "s1:3", fetchOpening: async () => {
+    openingCalls++;
+    return { events: [event(10)], eventEpoch: 3, turnStartSeq: 10, tailSeq: 20,
+      nextAfter: 10, hasMoreLater: true, cacheComplete: openingCalls > 1 };
+  }, fetchTailPage: async () => { tailCalls++; return { events: [event(20)], eventEpoch: 3,
+    nextBefore: 20, hasMoreOlder: true, cacheComplete: true }; },
+  applyWindow: () => { applied++; }, applyOpening: () => { applied++; return true; },
+  isCurrent: () => true, wait: async () => {} };
+  await recoverSessionTurnStartWindow({ sessionId: "s1", eventEpoch: 3, recoveryRevision: 1 }, options);
+  assert.equal(openingCalls, 2);
+  assert.equal(applied, 1);
+  assert.equal(tailCalls, 0);
+  await recoverSessionTurnStartWindow({ sessionId: "s1", eventEpoch: 4, recoveryRevision: 1 },
+    { ...options, scope: {}, readKey: "s1:4" });
+  assert.equal(applied, 1, "a stale epoch never paints");
+  await recoverSessionTurnStartWindow({ sessionId: "s1", eventEpoch: 3, recoveryRevision: 1 },
+    { ...options, scope: {}, fetchOpening: async () => ({ events: [event(1)] }) });
+  assert.equal(tailCalls, 1);
+  assert.equal(applied, 2, "the existing aligned loader owns compatibility");
 });
 
 test("bounded recovery follows server cursors and completes only on the final cached page", async () => {

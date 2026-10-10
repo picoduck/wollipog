@@ -761,6 +761,11 @@ export function createApiClient(transport: ApiTransport) {
     return req<SessionEventsResponse>(`/api/sessions/${encodeURIComponent(id)}/events?${query}`);
   },
 
+  getSessionTurnStartPage: (id: string, eventEpoch: number, limit = 200) => {
+    const query = new URLSearchParams({ opening: "current-turn", eventEpoch: String(eventEpoch), limit: String(limit) });
+    return req<SessionEventsResponse>(`/api/sessions/${encodeURIComponent(id)}/events?${query}`);
+  },
+
   getRetainedAttachmentEventPage: (id: string, after: number, eventEpoch: number, limit = 200, signal?: AbortSignal) => {
     const query = new URLSearchParams({ after: String(after), limit: String(limit), eventEpoch: String(eventEpoch) });
     return req<{ events: SessionEvent[]; eventEpoch: number; nextAfter: number; hasMore: boolean }>(

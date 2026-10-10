@@ -133,6 +133,47 @@ function cachedTranscriptEvents(sessionId: string, turns: number): SessionEvent[
   return events;
 }
 
+test("a very long turn first renders its start and shares the opening across socket acknowledgement", async () => {
+  const pages = pageController();
+  let calls = 0;
+  let release!: (page: SessionEventsResponse) => void;
+  const pending = new Promise<SessionEventsResponse>(resolve => { release = resolve; });
+  const fixture = await mountFixture(pages, 0, { acknowledgeSubscription: false,
+    client: { getSessionTurnStartPage: async () => { calls++; return pending; } } });
+  try {
+    assert.equal(calls, 1);
+    // A tail frame can arrive before HTTP. It must never be the reader's first visible content.
+    await act(async () => fixture.socket.push({ type: "session_event", event: {
+      id: 10_504, sessionId: fixture.sessionId, seq: 10_504, ts: 1,
+      payload: { kind: "agent_message", text: "Unloaded current tail", final: true },
+    } }));
+    assert.ok(fixture.container.querySelector(".transcript-skeleton"));
+    const prefix: SessionEvent[] = Array.from({ length: 200 }, (_, index) => ({
+      id: 1_503 + index, seq: 1_503 + index, ts: index, sessionId: fixture.sessionId,
+      payload: index === 0 ? { kind: "user_message", text: "Current turn begins here" }
+        : { kind: "agent_message", text: `Current-turn step ${index}`, final: true },
+    }));
+    await act(async () => release({ events: prefix, eventEpoch: 0, turnStartSeq: 1_503,
+      tailSeq: 10_503, nextAfter: 1_702, hasMoreLater: true, hasMoreOlder: true,
+      turnAligned: true, cacheComplete: true }));
+    await flushAsyncWork();
+    assert.equal(followState(fixture), "paused", "the first content commit cannot follow to the prefix's tail");
+    assert.equal(fixture.scroller.scrollTop, 0);
+    assert.deepEqual(fixture.readLoadedEvents()?.[0]?.payload, { kind: "user_message", text: "Current turn begins here" });
+    assert.equal(fixture.container.textContent!.includes("Unloaded current tail"), false);
+    assert.equal(pages.tailCalls.length, 0);
+    assert.equal(pages.forwardCalls(), 0, "unread range stays reader-driven");
+    const revision = fixture.socket.sent.filter(message => message.type === "session_subscriptions").at(-1)?.revision;
+    assert.ok(revision != null);
+    await act(async () => fixture.socket.push({ type: "session_subscriptions_applied", revision,
+      sessionIds: [fixture.sessionId], podIds: [] }));
+    await flushAsyncWork();
+    assert.equal(calls, 1, "the acknowledged owner reuses this exact opening response");
+    assert.equal(followState(fixture), "paused");
+    assert.equal(fixture.readLoadedEvents()!.length, 200);
+  } finally { await unmountFixture(fixture); }
+});
+
 function EventSeeder({ sessionId, events }: { sessionId: string; events: SessionEvent[] }) {
   const ready = useStoreSelector((state) => state.sessions.has(sessionId));
   const { dispatch } = useStoreActions();
@@ -372,6 +413,7 @@ async function mountFixture(
         sessionSubscriptions: !acknowledgeSubscription,
         boundedDelivery: false,
         paginatedSessionHistory: false,
+        currentTurnOpening: clientOverrides?.getSessionTurnStartPage !== undefined,
         projects: true,
       },
       runners: [runner],

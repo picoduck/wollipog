@@ -165,7 +165,7 @@ import {
   loadOlderSessionEvents,
   recoverSessionHistory,
   recoverSessionHistoryGap,
-  recoverSessionHistoryWindow,
+  recoverSessionTurnStartWindow,
   type SessionHistoryRecoveryOptions,
   type SessionHistoryWindowOptions,
   shouldReadOpeningWindow,
@@ -1093,6 +1093,7 @@ function SessionDetailLoaded({
   // row, not for every token-usage upsert of every other session on the board.
   const {
     loadEvents,
+    loadTurnStartWindow,
     loadOlderEvents,
     beginOlderEventsLoad,
     failOlderEventsLoad,
@@ -1128,6 +1129,7 @@ function SessionDetailLoaded({
   }, [requestReviewFocus, rightPanel]);
   const openSession = useCallback((id: string) => navigate({ name: "session", id }), [navigate]);
   const recoveryEventEpoch = useStoreSelector((s) => s.sessions.get(sessionId)?.eventEpoch ?? 0);
+  const currentTurnOpeningSupported = useStoreSelector((s) => s.currentTurnOpeningSupported);
   const recoveryGeneration = useStoreSelector((s) => s.snapshotRevision);
   // A chunk that only lengthens the trailing reply renders the transcript alone (`ProfiledEventTimeline`
   // folds it in); this view reads it the next time it renders for anything else (#2763).
@@ -1404,6 +1406,9 @@ function SessionDetailLoaded({
   );
   const viewGenerationRef = useRef(0);
   const [historyRetry, setHistoryRetry] = useState(0);
+  const openingReadScope = useRef({});
+  const openingReadKey = `${instanceScope}:${sessionId}:${recoveryEventEpoch}:${recoveryGeneration}:${historyRetry}`;
+  const [unsupportedOpeningKey, setUnsupportedOpeningKey] = useState<string | null>(null);
   const timelineHistoryKey = `${session.id}:${session.eventEpoch ?? 0}`;
   const timelineHistoryKeyRef = useRef(timelineHistoryKey);
   timelineHistoryKeyRef.current = timelineHistoryKey;
@@ -2673,9 +2678,14 @@ function SessionDetailLoaded({
         return true;
       };
       beginEventHistoryLoad(sessionId, epoch, revision, generation);
-      void recoverSessionHistoryWindow(
+      void recoverSessionTurnStartWindow(
         { sessionId, eventEpoch: epoch, recoveryRevision: revision },
         {
+          scope: openingReadScope.current,
+          readKey: openingReadKey,
+          fetchOpening: currentTurnOpeningSupported ? api.getSessionTurnStartPage : undefined,
+          onUnsupported: () => { if (!cancelled) setUnsupportedOpeningKey(openingReadKey); },
+          applyOpening: (page) => canApply() && loadTurnStartWindow(sessionId, page, revision, generation),
           fetchTailPage: api.getSessionEventTailPage,
           applyWindow: (id, events, pageEpoch, pageRevision, complete, hasOlder, turnAligned) => {
             // A warm reader can pause while this GET is pending. Its saved row and offset own
@@ -2729,10 +2739,10 @@ function SessionDetailLoaded({
       if (metadataRetryTimer !== undefined) window.clearTimeout(metadataRetryTimer);
     };
   }, [api, instanceScope, sessionId, conn, recoveryRevision, recoveryEventEpoch, recoveryGeneration,
-    historyRetry, beginEventHistoryLoad, failEventHistoryLoad, loadEvents, loadSession, getSession, cacheCannotFill]);
+    historyRetry, beginEventHistoryLoad, failEventHistoryLoad, loadEvents, loadTurnStartWindow, loadSession, getSession, cacheCannotFill, openingReadKey, currentTurnOpeningSupported]);
 
-  // Opening a session reads a bounded window at the TAIL: one request paints the newest activity
-  // no matter how long the session is. Reopening after an outage instead backfills only the gap
+  // Opening a session reads a bounded prefix at the current turn's start. Reopening after an
+  // outage instead backfills only the gap
   // since what we already have, with a fixed page budget before tail replacement while following.
   // Also re-runs when the socket comes back ONLINE: events broadcast during the
   // outage never arrived, and without this re-fetch the timeline silently misses them until the
@@ -2776,15 +2786,20 @@ function SessionDetailLoaded({
     // a reader who starts reading during recovery keeps the rows their saved position depends on.
     // After the budget, a paused reader keeps its slice while a separately retained current tail
     // makes returning to live independent of the gap's size. Missing middle rows are reader-driven.
-    const openWindow = shouldReadOpeningWindow({
+    const openWindow = (eventWindow?.openingStartSeq !== undefined && !eventWindow.complete) || shouldReadOpeningWindow({
       recoveryAfter: after,
       hasSavedReadingPosition: !canReplaceWithWindow(),
     });
     beginEventHistoryLoad(sessionId, epoch, recoveryRevision, generation);
-    const gapFence = beginEventGapRecovery(sessionId, epoch, recoveryRevision, generation,
+    const gapFence = openWindow ? null : beginEventGapRecovery(sessionId, epoch, recoveryRevision, generation,
       () => hasSavedFollowTailAnchor(instanceScope, sessionId));
     const load = openWindow
-      ? recoverSessionHistoryWindow(request, windowOptions)
+      ? recoverSessionTurnStartWindow(request, { ...windowOptions,
+        scope: openingReadScope.current, readKey: openingReadKey,
+        fetchOpening: currentTurnOpeningSupported ? api.getSessionTurnStartPage : undefined,
+        onUnsupported: () => { if (isCurrent()) setUnsupportedOpeningKey(openingReadKey); },
+        applyOpening: (page) => isCurrent() && loadTurnStartWindow(sessionId, page, recoveryRevision, generation),
+      })
         .then((result) => (result.supported ? result.complete : forwardRecovery()))
       : recoverSessionHistoryGap(request, {
         history: historyOptions,
@@ -2812,7 +2827,7 @@ function SessionDetailLoaded({
       if (gapFence) cancelEventGapRecovery(gapFence);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api, sessionId, loadEvents, conn, recoveryRevision, recoveryReadAfter, recoveryEventEpoch, recoveryGeneration, historyRetry, beginEventHistoryLoad, failEventHistoryLoad, isEventGapRecoveryCurrent, beginEventGapRecovery, cancelEventGapRecovery, finishEventGapRecovery, loadEventGapWindow, deferEventTail, cacheCannotFill]);
+  }, [api, sessionId, loadEvents, loadTurnStartWindow, conn, recoveryRevision, recoveryReadAfter, recoveryEventEpoch, recoveryGeneration, historyRetry, beginEventHistoryLoad, failEventHistoryLoad, isEventGapRecoveryCurrent, beginEventGapRecovery, cancelEventGapRecovery, finishEventGapRecovery, loadEventGapWindow, deferEventTail, cacheCannotFill, openingReadKey, currentTurnOpeningSupported]);
 
   const loadLater = useCallback(() => {
     const request = beginLaterEventsLoad(sessionId);
@@ -3796,11 +3811,15 @@ function SessionDetailLoaded({
     persistenceScope: instanceScope,
     rows: items,
     rowGeneration: session.eventEpoch ?? 0,
+    openingAnchor: eventWindow?.openingStartSeq && evs?.[0]
+      ? { key: `item:${evs[0].payload.kind}:${eventWindow.openingStartSeq}`, offset: 0 }
+      : null,
   });
   useEffect(() => {
     provisionalFollowStateRef.current?.(followTail.state);
   }, [followTail.state]);
   const acknowledgedFollowRef = useRef({ key: timelineHistoryKey, state: followTail.state });
+  const jumpTailInFlightRef = useRef<symbol | null>(null);
   useEffect(() => {
     const previous = acknowledgedFollowRef.current;
     acknowledgedFollowRef.current = { key: timelineHistoryKey, state: followTail.state };
@@ -3809,7 +3828,24 @@ function SessionDetailLoaded({
     if (gap) {
       // Promotion cancels a pending reader-driven page before adopting the separately fetched tail.
       // Its operation fence also rejects a tail retained by an obsolete API or recovery owner.
-      if (!promoteDeferredEventTail(gap.fence)) setHistoryRetry((value) => value + 1);
+      if (!promoteDeferredEventTail(gap.fence)) {
+        if (jumpTailInFlightRef.current) return;
+        const attempt = Symbol("jump-tail");
+        jumpTailInFlightRef.current = attempt;
+        // A cold opening knows the tail coordinate but has fetched only its turn-start prefix.
+        // The explicit Jump action owns this replacement; automatic opening never moves there.
+        void api.getSessionEventTailPage(sessionId, undefined, gap.fence.eventEpoch, SESSION_EVENT_PAGE_LIMIT)
+          .then((page) => {
+            if (!isEventGapRecoveryCurrent(gap.fence) || page.eventEpoch !== gap.fence.eventEpoch ||
+                page.cacheComplete !== true || !deferEventTail(gap.fence, page.events, true,
+                  page.hasMoreOlder === true, page.turnAligned) || !promoteDeferredEventTail(gap.fence)) {
+              failEventHistoryLoad(sessionId, "Could not load the latest activity. Retry to continue reading.",
+                gap.fence.eventEpoch, gap.fence.recoveryRevision, gap.fence.recoveryGeneration);
+            }
+          }).catch(() => failEventHistoryLoad(sessionId, "Could not load the latest activity.",
+            gap.fence.eventEpoch, gap.fence.recoveryRevision, gap.fence.recoveryGeneration))
+          .finally(() => { if (jumpTailInFlightRef.current === attempt) jumpTailInFlightRef.current = null; });
+      }
     } else if (previous.key === timelineHistoryKey && previous.state !== "following" &&
         recoveryRevision != null && eventHistory?.error != null) {
       // A sparse live slice can deliberately refuse staging to preserve a chosen reading row.
@@ -3817,7 +3853,7 @@ function SessionDetailLoaded({
       setHistoryRetry((value) => value + 1);
     }
   }, [followTail.state, timelineHistoryKey, eventWindow?.laterGap, eventHistory?.error,
-    recoveryRevision, promoteDeferredEventTail]);
+    recoveryRevision, promoteDeferredEventTail, api, sessionId, isEventGapRecoveryCurrent, deferEventTail, failEventHistoryLoad]);
 
   // A 200-event opening window is a transport budget, not a visual one: hundreds of streamed
   // chunks can collapse into a single short timeline row. While a freshly opened reader is still
@@ -3867,6 +3903,10 @@ function SessionDetailLoaded({
       return;
     }
     if (!eventWindow) return;
+    if (eventWindow.openingStartSeq !== undefined) {
+      settle();
+      return;
+    }
     if (!eventWindow.hasOlder || eventWindow.error || eventWindow.baseSeq <= 1) {
       settle();
       return;
@@ -4855,10 +4895,14 @@ function SessionDetailLoaded({
   // activity can still hold rows. Governance decisions are rows the timeline adds to these items.
   const historyPartial = isPartialHistory(eventWindow);
   const shownItemCount = !showAgentLogs && !historyPartial && agentLogOnly(timelineItems) ? 0 : items.length;
+  // Socket delivery can race ahead of the opening read. A cold reader must not paint those tail
+  // rows before it has the turn start; a warm reading slice keeps its existing content.
+  const awaitingTurnStart = currentTurnOpeningSupported && eventWindow === undefined &&
+    eventHistory?.everComplete !== true && eventHistory?.error == null && unsupportedOpeningKey !== openingReadKey;
   const transcript = transcriptPresentation({
-    itemCount: shownItemCount,
-    hasOptimistic: showOptimistic,
-    working: activeTurnVisible && !startingWithoutActivity,
+    itemCount: awaitingTurnStart ? 0 : shownItemCount,
+    hasOptimistic: !awaitingTurnStart && showOptimistic,
+    working: !awaitingTurnStart && activeTurnVisible && !startingWithoutActivity,
     history: eventHistory,
     conn,
   });
@@ -6842,7 +6886,8 @@ function SessionDetailLoaded({
                         items={timelineItems}
                         itemsDerivedFrom={evs}
                         liveSessionId={sessionId}
-                        sessionActive={isTimelineSessionActive(session.status)}
+                        sessionActive={isTimelineSessionActive(session.status) ||
+                          (eventWindow?.openingStartSeq !== undefined && eventWindow.laterGap !== undefined)}
                         onOpenSubagent={mode === "expanded" ? openSubagent : undefined}
                         onOpenSourceLocation={openSourceLocation}
                         onOpenInReview={mode === "expanded" ? openInReview : undefined}

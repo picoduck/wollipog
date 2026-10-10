@@ -29,6 +29,112 @@ function message(store: Store, msg: ControlPlaneToUi, now?: number): void {
   store.dispatch({ type: "msg", msg, now });
 }
 
+test("a turn-start prefix keeps its unread remainder and live traffic outside the reader", () => {
+  const store = new Store({ name: "session", id: "s1" });
+  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [] });
+  const generation = store.getState().snapshotRevision;
+  store.beginEventHistoryLoad("s1", 0, -1, generation);
+  assert.equal(store.loadTurnStartWindow("s1", {
+    events: [userEvent("s1", 501), event("s1", 502)], eventEpoch: 0, turnStartSeq: 501,
+    tailSeq: 3_001, nextAfter: 502, hasMoreLater: true, hasMoreOlder: true, turnAligned: true, cacheComplete: true,
+  }, -1, generation), true);
+  const state = store.getState();
+  assert.equal(state.eventHistory.get("s1")!.everComplete, false);
+  assert.equal(state.eventHistory.get("s1")!.refreshing, false, "interactive with an explicit later range");
+  assert.equal(state.eventWindows.get("s1")!.complete, false);
+  assert.equal(isPartialHistory(state.eventWindows.get("s1")), true);
+  message(store, { type: "session_event", event: event("s1", 3_002) });
+  assert.deepEqual(store.getState().events.get("s1")!.map(row => row.seq), [501, 502]);
+  const request = store.beginLaterEventsLoad("s1")!;
+  assert.equal(request.after, 502);
+  assert.equal(store.loadLaterEvents(request, { events: [event("s1", 503)], eventEpoch: 0,
+    nextAfter: 503, hasMoreCached: true, cacheComplete: true }), true);
+  assert.deepEqual(store.getState().events.get("s1")!.map(row => row.seq), [501, 502, 503]);
+  assert.equal(store.getState().eventWindows.get("s1")!.laterGap!.afterSeq, 503);
+  assert.equal(store.getState().eventHistory.get("s1")!.everComplete, false);
+});
+
+test("a turn-start remainder becomes complete only after its contiguous final page", () => {
+  const store = new Store({ name: "session", id: "s1" });
+  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [] });
+  store.beginEventHistoryLoad("s1", 0, -1);
+  assert.equal(store.loadTurnStartWindow("s1", { events: [userEvent("s1", 10), event("s1", 11)],
+    eventEpoch: 0, turnStartSeq: 10, nextAfter: 11, tailSeq: 13, hasMoreLater: true,
+    hasMoreOlder: true, cacheComplete: true }, -1), true);
+  const request = store.beginLaterEventsLoad("s1")!;
+  assert.equal(store.loadLaterEvents(request, { events: [event("s1", 12), event("s1", 13)],
+    eventEpoch: 0, nextAfter: 13, hasMoreCached: false, cacheComplete: true }), true);
+  assert.equal(store.getState().eventWindows.get("s1")!.laterGap, undefined);
+  assert.equal(store.getState().eventWindows.get("s1")!.complete, true);
+  assert.equal(store.getState().eventHistory.get("s1")!.everComplete, true);
+});
+
+test("turn-start openings reject stale generations, sparse payloads and foreign sessions", () => {
+  const store = new Store({ name: "session", id: "s1" });
+  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1", 2)], runs: [], pods: [] });
+  const generation = store.getState().snapshotRevision;
+  store.beginEventHistoryLoad("s1", 2, -1, generation);
+  const page = { events: [userEvent("s1", 10), event("s1", 11)], eventEpoch: 2,
+    turnStartSeq: 10, tailSeq: 20, nextAfter: 11, hasMoreLater: true, hasMoreOlder: true, cacheComplete: true };
+  assert.equal(store.loadTurnStartWindow("s1", page, -1, generation - 1), false);
+  assert.equal(store.loadTurnStartWindow("s1", { ...page, eventEpoch: 1 }, -1, generation), false);
+  assert.equal(store.loadTurnStartWindow("s1", { ...page, events: [userEvent("s1", 10), event("s1", 12)] }, -1, generation), false);
+  assert.equal(store.loadTurnStartWindow("s1", { ...page, events: [userEvent("other", 10)] }, -1, generation), false);
+  assert.equal(store.getState().eventWindows.has("s1"), false);
+});
+
+test("an incomplete turn-start cache needs an authoritative terminal page", () => {
+  const store = new Store({ name: "session", id: "s1" });
+  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [] });
+  store.beginEventHistoryLoad("s1", 0, -1);
+  store.loadTurnStartWindow("s1", { events: [userEvent("s1", 10)], eventEpoch: 0,
+    turnStartSeq: 10, nextAfter: 10, tailSeq: 11, hasMoreLater: true, hasMoreOlder: true,
+    cacheComplete: false }, -1);
+  assert.equal(store.loadLaterEvents(store.beginLaterEventsLoad("s1")!, {
+    events: [event("s1", 11)], eventEpoch: 0, nextAfter: 11, hasMoreCached: false, cacheComplete: false,
+  }), true);
+  assert.equal(store.getState().eventHistory.get("s1")!.everComplete, false);
+  assert.ok(store.getState().eventWindows.get("s1")!.laterGap);
+  assert.equal(store.loadLaterEvents(store.beginLaterEventsLoad("s1")!, {
+    events: [], eventEpoch: 0, nextAfter: 11, hasMoreCached: false, cacheComplete: true,
+  }), true);
+  assert.equal(store.getState().eventHistory.get("s1")!.everComplete, true);
+  assert.equal(store.getState().eventWindows.get("s1")!.laterGap, undefined);
+});
+
+test("an acknowledged opening preserves reader-driven pages and staged live frames", () => {
+  const store = new Store({ name: "session", id: "s1" });
+  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [] });
+  store.beginEventHistoryLoad("s1", 0, -1);
+  const opening = { events: [userEvent("s1", 10)], eventEpoch: 0, turnStartSeq: 10,
+    nextAfter: 10, tailSeq: 12, hasMoreLater: true, hasMoreOlder: true, cacheComplete: true };
+  store.loadTurnStartWindow("s1", opening, -1);
+  store.loadLaterEvents(store.beginLaterEventsLoad("s1")!, { events: [event("s1", 11)],
+    eventEpoch: 0, nextAfter: 11, hasMoreCached: true, cacheComplete: true });
+  message(store, { type: "session_event", event: event("s1", 13) });
+  store.beginEventHistoryLoad("s1", 0, 1);
+  assert.equal(store.loadTurnStartWindow("s1", opening, 1), true);
+  assert.deepEqual(store.getState().events.get("s1")!.map(row => row.seq), [10, 11]);
+  assert.equal(store.getState().eventWindows.get("s1")!.laterGap!.tailSeq, 13);
+  store.loadLaterEvents(store.beginLaterEventsLoad("s1")!, { events: [event("s1", 12)],
+    eventEpoch: 0, nextAfter: 12, hasMoreCached: false, cacheComplete: true });
+  assert.deepEqual(store.getState().events.get("s1")!.map(row => row.seq), [10, 11, 12, 13]);
+  assert.equal(store.getState().eventWindows.get("s1")!.laterGap, undefined);
+});
+
+test("an empty opening keeps a racing distant live frame behind an explicit gap", () => {
+  const store = new Store({ name: "session", id: "s1" });
+  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [] });
+  store.beginEventHistoryLoad("s1", 0, -1);
+  message(store, { type: "session_event", event: event("s1", 5) });
+  assert.equal(store.loadTurnStartWindow("s1", { events: [], eventEpoch: 0, turnStartSeq: 0,
+    nextAfter: 0, tailSeq: 0, hasMoreLater: false, hasMoreOlder: false, cacheComplete: true }, -1), true);
+  assert.deepEqual(store.getState().events.get("s1"), []);
+  assert.equal(store.getState().eventWindows.get("s1")!.complete, false);
+  assert.equal(store.getState().eventWindows.get("s1")!.laterGap!.tailSeq, 5);
+  assert.equal(store.beginLaterEventsLoad("s1")!.after, 0);
+});
+
 test("a recreated reminder replaces a stale higher revision from the prior reminder id", () => {
   const store = new Store();
   const reminder = (reminderId: string, revision: number): SessionReminderView => ({

@@ -770,6 +770,7 @@ export class Hub {
         sessionSubscriptions: true,
         boundedDelivery: true,
         paginatedSessionHistory: true,
+        currentTurnOpening: true,
         projects: true,
         createProjectLocations: true,
         accessScopeManagement: true,
