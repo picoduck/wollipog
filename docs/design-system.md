@@ -947,7 +947,9 @@ Requests, Decision History, and Terminal once #2868 moves it) opens in one frame
     - a new danger entry of the notice slot. An action's own failure is not counted here; it
       restores the panel where the action runs, as above.
 
-    The slot shows the failure ahead of the request dock.
+    The slot shows the failure, unless a pending request holds the slot. The dock keeps an unsent
+    answer only while it is mounted, so the request keeps its place and the failure waits behind
+    its "+N More" (§13.2). The announcement still names the failure.
   - A request keeps the layout. On desktop the session bar's status control is its indicator, and
     its Answer action restores the panel. On a phone the sheet's bar ends with a button: the lead
     request's kind icon with the count badge (§11.4), named "Answer Request" or "Review 2 Requests".

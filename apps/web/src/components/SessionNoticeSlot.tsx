@@ -158,9 +158,11 @@ type NoticeRevealer = (key: string, focus: boolean) => boolean;
 const noticeRevealers = new Map<string, NoticeRevealer[]>();
 
 /**
- * Shows one condition in a mounted slot of the session, ahead of the request dock and of any
- * "+N More" choice, and with `focus` moves focus to the slot. It is how a failure that arrived while
- * the side panel hid the chat column comes into view (#2894). False when no slot has the key.
+ * Shows one condition in a mounted slot of the session, ahead of any "+N More" choice, and with
+ * `focus` moves focus to the slot. It is how a failure that arrived while the side panel hid the
+ * chat column comes into view (#2894). A pending request keeps its place: the dock holds an unsent
+ * answer only while it is mounted, so the condition waits behind its "+N More" instead (§13.2).
+ * False when no slot has the key.
  */
 export function revealSessionNotice(sessionId: string, key: string, focus: boolean): boolean {
   return (noticeRevealers.get(sessionId) ?? []).some((revealer) => revealer(key, focus));
@@ -218,13 +220,13 @@ export function SessionNoticeSlot({ sessionId, entries, lead, label = "Session N
     });
   }, [leadHidden, sessionId]);
 
-  const revealState = useRef({ keys: [] as string[], signature });
-  revealState.current = { keys: candidates.map(keyOf), signature };
+  const revealState = useRef({ keys: [] as string[], signature, leadShown: false });
+  revealState.current = { keys: candidates.map(keyOf), signature, leadShown: shown !== undefined && "lead" in shown };
   useEffect(() => {
     const revealer: NoticeRevealer = (key, focus) => {
-      const { keys, signature: current } = revealState.current;
+      const { keys, signature: current, leadShown } = revealState.current;
       if (!keys.includes(key)) return false;
-      flushSync(() => setChoice({ key, signature: current }));
+      if (!leadShown) flushSync(() => setChoice({ key, signature: current }));
       if (focus) slotRef.current?.focus();
       return true;
     };

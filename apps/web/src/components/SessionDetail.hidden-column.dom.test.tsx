@@ -21,6 +21,7 @@ import { SessionDetail } from "./SessionDetail.js";
 import type { RightPanelState } from "./RightPanel.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
+import { setQuestionResponseStyle } from "../question-response-style.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
@@ -211,7 +212,7 @@ test("desktop Expanded: a queued message's delivery failure restores the panel o
     assert.deepEqual(fixture.calls, ["restore"], "the failure restores the expanded panel");
     assert.equal(fixture.slotKey(), "queued-delivery:queued-1", "the slot shows the failure");
     assert.match(fixture.announcement(), /Message Not Delivered\./u);
-    assert.equal(document.activeElement, switcher, "focus stays in the panel, which is still in view");
+    assert.ok(document.activeElement === switcher, "focus stays in the panel, which is still in view");
 
     // The person expands the panel again; the failure stays, clears and comes back.
     await fixture.setPanel({ open: true, expanded: true });
@@ -334,21 +335,41 @@ test("phone sheet: a delivery failure closes the sheet and focuses its notice (#
       "closing the sheet lifts the session's inert state (#2888)");
     const slot = fixture.container.querySelector<HTMLElement>(".session-notice-slot");
     assert.equal(slot?.dataset.noticeKey, "queued-delivery:queued-1");
-    assert.equal(document.activeElement, slot, "focus moves to the failure");
+    assert.ok(document.activeElement === slot, "focus moves to the failure");
     await flush(5);
-    assert.equal(document.activeElement, slot, "closing the panel does not pull focus back to its opener");
+    assert.ok(document.activeElement === slot, "closing the panel does not pull focus back to its opener");
   } finally {
     await fixture.unmount();
   }
 });
 
-test("phone sheet: a failure behind a waiting request still comes into view (#2894)", async () => {
-  const fixture = await mount(sessionView({ status: "input_required", pendingApproval: request("ask-1") }), { phone: true });
+test("phone sheet: a failure under a waiting request keeps the dock and its unsent secret answer (#2894)", async () => {
+  setQuestionResponseStyle("interactive", domWindow as never);
+  const question = {
+    requestId: "ask-token", occurrenceId: "ask-token-1", kind: "question", title: "Enter the token", options: [],
+    questions: [{ id: "token", question: "Enter the token", options: [], allowOther: true, secret: true }],
+  } as unknown as PendingApproval;
+  const fixture = await mount(sessionView({ status: "input_required", pendingApproval: question }), { phone: true, open: false });
   try {
-    await fixture.update({ queued: failedDelivery("uncertain") });
-    assert.deepEqual(fixture.calls, ["close"]);
-    assert.equal(fixture.slotKey(), "queued-delivery:queued-1", "the failure shows ahead of the request dock");
+    const secret = () => fixture.container.querySelector<HTMLInputElement>('.request-dock input[type="password"]');
+    const input = secret();
+    assert.ok(input, "the dock asks for the secret");
+    await act(async () => {
+      input.value = "s3cret";
+      fireDomEvent.change(input, { target: { value: "s3cret" } } as never);
+    });
+    await fixture.setPanel({ open: true, expanded: false });
+    await fixture.update({ queued: failedDelivery("failed") });
+    assert.deepEqual(fixture.calls, ["close"], "the failure closes the sheet");
+    assert.equal(fixture.slotKey(), "request-dock", "the request keeps its place in the slot");
+    assert.equal(secret()?.value, "s3cret", "the unsent secret answer survives");
+    const more = [...fixture.container.querySelectorAll<HTMLButtonElement>(".session-notice-slot button")]
+      .find((button) => /^\+1 More$/u.test(button.textContent ?? ""));
+    assert.ok(more, "the failure waits behind the dock's +1 More");
+    assert.ok(document.activeElement === fixture.container.querySelector(".session-notice-slot"), "focus moves to the slot");
+    assert.match(fixture.announcement(), /Message Not Delivered\./u, "and the failure is announced");
   } finally {
+    setQuestionResponseStyle("interactive", domWindow as never);
     await fixture.unmount();
   }
 });
@@ -392,9 +413,9 @@ test("phone sheet: a campaign continuation whose retries stopped closes the shee
     assert.deepEqual(fixture.calls, ["close"]);
     const notice = fixture.container.querySelector<HTMLElement>('.campaign-notices .notice[data-state="failed"]');
     assert.ok(notice, "the failed continuation is shown");
-    assert.equal(document.activeElement, notice, "focus moves to it");
+    assert.ok(document.activeElement === notice, "focus moves to it");
     await flush(5);
-    assert.equal(document.activeElement, notice, "and stays there");
+    assert.ok(document.activeElement === notice, "and stays there");
   } finally {
     await fixture.unmount();
   }

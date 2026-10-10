@@ -3997,6 +3997,13 @@ textarea {
   position: relative;
   display: inline-flex;
 }
+/* The kind glyphs are 16px, several of them filled, so the badge sits further out on the corner than
+   it does on the rail's larger glyphs, leaving the kind readable; it stays inside the 32px and 44px
+   button. */
+.rpanel-request-icon > .count-badge.on-icon {
+  top: -9px;
+  left: calc(100% - 4px);
+}
 /* A tool's body, which scrolls as one. */
 .rpanel-body {
   flex: 1;
