@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs, { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import fsPromises from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -38,6 +39,7 @@ for (const fn of new Set(config.pauses.map((pause) => pause.fn))) {
       const target = String(args[pause.arg]);
       if (pause.prefix ? !target.startsWith(pause.prefix) : target !== pause.path) continue;
       if (pause.exclude && target.includes(pause.exclude)) continue;
+      if (pause.caller && !new Error().stack.includes(pause.caller)) continue;
       pause.seen = (pause.seen ?? 0) + 1;
       if (pause.seen < (pause.nth ?? 1)) continue;
       pause.fired = true;
@@ -90,6 +92,8 @@ let result = null;
 if (config.op === "acquire") result = store.acquireLock(config.id, config.owner);
 else if (config.op === "acquireFree") result = store.acquireFreeLock(config.id, config.owner);
 else if (config.op === "meta") result = store.patchMeta(config.id, { title: config.owner }) !== null;
+else if (config.op === "reset") result = (store.resetEvents(config.id), true);
+else if (config.op === "append") result = store.appendEvent(config.id, { kind: "agent_message", text: config.owner }) !== null;
 else if (config.op === "refresh") result = store.refreshLock(config.id, config.owner);
 else store.releaseLock(config.id, config.owner);
 fs.writeFileSync(signal(config.name, "result"), JSON.stringify(result));
@@ -109,12 +113,15 @@ type Pause = {
   nth?: number;
   /** Skip calls whose file name contains this. */
   exclude?: string;
+  /** Count only calls made from inside this function. */
+  caller?: string;
 };
 
 type ChildSpec = {
   name: string;
-  /** `acquireFree` is compaction's free-only acquire; `meta` writes meta.json with `owner` as its title. */
-  op: "acquire" | "acquireFree" | "refresh" | "release" | "meta";
+  /** `acquireFree` is compaction's free-only acquire; `meta` writes meta.json with `owner` as its
+   * title; `reset` resets the event history; `append` appends an event whose text is `owner`. */
+  op: "acquire" | "acquireFree" | "refresh" | "release" | "meta" | "reset" | "append";
   owner: string;
   /** Shorthand: pause, under the child's own name, after this call on the lock file. */
   pauseOn?: "readFileSync" | "existsSync";
@@ -199,6 +206,10 @@ class LockRace {
     const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
     child.kill("SIGKILL");
     await exited;
+  }
+
+  pidOf(name: string): number {
+    return this.children.get(name)!.pid!;
   }
 
   result(name: string): unknown {
@@ -948,28 +959,49 @@ test("refresh moves only the mtime, and a same-owner acquire keeps the lock with
 /** Older than the default orphan grace period (one hour). */
 const PAST_GRACE_MS = 2 * 60 * 60 * 1_000;
 
-/** Pause a writer right after it writes its temp file for `file`, before the rename or link. */
-function tempWritten(race: LockRace, file: "meta.json" | "lock" | "lock.guard"): Pause {
-  const path = { "meta.json": race.metaPath, lock: race.lockPath, "lock.guard": race.guardPath }[file];
-  return { name: "w-written", fn: "writeFileSync", arg: 0, prefix: `${path}.`, ...file === "lock" ? { exclude: "lock.guard" } : {} };
+type TempWriter = {
+  /** The file the writer publishes; its temp file is `<file>.<pid>.<uuid>.tmp`. */
+  file: string;
+  /** The production function that writes the temp file. */
+  writer: string;
+  op: ChildSpec["op"];
+  /** Pause right after this call creates or writes the temp file, before its rename or link. */
+  fn: "writeFileSync" | "openSync";
+  setup?: (race: LockRace) => void;
+};
+
+const TEMP_WRITERS: TempWriter[] = [
+  { file: "meta.json", writer: "writeMeta", op: "meta", fn: "writeFileSync" },
+  { file: "lock", writer: "publishExclusive", op: "acquire", fn: "writeFileSync" },
+  { file: "lock", writer: "replaceLockFile", op: "acquire", fn: "writeFileSync", setup: (race) => race.writeLock("dead-runner", 120_000) },
+  { file: "lock.guard", writer: "publishExclusive", op: "acquire", fn: "writeFileSync", setup: (race) => race.writeLock("dead-runner", 120_000) },
+  { file: "events.reset.json", writer: "writeHistoryResetIntent", op: "reset", fn: "writeFileSync" },
+  { file: "events.idx", writer: "writeHistoryIndex", op: "reset", fn: "openSync" },
+  { file: "events.idx", writer: "rebuildHistoryIndex", op: "append", fn: "openSync", setup: (race) => rmSync(join(race.root, ID, "events.idx")) },
+];
+
+function tempWritten(race: LockRace, { file, writer, fn }: TempWriter): Pause {
+  return {
+    name: "w-written", fn, arg: 0, prefix: `${join(race.root, ID, file)}.`, caller: writer,
+    ...file === "lock" ? { exclude: "lock.guard" } : {},
+  };
 }
 
 test("a temp file left by a writer killed before its rename is swept once past the grace period", async (t) => {
-  for (const file of ["meta.json", "lock", "lock.guard"] as const) {
-    await t.test(file, async () => {
+  for (const temp of TEMP_WRITERS) {
+    await t.test(`${temp.file} (${temp.writer})`, async () => {
       const race = new LockRace();
       try {
-        if (file === "lock.guard") race.writeLock("dead-runner", 120_000);
-        await race.start({
-          name: "w", op: file === "meta.json" ? "meta" : "acquire", owner: "runner-w", pauses: [tempWritten(race, file)],
-        });
+        temp.setup?.(race);
+        await race.start({ name: "w", op: temp.op, owner: "runner-w", pauses: [tempWritten(race, temp)] });
         assert.ok(race.paused("w-written"));
         await race.kill("w");
         const left = race.tempFiles();
         assert.equal(left.length, 1);
-        assert.ok(left[0]!.startsWith(`${file}.`), `${left[0]} is ${file}'s temp file`);
-        const store = new SessionStore(race.root);
-        await store.maintainHistories("runner-m:history");
+        assert.ok(left[0]!.startsWith(`${temp.file}.${race.pidOf("w")}.`), `${left[0]} is the killed writer's ${temp.file} temp file`);
+        // The runner's store maintains; it also breaks a guard the killed writer held.
+        const store = new SessionStore(race.root, undefined, undefined, true);
+        assert.equal((await store.maintainHistories("runner-m:history")).inspected, 1);
         assert.deepEqual(race.tempFiles(), left, "a temp file younger than the grace period stays");
         ageFile(join(race.root, ID, left[0]!), PAST_GRACE_MS);
         assert.equal((await store.maintainHistories("runner-m:history")).orphansRemoved, 1);
@@ -983,28 +1015,71 @@ test("a temp file left by a writer killed before its rename is swept once past t
 });
 
 test("the sweep never removes a temp file whose writer is still alive, however old", async (t) => {
-  for (const file of ["meta.json", "lock"] as const) {
-    await t.test(file, async () => {
+  // A paused replaceLockFile holds the guard, which keeps maintenance (and so the sweep) out.
+  for (const temp of TEMP_WRITERS.filter(({ op, writer }) => (op === "meta" || op === "acquire") && writer !== "replaceLockFile")) {
+    await t.test(`${temp.file} (${temp.writer})`, async () => {
       const race = new LockRace();
       try {
-        await race.start({
-          name: "w", op: file === "meta.json" ? "meta" : "acquire", owner: "runner-w", pauses: [tempWritten(race, file)],
-        });
+        temp.setup?.(race);
+        await race.start({ name: "w", op: temp.op, owner: "runner-w", pauses: [tempWritten(race, temp)] });
         const left = race.tempFiles();
         assert.equal(left.length, 1);
         ageFile(join(race.root, ID, left[0]!), PAST_GRACE_MS);
-        const store = new SessionStore(race.root);
-        assert.equal((await store.maintainHistories("runner-m:history")).orphansRemoved, 0);
+        const store = new SessionStore(race.root, undefined, undefined, true);
+        assert.equal((await store.maintainHistories("runner-m:history")).inspected, 1, "the sweep ran");
         assert.deepEqual(race.tempFiles(), left);
         await race.resume("w", "w-written");
         assert.equal(race.result("w"), true, "the writer's rename or link still finds its temp file");
         assert.deepEqual(race.tempFiles(), []);
-        if (file === "meta.json") assert.equal(new SessionStore(race.root).readMeta(ID)?.title, "runner-w");
+        if (temp.op === "meta") assert.equal(new SessionStore(race.root).readMeta(ID)?.title, "runner-w");
         else assert.equal(race.lockOwner(), "runner-w");
       } finally {
         await race.dispose();
       }
     });
+  }
+});
+
+test("the sweep keeps this process's background meta write in flight, however old its temp file looks (CR-1.1)", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-lock-temps-"));
+  const store = new SessionStore(root);
+  try {
+    store.create(sessionMeta());
+    store.patchMeta(ID, { preview: "flushed" }); // a lazy patch, left to the background flush
+    const dir = join(root, ID);
+    // Hold the background write once its temp file exists, before it is written and renamed.
+    const realOpen = fsPromises.open;
+    let created!: () => void;
+    const tempCreated = new Promise<void>((resolve) => { created = resolve; });
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    t.mock.method(fsPromises, "open", async (...args: Parameters<typeof fsPromises.open>) => {
+      const handle = await realOpen(...args);
+      if (String(args[0]).startsWith(join(dir, "meta.json."))) {
+        created();
+        await released;
+      }
+      return handle;
+    });
+    syncBuiltinESMExports();
+    const internals = store as unknown as { flushInBackground(id: string): Promise<void> };
+    const flushing = internals.flushInBackground(ID);
+    await tempCreated;
+    const [temp] = readdirSync(dir).filter((name) => name.startsWith(`meta.json.${process.pid}.`));
+    assert.ok(temp, "the background write's temp file exists");
+    // A coarse or stepped clock can date it before this process started; it is still in flight.
+    ageFile(join(dir, temp), PAST_GRACE_MS);
+    assert.equal((await store.maintainHistories("runner-m:history")).inspected, 1, "the sweep ran");
+    assert.ok(existsSync(join(dir, temp)), "the sweep leaves the in-flight temp file alone");
+    release();
+    await flushing;
+    assert.equal(existsSync(join(dir, temp)), false);
+    assert.equal(new SessionStore(root).readMeta(ID)?.preview, "flushed");
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    store.remove(ID);
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -1031,11 +1106,13 @@ test("the sweep removes only writer temp files whose writer is gone", async (t) 
       `meta.json.${dead}.${randomUUID()}.tmp`,
       `lock.${dead}.${randomUUID()}.tmp`,
       `lock.guard.${dead}.${randomUUID()}.tmp`,
+      `events.idx.${dead}.${randomUUID()}.tmp`,
+      `events.reset.json.${dead}.${randomUUID()}.tmp`,
       `lock.guard.${dead}.${randomUUID()}.broken`,
-      `meta.json.${process.pid}.${randomUUID()}.tmp`, // written before this process started
+      `meta.json.${process.pid}.${randomUUID()}.tmp`, // this process is not writing it
+      `lock.${process.pid}.${randomUUID()}.tmp`,
     ];
     const kept = [
-      `lock.${process.pid}.${randomUUID()}.tmp`, // this process may still be writing it
       `meta.json.${process.ppid}.${randomUUID()}.tmp`, // a live writer
       `lock.guard.${otherUser}.${randomUUID()}.tmp`, // a live writer that belongs to another user
       `lock.${dead}.${randomUUID()}.broken`,
@@ -1044,7 +1121,6 @@ test("the sweep removes only writer temp files whose writer is gone", async (t) 
       "meta.json.tmp",
     ];
     for (const name of [...gone, ...kept]) writeFileSync(join(dir, name), "x");
-    ageFile(join(dir, gone[4]!), PAST_GRACE_MS);
     assert.equal((await store.maintainHistories("runner-m:history")).orphansRemoved, gone.length);
     const left = new Set(readdirSync(dir));
     assert.deepEqual(gone.filter((name) => left.has(name)), []);
