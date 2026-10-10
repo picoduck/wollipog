@@ -54,7 +54,7 @@ test("a family sorts as one unit with the parent first, children indent under it
   await expect(page.locator(".inbox-row-shell.stacked")).toHaveCount(0);
   const parent = parentRow(page);
   await expect(parent.locator(".inbox-thread-toggle")).toHaveAttribute("aria-label", "Collapse Thread");
-  await expect(parent.locator(".inbox-thread-family-text")).toHaveText("4 Children · Needs Your Input");
+  await expect(parent.locator(".inbox-thread-family-text")).toHaveText("4 Children · Needs Your Input · 1 Working");
   await expect(parent.locator(".inbox-thread-family")).toHaveClass(/waiting/);
   await expect(parent.locator(".inbox-thread-dot")).toHaveCount(4);
   await expect(page.locator(".inbox-row-shell.thread-child")).toHaveCount(4);
@@ -88,7 +88,7 @@ test("t, Shift+T, p, and the arrows drive the thread, the chevron is the pointer
   await list.press("t");
   await expect(page.locator(".inbox-row-shell.thread-child")).toHaveCount(0);
   await expect(parentRow(page).locator(".inbox-thread-toggle")).toHaveAttribute("aria-expanded", "false");
-  await expect(parentRow(page).locator(".inbox-thread-family-text")).toHaveText("4 Children · Needs Your Input");
+  await expect(parentRow(page).locator(".inbox-thread-family-text")).toHaveText("4 Children · Needs Your Input · 1 Working");
   await page.screenshot({ path: `${EVIDENCE}/desktop-collapsed.png`, fullPage: true });
   await page.reload();
   await expect(page.locator(".page-tabs .tabs-bar, .sessions-app-bar")).toBeVisible();
@@ -262,11 +262,11 @@ test("phone parents visibly identify review work and suppress controller-owned r
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`${PAGE}&family-follow-up=review`);
   const parent = parentRow(page);
-  await expect(parent.locator(".status")).toHaveText("Ready for Review");
+  await expect(parent.locator(".status")).toHaveText("Result Available");
   await expect(parent.locator(".status")).toBeVisible();
   await parent.locator(".inbox-thread-toggle").click();
   await expect(page.locator(".inbox-row-shell.thread-child")).toHaveCount(0);
-  await expect(parent.locator(".status")).toHaveText("Ready for Review");
+  await expect(parent.locator(".status")).toHaveText("Result Available");
   await expect(parent.locator(".status")).toBeVisible();
   const box = await parent.locator(".status").evaluate((badge) => ({
     width: badge.clientWidth, contentWidth: badge.scrollWidth, right: badge.getBoundingClientRect().right,
@@ -276,7 +276,7 @@ test("phone parents visibly identify review work and suppress controller-owned r
   await page.goto(`${PAGE}&family-follow-up=controlled`);
   await expect(parent.locator(".status")).toHaveText("Running");
   await expect(parent.locator(".status")).toHaveCount(1);
-  await expect(parent.locator(".inbox-thread-family")).not.toContainText(/Needs Your Input|Ready for Review/);
+  await expect(parent.locator(".inbox-thread-family")).not.toContainText(/Needs Your Input|Result Available/);
 });
 
 test("the mobile thread toggle confines paint beside both provider icons at both densities", async ({ page }) => {
@@ -327,8 +327,8 @@ test("Board cards carry the row's one status and the family chip without nesting
   await page.setViewportSize({ width: 1280, height: 900 });
   await openList(page, "/board");
   const card = page.locator(".card", { hasText: "Ship the usage and cost overhaul" });
-  await expect(card.locator(".inbox-thread-family-text")).toHaveText("4 Children · 2 Awaiting Input");
-  await expect(card.locator(".inbox-thread-family")).toHaveAttribute("aria-label", "4 Children · 2 Awaiting Input");
+  await expect(card.locator(".inbox-thread-family-text")).toHaveText("4 Children · 2 Awaiting Input · 1 Working");
+  await expect(card.locator(".inbox-thread-family")).toHaveAttribute("aria-label", "4 Children · 2 Awaiting Input · 1 Working");
   await expect(card.locator(".inbox-thread-dot")).toHaveCount(4);
   const approval = page.locator(".card", { hasText: "Approval Session" });
   // One status, by the row's ranking (#2222), with the other kind in its "+1".

@@ -17,8 +17,8 @@ const label = (status: ReturnType<typeof sessionRowStatus>) => status.badge?.met
 test("outstanding human results use the single row badge without overriding human input", () => {
   const attention = { version: 1 as const, humanActions: [], meaningfulAt: 1,
     result: { revision: "r1", at: 1, owner: "human" as const }, acknowledgedRevision: null };
-  assert.equal(label(sessionRowStatus(session({ status: "running", attention }))), "Ready for Review");
-  assert.equal(label(sessionRowStatus(session({ status: "idle", attention }))), "Ready for Review");
+  assert.equal(label(sessionRowStatus(session({ status: "running", attention }))), "Result Available");
+  assert.equal(label(sessionRowStatus(session({ status: "idle", attention }))), "Result Available");
   assert.equal(label(sessionRowStatus(session({ status: "running", attention: { ...attention, acknowledgedRevision: "r1" } }))), "Running");
   assert.equal(label(sessionRowStatus(session({ status: "running", attention: { ...attention,
     result: { ...attention.result, owner: "orchestrator" } } }))), "Running");
@@ -113,16 +113,16 @@ test("phone family reasons use one badge while preserving warnings and stronger 
   assert.equal(label(sessionRowStatus(session({ status: "running" }), {
     familyFollowUpLabel: "Needs Your Input" })), "Needs Your Input");
   assert.equal(label(sessionRowStatus(session({ status: "running" }), {
-    familyFollowUpLabel: "Ready for Review" })), "Ready for Review");
+    familyFollowUpLabel: "Result Available" })), "Result Available");
   const disconnected = sessionRowStatus(session({ status: "running" }), {
-    runnerOnline: false, familyFollowUpLabel: "Ready for Review" });
-  assert.equal(label(disconnected), "Ready for Review");
+    runnerOnline: false, familyFollowUpLabel: "Result Available" });
+  assert.equal(label(disconnected), "Result Available");
   assert.deepEqual(disconnected.others, [], "passive warnings never inflate the actionable +N count");
   assert.equal(disconnected.badge?.meta.tone, "danger");
   assert.match(disconnected.badge?.title ?? "", /disconnected|offline|not connected/i);
   const ownQuestion = sessionRowStatus(session({ status: "input_required",
     pendingApproval: { requestId: "q", kind: "question", title: "Choose", options: [] } }), {
-    familyFollowUpLabel: "Ready for Review" });
+    familyFollowUpLabel: "Result Available" });
   assert.equal(label(ownQuestion), "Answer Required");
   const returned = sessionRowStatus(session({ status: "running" }), {
     reminder: reminder({ state: "fired" }), familyFollowUpLabel: "Needs Your Input" });
@@ -131,7 +131,7 @@ test("phone family reasons use one badge while preserving warnings and stronger 
   assert.match(returned.badge?.title ?? "", /returned|reminder/i);
   const ownResult = session({ status: "running", attention: { version: 1, meaningfulAt: 10, humanActions: [],
     result: { revision: "own", at: 10, owner: "human" }, acknowledgedRevision: null } });
-  assert.equal(sessionRowStatus(ownResult, { familyFollowUpLabel: "Ready for Review" }).badge?.title,
+  assert.equal(sessionRowStatus(ownResult, { familyFollowUpLabel: "Result Available" }).badge?.title,
     sessionRowStatus(ownResult).badge?.title, "an identical family reason preserves the parent's own result description");
   assert.equal(label(sessionRowStatus(session({ status: "running" }))), "Running",
     "controller-owned descendants have no human family reason to promote");
@@ -165,4 +165,20 @@ test("a stalled session's badge turns danger, stops pulsing, and says how long i
   assert.equal(silenceDuration(10 * 60_000), "10 minutes");
   assert.equal(silenceDuration(125 * 60_000), "2 hours");
   assert.equal(silenceDuration(61 * 60_000), "1 hour");
+});
+
+
+test("available results use a neutral badge while required answers keep warning priority", () => {
+  const attention = { version: 1 as const, humanActions: [], meaningfulAt: 1,
+    result: { revision: "r1", at: 1, owner: "human" as const }, acknowledgedRevision: null };
+  const result = sessionRowStatus(session({ status: "running", attention }));
+  assert.equal(result.badge?.meta.label, "Result Available");
+  assert.equal(result.badge?.meta.tone, "neutral");
+  assert.equal(result.badge?.ariaLabel, "Status: Result Available");
+  const question = sessionRowStatus(session({ status: "running", attention: { ...attention,
+    humanActions: [{ requestId: "q", rank: 3, requestedAt: 2 }] },
+    pendingApproval: { requestId: "q", kind: "question", title: "Choose", options: [] } }), {
+    familyFollowUpLabel: "Result Available" });
+  assert.equal(question.badge?.meta.label, "Answer Required");
+  assert.equal(question.badge?.meta.tone, "warning");
 });

@@ -230,8 +230,10 @@ export interface InboxThreadChild {
 
 /** What a parent card says about its thread, whether or not the thread is expanded. */
 export interface InboxThreadChildren {
-  followUpLabel?: "Needs Your Input" | "Ready for Review";
+  followUpLabel?: "Needs Your Input" | "Result Available";
   count: number;
+  /** Working descendants, including those hidden by a collapsed nested thread. */
+  working?: number;
   /** Children with a pending request. */
   waiting: number;
   children: InboxThreadChild[];
@@ -282,12 +284,13 @@ export function inboxThreadChildState(
  * that matters most about the children right now. */
 export function inboxThreadChildrenLabel(children: InboxThreadChildren): string {
   const parts = [`${children.count} ${children.count === 1 ? "Child" : "Children"}`];
-  const running = children.children.filter((child) => child.state === "running").length;
+  const running = children.working ?? children.children.filter((child) => child.state === "running").length;
   const done = children.children.filter((child) => child.state === "done").length;
   if (children.followUpLabel) parts.push(children.followUpLabel);
   else if (children.waiting > 0) parts.push(`${children.waiting} Awaiting Input`);
-  else if (running > 0) parts.push(`${running} Running`);
+  else if (running > 0) parts.push(`${running} Working`);
   else if (done === children.count) parts.push(`${done} Completed`);
+  if (running > 0 && (children.followUpLabel || children.waiting > 0)) parts.push(`${running} Working`);
   return parts.join(" · ");
 }
 
@@ -316,14 +319,16 @@ export function threadInboxRows<T extends { session: SessionView }>(
     const next = new Set(trail).add(row.session.id);
     const children = (childrenByParent.get(row.session.id) ?? [])
       .filter((child) => !next.has(child.id) && !emitted.has(child.id));
-    const descendantAttention = (members: SessionView[], seen: Set<string>): ReturnType<typeof sessionFollowUp>[] =>
-      members.flatMap((child) => seen.has(child.id) ? [] : [sessionFollowUp(child),
-        ...descendantAttention(childrenByParent.get(child.id) ?? [], new Set(seen).add(child.id))]);
-    const strongest = descendantAttention(children, next).sort((a, b) => b.priority - a.priority)[0];
+    const descendants = (members: SessionView[], seen: Set<string>): SessionView[] =>
+      members.flatMap((child) => seen.has(child.id) ? [] : [child,
+        ...descendants(childrenByParent.get(child.id) ?? [], new Set(seen).add(child.id))]);
+    const members = descendants(children, next);
+    const strongest = members.map(sessionFollowUp).sort((a, b) => b.priority - a.priority)[0];
     const summary: InboxThreadChildren | null = children.length === 0 ? null : {
       ...(strongest && strongest.priority >= 2 ? { followUpLabel: strongest.group === "needs_input"
-        ? "Needs Your Input" as const : "Ready for Review" as const } : {}),
+        ? "Needs Your Input" as const : "Result Available" as const } : {}),
       count: children.length,
+      working: members.filter((child) => inboxThreadChildState(child, stalledSessionIds.has(child.id)) === "running").length,
       waiting: children.filter((child) => isInboxBlocked(child)).length,
       children: children.map((child) => ({
         id: child.id,

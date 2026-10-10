@@ -12682,7 +12682,7 @@ body.shell-dock-dragging * {
 .inbox-row-shell.thread-child .inbox-row-primary-cell::before { top: 50%; left: -15px; width: 11px; height: 2px; }
 /* The family chip, directly after a parent's title (#2215): dots first, then the rollup. It is sized
    to the pills it shares a card with, and it never grows the card. Below a 600px list (a narrow
-   column, Preview Right, a phone) it keeps only its dots; its name and tooltip keep the rollup. */
+   column, Preview Right, a phone) it keeps its dots and working count; its name and tooltip keep the rollup. */
 .inbox-thread-family {
   display: inline-flex;
   flex: none;
@@ -12702,10 +12702,12 @@ body.shell-dock-dragging * {
 }
 .inbox-thread-family.waiting { border-color: transparent; color: var(--accent-2-on-tint); background: color-mix(in srgb, var(--accent-2) 12%, transparent); }
 .inbox-thread-family-text { overflow: hidden; text-overflow: ellipsis; }
+.inbox-thread-working { display: none; overflow: hidden; text-overflow: ellipsis; }
 /* A Board card decides by its own width instead (`.card-status > .inbox-thread-family.dots-only`). */
 @container list (max-width: 599px) {
-  :not(.card-status) > .inbox-thread-family { gap: 0; padding-inline: var(--space-1); }
+  :not(.card-status) > .inbox-thread-family { gap: var(--space-1); padding-inline: var(--space-1); }
   :not(.card-status) > .inbox-thread-family > .inbox-thread-family-text { display: none; }
+  :not(.card-status) > .inbox-thread-family > .inbox-thread-working { display: inline; }
 }
 .inbox-thread-dots { display: inline-flex; flex: none; gap: 3px; }
 .inbox-thread-dot { display: inline-block; width: 7px; height: 7px; border-radius: var(--radius-pill); background: var(--border-strong); }
