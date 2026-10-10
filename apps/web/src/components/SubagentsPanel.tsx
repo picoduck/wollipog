@@ -7,16 +7,18 @@ import {
   selectedSubagentId,
   subagentTokenTotal,
   type SubagentDescriptor,
-  type SubagentLifecycle,
 } from "../subagents.js";
 import type { TimelineItem } from "../timeline.js";
 import { isTimelineSessionActive, useTimelineClock } from "../timeline-clock.js";
 import { EventTimeline } from "./EventTimeline.js";
-import { statusMeta } from "../status-meta.js";
+import { subagentStatusContext, subagentWorkerStatus, workerStatusMeta, type SubagentStatusContextValue } from "../worker-roster.js";
 
-/** A subagent's lifecycle in the shared job vocabulary. An unreachable subagent is Lost (§11.2). */
-export function subagentLifecycleLabel(lifecycle: SubagentLifecycle): string {
-  return statusMeta("job", lifecycle === "unreachable" ? "lost" : lifecycle).label;
+/** A subagent's one worker word, as its roster row and transcript row read it (#2857). */
+export function subagentStatusLabel(
+  descriptor: Pick<SubagentDescriptor, "id" | "lifecycle" | "availability">,
+  context: Pick<SubagentStatusContextValue, "attention">,
+): string {
+  return workerStatusMeta(subagentWorkerStatus(descriptor, context.attention.get(descriptor.id))).label;
 }
 
 function elapsed(descriptor: SubagentDescriptor, now: number): string {
@@ -89,6 +91,9 @@ export function SubagentsPanel({
     availability: runnerOnline && isTimelineSessionActive(session.status) ? "live" : "recorded",
   }), [items, runnerOnline, session.status]);
   const descriptors = projection.descriptors;
+  const statusContext = useMemo(() => subagentStatusContext(session, runnerOnline),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [session.status, session.pendingApproval, runnerOnline]);
   const selectionScope = `${session.id}:${session.eventEpoch ?? 0}`;
   const automaticSelection = useRef<{ scope: string; id: string | null }>({ scope: selectionScope, id: null });
   if (automaticSelection.current.scope !== selectionScope) {
@@ -171,7 +176,7 @@ export function SubagentsPanel({
                 <span className="subagent-list-copy">
                   <span className="subagent-list-title">{descriptor.title}</span>
                   <span className="subagent-list-meta">
-                    <span>{subagentLifecycleLabel(descriptor.lifecycle)}</span>
+                    <span>{subagentStatusLabel(descriptor, statusContext)}</span>
                     {descriptor.availability === "recorded" && <span>Recorded</span>}
                     {duration && <span>{duration}</span>}
                     {tokens != null && <span>{tokens.toLocaleString()} Tokens</span>}
@@ -210,7 +215,7 @@ export function SubagentsPanel({
             <div>
               {titled && <div id={labelId} className="subagent-detail-title">{selected.title}</div>}
               <div id={metaId} className="subagent-detail-meta">
-                {subagentLifecycleLabel(selected.lifecycle)}
+                {subagentStatusLabel(selected, statusContext)}
                 {` · ${subagentOutputLabel(selected, runnerOnline)}`}
                 {selected.childIds.length > 0 ? ` · ${selected.childIds.length} Nested` : ""}
               </div>
@@ -236,6 +241,7 @@ export function SubagentsPanel({
                 sessionActive={["starting", "running", "waiting"].includes(selected.lifecycle)}
                 ariaLabel="Subagent Activity"
                 onOpenSubagent={openNestedSubagent}
+                subagentStatus={statusContext}
               />
             ) : (
               <div className="subagent-output-empty">No Output Recorded Yet</div>

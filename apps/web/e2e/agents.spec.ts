@@ -138,7 +138,7 @@ test("an active-tail conflict on initial registry load retries against the curre
 test("a Load More generation conflict preserves verified pages and retries the cursor", async ({ page }) => {
   await page.goto("/agents-e2e.html?registry-retry=load-more");
   await expect(page.getByText("Durable First", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Load More Recorded Workers", exact: true }).click();
+  await page.getByRole("button", { name: "Show 50 More", exact: true }).click();
   await expect(page.getByText("Recorded worker inventory changed while loading. Retrying…", { exact: true })).toBeVisible();
   await expect(page.getByText("Durable First", { exact: true })).toBeVisible();
   await expect(page.getByText("Durable Second", { exact: true })).toBeVisible();
@@ -161,7 +161,7 @@ for (const viewport of [
   test(`agents preserve exact selection and requests on ${viewport.name} ${theme}`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await page.goto(`/agents-e2e.html?theme=${theme}`);
-    const roster = page.getByRole("list", { name: "Agents", exact: true });
+    const roster = page.locator(".agents-list");
     await expect(roster.getByRole("listitem")).toHaveCount(3);
     await page.getByRole("button", { name: "Inspect Parser · Approval Required", exact: true }).click();
     await expect(page.getByRole("region", { name: "Selected Worker Request" })).toBeFocused();
@@ -170,9 +170,9 @@ for (const viewport of [
     await expect(page.getByRole("button", { name: "Inspect Parser · Approval Required", exact: true })).toHaveCount(0);
     await expect(page.getByRole("region", { name: "Worker Attention", exact: true })).toBeFocused();
     await expect(page.getByRole("button", { name: "Audit Storage · Approval Required", exact: true })).toBeVisible();
-    await page.getByRole("radio", { name: "History (1)", exact: true }).click();
+    await page.getByRole("radio", { name: "History, 1", exact: true }).click();
     await expect(roster.getByText("Review Documentation", { exact: true })).toBeVisible();
-    await page.getByRole("radio", { name: "Active (3)", exact: true }).click();
+    await page.getByRole("radio", { name: "Active, 3", exact: true }).click();
     await roster.getByRole("button", { name: /Background Monitor/ }).click();
     // The job opens as a page in the roster's place (#2856).
     await expect(page.locator(".agents-page").getByText("Monitor Job 1", { exact: true })).toBeVisible();
@@ -181,7 +181,7 @@ for (const viewport of [
     await page.screenshot({ path: `.agents/tmp/wave2-evidence/agents-${viewport.name}-${theme}.png`, fullPage: true });
     await page.getByRole("button", { name: "Disconnect Runner", exact: true }).click();
     // This fixture renders the roster outside the side panel, with no header Back, so the roster
-    // stays under the page.
-    await expect(page.getByRole("radio", { name: "Active (0)", exact: true, includeHidden: true })).toBeAttached();
+    // stays under the page. Offline workers stay in Active, as Unverified (#2857).
+    await expect(page.getByRole("radio", { name: "Active, 3", exact: true, includeHidden: true })).toBeAttached();
   });
 }

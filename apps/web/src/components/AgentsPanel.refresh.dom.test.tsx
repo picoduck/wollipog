@@ -174,7 +174,7 @@ test("a page load started under an armed timer moves the deadline instead of los
 
     // "Load More" starts its own request 0.8 s in, resetting the deadline to 1.8 s.
     const loadMore = Array.from(container.querySelectorAll("button"))
-      .find((button) => button.textContent === "Load More Recorded Workers")!;
+      .find((button) => button.textContent === "Show 50 More")!;
     await act(async () => { (loadMore as HTMLButtonElement).click(); });
     await advance(500);
     assert.deepEqual(calls, [{ after: 0, kind: "refresh" }, { after: 1, kind: "load" }],
@@ -325,7 +325,7 @@ test("a single child's change costs two requests against a five-page registry, n
     // Read the whole registry in, the way a reader does: five pages, four of them behind Load More.
     for (let page = 1; page < 5; page += 1) {
       const loadMore = Array.from(container.querySelectorAll("button"))
-        .find((button) => button.textContent === "Load More Recorded Workers")!;
+        .find((button) => button.textContent === "Show 50 More")!;
       await act(async () => { (loadMore as HTMLButtonElement).click(); });
       await advance(60);
     }
@@ -404,7 +404,7 @@ test("a rejected refresh leaves its evidence unspent, so the next one still read
     await advance(50);
     for (let page = 1; page < 3; page += 1) {
       const loadMore = Array.from(container.querySelectorAll("button"))
-        .find((button) => button.textContent === "Load More Recorded Workers")!;
+        .find((button) => button.textContent === "Show 50 More")!;
       await act(async () => { (loadMore as HTMLButtonElement).click(); });
       await advance(60);
     }
@@ -483,7 +483,7 @@ test("the Nth idle refresh sweeps every loaded page, and the Nth active refresh 
     await advance(50);
     for (let page = 1; page < 3; page += 1) {
       const loadMore = Array.from(container.querySelectorAll("button"))
-        .find((button) => button.textContent === "Load More Recorded Workers")!;
+        .find((button) => button.textContent === "Show 50 More")!;
       await act(async () => { (loadMore as HTMLButtonElement).click(); });
       await advance(60);
     }
@@ -583,7 +583,7 @@ test("a deduplicated idle callback does not count toward the backstop", async ()
     await advance(50);
     for (let page = 1; page < 3; page += 1) {
       const loadMore = Array.from(container.querySelectorAll("button"))
-        .find((button) => button.textContent === "Load More Recorded Workers")!;
+        .find((button) => button.textContent === "Show 50 More")!;
       await act(async () => { (loadMore as HTMLButtonElement).click(); });
       await advance(60);
     }

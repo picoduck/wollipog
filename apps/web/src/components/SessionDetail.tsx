@@ -316,7 +316,7 @@ import {
 } from "../composer-placeholder.js";
 import { IncrementalActiveTurnProgress } from "../turn-progress.js";
 import { IncrementalSubagentProjector } from "../subagents.js";
-import { workerRoster, isCurrentWorker } from "../worker-roster.js";
+import { workerRoster, isLiveWorker, subagentStatusContext } from "../worker-roster.js";
 import { WorkingIndicator } from "./WorkingIndicator.js";
 import {
   clearDurableQueuedEditRecoveriesForAccount,
@@ -3440,7 +3440,7 @@ function SessionDetailLoaded({
     (session.runId ? rosterRuns.get(session.runId)?.sessionIds ?? [] : []).flatMap((id) => {
       const member = rosterSessions.get(id);
       return member ? [member] : [];
-    }), (id) => rosterRunners.get(id)?.status === "online").filter(isCurrentWorker).length,
+    }), (id) => rosterRunners.get(id)?.status === "online").filter(isLiveWorker).length,
   [session, activeSubagents, rosterSessions, rosterRuns, rosterRunners]);
   const backgroundParentTurnEventIds = useMemo(() => new Map(items
     .filter((item): item is Extract<TimelineItem, { kind: "user_message" }> =>
@@ -4996,6 +4996,11 @@ function SessionDetailLoaded({
     onJumpToQuestion: reviewPendingRequest,
     selectedRequestId: selectedMarker,
   }), [pendingQuestionIds, reviewPendingRequest, selectedMarker]);
+  // An agent row reads the same worker word as the Agents roster (#2857); rebuilt only when the
+  // session's status, runner or requests move, never per streamed event (#2872).
+  const timelineSubagentStatus = useMemo(() => subagentStatusContext(session, runnerOnline),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [session.status, session.pendingApproval, runnerOnline]);
   // A question whose request carries none of its questions (an older control plane) reads them from
   // its transcript event.
   const dockQuestions = useCallback((request: PendingApproval): AgentQuestion[] => {
@@ -7062,6 +7067,7 @@ function SessionDetailLoaded({
                         revealRequest={timelineRevealRequest}
                         onRevealHandled={handleTimelineReveal}
                         questionContext={timelineQuestionContext}
+                        subagentStatus={timelineSubagentStatus}
                       />
                     </Profiler>
                   )}

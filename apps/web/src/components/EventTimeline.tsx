@@ -73,6 +73,7 @@ import { TranscriptImageCacheProvider } from "./TranscriptImageCache.js";
 import { EventPayloadContent } from "./EventPayloadContent.js";
 import { useTimelineClock } from "../timeline-clock.js";
 import { deriveSubagentLifecycle } from "../subagents.js";
+import { subagentWorkerStatus, workerStatusMeta, type SubagentStatusContextValue } from "../worker-roster.js";
 import { QuestionHistoryRow, isSettledQuestion, questionTitle, type SettledQuestionItem } from "./QuestionHistoryRow.js";
 import { AskMarker } from "./requests/AskMarker.js";
 import type { ConversationForkAvailability, EditInForkAvailability } from "../session-actions.js";
@@ -564,6 +565,7 @@ export const EventTimeline = memo(function EventTimeline({
   workspaceRoot,
   onOpenSession,
   onInsertReply,
+  subagentStatus,
 }: {
   handoff?: { open: (turn: number) => void; reason?: string };
   /** Retry Turn on a failed turn's notice; absent where a transcript cannot start a turn. */
@@ -613,6 +615,9 @@ export const EventTimeline = memo(function EventTimeline({
    * the reply's text into the session's draft and never sends it. Must be identity-stable.
    */
   onInsertReply?: (item: AgentReplyItem) => void;
+  /** The session's status, runner and worker requests, so an agent row's badge matches the Agents
+   * roster's (#2857). Must be identity-stable. */
+  subagentStatus?: SubagentStatusContextValue;
 }) {
   const effectiveHistoryKey = historyKey ?? "timeline";
   const scopedRevealRequest = revealRequest?.historyKey === effectiveHistoryKey ? revealRequest : null;
@@ -620,6 +625,7 @@ export const EventTimeline = memo(function EventTimeline({
     <HandoffContext.Provider value={handoff}>
     <TimelineSessionLinkContext.Provider value={onOpenSession}>
     <InsertReplyContext.Provider value={onInsertReply}>
+    <SubagentStatusContext.Provider value={subagentStatus ?? DEFAULT_SUBAGENT_STATUS}>
     <TurnRetryContext.Provider value={turnRetry}>
     <TranscriptImageCacheProvider key={effectiveHistoryKey} enabled={historyKey !== undefined}>
     <EventTimelineBody
@@ -652,6 +658,7 @@ export const EventTimeline = memo(function EventTimeline({
     />
     </TranscriptImageCacheProvider>
     </TurnRetryContext.Provider>
+    </SubagentStatusContext.Provider>
     </InsertReplyContext.Provider>
     </TimelineSessionLinkContext.Provider>
     </HandoffContext.Provider>
@@ -983,6 +990,10 @@ const TimelineSessionLinkContext = createContext<((sessionId: string) => void) |
 
 /** Side Chat's Insert into Draft on every top-level reply (#2862); absent in the main transcript. */
 const InsertReplyContext = createContext<((item: AgentReplyItem) => void) | undefined>(undefined);
+/** What an agent row needs to read the same worker word as the Agents roster (#2857). A transcript
+ * shown outside its session (a run, a pod, Side Chat) assumes a live runner and no requests. */
+const DEFAULT_SUBAGENT_STATUS: SubagentStatusContextValue = { sessionStatus: "running", runnerOnline: true, attention: new Map() };
+const SubagentStatusContext = createContext<SubagentStatusContextValue>(DEFAULT_SUBAGENT_STATUS);
 
 function TimelineClockProvider({ enabled, sessionActive, driver, children }: {
   enabled: boolean;
@@ -2036,11 +2047,16 @@ function flattenTimelineItemRows(
   return rows;
 }
 
-/** The subagent vocabulary (§11.2) for an agent call: the provider's lifecycle when it reported
- * one, otherwise the call's own status. An unreachable agent is Lost, as in the Agents panel. */
-export function subagentStatusMeta(tool: Pick<ToolItem, "status" | "subagentLifecycle">) {
-  const lifecycle = deriveSubagentLifecycle(tool.status, "running", true, tool.subagentLifecycle);
-  return statusMeta("job", lifecycle === "unreachable" ? "lost" : lifecycle);
+/** The worker word (§11.2) for an agent call, as the Agents roster reads it (#2857): the provider's
+ * lifecycle when it reported one, otherwise the call's own status, then its pending request and its
+ * runner. */
+export function subagentStatusMeta(
+  tool: Pick<ToolItem, "toolCallId" | "status" | "subagentLifecycle">,
+  context: SubagentStatusContextValue = DEFAULT_SUBAGENT_STATUS,
+) {
+  const lifecycle = deriveSubagentLifecycle(tool.status, context.sessionStatus, context.runnerOnline, tool.subagentLifecycle);
+  return workerStatusMeta(subagentWorkerStatus({ lifecycle, availability: context.runnerOnline ? "live" : "recorded" },
+    context.attention.get(tool.toolCallId)));
 }
 
 /**
@@ -2061,7 +2077,7 @@ function SubagentSummary({ tool, open, onToggle, onOpen }: {
   const role = tool.subagentRole ? titleCaseLabel(tool.subagentRole) : undefined;
   const steps = foldRetries(tool.children ?? []).filter((step) => timelineItemRendersRow(step.item)).length;
   const stepCount = `${steps} Step${steps === 1 ? "" : "s"}`;
-  const status = subagentStatusMeta(tool);
+  const status = subagentStatusMeta(tool, useContext(SubagentStatusContext));
   const span = useStepSpan(tool.startedAt, tool.lastActivityAt, tool.completedAt, status.pulse === true);
   return (
     <div className="tl-agent">
