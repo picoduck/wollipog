@@ -27,6 +27,7 @@ import type {
   UiToControlPlane,
 } from "@wollipog/protocol";
 import { pendingRequests } from "@wollipog/protocol";
+import { reconcileQuestionDrafts } from "./question-drafts.js";
 import { CONTROL_PLANE_WS } from "./config.js";
 import { expireFollowTailAnchor } from "./useFollowTail.js";
 import { DEVICE_TOKEN_CHANGED_EVENT, deviceToken } from "./device-token.js";
@@ -1968,6 +1969,18 @@ export class Store {
       for (const spoken of this.backfillFences) spoken.add(action.msg.sessionId);
     }
     let next = reducer(this.state, action);
+    if (action.type === "msg") {
+      const msg = action.msg;
+      // Projected questions omit schemas. Reconciliation checks their occurrence only,
+      // retaining drafts until a full detail read can validate the schema.
+      const sessions = msg.type === "session_upsert" ? [msg.session]
+        : msg.type === "snapshot" ? msg.sessions
+        : msg.type === "session_snapshot_page" && next !== this.state ? msg.sessions : [];
+      for (const session of sessions) {
+        reconcileQuestionDrafts(session.id, pendingRequests(session.pendingApproval), this.instanceScope);
+      }
+      if (msg.type === "session_removed") reconcileQuestionDrafts(msg.sessionId, [], this.instanceScope);
+    }
     if (next === this.state) return;
     // Explicit resets also cover rolling senders that omit the epoch. Their authoritative
     // replacement must invalidate an inactive slice even when metadata still names its old epoch.

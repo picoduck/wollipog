@@ -383,6 +383,8 @@ export function RequestDock({
             sessionId={session.id}
             requestId={expanded.requestId}
             occurrenceId={expanded.occurrenceId}
+            requestedAt={expanded.requestedAt}
+            recoveryId={expanded.recoveryId}
             questions={questionsFor?.(expanded) ?? expanded.questions ?? []}
             isAsync={expanded.async}
             recoveryReason={expanded.recoveryReason}

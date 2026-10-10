@@ -7,6 +7,7 @@ import React, {
   useEffect,
   useId,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type KeyboardEvent,
@@ -16,6 +17,7 @@ import React, {
   type RefObject,
 } from "react";
 import { useApi } from "../api-context.js";
+import { useInstanceScope } from "../instance-scope.js";
 import { KEYBOARD_EDITABLE, TOUCH_PHONE_MEDIA } from "../mobile-viewport.js";
 import {
   clearQuestionDrafts,
@@ -24,6 +26,7 @@ import {
   questionDraftAnswers,
   questionDraftSelections,
   questionDraftText,
+  questionDraftIdentity,
   storedQuestionDrafts,
   storedQuestionStep,
   storeQuestionDrafts,
@@ -48,6 +51,8 @@ export interface ComposerQuestionResponseProps {
   sessionId: string;
   requestId: string;
   occurrenceId?: string;
+  requestedAt?: number;
+  recoveryId?: string;
   isAsync?: boolean;
   questions: AgentQuestion[];
   runnerOnline: boolean;
@@ -86,7 +91,7 @@ function withDraft(
   return next;
 }
 
-/** Persist page-lifetime answer drafts without ever putting secret values in shared storage. */
+/** Share non-secret answer drafts while keeping secret values in this mounted response surface. */
 function persistDrafts(
   sessionId: string,
   requestId: string,
@@ -152,6 +157,8 @@ export function ComposerQuestionResponse({
   sessionId,
   requestId,
   occurrenceId,
+  requestedAt,
+  recoveryId,
   isAsync,
   questions,
   runnerOnline,
@@ -165,7 +172,10 @@ export function ComposerQuestionResponse({
   recovery = false,
 }: ComposerQuestionResponseProps) {
   const api = useApi();
-  const answerKey = isAsync && occurrenceId ? `${requestId}:${occurrenceId}` : requestId;
+  const instanceScope = useInstanceScope();
+  const operationKey = isAsync && occurrenceId ? `${requestId}:${occurrenceId}` : requestId;
+  const answerKey = useMemo(() => questionDraftIdentity(requestId, questions, occurrenceId, requestedAt, instanceScope),
+    [requestId, questions, occurrenceId, requestedAt, instanceScope]);
   const ids = useId().replace(/:/g, "");
   const [draftState, setDraftState] = useState(() => ({
     requestId: answerKey,
@@ -185,8 +195,9 @@ export function ComposerQuestionResponse({
     // A committed question owns its response only until replacement or unmount. A fresh
     // token also prevents an earlier incarnation of the same request from regaining ownership.
     liveRequestRef.current = {};
+    operationPendingRef.current = null;
     return () => { liveRequestRef.current = null; };
-  }, [answerKey, sessionId]);
+  }, [answerKey, sessionId, recoveryId]);
 
   useEffect(() => {
     setDraftState({ requestId: answerKey, values: storedQuestionDrafts(sessionId, answerKey) });
@@ -197,6 +208,11 @@ export function ComposerQuestionResponse({
     setBusy(false);
     operationPendingRef.current = null;
   }, [answerKey, sessionId]);
+
+  useEffect(() => {
+    setBusy(false);
+    setSubmissionError(null);
+  }, [recoveryId]);
 
   useEffect(() => {
     const entering = active && !previousActiveRef.current;
@@ -320,7 +336,7 @@ export function ComposerQuestionResponse({
     if (operationPendingRef.current === answerKey || !runnerOnline) return;
     const submittedRequestId = requestId;
     const submittedRequest = liveRequestRef.current;
-    const releaseOperation = claimQuestionResponseOperation(sessionId, answerKey);
+    const releaseOperation = claimQuestionResponseOperation(sessionId, operationKey);
     if (!releaseOperation) {
       setSubmissionError(QUESTION_CARD_COPY.alreadySending);
       focusSoon(inputRef);

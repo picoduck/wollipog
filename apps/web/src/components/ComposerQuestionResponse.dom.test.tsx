@@ -7,7 +7,7 @@ import { Window } from "happy-dom";
 import type { AgentQuestion, SessionView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
-import { clearQuestionDrafts, storedQuestionDrafts, storedQuestionStep, storeQuestionStep } from "../question-response.js";
+import { clearQuestionDrafts, questionDraftIdentity, storedQuestionDrafts, storedQuestionStep, storeQuestionStep } from "../question-response.js";
 import { ComposerQuestionResponse, answerSelectionSummary } from "./ComposerQuestionResponse.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 
@@ -349,7 +349,7 @@ test("several questions step with Back from question 2, and a masked secret surv
     await act(async () => { row(container, "Production").click(); });
     await act(async () => { buttonNamed(container, "Next").click(); });
     assert.equal(container.querySelector(".answer-step")?.textContent, "Question 2 of 3");
-    assert.equal(storedQuestionStep("session-1", "ask-flow"), 1, "the step is kept in the request's draft");
+    assert.equal(storedQuestionStep("session-1", questionDraftIdentity("ask-flow", questions)), 1, "the step is kept in the request's draft");
     await act(async () => { buttonNamed(container, "Back").click(); });
     assert.equal(container.querySelector(".answer-step")?.textContent, "Question 1 of 3");
     assert.equal(row(container, "Production").checked, true);
@@ -361,7 +361,7 @@ test("several questions step with Back from question 2, and a masked secret surv
     assert.equal(input.type, "password");
     assert.equal(buttonNamed(container, "Submit Answers").textContent, "Submit Answers");
     await act(async () => setInputValue(input, "page-only-secret"));
-    assert.deepEqual(storedQuestionDrafts("session-1", "ask-flow"), {
+    assert.deepEqual(storedQuestionDrafts("session-1", questionDraftIdentity("ask-flow", questions)), {
       target: { kind: "choice", labels: ["Production"] },
       region: { kind: "choice", labels: ["East"] },
     });
@@ -489,7 +489,7 @@ test("Show Context shrinks the panel to its head and keeps the selection, the ty
     { id: "target", question: "Choose a target", options: [{ label: "Staging" }, { label: "Production" }], allowOther: true },
   ];
   try {
-    storeQuestionStep("session-1", "ask-context", 1);
+    storeQuestionStep("session-1", questionDraftIdentity("ask-context", questions), 1);
     await act(async () => root.render(<Harness client={{ ...api } as ApiClient} questions={questions} requestId="ask-context" />));
     const panel = container.querySelector<HTMLElement>(".composer-answer")!;
     assert.equal(container.querySelector(".answer-step")?.textContent, "Question 2 of 2", "the step comes from the draft");

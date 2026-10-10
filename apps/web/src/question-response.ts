@@ -241,16 +241,17 @@ export function questionDraftAnswers(
   return { answers, errors };
 }
 
-/** One request's draft: the answers by question id, and the Interactive Form's step (#2196), so a
- * card that remounts returns to the question it was on. */
-interface StoredQuestionDraft {
-  values: Record<string, QuestionResponseDraft>;
-  step: number;
-}
-
-const questionDraftStore = new Map<string, StoredQuestionDraft>();
+/** Reload-safe non-secret drafts shared by the question response surfaces. */
+export {
+  questionDraftIdentity,
+  reconcileQuestionDrafts,
+  storedQuestionDrafts,
+  storedQuestionStep,
+  storeQuestionDrafts,
+  storeQuestionStep,
+  clearQuestionDrafts,
+} from "./question-drafts.js";
 const pendingQuestionOperations = new Map<string, { token: symbol; expiresAt: number }>();
-const QUESTION_DRAFT_LIMIT = 50;
 const QUESTION_OPERATION_LEASE_MS = 60_000;
 
 function draftKey(sessionId: string, requestId: string): string {
@@ -274,43 +275,4 @@ export function claimQuestionResponseOperation(
     released = true;
     if (pendingQuestionOperations.get(key)?.token === token) pendingQuestionOperations.delete(key);
   };
-}
-
-/** Page-lifetime drafts let the question surface survive transcript virtualization. */
-export function storedQuestionDrafts(sessionId: string, requestId: string): Record<string, QuestionResponseDraft> {
-  return structuredClone(questionDraftStore.get(draftKey(sessionId, requestId))?.values ?? {});
-}
-
-/** The Interactive Form's step for this request: 0 until a step was stored. */
-export function storedQuestionStep(sessionId: string, requestId: string): number {
-  return questionDraftStore.get(draftKey(sessionId, requestId))?.step ?? 0;
-}
-
-function storeQuestionDraft(sessionId: string, requestId: string, update: Partial<StoredQuestionDraft>): void {
-  const key = draftKey(sessionId, requestId);
-  const current = questionDraftStore.get(key);
-  questionDraftStore.delete(key);
-  questionDraftStore.set(key, {
-    values: update.values ? structuredClone(update.values) : current?.values ?? {},
-    step: update.step ?? current?.step ?? 0,
-  });
-  while (questionDraftStore.size > QUESTION_DRAFT_LIMIT) {
-    questionDraftStore.delete(questionDraftStore.keys().next().value!);
-  }
-}
-
-export function storeQuestionDrafts(
-  sessionId: string,
-  requestId: string,
-  values: Record<string, QuestionResponseDraft>,
-): void {
-  storeQuestionDraft(sessionId, requestId, { values });
-}
-
-export function storeQuestionStep(sessionId: string, requestId: string, step: number): void {
-  storeQuestionDraft(sessionId, requestId, { step });
-}
-
-export function clearQuestionDrafts(sessionId: string, requestId: string): void {
-  questionDraftStore.delete(draftKey(sessionId, requestId));
 }

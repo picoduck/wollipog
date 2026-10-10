@@ -11,7 +11,7 @@ import { assertNoDomNode } from "../dom-test-assertions.js";
 import { viewPath } from "../navigation.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { loadEvidenceReviewDraft, saveEvidenceReviewDraft } from "../evidence-review-drafts.js";
-import { clearQuestionDrafts, storedQuestionDrafts } from "../question-response.js";
+import { clearQuestionDrafts, questionDraftIdentity, storedQuestionDrafts } from "../question-response.js";
 import { useEvidenceDraftRetirement } from "./SessionApproval.js";
 import { dockRequests } from "./requests/RequestDock.js";
 import { SessionRequestPanel, sessionRequestPanelKey } from "./SessionRequestPanel.js";
@@ -671,7 +671,8 @@ test("switching between descendant questions preserves each request's draft", as
       firstInput.value = "Keep this draft";
       fireDomEvent.change(firstInput, { target: { value: "Keep this draft" } } as never);
     });
-    const storedDraft = storedQuestionDrafts("child-one", "question-one").response;
+    const storedDraft = storedQuestionDrafts("child-one", questionDraftIdentity("question-one", requests[0]!.request.questions ?? [],
+      requests[0]!.request.occurrenceId, requests[0]!.request.requestedAt)).response;
     assert.equal(storedDraft?.kind === "other" ? storedDraft.value : undefined, "Keep this draft");
     const step = (name: string) => [...container.querySelectorAll<HTMLButtonElement>("button")]
       .find((button) => button.getAttribute("aria-label") === name)!;

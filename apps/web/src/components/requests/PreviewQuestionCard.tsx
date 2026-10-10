@@ -1,7 +1,8 @@
 import React, { useEffect, useId, useRef, useState, type MutableRefObject, type ReactNode, type Ref } from "react";
 import type { AgentQuestion, PendingApproval, SessionView } from "@wollipog/protocol";
 import { useApi } from "../../api-context.js";
-import { claimQuestionResponseOperation, clearQuestionDrafts } from "../../question-response.js";
+import { claimQuestionResponseOperation, clearQuestionDrafts, questionDraftIdentity } from "../../question-response.js";
+import { useInstanceScope } from "../../instance-scope.js";
 import { Notice } from "../Notice.js";
 import { useSessionResponseRefusal } from "../SessionApproval.js";
 import { QUESTION_CARD_COPY } from "./QuestionStep.js";
@@ -54,6 +55,8 @@ export function PreviewQuestionCard({
   const unavailable = !runnerOnline ? QUESTION_CARD_COPY.runnerOffline : refusal;
   // An asynchronous question's answer key is its occurrence, as on the session's question card.
   const answerKey = request.async && request.occurrenceId ? `${request.requestId}:${request.occurrenceId}` : request.requestId;
+  const draftIdentity = questionDraftIdentity(request.requestId, questions, request.occurrenceId,
+    request.requestedAt, useInstanceScope());
 
   const dismiss = async () => {
     if (unavailable !== null) return;
@@ -67,7 +70,7 @@ export function PreviewQuestionCard({
         answers: {},
         action: "dismiss",
       });
-      clearQuestionDrafts(sessionId, answerKey);
+      clearQuestionDrafts(sessionId, draftIdentity);
       onSessionUpdate?.(updated);
     } catch (cause) {
       setFailure((cause as Error).message);

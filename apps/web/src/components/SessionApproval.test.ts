@@ -3,7 +3,7 @@ import test from "node:test";
 import React from "react";
 import type { SessionView } from "@wollipog/protocol";
 import { renderToStaticMarkup } from "react-dom/server";
-import { clearQuestionDrafts, storeQuestionStep } from "../question-response.js";
+import { clearQuestionDrafts, questionDraftIdentity, storeQuestionStep } from "../question-response.js";
 import {
   approvalFocusDestination,
   SessionApprovalRegion,
@@ -117,7 +117,7 @@ test("question choices are native radios and checkboxes in labelled ChoiceRows, 
   assert.match(first, /Question 1 of 2/);
   assert.doesNotMatch(first, /select all that apply|question-chip/);
 
-  storeQuestionStep("s1", "ask-step-2", 1);
+  storeQuestionStep("s1", questionDraftIdentity("ask-step-2", questions), 1);
   try {
     const second = render("ask-step-2");
     assert.match(second, /class="choice-rows" role="group" aria-labelledby="[^"]+-title"/);
@@ -199,7 +199,7 @@ test("provider form questions render context and constrained free-text controls,
     },
   ];
   const render = (step: number) => {
-    storeQuestionStep("s-form", "ask-form", step);
+    storeQuestionStep("s-form", questionDraftIdentity("ask-form", questions), step);
     try {
       return renderToStaticMarkup(React.createElement(SessionQuestionBanner, {
         sessionId: "s-form",

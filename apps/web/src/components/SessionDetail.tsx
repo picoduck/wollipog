@@ -7334,6 +7334,8 @@ function SessionDetailLoaded({
                   sessionId={session.id}
                   requestId={pendingQuestion.requestId}
                   occurrenceId={pendingQuestion.occurrenceId}
+                  requestedAt={pendingQuestion.requestedAt}
+                  recoveryId={pendingQuestion.recoveryId}
                   isAsync={pendingQuestion.async}
                   questions={composerQuestions}
                   runnerOnline={runnerOnline}
