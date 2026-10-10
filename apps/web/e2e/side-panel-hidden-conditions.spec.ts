@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { waitForSessionPreview } from "./session-readiness.js";
 
 /**
  * Conditions that arrive while the side panel hides the chat column (#2894; docs/design-system.md
@@ -15,6 +16,7 @@ async function openSession(page: Page, width: number, height = 860) {
   await page.reload();
   await page.getByRole("button", { name: /Alpha Session/ }).first().click();
   const open = page.getByRole("button", { name: "Open Session", exact: true });
+  await waitForSessionPreview(page);
   if (await open.isVisible()) await open.click();
   await expect(page.locator(".composer-input")).toBeAttached();
 }
