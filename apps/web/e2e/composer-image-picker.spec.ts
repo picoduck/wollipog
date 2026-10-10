@@ -1,3 +1,4 @@
+import { waitForSessionPreview } from "./session-readiness.js";
 import { devices, expect, test, type Page } from "@playwright/test";
 import { openSessionWithTray } from "./fixtures/composer-tray.js";
 import { DECODABLE_PNG, UNDRAWABLE_PNG } from "./fixtures/prompt-image.js";
@@ -34,6 +35,7 @@ async function openSession(page: Page, supportsImages = true) {
   );
   await page.getByRole("button", { name: /Alpha Session/ }).click();
   const expand = page.getByRole("button", { name: "Open Session", exact: true });
+  await waitForSessionPreview(page);
   if (await expand.isVisible()) await expand.click();
   await expect(page.locator(".composer-input")).toBeEnabled();
 }
@@ -220,6 +222,7 @@ test("picked images survive navigation and remount, then send through the prompt
   await page.getByRole("button", { name: "Back to Sessions" }).click();
   await page.getByRole("button", { name: /Alpha Session/ }).click();
   const expand = page.getByRole("button", { name: "Open Session", exact: true });
+  await waitForSessionPreview(page);
   if (await expand.isVisible()) await expand.click();
   await expect(thumbnails(page)).toHaveCount(1);
 

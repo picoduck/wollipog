@@ -1,3 +1,4 @@
+import { waitForSessionPreview } from "./session-readiness.js";
 import { expect, test, type Page } from "@playwright/test";
 import { dialogMotionSettled } from "./dialog-motion.js";
 import { join } from "node:path";
@@ -24,6 +25,7 @@ async function openSession(page: Page, scenario = "preview-follow", params: Reco
   await page.reload();
   await page.getByRole("button", { name: /Alpha Session/ }).click();
   const expand = page.getByRole("button", { name: "Open Session", exact: true });
+  await waitForSessionPreview(page);
   if (await expand.isVisible()) await expand.click();
   await expect(page.locator(".session-bar")).toBeVisible();
   if (evidenceTheme === "dark" || evidenceTheme === "light") {
@@ -115,9 +117,12 @@ for (const viewport of [
     await page.reload();
     await page.getByRole("button", { name: /Alpha Session/ }).click();
     const expand = page.getByRole("button", { name: "Open Session", exact: true });
+    await waitForSessionPreview(page);
     if (await expand.isVisible()) await expand.click();
     const toggle = page.getByRole("button", { name: "Side Panel", exact: true, pressed: false });
     await expect(toggle).toBeVisible();
+
+    await expect(page.locator(".session-detail.expanded .detail-columns")).toBeVisible();
 
     expect(await page.evaluate(() => {
       const observed: string[] = [];
@@ -170,6 +175,7 @@ test("the Requests panel follows descendant polling, and says Nothing Waiting on
   });
   await page.getByRole("button", { name: /Alpha Session/ }).click();
   const expand = page.getByRole("button", { name: "Open Session", exact: true });
+  await waitForSessionPreview(page);
   if (await expand.isVisible()) await expand.click();
   await expect.poll(() => page.evaluate(() =>
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.descendantRequestCallCount())).toBe(1);

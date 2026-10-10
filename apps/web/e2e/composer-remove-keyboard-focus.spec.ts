@@ -1,3 +1,4 @@
+import { waitForSessionPreview } from "./session-readiness.js";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { DECODABLE_PNG } from "./fixtures/prompt-image.js";
 
@@ -21,6 +22,7 @@ async function openSession(page: Page) {
   }));
   await page.getByRole("button", { name: /Alpha Session/ }).click();
   const expand = page.getByRole("button", { name: "Open Session", exact: true });
+  await waitForSessionPreview(page);
   if (await expand.isVisible()) await expand.click();
   const composer = page.locator(".composer-input");
   await expect(composer).toBeEnabled();

@@ -1,3 +1,4 @@
+import { waitForSessionPreview } from "./session-readiness.js";
 import { expect, test, type Page } from "@playwright/test";
 
 /** Claude Code's session catalog once the runner forwards its `system/init` list (#1224). */
@@ -22,6 +23,7 @@ async function openClaudeSession(page: Page) {
   await page.reload();
   await page.getByRole("button", { name: /Alpha Session/ }).click();
   const expand = page.getByRole("button", { name: "Open Session", exact: true });
+  await waitForSessionPreview(page);
   if (await expand.isVisible()) await expand.click();
   await expect(page.locator(".composer-input")).toBeEnabled();
   await page.evaluate((catalog) => window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {

@@ -1,3 +1,4 @@
+import { waitForSessionPreview } from "./session-readiness.js";
 import { expect, test, type Page } from "@playwright/test";
 
 /**
@@ -32,6 +33,7 @@ async function openBar(
   });
   await page.getByRole("button", { name: options.session ?? /Alpha Session/ }).click();
   const expand = page.getByRole("button", { name: "Open Session", exact: true });
+  await waitForSessionPreview(page);
   if (await expand.isVisible()) await expand.click();
   await expect(page.locator("header.session-bar")).toBeVisible();
 }

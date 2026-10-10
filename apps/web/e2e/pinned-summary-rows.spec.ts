@@ -1,3 +1,4 @@
+import { waitForSessionPreview } from "./session-readiness.js";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
 // These cases exercise the explicitly enabled privacy mode. Default-off behavior has separate coverage.
@@ -26,6 +27,7 @@ async function openSession(page: Page, width: number, storage: Record<string, st
   await page.goto(fixture);
   await page.getByRole("button", { name: /Alpha Session/ }).first().click();
   const expand = page.getByRole("button", { name: "Open Session", exact: true });
+  await waitForSessionPreview(page);
   if (await expand.isVisible()) await expand.click();
   await expect(page.locator(".md table")).toBeVisible();
 }

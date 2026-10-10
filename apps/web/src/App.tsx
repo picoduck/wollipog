@@ -40,6 +40,7 @@ import { DesktopExternalLinkRouter } from "./components/DesktopExternalLinkRoute
 import { useWindowTitle, windowDragRegion } from "./desktop-window.js";
 import { ErrorBoundary } from "./components/ErrorBoundary.js";
 import { LazyDialogBoundary } from "./components/LazyDialogBoundary.js";
+import { LazyRouteFocusRecovery, LazyRouteLoading } from "./components/LazyRouteLoading.js";
 import { useSearchShortcut } from "./use-search-shortcut.js";
 import { SettingsTrigger } from "./components/SettingsTrigger.js";
 import { useTheme } from "./components/ThemeProvider.js";
@@ -101,7 +102,6 @@ import {
 import type { NewSessionPreset } from "./components/NewSessionDialog.js";
 import { useNotifySetting } from "./use-notify-setting.js";
 import { State } from "./components/State.js";
-import { PageHeader } from "./components/PageHeader.js";
 
 const ApprovalsPanel = lazy(() => import("./components/ApprovalsPanel.js").then((module) => ({ default: module.ApprovalsPanel })));
 const RunnersView = lazy(() => import("./components/RunnersView.js").then((module) => ({ default: module.RunnersView })));
@@ -496,9 +496,11 @@ export function Shell() {
   // heading, after which this one sees a live element and declines.
   const path = viewPath(view);
   const previousPath = useRef(path);
+  const pendingRouteTitleFocus = useRef(false);
   useEffect(() => {
     if (previousPath.current === path) return;
     previousPath.current = path;
+    pendingRouteTitleFocus.current = document.activeElement === document.body;
     rescueFocusTo(document.getElementById("page-title"));
   }, [path]);
 
@@ -841,7 +843,8 @@ export function Shell() {
             // The Session's own bar owns its title (the phone top bar sits outside this boundary).
             pageTitle={view.name === "session" ? undefined : viewTitle(view, entityTitle)}
           >
-          <Suspense fallback={<div className="page"><PageHeader title={viewTitle(view, entityTitle)} /><State variant="loading">Loading…</State></div>}>
+          <Suspense fallback={<LazyRouteLoading title={viewTitle(view, entityTitle)} pending={pendingRouteTitleFocus} />}>
+          <LazyRouteFocusRecovery path={path} pending={pendingRouteTitleFocus} />
           {(view.name === "inbox" || view.name === "session" || view.name === "board") && (
             /* InboxView draws the Sessions page header, whose controls are its state (#2159). */
             <div className="page full fill">

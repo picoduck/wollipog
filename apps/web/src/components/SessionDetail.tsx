@@ -780,6 +780,8 @@ export function SessionDetail(props: SessionDetailProps) {
     return () => {
       current = false;
       detailLoad.cancel();
+      // A cancelled setup must not suppress StrictMode's replacement lookup. Settled reads
+      // retain their key, so loading an archived row does not immediately fetch it again.
       if (!complete && lastLookupKeyRef.current === lookupKey) lastLookupKeyRef.current = null;
     };
   // Summary pages and live list updates can replace a row during its lookup. They must not cancel

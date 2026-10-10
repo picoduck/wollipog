@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import { waitForSessionPreview } from "./session-readiness.js";
 
 /**
  * The one keycap of docs/design-system.md §11.5 (#1956), measured in a browser: every `<kbd>` is
@@ -80,6 +81,7 @@ test.describe("with a fine pointer at 1440px", () => {
 
   test("an inline hint and the Jump to Latest control draw the one keycap", async ({ page }) => {
     await page.goto(PREVIEW);
+    await waitForSessionPreview(page);
     await page.locator(".inbox-list").focus();
     await page.keyboard.press("Shift+Space");
     await expect(page.locator(".detail-scroll[data-follow-tail-state]")).toHaveAttribute("data-follow-tail-state", "previewing");
@@ -160,6 +162,7 @@ for (const width of [390, 1440]) {
       await expect(page.locator(".inbox-search kbd")).toBeHidden();
       if (width === 1440) {
         await page.goto(PREVIEW);
+        await waitForSessionPreview(page);
         await page.locator(".inbox-list").focus();
         await page.keyboard.press("Shift+Space");
         // Jump to Latest keeps its label on a touch screen and drops its End keycap.

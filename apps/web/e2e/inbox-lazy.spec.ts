@@ -2,6 +2,53 @@ import { expect, test } from "@playwright/test";
 import { installInboxFixture } from "./inbox-production-fixture.js";
 import { encodeResourceId } from "../src/navigation.js";
 
+for (const focusDestination of ["page title", "deliberately moved control", "deliberately blurred body"] as const) {
+  test(`a delayed route preserves ${focusDestination} focus @production`, async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await installInboxFixture(page);
+    let release!: () => void;
+    const pending = new Promise<void>((done) => { release = done; });
+    await page.route("**/assets/ArchivedSessionsView-*.js", async (route) => { await pending; await route.continue(); });
+    await page.goto("/index.html");
+    await expect(page.getByText("Synthetic Session 1", { exact: true })).toBeVisible();
+    await expect(page.locator(".inbox-preview-skeleton")).toBeHidden();
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    const digit = await page.getByRole("link", { name: "Archived Sessions", exact: true }).getAttribute("aria-keyshortcuts");
+    await page.keyboard.press(digit!.trim());
+    const title = page.getByRole("heading", { name: "Archived Sessions", exact: true });
+    // A keyboard reader can focus the heading while the view's script is pending.
+    await title.focus();
+    await expect(title).toBeFocused();
+    const sessions = page.getByRole("link", { name: "Sessions", exact: true });
+    if (focusDestination === "deliberately moved control") await sessions.focus();
+    if (focusDestination === "deliberately blurred body") await title.evaluate((element) => element.blur());
+    release();
+    await expect(page.locator("[data-route-loading]")).toBeHidden();
+    if (focusDestination === "deliberately blurred body") {
+      expect(await page.evaluate(() => document.activeElement === document.body)).toBe(true);
+    } else {
+      await expect(focusDestination === "deliberately moved control" ? sessions : title).toBeFocused();
+    }
+  });
+}
+
+test("desktop row selection survives a delayed preview and opens the full composer @production", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await installInboxFixture(page);
+  let release!: () => void;
+  const pending = new Promise<void>((done) => { release = done; });
+  await page.route("**/assets/SessionDetail-*.js", async (route) => { await pending; await route.continue(); });
+  await page.goto("/index.html");
+  await page.getByRole("button", { name: /Synthetic Session 2/ }).click();
+  await expect(page.locator(".inbox-preview-skeleton")).toBeVisible();
+  release();
+  await page.getByRole("button", { name: "Open Session", exact: true }).click();
+  await expect(page.locator(".composer-input")).toBeEnabled();
+  await page.locator(".composer-input").fill("A draft after loading");
+  await expect(page.locator(".composer-input")).toHaveValue("A draft after loading");
+  await expect(page).toHaveURL(new RegExp(`/sessions/~${encodeResourceId("synthetic-2")}$`));
+});
+
 test("phone inbox defers secondary views and shows loading while Settings arrives @production", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await installInboxFixture(page);
