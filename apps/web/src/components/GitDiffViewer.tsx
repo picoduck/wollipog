@@ -491,7 +491,7 @@ function DiffFileSection({
     : undefined;
 
   return (
-    <section className="dfile" ref={sectionRef} data-path={file.path} aria-label={file.path}>
+    <section className="dfile" ref={sectionRef} data-path={file.path}>
       <div className="dfile-head">
         <button
           ref={headRef}
