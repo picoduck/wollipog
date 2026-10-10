@@ -57,6 +57,7 @@ declare global {
       reveal(requestId: string): boolean;
       /** A request arrives while the dock is pending (#2195). */
       addRequest(kind: "sign-in" | "budget"): void;
+      setKeyboard(open: boolean): void;
     };
   }
 }
@@ -184,6 +185,7 @@ let openedHeldChild: string | null = null;
 let retries = 0;
 let clearHold: (sessionId: string) => void = () => {};
 let addRequest: (kind: "sign-in" | "budget") => void = () => {};
+let setKeyboard: (open: boolean) => void = () => {};
 const submissions: unknown[] = [];
 
 function evidenceSession(): SessionView {
@@ -264,7 +266,9 @@ function evidenceSession(): SessionView {
 function issueScopeSession(): SessionView {
   const base=evidenceSession();
   const snapshot={category:"campaign_issue_scope" as const,repository:"team/repo",expectedRevision:1,before:[123,124],additions:[125],removals:[124],
-    explanation:"Update the intended epic members.",affectedAssignments:[{sessionId:"child",issue:124}],affectedDecisions:["closure-member-124"],activeChildren:[{sessionId:"child",title:"Implement Member Work",assignmentDigest:"a".repeat(64)}]};
+    explanation: tallBody ? Array.from({ length: 12 }, (_, index) =>
+      `Review scope item ${index + 1}: confirm the requested work, dependencies, and affected assignments before approving this campaign change.`).join("\n\n")
+      : "Update the intended epic members.",affectedAssignments:[{sessionId:"child",issue:124}],affectedDecisions:["closure-member-124"],activeChildren:[{sessionId:"child",title:"Implement Member Work",assignmentDigest:"a".repeat(64)}]};
   return {...base,title:"Campaign Issue Scope",pendingApproval:{...base.pendingApproval!,title:"Campaign Issue Scope Approval Required",context:{input:JSON.stringify(snapshot)},
     workflowDecision:{...base.pendingApproval!.workflowDecision!,category:"campaign_issue_scope",resourceSnapshot:snapshot,controllingSessionId:base.id,authority:"human"}}};
 }
@@ -765,6 +769,8 @@ function ReadingKeys({ scrollRef }: {
 }
 
 function Fixture() {
+  const [keyboard, updateKeyboard] = useState(keyboardOpen);
+  setKeyboard = updateKeyboard;
   const [session, setSession] = useState(() => scenario === "issue-scope" ? issueScopeSession() : scenario === "issue-closure" ? issueClosureSession() : scenario === "continuation"
     ? continuationSession()
     : scenario === "held" || scenario === "both"
@@ -973,7 +979,7 @@ function Fixture() {
         headTrailing={trailing}
         onSessionUpdate={setSession}
         showKeyHints
-        keyboardOpen={keyboardOpen}
+        keyboardOpen={keyboard}
         revealRequestId={revealRequestId}
         followTailState={followTailEnabled ? followTail.state : undefined}
         readerRef={scrollRef}
@@ -1122,6 +1128,7 @@ function Fixture() {
 }
 
 window.__WOLLIPOG_REQUEST_SURFACES_E2E__ = {
+  setKeyboard: (open) => setKeyboard(open),
   openedChild: () => openedChild,
   retries: () => retries,
   submissions: () => submissions,

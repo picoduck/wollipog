@@ -17,7 +17,7 @@ import { useOptionalNavigate, useOptionalStoreSelector } from "../../store.js";
 import { sessionCommandRefusal } from "../../session-command-permissions.js";
 import { useAccessibleMenu } from "../interactions.js";
 import { MenuItem, MenuSurface } from "../Menu.js";
-import { BanIcon, ChevronRightIcon, MoreHorizontalIcon } from "../Icons.js";
+import { BanIcon, ChevronDownIcon, ChevronRightIcon, ChevronUpIcon, MoreHorizontalIcon } from "../Icons.js";
 import { Notice } from "../Notice.js";
 import { BusyButton } from "../ui/BusyButton.js";
 import { ChoiceRows } from "../ui/ChoiceControls.js";
@@ -77,6 +77,8 @@ export interface RequestCardProps {
   /** The dock shows its reading-back strip in the card's place (#2195). The card stays mounted, so a
    * sign-in code being typed or an evidence review keeps its state, but its menu closes. */
   concealed?: boolean;
+  /** Explicit reading mode on the session dock, shared with expanded questions (#2874). */
+  onReadingChange?: (reading: boolean) => void;
   /** Someone else answers this request (an Orchestrator-owned child request, #2206): the card says
    * so in a neutral notice under its title and shows the request's facts, with no actions. */
   readOnlyNotice?: string;
@@ -108,6 +110,7 @@ export function RequestCard({
   intentRef,
   headingRef,
   concealed = false,
+  onReadingChange,
   readOnlyNotice,
   accountUnknown = false,
 }: RequestCardProps) {
@@ -125,6 +128,16 @@ export function RequestCard({
   // The decision in flight lives outside the card, which remounts when another request is expanded
   // and this one comes back; a second decision for the same occurrence is refused until it settles.
   const flightKey = decisionKey(session.id, request.requestId, request.occurrenceId);
+  const [readingKey, setReadingKey] = useState<string | null>(null);
+  const canExpandDecision = request.kind === "workflow_decision" && presentation === "dock";
+  const reading = canExpandDecision && readingKey === flightKey;
+  const onReadingChangeRef = useRef(onReadingChange);
+  onReadingChangeRef.current = onReadingChange;
+  useEffect(() => {
+    if (!reading) return;
+    onReadingChangeRef.current?.(true);
+    return () => onReadingChangeRef.current?.(false);
+  }, [reading]);
   const busy = useDecisionInFlight(flightKey);
   const error = useDecisionFailure(flightKey);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -135,6 +148,7 @@ export function RequestCard({
   }, [concealed]);
   const idPrefix = useId().replace(/:/g, "");
   const titleId = `${idPrefix}-title`;
+  const bodyId = `${idPrefix}-body`;
   const reasonId = `${idPrefix}-reason`;
   const signInReasonId = `${idPrefix}-sign-in-reason`;
   const evidenceReasonId = `${idPrefix}-evidence-reason`;
@@ -417,6 +431,7 @@ export function RequestCard({
       className="request-card"
       data-presentation={presentation}
       data-request-kind={meta.kind}
+      data-decision-expanded={reading ? "" : undefined}
       data-read-only={readOnly ? "" : undefined}
       aria-labelledby={titleId}
       aria-busy={busy !== null || undefined}
@@ -428,14 +443,29 @@ export function RequestCard({
         kind={<><RequestKindIcon request={request} />{meta.label}</>}
         owner={owner}
         time={time}
-        trailing={headTrailing}
+        trailing={canExpandDecision ? <>
+          <button
+            type="button"
+            className="btn sm ghost decision-reading-toggle"
+            aria-label={reading ? REQUEST_CARD_COPY.collapseDecision : REQUEST_CARD_COPY.expandDecision}
+            aria-expanded={reading}
+            aria-controls={`${titleId} ${bodyId}`}
+            onClick={() => setReadingKey(reading ? null : flightKey)}
+          >
+            {reading ? <ChevronDownIcon size={14} /> : <ChevronUpIcon size={14} />}
+            <span className="decision-reading-toggle-label">
+              {reading ? REQUEST_CARD_COPY.collapseDecision : REQUEST_CARD_COPY.expandDecision}
+            </span>
+          </button>
+          {headTrailing}
+        </> : headTrailing}
       />
       <h3 className="request-card-title" id={titleId} ref={headingRef} tabIndex={-1} data-session-request-focus="">
         {evidence && !readOnly ? evidence.title : request.title}
       </h3>
       {readOnly && <Notice tone="neutral" compact>{readOnlyNotice}</Notice>}
       {policyLine && <p className="request-card-policy">{policyLine}</p>}
-      {body.length > 0 && <div className="request-card-body" ref={bodyRef}>{body}</div>}
+      {body.length > 0 && <div className="request-card-body" id={bodyId} ref={bodyRef}>{body}</div>}
       {error && !readOnly && (
         <Notice tone="danger" compact role="alert">
           {REQUEST_CARD_COPY.notSent} {error}
