@@ -919,7 +919,10 @@ Requests, Decision History, and Terminal once #2868 moves it) opens in one frame
   above, which is only the place for the shared `.toolbar` row (§4.7); `.rpanel-scroll`, the tool's
   only vertical scroller; and the optional `.rpanel-foot`, fixed below (Review's commit bar, #2847).
   The body then gives up its own scroll and padding. Nothing inside the scroller scrolls vertically
-  on its own.
+  on its own. On a coarse pointer the foot collapses while a text field inside the scroller has
+  focus, such as the finding editor's textarea (#2907): the keyboard serves that field, so the foot's
+  height goes to the scroller. It returns unchanged when the field loses focus. Focus in the foot's
+  own fields never collapses it, and a fine pointer never does.
 - **Resize handle.** An 8px strip centred on the leading edge that takes no room. On hover a 2px
   line and a grip in `--control-outline`, on keyboard focus the line in `--focus` (with a transparent
   outline for forced colors), and the width in a tooltip while dragging. Arrow keys, Home, End,
