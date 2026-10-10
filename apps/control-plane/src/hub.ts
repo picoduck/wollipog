@@ -1691,8 +1691,8 @@ export class Hub {
     // O(clients × payload) on the streamed-delta hot path.
     if (this.uiClients.size === 0) return;
     const data = JSON.stringify(msg);
-    // A session view carries the receiving principal's command permissions (#1843). Most clients
-    // share one verdict, so serialize once per distinct verdict rather than once per client.
+    // Reuse a projected session only for the same principal and verdict: campaign request
+    // visibility and personal attention can differ even when command permissions match.
     const sessionDataByPermissions = new Map<string, string>();
     for (const [client, info] of this.uiClients) {
       if (!this.isSubscribed(info, msg)) continue;
@@ -1713,7 +1713,7 @@ export class Hub {
         }
         if (projected.type === "session_upsert" && info.principal !== undefined) {
           const session = withSessionCommandPermissions(this.db, info.principal, projected.session);
-          const key = permissionsKey(session) + JSON.stringify(session.attention);
+          const key = JSON.stringify(info.principal) + permissionsKey(session) + JSON.stringify(session.attention);
           const shared = projected === msg ? sessionDataByPermissions.get(key) : undefined;
           clientData = shared ?? JSON.stringify({ ...projected, session } satisfies ControlPlaneToUi);
           if (projected === msg && shared === undefined) sessionDataByPermissions.set(key, clientData);

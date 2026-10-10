@@ -6727,7 +6727,8 @@ export interface SessionView {
   orchestratorPolicy?: OrchestratorCampaignPolicy;
   /** Current effective campaign state. Omitted by older control planes and non-Orchestrators. */
   orchestratorCampaign?: OrchestratorCampaignProjection;
-  /** Authorized aggregate child-request counts on lightweight lists; full campaign state is detail-only. */
+  /** Audience-scoped child-request counts, consistent across summary, detail and live rows.
+   * Full campaign inventory remains detail-only. */
   campaignRequests?: { human: number; orchestrator: number; humanRequestTokens?: string[] };
   /** v196 membership of a campaign descendant in its root campaign's work ledger (#2417), filled by
    * the Read API slice. Omitted for non-members and by older control planes. */

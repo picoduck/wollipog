@@ -4,12 +4,15 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { PROTOCOL_VERSION, DEFAULT_ORCHESTRATOR_DEFAULTS } from "@wollipog/protocol";
+import Fastify from "fastify";
+import { PROTOCOL_VERSION, DEFAULT_ORCHESTRATOR_DEFAULTS, sessionCampaignRequests, campaignHumanAttentionAdded, type SessionView } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub, MAX_UI_BUFFERED_BYTES, serializeUiSnapshot, type Socket } from "./hub.js";
 import { LOCAL_OWNER_USER_ID, PERSONAL_ORGANIZATION_ID, type HumanPrincipal, type AgentPrincipal } from "./identity.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { withSessionCommandPermissions } from "./session-command-permissions.js";
+import { registerVisibleCampaignChildrenHook } from "./visible-campaign-children-hook.js";
+import { registerSessionLookupRoute } from "./session-lookup-route.js";
 
 export const sessionListPrincipal: HumanPrincipal = {
   kind: "human", actorId: LOCAL_OWNER_USER_ID, userId: LOCAL_OWNER_USER_ID, userName: "Synthetic Owner",
@@ -371,4 +374,86 @@ test("dashboard frames are byte bounded, share a principal snapshot, and invalid
       assert.equal(closed,1009);
     }
   } finally { db.close(); }
+});
+
+
+test("campaign summaries, lookup, mutation responses and live rows keep one viewer's request audience", async () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const app = Fastify();
+  try {
+    seedSessionList(db, 2);
+    db.createSession({ id: "root", runnerId: "r", workspaceId: null, agentId: null, title: "Root", useWorktree: false,
+      driver: "codex-app-server", config: {}, now: 3, role: "orchestrator",
+      orchestratorPolicy: resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default") });
+    db.raw().prepare("UPDATE sessions SET parent_session_id='root' WHERE id IN ('s-0','s-1')").run();
+    db.createIdentityMember({ userId: "other-reader", displayName: "Other Reader",
+      organizationId: PERSONAL_ORGANIZATION_ID, role: "operator", now: 4 });
+    db.createIdentityTeam({ teamId: "team", organizationId: PERSONAL_ORGANIZATION_ID, name: "Team",
+      memberUserIds: [LOCAL_OWNER_USER_ID, "other-reader"], now: 4 });
+    db.raw().prepare("UPDATE session_ownership SET owner_kind='team',owner_id='team' WHERE session_id IN ('root','s-0')").run();
+    db.raw().prepare("UPDATE session_ownership SET owner_kind='user',owner_id=? WHERE session_id='s-1'").run(LOCAL_OWNER_USER_ID);
+    for (const id of ["s-0", "s-1"]) {
+      db.setPendingApproval(id, { requestId: id, kind: "authentication", title: "Sign In", options: [] });
+    }
+    const local = { ...sessionListPrincipal, role: "operator" as const };
+    const other = { ...local, actorId: "other-reader", userId: "other-reader", localBootstrap: false };
+    const principals = { local, other };
+    const requestPrincipal = (req: { headers: { authorization?: string } }) =>
+      principals[req.headers.authorization as keyof typeof principals] ?? null;
+    registerVisibleCampaignChildrenHook(app, { db, requestPrincipal });
+    registerSessionLookupRoute(app, { db, requestPrincipal });
+    app.post("/api/sessions/root/title", async () => db.getSession("root"));
+    await app.ready();
+
+    const hub = new Hub(db);
+    const viewers = Object.entries(principals).map(([name, principal]) => {
+      const frames: Array<{ type: string; sessions?: SessionView[]; session?: SessionView; complete?: boolean }> = [];
+      let complete = false;
+      hub.addUiClient({ send(data) {
+        const message = JSON.parse(data);
+        frames.push(message);
+        if (message.complete) complete = true;
+      } }, { principal, deviceId: null, uiProtocolVersion: PROTOCOL_VERSION, close() { assert.fail("closed"); } });
+      return { name, principal, frames, get complete() { return complete; } };
+    });
+    while (viewers.some((viewer) => !viewer.complete)) await new Promise<void>((resolve) => setImmediate(resolve));
+    const summaryFor = (viewer: typeof viewers[number]) => viewer.frames.flatMap((frame) => frame.sessions ?? [])
+      .find((session) => session.id === "root")!;
+    assert.equal(sessionCampaignRequests(summaryFor(viewers[0]!))?.human, 2);
+    assert.equal(sessionCampaignRequests(summaryFor(viewers[1]!))?.human, 1);
+    const full = viewers.map((viewer) => withSessionCommandPermissions(db, viewer.principal, db.getSession("root")!));
+    assert.deepEqual(full[0]!.commandPermissions, full[1]!.commandPermissions,
+      "equal command verdicts do not imply equal child-request audiences");
+    for (const viewer of viewers) {
+      const summary = summaryFor(viewer);
+      for (const request of [
+        { method: "GET" as const, url: "/api/sessions/lookup/by-id?id=root" },
+        { method: "POST" as const, url: "/api/sessions/root/title" },
+      ]) {
+        const response = await app.inject({ ...request, headers: { authorization: viewer.name } });
+        assert.equal(response.statusCode, 200);
+        const body = response.json();
+        const detail = (body.session ?? body) as SessionView;
+        assert.deepEqual(sessionCampaignRequests(detail), sessionCampaignRequests(summary));
+        assert.equal(detail.status, summary.status);
+        assert.equal(campaignHumanAttentionAdded(sessionCampaignRequests(summary), sessionCampaignRequests(detail)), false);
+      }
+    }
+    hub.sessionChanged(db.getSession("root")!, false);
+    const liveFor = (viewer: typeof viewers[number]) => viewer.frames.slice().reverse().find((frame) => frame.type === "session_upsert")!.session!;
+    for (const viewer of viewers) {
+      assert.deepEqual(sessionCampaignRequests(liveFor(viewer)), sessionCampaignRequests(summaryFor(viewer)));
+      assert.equal(campaignHumanAttentionAdded(sessionCampaignRequests(summaryFor(viewer)), sessionCampaignRequests(liveFor(viewer))), false,
+        "summary-to-live hydration cannot announce an unchanged or invisible request");
+    }
+    const before = viewers.map(liveFor);
+    db.setPendingApproval("s-1", { requestId: "private-replacement", kind: "authentication", title: "Sign In", options: [] });
+    hub.sessionChanged(db.getSession("root")!, false);
+    assert.equal(campaignHumanAttentionAdded(sessionCampaignRequests(before[0]!), sessionCampaignRequests(liveFor(viewers[0]!))), true, "a visible replacement still notifies");
+    assert.equal(campaignHumanAttentionAdded(sessionCampaignRequests(before[1]!), sessionCampaignRequests(liveFor(viewers[1]!))), false, "a private replacement never notifies another reader");
+    db.setSessionArchived("root", true, 10);
+    const archived = withSessionCommandPermissions(db, other, db.getSession("root")!);
+    assert.deepEqual(sessionCampaignRequests(archived), sessionCampaignRequests(summaryFor(viewers[1]!)),
+      "authorized archived detail keeps the same scoped request facts");
+  } finally { await app.close(); db.close(); }
 });

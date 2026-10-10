@@ -43,6 +43,16 @@ test("idle Orchestrator campaigns notify when a human request is replaced at the
     "partially clearing human work does not create a new browser notification");
 });
 
+test("summary-to-detail campaign hydration ignores requests outside the reader's audience", () => {
+  const counts = { human: 1, orchestrator: 0, humanRequestTokens: ["visible"] };
+  const summary = session({ status: "idle", projection: "summary", campaignRequests: counts });
+  const detail = session({ status: "idle", campaignRequests: counts, orchestratorCampaign: {
+    pendingRequests: { human: 2, orchestrator: 0, humanRequestTokens: ["visible", "private"] },
+  } as SessionView["orchestratorCampaign"] });
+  assert.equal(notifyDecision(summary, detail), null);
+  assert.equal(notifyDecision(detail, summary), null);
+});
+
 test("compact campaign summaries retain same-count replacement and partial-clear notifications", () => {
   const summary=(humanRequestTokens: string[]) => session({ status: "idle",projection: "summary",
     campaignRequests: { human: humanRequestTokens.length,orchestrator: 0,humanRequestTokens } });

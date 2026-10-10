@@ -10532,6 +10532,11 @@ export class ControlPlaneDb {
     return this.sessionSummaryRead(principal,includeArchived).sessions;
   }
 
+  /** Detail and live rows carry the same audience-scoped list facts as their summary. */
+  campaignRequestsForPrincipal(principal: AuthPrincipal, sessionId: string, includeArchived = false): SessionView["campaignRequests"] {
+    return this.sessionSummaryRead(principal,includeArchived).sessions.find((session) => session.id === sessionId)?.campaignRequests;
+  }
+
   private readonly sessionSummaryReads = new Map<string,{ revision: string; sessions: SessionView[]; json: string; bytes: number }>();
   private sessionSummaryReadBytes = 0;
 
