@@ -1020,7 +1020,11 @@ default (converge on the People & Devices anatomy).
   one-line `plainTextPreview()` of the latest message. The request is a warning inset notice (§13.2):
   the request in `--type-body` with a code line when it has one, then **Approve** and **Deny** as
   the equal pair (§3.1). Approve is the first one-time allow option and Deny the first one-time reject
-  or deny option. A persistent `*_always` option is never relabeled; it stays in the session. A question shows **Answer in Session**. A sign-in shows
+  or deny option. A persistent `*_always` option is never relabeled; it stays in the session. When
+  neither one-time action exists, **Answer in Session** opens the session to review the choices;
+  persistent choices have a plain explanation that they apply to future requests. Opening the
+  session remains available offline and to Viewers, with their response refusal still visible.
+  A question shows **Answer in Session**. A sign-in shows
   one primary **Sign In** menu button: its methods are two-line items, and Cancel Sign-In is last, in
   the danger style. Hover steps the fill up one surface; nothing moves.
 
