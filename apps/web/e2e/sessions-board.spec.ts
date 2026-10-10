@@ -660,7 +660,8 @@ async function expectWholeStatusLines(page: Page) {
     expect(line.badgeClipped, `${line.id}'s badge reads whole`).toBe(false);
     expect(line.stripPlacement, `${line.id}'s strip never squeezes the badge`).not.toBe("squeezed");
     if (!line.hasChip) continue;
-    expect(line.chipName, `${line.id}'s chip is named by its whole rollup`).toBe("4 Children · 1 Awaiting Input");
+    expect(line.chipName, `${line.id}'s chip is named by its whole rollup`).toBe(
+      line.id === "s-parent" ? "4 Children · 1 Awaiting Input · 1 Working" : "4 Children · 1 Awaiting Input");
     if (!line.chipDotsOnly) expect(line.chipWordsWhole, `${line.id}'s chip words are whole when shown`).toBe(true);
   }
   const parent = lines.find((line) => line.parent)!;
