@@ -52,6 +52,30 @@ for (const theme of ["dark", "light"] as const) {
   });
 }
 
+test("a runner too old for any diff keeps Scope and View Options on one line, with the reason under them", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openReview(page, "width=320&protocol=11");
+  const layout = await page.locator(".rpanel-toolbar > .toolbar").evaluate((row) => {
+    const box = row.getBoundingClientRect();
+    const seg = row.querySelector(".seg")!.getBoundingClientRect();
+    const button = row.querySelector(".review-view-options")!.getBoundingClientRect();
+    const reason = row.querySelector(".seg-reason")!.getBoundingClientRect();
+    return {
+      overflow: row.scrollWidth - row.clientWidth,
+      sameLine: Math.round(seg.top) === Math.round(button.top),
+      reasonBelow: reason.top >= Math.max(seg.bottom, button.bottom),
+      reasonWidth: reason.width / box.width,
+      buttonInside: button.right <= box.right,
+    };
+  });
+  expect(layout.overflow).toBeLessThanOrEqual(0);
+  expect(layout.sameLine, "Scope and View Options share the row").toBe(true);
+  expect(layout.reasonBelow, "the reason is under the row").toBe(true);
+  expect(layout.reasonWidth, "the reason spans the row").toBeGreaterThan(0.95);
+  expect(layout.buttonInside).toBe(true);
+  await expect(page.locator(".rpanel-toolbar .seg-reason")).toHaveText(/needs a newer runner for rich diff loading/);
+});
+
 for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
   test(`the scroller is the only vertical scroller in Review at ${viewport.width}px`, async ({ page }) => {
     await page.setViewportSize(viewport);

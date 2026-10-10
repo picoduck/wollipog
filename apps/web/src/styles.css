@@ -4987,6 +4987,14 @@ textarea {
    gate's reason, when there is one, sits under the row. */
 .review-toolbar > .seg { min-width: 0; }
 .review-view-options { margin-left: auto; }
+/* A runner too old for any diff disables every Scope option, and the segmented control prints that
+   one reason after the group: it takes a line of its own under the row rather than a column in it. */
+.review-toolbar { flex-wrap: wrap; }
+.review-toolbar > .seg-reason {
+  order: 1;
+  flex-basis: 100%;
+  margin-top: 0;
+}
 /* At the panel's narrowest the three equal Scope options and View Options need about 322px of a
    287px row; at their content widths they need about 270px, so they keep one line (§10.2). */
 @container rp (max-width: 359px) {

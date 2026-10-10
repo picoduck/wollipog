@@ -9,6 +9,7 @@
  * - `offline`: the uncommitted review, then the machine goes offline (`setOnline(false)`);
  * - `older`: a runner that predates hunk staging.
  * `theme=light` switches the palette. `width` sets the docked panel's width (default 400).
+ * `protocol` overrides the runner's protocol version (11 predates rich diffs).
  */
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -253,7 +254,7 @@ function Fixture() {
             state={state}
             session={session}
             runnerOnline={online}
-            runnerProtocolVersion={scenario === "older" ? 12 : PROTOCOL_VERSION}
+            runnerProtocolVersion={params.has("protocol") ? Number(params.get("protocol")) : scenario === "older" ? 12 : PROTOCOL_VERSION}
             onOpenSourceLocation={() => {}}
             onClearSourceLocation={() => {}}
             git={git}
