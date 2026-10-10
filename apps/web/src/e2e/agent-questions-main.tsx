@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { summarizeQuestionAnswers, type AgentQuestion, type PendingApproval, type SessionView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
-import { focusSessionRequest } from "../components/SessionApproval.js";
+import { focusSessionRequest, useQuestionDraftRetirement } from "../components/SessionApproval.js";
 import { ComposerQuestionResponse } from "../components/ComposerQuestionResponse.js";
 import { QueuedMessages } from "../components/QueuedMessages.js";
 import { EventTimeline, type TimelineRevealRequest } from "../components/EventTimeline.js";
@@ -270,7 +270,7 @@ const formQuestions: AgentQuestion[] = [
 
 window.agentQuestionCalls = [];
 const askedAt = Date.UTC(2026, 9, 3, 7, 30, 0);
-const SESSION_ID = "agent-question-session";
+const SESSION_ID = params.get("session") ?? "agent-question-session";
 const QUESTION_EVENT_ID = 1_000;
 
 function transcriptRow(id: number, index: number, label: string): TimelineItem {
@@ -293,6 +293,8 @@ function Fixture() {
           ? longLabelQuestions
         : params.get("set") === "paragraph"
           ? paragraphQuestions
+      : params.get("set") === "long-note"
+        ? formQuestions.map((question) => question.id === "note" ? { ...question, maxLength: 8000 } : question)
       : params.get("set") === "forms"
         ? formQuestions
         : params.get("set") === "notes"
@@ -366,6 +368,8 @@ function Fixture() {
   const request = useMemo<PendingApproval | null>(() => resolved ? null : {
     kind: "question",
     requestId,
+    occurrenceId: `${params.get("epoch") ?? "occurrence"}:${requestId}`,
+    requestedAt: askedAt,
     title: questions[0]?.header ?? "Agent Question",
     options: [],
     questions,
@@ -376,6 +380,7 @@ function Fixture() {
     id: SESSION_ID, runnerId: "runner-1", title: "Agent Questions", status: "input_required",
     pendingApproval: request ?? undefined,
   }) as SessionView, [request]);
+  useQuestionDraftRetirement(session);
 
   // Reading back and Show Where Asked work as in a session: the reader follows its tail, and a reveal
   // pauses it, so the dock takes its strip.
@@ -416,6 +421,8 @@ function Fixture() {
       <ComposerQuestionResponse
         sessionId={SESSION_ID}
         requestId={requestId}
+        occurrenceId={request?.occurrenceId}
+        requestedAt={request?.requestedAt}
         questions={questions}
         runnerOnline={runnerOnline}
         active

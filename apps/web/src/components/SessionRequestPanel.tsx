@@ -380,6 +380,8 @@ export function SessionRequestPanel({
               sessionId={detail.sessionId}
               requestId={detail.request.requestId}
               occurrenceId={detail.request.occurrenceId}
+              requestedAt={detail.request.requestedAt}
+              recoveryId={detail.request.recoveryId}
               questions={detail.request.questions ?? []}
               isAsync={detail.request.async}
               recoveryReason={detail.request.recoveryReason}

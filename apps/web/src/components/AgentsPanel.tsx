@@ -760,6 +760,7 @@ export function AgentsPanel(props: Props) {
           data-session-request-id={selectedRequest.requestId} data-session-request-session={session.id}>
           {selectedRequest.kind === "question" ? <SessionQuestionBanner key={selectedRequest.requestId}
             sessionId={session.id} requestId={selectedRequest.requestId} occurrenceId={selectedRequest.occurrenceId}
+            requestedAt={selectedRequest.requestedAt} recoveryId={selectedRequest.recoveryId}
             questions={selectedRequest.questions ?? []} isAsync={selectedRequest.async}
             recoveryReason={selectedRequest.recoveryReason} recoveryAction={selectedRequest.recoveryAction}
             runnerOnline={runnerOnline} onSessionUpdate={loadSession} showKeyHints={false} />
