@@ -1478,6 +1478,8 @@ function SessionDetailLoaded({
     historyKey: timelineHistoryKey,
     version: 0,
   });
+  /** Counts every older read that settled, including one from a history since rebuilt. */
+  const [olderReadReleases, setOlderReadReleases] = useState(0);
   const [openingHistoryFill, setOpeningHistoryFill] = useState({
     historyKey: timelineHistoryKey,
     settled: false,
@@ -2989,6 +2991,9 @@ function SessionDetailLoaded({
       .catch(() => failOlderEventsLoad(sessionId, "Could not load earlier activity.", base, epoch))
       .finally(() => {
         olderInFlightRef.current = false;
+        // Whatever history it belonged to, the one older read is free again: wake a View Turn that
+        // waited on it (#2858).
+        setOlderReadReleases((count) => count + 1);
         if (timelineHistoryKeyRef.current !== timelineHistoryKey) return;
         setOlderRequestSettled((current) => ({
           historyKey: timelineHistoryKey,
@@ -4189,7 +4194,7 @@ function SessionDetailLoaded({
       return;
     }
     setPendingTurnView({ ...pendingTurnView, requestedBase: base });
-  }, [pendingTurnView, backgroundParentTurns, eventWindow?.baseSeq, eventWindow?.hasOlder, olderRequestSettled,
+  }, [pendingTurnView, backgroundParentTurns, eventWindow?.baseSeq, eventWindow?.hasOlder, olderReadReleases,
     timelineHistoryKey, loadOlder, revealCurrentOperation]);
   const previewNavigationControls = useMemo<PreviewNavigationControls>(() => ({
     beginProgrammaticScroll: followTail.beginProgrammaticScroll,

@@ -97,8 +97,8 @@ function transcript(sessionId: string): SessionEvent[] {
   return events;
 }
 
-test("Background Work names groups by the transcript's turns, and View Turn loads earlier activity to land on an unloaded turn (#2858)", async () => {
-  const sessionId = "background-turns";
+/** SessionDetail on a session with jobs in Turns 1, 2 and 4, its Background Work panel open. */
+async function mountBackgroundTurns(sessionId: string) {
   const now = Date.now();
   const events = transcript(sessionId);
   const job = (id: string, parentTurnId: string, registeredAt: number) => ({
@@ -145,22 +145,22 @@ test("Background Work names groups by the transcript's turns, and View Turn load
     backgroundDeliveries: [],
   } as unknown as SessionView;
 
-  const tailCalls: Array<number | undefined> = [];
+  const tailCalls: Array<{ before: number | undefined; eventEpoch: number }> = [];
   const pending: Array<(page: SessionEventsResponse) => void> = [];
   const client = {
     ...api,
     session: () => new Promise<never>(() => {}),
     getSessionEventPage: () => new Promise<never>(() => {}),
-    getSessionEventTailPage: (_id: string, before: number | undefined) => {
-      tailCalls.push(before);
+    getSessionEventTailPage: (_id: string, before: number | undefined, eventEpoch: number) => {
+      tailCalls.push({ before, eventEpoch });
       return new Promise<SessionEventsResponse>((resolve) => { pending.push(resolve); });
     },
     getSessionTurnStartPage: undefined,
   } as unknown as ApiClient;
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
-    instanceId: "background-turns",
-    runtimeKey: "background-turns:1",
+    instanceId: sessionId,
+    runtimeKey: `${sessionId}:1`,
     createSocket: () => socket,
     close() {},
   };
@@ -169,7 +169,6 @@ test("Background Work names groups by the transcript's turns, and View Turn load
     push() {},
     listen: () => () => {},
   };
-  const closed: string[] = [];
   const rightPanel = {
     open: true,
     mode: "background" as const,
@@ -184,7 +183,7 @@ test("Background Work names groups by the transcript's turns, and View Turn load
     expanded: false,
     setExpanded() {},
     setDragging() {},
-    close() { closed.push("close"); },
+    close() {},
     selectSubagent() {},
     showSubagent() {},
     consumeSubagentFocusRequest() {},
@@ -192,81 +191,139 @@ test("Background Work names groups by the transcript's turns, and View Turn load
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
+  await act(async () => root.render(
+    <ApiProvider client={client}>
+      <StoreProvider connection={connection} navigation={navigation}>
+        <SessionDetail
+          sessionId={sessionId}
+          mode="expanded"
+          rightPanel={rightPanel}
+          onOpenTerminal={() => {}}
+          pinnedSummary={staticPinnedSummary(false)}
+          composerDraftLoader={async () => null}
+        />
+      </StoreProvider>
+    </ApiProvider>,
+  ));
+  await act(async () => socket.push({
+    type: "snapshot",
+    capabilities: {
+      sessionSubscriptions: false,
+      boundedDelivery: false,
+      paginatedSessionHistory: false,
+      currentTurnOpening: false,
+      projects: true,
+    },
+    runners: [runner],
+    boxes: [],
+    projects: [],
+    sessions: [session],
+    runs: [],
+    pods: [],
+  } as unknown as ControlPlaneToUi));
+  await flushAsyncWork();
+  const headings = () => [...container.querySelectorAll(".background-work-turn-head h3")].map((heading) => heading.textContent);
+  const viewTurn = (title: string) => [...container.querySelectorAll<HTMLElement>(".background-work-turn-head")]
+    .find((head) => head.querySelector("h3")?.textContent === title)?.querySelector<HTMLButtonElement>("button") ?? null;
+  /** The older pages requested, as the `before` of each. */
+  const olderRequests = () => tailCalls.filter((call) => call.before !== undefined);
+  /** The opening window: Turns 2 to 4, with Turn 1 on an older page. */
+  const releaseOpening = (eventEpoch: number) => act(async () => pending.shift()!({
+    events: events.slice(3), eventEpoch, nextBefore: 4, hasMoreOlder: true, cacheComplete: true,
+  } as SessionEventsResponse));
+  const releaseOlder = (eventEpoch: number) => act(async () => pending.shift()!({
+    events: events.slice(0, 3), eventEpoch, nextBefore: 0, hasMoreOlder: false, cacheComplete: true,
+  } as SessionEventsResponse));
+  return {
+    container, socket, session, tailCalls, pending, headings, viewTurn, olderRequests, releaseOpening, releaseOlder,
+    /** A reader whose first window fills it, so nothing older loads on its own; or one it does not
+     * fill, so the reader's own earlier-activity fill reads an older page. */
+    fillViewport(filled = true) {
+      Object.defineProperties(container.querySelector(".detail-scroll")!, {
+        clientHeight: { configurable: true, value: filled ? 600 : 2_000 },
+        scrollHeight: { configurable: true, value: filled ? 4_000 : 2_000 },
+      });
+    },
+    async dispose() {
+      await flushAsyncWork(1);
+      await act(async () => root.unmount());
+      container.remove();
+    },
+  };
+}
+
+test("Background Work names groups by the transcript's turns, and View Turn loads earlier activity to land on an unloaded turn (#2858)", async () => {
+  const view = await mountBackgroundTurns("background-turns");
   try {
-    await act(async () => root.render(
-      <ApiProvider client={client}>
-        <StoreProvider connection={connection} navigation={navigation}>
-          <SessionDetail
-            sessionId={sessionId}
-            mode="expanded"
-            rightPanel={rightPanel}
-            onOpenTerminal={() => {}}
-            pinnedSummary={staticPinnedSummary(false)}
-            composerDraftLoader={async () => null}
-          />
-        </StoreProvider>
-      </ApiProvider>,
-    ));
-    await act(async () => socket.push({
-      type: "snapshot",
-      capabilities: {
-        sessionSubscriptions: false,
-        boundedDelivery: false,
-        paginatedSessionHistory: false,
-        currentTurnOpening: false,
-        projects: true,
-      },
-      runners: [runner],
-      boxes: [],
-      projects: [],
-      sessions: [session],
-      runs: [],
-      pods: [],
-    } as unknown as ControlPlaneToUi));
-    await flushAsyncWork();
-    // A reader whose first window already fills it, so nothing older loads on its own.
-    Object.defineProperties(container.querySelector(".detail-scroll")!, {
-      clientHeight: { configurable: true, value: 600 },
-      scrollHeight: { configurable: true, value: 4_000 },
-    });
-    // The opening window holds Turns 2 to 4; Turn 1 is on an older page.
-    assert.ok(pending.length >= 1, "the opening tail is requested");
-    await act(async () => pending.shift()!({
-      events: events.slice(3), eventEpoch: 0, nextBefore: 4, hasMoreOlder: true, cacheComplete: true,
-    } as SessionEventsResponse));
+    view.fillViewport();
+    assert.ok(view.pending.length >= 1, "the opening tail is requested");
+    await view.releaseOpening(0);
     await flushAsyncWork(1);
 
-    const headings = () => [...container.querySelectorAll(".background-work-turn-head h3")].map((heading) => heading.textContent);
-    assert.deepEqual(headings(), ["Turn 4", "Turn 2", "Earlier Turn"],
+    assert.deepEqual(view.headings(), ["Turn 4", "Turn 2", "Earlier Turn"],
       "groups read the transcript's own turn numbers, newest first, never list positions");
-    const viewTurn = (title: string) => [...container.querySelectorAll<HTMLElement>(".background-work-turn-head")]
-      .find((head) => head.querySelector("h3")?.textContent === title)?.querySelector<HTMLButtonElement>("button") ?? null;
-    assert.ok(viewTurn("Turn 4") && viewTurn("Turn 2"), "each loaded turn has View Turn");
+    assert.ok(view.viewTurn("Turn 4") && view.viewTurn("Turn 2"), "each loaded turn has View Turn");
 
     // Every follow state the reader passes through from here on. (Where the row lands is measured in
     // a browser, background-work-visibility.spec.ts; this DOM has no layout to scroll.)
-    const scroller = container.querySelector<HTMLElement>(".detail-scroll")!;
+    const scroller = view.container.querySelector<HTMLElement>(".detail-scroll")!;
     const followStates: string[] = [];
     const observer = new domWindow.MutationObserver(() => {
       followStates.push(scroller.getAttribute("data-follow-tail-state") ?? "");
     });
     observer.observe(scroller as never, { attributes: true, attributeFilter: ["data-follow-tail-state"] });
-    assert.deepEqual(tailCalls.filter((before) => before !== undefined), [], "nothing older is loaded yet");
-    await act(async () => viewTurn("Earlier Turn")!.click());
+    assert.deepEqual(view.olderRequests(), [], "nothing older is loaded yet");
+    await act(async () => view.viewTurn("Earlier Turn")!.click());
     await flushAsyncWork(1);
-    assert.deepEqual(tailCalls.filter((before) => before !== undefined), [4], "View Turn loads the page that holds the turn");
+    assert.deepEqual(view.olderRequests().map((call) => call.before), [4], "View Turn loads the page that holds the turn");
     assert.deepEqual(followStates, [], "nothing moves until the turn is there");
-    await act(async () => pending.shift()!({
-      events: events.slice(0, 3), eventEpoch: 0, nextBefore: 0, hasMoreOlder: false, cacheComplete: true,
-    } as SessionEventsResponse));
+    await view.releaseOlder(0);
     await flushAsyncWork(1);
-    assert.deepEqual(headings(), ["Turn 4", "Turn 2", "Turn 1"], "once loaded, the turn has its number");
+    assert.deepEqual(view.headings(), ["Turn 4", "Turn 2", "Turn 1"], "once loaded, the turn has its number");
     assert.equal(followStates[0], "previewing", "and the transcript leaves the tail to show it");
-    assert.deepEqual(tailCalls.filter((before) => before !== undefined), [4], "no page past the turn is requested");
+    assert.deepEqual(view.olderRequests().map((call) => call.before), [4], "no page past the turn is requested");
     observer.disconnect();
   } finally {
+    await view.dispose();
+  }
+});
+
+test("View Turn waiting on an older read from a rebuilt history resumes once that read settles (#2858)", async () => {
+  const view = await mountBackgroundTurns("background-turns-rebuilt");
+  try {
+    // The reader's own earlier-activity fill holds the one older read open.
+    view.fillViewport(false);
+    await view.releaseOpening(0);
     await flushAsyncWork(1);
-    await act(async () => root.unmount());
-    container.remove();
+    assert.deepEqual(view.olderRequests(), [{ before: 4, eventEpoch: 0 }], "the reader's fill is reading an older page");
+    const staleRead = view.pending.shift()!;
+
+    // The history is rebuilt, and the new generation's window opens without Turn 1.
+    await act(async () => view.socket.push({
+      type: "session_upsert", session: { ...view.session, eventEpoch: 1, updatedAt: 2 },
+    } as unknown as ControlPlaneToUi));
+    await flushAsyncWork(1);
+    assert.ok(view.pending.length >= 1, "the new generation's window is requested");
+    view.fillViewport();
+    await view.releaseOpening(1);
+    await flushAsyncWork(1);
+    assert.equal(view.headings().at(-1), "Earlier Turn");
+
+    // View Turn waits for the one older read, which belongs to the old history.
+    const before = view.olderRequests().length;
+    await act(async () => view.viewTurn("Earlier Turn")!.click());
+    await flushAsyncWork(1);
+    assert.equal(view.olderRequests().length, before, "it waits while the older read is out");
+    await act(async () => staleRead({
+      events: [], eventEpoch: 0, nextBefore: 0, hasMoreOlder: false, cacheComplete: true,
+    } as SessionEventsResponse));
+    await flushAsyncWork(1);
+    assert.deepEqual(view.olderRequests().slice(before), [{ before: 4, eventEpoch: 1 }],
+      "once it settles, View Turn reads the new history's older page itself");
+    await view.releaseOlder(1);
+    await flushAsyncWork(1);
+    assert.equal(view.headings().at(-1), "Turn 1");
+  } finally {
+    await view.dispose();
   }
 });

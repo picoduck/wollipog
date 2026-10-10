@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { after, before, test } from "node:test";
+import { after, before, beforeEach, test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
@@ -50,6 +50,10 @@ after(() => {
 });
 
 const MINUTE = 60_000;
+// Stop Job's requests outlive their page, by session and job, so each test has its own session.
+let sessionSequence = 0;
+let sessionId = "session-0";
+beforeEach(() => { sessionId = `session-${++sessionSequence}`; });
 const flush = () => act(async () => {
   await Promise.resolve();
   await Promise.resolve();
@@ -70,7 +74,7 @@ function job(overrides: Partial<ManagedBackgroundJobView> = {}): ManagedBackgrou
 
 function session(jobs: ManagedBackgroundJobView[], overrides: Partial<SessionView> = {}): SessionView {
   return {
-    id: "session",
+    id: sessionId,
     runnerId: "runner",
     driver: "claude-code",
     backgroundWorkTracking: "managed",
@@ -193,6 +197,39 @@ test("while stopping the button is busy, then says the outcome; a refusal is a d
     assertNoDomNode(detail.stopButton(), "nothing is left to stop");
   } finally {
     await detail.dispose();
+  }
+});
+
+test("a stop still running when the page closes keeps the reopened page busy, and sends nothing twice (#2858)", async () => {
+  let finish!: (value: BackgroundJobStopResponse) => void;
+  const calls: string[] = [];
+  const client = {
+    stopBackgroundJob: (_sessionId: string, jobId: string) => {
+      calls.push(jobId);
+      return new Promise<BackgroundJobStopResponse>((resolve) => { finish = resolve; });
+    },
+  } as Partial<ApiClient>;
+  const first = await mountDetail({ session: session([job()]) }, client);
+  await act(async () => first.stopButton()!.click());
+  await flush();
+  assert.deepEqual(calls, ["job-shell-a1f3c9"]);
+  await first.dispose();
+  // Back, then the same job again: the request is still running.
+  const reopened = await mountDetail({ session: session([job()]) }, client);
+  try {
+    assert.equal(reopened.stopButton()!.getAttribute("aria-busy"), "true", "the reopened page shows it still stopping");
+    await act(async () => reopened.stopButton()!.click());
+    await flush();
+    assert.deepEqual(calls, ["job-shell-a1f3c9"], "and sends no second request");
+    assert.equal(reopened.confirmations.length, 0, "nor asks again");
+    await act(async () => {
+      finish({ sessionId, jobId: "job-shell-a1f3c9", outcome: "stopped", terminalStatus: "killed" });
+      await Promise.resolve();
+    });
+    assert.match(reopened.container.textContent ?? "", new RegExp(STOP_JOB_STOPPED.replace(/\./gu, "\\.")),
+      "the outcome lands on the page that is open");
+  } finally {
+    await reopened.dispose();
   }
 });
 

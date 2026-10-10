@@ -412,8 +412,8 @@ export function summarizeTimelineTurns(
 
 /**
  * Each loaded turn a prompt opened, by its runner turn id (#2858): the prompt to scroll to and the
- * number its footer shows. A turn id seen only on a message that did not open a turn (steering)
- * still names that message, without a number.
+ * number its footer shows. Only the prompt counts: a steering message carries its turn's id too, but
+ * a turn whose prompt is not loaded is not loaded, so View Turn keeps loading until the prompt is.
  */
 export function transcriptTurnsById(
   items: readonly TimelineItem[],
@@ -427,10 +427,6 @@ export function transcriptTurnsById(
       ...(segment.turn !== undefined ? { turn: segment.turn } : {}),
       ...(Number.isFinite(prompt.createdAt) ? { startedAt: prompt.createdAt } : {}),
     });
-  }
-  for (const item of items) {
-    if (item.kind !== "user_message" || !item.turnId || turns.has(item.turnId)) continue;
-    turns.set(item.turnId, { eventId: item.id, ...(Number.isFinite(item.createdAt) ? { startedAt: item.createdAt } : {}) });
   }
   return turns;
 }
