@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { CampaignIcon, ChevronDownIcon, ChevronLeftIcon, CloseIcon, CommandLineIcon, DiffIcon, FolderIcon, GlobeIcon, GridIcon, QuestionIcon, InboxIcon, JobsIcon, LockIcon, TeamIcon } from "./Icons.js";
 import { Maximize2Icon, Minimize2Icon } from "./Icons.js";
@@ -137,10 +137,12 @@ export interface PanelBack {
   onBack: () => void;
 }
 
+type ToolBack = { label: string; run: () => void } | null;
+
 interface PanelBackSlot {
   /** The panel is a phone sheet, whose header leads with a Back (#2843). */
   phone: boolean;
-  set: Dispatch<SetStateAction<{ label: string; run: () => void } | null>>;
+  set: (update: ToolBack | ((current: ToolBack) => ToolBack)) => void;
   /** Focus the header's Back. */
   focus: () => void;
 }
@@ -655,12 +657,14 @@ export function RightPanel({
   // The tool's own Escape layer, when it has one (`usePanelEscapeLayer`).
   const escapeLayerRef = useRef<(() => void) | null>(null);
   // The tool's own Back on a phone, when it has one (`usePanelBack`).
-  const [toolBack, setToolBack] = useState<{ label: string; run: () => void } | null>(null);
+  const [toolBack, setToolBack] = useState<ToolBack>(null);
   const phoneBackRef = useRef<HTMLButtonElement>(null);
-  const backSlot = useMemo<PanelBackSlot>(
-    () => ({ phone, set: setToolBack, focus: () => phoneBackRef.current?.focus() }),
-    [phone],
-  );
+  // One slot per presentation, so a tool re-registers only when the panel crosses the breakpoint.
+  const backSlotRef = useRef<PanelBackSlot | null>(null);
+  if (backSlotRef.current?.phone !== phone) {
+    backSlotRef.current = { phone, set: setToolBack, focus: () => phoneBackRef.current?.focus() };
+  }
+  const backSlot = backSlotRef.current;
   const phoneBack = phone ? toolBack : null;
   /** Escape's step for the panel itself: Restore Panel while expanded, then Close Panel (#2845). */
   const dismiss = expanded ? () => state.setExpanded(false) : state.close;
