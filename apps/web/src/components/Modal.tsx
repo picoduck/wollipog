@@ -1,4 +1,5 @@
 import React, {
+  useContext,
   useEffect,
   useId,
   useLayoutEffect,
@@ -11,6 +12,7 @@ import React, {
 import { createPortal } from "react-dom";
 import { ChevronLeftIcon, CloseIcon, WarningIcon } from "./Icons.js";
 import { MOBILE_BREAKPOINT_PX } from "./useIsMobile.js";
+import { DialogReturnFocusContext } from "./dialog-return-focus.js";
 
 /** Dialog widths (docs/design-system.md §7.1): confirmations, forms, review and pickers, rare long flows. */
 export type ModalSize = "sm" | "md" | "lg" | "full";
@@ -169,8 +171,9 @@ export function Modal({
   const openerFocusRef = useRef<HTMLElement | null>(
     typeof document !== "undefined" && document.activeElement instanceof HTMLElement ? document.activeElement : null,
   );
-  const explicitReturnFocusRef = useRef(returnFocusRef);
-  explicitReturnFocusRef.current = returnFocusRef;
+  const lazyReturnFocusRef = useContext(DialogReturnFocusContext);
+  const explicitReturnFocusRef = useRef(returnFocusRef ?? lazyReturnFocusRef);
+  explicitReturnFocusRef.current = returnFocusRef ?? lazyReturnFocusRef;
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
   const layerIdRef = useRef<number | undefined>(undefined);
@@ -370,6 +373,7 @@ export function Modal({
   const backName = back?.label ?? backLabel;
   const hasTertiary = tertiary != null;
   const panel = (
+    <DialogReturnFocusContext.Provider value={null}>
     <div
       ref={panelRef}
       className={["modal-panel", hosted ? "pushed" : "", className ?? ""].filter(Boolean).join(" ")}
@@ -420,6 +424,7 @@ export function Modal({
         </div>
       )}
     </div>
+    </DialogReturnFocusContext.Provider>
   );
 
   if (!canPortal || !panelHost) {

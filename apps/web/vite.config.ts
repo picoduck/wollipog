@@ -6,6 +6,7 @@ import react from "@vitejs/plugin-react";
 import { DESKTOP_EXCLUDED_ASSETS, isDesktopBuild, stripManifestLink } from "./src/desktop-bundle.js";
 import { webviewTargets } from "./src/css-support.js";
 import { precompressEmittedAssets } from "./src/precompressed-assets.js";
+import { inboxEntryBudget } from "./src/entry-bundle-budget.js";
 
 const appRoot = dirname(fileURLToPath(import.meta.url));
 
@@ -71,7 +72,7 @@ function precompressAssets(mode: string): Plugin {
 // The control plane runs separately (default http://127.0.0.1:4317). The web app
 // talks to it directly over CORS + websocket; override via VITE_CONTROL_PLANE_*.
 export default defineConfig(({ mode }) => ({
-  plugins: [react(), excludePwaAssetsFromDesktop(), precompressAssets(mode)],
+  plugins: [react(), inboxEntryBudget(), excludePwaAssetsFromDesktop(), precompressAssets(mode)],
   build: {
     target: WOLLIPOG_WEBVIEW_TARGETS,
     cssTarget: WOLLIPOG_WEBVIEW_TARGETS,
@@ -80,6 +81,7 @@ export default defineConfig(({ mode }) => ({
       outDir: "dist-e2e",
       rolldownOptions: {
         input: {
+          inboxApp: resolve(appRoot, "index.html"),
           timelineReflow: resolve(appRoot, "timeline-reflow-e2e.html"),
           settingsRows: resolve(appRoot, "settings-rows-e2e.html"),
           xtermSmoke: resolve(appRoot, "xterm-smoke-e2e.html"),

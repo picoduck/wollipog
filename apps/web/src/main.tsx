@@ -1,9 +1,10 @@
-import React from "react";
+import React, { lazy, Suspense } from "react";
 import { createRoot } from "react-dom/client";
 import { installMobileViewportFallback } from "./mobile-viewport.js";
 import { installDesktopWindowChrome } from "./desktop-window.js";
 import { App } from "./App.js";
-import { SharedTranscript } from "./components/SharedTranscript.js";
+import { State } from "./components/State.js";
+import { ErrorBoundary } from "./components/ErrorBoundary.js";
 import { adoptPairingFragment } from "./device-token.js";
 import { adoptManagedDesktopPairing } from "./desktop-local-pairing.js";
 import { registerServiceWorker } from "./pwa.js";
@@ -15,6 +16,8 @@ import {
 } from "./navigation.js";
 import { ThemeProvider } from "./components/ThemeProvider.js";
 import "./styles.css";
+
+const SharedTranscript = lazy(() => import("./components/SharedTranscript.js").then((module) => ({ default: module.SharedTranscript })));
 
 async function bootstrap(): Promise<void> {
   // Before anything renders or connects: a `#pair=<token>` link stores its device token and
@@ -51,7 +54,7 @@ async function bootstrap(): Promise<void> {
   createRoot(root).render(
     <React.StrictMode>
       <ThemeProvider>
-        {shared.requested ? <SharedTranscript token={shared.token} /> : <App />}
+        {shared.requested ? <ErrorBoundary name="This Transcript"><Suspense fallback={<State variant="loading">Loading transcript…</State>}><SharedTranscript token={shared.token} /></Suspense></ErrorBoundary> : <App />}
       </ThemeProvider>
     </React.StrictMode>,
   );

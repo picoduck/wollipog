@@ -20,6 +20,9 @@ import {
   usePanelScratchScope,
 } from "../right-panel-scratch.js";
 
+import { subscribeSideChatFocus, takeSideChatFocusRequest } from "./side-chat-focus.js";
+export { requestSideChatFocus } from "./side-chat-focus.js";
+
 const POLL_MS = 1_500;
 const SIDE_CHAT_DRAFT_KEY = "sidechat.draft";
 const PAGE_SIZE = 200;
@@ -30,31 +33,6 @@ const PAGE_SIZE = 200;
  * very text on its way out; without this it would offer to send it again (#1284).
  */
 const sendsInFlight = new Map<string, Promise<unknown>>();
-
-/**
- * Ctrl/⌘+; puts focus in Side Chat (#2862): its message field, or Start Side Chat when there is no
- * side chat yet. A mounted panel takes the request at once, waiting for its first load if it is still
- * loading; otherwise the next panel to mount takes it, provided it mounts within a second, so a
- * request can never surface on an unrelated later visit.
- */
-const sideChatFocusListeners = new Set<() => void>();
-let sideChatFocusRequestedAt: number | null = null;
-const SIDE_CHAT_FOCUS_WINDOW_MS = 1000;
-
-export function requestSideChatFocus(): void {
-  if (sideChatFocusListeners.size > 0) {
-    sideChatFocusRequestedAt = null;
-    for (const listener of sideChatFocusListeners) listener();
-    return;
-  }
-  sideChatFocusRequestedAt = Date.now();
-}
-
-function takeSideChatFocusRequest(): boolean {
-  const requestedAt = sideChatFocusRequestedAt;
-  sideChatFocusRequestedAt = null;
-  return requestedAt !== null && Date.now() - requestedAt <= SIDE_CHAT_FOCUS_WINDOW_MS;
-}
 
 /** Prose, so sentence case: these complete the sentence "This side chat's session …". */
 const ENDED_PHRASE: Partial<Record<SessionStatus, string>> = {
@@ -163,8 +141,7 @@ export function SideChatPanel({
       settleFocusRequest();
     };
     if (takeSideChatFocusRequest()) listener();
-    sideChatFocusListeners.add(listener);
-    return () => { sideChatFocusListeners.delete(listener); };
+    return subscribeSideChatFocus(listener);
   }, [settleFocusRequest]);
   // A request made while the panel was loading is settled by the render that loads it.
   useEffect(() => { settleFocusRequest(); }, [sideChat, settleFocusRequest]);
