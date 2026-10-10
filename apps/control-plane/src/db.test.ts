@@ -6764,6 +6764,54 @@ test("listCachedEventTailPage reads the newest rows first and pages older below 
   assert.throws(() => db.listCachedEventTailPage("windowed-cache", -1, 2), /non-negative safe integer/);
 });
 
+test("current-turn opening reads its start once even beyond the backward alignment cap", () => {
+  const db = withRunner();
+  try {
+    db.createSession(newSession({ id: "long-opening" }));
+    db.appendEvent("long-opening", { kind: "user_message", text: "previous" }, 1);
+    db.appendEvent("long-opening", { kind: "user_message", text: "current" }, 2);
+    for (let index = 0; index < 3_000; index++) {
+      db.appendEvent("long-opening", { kind: "agent_message", text: `Step ${index}` }, 3 + index);
+    }
+    db.appendEvent("long-opening", { kind: "user_message", text: "steer", deliveryIntent: "steer" }, 3_004);
+    const page = db.listCachedCurrentTurnOpening("long-opening", 200);
+    assert.equal(page.turnStartSeq, 2);
+    assert.equal(page.turnAligned, true);
+    assert.equal(page.events.length, 200);
+    assert.equal(page.events[0]!.payload.kind, "user_message");
+    assert.equal(page.nextAfter, 201);
+    assert.equal(page.tailSeq, 3_003);
+    assert.equal(page.hasMoreLater, true);
+    assert.equal(page.hasMoreOlder, true);
+    const next = db.listCachedEventPage("long-opening", page.nextAfter, 200);
+    assert.equal(next.events[0]!.seq, 202, "the existing forward cursor continues without omission");
+    assert.equal(db.listCachedEventTailPage("long-opening", undefined, 200, { alignToTurn: true }).turnAligned,
+      false, "the existing backward alignment safety cap remains unchanged");
+    const plan = db.raw().prepare(`EXPLAIN QUERY PLAN SELECT seq FROM session_events WHERE session_id=?
+      AND kind='user_message' AND COALESCE(json_extract(payload, '$.deliveryIntent'), '')!='steer'
+      AND json_type(payload, '$.commandInvocation') IS NULL ORDER BY seq DESC LIMIT 1`).all("long-opening");
+    assert.match(JSON.stringify(plan), /idx_session_events_turn_start/);
+    assert.throws(() => db.listCachedCurrentTurnOpening("long-opening", 201), /at most 200/);
+    const absent = db.listCachedCurrentTurnOpening("missing", 200);
+    assert.equal(absent.turnStartSeq, 0);
+    assert.equal(absent.turnAligned, false);
+    assert.deepEqual(absent.events, []);
+  } finally { db.close(); }
+});
+
+test("current-turn opening without a semantic anchor reports an unaligned bounded prefix", () => {
+  const db = withRunner();
+  try {
+    db.createSession(newSession({ id: "adopted-opening" }));
+    for (let i = 0; i < 250; i++) db.appendEvent("adopted-opening", { kind: "agent_message", text: "adopted" }, i);
+    const page = db.listCachedCurrentTurnOpening("adopted-opening", 200);
+    assert.equal(page.turnAligned, false);
+    assert.equal(page.turnStartSeq, 1);
+    assert.equal(page.hasMoreLater, true);
+    assert.equal(page.events.length, 200);
+  } finally { db.close(); }
+});
+
 test("a turn-aligned tail page begins at an invocation rather than orphaned updates", () => {
   const db = withRunner();
   db.createSession(newSession({ id: "aligned-cache" }));

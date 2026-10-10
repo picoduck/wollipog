@@ -311,6 +311,8 @@ export interface EventWindowState {
    * slice; newer complete turns can still follow it. */
   turnAligned?: boolean;
   loadingOlder: boolean;
+  /** A bounded prefix opened at this turn start; unread activity remains an explicit laterGap. */
+  openingStartSeq?: number;
   error: string | null;
 }
 
@@ -322,6 +324,7 @@ export function isPartialHistory(window: EventWindowState | undefined): boolean 
 
 export interface State {
   conn: ConnState;
+  currentTurnOpeningSupported: boolean;
   /** Latched by a policy-closed (1008) /ui socket; cleared only by a successful connect. Keeps
    * the pairing card mounted (draft intact) across the background retries, whose transient
    * "connecting"/"offline" states would otherwise unmount it every cycle. */
@@ -419,6 +422,8 @@ type Action =
       /** Present only for an aligned opening-window read. False means the server kept its bounded
        * count boundary because the turn start was beyond the supported extension. */
       windowTurnAligned?: boolean;
+      /** A turn-start prefix excludes distant live rows from its contiguous visible range. */
+      windowThroughSeq?: number;
       /** The acknowledged owner may intentionally replace its own reading window. */
       gapWindowFence?: EventGapFence;
     }
@@ -944,9 +949,10 @@ function reducer(state: State, action: Action): State {
       // window already or newer than the point-in-time read that produced it, which is exactly the
       // live event a coarser rule would lose.
       const windowBase = action.windowHasOlder !== undefined ? action.events[0]?.seq : undefined;
-      const retained = windowBase === undefined
+      const retained = windowBase === undefined && action.windowThroughSeq === undefined
         ? events.get(action.sessionId)
-        : events.get(action.sessionId)?.filter((entry) => entry.seq >= windowBase);
+        : events.get(action.sessionId)?.filter((entry) => entry.seq >= (windowBase ?? 0) &&
+          (action.windowThroughSeq === undefined || entry.seq <= action.windowThroughSeq));
       const merged = mergeEvents(retained, action.events);
       events.set(action.sessionId, merged);
       const session = state.sessions.get(action.sessionId);
@@ -1227,6 +1233,7 @@ function reducer(state: State, action: Action): State {
             streamRecoveryCursors: new Map(),
             pendingStreamRecovery: null,
             snapshotLoaded: true,
+            currentTurnOpeningSupported: msg.capabilities?.currentTurnOpening === true,
             snapshotRevision: state.snapshotRevision + 1,
             projectsSupported: msg.capabilities?.projects === true || msg.projects !== undefined,
             projectLocationCreationSupported: msg.capabilities?.createProjectLocations === true,
@@ -1629,6 +1636,7 @@ function initialState(
     conn: "connecting",
     authRequired: false,
     snapshotLoaded: false,
+    currentTurnOpeningSupported: false,
     snapshotRevision: 0,
     projectsSupported: false,
     projectLocationCreationSupported: false,
@@ -1717,6 +1725,7 @@ interface StoreValue extends State {
   cancelEventGapRecovery: Store["cancelEventGapRecovery"];
   finishEventGapRecovery: Store["finishEventGapRecovery"];
   loadEventGapWindow: Store["loadEventGapWindow"];
+  loadTurnStartWindow: Store["loadTurnStartWindow"];
   deferEventTail: Store["deferEventTail"];
   beginLaterEventsLoad: Store["beginLaterEventsLoad"];
   loadLaterEvents: Store["loadLaterEvents"];
@@ -2037,7 +2046,7 @@ export class Store {
       if (bounded.truncated) { tail.hasOlder = true; tail.turnAligned = false; }
     }
     const eventWindows = new Map(next.eventWindows).set(event.sessionId, {
-      ...window!, laterGap: { ...gap, beforeSeq: tail.events[0]!.seq, tailSeq: Math.max(gap.tailSeq, event.seq) },
+      ...window!, laterGap: { ...gap, beforeSeq: tail.events[0]?.seq ?? gap.beforeSeq, tailSeq: Math.max(gap.tailSeq, event.seq) },
     });
     return { ...next, events, eventWindows };
   }
@@ -2214,6 +2223,71 @@ export class Store {
     this.dispatch({ type: "events_older_loading", sessionId, eventEpoch, requestedBase });
     return this.state !== before;
   };
+
+  /** Install a bounded prefix and unread range. Tail metadata is never proof that its events were
+   * read. Publish only after the prefix and gap exist together, including racing live frames. */
+  loadTurnStartWindow = (
+    sessionId: string, page: SessionEventsResponse, recoveryRevision: number,
+    recoveryGeneration = this.state.snapshotRevision,
+  ): boolean => {
+    const epoch = page.eventEpoch;
+    const start = page.turnStartSeq;
+    let end = page.nextAfter;
+    const knownTail = page.tailSeq;
+    if (epoch === undefined || start === undefined || end === undefined || knownTail === undefined ||
+        !Number.isSafeInteger(start) || start < 0 || !Number.isSafeInteger(end) || end < 0 ||
+        !Number.isSafeInteger(knownTail) || knownTail < end || page.events.length > 200 ||
+        page.events.some(event => event.sessionId !== sessionId) ||
+        (page.events.length ? page.events[0]!.seq !== start ||
+          contiguousEventHighWater(page.events, start - 1) !== end || page.events.at(-1)!.seq !== end
+          : start !== 0 || end !== 0) ||
+        page.hasMoreLater !== (knownTail > end)) return false;
+    const priorWindow = this.state.eventWindows.get(sessionId);
+    const priorTail = this.deferredTails.get(sessionId);
+    const reuse = priorWindow?.openingStartSeq === start && priorWindow.eventEpoch === epoch &&
+      this.state.snapshotRevision === recoveryGeneration;
+    // The acknowledgement can arrive after the reader explicitly loaded another page. Reusing
+    // the same opening must preserve that contiguous range and the live frames staged beside it.
+    let reading = page.events;
+    if (reuse && start > 0) {
+      const base = priorWindow.baseSeq;
+      const retained = (this.state.events.get(sessionId) ?? []).filter(event => event.seq >= base);
+      const through = contiguousEventHighWater(retained, base - 1);
+      reading = mergeEvents(page.events, retained.filter(event => event.seq <= through));
+      end = reading.at(-1)?.seq ?? end;
+    }
+    const live = mergeEvents((this.state.events.get(sessionId) ?? []).filter(event => event.seq > end),
+      reuse && priorTail?.fence.eventEpoch === epoch && priorTail.fence.recoveryGeneration === recoveryGeneration
+        ? priorTail.events.filter(event => event.seq > end) : []);
+    const tailSeq = Math.max(knownTail, end, live.at(-1)?.seq ?? 0,
+      reuse ? priorWindow.laterGap?.tailSeq ?? 0 : 0);
+    const before = this.state;
+    this.apply({ type: "events_loaded", sessionId, events: reading, eventEpoch: epoch,
+      recoveryRevision, recoveryGeneration, recoveryComplete: page.cacheComplete === true && tailSeq <= end,
+      windowHasOlder: reuse ? priorWindow.hasOlder : page.hasMoreOlder === true,
+      windowTurnAligned: reuse ? priorWindow.turnAligned : page.turnAligned,
+      windowThroughSeq: end });
+    if (this.state === before) return false;
+    const window = this.state.eventWindows.get(sessionId)!;
+    const windows = new Map(this.state.eventWindows);
+    windows.set(sessionId, { ...window, openingStartSeq: start,
+      complete: page.cacheComplete === true && tailSeq <= end });
+    this.commit({ ...this.state, eventWindows: windows });
+    if (tailSeq > end) {
+      const fence = this.beginEventGapRecovery(sessionId, epoch, recoveryRevision, recoveryGeneration, () => true);
+      if (!fence) { this.publish(); return false; }
+      const bounded = live.length ? this.boundedDeferredEvents(live, sessionId) : null;
+      this.deferredTails.set(sessionId, { fence, observedTailSeq: tailSeq, events: bounded?.events ?? [],
+        bytes: bounded?.bytes ?? 0, byteSizes: bounded?.byteSizes ?? new Map(),
+        httpTailSeq: knownTail, hasOlder: true });
+      this.dispatch({ type: "event_gap_state", fence, events: reading,
+        window: { ...this.state.eventWindows.get(sessionId)!, laterGap: {
+          afterSeq: end, beforeSeq: end + 1, tailSeq, loading: false, error: null, fence,
+        } }, settled: true });
+    } else this.publish();
+    return true;
+  };
+
   failOlderEventsLoad = (
     sessionId: string,
     error: string,
@@ -2281,9 +2355,28 @@ export class Store {
     eventEpoch = sessionEventEpoch(this.state.sessions.get(sessionId)),
     recoveryRevision = -1,
     recoveryGeneration = this.state.snapshotRevision,
-  ): void => this.dispatch({
-    type: "event_history_loading", sessionId, eventEpoch, recoveryRevision, recoveryGeneration,
-  });
+  ): void => {
+    const priorWindow = this.state.eventWindows.get(sessionId);
+    const priorTail = this.deferredTails.get(sessionId);
+    const retainOpening = priorWindow?.openingStartSeq !== undefined && priorWindow.laterGap && priorTail &&
+      priorTail.fence.eventEpoch === eventEpoch && priorTail.fence.recoveryGeneration === recoveryGeneration &&
+      recoveryGeneration === this.state.snapshotRevision && this.eventEpoch(sessionId) === eventEpoch;
+    this.apply({ type: "event_history_loading", sessionId, eventEpoch, recoveryRevision, recoveryGeneration });
+    if (retainOpening) {
+      // Transfer the bounded staged rows to the acknowledged owner. A fresh fence revokes old
+      // page tickets while preserving live rows through the provisional-to-acknowledged handoff.
+      const fence = this.beginEventGapRecovery(sessionId, eventEpoch, recoveryRevision, recoveryGeneration, () => true);
+      if (fence) {
+        const { pageRequest: _request, ...tail } = priorTail;
+        this.deferredTails.set(sessionId, { ...tail, fence });
+        const window = this.state.eventWindows.get(sessionId)!;
+        this.dispatch({ type: "event_gap_state", fence, events: this.state.events.get(sessionId) ?? [],
+          window: { ...window, laterGap: { ...priorWindow.laterGap!, fence, loading: false } }, settled: false });
+        return;
+      }
+    }
+    this.publish();
+  };
   failEventHistoryLoad = (
     sessionId: string,
     error: string,
@@ -2301,7 +2394,8 @@ export class Store {
     const reading = this.state.events.get(sessionId);
     // Empty authoritative logs have base0. Once live rows arrive they can own recovery from
     // seq1, while a missing initial prefix still fails contiguity rather than being skipped.
-    const baseSeq = window?.baseSeq === 0 && reading?.length ? 1 : window?.baseSeq ?? reading?.[0]?.seq ?? 0;
+    const baseSeq = window?.baseSeq === 0 && (reading?.length || window.openingStartSeq === 0)
+      ? 1 : window?.baseSeq ?? reading?.[0]?.seq ?? 0;
     const fence: EventGapFence = { sessionId, eventEpoch, recoveryRevision, recoveryGeneration,
       operationId: ++this.gapRequestSequence, baseSeq };
     const prior = this.gapOperations.get(sessionId);
@@ -2400,9 +2494,13 @@ export class Store {
     const ordered = mergeEvents(undefined, incoming);
     if (contiguousEventHighWater(ordered, ordered[0]!.seq - 1) !== ordered.at(-1)!.seq) return false;
     const pending = this.pendingGapLive.get(fence.sessionId);
-    const buffered = pending?.fence === fence ? pending.events.filter(event => event.seq >= ordered[0]!.seq) : [];
+    const previous = this.deferredTails.get(fence.sessionId);
+    const buffered = mergeEvents(pending?.fence === fence
+      ? pending.events.filter(event => event.seq >= ordered[0]!.seq) : [],
+      previous?.fence === fence ? previous.events.filter(event => event.seq >= ordered[0]!.seq) : []);
     const combined = mergeEvents(ordered, buffered);
-    const observedTailSeq = Math.max(combined.at(-1)!.seq, pending?.fence === fence ? pending.observedTailSeq : 0);
+    const observedTailSeq = Math.max(combined.at(-1)!.seq, pending?.fence === fence ? pending.observedTailSeq : 0,
+      previous?.fence === fence ? previous.observedTailSeq : 0);
     const bounded = this.boundedDeferredEvents(combined, fence.sessionId);
     if (!bounded) return false;
     const window = this.state.eventWindows.get(fence.sessionId) ?? {
@@ -2418,8 +2516,11 @@ export class Store {
       retainedReading = merged.filter(event => event.seq <= readingEnd);
       if (readingEnd >= observedTailSeq) {
         this.pendingGapLive.delete(fence.sessionId);
-        this.dispatch({ type: "event_gap_state", fence, events: retainedReading, window,
+        this.deferredTails.delete(fence.sessionId);
+        const { laterGap: _gap, ...completed } = window;
+        this.dispatch({ type: "event_gap_state", fence, events: retainedReading, window: { ...completed, complete: true },
           settled: true, complete: true, advanceCursor: true });
+        this.finishEventGapRecovery(fence);
         return true;
       }
       const remaining = retainedTail.filter(event => event.seq > readingEnd);
@@ -2474,30 +2575,29 @@ export class Store {
         page.events.length > 200 || page.events.some(event => event.sessionId !== id)) return false;
     const ordered = mergeEvents(undefined, page.events);
     const after = contiguousEventHighWater(ordered, request.after);
-    if (!ordered.length || ordered[0]!.seq !== request.after + 1 || after !== ordered.at(-1)!.seq ||
+    if ((ordered.length && (ordered[0]!.seq !== request.after + 1 || after !== ordered.at(-1)!.seq)) ||
+        (!ordered.length && page.hasMoreCached === true) ||
         (page.nextAfter !== undefined && page.nextAfter !== after)) return false;
     delete tail.pageRequest;
     let reading = mergeEvents(this.state.events.get(id), ordered);
     let end = after;
-    if (tail.events[0]!.seq <= end + 1) {
+    if (tail.events.length && tail.events[0]!.seq <= end + 1) {
       const connected = contiguousEventHighWater(tail.events, end);
       reading = mergeEvents(reading, tail.events.filter(event => event.seq <= connected));
       end = connected;
     }
-    const done = end >= gap.tailSeq && end >= tail.httpTailSeq;
+    const done = page.cacheComplete === true && end >= gap.tailSeq && end >= tail.httpTailSeq;
     const { laterGap: _gap, ...baseWindow } = window!;
     if (done) this.deferredTails.delete(id);
     else {
       const remaining = tail.events.filter(event => event.seq > end);
-      if (remaining.length) {
-        tail.events = remaining;
-        tail.bytes = remaining.reduce((bytes, event) => bytes + (tail.byteSizes.get(event.seq)?.bytes ?? 0), 0);
-        tail.byteSizes = new Map(remaining.map(event => [event.seq, tail.byteSizes.get(event.seq)!]));
-      }
+      tail.events = remaining;
+      tail.bytes = remaining.reduce((bytes, event) => bytes + (tail.byteSizes.get(event.seq)?.bytes ?? 0), 0);
+      tail.byteSizes = new Map(remaining.map(event => [event.seq, tail.byteSizes.get(event.seq)!]));
     }
     this.dispatch({ type: "event_gap_state", fence: request.fence, events: reading,
-      window: done ? baseWindow : { ...baseWindow, laterGap: { ...gap, afterSeq: end,
-        beforeSeq: Math.max(end + 1, tail.events[0]!.seq), loading: false, error: null } },
+      window: done ? { ...baseWindow, complete: page.cacheComplete === true } : { ...baseWindow, laterGap: { ...gap, afterSeq: end,
+        beforeSeq: Math.max(end + 1, tail.events[0]?.seq ?? end + 1), loading: false, error: null } },
       settled: true, complete: done, advanceCursor: done });
     if (done) this.finishEventGapRecovery(request.fence);
     return true;
@@ -2506,7 +2606,7 @@ export class Store {
   promoteDeferredEventTail = (fence: EventGapFence): boolean => {
     const tail = this.deferredTails.get(fence.sessionId);
     const gap = this.state.eventWindows.get(fence.sessionId)?.laterGap;
-    if (!tail || tail.fence !== fence || !gap || !this.currentGapFence(fence) ||
+    if (!tail || !tail.events.length || tail.fence !== fence || !gap || !this.currentGapFence(fence) ||
         tail.events[0]!.seq > tail.httpTailSeq ||
         contiguousEventHighWater(tail.events, tail.events[0]!.seq - 1) < gap.tailSeq) return false;
     // This is an explicit change of reading window: the omitted prefix becomes ordinary older
@@ -2860,7 +2960,7 @@ export function useHasStore(): boolean {
 }
 
 /** Stable action handles (never cause re-renders). */
-export function useStoreActions(): Pick<Store, "dispatch" | "navigate" | "setInboxPersistenceEnabled" | "setInboxSelection" | "setInboxSplit" | "setInboxRatio" | "setFilters" | "loadEvents" | "loadOlderEvents" | "beginOlderEventsLoad" | "failOlderEventsLoad" | "eventWindowBase" | "loadSession" | "getSession" | "beginSessionsBackfill" | "beginEventHistoryLoad" | "failEventHistoryLoad" | "isEventGapRecoveryCurrent" | "beginEventGapRecovery" | "cancelEventGapRecovery" | "finishEventGapRecovery" | "loadEventGapWindow" | "deferEventTail" | "beginLaterEventsLoad" | "loadLaterEvents" | "failLaterEventsLoad" | "promoteDeferredEventTail" | "loadPodContext" | "eventHighWater" | "recoveryAfter" | "recoveryReadAfter" | "eventEpoch" | "reconcileShellOutputs" | "loadShellHistory" | "removeShellOutput" | "reconnectNow"> {
+export function useStoreActions(): Pick<Store, "dispatch" | "navigate" | "setInboxPersistenceEnabled" | "setInboxSelection" | "setInboxSplit" | "setInboxRatio" | "setFilters" | "loadEvents" | "loadTurnStartWindow" | "loadOlderEvents" | "beginOlderEventsLoad" | "failOlderEventsLoad" | "eventWindowBase" | "loadSession" | "getSession" | "beginSessionsBackfill" | "beginEventHistoryLoad" | "failEventHistoryLoad" | "isEventGapRecoveryCurrent" | "beginEventGapRecovery" | "cancelEventGapRecovery" | "finishEventGapRecovery" | "loadEventGapWindow" | "deferEventTail" | "beginLaterEventsLoad" | "loadLaterEvents" | "failLaterEventsLoad" | "promoteDeferredEventTail" | "loadPodContext" | "eventHighWater" | "recoveryAfter" | "recoveryReadAfter" | "eventEpoch" | "reconcileShellOutputs" | "loadShellHistory" | "removeShellOutput" | "reconnectNow"> {
   return useStoreHandle();
 }
 
@@ -2987,6 +3087,7 @@ export function useStore(): StoreValue {
     setInboxRatio: store.setInboxRatio,
     setFilters: store.setFilters,
     loadEvents: store.loadEvents,
+    loadTurnStartWindow: store.loadTurnStartWindow,
     loadOlderEvents: store.loadOlderEvents,
     beginOlderEventsLoad: store.beginOlderEventsLoad,
     failOlderEventsLoad: store.failOlderEventsLoad,

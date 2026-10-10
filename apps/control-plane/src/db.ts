@@ -1416,6 +1416,9 @@ CREATE TABLE IF NOT EXISTS session_events (
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_session_events_session ON session_events(session_id, seq);
+CREATE INDEX IF NOT EXISTS idx_session_events_turn_start ON session_events(session_id, seq)
+  WHERE kind='user_message' AND COALESCE(json_extract(payload, '$.deliveryIntent'), '')!='steer'
+    AND json_type(payload, '$.commandInvocation') IS NULL;
 -- Pending-attention projections resolve an exact structured owner on every session snapshot.
 -- Keep that compact join independent of transcript length.
 CREATE INDEX IF NOT EXISTS idx_session_events_tool_call_id
@@ -22271,6 +22274,31 @@ export class ControlPlaneDb {
     } catch {
       return undefined;
     }
+  }
+
+  /** One bounded page from the CP cache. The extra row is observed only to compute hasMore. */
+  listCachedCurrentTurnOpening(sessionId: string, limit: number): {
+    events: SessionEvent[]; turnStartSeq: number; tailSeq: number; nextAfter: number;
+    hasMoreLater: boolean; hasMoreOlder: boolean; turnAligned: boolean;
+  } {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
+      throw new RangeError("limit must be a positive safe integer at most 200");
+    }
+    // This partial index finds the anchor without examining a long turn's payloads. Steering and
+    // command-only messages do not start a conversation turn in the reader.
+    const anchor = this.stmt(`SELECT seq FROM session_events WHERE session_id=?
+      AND kind='user_message' AND COALESCE(json_extract(payload, '$.deliveryIntent'), '')!='steer'
+      AND json_type(payload, '$.commandInvocation') IS NULL ORDER BY seq DESC LIMIT 1`)
+      .get(sessionId) as { seq: number } | undefined;
+    const first = this.stmt(`SELECT seq FROM session_events WHERE session_id=? ORDER BY seq LIMIT 1`)
+      .get(sessionId) as { seq: number } | undefined;
+    const tail = this.stmt(`SELECT seq FROM session_events WHERE session_id=? ORDER BY seq DESC LIMIT 1`)
+      .get(sessionId) as { seq: number } | undefined;
+    const start = anchor?.seq ?? first?.seq ?? 0;
+    const tailSeq = tail?.seq ?? 0;
+    const page = this.listCachedEventPage(sessionId, Math.max(0, start - 1), limit);
+    return { events: page.events, turnStartSeq: start, tailSeq, nextAfter: page.nextAfterSeq,
+      hasMoreLater: page.hasMore, hasMoreOlder: start > (first?.seq ?? 0), turnAligned: anchor !== undefined };
   }
 
   /** One bounded page from the CP cache. The extra row is observed only to compute hasMore. */

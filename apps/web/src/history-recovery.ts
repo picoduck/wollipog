@@ -9,6 +9,60 @@ export const SESSION_HISTORY_RECONNECT_PAGE_BUDGET = 4;
  * older pages afterward because many streamed events can collapse into one short timeline row. */
 export const SESSION_EVENT_WINDOW_LIMIT = 200;
 
+const openingReads = new WeakMap<object, Map<string, Promise<SessionEventsResponse>>>();
+const openingSources = new WeakMap<object, NonNullable<Parameters<typeof recoverSessionTurnStartWindow>[1]["fetchOpening"]>>();
+
+/** Share a mounted reader's provisional REST read with its socket-acknowledged successor.
+ * Cache only one bounded opening; epochs, reconnect generations and retries use new keys. */
+export async function recoverSessionTurnStartWindow(
+  request: SessionHistoryWindowRequest,
+  options: SessionHistoryWindowOptions & {
+    scope: object;
+    readKey: string;
+    fetchOpening?: (id: string, epoch: number, limit: number) => Promise<SessionEventsResponse>;
+    applyOpening: (page: SessionEventsResponse) => boolean;
+    onUnsupported?: () => void;
+  },
+): Promise<{ supported: boolean; complete: boolean }> {
+  if (!options.fetchOpening) {
+    options.onUnsupported?.();
+    return recoverSessionHistoryWindow(request, options);
+  }
+  let reads = openingReads.get(options.scope);
+  if (!reads || openingSources.get(options.scope) !== options.fetchOpening) {
+    reads = new Map();
+    openingReads.set(options.scope, reads);
+    openingSources.set(options.scope, options.fetchOpening);
+  }
+  for (const key of reads.keys()) if (key !== options.readKey) reads.delete(key);
+  const wait = options.wait ?? defaultWait;
+  for (let poll = 0; options.isCurrent(); poll++) {
+    let pending = reads.get(options.readKey);
+    if (!pending) {
+      pending = options.fetchOpening(request.sessionId, request.eventEpoch, SESSION_EVENT_WINDOW_LIMIT);
+      reads.set(options.readKey, pending);
+    }
+    let page: SessionEventsResponse;
+    try { page = await pending; } catch (error) { reads.delete(options.readKey); throw error; }
+    if (!options.isCurrent()) return { supported: true, complete: false };
+    // Old servers ignore opening and return a forward page. Never paint it as a turn start.
+    if (page.turnStartSeq === undefined || page.hasMoreLater === undefined || page.tailSeq === undefined) {
+      reads.delete(options.readKey);
+      options.onUnsupported?.();
+      return recoverSessionHistoryWindow(request, options);
+    }
+    if (page.eventEpoch !== request.eventEpoch) return { supported: true, complete: false };
+    if (page.cacheComplete === true || options.cacheCannotFill?.() || poll >= (options.maxIdlePolls ?? 160)) {
+      return { supported: true, complete: options.applyOpening(page) && page.cacheComplete === true };
+    }
+    // A hydrating prefix cannot prove the latest turn yet. Retain the loading state until the
+    // cache catches up, or show an explicitly incomplete offline/timeout fallback.
+    reads.delete(options.readKey);
+    await wait(options.idlePollMs ?? 75);
+  }
+  return { supported: true, complete: false };
+}
+
 /** Stable scalar dependency for restarting a recovery when any selected timeline generation
  * changes in place. Length-prefix ids so arbitrary session names cannot collide. */
 export function sessionHistoryEpochKey(

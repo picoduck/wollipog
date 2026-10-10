@@ -4313,10 +4313,17 @@ app.get("/api/sessions/:id/events", async (req, reply) => {
     before?: string;
     direction?: string;
     align?: string;
+    opening?: string;
     limit?: string;
     eventEpoch?: string;
   };
   const after = Number(query.after ?? 0);
+  const currentTurnOpening = query.opening === "current-turn";
+  if (query.opening !== undefined && (!currentTurnOpening || query.limit === undefined ||
+      query.after !== undefined || query.before !== undefined || query.direction !== undefined || query.align !== undefined)) {
+    return reply.code(400).send({ error: "opening must be current-turn with limit and no paging cursors",
+      code: "invalid_history_page" });
+  }
   if (query.limit === undefined) {
     await svc.hydrateHistory(id);
     return { events: db.listEvents(id, after) };
@@ -4386,6 +4393,11 @@ app.get("/api/sessions/:id/events", async (req, reply) => {
   }
   const indexed = runnerSupportsProtocol(db.getRunner(session.runnerId)?.protocolVersion, "indexedHistory");
   const cacheComplete = indexed ? state.complete : state.hydratedSeq >= state.tailSeq;
+  if (currentTurnOpening) {
+    const opening = db.listCachedCurrentTurnOpening(id, limit);
+    void svc.hydrateHistory(id);
+    return { ...opening, eventEpoch: state.eventEpoch, cacheComplete };
+  }
   if (backward) {
     const tail = db.listCachedEventTailPage(id, before, limit, { alignToTurn });
     // Hydration still runs forward from the runner. An incomplete cache means this window is not

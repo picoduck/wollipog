@@ -10419,6 +10419,8 @@ export interface UiSnapshotMessage {
     sessionSubscriptions?: boolean;
     boundedDelivery?: boolean;
     paginatedSessionHistory?: boolean;
+    /** Bounded initial page at the current semantic turn's start, with explicit unread range. */
+    currentTurnOpening?: boolean;
     /** The snapshot carries an authoritative durable Project inventory and live Project events. */
     projects?: boolean;
     /** The control plane can register a browsed folder as a new Project Location. */
@@ -11014,6 +11016,13 @@ export interface ArchiveProjectSessionsResponse {
 
 export interface SessionEventsResponse {
   events: SessionEvent[];
+  /** Opt-in current-turn opening: the visible prefix starts here, never at the tail. Zero means
+   * the cache is empty. An absent semantic anchor is reported by turnAligned=false. */
+  turnStartSeq?: number;
+  /** Point-in-time cached tail. A prefix is incomplete while hasMoreLater is true, even when
+   * cacheComplete proves that the server has finished hydrating its cache. */
+  tailSeq?: number;
+  hasMoreLater?: boolean;
   /** CP-owned replacement generation for stale-page rejection. Absent on legacy control planes. */
   eventEpoch?: number;
   /** CP event seq to pass as `after` for the next cached page. */
