@@ -109,6 +109,8 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `EyeOffIcon` | Lucide | `EyeOff` | Hide a revealed personal identifier. |
 | `PanelRightIcon` | Lucide | `PanelRight` | Right panel placement; Preview Right, the Sessions preview beside the list (#2219). |
 | `PanelBottomIcon` | Lucide | `PanelBottom` | Preview Below, the Sessions preview under the list (#2219). |
+| `Maximize2Icon` | Lucide | `Maximize2` | Expand Panel: the side panel fills the session's content area (#2845). |
+| `Minimize2Icon` | Lucide | `Minimize2` | Restore Panel: an expanded side panel returns beside the chat (#2845). |
 | `PanelLeftOpenIcon` | Lucide | `PanelLeftOpen` | Expand Navigation: show names in the desktop rail. |
 | `PanelLeftCloseIcon` | Lucide | `PanelLeftClose` | Collapse Navigation: return the desktop rail to icons. |
 | `CommandLineIcon` | Lucide | `SquareTerminal` | Command-line destination; the session bar's Terminal toggle. |

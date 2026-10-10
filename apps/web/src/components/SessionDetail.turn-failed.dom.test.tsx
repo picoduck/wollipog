@@ -127,7 +127,7 @@ async function withFailedTurn(
   const navigation: ViewNavigation = { current: () => ({ name: "session", id }), push() {}, listen: () => () => {} };
   const rightPanel = {
     open: false, mode: "launcher" as const, width: 360, dragging: false, subagentTarget: null,
-    toggle() {}, openMode() {}, show() {}, setMode() {}, setWidth() {}, setDragging() {}, close() {},
+    toggle() {}, openMode() {}, show() {}, setMode() {}, setWidth() {}, expanded: false, setExpanded() {}, setDragging() {}, close() {},
     selectSubagent() {}, showSubagent() {}, consumeSubagentFocusRequest() {},
   };
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;

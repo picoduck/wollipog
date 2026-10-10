@@ -179,7 +179,7 @@ async function mount(current: SessionView, { online = true, client: overrides = 
   } as unknown as ApiClient;
   const rightPanel = {
     open: false, mode: "launcher" as const, width: 360, dragging: false, subagentTarget: null,
-    toggle() {}, openMode() {}, show() {}, setMode() {}, setWidth() {}, setDragging() {},
+    toggle() {}, openMode() {}, show() {}, setMode() {}, setWidth() {}, expanded: false, setExpanded() {}, setDragging() {},
     close() {}, selectSubagent() {}, showSubagent() {}, consumeSubagentFocusRequest() {},
   };
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;

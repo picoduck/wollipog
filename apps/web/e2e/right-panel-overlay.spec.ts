@@ -66,13 +66,14 @@ async function expectPresentation(page: Page, label: string): Promise<boolean> {
 }
 
 const CASES = [
-  // The 64px rail at 940px leaves the chat 500px beside a 376px panel; the 208px labelled rail
-  // leaves 356px. At 1099px both keep 480px beside the 400px default.
+  // The 64px rail at 940px leaves the chat 490px beside a 386px panel (its drag ceiling, #2845);
+  // with the 208px labelled rail even a 320px one leaves 412px. At 1099px both keep 480px beside the
+  // 400px default.
   { width: 940, labelled: false, overlays: false },
   { width: 940, labelled: true, overlays: true },
   { width: 1099, labelled: false, overlays: false },
   { width: 1099, labelled: true, overlays: false },
-  // #2843's widths: a 400px panel docks at 1100px; at 834px (an iPad) a 333px one leaves 437px.
+  // #2843's widths: a 400px panel docks at 1100px; at 834px (an iPad) a 320px one leaves 450px.
   { width: 1100, labelled: false, overlays: false },
   { width: 834, labelled: false, overlays: true },
   // At the tier's narrowest width even the default rail leaves too little.

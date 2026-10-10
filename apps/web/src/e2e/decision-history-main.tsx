@@ -148,6 +148,8 @@ function Fixture() {
     show: (next) => { setMode(next); setOpen(true); },
     setMode,
     setWidth: (update) => setWidth(update),
+    expanded: false,
+    setExpanded: () => {},
     setDragging: () => {},
     close: () => setOpen(false),
     selectSubagent: () => {},

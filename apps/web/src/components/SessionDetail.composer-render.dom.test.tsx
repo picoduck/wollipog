@@ -185,6 +185,8 @@ async function mount(client: Partial<ApiClient> = {}) {
     show() {},
     setMode() {},
     setWidth() {},
+    expanded: false,
+    setExpanded() {},
     setDragging() {},
     close() {},
     selectSubagent() {},

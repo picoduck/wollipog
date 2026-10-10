@@ -217,6 +217,8 @@ interface FixtureOptions {
   client?: Partial<ApiClient>;
   mainEventPayloads?: SessionEvent["payload"][];
   rightPanelMode?: "launcher" | "sidechat" | "background";
+  /** The side panel is expanded over the chat column (#2845); Restore Panel calls are recorded. */
+  rightPanelExpanded?: { calls: boolean[] };
   composerDraftCleanup?: typeof deleteComposerDraftIfMatches;
   sessionCapabilities?: SessionView["agentCapabilities"];
   sessionPatch?: Partial<SessionView>;
@@ -315,6 +317,8 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
     show() {},
     setMode() {},
     setWidth() {},
+    expanded: options.rightPanelExpanded != null,
+    setExpanded(value: boolean) { options.rightPanelExpanded?.calls.push(value); },
     setDragging() {},
     close() {},
     selectSubagent() {},
@@ -6921,5 +6925,42 @@ test("a draft that changed under a phone's side panel sheet is grown to fit when
       if (descriptor) Object.defineProperty(prototype, name, descriptor);
       else delete (prototype as unknown as Record<string, unknown>)[name];
     }
+  }
+});
+
+test("inserting a side-chat response restores an expanded side panel so the draft shows (#2845)", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const child = session("side-chat-expanded-child");
+  const relation: SideChatView = { parentSessionId: "unused-by-panel", session: child, createdAt: 1 };
+  const response: SessionEvent = {
+    id: 1,
+    sessionId: child.id,
+    seq: 1,
+    ts: 2,
+    payload: { kind: "agent_message", text: "side-chat answer", final: true },
+  };
+  const expanded = { calls: [] as boolean[] };
+  const fixture = await mountFixture(draft, {
+    rightPanelMode: "sidechat",
+    rightPanelExpanded: expanded,
+    client: {
+      sideChat: async () => ({ sideChat: relation }),
+      session: async (id: string) => ({ session: id === child.id ? child : session(id) }),
+      getSessionEventPage: async () => ({ events: [response], eventEpoch: 0, nextAfter: 1, cacheComplete: true }),
+    },
+  });
+  try {
+    await resolveDraft(draft, "");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
+    assert.equal(fixture.container.querySelector<HTMLElement>("#right-panel")?.dataset.presentation, "expanded");
+    const insert = [...fixture.container.querySelectorAll("button")]
+      .find((button) => button.textContent === "Insert Latest Response into Primary Draft") as HTMLButtonElement;
+    assert.ok(insert);
+    await act(async () => insert.click());
+    assert.deepEqual(expanded.calls, [false], "Insert restores the panel beside the chat");
+    await act(async () => { flushFrames(); });
+    assert.equal(fixture.composer.value, "side-chat answer");
+  } finally {
+    await unmountFixture(fixture);
   }
 });

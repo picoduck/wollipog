@@ -157,7 +157,7 @@ async function mount() {
   } as unknown as ApiClient;
   const rightPanel = {
     open: false, mode: "launcher", width: 360, dragging: false, subagentTarget: null,
-    toggle() {}, openMode() {}, show() {}, setMode() {}, setWidth() {}, setDragging() {}, close() {},
+    toggle() {}, openMode() {}, show() {}, setMode() {}, setWidth() {}, expanded: false, setExpanded() {}, setDragging() {}, close() {},
     selectSubagent() {}, showSubagent() {}, consumeSubagentFocusRequest() {},
   };
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;

@@ -170,7 +170,7 @@ async function mountSession({
   let actions: StoreActions | undefined;
   const rightPanel = {
     open: false, mode: "launcher" as const, width: 360, dragging: false, subagentTarget: null,
-    toggle() {}, openMode: record, show: record, setMode() {}, setWidth() {}, setDragging() {}, close() {},
+    toggle() {}, openMode: record, show: record, setMode() {}, setWidth() {}, expanded: false, setExpanded() {}, setDragging() {}, close() {},
     selectSubagent() {}, showSubagent() {}, consumeSubagentFocusRequest() {},
   };
   const events = transcriptEvents(id, Math.ceil(cachedEvents / 2)).slice(0, cachedEvents);

@@ -101,8 +101,8 @@ test("at 1440px the summary is a 280px column that gives its width back when tog
 });
 
 test("a wide right panel turns the summary into a drawer, and the reader never drops under 560px docked", async ({ page }) => {
-  // 640px asks for more than the 40% window cap, so the panel takes 576px at 1440: the session
-  // body is then too narrow to keep 560px of reader beside a 280px summary.
+  // A 640px panel fits beside the chat's 480px at 1440 (#2845): the session body is then too narrow
+  // to keep 560px of reader beside a 280px summary.
   await openSession(page, 1440, {
     "wollipog.pinned.open": "1",
     "wollipog.rightpanel.open": "1",

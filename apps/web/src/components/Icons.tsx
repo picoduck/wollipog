@@ -97,6 +97,8 @@ import {
   PanelLeftClose as LucidePanelLeftClose,
   PanelLeftOpen as LucidePanelLeftOpen,
   PanelRight as LucidePanelRight,
+  Maximize2 as LucideMaximize2,
+  Minimize2 as LucideMinimize2,
   Paperclip as LucidePaperclip,
   Pencil as LucidePencil,
   Pin as LucidePin,
@@ -514,6 +516,16 @@ export function EyeOffIcon(props: IconProps) {
 
 export function PanelRightIcon(props: IconProps) {
   return <LibraryIcon glyph={LucidePanelRight} {...props} />;
+}
+
+/** Expand Panel: the side panel fills the session's content area (#2845). */
+export function Maximize2Icon(props: IconProps) {
+  return <LibraryIcon glyph={LucideMaximize2} {...props} />;
+}
+
+/** Restore Panel: an expanded side panel returns beside the chat (#2845). */
+export function Minimize2Icon(props: IconProps) {
+  return <LibraryIcon glyph={LucideMinimize2} {...props} />;
 }
 
 /** Preview Below: the Sessions preview under the list (#2219). */

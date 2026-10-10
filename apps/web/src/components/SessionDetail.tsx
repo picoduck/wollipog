@@ -2024,11 +2024,13 @@ function SessionDetailLoaded({
     setProgrammaticComposerText(next);
   });
   const insertSideChatDraft = useCallback((response: string) => {
+    // An expanded side panel fills the chat column's place (#2845); the draft is shown, not hidden.
+    if (!isMobile && rightPanelRef.current.expanded) rightPanelRef.current.setExpanded(false);
     revealOrdinaryComposerRef.current("always");
     markDraftDirty();
     const next = appendTranscript(draftState.current.text, response);
     setProgrammaticComposerText(next);
-  }, [markDraftDirty, setProgrammaticComposerText]);
+  }, [isMobile, markDraftDirty, setProgrammaticComposerText]);
   // Shared git status: the composer branch chip + the right panel's Review mode read one
   // fetch. Called before the !session guard — hooks must run unconditionally.
   // Inbox previews render neither the composer Git chip, pinned summary, nor Review panel. Do not
@@ -3984,7 +3986,15 @@ function SessionDetailLoaded({
     else followTail.preview();
   }, [followTail.follow, followTail.pause, followTail.preview]);
   const revealTranscriptItemFromPanel = useCallback((eventId: number) => {
+    // A phone's panel covers the transcript; an expanded one fills its place (#2845).
     if (isMobile) rightPanelRef.current.close();
+    else if (rightPanelRef.current.expanded) {
+      // Restoring narrows the transcript from the row's width back to the chat column's, which
+      // re-measures its rows; reveal once that layout has settled, not against the wide one.
+      rightPanelRef.current.setExpanded(false);
+      window.requestAnimationFrame(() => window.requestAnimationFrame(() => revealCurrentOperation(eventId)));
+      return;
+    }
     revealCurrentOperation(eventId);
   }, [isMobile, revealCurrentOperation]);
   const previewNavigationControls = useMemo<PreviewNavigationControls>(() => ({

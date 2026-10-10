@@ -127,6 +127,8 @@ test("no unacknowledged rule sets a layer on a guarded surface", () => {
     // The panel's sheet over the transcript where docking would squeeze the chat (#2206, #2725), on
     // the panel's own layer.
     '.detail-columns > .rpanel[data-presentation="overlay"]',
+    // Expand Panel (#2845): the panel over the hidden chat column, on the same layer.
+    '.detail-columns > .rpanel[data-presentation="expanded"]',
   ]);
   const touching = new Set<string>();
   for (const decl of zIndexDecls) {
@@ -170,6 +172,7 @@ test("the composer pickers stay below the mobile right panel", () => {
   assert.equal(layerOf(".picker"), "var(--z-sticky)");
   assert.equal(layerOf(".rpanel"), "var(--z-panel)");
   assert.equal(layerOf('.detail-columns > .rpanel[data-presentation="overlay"]'), "var(--z-panel)");
+  assert.equal(layerOf('.detail-columns > .rpanel[data-presentation="expanded"]'), "var(--z-panel)");
   assert.ok(tokenValue("--z-sticky") < tokenValue("--z-panel"));
 });
 

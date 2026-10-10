@@ -37,10 +37,29 @@ export function rightPanelOverlays(columnsWidth: number, panelWidth: number): bo
   return columnsWidth - panelWidth < RIGHT_PANEL_CHAT_MIN_WIDTH;
 }
 
-/** Clamp a panel width. `max` lets callers pass a viewport-aware ceiling (e.g. 40% of the
- * window width) so the panel can never squeeze the transcript + composer into a sliver on a
- * narrow window; it is itself floored at RIGHT_PANEL_MIN_WIDTH so a tiny window can't invert
- * the bounds (same stance as the shell dock's height clamp). */
+/**
+ * The room the drag ceiling keeps beside the chat column's 480px for the resize handle (#2845).
+ * Since #2843 the 8px handle straddles the panel's edge and takes no room, so this is a margin: a
+ * drag stops 10px short of the width at which the panel would overlay.
+ */
+export const RIGHT_PANEL_HANDLE_ROOM = 10;
+
+/**
+ * The widest the panel may be dragged in a row of `columnsWidth` (#2845): what §15.2's 480px rule
+ * leaves, `row − 480 − 10`, never above 640px (wider work uses Expand Panel) nor under 320px. So a
+ * drag never turns the panel into an overlay; only a row too narrow for even 320px does. A row not
+ * yet measured has no ceiling but the 640px maximum.
+ */
+export function rightPanelDragCeiling(columnsWidth: number | null): number {
+  if (columnsWidth === null) return RIGHT_PANEL_MAX_WIDTH;
+  const room = columnsWidth - RIGHT_PANEL_CHAT_MIN_WIDTH - RIGHT_PANEL_HANDLE_ROOM;
+  return Math.max(RIGHT_PANEL_MIN_WIDTH, Math.min(RIGHT_PANEL_MAX_WIDTH, Math.floor(room)));
+}
+
+/** Clamp a panel width. `max` lets callers pass the row-aware ceiling (`rightPanelDragCeiling`) so
+ * the panel can never squeeze the transcript + composer under its 480px; it is itself floored at
+ * RIGHT_PANEL_MIN_WIDTH so a tiny window can't invert the bounds (same stance as the shell dock's
+ * height clamp). */
 export function clampRightPanelWidth(width: number, max = RIGHT_PANEL_MAX_WIDTH): number {
   const ceiling = Math.max(RIGHT_PANEL_MIN_WIDTH, Math.min(RIGHT_PANEL_MAX_WIDTH, max));
   return Math.min(ceiling, Math.max(RIGHT_PANEL_MIN_WIDTH, width));
@@ -56,6 +75,14 @@ export function parseStoredRightPanelWidth(raw: string | null): number {
   const n = raw === null || raw.trim() === "" ? NaN : Number(raw);
   if (!Number.isFinite(n)) return RIGHT_PANEL_DEFAULT_WIDTH;
   return clampRightPanelWidth(n);
+}
+
+/**
+ * Parse the persisted Expanded state (#2845, `wollipog.rightpanel.expanded`). Only the "1" this
+ * build writes expands; anything else, a missing key included, restores the docked panel.
+ */
+export function parseStoredRightPanelExpanded(raw: string | null): boolean {
+  return raw === "1";
 }
 
 /**

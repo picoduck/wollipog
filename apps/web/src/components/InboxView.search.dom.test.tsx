@@ -103,6 +103,8 @@ const rightPanel = {
   show() {},
   setMode() {},
   setWidth() {},
+  expanded: false,
+  setExpanded() {},
   setDragging() {},
   close() {},
   selectSubagent() {},

@@ -166,6 +166,7 @@ function Fixture() {
   const [open, setOpen] = React.useState(true);
   const [mode, setMode] = React.useState<RightPanelMode>("decisions");
   const [width, setWidth] = React.useState(420);
+  const [expanded, setExpanded] = React.useState(params.get("expanded") === "1");
   const rightPanel: RightPanelState = {
     open,
     mode,
@@ -180,6 +181,8 @@ function Fixture() {
     show: (next) => { setMode(next); setOpen(true); },
     setMode,
     setWidth: (update) => setWidth(update),
+    expanded,
+    setExpanded,
     setDragging: () => {},
     close: () => setOpen(false),
     selectSubagent: () => {},
