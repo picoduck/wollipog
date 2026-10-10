@@ -157,7 +157,7 @@ test("ten nine-session production cycles release detached previews and keep DOM/
   const gitStatus = spawnSync("git", ["status", "--porcelain"], { cwd: referenceRoot, encoding: "utf8" });
   const sourceDirty = gitStatus.status === 0 ? Boolean(gitStatus.stdout.trim()) : null;
   const report = { sourceRevision, sourceDirty, assetSha256,
-    engineMode: process.env.SESSION_RETENTION_JITLESS === "1" ? "jitless" : "default",
+    engineMode: info.project.use.launchOptions?.args?.includes("--js-flags=--jitless") ? "jitless" : "default",
     sessions: RETENTION_SESSION_COUNT, warmupCycles: 2, measuredCycles: cycles,
     samples, ...retainers, heapTrendBytesPerCycle: (samples.at(-1)!.heapBytes - samples[0]!.heapBytes) / cycles };
   await info.attach("session-retention.json", { body: JSON.stringify(report, null, 2), contentType: "application/json" });
