@@ -56,7 +56,7 @@ export function PreviewQuestionCard({
   // An asynchronous question's answer key is its occurrence, as on the session's question card.
   const answerKey = request.async && request.occurrenceId ? `${request.requestId}:${request.occurrenceId}` : request.requestId;
   const draftIdentity = questionDraftIdentity(request.requestId, questions, request.occurrenceId,
-    request.requestedAt, useInstanceScope(), request.recoveryId);
+    request.requestedAt, useInstanceScope());
 
   const dismiss = async () => {
     if (unavailable !== null) return;

@@ -174,8 +174,8 @@ export function ComposerQuestionResponse({
   const api = useApi();
   const instanceScope = useInstanceScope();
   const operationKey = isAsync && occurrenceId ? `${requestId}:${occurrenceId}` : requestId;
-  const answerKey = useMemo(() => questionDraftIdentity(requestId, questions, occurrenceId, requestedAt, instanceScope, recoveryId),
-    [requestId, questions, occurrenceId, requestedAt, instanceScope, recoveryId]);
+  const answerKey = useMemo(() => questionDraftIdentity(requestId, questions, occurrenceId, requestedAt, instanceScope),
+    [requestId, questions, occurrenceId, requestedAt, instanceScope]);
   const ids = useId().replace(/:/g, "");
   const [draftState, setDraftState] = useState(() => ({
     requestId: answerKey,
@@ -195,8 +195,9 @@ export function ComposerQuestionResponse({
     // A committed question owns its response only until replacement or unmount. A fresh
     // token also prevents an earlier incarnation of the same request from regaining ownership.
     liveRequestRef.current = {};
+    operationPendingRef.current = null;
     return () => { liveRequestRef.current = null; };
-  }, [answerKey, sessionId]);
+  }, [answerKey, sessionId, recoveryId]);
 
   useEffect(() => {
     setDraftState({ requestId: answerKey, values: storedQuestionDrafts(sessionId, answerKey) });
@@ -207,6 +208,11 @@ export function ComposerQuestionResponse({
     setBusy(false);
     operationPendingRef.current = null;
   }, [answerKey, sessionId]);
+
+  useEffect(() => {
+    setBusy(false);
+    setSubmissionError(null);
+  }, [recoveryId]);
 
   useEffect(() => {
     const entering = active && !previousActiveRef.current;

@@ -33,10 +33,10 @@ export function questionDraftIdentity(
   occurrenceId?: string,
   requestedAt?: number,
   scope = "local",
-  recoveryId?: string,
 ): string {
   const epoch = occurrenceId || (Number.isSafeInteger(requestedAt) && requestedAt! > 0 ? requestedAt : null);
-  const key = JSON.stringify([scope, requestId, epoch, recoveryId ?? null, schemaDiscriminator(questions)]);
+  // Provider recovery changes delivery, not the server-owned pending occurrence.
+  const key = JSON.stringify([scope, requestId, epoch, schemaDiscriminator(questions)]);
   bindings.delete(key);
   bindings.set(key, { scope, requestId, questions, durable: epoch !== null });
   while (bindings.size > LIMIT * 4) bindings.delete(bindings.keys().next().value!);
@@ -78,14 +78,20 @@ function save(scope: string, entries: RecordEntry[]): void {
     while (entries.length > LIMIT || JSON.stringify(entries).length > MAX_CHARS) entries.shift();
     if (entries.length) storage()?.setItem(STORAGE_PREFIX + scope, JSON.stringify(entries));
     else storage()?.removeItem(STORAGE_PREFIX + scope);
-  } catch { /* Drafts remain available in this page when browser storage is unavailable. */ }
+  } catch {
+    // Do not leave an earlier answer recoverable when its replacement could not be saved.
+    try { storage()?.removeItem(STORAGE_PREFIX + scope); } catch { /* Storage may be disabled. */ }
+  }
 }
 
-function safeValues(binding: Binding, values: Record<string, QuestionResponseDraft>): Record<string, QuestionResponseDraft> {
+function safeValues(binding: Binding, values: Record<string, QuestionResponseDraft>, durable = false): Record<string, QuestionResponseDraft> {
   const safe: Record<string, QuestionResponseDraft> = {};
   for (const question of binding.questions) {
-    // Apply the same conservative sensitive-field classification used by campaign routing.
-    if (!parentControlRequestEligible("questions", { requestId: "draft", title: "", options: [], kind: "question", questions: [question] }) ||
+    // Secret answers stay in their mounted surface. Other sensitive fields may be shared in this
+    // page, but the conservative campaign classifier excludes them from browser persistence.
+    if (question.secret || durable && !parentControlRequestEligible("questions", {
+      requestId: "draft", title: "", options: [], kind: "question", questions: [question],
+    }) ||
         !Object.hasOwn(values, question.id)) continue;
     const value = values[question.id]!;
     if (value.kind === "choice") {
@@ -104,7 +110,7 @@ function read(sessionId: string, key: string): Draft {
   const current = memory.get(memoryKey(sessionId, key));
   const persisted = !current && binding?.durable ? records(binding.scope).find((entry) => entry.sessionId === sessionId && entry.key === key) : undefined;
   const draft = current ?? persisted ?? { values: {}, step: 0 };
-  return { values: binding ? safeValues(binding, draft.values) : structuredClone(draft.values),
+  return { values: binding ? safeValues(binding, draft.values, !!persisted) : structuredClone(draft.values),
     step: binding ? Math.min(draft.step, Math.max(0, binding.questions.length - 1)) : draft.step };
 }
 
@@ -123,7 +129,7 @@ function update(sessionId: string, key: string, patch: Partial<Draft>): void {
   while (memory.size > LIMIT) memory.delete(memory.keys().next().value!);
   if (binding?.durable) save(binding.scope, [
     ...records(binding.scope).filter((entry) => entry.sessionId !== sessionId || entry.key !== key),
-    { ...draft, sessionId, key, savedAt: Date.now() },
+    { ...draft, values: safeValues(binding, draft.values, true), sessionId, key, savedAt: Date.now() },
   ]);
 }
 export function storeQuestionDrafts(sessionId: string, key: string, values: Record<string, QuestionResponseDraft>): void {
@@ -139,7 +145,7 @@ export function clearQuestionDrafts(sessionId: string, key: string): void {
     // A captured exact key remains clearable after its validator leaves the bounded registry.
     try {
       const parts: unknown = JSON.parse(key);
-      if (Array.isArray(parts) && parts.length === 5 && typeof parts[0] === "string") {
+      if (Array.isArray(parts) && parts.length === 4 && typeof parts[0] === "string") {
         save(parts[0], records(parts[0]).filter((entry) => entry.sessionId !== sessionId || entry.key !== key));
         return;
       }
@@ -156,9 +162,9 @@ export function reconcileQuestionDrafts(sessionId: string, requests: readonly Pe
   const questions = requests.filter((request) => request.kind === "question");
   const live = (key: string) => {
     try {
-      const [owner, requestId, epoch, recoveryId, schema] = JSON.parse(key);
+      const [owner, requestId, epoch, schema] = JSON.parse(key);
       return owner === scope && questions.some((request) => request.requestId === requestId &&
-        (request.occurrenceId || request.requestedAt || null) === epoch && (request.recoveryId ?? null) === recoveryId &&
+        (request.occurrenceId || request.requestedAt || null) === epoch &&
         (request.questions === undefined || schemaDiscriminator(request.questions) === schema));
     } catch { return false; }
   };

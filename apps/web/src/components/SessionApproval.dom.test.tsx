@@ -1369,3 +1369,78 @@ test("switching to Interactive Form does not present an invalid typed choice as 
     clearQuestionDrafts("session-1", "question-1");
   }
 });
+
+test("provider recovery of the same occurrence keeps the form step and entered choices", async () => {
+  const { container, root } = mount();
+  const questions: AgentQuestion[] = [
+    { id: "target", question: "Choose a target.", options: [{ label: "Staging" }, { label: "Production" }] },
+    { id: "checks", question: "Choose checks.", multiSelect: true, options: [{ label: "Unit Tests" }, { label: "Browser Tests" }] },
+  ];
+  const render = (recovered: boolean) => root.render(<ApiProvider client={api}>
+    <SessionQuestionBanner sessionId="recover-form" requestId="recover-form" occurrenceId="same-occurrence"
+      questions={questions} runnerOnline recoveryId={recovered ? "restart" : undefined}
+      recoveryReason={recovered ? "provider_restart" : undefined} recoveryAction={recovered ? "resume_answer" : undefined} />
+  </ApiProvider>);
+  const key = questionDraftIdentity("recover-form", questions, "same-occurrence");
+  try {
+    setQuestionResponseStyle("interactive", domWindow as never);
+    await act(async () => render(false));
+    await act(async () => row(container, "Staging").click());
+    await act(async () => button(container, "next").click());
+    await act(async () => row(container, "Unit Tests").click());
+    await act(async () => render(true));
+    assert.equal(row(container, "Unit Tests").checked, true);
+    assert.equal(storedQuestionStep("recover-form", key), 1);
+    await act(async () => button(container, "back").click());
+    assert.equal(row(container, "Staging").checked, true);
+  } finally {
+    await act(async () => root.unmount());
+    clearQuestionDrafts("recover-form", key);
+    container.remove();
+  }
+});
+
+test("response mode switches keep a non-secret account choice in this page", async () => {
+  const { container, root } = mount();
+  const questions: AgentQuestion[] = [{ id: "account", question: "Which AWS account should I deploy to?",
+    options: [{ label: "Staging" }, { label: "Production" }] }];
+  try {
+    setQuestionResponseStyle("interactive", domWindow as never);
+    await renderComposerCard(root, questions);
+    await act(async () => row(container, "Staging").click());
+    await act(async () => setQuestionResponseStyle("composer", domWindow as never));
+    await act(async () => setQuestionResponseStyle("interactive", domWindow as never));
+    assert.equal(row(container, "Staging").checked, true);
+    assert.doesNotMatch(domWindow.sessionStorage.getItem("wollipog:question-drafts:v1:local") ?? "", /Staging/);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("late question schema hydration reads the incoming occurrence's existing draft", async () => {
+  const { container, root } = mount();
+  const questions: AgentQuestion[] = [
+    { id: "target", question: "Choose a target.", options: [{ label: "Staging" }] },
+    { id: "checks", question: "Choose checks.", multiSelect: true, options: [{ label: "Unit Tests" }] },
+  ];
+  const key = questionDraftIdentity("hydrate", questions, "hydrate-occurrence");
+  storeQuestionDrafts("hydrate", key, { target: { kind: "choice", labels: ["Staging"] },
+    checks: { kind: "choice", labels: ["Unit Tests"] } });
+  const render = (schema: AgentQuestion[]) => root.render(<ApiProvider client={api}>
+    <SessionQuestionBanner sessionId="hydrate" requestId="hydrate" occurrenceId="hydrate-occurrence"
+      questions={schema} runnerOnline />
+  </ApiProvider>);
+  try {
+    setQuestionResponseStyle("interactive", domWindow as never);
+    await act(async () => render([]));
+    await act(async () => render(questions));
+    assert.equal(row(container, "Staging").checked, true);
+    await act(async () => button(container, "next").click());
+    assert.equal(row(container, "Unit Tests").checked, true);
+  } finally {
+    await act(async () => root.unmount());
+    clearQuestionDrafts("hydrate", key);
+    container.remove();
+  }
+});

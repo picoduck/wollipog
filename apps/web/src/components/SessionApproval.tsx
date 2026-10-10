@@ -381,8 +381,8 @@ export function SessionQuestionBanner({
   const responseStyle = useQuestionResponseStyle();
   const instanceScope = useInstanceScope();
   const operationKey = isAsync && occurrenceId ? `${requestId}:${occurrenceId}` : requestId;
-  const answerKey = useMemo(() => questionDraftIdentity(requestId, questions, occurrenceId, requestedAt, instanceScope, recoveryEpoch),
-    [requestId, questions, occurrenceId, requestedAt, instanceScope, recoveryEpoch]);
+  const answerKey = useMemo(() => questionDraftIdentity(requestId, questions, occurrenceId, requestedAt, instanceScope),
+    [requestId, questions, occurrenceId, requestedAt, instanceScope]);
   const [busy, setBusy] = useState<"submit" | "dismiss" | null>(null);
   const [drafts, setDrafts] = useState<{
     requestId: string;
@@ -407,7 +407,7 @@ export function SessionQuestionBanner({
     liveRequestRef.current = {};
     operationPendingRef.current = null;
     return () => { liveRequestRef.current = null; };
-  }, [answerKey, sessionId]);
+  }, [answerKey, sessionId, recoveryEpoch]);
   const titleRef = useRef<HTMLDivElement>(null);
   const setTitle = useCallback((node: HTMLDivElement | null) => {
     titleRef.current = node;
@@ -443,9 +443,9 @@ export function SessionQuestionBanner({
     const previous = previousDraftRequestRef.current;
     if (previous.sessionId !== sessionId || previous.requestId !== answerKey) {
       clearQuestionDrafts(previous.sessionId, previous.requestId);
-      clearQuestionDrafts(sessionId, answerKey);
       previousDraftRequestRef.current = { sessionId, requestId: answerKey };
-      setDrafts({ requestId: answerKey, values: {}, step: 0 });
+      setDrafts({ requestId: answerKey, values: storedQuestionDrafts(sessionId, answerKey),
+        step: storedQuestionStep(sessionId, answerKey) });
     } else {
       setDrafts({
         requestId: answerKey,
@@ -458,6 +458,12 @@ export function SessionQuestionBanner({
     setFailure(null);
     setRetrying(false);
   }, [answerKey, sessionId]);
+
+  useEffect(() => {
+    setBusy(null);
+    setFailure(null);
+    setRetrying(false);
+  }, [recoveryEpoch]);
 
   useEffect(() => {
     setDrafts({

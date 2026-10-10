@@ -28,7 +28,8 @@ test("only non-sensitive known fields and offered choices enter durable drafts",
     private: { kind: "entry", value: "SECRET-A" }, credential: { kind: "entry", value: "SECRET-B" },
     email: { kind: "entry", value: "PRIVATE-C" }, unknown: { kind: "entry", value: "UNKNOWN-D" },
   });
-  assert.deepEqual(storedQuestionDrafts("sensitive", key), { note: { kind: "entry", value: "Synthetic note" } });
+  assert.deepEqual(storedQuestionDrafts("sensitive", key), { note: { kind: "entry", value: "Synthetic note" },
+    credential: { kind: "entry", value: "SECRET-B" }, email: { kind: "entry", value: "PRIVATE-C" } });
   assert.doesNotMatch([...data.values()].join(""), /SECRET|PRIVATE-C|UNKNOWN-D|Not Offered/);
 });
 
@@ -48,7 +49,7 @@ test("authoritative projected occurrences retain drafts; full schema replacement
   assert.equal(data.size, 0);
 });
 
-test("legacy requests without an occurrence epoch stay page-only; instance and recovery epochs isolate answers", () => {
+test("legacy requests without an occurrence epoch stay page-only; instances isolate answers", () => {
   const key = questionDraftIdentity("legacy", questions);
   storeQuestionDrafts("legacy", key, { target: { kind: "choice", labels: ["Staging"] } });
   assert.equal(data.size, 0);
@@ -57,7 +58,6 @@ test("legacy requests without an occurrence epoch stay page-only; instance and r
   storeQuestionDrafts("instance", local, { target: { kind: "choice", labels: ["Staging"] } });
   const remote = questionDraftIdentity("bound", questions, "epoch", undefined, "remote");
   assert.deepEqual(storedQuestionDrafts("instance", remote), {});
-  assert.deepEqual(storedQuestionDrafts("instance", questionDraftIdentity("bound", questions, "epoch", undefined, "local", "restart")), {});
 });
 
 test("corrupted field shapes and secret values are filtered when durable storage is read", () => {
@@ -109,4 +109,37 @@ test("store updates retire resolved and replaced questions even without a mounte
   storeQuestionDrafts("missing", key, { target: { kind: "choice", labels: ["Staging"] } });
   store.dispatch({ type: "msg", msg: { type: "session_removed", sessionId: "missing" } });
   assert.deepEqual(storedQuestionDrafts("missing", key), {});
+});
+
+test("the same question occurrence retains its answers when provider recovery metadata arrives", () => {
+  const key = questionDraftIdentity("recover", questions, "same-occurrence");
+  storeQuestionDrafts("recover", key, { target: { kind: "choice", labels: ["Staging"] } });
+  storeQuestionStep("recover", key, 1);
+  reconcileQuestionDrafts("recover", [{ ...request, requestId: "recover", occurrenceId: "same-occurrence",
+    recoveryId: "provider-restart", recoveryReason: "provider_restart", recoveryAction: "resume_answer" }]);
+  assert.equal(storedQuestionStep("recover", key), 1);
+  assert.deepEqual(storedQuestionDrafts("recover", key), { target: { kind: "choice", labels: ["Staging"] } });
+});
+
+test("ordinary account choices stay shared in this page while conservative browser persistence excludes them", () => {
+  const fields: AgentQuestion[] = [{ id: "account", question: "Which AWS account should I deploy to?",
+    options: [{ label: "Staging" }] }];
+  const key = questionDraftIdentity("account", fields, "account-occurrence");
+  storeQuestionDrafts("account", key, { account: { kind: "choice", labels: ["Staging"] } });
+  assert.deepEqual(storedQuestionDrafts("account", key), { account: { kind: "choice", labels: ["Staging"] } });
+  assert.doesNotMatch([...data.values()].join(""), /Staging/);
+});
+
+test("a failed storage update removes the earlier browser answer instead of restoring it after reload", () => {
+  const key = questionDraftIdentity("quota", questions, "quota-occurrence");
+  storeQuestionDrafts("quota", key, { target: { kind: "choice", labels: ["Staging"] } });
+  Object.defineProperty(window, "sessionStorage", { configurable: true, value: { ...browserStorage,
+    setItem() { throw new Error("quota"); } } });
+  try {
+    storeQuestionDrafts("quota", key, { target: { kind: "choice", labels: ["Production"] } });
+    assert.deepEqual(storedQuestionDrafts("quota", key), { target: { kind: "choice", labels: ["Production"] } });
+    assert.equal(data.size, 0);
+  } finally {
+    Object.defineProperty(window, "sessionStorage", { configurable: true, value: browserStorage });
+  }
 });
