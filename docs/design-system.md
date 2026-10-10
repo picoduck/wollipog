@@ -954,6 +954,16 @@ Requests, Decision History, and Terminal once #2868 moves it) opens in one frame
   focus, such as the finding editor's textarea (#2907): the keyboard serves that field, so the foot's
   height goes to the scroller. It returns unchanged when the field loses focus. Focus in the foot's
   own fields never collapses it, and a fine pointer never does.
+- **Side Chat** (#2863, `SideChatPanel.tsx`) lays out on its own three parts: a 40px context line
+  (`.sc-context`: the side chat's one `StatusBadge` in the session words, Unverified while its
+  machine is offline, "Separate Worktree" as meta, and Open Session), the transcript as the one
+  scroller, and a foot. The foot is the composer card (`.sc-composer`, the main composer's card
+  recipe: a textarea that grows from one line to eight with Send inset at its trailing edge, never
+  wrapping), whose Send seat holds Stop Turn while the side chat replies. Ended, the foot is one
+  sentence and Start New Side Chat instead, with no textarea; at 760px and below they stack and the
+  button is full width and 44px. Starting keeps the textarea and holds Send with the sentence that
+  says why; a failed start is a danger notice with Retry over the kept draft. About Side Chat holds
+  what is shared and what comes back.
 - **Resize handle.** An 8px strip centred on the leading edge that takes no room. On hover a 2px
   line and a grip in `--control-outline`, on keyboard focus the line in `--focus` (with a transparent
   outline for forced colors), and the width in a tooltip while dragging. Arrow keys, Home, End,

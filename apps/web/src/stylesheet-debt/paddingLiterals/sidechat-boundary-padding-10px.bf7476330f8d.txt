@@ -1,1 +1,0 @@
-|.sidechat-boundary|padding|10px

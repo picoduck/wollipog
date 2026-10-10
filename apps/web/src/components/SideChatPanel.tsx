@@ -1,31 +1,64 @@
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type MouseEvent,
+  type PointerEvent,
+} from "react";
 import { State } from "./State.js";
 import { Notice } from "./Notice.js";
-import { isTerminal, type SessionEvent, type SessionStatus, type SessionView, type SideChatView } from "@wollipog/protocol";
+import {
+  isPolicyApproval,
+  isTerminal,
+  type SessionEvent,
+  type SessionStatus,
+  type SessionView,
+  type SideChatView,
+} from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
-import { useHasStore, useStoreActions } from "../store.js";
+import { useHasStore, useOptionalStoreSelector, useStoreActions } from "../store.js";
 import { viewPath } from "../navigation.js";
-import { shortcutLayerActive } from "../shortcuts.js";
+import { matchesShortcut, shortcutDisplay, shortcutLayerActive } from "../shortcuts.js";
 import { enterKeystrokeSends, useEnterKeyBehavior } from "../enter-key.js";
 import { EventTimeline, type AgentReplyItem } from "./EventTimeline.js";
-import { ArrowUpRightIcon } from "./Icons.js";
-import { useIsTouchPhone } from "./useIsMobile.js";
+import { ArrowUpIcon, ArrowUpRightIcon, MessageSquareIcon, StopTurnIcon } from "./Icons.js";
+import { Spinner } from "./common.js";
+import { InfoPopover } from "./InfoPopover.js";
+import { PanelNoticeSlot } from "./PanelNoticeSlot.js";
+import { PANEL_NOTICE_RANK, type SessionNoticeEntry } from "./SessionNoticeSlot.js";
+import { PanelHeaderActions } from "./RightPanel.js";
+import { StatusBadge } from "./StatusBadge.js";
+import { TranscriptSkeleton } from "./TranscriptSkeleton.js";
+import { useIsCoarsePointer, useIsTouchPhone } from "./useIsMobile.js";
 import { useTimeline } from "./useTimeline.js";
 import { isTimelineSessionActive } from "../timeline-clock.js";
+import { statusMeta, type StatusMeta } from "../status-meta.js";
+import { canStopActiveTurn, composerPrimaryAction } from "../session-actions.js";
+import { sessionCommandRefusal } from "../session-command-permissions.js";
+import { composerAgentName } from "../composer-placeholder.js";
+import { runnerDisplay } from "../runners.js";
 import {
   clearPanelScratchIf,
   panelScratchRevision,
   usePanelScratchDraft,
   usePanelScratchScope,
 } from "../right-panel-scratch.js";
-
 import { subscribeSideChatFocus, takeSideChatFocusRequest } from "./side-chat-focus.js";
 export { requestSideChatFocus } from "./side-chat-focus.js";
 
 const POLL_MS = 1_500;
 const SIDE_CHAT_DRAFT_KEY = "sidechat.draft";
 const PAGE_SIZE = 200;
+/** How long a Stop Turn waits for the turn to end before saying it is still running, as the main
+ * composer's does. */
+const STOP_TURN_WAIT_MS = 8_000;
+/** The textarea grows from one line to this many, then scrolls (#2863). */
+const COMPOSER_MAX_LINES = 8;
 
 /**
  * Sends still awaiting the control plane, by panel scratch scope. A send outlives the panel that
@@ -34,7 +67,7 @@ const PAGE_SIZE = 200;
  */
 const sendsInFlight = new Map<string, Promise<unknown>>();
 
-/** Prose, so sentence case: these complete the sentence "This side chat's session …". */
+/** Prose, so sentence case: these complete the sentence "This side chat …". */
 const ENDED_PHRASE: Partial<Record<SessionStatus, string>> = {
   completed: "has finished",
   failed: "failed",
@@ -42,19 +75,44 @@ const ENDED_PHRASE: Partial<Record<SessionStatus, string>> = {
 };
 
 /**
- * Why the composer is unavailable, or null when it is usable. An ended child and an offline runner
- * are different problems with different remedies, so they never share one message (#1206).
+ * The ended state's one sentence (#1206, #2863): what happened and where the transcript is. Its
+ * remedy is the one button beside it, so the sentence does not repeat it.
  */
-export function sideChatComposerUnavailable(
-  status: SessionStatus,
-  runnerOnline: boolean,
-): string | null {
-  if (isTerminal(status)) {
-    return `This side chat's session ${ENDED_PHRASE[status] ?? "ended"}, so it can no longer receive ` +
-      "messages. Start a new side chat to continue; the ended transcript stays open at the link above.";
+export function sideChatEndedSentence(status: SessionStatus): string {
+  return `This side chat ${ENDED_PHRASE[status] ?? "ended"}. Its transcript stays here and in Sessions.`;
+}
+
+/** A child still being created on its machine: the composer takes a draft but cannot send it yet. */
+function sideChatStarting(status: SessionStatus): boolean {
+  return status === "starting" || status === "queued";
+}
+
+/**
+ * The context line's one badge (#2863; §11.1, §11.2): the side chat's session word, Starting while
+ * it is being created, and Unverified while its machine is offline, since then nobody can vouch for
+ * a live status. An ended child stays ended whatever its machine is doing.
+ */
+export function sideChatStatusMeta(status: SessionStatus | "creating", runnerOnline: boolean): StatusMeta {
+  if (status === "creating") return statusMeta("session", "starting");
+  if (!runnerOnline && !isTerminal(status)) return statusMeta("job", "unverified");
+  return statusMeta("session", status);
+}
+
+/** What a failed create was, kept for Retry and Show Details. */
+interface StartFailure {
+  replaceEnded: boolean;
+  /** No response at all, or a gateway that gave up waiting for one. */
+  noResponse: boolean;
+  status?: number;
+  message: string;
+}
+
+function startFailure(cause: unknown, replaceEnded: boolean): StartFailure {
+  if (cause instanceof ApiError) {
+    return { replaceEnded, noResponse: cause.status === 502 || cause.status === 503 || cause.status === 504,
+      status: cause.status, message: cause.message };
   }
-  if (!runnerOnline) return "The runner is offline, so this side chat cannot send messages until it reconnects.";
-  return null;
+  return { replaceEnded, noResponse: true, message: cause instanceof Error ? cause.message : String(cause) };
 }
 
 /**
@@ -81,28 +139,75 @@ function OpenSideChatSession({ childSessionId }: { childSessionId: string }) {
   );
 }
 
+/**
+ * About Side Chat (#2863; §4.9): what a side chat shares and what comes back, which used to sit as
+ * two paragraphs above every first question. Open names the shortcut, which a touch-only device has
+ * no keyboard for.
+ */
+function AboutSideChat() {
+  const coarsePointer = useIsCoarsePointer();
+  const facts = [
+    { term: "Shared", value: "The agent and the project" },
+    { term: "Not Shared", value: "This conversation, its attachments, artifacts and budget" },
+    { term: "Comes Back", value: "Only a response you insert into your draft" },
+    { term: "Send", value: "Enter works as in the main composer, following your Enter Key setting" },
+    ...coarsePointer ? [] : [{ term: "Open", value: `${shortcutDisplay("open-side-chat")} from anywhere in the session` }],
+  ];
+  return (
+    <PanelHeaderActions>
+      <InfoPopover tool="Side Chat" facts={facts}>
+        Ask this session&apos;s agent something without adding it to this conversation. The side chat
+        runs in its own worktree.
+      </InfoPopover>
+    </PanelHeaderActions>
+  );
+}
+
+/** The request and the response of a failed call, for Show Details. */
+function FailureDetails({ request, failure }: { request: string; failure: { status?: number; message: string } }) {
+  return (
+    <div className="code-well">
+      <pre>{`${request}\n${failure.status === undefined ? "No response" : `HTTP ${failure.status}`}: ${failure.message}`}</pre>
+    </div>
+  );
+}
+
 export function SideChatPanel({
   session,
   runnerOnline,
+  runnerProtocolVersion,
   onInsertDraft,
 }: {
   session: SessionView;
   runnerOnline: boolean;
+  /** The machine's protocol, which decides whether a turn can be interrupted. */
+  runnerProtocolVersion?: number | null;
   /** Explicit composer preparation only. This callback must never submit the primary prompt. */
   onInsertDraft: (text: string) => void;
 }) {
   const api = useApi();
   const hasStore = useHasStore();
+  const runner = useOptionalStoreSelector((state) => state.runners.get(session.runnerId));
+  const machine = runnerDisplay(runner, undefined, session.runnerId).name || "The machine";
+  const agent = composerAgentName(session.driver, session.agentName, session.agentId);
   const [sideChat, setSideChat] = useState<SideChatView | null>();
+  const [loadError, setLoadError] = useState<{ message: string; status?: number } | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [events, setEvents] = useState<SessionEvent[]>([]);
+  /** The child and history generation whose first page has arrived; until then the transcript is
+   * loading, never empty. */
+  const [loadedTranscript, setLoadedTranscript] = useState<string | null>(null);
   // The unsent message belongs to the person typing it, not to the child: it survives the panel
   // being switched away and closed (#1202), the transcript resets around it, and no tour of other
   // sessions can evict the scope while it still holds one (#1283).
   const panelScratch = usePanelScratchScope(session.id);
   const [text, setText] = usePanelScratchDraft(panelScratch, SIDE_CHAT_DRAFT_KEY);
   const [creating, setCreating] = useState(false);
+  const [startFailed, setStartFailed] = useState<StartFailure | null>(null);
   const [sending, setSending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [stopping, setStopping] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<{ kind: "send" | "stop"; message: string; status?: number } | null>(null);
+  const [pollError, setPollError] = useState<string | null>(null);
   const enterKeySetting = useEnterKeyBehavior();
   const isTouchPhone = useIsTouchPhone();
   const mountedRef = useRef(true);
@@ -113,6 +218,7 @@ export function SideChatPanel({
   const focusPendingRef = useRef(false);
   const cursorRef = useRef(0);
   const epochRef = useRef(0);
+  const reasonId = `sidechat-reason-${useId().replace(/:/g, "")}`;
   /**
    * The child the transcript state currently belongs to, tracked synchronously. A poll iteration
    * for the outgoing child can resolve after the switch but before React commits — and therefore
@@ -122,7 +228,12 @@ export function SideChatPanel({
   const transcriptChildRef = useRef<string | undefined>(undefined);
   const childId = sideChat?.session.id;
 
-  useEffect(() => () => { mountedRef.current = false; }, []);
+  // Re-armed on every setup: StrictMode runs setup, cleanup and setup again, and a flag only ever
+  // cleared left every create, send and stop in development unable to settle (#2863).
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   loadedRef.current = sideChat !== undefined;
   /** Settle a pending Ctrl/⌘+; once this panel has loaded: the first usable control takes focus. */
@@ -161,18 +272,18 @@ export function SideChatPanel({
     let current = true;
     setSideChat(undefined);
     setEvents([]);
-    setError(null);
+    setLoadError(null);
+    setStartFailed(null);
     void api.sideChat(session.id)
       .then(({ sideChat: loaded }) => {
         if (current) setSideChat(loaded);
       })
       .catch((cause: unknown) => {
         if (!current) return;
-        setSideChat(null);
-        setError((cause as Error).message);
+        setLoadError({ message: (cause as Error).message, status: cause instanceof ApiError ? cause.status : undefined });
       });
     return () => { current = false; };
-  }, [api, session.id]);
+  }, [api, session.id, loadAttempt]);
 
   /**
    * Drop the transcript belonging to whichever child we are leaving. Call this in the SAME commit as
@@ -185,6 +296,7 @@ export function SideChatPanel({
     cursorRef.current = 0;
     epochRef.current = next?.session.eventEpoch ?? 0;
     setEvents([]);
+    setLoadedTranscript(null);
   };
 
   // Backstop for any path that changes the child without going through `resetTranscript`. It runs
@@ -194,6 +306,7 @@ export function SideChatPanel({
     cursorRef.current = 0;
     epochRef.current = sideChat?.session.eventEpoch ?? 0;
     setEvents([]);
+    setLoadedTranscript(null);
   }, [childId]);
 
   useEffect(() => {
@@ -224,6 +337,7 @@ export function SideChatPanel({
           epochRef.current = epoch;
           cursorRef.current = 0;
           setEvents([]);
+          setLoadedTranscript(null);
         }
         readingEvents = true;
         const page = await api.getSessionEventPage(childId, cursorRef.current, epoch, PAGE_SIZE);
@@ -236,7 +350,8 @@ export function SideChatPanel({
           });
         }
         cursorRef.current = page.nextAfter ?? page.events.at(-1)?.seq ?? cursorRef.current;
-        setError(null);
+        setLoadedTranscript(`${childId}:${epoch}`);
+        setPollError(null);
       } catch (cause) {
         if (!current || transcriptChildRef.current !== childId) return;
         if (readingEvents && cause instanceof ApiError && cause.status === 409) {
@@ -245,8 +360,9 @@ export function SideChatPanel({
           // the relationship lookup is a different, reportable condition and must not land here.
           cursorRef.current = 0;
           setEvents([]);
+          setLoadedTranscript(null);
         } else {
-          setError((cause as Error).message);
+          setPollError((cause as Error).message);
         }
       } finally {
         inFlight = false;
@@ -267,27 +383,58 @@ export function SideChatPanel({
   const create = async (replaceEnded = false) => {
     if (creating) return;
     setCreating(true);
-    setError(null);
+    setStartFailed(null);
+    setActionError(null);
     try {
       const created = await api.createSideChat(session.id, replaceEnded);
       if (!mountedRef.current) return;
       if (created.session.id !== childId) resetTranscript(created);
       setSideChat(created);
     } catch (cause) {
-      if (mountedRef.current) setError((cause as Error).message);
+      if (mountedRef.current) setStartFailed(startFailure(cause, replaceEnded));
     } finally {
       if (mountedRef.current) setCreating(false);
     }
   };
+  /** Start, then put the person in the composer, which takes a draft while the side chat starts. */
+  const start = (replaceEnded: boolean) => {
+    void create(replaceEnded);
+    window.requestAnimationFrame(() => textareaRef.current?.focus());
+  };
+
+  const child = sideChat?.session;
+  const childEnded = child !== undefined && isTerminal(child.status);
+  const childStarting = creating || (child !== undefined && sideChatStarting(child.status));
+  const canStopTurn = child !== undefined && canStopActiveTurn({
+    runnerOnline,
+    runnerProtocolVersion: runnerProtocolVersion ?? undefined,
+    status: child.status,
+    policyPaused: isPolicyApproval(child.pendingApproval),
+    activeTurnId: child.activeTurnId,
+  });
+  const stopRefusal = child ? sessionCommandRefusal(child, "cancelTurn") : null;
+  // The turn a Stop Turn was pressed for: once it is over, or another took its place, Send is back.
+  const stoppingTurn = stopping !== null && canStopTurn && child?.activeTurnId === stopping;
+  useEffect(() => {
+    if (stopping !== null && !stoppingTurn) setStopping(null);
+  }, [stopping, stoppingTurn]);
+  useEffect(() => {
+    if (!stoppingTurn) return;
+    const timer = window.setTimeout(() => {
+      setStopping(null);
+      setActionError({ kind: "stop", message: "The turn is still running." });
+    }, STOP_TURN_WAIT_MS);
+    return () => window.clearTimeout(timer);
+  }, [stoppingTurn]);
 
   const send = async () => {
     const outgoing = text.trim();
-    if (!sideChat || !outgoing || sending || !runnerOnline || isTerminal(sideChat.session.status)) return;
+    if (!child || !outgoing || sending || !runnerOnline || isTerminal(child.status) || sideChatStarting(child.status)) return;
     const sent = text;
     const sentRevision = panelScratchRevision(panelScratch, SIDE_CHAT_DRAFT_KEY);
     setSending(true);
-    setError(null);
-    const prompted = api.prompt(sideChat.session.id, outgoing);
+    setActionError(null);
+    const prompted = api.prompt(child.id, outgoing);
     const settled = prompted.catch(() => undefined);
     sendsInFlight.set(panelScratch, settled);
     void settled.then(() => {
@@ -306,11 +453,42 @@ export function SideChatPanel({
       setSideChat((prior) => prior ? { ...prior, session: updated } : prior);
       setText("");
     } catch (cause) {
-      if (mountedRef.current) setError((cause as Error).message);
+      if (mountedRef.current) {
+        setActionError({ kind: "send", message: (cause as Error).message,
+          status: cause instanceof ApiError ? cause.status : undefined });
+      }
     } finally {
       if (mountedRef.current) setSending(false);
     }
   };
+
+  /** Interrupt the side chat's own turn, as the main composer's Stop Turn does for the session's. */
+  const stopTurn = async () => {
+    if (!child?.activeTurnId || !canStopTurn || stopRefusal !== null || stopping !== null) return;
+    const turn = child.activeTurnId;
+    setStopping(turn);
+    setActionError(null);
+    try {
+      const updated = await api.cancelTurn(child.id);
+      if (!mountedRef.current) return;
+      setSideChat((prior) => prior?.session.id === updated.id ? { ...prior, session: updated } : prior);
+    } catch (cause) {
+      if (!mountedRef.current) return;
+      setStopping(null);
+      setActionError({ kind: "stop", message: (cause as Error).message,
+        status: cause instanceof ApiError ? cause.status : undefined });
+    }
+  };
+
+  // The textarea grows from one line to eight. Where the browser sizes it to its content
+  // (`field-sizing`), CSS does it; elsewhere this does, from the content's own height.
+  useLayoutEffect(() => {
+    const field = textareaRef.current;
+    if (!field || field.ownerDocument.defaultView?.CSS?.supports?.("field-sizing", "content")) return;
+    const lineHeight = Number.parseFloat(field.ownerDocument.defaultView?.getComputedStyle(field).lineHeight ?? "") || 22;
+    field.style.height = "auto";
+    field.style.height = `${Math.min(field.scrollHeight, lineHeight * COMPOSER_MAX_LINES)}px`;
+  });
 
   // The main composer's Enter pair, read at keydown from the per-device setting: Enter sends and
   // Shift+Enter is a newline, or the reverse (#2862). Ctrl/⌘+Enter is the main composer's steering
@@ -322,80 +500,199 @@ export function SideChatPanel({
     event.preventDefault();
     void send();
   };
+  // Shift+Esc inside Side Chat is Side Chat's: it stops the side chat's turn, and never the session's
+  // behind the panel, which the main composer's window-level shortcut would otherwise do.
+  const onPanelKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.defaultPrevented || event.nativeEvent.isComposing || !matchesShortcut(event, "stop-turn")) return;
+    event.preventDefault();
+    void stopTurn();
+  };
+  // Taps inside the composer keep focus in its textarea (§16.2), so on a phone Send works on the
+  // first tap instead of first closing the keyboard and moving the card.
+  const keepFocus = (event: PointerEvent<HTMLButtonElement>) => event.preventDefault();
   // The tooltip advertises whichever key sends under that setting, as the main composer's Send does;
   // a touch phone in newline mode has no Shift+Enter to advertise.
   const sendKeys = enterKeySetting === "send" ? "Enter" : isTouchPhone ? null : "Shift+Enter";
 
-  if (sideChat === undefined) return <State variant="loading" compact>Loading side chat…</State>;
-  if (!sideChat) {
+  const about = <AboutSideChat />;
+
+  if (loadError && sideChat === undefined) {
+    return (
+      <>
+        {about}
+        <State variant="error" compact title="Couldn't Load Side Chat"
+          actions={<button type="button" className="btn sm" onClick={() => setLoadAttempt((attempt) => attempt + 1)}>Retry</button>}
+          details={<FailureDetails request={`GET /api/sessions/${session.id}/side-chat`} failure={loadError} />}>
+          This session&apos;s side chat couldn&apos;t be loaded.
+        </State>
+      </>
+    );
+  }
+  if (sideChat === undefined) {
+    return <>{about}<TranscriptSkeleton label="Loading Side Chat" /></>;
+  }
+
+  const notStarted = !sideChat && !creating && !startFailed;
+  if (notStarted) {
     const unavailable = !session.agentId
       ? "This session has no reusable agent."
-      : !runnerOnline ? "The runner must be online to start a side chat." : null;
+      : !runnerOnline ? `${machine} is offline.` : null;
     return (
-      <State compact title="No Side Chat Yet" actions={(
-        <button type="button" className="btn primary" ref={startRef} disabled={creating || Boolean(unavailable)} onClick={() => void create()}>
-          {creating ? "Starting…" : "Start Side Chat"}
-        </button>
-      )}>
-        <p>Start a separate conversation using this session&apos;s agent in an isolated worktree.</p>
-        <p>No prompt, transcript, attachments, artifacts, or budget are copied. Only text you explicitly insert returns to the primary composer.</p>
-        {unavailable && <Notice tone="warning" compact role="status">{unavailable}</Notice>}
-        {error && <Notice tone="danger" compact role="alert">{error}</Notice>}
-      </State>
+      <>
+        {about}
+        <State compact icon={<MessageSquareIcon />} title="Ask a Side Question" actions={(
+          <>
+            <button type="button" className="btn primary" ref={startRef} disabled={Boolean(unavailable)}
+              aria-describedby={unavailable ? reasonId : undefined} onClick={() => start(false)}>
+              Start Side Chat
+            </button>
+            {unavailable && <span className="sc-reason" id={reasonId}>{unavailable}</span>}
+          </>
+        )}>
+          <p>Chat with this session&apos;s agent in a separate worktree. Nothing from this conversation is shared, and nothing comes back unless you insert it.</p>
+          {session.agentId && <p className="sc-uses">Uses {agent} on {machine}.</p>}
+        </State>
+      </>
     );
   }
 
-  const childEnded = isTerminal(sideChat.session.status);
-  const unavailable = sideChatComposerUnavailable(sideChat.session.status, runnerOnline);
-  // Starting the replacement launches a child on the runner, so it needs the runner even though the
-  // ended child is the reason the composer is closed.
-  const replacementBlocked = childEnded && !runnerOnline
-    ? "The runner must be online to start a new side chat." : null;
-  const canSend = !unavailable && Boolean(text.trim()) && !sending;
-  return (
-    <div className="sidechat-panel">
-      <div className="sidechat-boundary" role="note">
-        <strong>Isolated Side Chat</strong>
-        <span>{sideChat.session.status} · separate worktree and transcript</span>
-        {hasStore && <OpenSideChatSession childSessionId={sideChat.session.id} />}
-      </div>
-      <div className="sidechat-timeline" aria-label="Side Chat Transcript">
-        {items.length ? (
-          <EventTimeline
-            items={items}
-            driver={sideChat.session.driver}
-            sessionActive={isTimelineSessionActive(sideChat.session.status)}
-            historyKey={`${sideChat.session.id}:${sideChat.session.eventEpoch ?? 0}`}
-            onInsertReply={insertReply}
-          />
-        ) : (
-          <div className="hint">No messages yet. Ask a question below; primary-session context is not included.</div>
-        )}
-      </div>
-      {unavailable && <div className="hint warn" role="status">{unavailable}</div>}
-      {replacementBlocked && <div className="hint warn" role="status">{replacementBlocked}</div>}
-      {childEnded && (
-        <button type="button" className="btn primary sidechat-restart" ref={restartRef}
-          disabled={creating || Boolean(replacementBlocked)} onClick={() => void create(true)}>
-          {creating ? "Starting…" : "Start a New Side Chat"}
-        </button>
-      )}
-      {error && <div className="error-box" role="alert">{error}</div>}
-      <div className="sidechat-composer">
-        <textarea
-          ref={textareaRef}
-          value={text}
-          onChange={(event) => setText(event.target.value)}
-          onKeyDown={onKeyDown}
-          placeholder="Ask a side question…"
-          aria-label="Side Chat Message"
-          rows={3}
-          disabled={Boolean(unavailable)}
+  const startingSentence = `Creating a worktree on ${machine}. You can type your question now and send it when the side chat is ready.`;
+  const failure = startFailed;
+  const failureNotice = failure && (
+    <Notice tone="danger" role="alert" title="Couldn't Start Side Chat"
+      actions={<button type="button" className="btn sm" ref={restartRef} onClick={() => start(failure.replaceEnded)}>Retry</button>}
+      details={<FailureDetails request={`POST /api/sessions/${session.id}/side-chat`} failure={failure} />}>
+      {failure.noResponse
+        ? `${machine} didn't respond. Nothing was created, and your draft is kept.`
+        : "The side chat couldn't be created. Your draft is kept."}
+    </Notice>
+  );
+
+  // An ended child takes no message: its foot is one sentence and one way to start again, and while
+  // a replacement is being created or failed to be, the composer it will take comes back.
+  const showEnded = childEnded && !creating && !(failure?.replaceEnded);
+  const sendBlocked = childStarting ? startingSentence
+    : failure ? "Start the side chat to send."
+      : !runnerOnline ? `${machine} is offline.`
+        : null;
+  const primary = composerPrimaryAction({ canStopTurn, hasContent: Boolean(text.trim()), stopping: stoppingTurn });
+  const canSend = sendBlocked === null && Boolean(text.trim()) && !sending;
+  // A start that failed created nothing, so there is no status to show.
+  const badge = creating ? sideChatStatusMeta("creating", runnerOnline)
+    : child ? sideChatStatusMeta(child.status, runnerOnline) : null;
+
+  const notices: SessionNoticeEntry[] = [];
+  if (!runnerOnline && child && !childEnded) {
+    notices.push({
+      key: "sidechat-runner-offline",
+      severity: "warning",
+      rank: PANEL_NOTICE_RANK.runnerOffline,
+      title: "Machine Offline",
+      render: ({ trailing }) => (
+        <Notice tone="warning" compact trailing={trailing}>
+          {machine} is offline. You can send again when it reconnects.
+        </Notice>
+      ),
+    });
+  }
+  if (pollError && child) {
+    notices.push({
+      key: "sidechat-load-error",
+      severity: "danger",
+      rank: PANEL_NOTICE_RANK.loadError,
+      title: "Couldn't Refresh Side Chat",
+      render: ({ trailing }) => (
+        <Notice tone="danger" title="Couldn't Refresh Side Chat" trailing={trailing}
+          details={<FailureDetails request={`GET /api/sessions/${child.id}/events`} failure={{ message: pollError }} />}>
+          New messages aren&apos;t arriving. Wollipog keeps trying.
+        </Notice>
+      ),
+    });
+  }
+
+  const transcriptLoaded = child !== undefined && loadedTranscript === `${child.id}:${child.eventEpoch ?? 0}`;
+  const transcript = creating || !child ? null
+    : !transcriptLoaded ? <TranscriptSkeleton label="Loading Side Chat Transcript" />
+      : items.length ? (
+        <EventTimeline
+          items={items}
+          driver={child.driver}
+          sessionActive={isTimelineSessionActive(child.status)}
+          historyKey={`${child.id}:${child.eventEpoch ?? 0}`}
+          onInsertReply={insertReply}
         />
-        <button type="button" className="btn primary" disabled={!canSend} onClick={() => void send()}
-          title={sendKeys ? `Send (${sendKeys})` : "Send"} aria-keyshortcuts={sendKeys ?? undefined}>
-          {sending ? "Sending…" : "Send"}
-        </button>
+      ) : childEnded || childStarting ? null : <p className="sc-empty">No messages yet.</p>;
+
+  return (
+    <div className="sc-panel" onKeyDown={onPanelKeyDown}>
+      {about}
+      <PanelNoticeSlot sessionId={session.id} entries={notices} />
+      <div className="sc-context">
+        {badge && <StatusBadge meta={badge} role="status" />}
+        <span className="sc-meta">Separate Worktree</span>
+        {hasStore && child && !creating && <OpenSideChatSession childSessionId={child.id} />}
+      </div>
+      <div className="sc-transcript" role="region" aria-label="Side Chat Transcript">
+        {transcript}
+      </div>
+      <div className="sc-foot">
+        {showEnded ? (
+          <div className="sc-ended">
+            <p className="sc-ended-text">{sideChatEndedSentence(child!.status)}</p>
+            <div className="sc-ended-action">
+              <button type="button" className="btn primary" ref={restartRef} disabled={!runnerOnline}
+                aria-describedby={!runnerOnline ? reasonId : undefined} onClick={() => start(true)}>
+                Start New Side Chat
+              </button>
+              {!runnerOnline && <span className="sc-reason" id={reasonId}>{machine} is offline.</span>}
+            </div>
+          </div>
+        ) : (
+          <>
+            {failureNotice}
+            {!failure && childStarting && <p className="sc-reason" id={reasonId}>{startingSentence}</p>}
+            {actionError && (
+              <Notice tone="danger" compact role="alert"
+                details={actionError.kind === "send" && child
+                  ? <FailureDetails request={`POST /api/sessions/${child.id}/prompt`} failure={actionError} />
+                  : undefined}>
+                {actionError.kind === "send"
+                  ? "Couldn't send your message. Your draft is kept."
+                  : `Couldn't stop the side chat's turn. ${actionError.message}`}
+              </Notice>
+            )}
+            <div className="sc-composer">
+              <textarea
+                ref={textareaRef}
+                value={text}
+                onChange={(event) => setText(event.target.value)}
+                onKeyDown={onKeyDown}
+                placeholder="Ask a side question…"
+                aria-label="Side Chat Message"
+                rows={1}
+              />
+              {primary === "send" ? (
+                <button type="button" className="icon-btn primary" disabled={!canSend}
+                  onPointerDown={keepFocus} onClick={() => void send()}
+                  title={sendBlocked ?? (sendKeys ? `Send (${sendKeys})` : "Send")}
+                  aria-label="Send" aria-keyshortcuts={sendKeys ?? undefined}
+                  aria-describedby={childStarting && !failure ? reasonId : undefined}>
+                  {sending ? <Spinner decorative /> : <ArrowUpIcon size={16} />}
+                </button>
+              ) : (
+                <button type="button" className="icon-btn sc-stop"
+                  disabled={primary === "stopping" || stopRefusal !== null}
+                  onPointerDown={keepFocus} onClick={() => void stopTurn()}
+                  title={primary === "stopping" ? "Stopping Turn" : stopRefusal ?? `Stop turn (${shortcutDisplay("stop-turn")})`}
+                  aria-label={primary === "stopping" ? "Stopping Turn" : "Stop Turn"}
+                  aria-keyshortcuts="Shift+Escape">
+                  {primary === "stopping" ? <Spinner decorative /> : <StopTurnIcon size={16} />}
+                </button>
+              )}
+            </div>
+            {stopRefusal !== null && primary !== "send" && <p className="sc-reason">{stopRefusal}</p>}
+          </>
+        )}
       </div>
     </div>
   );

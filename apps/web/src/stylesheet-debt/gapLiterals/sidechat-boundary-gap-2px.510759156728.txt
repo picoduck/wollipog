@@ -1,1 +1,0 @@
-|.sidechat-boundary|gap|2px
