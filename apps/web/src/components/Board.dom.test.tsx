@@ -170,15 +170,16 @@ class FakeSocket implements UiSocket {
 
 const navigation: ViewNavigation = { current: () => ({ name: "board" }), push() {}, listen: () => () => {} };
 
-function Harness({ onSessionMenu }: { onSessionMenu: (sessionId: string) => void }) {
+function Harness({ onSessionMenu, stalledSessionIds }: { onSessionMenu: (sessionId: string) => void; stalledSessionIds: ReadonlySet<string> }) {
   const all = useStoreSelector((s) => s.sessions);
   const scoped = React.useMemo(() => [...all.values()], [all]);
-  return <Board sessions={scoped} searchActive={false} onShowAll={() => {}} onNewSession={() => {}} onSessionMenu={onSessionMenu} />;
+  return <Board sessions={scoped} stalledSessionIds={stalledSessionIds} searchActive={false} onShowAll={() => {}} onNewSession={() => {}} onSessionMenu={onSessionMenu} />;
 }
 
 let sequence = 0;
-async function mount({ runners = [runner("runner-1", "Studio")], sessions = SESSIONS,detailSessions = sessions }: {
-  runners?: RunnerView[]; sessions?: SessionView[]; detailSessions?: SessionView[];
+async function mount({ runners = [runner("runner-1", "Studio")], sessions = SESSIONS, detailSessions = sessions,
+  stalledSessionIds = new Set<string>() }: {
+  runners?: RunnerView[]; sessions?: SessionView[]; detailSessions?: SessionView[]; stalledSessionIds?: ReadonlySet<string>;
 } = {}) {
   const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(mountPoint as never);
@@ -212,7 +213,7 @@ async function mount({ runners = [runner("runner-1", "Studio")], sessions = SESS
         <StoreProvider connection={connection} navigation={{ ...navigation, push: (view) => {
           if (view.name === "session") opened.push(view.id);
         } }}>
-          <Harness onSessionMenu={(sessionId) => menus.push(sessionId)} />
+          <Harness onSessionMenu={(sessionId) => menus.push(sessionId)} stalledSessionIds={stalledSessionIds} />
         </StoreProvider>
       </ApiProvider>,
     );
@@ -499,6 +500,18 @@ test("a card's ⋯ opens the session's shared context menu", async () => {
     assert.equal(more.getAttribute("aria-haspopup"), "menu");
     await act(async () => { more.click(); });
     assert.deepEqual(board.menus, ["idle"]);
+  } finally {
+    await board.unmount();
+  }
+});
+
+
+test("Board family summaries do not call a stalled child working beside a waiting one", async () => {
+  const board = await mount({ stalledSessionIds: new Set(["child-a"]) });
+  try {
+    const chip = board.card("parent").querySelector(".inbox-thread-family")!;
+    assert.equal(chip.getAttribute("aria-label"), "2 Children · 1 Awaiting Input");
+    assert.doesNotMatch(chip.textContent ?? "", /Working/);
   } finally {
     await board.unmount();
   }
