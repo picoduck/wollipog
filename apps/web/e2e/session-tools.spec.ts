@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { waitForSessionPreview } from "./session-readiness.js";
 
 /**
  * Session Tools (#2844; docs/design-system.md §4.9, §5.2): the side panel's landing list starts at
@@ -15,6 +16,7 @@ async function openTools(page: Page, width: number, height = 860) {
   await page.reload();
   await page.getByRole("button", { name: /Alpha Session/ }).first().click();
   const open = page.getByRole("button", { name: "Open Session", exact: true });
+  await waitForSessionPreview(page);
   if (await open.isVisible()) await open.click();
   await expect(page.locator(".composer-input")).toBeAttached();
   await page.getByRole("button", { name: "Side Panel", exact: true }).click();

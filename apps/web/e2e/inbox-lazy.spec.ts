@@ -239,6 +239,6 @@ test("desktop session loads xterm on demand and restores shell output after the 
   await expect(page.locator(".xterm-screen")).toBeVisible();
   await expect(page.locator(".xterm-rows")).toContainText("Synthetic terminal output");
   if (process.env.EVIDENCE_DIR) await page.screenshot({ path: `${process.env.EVIDENCE_DIR}/terminal-ready-1440.png` });
-  await page.getByRole("button", { name: "Detach Terminal Panel; Shells Keep Running", exact: true }).click();
+  await page.getByRole("button", { name: "Hide Terminal", exact: true }).click();
   await expect(page.locator(".xterm-screen")).toBeHidden();
 });

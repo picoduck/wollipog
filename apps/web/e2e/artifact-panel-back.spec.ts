@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { waitForSessionPreview } from "./session-readiness.js";
 
 /**
  * The Browser's open artifact in the real side panel (#2855): exactly one back control at a 400px
@@ -17,6 +18,7 @@ async function openBrowser(page: Page, width: number) {
   await page.goto("/command-inbox-projects-e2e.html?fullShell=1&runArtifacts=1");
   await page.getByRole("button", { name: /Alpha Session/ }).first().click();
   const expand = page.getByRole("button", { name: "Open Session", exact: true });
+  await waitForSessionPreview(page);
   if (await expand.isVisible()) await expand.click();
   await expect(page.locator("#right-panel .browser-artifact-list .row").first()).toBeVisible();
 }
