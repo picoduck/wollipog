@@ -13901,17 +13901,17 @@ body.shell-dock-dragging * {
   max-height: none;
   margin: 0;
 }
-/* Show Where Asked, after the time, and Collapse Question while the question is expanded; each
+/* Show Where Asked, after the time, and the question's expand/collapse toggle; each
    icon-only in a card narrower than 600px (a phone, a column beside the right panel) under the same
    name (§15.1). */
 @container question-card (max-width: 599px) {
   /* Square: `.btn.sm`'s padding and `.btn`'s max-content cap would size it by its label. */
-  .btn:is(.question-where-asked, .question-collapse) {
+  .btn:is(.question-where-asked, .question-reading-toggle) {
     width: var(--control-h-sm);
     max-width: none;
     padding: 0;
   }
-  :is(.question-where-asked-label, .question-collapse-label) { display: none; }
+  :is(.question-where-asked-label, .question-reading-toggle-label) { display: none; }
 }
 /* Expanded (#2786), the head line stays at the card's top edge as the footer stays at its bottom,
    so Collapse Question is in reach however long the question is. What scrolls passes under it, and

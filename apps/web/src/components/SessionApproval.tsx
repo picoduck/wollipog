@@ -18,7 +18,7 @@ import {
 import { useQuestionResponseStyle } from "../question-response-style.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { clearEvidenceReviewDraft } from "../evidence-review-drafts.js";
-import { ChevronDownIcon, LocateIcon, QuestionIcon } from "./Icons.js";
+import { ChevronDownIcon, ChevronUpIcon, LocateIcon, QuestionIcon } from "./Icons.js";
 import { Notice } from "./Notice.js";
 import { StructuredQuestionText } from "./StructuredQuestionText.js";
 import { BusyButton } from "./ui/BusyButton.js";
@@ -293,7 +293,8 @@ type CardFocus =
  * keyboard, clear of a sticky head line and footer (#2801).
  *
  * A question longer than the card's few clamped lines ends on a whole line and offers Show Full
- * Question (#2683). Expanded, the question is shown whole, the head line offers Collapse Question,
+ * Question (#2683), and the head line also offers Expand Question. Expanded, the question is shown
+ * whole, that header control becomes Collapse Question,
  * and the card scrolls between its head and its footer. On a session's request dock that is a
  * reading mode (#2786): the card takes the whole reading column over the transcript, which keeps its
  * place underneath, and the keyboard's compact layout gives way to it.
@@ -400,9 +401,12 @@ export function SessionQuestionBanner({
   const [expandedQuestion, setExpandedQuestion] = useState<string | null>(null);
   const [titleTruncates, setTitleTruncates] = useState(false);
   const titleToggleRef = useRef<HTMLButtonElement>(null);
-  const collapseRef = useRef<HTMLButtonElement>(null);
+  const headerToggleRef = useRef<HTMLButtonElement>(null);
+  const expandedFromHeader = useRef(false);
   // Set while the control that changed the question's state is the one about to be replaced.
   const toggleFocusPending = useRef(false);
+  const onReadingChangeRef = useRef(onReadingChange);
+  onReadingChangeRef.current = onReadingChange;
   const cardRef = useRef<HTMLElement>(null);
   const [cardCramped, setCardCramped] = useState(false);
   const previousDraftRequestRef = useRef({ sessionId, requestId: answerKey });
@@ -500,7 +504,11 @@ export function SessionQuestionBanner({
       if (titleExpanded) title.classList.remove("is-clamped");
       // A toggle that is about to disappear hands its focus to the question it controlled (§16.1).
       const toggle = titleToggleRef.current;
-      if (!hidden && toggle && toggle === toggle.ownerDocument.activeElement) title.focus({ preventScroll: true });
+      const headerToggle = headerToggleRef.current;
+      if (!hidden && ((toggle && toggle === toggle.ownerDocument.activeElement) ||
+          (!titleExpanded && !onReadingChangeRef.current && headerToggle === title.ownerDocument.activeElement))) {
+        title.focus({ preventScroll: true });
+      }
       setTitleTruncates(hidden);
       if (!body) {
         setCardCramped(false);
@@ -523,16 +531,23 @@ export function SessionQuestionBanner({
   // Expanded is the person's choice, kept until they collapse it: a layout in which the question no
   // longer needs its clamp keeps it expanded, and Collapse Question stays.
   const cardScrolls = titleExpanded || cardCramped;
-  // Expanding and collapsing each replace the control that was used: Show Full Question under the
-  // question becomes Collapse Question in the head line, and back. Focus moves with it.
+  // The header toggle keeps focus in place; the inline link returns focus to that same link after
+  // collapsing from the header. If the inline link no longer exists, the header remains available.
   useIsomorphicLayoutEffect(() => {
     if (!toggleFocusPending.current) return;
     toggleFocusPending.current = false;
-    (titleExpanded ? collapseRef.current : titleToggleRef.current ?? titleRef.current)?.focus({ preventScroll: true });
+    if (!titleExpanded && expandedFromHeader.current) {
+      const card = cardRef.current;
+      if (card) {
+        card.scrollTop = 0;
+        const dock = card.closest<HTMLElement>(".request-dock");
+        if (dock) dock.scrollTop = 0;
+      }
+    }
+    (titleExpanded || expandedFromHeader.current ? headerToggleRef.current ?? titleRef.current
+      : titleToggleRef.current ?? headerToggleRef.current ?? titleRef.current)?.focus({ preventScroll: true });
   }, [titleExpanded]);
   const reading = titleExpanded;
-  const onReadingChangeRef = useRef(onReadingChange);
-  onReadingChangeRef.current = onReadingChange;
   useEffect(() => {
     if (!reading) return;
     onReadingChangeRef.current?.(true);
@@ -540,6 +555,7 @@ export function SessionQuestionBanner({
   }, [reading]);
   const toggleQuestion = (event: React.MouseEvent<HTMLButtonElement>) => {
     if (!question) return;
+    if (!titleExpanded) expandedFromHeader.current = event.currentTarget === headerToggleRef.current;
     toggleFocusPending.current = event.currentTarget === event.currentTarget.ownerDocument.activeElement;
     setExpandedQuestion(titleExpanded ? null : question.id);
   };
@@ -868,6 +884,7 @@ export function SessionQuestionBanner({
   const navigateOnly = !answerable;
   // The compact card's foot-note; a person who may not answer reads the refusal in its place.
   const draftKept = compact && questions.length > 0 && !recoveryRequiresDismiss && responseRefusal === null;
+  const canExpandQuestion = question !== undefined && (titleExpanded || titleTruncates || onReadingChange !== undefined);
 
   return (
     <section
@@ -891,7 +908,7 @@ export function SessionQuestionBanner({
         kind={<><QuestionIcon />{kindLabel}</>}
         owner={owner}
         time={createdAt}
-        trailing={whereAsked || titleExpanded || headTrailing ? <>
+        trailing={whereAsked || canExpandQuestion || headTrailing ? <>
           {whereAsked && (
             // Icon-only below 760px, under the same name (§15.1).
             <BusyButton
@@ -912,19 +929,21 @@ export function SessionQuestionBanner({
               <span className="question-where-asked-label">{QUESTION_CARD_COPY.showWhereAsked}</span>
             </BusyButton>
           )}
-          {titleExpanded && (
+          {canExpandQuestion && (
             // Icon-only below 760px, under the same name (§15.1).
             <button
-              ref={collapseRef}
+              ref={headerToggleRef}
               type="button"
-              className="btn sm ghost question-collapse"
-              aria-label={QUESTION_CARD_COPY.collapseQuestion}
-              aria-expanded
+              className="btn sm ghost question-reading-toggle"
+              aria-label={titleExpanded ? QUESTION_CARD_COPY.collapseQuestion : QUESTION_CARD_COPY.expandQuestion}
+              aria-expanded={titleExpanded}
               aria-controls={titleId}
               onClick={toggleQuestion}
             >
-              <ChevronDownIcon size={14} />
-              <span className="question-collapse-label">{QUESTION_CARD_COPY.collapseQuestion}</span>
+              {titleExpanded ? <ChevronDownIcon size={14} /> : <ChevronUpIcon size={14} />}
+              <span className="question-reading-toggle-label">
+                {titleExpanded ? QUESTION_CARD_COPY.collapseQuestion : QUESTION_CARD_COPY.expandQuestion}
+              </span>
             </button>
           )}
           {headTrailing}

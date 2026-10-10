@@ -2411,10 +2411,13 @@ follows these rules so it never crowds out the conversation it asks about:
   worker's or a child's, in a panel) the card is the form in either style, and the Sessions preview
   keeps its own question card (#2210). A long question never scrolls on its own (#2683): it
   ends on a whole line with an ellipsis, five lines or three on a phone, and a `.link` **Show Full
-  Question** under it (`aria-expanded`, controlling the title) shows it whole. Expanded, the head
-  line offers **Collapse Question** (`.btn.sm.ghost` with a chevron, icon-only below 760px under the
-  same name, `aria-expanded`, controlling the title), which clamps it again; focus moves between
-  the two as each replaces the other, and neither touches the answers or the step. Show Full
+  Question** under it (`aria-expanded`, controlling the title) shows it whole. The head line also
+  offers **Expand Question** when the title is clamped, and always on a full-session reading dock,
+  even for a short question. It becomes **Collapse Question** in place (`.btn.sm.ghost` with a
+  chevron, icon-only in a card narrower than 600px under the same name, `aria-expanded`, controlling
+  the title). Header expansion keeps focus on the header toggle; inline expansion returns focus to
+  Show Full Question after collapse, or to the header if that link is no longer needed. Neither
+  changes answers or the step. Show Full
   Question shows only when the clamp hides something, and gives way with the head line while the
   software keyboard is open. Expanded is the person's choice: a layout that no longer needs the
   clamp, a step away and back, or the keyboard opening keeps it expanded. In a capped card (the
@@ -2437,7 +2440,7 @@ follows these rules so it never crowds out the conversation it asks about:
   underneath and new requests wait. The head, title and decision actions stay in reach while the
   details scroll, including with the keyboard open. Below 200px of reading-column height the whole
   decision scrolls instead, so its body and controls remain reachable. Reading shortcuts while
-  focus is in an expanded decision leave the hidden transcript alone. Collapsing restores the
+  an expanded decision is being read leave the hidden transcript alone. Collapsing restores the
   compact card and the transcript. Both transitions keep the review mounted, preserving selections,
   entered text and evidence progress; neither resolves the decision or changes who may answer it.
   The Sessions preview keeps its capped presentation; reading mode is available in the full session.

@@ -626,6 +626,36 @@ test("a long question shows Show Full Question, expands whole and collapses, kee
   }
 });
 
+test("the question header expands and collapses a short reading question in place, preserving its answer", async () => {
+  const layout = stubQuestionLayout({ "Pick one": 1 });
+  const { container, root } = mount();
+  const reading: boolean[] = [];
+  try {
+    await renderBanner(root, [{ id: "short", question: "Pick one", options: [{ label: "A" }, { label: "B" }] }],
+      true, api, "question-header-expand", undefined, next => reading.push(next));
+    assertNoDomNode(container.querySelector(".question-text-toggle"), "a short question has no inline expansion link");
+    const toggle = container.querySelector<HTMLButtonElement>('.request-card-head [aria-label="Expand Question"]')!;
+    assert.ok(toggle);
+    assert.equal(toggle.getAttribute("aria-expanded"), "false");
+    await act(async () => row(container, "B").click());
+    await act(async () => { toggle.focus(); toggle.click(); });
+    assert.equal(toggle.getAttribute("aria-label"), "Collapse Question");
+    assert.equal(toggle.getAttribute("aria-expanded"), "true");
+    assert.ok(domWindow.document.activeElement === toggle as unknown);
+    assert.equal(row(container, "B").checked, true);
+    await act(async () => toggle.click());
+    assert.equal(toggle.getAttribute("aria-label"), "Expand Question");
+    assert.ok(domWindow.document.activeElement === toggle as unknown);
+    assert.equal(row(container, "B").checked, true);
+    assert.deepEqual(reading, [true, false]);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    layout.restore();
+    clearQuestionDrafts("session-1", "question-header-expand");
+  }
+});
+
 test("options are native radios and checkboxes inside ChoiceRows, with no drawn glyphs", async () => {
   const { container, root } = mount();
   try {

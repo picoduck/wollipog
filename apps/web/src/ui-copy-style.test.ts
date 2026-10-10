@@ -793,7 +793,7 @@ test("the Requests panel's labels are Title Case, and its notice and state sente
 test("the question card's labels and buttons are Title Case, and its hints and errors are sentences (#2196)", () => {
   const titles = ["agentQuestions", "question", "asyncQuestion", "recoveryRequired", "dismiss", "dismissAndContinue",
     "back", "next", "submitAnswers", "tryAgain", "somethingElse", "somethingElseField", "showWhereAsked",
-    "showFullQuestion", "collapseQuestion", "answer", "exitAnswerMode", "showContext", "showAnswer"] as const;
+    "showFullQuestion", "expandQuestion", "collapseQuestion", "answer", "exitAnswerMode", "showContext", "showAnswer"] as const;
   // "Choose one", "Choose any" and "Optional" are the dim line above a question, Answer Mode's summary
   // ("Nothing chosen yet") and placeholders say what to type: sentence fragments (#2212).
   const fragments = ["chooseOne", "chooseAny", "optional", "nothingChosen", "answerEntered", "typeAnswer", "typeChoice",

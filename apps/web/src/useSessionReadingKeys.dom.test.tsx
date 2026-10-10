@@ -44,7 +44,7 @@ function Harness({
   useSessionReadingKeys({ enabled: true, sessionId, scrollRef, composerAvailable, actions });
   return (
     <div>
-      <div data-focus-zone="main">
+      <div className="chat-reading" data-focus-zone="main">
         <div className="detail-scroll" ref={scrollRef} tabIndex={0} onKeyDown={onTranscriptKeyDown}>
           Transcript
           <button type="button">Transcript Control</button>
@@ -365,6 +365,19 @@ test("an expanded workflow decision owns focus without moving the hidden transcr
   }
   assert.deepEqual(fixture.scrollCalls, []);
   assert.deepEqual(fixture.calls, []);
+  // Text clicks can focus the surrounding notice slot or the page body rather than the card.
+  const column = fixture.container.querySelector<HTMLElement>(".chat-reading")!;
+  column.tabIndex = -1;
+  for (const target of [column, domWindow.document.body as unknown as HTMLElement]) {
+    target.tabIndex = -1;
+    target.focus();
+    for (const key of ["j", "k", "PageDown", "PageUp", "End", "g", "g"]) {
+      assert.equal(dispatchKey(key).defaultPrevented, false, key);
+    }
+  }
+  assert.deepEqual(fixture.scrollCalls, []);
+  assert.deepEqual(fixture.calls, []);
+  request.querySelector<HTMLElement>("[role=heading]")!.focus();
   request.removeAttribute("data-decision-expanded");
   assert.equal(dispatchKey("j").defaultPrevented, true);
   assert.deepEqual(fixture.scrollCalls, [{ kind: "by", top: SESSION_READING_LINE_PX }]);

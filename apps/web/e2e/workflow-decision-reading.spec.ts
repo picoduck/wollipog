@@ -41,6 +41,54 @@ async function expectReadingMode(page: Page) {
 
 test.describe("workflow decision reading mode (#2874)", () => {
   test.use({ hasTouch: true });
+  for (const viewport of [
+    { width: 390, height: 844 }, { width: 844, height: 390 }, { width: 1440, height: 900 },
+  ]) {
+    test(`the question header expands and collapses in place at ${viewport.width}px`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await page.goto("/agent-questions-e2e.html?set=long-text&more=1&after=40");
+      const question = page.locator(".request-dock .question-card");
+      const choice = question.getByRole("radio", { name: /^Hold/ });
+      await choice.check();
+      const header = question.locator(".request-card-head");
+      const expand = header.getByRole("button", { name: "Expand Question", exact: true });
+      await expect(expand).toHaveAttribute("aria-expanded", "false");
+      await expand.focus();
+      await expect(expand).toBeInViewport();
+      await expand.click();
+      const collapse = header.getByRole("button", { name: "Collapse Question", exact: true });
+      await expect(collapse).toBeFocused();
+      await expect(collapse).toHaveAttribute("aria-expanded", "true");
+      await expect(page.locator(".request-dock")).toHaveAttribute("data-reading", "");
+      await expect(page.locator(".detail-main")).toHaveCSS("visibility", "hidden");
+      await expect(choice).toBeChecked();
+      await question.evaluate(element => { element.scrollTop = element.scrollHeight; });
+      await expect(collapse).toBeInViewport();
+      await collapse.click();
+      await expect(expand).toBeFocused();
+      await expect(expand).toBeInViewport();
+      await expect(expand).toHaveAttribute("aria-expanded", "false");
+      await expect(page.locator(".detail-main")).toHaveCSS("visibility", "visible");
+      await expect(choice).toBeChecked();
+      await expect.poll(() => page.evaluate(() => window.agentQuestionCalls)).toEqual([]);
+    });
+  }
+
+  test("clicking decision text and using reading keys keeps the hidden transcript in place", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 500 });
+    await page.goto("/request-surfaces-e2e.html?scenario=evidence&items=8");
+    await page.getByRole("region", { name: "Session Activity" }).hover();
+    await page.mouse.wheel(0, 200);
+    await expect.poll(() => page.locator(".detail-scroll").evaluate(element => element.scrollTop)).toBeGreaterThan(100);
+    await card(page).getByRole("button", { name: "Expand Decision" }).click();
+    await expect.poll(() => page.locator(".detail-scroll").evaluate(element => element.scrollTop)).toBeGreaterThan(100);
+    const before = await page.locator(".detail-scroll").evaluate(element => element.scrollTop);
+    await card(page).locator(".ev-progress").click();
+    await expect(page.locator(".session-notice-slot")).toBeFocused();
+    for (const key of ["PageUp", "k", "g", "g"]) await page.keyboard.press(key);
+    await expect.poll(async () => Math.abs(await page.locator(".detail-scroll").evaluate(element => element.scrollTop) - before)).toBeLessThanOrEqual(1);
+  });
+
   test("a keyboard-resized landscape column can still read the decision and reach its controls", async ({ page }) => {
     await page.setViewportSize({ width: 844, height: 260 });
     await page.goto("/request-surfaces-e2e.html?scenario=issue-scope&tall=1&keyboard=1");
@@ -50,7 +98,7 @@ test.describe("workflow decision reading mode (#2874)", () => {
       column: document.querySelector(".chat-reading")!.getBoundingClientRect().height,
       body: document.querySelector(".request-card-body")!.getBoundingClientRect().height,
     }));
-    expect(geometry.column).toBeLessThan(300);
+    expect(geometry.column).toBeLessThan(200);
     expect(geometry.body).toBeGreaterThan(20);
     const lastItem = card(page).getByText(/Review scope item 12:/);
     await lastItem.scrollIntoViewIfNeeded();
