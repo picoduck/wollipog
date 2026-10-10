@@ -235,7 +235,9 @@ export function TerminalNewTab({ id, kinds, busy, disabledReason }: {
   }
 
   const choose = (kind: TerminalTabKind) => {
-    if (kind.unavailableReason) return;
+    // A menu opened before a tab started opening (the dock's automatic first shell) stays open, so it
+    // refuses a second open while busy, as the busy trigger does.
+    if (busy || kind.unavailableReason) return;
     menu.triggerRef.current?.focus();
     menu.close(false);
     kind.open();

@@ -12132,9 +12132,12 @@ body.shell-dock-dragging * {
   padding: 0 var(--space-2) 0 var(--space-3);
   box-shadow: inset 0 -1px 0 var(--border);
 }
-/* Every tab keeps its Close's room, so tabs sit closer than §10.1's 24px: that room already parts them. */
+/* Every tab keeps its Close's room, so tabs sit closer than §10.1's 24px: that room already parts them.
+   The tabs take only the width the tools leave, and scroll; the tools shrink only when the head is
+   narrower than they are, and never past their content, so an open search never runs under New Tab
+   and Hide Terminal. */
 .shell-dock-head > .shell-tabs {
-  flex: 0 1 auto;
+  flex: 1 1 0;
   align-self: stretch;
   gap: var(--space-2);
 }
@@ -12164,7 +12167,6 @@ body.shell-dock-dragging * {
   display: flex;
   flex: 0 1 auto;
   align-items: center;
-  min-width: 0;
   gap: var(--space-2);
   margin-left: auto;
 }
@@ -12173,7 +12175,6 @@ body.shell-dock-dragging * {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  min-width: 0;
 }
 /* The field is 28px (36px on touch) inside a label one control tall, so on touch the label's 44px is
    the field's target, as a small button borrows its hit area (§2.8). */

@@ -21,7 +21,8 @@ import "../styles.css";
  * with output that holds "test" five times, Shell 2, and an exited Shell 3. Query parameters:
  * `?theme=light`; `?tui=` `available` (the default), `open` (an Agent TUI tab is open), `guardrail`
  * (a cost budget blocks it), `unsupported` (the agent has no TUI) or `offline` (the machine is
- * offline); `?shells=0` starts with no shell. New Shell takes a moment, so its busy state can be seen.
+ * offline); `?shells=0` starts with no shell and `?shells=many` with twelve; `?listDelay=` holds the
+ * registry reads that many milliseconds after load. New Shell takes a moment, so its busy state can be seen.
  */
 const params = new URLSearchParams(window.location.search);
 const theme = params.get("theme") === "light" ? "light" : "dark";
@@ -66,7 +67,9 @@ const shell = (index: number, overrides: Partial<ShellView> = {}): ShellView => 
   kind: "shell", status: "running", outputStartSeq: 0, outputEndSeq: 1, outputTruncated: false, ...overrides,
 });
 
-const shells: ShellView[] = params.get("shells") === "0" ? [] : [
+const shells: ShellView[] = params.get("shells") === "0" ? [] : params.get("shells") === "many"
+  ? Array.from({ length: 12 }, (_, index) => shell(index + 1))
+  : [
   shell(1),
   shell(2),
   shell(3, { status: "exited", exitCode: 0 }),
@@ -90,9 +93,16 @@ const output: Record<string, string> = {
 };
 
 let opened = shells.length;
+let openRequests = 0;
+/** Every registry read before this moment waits for it (the dock reads once on mount and again online). */
+const listReadyAt = Date.now() + Number(params.get("listDelay") ?? 0);
 const client: ApiClient = {
   ...api,
-  listShells: async () => ({ shells: structuredClone(shells) }),
+  listShells: async () => {
+    const wait = listReadyAt - Date.now();
+    if (wait > 0) await new Promise((resolve) => window.setTimeout(resolve, wait));
+    return { shells: structuredClone(shells) };
+  },
   shellHistory: async (_sessionId, shellId) => ({
     shellId,
     chunks: output[shellId] ? [{ seq: 1, stream: "stdout" as const, data: output[shellId]! }] : [],
@@ -101,6 +111,7 @@ const client: ApiClient = {
     truncatedBefore: false,
   }),
   openShell: async (_sessionId, request) => {
+    openRequests += 1;
     await new Promise((resolve) => window.setTimeout(resolve, 600));
     opened += 1;
     const created = shell(opened, request?.kind === "agent_tui"
@@ -158,10 +169,10 @@ const navigation: ViewNavigation = {
 let hideCount = 0;
 declare global {
   interface Window {
-    __WOLLIPOG_SHELL_DOCK_E2E__: { hideCount(): number };
+    __WOLLIPOG_SHELL_DOCK_E2E__: { hideCount(): number; openRequests(): number };
   }
 }
-window.__WOLLIPOG_SHELL_DOCK_E2E__ = { hideCount: () => hideCount };
+window.__WOLLIPOG_SHELL_DOCK_E2E__ = { hideCount: () => hideCount, openRequests: () => openRequests };
 
 function Fixture() {
   return (

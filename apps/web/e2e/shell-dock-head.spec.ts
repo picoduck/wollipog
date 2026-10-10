@@ -134,6 +134,43 @@ test.describe("at 1440px with a fine pointer", () => {
     });
   }
 
+  test("a New Tab menu opened before the first shell starts refuses a second open while it is busy", async ({ page }) => {
+    const response = await page.goto("/shell-dock-e2e.html?shells=0&listDelay=800");
+    expect(response?.ok()).toBe(true);
+    const dock = page.getByRole("region", { name: "Terminal" });
+    const newTab = dock.getByRole("button", { name: "New Tab" });
+    await newTab.click();
+    const newShell = page.getByRole("menu", { name: "New Tab" }).getByRole("menuitem", { name: "New Shell" });
+    await expect(newShell).toBeVisible();
+    // The empty registry lands and the dock opens its first shell while the menu is still open.
+    await expect(newTab).toHaveAttribute("aria-busy", "true");
+    await newShell.click();
+    await expect(dock.getByRole("tab", { name: /Shell 1/ })).toBeVisible();
+    expect(await page.evaluate(() => window.__WOLLIPOG_SHELL_DOCK_E2E__.openRequests())).toBe(1);
+  });
+
+  test("an open search never runs under New Tab and Hide Terminal, however many tabs there are", async ({ page }) => {
+    await page.setViewportSize({ width: 940, height: 800 });
+    const dock = await openDock(page, "?shells=many");
+    await dock.getByRole("button", { name: "Search Output" }).click();
+    const rects = await dock.locator(".shell-dock-tools > *").evaluateAll((elements) => elements
+      .filter((element) => element.getClientRects().length > 0 && !element.classList.contains("sr-only"))
+      .flatMap((element) => element.matches(".shell-search") ? [...element.children] : [element])
+      .map((element) => {
+        const box = element.getBoundingClientRect();
+        return { name: element.getAttribute("aria-label") ?? element.className, left: box.left, right: box.right };
+      }));
+    const head = (await dock.locator(".shell-dock-head").boundingBox())!;
+    for (let index = 1; index < rects.length; index += 1) {
+      expect(rects[index]!.left, `${rects[index]!.name} starts after ${rects[index - 1]!.name}`)
+        .toBeGreaterThanOrEqual(rects[index - 1]!.right);
+    }
+    expect(rects.at(-1)!.right).toBeLessThanOrEqual(head.x + head.width);
+    expect((await dock.locator(".shell-search-field").boundingBox())!.width).toBe(200);
+    const tabs = (await dock.locator(".shell-tabs").boundingBox())!;
+    expect(tabs.x + tabs.width).toBeLessThanOrEqual(rects[0]!.left);
+  });
+
   test("without an Agent TUI, New Tab opens a shell directly", async ({ page }) => {
     const dock = await openDock(page, "?tui=unsupported");
     const newTab = dock.getByRole("button", { name: "New Tab" });
