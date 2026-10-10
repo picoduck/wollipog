@@ -170,14 +170,19 @@ export function priceUsage(
   costIsEstimate = false,
 ): PricedUsage {
   const base = table ? lookupRate(table, model) : null;
+  const reportedCost = finiteNonNegative(reportedCostUsd);
   let rate = base;
-  if (base && context) {
-    const requestedTier = context.serviceTier ?? "default";
+  // Supplied costs retain their existing savings calculation when request context is absent.
+  // Missing coordinates must prevent a new cost estimate, not discard a supplied amount.
+  if (base && (context || reportedCost === null && base.requestRates?.length)) {
+    const requestedTier = context?.serviceTier ?? "default";
     const tier = requestedTier === "fast" ? "priority" : requestedTier === "standard" ? "default" : requestedTier;
-    const requestInput = finiteNonNegative(context.requestInputTokens);
+    const requestInput = finiteNonNegative(context?.requestInputTokens);
     const variants = base.requestRates ?? [];
-    // Never use a turn's aggregated input to choose a per-request context premium.
-    if (variants.some((variant) => variant.inputThreshold !== undefined) && requestInput === null) rate = null;
+    // Missing context cannot imply a standard request. Require only the coordinates that can
+    // change this model's rate, and never use a turn's aggregated input for a request premium.
+    if (reportedCost === null && variants.some((variant) => variant.serviceTier !== "default") && context?.serviceTier === undefined ||
+        variants.some((variant) => variant.inputThreshold !== undefined) && requestInput === null) rate = null;
     else {
       const threshold = variants.reduce((maximum, variant) =>
         variant.inputThreshold !== undefined && requestInput !== null && requestInput > variant.inputThreshold
@@ -197,8 +202,8 @@ export function priceUsage(
   const cacheSavingsUsd = rate
     ? Math.max(0, buckets.cachedInputTokens * (rate.inputCostPerToken - rate.cacheReadCostPerToken))
     : 0;
-  if (typeof reportedCostUsd === "number" && Number.isFinite(reportedCostUsd) && reportedCostUsd >= 0) {
-    return { costUsd: reportedCostUsd, costSource: costIsEstimate ? "modelPriced" : "providerReported", cacheSavingsUsd };
+  if (reportedCost !== null) {
+    return { costUsd: reportedCost, costSource: costIsEstimate ? "modelPriced" : "providerReported", cacheSavingsUsd };
   }
   if (!rate) return { costUsd: 0, costSource: "unpriced", cacheSavingsUsd: 0 };
   const costUsd =
