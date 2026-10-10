@@ -102,7 +102,7 @@ const memoryKey = (sessionId: string, key: string) => JSON.stringify([sessionId,
 function read(sessionId: string, key: string): Draft {
   const binding = bindings.get(key);
   const current = memory.get(memoryKey(sessionId, key));
-  const persisted = binding?.durable ? records(binding.scope).find((entry) => entry.sessionId === sessionId && entry.key === key) : undefined;
+  const persisted = !current && binding?.durable ? records(binding.scope).find((entry) => entry.sessionId === sessionId && entry.key === key) : undefined;
   const draft = current ?? persisted ?? { values: {}, step: 0 };
   return { values: binding ? safeValues(binding, draft.values) : structuredClone(draft.values),
     step: binding ? Math.min(draft.step, Math.max(0, binding.questions.length - 1)) : draft.step };
@@ -162,7 +162,10 @@ export function reconcileQuestionDrafts(sessionId: string, requests: readonly Pe
         (request.questions === undefined || schemaDiscriminator(request.questions) === schema));
     } catch { return false; }
   };
-  save(scope, records(scope).filter((entry) => entry.sessionId !== sessionId || live(entry.key)));
+  const persisted = records(scope);
+  const remaining = persisted.filter((entry) => entry.sessionId !== sessionId || live(entry.key));
+  // Most upserts have no draft lifecycle change. Do not rewrite the browser store for them.
+  if (remaining.length !== persisted.length) save(scope, remaining);
   for (const id of memory.keys()) {
     const [owner, key] = JSON.parse(id) as [string, string];
     if (owner === sessionId && bindings.get(key)?.scope === scope && !live(key)) memory.delete(id);
