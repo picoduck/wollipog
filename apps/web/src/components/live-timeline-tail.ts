@@ -75,6 +75,13 @@ interface TrailingFold {
   folded: TimelineItem[];
 }
 
+/** Whether `next` holds `previous`'s own events from `from` on. */
+function sameEvents(previous: readonly SessionEvent[], next: readonly SessionEvent[], from: number): boolean {
+  if (next.length < previous.length) return false;
+  for (let index = from; index < previous.length; index += 1) if (next[index] !== previous[index]) return false;
+  return true;
+}
+
 function foldOnto(base: TrailingFold, from: number, live: readonly SessionEvent[]): TrailingFold {
   let item = base.folded[base.index] as Extract<TimelineItem, { kind: "agent_message" | "agent_thought" }>;
   for (let next = from; next < live.length; next += 1) {
@@ -91,7 +98,7 @@ function foldOnto(base: TrailingFold, from: number, live: readonly SessionEvent[
  * or null when they do not only continue it or that item is not among them. The session view renders
  * for none of those chunks, nor for the paced upserts that count them (#2872), so a long reply can
  * stream entirely between two of its renders: a fold that only extends the previous one adds just the
- * new chunks, so each chunk is checked and folded once.
+ * new chunks, so each chunk is folded once.
  */
 function foldTrailingText(
   items: TimelineItem[],
@@ -100,9 +107,11 @@ function foldTrailingText(
   prior: TrailingFold | null,
 ): TrailingFold | null {
   if (!derivedFrom || !live || live === derivedFrom) return null;
-  // `onlyContinuesTrailingText` is transitive, so derivedFrom → prior.live → live continues as a whole.
+  // `onlyContinuesTrailingText` is transitive, so derivedFrom → prior.live → live continues as a whole,
+  // provided every chunk the previous fold read is still there: a replayed event can replace one in
+  // place, keeping the others.
   if (prior && prior.items === items && prior.derivedFrom === derivedFrom &&
-      onlyContinuesTrailingText(prior.live, live)) {
+      sameEvents(prior.live, live, derivedFrom.length) && onlyContinuesTrailingText(prior.live, live)) {
     return foldOnto(prior, prior.live.length, live);
   }
   if (!onlyContinuesTrailingText(derivedFrom, live)) return null;

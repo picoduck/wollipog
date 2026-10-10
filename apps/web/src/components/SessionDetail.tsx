@@ -55,7 +55,8 @@ import { useApi } from "../api-context.js";
 import { outstandingSessionResult } from "../session-follow-up.js";
 import { SkillsUnavailableNotice, skillsUnavailableSentence, useSessionSkillsUnavailable, useSkillsNoticeDismissal } from "./SkillsUnavailableNotice.js";
 import {
-  isPartialHistory, isRebuiltEventsArray, sessionEqualIgnoringStreaming, sessionsEqualIgnoringStreaming, useStoreActions, useStoreSelector, useStoreSelectorUnlessQuiet,
+  isPartialHistory, isRebuiltEventsArray, sessionEqualIgnoringStreaming, sessionsEqualIgnoringStreaming, useStoreActions,
+  useStoreSelector, useStoreSelectorUnlessQuiet, useStoreValueSource,
 } from "../store.js";
 import { useShowAgentLogs } from "../agent-logs.js";
 import { agentLogOnly } from "../work-steps.js";
@@ -3251,15 +3252,15 @@ function SessionDetailLoaded({
   // Governance outcomes are transcript context, not a persistent header: the decisions whose
   // request has no transcript row of its own are spliced in at their chronological position, and
   // the whole list stays reviewable in the side panel (a full-screen drawer on phones).
-  // It refreshes when the session changes and when the transcript does. A policy that decides a tool
-  // call records its outcome without changing the session, and the call's own event follows it; the
-  // streamed counters that move `updatedAt` no longer render this view (#2872).
-  const governanceAudit = useGovernanceAudit(
-    sessionId,
-    `${session.updatedAt}:${session.pendingApproval?.requestId ?? ""}:${evs?.[evs.length - 1]?.seq ?? 0}`,
-    mode === "expanded",
-    evs?.[0]?.ts,
-  );
+  // It refreshes whenever the session's `updatedAt` or request moves, as the session renders. A
+  // policy that decides a tool call records its outcome without changing anything else, so the paced
+  // upserts that move `updatedAt` while an agent streams refresh it too, without rendering this view
+  // (#2872).
+  const governanceRevision = useStoreValueSource((s) => {
+    const live = s.sessions.get(sessionId);
+    return `${live?.updatedAt ?? ""}:${live?.pendingApproval?.requestId ?? ""}`;
+  });
+  const governanceAudit = useGovernanceAudit(sessionId, "", mode === "expanded", evs?.[0]?.ts, governanceRevision);
   const governanceDecisions = governanceAudit.decisions;
   const timelineItems = useGovernanceTimeline(
     items,
@@ -6675,6 +6676,7 @@ function SessionDetailLoaded({
               )}
               {heldChildren.length > 0 && (
                 <CampaignHeldChildren
+                  sessionId={sessionId}
                   heldChildren={heldChildren}
                   blocked={session.orchestratorCampaign?.children?.blocked ?? heldChildren.length}
                   childTitle={heldChildTitle}

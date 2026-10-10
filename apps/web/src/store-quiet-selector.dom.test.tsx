@@ -5,7 +5,7 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { ControlPlaneToUi, SessionView } from "@wollipog/protocol";
 import {
-  sessionEqualIgnoringStreaming, StoreProvider, useLiveSession, useStoreSelector, useStoreSelectorUnlessQuiet,
+  sessionEqualIgnoringStreaming, StoreProvider, useLiveSession, useSessionChanges, useStoreSelector, useStoreSelectorUnlessQuiet,
 } from "./store.js";
 import type { UiConnectionRuntime, UiSocket } from "./ui-transport.js";
 import { installDomTestCleanup } from "./dom-test-cleanup.js";
@@ -143,6 +143,37 @@ test("useLiveSession shows the session it was given where no store is mounted", 
   try {
     await act(async () => root.render(<LiveCount session={session(7)} />));
     assert.equal(container.querySelector("[data-live]")?.textContent, "7");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+let ageRenders = 0;
+/** An age read from the clock as it renders, as the session view's panels show them. */
+function Age({ sessionId }: { sessionId: string }) {
+  useSessionChanges(sessionId);
+  ageRenders += 1;
+  return null;
+}
+
+test("useSessionChanges renders its caller for a streaming-only upsert of its session alone (#2872)", async () => {
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "changes", runtimeKey: "changes:1", createSocket: () => socket, close() {},
+  };
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<StoreProvider connection={connection}><Age sessionId="s1" /></StoreProvider>));
+    const other = { ...session(0), id: "s2" };
+    await act(async () => socket.push({ type: "snapshot", runners: [], boxes: [], sessions: [session(0), other], runs: [], pods: [] }));
+    const before = ageRenders;
+    await act(async () => socket.push({ type: "session_upsert", session: { ...session(0), lastEventAt: 9, updatedAt: 9 } }));
+    assert.equal(ageRenders, before + 1, "its session's paced upsert renders it, as it rendered the whole view");
+    await act(async () => socket.push({ type: "session_upsert", session: { ...other, lastEventAt: 9, updatedAt: 9 } }));
+    assert.equal(ageRenders, before + 1, "another session's does not");
   } finally {
     await act(async () => root.unmount());
     container.remove();

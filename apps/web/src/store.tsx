@@ -3,6 +3,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useSyncExternalStore,
   type Dispatch,
@@ -2940,6 +2941,33 @@ export function useOptionalStoreSelector<T>(
 export function useLiveSession<T extends Pick<SessionView, "id">>(session: T): T {
   // `T` is a view of a `SessionView` (the whole one, or a Pick of it), which the stored one satisfies.
   return (useOptionalStoreSelector((s) => s.sessions.get(session.id)) as T | undefined) ?? session;
+}
+
+/**
+ * Renders the caller whenever its session changes, streaming fields included, as the whole session
+ * view used to (#2872): for a part that reads the clock as it renders, such as an age, and so moved
+ * on with every paced upsert. Does nothing where no store is mounted.
+ */
+export function useSessionChanges(sessionId: string | undefined): void {
+  useOptionalStoreSelector((s) => sessionId === undefined ? undefined : s.sessions.get(sessionId));
+}
+
+/** A store value read and watched without rendering. */
+export interface StoreValueSource<T> {
+  read(): T;
+  subscribe(onChange: () => void): () => void;
+}
+
+/**
+ * `selector`'s value as a source an effect can read and watch, for work that follows a change
+ * without showing it, such as a refetch (#2872). The component does not render for it. `selector`
+ * is read when the source is, so it may use values the component renders with.
+ */
+export function useStoreValueSource<T>(selector: (s: State) => T): StoreValueSource<T> {
+  const store = useStoreHandle();
+  const selectorRef = useRef(selector);
+  selectorRef.current = selector;
+  return useMemo(() => ({ read: () => selectorRef.current(store.getState()), subscribe: store.subscribe }), [store]);
 }
 
 /** Back-compat full-state subscription: re-renders on EVERY store change. Fine for transient

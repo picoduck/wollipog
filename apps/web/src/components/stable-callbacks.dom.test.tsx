@@ -23,7 +23,7 @@ for (const [name, value] of Object.entries({
 interface ChildProps {
   label: string;
   onPick: (value: string) => string;
-  onExtra?: () => void;
+  onExtra?: () => string;
 }
 
 let childRenders = 0;
@@ -35,6 +35,8 @@ const Child = memo(function Child(props: ChildProps) {
 });
 
 let rerender: (next: { label: string; tick: number; extra: boolean }) => void = () => {};
+/** Runs inside the parent's render, before that render commits. */
+let duringRender: (() => void) | null = null;
 
 function Parent() {
   const [state, setState] = useState({ label: "One", tick: 0, extra: false });
@@ -43,8 +45,10 @@ function Parent() {
     label: state.label,
     // A new closure on every render, reading this render's tick.
     onPick: (value) => `${value}:${state.tick}`,
-    ...(state.extra ? { onExtra: () => {} } : {}),
+    ...(state.extra ? { onExtra: () => `extra:${state.tick}` } : {}),
   });
+  // After this render made its callbacks, before it commits.
+  duringRender?.();
   return <Child {...props} />;
 }
 
@@ -72,6 +76,31 @@ test("new closures alone do not render the memoized child, and its callbacks cal
     assert.equal(childRenders, before + 2, "a callback that appears renders the child");
     assert.equal(typeof lastChild!.onExtra, "function");
   } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("a render that has not committed does not reach the child's callbacks, and a dropped one keeps its last", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<Parent />));
+    await act(async () => rerender({ label: "One", tick: 1, extra: true }));
+    const held = lastChild!;
+    const seenDuringRender: string[] = [];
+    duringRender = () => { seenDuringRender.push(held.onPick("a")); };
+    await act(async () => rerender({ label: "One", tick: 2, extra: true }));
+    duringRender = null;
+    assert.equal(seenDuringRender[0], "a:1", "while the next render is under way, the committed callback answers");
+    assert.equal(held.onPick("a"), "a:2", "once it commits, the new one does");
+
+    await act(async () => rerender({ label: "Three", tick: 3, extra: false }));
+    assert.equal(lastChild!.onExtra, undefined);
+    assert.equal(held.onExtra!(), "extra:2", "a callback the parent dropped still calls the last one it stood for");
+  } finally {
+    duringRender = null;
     await act(async () => root.unmount());
     container.remove();
   }

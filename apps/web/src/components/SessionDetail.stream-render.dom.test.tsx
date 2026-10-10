@@ -204,6 +204,12 @@ async function mount() {
     container,
     push,
     append,
+    /** Several frames received before one animation frame publishes them together. */
+    async pushTogether(messages: ControlPlaneToUi[]) {
+      await act(async () => { for (const message of messages) socket.push(message); });
+      await frame();
+    },
+    lastSeq: () => seq,
     async unmount() {
       await act(async () => root.unmount());
       container.remove();
@@ -294,6 +300,26 @@ test("a chunk that only lengthens the reply renders the transcript, not the sess
     assert.equal(text().split(reply).length, 2, "the first reply still appears exactly once");
   } finally {
     stops.forEach((stop) => stop());
+    await view.unmount();
+  }
+});
+
+test("a replayed chunk that replaces one already folded shows its own text (#2872)", async () => {
+  const view = await mount();
+  try {
+    for (const word of ["Alpha", "Bravo", "Charlie"]) await view.append({ kind: "agent_message", text: `${word} ` });
+    const text = () => view.container.textContent ?? "";
+    assert.ok(text().includes("Alpha Bravo Charlie"));
+    const bravo = view.lastSeq() - 1;
+    const next = view.lastSeq() + 1;
+    // A replay rewrites Bravo's event in place while a new chunk arrives, both in one published frame.
+    await view.pushTogether([
+      { type: "session_event", event: { id: 9_000 + bravo, sessionId: view.fixture.id, seq: bravo, ts: bravo, payload: { kind: "agent_message", text: "Xray " } } },
+      { type: "session_event", event: { id: next, sessionId: view.fixture.id, seq: next, ts: next, payload: { kind: "agent_message", text: "Delta " } } },
+    ]);
+    assert.ok(text().includes("Alpha Xray Charlie Delta"), `the replaced chunk's text is shown: ${text()}`);
+    assert.ok(!text().includes("Bravo"));
+  } finally {
     await view.unmount();
   }
 });

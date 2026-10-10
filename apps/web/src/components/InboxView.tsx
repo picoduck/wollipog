@@ -1553,20 +1553,10 @@ export function InboxView({
     // A tab the URL names stays named across the mode switch.
     navigate({ name: mode === "board" ? "board" : "inbox", ...(routeSplit === undefined ? {} : { split: routeSplit }) });
   };
-  // Each callback here is a new closure on every render of the list; stable ones that call the
-  // latest let the memoized session skip those renders (#2872).
-  const surfaceProps = useStableCallbacks<SessionDetailProps>({
-    sessionId: surfaceSessionId ?? "",
-    mode: expanded ? "expanded" : "preview",
-    sourceLocation: expanded ? sourceLocation : undefined,
-    attentionTarget: expanded ? attentionTarget : undefined,
-    topbarControls: expanded ? topbarControls : undefined,
-    rightPanel,
-    onOpenTerminal,
-    pinnedSummary: expanded ? pinnedSummary : undefined,
-    composerFocusIntent: focusComposerSessionId === surfaceSessionId ? "reply" : undefined,
-    onComposerFocusConsumed,
-    onBack: onCollapse,
+  // The callbacks made here are new closures on every render of the list; stable ones that call the
+  // latest let the memoized session skip those renders (#2872). Callbacks the list was handed, and the
+  // registrations the session's effects clean up with, are already stable and pass through as they are.
+  const surfaceCallbacks = useStableCallbacks<Partial<SessionDetailProps>>({
     onExpand: () => { if (surfaceSessionId) expand(surfaceSessionId); },
     onNextSession: () => hopExpanded("next"),
     onPreviousSession: () => hopExpanded("previous"),
@@ -1581,7 +1571,6 @@ export function InboxView({
     onArchive: () => { if (surfaceSessionId) void archive(surfaceSessionId); },
     ...(sessionRemindersSupported && surfaceSessionId ? {
       onSnooze: () => setSnoozeSessionId(surfaceSessionId),
-      reminder: reminders.get(surfaceSessionId),
       onDismissReminder: () => {
         void dismissReturnedReminder(surfaceSessionId)
           .catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" }));
@@ -1595,9 +1584,24 @@ export function InboxView({
         if (target) openRequest(target, requestId);
       },
     }),
+  });
+  const surfaceProps: SessionDetailProps = {
+    sessionId: surfaceSessionId ?? "",
+    mode: expanded ? "expanded" : "preview",
+    sourceLocation: expanded ? sourceLocation : undefined,
+    attentionTarget: expanded ? attentionTarget : undefined,
+    topbarControls: expanded ? topbarControls : undefined,
+    rightPanel,
+    onOpenTerminal,
+    pinnedSummary: expanded ? pinnedSummary : undefined,
+    composerFocusIntent: focusComposerSessionId === surfaceSessionId ? "reply" : undefined,
+    onComposerFocusConsumed,
+    onBack: onCollapse,
+    ...surfaceCallbacks,
+    ...(sessionRemindersSupported && surfaceSessionId ? { reminder: reminders.get(surfaceSessionId) } : {}),
     onPreviewNavigationReady: expanded ? undefined : registerPreviewNavigation,
     onPreviewForkReady: expanded ? undefined : setPreviewForkControls,
-  });
+  };
   return (
     <>
     {/* The Sessions page header (§4.2): the view switch, the Snoozed filter, ⋯ and New Session; on a

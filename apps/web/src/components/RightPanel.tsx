@@ -29,6 +29,7 @@ import { ReviewPanel } from "./ReviewPanel.js";
 import type { DiffFileFocus } from "./GitDiffViewer.js";
 import type { GitStatus } from "./useGitStatus.js";
 import { shortcutDisplay } from "../shortcuts.js";
+import { useSessionChanges } from "../store.js";
 import type { TimelineItem } from "../timeline.js";
 import type { GovernanceDecision } from "../governance.js";
 import { DecisionHistoryPanel } from "./DecisionHistoryPanel.js";
@@ -292,6 +293,9 @@ export function RightPanel({
   /** Opens another session from a panel link, keeping the panel and its mode. */
   onOpenSession?: (sessionId: string) => void;
 }) {
+  // The panels show ages that read the clock as they render (requests, decisions, background work),
+  // and moved on with every paced upsert while the session view rendered for them (#2872).
+  useSessionChanges(session.id);
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const previouslyOpenRef = useRef(false);
