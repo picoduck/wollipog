@@ -18,6 +18,7 @@ import { ApiProvider } from "../api-context.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { FeedbackContext } from "./FeedbackProvider.js";
 import { ReviewPanel } from "./ReviewPanel.js";
+import { PanelActionSlotContext } from "./RightPanel.js";
 import { clearPanelScratch } from "../right-panel-scratch.js";
 import type { GitStatus } from "./useGitStatus.js";
 
@@ -36,6 +37,7 @@ const globals: Record<string, unknown> = {
   localStorage: domWindow.localStorage,
   navigator: domWindow.navigator,
   HTMLElement: domWindow.HTMLElement,
+  HTMLButtonElement: domWindow.HTMLButtonElement,
   Node: domWindow.Node,
   Event: domWindow.Event,
   InputEvent: domWindow.InputEvent,
@@ -175,7 +177,11 @@ const noFindings: ReviewFindingsResponse = {
 async function mountPanel(initial: SessionView) {
   const host = domWindow.document.createElement("div");
   domWindow.document.body.appendChild(host);
-  const root = createRoot(host as unknown as Element);
+  // The panel header's action slot sits beside the body, as in RightPanel.
+  const slot = domWindow.document.createElement("div");
+  const body = domWindow.document.createElement("div");
+  host.append(slot, body);
+  const root = createRoot(body as unknown as Element);
   const calls: string[] = [];
   // Confirmations are answered by the test, so a verdict can change while one is open.
   const confirmations: Array<(answer: boolean) => void> = [];
@@ -214,13 +220,15 @@ async function mountPanel(initial: SessionView) {
   const tree = (session: SessionView) => (
     <FeedbackContext.Provider value={feedback}>
       <ApiProvider client={client}>
-        <ReviewPanel
-          session={session}
-          runnerOnline
-          runnerProtocolVersion={157}
-          git={git}
-          onOpenSourceLocation={() => {}}
-        />
+        <PanelActionSlotContext.Provider value={slot as unknown as HTMLElement}>
+          <ReviewPanel
+            session={session}
+            runnerOnline
+            runnerProtocolVersion={157}
+            git={git}
+            onOpenSourceLocation={() => {}}
+          />
+        </PanelActionSlotContext.Provider>
       </ApiProvider>
     </FeedbackContext.Provider>
   );
@@ -250,10 +258,15 @@ function onlyButton(scope: Element, label: string): HTMLButtonElement {
   return found[0]!;
 }
 
-async function choosePane(container: HTMLElement, label: "All Changes" | "Unstaged") {
-  const pane = container.querySelector('[role="radiogroup"][aria-label="Index Pane"]');
-  assert.ok(pane, "the index pane choice is rendered");
-  await act(async () => { fireDomEvent.click(onlyButton(pane, label)); });
+/** Choose one View Options item (a Show pane or a Layout); the menu is portalled to the body. */
+async function chooseViewOption(container: HTMLElement, label: "All Changes" | "Unstaged Only" | "Side by Side") {
+  const trigger = container.querySelector<HTMLButtonElement>('button[aria-label="View Options"]');
+  assert.ok(trigger, "the View Options button is rendered");
+  await act(async () => { fireDomEvent.click(trigger); });
+  const item = [...domWindow.document.querySelectorAll('[role="menuitemradio"]')]
+    .find((node) => (node.textContent ?? "").trim() === label) as unknown as HTMLElement | undefined;
+  assert.ok(item, `View Options offers ${label}`);
+  await act(async () => { fireDomEvent.click(item); });
 }
 
 /** The Git actions on the All Changes pane: the panel's own, then the diff's hunk Stage and Discard. */
@@ -303,7 +316,7 @@ test("a refused person sees every Git action disabled with the reason, and nothi
     }
     assert.equal(harness.confirmations.length, 0, "Discard opens no confirmation");
 
-    await choosePane(harness.container, "Unstaged");
+    await chooseViewOption(harness.container, "Unstaged Only");
     const lines = lineControls(harness.container);
     for (const [name, control] of lines) assertRefused(harness.container, name, control);
     for (const [, control] of lines) {
@@ -312,14 +325,12 @@ test("a refused person sees every Git action disabled with the reason, and nothi
     assert.equal(onlyButton(harness.container, "Stage Selected (0)").disabled, true, "no line could be selected");
 
     // The side-by-side layout renders its own line selection boxes.
-    const layout = harness.container.querySelector('[role="radiogroup"][aria-label="Diff Layout"]');
-    assert.ok(layout, "the diff layout choice is rendered");
-    await act(async () => { fireDomEvent.click(onlyButton(layout, "Side by Side")); });
+    await chooseViewOption(harness.container, "Side by Side");
     assert.ok(harness.container.querySelector(".diff-split-row"), "the diff is side by side");
     for (const [name, control] of lineControls(harness.container)) assertRefused(harness.container, `split ${name}`, control);
 
     assert.deepEqual(harness.calls, []);
-    assert.equal(onlyButton(harness.container, "Refresh Git Status").disabled, false,
+    assert.equal(harness.container.querySelector<HTMLButtonElement>('button[aria-label="Refresh Review"]')?.disabled, false,
       "reads are not Git actions this verdict disables in the panel");
   } finally {
     await harness.unmount();
@@ -364,7 +375,7 @@ test("an allowed or absent verdict leaves every Git action as it was (#1870)", a
       await act(async () => { fireDomEvent.click(onlyButton(harness.container, "Commit Staged")); });
       await act(async () => { fireDomEvent.click(onlyButton(harness.container, "Commit All")); });
       await act(async () => { fireDomEvent.click(onlyButton(harness.container, "Push & Open Pull Request")); });
-      await choosePane(harness.container, "Unstaged");
+      await chooseViewOption(harness.container, "Unstaged Only");
       for (const [name, control] of lineControls(harness.container)) {
         assert.equal(control.disabled, name === "Stage Selected (0)", `${name} is enabled unless nothing is selected`);
         assert.equal(control.getAttribute("aria-describedby"), null, `${name} has no refusal description`);

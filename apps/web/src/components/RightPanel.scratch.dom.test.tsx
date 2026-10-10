@@ -56,6 +56,7 @@ const globals: Record<string, unknown> = {
   localStorage: domWindow.localStorage,
   navigator: domWindow.navigator,
   HTMLElement: domWindow.HTMLElement,
+  HTMLButtonElement: domWindow.HTMLButtonElement,
   Node: domWindow.Node,
   Event: domWindow.Event,
   InputEvent: domWindow.InputEvent,
@@ -285,6 +286,30 @@ const choice = (panel: Panel, group: string, name: string) =>
   [...panel.container.querySelectorAll<HTMLButtonElement>(`[aria-label="${group}"] [role="radio"]`)]
     .find((button) => button.textContent === name)!;
 
+/** Review's View Options menu, opened; it is portalled to the document body. */
+async function openViewOptions(panel: Panel): Promise<void> {
+  const trigger = panel.container.querySelector<HTMLButtonElement>('button[aria-label="View Options"]')!;
+  await act(async () => fireDomEvent.click(trigger));
+}
+
+/** Choose a View Options item, which closes the menu. */
+async function chooseViewOption(panel: Panel, name: string): Promise<void> {
+  await openViewOptions(panel);
+  const item = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')]
+    .find((button) => (button.textContent ?? "").trim() === name)!;
+  await act(async () => fireDomEvent.click(item));
+}
+
+/** Whether a View Options item is the checked one, read from the menu and closed again. */
+async function viewOptionChecked(panel: Panel, name: string): Promise<string | null> {
+  await openViewOptions(panel);
+  const item = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')]
+    .find((button) => (button.textContent ?? "").trim() === name)!;
+  const checked = item.getAttribute("aria-checked");
+  await act(async () => fireDomEvent.click(document.querySelector<HTMLElement>(".menu-backdrop")!));
+  return checked;
+}
+
 /** The visible directory, read the way the user reads it: the crumb trail. */
 /** The Browser's address bar is labelled by a visually hidden <label>, so it is found by id. */
 const addressBar = (panel: Panel) => panel.container.querySelector<HTMLInputElement>("#browser-url")!;
@@ -304,8 +329,8 @@ test("Review drafts and view choices survive a mode switch and a panel close", a
     await type(field(panel, "PR Title")!, "Preserve right panel state");
     await type(field(panel, "PR Description")!, "Round-tripping the whole body.");
     await type(field(panel, "Branch Name")!, "fix/issue-1202");
-    await act(async () => fireDomEvent.click(choice(panel, "Diff Scope", "Branch")));
-    await act(async () => fireDomEvent.click(choice(panel, "Diff Layout", "Side by Side")));
+    await act(async () => fireDomEvent.click(choice(panel, "Scope", "Branch")));
+    await chooseViewOption(panel, "Side by Side");
 
     await panel.show("files");
     assertNoDomNode(field(panel, "PR Description"), "the Review body is unmounted, not hidden");
@@ -315,15 +340,15 @@ test("Review drafts and view choices survive a mode switch and a panel close", a
     assert.equal(field(panel, "PR Title")!.value, "Preserve right panel state");
     assert.equal(field(panel, "PR Description")!.value, "Round-tripping the whole body.");
     assert.equal(field(panel, "Branch Name")!.value, "fix/issue-1202");
-    assert.equal(choice(panel, "Diff Scope", "Branch").getAttribute("aria-checked"), "true");
-    assert.equal(choice(panel, "Diff Layout", "Side by Side").getAttribute("aria-checked"), "true");
+    assert.equal(choice(panel, "Scope", "Branch").getAttribute("aria-checked"), "true");
+    assert.equal(await viewOptionChecked(panel, "Side by Side"), "true");
 
     await act(async () => panel.state.close());
     assertNoDomNode(panel.container.querySelector(".rpanel"), "a closed panel renders nothing");
     await panel.show("review");
     assert.equal(field(panel, "PR Description")!.value, "Round-tripping the whole body.",
       "closing and reopening the panel is the same unmount");
-    assert.equal(choice(panel, "Diff Layout", "Side by Side").getAttribute("aria-checked"), "true");
+    assert.equal(await viewOptionChecked(panel, "Side by Side"), "true");
   } finally {
     await panel.dispose();
   }
@@ -438,7 +463,7 @@ test("every mode resumes where it was left after a page reload", async () => {
   await type(field(before, "PR Title")!, "Persist right panel scratch");
   await type(field(before, "PR Description")!, "Written over an hour, not to be spent on a reload.");
   await type(field(before, "Branch Name")!, "fix/issue-1282");
-  await act(async () => fireDomEvent.click(choice(before, "Diff Layout", "Side by Side")));
+  await chooseViewOption(before, "Side by Side");
 
   await before.show("files");
   await act(async () => fireDomEvent.click(before.container.querySelector<HTMLButtonElement>(".files-list .row")!));
@@ -462,7 +487,7 @@ test("every mode resumes where it was left after a page reload", async () => {
     assert.equal(field(after, "PR Description")!.value,
       "Written over an hour, not to be spent on a reload.");
     assert.equal(field(after, "Branch Name")!.value, "fix/issue-1282");
-    assert.equal(choice(after, "Diff Layout", "Side by Side").getAttribute("aria-checked"), "true",
+    assert.equal(await viewOptionChecked(after, "Side by Side"), "true",
       "the view choices come back with the drafts they were made beside");
 
     await after.show("files");

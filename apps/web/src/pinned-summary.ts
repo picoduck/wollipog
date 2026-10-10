@@ -350,6 +350,16 @@ export function deriveCommitAction(status: { hasChanges: boolean; ahead: number 
   return "up_to_date";
 }
 
+/** A forge's pull or merge request state as the fact the Pinned Summary and Review show (§11.2). */
+export function forgeStateLabel(state: string): string {
+  const normalized = state.toUpperCase();
+  if (normalized === "OPEN" || normalized === "OPENED") return "Open";
+  if (normalized === "MERGED") return "Merged";
+  if (normalized === "CLOSED") return "Closed";
+  if (normalized === "DRAFT") return "Draft";
+  return state.charAt(0).toUpperCase() + state.slice(1).toLowerCase();
+}
+
 /**
  * The prompt the "Fix" button sends when checks are failing — the Codex affordance: hand the
  * failing-check names to the agent and let it investigate.

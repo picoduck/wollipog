@@ -10,6 +10,7 @@ import {
   deriveHost,
   deriveSubagents,
   fixChecksPrompt,
+  forgeStateLabel,
   legacyLocalGitFacts,
   remoteHttpUrl,
   visibleForgeFacts,
@@ -53,15 +54,6 @@ import { childSessionRequestsLabel, workflowDecisionsSummary } from "./Orchestra
 const BUSY = ["queued", "starting", "running", "input_required"];
 
 /** gh and glab report OPEN, OPENED, MERGED and CLOSED; a pull request's state is a fact (§11.2). */
-function forgeStateLabel(state: string): string {
-  const normalized = state.toUpperCase();
-  if (normalized === "OPEN" || normalized === "OPENED") return "Open";
-  if (normalized === "MERGED") return "Merged";
-  if (normalized === "CLOSED") return "Closed";
-  if (normalized === "DRAFT") return "Draft";
-  return state.charAt(0).toUpperCase() + state.slice(1).toLowerCase();
-}
-
 function requestNoun(kind: string | undefined): string {
   return kind === "merge_request" ? "Merge Request" : "Pull Request";
 }

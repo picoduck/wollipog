@@ -43,7 +43,7 @@ for (const pointer of ["fine", "coarse"] as const) {
       expect(look).toEqual({ background: "rgba(0, 0, 0, 0)", underline: "2px", transform: "none" });
     });
 
-    test(`Files entries and Review changed files are ${dense}px dense rows`, async ({ page }) => {
+    test(`Files entries are ${dense}px dense rows, and Review has no separate file list`, async ({ page }) => {
       await page.goto("/files-panel-e2e.html");
       const files = await heights(page, ".files-list .row");
       expect(files.length).toBe(7);
@@ -56,10 +56,10 @@ for (const pointer of ["fine", "coarse"] as const) {
       expect(offsets.length).toBeGreaterThan(0);
       for (const offset of offsets) expect(Math.abs(offset)).toBeLessThan(1);
 
+      // Review's file sections are its list (#2846): the 12-row changed-file list is gone.
       await page.goto("/review-anchor-reload-e2e.html");
-      const changed = await heights(page, ".git-files .row");
-      expect(changed.length).toBe(2);
-      for (const height of changed) expect(height).toBe(dense);
+      await expect(page.locator(".diff-file").first()).toBeVisible();
+      await expect(page.locator(".git-files")).toHaveCount(0);
     });
   });
 }

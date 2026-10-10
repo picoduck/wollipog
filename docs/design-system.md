@@ -882,7 +882,13 @@ Requests, Decision History, and Terminal once #2868 moves it) opens in one frame
 - **Action slot.** A tool puts its own header actions in the slot by rendering `PanelHeaderActions`
   anywhere in its body: `.icon-btn` buttons (32px, 44px on touch) with Title Case names. It is the
   one extension point for per-tool header controls (a pushed page's Back, an About popover), so a
-  tool never adds a second bar inside its body.
+  tool never adds a second bar inside its body. Review's one Refresh lives here (#2846).
+- **Body slots.** `.rpanel-body` scrolls as one by default. A tool with fixed controls lays out on
+  three slots instead, rendering `PanelToolLayout` as its body (#2846): `.rpanel-toolbar`, fixed
+  above, which is only the place for the shared `.toolbar` row (§4.7); `.rpanel-scroll`, the tool's
+  only vertical scroller; and the optional `.rpanel-foot`, fixed below (Review's commit bar, #2847).
+  The body then gives up its own scroll and padding. Nothing inside the scroller scrolls vertically
+  on its own.
 - **Resize handle.** An 8px strip centred on the leading edge that takes no room. On hover a 2px
   line and a grip in `--control-outline`, on keyboard focus the line in `--focus` (with a transparent
   outline for forced colors), and the width in a tooltip while dragging. Arrow keys, Home, End,
@@ -1675,7 +1681,8 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 - The same rule marks every neutral "chosen one among peers": the knob and a toggle that is on
   (§3.1). Hover never draws the edge.
 - 2 to 4 options, each label fits on one line at the control's width. If they do not fit, use a
-  Select. A segmented control never wraps.
+  Select. A segmented control never wraps. In a toolbar too narrow for equal options, they may take
+  their content widths instead (Review's Scope below a 360px panel).
 - Counts inside options: `--text-faint`, tabular, after the label.
 - **Full width** (`.seg.block`): the group fills its row with equal options instead of sitting at
   its content width, for a filter in a narrow panel (the Projects list's visibility filter). It is
@@ -1746,6 +1753,7 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Usage (provider availability) | Available: success · Approaching Limit: warning · Temporarily Unavailable: danger |
 | Transcript share link | Active: success · Expired, Revoked: neutral. Rendered as the inline badge on Share Transcript's link rows. |
 | Pull request | Open, Draft, Merged and Closed are **facts**: row meta with the Git icon, not status badges. |
+| Pull request checks (Review's summary, #2846) | Checks Failing: danger · Checks Running: info, pulsing. Passing checks get no badge. |
 
 "Orphaned" is retired everywhere, including the session header badge, which reads "Background Work
 Lost". Update Required applies to machines, instances and devices alike.

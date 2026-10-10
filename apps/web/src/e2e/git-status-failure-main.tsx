@@ -1,10 +1,11 @@
-import React from "react";
+import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { PROTOCOL_VERSION, type SessionView } from "@wollipog/protocol";
 import { createApiClient } from "../api.js";
 import { createBrowserApiTransport } from "../api-transport.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
+import { PanelActionSlotContext } from "../components/RightPanel.js";
 import { ReviewPanel } from "../components/ReviewPanel.js";
 import { useGitStatus } from "../components/useGitStatus.js";
 import "../styles.css";
@@ -31,11 +32,27 @@ function Panel() {
     git={git} onOpenSourceLocation={() => {}} />;
 }
 
+/** The side panel's frame around Review: its header holds Review's Refresh (#2846). */
+function Frame() {
+  const [slot, setSlot] = useState<HTMLDivElement | null>(null);
+  return (
+    <section className="rpanel" style={{ width: "100%", maxWidth: 820, height: "calc(100vh - 32px)", margin: "0 auto" }}>
+      <div className="rpanel-head">
+        <h2 className="rpanel-title">Review</h2>
+        <div className="rpanel-actions" ref={setSlot} />
+      </div>
+      <PanelActionSlotContext.Provider value={slot}>
+        <div className="rpanel-body"><Panel /></div>
+      </PanelActionSlotContext.Provider>
+    </section>
+  );
+}
+
 createRoot(document.getElementById("root")!).render(
   <ApiProvider client={client}>
     <FeedbackProvider>
       <main className="app" style={{ minHeight: "100vh", background: "var(--bg)", padding: 16 }}>
-        <section className="rpanel" style={{ width: "100%", maxWidth: 820, margin: "0 auto" }}><Panel /></section>
+        <Frame />
       </main>
     </FeedbackProvider>
   </ApiProvider>,

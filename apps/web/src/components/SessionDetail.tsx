@@ -142,6 +142,7 @@ import { PinnedSummary } from "./PinnedSummary.js";
 import { PinnedSummaryDock } from "./PinnedSummaryDock.js";
 import type { PinnedSummaryState } from "./pinned-summary-state.js";
 import { deriveGitPresentation } from "../pinned-summary.js";
+import { visibleForgeFacts } from "../pinned-summary.js";
 import { useVoiceDictation } from "./useVoiceDictation.js";
 import { DictationStrip } from "./DictationStrip.js";
 import { appendTranscript } from "../dictation.js";
@@ -2089,6 +2090,13 @@ function SessionDetailLoaded({
       errorCode: gitSummary.errorCode,
     },
   }), [git, gitSummary, runnerOnline, session.worktreePath]);
+  // Review's pull request row (#2846) reads the same forge facts as the Pinned Summary, hidden by the
+  // same current-repository decision.
+  const reviewForgeFacts = useMemo(() => visibleForgeFacts(
+    gitSummary.summary,
+    git.status?.remoteUrl,
+    !richGitSupported || gitPresentation.state !== "not_repository",
+  ), [git.status?.remoteUrl, gitPresentation.state, gitSummary.summary, richGitSupported]);
 
   useEffect(() => {
     const generation = ++viewGenerationRef.current;
@@ -7488,6 +7496,7 @@ function SessionDetailLoaded({
           runnerProtocolVersion={runner?.protocolVersion}
           git={git}
           forge={gitSummary.summary?.forge}
+          forgeFacts={reviewForgeFacts}
           onOpenTerminal={onOpenTerminal}
           onInsertSideChatDraft={insertSideChatDraft}
           onAttachWorkspaceReference={workspaceReferencesSupported ? attachWorkspaceTarget : undefined}
