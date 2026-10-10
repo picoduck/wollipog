@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { useId, useMemo, useSyncExternalStore, type ReactNode } from "react";
 import { runnerSupportsProtocol, type SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import {
@@ -64,6 +64,23 @@ function RecordedAge({ at, now, clock = false }: { at: number | undefined; now: 
 type StopFeedback = { state: "pending" } | BackgroundJobStopResult;
 
 /**
+ * Each job's Stop Job request and its outcome, by session and job, for the life of the page. The
+ * request outlives the page that sent it: Back and reopening the job shows it still stopping, so a
+ * second request is never sent while the first runs, and its outcome lands wherever the job is open.
+ */
+const stopFeedback = new Map<string, StopFeedback>();
+const stopListeners = new Set<() => void>();
+const stopKey = (sessionId: string, jobId: string) => JSON.stringify([sessionId, jobId]);
+function setStopFeedback(key: string, feedback: StopFeedback) {
+  stopFeedback.set(key, feedback);
+  for (const listener of stopListeners) listener();
+}
+function subscribeStopFeedback(listener: () => void) {
+  stopListeners.add(listener);
+  return () => { stopListeners.delete(listener); };
+}
+
+/**
  * Stop Job… for one unfinished job (#1780, #2858). It asks first, in the shared danger confirmation
  * titled with the job's name, with Cancel focused; the runner then ends only that job. Unavailable,
  * the button stays, disabled, with its reason as visible text it is described by.
@@ -78,23 +95,20 @@ function StopJob({ sessionId, jobId, label, availability, stoppable }: {
   const api = useApi();
   const { confirm } = useFeedback();
   const reasonId = useId();
-  const [feedback, setFeedback] = useState<StopFeedback | null>(null);
-  const mounted = useRef(true);
-  useEffect(() => {
-    mounted.current = true;
-    return () => { mounted.current = false; };
-  }, []);
+  const key = stopKey(sessionId, jobId);
+  const feedback = useSyncExternalStore(subscribeStopFeedback, () => stopFeedback.get(key) ?? null);
   const stop = async () => {
+    if (stopFeedback.get(key)?.state === "pending") return;
     const confirmed = await confirm({
       title: `Stop ${label}`,
       message: STOP_JOB_OUTCOME,
       confirmLabel: "Stop Job",
       tone: "danger",
     });
-    if (!confirmed || !mounted.current) return;
-    setFeedback({ state: "pending" });
-    const result = await requestBackgroundJobStop(api, sessionId, jobId);
-    if (mounted.current) setFeedback(result);
+    // Another page of the same job may have sent it while this confirmation was open.
+    if (!confirmed || stopFeedback.get(key)?.state === "pending") return;
+    setStopFeedback(key, { state: "pending" });
+    setStopFeedback(key, await requestBackgroundJobStop(api, sessionId, jobId));
   };
   // Once stopped, the job is no longer stoppable and the button goes; its outcome stays.
   const offered = stoppable && feedback?.state !== "stopped" && feedback?.state !== "already_terminal";
