@@ -17,12 +17,25 @@ async function open(page: Page, query: string, viewport = { width: 1100, height:
   await expect(page.locator(".dfile").first()).toBeVisible();
 }
 
-/** Open the editor under the checkout file's new line 21 and return the card. */
-async function openEditor(page: Page): Promise<Locator> {
-  const add = page.getByRole("button", { name: `Comment on ${CHECKOUT} right line 21` });
-  await add.scrollIntoViewIfNeeded();
-  await add.hover();
-  await add.click();
+const checkoutFile = (scope: Page | Locator) => scope.locator(`.dfile[data-path="${CHECKOUT}"]`);
+
+/**
+ * Open the editor under the checkout file's new line 21 and return the card: with a mouse through
+ * the line's hover "+", on touch through its line menu's Add Finding… (#2849).
+ */
+async function openEditor(page: Page, { touch = false }: { touch?: boolean } = {}): Promise<Locator> {
+  const file = checkoutFile(page);
+  if (touch) {
+    const number = file.getByRole("button", { name: "Line 21 Actions", exact: true });
+    await number.scrollIntoViewIfNeeded();
+    await number.tap();
+    await page.getByRole("menuitem", { name: "Add Finding…" }).tap();
+  } else {
+    const add = file.getByRole("button", { name: "Add Finding on Line 21", exact: true });
+    await add.scrollIntoViewIfNeeded();
+    await add.hover();
+    await add.click();
+  }
   const card = page.locator(".dedit");
   await expect(card).toBeVisible();
   return card;
@@ -211,7 +224,7 @@ test.describe("on a phone with a coarse pointer", () => {
 
   test("in a 360px panel Severity and Required still share a row with 44px targets", async ({ page }) => {
     await open(page, "width=360");
-    await expectOneOptionsRow(await openEditor(page));
+    await expectOneOptionsRow(await openEditor(page, { touch: true }));
   });
 
   test("with the textarea focused and the keyboard open, Add Finding is above it and no composer is rendered", async ({ page }) => {
@@ -228,9 +241,10 @@ test.describe("on a phone with a coarse pointer", () => {
     await page.getByRole("menuitemradio", { name: "Review" }).tap();
     await expect(panel.locator(".dfile").first()).toBeVisible();
 
-    const add = panel.getByRole("button", { name: `Comment on ${CHECKOUT} right line 21` });
-    await add.scrollIntoViewIfNeeded();
-    await add.tap();
+    const number = checkoutFile(panel).getByRole("button", { name: "Line 21 Actions", exact: true });
+    await number.scrollIntoViewIfNeeded();
+    await number.tap();
+    await page.getByRole("menuitem", { name: "Add Finding…" }).tap();
     const card = panel.locator(".dedit");
     await expect(card.locator("textarea")).toBeFocused();
     await expectOneOptionsRow(card);

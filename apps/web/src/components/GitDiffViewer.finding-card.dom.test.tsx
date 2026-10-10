@@ -103,9 +103,9 @@ function controls(overrides: Partial<DiffReviewControls> = {}) {
   return { review, created, statuses };
 }
 
-/** Open the editor on the added line (new-side line 2), as the line's own control does. */
+/** Open the editor on the added line (new-side line 2) with its hover "+" (#2849). */
 async function openEditor(container: HTMLElement): Promise<HTMLElement> {
-  const add = container.querySelector<HTMLButtonElement>('button[aria-label="Comment on src/a.ts right line 2"]');
+  const add = container.querySelector<HTMLButtonElement>('button[aria-label="Add Finding on Line 2"]');
   assert.ok(add, "the line offers to add a finding");
   await act(async () => { add.click(); });
   const editor = container.querySelector<HTMLElement>(".dedit");

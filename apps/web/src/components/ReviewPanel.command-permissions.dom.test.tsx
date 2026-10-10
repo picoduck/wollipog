@@ -458,7 +458,7 @@ test("a refused person gets no +, and the line menu lists Add Finding… unavail
     assert.equal(item.getAttribute("aria-disabled"), "true", "Add Finding… is unavailable");
     assert.equal(item.querySelector(".menu-desc")?.textContent, VIEWER, "and says why");
     await act(async () => { fireDomEvent.click(item); await Promise.resolve(); });
-    assertNoDomNode(harness.container.querySelector(".diff-comment-editor"), "no draft editor opened");
+    assertNoDomNode(harness.container.querySelector(".dedit"), "no draft editor opened");
     assert.deepEqual(harness.calls, []);
   } finally {
     await harness.unmount();
