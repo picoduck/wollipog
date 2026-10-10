@@ -99,6 +99,9 @@ test("the other tools' facts read in sentence case (#2844)", () => {
   assert.equal(backgroundFact(["running"]), "1 of 1 job running");
   // Only a verified running job counts: unverified, lost and stalled ones are not running.
   assert.equal(backgroundFact(["unverified", "lost", "stalled"]), "0 of 3 jobs running");
+  // Known history whose inventory is not loaded yet is never "nothing has run".
+  assert.equal(backgroundFact("loading"), "Checking background jobs…");
+  assert.equal(backgroundFact("error"), "Background jobs can't be loaded right now");
   assert.equal(campaignFact({ counts: { delivered: 3, committed: 7 } }), "3 of 7 delivered");
   assert.equal(campaignFact(null), "Progress of this session's campaign");
   assert.equal(decisionsFact(0, false, "ready"), "No decisions recorded yet");

@@ -142,7 +142,10 @@ export function agentsFact(subagents: number, more = false): string {
  * Background Work: of the jobs the session lists, those the Background Work panel shows as Running
  * (`backgroundJobCurrentState`), so an unverified, lost or stalled job is never counted as running.
  */
-export function backgroundFact(states: readonly string[]): string {
+export function backgroundFact(states: readonly string[] | "loading" | "error"): string {
+  // A compact session view says job history exists without carrying it until it is loaded.
+  if (states === "loading") return "Checking background jobs…";
+  if (states === "error") return "Background jobs can't be loaded right now";
   if (states.length === 0) return "Nothing has run in the background";
   const running = states.filter((state) => state === "running").length;
   return `${running} of ${count(states.length, "job", "jobs")} running`;

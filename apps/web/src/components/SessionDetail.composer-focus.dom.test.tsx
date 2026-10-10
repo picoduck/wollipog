@@ -7114,3 +7114,34 @@ test("expanding the side panel over the composer ends dictation (#2845)", async 
     }
   });
 });
+
+test("Session Tools loads the job inventory a compact session leaves out, and counts it once it lands (#2844)", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const requests: Array<Deferred<{ session: SessionView }>> = [];
+  const fixture = await mountFixture(draft, {
+    rightPanelMode: "launcher",
+    runnerProtocolVersion: 99,
+    sessionPatch: { backgroundWorkTracking: "managed", backgroundJobsAvailable: true },
+    client: {
+      session: async () => {
+        const request = deferred<{ session: SessionView }>();
+        requests.push(request);
+        return request.promise;
+      },
+    },
+  });
+  const fact = () => fixture.container.querySelector('.session-tools [data-tool="background"] .row-sub')?.textContent;
+  try {
+    await flushAsyncWork();
+    assert.ok(requests.length >= 1, "the list asks for the omitted inventory");
+    assert.equal(fact(), "Checking background jobs…", "known history is never reported as empty");
+    await act(async () => {
+      for (const request of requests) request.resolve({ session: detailedBackgroundSession(fixture.sessionId) });
+      await Promise.all(requests.map((request) => request.promise));
+    });
+    await flushAsyncWork();
+    assert.equal(fact(), "0 of 1 job running");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});

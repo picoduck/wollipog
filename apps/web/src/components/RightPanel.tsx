@@ -1114,6 +1114,7 @@ export function RightPanel({
               session={session}
               runnerOnline={runnerOnline}
               runnerProtocolVersion={runnerProtocolVersion}
+              backgroundInventoryError={backgroundInventoryError}
               git={git}
               items={items}
               context={toolContext}

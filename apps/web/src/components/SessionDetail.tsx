@@ -340,6 +340,9 @@ import { holdRecoveryActionFor, sessionArchiveActionRefusal, sessionCommandRefus
 import { sessionReadingTarget } from "../focus-zones.js";
 
 const NO_IMAGE_MIME_TYPES: readonly string[] = [];
+/** The side panel tools that show the job inventory a compact session view omits; Session Tools
+ * counts its running jobs (#2844). */
+const BACKGROUND_INVENTORY_MODES: readonly string[] = ["background", "subagents", "launcher"];
 const STOP_TURN_RETRY_MS = 8_000;
 /** WebKit may synthesize a touch click in a later task. Keep the pointer transfer alive long
  * enough for that click; if no click arrives, finish the collapse instead of leaving a blurred
@@ -1594,10 +1597,10 @@ function SessionDetailLoaded({
     setBackgroundInventoryAttempt((attempt) => attempt + 1);
   }, []);
   useEffect(() => {
-    if (mode !== "expanded" || !rightPanel.open || !["background", "subagents"].includes(rightPanel.mode) ||
+    if (mode !== "expanded" || !rightPanel.open || !BACKGROUND_INVENTORY_MODES.includes(rightPanel.mode) ||
         session.backgroundJobsAvailable !== true || session.backgroundJobs !== undefined) {
       if (session.backgroundJobs !== undefined || mode !== "expanded" ||
-          !rightPanel.open || !["background", "subagents"].includes(rightPanel.mode)) {
+          !rightPanel.open || !BACKGROUND_INVENTORY_MODES.includes(rightPanel.mode)) {
         backgroundInventoryRequestRef.current = null;
         setBackgroundInventoryError(null);
       }

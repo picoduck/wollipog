@@ -82,6 +82,8 @@ export interface SessionToolsListProps {
   session: SessionView;
   runnerOnline: boolean;
   runnerProtocolVersion: number | null | undefined;
+  /** Why the omitted job inventory could not be loaded, if it could not. */
+  backgroundInventoryError: string | null;
   git: GitStatus;
   items: TimelineItem[];
   context: SessionToolContext;
@@ -194,6 +196,7 @@ function SessionToolsListView({
   session,
   runnerOnline,
   runnerProtocolVersion,
+  backgroundInventoryError,
   git,
   items,
   context,
@@ -249,6 +252,10 @@ function SessionToolsListView({
       case "subagents": return { text: agentsFact(subagents.length, registry?.nextAfter != null), badge: agentsBadge || undefined };
       case "sidechat": return { text: SIDE_CHAT_FACT };
       case "background": {
+        // Job history the compact session view leaves out until SessionDetail loads it.
+        if (session.backgroundJobs === undefined && session.backgroundJobsAvailable === true) {
+          return { text: backgroundFact(backgroundInventoryError ? "error" : "loading") };
+        }
         // The Background Work panel's own job states, so only a verified job counts as running.
         const inventorySupported = runnerSupportsProtocol(runnerProtocolVersion, "managedBackgroundInventory");
         const states = (session.backgroundJobs ?? []).map((job) => backgroundJobCurrentState(
