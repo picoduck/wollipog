@@ -113,6 +113,46 @@ table code fell from 6.46–6.77% to 0.079–0.146%. Timestamp formatting fell f
 self time to about 2%. The parser still does cold work; lower total traversal time changes these
 percentages, so they should be read alongside raw profiles and wall-clock durations.
 
+A second five-trial build captured clean source commit
+`4fc5ffeb9988cbefc391bdfbd137951fac0bb837` before building. It again measured 16.8 ms p95
+in every trial, with traversal times 24.242/24.166/24.255/24.564/24.341 s (mean 24.314 s,
+sample SD 0.153 s). One of its 7,200 frames exceeded 34 ms, at 49.9 ms; none reached 50 ms.
+Both final series completed all five traversals at scrollTop 0 with no page errors.
+
+The full cold traversal records 1,013 parses and only two cache hits per trial: most messages
+are first visits, and the bounded LRU cannot retain the entire transcript. Remount regression
+tests separately establish working-set reuse; the frame-time gain is not attributed solely to
+the content cache.
+
+### Build Provenance
+
+The controlled baseline reused a preserved bundle originally built from baseline source. Its
+later `report.sourceSnapshot` describes the dirty checkout at rerun time, not the source that
+built that bundle. The first final bundle was also built before committing; its original dirty
+`build-snapshot.json` is retained without relabeling it as a clean-head build. Emitted source-map
+contents independently match Git source for both production files below: baseline matches
+`158e4e9b577ec519795444767fc0bd72c2c675b3`, and both final builds match `4fc5ffeb9988cbefc391bdfbd137951fac0bb837`.
+The campaign parent independently verified the raw frame arrays, dataset identity, asset hashes
+and these source comparisons. The second final build additionally records a clean prebuild head.
+
+| Source | Baseline SHA-256 | Final SHA-256 |
+| --- | --- | --- |
+| `Markdown.tsx` | `96ba3f130127b9d6ca100b552d5bc956057015d9b556d66137a67d427d864376` | `2a70aafbc92d7e5b843d7a7c0d105d56785adebcd9126f25e472a7186bde68cc` |
+| `format.ts` | `845b4de54a495b3410a8e1fc15895ff62a3fa8d5bd910e1e21307735e56cd2ca` | `59b38e771318b479cdc369d9b9f9932c0fd369aa167dbbebcbbc3eea6a043c9a` |
+
+| Build | JavaScript Asset | SHA-256 |
+| --- | --- | --- |
+| Preserved Baseline | `transcript-scroll-e2e-BJYrJdit.js` | `78dcd68f783d36b20f28a0ad3ecf4ad8e18a8d2f9701cc93891a585d94e038b2` |
+| Preserved Baseline | `rehype-highlight-YA1HWRtD.js` | `9d489fc009989c5401b96baba44f37e24d45ad7c59280b6120c7fbad070db4bf` |
+| Precommit Final | `transcript-scroll-e2e-CqUGxa1R.js` | `7b1cd5feec0e1cb94641335d647941a8851431ef51fb7faf6637425fbde03ec4` |
+| Precommit Final | `rehype-highlight-Da0OXhry.js` | `82c555b58ea92966e4770b177e9a1228b47b4444cf41c7dea06d19ac700d7ae1` |
+| Clean-Source Repeat | `transcript-scroll-e2e-CdHQu0LP.js` | `55972b0b53460edd98843e74f27fcd93ec31715df44bc98b06de7aed90d12650` |
+| Clean-Source Repeat | `rehype-highlight-D5HLPq9z.js` | `0134d33ed4e9105baa2f1ebf99a07c0a0fef85fa7052e8b438aa668c9e4d238d` |
+
+Asset changes between final builds include fixture capture instrumentation; the production source
+fingerprints above are identical. Raw reports, original build snapshots, source fingerprints,
+profiles and frame arrays remain separate records rather than being rewritten into one result.
+
 All exploratory runs are reported separately: the first baseline series had p95
 83.2/66.6/66.7/66.7/66.6 ms, and Markdown/table-only changes had
 50.0/33.4/50.0/66.6/50.0 ms. Those series overlapped with test/typecheck activity and motivated
