@@ -89,6 +89,81 @@ test("access loss between snapshot pages closes the stream before sending privat
   } finally { db.close(); }
 });
 
+test("ordinary session writes between snapshot pages do not interrupt a reconnect", async () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    seedSessionList(db,2);
+    const frames: string[] = [];
+    let next: (() => void) | undefined;
+    const hub = new Hub(db);
+    hub.addUiClient({ asyncDelivery: true,send(data,done) { frames.push(data); next=done; } }, {
+      principal: sessionListPrincipal,deviceId: null,uiProtocolVersion: PROTOCOL_VERSION,
+      close() { assert.fail("ordinary writes must not close a still-authorized inventory"); },
+    });
+    while (!frames.length) await new Promise<void>((resolve) => setImmediate(resolve));
+    db.createSession({ id: "new",runnerId: "r",workspaceId: null,agentId: null,title: "New",
+      useWorktree: false,driver: "codex-app-server",config: {},now: 3 });
+    db.setSessionArchived("s-0",true,4);
+    next?.();
+    assert.equal(JSON.parse(frames.at(-1)!).complete,true);
+    assert.equal(frames.flatMap((frame) => JSON.parse(frame).sessions).length,2);
+  } finally { db.close(); }
+});
+
+test("reminder inventories use one authorized read and preserve archived and team boundaries", async () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    seedSessionList(db,2000);
+    for (let index=0;index<2000;index++) db.setSessionReminder({ sessionId: `s-${index}`,userId: LOCAL_OWNER_USER_ID,
+      scheduledFor: 10000,timeZone: "UTC",originalExpression: "Synthetic",wakePolicy: "regardless",now: 1 });
+    db.createIdentityTeam({ teamId: "team",organizationId: PERSONAL_ORGANIZATION_ID,name: "Team",
+      memberUserIds: [LOCAL_OWNER_USER_ID],now: 1 });
+    db.raw().prepare("UPDATE session_ownership SET owner_kind='team',owner_id='team' WHERE session_id='s-0'").run();
+    db.raw().prepare("UPDATE session_ownership SET owner_id='outsider' WHERE session_id='s-1'").run();
+    db.setSessionArchived("s-0",true,2);
+    const member = { ...sessionListPrincipal,role: "operator" as const };
+    const source = db as unknown as { stmt(sql: string): unknown };
+    const original = source.stmt.bind(db);
+    let queries=0;
+    source.stmt = (sql) => { queries++; return original(sql); };
+    const reminders = db.listSessionRemindersForPrincipal(LOCAL_OWNER_USER_ID,member);
+    assert.equal(queries,1);
+    assert.equal(reminders.length,1999);
+    assert.ok(reminders.some((reminder) => reminder.sessionId === "s-0"),"archiving does not discard a reminder");
+    assert.ok(!reminders.some((reminder) => reminder.sessionId === "s-1"));
+    db.canAccessSession = () => { assert.fail("connect must not check each reminder"); };
+    let complete=false;
+    new Hub(db).addUiClient({ send(data) { if (JSON.parse(data).complete) complete=true; } }, {
+      principal: member,deviceId: null,uiProtocolVersion: PROTOCOL_VERSION,close() { assert.fail("closed"); },
+    });
+    while (!complete) await new Promise<void>((resolve) => setImmediate(resolve));
+    db.updateIdentityTeamMembers({ teamId: "team",organizationId: PERSONAL_ORGANIZATION_ID,memberUserIds: [],now: 3 });
+    assert.equal(db.listSessionRemindersForPrincipal(LOCAL_OWNER_USER_ID,member).length,1998);
+  } finally { db.close(); }
+});
+
+test("summary holds retain owed decision resumes and live capacity matches detail", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    seedSessionList(db,3);
+    db.raw().prepare("UPDATE sessions SET parent_session_id='s-0' WHERE id IN ('s-1','s-2')").run();
+    db.raw().prepare("UPDATE sessions SET status='completed' WHERE id='s-2'").run();
+    db.raw().prepare("UPDATE sessions SET queue_hold=? WHERE id='s-0'").run(JSON.stringify({
+      kind: "provider_account_switch",holdId: "hold",since: 10,target: "Synthetic",queuedPrompts: 2,
+      unfinishedBackgroundJobs: 1,
+    }));
+    db.raw().prepare(`INSERT INTO workflow_decisions(request_id,occurrence_id,session_id,controlling_session_id,
+      category,resource_key,resource_snapshot,resource_digest,policy_revision,authority,status,created_at,
+      resolved_at,resume_state,resume_updated_at)
+      VALUES ('request','occurrence','s-0','s-0','implementation_question','key','{}','digest',1,'human','approved',1,2,'held',3)`).run();
+    const summary = db.listSessionsForPrincipal(sessionListPrincipal).find((row) => row.id === "s-0")!;
+    const detail = withSessionCommandPermissions(db,sessionListPrincipal,db.getSession("s-0")!);
+    assert.deepEqual(summary.holds,detail.holds);
+    assert.deepEqual(summary.liveChildCapacity,detail.liveChildCapacity);
+    assert.equal(summary.holds?.[0]?.heldResumes?.[0]?.occurrenceId,"occurrence");
+  } finally { db.close(); }
+});
+
 test("summary child owners preserve ambiguous and duplicate request identity", () => {
   const db = ControlPlaneDb.open(":memory:");
   try {
@@ -198,5 +273,14 @@ test("dashboard frames are byte bounded, share a principal snapshot, and invalid
     const huge = { type: "snapshot" as const,runners: [],boxes: [],sessions: [{ ...original()[0]!,title: "x".repeat(MAX_UI_BUFFERED_BYTES) }],runs: [] };
     assert.equal(serializeUiSnapshot(huge,true),null);
     assert.equal(serializeUiSnapshot(huge,false),null);
+    db.raw().prepare("UPDATE sessions SET title=? WHERE id='s-0'").run("x".repeat(MAX_UI_BUFFERED_BYTES));
+    for (const version of [PROTOCOL_VERSION-1,PROTOCOL_VERSION]) {
+      let closed: number | undefined;
+      new Hub(db).addUiClient({ send() { assert.fail("oversized inventory sent a frame"); } }, {
+        principal: sessionListPrincipal,deviceId: null,uiProtocolVersion: version,close(code) { closed=code; },
+      });
+      while (closed === undefined) await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(closed,1009);
+    }
   } finally { db.close(); }
 });

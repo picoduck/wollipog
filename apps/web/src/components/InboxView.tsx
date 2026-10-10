@@ -1311,8 +1311,7 @@ export function InboxView({
   const openTopRequest = useCallback((sessionId: string) => {
     const targetSession = sessions.get(sessionId);
     if (!targetSession) return;
-    const top = prioritizedPendingRequests(targetSession.pendingApproval)[0] ??
-      [...(targetSession.attention?.humanActions ?? [])].sort((a,b) => a.rank-b.rank)[0];
+    const top = prioritizedPendingRequests(targetSession.pendingApproval)[0];
     if (top) openRequest(targetSession, top.requestId);
     else expand(sessionId);
   }, [expand, openRequest, sessions]);

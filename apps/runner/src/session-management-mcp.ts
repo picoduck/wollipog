@@ -1108,7 +1108,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "list_sessions",
-    description: "List sessions with status, title, guardrails, live-child capacity, and any pending approval.",
+    description: "List lightweight session summaries with status, title, guardrails, live-child capacity, and any pending approval title. Use get_session for full campaign state and unfinished background-job ids.",
     inputSchema: {
       type: "object",
       properties: { archived: { type: "boolean", description: "Include archived sessions" } },

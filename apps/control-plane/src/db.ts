@@ -2933,6 +2933,7 @@ interface SessionSummaryContext {
   costSources: Map<string, UsageCostSource | undefined>;
   backgroundDeliveries: Map<string,BackgroundDeliveryView[]>;
   childObservations: Map<string,Array<{ payload: string }>>;
+  heldResumes: Map<string,HeldSessionResumeView[]>;
 }
 
 interface SessionStopIntentRow {
@@ -10679,7 +10680,24 @@ export class ControlPlaneDb {
       costSources: new Map(),
       backgroundDeliveries: new Map(),
       childObservations: new Map(),
+      heldResumes: new Map(),
     };
+    const heldIds = rows.filter((row) => row.worktree_recovery || !isTerminal(row.status as SessionStatus) && row.queue_hold)
+      .map((row) => row.id);
+    if (heldIds.length) {
+      const resumes = this.stmt(`SELECT decision.session_id,decision.occurrence_id,decision.resume_updated_at
+        FROM workflow_decisions decision
+        LEFT JOIN session_prompt_commands command ON command.command_id=decision.resume_command_id
+        WHERE decision.session_id IN (SELECT value FROM json_each(?)) AND (decision.resume_state='held'
+          OR (decision.resume_state='delivering' AND command.state IN ('pending','sent','accepted','queued')))
+        ORDER BY decision.resolved_at,decision.occurrence_id`).all(JSON.stringify(heldIds)) as unknown as
+        Array<{ session_id: string; occurrence_id: string; resume_updated_at: number | null }>;
+      for (const resume of resumes) {
+        const list = context.heldResumes.get(resume.session_id) ?? [];
+        list.push({ kind: "workflow_decision_resolution", occurrenceId: resume.occurrence_id, since: resume.resume_updated_at ?? 0 });
+        context.heldResumes.set(resume.session_id,list);
+      }
+    }
     const ownedRequestCandidates=rows.flatMap((row) => pendingRequests(parseJson<PendingApproval>(row.pending_approval)).flatMap((request) =>
       request.ownerToolUseId ? [{ sessionId: row.id,toolCallId: request.ownerToolUseId }] : []));
     const ownedRequests=[...new Map(ownedRequestCandidates.map((request) => [JSON.stringify(request),request])).values()];
@@ -10842,6 +10860,17 @@ export class ControlPlaneDb {
         delegated.kind === "user" ? delegated.userId : delegated.teamId,
       ],
     };
+  }
+
+  /** One audience check for an in-flight inventory after any access-cache invalidation. Deleted
+   * rows cannot disclose private content; their queued removal follows the captured snapshot. */
+  canAccessCapturedSessions(principal: AuthPrincipal, sessionIds: readonly string[]): boolean {
+    const authorization = this.sessionAuthorizationSql(principal);
+    return !this.stmt(`SELECT 1 FROM sessions session
+      LEFT JOIN session_ownership ownership ON ownership.session_id=session.id
+      WHERE session.id IN (SELECT value FROM json_each(?))
+        AND (${authorization.sql}) IS NOT TRUE LIMIT 1`)
+      .get(JSON.stringify(sessionIds), ...authorization.params);
   }
 
   /** Principal-scoped archive page candidates. Authorization, filters, transcript matching,
@@ -15627,6 +15656,18 @@ export class ControlPlaneDb {
                 CASE schedule_kind WHEN 'timed' THEN 0 ELSE 1 END,
                 scheduled_for, session_id`,
     ).all(userId) as unknown as SessionReminderRow[];
+    return rows.map((row) => this.sessionReminderView(row));
+  }
+
+  listSessionRemindersForPrincipal(userId: string, principal: AuthPrincipal): SessionReminderView[] {
+    const authorization = this.sessionAuthorizationSql(principal);
+    const rows = this.stmt(`SELECT reminder.* FROM session_reminders reminder
+      JOIN session_ownership ownership ON ownership.session_id=reminder.session_id
+      WHERE reminder.user_id=? AND ${authorization.sql}
+      ORDER BY CASE reminder.state WHEN 'pending' THEN 0 ELSE 1 END,
+               CASE reminder.schedule_kind WHEN 'timed' THEN 0 ELSE 1 END,
+               reminder.scheduled_for, reminder.session_id`)
+      .all(userId, ...authorization.params) as unknown as SessionReminderRow[];
     return rows.map((row) => this.sessionReminderView(row));
   }
 
@@ -21546,7 +21587,7 @@ export class ControlPlaneDb {
       backgroundWorkTracking: row.background_work_tracking ? parseBackgroundWorkTracking(row.background_work_tracking) : undefined,
       historyQuarantine: row.history_quarantine ? parseHistoryQuarantine(row.history_quarantine) : undefined,
       worktreeRecovery, queueHold,
-      holds: worktreeRecovery || queueHold ? sessionHolds({ worktreeRecovery, queueHold }) : undefined,
+      holds: worktreeRecovery || queueHold ? sessionHolds({ worktreeRecovery, queueHold },context.heldResumes.get(row.id)) : undefined,
       backgroundDeliveries: deliveries?.length ? deliveries : undefined,
       backgroundJobsAvailable: row.summary_jobs === 1,
       status, column: (row.board_column as BoardColumn | null) ?? columnForStatus(status),

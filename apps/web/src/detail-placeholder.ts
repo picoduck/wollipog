@@ -37,7 +37,7 @@ export function shouldHydrateRoutedSession(
   conn: ConnState,
 ): boolean {
   if (conn !== "online") return false;
-  return !session || session.projection === "summary" || (Boolean(session.archived) && snapshotRevision > 0);
+  return !session || session.projection === "summary" || snapshotRevision > 0;
 }
 
 const RESOURCE_NOUN = { Session: "session", Run: "run", Pod: "pod" } as const;

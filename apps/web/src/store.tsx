@@ -26,6 +26,7 @@ import type {
   ShellStatus,
   UiToControlPlane,
 } from "@wollipog/protocol";
+import { pendingRequests } from "@wollipog/protocol";
 import { CONTROL_PLANE_WS } from "./config.js";
 import { expireFollowTailAnchor } from "./useFollowTail.js";
 import { DEVICE_TOKEN_CHANGED_EVENT, deviceToken } from "./device-token.js";
@@ -1160,7 +1161,9 @@ function reducer(state: State, action: Action): State {
           const messageNow = Number.isSafeInteger(action.now) && action.now! >= 0 ? action.now! : state.activityNow;
           const targeted = msg.capabilities?.sessionSubscriptions === true;
           const pods = new Map((msg.pods ?? []).map((pod) => [pod.id, pod]));
-          const sessions = new Map(msg.sessions.map((session) => [session.id, session]));
+          const sessions = msg.sessionsComplete === false ? new Map(state.sessions)
+            : new Map<string, SessionView>();
+          for (const session of msg.sessions) sessions.set(session.id,session);
           // Live snapshots deliberately omit archived rows. Keep the currently rendered archived
           // detail mounted across reconnect; SessionDetail revalidates it against the exact REST
           // endpoint for this snapshot generation and removes it on an authoritative 404.
@@ -1342,7 +1345,15 @@ function reducer(state: State, action: Action): State {
           for (const session of msg.sessions) {
             received.add(session.id);
             const previous = sessions.get(session.id);
-            sessions.set(session.id,session);
+            // A paged reconnect must not unmount an open detail view or discard its request bodies.
+            // Mounted detail views revalidate once per snapshot generation through authorized REST.
+            const retainedDetail = session.projection === "summary" && previous && previous.projection !== "summary"
+              && sessionEventEpoch(previous) === sessionEventEpoch(session)
+              && JSON.stringify(pendingRequests(previous.pendingApproval).map((request) => [request.requestId,request.occurrenceId]))
+                === JSON.stringify(pendingRequests(session.pendingApproval).map((request) => [request.requestId,request.occurrenceId]));
+            sessions.set(session.id, retainedDetail
+              ? { ...previous,...session,projection: undefined,pendingApproval: previous.pendingApproval }
+              : session);
             state.activity.set(session.id,reconcileSessionActivity(state.activity.get(session.id),previous,session));
             const epoch = sessionEventEpoch(session);
             if ((eventEpochs.get(session.id) ?? eventHistory.get(session.id)?.eventEpoch ?? 0) !== epoch) {
@@ -1354,7 +1365,8 @@ function reducer(state: State, action: Action): State {
           }
           if (msg.complete) {
             for (const [id,session] of sessions) {
-              if (!received.has(id) && !session.archived) sessions.delete(id);
+              const routedArchive = session.archived && state.view.name === "session" && state.view.id === id;
+              if (!received.has(id) && !routedArchive) sessions.delete(id);
             }
             for (const id of new Set([...events.keys(),...eventHistory.keys(),...eventEpochs.keys(),...state.activity.keys()])) {
               if (sessions.has(id)) continue;

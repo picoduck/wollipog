@@ -284,6 +284,7 @@ interface UiClientInfo {
   initialFrameIndex?: number;
   preparingSnapshot?: boolean;
   snapshotAccessRevision?: number;
+  snapshotSessionIds?: readonly string[];
   lastSubscriptionRevision?: number;
   observedBackgroundDeliveryKeys?: Set<string>;
   /** Pending Someday sessions omitted from a legacy UI's compatibility projection. */
@@ -837,9 +838,7 @@ export class Hub {
           const hiddenIds = info.hiddenIndefiniteReminderSessionIds!;
           for (const target of pending.clients) {
             if (this.uiClients.get(target.client) !== target.info) continue;
-            if (target.info.snapshotAccessRevision !== undefined && this.db.sessionAccessRevision?.() !== target.info.snapshotAccessRevision) {
-              this.evictUiClient(target.client, target.info, 1012, "access changed; reconnect for fresh state");
-            } else if (!frames) this.evictUiClient(target.client, target.info, 1009, "dashboard inventory is too large; open a session directly");
+            if (!frames) this.evictUiClient(target.client, target.info, 1009, "dashboard inventory is too large; open a session directly");
             else this.installUiSnapshot(target.client, target.info, snapshot, frames, hiddenIds);
           }
           if (frames && revision !== undefined && this.db.sessionListRevision?.() === revision) {
@@ -877,8 +876,11 @@ export class Hub {
     const globalAdmin = info.principal === undefined || this.isGlobalAdmin(info.principal);
     const reminderUserId = info.principal === undefined ? LOCAL_OWNER_USER_ID
       : info.principal.kind === "human" ? info.principal.userId : null;
-    const allReminders = reminderUserId === null ? [] : this.db.listSessionReminders(reminderUserId)
-      .filter((reminder) => info.principal === undefined || this.db.canAccessSession(info.principal, reminder.sessionId));
+    const allReminders = reminderUserId === null ? []
+      : info.principal && this.db.listSessionRemindersForPrincipal
+        ? this.db.listSessionRemindersForPrincipal(reminderUserId, info.principal)
+        : this.db.listSessionReminders(reminderUserId)
+          .filter((reminder) => info.principal === undefined || this.db.canAccessSession(info.principal, reminder.sessionId));
     const supportsIndefiniteReminders = this.supportsIndefiniteReminders(info);
     info.hiddenIndefiniteReminderSessionIds = new Set(supportsIndefiniteReminders ? [] : allReminders
       .filter((reminder) => reminder.scheduleKind === "someday" && reminder.state === "pending")
@@ -945,6 +947,8 @@ export class Hub {
     info.hiddenIndefiniteReminderSessionIds = new Set(hiddenIds);
     if (info.principal) info.sentCommandPermissions = new Map(snapshot.sessions.map((session) => [session.id, permissionsKey(session)]));
     info.initialFrames = frames;
+    info.snapshotSessionIds = [...new Set([...snapshot.sessions.map((session) => session.id),
+      ...(snapshot.reminders ?? []).map((reminder) => reminder.sessionId)])];
     info.initialFrameIndex = 0;
     info.preparingSnapshot=false;
     this.uiClients.set(client,info);
@@ -961,6 +965,7 @@ export class Hub {
     info.queuedBytes = 0;
     info.sending = false;
     info.initialFrames = undefined;
+    info.snapshotSessionIds = undefined;
     info.visibleSessionIds?.clear();
     info.visibleRunnerIds?.clear();
     info.visibleProjectIds?.clear();
@@ -1802,15 +1807,24 @@ export class Hub {
   private pumpUiClient(client: Socket, info: UiClientInfo): void {
     if (info.preparingSnapshot || info.sending || this.uiClients.get(client) !== info) return;
     const initial = info.initialFrames?.[info.initialFrameIndex ?? 0];
-    if (initial!==undefined && info.snapshotAccessRevision!==undefined && this.db.sessionAccessRevision?.()!==info.snapshotAccessRevision) {
-      this.evictUiClient(client,info,1012,"access changed; reconnect for fresh state");
-      return;
+    if (initial!==undefined && info.snapshotAccessRevision!==undefined) {
+      const revision = this.db.sessionAccessRevision?.();
+      if (revision !== info.snapshotAccessRevision) {
+        if (info.principal && !this.db.canAccessCapturedSessions(info.principal, info.snapshotSessionIds ?? [])) {
+          this.evictUiClient(client,info,1012,"access changed; reconnect for fresh state");
+          return;
+        }
+        info.snapshotAccessRevision = revision;
+      }
     }
     const frame = initial === undefined ? info.outbound?.shift() : { data: initial, bytes: Buffer.byteLength(initial) };
     if (!frame) return;
     if (initial !== undefined) {
       info.initialFrameIndex = (info.initialFrameIndex ?? 0)+1;
-      if (info.initialFrameIndex === info.initialFrames?.length) info.initialFrames = undefined;
+      if (info.initialFrameIndex === info.initialFrames?.length) {
+        info.initialFrames = undefined;
+        info.snapshotSessionIds = undefined;
+      }
     } else info.queuedBytes = Math.max(0, (info.queuedBytes ?? 0) - frame.bytes);
     if ((client.bufferedAmount ?? 0)+frame.bytes > MAX_UI_BUFFERED_BYTES) {
       this.evictUiClient(client,info,1013,"client is too slow; reconnect for fresh state");

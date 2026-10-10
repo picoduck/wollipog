@@ -2833,6 +2833,7 @@ declare global {
     __WOLLIPOG_TOASTS_E2E__?: { show(message: string, options?: Omit<ToastOptions, "action"> & { actionLabel?: string }): number };
     __WOLLIPOG_PROJECT_INBOX_E2E__: {
       sessionDetailLookups(): number;
+      reconnectSessionSummaries(): void;
       failOfflineAttempt(): void;
       failNextProjectUpdate(message?: string): void;
       updateProject(id: string, patch: Partial<Pick<ProjectView, "name" | "hidden" | "childSessionDefaults" | "memorySharing">>): void;
@@ -2955,6 +2956,16 @@ declare global {
 
 window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
   sessionDetailLookups: () => sessionDetailLookups,
+  reconnectSessionSummaries() {
+    const inventory = snapshot();
+    socket?.push({ ...inventory,sessions: [],sessionsComplete: false });
+    const summaries = inventory.sessions.map((session): SessionView => ({ ...session,projection: "summary",
+      agentCapabilities: undefined,worktrees: undefined,queued: undefined,pendingPrompts: undefined,
+      pendingApproval: session.pendingApproval ? { requestId: session.pendingApproval.requestId,
+        kind: session.pendingApproval.kind,title: session.pendingApproval.title,options: [] } : null }));
+    socket?.push({ type: "session_snapshot_page",sessions: summaries.slice(0,1),complete: false });
+    window.setTimeout(() => socket?.push({ type: "session_snapshot_page",sessions: summaries.slice(1),complete: true }),250);
+  },
   failOfflineAttempt() { offlineBannerSocket?.onclose?.({ code: 1006 }); },
   workspaceMoveCount: () => workspaceMoveCount,
   setIdentityTeams(teams) {

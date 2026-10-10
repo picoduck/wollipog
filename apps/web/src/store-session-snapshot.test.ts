@@ -14,14 +14,16 @@ test("paged snapshots retain the routed history until its row arrives and reconc
   store.dispatch({ type: "msg",msg: { type: "snapshot",sessionsComplete: false,
     capabilities: { sessionSubscriptions: true },runners: [],boxes: [],sessions: [],runs: [] } });
   assert.equal(store.getState().snapshotLoaded,false);
+  assert.equal(store.getState().sessions.has("removed"),true,"keep the inventory during a reconnect");
   assert.equal(store.getState().events.get("active")?.[0]?.seq,1);
   store.dispatch({ type: "msg",msg: { type: "session_snapshot_page",sessions: [session("other")],complete: false } });
   assert.equal(store.getState().snapshotLoaded,false);
-  store.dispatch({ type: "msg",msg: { type: "session_snapshot_page",sessions: [{ ...session("active"),projection: "summary" }],complete: true } });
+  store.dispatch({ type: "msg",msg: { type: "session_snapshot_page",sessions: [{ ...session("active"),projection: "summary",title: "Fresh Title" }],complete: true } });
   assert.equal(store.getState().snapshotLoaded,true);
   assert.deepEqual([...store.getState().sessions.keys()].sort(),["active","other"]);
   assert.equal(store.getState().events.get("active")?.[0]?.seq,1);
-  assert.equal(store.getState().sessions.get("active")?.projection,"summary");
+  assert.equal(store.getState().sessions.get("active")?.projection,undefined,"keep the mounted detail across summary pages");
+  assert.equal(store.getState().sessions.get("active")?.title,"Fresh Title","refresh list facts while retaining detail");
 });
 
 test("a page invalidates a replaced timeline and final absence removes a stale routed session", () => {

@@ -16,7 +16,8 @@ The script asserts both REST p95 measurements are below 50 ms, every dashboard-r
 below 50 ms, and each snapshot frame fits the 8 MiB per-client buffer. It prints the measured timing,
 REST/snapshot bytes, largest frame, and buffer cap as JSON. Query-count regressions are tested in
 `session-list.test.ts`: seven SQL reads for the plain inventory, plus one bounded bulk read when
-pending requests need structured child-owner observations. Query count is independent of session
+pending requests need structured child-owner observations and one when holds have owed decision
+resumes. Reminders use one authorized bulk query. Query count is independent of session
 count, with audience predicates applied in SQL.
 
 REST caches the serialized authorized list for the exact principal and archived filter. Both local
@@ -26,7 +27,8 @@ encoding yields every approximately 128 KiB page. Caches retain at most four ent
 serialized bytes each. These byte limits measure retained wire data rather than JavaScript heap.
 
 Protocol v212 dashboards receive a metadata header followed by session pages, draining one frame at
-a time before live deltas. Scope changes interrupt pending pages and require a fresh connection.
+a time before live deltas. Access revisions trigger one bulk recheck of captured session/reminder
+ids; loss of audience access interrupts pending pages. Ordinary writes do not interrupt loading.
 Older dashboards keep the complete single-frame contract; an oversized inventory closes before any
 snapshot is sent. A metadata header or individual summary exceeding the hard cap also closes rather
 than retaining an oversized frame. Runner, project, and global administrator inventories are not

@@ -727,6 +727,7 @@ export function SessionDetail(props: SessionDetailProps) {
   // fields read it through `useLiveSession`.
   const session = useStoreSelector((s) => s.sessions.get(sessionId), sessionEqualIgnoringStreaming);
   const needsDetail = !session || session.projection === "summary" || Boolean(session.archived);
+  const detailEpoch = session?.eventEpoch ?? 0;
   const conn = useStoreSelector((s) => s.conn);
   const snapshotRevision = useStoreSelector((s) => s.snapshotRevision);
   const snapshotLoaded = useStoreSelector((s) => s.snapshotLoaded);
@@ -738,25 +739,26 @@ export function SessionDetail(props: SessionDetailProps) {
   const [lookupAttempt, setLookupAttempt] = useState(0);
   useEffect(() => () => clearRoutedSessionLookup(sessionId), [sessionId]);
 
-  // Archived sessions are deliberately absent from the live snapshot. Resolve the exact routed id
-  // through the normal authorized REST surface so copied links remain durable after archiving.
-  // A reconnect keeps the already-rendered archived row mounted, then revalidates it once for the
-  // new snapshot generation so a deletion missed while offline still becomes authoritative.
+  // Revalidate mounted detail once per snapshot generation. Paged reconnects keep the rendered
+  // row (and its local UI) while this exact authorized read refreshes omitted detail fields.
   useEffect(() => {
     if (!shouldHydrateRoutedSession(session, snapshotRevision, conn)) return;
-    const lookupKey = JSON.stringify([sessionId, snapshotRevision, conn, lookupAttempt, needsDetail]);
+    const lookupKey = JSON.stringify([sessionId, snapshotRevision, conn, lookupAttempt, detailEpoch]);
     if (lastLookupKeyRef.current === lookupKey) return;
     lastLookupKeyRef.current = lookupKey;
     let current = true;
+    let complete = false;
     setRoutedSessionLookup({ sessionId, complete: false, error: null });
     void api.session(sessionId)
       .then(({ session: loaded }) => {
         if (!current) return;
+        complete = true;
         loadSession(loaded);
         setRoutedSessionLookup({ sessionId, complete: true, error: null });
       })
       .catch((cause: unknown) => {
         if (!current) return;
+        complete = true;
         const notFound = cause instanceof ApiError && cause.status === 404;
         if (notFound) {
           dispatch({ type: "msg", msg: { type: "session_removed", sessionId } });
@@ -765,11 +767,11 @@ export function SessionDetail(props: SessionDetailProps) {
       });
     return () => {
       current = false;
-      if (lastLookupKeyRef.current === lookupKey) lastLookupKeyRef.current = null;
+      if (!complete && lastLookupKeyRef.current === lookupKey) lastLookupKeyRef.current = null;
     };
   // Summary pages and live list updates can replace a row during its lookup. They must not cancel
   // that in-flight detail read unless whether the row needs hydration actually changed.
-  }, [api, sessionId, needsDetail, loadSession, dispatch, conn, snapshotRevision, lookupAttempt]);
+  }, [api, sessionId, needsDetail, detailEpoch, loadSession, dispatch, conn, snapshotRevision, lookupAttempt]);
 
   if (!session || session.projection === "summary") {
     return (

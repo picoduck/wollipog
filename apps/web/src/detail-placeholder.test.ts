@@ -111,7 +111,7 @@ test("archived revalidation waits for an authenticated online connection", () =>
   assert.equal(shouldHydrateRoutedSession(archived, 2, "offline"), false);
   assert.equal(shouldHydrateRoutedSession(archived, 2, "online"), true);
   assert.equal(shouldHydrateRoutedSession(archived, 0, "online"), false);
-  assert.equal(shouldHydrateRoutedSession({ archived: false }, 2, "online"), false);
+  assert.equal(shouldHydrateRoutedSession({ archived: false }, 2, "online"), true);
   assert.equal(shouldHydrateRoutedSession({ archived: false,projection: "summary" }, 2, "online"), true);
   assert.equal(shouldHydrateRoutedSession(undefined, 0, "online"), true);
 });
