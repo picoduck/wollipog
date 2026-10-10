@@ -5,6 +5,7 @@ import { statusValues } from "./status-meta.js";
 import {
   backgroundWorkerState,
   isCurrentWorker,
+  isLiveWorker,
   memberName,
   memberWorkerStatus,
   stepActivity,
@@ -128,6 +129,8 @@ test("offline workers stay current as Unverified; settled ones move to History",
   const offline = workerRoster(session, [{ ...child, availability: "recorded" }], [], () => false);
   assert.deepEqual(offline.map((row) => row.state), ["unverified", "unverified"]);
   assert.equal(offline.filter(isCurrentWorker).length, 2);
+  assert.equal(offline.filter(isLiveWorker).length, 0, "the session header counts only verifiably live workers");
+  assert.equal(isLiveWorker({ state: "attention" }), true, "a worker waiting on the user is still in flight");
   const completed = workerRoster(session, [{ ...child, lifecycle: "completed", latestTool: { title: "$ npm test", active: false } }], [], () => true)[0]!;
   assert.equal(completed.state, "completed");
   assert.equal(completed.activity, "Ran npm test");

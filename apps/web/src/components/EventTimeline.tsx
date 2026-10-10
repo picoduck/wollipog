@@ -73,7 +73,7 @@ import { TranscriptImageCacheProvider } from "./TranscriptImageCache.js";
 import { EventPayloadContent } from "./EventPayloadContent.js";
 import { useTimelineClock } from "../timeline-clock.js";
 import { deriveSubagentLifecycle } from "../subagents.js";
-import { subagentWorkerStatus, workerStatusMeta, type SubagentStatusContextValue } from "../worker-roster.js";
+import { isLiveWorker, subagentWorkerStatus, workerStatusMeta, type SubagentStatusContextValue } from "../worker-roster.js";
 import { QuestionHistoryRow, isSettledQuestion, questionTitle, type SettledQuestionItem } from "./QuestionHistoryRow.js";
 import { AskMarker } from "./requests/AskMarker.js";
 import type { ConversationForkAvailability, EditInForkAvailability } from "../session-actions.js";
@@ -2054,9 +2054,13 @@ export function subagentStatusMeta(
   tool: Pick<ToolItem, "toolCallId" | "status" | "subagentLifecycle">,
   context: SubagentStatusContextValue = DEFAULT_SUBAGENT_STATUS,
 ) {
+  return workerStatusMeta(subagentToolWorker(tool, context));
+}
+
+function subagentToolWorker(tool: Pick<ToolItem, "toolCallId" | "status" | "subagentLifecycle">, context: SubagentStatusContextValue) {
   const lifecycle = deriveSubagentLifecycle(tool.status, context.sessionStatus, context.runnerOnline, tool.subagentLifecycle);
-  return workerStatusMeta(subagentWorkerStatus({ lifecycle, availability: context.runnerOnline ? "live" : "recorded" },
-    context.attention.get(tool.toolCallId)));
+  return subagentWorkerStatus({ lifecycle, availability: context.runnerOnline ? "live" : "recorded" },
+    context.attention.get(tool.toolCallId));
 }
 
 /**
@@ -2077,8 +2081,10 @@ function SubagentSummary({ tool, open, onToggle, onOpen }: {
   const role = tool.subagentRole ? titleCaseLabel(tool.subagentRole) : undefined;
   const steps = foldRetries(tool.children ?? []).filter((step) => timelineItemRendersRow(step.item)).length;
   const stepCount = `${steps} Step${steps === 1 ? "" : "s"}`;
-  const status = subagentStatusMeta(tool, useContext(SubagentStatusContext));
-  const span = useStepSpan(tool.startedAt, tool.lastActivityAt, tool.completedAt, status.pulse === true);
+  const worker = subagentToolWorker(tool, useContext(SubagentStatusContext));
+  const status = workerStatusMeta(worker);
+  // An agent waiting on the user is still in flight, so its span keeps counting.
+  const span = useStepSpan(tool.startedAt, tool.lastActivityAt, tool.completedAt, isLiveWorker(worker));
   return (
     <div className="tl-agent">
       <button

@@ -4094,6 +4094,11 @@ textarea {
 .worker-row-item.nested::before { top: 0; bottom: 0; width: 2px; }
 .worker-row-item.nested.nested-last::before { bottom: 50%; }
 .worker-row-item.nested::after { top: calc(50% - 1px); width: var(--space-2); height: 2px; }
+/* Forced colors drops fills, so the spine and its ticks take a system colour, as a thread's do. */
+@media (forced-colors: active) {
+  .worker-row-item.nested::before,
+  .worker-row-item.nested::after { background: GrayText; }
+}
 .worker-list-count {
   flex: 1;
   min-width: 0;
