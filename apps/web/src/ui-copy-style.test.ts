@@ -81,7 +81,7 @@ const PHRASAL_VERBS = new Set([
   "back", "check", "clean", "follow", "hand", "log", "look", "opt", "pick", "set", "sign", "signed", "start",
   "take", "turn",
 ]);
-const LABEL_TAGS = new Set(["button", "caption", "dt", "h1", "h2", "h3", "h4", "h5", "h6", "legend", "summary", "th"]);
+const LABEL_TAGS = new Set(["button", "BusyButton", "caption", "dt", "h1", "h2", "h3", "h4", "h5", "h6", "legend", "summary", "th"]);
 const LABEL_PROPERTIES = new Set(["actionLabel", "cancelLabel", "confirmLabel", "label"]);
 
 function sourceFiles(directory: string): string[] {
@@ -387,7 +387,7 @@ test("the Title Case check reads label-tag text built in expressions and templat
 test("reverting any label fixed for #2096 or #2098 fails the Title Case check", () => {
   const reverts = [
     ["components/GitDiffViewer.tsx", '"Unstage"} Hunk`', '"Unstage"} hunk`', '"Name hunk"'],
-    ["components/ReviewPanel.tsx", '"Commit Staged"', '"Commit staged"', '"Commit staged"'],
+    ["components/CommitBar.tsx", ">\n          Commit Staged\n", ">\n          Commit staged\n", '"Commit staged"'],
     ["components/EventPayloadContent.tsx", "`Hide Full ${label}`", "`Hide full ${label}`", '"Hide full Name"'],
     ["components/EventPayloadContent.tsx", "`Loading Full ${label}…`", "`Loading full ${label}…`", '"Loading full Name…"'],
     ["components/EventPayloadContent.tsx", "`Load Full ${label} (", "`Load full ${label} (", '"Load full Name (Name)"'],
@@ -399,7 +399,7 @@ test("reverting any label fixed for #2096 or #2098 fails the Title Case check", 
     assert.deepEqual(titleCaseFailures(parseSource(target)).failures, [], `${file} passes as it is`);
     const { failures } = titleCaseFailures(parseSource(target, source.replace(fixed!, reverted!)));
     assert.equal(failures.length, 1, `${file} with ${reverted}: ${failures.join("\n")}`);
-    assert.match(failures[0]!, new RegExp(`^${file!.replace(/\./g, "\\.")}:\\d+ <button>: ${reported!.replace(/[()]/g, "\\$&")}$`));
+    assert.match(failures[0]!, new RegExp(`^${file!.replace(/\./g, "\\.")}:\\d+ <(?:button|BusyButton)>: ${reported!.replace(/[()]/g, "\\$&")}$`));
   }
 });
 

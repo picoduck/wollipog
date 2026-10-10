@@ -10,7 +10,6 @@ import {
   runnerSupportsProtocol,
   type CreateReviewFindingRequest,
   type CreateWorkspaceReferenceRequest,
-  type GitCommitInfo,
   type GitDiffInfo,
   type GitDiffScope,
   type GitForgeInfo,
@@ -24,6 +23,7 @@ import {
   type SourceLocation,
 } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
+import { describeGitFailure, type GitFailure } from "../git-failure.js";
 import { useApi } from "../api-context.js";
 import { formatClock, titleCaseLabel } from "../format.js";
 import {
@@ -41,6 +41,8 @@ import {
   type FindingAnchorStore,
 } from "../review-anchors.js";
 import { useFeedback } from "./FeedbackProvider.js";
+import { CommitBar, type CommitBarBusy, type CommitBarNotice, type RequestLink } from "./CommitBar.js";
+import { OpenRequestDialog } from "./OpenRequestDialog.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { safeExternalHref } from "../external-href.js";
 import { sourceKind } from "../pinned-summary.js";
@@ -115,6 +117,39 @@ function releaseSubmitted({ scope, drafts }: SubmittedDrafts): void {
   }
 }
 
+/** A request the forge still lists as open, so the next push updates it. */
+function isOpenRequest(pr: GitPrSummary | null | undefined): boolean {
+  return !!pr && ["OPEN", "OPENED", "DRAFT"].includes(pr.state.toUpperCase());
+}
+
+/**
+ * The summary row for a request this panel just opened (#2847). The forge summary is cached on the
+ * runner for a few seconds, so its next read can still say the branch has none; the row shows from
+ * the creation result until that read catches up, and the forge's own row replaces it.
+ */
+function openedRequestSummary(pr: GitPrInfo, title: string): GitPrSummary | null {
+  const number = /\/(?:pull|merge_requests)\/(\d+)/.exec(pr.url)?.[1];
+  if (!number) return null;
+  return {
+    number: Number(number),
+    title,
+    url: pr.url,
+    state: "OPEN",
+    ...(pr.provider ? { provider: pr.provider } : {}),
+    ...(pr.kind ? { kind: pr.kind } : {}),
+  };
+}
+
+/** Where a request result's link goes, named for the button: "Open on GitHub". */
+function requestLink(pr: GitPrInfo, fallbackProvider: "github" | "gitlab" | null): RequestLink {
+  const provider = pr.provider ?? fallbackProvider;
+  return {
+    href: safeExternalHref(pr.url),
+    url: pr.url,
+    forge: provider === "gitlab" ? "GitLab" : provider === "github" ? "GitHub" : null,
+  };
+}
+
 /** File-section placeholders while the first diff of a scope loads (§12.3). */
 function DiffSkeleton() {
   return (
@@ -137,8 +172,8 @@ function DiffSkeleton() {
  * shared read (useGitStatus); the diff and its staging state are owned here.
  *
  * Laid out on the panel's slots (#2846): the toolbar fixed above, one scroller holding the notices,
- * the summary, the diff, the findings and (until #2847 moves them to the foot) the commit and pull
- * request forms. Its one Refresh is in the panel header.
+ * the summary, the diff and the findings, and the commit bar fixed in the foot (#2847), whose Open
+ * Pull Request… opens a dialog. Its one Refresh is in the panel header.
  */
 export function ReviewPanel({
   session,
@@ -167,8 +202,32 @@ export function ReviewPanel({
 }) {
   const api = useApi();
   const { confirm } = useFeedback();
-  const [busy, setBusy] = useState<null | "commit" | "pr">(null);
-  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<CommitBarBusy | null>(null);
+  // What the commit bar's buttons last did (#2847): one notice, beside the buttons, newest first.
+  const [barNotice, setBarNotice] = useState<CommitBarNotice | null>(null);
+  const [requestDialogOpen, setRequestDialogOpen] = useState(false);
+  const requestDialogOpenRef = useRef(false);
+  requestDialogOpenRef.current = requestDialogOpen;
+  const [requestFailure, setRequestFailure] = useState<GitFailure | null>(null);
+  const [openedRequest, setOpenedRequest] = useState<GitPrSummary | null>(null);
+  const openRequestButtonRef = useRef<HTMLButtonElement | null>(null);
+  // The branch's request: the forge's own, else the one this panel just opened.
+  const summaryPr = forgeFacts?.pr ?? openedRequest;
+  // Once the forge reports the branch's request, its row is the one to follow from then on.
+  const forgeHasRequest = !!forgeFacts?.pr;
+  useEffect(() => {
+    if (forgeHasRequest) setOpenedRequest(null);
+  }, [forgeHasRequest]);
+  // The panel stays mounted across a session switch, so the bar's results belong to the session they
+  // were for: switching clears them, and a result that lands after the switch is not shown.
+  const sessionIdRef = useRef(session.id);
+  sessionIdRef.current = session.id;
+  useEffect(() => {
+    setBarNotice(null);
+    setOpenedRequest(null);
+    setRequestFailure(null);
+    setRequestDialogOpen(false);
+  }, [session.id]);
   const status = git.status;
   // Everything the reviewer typed or chose outlives this mount: the panel is unmounted by any
   // mode switch and by closing the panel, and losing a pull request description to a glance at
@@ -182,8 +241,6 @@ export function ReviewPanel({
   const [prTitle, setPrTitle] = usePanelScratchDraft(panelScratch, REQUEST_TITLE_KEY, defaultMessage);
   const [prBody, setPrBody] = usePanelScratchDraft(panelScratch, REQUEST_BODY_KEY);
   const [branch, setBranch] = usePanelScratchDraft(panelScratch, BRANCH_KEY);
-  const [commit, setCommit] = useState<GitCommitInfo | null>(null);
-  const [pr, setPr] = useState<GitPrInfo | null>(null);
   // Rich-diff pane (Phase 2, PR-A). Branch-relative scopes only make sense for worktree sessions;
   // a WSL in-place session has no session branch to diff, so it gets Uncommitted only — which is
   // also why restoring a remembered scope re-checks that this session still offers it.
@@ -279,7 +336,6 @@ export function ReviewPanel({
   const statusSignature = useMemo(() => changeSetSignature(status), [status]);
   statusSignatureRef.current = statusSignature;
   const uid = useId();
-  const commitId = `${uid}-commit`;
 
   const loadStatus = () => git.refresh();
   const diffSupported = runnerSupportsProtocol(runnerProtocolVersion, "richDiff");
@@ -287,14 +343,16 @@ export function ReviewPanel({
   const fineDiffSupported = runnerSupportsProtocol(runnerProtocolVersion, "fineGrainedDiff");
   const githubReviewSupported = runnerSupportsProtocol(runnerProtocolVersion, "githubReviewReconciliation");
   const forgeReviewSupported = runnerSupportsProtocol(runnerProtocolVersion, "forgeIntegration");
-  const hostedGitLab = sourceKind(status?.remoteUrl) === "gitlab";
+  const remoteKind = sourceKind(status?.remoteUrl);
+  const hostedGitLab = remoteKind === "gitlab";
   const forgeProvider = forge?.provider ?? (hostedGitLab ? "gitlab" : "github");
   // A pre-v106 runner treats GitLab as generic Git. Preserve that established action surface until
   // the runner advertises the forge contract; otherwise the web client would promise MR creation
   // while dispatching to a runner that can only push a branch.
   const mergeRequest = forgeProvider === "gitlab" && forgeReviewSupported;
   const requestName = mergeRequest ? "Merge Request" : "Pull Request";
-  const requestShortName = mergeRequest ? "MR" : "PR";
+  // Names a result's link for an older runner that doesn't say which forge it used.
+  const linkProvider = forge?.provider ?? (remoteKind === "github" || remoteKind === "gitlab" ? remoteKind : null);
   const reviewSyncSupported = forgeReviewSupported || (!mergeRequest && githubReviewSupported);
   const diffHint = runnerCapabilityRequirement(runnerProtocolVersion, "richDiff", "rich diff loading");
   const stagingHint = runnerCapabilityRequirement(runnerProtocolVersion, "hunkStaging", "hunk staging");
@@ -589,11 +647,11 @@ export function ReviewPanel({
   /** `all` forces commit-everything even with staged hunks — the escape hatch out of a partial stage. */
   const doCommit = async (all = false) => {
     if (gitRefusal !== null) return;
-    setBusy("commit");
-    // Clear prior success so a failed retry can't show a stale "✓ committed"/"PR opened".
-    setError(null);
-    setCommit(null);
-    setPr(null);
+    setBusy(all ? "commit_all" : "commit");
+    // The bar's last result goes as the next action starts, so a stale one never reads as this one's.
+    setBarNotice(null);
+    const startedFor = session.id;
+    const current = () => sessionIdRef.current === startedFor;
     const submitted = captureSubmitted(panelScratch, { [COMMIT_MESSAGE_KEY]: commitMsg });
     try {
       const d = await api.git(session.id, {
@@ -605,17 +663,23 @@ export function ReviewPanel({
             // since this panel read it, instead of committing a different set than promised.
             { expectStaged: (status?.stagedCount ?? 0) > 0 }),
       });
-      setCommit(d.commit ?? null);
+      if (current()) setBarNotice(d.commit ? { kind: "committed", commit: d.commit } : null);
       releaseSubmitted(submitted);
       await loadStatus();
       await loadDiff();
     } catch (e) {
+      if (!current()) return;
       if (e instanceof ApiError && e.code === "GIT_STALE") {
-        setStageNotice(`${e.message} — the panel has been refreshed.`);
+        // The staged set moved under the button's label: refresh, and say so beside the button.
+        setBarNotice({ kind: "stale" });
         void loadStatus();
         void loadDiff();
       } else {
-        setError((e as Error).message);
+        setBarNotice({
+          kind: "failed",
+          failure: describeGitFailure("commit", (e as Error).message, requestName),
+          onRetry: () => void gitActionsRef.current.doCommit(all),
+        });
       }
     } finally {
       setBusy(null);
@@ -700,41 +764,70 @@ export function ReviewPanel({
     }
   };
 
-  const doPr = async () => {
+  /**
+   * Open a request from the dialog's fields, or push to the branch's open one. Both are the runner's
+   * one `open_pr` flow: it commits any pending changes with the bar's message, pushes, and returns
+   * the request (an existing one when the branch already has it). Pushing to an open request sends
+   * no branch, so it can never rename the branch under it.
+   */
+  const doPr = async (mode: "open" | "push") => {
     if (gitRefusal !== null) return;
-    setBusy("pr");
-    setError(null);
-    setPr(null);
-    setCommit(null);
-    const submitted = captureSubmitted(panelScratch, {
-      [COMMIT_MESSAGE_KEY]: commitMsg,
-      [REQUEST_TITLE_KEY]: prTitle,
-      [REQUEST_BODY_KEY]: prBody,
-      [BRANCH_KEY]: branch,
-    });
+    setBusy(mode);
+    setBarNotice(null);
+    setRequestFailure(null);
+    const startedFor = session.id;
+    const current = () => sessionIdRef.current === startedFor;
+    const title = mode === "push" ? summaryPr?.title || prTitle : prTitle;
+    const submitted = mode === "open"
+      ? captureSubmitted(panelScratch, {
+          [COMMIT_MESSAGE_KEY]: commitMsg,
+          [REQUEST_TITLE_KEY]: prTitle,
+          [REQUEST_BODY_KEY]: prBody,
+          [BRANCH_KEY]: branch,
+        })
+      : null;
     try {
       // Pass the visible commit message so the one-click flow's auto-commit of any
       // pending changes uses it (not the PR title).
-      const d = await api.git(session.id, { action: "open_pr", title: prTitle, body: prBody, branch, message: commitMsg });
-      setPr(d.pr ?? null);
-      // Only a request that was actually opened holds the text. The fallback link GitHub gets when
-      // forge tooling is unavailable carries neither title nor description, so the reviewer still
-      // needs both to paste into the page it opens.
-      if (d.pr?.created ?? d.pr?.createdWithGh) releaseSubmitted(submitted);
+      const d = await api.git(session.id, mode === "open"
+        ? { action: "open_pr", title, body: prBody, branch, message: commitMsg }
+        : { action: "open_pr", title, body: "", branch: "", message: commitMsg });
+      const pr = d.pr;
+      if (pr && current()) {
+        const link = requestLink(pr, linkProvider);
+        // Only a request that was actually opened holds the text. The fallback link GitHub gets when
+        // forge tooling is unavailable carries neither title nor description, so the reviewer still
+        // needs both to paste into the page it opens.
+        if (pr.created ?? pr.createdWithGh) {
+          if (submitted) releaseSubmitted(submitted);
+          if (mode === "open") setOpenedRequest(openedRequestSummary(pr, title));
+          setBarNotice({ kind: mode === "open" ? "opened" : "pushed", link });
+        } else {
+          setBarNotice({ kind: "finish", link, ...(pr.notice ? { detail: pr.notice } : {}) });
+        }
+      }
+      if (current()) setRequestDialogOpen(false);
       await loadStatus();
       await loadDiff();
     } catch (e) {
-      setError((e as Error).message);
+      if (!current()) return;
+      const failure = describeGitFailure("push", (e as Error).message, requestName);
+      // The dialog shows its own failure while it is open; otherwise the bar does, beside the button.
+      if (mode === "open" && requestDialogOpenRef.current) setRequestFailure(failure);
+      else setBarNotice({ kind: "failed", failure, onRetry: () => void gitActionsRef.current.doPr(mode) });
     } finally {
       setBusy(null);
     }
   };
+  // A notice's Try Again runs the action as it is now, with the message and fields on screen.
+  const gitActionsRef = useRef({ doCommit, doPr });
+  gitActionsRef.current = { doCommit, doPr };
 
-  // hunkBusy included: a Commit clicked while a stage RPC is in flight would land AFTER the
-  // stage (the runner queues mutations) and silently become a staged-only commit under a
-  // plain "Commit" label.
-  const disabled = !!busy || git.busy || hunkBusy !== null || !runnerOnline;
-  const prHref = safeExternalHref(pr?.url);
+  // The commit bar waits on reads and on the other mutations. hunkBusy included: a Commit clicked
+  // while a stage RPC is in flight would land AFTER the stage (the runner queues mutations) and
+  // silently become a staged-only commit under a plain "Commit" label. Its own running action is
+  // `busy`, which the bar shows on the button that started it.
+  const barHeld = git.busy || hunkBusy !== null;
 
   // Never render a diff under the wrong tab: a scope switch keeps the previous response in state
   // until the new one lands, so gate the viewer on the response's own scope. A same-scope refresh
@@ -808,9 +901,7 @@ export function ReviewPanel({
         }
       : undefined;
   const stagedCount = status?.stagedCount ?? 0;
-  // Commit and Push & Open also wait on the reads and mutations `disabled` covers.
-  const gitActionDisabled = disabled || gitRefusal !== null;
-  const gitRefusalProps = gitRefusal === null ? {} : { title: gitRefusal, "aria-describedby": gitRefusalId };
+  const fileCount = status?.files.length ?? 0;
 
   const refreshReview = async () => {
     setRefreshing(true);
@@ -896,6 +987,30 @@ export function ReviewPanel({
             refusal={gitRefusal === null ? null : { reason: gitRefusal, id: gitRefusalId }}
           />
         )}
+        foot={(
+          <CommitBar
+            message={commitMsg}
+            onMessageChange={setCommitMsg}
+            stagedCount={stagedCount}
+            fileCount={{ count: fileCount, label: `${fileCount}${status?.filesTruncated ? "+" : ""}` }}
+            hasChanges={status ? status.hasChanges : null}
+            requestName={requestName}
+            requestOpen={isOpenRequest(summaryPr)}
+            busy={busy}
+            disabled={barHeld}
+            offline={!runnerOnline}
+            refusal={gitRefusal === null ? null : { reason: gitRefusal, id: gitRefusalId }}
+            notice={barNotice}
+            onDismissNotice={() => setBarNotice(null)}
+            onCommit={(all) => void doCommit(all)}
+            onOpenRequest={() => {
+              setRequestFailure(null);
+              setRequestDialogOpen(true);
+            }}
+            onPushToRequest={() => void doPr("push")}
+            openRequestRef={openRequestButtonRef}
+          />
+        )}
       >
         <div className="review-panel">
           {/* Notices first, at the top of the scroller (§13.2): each is one compact line. */}
@@ -907,7 +1022,6 @@ export function ReviewPanel({
             </Notice>
           )}
           {runnerLimit && <Notice tone="neutral" compact role="status">{runnerLimit}</Notice>}
-          {error && <Notice tone="danger" compact>{error}</Notice>}
           {/* A failed status refresh keeps the last-known numbers on screen — say so, or the
               stale branch/file count reads as current. */}
           {git.error && (
@@ -942,7 +1056,7 @@ export function ReviewPanel({
               session={session}
               status={status}
               stats={shownDiff?.stats ?? null}
-              pr={forgeFacts?.pr ?? null}
+              pr={summaryPr}
               checks={forgeFacts?.checks ?? null}
               canPrompt={canPrompt}
             />
@@ -1021,7 +1135,7 @@ export function ReviewPanel({
             </div>
             {findingRefusal !== null && <p id={findingRefusalId} className="muted review-findings-refusal">{findingRefusal}</p>}
             {findingError && <Notice tone="danger" compact>Review findings: {findingError}</Notice>}
-            {findingNotice && <div className="git-ok">✓ {findingNotice}</div>}
+            {findingNotice && <Notice tone="success" compact role="status">{findingNotice}</Notice>}
             {findings.filter((finding) => finding.status === "open" || finding.status === "sent").length === 0 ? (
               <div className="muted review-findings-empty">Add a comment from any exact diff line to start a review.</div>
             ) : (
@@ -1099,81 +1213,25 @@ export function ReviewPanel({
               </div>
             )}
           </section>
-
-          <div className="git-action">
-            <label htmlFor={commitId}>Commit Message</label>
-            <div className="git-inline">
-              <input
-                id={commitId}
-                value={commitMsg}
-                onChange={(e) => setCommitMsg(e.target.value)}
-                placeholder="Describe the change"
-              />
-              <button className="btn sm" onClick={() => doCommit(false)} disabled={gitActionDisabled} {...gitRefusalProps}>
-                {busy === "commit" ? "Committing…" : stagedCount > 0 ? "Commit Staged" : "Commit"}
-              </button>
-              {stagedCount > 0 && (
-                <button
-                  className="btn ghost sm"
-                  onClick={() => doCommit(true)}
-                  disabled={gitActionDisabled}
-                  title="Ignore the staged selection and commit every change in the worktree"
-                  {...gitRefusalProps}
-                >
-                  Commit All
-                </button>
-              )}
-            </div>
-            {stagedCount > 0 && (
-              <div className="hint">
-                {stagedCount} file{stagedCount === 1 ? " has" : "s have"} staged changes — Commit commits only those; unstaged
-                edits stay in the worktree.
-              </div>
-            )}
-            {commit && (
-              <div className="git-ok">
-                ✓ Committed <code>{commit.sha}</code> ({commit.filesChanged} File{commit.filesChanged === 1 ? "" : "s"}
-                {commit.stagedOnly ? ", Staged Only" : ""})
-              </div>
-            )}
-          </div>
-
-          <div className="git-action" role="group" aria-label={`Open a ${requestName}`}>
-            <label>Open a {requestName}</label>
-            <input value={prTitle} onChange={(e) => setPrTitle(e.target.value)} placeholder={mergeRequest ? "MR title" : "PR title"} aria-label={`${requestShortName} Title`} />
-            <textarea
-              value={prBody}
-              onChange={(e) => setPrBody(e.target.value)}
-              placeholder={mergeRequest ? "MR description (optional)" : "PR description (optional)"}
-              aria-label={`${requestShortName} Description`}
-              rows={2}
-            />
-            <div className="git-inline">
-              <input
-                value={branch}
-                onChange={(e) => setBranch(e.target.value)}
-                placeholder="branch name (optional — defaults to the agent branch)"
-                aria-label="Branch Name"
-              />
-              <button className="btn primary sm" onClick={doPr} disabled={gitActionDisabled} {...gitRefusalProps}>
-                {busy === "pr" ? "Opening…" : `Push & Open ${requestName}`}
-              </button>
-            </div>
-            <div className="hint">Commits any pending changes, pushes the branch, and opens a {requestName.toLowerCase()} (falls back to a validated prefilled link when authenticated forge tooling is unavailable). If you've staged hunks selectively, use Commit first — Push &amp; Open {requestName} won't guess at a partial stage.</div>
-            {pr && (
-              <div className="git-ok">
-                ✓ {(pr.created ?? pr.createdWithGh) ? `${pr.kind === "merge_request" ? "Merge Request" : "Pull Request"} opened` : `Branch pushed — click to open the ${pr.kind === "merge_request" ? "Merge Request" : "Pull Request"}`}:{" "}
-                {prHref ? (
-                  <a className="link" href={prHref} target="_blank" rel="noreferrer">{pr.url}</a>
-                ) : (
-                  <code>{pr.url}</code>
-                )}
-              </div>
-            )}
-            {pr?.notice && <div className="hint warn">{pr.notice}</div>}
-          </div>
         </div>
       </PanelToolLayout>
+      {requestDialogOpen && (
+        <OpenRequestDialog
+          requestName={requestName}
+          title={prTitle}
+          onTitleChange={setPrTitle}
+          body={prBody}
+          onBodyChange={setPrBody}
+          branch={branch}
+          onBranchChange={setBranch}
+          partialStage={stagedCount > 0 && stagedCount < fileCount}
+          busy={busy === "open"}
+          failure={requestFailure}
+          onSubmit={() => void doPr("open")}
+          onClose={() => setRequestDialogOpen(false)}
+          returnFocusRef={openRequestButtonRef}
+        />
+      )}
     </>
   );
 }

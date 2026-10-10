@@ -588,7 +588,9 @@ Rules
   and Choose Where to Open). Two `.btn`s in a `.split` join on one shared edge: the first loses its
   trailing radius, the second its leading radius, a 1px overlap, and 8px side padding for the
   chevron. The recipe sits at a single class's weight (`:where()`), so a component can size its
-  segments. The session header's Open control is the first consumer (`EditorSelect`).
+  segments. The session header's Open control is the first consumer (`EditorSelect`); Review's
+  commit bar is the second (Commit Staged, whose menu holds Commit All Changes, #2847). The second
+  segment is matched as a later sibling, so a `BusyButton` segment's live line does not break it.
 - Pills are never actions. A clickable status (for example a descendant-request count) is a
   `.btn.sm.ghost` containing a status badge, so it looks and hits like a button.
 

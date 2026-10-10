@@ -55,9 +55,6 @@ const RECORDED: readonly (readonly [string, string, string, string])[] = [
   ["components/OnboardRunnerDialog.tsx", "↻", "↻ Retry", CONNECTIONS],
   ["components/PodsView.tsx", "→", "→", PODS],
   ["components/PodsView.tsx", "→", "→", PODS],
-  ["components/ReviewPanel.tsx", "✓", "✓", RIGHT_PANEL],
-  ["components/ReviewPanel.tsx", "✓", "✓ Committed", RIGHT_PANEL],
-  ["components/ReviewPanel.tsx", "✓", "✓", RIGHT_PANEL],
   ["components/RunsView.tsx", "×", "×", RIGHT_PANEL], // the artifact preview in Run detail (#2855)
   ["components/ShellDock.tsx", "×", "×", TERMINAL],
   ["components/ShellDock.tsx", "×", "×", TERMINAL],
