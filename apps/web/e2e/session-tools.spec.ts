@@ -74,8 +74,8 @@ test.describe("with a mouse", () => {
       .toHaveText("An approval from Deploy Pipeline, and a question from Docs Subagent");
     await expect(row(page, "subagents").locator(".status")).toHaveText("1 Working");
     await expect(row(page, "background").locator(".row-sub")).toHaveText("1 of 3 jobs running");
-    for (const id of ["review", "files", "terminal"]) await expect(row(page, id).locator("kbd")).toBeVisible();
-    await expect(tools(page).locator("kbd")).toHaveCount(3);
+    for (const id of ["review", "files", "terminal", "sidechat"]) await expect(row(page, id).locator("kbd")).toBeVisible();
+    await expect(tools(page).locator("kbd")).toHaveCount(4);
     // No card borders; hover fills the row.
     const review = row(page, "review");
     expect(await review.evaluate((element) => getComputedStyle(element).borderTopWidth)).toBe("0px");

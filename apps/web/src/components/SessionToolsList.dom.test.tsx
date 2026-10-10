@@ -331,7 +331,7 @@ test("keycaps show for a mouse and are absent on a coarse pointer (#2844)", asyn
   try {
     const keyed = [...fine.container.querySelectorAll<HTMLElement>(".session-tools .session-tool")]
       .filter((button) => button.querySelector("kbd")).map((button) => button.dataset.tool);
-    assert.deepEqual(keyed, ["review", "files", "terminal"]);
+    assert.deepEqual(keyed, ["review", "files", "terminal", "sidechat"]);
   } finally {
     await fine.dispose();
   }
