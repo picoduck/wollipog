@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { dialogMotionSettled } from "./dialog-motion.js";
+import { viewPath } from "../src/navigation.js";
 
 /**
  * The Sessions list/board merge (#499), pinned in a real browser (#527).
@@ -723,6 +724,27 @@ test.describe("Board cards at 1440×900 (#2222)", () => {
     await card.getByRole("button", { name: "Approve" }).click();
     await expect.poll(() => page.evaluate(() => window.__approveCalls)).toEqual(["s-permission"]);
     await expect(page.locator(".inbox-view.expanded")).toHaveCount(0, "deciding does not open the session");
+  });
+
+  test("persistent-only permission choices explain their scope and open in Session without approving", async ({ page }) => {
+    await openCards(page);
+    await page.evaluate(() => window.__updateSession("s-permission", {
+      pendingApproval: {
+        requestId: "req-persistent",
+        kind: "permission",
+        title: "Allow future test runs?",
+        options: [
+          { optionId: "always", name: "Always Allow", kind: "allow_always" },
+          { optionId: "never", name: "Always Reject", kind: "reject_always" },
+        ],
+      },
+    }));
+    const card = page.locator('.board .card[data-session-id="s-permission"]');
+    await expect(card.locator(".card-request .btn")).toHaveText(["Answer in Session"]);
+    await expect(card.locator(".card-request")).toContainText("These choices apply to future requests.");
+    await card.getByRole("button", { name: "Answer in Session", exact: true }).click();
+    await expect.poll(() => harnessPath(page)).toBe(viewPath({ name: "session", id: "s-permission" }));
+    expect(await page.evaluate(() => window.__approveCalls)).toEqual([]);
   });
 
   test("at a 230px column no card button wraps, and Sign In lists each method then Cancel Sign-In", async ({ page }) => {
