@@ -1363,15 +1363,16 @@ function SessionDetailLoaded({
   const showComposerError = useCallback((source: ComposerErrorSource, next: ComposerError | null) => {
     // An expanded side panel hides the notice slot with the chat column (#2845). What an action could
     // not do is never left unseen: its failure restores the panel. Clearing one leaves the panel be.
+    // A Sessions preview shares the panel's state but never shows the panel.
     const panel = rightPanelRef.current;
-    if (next && !isMobileRef.current && panel.open && panel.expanded) panel.setExpanded(false);
+    if (next && mode === "expanded" && !isMobileRef.current && panel.open && panel.expanded) panel.setExpanded(false);
     setComposerErrors((current) => {
       if (next) return { ...current, [source]: next };
       if (!current[source]) return current;
       const { [source]: _cleared, ...rest } = current;
       return rest;
     });
-  }, []);
+  }, [mode]);
   const clearComposerErrors = useCallback(() => {
     setComposerErrors((current) => Object.keys(current).length ? {} : current);
   }, []);
