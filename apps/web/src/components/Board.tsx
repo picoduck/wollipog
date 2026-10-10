@@ -715,6 +715,8 @@ function CardRequest({ session, request, runnerOnline, onOpen }: {
   const question = request.kind === "question";
   const signIn = request.kind === "authentication";
   const decisions = question || signIn ? null : boardCardDecisions(request.options);
+  const answerInSession = decisions !== null && !decisions.approve && !decisions.deny;
+  const persistentChoices = answerInSession && request.options.some((option) => option.kind?.endsWith("_always"));
   const code = question ? null : boardCardRequestCode(request);
   const actions = question ? (
     // Structured questions have no inline options (options[] is empty by design): the card opens the
@@ -732,13 +734,20 @@ function CardRequest({ session, request, runnerOnline, onOpen }: {
       {decisions.approve && optionButton(decisions.approve, "Approve", true)}
       {decisions.deny && optionButton(decisions.deny, "Deny", false)}
     </>
-  ) : null;
+  ) : (
+    <button type="button" className="btn sm primary" onClick={onOpen}>Answer in Session</button>
+  );
 
   return (
     // Decisions stay on the card: a click inside, or in a menu portalled from here, never opens it.
     <div className="card-request" onClick={(e) => e.stopPropagation()}>
       <Notice tone="warning" className={`card-request-notice${decisions ? " decision-pair" : ""}`} actions={actions}>
         <p className="card-request-text">{plainTextPreview(request.title)}</p>
+        {answerInSession && (
+          <p>{persistentChoices
+            ? "These choices apply to future requests. Open the session to review their scope before answering."
+            : "Open the session to review the available choices before answering."}</p>
+        )}
         {code && <code className="card-request-code">{code}</code>}
         {respondRefusal !== null && !question && (
           <p className="approval-refusal" id={refusalId}>{respondRefusal}</p>
