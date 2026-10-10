@@ -910,7 +910,8 @@ Requests, Decision History, and Terminal once #2868 moves it) opens in one frame
   does focus left in the chat column. An action whose result shows in the chat column restores the
   panel first: the Pinned Summary toggle, Attach to Prompt, Side Chat's Insert, Show in Transcript,
   Reply from the Sessions list, and an attention link or the session bar's attention control that
-  opens a request on the dock.
+  opens a request on the dock. So does any failure the notice slot above the composer reports (Stop
+  Turn, Fork Conversation, every other session action), so it is never left unseen.
 - **Keyboard.** The Side Panel chord (Ctrl/⌘+\\) toggles the panel and reopens the last tool, with
   focus on the switcher, so the arrow keys reach every other tool.
   Escape closes it from any tool while focus is inside, once nothing above takes Escape (§16.2): a

@@ -329,3 +329,18 @@ test("an attention route restores an expanded panel and focuses the request on t
   await expect(panel(page)).toHaveAttribute("data-presentation", "docked");
   expect(await page.evaluate(() => localStorage.getItem("wollipog.rightpanel.expanded"))).toBe("0");
 });
+
+test("opening a session straight from its URL lands on the expanded panel's switcher (#2845)", async ({ page }) => {
+  const opaque = (value: string) => Buffer.from(value, "utf16le").toString("base64url");
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.addInitScript(() => {
+    localStorage.setItem("wollipog.rightpanel.open", "1");
+    localStorage.setItem("wollipog.rightpanel.mode", "launcher");
+    localStorage.setItem("wollipog.rightpanel.expanded", "1");
+  });
+  // Without the Sessions list's landing focus: the session's own opening focus decides.
+  const path = `/sessions/~${opaque("s-approval")}`;
+  await page.goto(`/sessions-board-e2e.html?full-shell=1&path=${encodeURIComponent(path)}`);
+  await expect(panel(page)).toHaveAttribute("data-presentation", "expanded");
+  await expect(panel(page).locator(".rpanel-switcher")).toBeFocused();
+});

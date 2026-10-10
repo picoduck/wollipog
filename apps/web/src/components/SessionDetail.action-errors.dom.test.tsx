@@ -121,9 +121,11 @@ async function flush(delay = 0) {
   });
 }
 
-async function mount(current: SessionView, { client: overrides = {}, events }: {
+async function mount(current: SessionView, { client: overrides = {}, events, expanded }: {
   client?: Partial<ApiClient>;
   events?: SessionEvent["payload"][];
+  /** The side panel is open and expanded over the chat column (#2845); Restore calls are recorded. */
+  expanded?: { calls: boolean[] };
 } = {}) {
   const toasts: string[] = [];
   /** What a confirmation that runs its action would show as its failure. */
@@ -143,8 +145,9 @@ async function mount(current: SessionView, { client: overrides = {}, events }: {
     ...overrides,
   } as unknown as ApiClient;
   const rightPanel = {
-    open: false, mode: "launcher" as const, width: 360, dragging: false, subagentTarget: null,
-    toggle() {}, openMode() {}, show() {}, setMode() {}, setWidth() {}, expanded: false, setExpanded() {}, setDragging() {},
+    open: expanded !== undefined, mode: "launcher" as const, width: 360, dragging: false, subagentTarget: null,
+    toggle() {}, openMode() {}, show() {}, setMode() {}, setWidth() {}, expanded: expanded !== undefined,
+    setExpanded(value: boolean) { expanded?.calls.push(value); }, setDragging() {},
     close() {}, selectSubagent() {}, showSubagent() {}, consumeSubagentFocusRequest() {},
   };
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
@@ -588,6 +591,22 @@ test("an offline machine is named in the sentence, with nothing behind Show Deta
       "Couldn't restart this session. Build Box is offline. Try again once it reconnects.");
     assertNoDomNode(notice.querySelector(".notice-details-toggle"));
     assert.doesNotMatch(fixture.container.textContent ?? "", /runner is offline/u);
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("a failure an expanded side panel would hide restores the panel, so it is seen (#2845)", async () => {
+  const server = "the runner could not stop the active turn";
+  const expanded = { calls: [] as boolean[] };
+  const fixture = await mount(sessionView({ status: "running", activeTurnId: "turn-1" }), {
+    client: { cancelTurn: refuse(server) } as Partial<ApiClient>,
+    expanded,
+  });
+  try {
+    await fixture.click("Stop Turn");
+    await assertPlainFailure(fixture, "Turn Not Stopped", "Couldn't stop the turn. Try again or use Stop Session.", server);
+    assert.deepEqual(expanded.calls, [false], "the failure restores the panel once");
   } finally {
     await fixture.unmount();
   }

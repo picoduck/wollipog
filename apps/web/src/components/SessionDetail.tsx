@@ -334,6 +334,7 @@ import {
 } from "../queued-edit-recovery.js";
 import { materializePromptImages } from "../prompt-image-materialization.js";
 import { holdRecoveryActionFor, sessionArchiveActionRefusal, sessionCommandRefusal } from "../session-command-permissions.js";
+import { sessionReadingTarget } from "../focus-zones.js";
 
 const NO_IMAGE_MIME_TYPES: readonly string[] = [];
 const STOP_TURN_RETRY_MS = 8_000;
@@ -1360,6 +1361,10 @@ function SessionDetailLoaded({
   // Dismiss, and every one clears when the draft changes or the next send is accepted.
   const [composerErrors, setComposerErrors] = useState<ComposerErrors>({});
   const showComposerError = useCallback((source: ComposerErrorSource, next: ComposerError | null) => {
+    // An expanded side panel hides the notice slot with the chat column (#2845). What an action could
+    // not do is never left unseen: its failure restores the panel. Clearing one leaves the panel be.
+    const panel = rightPanelRef.current;
+    if (next && !isMobileRef.current && panel.open && panel.expanded) panel.setExpanded(false);
     setComposerErrors((current) => {
       if (next) return { ...current, [source]: next };
       if (!current[source]) return current;
@@ -1888,7 +1893,11 @@ function SessionDetailLoaded({
 
   useLayoutEffect(() => {
     if (mode !== "expanded" || focusComposerRequestedRef.current || attentionTarget) return;
-    const frame = window.requestAnimationFrame(() => scrollRef.current?.focus());
+    // The reading pane: the transcript, or the switcher of a side panel expanded over it (#2845).
+    const frame = window.requestAnimationFrame(() => {
+      const row = scrollRef.current?.closest(".detail-columns");
+      (row ? sessionReadingTarget(row) : scrollRef.current)?.focus();
+    });
     return () => window.cancelAnimationFrame(frame);
   }, [mode, sessionId, attentionTarget]);
 
