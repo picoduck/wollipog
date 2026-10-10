@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type MutableRefObject, type ReactNode, type RefObject } from "react";
-import type { AgentQuestion, PendingApproval, SessionView } from "@wollipog/protocol";
+import React, { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode, type RefObject } from "react";
+import { pendingRequests, type AgentQuestion, type PendingApproval, type SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { useOptionalStoreSelector } from "../store.js";
 import { sessionCommandRefusal } from "../session-command-permissions.js";
@@ -9,6 +9,8 @@ import {
   isAnswerableAgentQuestion,
   questionDraftAnswers,
   questionDraftSelections,
+  questionDraftIdentity,
+  reconcileQuestionDrafts,
   storedQuestionDrafts,
   storedQuestionStep,
   storeQuestionDrafts,
@@ -85,6 +87,7 @@ export function SessionApprovalRegion({
   onFallbackFocus?: () => boolean;
 }) {
   const approval = session.pendingApproval;
+  useQuestionDraftRetirement(session);
   return (
     <SessionRequestCoordinator
       sessionId={session.id}
@@ -96,6 +99,14 @@ export function SessionApprovalRegion({
       onFallbackFocus={onFallbackFocus}
     />
   );
+}
+
+/** Retire drafts against the session's complete request list, including external resolution. */
+export function useQuestionDraftRetirement(session: SessionView): void {
+  const instanceScope = useInstanceScope();
+  useEffect(() => {
+    reconcileQuestionDrafts(session.id, pendingRequests(session.pendingApproval), instanceScope);
+  }, [session.id, session.pendingApproval, instanceScope]);
 }
 
 /** Clears the saved review of a UI evidence decision once it is no longer pending, wherever it was
@@ -188,7 +199,6 @@ function SessionRequestCoordinator({
   onFallbackFocus?: () => boolean;
 }) {
   const previousRequestRef = useRef<string | null>(null);
-  const previousRequestWasQuestionRef = useRef(false);
   const announcedRequestRef = useRef<string | null>(null);
   const previousRunnerOnlineRef = useRef(runnerOnline);
   const [announcement, setAnnouncement] = useState("");
@@ -209,12 +219,8 @@ function SessionRequestCoordinator({
 
   useIsomorphicLayoutEffect(() => {
     const requestChanged = previousRequestRef.current !== requestId;
-    if (requestChanged && previousRequestWasQuestionRef.current && previousRequestRef.current) {
-      clearQuestionDrafts(sessionId, previousRequestRef.current);
-    }
     const focusDestination = approvalFocusDestination(previousRequestRef.current, requestId, ownedFocusBeforeRender);
     previousRequestRef.current = requestId;
-    previousRequestWasQuestionRef.current = requestIsQuestion;
     const activeRegion = requestRegionFor(document.activeElement);
     const representationMoved = !requestChanged && ownedFocusBeforeRender &&
       (activeRegion?.dataset.sessionRequestId !== requestId || activeRegion?.dataset.sessionRequestSession !== sessionId);
@@ -307,6 +313,8 @@ export function SessionQuestionBanner({
   sessionId,
   requestId,
   occurrenceId,
+  requestedAt,
+  recoveryId: recoveryEpoch,
   questions,
   isAsync,
   recoveryReason,
@@ -330,6 +338,8 @@ export function SessionQuestionBanner({
   sessionId: string;
   requestId: string;
   occurrenceId?: string;
+  requestedAt?: number;
+  recoveryId?: string;
   questions: AgentQuestion[];
   isAsync?: boolean;
   recoveryReason?: "provider_restart";
@@ -369,7 +379,10 @@ export function SessionQuestionBanner({
   // is unavailable and the foot-note says why.
   const responsesAvailable = runnerOnline && responseRefusal === null;
   const responseStyle = useQuestionResponseStyle();
-  const answerKey = isAsync && occurrenceId ? `${requestId}:${occurrenceId}` : requestId;
+  const instanceScope = useInstanceScope();
+  const operationKey = isAsync && occurrenceId ? `${requestId}:${occurrenceId}` : requestId;
+  const answerKey = useMemo(() => questionDraftIdentity(requestId, questions, occurrenceId, requestedAt, instanceScope, recoveryEpoch),
+    [requestId, questions, occurrenceId, requestedAt, instanceScope, recoveryEpoch]);
   const [busy, setBusy] = useState<"submit" | "dismiss" | null>(null);
   const [drafts, setDrafts] = useState<{
     requestId: string;
@@ -674,7 +687,7 @@ export function SessionQuestionBanner({
       showErrors(invalid);
       return;
     }
-    const releaseOperation = claimQuestionResponseOperation(sessionId, answerKey);
+    const releaseOperation = claimQuestionResponseOperation(sessionId, operationKey);
     if (!releaseOperation) {
       setFailure({ action: "submit", detail: QUESTION_CARD_COPY.alreadySending });
       return;
@@ -705,7 +718,7 @@ export function SessionQuestionBanner({
 
   const dismiss = async () => {
     if (operationPendingRef.current || busy !== null || !responsesAvailable) return;
-    const releaseOperation = claimQuestionResponseOperation(sessionId, answerKey);
+    const releaseOperation = claimQuestionResponseOperation(sessionId, operationKey);
     if (!releaseOperation) {
       setFailure({ action: "dismiss", detail: QUESTION_CARD_COPY.alreadySending });
       return;
