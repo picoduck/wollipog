@@ -57,7 +57,7 @@ import {
   handleRovingChoiceKeyDown,
   rovingChoiceTabIndex,
 } from "./components/interactions.js";
-import { cycleFocusZone, escapeOwner, focusZone, indicateFocusZone, shortcutScopeForFocus } from "./focus-zones.js";
+import { cycleFocusZone, escapeOwner, focusZone, indicateFocusZone, sessionReadingTarget, shortcutScopeForFocus } from "./focus-zones.js";
 import { installTerminalExitBoundary } from "./terminal-focus.js";
 import {
   bareDigitPressed,
@@ -578,12 +578,14 @@ export function Shell() {
       if (owner === "terminal") return;
       if (owner === "terminal-exit") {
         e.preventDefault();
-        document.querySelector<HTMLElement>(".main-body .detail-scroll")?.focus();
+        const main = document.querySelector(".main-body");
+        if (main) sessionReadingTarget(main)?.focus();
       } else if (owner === "composer") {
         e.preventDefault();
         (document.activeElement as HTMLElement | null)?.blur();
         window.requestAnimationFrame(() => {
-          document.querySelector<HTMLElement>(".main-body .detail-scroll")?.focus();
+          const main = document.querySelector(".main-body");
+          if (main) sessionReadingTarget(main)?.focus();
         });
       } else if (owner === "session-reading") {
         e.preventDefault();

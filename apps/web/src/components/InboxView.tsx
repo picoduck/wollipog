@@ -91,6 +91,7 @@ import { useOpenSearchPalette } from "./search-palette-context.js";
 import { State, useSnapshotState } from "./State.js";
 import { StaleContent } from "./StaleContent.js";
 import { useRemovedFocus } from "./useRemovedFocus.js";
+import { sessionReadingTarget } from "../focus-zones.js";
 
 const PROJECT_PIN_KEY = "wollipog.projects.pinned";
 const SEEN_DWELL_MS = 1_500;
@@ -751,8 +752,8 @@ export function InboxView({
     const frame = window.requestAnimationFrame(() => {
       previousSurfaceRef.current = { expanded, sessionId: surfaceSessionId };
       if (expanded) {
-        if (focusComposerSessionId !== surfaceSessionId && !attentionTarget) {
-          viewRef.current?.querySelector<HTMLElement>(".detail-scroll")?.focus();
+        if (focusComposerSessionId !== surfaceSessionId && !attentionTarget && viewRef.current) {
+          sessionReadingTarget(viewRef.current)?.focus();
         }
       } else if (shouldRestoreInboxScroll(previous, expanded)) {
         // See shouldRestoreInboxScroll: restoring on every selection change overwrote the scroll

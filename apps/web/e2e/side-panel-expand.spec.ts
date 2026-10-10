@@ -142,6 +142,8 @@ test("the expanded state survives switching tools and sessions, closing the pane
   await enterSession(page, "No Project Session");
   await expect(page.locator("[data-session-surface-id='session-no-project']")).toBeAttached();
   await expectExpanded(page, "another session");
+  // Opening a session lands on its reading pane, which is the expanded panel's switcher here.
+  await expect(panel(page).locator(".rpanel-switcher")).toBeFocused();
 });
 
 test("no Expand or Restore control renders at 390px, even with Expanded stored (#2845)", async ({ page }) => {

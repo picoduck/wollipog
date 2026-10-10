@@ -1,4 +1,5 @@
 import { matchesShortcut } from "./shortcuts.js";
+import { sessionReadingTarget } from "./focus-zones.js";
 
 /**
  * Install the one capture-phase exception to terminal key ownership. Window capture runs before
@@ -13,7 +14,8 @@ export function installTerminalExitBoundary(targetWindow: Window, targetDocument
     if (!matchesShortcut(event, "exit-terminal", targetDocument)) return;
     event.preventDefault();
     event.stopPropagation();
-    targetDocument.querySelector<HTMLElement>(".main-body .detail-scroll")?.focus();
+    const main = targetDocument.querySelector(".main-body");
+    if (main) sessionReadingTarget(main)?.focus();
   };
   targetWindow.addEventListener("keydown", onKeyDown, true);
   return () => targetWindow.removeEventListener("keydown", onKeyDown, true);
