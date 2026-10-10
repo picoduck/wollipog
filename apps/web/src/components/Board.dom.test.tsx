@@ -168,14 +168,14 @@ class FakeSocket implements UiSocket {
 
 const navigation: ViewNavigation = { current: () => ({ name: "board" }), push() {}, listen: () => () => {} };
 
-function Harness({ onSessionMenu }: { onSessionMenu: (sessionId: string) => void }) {
+function Harness({ onSessionMenu, stalledSessionIds }: { onSessionMenu: (sessionId: string) => void; stalledSessionIds: ReadonlySet<string> }) {
   const all = useStoreSelector((s) => s.sessions);
   const scoped = React.useMemo(() => [...all.values()], [all]);
-  return <Board sessions={scoped} searchActive={false} onShowAll={() => {}} onNewSession={() => {}} onSessionMenu={onSessionMenu} />;
+  return <Board sessions={scoped} stalledSessionIds={stalledSessionIds} searchActive={false} onShowAll={() => {}} onNewSession={() => {}} onSessionMenu={onSessionMenu} />;
 }
 
 let sequence = 0;
-async function mount({ runners = [runner("runner-1", "Studio")], sessions = SESSIONS } = {}) {
+async function mount({ runners = [runner("runner-1", "Studio")], sessions = SESSIONS, stalledSessionIds = new Set<string>() } = {}) {
   const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(mountPoint as never);
   const root = createRoot(mountPoint);
@@ -200,7 +200,7 @@ async function mount({ runners = [runner("runner-1", "Studio")], sessions = SESS
     root.render(
       <ApiProvider client={client}>
         <StoreProvider connection={connection} navigation={navigation}>
-          <Harness onSessionMenu={(sessionId) => menus.push(sessionId)} />
+          <Harness onSessionMenu={(sessionId) => menus.push(sessionId)} stalledSessionIds={stalledSessionIds} />
         </StoreProvider>
       </ApiProvider>,
     );
@@ -261,7 +261,7 @@ test("a returned result keeps one review badge and meaningful time despite newer
   })] });
   try {
     const card = board.card("result");
-    assert.deepEqual([...card.querySelectorAll(".status")].map((badge) => badge.textContent), ["Ready for Review"]);
+    assert.deepEqual([...card.querySelectorAll(".status")].map((badge) => badge.textContent), ["Result Available"]);
     assert.equal(card.querySelector("time.card-time")?.getAttribute("datetime"), new Date(meaningfulAt).toISOString());
     assert.equal(card.querySelector("time.card-time")?.textContent, "15m ago");
     assert.equal(card.querySelector(".card-sender-text")?.textContent, "Codex App Server · Wollipog");
@@ -370,7 +370,7 @@ test("the family chip after the badge is an image named by the whole rollup at e
     const chip = status.querySelector(".inbox-thread-family")!;
     assert.ok(chip, "the parent shows its family chip");
     assert.equal(chip.getAttribute("role"), "img");
-    assert.equal(chip.getAttribute("aria-label"), "2 Children · 1 Awaiting Input");
+    assert.equal(chip.getAttribute("aria-label"), "2 Children · 1 Awaiting Input · 1 Working");
     assert.equal(chip.querySelector(".inbox-thread-family-text")?.getAttribute("aria-hidden"), "true",
       "the visible rollup, which a narrow list hides, stays out of the accessible tree");
     const order = [...status.children].map((child) => child.className);
@@ -379,7 +379,7 @@ test("the family chip after the badge is an image named by the whole rollup at e
     // A running parent shows the chip in place of the strip; a running card without children keeps its strip.
     assertNoDomNode(status.querySelector(".activity-strip"), "a parent card shows the chip, not the strip");
     assert.ok(board.card("running").querySelector(".card-status .activity-strip"), "a running card shows its strip");
-    assert.equal(chip.getAttribute("title"), "2 Children · 1 Awaiting Input", "and a tooltip with the whole rollup");
+    assert.equal(chip.getAttribute("title"), "2 Children · 1 Awaiting Input · 1 Working", "and a tooltip with the whole rollup");
   } finally {
     await board.unmount();
   }
@@ -393,6 +393,18 @@ test("a card's ⋯ opens the session's shared context menu", async () => {
     assert.equal(more.getAttribute("aria-haspopup"), "menu");
     await act(async () => { more.click(); });
     assert.deepEqual(board.menus, ["idle"]);
+  } finally {
+    await board.unmount();
+  }
+});
+
+
+test("Board family summaries do not call a stalled child working beside a waiting one", async () => {
+  const board = await mount({ stalledSessionIds: new Set(["child-a"]) });
+  try {
+    const chip = board.card("parent").querySelector(".inbox-thread-family")!;
+    assert.equal(chip.getAttribute("aria-label"), "2 Children · 1 Awaiting Input");
+    assert.doesNotMatch(chip.textContent ?? "", /Working/);
   } finally {
     await board.unmount();
   }

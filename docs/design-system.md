@@ -990,7 +990,13 @@ Rules
   its tooltip with the key (T), and is not a tab stop: the list owns the keyboard (T, Shift+T, P). The
   title shrinks to its content and the **family chip** follows it directly (dots, then the rollup,
   "4 Children · 1 Awaiting Input"). Below a 600px list (a narrow column, Preview Right, phones) the
-  chip keeps only its dots; it is an image named by the whole rollup, which its tooltip repeats.
+  chip keeps its dots and a compact "N Working" count while descendants are working; its accessible
+  name and tooltip keep the full rollup. On narrow lists, dots give up space before the working
+  count so a large family cannot hide ongoing work. List rollups count nested descendants; Board
+  chips count direct children because Board cards remain flat. The list count remains visible
+  when collapsed. Available human-owned results use a neutral **Result Available** badge; questions
+  retain the amber **Answer Required** badge. A result is available for assessment independently of
+  lifecycle and does not imply that the session or its campaign has finished.
   Children indent under a 2px `--border-strong` spine with a tick into each row. A stalled parent or
   child says so once, with its one status badge (§11.1); there is no stalled rail or border, because
   the leading edge is the selection bar.

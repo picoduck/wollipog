@@ -29,5 +29,5 @@ export function sessionFollowUp(session: SessionView) {
   return { group, priority: { needs_input: 3, ready_for_review: 2, working: 1, quiet: 0 }[group],
     requestRank: firstAction?.rank ?? (recovery ? 0 : 6),
     at: firstAction?.requestedAt ?? result?.at ?? session.attention?.meaningfulAt ?? session.createdAt ?? 0,
-    label: { needs_input: "Needs Your Input", ready_for_review: "Ready for Review", working: "Working", quiet: "Quiet" }[group] };
+    label: { needs_input: "Needs Your Input", ready_for_review: "Result Available", working: "Working", quiet: "Quiet" }[group] };
 }

@@ -62,7 +62,7 @@ const badges = (container: Element) => [...container.querySelectorAll<HTMLElemen
 const minutesAgo = (minutes: number): SessionActivity => recordSessionActivity(undefined, NOW - minutes * ACTIVITY_BUCKET_MS);
 
 test("a parent keeps its human family reason in the single badge across phone and desktop shapes", async () => {
-  for (const reason of ["Needs Your Input", "Ready for Review"] as const) {
+  for (const reason of ["Needs Your Input", "Result Available"] as const) {
     await withRow(baseSession({ status: "running" }), async (container, rerender) => {
       assert.deepEqual(badges(container).map((badge) => badge.textContent), [reason]);
       await rerender({ threeRow: false });
@@ -496,4 +496,21 @@ test("a parent row carries the chevron and family chip, and a child row its thre
     await act(async () => root.unmount());
     container.remove();
   }
+});
+
+
+test("a result remains neutral beside a visible compact working count on collapsed phone families", async () => {
+  const attention = { version: 1 as const, humanActions: [], meaningfulAt: NOW,
+    result: { revision: "r1", at: NOW, owner: "human" as const }, acknowledgedRevision: null };
+  await withRow(baseSession({ attention }), async (container, rerender) => {
+    assert.equal(badges(container)[0]?.textContent, "Result Available");
+    assert.ok(badges(container)[0]?.classList.contains("t-neutral"));
+    assert.equal(container.querySelector(".inbox-thread-working")?.textContent, "2 Working");
+    assert.match(container.querySelector(".inbox-thread-family")?.getAttribute("aria-label") ?? "", /2 Working/);
+    await rerender({ threadChildren: JSON.stringify({ count: 1, waiting: 0, working: 0,
+      children: [{ id: "child", title: "Child", state: "done" }] }) });
+    assertNoDomNode(container.querySelector(".inbox-thread-working"));
+    assert.equal(badges(container)[0]?.textContent, "Result Available");
+  }, { threeRow: true, threadCollapsed: true, threadChildren: JSON.stringify({ count: 1, waiting: 0, working: 2,
+    children: [{ id: "child", title: "Child", state: "running" }] }) });
 });

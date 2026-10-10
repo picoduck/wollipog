@@ -12682,7 +12682,7 @@ body.shell-dock-dragging * {
 .inbox-row-shell.thread-child .inbox-row-primary-cell::before { top: 50%; left: -15px; width: 11px; height: 2px; }
 /* The family chip, directly after a parent's title (#2215): dots first, then the rollup. It is sized
    to the pills it shares a card with, and it never grows the card. Below a 600px list (a narrow
-   column, Preview Right, a phone) it keeps only its dots; its name and tooltip keep the rollup. */
+   column, Preview Right, a phone) it keeps its dots and working count; its name and tooltip keep the rollup. */
 .inbox-thread-family {
   display: inline-flex;
   flex: none;
@@ -12702,10 +12702,14 @@ body.shell-dock-dragging * {
 }
 .inbox-thread-family.waiting { border-color: transparent; color: var(--accent-2-on-tint); background: color-mix(in srgb, var(--accent-2) 12%, transparent); }
 .inbox-thread-family-text { overflow: hidden; text-overflow: ellipsis; }
+.inbox-thread-working { display: none; overflow: hidden; text-overflow: ellipsis; }
 /* A Board card decides by its own width instead (`.card-status > .inbox-thread-family.dots-only`). */
 @container list (max-width: 599px) {
-  :not(.card-status) > .inbox-thread-family { gap: 0; padding-inline: var(--space-1); }
+  :not(.card-status) > .inbox-thread-family { gap: var(--space-1); padding-inline: var(--space-1); }
   :not(.card-status) > .inbox-thread-family > .inbox-thread-family-text { display: none; }
+  :not(.card-status) > .inbox-thread-family > .inbox-thread-working { display: inline; flex: none; }
+  .inbox-row-copy .inbox-thread-dots { min-width: 0; overflow: hidden; flex-shrink: 1; }
+  .inbox-row-copy .inbox-thread-dot { flex: none; }
 }
 .inbox-thread-dots { display: inline-flex; flex: none; gap: 3px; }
 .inbox-thread-dot { display: inline-block; width: 7px; height: 7px; border-radius: var(--radius-pill); background: var(--border-strong); }
@@ -12891,6 +12895,10 @@ body.shell-dock-dragging * {
 .icon-btn.inbox-row-more { width: var(--control-h-sm); height: var(--control-h-sm); }
 @media (pointer: fine) {
   :is(.inbox-row-shell:hover, .inbox-row-shell:focus-within) .inbox-row-actions { display: inline-flex; }
+  @container list (max-width: 879px) {
+    /* Keep the family rollup readable when the action tray covers the title line. */
+    .inbox-row-shell.thread-parent:is(:hover, :focus-within) .inbox-row-copy { padding-right: var(--inbox-row-col-actions); }
+  }
   /* The row keeps its hover fill while the pointer is on its actions, which are beside its button. */
   .inbox-row-shell:is(:hover, :focus-within):not(.selected, .stacked) .inbox-row { background: var(--bg-elev-2); }
 }
@@ -12907,6 +12915,7 @@ body.shell-dock-dragging * {
   .inbox-row-action:not(.inbox-row-more) { display: none; }
   .icon-btn.inbox-row-more { width: var(--control-h); height: var(--control-h); }
   .inbox-row-shell .inbox-row { padding-right: var(--control-h); }
+  .inbox-row-shell.stacked .inbox-row { padding-right: calc(var(--control-h) + var(--space-2)); }
 }
 /* What the session wants, after the title (#2218): only a list wide enough for it shows it. */
 .inbox-row-snippet { display: none; }

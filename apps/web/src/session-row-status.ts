@@ -18,7 +18,7 @@ export interface SessionRowStatusContext {
   /** How long a stalled session has been silent, in milliseconds; absent while it is not stalled. */
   stalledForMs?: number;
   /** A parent's human-owned descendant reason, visible even when its family chip is dots. */
-  familyFollowUpLabel?: "Needs Your Input" | "Ready for Review";
+  familyFollowUpLabel?: "Needs Your Input" | "Result Available";
 }
 
 /** The one badge a row draws. */
@@ -77,7 +77,7 @@ function snoozedCondition(session: SessionStatusSource, needs: readonly SessionC
  *    attention reasons count among them.
  * 2. Else Background Work Lost, Disconnected, then Waiting on External Job (`sessionStatusSummary()`).
  * 3. Else a fired reminder's Returned.
- * 4. Else an outstanding human result's Ready for Review.
+ * 4. Else an outstanding human result's Result Available.
  * 5. Else the lifecycle status, except Awaiting Prompt, which shows no badge.
  *
  * A family's human-attention reason is visible on its parent's badge at every list width, including
@@ -110,7 +110,7 @@ export function sessionRowStatus(session: SessionStatusSource, context: SessionR
   if ((!primary || (primary.kind === "lifecycle" && primary.meta.tone !== "danger" && !session.stopOperation)) &&
       needs.length === 0 && reminder?.state !== "fired" &&
       session.attention && sessionFollowUp(session as SessionView).group === "ready_for_review") {
-    primary = { kind: "lifecycle", meta: { label: "Ready for Review", tone: "warning", pulse: false },
+    primary = { kind: "lifecycle", meta: { label: "Result Available", tone: "neutral", pulse: false },
       description: "A new result is waiting for your assessment or next instructions.", needsYou: true };
   }
   const others = needs.slice(1).map(conditionName);
@@ -125,7 +125,7 @@ export function sessionRowStatus(session: SessionStatusSource, context: SessionR
       ? "A session in this family is waiting for your input."
       : "A result in this family is waiting for your assessment or next instructions.";
     primary = { kind: "lifecycle", meta: { label: familyLabel,
-      tone: keepPrevious && previous.meta.tone === "danger" ? "danger" : "warning", pulse: false },
+      tone: keepPrevious && previous.meta.tone === "danger" ? "danger" : familyLabel === "Needs Your Input" ? "warning" : "neutral", pulse: false },
       description: keepPrevious ? `${description} ${previous.description}` : description, needsYou: true };
   }
   if (!primary) return { badge: null, others };

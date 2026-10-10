@@ -45,7 +45,7 @@ for (const width of [1440, 390]) {
       .find((s) => s.id === "session-review")!.attention!.acknowledgedRevision)).toBeNull();
     await row(page, result).click({ button: "right" });
     await page.getByRole("menuitem", { name: "Mark Reviewed", exact: true }).click();
-    await expect(row(page, result).getByText("Ready for Review", { exact: true })).toHaveCount(0);
+    await expect(row(page, result).getByText("Result Available", { exact: true })).toHaveCount(0);
     expect(await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.model().sessions
       .find((s) => s.id === "session-review")!.attention!.acknowledgedRevision)).toBe("result-2");
     await page.reload();
@@ -129,7 +129,7 @@ test("mobile touch menu keeps its target while a result changes priority", async
   await page.getByRole("menuitem", { name: "Mark Reviewed", exact: true }).click();
   expect(await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.model().sessions
     .find((s) => s.id === "session-review")!.attention!.acknowledgedRevision)).toBe("result-1");
-  await expect(row(page, work).getByText("Ready for Review", { exact: true })).toBeVisible();
+  await expect(row(page, work).getByText("Result Available", { exact: true })).toBeVisible();
 });
 
 if (process.env.WOLLIPOG_CAPTURE_EVIDENCE === "1") {
@@ -149,4 +149,54 @@ if (process.env.WOLLIPOG_CAPTURE_EVIDENCE === "1") {
       await page.screenshot({ path: `/tmp/2717-evidence/after-${width}-${theme}-review-menu.png`, fullPage: true });
     });
   }
+}
+
+
+for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
+  test(`questions stand out from available results while collapsed children keep working at ${width}px in ${theme}`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await open(page);
+    await page.evaluate((theme) => {
+      document.documentElement.dataset.theme = theme;
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-working", { parentSessionId: "session-review" });
+    }, theme);
+    const parent = row(page, result);
+    const resultBadge = parent.locator(".status");
+    const answerBadge = row(page, input).locator(".status");
+    await expect(resultBadge).toHaveText("Result Available");
+    await expect(resultBadge).toHaveClass(/t-neutral/);
+    await expect(answerBadge).toHaveText("Answer Required");
+    await expect(answerBadge).toHaveClass(/t-warning/);
+    expect(await resultBadge.evaluate((badge) => getComputedStyle(badge).color))
+      .not.toBe(await answerBadge.evaluate((badge) => getComputedStyle(badge).color));
+    await parent.locator(".inbox-thread-toggle").click();
+    await expect(row(page, work)).toHaveCount(0);
+    const working = parent.locator(width < 600 ? ".inbox-thread-working" : ".inbox-thread-family-text");
+    await expect(working).toBeVisible();
+    await expect(working).toContainText("1 Working");
+    await parent.hover();
+    const actions = parent.locator(".inbox-row-actions");
+    await expect(actions).toBeVisible();
+    const workingBox = await working.boundingBox();
+    const actionsBox = await actions.boundingBox();
+    expect(workingBox).not.toBeNull();
+    expect(actionsBox).not.toBeNull();
+    expect(workingBox!.x + workingBox!.width).toBeLessThanOrEqual(actionsBox!.x);
+    expect(await working.evaluate((label) => label.scrollWidth <= label.clientWidth)).toBe(true);
+    await expect(parent.locator(".inbox-thread-family")).toHaveAttribute("aria-label", /1 Working/);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.emulateMedia({ forcedColors: "active" });
+    await expect(answerBadge).toHaveAccessibleName("Status: Answer Required");
+    await expect(resultBadge).toHaveAccessibleName("Status: Result Available");
+    await expect(working).toBeVisible();
+    await page.emulateMedia({ forcedColors: "none" });
+    await page.evaluate(() => {
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-working", { status: "completed" });
+    });
+    await expect(parent.locator(".inbox-thread-working")).toHaveCount(0);
+    await expect(resultBadge).toHaveText("Result Available");
+    await parent.click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Mark Reviewed", exact: true }).click();
+    await expect(resultBadge).toHaveText("Running");
+  });
 }
