@@ -2,6 +2,25 @@ import { expect, test } from "@playwright/test";
 import { installInboxFixture } from "./inbox-production-fixture.js";
 import { encodeResourceId } from "../src/navigation.js";
 
+test("keyboard navigation from the inbox reader focuses a delayed route's title @production", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await installInboxFixture(page);
+  let release!: () => void;
+  const pending = new Promise<void>((done) => { release = done; });
+  await page.route("**/assets/ArchivedSessionsView-*.js", async (route) => { await pending; await route.continue(); });
+  await page.goto("/index.html");
+  await expect(page.getByText("Synthetic Session 1", { exact: true })).toBeVisible();
+  await expect(page.locator(".inbox-preview-skeleton")).toBeHidden();
+  await page.locator(".inbox-list").focus();
+  await expect(page.locator(".inbox-list")).toBeFocused();
+  const digit = await page.getByRole("link", { name: "Archived Sessions", exact: true }).getAttribute("aria-keyshortcuts");
+  await page.keyboard.press(digit!.trim());
+  await expect(page.locator("[data-route-loading]")).toBeVisible();
+  release();
+  await expect(page.locator("[data-route-loading]")).toBeHidden();
+  await expect(page.getByRole("heading", { name: "Archived Sessions", exact: true })).toBeFocused();
+});
+
 for (const focusDestination of ["page title", "deliberately moved control", "deliberately blurred body"] as const) {
   test(`a delayed route preserves ${focusDestination} focus @production`, async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
