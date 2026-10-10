@@ -13,7 +13,7 @@ import { ViewerIdentityContext, type ViewerIdentity } from "../resolver-identity
 import {
   ArtifactPreviewBody,
   ArtifactPreviewDialog,
-  ArtifactPreviewHeader,
+  ArtifactPreviewBar,
   ArtifactPreviewMeta,
   DOWNLOAD_WARNING,
   useArtifactPreview,
@@ -44,12 +44,12 @@ function artifact(kind: WorkflowArtifactKind, name: string, body: string | Uint8
 
 const viewer: ViewerIdentity = { userId: "usr_8f2c41", shared: false, names: new Map() };
 
-/** The Browser's anatomy without the panel: the header, the meta line and the body over one load. */
-function Preview({ item, onBack }: { item: WorkflowArtifactView; onBack?: () => void }) {
+/** The Browser's anatomy without the panel: the bar, the meta line and the body over one load. */
+function Preview({ item }: { item: WorkflowArtifactView }) {
   const model = useArtifactPreview(item);
   return (
     <div className="art-view">
-      <ArtifactPreviewHeader model={model} onBack={onBack} />
+      <ArtifactPreviewBar model={model} />
       <ArtifactPreviewMeta model={model} />
       <ArtifactPreviewBody model={model} />
     </div>
@@ -101,21 +101,18 @@ const buttonNamed = (scope: ParentNode, name: string) =>
     .find((button) => (button.getAttribute("aria-label") ?? button.textContent?.trim()) === name) ?? null;
 
 describe("the artifact preview's header and meta line (#2855)", () => {
-  test("one 48px bar: Back to Artifacts, the title from the leading edge, then Download", async () => {
+  test("one bar of Enlarge and Download, with no back and no title of its own (#2914)", async () => {
     const item = artifact("test_log", "web unit suite.log", "ok 1\n");
-    let backs = 0;
-    const container = await render(<Preview item={item} onBack={() => backs++} />, exporting(item, "ok 1\n"));
+    const container = await render(<Preview item={item} />, exporting(item, "ok 1\n"));
     await settle(ready(container), "the log");
     const bar = container.querySelector(".art-bar")!;
     assert.ok(bar.classList.contains("toolbar"));
-    // Download's progress line is a visually hidden sibling, not a control.
+    // Download's progress line is a visually hidden sibling, not a control; a log has no Enlarge.
     const controls = [...bar.querySelectorAll(":scope > button, :scope > h2")]
       .map((child) => child.getAttribute("aria-label") ?? child.textContent?.trim());
-    assert.deepEqual(controls, ["Back to Artifacts", "web unit suite.log", "Download"], "back, title, Download in order");
-    assert.equal(bar.querySelector("h2.art-title")?.getAttribute("title"), "web unit suite.log");
+    assert.deepEqual(controls, ["Download"], "the panel header carries Back and the title, so the bar has neither");
+    assertNoDomNode(bar.querySelector("h2"), "the title is shown once, in the panel header");
     assert.doesNotMatch(container.textContent ?? "", /‹/u, "no text-glyph back");
-    await act(async () => buttonNamed(bar, "Back to Artifacts")!.click());
-    assert.equal(backs, 1);
   });
 
   test("the meta line names kind, size, author and Verified, and never a MIME type, hash or user id", async () => {
@@ -286,6 +283,44 @@ describe("the artifact preview's bodies (#2855)", () => {
     const container = await render(<Preview item={item} />, exporting(item, "x"));
     await settle(ready(container), "the log");
     assertNoDomNode(buttonNamed(container, "Enlarge"));
+  });
+
+  test("closed and reopened, a preview loads again rather than showing the media URL it revoked (#2914)", async () => {
+    const bytes = new Uint8Array([137, 80, 78, 71]);
+    const item = artifact("screenshot", "Settings at 390px.png", bytes);
+    const priorCreate = URL.createObjectURL;
+    const priorRevoke = URL.revokeObjectURL;
+    let created = 0;
+    const revoked: string[] = [];
+    URL.createObjectURL = () => `blob:shot-${++created}`;
+    URL.revokeObjectURL = (url: string) => { revoked.push(url); };
+    // The Browser holds one preview for whichever artifact is on top, so Back passes no artifact.
+    let setOpen!: (open: boolean) => void;
+    function Reopened() {
+      const [open, set] = React.useState(true);
+      setOpen = set;
+      const model = useArtifactPreview(open ? item : null);
+      return model ? <ArtifactPreviewBody model={model} /> : <p>Closed</p>;
+    }
+    let exports = 0;
+    try {
+      const container = await render(<Reopened />, () => {
+        exports += 1;
+        // The second load never answers, so what shows is whatever the hook derives meanwhile.
+        return exports === 1 ? Promise.resolve(new Blob([bytes as BlobPart], { type: item.mimeType })) : new Promise<Blob>(() => {});
+      });
+      await settle(ready(container), "the screenshot");
+      assert.equal(container.querySelector("img.art-image")?.getAttribute("src"), "blob:shot-1");
+      await act(async () => setOpen(false));
+      assert.deepEqual(revoked, ["blob:shot-1"], "closing releases the image's URL");
+      await act(async () => setOpen(true));
+      assert.equal(exports, 2, "reopening asks for the bytes again");
+      assert.equal(container.querySelector(".artifact-preview")?.getAttribute("aria-busy"), "true", "and shows loading meanwhile");
+      assertNoDomNode(container.querySelector("img.art-image"), "never the revoked URL");
+    } finally {
+      URL.createObjectURL = priorCreate;
+      URL.revokeObjectURL = priorRevoke;
+    }
   });
 });
 

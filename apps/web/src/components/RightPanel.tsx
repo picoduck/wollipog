@@ -126,47 +126,6 @@ export function PanelHeaderActions({ children }: { children: ReactNode }) {
   return slot ? createPortal(children, slot) : null;
 }
 
-/** What a tool's Back does from the phone panel's header, and its Title Case name. */
-export interface PanelBack {
-  label: string;
-  onBack: () => void;
-}
-
-type ToolBack = { label: string; run: () => void } | null;
-
-interface PanelBackSlot {
-  /** The panel is a phone sheet, whose header leads with a Back (#2843). */
-  phone: boolean;
-  set: (update: ToolBack | ((current: ToolBack) => ToolBack)) => void;
-  /** Focus the header's Back. */
-  focus: () => void;
-}
-
-/** Where a tool registers its own Back (`usePanelBack`). */
-const PanelBackContext = createContext<PanelBackSlot | null>(null);
-
-/**
- * A tool's own Back in the phone panel's header (#2855), so a page inside a tool, such as an open
- * artifact, has one back control: while `back` is set on a phone, the header's Back takes its name
- * and runs it instead of Back to Session. `carried` says the header carries it, when the tool must
- * not draw a back of its own; on a desktop panel, whose header has no Back, it is false. #2856's page
- * stack is meant to absorb this. Outside the side panel it does nothing.
- */
-export function usePanelBack(back: PanelBack | null): { carried: boolean; focus: () => void } {
-  const slot = useContext(PanelBackContext);
-  const handlerRef = useRef(back?.onBack);
-  handlerRef.current = back?.onBack;
-  const label = back?.label ?? null;
-  const carried = Boolean(slot?.phone && label !== null);
-  useLayoutEffect(() => {
-    if (!slot?.phone || label === null) return;
-    const entry = { label, run: () => handlerRef.current?.() };
-    slot.set(entry);
-    return () => slot.set((current) => (current === entry ? null : current));
-  }, [slot, label]);
-  return { carried, focus: () => slot?.focus() };
-}
-
 /**
  * A tool's own Escape layer on its body (§16.2): a selection such as Review's Select Lines (#2849).
  * While one is registered, Escape inside the panel goes to it instead of restoring or closing the
@@ -668,16 +627,6 @@ export function RightPanel({
 
   // The tool's own Escape layer, when it has one (`usePanelEscapeLayer`).
   const escapeLayerRef = useRef<(() => void) | null>(null);
-  // The tool's own Back on a phone, when it has one (`usePanelBack`).
-  const [toolBack, setToolBack] = useState<ToolBack>(null);
-  const phoneBackRef = useRef<HTMLButtonElement>(null);
-  // One slot per presentation, so a tool re-registers only when the panel crosses the breakpoint.
-  const backSlotRef = useRef<PanelBackSlot | null>(null);
-  if (backSlotRef.current?.phone !== phone) {
-    backSlotRef.current = { phone, set: setToolBack, focus: () => phoneBackRef.current?.focus() };
-  }
-  const backSlot = backSlotRef.current;
-  const phoneBack = phone ? toolBack : null;
   /** Escape's step for the panel itself: Restore Panel while expanded, then Close Panel (#2845). */
   const dismiss = expanded ? () => state.setExpanded(false) : state.close;
 
@@ -989,8 +938,7 @@ export function RightPanel({
           />
         );
       case "browser":
-        // An open artifact's Back to Artifacts is the phone header's Back (`usePanelBack`, #2855).
-        return <PanelBackContext.Provider value={backSlot}><BrowserPanel session={session} /></PanelBackContext.Provider>;
+        return <BrowserPanel session={session} />;
       case "sidechat":
         return <SideChatPanel session={session} runnerOnline={runnerOnline} onInsertDraft={onInsertSideChatDraft} />;
       case "subagents":
@@ -1128,12 +1076,11 @@ export function RightPanel({
           )}
           {!page && phone && (
             <button
-              ref={phoneBackRef}
               type="button"
               className="icon-btn"
-              onClick={phoneBack?.run ?? state.close}
-              title={phoneBack?.label ?? "Back to Session"}
-              aria-label={phoneBack?.label ?? "Back to Session"}
+              onClick={state.close}
+              title="Back to Session"
+              aria-label="Back to Session"
             >
               <ChevronLeftIcon />
             </button>

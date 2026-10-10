@@ -1,3 +1,4 @@
+import { fireDomEvent } from "./test-dom-events.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { after, before, beforeEach, describe, test } from "node:test";
@@ -11,13 +12,15 @@ import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime } from "../ui-transport.js";
 import { clearPanelScratch } from "../right-panel-scratch.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import type { GitStatus } from "./useGitStatus.js";
 import { RightPanel, useRightPanelState, type RightPanelState } from "./RightPanel.js";
 
 /**
- * The Browser's open artifact inside the real side panel (#2855): one back control at every width.
- * On a desktop panel it is the artifact header's Back to Artifacts; on a phone, whose panel header
- * already leads with a Back (#2843), that Back becomes Back to Artifacts and the header draws none.
+ * The Browser's open artifact inside the real side panel: a page on the panel's stack (#2914, #2856),
+ * so its one back control at every width is the panel header's Back to Browser, beside the page's
+ * title. Escape pops it as Back does, and focus returns to the artifact's row. Like every tool's
+ * page it clears on a tool switch, while the tab and the address stay in panel scratch (#1202).
  */
 const domWindow = new Window({ url: "http://localhost/", settings: { disableIframePageLoading: true } });
 installDomTestCleanup(domWindow);
@@ -36,7 +39,8 @@ const globals: Record<string, unknown> = {
   window: domWindow, document: domWindow.document, localStorage: domWindow.localStorage,
   navigator: domWindow.navigator, HTMLElement: domWindow.HTMLElement, HTMLButtonElement: domWindow.HTMLButtonElement,
   Element: domWindow.Element, Node: domWindow.Node, Event: domWindow.Event, MouseEvent: domWindow.MouseEvent,
-  ResizeObserver: domWindow.ResizeObserver, React, IS_REACT_ACT_ENVIRONMENT: true,
+  ResizeObserver: domWindow.ResizeObserver, InputEvent: domWindow.InputEvent, KeyboardEvent: domWindow.KeyboardEvent,
+  HTMLInputElement: domWindow.HTMLInputElement, React, IS_REACT_ACT_ENVIRONMENT: true,
 };
 const prior = Object.fromEntries(Object.keys(globals).map((name) => [name, (globalThis as Record<string, unknown>)[name]]));
 before(() => {
@@ -144,43 +148,108 @@ async function openArtifact(panel: Element) {
   await settle(() => panel.querySelector(".artifact-preview")?.getAttribute("aria-busy") === "false", "the preview");
 }
 
-describe("one back control in the panel for an open artifact (#2855)", () => {
-  test("on a desktop panel it is the artifact header's Back to Artifacts; the panel header has none", async () => {
+/** Only what shows: the list waits mounted under a page, hidden. */
+const shown = (element: Element | null) => !!element && !element.closest("[hidden]");
+const row = (panel: Element) => panel.querySelector<HTMLButtonElement>(".browser-artifact-list .row")!;
+const pageTitle = (panel: Element) => panel.querySelector<HTMLElement>(".rpanel-head .rpanel-page-title")!;
+const focused = (element: Element | null) => Object.is(domWindow.document.activeElement, element);
+
+async function pressEscape() {
+  const target = domWindow.document.activeElement ?? domWindow.document.body;
+  await act(async () => {
+    target.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+  });
+}
+
+describe("an open artifact is a page with the panel header's Back as its one back control (#2914)", () => {
+  for (const phone of [false, true]) {
+    test(`on a ${phone ? "phone" : "desktop panel"}, Back to Browser and the title lead the header, and the bar has neither`, async () => {
+      const view = await openPanel(phone);
+      try {
+        const head = view.panel.querySelector(".rpanel-head")!;
+        assert.deepEqual(backs(view.panel), phone ? ["Back to Session"] : [], "the list keeps the panel's own Back");
+        await openArtifact(view.panel);
+        assert.deepEqual(backs(view.panel), ["Back to Browser"], "exactly one back control while an artifact is open");
+        assert.deepEqual(backs(head), ["Back to Browser"], "and it is the panel header's");
+        assert.equal(head.querySelector('button[aria-label="Back to Browser"]')?.getAttribute("title"), "Back to Browser");
+        assert.equal(pageTitle(view.panel).hidden, false);
+        assert.equal(pageTitle(view.panel).textContent, log.name, "the page's title is in the header");
+        assert.ok(focused(pageTitle(view.panel)), "the title takes focus as the page opens");
+        assertNoDomNode(head.querySelector(".rpanel-switcher"), "the title takes the switcher's place");
+        const bar = view.panel.querySelector(".rpanel-toolbar > .art-bar")!;
+        assert.deepEqual([...bar.querySelectorAll(":scope > button")].map((button) => button.textContent?.trim()), ["Download"],
+          "the bar keeps Download (and Enlarge, for media) and draws no back");
+        assert.equal([...view.panel.querySelectorAll(".rpanel-body *")].filter((node) => shown(node) && node.textContent === log.name).length, 0,
+          "the title is shown once");
+        assertNoDomNode(view.panel.querySelector('[role="tablist"][aria-label="Browser"]'), "the tabs give way to the page");
+        assert.ok(row(view.panel), "the list stays mounted under the page");
+        assert.equal(shown(row(view.panel)), false, "hidden");
+      } finally {
+        await view.dispose();
+      }
+    });
+
+    test(`on a ${phone ? "phone" : "desktop panel"}, Back and Escape each return to the list with focus on the artifact's row`, async () => {
+      const view = await openPanel(phone);
+      try {
+        assert.equal(row(view.panel).dataset.panelPageKey, log.artifactId, "the row carries its page's key");
+        for (const close of ["Back", "Escape"] as const) {
+          await act(async () => row(view.panel).focus());
+          await openArtifact(view.panel);
+          if (close === "Back") {
+            await act(async () => view.panel.querySelector<HTMLButtonElement>('.rpanel-head button[aria-label="Back to Browser"]')!.click());
+          } else {
+            await pressEscape();
+          }
+          assert.equal(view.state.open, true, `${close} keeps the panel open`);
+          assert.ok(shown(row(view.panel)), `${close} shows the list again`);
+          assert.ok(focused(row(view.panel)), `${close} returns focus to the artifact's row`);
+          assert.equal(pageTitle(view.panel).hidden, true);
+          assert.deepEqual(backs(view.panel), phone ? ["Back to Session"] : [], `after ${close} the panel's Back is its own again`);
+        }
+        if (phone) {
+          await act(async () => view.panel.querySelector<HTMLButtonElement>('.rpanel-head button[aria-label="Back to Session"]')!.click());
+          assert.equal(view.state.open, false, "Back to Session still closes the panel");
+        }
+      } finally {
+        await view.dispose();
+      }
+    });
+  }
+
+  test("switching tools and back reopens the Browser on its list, with the tab and the address kept", async () => {
     const view = await openPanel(false);
     try {
-      assert.deepEqual(backs(view.panel), [], "the list has no back control");
+      const tab = (name: string) => [...view.panel.querySelectorAll<HTMLButtonElement>('[role="tablist"][aria-label="Browser"] [role="tab"]')]
+        .find((candidate) => candidate.textContent?.startsWith(name))!;
+      await act(async () => tab("Web Preview").click());
+      const address = view.panel.querySelector<HTMLInputElement>("#browser-url")!;
+      await act(async () => fireDomEvent.change(address, { target: { value: "http://preview.test/dashboard" } }));
+      await act(async () => fireDomEvent.submit(view.panel.querySelector(".browser-address")!));
+      assert.equal(view.panel.querySelector(".browser-web-frame")?.getAttribute("src"), "http://preview.test/dashboard");
+      await act(async () => tab("Artifacts").click());
       await openArtifact(view.panel);
-      assert.deepEqual(backs(view.panel), ["Back to Artifacts"]);
-      assert.deepEqual(backs(view.panel.querySelector(".rpanel-head")!), [], "the panel header has Close, not Back");
-      assert.ok(view.panel.querySelector('.art-bar button[aria-label="Back to Artifacts"]'));
-    } finally {
-      await view.dispose();
-    }
-  });
 
-  test("on a phone the panel's Back becomes Back to Artifacts, then Back to Session again on the list", async () => {
-    const view = await openPanel(true);
-    try {
-      (domWindow.document.activeElement as unknown as HTMLElement | null)?.blur();
-      const head = view.panel.querySelector(".rpanel-head")!;
-      assert.deepEqual(backs(view.panel), ["Back to Session"], "the list keeps #2843's Back");
+      await act(async () => view.state.show("decisions"));
+      await act(async () => view.state.show("browser"));
+      await settle(() => !!view.panel.querySelector(".browser-artifact-list .row"), "the artifact list");
+      assert.equal(pageTitle(view.panel).hidden, true, "no page is pushed");
+      assert.deepEqual(backs(view.panel), []);
+      assert.ok(shown(row(view.panel)), "the Browser shows its list");
+      assertNoDomNode(view.panel.querySelector(".art-bar"), "and no preview");
+      assert.equal(tab("Artifacts").getAttribute("aria-selected"), "true", "the tab is kept");
+      await act(async () => tab("Web Preview").click());
+      assert.equal(view.panel.querySelector<HTMLInputElement>("#browser-url")!.value, "http://preview.test/dashboard", "the address is kept");
+      assert.equal(view.panel.querySelector(".browser-web-frame")?.getAttribute("src"), "http://preview.test/dashboard", "the open page is kept");
+
+      await act(async () => tab("Artifacts").click());
       await openArtifact(view.panel);
-      assert.deepEqual(backs(view.panel), ["Back to Artifacts"], "exactly one back control while an artifact is open");
-      const back = head.querySelector<HTMLButtonElement>('button[aria-label="Back to Artifacts"]')!;
-      assert.equal(back.getAttribute("title"), "Back to Artifacts");
-      assert.equal(view.panel.querySelector(".art-bar")?.querySelectorAll("button[aria-label^='Back']").length, 0,
-        "the artifact header draws no back of its own");
-      assert.ok(Object.is(domWindow.document.activeElement, back), "the panel's Back takes focus as the row goes away");
-
-      await act(async () => back.click());
-      assert.equal(view.state.open, true, "Back to Artifacts keeps the panel open");
-      const row = view.panel.querySelector<HTMLButtonElement>(".browser-artifact-list .row");
-      assert.ok(row, "the list is back");
-      assert.ok(Object.is(domWindow.document.activeElement, row), "focus is on the artifact's row");
-      assert.deepEqual(backs(view.panel), ["Back to Session"], "the panel's Back is #2843's again");
-
-      await act(async () => head.querySelector<HTMLButtonElement>('button[aria-label="Back to Session"]')!.click());
-      assert.equal(view.state.open, false, "Back to Session still closes the panel");
+      await act(async () => view.state.close());
+      await act(async () => view.state.show("browser"));
+      await settle(() => !!domWindow.document.querySelector("#right-panel .browser-artifact-list .row"), "the reopened list");
+      const reopened = domWindow.document.querySelector("#right-panel") as unknown as Element;
+      assert.equal(pageTitle(reopened).hidden, true, "closing the panel clears the page too");
+      assert.ok(shown(row(reopened)));
     } finally {
       await view.dispose();
     }

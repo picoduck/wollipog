@@ -192,36 +192,36 @@ test.describe("on a phone", () => {
 });
 
 /**
- * An opened artifact (#2855; docs/design-system.md §11.9): one 48px header with the title from its
- * leading edge and one back control, a plain meta line, Download's menu carrying the warning, the
- * bodies and their states, at the panel's 400px and on a 390px phone.
+ * An opened artifact (#2855; docs/design-system.md §11.9): a 48px bar of Enlarge and Download, a plain
+ * meta line, Download's menu carrying the warning, the bodies and their states, at the panel's 400px
+ * and on a 390px phone. It is a page of the side panel (#2914), whose header carries its Back and
+ * title; this fixture's header is a stand-in, so those are covered in artifact-panel-back.spec.ts.
  */
 async function openArtifact(page: Page, name: string) {
   await page.locator(".browser-artifact-list .row").filter({ hasText: name }).click();
-  await expect(page.locator(".art-bar .art-title")).toHaveText(name);
+  await expect(page.locator(".rpanel-toolbar > .art-bar")).toBeVisible();
+  await expect(page.locator(".browser-artifact-list")).toBeHidden();
 }
 
 for (const [label, width, touch] of [["a 400px panel", 1440, false], ["a 390px phone", 390, true]] as const) {
   test.describe(`an artifact preview in ${label}`, () => {
     test.use({ hasTouch: touch, isMobile: touch });
 
-    test("the title is left-aligned in a 48px header with one back control", async ({ page }) => {
+    test("a 48px bar holds Download at its trailing edge, with no back and no title of its own", async ({ page }) => {
       await openBrowser(page, width);
       await openArtifact(page, "Review of the Browser panel rebuild");
       const bar = page.locator(".rpanel-toolbar > .art-bar");
-      expect((await bar.boundingBox())!.height).toBe(48);
-      const back = bar.getByRole("button", { name: "Back to Artifacts" });
-      await expect(back).toBeFocused();
-      await expect(page.getByRole("button", { name: /^Back/u })).toHaveCount(1);
-      const title = (await bar.locator(".art-title").boundingBox())!;
-      const backBox = (await back.boundingBox())!;
-      expect(title.x - (backBox.x + backBox.width), "the title starts right after Back").toBeLessThanOrEqual(8);
+      const barBox = (await bar.boundingBox())!;
+      expect(barBox.height).toBe(48);
+      await expect(page.getByRole("button", { name: /^Back/u })).toHaveCount(0);
+      await expect(bar.locator("h2")).toHaveCount(0);
+      const download = (await bar.getByRole("button", { name: "Download" }).boundingBox())!;
+      expect(barBox.x + barBox.width - (download.x + download.width), "Download sits at the bar's trailing padding").toBeLessThanOrEqual(17);
+      await expect(page.getByRole("tablist", { name: "Browser" })).toHaveCount(0);
       await expect(page.locator(".art-meta")).toContainText("Review report");
       await expect(page.locator(".art-meta .art-verified")).toHaveText("Verified");
       await expect(page.locator(".art-meta")).not.toContainText("text/markdown");
       await expect(page.locator(".art-markdown h1")).toHaveCount(0);
-      await back.click();
-      await expect(page.locator(".browser-artifact-list .row").first()).toBeFocused();
     });
 
     test("Download's menu carries the warning, and a JSON verdict reads in a code well", async ({ page }) => {

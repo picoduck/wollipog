@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { ArtifactUploadNotice } from "./ArtifactUploadNotice.js";
 import { Notice } from "./Notice.js";
 import { TabList } from "./Tabs.js";
@@ -14,9 +14,9 @@ import { useApi } from "../api-context.js";
 import { normalizeBrowserUrl } from "../artifact-preview.js";
 import { handleRovingChoiceKeyDown } from "./interactions.js";
 import { useTimelineClock } from "../timeline-clock.js";
-import { ArtifactPreviewBody, ArtifactPreviewHeader, ArtifactPreviewMeta, ArtifactRow, useArtifactPreview } from "./ArtifactPreview.js";
+import { ArtifactPreviewBar, ArtifactPreviewBody, ArtifactPreviewMeta, ArtifactRow, useArtifactPreview } from "./ArtifactPreview.js";
 import { usePanelScratchChoice, usePanelScratchScope, usePanelScratchText } from "../right-panel-scratch.js";
-import { usePanelBack } from "./RightPanel.js";
+import { PanelPageTitle, usePanelPages } from "./PanelPages.js";
 
 type BrowserMode = "artifacts" | "web";
 
@@ -27,8 +27,9 @@ export const PAGE_BLOCKED_AFTER_MS = 8_000;
 export function BrowserPanel({ session }: { session: SessionView }) {
   const api = useApi();
   // Where this session's browsing was left. The panel unmounts on every mode switch, so without
-  // this the tab, the address, and the artifact being read are gone on return (#1202). The empty
-  // string is "nothing opened yet" throughout.
+  // this the tab and the address are gone on return (#1202). The empty string is "nothing opened
+  // yet" throughout. An open artifact is a pushed page instead (#2914), so like every tool's page it
+  // clears on a switch and the Browser reopens on its list (§4.9).
   const panelScratch = usePanelScratchScope(session.id);
   const [mode, setMode] = usePanelScratchChoice<BrowserMode>(
     panelScratch, "browser.mode", "artifacts", (raw) => raw === "artifacts" || raw === "web",
@@ -51,12 +52,12 @@ export function BrowserPanel({ session }: { session: SessionView }) {
   const [listError, setListError] = useState<string | null>(null);
   // Bumped by Retry: the first page loads again from the top.
   const [listAttempt, setListAttempt] = useState(0);
-  // The artifact is remembered by id and re-resolved against the list this mount loaded: an id the
-  // reloaded pages no longer carry simply returns the list, never a stale preview.
-  const [selectedId, setSelectedId] = usePanelScratchText(panelScratch, "browser.artifactId");
-  const selected = artifacts.find((artifact) => artifact.artifactId === selectedId) ?? null;
-  // The artifact a preview was just left from, so the list puts focus back on its row.
-  const returnToRef = useRef("");
+  // The open artifact is the page on top of the panel's stack, keyed by its id (#2914), and resolved
+  // against the list this mount loaded: an id the list doesn't carry shows the list, never a stale
+  // preview.
+  const pages = usePanelPages();
+  const selected = pages.current === null ? null : artifacts.find((artifact) => artifact.artifactId === pages.current) ?? null;
+  const preview = useArtifactPreview(selected);
   const generationRef = useRef(0);
 
   useEffect(() => {
@@ -76,6 +77,13 @@ export function BrowserPanel({ session }: { session: SessionView }) {
     });
     return () => { generationRef.current++; };
   }, [api, session.id, listAttempt]);
+
+  // A page whose artifact the settled list doesn't carry (another session's) gives way to the list,
+  // so the header never keeps a Back and an empty title over it.
+  const stalePage = pages.current !== null && selected === null && !listBusy;
+  useEffect(() => {
+    if (stalePage) pages.clear();
+  }, [stalePage, pages]);
 
   const loadMore = async () => {
     if (!cursor || listBusy) return;
@@ -104,55 +112,57 @@ export function BrowserPanel({ session }: { session: SessionView }) {
 
   // The tabs sit directly above the panel's slots, so their underline rests on a hairline (§10.1);
   // each tab's content is a PanelToolLayout of its own: Web Preview puts its address row in the
-  // toolbar slot, and both scroll in the one scroller.
+  // toolbar slot, and both scroll in the one scroller. An open artifact is a page over the Artifacts
+  // tab (#2914): the panel header carries its Back and title, so the tabs give way to it, its bar
+  // (Enlarge and Download) takes the toolbar slot, and the list waits hidden in the same scroller,
+  // with its rows and scroll there again on Back.
   return (
     <>
-      <TabList label="Browser" className="browser-tabs" onKeyDown={(event) => handleRovingChoiceKeyDown(event, "tab")}>
-        <button
-          id="browser-artifacts-tab"
-          type="button"
-          role="tab"
-          className="tab"
-          aria-selected={mode === "artifacts"}
-          aria-controls="browser-artifacts-panel"
-          tabIndex={mode === "artifacts" ? 0 : -1}
-          onClick={() => setMode("artifacts")}
-        >
-          Artifacts{count !== null && <span className="count">{count}</span>}
-        </button>
-        <button
-          id="browser-web-tab"
-          type="button"
-          role="tab"
-          className="tab"
-          aria-selected={mode === "web"}
-          aria-controls="browser-web-panel"
-          tabIndex={mode === "web" ? 0 : -1}
-          onClick={() => setMode("web")}
-        >
-          Web Preview
-        </button>
-      </TabList>
+      {!preview && (
+        <TabList label="Browser" className="browser-tabs" onKeyDown={(event) => handleRovingChoiceKeyDown(event, "tab")}>
+          <button
+            id="browser-artifacts-tab"
+            type="button"
+            role="tab"
+            className="tab"
+            aria-selected={mode === "artifacts"}
+            aria-controls="browser-artifacts-panel"
+            tabIndex={mode === "artifacts" ? 0 : -1}
+            onClick={() => setMode("artifacts")}
+          >
+            Artifacts{count !== null && <span className="count">{count}</span>}
+          </button>
+          <button
+            id="browser-web-tab"
+            type="button"
+            role="tab"
+            className="tab"
+            aria-selected={mode === "web"}
+            aria-controls="browser-web-panel"
+            tabIndex={mode === "web" ? 0 : -1}
+            onClick={() => setMode("web")}
+          >
+            Web Preview
+          </button>
+        </TabList>
+      )}
 
-      {mode === "web" ? (
+      {mode === "web" && !preview ? (
         <WebPreview
           urlInput={urlInput}
           setUrlInput={setUrlInput}
           url={openUrl || null}
           setUrl={setOpenUrl}
         />
-      ) : selected ? (
-        <ArtifactDetail
-          key={selected.artifactId}
-          artifact={selected}
-          onBack={() => {
-            returnToRef.current = selected.artifactId;
-            setSelectedId("");
-          }}
-        />
       ) : (
-        <PanelToolLayout>
-          <div id="browser-artifacts-panel" role="tabpanel" aria-labelledby="browser-artifacts-tab" className="browser-artifacts">
+        <PanelToolLayout toolbar={preview && <ArtifactPreviewBar key={preview.artifact.artifactId} model={preview} />}>
+          <div
+            id="browser-artifacts-panel"
+            role="tabpanel"
+            aria-labelledby="browser-artifacts-tab"
+            className="browser-artifacts"
+            hidden={preview !== null}
+          >
             <ArtifactUploadNotice />
             {listBusy && artifacts.length === 0 ? (
               <Skeleton rows={3} announce="Loading artifacts…" />
@@ -177,7 +187,7 @@ export function BrowserPanel({ session }: { session: SessionView }) {
               </State>
             ) : (
               <>
-                <ArtifactList artifacts={artifacts} returnTo={returnToRef} onOpen={setSelectedId} />
+                <ArtifactList artifacts={artifacts} onOpen={(artifactId) => pages.push(artifactId)} />
                 {listError && (
                   <Notice
                     tone="danger"
@@ -198,64 +208,32 @@ export function BrowserPanel({ session }: { session: SessionView }) {
               </>
             )}
           </div>
+          {/* The open artifact (#2855): the meta line and the body, under its title in the panel
+              header. The page takes focus on its title as it opens (§4.9). */}
+          {preview && (
+            <div key={preview.artifact.artifactId} className="browser-artifacts">
+              <PanelPageTitle>{preview.artifact.name}</PanelPageTitle>
+              <ArtifactPreviewMeta model={preview} />
+              <ArtifactPreviewBody model={preview} />
+            </div>
+          )}
         </PanelToolLayout>
       )}
     </>
   );
 }
 
-/**
- * An open artifact (#2855): its header in the toolbar slot, so the title, Enlarge and Download stay
- * put while the meta line and the body scroll under them. Back to Artifacts is the only back control:
- * the header's own on a desktop panel, and the panel's Back on a phone, whose header already leads
- * with one (`usePanelBack`). Back takes focus as the preview opens, since the row that opened it is
- * gone; on a phone that is the panel's Back.
- */
-function ArtifactDetail({ artifact, onBack }: { artifact: WorkflowArtifactView; onBack: () => void }) {
-  const model = useArtifactPreview(artifact);
-  const backRef = useRef<HTMLButtonElement>(null);
-  const panelBack = usePanelBack({ label: "Back to Artifacts", onBack });
-  useLayoutEffect(() => {
-    const focused = document.activeElement;
-    if (focused && focused !== document.body) return;
-    if (backRef.current) backRef.current.focus();
-    else panelBack.focus();
-    // Once, as the preview opens.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-  return (
-    <PanelToolLayout toolbar={<ArtifactPreviewHeader model={model} onBack={panelBack.carried ? undefined : onBack} backRef={backRef} />}>
-      <div id="browser-artifacts-panel" role="tabpanel" aria-labelledby="browser-artifacts-tab" className="browser-artifacts">
-        <ArtifactPreviewMeta model={model} />
-        <ArtifactPreviewBody model={model} />
-      </div>
-    </PanelToolLayout>
-  );
-}
-
-/** The rows; back from a preview, focus moves to the row that opened it. */
-function ArtifactList({ artifacts, returnTo, onOpen }: {
+/** The rows. Each carries its artifact's page key, where focus returns on Back (#2914). */
+function ArtifactList({ artifacts, onOpen }: {
   artifacts: readonly WorkflowArtifactView[];
-  returnTo: { current: string };
   onOpen: (artifactId: string) => void;
 }) {
   const now = useTimelineClock(artifacts.length > 0);
-  const listRef = useRef<HTMLUListElement>(null);
-  useLayoutEffect(() => {
-    const artifactId = returnTo.current;
-    returnTo.current = "";
-    // Set only by Back to Artifacts, which the person just chose: on a phone it is the panel's Back,
-    // which stays in place and so still holds focus here.
-    if (!artifactId) return;
-    const row = [...listRef.current?.querySelectorAll<HTMLElement>("li[data-artifact-id]") ?? []]
-      .find((item) => item.dataset.artifactId === artifactId);
-    row?.querySelector<HTMLButtonElement>("button")?.focus();
-  }, [returnTo]);
   return (
-    <ul className="browser-artifact-list" ref={listRef}>
+    <ul className="browser-artifact-list">
       {artifacts.map((artifact) => (
-        <li key={artifact.artifactId} data-artifact-id={artifact.artifactId}>
-          <ArtifactRow artifact={artifact} now={now} onOpen={() => onOpen(artifact.artifactId)} />
+        <li key={artifact.artifactId}>
+          <ArtifactRow artifact={artifact} now={now} pageKey={artifact.artifactId} onOpen={() => onOpen(artifact.artifactId)} />
         </li>
       ))}
     </ul>

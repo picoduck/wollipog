@@ -1,4 +1,4 @@
-import { Fragment, useContext, useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
+import { Fragment, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Notice } from "./Notice.js";
 import { State } from "./State.js";
 import { Modal } from "./Modal.js";
@@ -7,7 +7,7 @@ import { BusyButton } from "./ui/BusyButton.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { useAccessibleMenu } from "./interactions.js";
 import {
-  ChevronDownIcon, ChevronLeftIcon, CopyIcon, DiffIcon, DownloadIcon, HtmlIcon, ImageIcon, JsonIcon, LogIcon,
+  ChevronDownIcon, CopyIcon, DiffIcon, DownloadIcon, HtmlIcon, ImageIcon, JsonIcon, LogIcon,
   Maximize2Icon, ReportIcon, ShieldCheckIcon, VideoIcon, WrapLinesIcon,
 } from "./Icons.js";
 import type { WorkflowArtifactKind, WorkflowArtifactView } from "@wollipog/protocol";
@@ -76,12 +76,15 @@ function decodeUtf8(bytes: ArrayBuffer): string {
 
 /**
  * Explicit, authenticated artifact materialization shared by Run detail and the Browser panel. Only
- * bytes that match the artifact's length, type and SHA-256 reach a renderer.
+ * bytes that match the artifact's length, type and SHA-256 reach a renderer. With no artifact (a host
+ * whose list shows in its place) it loads nothing and has no model.
  */
-export function useArtifactPreview(artifact: WorkflowArtifactView): ArtifactPreviewModel {
+export function useArtifactPreview(artifact: WorkflowArtifactView): ArtifactPreviewModel;
+export function useArtifactPreview(artifact: WorkflowArtifactView | null): ArtifactPreviewModel | null;
+export function useArtifactPreview(artifact: WorkflowArtifactView | null): ArtifactPreviewModel | null {
   const api = useApi();
   const transcriptImageCache = useTranscriptImageCache();
-  const previewClass = classifyArtifactPreview(artifact);
+  const previewClass = artifact ? classifyArtifactPreview(artifact) : "unsupported";
   // Bumped by Retry: the same artifact loads again.
   const [attempt, setAttempt] = useState(0);
   // Keyed by the load it describes, so another artifact or a Retry starts loading in the render that
@@ -95,7 +98,7 @@ export function useArtifactPreview(artifact: WorkflowArtifactView): ArtifactPrev
   useEffect(() => {
     const request = ++requestRef.current;
     let objectUrl: string | null = null;
-    if (previewClass === "unsupported") return () => { requestRef.current++; };
+    if (!artifact || previewClass === "unsupported") return () => { requestRef.current++; };
     const setState = (next: PreviewState) => setSettled({ artifact, attempt, state: next });
 
     void (async () => {
@@ -132,10 +135,13 @@ export function useArtifactPreview(artifact: WorkflowArtifactView): ArtifactPrev
     return () => {
       requestRef.current++;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
+      // A host that outlives its preview (the Browser, whose Back passes no artifact) can reopen the
+      // same artifact on the same attempt: this load is over, so it must not read as ready again.
+      setSettled((current) => (current?.artifact === artifact && current.attempt === attempt ? null : current));
     };
   }, [api, artifact, previewClass, transcriptImageCache, attempt]);
 
-  return { artifact, previewClass, state, retry: () => setAttempt((count) => count + 1) };
+  return artifact && { artifact, previewClass, state, retry: () => setAttempt((count) => count + 1) };
 }
 
 /** Downloads the original bytes, checked like a preview's; the preview's own bytes when it has them. */
@@ -312,23 +318,13 @@ function HtmlFrame({ artifact, source, className }: { artifact: WorkflowArtifact
 }
 
 /**
- * The preview's header (#2855; docs/design-system.md §4.4): one 48px `.art-bar` with Back to
- * Artifacts where the host has a list to return to, the title from the leading edge, then Enlarge
- * and Download. It is the Browser's only back control.
+ * The preview's bar in the Browser (#2855, #2914; docs/design-system.md §11.9): one 48px `.art-bar`
+ * of Enlarge and Download at its trailing edge. The artifact is a page of the side panel, whose
+ * header carries its Back and its title, so the bar has neither.
  */
-export function ArtifactPreviewHeader({ model, onBack, backRef }: {
-  model: ArtifactPreviewModel;
-  onBack?: () => void;
-  backRef?: Ref<HTMLButtonElement>;
-}) {
+export function ArtifactPreviewBar({ model }: { model: ArtifactPreviewModel }) {
   return (
     <div className="toolbar art-bar">
-      {onBack && (
-        <button ref={backRef} type="button" className="icon-btn" aria-label="Back to Artifacts" title="Back to Artifacts" onClick={onBack}>
-          <ChevronLeftIcon />
-        </button>
-      )}
-      <h2 className="art-title" title={model.artifact.name}>{model.artifact.name}</h2>
       <EnlargeButton model={model} />
       <ArtifactDownloadMenu model={model} />
     </div>
@@ -495,19 +491,20 @@ export function ArtifactPreviewDialog({ artifact, onClose }: { artifact: Workflo
 /**
  * One artifact as a two-line row (§5.2): its kind on a 32px tile, the title over the kind, who saved
  * it where the host shows that, and when, and the size trailing on one line however narrow it gets.
- * No ids or hashes.
+ * No ids or hashes. `pageKey` names the side panel page the row opens (§4.9), where focus returns.
  */
-export function ArtifactRow({ artifact, now, showAuthor = false, onOpen }: {
+export function ArtifactRow({ artifact, now, showAuthor = false, pageKey, onOpen }: {
   artifact: WorkflowArtifactView;
   now: number;
   showAuthor?: boolean;
+  pageKey?: string;
   onOpen: () => void;
 }) {
   const KindIcon = KIND_ICONS[artifact.kind] ?? ReportIcon;
   const created = formatRecordedTimestamp(artifact.createdAt);
   const author = useArtifactAuthor(artifact);
   return (
-    <button type="button" className="row row-2" onClick={onOpen}>
+    <button type="button" className="row row-2" data-panel-page-key={pageKey} onClick={onOpen}>
       <span className="art-kind" aria-hidden="true"><KindIcon size={16} /></span>
       <span className="row-body">
         <span className="row-title" title={artifact.name}>{artifact.name}</span>
