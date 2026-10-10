@@ -158,3 +158,42 @@ test("keeps terminal shortcuts in xterm and supports the terminal-exit shortcut"
   await expect(page.locator(".detail-scroll")).toBeFocused();
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.logs().interactive.input)).toEqual(["c", "\u001b"]);
 });
+
+test("searches output with a match count, Previous and Next, Enter, Shift+Enter and Escape (#2864) @production", async ({ page }) => {
+  const terminal = page.getByRole("region", { name: "Interactive Terminal Fixture" });
+  await page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.appendInteractive(
+    "test one\r\ntest two\r\nthe test three\r\nlast test\r\ntest\r\n",
+  ));
+  await expect(terminalRows(terminal)).toContainText("last test");
+
+  await page.getByRole("button", { name: "Search Output" }).click();
+  const search = page.getByRole("group", { name: "Search Output" });
+  const field = search.getByRole("textbox", { name: "Search Output" });
+  await expect(field).toBeFocused();
+  await field.fill("test");
+  const count = search.getByRole("status");
+  await expect(count).toHaveText("1 of 5");
+  await search.getByRole("button", { name: "Next Match" }).click();
+  await expect(count).toHaveText("2 of 5");
+  await field.press("Enter");
+  await expect(count).toHaveText("3 of 5");
+  await search.getByRole("button", { name: "Previous Match" }).click();
+  await expect(count).toHaveText("2 of 5");
+  await field.press("Shift+Enter");
+  await expect(count).toHaveText("1 of 5");
+  // Previous from the first match wraps to the last.
+  await field.press("Shift+Enter");
+  await expect(count).toHaveText("5 of 5");
+  // Output that arrives while searching is counted without moving the selected match.
+  await page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.appendInteractive("one more test\r\n"));
+  await expect(count).toHaveText("5 of 6");
+
+  await field.fill("absent-term");
+  await expect(count).toHaveText("No matches");
+  await expect(search.getByRole("button", { name: "Next Match" })).toBeDisabled();
+
+  await field.press("Escape");
+  await expect(terminal.locator(".xterm-helper-textarea")).toBeFocused();
+  await expect(page.getByRole("button", { name: "Search Output" })).toBeVisible();
+  await expect(page.getByRole("group", { name: "Search Output" })).toHaveCount(0);
+});

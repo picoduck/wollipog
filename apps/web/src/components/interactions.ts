@@ -35,6 +35,9 @@ export function anchoredMenuPlacement(input: {
   align?: "start" | "end";
   gap?: number;
   margin?: number;
+  /** The side tried first. A menu from a bottom dock's head opens above it, over the content rather
+   * than the output under the head; either side falls back to the other when it is short. */
+  prefer?: "below" | "above";
 }): AnchoredMenuPlacement {
   const gap = input.gap ?? 6;
   const margin = input.margin ?? 8;
@@ -48,7 +51,10 @@ export function anchoredMenuPlacement(input: {
   const above = input.trigger.top - gap - margin;
   let top: number | "auto";
   let bottom: number | "auto" = "auto";
-  if (below >= maxHeight) {
+  if (input.prefer === "above" && above >= maxHeight) {
+    top = "auto";
+    bottom = viewportHeight - (input.trigger.top - gap);
+  } else if (below >= maxHeight) {
     top = input.trigger.bottom + gap;
   } else if (above >= maxHeight) {
     // The menu may render shorter than its requested maximum. Anchor its bottom edge so its real

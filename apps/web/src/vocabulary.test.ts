@@ -102,7 +102,6 @@ test("known placeholders read as hint text, not labels", () => {
 const EXPECTED_TOOLTIPS: ReadonlyArray<[string, string]> = [
   ["./components/GitDiffViewer.tsx", "Add a finding on this line"],
   ["./components/RunnersView.tsx", "Reconnect this machine"],
-  ["./components/ShellDock.tsx", "Close shell"],
 ];
 
 test("tooltips stay in sentence case", () => {

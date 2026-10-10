@@ -1,10 +1,28 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useImperativeHandle, useRef, type Ref } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { SearchAddon } from "@xterm/addon-search";
+import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
+import { TERMINAL_SEARCH_LIMIT, type TerminalSearchResults } from "../shells-panel.js";
 import { terminalTheme, type ResolvedTheme } from "../theme.js";
 import { TERMINAL_FONT_FAMILY, loadTerminalFont } from "../terminal-font.js";
 import "@xterm/xterm/css/xterm.css";
+
+/** What a host's search controls drive (#2864): Next and Previous Match, and focus on Escape. */
+export interface ShellTerminalHandle {
+  findNext(term: string): void;
+  findPrevious(term: string): void;
+  focus(): void;
+}
+
+/**
+ * The search addon counts matches only while it decorates them, so every search passes decorations.
+ * They carry no fill or border of their own: the selected match still shows as the terminal's
+ * selection, and the overview ruler they name is not enabled.
+ */
+const SEARCH_DECORATIONS: NonNullable<ISearchOptions["decorations"]> = {
+  matchOverviewRuler: "#808080",
+  activeMatchColorOverviewRuler: "#808080",
+};
 
 /**
  * One xterm.js pane bound to one shell's scrollback. xterm is the ANSI parser/renderer — raw
@@ -24,6 +42,8 @@ export function ShellTerminal({
   scheme,
   onData,
   onResize,
+  onSearchResults,
+  handleRef,
 }: {
   /** Capped raw scrollback from the store. */
   text: string;
@@ -31,7 +51,8 @@ export function ShellTerminal({
   total: number;
   /** PTY mode: capture keystrokes + report size. */
   interactive: boolean;
-  /** Incremental bounded-history search, highlighted directly in xterm. */
+  /** Incremental bounded-history search, selected directly in xterm. Next and Previous go through
+   * `handleRef`. */
   searchTerm: string;
   /** Resolved app palette; changes update the existing xterm without losing scrollback. */
   theme: ResolvedTheme;
@@ -46,6 +67,9 @@ export function ShellTerminal({
   scheme: string;
   onData?: (data: string) => void;
   onResize?: (cols: number, rows: number) => void;
+  /** The match count for `searchTerm`, refreshed as output arrives; null once the term is cleared. */
+  onSearchResults?: (results: TerminalSearchResults | null) => void;
+  handleRef?: Ref<ShellTerminalHandle>;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -65,6 +89,8 @@ export function ShellTerminal({
   onDataRef.current = onData;
   const onResizeRef = useRef(onResize);
   onResizeRef.current = onResize;
+  const onSearchResultsRef = useRef(onSearchResults);
+  onSearchResultsRef.current = onSearchResults;
   const interactiveRef = useRef(interactive);
   interactiveRef.current = interactive;
 
@@ -99,9 +125,11 @@ export function ShellTerminal({
         // face settled and the ordinary theme effect ran before xterm existed.
         theme: terminalTheme(themeRef.current),
         disableStdin: !interactiveAtMount,
+        // Search decorations (the only way the addon reports a match count) are proposed API.
+        allowProposedApi: true,
       });
       const fit = new FitAddon();
-      const search = new SearchAddon();
+      const search = new SearchAddon({ highlightLimit: TERMINAL_SEARCH_LIMIT });
       term.loadAddon(fit);
       term.loadAddon(search);
       term.open(host);
@@ -119,6 +147,11 @@ export function ShellTerminal({
         if (interactiveRef.current) onDataRef.current?.(d);
       });
       term.onResize(({ cols, rows }) => reportSize(cols, rows));
+      // The addon re-runs the search itself as output arrives (without scrolling), so the count
+      // follows the stream.
+      search.onDidChangeResults(({ resultIndex, resultCount }) => {
+        if (searchTermRef.current) onSearchResultsRef.current?.({ index: resultIndex, count: resultCount });
+      });
       fit.fit();
       // fit() only fires onResize when dims CHANGED — report the fitted size unconditionally, with
       // de-duplication when xterm already emitted it, so the PTY receives one settled update.
@@ -128,13 +161,18 @@ export function ShellTerminal({
       searchRef.current = search;
 
       // React may have committed output while the font was loading. Consume the current snapshot
-      // once now; the ordinary delta effect takes over after the terminal reference exists.
+      // once now; the ordinary delta effect takes over after the terminal reference exists. A term
+      // entered before the terminal existed searches once the snapshot is parsed; with no output yet
+      // it searches the empty buffer, which arms the addon to re-search as output arrives.
+      const runPendingSearch = () => {
+        const pendingSearch = searchTermRef.current;
+        if (pendingSearch) search.findNext(pendingSearch, { incremental: true, decorations: SEARCH_DECORATIONS });
+      };
       if (totalRef.current > 0) {
-        term.write(textRef.current, () => {
-          const pendingSearch = searchTermRef.current;
-          if (pendingSearch) search.findNext(pendingSearch, { incremental: true });
-        });
+        term.write(textRef.current, runPendingSearch);
         consumedRef.current = totalRef.current;
+      } else {
+        runPendingSearch();
       }
 
       // Refit when the pane's box changes (dock resize, panel drag, window resize).
@@ -179,15 +217,29 @@ export function ShellTerminal({
     consumedRef.current = total;
   }, [text, total]);
 
+  // Typing searches incrementally from the current match. Output arriving later is the addon's to
+  // re-search: running findNext on every chunk here would move the match and scroll the terminal.
   useEffect(() => {
     const search = searchRef.current;
     if (!search) return;
     if (!searchTerm) {
+      search.clearDecorations();
       termRef.current?.clearSelection();
+      onSearchResultsRef.current?.(null);
       return;
     }
-    search.findNext(searchTerm, { incremental: true });
-  }, [searchTerm, text, total]);
+    search.findNext(searchTerm, { incremental: true, decorations: SEARCH_DECORATIONS });
+  }, [searchTerm]);
+
+  useImperativeHandle(handleRef, () => ({
+    findNext: (term) => {
+      if (term) searchRef.current?.findNext(term, { decorations: SEARCH_DECORATIONS });
+    },
+    findPrevious: (term) => {
+      if (term) searchRef.current?.findPrevious(term, { decorations: SEARCH_DECORATIONS });
+    },
+    focus: () => termRef.current?.focus(),
+  }), []);
 
   return <div className={`shell-term${interactive ? "" : " is-readonly"}`} ref={hostRef} />;
 }

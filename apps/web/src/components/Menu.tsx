@@ -112,6 +112,7 @@ function useMenuPlacement(
   boundary: string | undefined,
   beside: string | undefined,
   inline: boolean,
+  prefer: "below" | "above" | undefined,
 ): { placement: Placement | undefined; box: FixedContainingBlockOffset } {
   const [placement, setPlacement] = useState<Placement>();
   const [box, setBox] = useState(VIEWPORT_BOX);
@@ -172,6 +173,7 @@ function useMenuPlacement(
         desiredHeight: wantedHeight,
         align,
         gap,
+        prefer,
       });
       const style: Placement = { top: next.top, bottom: next.bottom, left: next.left, maxHeight: next.maxHeight };
       // Taller than the room on either side: open on the roomier side and
@@ -220,7 +222,7 @@ function useMenuPlacement(
       window.cancelAnimationFrame(frame);
       observer?.disconnect();
     };
-  }, [sheet, surfaceRef, trigger, pointX, pointY, align, gap, maxWidth, boundary, beside, inline]);
+  }, [sheet, surfaceRef, trigger, pointX, pointY, align, gap, maxWidth, boundary, beside, inline, prefer]);
   return { placement, box };
 }
 
@@ -247,6 +249,8 @@ export interface MenuSurfaceProps extends Omit<HTMLAttributes<HTMLDivElement>, "
   boundary?: string;
   /** A selector for the trigger's ancestor the menu opens beside as a flyout on desktop (the rail). */
   beside?: string;
+  /** The side tried first on desktop: "above" for a menu from a bottom dock's head (§9.1). */
+  prefer?: "below" | "above";
   /** A backdrop click. The shell's Escape ladder clicks the same backdrop. */
   onDismiss: () => void;
   /**
@@ -281,6 +285,7 @@ export function MenuSurface({
   maxWidth,
   boundary,
   beside,
+  prefer,
   onDismiss,
   inline = false,
   className,
@@ -299,6 +304,7 @@ export function MenuSurface({
     boundary,
     beside,
     inline,
+    prefer,
   );
   const fixedWidth = sheet || width === undefined
     ? undefined

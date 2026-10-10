@@ -291,6 +291,11 @@ const VOCABULARY = {
     /** The machine could not confirm the account's sign-in; using it rechecks first (#2208). */
     status_unknown: neutral("Status Unknown"),
   },
+  /** A terminal tab's shell (#2864). A running shell carries no status; its tab is the fact. */
+  shell: {
+    exited: neutral("Exited"),
+    reconnecting: info("Reconnecting"),
+  },
   /** A transcript share link (Share Transcript, #2148). */
   share: {
     active: success("Active"),

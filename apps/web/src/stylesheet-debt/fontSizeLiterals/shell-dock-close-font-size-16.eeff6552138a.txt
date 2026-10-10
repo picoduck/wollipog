@@ -1,1 +1,0 @@
-|.shell-dock-close|font-size|16

@@ -1635,7 +1635,9 @@ workflow step list is a different component and keeps a local name.
 - **Note** (`.menu-note`, `MenuNote`): one sentence of context at the end of a menu, `--type-small`
   in `--text-dim`, max 280px. It replaced `.menu-caution` (#1803).
 - **Opening upward.** A menu near the bottom of the view opens above its trigger. `Menu.tsx` places
-  every menu and flips it when the space below is short (#1803). An area design that draws
+  every menu and flips it when the space below is short (#1803). A menu from a bottom dock's head
+  (the terminal's New Tab, #2864) prefers above with `MenuSurface`'s `prefer`, falling back to below
+  only when the space above is short. An area design that draws
   `.menu.flip-up` or `.drop-up` means this placement, and there is no class for it: the placement is
   inline, and a class with a rule of its own would change what the menu draws.
 - **Flyout.** A menu opened from the rail (the instance menu, §4.1) opens 4px to the right of the
@@ -1804,6 +1806,7 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Campaign work item (`campaignWork`, Campaign Status) | Planned, Queued, Canceled, Scope Removed: neutral · Running: info (pulse) · Waiting: warning · Blocked: danger · Delivered: success. Rendered as the inline badge on work rows. |
 | Provider account | Signed In: success (inline) · Sign-In Required: warning · Signed Out, Status Unknown: neutral |
 | Usage (provider availability) | Available: success · Approaching Limit: warning · Temporarily Unavailable: danger |
+| Terminal tab (`shell`, #2864) | Exited: neutral · Reconnecting: info. Rendered as the inline badge after the tab's label; a running shell has none. |
 | Transcript share link | Active: success · Expired, Revoked: neutral. Rendered as the inline badge on Share Transcript's link rows. |
 | Pull request | Open, Draft, Merged and Closed are **facts**: row meta with the Git icon, not status badges. |
 | Pull request checks (Review's summary, #2846) | Checks Failing: danger · Checks Running: info, pulsing. Passing checks get no badge. |
