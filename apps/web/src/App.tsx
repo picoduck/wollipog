@@ -39,7 +39,7 @@ import { AutomationsView } from "./components/AutomationsView.js";
 import { SkillsView } from "./components/SkillsView.js";
 import { UsageView } from "./components/UsageView.js";
 import { ShellDock } from "./components/ShellDock.js";
-import { openGoToFile, useRightPanelState, type RightPanelState } from "./components/RightPanel.js";
+import { openGoToFile, openSideChat, useRightPanelState, type RightPanelState } from "./components/RightPanel.js";
 import { usePinnedSummaryState } from "./components/pinned-summary-state.js";
 import { EditorSelect } from "./components/EditorSelect.js";
 import { DesktopCloseGuard } from "./components/DesktopCloseGuard.js";
@@ -679,6 +679,11 @@ export function Shell() {
       if (matchesShortcut(e, "open-review")) {
         e.preventDefault();
         rightPanel.openMode("review");
+      }
+      // Side Chat: opens the panel on it with focus in its message field, never closes it (#2862).
+      if (matchesShortcut(e, "open-side-chat")) {
+        e.preventDefault();
+        openSideChat(rightPanel);
       }
       if (matchesShortcut(e, "toggle-terminal")) {
         e.preventDefault();

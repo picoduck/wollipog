@@ -1,11 +1,15 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
 import { State } from "./State.js";
 import { Notice } from "./Notice.js";
 import { isTerminal, type SessionEvent, type SessionStatus, type SessionView, type SideChatView } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { useHasStore, useStoreActions } from "../store.js";
-import { EventTimeline } from "./EventTimeline.js";
+import { viewPath } from "../navigation.js";
+import { enterKeystrokeSends, useEnterKeyBehavior } from "../enter-key.js";
+import { EventTimeline, type AgentReplyItem } from "./EventTimeline.js";
+import { ArrowUpRightIcon } from "./Icons.js";
+import { useIsTouchPhone } from "./useIsMobile.js";
 import { useTimeline } from "./useTimeline.js";
 import { isTimelineSessionActive } from "../timeline-clock.js";
 import {
@@ -25,6 +29,31 @@ const PAGE_SIZE = 200;
  * very text on its way out; without this it would offer to send it again (#1284).
  */
 const sendsInFlight = new Map<string, Promise<unknown>>();
+
+/**
+ * Ctrl/⌘+; puts focus in Side Chat (#2862): its message field, or Start Side Chat when there is no
+ * side chat yet. A mounted panel takes the request at once, waiting for its first load if it is still
+ * loading; otherwise the next panel to mount takes it, provided it mounts within a second, so a
+ * request can never surface on an unrelated later visit.
+ */
+const sideChatFocusListeners = new Set<() => void>();
+let sideChatFocusRequestedAt: number | null = null;
+const SIDE_CHAT_FOCUS_WINDOW_MS = 1000;
+
+export function requestSideChatFocus(): void {
+  if (sideChatFocusListeners.size > 0) {
+    sideChatFocusRequestedAt = null;
+    for (const listener of sideChatFocusListeners) listener();
+    return;
+  }
+  sideChatFocusRequestedAt = Date.now();
+}
+
+function takeSideChatFocusRequest(): boolean {
+  const requestedAt = sideChatFocusRequestedAt;
+  sideChatFocusRequestedAt = null;
+  return requestedAt !== null && Date.now() - requestedAt <= SIDE_CHAT_FOCUS_WINDOW_MS;
+}
 
 /** Prose, so sentence case: these complete the sentence "This side chat's session …". */
 const ENDED_PHRASE: Partial<Record<SessionStatus, string>> = {
@@ -54,14 +83,22 @@ export function sideChatComposerUnavailable(
  * `src/e2e/request-surfaces-main.tsx`), and `useStoreActions` throws there. Keeping the one
  * store-backed control in its own component means adding this link cannot make the whole panel
  * un-renderable on those pages.
+ *
+ * A link, so a modified or middle click opens the child in a new tab; a plain click navigates in
+ * place through the store (#2862).
  */
 function OpenSideChatSession({ childSessionId }: { childSessionId: string }) {
   const { navigate } = useStoreActions();
+  const open = (event: MouseEvent<HTMLAnchorElement>) => {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    navigate({ name: "session", id: childSessionId });
+  };
   return (
-    <button type="button" className="btn sidechat-open-child"
-      onClick={() => navigate({ name: "session", id: childSessionId })}>
-      Open Side Chat Session
-    </button>
+    <a className="link sidechat-open-session" href={viewPath({ name: "session", id: childSessionId })} onClick={open}>
+      Open Session
+      <ArrowUpRightIcon size={14} aria-hidden="true" />
+    </a>
   );
 }
 
@@ -87,7 +124,14 @@ export function SideChatPanel({
   const [creating, setCreating] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const enterKeySetting = useEnterKeyBehavior();
+  const isTouchPhone = useIsTouchPhone();
   const mountedRef = useRef(true);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const startRef = useRef<HTMLButtonElement | null>(null);
+  const restartRef = useRef<HTMLButtonElement | null>(null);
+  const loadedRef = useRef(false);
+  const focusPendingRef = useRef(false);
   const cursorRef = useRef(0);
   const epochRef = useRef(0);
   /**
@@ -100,6 +144,27 @@ export function SideChatPanel({
   const childId = sideChat?.session.id;
 
   useEffect(() => () => { mountedRef.current = false; }, []);
+
+  loadedRef.current = sideChat !== undefined;
+  /** Settle a pending Ctrl/⌘+; once this panel has loaded: the first usable control takes focus. */
+  const settleFocusRequest = useCallback(() => {
+    if (!focusPendingRef.current || !loadedRef.current) return;
+    focusPendingRef.current = false;
+    const target = [textareaRef.current, startRef.current, restartRef.current]
+      .find((candidate) => candidate?.isConnected && !candidate.disabled);
+    target?.focus();
+  }, []);
+  useEffect(() => {
+    const listener = () => {
+      focusPendingRef.current = true;
+      settleFocusRequest();
+    };
+    if (takeSideChatFocusRequest()) listener();
+    sideChatFocusListeners.add(listener);
+    return () => { sideChatFocusListeners.delete(listener); };
+  }, [settleFocusRequest]);
+  // A request made while the panel was loading is settled by the render that loads it.
+  useEffect(() => { settleFocusRequest(); }, [sideChat, settleFocusRequest]);
 
   // Inherit a send an earlier mount started, so its text is not offered for sending twice while it
   // is still in flight. The draft itself is cleared from under this composer when the send lands.
@@ -132,9 +197,8 @@ export function SideChatPanel({
   /**
    * Drop the transcript belonging to whichever child we are leaving. Call this in the SAME commit as
    * the switch: React batches the two updates, so the incoming child never renders for a frame with
-   * the retired child's events beneath it — which would also, briefly, offer that child's text to
-   * "Insert Latest Response into Primary Draft", the one action that crosses back into the primary
-   * composer.
+   * the retired child's events beneath it — which would also, briefly, offer that child's replies to
+   * Insert into Draft, the one action that crosses back into the primary composer.
    */
   const resetTranscript = (next: SideChatView | null) => {
     transcriptChildRef.current = next?.session.id;
@@ -217,13 +281,8 @@ export function SideChatPanel({
   }, [api, childId, session.id]);
 
   const items = useTimeline(childId ?? "side-chat", events, sideChat?.session.eventEpoch ?? 0);
-  const latestResponse = useMemo(() => {
-    for (let index = items.length - 1; index >= 0; index -= 1) {
-      const item = items[index];
-      if (item?.kind === "agent_message" && !item.parentToolUseId && item.text.trim()) return item.text;
-    }
-    return null;
-  }, [items]);
+  // Identity-stable, so the transcript's row memo holds while the child streams (#2763).
+  const insertReply = useCallback((item: AgentReplyItem) => onInsertDraft(item.text), [onInsertDraft]);
 
   const create = async (replaceEnded = false) => {
     if (creating) return;
@@ -273,13 +332,19 @@ export function SideChatPanel({
     }
   };
 
+  // The main composer's Enter pair, read at keydown from the per-device setting: Enter sends and
+  // Shift+Enter is a newline, or the reverse (#2862). Ctrl/⌘+Enter is the main composer's steering
+  // key and does nothing here; an IME composition never sends.
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.nativeEvent.isComposing || event.keyCode === 229) return;
-    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-      event.preventDefault();
-      void send();
-    }
+    if (event.key !== "Enter" || event.metaKey || event.ctrlKey) return;
+    if (!enterKeystrokeSends(event.shiftKey)) return;
+    event.preventDefault();
+    void send();
   };
+  // The tooltip advertises whichever key sends under that setting, as the main composer's Send does;
+  // a touch phone in newline mode has no Shift+Enter to advertise.
+  const sendKeys = enterKeySetting === "send" ? "Enter" : isTouchPhone ? null : "Shift+Enter";
 
   if (sideChat === undefined) return <State variant="loading" compact>Loading side chat…</State>;
   if (!sideChat) {
@@ -288,7 +353,7 @@ export function SideChatPanel({
       : !runnerOnline ? "The runner must be online to start a side chat." : null;
     return (
       <State compact title="No Side Chat Yet" actions={(
-        <button type="button" className="btn primary" disabled={creating || Boolean(unavailable)} onClick={() => void create()}>
+        <button type="button" className="btn primary" ref={startRef} disabled={creating || Boolean(unavailable)} onClick={() => void create()}>
           {creating ? "Starting…" : "Start Side Chat"}
         </button>
       )}>
@@ -321,20 +386,16 @@ export function SideChatPanel({
             driver={sideChat.session.driver}
             sessionActive={isTimelineSessionActive(sideChat.session.status)}
             historyKey={`${sideChat.session.id}:${sideChat.session.eventEpoch ?? 0}`}
+            onInsertReply={insertReply}
           />
         ) : (
           <div className="hint">No messages yet. Ask a question below; primary-session context is not included.</div>
         )}
       </div>
-      {latestResponse && (
-        <button type="button" className="btn sidechat-insert" onClick={() => onInsertDraft(latestResponse)}>
-          Insert Latest Response into Primary Draft
-        </button>
-      )}
       {unavailable && <div className="hint warn" role="status">{unavailable}</div>}
       {replacementBlocked && <div className="hint warn" role="status">{replacementBlocked}</div>}
       {childEnded && (
-        <button type="button" className="btn primary sidechat-restart"
+        <button type="button" className="btn primary sidechat-restart" ref={restartRef}
           disabled={creating || Boolean(replacementBlocked)} onClick={() => void create(true)}>
           {creating ? "Starting…" : "Start a New Side Chat"}
         </button>
@@ -342,19 +403,20 @@ export function SideChatPanel({
       {error && <div className="error-box" role="alert">{error}</div>}
       <div className="sidechat-composer">
         <textarea
+          ref={textareaRef}
           value={text}
           onChange={(event) => setText(event.target.value)}
           onKeyDown={onKeyDown}
-          placeholder="Ask without sharing the primary transcript…"
+          placeholder="Ask a side question…"
           aria-label="Side Chat Message"
           rows={3}
           disabled={Boolean(unavailable)}
         />
-        <button type="button" className="btn primary" disabled={!canSend} onClick={() => void send()}>
+        <button type="button" className="btn primary" disabled={!canSend} onClick={() => void send()}
+          title={sendKeys ? `Send (${sendKeys})` : "Send"} aria-keyshortcuts={sendKeys ?? undefined}>
           {sending ? "Sending…" : "Send"}
         </button>
       </div>
-      <div className="hint sidechat-shortcut">Ctrl/⌘+Enter to send</div>
     </div>
   );
 }

@@ -20,6 +20,7 @@ export type ShortcutId =
   | "focus-previous-zone"
   | "open-files"
   | "open-review"
+  | "open-side-chat"
   | "toggle-terminal"
   | "toggle-side-panel"
   | "submit-run"
@@ -186,6 +187,15 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     label: "Review Panel",
     scope: "Session",
     binding: { key: "g", primary: true, shift: true },
+  },
+  // Ctrl/⌘+; as in Claude Code Desktop (#2862). Ctrl/⌘+Alt+S (the Codex app) is AltGr+S on Windows
+  // layouts, which types a character there.
+  {
+    id: "open-side-chat",
+    group: "Session",
+    label: "Side Chat Panel",
+    scope: "Session",
+    binding: { key: ";", primary: true },
   },
   {
     id: "toggle-terminal",

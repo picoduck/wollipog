@@ -267,3 +267,22 @@ test("Markdown's plain text keeps paragraphs, lists, code, tables, task boxes an
   assert.equal(markdownPlainText("![a chart](https://example.test/chart.png) <b>raw</b>"), "a chart raw");
   assert.equal(markdownPlainText("> quoted\n\n---\n\nafter"), "quoted\n\nafter");
 });
+
+test("Insert into Draft appears only where a transcript supplies it, on top-level replies alone (#2862)", async () => {
+  coarsePointer = false;
+  const withSubagent: TimelineItem[] = [
+    ...items,
+    { kind: "agent_message", id: 5, text: "A subagent's note", parentToolUseId: "task-1" },
+  ];
+  const main = await mount({ items: withSubagent });
+  assertNoDomNode(main.container.querySelector('button[aria-label="Insert into Draft"]'),
+    "the main session's transcript never shows the action");
+
+  const inserted: string[] = [];
+  const side = await mount({ items: withSubagent, onInsertReply: (item) => inserted.push(item.text) });
+  const inserts = [...side.container.querySelectorAll<HTMLButtonElement>('button[aria-label="Insert into Draft"]')];
+  assert.equal(inserts.length, 1, "a subagent's reply is not the agent's answer, so it has none");
+  await act(async () => { inserts[0]!.click(); });
+  assert.deepEqual(inserted, ["## Result\n\nThe **answer** is [here](https://example.test).\n\n- one\n- two"],
+    "the reply's own source text");
+});
