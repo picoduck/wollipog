@@ -5,6 +5,7 @@ import { MenuItem, MenuSurface } from "./Menu.js";
 import { ToneIcon } from "./Notice.js";
 import { useRemovedFocus } from "./useRemovedFocus.js";
 import { registerRequestRevealer } from "./requests/request-reveal.js";
+import { TERMINAL_NOTICE_RANKS } from "../shells-panel.js";
 
 /**
  * The one notice slot between the transcript and the composer (docs/design-system.md §13.2,
@@ -38,6 +39,9 @@ import { registerRequestRevealer } from "./requests/request-reveal.js";
  *
  * THE SIDE PANEL. A panel tool's notices are a third instance under the panel header
  * (`PanelNoticeSlot`, `PANEL_NOTICE_RANK`; #2856).
+ *
+ * THE TERMINAL. A terminal's notices are a fourth instance above the terminal, wherever it is placed
+ * (`TerminalNoticeSlot`, `TERMINAL_NOTICE_RANK`; #2865).
  */
 
 export type SessionNoticeSeverity = "danger" | "warning" | "info";
@@ -123,6 +127,13 @@ export const PANEL_NOTICE_RANK = {
   workflowDetailsUnavailable: 7,
   olderHistoryTruncated: 8,
 } as const;
+
+/**
+ * The terminal's own ranks (`TerminalNoticeSlot`, #2865): machine offline, a shell reconnecting, the
+ * Agent TUI blocked, the Agent TUI outside tracking, output that may be incomplete, then a failed
+ * action. The table lives beside the conditions that use it, in `shells-panel.ts`.
+ */
+export const TERMINAL_NOTICE_RANK = TERMINAL_NOTICE_RANKS;
 
 const SEVERITY_ORDER: Record<SessionNoticeSeverity, number> = { danger: 0, warning: 1, info: 2 };
 

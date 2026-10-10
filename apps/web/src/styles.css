@@ -4148,6 +4148,245 @@ textarea {
 }
 .info-popover-text + .facts { margin-top: var(--space-3); }
 
+/* Side Chat: Open Session links to the side chat's own session, with a trailing arrow (#2862). */
+.sidechat-open-session {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+  font: var(--type-small);
+}
+
+/* --- Terminal dock (§4.6). One head, --control-h-lg tall (40px, 48px on touch) over its hairline:
+   the shell tabs (§10.1), then Search Output, New Tab and Hide Terminal as small icon buttons (28px,
+   36px with a 44px hit area on touch). The head never wraps; tabs that do not fit scroll sideways
+   (#2864). --- */
+.shell-dock {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border);
+  background: var(--bg-elev);
+  position: relative;
+}
+/* Pointer capture lets a dock drag travel over the transcript/composer — suppress selection
+   and keep the resize cursor app-wide for the drag's duration (set on <body> by ShellDock). */
+body.shell-dock-dragging,
+body.shell-dock-dragging * {
+  user-select: none !important;
+  cursor: ns-resize !important;
+}
+.shell-dock.is-dragging {
+  user-select: none;
+}
+/* Resize Terminal (#2865, §2.8): a 32×4 --border-strong mark on the dock's top edge, always shown.
+   A fine pointer drags a 7px strip straddling the edge. A coarse pointer gets a 28px strip in the
+   flow above the head, whose hit area reaches 16px up into the composer's bottom padding (44px in
+   all) and never over the tabs. */
+.shell-dock-grip {
+  position: absolute;
+  top: -3px;
+  left: 0;
+  right: 0;
+  height: 7px;
+  cursor: ns-resize;
+  z-index: 5;
+  touch-action: none;
+}
+.shell-dock-grip::after {
+  content: "";
+  position: absolute;
+  top: calc(50% - 2px);
+  left: calc(50% - 16px);
+  width: 32px;
+  height: var(--space-1);
+  border-radius: var(--radius-pill);
+  background: var(--border-strong);
+}
+@media (hover: hover) {
+  .shell-dock-grip:hover {
+    background: color-mix(in srgb, var(--accent) 35%, transparent);
+  }
+  .shell-dock-grip:hover::after { background: var(--accent); }
+}
+.shell-dock-grip:focus-visible::after,
+.shell-dock.is-dragging > .shell-dock-grip::after {
+  background: var(--accent);
+}
+@media (pointer: coarse) {
+  .shell-dock-grip {
+    position: relative;
+    top: auto;
+    flex: none;
+    height: 28px;
+  }
+  .shell-dock-grip::before {
+    content: "";
+    position: absolute;
+    inset: calc(-1 * var(--space-4)) 0 0;
+  }
+}
+.shell-dock-head {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-2);
+  height: var(--control-h-lg);
+  padding: 0 var(--space-2) 0 var(--space-3);
+  box-shadow: inset 0 -1px 0 var(--border);
+}
+/* Every tab keeps its Close's room, so tabs sit closer than §10.1's 24px: that room already parts them.
+   The tabs take only the width the tools leave, and scroll; the tools shrink only when the head is
+   narrower than they are, and never past their content, so an open search never runs under New Tab
+   and Hide Terminal. */
+.shell-dock-head > .shell-tabs {
+  flex: 1 1 0;
+  align-self: stretch;
+  gap: var(--space-2);
+}
+/* A tab and its Close: the underline stays under the tab, and Close sits just after it. */
+.shell-tab {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
+}
+.shell-tab-folder {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-dim);
+  font-weight: var(--weight-normal);
+}
+/* Close shows on hover, on focus and on the selected tab with a fine pointer, keeping its room so
+   nothing moves; on touch only the selected tab has one. */
+@media (pointer: fine) {
+  .shell-tab:not(:hover, :focus-within, .is-active) > .shell-tab-close { visibility: hidden; }
+}
+@media (pointer: coarse) {
+  .shell-tab:not(.is-active) > .shell-tab-close { display: none; }
+  /* With no Close room between them, tabs keep §10.1's 24px apart. */
+  .shell-dock-head > .shell-tabs { gap: var(--space-6); }
+}
+.shell-dock-tools {
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+/* Search Output, open: the field, its count, Previous and Next Match and Close Search. */
+.shell-search {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+/* The field is 28px (36px on touch) inside a label one control tall, so on touch the label's 44px is
+   the field's target, as a small button borrows its hit area (§2.8). */
+.shell-search-field {
+  display: flex;
+  flex: 0 1 200px;
+  align-items: center;
+  min-width: 6em;
+  height: var(--control-h);
+}
+.shell-search-field > input { height: var(--control-h-sm); }
+.shell-search-count {
+  min-width: 4.5em;
+  color: var(--text-dim);
+  font: var(--type-small);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+/* The terminal is flush (#2865, §2.5): no frame of its own, on a body that is --terminal-bg edge to
+   edge with even padding. The body holds the terminal's one notice, the terminals, then an exited or
+   read-only shell's status row or a pipe shell's command row. */
+.shell-dock-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-height: 0;
+  padding: var(--space-2) var(--space-3);
+  background: var(--terminal-bg);
+}
+/* The terminal's notice slot (§13.2): one compact notice above the terminal, the rest behind
+   "+N More". Empty, it takes no room. */
+.session-notice-slot.terminal-notice-slot {
+  flex: none;
+  margin-bottom: 0;
+}
+/* One terminal per shell in one cell: only the selected one shows, and the others keep their size
+   and scroll position until their tab is selected again. */
+.shell-term-stack {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+}
+.shell-term-stack > .shell-term {
+  grid-area: 1 / 1;
+  height: auto;
+  min-height: 0;
+}
+.shell-term.is-hidden { visibility: hidden; }
+
+.shell-term {
+  height: 300px;
+  overflow: hidden;
+  background: var(--terminal-bg);
+}
+.shell-term .xterm {
+  height: 100%;
+}
+/* xterm paints its viewport black, which shows under the last whole row once the terminal has no
+   padding of its own; the terminal's ground continues there instead. */
+.shell-term .xterm .xterm-viewport { background: var(--terminal-bg); }
+/* Under an exited shell (§11.3): "Shell exited with code 0." then Start New Shell and Close Tab. A
+   read-only shell's sentence takes the same row. */
+.term-status {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.term-status-text { overflow-wrap: anywhere; }
+/* A pipe shell's command row: the "$" prompt and No TTY keep their width and the field gives way, so
+   nothing clips at 390px. */
+.pipe-row {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.pipe-row-meta {
+  flex: none;
+  color: var(--text-dim);
+  font: var(--type-small);
+  white-space: nowrap;
+}
+.shell-prompt {
+  color: var(--accent);
+  font-family: var(--font-terminal);
+  flex: none;
+}
+.shell-input {
+  flex: 1 1 0;
+  min-width: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  padding: 7px 10px;
+  font-family: var(--font-terminal);
+  font-size: 12.5px;
+}
+
 /* The Requests panel (#2206; docs/design-system.md §6, §6.2): a list that opens each child request in
    a detail in its place, at every width. Each view is one scroller below the panel head. */
 .rpanel-body:has(> .request-panel) {
@@ -5648,174 +5887,6 @@ textarea {
 @media (max-width: 600px) {
   .sidechat-composer { flex-wrap: wrap; }
   .sidechat-composer textarea { flex-basis: 100%; min-height: 88px; }
-}
-
-/* ------------------------------ Session Companions ------------------------------
-   Agents, Background Work, Side Chat and Terminal (#2871), one block per component. */
-
-/* Side Chat: Open Session links to the side chat's own session, with a trailing arrow (#2862). */
-.sidechat-open-session {
-  display: inline-flex;
-  align-items: center;
-  align-self: flex-start;
-  gap: var(--space-1);
-  margin-top: var(--space-1);
-  font: var(--type-small);
-}
-
-/* --- Terminal dock (§4.6). One head, --control-h-lg tall (40px, 48px on touch) over its hairline:
-   the shell tabs (§10.1), then Search Output, New Tab and Hide Terminal as small icon buttons (28px,
-   36px with a 44px hit area on touch). The head never wraps; tabs that do not fit scroll sideways
-   (#2864). --- */
-.shell-dock {
-  flex: none;
-  display: flex;
-  flex-direction: column;
-  border-top: 1px solid var(--border);
-  background: var(--bg-elev);
-  position: relative;
-}
-/* Pointer capture lets a dock drag travel over the transcript/composer — suppress selection
-   and keep the resize cursor app-wide for the drag's duration (set on <body> by ShellDock). */
-body.shell-dock-dragging,
-body.shell-dock-dragging * {
-  user-select: none !important;
-  cursor: ns-resize !important;
-}
-.shell-dock.is-dragging {
-  user-select: none;
-}
-.shell-dock-grip {
-  position: absolute;
-  top: -3px;
-  left: 0;
-  right: 0;
-  height: 7px;
-  cursor: ns-resize;
-  z-index: 5;
-  touch-action: none;
-}
-.shell-dock-grip:hover {
-  background: color-mix(in srgb, var(--accent) 35%, transparent);
-}
-.shell-dock-head {
-  display: flex;
-  flex: none;
-  align-items: center;
-  gap: var(--space-2);
-  height: var(--control-h-lg);
-  padding: 0 var(--space-2) 0 var(--space-3);
-  box-shadow: inset 0 -1px 0 var(--border);
-}
-/* Every tab keeps its Close's room, so tabs sit closer than §10.1's 24px: that room already parts them.
-   The tabs take only the width the tools leave, and scroll; the tools shrink only when the head is
-   narrower than they are, and never past their content, so an open search never runs under New Tab
-   and Hide Terminal. */
-.shell-dock-head > .shell-tabs {
-  flex: 1 1 0;
-  align-self: stretch;
-  gap: var(--space-2);
-}
-/* A tab and its Close: the underline stays under the tab, and Close sits just after it. */
-.shell-tab {
-  display: flex;
-  flex: none;
-  align-items: center;
-  gap: var(--space-1);
-}
-.shell-tab-folder {
-  max-width: 160px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  color: var(--text-dim);
-  font-weight: var(--weight-normal);
-}
-/* Close shows on hover, on focus and on the selected tab with a fine pointer, keeping its room so
-   nothing moves; on touch only the selected tab has one. */
-@media (pointer: fine) {
-  .shell-tab:not(:hover, :focus-within, .is-active) > .shell-tab-close { visibility: hidden; }
-}
-@media (pointer: coarse) {
-  .shell-tab:not(.is-active) > .shell-tab-close { display: none; }
-  /* With no Close room between them, tabs keep §10.1's 24px apart. */
-  .shell-dock-head > .shell-tabs { gap: var(--space-6); }
-}
-.shell-dock-tools {
-  display: flex;
-  flex: 0 1 auto;
-  align-items: center;
-  gap: var(--space-2);
-  margin-left: auto;
-}
-/* Search Output, open: the field, its count, Previous and Next Match and Close Search. */
-.shell-search {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-}
-/* The field is 28px (36px on touch) inside a label one control tall, so on touch the label's 44px is
-   the field's target, as a small button borrows its hit area (§2.8). */
-.shell-search-field {
-  display: flex;
-  flex: 0 1 200px;
-  align-items: center;
-  min-width: 6em;
-  height: var(--control-h);
-}
-.shell-search-field > input { height: var(--control-h-sm); }
-.shell-search-count {
-  min-width: 4.5em;
-  color: var(--text-dim);
-  font: var(--type-small);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-.shell-dock-body {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 0 12px 12px;
-  min-height: 0;
-}
-.shell-dock-body .shell-term {
-  flex: 1;
-  height: auto;
-  min-height: 0;
-}
-.shell-dock-empty {
-  padding: 12px 0;
-}
-
-.shell-term {
-  background: var(--terminal-bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 8px 4px 8px 10px;
-  height: 300px;
-  overflow: hidden;
-}
-.shell-term .xterm {
-  height: 100%;
-}
-.shell-input-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.shell-prompt {
-  color: var(--accent);
-  font-family: var(--font-terminal);
-  flex: none;
-}
-.shell-input {
-  flex: 1;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--text);
-  padding: 7px 10px;
-  font-family: var(--font-terminal);
-  font-size: 12.5px;
 }
 
 .detail-main {

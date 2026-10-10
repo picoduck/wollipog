@@ -1,1 +1,0 @@
-|.shell-term|padding|4px

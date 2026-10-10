@@ -23,17 +23,21 @@ import "../styles.css";
  * (a cost budget blocks it), `unsupported` (the agent has no TUI) or `offline` (the machine is
  * offline); `?shells=0` starts with no shell and `?shells=many` with twelve; `?listDelay=` holds the
  * registry reads that many milliseconds after load. New Shell takes a moment, so its busy state can be seen.
+ * For #2865: `?pipe=1` makes every shell a Windows-native pipe shell; `?reconnecting=1` has Shell 1
+ * reconnecting; `?long=1` gives Shell 1 two hundred lines to scroll; `?expired=1` says retention removed
+ * Shell 1's oldest output; `?status=completed` ends the session, so an empty dock opens no shell itself.
  */
 const params = new URLSearchParams(window.location.search);
 const theme = params.get("theme") === "light" ? "light" : "dark";
 document.documentElement.setAttribute("data-theme", theme);
 const tui = params.get("tui") ?? "available";
+const pipe = params.get("pipe") === "1";
 
 const runner: RunnerView = {
   runnerId: "runner-1",
   hostname: "build-box",
   displayName: "Build Box",
-  os: "linux",
+  os: pipe ? "windows" : "linux",
   version: "1",
   status: tui === "offline" ? "offline" : "online",
   agents: [{
@@ -54,7 +58,8 @@ const runner: RunnerView = {
 
 const session: SessionView = {
   id: "shell-dock-e2e", runnerId: runner.runnerId, workspaceId: "workspace-1", workspaceName: "Acme Storefront",
-  projectId: null, agentId: "claude", agentName: "Claude Code", title: "Fix the Checkout Total", status: "idle",
+  projectId: null, agentId: "claude", agentName: "Claude Code", title: "Fix the Checkout Total",
+  status: params.get("status") === "completed" ? "completed" : "idle",
   column: "review", runId: null, useWorktree: true, worktreePath: "/home/dev/worktrees/acme-storefront",
   archived: false, createdAt: 1, updatedAt: 1, lastEventAt: 1, messageCount: 1, eventEpoch: 0,
   preview: null, pendingApproval: null, driver: tui === "unsupported" ? "acp" : "claude-code", model: null,
@@ -63,14 +68,14 @@ const session: SessionView = {
 };
 
 const shell = (index: number, overrides: Partial<ShellView> = {}): ShellView => ({
-  shellId: `shell-${index}`, sessionId: session.id, name: `Shell ${index}`, createdAt: index, pty: true,
+  shellId: `shell-${index}`, sessionId: session.id, name: `Shell ${index}`, createdAt: index, pty: !pipe,
   kind: "shell", status: "running", outputStartSeq: 0, outputEndSeq: 1, outputTruncated: false, ...overrides,
 });
 
 const shells: ShellView[] = params.get("shells") === "0" ? [] : params.get("shells") === "many"
   ? Array.from({ length: 12 }, (_, index) => shell(index + 1))
   : [
-  shell(1),
+  shell(1, params.get("reconnecting") === "1" ? { status: "reconnecting" } : {}),
   shell(2),
   shell(3, { status: "exited", exitCode: 0 }),
   ...(tui === "open" ? [shell(4, { shellId: "agent-tui", name: "Agent TUI", kind: "agent_tui" })] : []),
@@ -78,6 +83,7 @@ const shells: ShellView[] = params.get("shells") === "0" ? [] : params.get("shel
 
 const output: Record<string, string> = {
   "shell-1": [
+    ...(params.get("long") === "1" ? Array.from({ length: 200 }, (_, index) => `build step ${index + 1} of 200 done`) : []),
     "dev@build-box:~/worktrees/acme-storefront$ pnpm test",
     "> acme-storefront@1.4.0 test",
     "",
@@ -108,7 +114,7 @@ const client: ApiClient = {
     chunks: output[shellId] ? [{ seq: 1, stream: "stdout" as const, data: output[shellId]! }] : [],
     nextAfter: 1,
     hasMore: false,
-    truncatedBefore: false,
+    truncatedBefore: shellId === "shell-1" && params.get("expired") === "1",
   }),
   openShell: async (_sessionId, request) => {
     openRequests += 1;

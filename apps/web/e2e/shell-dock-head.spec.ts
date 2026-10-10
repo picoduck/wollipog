@@ -228,7 +228,7 @@ test.describe("at 1440px with a fine pointer", () => {
     await field.fill("test");
     await expect(dock.getByRole("group", { name: "Search Output" }).getByRole("status")).toHaveText("1 of 5");
     await field.press("Escape");
-    await expect(dock.locator(".xterm-helper-textarea")).toBeFocused();
+    await expect(dock.locator(".shell-term:not(.is-hidden) .xterm-helper-textarea")).toBeFocused();
     await expect(dock.getByRole("button", { name: "Search Output" })).toBeVisible();
 
     // Escape closes search from any of its controls, not only the field.
@@ -238,7 +238,7 @@ test.describe("at 1440px with a fine pointer", () => {
       await dock.getByRole("button", { name: control }).focus();
       await page.keyboard.press("Escape");
       await expect(dock.getByRole("group", { name: "Search Output" }), control).toHaveCount(0);
-      await expect(dock.locator(".xterm-helper-textarea"), control).toBeFocused();
+      await expect(dock.locator(".shell-term:not(.is-hidden) .xterm-helper-textarea"), control).toBeFocused();
     }
   });
 

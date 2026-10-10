@@ -1180,8 +1180,9 @@ test("Native TUI launch sends the harness intent and opens Terminal only after c
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.terminalOpenCount()))
     .toBe(1);
   await expect(page.getByRole("tab", { name: "Agent TUI" })).toBeVisible();
-  await expect(page.getByRole("status").filter({ hasText: "Manager policy hooks remain active" })).toHaveText(
-    "Usage Accounting: Unavailable. No structured events or approval cards. Manager policy hooks remain active.",
+  // The terminal's one notice (#2865) says what the Agent TUI leaves out, and that policy hooks still apply.
+  await expect(page.getByRole("status").filter({ hasText: "Policy hooks stay on" })).toHaveText(
+    "Agent TUI runs outside Wollipog's tracking: no usage, approval cards or transcript entries. Policy hooks stay on.",
   );
 
   await page.evaluate(() => {

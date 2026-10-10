@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { TERMINAL_FONT_FACE, TERMINAL_FONT_FAMILY, TERMINAL_FONT_LOAD_SPEC, loadTerminalFont } from "./terminal-font.js";
+import {
+  TERMINAL_FONT_FACE,
+  TERMINAL_FONT_FAMILY,
+  TERMINAL_FONT_LOAD_SPEC,
+  TERMINAL_NARROW_WIDTH,
+  loadTerminalFont,
+  terminalFontMetrics,
+} from "./terminal-font.js";
 
 test("the terminal font helper settles the bundled face before readiness", async () => {
   const events: string[] = [];
@@ -33,4 +40,13 @@ test("font loading failure preserves terminal fallback behavior", async () => {
   } as unknown as FontFaceSet;
   await assert.doesNotReject(loadTerminalFont(fonts));
   await assert.doesNotReject(loadTerminalFont(undefined));
+});
+
+test("a host narrower than 560px gets 12px text; wider and unmeasured hosts keep 12.5px (#2865)", () => {
+  assert.equal(TERMINAL_NARROW_WIDTH, 560);
+  assert.equal(terminalFontMetrics(390).fontSize, 12);
+  assert.equal(terminalFontMetrics(559).fontSize, 12);
+  assert.equal(terminalFontMetrics(560).fontSize, 12.5);
+  assert.equal(terminalFontMetrics(1440).fontSize, 12.5);
+  assert.equal(terminalFontMetrics(0).fontSize, 12.5, "a hidden host is not a phone");
 });

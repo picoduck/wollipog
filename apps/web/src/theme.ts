@@ -279,3 +279,34 @@ export function terminalTheme(theme: ResolvedTheme, doc?: Document) {
     brightWhite: readable("--text", base.brightWhite),
   };
 }
+
+/** `amount` of `color` over `ground`, as the `#RRGGBB` the search addon requires; null when either
+ * is not a six-digit hex colour. */
+function mixHex(color: string, ground: string, amount: number): string | null {
+  const hex = /^#([0-9a-f]{6})$/i;
+  const a = hex.exec(color)?.[1];
+  const b = hex.exec(ground)?.[1];
+  if (!a || !b) return null;
+  const channel = (value: string, at: number) => Number.parseInt(value.slice(at, at + 2), 16);
+  return `#${[0, 2, 4].map((at) => Math.round(channel(b, at) + (channel(a, at) - channel(b, at)) * amount)
+    .toString(16).padStart(2, "0")).join("")}`;
+}
+
+/**
+ * Terminal search highlights (#2865; docs/design-system.md §4.6), from the same computed tokens as
+ * `terminalTheme`: every match a neutral wash of the terminal's text at 24%, and the active match
+ * `--accent` at 32% inside a 1px `--accent` outline, so it stands apart from the rest in either
+ * theme. The search addon takes only solid `#RRGGBB`, so each wash is pre-mixed over the ground.
+ * The selection is left as it is.
+ */
+export function terminalSearchDecorations(theme: ResolvedTheme, doc?: Document) {
+  const palette = terminalTheme(theme, doc);
+  const accent = paletteColor("--accent", palette.cursor, doc);
+  return {
+    matchBackground: mixHex(palette.foreground, palette.background, 0.24) ?? undefined,
+    matchOverviewRuler: palette.foreground,
+    activeMatchBackground: mixHex(accent, palette.background, 0.32) ?? undefined,
+    activeMatchBorder: accent,
+    activeMatchColorOverviewRuler: accent,
+  };
+}

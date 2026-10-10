@@ -58,3 +58,10 @@ test("parseStoredDockVisible: migration — only a legacy explicitly-expanded do
   assert.equal(parseStoredDockVisible(null, null), false, "fresh install → hidden");
   assert.equal(parseStoredDockVisible("garbage", "garbage"), false, "garbage everywhere → hidden");
 });
+
+test("a first-time dock opens 220px tall and a stored height is kept (#2865)", () => {
+  assert.equal(DOCK_DEFAULT_HEIGHT, 220);
+  assert.equal(parseStoredHeight(null), 220);
+  assert.equal(parseStoredHeight("280"), 280, "the old default, once stored, stays");
+  assert.equal(parseStoredHeight("252"), 252);
+});
