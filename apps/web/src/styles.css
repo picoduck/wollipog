@@ -4865,7 +4865,9 @@ textarea {
 }
 .session-tool[aria-disabled="true"] .row-sub { color: var(--text-faint); }
 @media (hover: hover) {
-  .session-tool[aria-disabled="true"]:hover { background: none; }
+  /* Outranks the shared row hover, :is(button, a).row:hover:not(:disabled), which aria-disabled
+     rows still match. */
+  button.session-tool[aria-disabled="true"]:hover { background: none; }
 }
 /* Campaign Status (#2417): summary facts over a filterable work list; an item's details replace it. */
 /* The panel owns its scroll so the list position it restores is the one the person sees. */

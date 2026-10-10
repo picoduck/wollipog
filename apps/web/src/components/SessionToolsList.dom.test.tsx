@@ -3,7 +3,7 @@ import { after, before, beforeEach, test } from "node:test";
 import React, { act, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { DescendantRequestView, GitStatusInfo, ReviewFindingSummary, SessionView } from "@wollipog/protocol";
+import type { ChildSessionRegistryPage, DescendantRequestView, GitStatusInfo, ReviewFindingSummary, SessionView } from "@wollipog/protocol";
 import type { TimelineItem } from "../timeline.js";
 import { RightPanel, useRightPanelState, type RightPanelState } from "./RightPanel.js";
 import type { GitStatus } from "./useGitStatus.js";
@@ -29,6 +29,8 @@ const connection: UiConnectionRuntime = {
 };
 
 let required = 0;
+/** The durable child-session registry the Agents panel reads; null is a control plane without one. */
+let registry: ChildSessionRegistryPage | null = null;
 let findingReads = 0;
 const summary = (): ReviewFindingSummary => ({
   total: required, unresolved: required, requiredUnresolved: required, sent: 0, resolved: 0, dismissed: 0,
@@ -37,7 +39,7 @@ const summary = (): ReviewFindingSummary => ({
 const notHere = () => Promise.reject(new ApiError("This fixture has no control plane.", 404));
 const client = {
   ...api,
-  childSessions: notHere,
+  childSessions: () => registry ? Promise.resolve(registry) : notHere(),
   workflowInstances: notHere,
   reviewFindings: async () => {
     findingReads += 1;
@@ -93,6 +95,7 @@ beforeEach(() => {
   coarsePointer = false;
   required = 0;
   findingReads = 0;
+  registry = null;
 });
 
 after(() => {
@@ -151,6 +154,7 @@ interface HarnessProps {
   runnerProtocolVersion?: number | null;
   descendantRequests?: readonly DescendantRequestView[];
   items?: TimelineItem[];
+  session?: SessionView;
 }
 
 async function settle() {
@@ -175,7 +179,7 @@ async function mount(initial: HarnessProps) {
     return (
       <ApiProvider client={client}><StoreProvider connection={connection}><RightPanel
         state={panel}
-        session={session}
+        session={props.session ?? session}
         runnerOnline
         runnerProtocolVersion={props.runnerProtocolVersion === undefined ? CURRENT_RUNNER : props.runnerProtocolVersion}
         git={props.git}
@@ -365,6 +369,40 @@ test("Side Chat and Decision History use their new icons in the list and the swi
       .find((candidate) => candidate.textContent?.includes(name)) as unknown as Element | undefined;
     assert.equal(glyph(item("Side Chat")?.querySelector("svg")), messageSquare);
     assert.equal(glyph(item("Decision History")?.querySelector("svg")), history);
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("Agents counts the durable registry's subagents, as the Agents panel does, beyond the loaded transcript (#2844)", async () => {
+  registry = {
+    children: [{
+      toolCallId: "durable-agent", name: "Audit Agent", status: "in_progress", lifecycle: "running",
+      sourceSeq: 1, startedAt: 1, lastActivityAt: 2, toolCount: 3,
+    }],
+    attentionOwners: [], unidentifiedChildren: 0, eventEpoch: 1, nextAfter: null, truncated: false,
+  };
+  // The transcript window holds no launch at all.
+  const panel = await mount({ git: gitWith(0), items: [] });
+  try {
+    assert.equal(fact(panel.container, "subagents"), "1 subagent in this session");
+    assert.match(row(panel.container, "subagents")?.querySelector(".status")?.textContent ?? "", /^1 Working$/);
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("Background Work counts only jobs the Background Work panel shows as running (#2844)", async () => {
+  const job = { id: "job-1", parentTurnId: "turn-1", launchType: "shell" as const, registeredAt: Date.now(), lastObservedAt: Date.now(), sourcePresent: true };
+  const done = { ...job, id: "job-2", terminalStatus: "completed" as const };
+  const panel = await mount({ git: gitWith(0), session: { ...session, backgroundJobs: [job, done], backgroundWorkState: "running" } });
+  try {
+    assert.equal(fact(panel.container, "background"), "1 of 2 jobs running");
+    // Without the runner's aggregate running state the job is unverified, never running.
+    await panel.setProps({ session: { ...session, backgroundJobs: [job, done], backgroundWorkState: undefined } });
+    assert.equal(fact(panel.container, "background"), "0 of 2 jobs running");
+    await panel.setProps({ session: { ...session, backgroundJobs: [job, done], backgroundWorkState: "orphaned" } });
+    assert.equal(fact(panel.container, "background"), "0 of 2 jobs running");
   } finally {
     await panel.dispose();
   }

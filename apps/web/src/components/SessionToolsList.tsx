@@ -1,6 +1,13 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
-import type { CampaignWorkSummary, DescendantRequestView, SessionView } from "@wollipog/protocol";
+import {
+  runnerSupportsProtocol,
+  type CampaignWorkSummary,
+  type ChildSessionRegistryPage,
+  type DescendantRequestView,
+  type SessionView,
+} from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
+import { backgroundJobCurrentState } from "../background-job-stop.js";
 import { workspaceFolderName } from "../files-panel.js";
 import { runnerDisplay } from "../runners.js";
 import { shortcutDisplay } from "../shortcuts.js";
@@ -27,6 +34,7 @@ import {
   type SessionToolContext,
   type SessionToolId,
 } from "../session-tools.js";
+import { durableAgentDescriptors, mergeCompactAttentionOwners, mergeDurableAgents } from "./AgentsPanel.js";
 import { CountBadge } from "./CountBadge.js";
 import {
   BotIcon,
@@ -73,6 +81,7 @@ export function SessionToolIcon({ id, size = 16 }: { id: SessionToolId; size?: n
 export interface SessionToolsListProps {
   session: SessionView;
   runnerOnline: boolean;
+  runnerProtocolVersion: number | null | undefined;
   git: GitStatus;
   items: TimelineItem[];
   context: SessionToolContext;
@@ -146,6 +155,28 @@ function useArtifactCount(sessionId: string, observation: number): { count: numb
 }
 
 /**
+ * The first page of the session's durable child-session registry, the Agents panel's authority for
+ * subagents whose launch is outside the loaded transcript. Null until read, and on a control plane
+ * that has none, where the list counts the transcript's agents as the panel then does.
+ */
+function useChildRegistry(session: Pick<SessionView, "id" | "eventEpoch">, observation: number): ChildSessionRegistryPage | null {
+  const api = useApi();
+  const generation = `${session.id}:${session.eventEpoch ?? 0}`;
+  const [read, setRead] = useState<{ generation: string; page: ChildSessionRegistryPage | null } | null>(null);
+  useEffect(() => {
+    let current = true;
+    api.childSessions(session.id, session.eventEpoch ?? 0, 0, CHILD_REGISTRY_PAGE).then(
+      (page) => { if (current) setRead({ generation, page }); },
+      () => { if (current) setRead({ generation, page: null }); },
+    );
+    return () => { current = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [api, generation, observation]);
+  return read?.generation === generation ? read.page : null;
+}
+const CHILD_REGISTRY_PAGE = 50;
+
+/**
  * The Files and Terminal rows' reasons on an older runner: short enough to read whole on one line at
  * phone width, beside the notice above the list that says which machine to update and how. The
  * switcher keeps the full sentence as its item description.
@@ -166,6 +197,7 @@ interface RowFact {
 function SessionToolsListView({
   session,
   runnerOnline,
+  runnerProtocolVersion,
   git,
   items,
   context,
@@ -183,15 +215,23 @@ function SessionToolsListView({
   const requiredFindings = useRequiredFindings(session.id, git.observation);
   const artifacts = useArtifactCount(session.id, git.observation);
 
-  // The Agents panel's own projection and roster rules (worker-roster.ts), limited to subagents.
+  const registry = useChildRegistry(session, git.observation);
+
+  // The Agents panel's own agents and roster rules (AgentsPanel.tsx, worker-roster.ts), limited to
+  // subagents: the transcript's projection joined with the durable registry when it has one.
   const projector = useRef(new IncrementalSubagentProjector());
   const subagents = useMemo(() => {
     const projection = projector.current.project(items, {
       sessionStatus: session.status, runnerOnline, availability: runnerOnline ? "live" : "recorded",
     });
-    return workerRoster(session, projection.descriptors, [], () => runnerOnline)
+    const unresolved = new Set(mergeCompactAttentionOwners(registry?.attentionOwners ?? [], session.attentionOwners ?? [])
+      .filter((owner) => !owner.resolved).map((owner) => owner.toolCallId));
+    const agents = registry
+      ? mergeDurableAgents(durableAgentDescriptors(registry.children, session.status, runnerOnline), projection.descriptors, unresolved)
+      : projection.descriptors.filter((agent) => !unresolved.has(agent.id));
+    return workerRoster(session, agents, [], () => runnerOnline)
       .filter((row) => row.target.kind === "subagent");
-  }, [items, runnerOnline, session]);
+  }, [items, registry, runnerOnline, session]);
   const urgent = AGENT_URGENCY.find((state) => subagents.some((row) => isCurrentWorker(row) && row.state === state));
   const agentsBadge = urgent && (() => {
     const meta = statusMeta("job", urgent);
@@ -210,9 +250,15 @@ function SessionToolsListView({
       case "files": return { text: filesFact(workspaceFolderName(session.worktreePath, session.workspaceName)) };
       case "browser": return { text: browserFact(artifacts) };
       case "terminal": return { text: TERMINAL_FACT };
-      case "subagents": return { text: agentsFact(subagents.length), badge: agentsBadge || undefined };
+      case "subagents": return { text: agentsFact(subagents.length, registry?.nextAfter != null), badge: agentsBadge || undefined };
       case "sidechat": return { text: SIDE_CHAT_FACT };
-      case "background": return { text: backgroundFact(session.backgroundJobs ?? []) };
+      case "background": {
+        // The Background Work panel's own job states, so only a verified job counts as running.
+        const inventorySupported = runnerSupportsProtocol(runnerProtocolVersion, "managedBackgroundInventory");
+        const states = (session.backgroundJobs ?? []).map((job) => backgroundJobCurrentState(
+          job, session.backgroundWorkState, runnerOnline, inventorySupported, Date.now()));
+        return { text: backgroundFact(states) };
+      }
       case "campaign": return { text: campaignFact(campaignWork) };
       case "requests": return {
         text: requestsFact(descendantRequests, descendantRequestStatus),

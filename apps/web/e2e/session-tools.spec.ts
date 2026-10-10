@@ -133,6 +133,17 @@ test.describe("with a mouse", () => {
       expect(look.tileFill).toBe("rgba(0, 0, 0, 0)");
     }
     await expect(tools(page).locator("[title]")).toHaveCount(0);
+    // A tool that cannot open takes no hover fill. Hover an available row first, so the fill's
+    // transition is known to have run before the unavailable row is read.
+    const review = row(page, "review");
+    await review.hover();
+    await expect.poll(() => review.evaluate((element) => getComputedStyle(element).backgroundColor))
+      .not.toBe("rgba(0, 0, 0, 0)");
+    const files = row(page, "files");
+    await files.hover();
+    await expect.poll(() => review.evaluate((element) => getComputedStyle(element).backgroundColor))
+      .toBe("rgba(0, 0, 0, 0)");
+    expect(await files.evaluate((element) => getComputedStyle(element).backgroundColor)).toBe("rgba(0, 0, 0, 0)");
   });
 });
 

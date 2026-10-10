@@ -132,14 +132,20 @@ export function browserFact(artifacts: { count: number; more: boolean } | null):
   return `${shown}, or preview a web page`;
 }
 
-export function agentsFact(subagents: number): string {
+/** Agents: the subagents the Agents panel lists; a registry with more pages reads "50+". */
+export function agentsFact(subagents: number, more = false): string {
+  if (more) return `${subagents}+ subagents in this session`;
   return subagents === 0 ? "No subagents in this session" : `${count(subagents, "subagent", "subagents")} in this session`;
 }
 
-export function backgroundFact(jobs: readonly { terminalStatus?: string }[]): string {
-  if (jobs.length === 0) return "Nothing has run in the background";
-  const running = jobs.filter((job) => job.terminalStatus === undefined).length;
-  return `${running} of ${count(jobs.length, "job", "jobs")} running`;
+/**
+ * Background Work: of the jobs the session lists, those the Background Work panel shows as Running
+ * (`backgroundJobCurrentState`), so an unverified, lost or stalled job is never counted as running.
+ */
+export function backgroundFact(states: readonly string[]): string {
+  if (states.length === 0) return "Nothing has run in the background";
+  const running = states.filter((state) => state === "running").length;
+  return `${running} of ${count(states.length, "job", "jobs")} running`;
 }
 
 /** Campaign Status: delivered of committed work, when this browser holds the campaign's summary. */

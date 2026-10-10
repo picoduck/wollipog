@@ -94,8 +94,9 @@ const LEGACY_WORKSPACES = FIXTURE_QUERY.get("legacyWorkspaces") === "1";
 const SESSION_TOOLS = SCENARIO === "session-tools";
 const SESSION_TOOLS_JOBS = [0, 1, 2].map((index) => ({
   id: `session-tools-job-${index}`, parentTurnId: "turn-1", launchType: "shell" as const,
-  registeredAt: 1_000 + index, lastObservedAt: 2_000, sourcePresent: index === 0,
-  ...(index === 0 ? {} : { terminalStatus: "completed" as const, terminalObservedAt: 1_500 }),
+  // Recent, so the running one is not yet past the stall bound.
+  registeredAt: Date.now() - (index + 1) * 60_000, lastObservedAt: Date.now(), sourcePresent: index === 0,
+  ...(index === 0 ? {} : { terminalStatus: "completed" as const, terminalObservedAt: Date.now() - 30_000 }),
 }));
 const UNFILED_WORKSPACE = FIXTURE_QUERY.get("unfiledWorkspace") === "1";
 const LONG_AGENT = FIXTURE_QUERY.get("longAgent") === "1";
@@ -663,6 +664,7 @@ function initialModel(): FixtureModel {
       worktreePath: "/repos/alpha/.agent-worktrees/session-alpha",
       status: "running",
       backgroundJobs: SESSION_TOOLS_JOBS,
+      backgroundWorkState: "running",
       // Its child sessions' requests come to it, so the panel reads them.
       parentControl: "questions_and_approvals",
     });

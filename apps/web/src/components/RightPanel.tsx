@@ -1113,6 +1113,7 @@ export function RightPanel({
             <SessionToolsList
               session={session}
               runnerOnline={runnerOnline}
+              runnerProtocolVersion={runnerProtocolVersion}
               git={git}
               items={items}
               context={toolContext}

@@ -93,9 +93,12 @@ test("the other tools' facts read in sentence case (#2844)", () => {
   assert.equal(agentsFact(0), "No subagents in this session");
   assert.equal(agentsFact(1), "1 subagent in this session");
   assert.equal(agentsFact(3), "3 subagents in this session");
+  assert.equal(agentsFact(50, true), "50+ subagents in this session");
   assert.equal(backgroundFact([]), "Nothing has run in the background");
-  assert.equal(backgroundFact([{}, { terminalStatus: "completed" }, { terminalStatus: "failed" }]), "1 of 3 jobs running");
-  assert.equal(backgroundFact([{}]), "1 of 1 job running");
+  assert.equal(backgroundFact(["running", "completed", "failed"]), "1 of 3 jobs running");
+  assert.equal(backgroundFact(["running"]), "1 of 1 job running");
+  // Only a verified running job counts: unverified, lost and stalled ones are not running.
+  assert.equal(backgroundFact(["unverified", "lost", "stalled"]), "0 of 3 jobs running");
   assert.equal(campaignFact({ counts: { delivered: 3, committed: 7 } }), "3 of 7 delivered");
   assert.equal(campaignFact(null), "Progress of this session's campaign");
   assert.equal(decisionsFact(0, false, "ready"), "No decisions recorded yet");
