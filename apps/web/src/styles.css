@@ -4051,6 +4051,11 @@ textarea {
   border-top: 1px solid var(--border);
   background: var(--bg);
 }
+/* While a text field in the scroller has focus, a coarse pointer's keyboard is serving it: the foot
+   gives its height to the scroller and comes back, unchanged, when the field loses focus (#2907). */
+@media (pointer: coarse) {
+  .rpanel-foot.is-yielded { display: none; }
+}
 
 /* ---------------------------- Session Companions ----------------------------
    The session companions in the side panel (Agents, Background Work, Side Chat and Terminal; #2871,
@@ -13751,6 +13756,9 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   justify-content: flex-end;
   gap: var(--space-2);
 }
+/* Keeping Add Finding in view reveals the card's own edge under it too: its padding, border and
+   margin (#2907). */
+.dedit-actions { scroll-margin-bottom: calc(var(--space-3) + 1px + var(--space-2)); }
 .dfinding-head {
   display: flex;
   flex-wrap: wrap;
