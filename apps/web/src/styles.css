@@ -4837,7 +4837,12 @@ textarea {
   overflow-y: auto;
   padding: var(--space-2) var(--space-1);
 }
-.session-tools > .notice { margin: 0 var(--space-3); }
+/* The list scrolls as a flex column, and a compact notice sets its own min-height, so without this it
+   shrinks to one line when the list outgrows the panel and clips its wrapped sentence. */
+.session-tools > .notice {
+  flex: none;
+  margin: 0 var(--space-3);
+}
 .session-tools-group {
   display: flex;
   flex-direction: column;

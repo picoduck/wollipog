@@ -159,7 +159,13 @@ test.describe("on a phone with a coarse pointer", () => {
     expectRowHeights(measured.rows, 64);
     await expect(tools(page).locator("kbd")).toHaveCount(0);
     await olderRunner(page);
-    expectRowHeights((await layout(page)).rows, 64);
+    const older = await layout(page);
+    expectRowHeights(older.rows, 64);
+    // The notice opens the list under the panel's bar, never under it, and its wrapped sentence fits.
+    expect(older.firstGap, "the notice starts at or below the bar").toBeGreaterThanOrEqual(0);
+    expect(older.firstGap).toBeLessThanOrEqual(16);
+    expect(await tools(page).locator(".notice").evaluate((element) => element.scrollHeight <= element.clientHeight),
+      "the notice's text fits its box").toBe(true);
     for (const id of ["files", "terminal"]) {
       expect(await row(page, id).locator(".row-sub").evaluate((element) => element.scrollWidth <= element.clientWidth),
         `${id}'s reason reads whole at 390px`).toBe(true);
