@@ -32,8 +32,15 @@ test("lazy New Session can be cancelled before its script arrives and opened aga
   await expect(page.getByText("Synthetic Session 1", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "New Session", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "New Session", exact: true });
+  await expect(dialog).toBeVisible();
   await expect(dialog.getByRole("status")).toHaveText("Loading…");
-  if (process.env.EVIDENCE_DIR) await page.screenshot({ path: `${process.env.EVIDENCE_DIR}/new-session-loading-390.png` });
+  if (process.env.EVIDENCE_DIR) {
+    // Capture pacing only: wait for the finite phone-sheet entry animation, excluding spinners.
+    await page.evaluate(() => Promise.all(document.getAnimations()
+      .filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity)
+      .map((animation) => animation.finished.catch(() => {}))));
+    await page.screenshot({ path: `${process.env.EVIDENCE_DIR}/new-session-loading-390.png` });
+  }
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
   release();
@@ -84,6 +91,7 @@ test("desktop session loads xterm on demand and restores shell output after the 
   await page.route("**/assets/ShellDock-*.js", async (route) => { await pending; await route.continue(); });
   await page.goto(`/sessions/~${encodeResourceId("synthetic-1")}`);
   await expect(page.locator(".composer-input")).toBeVisible();
+  await expect(page.getByText("Start the Conversation", { exact: true })).toBeVisible();
   await page.keyboard.press("Control+Backquote");
   await expect(page.getByRole("status").filter({ hasText: "Loading terminal…" })).toBeVisible();
   release();

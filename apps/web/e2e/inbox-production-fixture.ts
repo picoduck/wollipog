@@ -29,7 +29,7 @@ export async function installInboxFixture(page: Page) {
     let body: unknown;
     if (path === "/api/identity") body = { context: { userId: "synthetic-user", organizationId: "synthetic-org", role: "owner" }, memberships: [], teams: [], devices: [] };
     else if (path === "/api/instance") body = { instanceId: "synthetic-instance", appVersion: "1" };
-    else if (path.endsWith("/events")) body = { events: [], eventEpoch: 0, nextAfter: 0, hasMore: false };
+    else if (path.endsWith("/events")) body = { events: [], eventEpoch: 0, nextAfter: 0, hasMoreCached: false, hasMoreOlder: false, cacheComplete: true };
     else if (path.endsWith("/shells")) body = { shells: [{ shellId: "synthetic-shell", sessionId: "synthetic-1", name: "Synthetic Shell", createdAt: 1, pty: true, kind: "shell", status: "running" }] };
     else if (path.endsWith("/synthetic-shell/history")) body = { shellId: "synthetic-shell", chunks: [{ seq: 1, data: "Synthetic terminal output\r\n", stream: "stdout" }], nextAfter: 1, hasMore: false, truncatedBefore: false };
     else if (path.endsWith("/synthetic-shell/resize")) body = { ok: true };
