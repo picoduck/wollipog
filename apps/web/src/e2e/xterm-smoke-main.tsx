@@ -41,6 +41,13 @@ class InMemoryShellTransport {
   }
 }
 
+/** `?theme=light` renders every terminal on the light palette; dark otherwise. */
+const theme = new URLSearchParams(window.location.search).get("theme") === "light" ? "light" : "dark";
+
+/** Two shells' output for the tabbed fixture (#2865): Tab A has enough to scroll, Tab B a little. */
+const TAB_A_OUTPUT = Array.from({ length: 200 }, (_, index) => `tab-a-line-${index}\r\n`).join("");
+const TAB_B_OUTPUT = "tab-b-ready\r\n";
+
 const interactiveTransport = new InMemoryShellTransport();
 const readonlyTransport = new InMemoryShellTransport();
 const INITIAL_INTERACTIVE_OUTPUT = "Initial terminal output\r\nGlyphs:   󰊢 │ ─ é Ж 日本語\r\n";
@@ -85,6 +92,7 @@ function Fixture() {
   const [searchResults, setSearchResults] = useState<TerminalSearchResults | null>(null);
   const terminalRef = useRef<ShellTerminalHandle | null>(null);
   const [size, setSize] = useState({ width: 640, height: 180 });
+  const [tab, setTab] = useState<"a" | "b">("a");
 
   const openNewSession = useCallback(() => {
     appShortcutCount += 1;
@@ -140,7 +148,7 @@ function Fixture() {
           searchTerm={searchTerm}
           onSearchResults={setSearchResults}
           handleRef={terminalRef}
-          theme="dark"
+          theme={theme}
           scheme="wollipog"
           onData={(data) => interactiveTransport.receiveInput(data)}
           onResize={(cols, rows) => interactiveTransport.reportResize(cols, rows)}
@@ -152,22 +160,44 @@ function Fixture() {
           total={readonly.total}
           interactive={false}
           searchTerm=""
-          theme="dark"
+          theme={theme}
           scheme="wollipog"
           onData={(data) => readonlyTransport.receiveInput(data)}
           onResize={(cols, rows) => readonlyTransport.reportResize(cols, rows)}
         />
       </section>
-      <div className="shell-input-row">
+      <div className="pipe-row">
         <span className="shell-prompt" aria-hidden="true">$</span>
         <input className="shell-input" aria-label="Adjacent Shell Input Fixture" readOnly />
       </div>
+      {/* A terminal host's tabs (#2865): one mounted terminal per shell in one cell, the other hidden,
+          as the dock keeps them, so switching away and back keeps a scrolled-up tab where it was. */}
+      <section aria-label="Tabbed Terminal Fixture" style={{ width: 640 }}>
+        <div role="group" aria-label="Fixture Tabs">
+          <button type="button" aria-pressed={tab === "a"} onClick={() => setTab("a")}>Tab A</button>
+          <button type="button" aria-pressed={tab === "b"} onClick={() => setTab("b")}>Tab B</button>
+        </div>
+        <div className="shell-term-stack" style={{ height: 180 }}>
+          {(["a", "b"] as const).map((id) => (
+            <ShellTerminal
+              key={id}
+              hidden={tab !== id}
+              text={id === "a" ? TAB_A_OUTPUT : TAB_B_OUTPUT}
+              total={(id === "a" ? TAB_A_OUTPUT : TAB_B_OUTPUT).length}
+              interactive
+              searchTerm=""
+              theme={theme}
+              scheme="wollipog"
+            />
+          ))}
+        </div>
+      </section>
       <div className="detail-scroll" tabIndex={-1}>Terminal Exit Target</div>
     </main>
   );
 }
 
-document.documentElement.dataset.theme = "dark";
+document.documentElement.dataset.theme = theme;
 const root = document.getElementById("root");
 if (!root) throw new Error("missing #root element");
 createRoot(root).render(<Fixture />);

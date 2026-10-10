@@ -1,2 +1,0 @@
-|.shell-dock-body|padding|12px
-|.shell-dock-body|padding|12px

@@ -836,6 +836,37 @@ or unreadable value means Bottom Dock.
   live. Moving never restarts a running shell; its tab and scrollback move with it.
 - The Terminal toggle and Ctrl+` open the terminal wherever it is placed.
 
+**The terminal's body (#2865).** The terminal is flush: no border, radius or padding of its own, on
+a body that is `--terminal-bg` edge to edge with `--space-2` `--space-3` padding. Each shell keeps one
+mounted terminal, the others hidden at the same size, so switching tabs keeps every tab's scroll
+position. From top to bottom the body holds:
+
+- **One notice** (`TerminalNoticeSlot`, §13.2): machine offline ("Build Box is offline. Shells
+  reconnect when it's back."), reconnecting ("Reconnecting to this shell…"), Agent TUI blocked by a
+  guardrail, Agent TUI outside tracking ("Agent TUI runs outside Wollipog's tracking: no usage,
+  approval cards or transcript entries. Policy hooks stay on.", the last sentence only with hook
+  governance), output possibly incomplete, then a failed terminal action. The rest wait behind
+  "+N More".
+- **The terminals.** "Older output expired." is the faint first line of a scrollback whose oldest
+  output retention removed. Search highlights every match with a wash of the terminal's text at 24%
+  and the active match with `--accent` at 32% inside a 1px `--accent` outline, from the computed tokens,
+  so they follow the theme and scheme. The selection stays as it is, under the active wash.
+- **A status row** (`.term-status`, §11.3) under an exited shell: "Shell exited with code 0." with
+  **Start New Shell** and **Close Tab**. A running shell that takes no input here reads "Read-only: this
+  shell's output is shown, but it doesn't take input."
+- **The pipe row** (`.pipe-row`) of a Windows-native shell: the "$" prompt, a field with the
+  placeholder "Type a command", and a "No TTY" meta item whose tooltip gives the reason. The prompt
+  and the meta keep their width and the field gives way, so nothing clips at 390px.
+- **Empty**, a compact `State` (§12.1): "No Shells Open", "Run commands in this session's worktree on
+  <Machine>." and **New Shell**.
+
+A terminal whose host is narrower than 560px uses 12px text on 16px lines, read each time it is
+fitted; wider hosts keep 12.5px. The dock opens 220px tall the first time and keeps a height the
+person set. **Resize Terminal** draws a 32×4 `--border-strong` mark on the dock's top edge at all
+times. With a coarse pointer it is a 28px strip in the flow above the head whose hit area reaches 16px
+up into the composer's bottom padding (44px in all), never over the tabs. ArrowUp and ArrowDown resize
+it in 16px steps, and Home or a double-click resets it to 220px.
+
 ### 4.7 Toolbar
 
 A row of tools above the content they act on: search, filters, view switches and a result count.
@@ -2442,6 +2473,14 @@ session 1 (warning while pending, danger once failed or timed out), the open Pro
 suggestion 2 (info, only on that Project's tab), Recommended Skills 3 (info). Each entry keeps its own
 way out (Cancel Sign-In or Dismiss, Dismiss Setup Notice, Dismiss All), so the slot's info dismissal
 is unused. While reconnecting the slot is hidden, since what it would show is stale (§12.5).
+
+**Terminal notice slot (#2865).** The terminal's notices are another `SessionNoticeSlot`,
+`TerminalNoticeSlot`, directly above the terminal wherever it is placed (§4.6), with its menu named
+"Terminal Notices" and its ranks in `TERMINAL_NOTICE_RANK`: machine offline 1 (warning), reconnecting
+2 (info), Agent TUI blocked by a guardrail 3 (warning), Agent TUI outside tracking 4 (info), output
+possibly incomplete 5 (warning), a failed terminal action 6 (danger, with its own Dismiss). Every
+entry is a compact notice. The conditions come from `terminalNoticeConditions` in `shells-panel.ts`,
+so every host of the terminal shows the same ones.
 
 **Side panel notice slot (#2856).** A panel tool's notices are a third `SessionNoticeSlot`,
 `PanelNoticeSlot`, directly under the side panel's header (§4.9), with its menu named "Panel Notices"

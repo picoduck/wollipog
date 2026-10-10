@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { Notice } from "./Notice.js";
 import { isTerminal, nativeTuiHasTrackedGuardrails, type ShellKind, type ShellView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
@@ -11,20 +11,28 @@ import {
   resolveDockDrag,
 } from "../dock.js";
 import {
+  PIPE_MODE_REASON,
+  READ_ONLY_SHELL_MESSAGE,
   agentTuiUnavailableReason,
   exitedShellsWithoutTabs,
+  shellExitedMessage,
   shellTabView,
   shellsRemovedAfterReconnect,
   shellsVisibleAfterClose,
   splitShellInput,
   supportsSessionAgentTui,
   sessionHasHookGovernance,
+  terminalNoticeConditions,
   type TerminalSearchResults,
 } from "../shells-panel.js";
 import { runnerDisplay } from "../runners.js";
 import { ShellTerminal, type ShellTerminalHandle } from "./ShellTerminal.js";
 import { TerminalNewTab, TerminalSearch, TerminalTabs, terminalTabId, type TerminalTabKind } from "./TerminalHead.js";
-import { ChevronDownIcon } from "./Icons.js";
+import { TerminalNoticeSlot } from "./TerminalNoticeSlot.js";
+import type { SessionNoticeEntry } from "./SessionNoticeSlot.js";
+import { State } from "./State.js";
+import { BusyButton } from "./ui/BusyButton.js";
+import { ChevronDownIcon, TerminalIcon } from "./Icons.js";
 import { useIsCoarsePointer } from "./useIsMobile.js";
 import { shortcutAriaKeys, shortcutDisplay } from "../shortcuts.js";
 import type { ResolvedTheme } from "../theme.js";
@@ -50,6 +58,10 @@ function viewportDockMax(): number {
  *
  * Its one 40px head (#2864; docs/design-system.md §4.6) is the tabs, then Search Output, New Tab and
  * Hide Terminal. The tabs, search and New Tab are TerminalHead's, which any terminal host renders.
+ *
+ * Its body (#2865; §4.6) is the flush terminal on --terminal-bg: the terminal's one notice
+ * (`TerminalNoticeSlot`), one mounted `ShellTerminal` per shell with the others hidden, then an
+ * exited shell's status row or a pipe shell's command row; with no shell, an empty state.
  */
 export function ShellDock({
   sessionId,
@@ -120,7 +132,9 @@ export function ShellDock({
   const pipeInputRef = useRef<HTMLInputElement | null>(null);
   const keyQueue = useRef<{ shellId: string; data: string } | null>(null);
   const keyTimer = useRef<number | null>(null);
-  const resizeQueue = useRef<{ shellId: string; cols: number; rows: number } | null>(null);
+  // Every shell's terminal stays mounted at the dock's size, so each reports its own size: one
+  // pending size per shell, sent together.
+  const resizeQueue = useRef(new Map<string, { cols: number; rows: number }>());
   const resizeTimer = useRef<number | null>(null);
   const shellsRef = useRef<ShellView[] | null>(null);
   shellsRef.current = shells;
@@ -166,11 +180,7 @@ export function ShellDock({
       if (keyTimer.current != null) window.clearTimeout(keyTimer.current);
       keyTimer.current = null;
     }
-    if (resizeQueue.current && removed.has(resizeQueue.current.shellId)) {
-      resizeQueue.current = null;
-      if (resizeTimer.current != null) window.clearTimeout(resizeTimer.current);
-      resizeTimer.current = null;
-    }
+    for (const shellId of removed) resizeQueue.current.delete(shellId);
   };
 
   const loadShells = async (activate?: string, reconcile = false) => {
@@ -211,7 +221,7 @@ export function ShellDock({
             );
           } catch (e) {
             if (loadSeq.current === seq) {
-              setError(`Could not restore ${shell.name} history: ${(e as Error).message}`);
+              setError(`Couldn't restore the history of ${shell.name}: ${(e as Error).message}`);
             }
           }
         })();
@@ -290,9 +300,10 @@ export function ShellDock({
     }
   }, [shellOutput, shells, sessionId, removeShellOutput]);
 
-  // Another tab's terminal counts its own matches when it mounts; the last tab's count is not its.
+  // The last tab's count is not the next one's: the next tab's terminal counts its own matches as it
+  // takes the term. That happens in its effect, so the stale count goes first, in a layout effect.
   // With no tab left there is nothing to search, so search closes.
-  useEffect(() => {
+  useLayoutEffect(() => {
     setSearchResults(null);
     if (active === null) {
       setSearchOpen(false);
@@ -304,7 +315,15 @@ export function ShellDock({
   const hookGovernanceActive = sessionHasHookGovernance(session?.agentCapabilities);
   const scrollback = active ? shellOutput.get(active) : undefined;
   const isPty = activeShell?.pty === true;
-  const interactive = isPty && activeShell?.status === "running" && runnerOnline && !scrollback?.exited;
+  /** A shell's terminal takes keystrokes: a running PTY on an online machine. */
+  const shellInteractive = (shell: ShellView) =>
+    shell.pty === true && shell.status === "running" && runnerOnline && !shellOutput.get(shell.shellId)?.exited;
+  const interactive = activeShell !== null && shellInteractive(activeShell);
+  const exited = Boolean(scrollback?.exited) || activeShell?.status === "exited";
+  const pipeInput = activeShell !== null && !isPty && !exited && activeShell.status === "running";
+  // A shell that is neither exited nor waiting on its machine, but takes no input here.
+  const readOnly = activeShell !== null && !interactive && !pipeInput && !exited && runnerOnline &&
+    activeShell.status !== "reconnecting";
 
   const newShell = async (kind: ShellKind = "shell") => {
     setBusy(true);
@@ -363,7 +382,7 @@ export function ShellDock({
         await api.shellInput(sessionId, shellId, chunk); // sequential — order is the contract
       }
     } catch (e) {
-      setError(`shell input failed (some of it may not have been delivered): ${(e as Error).message}`);
+      setError(`Some input may not have reached the shell: ${(e as Error).message}`);
     }
   };
 
@@ -389,15 +408,16 @@ export function ShellDock({
 
   const sendResize = (shellId: string, cols: number, rows: number) => {
     if (resizeTimer.current != null) window.clearTimeout(resizeTimer.current);
-    resizeQueue.current = { shellId, cols, rows };
+    resizeQueue.current.set(shellId, { cols, rows });
     resizeTimer.current = window.setTimeout(() => {
       resizeTimer.current = null;
-      const queued = resizeQueue.current;
-      resizeQueue.current = null;
-      if (!queued) return;
-      api.resizeShell(sessionId, queued.shellId, queued.cols, queued.rows).catch(() => {
-        /* best-effort — pipe shells / old runners ignore it */
-      });
+      const queued = [...resizeQueue.current];
+      resizeQueue.current.clear();
+      for (const [queuedShellId, size] of queued) {
+        api.resizeShell(sessionId, queuedShellId, size.cols, size.rows).catch(() => {
+          /* best-effort — pipe shells / old runners ignore it */
+        });
+      }
     }, 250);
   };
 
@@ -408,7 +428,7 @@ export function ShellDock({
     keyTimer.current = null;
     resizeTimer.current = null;
     keyQueue.current = null;
-    resizeQueue.current = null;
+    resizeQueue.current.clear();
   }, []);
 
   /** Pipe-mode line input (Windows-native shells): a blank Enter is meaningful stdin. */
@@ -510,6 +530,35 @@ export function ShellDock({
     else terminalRef.current?.focus();
   };
 
+  // One notice above the terminal (§13.2): the most severe condition, the rest behind "+N More".
+  const noticeEntries: SessionNoticeEntry[] = terminalNoticeConditions({
+    machineOnline: runnerOnline,
+    machineName,
+    activeShell,
+    outputIncomplete: Boolean(scrollback?.incomplete),
+    agentTuiBlocked: tuiSupported && tuiGuardrailBlocked,
+    hookGovernance: hookGovernanceActive,
+    error,
+  }).map((condition) => ({
+    key: condition.key,
+    severity: condition.severity,
+    rank: condition.rank,
+    title: condition.title,
+    render: ({ trailing, onDismiss }) => (
+      <Notice
+        key={condition.key}
+        tone={condition.severity}
+        compact
+        role={condition.severity === "danger" ? "alert" : "status"}
+        trailing={trailing}
+        onDismiss={condition.key === "action-failed" ? () => setError(null) : onDismiss}
+        dismissLabel={condition.key === "action-failed" ? "Dismiss Error" : "Dismiss"}
+      >
+        {condition.message}
+      </Notice>
+    ),
+  }));
+
   if (!session) return null;
 
   return (
@@ -518,11 +567,11 @@ export function ShellDock({
         className="shell-dock-grip"
         role="separator"
         aria-orientation="horizontal"
-        aria-label="Resize Shell Panel"
+        aria-label="Resize Terminal"
         aria-valuemin={DOCK_MIN_HEIGHT}
         aria-valuemax={clampDockHeight(Number.MAX_SAFE_INTEGER, viewportMax)}
         aria-valuenow={effectiveHeight}
-        title="Drag to resize · double-click to reset"
+        title="Drag to resize. Double-click or press Home to reset."
         tabIndex={0}
         onPointerDown={onGripDown}
         onPointerMove={onGripMove}
@@ -533,6 +582,7 @@ export function ShellDock({
           // would make the first ArrowUp jump instead of grow by one step.
           if (e.key === "ArrowUp") setHeight(clampDockHeight(effectiveHeight + 16, viewportMax));
           else if (e.key === "ArrowDown") setHeight(clampDockHeight(effectiveHeight - 16, viewportMax));
+          else if (e.key === "Home") setHeight(clampDockHeight(DOCK_DEFAULT_HEIGHT, viewportMax));
           else return;
           e.preventDefault();
         }}
@@ -586,85 +636,109 @@ export function ShellDock({
         aria-labelledby={active ? `${tabsetId}-tab-${encodeURIComponent(active)}` : undefined}
         style={{ height: effectiveHeight }}
       >
-          {!runnerOnline && <div className="hint warn">Runner is offline — shells are unavailable.</div>}
-          {tuiSupported && tuiGuardrailBlocked && (
-            <div className="hint warn" role="status">
-              Agent TUI is unavailable while this session has a cost budget, cost checkpoint, or tool-call limit. Clear those guardrails or use Direct.
-            </div>
-          )}
-          {error && <Notice tone="danger" compact>{error}</Notice>}
-          {activeShell?.kind === "agent_tui" && (
-            <div className="hint" role="status">
-              {hookGovernanceActive
-                ? "Usage Accounting: Unavailable. No structured events or approval cards. Manager policy hooks remain active."
-                : "Usage Accounting: Unavailable. No structured events, approval cards, or manager policy interception."}
-            </div>
-          )}
-          {active ? (
-            <>
-              <ShellTerminal
-                key={`${active}:${scrollback?.revision ?? 0}`}
-                theme={theme}
-                scheme={scheme}
-                text={scrollback?.text ?? ""}
-                total={scrollback?.total ?? 0}
-                interactive={interactive}
-                searchTerm={searchOpen ? searchTerm : ""}
-                onSearchResults={setSearchResults}
-                handleRef={terminalRef}
-                onData={(d) => sendKeys(active, d)}
-                onResize={(cols, rows) => sendResize(active, cols, rows)}
-              />
-              {scrollback?.incomplete && (
-                <div className="hint warn" role="status">
-                  Some shell output may be missing after the dashboard reconnected to recover from a slow connection.
-                </div>
-              )}
-              {scrollback?.exited && (
-                <div className="hint">
-                  Shell exited{scrollback.exitCode != null ? ` (code ${scrollback.exitCode})` : ""}.
-                </div>
-              )}
-              {scrollback?.truncated && (
-                <div className="hint" role="status">Older terminal output expired from bounded history.</div>
-              )}
-              {activeShell?.status === "reconnecting" && (
-                <div className="hint warn" role="status">Reconnecting to the retained shell...</div>
-              )}
-              {!isPty && !scrollback?.exited && activeShell?.status === "running" && (
-                <div className="shell-input-row">
-                  <span className="shell-prompt">❯</span>
-                  <input
-                    ref={pipeInputRef}
-                    className="shell-input"
-                    value={input}
-                    placeholder="Type a command and press Enter… (pipe mode: no TTY on Windows-native sessions)"
-                    disabled={!runnerOnline}
-                    onChange={(e) => setInput(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && !e.shiftKey) {
-                        e.preventDefault();
-                        void sendLine();
-                      } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
-                        const history = commandHistory.current.get(active) ?? { entries: [], cursor: 0 };
-                        if (history.entries.length === 0) return;
-                        e.preventDefault();
-                        history.cursor = e.key === "ArrowUp"
-                          ? Math.max(0, history.cursor - 1)
-                          : Math.min(history.entries.length, history.cursor + 1);
-                        commandHistory.current.set(active, history);
-                        setInput(history.cursor === history.entries.length ? "" : history.entries[history.cursor] ?? "");
-                      }
-                    }}
-                  />
-                </div>
-              )}
-            </>
-          ) : (
-            <div className="hint shell-dock-empty">
-              No shell open — start one to run commands in this session's working directory.
-            </div>
-          )}
+        <TerminalNoticeSlot sessionId={sessionId} entries={noticeEntries} onFocusLost={() => terminalRef.current?.focus()} />
+        {shells !== null && shells.length > 0 && (
+          // One mounted terminal per shell, the inactive ones hidden at the same size, so a tab
+          // switch keeps each terminal's scroll position and no shell is resized by it.
+          <div className="shell-term-stack">
+            {shells.map((shell) => {
+              const selected = shell.shellId === active;
+              const output = shellOutput.get(shell.shellId);
+              return (
+                <ShellTerminal
+                  key={shell.shellId}
+                  hidden={!selected}
+                  theme={theme}
+                  scheme={scheme}
+                  text={output?.text ?? ""}
+                  total={output?.total ?? 0}
+                  revision={output?.revision ?? 0}
+                  historyExpired={Boolean(output?.truncated)}
+                  pty={shell.pty === true}
+                  interactive={shellInteractive(shell)}
+                  searchTerm={selected && searchOpen ? searchTerm : ""}
+                  onSearchResults={selected ? setSearchResults : undefined}
+                  handleRef={selected ? terminalRef : undefined}
+                  onData={(d) => sendKeys(shell.shellId, d)}
+                  onResize={(cols, rows) => sendResize(shell.shellId, cols, rows)}
+                />
+              );
+            })}
+          </div>
+        )}
+        {activeShell && exited && (
+          <div className="term-status">
+            <span className="term-status-text" role="status">{shellExitedMessage(activeShell.kind, scrollback?.exitCode ?? activeShell.exitCode)}</span>
+            <BusyButton
+              className="btn sm"
+              busy={busy}
+              progress="Starting a new shell…"
+              disabled={!runnerOnline}
+              onClick={() => void newShell()}
+            >
+              Start New Shell
+            </BusyButton>
+            <button type="button" className="btn sm ghost" onClick={() => void closeShell(activeShell.shellId)}>
+              Close Tab
+            </button>
+          </div>
+        )}
+        {readOnly && <div className="term-status"><span className="term-status-text">{READ_ONLY_SHELL_MESSAGE}</span></div>}
+        {active && pipeInput && (
+          <div className="pipe-row">
+            <span className="shell-prompt" aria-hidden="true">$</span>
+            <input
+              ref={pipeInputRef}
+              className="shell-input"
+              value={input}
+              aria-label="Command"
+              aria-describedby={`${tabsetId}-tty`}
+              placeholder="Type a command"
+              disabled={!runnerOnline}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  void sendLine();
+                } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+                  const history = commandHistory.current.get(active) ?? { entries: [], cursor: 0 };
+                  if (history.entries.length === 0) return;
+                  e.preventDefault();
+                  history.cursor = e.key === "ArrowUp"
+                    ? Math.max(0, history.cursor - 1)
+                    : Math.min(history.entries.length, history.cursor + 1);
+                  commandHistory.current.set(active, history);
+                  setInput(history.cursor === history.entries.length ? "" : history.entries[history.cursor] ?? "");
+                }
+              }}
+            />
+            {/* A meta item (§11.3) with the reason as its tooltip; the field reads both as its description. */}
+            <span className="pipe-row-meta" title={PIPE_MODE_REASON}>
+              <span aria-hidden="true">No TTY</span>
+              <span className="sr-only" id={`${tabsetId}-tty`}>{`No TTY. ${PIPE_MODE_REASON}`}</span>
+            </span>
+          </div>
+        )}
+        {shells !== null && shells.length === 0 && (
+          <State
+            compact
+            icon={<TerminalIcon />}
+            title="No Shells Open"
+            actions={(
+              <BusyButton
+                className="btn"
+                busy={busy}
+                progress="Starting a new shell…"
+                disabled={!runnerOnline}
+                onClick={() => void newShell()}
+              >
+                New Shell
+              </BusyButton>
+            )}
+          >
+            {`Run commands in this session's ${session.worktreePath ? "worktree" : "folder"} on ${machineName}.`}
+          </State>
+        )}
       </div>
     </div>
   );

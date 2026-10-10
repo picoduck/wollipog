@@ -6,6 +6,7 @@ import {
   applyThemeToDocument,
   parseThemePreference,
   resolveTheme,
+  terminalSearchDecorations,
   terminalTheme,
   themeColor,
 } from "./theme.js";
@@ -77,6 +78,27 @@ test("terminal palettes have theme-matched surfaces and readable ANSI colors", (
     assert.ok(contrast(light[color], light.background) >= 4.5, `${color} must remain readable on the light terminal`);
   }
   assert.ok(dark.red && dark.green && dark.blue && dark.cursor);
+});
+
+test("terminal search highlights: a neutral wash for every match, an accent wash and outline for the active one (#2865)", () => {
+  for (const theme of ["dark", "light"] as const) {
+    const palette = terminalTheme(theme);
+    const decorations = terminalSearchDecorations(theme);
+    // The search addon accepts only #RRGGBB.
+    for (const color of [decorations.matchBackground, decorations.activeMatchBackground, decorations.activeMatchBorder]) {
+      assert.match(color ?? "", /^#[0-9a-f]{6}$/i, `${theme}: ${color}`);
+    }
+    assert.notEqual(decorations.activeMatchBackground, decorations.matchBackground, `${theme}: the active match stands apart`);
+    assert.equal(decorations.activeMatchBorder, palette.cursor, `${theme}: the outline is --accent (the cursor's token)`);
+    // Each wash shows on the ground and keeps the text on it readable.
+    for (const wash of [decorations.matchBackground!, decorations.activeMatchBackground!]) {
+      assert.notEqual(wash, palette.background);
+      assert.ok(contrast(palette.foreground, wash) >= 4.5, `${theme}: text stays readable on ${wash}`);
+    }
+  }
+  // 24% of the dark terminal's text over its ground, and 32% of the accent.
+  assert.equal(terminalSearchDecorations("dark").matchBackground, "#3f4246");
+  assert.equal(terminalSearchDecorations("dark").activeMatchBackground, "#1d4d4c");
 });
 
 test("light UI semantic text tokens meet normal-text contrast on their owning surfaces", () => {

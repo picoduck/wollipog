@@ -59,10 +59,13 @@ test("Vite production browser coverage cannot silently lose a selected check", (
     [xtermSpec, "reports fitted dimensions, refits on resize, and preserves usable scrollback @production"],
     [xtermSpec, "applies search entered while the terminal font is still loading @production"],
     [xtermSpec, "searches output with a match count, Previous and Next, Enter, Shift+Enter and Escape (#2864) @production"],
+    [xtermSpec, "switching from a scrolled-up tab to another and back keeps its scroll position (#2865) @production"],
+    [xtermSpec, "the active search match is visibly different from the other matches in ${theme} (#2865) @production"],
   ];
 
-  // Ten tagged declarations discover eleven tests because the painted-affordance case runs in two themes.
-  assert.equal(markers.length, 10);
+  // Twelve tagged declarations discover fourteen tests because the painted-affordance case and the
+  // active-search-match case each run in two themes.
+  assert.equal(markers.length, 12);
   for (const [source, title] of requiredDeclarations) {
     assert.ok(source.includes(title), `missing required production browser declaration: ${title}`);
   }

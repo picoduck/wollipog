@@ -4,7 +4,8 @@
  * unit-tested without a DOM lives here.
  */
 
-export const DOCK_DEFAULT_HEIGHT = 280;
+/** The first-time height (#2865; docs/design-system.md §4.6). A height the person set is kept. */
+export const DOCK_DEFAULT_HEIGHT = 220;
 export const DOCK_MIN_HEIGHT = 120;
 export const DOCK_MAX_HEIGHT = 640;
 /** Dragging shorter than this snaps the dock closed instead of pinning it at the minimum. */

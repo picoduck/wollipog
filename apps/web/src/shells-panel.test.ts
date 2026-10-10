@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  PIPE_MODE_REASON,
+  READ_ONLY_SHELL_MESSAGE,
   SHELL_INPUT_CHUNK_UNITS,
+  TERMINAL_NOTICE_RANKS,
   agentTuiUnavailableReason,
   appendOrderedShellChunk,
   exitedShellsWithoutTabs,
@@ -16,6 +19,8 @@ import {
   terminalSearchCountLabel,
   supportsSessionAgentTui,
   sessionHasHookGovernance,
+  shellExitedMessage,
+  terminalNoticeConditions,
   type ShellScrollback,
 } from "./shells-panel.js";
 
@@ -224,4 +229,66 @@ test("terminalSearchCountLabel: the match count beside the search field", () => 
   assert.equal(terminalSearchCountLabel({ index: -1, count: 3 }), "3 matches");
   assert.equal(terminalSearchCountLabel({ index: -1, count: 1 }), "1 match");
   assert.equal(terminalSearchCountLabel({ index: 0, count: 1000 }), "1 of 1,000+");
+});
+
+const QUIET = {
+  machineOnline: true,
+  machineName: "Build Box",
+  activeShell: { shellId: "shell-1", kind: "shell" as const, status: "running" as const },
+  outputIncomplete: false,
+  agentTuiBlocked: false,
+  hookGovernance: false,
+  error: null,
+};
+
+test("terminalNoticeConditions: a running shell on an online machine has no notice (#2865)", () => {
+  assert.deepEqual(terminalNoticeConditions(QUIET), []);
+  assert.deepEqual(terminalNoticeConditions({ ...QUIET, activeShell: null }), []);
+});
+
+test("terminalNoticeConditions: every condition, in the issue's rank order, with its copy (#2865)", () => {
+  const all = terminalNoticeConditions({
+    ...QUIET,
+    machineOnline: false,
+    activeShell: { shellId: "tui-1", kind: "agent_tui", status: "reconnecting" },
+    outputIncomplete: true,
+    agentTuiBlocked: true,
+    hookGovernance: true,
+    error: "Couldn't reach Build Box.",
+  });
+  assert.deepEqual(all.map((condition) => [condition.key, condition.severity, condition.rank]), [
+    ["machine-offline", "warning", TERMINAL_NOTICE_RANKS.machineOffline],
+    ["reconnecting:tui-1", "info", TERMINAL_NOTICE_RANKS.reconnecting],
+    ["agent-tui-blocked", "warning", TERMINAL_NOTICE_RANKS.agentTuiBlocked],
+    ["agent-tui-untracked", "info", TERMINAL_NOTICE_RANKS.agentTuiUntracked],
+    ["output-incomplete", "warning", TERMINAL_NOTICE_RANKS.outputIncomplete],
+    ["action-failed", "danger", TERMINAL_NOTICE_RANKS.actionFailed],
+  ]);
+  const ranks = Object.values(TERMINAL_NOTICE_RANKS);
+  assert.deepEqual(ranks, [...ranks].sort((a, b) => a - b), "the table is in rank order");
+  const message = (key: string) => all.find((condition) => condition.key === key)?.message;
+  assert.equal(message("machine-offline"), "Build Box is offline. Shells reconnect when it's back.");
+  assert.equal(message("reconnecting:tui-1"), "Reconnecting to this shell…");
+  assert.equal(
+    message("agent-tui-untracked"),
+    "Agent TUI runs outside Wollipog's tracking: no usage, approval cards or transcript entries. Policy hooks stay on.",
+  );
+  assert.equal(
+    terminalNoticeConditions({ ...QUIET, activeShell: { shellId: "tui-1", kind: "agent_tui", status: "running" } })[0]?.message,
+    "Agent TUI runs outside Wollipog's tracking: no usage, approval cards or transcript entries.",
+    "without hook governance the last sentence goes",
+  );
+  for (const condition of all) {
+    assert.doesNotMatch(condition.message, /—|\.\.\./, `${condition.key} has no em dash or "..."`);
+    assert.match(condition.title, /^([A-Z][A-Za-z]*|TUI)( ([A-Z][A-Za-z]*|TUI|Be))*$/, `${condition.key} is Title Case`);
+  }
+});
+
+test("shellExitedMessage and the dock's fixed copy read as sentences (#2865)", () => {
+  assert.equal(shellExitedMessage("shell", 0), "Shell exited with code 0.");
+  assert.equal(shellExitedMessage(undefined, 130), "Shell exited with code 130.");
+  assert.equal(shellExitedMessage("shell", null), "Shell exited.");
+  assert.equal(shellExitedMessage("agent_tui", 1), "Agent TUI exited with code 1.");
+  assert.equal(READ_ONLY_SHELL_MESSAGE, "Read-only: this shell's output is shown, but it doesn't take input.");
+  for (const copy of [READ_ONLY_SHELL_MESSAGE, PIPE_MODE_REASON]) assert.doesNotMatch(copy, /—|\.\.\./);
 });
