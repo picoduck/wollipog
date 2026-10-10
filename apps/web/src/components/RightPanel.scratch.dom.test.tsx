@@ -336,8 +336,10 @@ async function viewOptionChecked(panel: Panel, name: string): Promise<string | n
 /** The Browser's address bar is labelled by a visually hidden <label>, so it is found by id. */
 const addressBar = (panel: Panel) => panel.container.querySelector<HTMLInputElement>("#browser-url")!;
 
+/** The path the Files crumbs show below the root, which they name after the session's folder (#2852);
+ * these cases are about where the browser is, so the root reads "root" whichever session it is. */
 const crumbs = (panel: Panel) =>
-  [...panel.container.querySelectorAll(".crumbs .crumb")].map((crumb) => crumb.textContent).join("/");
+  [...panel.container.querySelectorAll(".crumbs .crumb")].map((crumb, index) => index === 0 ? "root" : crumb.textContent).join("/");
 
 /** The Browser's Web Preview tab (#2854). */
 const webPreviewTab = (panel: Panel) =>

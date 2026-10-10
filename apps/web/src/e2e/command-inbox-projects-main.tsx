@@ -2731,6 +2731,20 @@ const client = {
     return { deleted: true as const };
   },
   revealWorkspace: async () => ({ ok: true as const }),
+  // The Files tool's folder (#2852): a root with one source folder.
+  listSessionFiles: async (_sessionId: string, path: string) => ({
+    path,
+    entries: path === "src"
+      ? [{ name: "session.ts", path: "src/session.ts", isDir: false, size: 2_048 }]
+      : path === ""
+        ? [
+          { name: "src", path: "src", isDir: true },
+          { name: "README.md", path: "README.md", isDir: false, size: 1_536 },
+          { name: "package.json", path: "package.json", isDir: false, size: 812 },
+        ]
+        : [],
+  }),
+  readSessionFile: async (_sessionId: string, path: string) => ({ path, content: `// ${path}\n`, size: 16 }),
   searchWorkspaceReferences: async (_sessionId: string, query: string) => ({
     results: [{ path: "src/session.ts", isDirectory: false }].filter((candidate) => candidate.path.includes(query)),
     truncated: false,

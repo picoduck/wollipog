@@ -1991,3 +1991,34 @@ test("deleting a Project explicitly retains sessions and moves them to No Projec
     };
   })).toEqual({ projectExists: false, sessionProjectId: null, sessionStillExists: true });
 });
+
+test.describe("Go to File (#2852)", () => {
+  test.use({ viewport: { width: 1440, height: 900 } });
+
+  test("Ctrl/Cmd+P opens the panel on Files with focus in Go to File, and a second press keeps both", async ({ page }) => {
+    await page.goto("/command-inbox-projects-e2e.html?scenario=git-visibility&reviewReady=1&fullShell=1");
+    await page.evaluate(() => localStorage.clear());
+    await page.reload();
+    await page.getByRole("button", { name: /Alpha Session/ }).click();
+    const expand = page.getByRole("button", { name: "Open Session", exact: true });
+    if (await expand.isVisible()) await expand.click();
+    await expect(page.locator("header.session-bar")).toBeVisible();
+    await expect(page.locator("#right-panel")).toHaveCount(0);
+
+    const field = page.locator("#right-panel").getByRole("combobox", { name: "Go to File" });
+    await page.keyboard.press("ControlOrMeta+p");
+    await expect(page.locator("#right-panel .rpanel-switcher-name")).toHaveText("Files");
+    await expect(field).toBeFocused();
+    await expect(page.locator("#right-panel .files-list .row").first()).toBeVisible();
+
+    await page.keyboard.press("ControlOrMeta+p");
+    await expect(page.locator("#right-panel")).toBeVisible();
+    await expect(field).toBeFocused();
+
+    await field.fill("session");
+    await expect(page.locator("#right-panel").getByRole("option")).toHaveCount(1);
+    await expect(page.locator("#right-panel").getByRole("option")).toHaveAttribute("title", "src/session.ts");
+    await field.press("Enter");
+    await expect(page.locator("#right-panel .crumbs .crumb.is-current")).toHaveText("session.ts");
+  });
+});

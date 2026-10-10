@@ -127,6 +127,9 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   // navigation rather than a persisted setting or one-of-N form choice. Listbox/option is the
   // correct combobox popup contract for its textarea; both pickers render through this one file.
   ["components/ComposerListbox.tsx", "raw-radiogroup", 2],
+  // Files' Go to File (#2852) is the same contract: a combobox field whose listbox of matching files
+  // opens one, which navigates rather than sets a value.
+  ["components/FilesPanel.tsx", "raw-radiogroup", 2],
   // The permission menu's §9.1 menu radios, and Model Settings (#2191): a popover of §9.1 rows
   // with the trailing check, as radios in labelled radio groups. It is a dialog rather than a menu
   // because its Context Window is a SegmentedControl, which a menu cannot hold.

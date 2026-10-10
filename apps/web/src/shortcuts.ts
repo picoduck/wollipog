@@ -176,7 +176,7 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
   {
     id: "open-files",
     group: "Session",
-    label: "Files Panel",
+    label: "Go to File",
     scope: "Session",
     binding: { key: "p", primary: true },
   },

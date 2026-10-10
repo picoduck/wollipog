@@ -1,6 +1,18 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { crumbsFor, editorSupportsSourceLocation, formatBytes, isMarkdownPath, resolveSourceTarget } from "./files-panel.js";
+import {
+  baseName,
+  crumbsFor,
+  editorSupportsSourceLocation,
+  fileIconKind,
+  formatBytes,
+  gitMarkers,
+  isMarkdownPath,
+  parentPath,
+  rankGoToFileResults,
+  resolveSourceTarget,
+  workspaceFolderName,
+} from "./files-panel.js";
 
 test("isMarkdownPath matches md/markdown/mdx case-insensitively", () => {
   assert.equal(isMarkdownPath("README.md"), true);
@@ -25,9 +37,9 @@ test("formatBytes: unknown, bytes, KB/MB thresholds, ≥100 rounds", () => {
 });
 
 test("crumbsFor builds cumulative root-relative paths from the root crumb", () => {
-  assert.deepEqual(crumbsFor(""), [{ name: "root", path: "" }]);
-  assert.deepEqual(crumbsFor("a/b/c"), [
-    { name: "root", path: "" },
+  assert.deepEqual(crumbsFor("", "wollipog"), [{ name: "wollipog", path: "" }]);
+  assert.deepEqual(crumbsFor("a/b/c", "wollipog"), [
+    { name: "wollipog", path: "" },
     { name: "a", path: "a" },
     { name: "b", path: "a/b" },
     { name: "c", path: "a/b/c" },
@@ -67,4 +79,71 @@ test("editor source affordances require advertised precision", () => {
   assert.equal(editorSupportsSourceLocation(editor, { path: "a.ts", line: 2 }), true);
   assert.equal(editorSupportsSourceLocation(editor, { path: "a.ts", line: 2, column: 3 }), false);
   assert.equal(editorSupportsSourceLocation({ id: "windsurf", name: "Devin Desktop" }, { path: "a.ts" }), false);
+});
+
+test("the root is named by its working folder, POSIX or Windows, else the workspace (#2852)", () => {
+  assert.equal(workspaceFolderName("/home/me/.agent-worktrees/wollipog-fix/"), "wollipog-fix");
+  assert.equal(workspaceFolderName("C:\\Users\\me\\src\\site"), "site");
+  assert.equal(workspaceFolderName(null, "Docs Site"), "Docs Site");
+  assert.equal(workspaceFolderName("", "  "), "Workspace");
+  assert.equal(parentPath("a/b/c.ts"), "a/b");
+  assert.equal(parentPath("c.ts"), "");
+  assert.equal(parentPath(""), "");
+  assert.equal(baseName("a/b/c.ts"), "c.ts");
+});
+
+test("rows name their icon by kind, never by emoji", () => {
+  assert.equal(fileIconKind("src", true), "folder");
+  assert.equal(fileIconKind("index.TSX", false), "code");
+  assert.equal(fileIconKind("Dockerfile", false), "code");
+  assert.equal(fileIconKind("logo.svg", false), "image");
+  assert.equal(fileIconKind("README.md", false), "file");
+  assert.equal(fileIconKind(".env", false), "file", "a dotfile has no extension");
+});
+
+test("git markers: untracked U, added or renamed A, everything else changed M, deletions none", () => {
+  const markers = gitMarkers([
+    { status: "M", path: "src/a.ts" },
+    { status: "MM", path: "src/b.ts" },
+    { status: "AM", path: "src/new.ts" },
+    { status: "??", path: "notes.txt" },
+    { status: "R", path: "old.ts -> src/moved.ts" },
+    { status: "D", path: "gone.ts" },
+    { status: "UU", path: "conflict.ts" },
+    { status: "??", path: "\"with space\\ttab.txt\"" },
+  ]);
+  assert.deepEqual(Object.fromEntries(markers), {
+    "src/a.ts": "M",
+    "src/b.ts": "M",
+    "src/new.ts": "A",
+    "notes.txt": "U",
+    "src/moved.ts": "A",
+    "conflict.ts": "M",
+    "with space\ttab.txt": "U",
+  });
+  assert.equal(gitMarkers(null).size, 0);
+});
+
+test("Go to File: files only, changed or recent first, then name matches before path matches", () => {
+  const ranked = rankGoToFileResults([
+    { path: "checks", isDirectory: true },
+    { path: "checks/run.ts", isDirectory: false },
+    { path: "src/checkout.ts", isDirectory: false },
+    { path: "docs/check-list.md", isDirectory: false },
+    { path: "src/precheck.ts", isDirectory: false },
+  ], "Check", (path) => path === "src/precheck.ts");
+  assert.deepEqual(ranked.map((match) => match.path), [
+    "src/precheck.ts",
+    "src/checkout.ts",
+    "docs/check-list.md",
+    "checks/run.ts",
+  ]);
+  assert.deepEqual(ranked[0], {
+    path: "src/precheck.ts", name: "precheck.ts", folder: "src", matchIn: "name", range: { start: 3, end: 8 },
+  });
+  assert.deepEqual(ranked[3], {
+    path: "checks/run.ts", name: "run.ts", folder: "checks", matchIn: "folder", range: { start: 0, end: 5 },
+  });
+  // A match across the folder and the name underlines nothing rather than the wrong letters.
+  assert.equal(rankGoToFileResults([{ path: "src/session.ts", isDirectory: false }], "src/se", () => false)[0]?.matchIn, "path");
 });
