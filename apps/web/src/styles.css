@@ -1874,7 +1874,8 @@ kbd {
 }
 /* §3.2 Split button: a primary action and the menu of its alternatives as one control. The two
    `.btn`s join on one shared edge. `:where()` keeps the recipe at a single class's weight, so a
-   component can size its segments without fighting it. */
+   component can size its segments without fighting it. The second segment is matched as a later
+   sibling, not the next one: a BusyButton segment is followed by its own live line. */
 .split {
   display: inline-flex;
   flex: none;
@@ -1884,7 +1885,7 @@ kbd {
   border-top-right-radius: 0;
   border-bottom-right-radius: 0;
 }
-.split > :where(.btn + .btn) {
+.split > :where(.btn ~ .btn) {
   margin-left: -1px;
   padding: 0 var(--space-2);
   border-top-left-radius: 0;
@@ -6513,8 +6514,10 @@ textarea {
    (§7.3): the footer's left slot, small and dim; its own row on a phone, above the two buttons.
    Guardrails (#2175) puts its one footer line here too: what empty means, or a Viewer's refusal.
    Hand Off (#2186) says why Create Handoff is disabled: "Choose a supported service tier." Snooze
-   (#2181) says why a reminder conflict refuses its primary: "Reload the reminder before saving." */
-.modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason) {
+   (#2181) says why a reminder conflict refuses its primary: "Reload the reminder before saving." Open
+   Pull Request (#2847) says why it can't open the request: offline, a Viewer's refusal, or a partial
+   stage ("Commit the staged changes first."). */
+.modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason) {
   flex: 0 1 auto;
   min-width: 0;
   margin: 0 auto 0 0;
@@ -6525,7 +6528,7 @@ textarea {
    buttons and wraps there, rather than pushing the primary onto a second row. */
 .modal-foot > .snooze-blocked-reason { flex: 1 1 0; }
 @media (max-width: 760px) {
-  .modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason) { flex-basis: 100%; }
+  .modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason) { flex-basis: 100%; }
 }
 /* Switch Account (#2149): one dim sentence about what moves, then the Accounts head and its rows. */
 .switch-account-rule {
@@ -13124,48 +13127,47 @@ body.shell-dock-dragging * {
   .inbox-row-base { display: none; }
 }
 
-.git-action {
+/* Review's commit bar (#2847; docs/design-system.md §4.9, §13.2): the commit message and the next
+   step in the panel's fixed foot. Its one notice sits above the field, beside the buttons that made
+   it; a row that cannot fit its buttons wraps them, primary last, rather than shrinking one. */
+.commit-bar {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-2);
 }
-.git-action > label {
-  font-size: 12px;
+.commit-bar-count {
+  flex: none;
   color: var(--text-dim);
-  font-weight: 600;
+  font: var(--type-small);
 }
-.git-action input,
-.git-action textarea {
-  width: 100%;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--text);
-  padding: 7px 10px;
-  font-family: inherit;
-  font-size: 13px;
+.commit-bar-reason {
+  margin: 0;
+  color: var(--text-dim);
+  font: var(--type-small);
 }
-.git-action textarea {
-  resize: vertical;
-}
-.git-inline {
+.commit-bar-actions {
   display: flex;
-  gap: 8px;
-  align-items: stretch;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
 }
-.git-inline input {
-  flex: 1;
+/* With nothing to commit the request action is the primary, so the disabled Commit is drawn before
+   it. Only the drawing moves: the request button keeps its place in the DOM, and with it its focus. */
+.commit-bar-idle-commit {
+  order: -1;
 }
-.git-inline .btn {
-  white-space: nowrap;
+/* Git's raw output, behind Show Details: capped, so a long rejection never pushes the field and its
+   buttons out of the foot. */
+.commit-bar-output {
+  max-height: 10rem;
+  overflow-y: auto;
 }
-.git-ok {
-  font-size: 12.5px;
-  color: var(--green);
-  word-break: break-all;
+.commit-bar-url {
+  overflow-wrap: anywhere;
 }
-.git-ok a {
-  color: var(--accent);
+.commit-bar-detail {
+  margin: 0;
 }
 
 /* Phase 2: diff viewer — scope selector, per-file cards, +/- line coloring, gutter. */

@@ -83,10 +83,7 @@ test("no user-facing string calls a Machine a box", () => {
 const EXPECTED_PLACEHOLDERS: ReadonlyArray<[string, string]> = [
   ["./components/SessionsSearch.tsx", "Search sessions"],
   ["./components/ProjectsView.tsx", "Search projects"],
-  ["./components/ReviewPanel.tsx", "PR title"],
-  ["./components/ReviewPanel.tsx", "MR title"],
-  ["./components/ReviewPanel.tsx", "PR description (optional)"],
-  ["./components/ReviewPanel.tsx", "MR description (optional)"],
+  ["./components/CommitBar.tsx", "Describe the change"],
 ];
 
 test("known placeholders read as hint text, not labels", () => {

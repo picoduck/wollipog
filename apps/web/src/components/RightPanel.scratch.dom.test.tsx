@@ -157,7 +157,7 @@ let releaseListing: (() => void) | null = null;
 /** Set by the case that needs a submit still in flight while the panel unmounts. */
 let heldGit = false;
 let releaseGit: (() => void) | null = null;
-/** Whether Push & Open really opens a request, or only returns the prefilled-link fallback. */
+/** Whether Open Pull Request really opens a request, or only returns the prefilled-link fallback. */
 let requestCreated = true;
 
 const client = {
@@ -276,11 +276,33 @@ async function mountPanel(options: { strict?: boolean } = {}): Promise<Panel> {
   };
 }
 
-const field = (panel: Panel, label: string) =>
-  panel.container.querySelector<HTMLInputElement | HTMLTextAreaElement>(`[aria-label="${label}"]`);
+/** The Open Pull Request dialog's fields (#2847), by the names these cases used for the old form. */
+const REQUEST_FIELDS: Record<string, string> = {
+  "PR Title": "Title",
+  "PR Description": "Description (Optional)",
+  "Branch Name": "Branch (Optional)",
+};
+
+/**
+ * A pull request field, read from the Open Pull Request dialog: opened from the commit bar when it
+ * is not open yet, so null when Review is not mounted at all. The dialog is portalled to the body.
+ */
+const field = (panel: Panel, label: string) => {
+  const dialogLabel = REQUEST_FIELDS[label];
+  if (!dialogLabel) return panel.container.querySelector<HTMLInputElement | HTMLTextAreaElement>(`[aria-label="${label}"]`);
+  if (!document.querySelector('[role="dialog"]')) {
+    const open = [...panel.container.querySelectorAll<HTMLButtonElement>(".commit-bar button")]
+      .find((candidate) => candidate.textContent === "Open Pull Request…");
+    if (!open) return null;
+    act(() => fireDomEvent.click(open));
+  }
+  const labelElement = [...document.querySelectorAll<HTMLLabelElement>('[role="dialog"] label')]
+    .find((candidate) => candidate.textContent === dialogLabel);
+  return labelElement ? document.getElementById(labelElement.htmlFor) as HTMLInputElement | HTMLTextAreaElement : null;
+};
 
 const commitInput = (panel: Panel) =>
-  panel.container.querySelector<HTMLInputElement>(".git-action input")!;
+  panel.container.querySelector<HTMLInputElement>(".commit-bar input")!;
 
 const choice = (panel: Panel, group: string, name: string) =>
   [...panel.container.querySelectorAll<HTMLButtonElement>(`[aria-label="${group}"] [role="radio"]`)]
@@ -778,9 +800,12 @@ test("a session whose draft was left blank is evicted like any other", async () 
   }
 });
 
+/** A commit bar button, or the open dialog's own primary. */
 const button = (panel: Panel, name: string) =>
-  [...panel.container.querySelectorAll<HTMLButtonElement>(".git-action button")]
-    .find((candidate) => candidate.textContent === name)!;
+  [
+    ...panel.container.querySelectorAll<HTMLButtonElement>(".commit-bar button"),
+    ...document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button'),
+  ].find((candidate) => candidate.textContent === name)!;
 
 async function writeRequest(panel: Panel): Promise<void> {
   await type(commitInput(panel), "fix: release submitted review drafts");
@@ -804,16 +829,20 @@ test("an opened pull request releases its session: a reload restores none of it 
   await browseIntoApps(before);
   await before.show("review");
   await writeRequest(before);
-  await act(async () => fireDomEvent.click(button(before, "Push & Open Pull Request")));
+  await act(async () => fireDomEvent.click(button(before, "Open Pull Request")));
 
-  assert.match(before.container.textContent ?? "", /Pull Request opened/, "the result line stays");
-  assert.equal(before.container.querySelector<HTMLAnchorElement>(".git-ok a")?.href,
+  assert.match(before.container.textContent ?? "", /Pull request opened\./, "the result notice stays");
+  assert.equal(before.container.querySelector<HTMLAnchorElement>(".commit-bar a.btn")?.href,
     "https://github.com/acme/app/pull/7", "and so does its link");
+  assertNoDomNode(document.querySelector('[role="dialog"]'), "the dialog closed on success");
+  assert.equal(commitInput(before).value, "fix: release submitted review drafts",
+    "the commit message stays on screen for the next commit");
+  // The bar now pushes to the request it opened; a fresh Review body offers Open Pull Request… again.
+  await before.show("files");
+  await before.show("review");
   assert.equal(field(before, "PR Title")!.value, "Panel Scratch Fixture", "the title is back to its default");
   assert.equal(field(before, "PR Description")!.value, "");
   assert.equal(field(before, "Branch Name")!.value, "");
-  assert.equal(commitInput(before).value, "fix: release submitted review drafts",
-    "the commit message stays on screen for the next commit");
 
   await reload(before);
 
@@ -850,7 +879,7 @@ test("a commit releases the message it committed but leaves it on screen", async
     await type(field(panel, "PR Description")!, "not submitted yet");
     await act(async () => fireDomEvent.click(button(panel, "Commit")));
 
-    assert.match(panel.container.textContent ?? "", /Committed abc1234/);
+    assert.match(panel.container.textContent ?? "", /Committed 1 file as abc1234\./);
     assert.equal(commitInput(panel).value, "fix: committed once", "a second commit usually reuses it");
 
     await panel.show("files");
@@ -872,8 +901,8 @@ test("a pull request that only got a prefilled link keeps its fields", async () 
   try {
     await panel.show("review");
     await writeRequest(panel);
-    await act(async () => fireDomEvent.click(button(panel, "Push & Open Pull Request")));
-    assert.match(panel.container.textContent ?? "", /Branch pushed/);
+    await act(async () => fireDomEvent.click(button(panel, "Open Pull Request")));
+    assert.match(panel.container.textContent ?? "", /Pushed the branch\./);
 
     await panel.show("files");
     await panel.show("review");
@@ -892,7 +921,7 @@ test("a pull request that opens after the panel remounted empties the remounted 
   try {
     await panel.show("review");
     await writeRequest(panel);
-    await act(async () => fireDomEvent.click(button(panel, "Push & Open Pull Request")));
+    await act(async () => fireDomEvent.click(button(panel, "Open Pull Request")));
 
     // The reviewer glances at Files while the push runs and comes back before it lands, so the
     // body showing the fields is not the one that submitted them.
@@ -922,9 +951,12 @@ test("text typed while the request is in flight is a new draft and survives it",
   try {
     await panel.show("review");
     await writeRequest(panel);
-    await act(async () => fireDomEvent.click(button(panel, "Push & Open Pull Request")));
+    await act(async () => fireDomEvent.click(button(panel, "Open Pull Request")));
     await type(field(panel, "PR Description")!, "a follow-up note written during the push");
     await act(async () => { releaseGit?.(); });
+    // The dialog closed on success and the bar now pushes to the opened request; reopen Review.
+    await panel.show("files");
+    await panel.show("review");
 
     assert.equal(field(panel, "PR Title")!.value, "Panel Scratch Fixture", "the submitted title is spent");
     assert.equal(field(panel, "PR Description")!.value, "a follow-up note written during the push",

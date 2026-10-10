@@ -24,9 +24,9 @@ import type { GitStatus } from "./useGitStatus.js";
 
 /**
  * A person the server refuses Git actions to (#1870) sees every Git action in the Review pane —
- * Commit, Commit All, Push & Open Pull Request, Sync GitHub, hunk and line Stage or Unstage, and
- * Discard — disabled and described by one visible refusal, and none of them reaches the API. An
- * allowed or absent verdict leaves them as before.
+ * the commit bar's Commit Staged, its More Commit Options menu and Open Pull Request…, Sync GitHub,
+ * hunk and line Stage or Unstage, and Discard — disabled and described by one visible refusal, and
+ * none of them reaches the API. An allowed or absent verdict leaves them as before.
  */
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -107,7 +107,7 @@ const diff: GitDiffInfo = {
   unstagedFiles: [file("src/a.ts")],
 };
 
-/** One staged file, so Commit All is offered next to Commit. */
+/** One staged file, so Commit Staged is a split button whose menu offers Commit All Changes. */
 const status: GitStatusInfo = {
   branch: "agent/session-1",
   files: [{ status: "M", path: "src/a.ts" }],
@@ -253,7 +253,7 @@ async function mountPanel(initial: SessionView) {
 
 function onlyButton(scope: Element, label: string): HTMLButtonElement {
   const found = [...scope.querySelectorAll<HTMLButtonElement>("button")]
-    .filter((button) => (button.textContent ?? "").trim() === label);
+    .filter((button) => ((button.textContent ?? "").trim() || button.getAttribute("aria-label")) === label);
   assert.equal(found.length, 1, `exactly one ${label} control`);
   return found[0]!;
 }
@@ -271,7 +271,7 @@ async function chooseViewOption(container: HTMLElement, label: "All Changes" | "
 
 /** The Git actions on the All Changes pane: the panel's own, then the diff's hunk Stage and Discard. */
 function combinedControls(container: HTMLElement): Array<[string, HTMLButtonElement]> {
-  return ["Commit Staged", "Commit All", "Push & Open Pull Request", "Sync GitHub", "Stage", "Discard"]
+  return ["Commit Staged", "More Commit Options", "Open Pull Request…", "Sync GitHub", "Stage", "Discard"]
     .map((label) => [label, onlyButton(container, label)]);
 }
 
@@ -363,8 +363,6 @@ test("an allowed or absent verdict leaves every Git action as it was (#1870)", a
         assert.equal(button.disabled, false, `${name} is enabled`);
         assert.equal(button.getAttribute("aria-describedby"), null, `${name} has no refusal description`);
       }
-      assert.equal(onlyButton(harness.container, "Commit All").getAttribute("title"),
-        "Ignore the staged selection and commit every change in the worktree", "Commit All keeps its own title");
       assert.equal(onlyButton(harness.container, "Discard").getAttribute("title"),
         "Discard all staged and unstaged changes to this tracked file", "Discard keeps its own title");
 
@@ -373,8 +371,13 @@ test("an allowed or absent verdict leaves every Git action as it was (#1870)", a
       await act(async () => { fireDomEvent.click(onlyButton(harness.container, "Discard")); });
       await act(async () => { harness.confirmations[0]!(true); await Promise.resolve(); });
       await act(async () => { fireDomEvent.click(onlyButton(harness.container, "Commit Staged")); });
-      await act(async () => { fireDomEvent.click(onlyButton(harness.container, "Commit All")); });
-      await act(async () => { fireDomEvent.click(onlyButton(harness.container, "Push & Open Pull Request")); });
+      await act(async () => { fireDomEvent.click(onlyButton(harness.container, "More Commit Options")); });
+      const commitAll = [...domWindow.document.querySelectorAll('[role="menuitem"]')]
+        .find((item) => (item.textContent ?? "").startsWith("Commit All Changes")) as unknown as HTMLElement;
+      await act(async () => { fireDomEvent.click(commitAll); });
+      await act(async () => { fireDomEvent.click(onlyButton(harness.container, "Open Pull Request…")); });
+      const dialog = domWindow.document.querySelector('[role="dialog"]') as unknown as HTMLElement;
+      await act(async () => { fireDomEvent.click(onlyButton(dialog, "Open Pull Request")); });
       await chooseViewOption(harness.container, "Unstaged Only");
       for (const [name, control] of lineControls(harness.container)) {
         assert.equal(control.disabled, name === "Stage Selected (0)", `${name} is enabled unless nothing is selected`);

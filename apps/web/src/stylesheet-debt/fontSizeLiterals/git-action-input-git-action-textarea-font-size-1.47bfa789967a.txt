@@ -1,1 +1,0 @@
-|.git-action input,.git-action textarea|font-size|13
