@@ -149,6 +149,7 @@ export function CommitBar({
   onOpenRequest,
   onPushToRequest,
   openRequestRef,
+  inputRef,
 }: {
   message: string;
   onMessageChange: (message: string) => void;
@@ -174,8 +175,10 @@ export function CommitBar({
   onCommit: (all: boolean) => void;
   onOpenRequest: () => void;
   onPushToRequest: () => void;
-  /** The Open Request… button, for the dialog to return focus to. */
+  /** The request button (Open Request… or Push to Request), for the dialog to return focus to. */
   openRequestRef?: { current: HTMLButtonElement | null };
+  /** The commit message field: the bar's one control that is never disabled. */
+  inputRef?: { current: HTMLInputElement | null };
 }) {
   const uid = useId().replace(/:/g, "");
   const inputId = `${uid}-message`;
@@ -218,7 +221,7 @@ export function CommitBar({
     : { label: `Open ${requestName}…`, busyKind: "open" as const, progress: `Opening the ${requestName.toLowerCase()}…`, run: onOpenRequest };
   const requestButton = (primary: boolean) => (
     <BusyButton
-      ref={requestOpen ? undefined : openRequestRef}
+      ref={openRequestRef}
       className={primary ? "btn primary sm" : "btn sm"}
       busy={busy === requestAction.busyKind}
       progress={requestAction.progress}
@@ -321,6 +324,7 @@ export function CommitBar({
           {countLabel && <span className="commit-bar-count">{countLabel}</span>}
         </div>
         <input
+          ref={inputRef}
           id={inputId}
           value={message}
           autoComplete="off"

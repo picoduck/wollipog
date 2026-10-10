@@ -171,12 +171,14 @@ interface Harness {
 interface Options {
   session: SessionView;
   status: GitStatusInfo | null;
+  /** The shared status reader is mid-read, which holds the bar. */
+  gitBusy: boolean;
   runnerOnline: boolean;
   forgeFacts: { pr: GitPrSummary | null; checks: GitChecksSummary | null } | null;
 }
 
 async function mountReview(initial: Partial<Options> = {}): Promise<Harness> {
-  let options: Options = { session: baseSession, status: statusOf(), runnerOnline: true, forgeFacts: null, ...initial };
+  let options: Options = { session: baseSession, status: statusOf(), gitBusy: false, runnerOnline: true, forgeFacts: null, ...initial };
   const host = domWindow.document.createElement("div");
   const head = domWindow.document.createElement("div");
   const body = domWindow.document.createElement("div");
@@ -213,7 +215,7 @@ async function mountReview(initial: Partial<Options> = {}): Promise<Harness> {
       observation: 1,
       observedAt: Date.UTC(2026, 9, 9, 9, 30),
       settled: true,
-      busy: false,
+      busy: options.gitBusy,
       error: null,
       errorCode: null,
       refresh: async () => {},
@@ -726,6 +728,57 @@ test("a push to an open request that forge tooling couldn't confirm still reads 
     await harness.render({ session: { ...baseSession, id: "session-other" } });
     await harness.render({ session: baseSession });
     assert.equal(input().value, "Speed Up Checkout", "the message the push committed with is released");
+  } finally {
+    await harness.unmount();
+  }
+});
+
+/* Cross-model review epoch 2 round 1 (#2893) */
+
+/** Let Modal's deferred focus restoration run. */
+const settleFocus = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+
+/** Where focus is, as text: asserting on DOM nodes would make a failure print the whole document. */
+const focusedName = () => {
+  const active = domWindow.document.activeElement as unknown as HTMLElement | null;
+  if (!active || active === (domWindow.document.body as unknown as HTMLElement)) return "<body>";
+  return `${active.localName}: ${active.getAttribute("aria-label") ?? (active.textContent ?? "").trim() ?? ""}${active.id ? ` #${active.id}` : ""}`;
+};
+
+test("Cancel returns focus to Open Pull Request…", async () => {
+  const harness = await mountReview();
+  try {
+    const opener = only(bar(harness.container), "Open Pull Request…");
+    opener.focus();
+    await click(opener);
+    await click(only(dialog()!, "Cancel"));
+    await settleFocus();
+    assert.equal(focusedName(), "button: Open Pull Request…");
+  } finally {
+    await harness.unmount();
+  }
+});
+
+test("a request opened while the status refresh holds the bar keeps keyboard position in the bar", async () => {
+  const harness = await mountReview();
+  try {
+    const opener = only(bar(harness.container), "Open Pull Request…");
+    opener.focus();
+    await click(opener);
+    harness.reply({ pr: { url: "https://github.com/acme/shop/pull/77", branch: "agent/commit-bar", pushed: true, createdWithGh: true, created: true, provider: "github", kind: "pull_request" } });
+    const release = harness.hold();
+    await act(async () => {
+      fireDomEvent.submit(dialog()!.querySelector("form")!);
+      await Promise.resolve();
+    });
+    // A status read is in flight as the request lands, so the bar is held when the dialog closes.
+    await harness.render({ gitBusy: true });
+    await release();
+    await settleFocus();
+    assertNoDomNode(dialog(), "the dialog closed");
+    assert.equal(only(bar(harness.container), "Push to Pull Request").disabled, true, "the opener is held");
+    assert.equal(focusedName(), `input:  #${bar(harness.container).querySelector("input")!.id}`,
+      "focus rests on the commit message, not the page");
   } finally {
     await harness.unmount();
   }

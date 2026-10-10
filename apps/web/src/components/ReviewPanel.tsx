@@ -211,6 +211,16 @@ export function ReviewPanel({
   const [requestFailure, setRequestFailure] = useState<GitFailure | null>(null);
   const [openedRequest, setOpenedRequest] = useState<GitPrSummary | null>(null);
   const openRequestButtonRef = useRef<HTMLButtonElement | null>(null);
+  const commitInputRef = useRef<HTMLInputElement | null>(null);
+  // Where the dialog returns focus as it closes: its opener, unless that is disabled by then — a
+  // successful submit closes it while the status refresh holds the bar — when the commit message,
+  // which is never disabled, keeps keyboard position in the bar.
+  const [requestDialogReturn] = useState(() => ({
+    get current(): HTMLElement | null {
+      const opener = openRequestButtonRef.current;
+      return opener && opener.isConnected && !opener.disabled ? opener : commitInputRef.current;
+    },
+  }));
   // The branch's request: one this panel just opened, until the forge reports that same request, else
   // the forge's own. The forge's may be an older, closed request on the same branch, which must not
   // hide the new one.
@@ -1028,6 +1038,7 @@ export function ReviewPanel({
             }}
             onPushToRequest={() => void doPr("push")}
             openRequestRef={openRequestButtonRef}
+            inputRef={commitInputRef}
           />
         )}
       >
@@ -1251,7 +1262,7 @@ export function ReviewPanel({
           failure={requestFailure}
           onSubmit={() => void doPr("open")}
           onClose={() => setRequestDialogOpen(false)}
-          returnFocusRef={openRequestButtonRef}
+          returnFocusRef={requestDialogReturn}
         />
       )}
     </>
