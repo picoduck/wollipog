@@ -139,7 +139,7 @@ export function agentsFact(subagents: number, more = false): string {
 }
 
 /** Why Background Work has no jobs to count, in the Background Work panel's terms. */
-export type BackgroundInventoryGap = "loading" | "error" | "unverified" | "reported" | "lost";
+export type BackgroundInventoryGap = "delivered" | "loading" | "error" | "unverified" | "reported" | "lost";
 
 /**
  * With no jobs listed, which of the Background Work panel's states the session is in (null when it
@@ -147,10 +147,13 @@ export type BackgroundInventoryGap = "loading" | "error" | "unverified" | "repor
  * per-job history exists, or only the runner's aggregate state. Mirrors BackgroundWorkPanel.tsx.
  */
 export function backgroundInventoryGap(
-  session: Pick<SessionView, "backgroundJobs" | "backgroundJobsAvailable" | "backgroundWorkState" | "backgroundWorkTracking">,
+  session: Pick<SessionView,
+    "backgroundJobs" | "backgroundJobsAvailable" | "backgroundWorkState" | "backgroundWorkTracking" | "backgroundDeliveries">,
   inventoryError: string | null,
 ): BackgroundInventoryGap | null {
   if ((session.backgroundJobs?.length ?? 0) > 0) return null;
+  // The panel lists retained delivery receipts as history even when no job is listed.
+  if ((session.backgroundDeliveries?.length ?? 0) > 0) return "delivered";
   if (session.backgroundJobsAvailable === true && session.backgroundJobs === undefined) return inventoryError ? "error" : "loading";
   const aggregate = session.backgroundWorkState === "resumed" ? undefined : session.backgroundWorkState;
   if (session.backgroundJobsAvailable === undefined && session.backgroundWorkTracking === "managed" && aggregate === undefined) {
@@ -170,6 +173,7 @@ export function backgroundFact(states: readonly string[] | BackgroundInventoryGa
     case "loading": return "Checking background jobs…";
     case "error": return "Background jobs can't be loaded right now";
     // The Background Work panel's own states when it has no jobs to list.
+    case "delivered": return "No jobs listed; earlier results are recorded";
     case "unverified": return "This server doesn't say whether jobs have run";
     case "reported": return "The runner reports background work";
     case "lost": return "Background work was lost";

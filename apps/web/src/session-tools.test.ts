@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { RIGHT_PANEL_MODES } from "./right-panel.js";
-import type { PendingApproval } from "@wollipog/protocol";
+import type { PendingApproval, SessionView } from "@wollipog/protocol";
 import {
   NO_REQUESTS_FACT,
   SESSION_TOOL_GROUPS,
@@ -120,6 +120,11 @@ test("with no jobs to count, Background Work takes the Background Work panel's o
   assert.equal(backgroundInventoryGap({ backgroundWorkState: "running" }, null), "reported");
   assert.equal(backgroundInventoryGap({ backgroundWorkState: "continuation_pending", backgroundJobs: [] }, null), "reported");
   assert.equal(backgroundInventoryGap({ backgroundWorkState: "orphaned" }, null), "lost");
+  // Delivery receipts the panel lists as history, ahead of every other state.
+  const delivery = { parentTurnId: "t" } as NonNullable<SessionView["backgroundDeliveries"]>[number];
+  assert.equal(backgroundInventoryGap({ backgroundJobs: [], backgroundDeliveries: [delivery] }, null), "delivered");
+  assert.equal(backgroundInventoryGap({ backgroundJobsAvailable: true, backgroundDeliveries: [delivery], backgroundWorkState: "resumed" }, null), "delivered");
+  assert.equal(backgroundFact("delivered"), "No jobs listed; earlier results are recorded");
   // Truly nothing: known empty history, or resumed work with nothing listed.
   assert.equal(backgroundInventoryGap({ backgroundJobs: [], backgroundJobsAvailable: false }, null), null);
   assert.equal(backgroundInventoryGap({ backgroundJobs: [], backgroundWorkState: "resumed", backgroundJobsAvailable: false }, null), null);

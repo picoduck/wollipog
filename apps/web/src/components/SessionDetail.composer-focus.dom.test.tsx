@@ -7188,3 +7188,44 @@ test("choosing Background Work from Session Tools while the inventory loads keep
     await unmountFixture(fixture);
   }
 });
+
+for (const leave of ["closing and reopening the panel", "remounting the session"] as const) {
+  test(`an inventory answer cancelled by ${leave} never replaces fresher session data (#2844)`, async () => {
+    const draft = deferred<ComposerDraft | null>();
+    const requests: Array<Deferred<{ session: SessionView }>> = [];
+    const fixture = await mountFixture(draft, {
+      rightPanelMode: "launcher",
+      runnerProtocolVersion: 99,
+      sessionPatch: { backgroundWorkTracking: "managed", backgroundJobsAvailable: true },
+      client: {
+        session: async () => {
+          const request = deferred<{ session: SessionView }>();
+          requests.push(request);
+          return request.promise;
+        },
+      },
+    });
+    try {
+      await flushAsyncWork();
+      assert.equal(requests.length, 1);
+      if (leave === "closing and reopening the panel") {
+        await fixture.setRightPanelOpen(false);
+        await fixture.setRightPanelOpen(true);
+      } else {
+        await fixture.remountWithDraftLoader(() => Promise.resolve(null));
+      }
+      await flushAsyncWork();
+      assert.equal(requests.length, 2, "coming back asks again");
+      await fixture.pushSession({ title: "Fresh Title" });
+      await act(async () => {
+        requests[0]!.resolve({ session: { ...detailedBackgroundSession(fixture.sessionId), title: "Stale Title" } });
+        await requests[0]!.promise;
+      });
+      await flushAsyncWork();
+      assert.doesNotMatch(fixture.container.textContent ?? "", /Stale Title/, "the cancelled answer is dropped");
+      assert.match(fixture.container.textContent ?? "", /Fresh Title/);
+    } finally {
+      await unmountFixture(fixture);
+    }
+  });
+}

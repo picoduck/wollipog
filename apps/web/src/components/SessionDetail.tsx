@@ -1588,7 +1588,8 @@ function SessionDetailLoaded({
     });
     return () => window.cancelAnimationFrame(frame);
   }, [mode, attentionTarget, attentionRequest, session.id, closeRequestOverlay]);
-  const backgroundInventoryRequestRef = useRef<string | null>(null);
+  const backgroundInventoryRequestRef = useRef<{ key: string } | null>(null);
+  useEffect(() => () => { backgroundInventoryRequestRef.current = null; }, []);
   const [backgroundInventoryError, setBackgroundInventoryError] = useState<string | null>(null);
   const [backgroundInventoryAttempt, setBackgroundInventoryAttempt] = useState(0);
   const retryBackgroundInventory = useCallback(() => {
@@ -1607,14 +1608,16 @@ function SessionDetailLoaded({
       return;
     }
     const requestKey = `${session.id}:${recoveryGeneration}`;
-    if (backgroundInventoryRequestRef.current === requestKey) return;
-    backgroundInventoryRequestRef.current = requestKey;
+    if (backgroundInventoryRequestRef.current?.key === requestKey) return;
+    // The load belongs to this request, not to this run of the effect: moving between the tools that
+    // show the inventory (Session Tools to Background Work, #2844) re-runs the effect for the same
+    // request, which must not discard the answer. Leaving them, another session or recovery
+    // generation, Retry and unmounting all drop the request, and a later one is a new request even
+    // under the same key, so a late answer never replaces fresher session data.
+    const request = { key: requestKey };
+    backgroundInventoryRequestRef.current = request;
     setBackgroundInventoryError(null);
-    // The load belongs to its request key, not to this run of the effect: moving between the tools
-    // that show the inventory (Session Tools to Background Work, #2844) re-runs the effect with the
-    // same key, which must not discard the answer. Leaving them, or another session or recovery
-    // generation, clears or replaces the key, and then a late answer is dropped.
-    const current = () => backgroundInventoryRequestRef.current === requestKey;
+    const current = () => backgroundInventoryRequestRef.current === request;
     void api.session(session.id)
       .then(({ session: loaded }) => {
         if (current()) loadSession(loaded);

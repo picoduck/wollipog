@@ -422,6 +422,12 @@ test("Background Work never reads as empty history when a server omits the inven
       session: { ...session, backgroundWorkTracking: "managed", backgroundJobsAvailable: false, backgroundJobs: [] },
     });
     assert.equal(fact(panel.container, "background"), "Nothing has run in the background");
+    // Retained delivery receipts are history the Background Work panel lists, with no job listed.
+    const delivery = { parentTurnId: "turn-1" } as NonNullable<SessionView["backgroundDeliveries"]>[number];
+    await panel.setProps({
+      session: { ...session, backgroundWorkTracking: "managed", backgroundJobsAvailable: false, backgroundJobs: [], backgroundDeliveries: [delivery] },
+    });
+    assert.equal(fact(panel.container, "background"), "No jobs listed; earlier results are recorded");
   } finally {
     await panel.dispose();
   }
