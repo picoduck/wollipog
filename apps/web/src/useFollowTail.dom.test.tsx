@@ -73,9 +73,10 @@ interface HarnessProps {
   rows?: readonly { id: number }[];
   generation?: number;
   onApi?: (api: FollowTailApi) => void;
+  children?: React.ReactNode;
 }
 
-function Harness({ sessionId, revision, mode, scope = "test", rows, generation, onApi }: HarnessProps) {
+function Harness({ sessionId, revision, mode, scope = "test", rows, generation, onApi, children }: HarnessProps) {
   const scrollRef = React.useRef<HTMLDivElement>(null);
   const followTail = useFollowTail({
     scrollRef, contentRevision: revision, sessionId, persistenceScope: scope, rows, rowGeneration: generation,
@@ -101,7 +102,7 @@ function Harness({ sessionId, revision, mode, scope = "test", rows, generation, 
         if (followTail.onKeyDown(event)) event.preventDefault();
       }}
       tabIndex={0}
-    />
+    >{children}</div>
   );
 }
 
@@ -124,6 +125,48 @@ test("the state machine uses the inclusive 48px bottom threshold", () => {
   assert.equal(nextFollowTailState("following", "preview"), "previewing");
   assert.equal(nextFollowTailState("previewing", "pause"), "paused");
   assert.equal(nextFollowTailState("paused", "resume"), "following");
+});
+
+test("follow-tail releases removed placeholders while observing the live reader and replacement content", async () => {
+  MockResizeObserver.instances.length = 0;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const render = (sessionId: string, loading: boolean) => (
+    <React.StrictMode>
+      <Harness sessionId={sessionId} revision={loading ? 0 : 1} mode="preview">
+        {loading ? <div key="loading" data-loading>Loading</div> : <section key="timeline" data-timeline>Conversation</section>}
+      </Harness>
+    </React.StrictMode>
+  );
+  try {
+    await act(async () => { root.render(render("observer-child-release", true)); });
+    const reader = container.firstElementChild as HTMLElement;
+    const placeholder = reader.firstElementChild!;
+    const observer = MockResizeObserver.instances.find(candidate => candidate.observed.has(reader));
+    assert.ok(observer);
+    assert.equal(observer.observed.has(placeholder), true);
+
+    await act(async () => {
+      root.render(render("observer-child-release", false));
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
+    });
+    const timeline = reader.firstElementChild!;
+    assert.equal(observer.observed.has(placeholder), false, "a detached placeholder must leave the live ResizeObserver");
+    assert.equal(observer.observed.has(reader), true, "viewport geometry must remain observed");
+    assert.equal(observer.observed.has(timeline), true, "replacement content must still publish late measurements");
+
+    await act(async () => { root.render(render("observer-child-release-next", false)); });
+    assert.equal(observer.observed.size, 0, "a session change disconnects the prior observer");
+    const replacement = MockResizeObserver.instances.find(candidate => candidate.observed.has(reader));
+    assert.ok(replacement);
+    assert.equal(replacement.observed.has(timeline), true);
+    await act(async () => { root.unmount(); });
+    assert.equal(replacement.observed.size, 0, "unmount disconnects the current observer");
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
 });
 
 test("programmatic preview paging owns smooth-scroll frames until the requested direction settles", async () => {
