@@ -1,3 +1,4 @@
+import { waitForSessionPreview } from "./session-readiness.js";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
@@ -51,6 +52,7 @@ async function openPicker(page: Page) {
   await page.goto("/command-inbox-projects-e2e.html?scenario=switch-account&accounts=default");
   await page.getByRole("button", { name: /Alpha Session/ }).click();
   const expand = page.getByRole("button", { name: "Open Session", exact: true });
+  await waitForSessionPreview(page);
   if (await expand.isVisible()) await expand.click();
   await page.getByRole("button", { name: "More Actions", exact: true }).first().click();
   await page.getByRole("menuitem", { name: /Switch Account…/ }).click();
@@ -191,6 +193,7 @@ for (const [width, theme] of [[390, "light"], [1440, "dark"]] as const) {
     await session.goto("/command-inbox-projects-e2e.html?fullShell=1&scenario=pinned-summary&psActivity=1");
     await session.getByRole("button", { name: /Alpha Session/ }).first().click();
     const expand = session.getByRole("button", { name: "Open Session", exact: true });
+    await waitForSessionPreview(session);
     if (await expand.isVisible()) await expand.click();
     await session.evaluate(theme => document.documentElement.dataset.theme = theme, theme);
     let summary = session.locator('aside.ps[aria-label="Pinned Summary"]');

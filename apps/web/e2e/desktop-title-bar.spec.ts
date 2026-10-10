@@ -1,3 +1,4 @@
+import { waitForSessionPreview } from "./session-readiness.js";
 import { expect, test, type Page } from "@playwright/test";
 
 /**
@@ -114,6 +115,7 @@ test.describe("the browser build", () => {
 
     await page.getByRole("button", { name: /Alpha Session/ }).click();
     const expand = page.getByRole("button", { name: "Open Session", exact: true });
+    await waitForSessionPreview(page);
     if (await expand.isVisible()) await expand.click();
     const title = (await page.locator(".session-bar h1").textContent())!.trim();
     expect(title).toContain("Alpha Session");

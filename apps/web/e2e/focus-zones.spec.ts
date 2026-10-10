@@ -15,6 +15,7 @@ async function openShell(page: Page, url: string) {
   await page.goto(url);
   await expect(page.locator(".app-rail")).toBeVisible();
   await expect(page.locator(".main-body[data-focus-zone='main']")).toBeVisible();
+  await expect(page.locator(".main-body [data-route-loading]")).toBeHidden();
 }
 
 const ROUTES = [

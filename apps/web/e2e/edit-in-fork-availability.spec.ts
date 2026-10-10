@@ -1,3 +1,4 @@
+import { waitForSessionPreview } from "./session-readiness.js";
 import { expect, test } from "@playwright/test";
 
 test("an Edit in a Fork that is temporarily blocked stays listed and says why (#1869)", async ({ page }) => {
@@ -6,6 +7,7 @@ test("an Edit in a Fork that is temporarily blocked stays listed and says why (#
   await page.goto(url); await page.evaluate(() => localStorage.clear()); await page.goto(url);
   await page.getByRole("button", { name: /Alpha Session/ }).click();
   const expand = page.getByRole("button", { name: "Open Session", exact: true });
+  await waitForSessionPreview(page);
   if (await expand.isVisible()) await expand.click();
 
   // Only the second message has an earlier checkpoint to fork from.

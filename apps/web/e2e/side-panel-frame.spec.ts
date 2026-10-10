@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { waitForSessionPreview } from "./session-readiness.js";
 
 /**
  * The side panel's frame (#2843; docs/design-system.md §4.9): a docked, flush column with a 48px
@@ -12,6 +13,7 @@ async function openSession(page: Page, width: number, height = 860) {
   await page.reload();
   await page.getByRole("button", { name: /Alpha Session/ }).click();
   const expand = page.getByRole("button", { name: "Open Session", exact: true });
+  await waitForSessionPreview(page);
   if (await expand.isVisible()) await expand.click();
   await expect(page.locator(".composer-input")).toBeAttached();
 }

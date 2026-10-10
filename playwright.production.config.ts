@@ -5,7 +5,7 @@ const port = playwrightPort("production");
 
 export default defineConfig({
   testDir: "./apps/web/e2e",
-  testMatch: ["timeline-reflow.spec.ts", "settings-rows.spec.ts", "xterm-smoke.spec.ts"],
+  testMatch: ["timeline-reflow.spec.ts", "settings-rows.spec.ts", "xterm-smoke.spec.ts", "inbox-lazy.spec.ts"],
   grep: /@production/,
   fullyParallel: false,
   retries: process.env.CI ? 2 : 0,

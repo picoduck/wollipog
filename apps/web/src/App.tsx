@@ -1,6 +1,7 @@
-import { ApprovalsPanel } from "./components/ApprovalsPanel.js";
 import { ExperimentGate } from "./components/ExperimentGate.js";
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useMemo,
@@ -27,19 +28,8 @@ import { SessionPanelToggles } from "./components/SessionPanelToggles.js";
 import { parseStoredDockVisible } from "./dock.js";
 import { isInboxBlocked } from "./inbox.js";
 import { sessionVisibleForReminderMode } from "./session-reminders.js";
-import { RunnersView } from "./components/RunnersView.js";
-import { RunsView, RunDetail } from "./components/RunsView.js";
 import { InboxView } from "./components/InboxView.js";
-import { ArchivedSessionsView } from "./components/ArchivedSessionsView.js";
-import { NewSessionDialog, type NewSessionPreset } from "./components/NewSessionDialog.js";
-import { NewRunDialog } from "./components/NewRunDialog.js";
-import { NewPodDialog } from "./components/NewPodDialog.js";
-import { PodDetail, PodsView } from "./components/PodsView.js";
-import { AutomationsView } from "./components/AutomationsView.js";
-import { SkillsView } from "./components/SkillsView.js";
-import { UsageView } from "./components/UsageView.js";
-import { ShellDock } from "./components/ShellDock.js";
-import { openGoToFile, openSideChat, useRightPanelState, type RightPanelState } from "./components/RightPanel.js";
+import { openGoToFile, openSideChat, useRightPanelState, type RightPanelState } from "./components/right-panel-state.js";
 import { usePinnedSummaryState } from "./components/pinned-summary-state.js";
 import { EditorSelect } from "./components/EditorSelect.js";
 import { DesktopCloseGuard } from "./components/DesktopCloseGuard.js";
@@ -49,8 +39,9 @@ import { useDesktopUpdateSetting } from "./desktop-updates.js";
 import { DesktopExternalLinkRouter } from "./components/DesktopExternalLinkRouter.js";
 import { useWindowTitle, windowDragRegion } from "./desktop-window.js";
 import { ErrorBoundary } from "./components/ErrorBoundary.js";
-import { CommandPalette, useSearchShortcut } from "./components/CommandPalette.js";
-import { ShortcutReference } from "./components/ShortcutReference.js";
+import { LazyDialogBoundary } from "./components/LazyDialogBoundary.js";
+import { LazyRouteFocusRecovery, LazyRouteLoading, routeFocusIsLost } from "./components/LazyRouteLoading.js";
+import { useSearchShortcut } from "./use-search-shortcut.js";
 import { SettingsTrigger } from "./components/SettingsTrigger.js";
 import { useTheme } from "./components/ThemeProvider.js";
 import {
@@ -74,7 +65,6 @@ import {
   saveBrowserStorageValue,
 } from "./instance-storage.js";
 import { FeedbackProvider } from "./components/FeedbackProvider.js";
-import { Modal } from "./components/common.js";
 import { OfflineBanner } from "./components/OfflineBanner.js";
 import { PairingBanner } from "./components/PairingBanner.js";
 import { ChevronLeftIcon, KeyboardIcon, LockIcon, PlusIcon } from "./components/Icons.js";
@@ -92,7 +82,6 @@ import { useRailPreferences } from "./use-rail-preferences.js";
 import { useSessionsViewModeMemory } from "./use-sessions-view-mode-memory.js";
 import { recordRecentSession } from "./recent-sessions.js";
 import { handleSettingsNavigationKey } from "./settings-navigation.js";
-import { ProjectsView } from "./components/ProjectsView.js";
 import { InstanceSelector } from "./components/InstanceSelector.js";
 import { RemoteInstanceBanner } from "./components/RemoteInstanceBanner.js";
 import { AppBarSearchProvider } from "./components/PageHeader.js";
@@ -101,21 +90,6 @@ import { InstancesPanel } from "./components/InstancesPanel.js";
 import { useNewSessionShortcut } from "./useNewSessionShortcut.js";
 import { useSessionsViewToggleKey } from "./useSessionsViewToggleKey.js";
 import { PROTOCOL_VERSION } from "@wollipog/protocol";
-import {
-  AboutPanel,
-  AppearancePanel,
-  NavigationRailPanel,
-  BehaviorPanel,
-  AgentHarnessDefaultsPanel,
-  ExperimentalPanel,
-  KeyboardPanel,
-  NetworkPanel,
-  NotificationsPanel,
-  SettingsView,
-  SessionNamingPanel,
-  useNotifySetting,
-} from "./components/SettingsView.js";
-import { OrchestratorSettingsPanel } from "./components/OrchestratorSettingsPanel.js";
 import { useExperiments } from "./use-experiments.js";
 import {
   isTauriRuntime,
@@ -124,6 +98,40 @@ import {
   type TailnetAccessSetting,
   type TailnetAccessStatus,
 } from "./tailnet-access.js";
+
+import type { NewSessionPreset } from "./components/NewSessionDialog.js";
+import { useNotifySetting } from "./use-notify-setting.js";
+import { State } from "./components/State.js";
+
+const ApprovalsPanel = lazy(() => import("./components/ApprovalsPanel.js").then((module) => ({ default: module.ApprovalsPanel })));
+const RunnersView = lazy(() => import("./components/RunnersView.js").then((module) => ({ default: module.RunnersView })));
+const RunsView = lazy(() => import("./components/RunsView.js").then((module) => ({ default: module.RunsView })));
+const RunDetail = lazy(() => import("./components/RunsView.js").then((module) => ({ default: module.RunDetail })));
+const ArchivedSessionsView = lazy(() => import("./components/ArchivedSessionsView.js").then((module) => ({ default: module.ArchivedSessionsView })));
+const NewSessionDialog = lazy(() => import("./components/NewSessionDialog.js").then((module) => ({ default: module.NewSessionDialog })));
+const NewRunDialog = lazy(() => import("./components/NewRunDialog.js").then((module) => ({ default: module.NewRunDialog })));
+const NewPodDialog = lazy(() => import("./components/NewPodDialog.js").then((module) => ({ default: module.NewPodDialog })));
+const PodDetail = lazy(() => import("./components/PodsView.js").then((module) => ({ default: module.PodDetail })));
+const PodsView = lazy(() => import("./components/PodsView.js").then((module) => ({ default: module.PodsView })));
+const AutomationsView = lazy(() => import("./components/AutomationsView.js").then((module) => ({ default: module.AutomationsView })));
+const SkillsView = lazy(() => import("./components/SkillsView.js").then((module) => ({ default: module.SkillsView })));
+const UsageView = lazy(() => import("./components/UsageView.js").then((module) => ({ default: module.UsageView })));
+const ShellDock = lazy(() => import("./components/ShellDock.js").then((module) => ({ default: module.ShellDock })));
+const ProjectsView = lazy(() => import("./components/ProjectsView.js").then((module) => ({ default: module.ProjectsView })));
+const OrchestratorSettingsPanel = lazy(() => import("./components/OrchestratorSettingsPanel.js").then((module) => ({ default: module.OrchestratorSettingsPanel })));
+const ShortcutReference = lazy(() => import("./components/ShortcutReference.js").then((module) => ({ default: module.ShortcutReference })));
+const CommandPalette = lazy(() => import("./components/CommandPalette.js").then((module) => ({ default: module.CommandPalette })));
+const AboutPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.AboutPanel })));
+const AppearancePanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.AppearancePanel })));
+const NavigationRailPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.NavigationRailPanel })));
+const BehaviorPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.BehaviorPanel })));
+const AgentHarnessDefaultsPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.AgentHarnessDefaultsPanel })));
+const ExperimentalPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.ExperimentalPanel })));
+const KeyboardPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.KeyboardPanel })));
+const NetworkPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.NetworkPanel })));
+const NotificationsPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.NotificationsPanel })));
+const SettingsView = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.SettingsView })));
+const SessionNamingPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.SessionNamingPanel })));
 
 /**
  * Move focus somewhere sensible when a layout change has dropped it on <body>.
@@ -488,10 +496,16 @@ export function Shell() {
   // heading, after which this one sees a live element and declines.
   const path = viewPath(view);
   const previousPath = useRef(path);
+  const pendingRouteTitleFocus = useRef(false);
   useEffect(() => {
     if (previousPath.current === path) return;
     previousPath.current = path;
-    rescueFocusTo(document.getElementById("page-title"));
+    pendingRouteTitleFocus.current = routeFocusIsLost();
+    if (pendingRouteTitleFocus.current) {
+      // The old route's hidden heading can precede the fallback with the same title id.
+      const title = document.querySelector<HTMLElement>("[data-route-loading] #page-title") ?? document.getElementById("page-title");
+      title?.focus();
+    }
   }, [path]);
 
   // And when the routed session loads or goes (deleted or hidden from another client): a missing
@@ -767,6 +781,10 @@ export function Shell() {
     </>
   ) : null;
 
+  const dialogKey = dialog?.kind ?? (palette !== null ? "search" : shortcutReferenceOpen ? "shortcuts" : "closed");
+  const dialogTitle = dialog?.kind === "session" ? "New Session"
+    : dialog?.kind === "run" ? "New Run" : dialog?.kind === "pod" ? "New Pod"
+    : palette !== null ? "Search" : "Keyboard Shortcuts";
   const shell = (
     <div className={`app${rightPanel.dragging ? " panel-dragging" : ""}`}>
       <Rail
@@ -829,6 +847,8 @@ export function Shell() {
             // The Session's own bar owns its title (the phone top bar sits outside this boundary).
             pageTitle={view.name === "session" ? undefined : viewTitle(view, entityTitle)}
           >
+          <Suspense fallback={<LazyRouteLoading title={viewTitle(view, entityTitle)} pending={pendingRouteTitleFocus} />}>
+          <LazyRouteFocusRecovery path={path} pending={pendingRouteTitleFocus} />
           {(view.name === "inbox" || view.name === "session" || view.name === "board") && (
             /* InboxView draws the Sessions page header, whose controls are its state (#2159). */
             <div className="page full fill">
@@ -932,6 +952,7 @@ export function Shell() {
               onNewSession={(preset) => setDialog({ kind: "session", preset })}
             />
           )}
+          </Suspense>
           </ErrorBoundary>
           </AppBarSearchProvider>
           </SearchPaletteContext.Provider>
@@ -941,6 +962,8 @@ export function Shell() {
         {/* Bottom shell dock: session-scoped terminals in the compact desktop layout. Mounted only
             while toggled on; keyed by session so tab selection never bleeds across navigations. */}
         {view.name === "session" && dockVisible && terminalSupported && (
+          <ErrorBoundary name="Terminal" resetKey={view.id}>
+          <Suspense fallback={<State variant="loading" compact>Loading terminal…</State>}>
           <ShellDock
             key={`dock-${view.id}`}
             sessionId={view.id}
@@ -948,9 +971,13 @@ export function Shell() {
             theme={theme.resolved}
             scheme={theme.scheme}
           />
+          </Suspense>
+          </ErrorBoundary>
         )}
       </main>
 
+      {dialogKey !== "closed" && <LazyDialogBoundary key={dialogKey} title={dialogTitle}
+        onClose={() => { setDialog(null); setPalette(null); if (shortcutReferenceOpen) closeShortcutReference(); }}>
       {dialog?.kind === "session" && (
         <NewSessionDialog
           onClose={() => setDialog(null)}
@@ -976,6 +1003,7 @@ export function Shell() {
           turnInterruptionSupported={turnInterruptionSupported}
         />
       )}
+      </LazyDialogBoundary>}
     </div>
   );
   // The rail tile and the Instances card read the banner's truth from here, so they never disagree.

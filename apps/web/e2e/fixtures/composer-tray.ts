@@ -1,3 +1,4 @@
+import { waitForSessionPreview } from "../session-readiness.js";
 import { expect, type Page } from "@playwright/test";
 import { DECODABLE_PNG_BASE64 } from "./prompt-image.js";
 
@@ -32,6 +33,7 @@ export async function openSessionWithTray(page: Page, { referenceOnly = false } 
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([], [], { supportsImages: true }));
   await page.getByRole("button", { name: /Alpha Session/ }).click();
   const expand = page.getByRole("button", { name: "Open Session", exact: true });
+  await waitForSessionPreview(page);
   if (await expand.isVisible()) await expand.click();
   await expect(page.locator(".composer-attachments")).toBeVisible();
 }

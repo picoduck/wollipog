@@ -109,6 +109,7 @@ for (const banner of [false, true]) {
     await page.locator(".page-header .page-primary").click();
     const dialog = page.getByRole("dialog", { name: /New Session/ });
     const input = dialog.getByRole("combobox", { name: "Project" });
+    await expect(input).toBeVisible();
     await dialogMotionSettled(page);
     await input.click();
     const list = dialog.getByRole("listbox", { name: "Project Options" });

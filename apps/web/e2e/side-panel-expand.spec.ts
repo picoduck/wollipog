@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { waitForSessionPreview } from "./session-readiness.js";
 
 /**
  * Expand Panel and the drag ceiling (#2845; docs/design-system.md §4.9, §15.2): expanded, the side
@@ -25,6 +26,7 @@ async function openSession(page: Page, width: number, { labelled = false, title 
 async function enterSession(page: Page, title: string) {
   await page.getByRole("button", { name: new RegExp(title) }).first().click();
   const open = page.getByRole("button", { name: "Open Session", exact: true });
+  await waitForSessionPreview(page);
   if (await open.isVisible()) await open.click();
   await expect(page.locator("header.session-bar")).toBeVisible();
 }

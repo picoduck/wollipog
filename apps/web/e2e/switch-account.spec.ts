@@ -1,3 +1,4 @@
+import { waitForSessionPreview } from "./session-readiness.js";
 import { expect, test, type Page } from "@playwright/test";
 
 /** Switch Account (#2149): the session's account leads the list, usage is a meter per window, and
@@ -8,6 +9,7 @@ async function openSwitchAccount(page: Page, accounts: "default" | "removed" | "
   await page.goto(url); await page.evaluate(() => { localStorage.clear(); localStorage.setItem("wollipog.hide-account-emails", "true"); }); await page.goto(url);
   await page.getByRole("button", { name: /Alpha Session/ }).click();
   const expand = page.getByRole("button", { name: "Open Session", exact: true });
+  await waitForSessionPreview(page);
   if (await expand.isVisible()) await expand.click();
   await page.getByRole("button", { name: "More Actions", exact: true }).first().click();
   await page.getByRole("menuitem", { name: /Switch Account…/ }).click();

@@ -26,6 +26,7 @@ const ROUTES = [
 async function open(page: Page, query: string, title: string) {
   await page.goto(fixture(query));
   await expect(page.getByRole("heading", { level: 1, name: title, exact: true })).toBeVisible();
+  await expect(page.locator("[data-route-loading]")).toBeHidden();
 }
 
 /**

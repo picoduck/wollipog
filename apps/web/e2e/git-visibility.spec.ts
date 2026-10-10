@@ -1,3 +1,4 @@
+import { waitForSessionPreview } from "./session-readiness.js";
 import { expect, test, type Page } from "@playwright/test";
 
 const LONG_BRANCH = "feature/session-alpha-with-a-deliberately-long-branch-name-for-narrow-layout-validation";
@@ -13,6 +14,7 @@ async function openSession(page: Page, name: string): Promise<void> {
   if (await back.isVisible()) await back.click();
   await page.getByRole("button", { name: new RegExp(name) }).click();
   const expand = page.getByRole("button", { name: "Open Session", exact: true });
+  await waitForSessionPreview(page);
   if (await expand.isVisible()) await expand.click();
   await expect(page.locator(".session-bar")).toBeVisible();
 }

@@ -780,6 +780,8 @@ export function SessionDetail(props: SessionDetailProps) {
     return () => {
       current = false;
       detailLoad.cancel();
+      // A cancelled setup must not suppress StrictMode's replacement lookup. Settled reads
+      // retain their key, so loading an archived row does not immediately fetch it again.
       if (!complete && lastLookupKeyRef.current === lookupKey) lastLookupKeyRef.current = null;
     };
   // Summary pages and live list updates can replace a row during its lookup. They must not cancel
@@ -3901,7 +3903,7 @@ function SessionDetailLoaded({
     }
   }, [api, canStopTurn, cancelTurnRefusal, clearStopTurnAttempt, mutationKey, sessionId]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (mode !== "expanded" || !canStopTurn || cancelTurnRefusal !== null) return;
     const onStopTurnShortcut = (event: globalThis.KeyboardEvent) => {
       if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
