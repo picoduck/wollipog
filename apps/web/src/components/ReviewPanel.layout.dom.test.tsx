@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 import React, { act } from "react";
+import { fireDomEvent } from "./test-dom-events.js";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type {
@@ -19,9 +20,9 @@ import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { fixChecksPrompt } from "../pinned-summary.js";
 import { clearPanelScratch } from "../right-panel-scratch.js";
 import { PanelActionSlotContext } from "./RightPanel.js";
+import type { DiffFileFocus } from "./GitDiffViewer.js";
 import { ReviewPanel } from "./ReviewPanel.js";
 import { reviewSummaryFacts } from "./ReviewSummary.js";
-import { fireDomEvent } from "./test-dom-events.js";
 import type { GitStatus } from "./useGitStatus.js";
 
 /**
@@ -156,7 +157,7 @@ interface Harness {
   container: HTMLElement;
   /** The panel header's action slot. */
   head: HTMLElement;
-  calls: { status: number; diff: GitDiffScope[]; findings: number; prompts: string[] };
+  calls: { status: number; diff: GitDiffScope[]; findings: number; prompts: string[]; focusHandled: number };
   render: (over?: Partial<Options>) => Promise<void>;
   /** Hold every subsequent diff read open; the returned function releases them. */
   holdDiff: () => () => Promise<void>;
@@ -170,6 +171,7 @@ interface Options {
   protocolVersion: number;
   diffs: Partial<Record<GitDiffScope, GitDiffInfo>>;
   forgeFacts: { pr: GitPrSummary | null; checks: GitChecksSummary | null } | null;
+  focus: DiffFileFocus | null;
 }
 
 async function mountReview(initial: Partial<Options> = {}): Promise<Harness> {
@@ -180,6 +182,7 @@ async function mountReview(initial: Partial<Options> = {}): Promise<Harness> {
     protocolVersion: 157,
     diffs: { uncommitted: diffOf("uncommitted", [file]), all_branch: diffOf("all_branch", [file]), last_turn: diffOf("last_turn", [file]) },
     forgeFacts: null,
+    focus: null,
     ...initial,
   };
   const host = domWindow.document.createElement("div");
@@ -188,7 +191,7 @@ async function mountReview(initial: Partial<Options> = {}): Promise<Harness> {
   host.append(head, body);
   domWindow.document.body.appendChild(host);
   const root = createRoot(body as unknown as Element);
-  const calls: Harness["calls"] = { status: 0, diff: [], findings: 0, prompts: [] };
+  const calls: Harness["calls"] = { status: 0, diff: [], findings: 0, prompts: [], focusHandled: 0 };
   let held = false;
   let waiting: Array<() => void> = [];
   const client = {
@@ -234,6 +237,8 @@ async function mountReview(initial: Partial<Options> = {}): Promise<Harness> {
             git={git}
             forgeFacts={options.forgeFacts}
             onOpenSourceLocation={() => {}}
+            focus={options.focus}
+            onFocusHandled={() => { calls.focusHandled += 1; options = { ...options, focus: null }; }}
           />
         </PanelActionSlotContext.Provider>
       </ApiProvider>
@@ -602,5 +607,70 @@ test("the viewer gate is the toolbar's disabled reason (#1870)", async () => {
     assert.equal(commit.getAttribute("aria-describedby"), reason?.id);
   } finally {
     await harness.unmount();
+  }
+});
+
+/** Choose one View Options item; the menu is portalled to the document body. */
+async function chooseViewOption(container: HTMLElement, label: string): Promise<void> {
+  await act(async () => { fireDomEvent.click(container.querySelector<HTMLButtonElement>('button[aria-label="View Options"]')!); });
+  const item = [...domWindow.document.querySelectorAll('[role="menuitemradio"]')]
+    .find((node) => (node.textContent ?? "").trim() === label) as unknown as HTMLElement | undefined;
+  assert.ok(item, `View Options offers ${label}`);
+  await act(async () => { fireDomEvent.click(item!); });
+}
+
+test("an unsent comment draft survives a visit to an empty pane", async () => {
+  // The empty pane's state is drawn by the viewer itself, so the viewer — and the draft it holds —
+  // stays mounted through All Changes, Staged Only (empty here) and back.
+  const harness = await mountReview();
+  try {
+    await act(async () => {
+      fireDomEvent.click(harness.container.querySelector<HTMLElement>('button[aria-label="Comment on src/checkout.ts right line 2"]')!);
+    });
+    await act(async () => {
+      const body = harness.container.querySelector<HTMLTextAreaElement>(".diff-comment-editor textarea")!;
+      fireDomEvent.change(body, { target: { value: "half-written finding" } });
+    });
+    await chooseViewOption(harness.container, "Staged Only");
+    assert.deepEqual(stateTitles(harness.container), ["No Staged Changes"]);
+    await chooseViewOption(harness.container, "All Changes");
+    assert.equal(
+      harness.container.querySelector<HTMLTextAreaElement>(".diff-comment-editor textarea")?.value,
+      "half-written finding",
+      "the draft is still there",
+    );
+  } finally {
+    await harness.unmount();
+  }
+});
+
+test("a fresh empty diff settles an Open in Review request for a file it does not hold", async () => {
+  const harness = await mountReview({ diffs: { uncommitted: diffOf("uncommitted", []) } });
+  try {
+    await harness.render({ focus: { path: "src/committed-away.ts", request: 1 } });
+    assert.equal(harness.calls.focusHandled, 1, "the request is answered, not left pending");
+    assert.deepEqual(stateTitles(harness.container), ["No Uncommitted Changes"]);
+  } finally {
+    await harness.unmount();
+  }
+});
+
+test("choosing Uncommitted after Review opened on Branch is remembered", async () => {
+  const clean = { status: statusOf({ files: [], hasChanges: false, ahead: 1 }) };
+  const first = await mountReview(clean);
+  try {
+    assert.equal(scopeOption(first.container, "Branch")?.getAttribute("aria-checked"), "true");
+    await act(async () => { fireDomEvent.click(scopeOption(first.container, "Uncommitted")!); });
+    assert.equal(scopeOption(first.container, "Uncommitted")?.getAttribute("aria-checked"), "true");
+  } finally {
+    await first.unmount();
+  }
+  const again = await mountReview(clean);
+  try {
+    assert.equal(scopeOption(again.container, "Uncommitted")?.getAttribute("aria-checked"), "true",
+      "the reviewer's choice outranks the opening rule");
+    assert.deepEqual(again.calls.diff, ["uncommitted"]);
+  } finally {
+    await again.unmount();
   }
 });

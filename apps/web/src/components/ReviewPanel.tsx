@@ -187,30 +187,27 @@ export function ReviewPanel({
   // Rich-diff pane (Phase 2, PR-A). Branch-relative scopes only make sense for worktree sessions;
   // a WSL in-place session has no session branch to diff, so it gets Uncommitted only — which is
   // also why restoring a remembered scope re-checks that this session still offers it.
-  const [chosenScope, setChosenScope] = usePanelScratchChoice<GitDiffScope>(
-    panelScratch,
-    DIFF_SCOPE_KEY,
-    "uncommitted",
-    (raw) => raw === "uncommitted" || (session.useWorktree === true && (raw === "all_branch" || raw === "last_turn")),
-  );
   // Review opens where the work is (#2846): with nothing uncommitted and the branch ahead, the first
-  // scope is Branch. Only a choice the reviewer made is remembered; the opening scope is decided
-  // once, from the first status read, and never written to scratch, so the next visit decides again.
-  const [scopeChosen, setScopeChosen] = useState(
+  // scope is Branch. The opening scope is decided once, from the first status read, and is only the
+  // choice's default: it is never written to scratch, so the next visit decides again, while any
+  // scope the reviewer picks that differs from it (Uncommitted after opening on Branch included) is
+  // remembered and wins from then on.
+  const [scopeRemembered] = useState(
     () => session.useWorktree !== true || readPanelScratch(panelScratch, DIFF_SCOPE_KEY) !== undefined,
   );
   const [openingScope, setOpeningScope] = useState<GitDiffScope | null>(null);
   useLayoutEffect(() => {
-    if (scopeChosen || openingScope !== null) return;
+    if (scopeRemembered || openingScope !== null) return;
     if (!status && !git.settled) return;
     setOpeningScope(status && status.files.length === 0 && status.ahead > 0 ? "all_branch" : "uncommitted");
-  }, [git.settled, openingScope, scopeChosen, status]);
-  const scope: GitDiffScope = scopeChosen ? chosenScope : openingScope ?? "uncommitted";
-  const scopeDecided = scopeChosen || openingScope !== null;
-  const setScope = (next: GitDiffScope) => {
-    setScopeChosen(true);
-    setChosenScope(next);
-  };
+  }, [git.settled, openingScope, scopeRemembered, status]);
+  const scopeDecided = scopeRemembered || openingScope !== null;
+  const [scope, setScope] = usePanelScratchChoice<GitDiffScope>(
+    panelScratch,
+    DIFF_SCOPE_KEY,
+    openingScope ?? "uncommitted",
+    (raw) => raw === "uncommitted" || (session.useWorktree === true && (raw === "all_branch" || raw === "last_turn")),
+  );
   const [pane, setPane] = usePanelScratchChoice<DiffPane>(
     panelScratch, "review.indexPane", "combined",
     (raw) => raw === "combined" || raw === "unstaged" || raw === "staged",
@@ -946,31 +943,32 @@ export function ReviewPanel({
               {/* Keyed off !shownDiff (not diffBusy): after a scope switch there is one paint before
                   the load effect sets busy, and the pane must not flash blank in between. Nothing
                   loads while the runner is offline or too old, and their notices say so. */}
+              {/* An empty diff still mounts the viewer: its unsent comment drafts and a pending
+                  Open in Review request must outlive a visit to an empty pane or scope. */}
               {shownDiff
-                ? shownDiff.files.length === 0
-                  ? emptyState
-                  : (
-                    <GitDiffViewer
-                      diff={shownDiff}
-                      staging={staging}
-                      layout={layout}
-                      onOpenSourceLocation={onOpenSourceLocation}
-                      onAttachWorkspaceReference={onAttachWorkspaceReference}
-                      focus={focus}
-                      focusSettled={focusSettled}
-                      onFocusHandled={onFocusHandled}
-                      review={{
-                        findings,
-                        anchoredFindingIds,
-                        lineage: diffLineage,
-                        creating: creatingFinding,
-                        busyFindingId: findingBusyId,
-                        onCreate: createFinding,
-                        onStatus: updateFinding,
-                        refusal: findingRefusal === null ? null : { reason: findingRefusal, id: findingRefusalId },
-                      }}
-                    />
-                  )
+                ? (
+                  <GitDiffViewer
+                    diff={shownDiff}
+                    staging={staging}
+                    layout={layout}
+                    onOpenSourceLocation={onOpenSourceLocation}
+                    onAttachWorkspaceReference={onAttachWorkspaceReference}
+                    focus={focus}
+                    focusSettled={focusSettled}
+                    onFocusHandled={onFocusHandled}
+                    empty={emptyState}
+                    review={{
+                      findings,
+                      anchoredFindingIds,
+                      lineage: diffLineage,
+                      creating: creatingFinding,
+                      busyFindingId: findingBusyId,
+                      onCreate: createFinding,
+                      onStatus: updateFinding,
+                      refusal: findingRefusal === null ? null : { reason: findingRefusal, id: findingRefusalId },
+                    }}
+                  />
+                )
                 : !diffError && runnerOnline && diffSupported && <DiffSkeleton />}
             </div>
           </StaleContent>

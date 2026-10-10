@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { normalizeSourcePath, REVIEW_ANCHOR_TEXT_MAX_LENGTH } from "@wollipog/protocol";
 import { StatusBadge } from "./StatusBadge.js";
 import type {
@@ -177,6 +177,7 @@ export function GitDiffViewer({
   focus,
   focusSettled = true,
   onFocusHandled,
+  empty,
 }: {
   diff: GitDiffInfo;
   staging?: StagingControls;
@@ -189,6 +190,9 @@ export function GitDiffViewer({
   focusSettled?: boolean;
   /** The focus request was met, or a diff read after it does not hold its file. */
   onFocusHandled?: () => void;
+  /** What to show for a diff with no files, in place of the default line (Review's states, #2846).
+   * The viewer stays mounted either way, so drafts and focus requests outlive an empty pane. */
+  empty?: ReactNode;
 }) {
   // Memoized on the diff object rather than repeated for every re-render the surrounding panel
   // causes (typing a commit message, a status poll landing).
@@ -262,6 +266,7 @@ export function GitDiffViewer({
   };
 
   if (files.length === 0) {
+    if (empty !== undefined) return <>{empty}</>;
     return (
       <div className="diff-empty muted">
         {diff.scope === "last_turn" ? "No changes in the last turn." : "No changes in this scope."}
