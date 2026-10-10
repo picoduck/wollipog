@@ -632,7 +632,8 @@ export function FilesBrowser({
               // Keep focus in the field, so the listbox stays its popup.
               onMouseDown={(event) => event.preventDefault()}
               onMouseMove={() => { if (index !== activeIndex) setActive(index); }}
-              onClick={() => openMatch(match)}
+              // Rows kept from an earlier query wait for the answer to what is typed (#2852).
+              onClick={() => { if (answered) openMatch(match); }}
             >
               <EntryIcon name={match.name} isDir={false} />
               <span className="row-title files-goto-name">

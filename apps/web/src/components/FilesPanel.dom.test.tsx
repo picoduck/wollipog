@@ -395,6 +395,10 @@ test("Enter opens only what answers the typed text: never an earlier query's row
     await key(mounted, "ArrowDown");
     await key(mounted, "Enter");
     assert.deepEqual(reads, [], "Enter does not open the earlier query's row");
+    await act(async () => fireDomEvent.click(options(mounted)[0]!));
+    await settle();
+    assert.deepEqual(reads, [], "nor does a click on it");
+    assert.equal(goToFile(mounted)!.value, "new", "and the query stays");
     await settle(GO_TO_FILE_DEBOUNCE_MS + 30);
     await act(async () => pending.get("new")!([{ path: "src/new.ts", isDirectory: false }]));
     await settle();

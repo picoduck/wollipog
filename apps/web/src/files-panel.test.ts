@@ -134,6 +134,8 @@ test("git markers: untracked U, added or renamed A, everything else changed M, d
   assert.equal(unquotePorcelainPath("\"a\\\"b\\\\c\""), "a\"b\\c");
   assert.equal(unquotePorcelainPath("plain.ts"), "plain.ts");
   assert.equal(unquotePorcelainPath("\"bad\\q\""), "\"bad\\q\"", "an unknown escape leaves the path as written");
+  // With `core.quotePath` off, git keeps literal non-ASCII inside a path it still quotes.
+  assert.equal(unquotePorcelainPath("\"emoji\u{1F600}\\\".ts\""), "emoji\u{1F600}\".ts");
 });
 
 test("Go to File: files only, changed or recent first, then name matches before path matches", () => {

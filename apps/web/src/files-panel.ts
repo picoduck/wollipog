@@ -103,14 +103,17 @@ const C_ESCAPES: Record<string, number> = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 1
 export function unquotePorcelainPath(path: string): string {
   if (!(path.length >= 2 && path.startsWith("\"") && path.endsWith("\""))) return path;
   const bytes: number[] = [];
-  const body = path.slice(1, -1);
+  const encoder = new TextEncoder();
+  // By code point, so a literal character outside the BMP (kept when `core.quotePath` is off) is
+  // encoded whole rather than as two lone surrogates. Every escape is ASCII.
+  const body = [...path.slice(1, -1)];
   for (let index = 0; index < body.length; index += 1) {
     const char = body[index]!;
     if (char !== "\\") {
-      bytes.push(...new TextEncoder().encode(char));
+      bytes.push(...encoder.encode(char));
       continue;
     }
-    const octal = /^[0-7]{3}/.exec(body.slice(index + 1));
+    const octal = /^[0-7]{3}$/.exec(body.slice(index + 1, index + 4).join(""));
     if (octal) {
       bytes.push(Number.parseInt(octal[0], 8));
       index += 3;
