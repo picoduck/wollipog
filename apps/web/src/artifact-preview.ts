@@ -21,6 +21,8 @@ export function normalizeBrowserUrl(input: string): BrowserUrlResult {
     return { ok: false, error: "Enter a complete http:// or https:// URL." };
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    // "localhost:3000" parses with "localhost:" as its scheme: what it lacks is the real one.
+    if (!/^[a-z][a-z\d+.-]*:\/\//i.test(value)) return { ok: false, error: "Start the address with http:// or https://." };
     return { ok: false, error: "Only http:// and https:// URLs can be previewed." };
   }
   if (parsed.username || parsed.password) return { ok: false, error: "URLs containing credentials are not allowed." };

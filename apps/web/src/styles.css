@@ -312,8 +312,6 @@
   --finding-row-pad-x: 11px;
   --ext-row-pad-y: 11px;
   --ext-row-pad-x: 12px;
-  --artifact-row-pad-y: 12px;
-  --artifact-row-pad-x: 6px;
   --runner-card-pad-y: 19px;
   --runner-card-pad-x: 21px;
   --ws-row-pad-y: 10px;
@@ -414,8 +412,6 @@
   --finding-row-pad-x: 9px;
   --ext-row-pad-y: 8px;
   --ext-row-pad-x: 10px;
-  --artifact-row-pad-y: 9px;
-  --artifact-row-pad-x: 4px;
   --runner-card-pad-y: 16px;
   --runner-card-pad-x: 18px;
   --ws-row-pad-y: 7px;
@@ -5107,73 +5103,127 @@ textarea {
 
 /* Browser and authenticated artifact previews. Both iframe surfaces are sandboxed in markup; the
    application chrome remains outside the untrusted browsing context. */
-.browser-panel,
-.browser-web,
-.browser-artifacts,
 .browser-artifact-detail,
 .artifact-preview {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-3);
 }
-.browser-panel { flex: 1; min-height: 0; }
-.browser-tabs { align-self: flex-start; flex: 0 0 auto; }
-.browser-address { display: flex; gap: 7px; }
-.browser-address input {
+/* The Browser tool (#2854): the Artifacts and Web Preview tabs over the panel's slots (§4.9), on the
+   hairline the slots start under. Web Preview's address row is the toolbar slot's row; an open page
+   takes the whole scroller, edge to edge, and never scrolls it. */
+.browser-tabs {
+  flex: none;
+  padding: 0 var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+.browser-artifacts {
   min-width: 0;
-  flex: 1;
-  padding: 7px 9px;
-  color: var(--text);
-  background: var(--bg);
-  border: 1px solid var(--border-strong);
-  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
 }
-.browser-security-note { line-height: 1.4; }
-.browser-web-actions,
+/* The address row is one line at every panel width: the field gives up width, never the buttons. */
+.browser-address > :not(.browser-address-field) { flex: none; }
+.browser-address-field { flex: 1; }
+.browser-address-error { padding-top: var(--space-2); }
+.rpanel-scroll:has(> .browser-web > .browser-web-view) {
+  overflow: hidden;
+  padding: 0;
+}
+.browser-web,
+.browser-web-view {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.browser-web-view { position: relative; }
+.browser-web-view > .notice { margin: var(--space-3) var(--space-4); }
+.browser-web-frame,
+.artifact-preview-frame {
+  width: 100%;
+  flex: 1;
+  /* Fixed white on purpose: this frames a page or a published artifact, which carries its own
+     theme. Tinting it with ours would show through the page's own background. */
+  background: #fff;
+}
+.browser-web-frame {
+  min-height: 0;
+  border: 0;
+}
+.browser-web-frame[hidden] { display: none; }
+.artifact-preview-frame {
+  min-height: 420px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+/* Until the page fires `load`: a 2px accent bar sweeping along the frame's top edge. */
+.browser-load-bar {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 2px;
+  overflow: hidden;
+}
+.browser-load-bar::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 40%;
+  background: var(--accent);
+  animation: browser-load-sweep 1.2s var(--ease-out) infinite;
+}
+@keyframes browser-load-sweep {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(250%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .browser-load-bar::before { width: 100%; animation: none; }
+}
 .browser-artifact-head,
 .artifact-preview-meta {
   min-width: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--space-2);
 }
-.browser-web-actions > span,
 .browser-artifact-head > strong,
 .artifact-preview-meta > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.browser-web-frame,
-.artifact-preview-frame {
-  width: 100%;
-  min-height: 420px;
-  flex: 1;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  /* Fixed white on purpose: this frames an iframe rendering a published artifact, which carries
-     its own theme. Tinting it with ours would show through the artifact's own background. */
-  background: #fff;
-}
 .browser-artifact-list { margin: 0; padding: 0; list-style: none; }
-.browser-artifact-list li + li { border-top: 1px solid var(--border); }
-.browser-artifact-row {
-  width: 100%;
-  min-width: 0;
-  display: flex;
+/* A two-line artifact row (§5.2): the kind on a 32px tile, the title over the kind and the time, and
+   the size trailing on one line however narrow the row gets. */
+.browser-artifact-kind {
+  display: inline-flex;
+  flex: none;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: var(--artifact-row-pad-y) var(--artifact-row-pad-x);
-  border: 0;
-  background: transparent;
-  color: var(--text);
-  text-align: left;
-  cursor: pointer;
+  justify-content: center;
+  width: var(--space-8);
+  height: var(--space-8);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev-2);
+  color: var(--text-dim);
 }
-.browser-artifact-row:hover { background: var(--bg-elev-2); }
-.browser-artifact-row > span:first-child { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.browser-artifact-row strong,
-.browser-artifact-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.browser-artifact-row small { color: var(--text-dim); text-transform: capitalize; }
+.browser-artifact-meta {
+  display: flex;
+  gap: var(--space-3);
+}
+.browser-artifact-meta > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.browser-artifact-meta > time { flex: none; }
+.browser-artifact-size {
+  flex: none;
+  max-width: none;
+}
 .artifact-preview-meta { color: var(--text-dim); font-size: 11px; }
 .artifact-preview-image { display: block; max-width: 100%; max-height: 70vh; margin: 0 auto; object-fit: contain; }
 .artifact-preview-video { display: block; width: 100%; max-height: 70vh; margin: 0 auto; background: var(--bg); }
@@ -5244,12 +5294,6 @@ textarea {
   .artifact-preview-frame { min-height: 55vh; }
   .sidechat-composer { flex-wrap: wrap; }
   .sidechat-composer textarea { flex-basis: 100%; min-height: 88px; }
-}
-/* The Browser tool answers to the panel's width, not the window's (§2.10; #2843). */
-@container rp (max-width: 600px) {
-  .browser-address { flex-wrap: wrap; }
-  .browser-address input { flex-basis: 100%; }
-  .browser-web-frame { min-height: 55vh; }
 }
 
 .detail-main {

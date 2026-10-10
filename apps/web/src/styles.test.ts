@@ -820,7 +820,7 @@ test("no viewport rule at 600px or 640px styles diff, finding, review or browser
   });
   assert.deepEqual(moved[".review-finding-row"], ["grid-template-columns: 22px minmax(0, 1fr)"]);
   for (const selector of [".diff-file-head-row", ".diff-hunk-header", ".hunk-actions",
-    ".diff-comment-editor,\n  .diff-inline-finding", ".review-findings-head", ".browser-address"]) {
+    ".diff-comment-editor,\n  .diff-inline-finding", ".review-findings-head"]) {
     assert.ok(moved[selector], `${selector} answers to the rp container`);
   }
 });

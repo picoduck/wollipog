@@ -19,6 +19,11 @@ test("browser URL admission accepts explicit web URLs and rejects credentials or
   assert.equal(normalizeBrowserUrl(`https://example.com/${"a".repeat(2_100)}`).ok, false);
 });
 
+test("a host and port without a scheme is told to add one (#2854)", () => {
+  assert.deepEqual(normalizeBrowserUrl("localhost:3000"), { ok: false, error: "Start the address with http:// or https://." });
+  assert.deepEqual(normalizeBrowserUrl("ftp://example.com/"), { ok: false, error: "Only http:// and https:// URLs can be previewed." });
+});
+
 test("artifact preview classification is exact rather than MIME-sniffed", () => {
   const base = { kind: "html_preview", mimeType: "text/html", encoding: "utf8" } as const;
   assert.equal(classifyArtifactPreview(base), "html");

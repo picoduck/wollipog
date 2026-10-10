@@ -317,6 +317,11 @@ const addressBar = (panel: Panel) => panel.container.querySelector<HTMLInputElem
 const crumbs = (panel: Panel) =>
   [...panel.container.querySelectorAll(".crumbs .crumb")].map((crumb) => crumb.textContent).join("/");
 
+/** The Browser's Web Preview tab (#2854). */
+const webPreviewTab = (panel: Panel) =>
+  [...panel.container.querySelectorAll<HTMLButtonElement>('[role="tablist"][aria-label="Browser"] [role="tab"]')]
+    .find((tab) => tab.textContent === "Web Preview")!;
+
 async function type(element: HTMLInputElement | HTMLTextAreaElement, value: string): Promise<void> {
   await act(async () => fireDomEvent.change(element, { target: { value } }));
 }
@@ -430,7 +435,7 @@ test("the Side Chat draft and the Browser address survive a mode switch", async 
     await type(field(panel, "Side Chat Message") as HTMLTextAreaElement, "does this survive?");
 
     await panel.show("browser");
-    await act(async () => fireDomEvent.click(choice(panel, "Browser Content", "Web URL")));
+    await act(async () => fireDomEvent.click(webPreviewTab(panel)));
     await type(addressBar(panel), "http://localhost:4174/preview");
     await act(async () => fireDomEvent.submit(panel.container.querySelector(".browser-address")!));
     assert.equal(panel.container.querySelector(".browser-web-frame")?.getAttribute("src"),
@@ -441,7 +446,7 @@ test("the Side Chat draft and the Browser address survive a mode switch", async 
       "an unsent side chat message is the reviewer's, not the mode's");
 
     await panel.show("browser");
-    assert.equal(choice(panel, "Browser Content", "Web URL").getAttribute("aria-checked"), "true");
+    assert.equal(webPreviewTab(panel).getAttribute("aria-selected"), "true");
     assert.equal(addressBar(panel).value, "http://localhost:4174/preview");
     assert.equal(panel.container.querySelector(".browser-web-frame")?.getAttribute("src"),
       "http://localhost:4174/preview", "the page it had open is still open");
@@ -470,7 +475,7 @@ test("every mode resumes where it was left after a page reload", async () => {
   assert.equal(crumbs(before), "root/apps");
 
   await before.show("browser");
-  await act(async () => fireDomEvent.click(choice(before, "Browser Content", "Web URL")));
+  await act(async () => fireDomEvent.click(webPreviewTab(before)));
   await type(addressBar(before), "http://localhost:4174/preview");
   await act(async () => fireDomEvent.submit(before.container.querySelector(".browser-address")!));
 
@@ -494,7 +499,7 @@ test("every mode resumes where it was left after a page reload", async () => {
     assert.equal(crumbs(after), "root/apps");
 
     await after.show("browser");
-    assert.equal(choice(after, "Browser Content", "Web URL").getAttribute("aria-checked"), "true");
+    assert.equal(webPreviewTab(after).getAttribute("aria-selected"), "true");
     assert.equal(addressBar(after).value, "http://localhost:4174/preview");
     assert.equal(after.container.querySelector(".browser-web-frame")?.getAttribute("src"),
       "http://localhost:4174/preview", "the page it had open is open again");

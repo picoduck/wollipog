@@ -1,1 +1,0 @@
-|.browser-web-actions,.browser-artifact-head,.artifact-preview-meta|gap|8px

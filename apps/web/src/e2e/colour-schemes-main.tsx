@@ -292,7 +292,6 @@ function Sample() {
           </div>
           <div className="review-findings-list"><div className="review-finding-row"><span /><span>A finding</span><span /></div></div>
           <div className="ext-session-list"><div className="ext-session"><span>An external session</span></div></div>
-          <div className="browser-artifact-row"><span>An artifact</span></div>
           {/* Real production runner cards. Their headings caused #237, and copied markup would
               allow the fixture to stay green while the components regress again. */}
           <div className="runner-grid">
