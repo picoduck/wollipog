@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ControlPlaneToUi, SessionEvent, SessionView } from "@wollipog/protocol";
 import { notifyDecision } from "./notify.js";
-import { sessionsEqualIgnoringStreaming, Store, type State, type StorePublishScheduler } from "./store.js";
+import {
+  sessionEqualIgnoringStreaming, sessionsEqualIgnoringStreaming, Store, type State, type StorePublishScheduler,
+} from "./store.js";
 
 /**
  * Socket frames received within one animation frame are published as one store update (#2763).
@@ -272,4 +274,14 @@ test("a session map differing only in streaming fields counts as unchanged for t
   }]])), false, "a nested change is a change");
   assert.equal(sessionsEqualIgnoringStreaming(previous, new Map([...previous, ["s2", session("s2")]])), false);
   assert.equal(sessionsEqualIgnoringStreaming(previous, new Map([["s2", base]])), false);
+});
+
+test("one session differing only in streaming fields counts as unchanged for the session view (#2872)", () => {
+  const base = session("s1", { status: "running", pendingApproval: null });
+  const streamed = { ...JSON.parse(JSON.stringify(base)) as SessionView, lastEventAt: 9, messageCount: 9, preview: "more", costUsd: 0.5 };
+  assert.equal(sessionEqualIgnoringStreaming(base, streamed), true);
+  assert.equal(sessionEqualIgnoringStreaming(base, { ...streamed, status: "idle" }), false);
+  assert.equal(sessionEqualIgnoringStreaming(undefined, undefined), true);
+  assert.equal(sessionEqualIgnoringStreaming(base, undefined), false, "a removed session is a change");
+  assert.equal(sessionEqualIgnoringStreaming(undefined, base), false, "an arriving session is a change");
 });

@@ -14,11 +14,12 @@ import { Modal } from "./common.js";
 import { FieldError } from "./FieldError.js";
 import { FieldWarning } from "./FieldWarning.js";
 import { CostIcon, CountIcon } from "./Icons.js";
+import { useLiveSession } from "../store.js";
 import { Notice } from "./Notice.js";
 import { BusyButton } from "./ui/BusyButton.js";
 
 export type GuardrailsDialogSession = Pick<SessionView,
-  | "costBudgetUsd" | "costCheckpointsUsd" | "costCheckpointApprovedUsd" | "costUsd"
+  | "id" | "costBudgetUsd" | "costCheckpointsUsd" | "costCheckpointApprovedUsd" | "costUsd"
   | "maxToolCalls" | "toolCallCount" | "maxChildSessions" | "liveChildCapacity">;
 
 const CHECKPOINT_WARNING = "This checkpoint won't pause separately, because the recurring threshold is lower.";
@@ -34,7 +35,7 @@ const CHECKPOINT_WARNING = "This checkpoint won't pause separately, because the 
  * the refusal, and cannot save.
  */
 export function GuardrailsDialog({
-  session,
+  session: rendered,
   configRefusal,
   onSave,
   onClose,
@@ -48,6 +49,8 @@ export function GuardrailsDialog({
   onClose: () => void;
   returnFocusRef?: { current: HTMLElement | null };
 }) {
+  // Spend and tool calls move with every streamed event; the session view does not render for that (#2872).
+  const session = useLiveSession(rendered);
   const idBase = useId();
   const id = (part: string) => `${idBase}-${part}`;
   // The limits as the dialog opened: a change the server reports meanwhile does not move a field

@@ -488,6 +488,15 @@ function sameSessionExceptStreaming(a: SessionView, b: SessionView): boolean {
 }
 
 /**
+ * Whether two versions of one session differ only in streaming fields (#2872). The session view
+ * selects its session with it, so a paced upsert renders only the parts that read those fields
+ * through `useLiveSession`.
+ */
+export function sessionEqualIgnoringStreaming(a: SessionView | undefined, b: SessionView | undefined): boolean {
+  return a === b || (a !== undefined && b !== undefined && sameSessionExceptStreaming(a, b));
+}
+
+/**
  * Whether two session maps differ only in streaming fields (#2763). A selector using it keeps the
  * previous map while an agent streams, so a component that never shows live counters or previews
  * (the app shell's rail counts and titles) does not re-render four times a second per streaming
@@ -2920,6 +2929,17 @@ export function useOptionalStoreSelector<T>(
     return next;
   };
   return useSyncExternalStore(store?.subscribe ?? (() => () => {}), getSnapshot, getSnapshot);
+}
+
+/**
+ * The store's current version of `session`, for a part of the session view that shows a streaming
+ * field: live usage, cost, activity time or the message count (#2872). The view itself keeps the
+ * version it last rendered while only those fields move, so it does not render four times a second
+ * while an agent streams. Falls back to `session` where no store is mounted or it holds no such session.
+ */
+export function useLiveSession<T extends Pick<SessionView, "id">>(session: T): T {
+  // `T` is a view of a `SessionView` (the whole one, or a Pick of it), which the stored one satisfies.
+  return (useOptionalStoreSelector((s) => s.sessions.get(session.id)) as T | undefined) ?? session;
 }
 
 /** Back-compat full-state subscription: re-renders on EVERY store change. Fine for transient

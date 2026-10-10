@@ -4,7 +4,9 @@ import React, { act, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { ControlPlaneToUi, SessionView } from "@wollipog/protocol";
-import { StoreProvider, useStoreSelectorUnlessQuiet } from "./store.js";
+import {
+  sessionEqualIgnoringStreaming, StoreProvider, useLiveSession, useStoreSelector, useStoreSelectorUnlessQuiet,
+} from "./store.js";
 import type { UiConnectionRuntime, UiSocket } from "./ui-transport.js";
 import { installDomTestCleanup } from "./dom-test-cleanup.js";
 
@@ -86,6 +88,61 @@ test("quiet changes render nothing, and the next render for any reason reads the
     assert.equal(shown(), "5", "a change that is not quiet renders");
     await act(async () => socket.push({ type: "session_upsert", session: session(7) }));
     assert.equal(shown(), "5", "quiet again from the new value");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+let parentRenders = 0;
+
+function LiveCount({ session: rendered }: { session: SessionView }) {
+  const live = useLiveSession(rendered);
+  return <output data-live="">{live.messageCount}</output>;
+}
+
+function SessionParent() {
+  const selected = useStoreSelector((state) => state.sessions.get("s1"), sessionEqualIgnoringStreaming);
+  parentRenders += 1;
+  return selected ? <><span data-title="">{selected.title}</span><LiveCount session={selected} /></> : null;
+}
+
+test("a view that ignores streaming fields keeps showing them live through useLiveSession (#2872)", async () => {
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "live", runtimeKey: "live:1", createSocket: () => socket, close() {},
+  };
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const live = () => container.querySelector("[data-live]")?.textContent;
+  try {
+    await act(async () => root.render(<StoreProvider connection={connection}><SessionParent /></StoreProvider>));
+    await act(async () => socket.push({ type: "snapshot", runners: [], boxes: [], sessions: [session(0)], runs: [], pods: [] }));
+    assert.equal(live(), "0");
+    const before = parentRenders;
+
+    await act(async () => socket.push({ type: "session_upsert", session: { ...session(3), preview: "streamed", lastEventAt: 9 } }));
+    assert.equal(parentRenders, before, "a streaming-only upsert does not render the view");
+    assert.equal(live(), "3", "the part that shows the count does");
+
+    await act(async () => socket.push({ type: "session_upsert", session: { ...session(4), title: "Renamed" } }));
+    assert.ok(parentRenders > before, "any other change renders the view");
+    assert.equal(container.querySelector("[data-title]")?.textContent, "Renamed");
+    assert.equal(live(), "4");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("useLiveSession shows the session it was given where no store is mounted", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<LiveCount session={session(7)} />));
+    assert.equal(container.querySelector("[data-live]")?.textContent, "7");
   } finally {
     await act(async () => root.unmount());
     container.remove();

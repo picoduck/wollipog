@@ -1,4 +1,4 @@
-import { type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, useCallback, useDeferredValue, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, memo, useCallback, useDeferredValue, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { prioritizedPendingRequests, providerSupportsConversationFork, type BoardColumn, type SessionReminderView, type SessionView, type SetSessionReminderRequest, type SnoozeScheduleInput, type SourceLocation } from "@wollipog/protocol";
 import { archiveAndStopMessage, archiveResultMessage, archiveResultTone, sessionArchiveRequiresStop } from "../archive-actions.js";
 import { sessionArchiveActionRefusal, sessionCommandRefusal } from "../session-command-permissions.js";
@@ -46,7 +46,8 @@ import { useFeedback, type ConfirmationOptions } from "./FeedbackProvider.js";
 import { InboxList, type InboxListEntry } from "./InboxList.js";
 import { CreateProjectDialog } from "./CreateProjectDialog.js";
 import { ProjectSplitMenu, type ProjectSplitActionsProps } from "./ProjectSplitMenu.js";
-import { SessionDetail, type PreviewForkControls } from "./SessionDetail.js";
+import { SessionDetail, type PreviewForkControls, type SessionDetailProps } from "./SessionDetail.js";
+import { useStableCallbacks } from "./stable-callbacks.js";
 import type { RightPanelState } from "./RightPanel.js";
 import type { PinnedSummaryState } from "./pinned-summary-state.js";
 import { useIsCompact, useIsMobile } from "./useIsMobile.js";
@@ -179,6 +180,12 @@ export interface InboxViewProps {
   /** Opens the Keyboard Shortcuts reference from the page ⋯ menu. */
   onOpenShortcuts?: () => void;
 }
+
+/**
+ * The session the list previews or expands. The list renders for every session's paced upsert while
+ * an agent streams, four times a second; the session renders only when its own props change (#2872).
+ */
+const InboxSessionDetail = memo(SessionDetail);
 
 export function InboxView({
   viewMode = "list",
@@ -1546,6 +1553,51 @@ export function InboxView({
     // A tab the URL names stays named across the mode switch.
     navigate({ name: mode === "board" ? "board" : "inbox", ...(routeSplit === undefined ? {} : { split: routeSplit }) });
   };
+  // Each callback here is a new closure on every render of the list; stable ones that call the
+  // latest let the memoized session skip those renders (#2872).
+  const surfaceProps = useStableCallbacks<SessionDetailProps>({
+    sessionId: surfaceSessionId ?? "",
+    mode: expanded ? "expanded" : "preview",
+    sourceLocation: expanded ? sourceLocation : undefined,
+    attentionTarget: expanded ? attentionTarget : undefined,
+    topbarControls: expanded ? topbarControls : undefined,
+    rightPanel,
+    onOpenTerminal,
+    pinnedSummary: expanded ? pinnedSummary : undefined,
+    composerFocusIntent: focusComposerSessionId === surfaceSessionId ? "reply" : undefined,
+    onComposerFocusConsumed,
+    onBack: onCollapse,
+    onExpand: () => { if (surfaceSessionId) expand(surfaceSessionId); },
+    onNextSession: () => hopExpanded("next"),
+    onPreviousSession: () => hopExpanded("previous"),
+    onApprove: () => {
+      if (!surfaceSessionId) return;
+      void decide(surfaceSessionId, "approve").catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" }));
+    },
+    onDeny: () => {
+      if (!surfaceSessionId) return;
+      void decide(surfaceSessionId, "deny").catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" }));
+    },
+    onArchive: () => { if (surfaceSessionId) void archive(surfaceSessionId); },
+    ...(sessionRemindersSupported && surfaceSessionId ? {
+      onSnooze: () => setSnoozeSessionId(surfaceSessionId),
+      reminder: reminders.get(surfaceSessionId),
+      onDismissReminder: () => {
+        void dismissReturnedReminder(surfaceSessionId)
+          .catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" }));
+      },
+    } : {}),
+    ...(expanded || !surfaceSessionId ? {} : {
+      onSessionMenu: (anchor: { x: number; y: number }, restoreTarget: () => HTMLElement | null) =>
+        openSessionMenuAt(surfaceSessionId, anchor, restoreTarget),
+      onOpenRequest: (requestId: string) => {
+        const target = sessions.get(surfaceSessionId);
+        if (target) openRequest(target, requestId);
+      },
+    }),
+    onPreviewNavigationReady: expanded ? undefined : registerPreviewNavigation,
+    onPreviewForkReady: expanded ? undefined : setPreviewForkControls,
+  });
   return (
     <>
     {/* The Sessions page header (§4.2): the view switch, the Snoozed filter, ⋯ and New Session; on a
@@ -1823,44 +1875,7 @@ export function InboxView({
           {split && !stacked && <SessionsListWidthDivider grid={viewRef} width={listWidth} onWidthChange={changeListWidth} />}
           <div className="inbox-preview-pane" ref={previewPaneRef} data-focus-zone="main">
             {surfaceSessionId && !listSkeleton ? (
-              <SessionDetail
-                key={surfaceSessionId}
-                sessionId={surfaceSessionId}
-                mode={expanded ? "expanded" : "preview"}
-                sourceLocation={expanded ? sourceLocation : undefined}
-                attentionTarget={expanded ? attentionTarget : undefined}
-                topbarControls={expanded ? topbarControls : undefined}
-                rightPanel={rightPanel}
-                onOpenTerminal={onOpenTerminal}
-                pinnedSummary={expanded ? pinnedSummary : undefined}
-                composerFocusIntent={focusComposerSessionId === surfaceSessionId ? "reply" : undefined}
-                onComposerFocusConsumed={onComposerFocusConsumed}
-                onBack={onCollapse}
-                onExpand={() => expand(surfaceSessionId)}
-                onNextSession={() => hopExpanded("next")}
-                onPreviousSession={() => hopExpanded("previous")}
-                onApprove={() => { void decide(surfaceSessionId, "approve").catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" })); }}
-                onDeny={() => { void decide(surfaceSessionId, "deny").catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" })); }}
-                onArchive={() => { void archive(surfaceSessionId); }}
-                {...(sessionRemindersSupported ? {
-                  onSnooze: () => setSnoozeSessionId(surfaceSessionId),
-                  reminder: reminders.get(surfaceSessionId),
-                  onDismissReminder: () => {
-                    void dismissReturnedReminder(surfaceSessionId)
-                      .catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" }));
-                  },
-                } : {})}
-                {...(expanded ? {} : {
-                  onSessionMenu: (anchor: { x: number; y: number }, restoreTarget: () => HTMLElement | null) =>
-                    openSessionMenuAt(surfaceSessionId, anchor, restoreTarget),
-                  onOpenRequest: (requestId: string) => {
-                    const target = sessions.get(surfaceSessionId);
-                    if (target) openRequest(target, requestId);
-                  },
-                })}
-                onPreviewNavigationReady={expanded ? undefined : registerPreviewNavigation}
-                onPreviewForkReady={expanded ? undefined : setPreviewForkControls}
-              />
+              <InboxSessionDetail key={surfaceSessionId} {...surfaceProps} />
             ) : (
               // Rows always select their first (inbox.ts repairInboxSelection), so the preview is
               // empty only while the list loads.

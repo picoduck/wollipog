@@ -11,6 +11,7 @@ import type { ViewNavigation } from "../navigation.js";
 import { animationFramePublishScheduler, setDefaultPublishScheduler, StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
+import { loadSeen } from "../sessions-seen.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
 import { SessionDetail } from "./SessionDetail.js";
 import { observeRenderProbe, SESSION_DETAIL_PROBE, TIMELINE_ROW_PROBE } from "./render-probe.js";
@@ -257,13 +258,32 @@ test("a chunk that only lengthens the reply renders the transcript, not the sess
     const replyRow = `${TIMELINE_ROW_PROBE}:${history.length + 1}`;
     assert.ok((transcriptRows.get(replyRow) ?? 0) >= words.length - 1, "the reply's row rendered for each of them");
 
-    // A paced upsert renders the session view, which then derives the chunks itself: nothing doubles.
+    // A paced upsert that only moves the streamed counters renders no more of the session view
+    // (#2872); what reads them reads them live, like the seen marker for the inbox's unread badge. It
+    // was first marked at the time it opened, with no activity yet, so the new activity comes later.
+    const activityAt = Date.now() + 60_000;
     await view.push({
       type: "session_upsert",
-      session: sessionView(view.fixture.id, { messageCount: history.length + words.length, preview: "derived" }),
+      session: sessionView(view.fixture.id, {
+        messageCount: history.length + words.length, preview: "derived", lastEventAt: activityAt, updatedAt: activityAt,
+      }),
     });
-    assert.ok(sessionViewRenders > afterFirst, "the upsert renders the session view");
+    assert.equal(sessionViewRenders, afterFirst, "a streaming-only upsert does not render the session view");
+    assert.equal(loadSeen()[view.fixture.id], activityAt, "the open session is marked seen at its new activity time");
     assert.equal(text().split(reply).length, 2, "the reply appears exactly once");
+
+    // A change to anything else renders it, and it then derives the chunks itself: nothing doubles.
+    await view.push({ type: "session_upsert", session: sessionView(view.fixture.id, { title: "Renamed Fixture" }) });
+    assert.ok(sessionViewRenders > afterFirst, "a title change renders the session view");
+    assert.equal(text().split(reply).length, 2, "the reply still appears exactly once");
+
+    // Chunks after that render fold onto the item it derived, each once.
+    const afterRename = sessionViewRenders;
+    const more = "and keeps folding after the view rendered".split(" ");
+    for (const word of more) await view.append({ kind: "agent_message", text: `${word} ` });
+    const whole = `${reply} ${more.join(" ")}`;
+    assert.equal(text().split(whole).length, 2, "the whole reply appears exactly once");
+    assert.equal(sessionViewRenders, afterRename, "and the later chunks rendered no session view");
 
     // A tool call is a new item: the session view renders, and the reply stays whole before it.
     const before = sessionViewRenders;

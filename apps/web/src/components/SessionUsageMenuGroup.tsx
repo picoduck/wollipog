@@ -4,6 +4,7 @@ import { computeContextFill } from "../context-meter.js";
 import type { ContextWindowCapacity } from "../context-window-capacity.js";
 import { formatContextWindow } from "../context-window-options.js";
 import { sessionCostLabel } from "../session-cost.js";
+import { useLiveSession } from "../store.js";
 import { ContextRing, ContextWindowBreakdown, contextToneClass } from "./ContextWindowMeter.js";
 import { ChevronRightIcon } from "./Icons.js";
 import { MenuLabel, MenuSeparator } from "./Menu.js";
@@ -52,10 +53,12 @@ function SessionUsageRow({ detail, label, ringTone, unpriced = false, children }
  * component then renders. Renders nothing for a session without usage yet, so Model Settings
  * opens on its model choices as before.
  */
-export function SessionUsageMenuGroup({ session, resolution }: {
+export function SessionUsageMenuGroup({ session: rendered, resolution }: {
   session: SessionView;
   resolution: ContextWindowCapacity;
 }) {
+  // Usage and cost move with every streamed event; the session view does not render for that (#2872).
+  const session = useLiveSession(rendered);
   const controller = useModelSettingsDetail();
   const fill = computeContextFill({
     tokensIn: session.tokensIn,

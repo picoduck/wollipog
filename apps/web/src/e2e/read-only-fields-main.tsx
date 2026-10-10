@@ -26,6 +26,7 @@ document.documentElement.setAttribute("data-theme", params.get("theme") === "lig
 const scenario = params.get("scenario") ?? "fields";
 
 const SESSION: GuardrailsDialogSession = {
+  id: "s_read_only_fields",
   costBudgetUsd: 5,
   costCheckpointsUsd: [10, 20],
   costUsd: 1.25,

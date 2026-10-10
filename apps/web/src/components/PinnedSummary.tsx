@@ -1,7 +1,7 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { isPolicyApproval, isTerminal, normalizeSourcePath, sessionRole, type GitChecksSummary, type PlanEntry, type SessionView, type SourceLocation } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
-import { useStoreActions, useStoreSelector } from "../store.js";
+import { useLiveSession, useStoreActions, useStoreSelector } from "../store.js";
 import { deriveSidePaneContent, type TimelineItem } from "../timeline.js";
 import {
   COMMIT_ACTION_LABELS,
@@ -235,11 +235,7 @@ export function PinnedSummary({
             onClick={onOpenOrchestratorControls}
           />
         )}
-        <SummaryRow
-          icon={<UpdatedIcon className="ps-icon" size={14} aria-hidden="true" />}
-          label="Updated"
-          value={relativeTime(session.updatedAt)}
-        />
+        <UpdatedRow session={session} />
         {(backgroundWorkMeta || backgroundWorkUntracked) && (
           <SummaryRow
             icon={<JobsIcon className="ps-icon" size={14} aria-hidden="true" />}
@@ -422,6 +418,19 @@ export function PinnedSummary({
         </SummarySection>
       )}
     </div>
+  );
+}
+
+/** When the session last changed. Every streamed event moves it, and the session view does not
+ * render for that (#2872), so this row reads it live. */
+function UpdatedRow({ session: rendered }: { session: SessionView }) {
+  const session = useLiveSession(rendered);
+  return (
+    <SummaryRow
+      icon={<UpdatedIcon className="ps-icon" size={14} aria-hidden="true" />}
+      label="Updated"
+      value={relativeTime(session.updatedAt)}
+    />
   );
 }
 
