@@ -36,6 +36,7 @@ test("Vite production output pins the supported desktop webview floor", () => {
   assert.deepEqual(e2eConfig.build?.cssTarget, WOLLIPOG_WEBVIEW_TARGETS);
   assert.equal(e2eConfig.build?.outDir, "dist-e2e");
   assert.deepEqual(Object.keys(e2eConfig.build?.rolldownOptions?.input ?? {}).sort(), [
+    "inboxApp",
     "settingsRows",
     "timelineReflow",
     "xtermSmoke",
@@ -68,7 +69,7 @@ test("Vite production browser coverage cannot silently lose a selected check", (
   }
   assert.match(
     productionConfig,
-    /testMatch:\s*\["timeline-reflow\.spec\.ts",\s*"settings-rows\.spec\.ts",\s*"xterm-smoke\.spec\.ts"\]/,
+    /testMatch:\s*\["timeline-reflow\.spec\.ts",\s*"settings-rows\.spec\.ts",\s*"xterm-smoke\.spec\.ts",\s*"inbox-lazy\.spec\.ts"\]/,
     "production browser selection must retain all validated fixtures",
   );
   assert.match(

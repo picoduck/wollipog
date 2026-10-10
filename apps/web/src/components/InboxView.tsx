@@ -1,4 +1,4 @@
-import { type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, memo, useCallback, useDeferredValue, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { lazy, Suspense, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, memo, useCallback, useDeferredValue, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { prioritizedPendingRequests, providerSupportsConversationFork, type BoardColumn, type SessionReminderView, type SessionView, type SetSessionReminderRequest, type SnoozeScheduleInput, type SourceLocation } from "@wollipog/protocol";
 import { archiveAndStopMessage, archiveResultMessage, archiveResultTone, sessionArchiveRequiresStop } from "../archive-actions.js";
 import { sessionArchiveActionRefusal, sessionCommandRefusal } from "../session-command-permissions.js";
@@ -46,7 +46,7 @@ import { useFeedback, type ConfirmationOptions } from "./FeedbackProvider.js";
 import { InboxList, type InboxListEntry } from "./InboxList.js";
 import { CreateProjectDialog } from "./CreateProjectDialog.js";
 import { ProjectSplitMenu, type ProjectSplitActionsProps } from "./ProjectSplitMenu.js";
-import { SessionDetail, type PreviewForkControls, type SessionDetailProps } from "./SessionDetail.js";
+import type { PreviewForkControls, SessionDetailProps } from "./SessionDetail.js";
 import { useStableCallbacks } from "./stable-callbacks.js";
 import type { RightPanelState } from "./RightPanel.js";
 import type { PinnedSummaryState } from "./pinned-summary-state.js";
@@ -86,6 +86,7 @@ import { normalizeSessionsQuery, searchInboxSplits, sessionMatchesQuery } from "
 import { SessionsNoMatches, SessionsSearchField } from "./SessionsSearch.js";
 import { SessionsListSkeleton, SessionsPreviewSkeleton, SessionsSituationState } from "./SessionsStates.js";
 import { SessionsArrivalFailed, useSessionsArrivalWait } from "./SessionsStates.js";
+import { SessionPlaceholder } from "./SessionPlaceholder.js";
 import { sessionsSituation, sessionsSituationOffersNewSession, sessionsSyncingCount } from "../sessions-states.js";
 import { sessionsToRestore } from "../sessions-states.js";
 import { useOpenSearchPalette } from "./search-palette-context.js";
@@ -93,6 +94,8 @@ import { State, useSnapshotState } from "./State.js";
 import { StaleContent } from "./StaleContent.js";
 import { useRemovedFocus } from "./useRemovedFocus.js";
 import { sessionReadingTarget } from "../focus-zones.js";
+
+const SessionDetail = lazy(() => import("./SessionDetail.js").then((module) => ({ default: module.SessionDetail })));
 
 const PROJECT_PIN_KEY = "wollipog.projects.pinned";
 const SEEN_DWELL_MS = 1_500;
@@ -1888,7 +1891,13 @@ export function InboxView({
           {split && !stacked && <SessionsListWidthDivider grid={viewRef} width={listWidth} onWidthChange={changeListWidth} />}
           <div className="inbox-preview-pane" ref={previewPaneRef} data-focus-zone="main">
             {surfaceSessionId && !listSkeleton ? (
-              <InboxSessionDetail key={surfaceSessionId} {...surfaceProps} />
+              <Suspense fallback={expanded
+                ? <SessionPlaceholder sessionId={surfaceSessionId} preview={false} isMobile={isMobile}
+                    placeholder={{ title: "Loading Session…", hint: null, variant: "loading", actions: [] }}
+                    onBack={onCollapse ?? (() => navigate({ name: "inbox" }))} onRetry={() => {}} />
+                : <SessionsPreviewSkeleton />}>
+                <InboxSessionDetail key={surfaceSessionId} {...surfaceProps} />
+              </Suspense>
             ) : (
               // Rows always select their first (inbox.ts repairInboxSelection), so the preview is
               // empty only while the list loads.

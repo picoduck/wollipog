@@ -1,7 +1,7 @@
-import React, { useEffect, useId, useMemo, useRef, useState } from "react";
+import React, { lazy, Suspense, useEffect, useId, useMemo, useRef, useState } from "react";
 import { StatusBadge } from "./StatusBadge.js";
 import { statusMeta } from "../status-meta.js";
-import { QRCodeSVG } from "qrcode.react";
+import { State } from "./State.js";
 import type {
   DeviceView,
   IdentityAdministrationView,
@@ -31,6 +31,8 @@ type AccessDialog =
   | { kind: "pair-device" }
   | { kind: "create-team" }
   | { kind: "manage-team"; team: TeamView };
+
+const QRCodeSVG = lazy(() => import("qrcode.react").then((module) => ({ default: module.QRCodeSVG })));
 
 const ROLE_HELP: Record<OrganizationRole, string> = {
   owner: "Full organization control, including ownership and administrator changes.",
@@ -313,6 +315,7 @@ export function PairDeviceDialog({
               </label>
             )}
             <div className="access-pairing-qr-frame">
+              <Suspense fallback={<State variant="loading" compact>Loading pairing code…</State>}>
               <QRCodeSVG
                 value={primaryLink}
                 title={`Pair ${name} with Wollipog`}
@@ -320,6 +323,7 @@ export function PairDeviceDialog({
                 level="M"
                 marginSize={4}
               />
+              </Suspense>
             </div>
             <p>On the device you are pairing, open the camera and scan this code.</p>
             <CopyButton text={copyValue} label="Copy Pairing Link" className="btn" />
