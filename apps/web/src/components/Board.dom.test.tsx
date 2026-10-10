@@ -294,7 +294,7 @@ test("a returned result keeps one review badge and meaningful time despite newer
     session("working", { status: "running", lastEventAt: Date.now(), attention })] });
   try {
     const card = board.card("result");
-    assert.deepEqual([...card.querySelectorAll(".status")].map((badge) => badge.textContent), ["Ready for Review"]);
+    assert.deepEqual([...card.querySelectorAll(".status")].map((badge) => badge.textContent), ["Result Available"]);
     // A session still working shows its working status, not its earlier result (#3074).
     assert.deepEqual([...board.card("working").querySelectorAll(".status")].map((badge) => badge.textContent), ["Running"]);
     assert.equal(card.querySelector("time.card-time")?.getAttribute("datetime"), new Date(meaningfulAt).toISOString());
@@ -476,7 +476,7 @@ test("the family chip after the badge is an image named by the whole rollup at e
     const chip = status.querySelector(".inbox-thread-family")!;
     assert.ok(chip, "the parent shows its family chip");
     assert.equal(chip.getAttribute("role"), "img");
-    assert.equal(chip.getAttribute("aria-label"), "2 Children · 1 Awaiting Input");
+    assert.equal(chip.getAttribute("aria-label"), "2 Children · 1 Awaiting Input · 1 Working");
     assert.equal(chip.querySelector(".inbox-thread-family-text")?.getAttribute("aria-hidden"), "true",
       "the visible rollup, which a narrow list hides, stays out of the accessible tree");
     const order = [...status.children].map((child) => child.className);
@@ -485,7 +485,7 @@ test("the family chip after the badge is an image named by the whole rollup at e
     // A running parent shows the chip in place of the strip; a running card without children keeps its strip.
     assertNoDomNode(status.querySelector(".activity-strip"), "a parent card shows the chip, not the strip");
     assert.ok(board.card("running").querySelector(".card-status .activity-strip"), "a running card shows its strip");
-    assert.equal(chip.getAttribute("title"), "2 Children · 1 Awaiting Input", "and a tooltip with the whole rollup");
+    assert.equal(chip.getAttribute("title"), "2 Children · 1 Awaiting Input · 1 Working", "and a tooltip with the whole rollup");
   } finally {
     await board.unmount();
   }
