@@ -892,7 +892,8 @@ export function RightPanel({
           />
         );
       case "browser":
-        return <BrowserPanel session={session} />;
+        // An open artifact's Back to Artifacts is the phone header's Back (`usePanelBack`, #2855).
+        return <PanelBackContext.Provider value={backSlot}><BrowserPanel session={session} /></PanelBackContext.Provider>;
       case "sidechat":
         return <SideChatPanel session={session} runnerOnline={runnerOnline} onInsertDraft={onInsertSideChatDraft} />;
       case "subagents":
@@ -1060,9 +1061,7 @@ export function RightPanel({
             />
           ) : (
             <PanelEscapeLayerContext.Provider value={escapeLayerRef}>
-              <PanelBackContext.Provider value={backSlot}>
-                <div className="rpanel-body">{modeBody(state.mode)}</div>
-              </PanelBackContext.Provider>
+              <div className="rpanel-body">{modeBody(state.mode)}</div>
             </PanelEscapeLayerContext.Provider>
           )}
         </PanelActionSlotContext.Provider>
