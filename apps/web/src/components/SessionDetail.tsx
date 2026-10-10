@@ -6546,6 +6546,7 @@ function SessionDetailLoaded({
         <>
         <SessionHeader
           session={session}
+          covered={phonePanelOpen}
           runnerOnline={runnerOnline}
           machineName={runnerDisp.name}
           machineAccounts={runner?.providerAccounts}
@@ -6639,8 +6640,9 @@ function SessionDetailLoaded({
           browser) reset with SessionDetail's own session-id key. */}
       <div className="detail-columns">
         {/* The session body: the reader column, then the docked Pinned Summary (#2147). It is the
-            `session-body` container, so docking follows the room the right panel leaves. */}
-        <div className="detail-body" ref={setDetailBody}>
+            `session-body` container, so docking follows the room the right panel leaves. A phone's
+            side panel sheet covers it, so it is inert while the sheet is open (#2888). */}
+        <div className="detail-body" ref={setDetailBody} inert={phonePanelOpen || undefined}>
         <div className="detail-chat" ref={detailChatRef}>
           {/* A preview has no composer to dock above, so its requests head the preview, right under
               the meta line, where Approve and Deny sit under the cursor that selected the row (#2210). */}
