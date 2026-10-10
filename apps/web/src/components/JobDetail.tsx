@@ -64,13 +64,16 @@ function RecordedAge({ at, now, clock = false }: { at: number | undefined; now: 
 type StopFeedback = { state: "pending" } | BackgroundJobStopResult;
 
 /**
- * Each job's Stop Job request and its outcome, by session and job, for the life of the page. The
- * request outlives the page that sent it: Back and reopening the job shows it still stopping, so a
- * second request is never sent while the first runs, and its outcome lands wherever the job is open.
+ * Each job's Stop Job request and its outcome, for the life of the page. The request outlives the
+ * page that sent it: Back and reopening the job shows it still stopping, so a second request is never
+ * sent while the first runs, and its outcome lands wherever the job is open. A job is keyed by its
+ * session, id and start time: after a restart a provider can reuse a task id for a new job, which
+ * must not inherit the old job's outcome.
  */
 const stopFeedback = new Map<string, StopFeedback>();
 const stopListeners = new Set<() => void>();
-const stopKey = (sessionId: string, jobId: string) => JSON.stringify([sessionId, jobId]);
+const stopKey = (sessionId: string, jobId: string, registeredAt: number) =>
+  JSON.stringify([sessionId, jobId, registeredAt]);
 function setStopFeedback(key: string, feedback: StopFeedback) {
   stopFeedback.set(key, feedback);
   for (const listener of stopListeners) listener();
@@ -85,9 +88,10 @@ function subscribeStopFeedback(listener: () => void) {
  * titled with the job's name, with Cancel focused; the runner then ends only that job. Unavailable,
  * the button stays, disabled, with its reason as visible text it is described by.
  */
-function StopJob({ sessionId, jobId, label, availability, stoppable }: {
+function StopJob({ sessionId, jobId, registeredAt, label, availability, stoppable }: {
   sessionId: string;
   jobId: string;
+  registeredAt: number;
   label: string;
   availability: BackgroundJobStopAvailability;
   stoppable: boolean;
@@ -95,7 +99,7 @@ function StopJob({ sessionId, jobId, label, availability, stoppable }: {
   const api = useApi();
   const { confirm } = useFeedback();
   const reasonId = useId();
-  const key = stopKey(sessionId, jobId);
+  const key = stopKey(sessionId, jobId, registeredAt);
   const feedback = useSyncExternalStore(subscribeStopFeedback, () => stopFeedback.get(key) ?? null);
   const stop = async () => {
     if (stopFeedback.get(key)?.state === "pending") return;
@@ -220,7 +224,7 @@ export function JobDetail({
         )}
       </dl>
       {jobStop && (
-        <StopJob sessionId={session.id} jobId={job.id} label={label} availability={jobStop}
+        <StopJob sessionId={session.id} jobId={job.id} registeredAt={job.registeredAt} label={label} availability={jobStop}
           stoppable={stoppableJobState(state)} />
       )}
     </section>

@@ -209,13 +209,14 @@ test("a stop still running when the page closes keeps the reopened page busy, an
       return new Promise<BackgroundJobStopResponse>((resolve) => { finish = resolve; });
     },
   } as Partial<ApiClient>;
-  const first = await mountDetail({ session: session([job()]) }, client);
+  const running = job();
+  const first = await mountDetail({ session: session([running]) }, client);
   await act(async () => first.stopButton()!.click());
   await flush();
   assert.deepEqual(calls, ["job-shell-a1f3c9"]);
   await first.dispose();
   // Back, then the same job again: the request is still running.
-  const reopened = await mountDetail({ session: session([job()]) }, client);
+  const reopened = await mountDetail({ session: session([running]) }, client);
   try {
     assert.equal(reopened.stopButton()!.getAttribute("aria-busy"), "true", "the reopened page shows it still stopping");
     await act(async () => reopened.stopButton()!.click());
@@ -230,6 +231,35 @@ test("a stop still running when the page closes keeps the reopened page busy, an
       "the outcome lands on the page that is open");
   } finally {
     await reopened.dispose();
+  }
+});
+
+test("a new job reusing a stopped job's id after a restart is offered Stop Job afresh (#2858, #1779)", async () => {
+  const calls: string[] = [];
+  const client = {
+    stopBackgroundJob: async (_sessionId: string, jobId: string) => {
+      calls.push(jobId);
+      return { sessionId, jobId, outcome: "stopped", terminalStatus: "killed" } as BackgroundJobStopResponse;
+    },
+  } as Partial<ApiClient>;
+  const now = Date.now();
+  const first = await mountDetail({ session: session([job({ registeredAt: now - 30 * MINUTE })]) }, client);
+  await act(async () => first.stopButton()!.click());
+  await flush();
+  assert.match(first.container.textContent ?? "", new RegExp(STOP_JOB_STOPPED.replace(/\./gu, "\\.")));
+  await first.dispose();
+  // The session restarted, and the provider started a new job under the same task id.
+  const replacement = await mountDetail({ session: session([job({ registeredAt: now - MINUTE, parentTurnId: "turn-5" })]) }, client);
+  try {
+    const stop = replacement.stopButton();
+    assert.ok(stop && !stop.disabled && stop.getAttribute("aria-busy") === null, "the new job can be stopped");
+    assert.doesNotMatch(replacement.container.textContent ?? "", /Stopped\. Its status updates/u,
+      "and does not show the old job's outcome");
+    await act(async () => stop!.click());
+    await flush();
+    assert.deepEqual(calls, ["job-shell-a1f3c9", "job-shell-a1f3c9"]);
+  } finally {
+    await replacement.dispose();
   }
 });
 
