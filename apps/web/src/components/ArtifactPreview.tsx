@@ -135,6 +135,9 @@ export function useArtifactPreview(artifact: WorkflowArtifactView | null): Artif
     return () => {
       requestRef.current++;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
+      // A host that outlives its preview (the Browser, whose Back passes no artifact) can reopen the
+      // same artifact on the same attempt: this load is over, so it must not read as ready again.
+      setSettled((current) => (current?.artifact === artifact && current.attempt === attempt ? null : current));
     };
   }, [api, artifact, previewClass, transcriptImageCache, attempt]);
 

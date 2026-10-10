@@ -284,6 +284,44 @@ describe("the artifact preview's bodies (#2855)", () => {
     await settle(ready(container), "the log");
     assertNoDomNode(buttonNamed(container, "Enlarge"));
   });
+
+  test("closed and reopened, a preview loads again rather than showing the media URL it revoked (#2914)", async () => {
+    const bytes = new Uint8Array([137, 80, 78, 71]);
+    const item = artifact("screenshot", "Settings at 390px.png", bytes);
+    const priorCreate = URL.createObjectURL;
+    const priorRevoke = URL.revokeObjectURL;
+    let created = 0;
+    const revoked: string[] = [];
+    URL.createObjectURL = () => `blob:shot-${++created}`;
+    URL.revokeObjectURL = (url: string) => { revoked.push(url); };
+    // The Browser holds one preview for whichever artifact is on top, so Back passes no artifact.
+    let setOpen!: (open: boolean) => void;
+    function Reopened() {
+      const [open, set] = React.useState(true);
+      setOpen = set;
+      const model = useArtifactPreview(open ? item : null);
+      return model ? <ArtifactPreviewBody model={model} /> : <p>Closed</p>;
+    }
+    let exports = 0;
+    try {
+      const container = await render(<Reopened />, () => {
+        exports += 1;
+        // The second load never answers, so what shows is whatever the hook derives meanwhile.
+        return exports === 1 ? Promise.resolve(new Blob([bytes as BlobPart], { type: item.mimeType })) : new Promise<Blob>(() => {});
+      });
+      await settle(ready(container), "the screenshot");
+      assert.equal(container.querySelector("img.art-image")?.getAttribute("src"), "blob:shot-1");
+      await act(async () => setOpen(false));
+      assert.deepEqual(revoked, ["blob:shot-1"], "closing releases the image's URL");
+      await act(async () => setOpen(true));
+      assert.equal(exports, 2, "reopening asks for the bytes again");
+      assert.equal(container.querySelector(".artifact-preview")?.getAttribute("aria-busy"), "true", "and shows loading meanwhile");
+      assertNoDomNode(container.querySelector("img.art-image"), "never the revoked URL");
+    } finally {
+      URL.createObjectURL = priorCreate;
+      URL.revokeObjectURL = priorRevoke;
+    }
+  });
 });
 
 describe("Run detail's preview dialog (#2855)", () => {
