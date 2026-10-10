@@ -13,7 +13,7 @@ import { ViewerIdentityContext, type ViewerIdentity } from "../resolver-identity
 import {
   ArtifactPreviewBody,
   ArtifactPreviewDialog,
-  ArtifactPreviewHeader,
+  ArtifactPreviewBar,
   ArtifactPreviewMeta,
   DOWNLOAD_WARNING,
   useArtifactPreview,
@@ -44,12 +44,12 @@ function artifact(kind: WorkflowArtifactKind, name: string, body: string | Uint8
 
 const viewer: ViewerIdentity = { userId: "usr_8f2c41", shared: false, names: new Map() };
 
-/** The Browser's anatomy without the panel: the header, the meta line and the body over one load. */
-function Preview({ item, onBack }: { item: WorkflowArtifactView; onBack?: () => void }) {
+/** The Browser's anatomy without the panel: the bar, the meta line and the body over one load. */
+function Preview({ item }: { item: WorkflowArtifactView }) {
   const model = useArtifactPreview(item);
   return (
     <div className="art-view">
-      <ArtifactPreviewHeader model={model} onBack={onBack} />
+      <ArtifactPreviewBar model={model} />
       <ArtifactPreviewMeta model={model} />
       <ArtifactPreviewBody model={model} />
     </div>
@@ -101,21 +101,18 @@ const buttonNamed = (scope: ParentNode, name: string) =>
     .find((button) => (button.getAttribute("aria-label") ?? button.textContent?.trim()) === name) ?? null;
 
 describe("the artifact preview's header and meta line (#2855)", () => {
-  test("one 48px bar: Back to Artifacts, the title from the leading edge, then Download", async () => {
+  test("one bar of Enlarge and Download, with no back and no title of its own (#2914)", async () => {
     const item = artifact("test_log", "web unit suite.log", "ok 1\n");
-    let backs = 0;
-    const container = await render(<Preview item={item} onBack={() => backs++} />, exporting(item, "ok 1\n"));
+    const container = await render(<Preview item={item} />, exporting(item, "ok 1\n"));
     await settle(ready(container), "the log");
     const bar = container.querySelector(".art-bar")!;
     assert.ok(bar.classList.contains("toolbar"));
-    // Download's progress line is a visually hidden sibling, not a control.
+    // Download's progress line is a visually hidden sibling, not a control; a log has no Enlarge.
     const controls = [...bar.querySelectorAll(":scope > button, :scope > h2")]
       .map((child) => child.getAttribute("aria-label") ?? child.textContent?.trim());
-    assert.deepEqual(controls, ["Back to Artifacts", "web unit suite.log", "Download"], "back, title, Download in order");
-    assert.equal(bar.querySelector("h2.art-title")?.getAttribute("title"), "web unit suite.log");
+    assert.deepEqual(controls, ["Download"], "the panel header carries Back and the title, so the bar has neither");
+    assertNoDomNode(bar.querySelector("h2"), "the title is shown once, in the panel header");
     assert.doesNotMatch(container.textContent ?? "", /‹/u, "no text-glyph back");
-    await act(async () => buttonNamed(bar, "Back to Artifacts")!.click());
-    assert.equal(backs, 1);
   });
 
   test("the meta line names kind, size, author and Verified, and never a MIME type, hash or user id", async () => {
