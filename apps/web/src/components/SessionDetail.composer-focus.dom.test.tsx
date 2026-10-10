@@ -6964,3 +6964,28 @@ test("inserting a side-chat response restores an expanded side panel so the draf
     await unmountFixture(fixture);
   }
 });
+
+test("the reader's keys are off while an expanded side panel hides the reader (#2845)", { timeout: 5_000 }, async () => {
+  for (const expanded of [false, true]) {
+    const draft = deferred<ComposerDraft | null>();
+    const fixture = await mountFixture(draft, {
+      rightPanelMode: "launcher",
+      ...(expanded ? { rightPanelExpanded: { calls: [] } } : {}),
+    });
+    try {
+      await resolveDraft(draft, "");
+      await act(async () => { flushFrames(); });
+      const reader = fixture.container.querySelector<HTMLElement>(".detail-scroll")!;
+      let scrolled = 0;
+      reader.scrollBy = (() => { scrolled += 1; }) as typeof reader.scrollBy;
+      await act(async () => { reader.focus(); });
+      await act(async () => {
+        reader.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "j", bubbles: true }) as never);
+        flushFrames();
+      });
+      assert.equal(scrolled, expanded ? 0 : 1, expanded ? "J reads nothing it cannot show" : "J scrolls beside a docked panel");
+    } finally {
+      await unmountFixture(fixture);
+    }
+  }
+});

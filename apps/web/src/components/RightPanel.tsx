@@ -529,8 +529,10 @@ export function RightPanel({
   // Expanded, the panel fills the row in place of the chat column (#2845); phones have no Expand.
   const expanded = state.open && state.expanded && !phone;
   // Every mode docks or overlays by the same rule; a phone's panel is full-screen (styles.css).
-  const overlay = state.open && !phone && !expanded && columnsWidth !== null &&
+  // Expanded, the panel still knows which it would be, so Restore returns there.
+  const overlaysAtWidth = !phone && columnsWidth !== null &&
     rightPanelOverlays(columnsWidth, clampRightPanelWidth(state.width, ceiling));
+  const overlay = state.open && !expanded && overlaysAtWidth;
   // Only a docked panel has a resize handle.
   const handleShown = !overlay && !expanded;
   // A panel that loses its handle (a window shrinking it into an overlay) ends the drag with it.
@@ -894,6 +896,10 @@ export function RightPanel({
           from the right, over a scrim a press on which closes the panel as Close Panel does (§15.2;
           #2206, #2725). */}
       {overlay && <div className="rpanel-scrim" aria-hidden="true" onClick={state.close} />}
+      {/* Expanded from docked, a spacer holds the panel's docked footprint, so the hidden chat column
+          keeps the width it had: its transcript and Pinned Summary are measured as they will be on
+          Restore, and expanding or restoring reflows nothing (#2845). */}
+      {expanded && !overlaysAtWidth && <div className="rpanel-spacer" aria-hidden="true" style={{ width: effectiveWidth }} />}
       <aside
         ref={asideRef}
         id="right-panel"

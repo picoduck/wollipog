@@ -446,6 +446,11 @@ export function Shell() {
   });
   const pinnedSummaryRef = useRef(pinnedSummary);
   pinnedSummaryRef.current = pinnedSummary;
+  // Expanded, the side panel fills the session body's place, the summary's drawer included (#2845).
+  const sidePanelExpanded = rightPanel.open && rightPanel.expanded && !isMobile;
+  useEffect(() => {
+    if (sidePanelExpanded) pinnedSummaryRef.current.closeOverlay();
+  }, [sidePanelExpanded]);
   const rightPanelWasOpen = useRef(rightPanel.open);
   useEffect(() => {
     const opened = rightPanel.open && !rightPanelWasOpen.current;
@@ -724,9 +729,19 @@ export function Shell() {
       )}
       <SessionPanelToggles
         small={isMobile}
-        pinnedSummaryOpen={pinnedSummary.open}
+        pinnedSummaryOpen={pinnedSummary.open && !sidePanelExpanded}
         pinnedSummaryRef={pinnedSummary.toggleRef}
-        onPinnedSummary={pinnedSummary.toggle}
+        onPinnedSummary={() => {
+          // An expanded side panel hides the session body the summary lives in (#2845): the toggle
+          // brings the body back with the summary in it. The hidden body keeps its docked width, so
+          // the summary already docks or opens as a drawer as it will once restored.
+          if (sidePanelExpanded) {
+            rightPanel.setExpanded(false);
+            if (!pinnedSummary.open) pinnedSummary.toggle();
+            return;
+          }
+          pinnedSummary.toggle();
+        }}
         terminalSupported={terminalSupported}
         terminalOpen={dockVisible}
         onTerminal={() => {

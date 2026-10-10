@@ -1490,6 +1490,18 @@ function SessionDetailLoaded({
   const retitleReceiptRef = useRef<HTMLDivElement>(null);
   const rightPanelRef = useRef(rightPanel);
   rightPanelRef.current = rightPanel;
+  /**
+   * An expanded side panel hides the chat column (#2845). An action whose result shows there (a
+   * draft, a reference chip, a request, a transcript row) restores the panel first, and commits it
+   * at once, so focus that follows in the same gesture lands on something visible. Phones have no
+   * Expand. Returns whether it restored.
+   */
+  const restoreExpandedPanel = useCallback(() => {
+    const panel = rightPanelRef.current;
+    if (isMobile || !panel.open || !panel.expanded) return false;
+    flushSync(() => panel.setExpanded(false));
+    return true;
+  }, [isMobile]);
   // Resolve attention only against this generation's known requests. Cold links stay on the
   // transcript while hydration catches up; they never guess an Agents overview first.
   const handledAttentionRef = useRef<string | null>(null);
@@ -2024,13 +2036,12 @@ function SessionDetailLoaded({
     setProgrammaticComposerText(next);
   });
   const insertSideChatDraft = useCallback((response: string) => {
-    // An expanded side panel fills the chat column's place (#2845); the draft is shown, not hidden.
-    if (!isMobile && rightPanelRef.current.expanded) rightPanelRef.current.setExpanded(false);
+    restoreExpandedPanel();
     revealOrdinaryComposerRef.current("always");
     markDraftDirty();
     const next = appendTranscript(draftState.current.text, response);
     setProgrammaticComposerText(next);
-  }, [isMobile, markDraftDirty, setProgrammaticComposerText]);
+  }, [markDraftDirty, restoreExpandedPanel, setProgrammaticComposerText]);
   // Shared git status: the composer branch chip + the right panel's Review mode read one
   // fetch. Called before the !session guard — hooks must run unconditionally.
   // Inbox previews render neither the composer Git chip, pinned summary, nor Review panel. Do not
@@ -3988,15 +3999,9 @@ function SessionDetailLoaded({
   const revealTranscriptItemFromPanel = useCallback((eventId: number) => {
     // A phone's panel covers the transcript; an expanded one fills its place (#2845).
     if (isMobile) rightPanelRef.current.close();
-    else if (rightPanelRef.current.expanded) {
-      // Restoring narrows the transcript from the row's width back to the chat column's, which
-      // re-measures its rows; reveal once that layout has settled, not against the wide one.
-      rightPanelRef.current.setExpanded(false);
-      window.requestAnimationFrame(() => window.requestAnimationFrame(() => revealCurrentOperation(eventId)));
-      return;
-    }
+    else restoreExpandedPanel();
     revealCurrentOperation(eventId);
-  }, [isMobile, revealCurrentOperation]);
+  }, [isMobile, restoreExpandedPanel, revealCurrentOperation]);
   const previewNavigationControls = useMemo<PreviewNavigationControls>(() => ({
     beginProgrammaticScroll: followTail.beginProgrammaticScroll,
     follow: followTail.follow,
@@ -4041,7 +4046,9 @@ function SessionDetailLoaded({
     resumeFollow: followTail.follow,
   }), [archiveRefusal, canAnswerPendingQuestion, enterAnswerMode, focusComposerAtDraftEnd, followTail.follow, followTail.pause, onApprove, onArchive, onDeny, onNextSession, onPreviousSession, onSnooze, responseRefusal,
     session.id, topQuestionInComposer, topRequestDocked]);
-  const sessionReadingKeys = mode === "expanded" && !isMobile;
+  // The reader's keys (J/K, A/D, R…) act on the transcript and the request dock, so they are off
+  // while an expanded side panel hides them (#2845).
+  const sessionReadingKeys = mode === "expanded" && !isMobile && !(rightPanel.open && rightPanel.expanded);
   useSessionReadingKeys({
     enabled: sessionReadingKeys,
     sessionId,
@@ -5053,6 +5060,13 @@ function SessionDetailLoaded({
       showActionError("addReference", cause);
     }
   }, [addWorkspaceReference, api, runner?.protocolVersion, sessionId, workspaceReferencesSupported]);
+
+  // The chip in the composer's tray is an attachment's confirmation (§13.1), so the panel's Attach
+  // to Prompt restores an expanded panel to show it (#2845).
+  const attachWorkspaceTargetFromPanel = useCallback((target: CreateWorkspaceReferenceRequest) => {
+    restoreExpandedPanel();
+    return attachWorkspaceTarget(target);
+  }, [attachWorkspaceTarget, restoreExpandedPanel]);
 
   const selectWorkspaceCandidate = (candidate: WorkspaceReferenceCandidate) => {
     if (!workspaceTrigger) return;
@@ -6609,6 +6623,7 @@ function SessionDetailLoaded({
           childRequests={{ count: humanDescendantRequests, onOpen: openChildRequests }}
           onOpenBackgroundWork={() => rightPanel.show("background")}
           onOpenAttention={() => {
+            restoreExpandedPanel();
             // The top request is answered on the dock when it is the session's own.
             const top = prioritizedRequests[0];
             if (top && dockedRequests.includes(top)) {
@@ -7509,7 +7524,7 @@ function SessionDetailLoaded({
           forgeFacts={reviewForgeFacts}
           onOpenTerminal={onOpenTerminal}
           onInsertSideChatDraft={insertSideChatDraft}
-          onAttachWorkspaceReference={workspaceReferencesSupported ? attachWorkspaceTarget : undefined}
+          onAttachWorkspaceReference={workspaceReferencesSupported ? attachWorkspaceTargetFromPanel : undefined}
           reviewFocus={reviewFocus}
           onReviewFocusHandled={clearReviewFocus}
           items={items}

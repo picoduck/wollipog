@@ -3857,11 +3857,12 @@ textarea {
 }
 /* Expand Panel (#2845): the panel fills the session's content area beside the rail, under the
    session bar, in place of the chat column, from either presentation and with no scrim or handle.
-   The chat column stays laid out and mounted underneath, hidden (out of the accessibility tree and
-   the tab order), so Restore brings it back as it was. The panel is the `rp` container still, so
+   The chat column stays mounted underneath, hidden (out of the accessibility tree and the tab
+   order), and `.rpanel-spacer` keeps it at its docked width, so Restore brings it back as it was. The panel is the `rp` container still, so
    its tools read the expanded width. */
 .detail-columns:has(> .rpanel[data-presentation="expanded"]) { position: relative; }
 .detail-columns:has(> .rpanel[data-presentation="expanded"]) > .detail-body { visibility: hidden; }
+.detail-columns > .rpanel-spacer { flex: none; }
 .detail-columns > .rpanel[data-presentation="expanded"] {
   position: absolute;
   inset: 0;

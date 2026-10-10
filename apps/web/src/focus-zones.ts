@@ -33,8 +33,9 @@ export const ZONE_TARGETS: Readonly<Record<FocusZone, readonly string[]>> = {
   // still needs a landing spot in each.
   list: [".inbox-list", ".inbox-state", ".inbox-skeleton", ".board-wrap"],
   // The Sessions reading pane lands on its transcript scroller, as opening a session does, or on its
-  // placeholder while the list loads.
-  main: [".detail-scroll", ".inbox-preview-skeleton"],
+  // placeholder while the list loads. An expanded side panel hides the transcript (#2845), so the
+  // session lands on the panel's tool switcher instead.
+  main: ['#right-panel[data-presentation="expanded"] .rpanel-switcher', ".detail-scroll", ".inbox-preview-skeleton"],
 };
 
 function zoneRoot(targetDocument: Document, zone: FocusZone): HTMLElement | null {

@@ -197,6 +197,8 @@ test("Expand Panel fills the row in place of the chat, and Restore Panel brings 
     assert.equal(panel.aside()?.style.width, "", "the stylesheet sizes an expanded panel to the row");
     assertNoDomNode(panel.container.querySelector(".rpanel-resizer"), "no resize handle while expanded");
     assertNoDomNode(panel.container.querySelector(".rpanel-scrim"), "no scrim while expanded");
+    assert.equal(panel.container.querySelector<HTMLElement>(".rpanel-spacer")?.style.width, "400px",
+      "a spacer holds the docked footprint, so the hidden chat keeps its width");
     assertNoDomNode(panel.button("Expand Panel"));
     const restore = panel.button("Restore Panel")!;
     assert.equal(restore.title, "Restore Panel");
@@ -208,6 +210,7 @@ test("Expand Panel fills the row in place of the chat, and Restore Panel brings 
     assert.equal(panel.aside()?.dataset.presentation, "docked");
     assert.equal(panel.aside()?.style.width, "400px", "back at the width it had");
     assert.ok(panel.container.querySelector(".rpanel-resizer"), "the handle returns");
+    assertNoDomNode(panel.container.querySelector(".rpanel-spacer"));
     assert.ok(isFocused(panel.button("Expand Panel")));
     assert.equal(loadBrowserStorageValue("wollipog.rightpanel.expanded"), "0");
   } finally {
@@ -324,6 +327,7 @@ test("in the overlay presentation, Expand fills the row with no scrim and Restor
     await act(async () => panel.button("Expand Panel")!.click());
     assert.equal(panel.aside()?.dataset.presentation, "expanded");
     assertNoDomNode(panel.container.querySelector(".rpanel-scrim"), "the scrim is hidden");
+    assertNoDomNode(panel.container.querySelector(".rpanel-spacer"), "an overlay held no room in the row to keep");
     assertNoDomNode(panel.container.querySelector(".rpanel-resizer"));
     await act(async () => panel.button("Restore Panel")!.click());
     assert.equal(panel.aside()?.dataset.presentation, "overlay");

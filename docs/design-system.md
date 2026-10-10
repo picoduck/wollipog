@@ -899,12 +899,16 @@ Requests, Decision History, and Terminal once #2868 moves it) opens in one frame
   240px snaps the panel closed. Wider work uses Expand Panel, not a wider drag.
 - **Expand Panel.** An `.icon-btn` (`Maximize2Icon`, "Expand Panel") before Close Panel, on desktop
   and in the overlay, never on a phone (#2845). Expanded, the panel fills the session's content area
-  beside the rail, under the session bar, in place of the chat column, which stays mounted and laid
-  out underneath but hidden. There is no scrim and no resize handle, and the panel is the `rp`
-  container still, at least 720px wide on any window 1100px or wider. The action becomes Restore
-  Panel (`Minimize2Icon`), which returns the panel to its docked width or to the overlay. The state
-  is stored per device in `wollipog.rightpanel.expanded` and survives switching tools and sessions,
-  a reload, and closing the panel, so the next open is expanded again.
+  beside the rail, under the session bar, in place of the chat column, which stays mounted
+  underneath at its docked width but hidden, so restoring reflows nothing. There is no scrim and no
+  resize handle, and the panel is the `rp` container still, at least 720px wide on any window 1100px
+  or wider. The action becomes Restore Panel (`Minimize2Icon`), which returns the panel to its docked
+  width or to the overlay. The state is stored per device in `wollipog.rightpanel.expanded` and
+  survives switching tools and sessions, a reload, and closing the panel, so the next open is
+  expanded again. While expanded, the reader's keys are off, F6 lands on the tool switcher, and focus
+  left in the chat column moves there. An action whose result shows in the chat column restores the
+  panel first: the Pinned Summary toggle, Attach to Prompt, Side Chat's Insert, Show in Transcript
+  and the session bar's attention control.
 - **Keyboard.** The Side Panel chord (Ctrl/⌘+\\) toggles the panel and reopens the last tool, with
   focus on the switcher, so the arrow keys reach every other tool.
   Escape closes it from any tool while focus is inside, once nothing above takes Escape (§16.2): a

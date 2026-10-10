@@ -91,7 +91,8 @@ test("at 1440px Expand Panel fills the content area, and Restore Panel and Escap
   expect(await expand.boundingBox()).toMatchObject({ width: 32, height: 32 });
   await expect(expand).toHaveAttribute("title", "Expand Panel");
   await expand.click();
-  await expectExpanded(page, "expanded");
+  const expanded = await expectExpanded(page, "expanded");
+  expect(expanded.body.width, "the hidden chat keeps its docked width, so nothing reflows").toBe(docked.body.width);
   await expect(page.locator("header.session-bar")).toBeVisible();
 
   await headButton(page, "Restore Panel").click();
@@ -233,4 +234,66 @@ test("Show in Transcript restores an expanded panel and scrolls the real transcr
   await historyRow.getByRole("button", { name: "Show in Transcript" }).click();
   await expect(panel(page)).toHaveAttribute("data-presentation", "docked");
   await expect(transcriptSummary).toBeInViewport();
+});
+
+for (const width of [1440, 1100]) {
+  test(`at ${width}px the Pinned Summary toggle restores an expanded panel and shows the summary (#2845)`, async ({ page }) => {
+    await openSession(page, width);
+    await openTool(page, "Review");
+    const toggle = page.getByRole("button", { name: "Pinned Summary", exact: true });
+    if (await toggle.getAttribute("aria-pressed") === "true") await toggle.click();
+    await headButton(page, "Expand Panel").click();
+    await expectExpanded(page, "expanded");
+    await expect(toggle, "the hidden summary does not read as open").toHaveAttribute("aria-pressed", "false");
+    await toggle.click();
+    await expect(panel(page)).toHaveAttribute("data-presentation", "docked");
+    // At 1100px the restored body is too narrow to dock it beside the reader, so it opens as a drawer.
+    const summary = page.locator('aside.ps[aria-label="Pinned Summary"]');
+    await expect(summary).toBeVisible();
+    await expect(summary).toHaveAttribute("data-presentation", width === 1440 ? "docked" : "drawer");
+    await expect(toggle).toHaveAttribute("aria-pressed", "true");
+  });
+}
+
+test("F6 lands on the expanded panel's switcher, and on the transcript once restored (#2845)", async ({ page }) => {
+  await openSession(page, 1440);
+  await openTool(page, "Review");
+  await headButton(page, "Expand Panel").click();
+  await expectExpanded(page, "expanded");
+  const rail = page.locator('.app-rail [aria-current="page"]');
+  await rail.focus();
+  await page.keyboard.press("F6");
+  await expect(panel(page).locator(".rpanel-switcher")).toBeFocused();
+  await headButton(page, "Restore Panel").click();
+  await rail.focus();
+  await page.keyboard.press("F6");
+  await expect(page.locator(".detail-scroll")).toBeFocused();
+});
+
+test("Attach Selected in an expanded Review restores the panel so its chip shows in the composer (#2845)", async ({ page }) => {
+  const line = (status: " " | "+", text: string) => ({ status, text });
+  const file = { path: "src/app.ts", status: "modified", binary: false, hunks: [{
+    header: "@@ -1,2 +1,3 @@", oldStart: 1, oldCount: 2, newStart: 1, newCount: 3,
+    lines: [line(" ", "const a = 1;"), line("+", "const b = 2;"), line(" ", "export { a };")],
+  }] };
+  await page.route("**/api/sessions/*/git", async (route) => {
+    const body = route.request().postDataJSON() as { action: string };
+    if (body.action !== "diff") return route.fallback();
+    await route.fulfill({ json: { diff: {
+      scope: "uncommitted", diffHash: "d".repeat(64), files: [file], unstagedFiles: [file], stagedFiles: [],
+      stats: { filesChanged: 1, insertions: 1, deletions: 0 },
+    } } });
+  });
+  await page.route("**/api/sessions/*/review-findings*", (route) => route.fulfill({ json: {
+    findings: [], summary: { total: 0, unresolved: 0, requiredUnresolved: 0, sent: 0, resolved: 0, dismissed: 0, completion: "complete" },
+  } }));
+  await openSession(page, 1440);
+  await openTool(page, "Review");
+  await headButton(page, "Expand Panel").click();
+  await expectExpanded(page, "expanded");
+  await panel(page).getByRole("checkbox", { name: "Select Worktree Line 2 for Prompt" }).check();
+  await panel(page).getByRole("button", { name: "Attach Selected (1)" }).click();
+  await expect(panel(page)).toHaveAttribute("data-presentation", "docked");
+  await expect(page.locator(".composer-input")).toBeVisible();
+  await expect(page.locator(".composer").getByText("app.ts", { exact: false }).first()).toBeVisible();
 });
