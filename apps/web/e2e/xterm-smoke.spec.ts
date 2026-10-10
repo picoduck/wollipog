@@ -13,7 +13,7 @@ async function waitForHarness(page: Page): Promise<void> {
 const SEARCH_DURING_FONT_LOAD_TEST = "applies search entered while the terminal font is still loading @production";
 
 test.beforeEach(async ({ page }, testInfo) => {
-  if (testInfo.title === SEARCH_DURING_FONT_LOAD_TEST) return;
+  if (testInfo.title === SEARCH_DURING_FONT_LOAD_TEST || testInfo.title.startsWith("the active search match")) return;
   await waitForHarness(page);
 });
 
@@ -197,3 +197,184 @@ test("searches output with a match count, Previous and Next, Enter, Shift+Enter 
   await expect(page.getByRole("button", { name: "Search Output" })).toBeVisible();
   await expect(page.getByRole("group", { name: "Search Output" })).toHaveCount(0);
 });
+
+test("switching from a scrolled-up tab to another and back keeps its scroll position (#2865) @production", async ({ page }) => {
+  const fixture = page.getByRole("region", { name: "Tabbed Terminal Fixture" });
+  const tabA = fixture.locator(".shell-term").nth(0);
+  await expect(terminalRows(tabA)).toContainText("tab-a-line-199");
+  await tabA.locator(".xterm").hover();
+  await page.mouse.wheel(0, -1200);
+  await expect(terminalRows(tabA)).not.toContainText("tab-a-line-199");
+  const scrolled = await terminalRows(tabA).innerText();
+
+  await fixture.getByRole("button", { name: "Tab B" }).click();
+  await expect(tabA).toHaveClass(/is-hidden/);
+  await expect(terminalRows(fixture.locator(".shell-term").nth(1))).toContainText("tab-b-ready");
+  await fixture.getByRole("button", { name: "Tab A" }).click();
+  await expect(tabA).not.toHaveClass(/is-hidden/);
+  await expect.poll(() => terminalRows(tabA).innerText()).toBe(scrolled);
+});
+
+test("a history revision replaces the scrollback after output still being parsed, and a half-read escape (#2865)", async ({ page }) => {
+  const terminal = page.getByRole("region", { name: "Interactive Terminal Fixture" });
+  await expect(terminalRows(terminal)).toContainText("Initial terminal output");
+  // In one task, so xterm has parsed none of it when the history arrives.
+  await page.evaluate(() => {
+    const harness = window.__WOLLIPOG_XTERM_E2E__;
+    harness.appendInteractive("pending-before-reset\r\n");
+    harness.appendInteractive("\u001b[31");
+    harness.replaceInteractive("restored history line\r\n");
+  });
+  await expect(terminalRows(terminal)).toContainText("restored history line");
+  const text = await terminalRows(terminal).innerText();
+  expect(text).not.toContain("pending-before-reset");
+  expect(text).not.toContain("Initial terminal output");
+  expect(text.match(/restored history line/g)).toHaveLength(1);
+  await expect(terminalRows(terminal).locator("span").filter({ hasText: "restored" })).not.toHaveClass(/xterm-fg-1/);
+});
+
+test("a shell that takes input again reports its size again, unchanged or after a history reload (#2865)", async ({ page }) => {
+  const logs = () => page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.logs().interactive.resizes);
+  await expect.poll(async () => (await logs()).length).toBe(1);
+  const [size] = await logs();
+  await page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.clearLogs());
+
+  await page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.setInteractiveMode(false));
+  await page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.setInteractiveMode(true));
+  await expect.poll(logs, { message: "a report that may not have arrived is sent again" }).toEqual([size]);
+
+  await page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.replaceInteractive("restored after reconnect\r\n"));
+  await expect.poll(logs, { message: "a history reload reports the size, as a remount did" }).toEqual([size, size]);
+});
+
+test("a terminal listed as a pipe and corrected to a PTY writes the PTY's stream as is (#2865)", async ({ page }) => {
+  await page.goto("/xterm-smoke-e2e.html?pty=0");
+  await expect.poll(() => page.evaluate(() => typeof window.__WOLLIPOG_XTERM_E2E__)).toBe("object");
+  const terminal = page.getByRole("region", { name: "Interactive Terminal Fixture" });
+  await expect(terminalRows(terminal)).toContainText("Initial terminal output");
+  // The registry corrects the shell to a PTY, and the history reload that follows replays it.
+  await page.evaluate(() => {
+    window.__WOLLIPOG_XTERM_E2E__.setPtyMode(true);
+    window.__WOLLIPOG_XTERM_E2E__.replaceInteractive("abc\nX");
+  });
+  await expect(terminalRows(terminal)).toContainText("abc");
+  // A PTY's bare LF moves down without returning, so X lands under the column after "abc".
+  const second = await terminalRows(terminal).locator(":scope > div").nth(1).innerText();
+  expect(second.replace(/\u00a0/g, " ")).toMatch(/^ {3}X/);
+});
+
+test("a manual selection over the active match takes the active wash with it (#2865)", async ({ page }) => {
+  const terminal = page.getByRole("region", { name: "Interactive Terminal Fixture" });
+  await page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.appendInteractive("test one\r\ntest two\r\n"));
+  await expect(terminalRows(terminal)).toContainText("test two");
+  await page.getByRole("button", { name: "Search Output" }).click();
+  await page.getByRole("textbox", { name: "Search Output" }).fill("test");
+  await expect(page.getByRole("group", { name: "Search Output" }).getByRole("status")).toHaveText("1 of 2");
+  const washed = () => terminalRows(terminal).evaluate((rows) => [...rows.querySelectorAll<HTMLElement>("span.xterm-decoration-top")]
+    .map((span) => span.style.backgroundColor));
+  const wash = (await washed())[0];
+  expect(wash, "the active match has its wash").toBeTruthy();
+
+  const row = (await terminalRows(terminal).locator(":scope > div").filter({ hasText: "test one" }).boundingBox())!;
+  await page.mouse.click(row.x + 40, row.y + row.height / 2, { clickCount: 3 });
+  await expect.poll(async () => (await washed()).filter((color) => color === wash).length).toBe(0);
+});
+
+test("changing the theme recolours every search highlight, keeping the selected match (#2865)", async ({ page }) => {
+  const terminal = page.getByRole("region", { name: "Interactive Terminal Fixture" });
+  await page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.appendInteractive("test one\r\ntest two\r\nthe test three\r\n"));
+  await expect(terminalRows(terminal)).toContainText("the test three");
+  await page.getByRole("button", { name: "Search Output" }).click();
+  await page.getByRole("textbox", { name: "Search Output" }).fill("test");
+  const count = page.getByRole("group", { name: "Search Output" }).getByRole("status");
+  await expect(count).toHaveText("1 of 3");
+  await page.getByRole("button", { name: "Next Match" }).click();
+  await expect(count).toHaveText("2 of 3");
+  const fills = () => terminalRows(terminal).evaluate((rows) => [...rows.querySelectorAll<HTMLElement>("span[style*='background-color']")]
+    .map((span) => span.style.backgroundColor));
+  const dark = new Set(await fills());
+
+  await page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.setTheme("light"));
+  await expect.poll(async () => (await fills()).filter((color) => dark.has(color)).length, {
+    message: "no highlight keeps a dark-theme colour",
+  }).toBe(0);
+  expect((await fills()).length).toBeGreaterThan(0);
+  await expect(count).toHaveText("2 of 3");
+});
+
+/** The most common colour in a screenshot, decoded by the page's own canvas. */
+async function dominantColor(page: Page, png: Buffer): Promise<[number, number, number]> {
+  return page.evaluate(async (base64) => {
+    const image = new Image();
+    image.src = `data:image/png;base64,${base64}`;
+    await image.decode();
+    const canvas = document.createElement("canvas");
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const context = canvas.getContext("2d")!;
+    context.drawImage(image, 0, 0);
+    const { data } = context.getImageData(0, 0, image.width, image.height);
+    const counts = new Map<string, number>();
+    for (let index = 0; index < data.length; index += 4) {
+      const key = `${data[index]},${data[index + 1]},${data[index + 2]}`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    const [top] = [...counts].sort((left, right) => right[1] - left[1]);
+    return top![0].split(",").map(Number) as [number, number, number];
+  }, png.toString("base64"));
+}
+
+const colorDistance = (left: readonly number[], right: readonly number[]) =>
+  left.reduce((sum, channel, index) => sum + Math.abs(channel - right[index]!), 0);
+
+for (const theme of ["dark", "light"] as const) {
+  test(`the active search match is visibly different from the other matches in ${theme} (#2865) @production`, async ({ page }) => {
+    const response = await page.goto(`/xterm-smoke-e2e.html?theme=${theme}`);
+    expect(response?.ok()).toBe(true);
+    await expect.poll(() => page.evaluate(() => typeof window.__WOLLIPOG_XTERM_E2E__)).toBe("object");
+    const terminal = page.getByRole("region", { name: "Interactive Terminal Fixture" });
+    await page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.appendInteractive("test one\r\ntest two\r\nthe test three\r\n"));
+    await expect(terminalRows(terminal)).toContainText("the test three");
+    await page.getByRole("button", { name: "Search Output" }).click();
+    await page.getByRole("textbox", { name: "Search Output" }).fill("test");
+    await expect(page.getByRole("group", { name: "Search Output" }).getByRole("status")).toHaveText("1 of 3");
+
+    // Each match's box, the active one being the match with the outline.
+    const matches = await terminal.locator(".xterm-find-result-decoration").evaluateAll((elements) => elements.map((element) => {
+      const box = element.getBoundingClientRect();
+      return { active: (element as HTMLElement).style.outline !== "", x: box.x, y: box.y, width: box.width, height: box.height };
+    }));
+    const active = matches.find((match) => match.active)!;
+    const other = matches.find((match) => !match.active && Math.abs(match.y - active.y) >= active.height)!;
+    expect(active, "the active match has its outline").toBeTruthy();
+    expect(other, "another match is highlighted").toBeTruthy();
+    // Inside the outline, so each clip is the match's own wash and glyphs.
+    const inner = (box: typeof active) => ({ x: box.x + 2, y: box.y + 2, width: box.width - 4, height: box.height - 4 });
+    const activeColor = await dominantColor(page, await page.screenshot({ clip: inner(active) }));
+    const otherColor = await dominantColor(page, await page.screenshot({ clip: inner(other) }));
+    const termBox = (await terminal.locator(".xterm-screen").boundingBox())!;
+    const ground = await dominantColor(page, await page.screenshot({
+      clip: { x: termBox.x + termBox.width - 40, y: termBox.y + termBox.height - 24, width: 32, height: 16 },
+    }));
+
+    // The active wash is --accent's, the others the text's: a different colour, not only a different edge.
+    expect(colorDistance(otherColor, ground), `${theme}: every match has a wash (${otherColor} on ${ground})`).toBeGreaterThan(30);
+    expect(colorDistance(activeColor, ground), `${theme}: the active match has a wash (${activeColor})`).toBeGreaterThan(30);
+    expect(colorDistance(activeColor, otherColor), `${theme}: the active wash differs (${activeColor} vs ${otherColor})`)
+      .toBeGreaterThan(20);
+    // And the active match alone has the 1px --accent outline: the row of pixels above each match.
+    const accent = await page.evaluate(() => {
+      const probe = document.createElement("div");
+      probe.style.color = "var(--accent)";
+      document.body.append(probe);
+      const color = getComputedStyle(probe).color.match(/\d+/g)!.slice(0, 3).map(Number);
+      probe.remove();
+      return color;
+    });
+    const edge = (box: typeof active) => ({ x: box.x + 2, y: box.y - 1, width: box.width - 4, height: 1 });
+    const activeEdge = await dominantColor(page, await page.screenshot({ clip: edge(active) }));
+    const otherEdge = await dominantColor(page, await page.screenshot({ clip: edge(other) }));
+    expect(colorDistance(activeEdge, accent), `${theme}: the active match is outlined in --accent (${activeEdge})`).toBeLessThan(40);
+    expect(colorDistance(otherEdge, accent), `${theme}: other matches have no outline (${otherEdge})`).toBeGreaterThan(100);
+  });
+}

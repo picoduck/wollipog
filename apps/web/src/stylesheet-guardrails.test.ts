@@ -3087,6 +3087,8 @@ const LIBRARY_CLASSES = new Map([
   ["function_", "rehype-highlight"],
   // remark-gfm's task lists.
   ["contains-task-list", "remark-gfm"],
+  // xterm.js's scrolling viewport, which its own stylesheet paints black (#2865).
+  ["xterm-viewport", "@xterm/xterm"],
 ]);
 
 const emittedByLibrary = (name: string) => LIBRARY_CLASSES.has(name);

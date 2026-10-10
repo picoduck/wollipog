@@ -252,3 +252,121 @@ export function terminalSearchCountLabel(results: TerminalSearchResults): string
   if (results.index < 0) return results.count === 1 ? "1 match" : `${total} matches`;
   return `${results.index + 1} of ${total}`;
 }
+
+/**
+ * The order of the terminal's notices within a severity (`TerminalNoticeSlot`, #2865). A failed
+ * terminal action is danger, so it shows ahead of them all. `TERMINAL_NOTICE_RANK` re-exports it
+ * beside the other slots' tables.
+ */
+export const TERMINAL_NOTICE_RANKS = {
+  machineOffline: 1,
+  reconnecting: 2,
+  agentTuiBlocked: 3,
+  agentTuiUntracked: 4,
+  outputIncomplete: 5,
+  actionFailed: 6,
+} as const;
+
+/** One condition for the terminal's notice slot: what it shows, without the rendering, so every host
+ * of the terminal ranks the same conditions the same way. */
+export interface TerminalNoticeCondition {
+  key: string;
+  severity: "danger" | "warning" | "info";
+  rank: number;
+  /** Title Case: its item in "+N More". */
+  title: string;
+  /** Sentence case: the notice's one line. */
+  message: string;
+}
+
+/** What holds for the terminal and its selected shell, as the slot's conditions. */
+export function terminalNoticeConditions({
+  machineOnline,
+  machineName,
+  activeShell,
+  outputIncomplete,
+  agentTuiBlocked,
+  hookGovernance,
+  error,
+}: {
+  machineOnline: boolean;
+  machineName: string;
+  /** The selected tab's shell, or null with no tab. */
+  activeShell: Pick<ShellView, "shellId" | "kind" | "status"> | null;
+  /** The selected shell's stream may have dropped output while the dashboard reconnected. */
+  outputIncomplete: boolean;
+  /** This session could open an Agent TUI, but a guardrail stops it. */
+  agentTuiBlocked: boolean;
+  /** Policy hooks still govern an Agent TUI in this session. */
+  hookGovernance: boolean;
+  /** The last terminal action that failed, in the server's words. */
+  error: string | null;
+}): TerminalNoticeCondition[] {
+  const rank = TERMINAL_NOTICE_RANKS;
+  const conditions: TerminalNoticeCondition[] = [];
+  if (!machineOnline) {
+    conditions.push({
+      key: "machine-offline",
+      severity: "warning",
+      rank: rank.machineOffline,
+      title: "Machine Offline",
+      message: `${machineName} is offline. Shells reconnect when it's back.`,
+    });
+  }
+  if (activeShell?.status === "reconnecting") {
+    conditions.push({
+      // Per shell, so dismissing one shell's reconnect never hides the next one's.
+      key: `reconnecting:${activeShell.shellId}`,
+      severity: "info",
+      rank: rank.reconnecting,
+      title: "Reconnecting",
+      message: "Reconnecting to this shell…",
+    });
+  }
+  if (agentTuiBlocked) {
+    conditions.push({
+      key: "agent-tui-blocked",
+      severity: "warning",
+      rank: rank.agentTuiBlocked,
+      title: "Agent TUI Unavailable",
+      message: "Agent TUI is unavailable while this session has a cost budget, cost checkpoint or tool-call limit. " +
+        "Clear those guardrails or use Direct.",
+    });
+  }
+  if (activeShell?.kind === "agent_tui") {
+    conditions.push({
+      key: "agent-tui-untracked",
+      severity: "info",
+      rank: rank.agentTuiUntracked,
+      title: "Agent TUI Not Tracked",
+      message: "Agent TUI runs outside Wollipog's tracking: no usage, approval cards or transcript entries." +
+        (hookGovernance ? " Policy hooks stay on." : ""),
+    });
+  }
+  if (outputIncomplete) {
+    conditions.push({
+      key: "output-incomplete",
+      severity: "warning",
+      rank: rank.outputIncomplete,
+      title: "Output May Be Incomplete",
+      message: "Some of this shell's output may be missing after the connection recovered.",
+    });
+  }
+  if (error) {
+    conditions.push({ key: "action-failed", severity: "danger", rank: rank.actionFailed, title: "Terminal Error", message: error });
+  }
+  return conditions;
+}
+
+/** The status row under an exited shell: "Shell exited with code 0." */
+export function shellExitedMessage(kind: ShellView["kind"], exitCode: number | null | undefined): string {
+  const subject = kind === "agent_tui" ? "Agent TUI" : "Shell";
+  return exitCode == null ? `${subject} exited.` : `${subject} exited with code ${exitCode}.`;
+}
+
+/** Under a running shell that takes no input here. */
+export const READ_ONLY_SHELL_MESSAGE = "Read-only: this shell's output is shown, but it doesn't take input.";
+
+/** Why a Windows-native shell's row reads "No TTY": its tooltip and description. */
+export const PIPE_MODE_REASON =
+  "This Windows-native shell has no TTY, so commands go in a line at a time and full-screen programs don't run.";
