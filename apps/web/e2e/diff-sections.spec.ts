@@ -124,7 +124,8 @@ test("Side by Side waits for a 720px panel, and expanded each column scrolls on 
 });
 
 test("Collapse All Files leaves one line per file, and choosing one opens it at the top", async ({ page }) => {
-  await open(page, "width=400");
+  // Short enough that the opened file and what follows it overflow the scroller beside the commit bar.
+  await open(page, "width=400", { width: 1100, height: 560 });
   await (await viewOption(page, "Collapse All Files")).click();
   const sections = page.locator(".dfile");
   const rows = await sections.evaluateAll((elements) => elements.map((element) => ({
@@ -134,14 +135,16 @@ test("Collapse All Files leaves one line per file, and choosing one opens it at 
   expect(rows.length).toBe(7);
   for (const row of rows) expect(row).toEqual({ height: 33, body: false }); // 32px row and its hairline
 
-  const target = page.locator('.dfile[data-path="apps/shop/src/legacy/old-totals.ts"]');
+  const target = page.locator('.dfile[data-path="apps/shop/src/cart/cart-store.ts"]');
   await target.locator(".dfile-toggle").click();
   await expect(target.locator(".dfile-body")).toBeVisible();
-  await expect.poll(async () => {
-    const scroller = (await page.locator(".rpanel-scroll").boundingBox())!;
-    const section = (await target.boundingBox())!;
-    return Math.round(section.y - scroller.y);
-  }, { message: "the chosen file is scrolled to the top" }).toBeLessThanOrEqual(0);
+  // At the top of the scroller, or as near it as the scroller goes when the file is near the end.
+  await expect.poll(() => target.evaluate((section) => {
+    const scroller = section.closest<HTMLElement>(".rpanel-scroll")!;
+    const offset = Math.round(section.getBoundingClientRect().top - scroller.getBoundingClientRect().top);
+    const atEnd = Math.ceil(scroller.scrollTop + scroller.clientHeight) >= scroller.scrollHeight;
+    return { inView: offset >= -1 && offset < scroller.clientHeight, atTopOrEnd: offset <= 0 || atEnd, scrolled: scroller.scrollTop > 0 };
+  }), { message: "the chosen file is scrolled to the top" }).toEqual({ inView: true, atTopOrEnd: true, scrolled: true });
 });
 
 test("Wrap Long Lines wraps code and keeps each line number beside its first line", async ({ page }) => {
