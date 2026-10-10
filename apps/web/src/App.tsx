@@ -40,7 +40,7 @@ import { DesktopExternalLinkRouter } from "./components/DesktopExternalLinkRoute
 import { useWindowTitle, windowDragRegion } from "./desktop-window.js";
 import { ErrorBoundary } from "./components/ErrorBoundary.js";
 import { LazyDialogBoundary } from "./components/LazyDialogBoundary.js";
-import { LazyRouteFocusRecovery, LazyRouteLoading } from "./components/LazyRouteLoading.js";
+import { LazyRouteFocusRecovery, LazyRouteLoading, routeFocusIsLost } from "./components/LazyRouteLoading.js";
 import { useSearchShortcut } from "./use-search-shortcut.js";
 import { SettingsTrigger } from "./components/SettingsTrigger.js";
 import { useTheme } from "./components/ThemeProvider.js";
@@ -500,8 +500,8 @@ export function Shell() {
   useEffect(() => {
     if (previousPath.current === path) return;
     previousPath.current = path;
-    pendingRouteTitleFocus.current = document.activeElement === document.body;
-    rescueFocusTo(document.getElementById("page-title"));
+    pendingRouteTitleFocus.current = routeFocusIsLost();
+    if (pendingRouteTitleFocus.current) document.getElementById("page-title")?.focus();
   }, [path]);
 
   // And when the routed session loads or goes (deleted or hidden from another client): a missing

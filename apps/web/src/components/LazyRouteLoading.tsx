@@ -2,6 +2,14 @@ import { useEffect, type RefObject } from "react";
 import { PageHeader } from "./PageHeader.js";
 import { State } from "./State.js";
 
+/** Suspense can keep the old reader connected while hiding it during a route change. */
+export function routeFocusIsLost() {
+  const active = document.activeElement;
+  if (!active || active === document.body || !active.isConnected) return true;
+  // Rects also work on desktop webviews without Element.checkVisibility.
+  return active.getClientRects().length === 0;
+}
+
 export function LazyRouteLoading({ title, pending }: { title: string; pending: RefObject<boolean> }) {
   return <div className="page" data-route-loading onFocusCapture={(event) => {
     if (event.target.id === "page-title") pending.current = true;
@@ -17,7 +25,7 @@ export function LazyRouteFocusRecovery({ path, pending }: { path: string; pendin
     if (!pending.current) return;
     pending.current = false;
     // A live control may have taken focus while loading. Keep that user's destination.
-    if (document.activeElement === document.body) document.getElementById("page-title")?.focus();
+    if (routeFocusIsLost()) document.getElementById("page-title")?.focus();
   }, [path, pending]);
   return null;
 }
