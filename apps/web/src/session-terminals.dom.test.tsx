@@ -1,6 +1,6 @@
 import { fireDomEvent } from "./components/test-dom-events.js";
 import assert from "node:assert/strict";
-import { registerHooks } from "node:module";
+import { register } from "node:module";
 import { after, afterEach, before, beforeEach, test } from "node:test";
 import React, { act, useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -25,17 +25,19 @@ import type { ShellTerminalInstance } from "./shell-terminal-instance.js";
 
 // The terminal is loaded as the bundler loads it: xterm and its addons from their ES module builds
 // (Node's `main` is a bundle it cannot read named exports from), and xterm's stylesheet, which only
-// the bundler handles, as an empty module. Everything that reaches xterm is imported after this hook.
-registerHooks({
-  resolve(specifier, context, nextResolve) {
-    const resolved = nextResolve(specifier, context);
-    if (!specifier.startsWith("@xterm/")) return resolved;
-    return { ...resolved, url: resolved.url.replace(/\/lib\/([\w-]+)\.js$/, "/lib/$1.mjs"), format: "module" };
-  },
-  load(url, context, nextLoad) {
-    return url.endsWith(".css") ? { format: "module", source: "", shortCircuit: true } : nextLoad(url, context);
-  },
-});
+// the bundler handles, as an empty module. Everything that reaches xterm is imported after these
+// hooks. `register` rather than `registerHooks`, which Node 22.13 (the supported minimum) lacks.
+const XTERM_LOADER = `
+export async function resolve(specifier, context, nextResolve) {
+  const resolved = await nextResolve(specifier, context);
+  if (!specifier.startsWith("@xterm/") || !resolved.url.endsWith(".js")) return resolved;
+  return { ...resolved, url: resolved.url.slice(0, -".js".length) + ".mjs", format: "module" };
+}
+export async function load(url, context, nextLoad) {
+  return url.endsWith(".css") ? { format: "module", source: "", shortCircuit: true } : nextLoad(url, context);
+}
+`;
+register(`data:text/javascript,${encodeURIComponent(XTERM_LOADER)}`, import.meta.url);
 const { FitAddon } = await import("@xterm/addon-fit");
 const { SessionTerminals, SessionTerminalsProvider, useSessionTerminals } = await import("./session-terminals.js");
 const { ShellDock } = await import("./components/ShellDock.js");
@@ -383,16 +385,98 @@ test("hiding and reopening the dock keeps the tab, the search and each terminal 
 
 test("leaving the session disposes its terminals", async () => {
   const view = await mountDock();
-  const terminals = await (async () => {
-    await until(() => requests.history.length === 2, "the shells' history");
-    return view.controls.terminals!;
-  })();
+  await until(() => requests.history.length === 2, "the shells' history");
+  const terminals = view.controls.terminals!;
   const shell1 = terminals.terminal("shell-1");
   await until(() => shell1.terminal !== null, "Shell 1's terminal to open");
   const disposals = countDisposals(shell1.terminal!);
   await view.unmount();
   await settle(10);
   assert.equal(disposals.count, 1, "the session's store ends its terminals when it goes");
+});
+
+// --- The store's loads, without a host rendering ---
+
+/** A store over a shell API whose registry, history answers and shell creation the test controls. */
+function storeOver(registry: ShellView[], options: { failHistory?: () => boolean; openShell?: () => Promise<ShellView> } = {}) {
+  const history: string[] = [];
+  const loaded: string[] = [];
+  const shellApi = {
+    ...client,
+    listShells: async () => ({ shells: structuredClone(registry) }),
+    shellHistory: async (_sessionId: string, shellId: string) => {
+      history.push(shellId);
+      if (options.failHistory?.()) throw new Error("history unavailable");
+      return { shellId, chunks: [], nextAfter: 0, hasMore: false, truncatedBefore: false };
+    },
+    openShell: async () => ({ shell: await (options.openShell ?? (() => Promise.reject(new Error("no shell"))))() }),
+  } as ApiClient;
+  const terminals = new SessionTerminals(session.id, shellApi, {
+    reconcileShellOutputs() {},
+    loadShellHistory(_sessionId, shellId) { loaded.push(shellId); },
+    removeShellOutput() {},
+  });
+  return { terminals, history, loaded };
+}
+
+test("history a reconnect left stale is fetched on every open until it lands", async () => {
+  let failHistory = false;
+  const { terminals, history, loaded } = storeOver([shell(1)], { failHistory: () => failHistory });
+  try {
+    let release = terminals.openHost();
+    await until(() => loaded.length === 1, "the first history");
+    release();
+
+    // The connection drops and returns while the terminal is hidden.
+    terminals.reconnected();
+    assert.deepEqual(history, ["shell-1"], "a hidden terminal reloads nothing yet");
+
+    failHistory = true;
+    release = terminals.openHost();
+    await until(() => history.length === 2, "the reload on the next open");
+    await settle(10);
+    release();
+    assert.deepEqual(loaded, ["shell-1"], "the failed reload committed nothing");
+
+    failHistory = false;
+    release = terminals.openHost();
+    await until(() => loaded.length === 2, "the reload to be retried");
+    release();
+    assert.deepEqual(history, ["shell-1", "shell-1", "shell-1"]);
+
+    release = terminals.openHost();
+    await settle(20);
+    release();
+    assert.equal(history.length, 3, "once it has landed, an open fetches no history");
+  } finally {
+    terminals.dispose();
+  }
+});
+
+test("a shell created while the terminal reopens keeps one tab", async () => {
+  const registry = [shell(1)];
+  let answer!: (created: ShellView) => void;
+  const { terminals } = storeOver(registry, {
+    openShell: () => new Promise<ShellView>((resolve) => { answer = resolve; }),
+  });
+  try {
+    let release = terminals.openHost();
+    await until(() => terminals.getSnapshot().shells?.length === 1, "the first list");
+    const creating = terminals.newShell();
+    release();
+
+    // The registry lists the new shell before its runner answers, so the reopened list holds it.
+    registry.push(shell(2));
+    release = terminals.openHost();
+    await until(() => terminals.getSnapshot().shells?.length === 2, "the reopened list");
+    answer(shell(2));
+    await creating;
+    release();
+    assert.deepEqual(terminals.getSnapshot().shells?.map((listed) => listed.shellId), ["shell-1", "shell-2"]);
+    assert.equal(terminals.getSnapshot().active, "shell-2", "the created shell is selected");
+  } finally {
+    terminals.dispose();
+  }
 });
 
 // --- One terminal, moved between hosts ---

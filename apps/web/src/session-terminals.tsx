@@ -38,7 +38,8 @@ import { ShellTerminalInstance } from "./shell-terminal-instance.js";
  * Nothing happens until a host first opens: a session whose terminal is never opened makes no shell
  * requests. Each open does what the dock's mount did: it lists the shells again (another dashboard may
  * have opened or closed some) and opens a first shell when none runs, but fetches history only for
- * shells it has not loaded, or for all of them after a reconnect it did not follow.
+ * shells whose history it does not hold: new to it, a load that failed or was superseded, or every
+ * shell after a reconnect.
  */
 
 export interface SessionTerminalsState {
@@ -102,9 +103,11 @@ export class SessionTerminals {
   /** Hosts showing the terminal now. */
   private hosts = 0;
   private everOpened = false;
-  /** A reconnect or registry change arrived while no host was open: the next open reloads all history. */
-  private historyStale = false;
-  /** Shells whose history this store has loaded (or opened itself, which needs none). */
+  /**
+   * Shells whose current history this store has loaded (or opened itself, which needs none). Every
+   * load fetches the history of the shells missing here; a mark is added only once its history has
+   * landed, and a reconnect clears them all, so a failed or superseded reload is retried by the next.
+   */
   private readonly historyLoaded = new Set<string>();
   // Monotonic load token: a list snapshot computed BEFORE a newShell() append must never land after it
   // and erase the just-opened tab. newShell bumps the token to invalidate in-flight loads; each load
@@ -191,7 +194,15 @@ export class SessionTerminals {
       const { shell } = await this.api.openShell(this.sessionId, { cols: 120, rows: 30, kind });
       this.loadSeq++; // an in-flight list snapshot predates this shell — don't let it land
       this.historyLoaded.add(shell.shellId);
-      this.setState({ shells: [...(this.state.shells ?? []), shell], active: shell.shellId });
+      // The registry lists a shell before its runner answers, so a list read while this request was
+      // out (the terminal reopened meanwhile) may already hold it: it keeps its tab.
+      const shells = this.state.shells ?? [];
+      this.setState({
+        shells: shells.some((listed) => listed.shellId === shell.shellId)
+          ? shells.map((listed) => listed.shellId === shell.shellId ? shell : listed)
+          : [...shells, shell],
+        active: shell.shellId,
+      });
     } catch (e) {
       this.setState({ error: (e as Error).message });
     } finally {
@@ -215,7 +226,7 @@ export class SessionTerminals {
     void this.api.closeShell(this.sessionId, shellId).catch((e: unknown) => {
       this.closingShellIds.delete(shellId);
       this.setState({ error: (e as Error).message });
-      void this.loadShells({ reconcile: true, history: "new" });
+      void this.loadShells({ reconcile: true });
     });
     return nextActive;
   };
@@ -303,13 +314,14 @@ export class SessionTerminals {
   /** The runner reconciled its shells after its own reconnect. */
   registryChanged(): void {
     if (!this.everOpened) return;
-    if (this.hosts > 0) void this.loadShells({ reconcile: this.initialShellLoadSettled, history: "all" });
-    else this.historyStale = true;
+    // Every shell's history is reloaded: now if a host shows the terminal, otherwise on the next open.
+    this.historyLoaded.clear();
+    if (this.hosts > 0) void this.loadShells({ reconcile: this.initialShellLoadSettled });
   }
 
   /** Output for a live shell with no tab: another dashboard opened it. */
   unknownShellSeen(): void {
-    if (this.hosts > 0) void this.loadShells({ reconcile: true, history: "new" });
+    if (this.hosts > 0) void this.loadShells({ reconcile: true });
   }
 
   /**
@@ -373,10 +385,8 @@ export class SessionTerminals {
     // Each open starts the first-shell offer afresh, as each mount of the dock did.
     this.initialShellLoadSettled = false;
     this.autoOpened = false;
-    const history = !this.everOpened || this.historyStale ? "all" : "new";
     this.everOpened = true;
-    this.historyStale = false;
-    void this.loadShells({ reconcile: this.state.shells !== null, history });
+    void this.loadShells({ reconcile: this.state.shells !== null });
   }
 
   private setState(patch: Partial<SessionTerminalsState>): void {
@@ -415,13 +425,10 @@ export class SessionTerminals {
   }
 
   /**
-   * List the shells, then load history: of every shell (`all`, after a reconnect) or of those this
-   * store has not loaded (`new`). `reconcile` drops work queued for shells that are gone.
+   * List the shells, then load the history of each shell whose history has not landed since it was
+   * listed or since the last reconnect. `reconcile` drops work queued for shells that are gone.
    */
-  private async loadShells({ reconcile, history }: {
-    reconcile: boolean;
-    history: "all" | "new";
-  }): Promise<void> {
+  private async loadShells({ reconcile }: { reconcile: boolean }): Promise<void> {
     const seq = ++this.loadSeq;
     try {
       const { shells: registry } = await this.api.listShells(this.sessionId);
@@ -440,7 +447,7 @@ export class SessionTerminals {
         ...(reconcile && previous && removed.has(previous) ? { input: "" } : {}),
       });
       for (const shell of list) {
-        if (history === "new" && this.historyLoaded.has(shell.shellId)) continue;
+        if (this.historyLoaded.has(shell.shellId)) continue;
         void this.loadHistory(shell, seq);
       }
       if (!this.initialShellLoadSettled) {
