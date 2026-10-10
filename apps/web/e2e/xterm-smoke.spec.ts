@@ -215,6 +215,63 @@ test("switching from a scrolled-up tab to another and back keeps its scroll posi
   await expect.poll(() => terminalRows(tabA).innerText()).toBe(scrolled);
 });
 
+test("a history revision replaces the scrollback after output still being parsed, and a half-read escape (#2865)", async ({ page }) => {
+  const terminal = page.getByRole("region", { name: "Interactive Terminal Fixture" });
+  await expect(terminalRows(terminal)).toContainText("Initial terminal output");
+  // In one task, so xterm has parsed none of it when the history arrives.
+  await page.evaluate(() => {
+    const harness = window.__WOLLIPOG_XTERM_E2E__;
+    harness.appendInteractive("pending-before-reset\r\n");
+    harness.appendInteractive("\u001b[31");
+    harness.replaceInteractive("restored history line\r\n");
+  });
+  await expect(terminalRows(terminal)).toContainText("restored history line");
+  const text = await terminalRows(terminal).innerText();
+  expect(text).not.toContain("pending-before-reset");
+  expect(text).not.toContain("Initial terminal output");
+  expect(text.match(/restored history line/g)).toHaveLength(1);
+  await expect(terminalRows(terminal).locator("span").filter({ hasText: "restored" })).not.toHaveClass(/xterm-fg-1/);
+});
+
+test("a manual selection over the active match takes the active wash with it (#2865)", async ({ page }) => {
+  const terminal = page.getByRole("region", { name: "Interactive Terminal Fixture" });
+  await page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.appendInteractive("test one\r\ntest two\r\n"));
+  await expect(terminalRows(terminal)).toContainText("test two");
+  await page.getByRole("button", { name: "Search Output" }).click();
+  await page.getByRole("textbox", { name: "Search Output" }).fill("test");
+  await expect(page.getByRole("group", { name: "Search Output" }).getByRole("status")).toHaveText("1 of 2");
+  const washed = () => terminalRows(terminal).evaluate((rows) => [...rows.querySelectorAll<HTMLElement>("span.xterm-decoration-top")]
+    .map((span) => span.style.backgroundColor));
+  const wash = (await washed())[0];
+  expect(wash, "the active match has its wash").toBeTruthy();
+
+  const row = (await terminalRows(terminal).locator(":scope > div").filter({ hasText: "test one" }).boundingBox())!;
+  await page.mouse.click(row.x + 40, row.y + row.height / 2, { clickCount: 3 });
+  await expect.poll(async () => (await washed()).filter((color) => color === wash).length).toBe(0);
+});
+
+test("changing the theme recolours every search highlight, keeping the selected match (#2865)", async ({ page }) => {
+  const terminal = page.getByRole("region", { name: "Interactive Terminal Fixture" });
+  await page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.appendInteractive("test one\r\ntest two\r\nthe test three\r\n"));
+  await expect(terminalRows(terminal)).toContainText("the test three");
+  await page.getByRole("button", { name: "Search Output" }).click();
+  await page.getByRole("textbox", { name: "Search Output" }).fill("test");
+  const count = page.getByRole("group", { name: "Search Output" }).getByRole("status");
+  await expect(count).toHaveText("1 of 3");
+  await page.getByRole("button", { name: "Next Match" }).click();
+  await expect(count).toHaveText("2 of 3");
+  const fills = () => terminalRows(terminal).evaluate((rows) => [...rows.querySelectorAll<HTMLElement>("span[style*='background-color']")]
+    .map((span) => span.style.backgroundColor));
+  const dark = new Set(await fills());
+
+  await page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.setTheme("light"));
+  await expect.poll(async () => (await fills()).filter((color) => dark.has(color)).length, {
+    message: "no highlight keeps a dark-theme colour",
+  }).toBe(0);
+  expect((await fills()).length).toBeGreaterThan(0);
+  await expect(count).toHaveText("2 of 3");
+});
+
 /** The most common colour in a screenshot, decoded by the page's own canvas. */
 async function dominantColor(page: Page, png: Buffer): Promise<[number, number, number]> {
   return page.evaluate(async (base64) => {

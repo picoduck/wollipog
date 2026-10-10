@@ -19,6 +19,9 @@ type SearchDecorations = NonNullable<ISearchOptions["decorations"]>;
 /** The faint first line of a scrollback whose oldest output retention removed (#2865). */
 const HISTORY_EXPIRED_LINE = "\u001b[2mOlder output expired.\u001b[22m\r\n";
 
+/** CAN, then ESC c: end any escape sequence in progress, then reset the terminal fully. */
+const FULL_RESET = "\u0018\u001bc";
+
 /**
  * One xterm.js pane bound to one shell's scrollback. xterm is the ANSI parser/renderer — raw
  * bytes go in (it handles escape sequences split across chunks internally). The store keeps a
@@ -173,10 +176,16 @@ export function ShellTerminal({
     markActiveMatch();
   };
 
-  /** Write the whole retained scrollback into an empty terminal, then search it. */
-  const replay = (term: Terminal) => {
+  /**
+   * Write the whole retained scrollback, then search it. `reset` clears what the terminal holds
+   * first, as a full reset written through xterm's own input queue: `term.reset()` would run ahead of
+   * writes still waiting to be parsed, which would then land on top of the replay, and would keep a
+   * half-parsed escape sequence that eats the replay's first bytes. CAN ends any sequence in
+   * progress and ESC c (RIS) resets the screen, the scrollback and the parser, in order.
+   */
+  const replay = (term: Terminal, reset = false) => {
     replayedHistoryRef.current = historyKeyRef.current;
-    const prefix = historyExpiredRef.current ? HISTORY_EXPIRED_LINE : "";
+    const prefix = (reset ? FULL_RESET : "") + (historyExpiredRef.current ? HISTORY_EXPIRED_LINE : "");
     if (totalRef.current > 0 || prefix) {
       term.write(prefix + textRef.current, searchAgain);
     } else {
@@ -241,6 +250,8 @@ export function ShellTerminal({
         markActiveMatch();
         onSearchResultsRef.current?.({ index: resultIndex, count: resultCount });
       });
+      // A selection the person makes over the match is theirs: the active wash goes with the match.
+      term.onSelectionChange(markActiveMatch);
       /** Fit the terminal to its host, at the text size the host's width calls for. A hidden or
        * collapsed host measures zero and keeps what it has. */
       const fitToHost = () => {
@@ -294,6 +305,9 @@ export function ShellTerminal({
     const term = termRef.current;
     if (!term) return;
     term.options.theme = terminalTheme(theme);
+    // The addon keeps the other matches' highlights while the term is unchanged, whatever their
+    // colours, so drop them first. The selection stays, and the incremental search keeps the match.
+    if (searchTermRef.current) searchRef.current?.clearDecorations();
     searchAgain();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [theme, scheme]);
@@ -318,8 +332,7 @@ export function ShellTerminal({
     const term = termRef.current;
     if (!term) return;
     if (replayedHistoryRef.current !== historyKey) {
-      term.reset();
-      replay(term);
+      replay(term, true);
       return;
     }
     const unseen = total - consumedRef.current;

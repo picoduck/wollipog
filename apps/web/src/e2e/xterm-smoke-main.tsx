@@ -12,6 +12,8 @@ import "./xterm-smoke.css";
 interface StreamState {
   text: string;
   total: number;
+  /** A history load rebuilds the scrollback under a new revision, as the store does (#2865). */
+  revision?: number;
 }
 
 interface TerminalTransportSnapshot {
@@ -41,8 +43,8 @@ class InMemoryShellTransport {
   }
 }
 
-/** `?theme=light` renders every terminal on the light palette; dark otherwise. */
-const theme = new URLSearchParams(window.location.search).get("theme") === "light" ? "light" : "dark";
+/** `?theme=light` starts every terminal on the light palette; dark otherwise. `setTheme` switches. */
+const initialTheme = new URLSearchParams(window.location.search).get("theme") === "light" ? "light" : "dark";
 
 /** Two shells' output for the tabbed fixture (#2865): Tab A has enough to scroll, Tab B a little. */
 const TAB_A_OUTPUT = Array.from({ length: 200 }, (_, index) => `tab-a-line-${index}\r\n`).join("");
@@ -65,7 +67,10 @@ declare global {
         appShortcutCount: number;
       };
       resizeInteractive(width: number, height: number): void;
+      /** A history load: the interactive terminal's scrollback becomes `text` under a new revision. */
+      replaceInteractive(text: string): void;
       setSearchTerm(value: string): void;
+      setTheme(theme: "dark" | "light"): void;
     };
   }
 }
@@ -93,6 +98,7 @@ function Fixture() {
   const terminalRef = useRef<ShellTerminalHandle | null>(null);
   const [size, setSize] = useState({ width: 640, height: 180 });
   const [tab, setTab] = useState<"a" | "b">("a");
+  const [theme, setTheme] = useState<"dark" | "light">(initialTheme);
 
   const openNewSession = useCallback(() => {
     appShortcutCount += 1;
@@ -115,7 +121,14 @@ function Fixture() {
         appShortcutCount,
       }),
       resizeInteractive: (width, height) => setSize({ width, height }),
+      replaceInteractive: (text) => flushSync(() => {
+        setInteractive((current) => ({ text, total: text.length, revision: (current.revision ?? 0) + 1 }));
+      }),
       setSearchTerm,
+      setTheme: (next) => {
+        document.documentElement.dataset.theme = next;
+        setTheme(next);
+      },
     };
   }, []);
 
@@ -144,6 +157,7 @@ function Fixture() {
         <ShellTerminal
           text={interactive.text}
           total={interactive.total}
+          revision={interactive.revision}
           interactive
           searchTerm={searchTerm}
           onSearchResults={setSearchResults}
@@ -197,7 +211,7 @@ function Fixture() {
   );
 }
 
-document.documentElement.dataset.theme = theme;
+document.documentElement.dataset.theme = initialTheme;
 const root = document.getElementById("root");
 if (!root) throw new Error("missing #root element");
 createRoot(root).render(<Fixture />);
