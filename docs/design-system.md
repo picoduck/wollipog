@@ -875,7 +875,8 @@ Requests, Decision History, and Terminal once #2868 moves it) opens in one frame
   rules, never the viewport's (§2.10). It docks or overlays by §15.2's 480px rule.
 - **Header.** `.rpanel-head` is a 48px bar (§4.4): the tool switcher as the title, the tool's action
   slot, Expand Panel, then Close Panel. The landmark is named "Side Panel". There is one close control in every
-  tool and no back-to-list button; a request's detail keeps its own "All Requests" inside the body.
+  tool. A tool's list has no back control; a pushed page has the frame's Back (below), and a request's
+  detail keeps its own "All Requests" inside the body.
 - **Tool switcher.** The title is a button with the tool's 16px icon, its name in `--type-section`
   and a caret. It opens a §9.1 menu built from `SESSION_TOOLS` (`session-tools.ts`, the same list
   the Session Tools list renders): Session Tools first, then the Code, Work and Decisions groups
@@ -883,8 +884,26 @@ Requests, Decision History, and Terminal once #2868 moves it) opens in one frame
   stays focusable with its reason as its second line.
 - **Action slot.** A tool puts its own header actions in the slot by rendering `PanelHeaderActions`
   anywhere in its body: `.icon-btn` buttons (32px, 44px on touch) with Title Case names. It is the
-  one extension point for per-tool header controls (a pushed page's Back, an About popover), so a
-  tool never adds a second bar inside its body. Review's one Refresh lives here (#2846).
+  one extension point for per-tool header controls (an About popover), so a tool never adds a second
+  bar inside its body. Review's one Refresh lives here (#2846).
+- **Pages.** A tool's detail (a worker, a job) opens as a page in the same frame, never below its
+  list or in a sheet over the panel (#2856, `usePanelPages`, `PanelPages.tsx`). The panel keeps a page
+  stack per tool, keyed by the item's id: `push(key)` and `pop()`. While a page is pushed the header
+  leads with Back to <Tool> (`ChevronLeft`, "Back to Agents") and the page's title at `--type-title`
+  (`PanelPageTitle`) in the switcher's place; the tool's actions, Expand Panel and Close Panel stay.
+  On push the title takes focus (`tabindex="-1"`, no ring) and the page starts at its top; on pop,
+  focus returns to the row that opened the page and the list is scrolled where it was. A row that
+  pushes a page carries `data-panel-page-key`, which is where focus returns when the opener is gone
+  (the transcript's Open, which pushes its worker's page as the only one). The tool keeps its list
+  mounted and hidden under the page. Switching tools or closing the panel clears the stack, so a
+  tool reopens on its list; panel scratch drafts are unaffected.
+- **About.** A tool's explanation (what it shows, what stays private) is an `InfoPopover` in the
+  action slot, never a paragraph on screen: an `.icon-btn` with the `Info` icon named "About <Tool>"
+  with the same tooltip, opening a §9.2 popover titled the same, with a short sentence-case text and
+  an optional `.facts` list; a bottom sheet with the grabber on phones. Escape closes only it.
+- **Notice slot.** A tool's status sentences go to the panel's one notice slot directly under the
+  header (and under a pushed page's header): `PanelNoticeSlot`, an instance of `SessionNoticeSlot`
+  with its own ranks in `PANEL_NOTICE_RANK` (§13.2). It shows one notice and the rest behind "+N More".
 - **Body slots.** `.rpanel-body` scrolls as one by default. A tool with fixed controls lays out on
   three slots instead, rendering `PanelToolLayout` as its body (#2846): `.rpanel-toolbar`, fixed
   above, which is only the place for the shared `.toolbar` row (§4.7); `.rpanel-scroll`, the tool's
@@ -918,13 +937,14 @@ Requests, Decision History, and Terminal once #2868 moves it) opens in one frame
 - **Keyboard.** The Side Panel chord (Ctrl/⌘+\\) toggles the panel and reopens the last tool, with
   focus on the switcher, so the arrow keys reach every other tool.
   Escape closes it from any tool while focus is inside, once nothing above takes Escape (§16.2): a
-  menu, popover or dialog first, then a layer the tool draws on its body (a selection, a pushed
-  page), which handles Escape and calls `preventDefault`, then Expanded, which Escape restores before
-  a second press closes. A terminal keeps Escape for its shell. Focus returns to the control that
+  menu, popover or dialog first, then a layer the tool draws on its body (a selection), which handles
+  Escape and calls `preventDefault`, then a pushed page, which pops, then Expanded, which Escape
+  restores before a second press closes. A terminal keeps Escape for its shell. Focus returns to the control that
   opened the panel, else the composer.
 - **Phone.** The open panel is a full-screen sheet that covers the session bar (which is not
   rendered) and ends at the tab bar. Its one 48px bar leads with Back to Session, then the switcher
-  and the tool's actions; there is no Close. The session composer is hidden while it is open (no
+  and the tool's actions; there is no Close. While a page is pushed that one Back is Back to <Tool>,
+  so the first Back pops the page and the next returns to the session; no second bar or Back is drawn. The session composer is hidden while it is open (no
   box, out of the accessibility tree, dictation ended), but stays mounted so an unsent secret answer
   survives, and while a focused field hides the tab bar the sheet reaches the keyboard inset (§15.1). Back
   returns focus to the control that opened the panel if it is still on screen, else to the
@@ -2374,6 +2394,13 @@ session 1 (warning while pending, danger once failed or timed out), the open Pro
 suggestion 2 (info, only on that Project's tab), Recommended Skills 3 (info). Each entry keeps its own
 way out (Cancel Sign-In or Dismiss, Dismiss Setup Notice, Dismiss All), so the slot's info dismissal
 is unused. While reconnecting the slot is hidden, since what it would show is stale (§12.5).
+
+**Side panel notice slot (#2856).** A panel tool's notices are a third `SessionNoticeSlot`,
+`PanelNoticeSlot`, directly under the side panel's header (§4.9), with its menu named "Panel Notices"
+and its ranks in `PANEL_NOTICE_RANK`: runner offline 1, load error 2, attention 3, inventory error 4,
+earlier activity not loaded 5, ambiguous identity 6, workflow details unavailable 7, older history
+truncated 8. Each tool adds its own entries in its own unit; Review, Files and Browser keep the
+notices at the top of their scrollers.
 
 - **Machine sign-in** (`MachineSignInNotice`): "Sign In to {Provider} on {Machine}", one sentence for
   the sign-in's state, the device code inline after it in a `.code-well` with its copy button, then

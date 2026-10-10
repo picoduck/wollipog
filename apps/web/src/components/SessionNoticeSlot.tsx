@@ -34,6 +34,9 @@ import { registerRequestRevealer } from "./requests/request-reveal.js";
  * THE SESSIONS LIST. The notices above the Sessions list are a second instance of this slot with its
  * own ranks (`SessionsListNotices`, `LIST_NOTICE_RANK`; #2221), so the two share one ranking and one
  * menu.
+ *
+ * THE SIDE PANEL. A panel tool's notices are a third instance under the panel header
+ * (`PanelNoticeSlot`, `PANEL_NOTICE_RANK`; #2856).
  */
 
 export type SessionNoticeSeverity = "danger" | "warning" | "info";
@@ -103,6 +106,21 @@ export const SESSION_NOTICE_RANK = {
   // A queued message whose delivery failed or could not be confirmed (#2178), after the composer's
   // own entries: the draft in hand comes before a message already sent.
   queuedMessageError: 16,
+} as const;
+
+/**
+ * The side panel's own ranks (`PanelNoticeSlot`, #2856), one table for every panel tool, so the
+ * order of a tool's conditions is reviewed in one place. Each tool adds its entries in its own unit.
+ */
+export const PANEL_NOTICE_RANK = {
+  runnerOffline: 1,
+  loadError: 2,
+  attention: 3,
+  inventoryError: 4,
+  earlierActivityUnloaded: 5,
+  ambiguousIdentity: 6,
+  workflowDetailsUnavailable: 7,
+  olderHistoryTruncated: 8,
 } as const;
 
 const SEVERITY_ORDER: Record<SessionNoticeSeverity, number> = { danger: 0, warning: 1, info: 2 };

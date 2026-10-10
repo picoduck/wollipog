@@ -4026,6 +4026,56 @@ textarea {
   border-top: 1px solid var(--border);
   background: var(--bg);
 }
+
+/* ---------------------------- Session Companions ----------------------------
+   The session companions in the side panel (Agents, Background Work, Side Chat and Terminal; #2871,
+   docs/design-system.md §4.9): one block per component, tokens only. */
+
+/* Panel pages (#2856, `usePanelPages`): while a tool has pushed a page, Back to <Tool> and the page's
+   title take the switcher's place in the header. One line at --type-title; it takes focus on push
+   with no ring (§16.1). The tool's list stays mounted under the page, hidden. */
+.rpanel-page-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  padding-inline: var(--space-1);
+  overflow: hidden;
+  color: var(--text);
+  font: var(--type-title);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agents-panel[hidden] { display: none; }
+.agents-page {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* The panel notice slot (#2856, `PanelNoticeSlot`): one notice directly under the header, above the
+   tool and above a pushed page alike, the rest behind "+N More" (§13.2). Empty, it takes no room. */
+.rpanel-notices {
+  flex: none;
+  padding: var(--space-2) var(--space-4) 0;
+}
+.rpanel-notices:empty { display: none; }
+.rpanel-notices > .panel-notice-slot { margin-bottom: 0; }
+
+/* About <Tool> (#2856, `InfoPopover`; §9.2): a title row at every width, one sentence and an
+   optional `.facts` list. On a phone the title is the sheet's 48px title row. */
+.info-popover-head {
+  display: flex;
+  align-items: center;
+  margin-bottom: var(--space-2);
+  font: var(--type-section);
+}
+.info-popover-text {
+  color: var(--text);
+  font: var(--type-body);
+}
+.info-popover-text + .facts { margin-top: var(--space-3); }
+
 /* The Requests panel (#2206; docs/design-system.md §6, §6.2): a list that opens each child request in
    a detail in its place, at every width. Each view is one scroller below the panel head. */
 .rpanel-body:has(> .request-panel) {

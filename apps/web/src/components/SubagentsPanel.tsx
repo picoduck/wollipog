@@ -66,6 +66,7 @@ export function SubagentsPanel({
   onFocusRequestHandled,
   onSelect,
   detailOnly = false,
+  titled = true,
 }: {
   session: SessionView;
   items: TimelineItem[];
@@ -77,6 +78,8 @@ export function SubagentsPanel({
   onFocusRequestHandled?: (request: number) => void;
   onSelect: (id: string) => void;
   detailOnly?: boolean;
+  /** False on a panel page, whose header already shows the worker's name (#2856). */
+  titled?: boolean;
 }) {
   const projector = useRef<IncrementalSubagentProjector | null>(null);
   if (!projector.current) projector.current = new IncrementalSubagentProjector();
@@ -199,12 +202,13 @@ export function SubagentsPanel({
           className="subagent-detail"
           role="region"
           tabIndex={-1}
-          aria-labelledby={labelId}
+          aria-labelledby={titled ? labelId : undefined}
+          aria-label={titled ? undefined : selected.title}
           aria-describedby={metaId}
         >
           <div className="subagent-detail-head">
             <div>
-              <div id={labelId} className="subagent-detail-title">{selected.title}</div>
+              {titled && <div id={labelId} className="subagent-detail-title">{selected.title}</div>}
               <div id={metaId} className="subagent-detail-meta">
                 {subagentLifecycleLabel(selected.lifecycle)}
                 {` · ${subagentOutputLabel(selected, runnerOnline)}`}
