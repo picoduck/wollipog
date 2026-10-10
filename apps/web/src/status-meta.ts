@@ -1,3 +1,4 @@
+import { sessionCampaignRequests } from "@wollipog/protocol";
 /**
  * The one status vocabulary (docs/design-system.md §11.2).
  *
@@ -454,7 +455,7 @@ export interface SessionStatusContext {
 
 /** The session fields the ranking reads. */
 export type SessionStatusSource = Pick<SessionView, "status" | "pendingApproval" | "attentionOwners"> &
-  Partial<Pick<SessionView, "attention" | "orchestratorCampaign" | "pendingRequestOwners" | "archived" |
+  Partial<Pick<SessionView, "attention" | "orchestratorCampaign" | "campaignRequests" | "pendingRequestOwners" | "archived" |
     "archiveStatus" | "archiveOperation" | "stopOperation" | "historyQuarantine" | "capacityWait" |
     "queueHold" | "holds" | "backgroundWorkState" | "backgroundDeliveries">>;
 
@@ -540,7 +541,7 @@ export function sessionStatusSummary(
 ): SessionStatusSummary {
   const runnerOnline = context.runnerOnline ?? true;
   const needs: SessionCondition[] = [];
-  const humanCampaignRequests = session.orchestratorCampaign?.pendingRequests?.human ?? 0;
+  const humanCampaignRequests = sessionCampaignRequests(session)?.human ?? 0;
   const groups = sessionAttentionBreakdown(session)
     // With no request of the person's own, the breakdown falls back to the campaign's "Needs Your
     // Input", which is the campaign-request condition below.
@@ -560,7 +561,7 @@ export function sessionStatusSummary(
   }
   // A campaign's request counts already include its descendants' requests, and come from the same
   // projection as its notices; without a campaign, the descendant poll is the count.
-  const childRequests = session.orchestratorCampaign?.pendingRequests
+  const childRequests = sessionCampaignRequests(session)
     ? humanCampaignRequests
     : context.descendantRequests ?? 0;
   if (childRequests > 0) {

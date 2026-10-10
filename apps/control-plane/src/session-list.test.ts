@@ -185,6 +185,24 @@ test("summary holds retain owed decision resumes and live capacity matches detai
   } finally { db.close(); }
 });
 
+test("summary worktrees retain one active branch and PR identity without setup or other inventories", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    seedSessionList(db,1);
+    db.raw().prepare("UPDATE sessions SET use_worktree=1,worktree_path='/active',worktrees=? WHERE id='s-0'").run(JSON.stringify([
+      { id: "other",path: "/other",branch: "other",source: "created" },
+      { id: "active",path: "/active",branch: "feature",source: "created",baseRef: "release",defaultBranch: "main",
+        pullRequest: { url: "https://github.com/example/synthetic/pull/1",state: "merged" },
+        setup: { status: "completed",output: "x".repeat(1_000_000) } },
+    ]));
+    const summary=db.listSessionSummaries(sessionListPrincipal)[0]!;
+    assert.deepEqual(summary.worktrees,[{ id: "active",path: "/active",branch: "feature",source: "created",
+      baseRef: "release",defaultBranch: "main",pullRequest: { url: "https://github.com/example/synthetic/pull/1",state: "merged" } }]);
+    assert.equal(db.getSession("s-0")!.worktrees?.length,2);
+    assert.ok(JSON.stringify(summary).length<4000);
+  } finally { db.close(); }
+});
+
 test("summary child owners preserve ambiguous and duplicate request identity", () => {
   const db = ControlPlaneDb.open(":memory:");
   try {
@@ -255,6 +273,23 @@ test("summary audiences, ownership verdicts, result acknowledgments and delegate
     assert.equal(summary.pendingApproval?.requestId,"q");
     assert.equal(summary.pendingApproval?.questions,undefined);
     assert.equal(summary.attention?.result?.owner,"orchestrator");
+    db.raw().prepare("UPDATE sessions SET parent_session_id='parent' WHERE id IN ('s-1','s-2')").run();
+    db.setPendingApproval("s-2",{ requestId: "private",kind: "authentication",title: "Private sign-in",options: [] });
+    db.raw().prepare(`INSERT INTO workflow_decisions(request_id,occurrence_id,session_id,controlling_session_id,
+      category,resource_key,resource_snapshot,resource_digest,policy_revision,authority,status,created_at)
+      VALUES ('gate','gate-occurrence','s-1','parent','implementation_question','key','{}','digest',1,'human','pending',14)`).run();
+    const memberRequests=db.listSessionSummaries(member).find((row) => row.id === "parent")!.campaignRequests!;
+    assert.deepEqual({ human: memberRequests.human,orchestrator: memberRequests.orchestrator },
+      { human: 1,orchestrator: 1 },"campaign counts exclude private children but retain authorized typed/provider requests");
+    const ownerRequests=db.listSessionSummaries(sessionListPrincipal).find((row) => row.id === "parent")!.campaignRequests!;
+    assert.deepEqual({ human: ownerRequests.human,orchestrator: ownerRequests.orchestrator },
+      { human: 2,orchestrator: 1 });
+    assert.equal(memberRequests.humanRequestTokens!.length,1);
+    assert.equal(ownerRequests.humanRequestTokens!.length,2);
+    db.raw().prepare("UPDATE workflow_decisions SET occurrence_id='replacement' WHERE request_id='gate'").run();
+    const replacement=db.listSessionSummaries(member).find((row) => row.id === "parent")!.campaignRequests!;
+    assert.equal(replacement.human,memberRequests.human);
+    assert.notDeepEqual(replacement.humanRequestTokens,memberRequests.humanRequestTokens);
     const agent: AgentPrincipal = { kind: "agent",actorId: "agent",organizationId: PERSONAL_ORGANIZATION_ID,
       credentialSessionId: "parent",orchestrator: true,delegatedScope: {
         organizationId: PERSONAL_ORGANIZATION_ID,owner: { kind: "user",userId: LOCAL_OWNER_USER_ID } } };

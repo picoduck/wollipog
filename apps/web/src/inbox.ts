@@ -1,3 +1,4 @@
+import { sessionCampaignRequests } from "@wollipog/protocol";
 import type {
   PendingApproval,
   PermissionOption,
@@ -92,7 +93,7 @@ export function isInboxBlocked(
     Partial<SessionView>,
 ): boolean {
   if (session.attention) return sessionFollowUp(session as SessionView).group === "needs_input";
-  if ((session.orchestratorCampaign?.pendingRequests?.human ?? 0) > 0) return true;
+  if ((sessionCampaignRequests(session)?.human ?? 0) > 0) return true;
   if (session.pendingRequestOwners && session.pendingRequestOwners.human === 0) return false;
   return session.status === "input_required" || session.pendingApproval != null;
 }
@@ -269,7 +270,7 @@ export function inboxPinnedAncestorIds(
 
 export function inboxThreadChildState(
   session: Pick<SessionView, "status" | "pendingApproval"> &
-    Partial<Pick<SessionView, "orchestratorCampaign" | "pendingRequestOwners">>,
+    Partial<Pick<SessionView, "orchestratorCampaign" | "campaignRequests" | "pendingRequestOwners">>,
   stalled: boolean,
 ): InboxThreadChildState {
   if (isInboxBlocked(session)) return stalled ? "stalled" : "blocked";

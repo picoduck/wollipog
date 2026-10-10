@@ -1213,7 +1213,9 @@ class FixtureSocket implements UiSocket {
       if (SESSION_SUMMARIES) {
         this.push({ ...initial, sessions: [], sessionsComplete: false });
         const sessions = initial.sessions.map((session): SessionView => ({
-          ...session, projection: "summary", agentCapabilities: undefined, worktrees: undefined,
+          ...session, projection: "summary", agentCapabilities: undefined,
+          worktrees: session.worktrees?.filter((tree) => tree.path === session.worktreePath).map(({ id,path,branch,source,baseRef,defaultBranch,pullRequest }) =>
+            ({ id,path,branch,source,baseRef,defaultBranch,pullRequest })),
           queued: undefined, pendingPrompts: undefined, steeringAttempts: undefined,
           pendingApproval: session.pendingApproval ? {
             requestId: session.pendingApproval.requestId, kind: session.pendingApproval.kind,
@@ -2960,7 +2962,10 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
     const inventory = snapshot();
     socket?.push({ ...inventory,sessions: [],sessionsComplete: false });
     const summaries = inventory.sessions.map((session): SessionView => ({ ...session,projection: "summary",
-      agentCapabilities: undefined,worktrees: undefined,queued: undefined,pendingPrompts: undefined,
+      agentCapabilities: undefined,
+      worktrees: session.worktrees?.filter((tree) => tree.path === session.worktreePath).map(({ id,path,branch,source,baseRef,defaultBranch,pullRequest }) =>
+        ({ id,path,branch,source,baseRef,defaultBranch,pullRequest })),
+      queued: undefined,pendingPrompts: undefined,
       pendingApproval: session.pendingApproval ? { requestId: session.pendingApproval.requestId,
         kind: session.pendingApproval.kind,title: session.pendingApproval.title,options: [] } : null }));
     socket?.push({ type: "session_snapshot_page",sessions: summaries.slice(0,1),complete: false });

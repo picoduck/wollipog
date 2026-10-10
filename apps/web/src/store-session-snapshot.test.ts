@@ -49,12 +49,14 @@ test("authoritative summary omissions clear optional list facts without discardi
   const previous={ ...session("active"),stopOperation: { status: "stop_pending" },holds: [{ kind: "queue" }],
     queueHold: { holdId: "old" },backgroundDeliveries: [{ parentTurnId: "old" }],
     roleConversion: { targetRole: "orchestrator",phase: "preparing" },capacityWait: { reason: "old" },
+    worktreePath: "/active",worktrees: [{ id: "active",path: "/active",branch: "Old",source: "created" }],
+    campaignRequests: { human: 3,orchestrator: 0 },
     agentCapabilities: { slashCommands: [{ name: "retained",description: "Detail" }] } } as unknown as SessionView;
   store.dispatch({ type: "msg",msg: { type: "snapshot",runners: [],boxes: [],sessions: [previous],runs: [] } });
   store.dispatch({ type: "msg",msg: { type: "snapshot",runners: [],boxes: [],sessions: [],runs: [],sessionsComplete: false } });
   store.dispatch({ type: "msg",msg: { type: "session_snapshot_page",sessions: [{ ...session("active"),projection: "summary" }],complete: true } });
   const current=store.getState().sessions.get("active")!;
-  for (const field of ["stopOperation","holds","queueHold","backgroundDeliveries","roleConversion","capacityWait"] as const) {
+  for (const field of ["stopOperation","holds","queueHold","backgroundDeliveries","roleConversion","capacityWait","campaignRequests","worktrees"] as const) {
     assert.equal(current[field],undefined,`${field} must clear when omitted from the authoritative summary`);
   }
   assert.deepEqual(current.agentCapabilities,previous.agentCapabilities);

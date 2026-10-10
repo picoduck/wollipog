@@ -17,7 +17,8 @@ below 50 ms, and each snapshot frame fits the 8 MiB per-client buffer. It prints
 REST/snapshot bytes, largest frame, and buffer cap as JSON. Query-count regressions are tested in
 `session-list.test.ts`: seven SQL reads for the plain inventory, plus one bounded bulk read when
 pending requests need structured child-owner observations and one when holds have owed decision
-resumes. Reminders use one authorized bulk query. Query count is independent of session
+resumes, plus one authorized aggregate read for campaign child-request counts when a root is listed.
+Reminders use one authorized bulk query. Query count is independent of session
 count, with audience predicates applied in SQL.
 
 REST caches the serialized authorized list for the exact principal and archived filter. Both local
@@ -36,7 +37,8 @@ paged by this change.
 
 The lightweight `projection: "summary"` keeps list identity, status, attention/acknowledgment,
 ownership verdicts, cost counters, and actionable recovery metadata. Request bodies, provider
-capabilities, worktree inventories, queues, and campaign inventories remain on the authorized
-session detail endpoint. Web previews and Session pages hydrate detail before rendering controls;
+capabilities, full worktree inventories, queues, and campaign inventories remain on the authorized
+session detail endpoint. One compact active-worktree identity retains the list's branch/base/PR
+metadata. Web previews, visible Board request cards and Session pages hydrate detail before rendering controls;
 runner tools use the existing `get_session` surface for full metadata. Native clients use the same
 web store and API contract. No history query or history recovery algorithm is changed here.

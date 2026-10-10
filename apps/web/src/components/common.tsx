@@ -1,3 +1,4 @@
+import { sessionCampaignRequests } from "@wollipog/protocol";
 import React, { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   sessionAttentionStatus,
@@ -228,7 +229,7 @@ export function lifecycleRepeatsAttention(lifecycle: StatusMeta, attention: unkn
 
 export function AttentionBadge({ session, ariaLabel, onOpen }: {
   session: Pick<SessionView, "status" | "pendingApproval"> &
-    Partial<Pick<SessionView, "orchestratorCampaign" | "pendingRequestOwners">>;
+    Partial<Pick<SessionView, "orchestratorCampaign" | "campaignRequests" | "pendingRequestOwners">>;
   ariaLabel?: string;
   onOpen?: () => void;
 }) {
@@ -246,7 +247,7 @@ export function AttentionBadge({ session, ariaLabel, onOpen }: {
  * "N Child Requests" status says instead (#2206).
  */
 function attentionIsChildRequestsOnly(session: Parameters<typeof sessionAttentionBreakdown>[0]): boolean {
-  return (session.orchestratorCampaign?.pendingRequests?.human ?? 0) > 0 &&
+  return (sessionCampaignRequests(session)?.human ?? 0) > 0 &&
     sessionAttentionBreakdown(session).every((group) => group.count === 0);
 }
 
@@ -273,7 +274,7 @@ export function ThreadDot({ state, title }: { state: "blocked" | "stalled" | "ru
  */
 export function AttentionPills({ session, compact = false }: {
   session: Pick<SessionView, "status" | "pendingApproval" | "attentionOwners"> &
-    Partial<Pick<SessionView, "orchestratorCampaign" | "pendingRequestOwners">>;
+    Partial<Pick<SessionView, "orchestratorCampaign" | "campaignRequests" | "pendingRequestOwners">>;
   /** A phone card has one line for the sender AND the signals: show the top-priority kind with a
    * "+N" for the rest instead of one pill per kind, so three kinds cannot push the sender off the card. */
   compact?: boolean;
@@ -320,7 +321,7 @@ export function SessionStatusIndicators({
 }: {
   session: Pick<SessionView, "status" | "pendingApproval" | "archiveStatus" | "archiveOperation" |
     "stopOperation" | "historyQuarantine" | "attentionOwners" | "capacityWait" | "queueHold" | "holds" |
-    "orchestratorCampaign" | "pendingRequestOwners"> & Partial<Pick<SessionView, "runnerId">>;
+    "orchestratorCampaign" | "campaignRequests" | "pendingRequestOwners"> & Partial<Pick<SessionView, "runnerId">>;
   /** The session's runner is not connected (offline, or not known to this client). */
   disconnected?: boolean;
   onOpenAttention?: () => void;
@@ -344,7 +345,7 @@ export function SessionStatusIndicators({
   });
   // Child requests are one status, "N Child Requests", whatever else the session needs (#2206). The
   // Orchestrator's own share is counted only inside the Requests panel.
-  const childRequests = session.orchestratorCampaign?.pendingRequests?.human ?? 0;
+  const childRequests = sessionCampaignRequests(session)?.human ?? 0;
   const attentionStatus = attentionIsChildRequestsOnly(session) ? null : sessionAttentionStatus(session);
   const queueHoldReason = session.status === "queued" && !session.capacityWait && session.queueHold
     ? session.holds?.find((hold) => hold.holdId === session.queueHold?.holdId)?.reason

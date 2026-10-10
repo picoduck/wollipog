@@ -2917,6 +2917,7 @@ interface SessionSummaryRow extends SessionRow {
   summary_jobs: number;
   summary_tool_calls: number;
   summary_conversion: string | null;
+  summary_worktree: string | null;
   summary_attention_revision: number | null;
   summary_meaningful_at: number | null;
   summary_result_revision: string | null;
@@ -2934,6 +2935,7 @@ interface SessionSummaryContext {
   backgroundDeliveries: Map<string,BackgroundDeliveryView[]>;
   childObservations: Map<string,Array<{ payload: string }>>;
   heldResumes: Map<string,HeldSessionResumeView[]>;
+  campaignRequests: Map<string,NonNullable<SessionView["campaignRequests"]>>;
 }
 
 interface SessionStopIntentRow {
@@ -10636,6 +10638,13 @@ export class ControlPlaneDb {
       EXISTS(SELECT 1 FROM managed_background_jobs job WHERE job.session_id=session.id) AS summary_jobs,
       COALESCE(tool.tool_calls,0) AS summary_tool_calls,
       CASE WHEN conversion.state!='applied' THEN json_object('targetRole', json_extract(conversion.command,'$.targetRole'), 'phase',conversion.state) END AS summary_conversion,
+      CASE WHEN session.worktree_path IS NOT NULL THEN (SELECT json_object(
+        'id',json_extract(tree.value,'$.id'),'path',json_extract(tree.value,'$.path'),
+        'branch',json_extract(tree.value,'$.branch'),'source',json_extract(tree.value,'$.source'),
+        'baseRef',json_extract(tree.value,'$.baseRef'),'defaultBranch',json_extract(tree.value,'$.defaultBranch'),
+        'pullRequest',json_extract(tree.value,'$.pullRequest'))
+        FROM json_each(CASE WHEN json_valid(session.worktrees) THEN session.worktrees ELSE '[]' END) tree
+        WHERE json_extract(tree.value,'$.path')=session.worktree_path LIMIT 1) END AS summary_worktree,
       attention.revision AS summary_attention_revision, attention.meaningful_at AS summary_meaningful_at,
       attention.result_revision AS summary_result_revision, attention.result_at AS summary_result_at,
       attention.human_handoff_revision AS summary_handoff_revision,
@@ -10656,7 +10665,7 @@ export class ControlPlaneDb {
       WHERE ${authorization.sql} ${includeArchived ? "" : "AND session.archived=0"}
       ORDER BY session.created_at DESC,session.id`;
     const summaryFields = [...columns, ...`summary_workspace_name summary_agent_name summary_project_name
-      summary_audience summary_owns summary_children summary_jobs summary_tool_calls summary_conversion
+      summary_audience summary_owns summary_children summary_jobs summary_tool_calls summary_conversion summary_worktree
       summary_attention_revision summary_meaningful_at summary_result_revision summary_result_at
       summary_handoff_revision summary_ack_revision summary_ack_counter`.split(/\s+/).filter(Boolean)];
     // Transfer one JSON value per row across SQLite's native boundary, rather than dozens of
@@ -10681,7 +10690,70 @@ export class ControlPlaneDb {
       backgroundDeliveries: new Map(),
       childObservations: new Map(),
       heldResumes: new Map(),
+      campaignRequests: new Map(),
     };
+    // Resolve the same outermost campaign boundary from the preloaded ancestry, with its existing
+    // 64-row/cycle/missing-parent refusal. No per-session ancestry SQL is needed.
+    const campaignRoots = new Map<string,string | null>();
+    const campaignRoot = (sessionId: string): string | null => {
+      if (campaignRoots.has(sessionId)) return campaignRoots.get(sessionId)!;
+      let current=context.rows.get(sessionId);
+      let root: SessionRow | undefined;
+      const seen=new Set<string>();
+      while (current) {
+        if (seen.size>=64 || seen.has(current.id)) { root=undefined; break; }
+        seen.add(current.id);
+        if (sessionRole({ role: current.session_role as SessionRole | null,permissionMode: current.permission_mode }) === "orchestrator") root=current;
+        if (!current.parent_session_id) break;
+        current=context.rows.get(current.parent_session_id);
+        if (!current) root=undefined;
+      }
+      const id=root && orchestratorCampaignPolicyFromJson(root.orchestrator_policy) ? root.id : null;
+      campaignRoots.set(sessionId,id);
+      return id;
+    };
+    for (const row of rows) {
+      if (row.orchestrator_policy && campaignRoot(row.id) === row.id) context.campaignRequests.set(row.id,{ human: 0,orchestrator: 0,humanRequestTokens: [] });
+    }
+    if (context.campaignRequests.size) {
+      const requests=this.stmt(`SELECT 'generic' AS type,session.id AS session_id,session.runner_id,
+        session.pending_approval,NULL AS controlling_session_id,NULL AS authority,NULL AS occurrence_id
+        FROM sessions session JOIN session_ownership ownership ON ownership.session_id=session.id
+        WHERE session.pending_approval IS NOT NULL AND ${authorization.sql}
+        UNION ALL SELECT 'typed',decision.session_id,NULL,NULL,decision.controlling_session_id,decision.authority,decision.occurrence_id
+        FROM workflow_decisions decision JOIN session_ownership ownership ON ownership.session_id=decision.session_id
+        WHERE decision.status='pending' AND ${authorization.sql}`)
+        .all(...authorization.params,...authorization.params) as unknown as Array<{
+          type: "generic" | "typed"; session_id: string; runner_id: string | null; pending_approval: string | null;
+          controlling_session_id: string | null; authority: "human" | "orchestrator" | null; occurrence_id: string | null;
+        }>;
+      for (const request of requests) {
+        if (request.type === "typed") {
+          const counts=context.campaignRequests.get(request.controlling_session_id!);
+          if (counts) {
+            counts[request.authority!]+=1;
+            if (request.authority === "human") counts.humanRequestTokens!.push(createHash("sha256")
+              .update(`typed:${request.session_id}:${request.occurrence_id}`).digest("hex"));
+          }
+          continue;
+        }
+        const rootId=campaignRoot(request.session_id);
+        if (!rootId || rootId===request.session_id) continue;
+        const counts=context.campaignRequests.get(rootId);
+        if (!counts) continue;
+        const root=context.rows.get(rootId)!;
+        const mode=root.parent_control === "questions" || root.parent_control === "questions_and_approvals" ? root.parent_control : "off";
+        const supported=runnerSupportsProtocol(context.runnerProtocols.get(request.runner_id!) ?? null,"delegatedParentControl");
+        for (const pending of pendingRequests(parseJson<PendingApproval>(request.pending_approval))) {
+          if (pending.kind === "workflow_decision") continue;
+          const authority=supported && parentControlRequestEligible(mode,pending) ? "orchestrator" : "human";
+          counts[authority]+=1;
+          if (authority === "human") counts.humanRequestTokens!.push(createHash("sha256")
+            .update(`generic:${request.session_id}:${pending.occurrenceId ?? pending.requestId}`).digest("hex"));
+        }
+      }
+    }
+    for (const counts of context.campaignRequests.values()) counts.humanRequestTokens!.sort();
     const heldIds = rows.filter((row) => row.worktree_recovery || !isTerminal(row.status as SessionStatus) && row.queue_hold)
       .map((row) => row.id);
     if (heldIds.length) {
@@ -21600,7 +21672,9 @@ export class ControlPlaneDb {
       parentControl: row.parent_control === "questions" || row.parent_control === "questions_and_approvals" ? row.parent_control : "off",
       role: sessionRole({ role: row.session_role as SessionRole | null, permissionMode: row.permission_mode }),
       orchestratorPolicy: row.orchestrator_policy ? orchestratorCampaignPolicyFromJson(row.orchestrator_policy) ?? undefined : undefined,
+      campaignRequests: context.campaignRequests.get(row.id),
       useWorktree: row.use_worktree === 1, worktreePath: row.worktree_path,
+      worktrees: row.summary_worktree ? [JSON.parse(row.summary_worktree) as SessionWorktreeView] : undefined,
       archived: row.archived === 1,
       archiveStatus: stopIntent?.archiveAfterStop ? stopIntent.operation.status : undefined,
       archiveOperation: stopIntent?.archiveAfterStop ? stopIntent.operation : undefined, stopOperation: stopIntent?.operation,

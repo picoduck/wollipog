@@ -686,10 +686,25 @@ function CardRequest({ session, request, runnerOnline, onOpen }: {
 }) {
   const api = useApi();
   const [busy, setBusy] = useState(false);
+  const { loadSession } = useStoreActions();
+  const needsDetail = session.projection === "summary" && request.kind !== "question";
+  const [detailError,setDetailError] = useState<string | null>(null);
+  const [detailAttempt,setDetailAttempt] = useState(0);
+  useEffect(() => {
+    if (!needsDetail) return;
+    let current=true;
+    setDetailError(null);
+    void api.session(session.id).then(({ session: detail }) => {
+      if (current) loadSession(detail);
+    }).catch((cause: unknown) => {
+      if (current) setDetailError((cause as Error).message);
+    });
+    return () => { current=false; };
+  },[api,loadSession,session.id,session.eventEpoch,request.requestId,request.occurrenceId,needsDetail,detailAttempt]);
   // A person the server refuses a decision (a Viewer) sees the options disabled with the reason (#1857).
   const respondRefusal = sessionCommandRefusal(session, "respond");
   const refusalId = `card-approval-refusal-${session.id}`;
-  const unavailable = busy || !runnerOnline || respondRefusal !== null;
+  const unavailable = busy || needsDetail || !runnerOnline || respondRefusal !== null;
   const decide = async (optionId: string) => {
     if (unavailable) return;
     setBusy(true);
@@ -716,7 +731,9 @@ function CardRequest({ session, request, runnerOnline, onOpen }: {
   const signIn = request.kind === "authentication";
   const decisions = question || signIn ? null : boardCardDecisions(request.options);
   const code = question ? null : boardCardRequestCode(request);
-  const actions = question ? (
+  const actions = needsDetail ? (
+    detailError ? <button type="button" className="btn sm" onClick={() => setDetailAttempt((attempt) => attempt+1)}>Retry</button> : null
+  ) : question ? (
     // Structured questions have no inline options (options[] is empty by design): the card opens the
     // session, whose question card is interactive.
     <button type="button" className="btn sm primary" onClick={onOpen}>Answer in Session</button>
@@ -739,6 +756,7 @@ function CardRequest({ session, request, runnerOnline, onOpen }: {
     <div className="card-request" onClick={(e) => e.stopPropagation()}>
       <Notice tone="warning" className={`card-request-notice${decisions ? " decision-pair" : ""}`} actions={actions}>
         <p className="card-request-text">{plainTextPreview(request.title)}</p>
+        {needsDetail && <p>{detailError ? "Couldn't load this request. Retry to review its options." : "Loading request…"}</p>}
         {code && <code className="card-request-code">{code}</code>}
         {respondRefusal !== null && !question && (
           <p className="approval-refusal" id={refusalId}>{respondRefusal}</p>

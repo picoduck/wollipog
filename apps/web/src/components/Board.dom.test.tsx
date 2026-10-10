@@ -35,6 +35,8 @@ for (const [name, value] of Object.entries({
   Event: domWindow.Event,
   MouseEvent: domWindow.MouseEvent,
   KeyboardEvent: domWindow.KeyboardEvent,
+  requestAnimationFrame: domWindow.requestAnimationFrame.bind(domWindow),
+  cancelAnimationFrame: domWindow.cancelAnimationFrame.bind(domWindow),
   React,
   IS_REACT_ACT_ENVIRONMENT: true,
   ResizeObserver: class { observe() {} unobserve() {} disconnect() {} },
@@ -175,7 +177,9 @@ function Harness({ onSessionMenu }: { onSessionMenu: (sessionId: string) => void
 }
 
 let sequence = 0;
-async function mount({ runners = [runner("runner-1", "Studio")], sessions = SESSIONS } = {}) {
+async function mount({ runners = [runner("runner-1", "Studio")], sessions = SESSIONS,detailSessions = sessions }: {
+  runners?: RunnerView[]; sessions?: SessionView[]; detailSessions?: SessionView[];
+} = {}) {
   const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(mountPoint as never);
   const root = createRoot(mountPoint);
@@ -183,8 +187,13 @@ async function mount({ runners = [runner("runner-1", "Studio")], sessions = SESS
   sequence += 1;
   const approvals: Array<{ sessionId: string; requestId: string; optionId: string | null }> = [];
   const menus: string[] = [];
+  const detailReads: string[] = [];
   const client = {
     ...api,
+    session: async (sessionId: string) => {
+      detailReads.push(sessionId);
+      return { session: detailSessions.find((candidate) => candidate.id === sessionId)! };
+    },
     approve: async (sessionId: string, body: { requestId: string; optionId: string | null }) => {
       approvals.push({ sessionId, ...body });
       return sessions.find((candidate) => candidate.id === sessionId)!;
@@ -220,11 +229,32 @@ async function mount({ runners = [runner("runner-1", "Studio")], sessions = SESS
   return {
     approvals,
     menus,
+    detailReads,
     card,
     cards: () => [...domWindow.document.querySelectorAll(".board .card")] as unknown as HTMLElement[],
     unmount: () => act(async () => { root.unmount(); mountPoint.remove(); }),
-  };
+};
 }
+
+test("summary Board requests hydrate visible permission and sign-in controls before rendering options", async () => {
+  const details=SESSIONS.filter((candidate) => ["approval","sign-in","question"].includes(candidate.id));
+  const summaries=details.map((candidate): SessionView => ({ ...candidate,projection: "summary",
+    pendingApproval: { ...candidate.pendingApproval!,context: undefined,workflowDecision: undefined,options: [] } }));
+  const board=await mount({ sessions: summaries,detailSessions: details });
+  try {
+    assert.deepEqual(board.detailReads.sort(),["approval","sign-in"],"questions already open in Session; only visible body-dependent cards hydrate");
+    const permissionButtons=[...board.card("approval").querySelectorAll<HTMLButtonElement>(".card-request button")];
+    assert.deepEqual(permissionButtons.map((button) => button.textContent),["Approve","Deny"]);
+    assert.equal(board.card("approval").querySelector(".card-request-code")?.textContent,"npm test -- --watch=false");
+    await act(async () => permissionButtons[0]!.click());
+    assert.deepEqual(board.approvals,[{ sessionId: "approval",requestId: "req-approval",optionId: "once" }]);
+    const signIn=board.card("sign-in").querySelector<HTMLButtonElement>(".card-request button")!;
+    assert.equal(signIn.textContent,"Sign In");
+    assert.equal(signIn.disabled,false);
+    await act(async () => signIn.click());
+    assert.ok(domWindow.document.querySelector('[role="menuitem"]'),"the hydrated Sign In menu has methods");
+  } finally { await board.unmount(); }
+});
 
 const EMOJI = /\p{Extended_Pictographic}/u;
 const MARKDOWN = /\]\(|\[ \]|\*\*|`|^#|\n#|- \[/u;

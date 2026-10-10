@@ -2573,6 +2573,10 @@ export function campaignHumanAttentionAdded(
   return (next?.human ?? 0) > (previous?.human ?? 0);
 }
 
+export function sessionCampaignRequests(session: Pick<SessionView,"campaignRequests" | "orchestratorCampaign">) {
+  return session.campaignRequests ?? session.orchestratorCampaign?.pendingRequests;
+}
+
 export interface RecordOrchestratorFollowUpRequest {
   originSessionId: string;
   repository: string;
@@ -3708,7 +3712,7 @@ export interface ChildSessionRegistryPage {
 /** Canonical, compatibility-safe projection of the concrete action a person must take. */
 export function sessionAttentionStatus(
   session: Pick<SessionView, "status" | "pendingApproval" | "attentionOwners"> &
-    Partial<Pick<SessionView, "orchestratorCampaign" | "pendingRequestOwners">>,
+    Partial<Pick<SessionView, "orchestratorCampaign" | "campaignRequests" | "pendingRequestOwners">>,
 ): SessionAttentionStatus | null {
   const result = singleSessionAttentionStatus(session);
   if (!result || !session.pendingApproval?.ownerToolUseId || session.pendingApproval.additionalRequests?.length) return result;
@@ -3755,7 +3759,7 @@ function humanOwnsPendingRequest(
  */
 export function sessionAttentionBreakdown(
   session: Pick<SessionView, "status" | "pendingApproval" | "attentionOwners"> &
-    Partial<Pick<SessionView, "orchestratorCampaign" | "pendingRequestOwners">>,
+    Partial<Pick<SessionView, "orchestratorCampaign" | "campaignRequests" | "pendingRequestOwners">>,
 ): SessionAttentionGroup[] {
   const requests = prioritizedPendingRequests(session.pendingApproval)
     .filter((request) => humanOwnsPendingRequest(session.pendingRequestOwners, request));
@@ -3764,6 +3768,7 @@ export function sessionAttentionBreakdown(
       status: session.status,
       pendingApproval: null,
       orchestratorCampaign: session.orchestratorCampaign,
+      campaignRequests: session.campaignRequests,
     });
     return fallback ? [{ ...fallback, count: 0, requests: [], owners: [] }] : [];
   }
@@ -3795,9 +3800,9 @@ export function sessionAttentionBreakdown(
 
 function singleSessionAttentionStatus(
   session: Pick<SessionView, "status" | "pendingApproval"> &
-    Partial<Pick<SessionView, "orchestratorCampaign" | "pendingRequestOwners">>,
+    Partial<Pick<SessionView, "orchestratorCampaign" | "campaignRequests" | "pendingRequestOwners">>,
 ): SessionAttentionStatus | null {
-  const humanCampaignRequests = session.orchestratorCampaign?.pendingRequests?.human ?? 0;
+  const humanCampaignRequests = sessionCampaignRequests(session)?.human ?? 0;
   const requests = pendingRequests(session.pendingApproval)
     .filter((request) => humanOwnsPendingRequest(session.pendingRequestOwners, request));
   if (requests.length === 0 && session.pendingApproval) {
@@ -6722,6 +6727,8 @@ export interface SessionView {
   orchestratorPolicy?: OrchestratorCampaignPolicy;
   /** Current effective campaign state. Omitted by older control planes and non-Orchestrators. */
   orchestratorCampaign?: OrchestratorCampaignProjection;
+  /** Authorized aggregate child-request counts on lightweight lists; full campaign state is detail-only. */
+  campaignRequests?: { human: number; orchestrator: number; humanRequestTokens?: string[] };
   /** v196 membership of a campaign descendant in its root campaign's work ledger (#2417), filled by
    * the Read API slice. Omitted for non-members and by older control planes. */
   campaignMembership?: CampaignMembershipView;

@@ -1,3 +1,4 @@
+import { sessionCampaignRequests } from "@wollipog/protocol";
 import { attentionRequestRank, pendingRequests, type SessionView } from "@wollipog/protocol";
 
 export type SessionFollowUpGroup = "needs_input" | "ready_for_review" | "working" | "quiet";
@@ -22,7 +23,7 @@ export function sessionFollowUp(session: SessionView) {
     session.backgroundDeliveries?.some((delivery) =>
       delivery.watchdogState === "continuation_blocked" || delivery.watchdogState === "accepted_without_result"));
   const result = outstandingSessionResult(session);
-  const group: SessionFollowUpGroup = firstAction || recovery || (session.orchestratorCampaign?.pendingRequests?.human ?? 0) > 0 ||
+  const group: SessionFollowUpGroup = firstAction || recovery || (sessionCampaignRequests(session)?.human ?? 0) > 0 ||
     (!session.attention && !session.pendingRequestOwners && session.status === "input_required")
     ? "needs_input" : result ? "ready_for_review" :
       ["running", "starting", "queued", "input_required"].includes(session.status) ? "working" : "quiet";

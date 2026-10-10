@@ -220,8 +220,8 @@ function CloseGuardSessionSource() {
       session: (id) => {
         const session = latest.current.get(id);
         if (!session) return null;
-        const { title, status, pendingApproval, pendingRequestOwners, orchestratorCampaign } = session;
-        return { title, status, pendingApproval, pendingRequestOwners, orchestratorCampaign };
+        const { title, status, pendingApproval, pendingRequestOwners, orchestratorCampaign, campaignRequests } = session;
+        return { title, status, pendingApproval, pendingRequestOwners, orchestratorCampaign, campaignRequests };
       },
     });
   }, [scope]);

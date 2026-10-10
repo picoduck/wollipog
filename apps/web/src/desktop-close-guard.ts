@@ -53,6 +53,7 @@ export interface CloseGuardSession {
   pendingRequestOwners?: SessionView["pendingRequestOwners"];
   /** A campaign's human-owned requests, which claim the row even with no request of its own. */
   orchestratorCampaign?: SessionView["orchestratorCampaign"];
+  campaignRequests?: SessionView["campaignRequests"];
 }
 
 /**

@@ -543,6 +543,7 @@ function mapSession(s: Json): Json {
     parentControl: s?.parentControl ?? "off",
     ...(s?.orchestratorPolicy ? { orchestratorPolicy: s.orchestratorPolicy } : {}),
     ...(s?.orchestratorCampaign ? { orchestratorCampaign: s.orchestratorCampaign } : {}),
+    ...(s?.campaignRequests ? { campaignRequests: s.campaignRequests } : {}),
     costUsd: s?.costUsd,
     costBudgetUsd: s?.costBudgetUsd ?? null,
     costCheckpointsUsd: s?.costCheckpointsUsd ?? null,

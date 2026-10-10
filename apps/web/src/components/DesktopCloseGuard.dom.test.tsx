@@ -434,5 +434,5 @@ test("the local instance's sessions are offered to the guard from inside that in
   const source = /function CloseGuardSessionSource\(\)[\s\S]*?\n\}/.exec(app)?.[0] ?? "";
   assert.match(source, /if \(scope !== LOCAL_INSTANCE_SCOPE\) return undefined;/);
   // A row badges attention only for requests the person owns, so the ownership has to come along (#2100).
-  assert.match(source, /return \{ title, status, pendingApproval, pendingRequestOwners, orchestratorCampaign \};/);
+  assert.match(source, /return \{ title, status, pendingApproval, pendingRequestOwners, orchestratorCampaign, campaignRequests \};/);
 });

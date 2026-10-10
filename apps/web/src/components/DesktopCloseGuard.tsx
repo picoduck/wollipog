@@ -1,3 +1,4 @@
+import { sessionCampaignRequests } from "@wollipog/protocol";
 import { useEffect, useRef } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -81,7 +82,7 @@ export function closeWarning(count: number): string {
 export function closeRowStatus(session: CloseGuardSession): StatusMeta {
   const attention = sessionAttentionStatus(session);
   const legacyInput = attention?.kind === "input_required" && !session.pendingApproval &&
-    !session.orchestratorCampaign?.pendingRequests?.human;
+    !sessionCampaignRequests(session)?.human;
   if (attention && !legacyInput) return statusMeta("attention", attention.kind);
   if (session.pendingApproval && !WORK_IN_FLIGHT[session.status]) return statusMeta("session", "input_required");
   return statusMeta("session", session.status);

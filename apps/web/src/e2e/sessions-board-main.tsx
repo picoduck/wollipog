@@ -36,6 +36,8 @@ import "../styles.css";
  * pushing a bare `/board` would make a reload fetch the production app instead of this fixture.
  */
 const SCOPE = "sessions-board-e2e";
+const sessionSummaries = new URLSearchParams(location.search).get("sessionSummaries") === "1";
+const detailDelay = Number(new URLSearchParams(location.search).get("detailDelay") ?? 0);
 const fullShell = new URLSearchParams(location.search).has("full-shell");
 const empty = new URLSearchParams(location.search).has("empty");
 /** An orchestrator with four children and a session with three pending requests (#896). */
@@ -451,7 +453,16 @@ const connection: UiConnectionRuntime = {
   runtimeKey: `${SCOPE}:1`,
   createSocket: () => {
     socket = new FixtureSocket();
-    window.setTimeout(() => socket?.push(snapshot()), 0);
+    window.setTimeout(() => {
+      const initial=snapshot();
+      if (!sessionSummaries) { socket?.push(initial); return; }
+      socket?.push({ ...initial,sessions: [],sessionsComplete: false });
+      socket?.push({ type: "session_snapshot_page",complete: true,sessions: initial.sessions.map((value): SessionView => ({
+        ...value,projection: "summary",agentCapabilities: undefined,worktrees: undefined,queued: undefined,
+        pendingApproval: value.pendingApproval ? { requestId: value.pendingApproval.requestId,
+          kind: value.pendingApproval.kind,title: value.pendingApproval.title,options: [] } : null,
+      })) });
+    }, 0);
     return socket;
   },
   close() {},
@@ -558,6 +569,7 @@ const client = {
     return { removed: true as const };
   },
   session: async (id: string) => {
+    if (detailDelay) await new Promise<void>((resolve) => window.setTimeout(resolve,detailDelay));
     if (id === "s-approval" && !entryHydrated) await new Promise<void>((resolve) => { entrySessionWaiters.push(resolve); });
     const value = sessions.find((candidate) => candidate.id === id);
     if (!value) throw new Error("session not found");
