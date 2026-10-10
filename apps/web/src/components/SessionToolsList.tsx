@@ -12,7 +12,7 @@ import { workspaceFolderName } from "../files-panel.js";
 import { runnerDisplay } from "../runners.js";
 import { shortcutDisplay } from "../shortcuts.js";
 import { statusMeta } from "../status-meta.js";
-import { useHasStore, useStoreSelector } from "../store.js";
+import { useOptionalStoreSelector } from "../store.js";
 import { IncrementalSubagentProjector } from "../subagents.js";
 import type { TimelineItem } from "../timeline.js";
 import { isCurrentWorker, workerRoster, type WorkerState } from "../worker-roster.js";
@@ -102,20 +102,16 @@ export interface SessionToolsListProps {
  * focusable (`aria-disabled`), so keyboard, touch and screen-reader users reach the reason (#1261).
  */
 export function SessionToolsList(props: SessionToolsListProps) {
-  // Harness pages render the panel without a store; their rows then read no campaign or machine.
-  return useHasStore() ? <StoreFacts {...props} /> : <SessionToolsListView {...props} campaignWork={null} machine={null} />;
-}
-
-function StoreFacts(props: SessionToolsListProps) {
   const availability = props.context.campaignAvailability;
   const campaignSessionId = availability.kind === "available" ? availability.campaignSessionId : null;
   // The campaign's summary rides on its root session's projection, which the server re-sends on
   // every ledger write (useCampaignStatus); a member reads it when this browser holds the root.
-  const storedWork = useStoreSelector((s) => campaignSessionId && campaignSessionId !== props.session.id
+  // Harness pages render the panel without a store; their rows then read no campaign or machine.
+  const storedWork = useOptionalStoreSelector((s) => campaignSessionId && campaignSessionId !== props.session.id
     ? s.sessions.get(campaignSessionId)?.orchestratorCampaign?.work ?? null
     : null);
-  const runner = useStoreSelector((s) => s.runners.get(props.session.runnerId));
-  const campaignWork = campaignSessionId === props.session.id ? props.session.orchestratorCampaign?.work ?? null : storedWork;
+  const runner = useOptionalStoreSelector((s) => s.runners.get(props.session.runnerId));
+  const campaignWork = campaignSessionId === props.session.id ? props.session.orchestratorCampaign?.work ?? null : storedWork ?? null;
   const machine = runnerDisplay(runner, undefined, props.session.runnerId).name || null;
   return <SessionToolsListView {...props} campaignWork={campaignWork} machine={machine} />;
 }
