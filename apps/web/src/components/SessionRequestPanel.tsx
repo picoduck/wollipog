@@ -13,7 +13,7 @@ import {
   type PendingApproval,
   type SessionView,
 } from "@wollipog/protocol";
-import { relativeTime } from "../format.js";
+import { useRelativeTime } from "./RelativeTime.js";
 import { viewPath } from "../navigation.js";
 import { sessionCommandRefusal } from "../session-command-permissions.js";
 import { CountBadge } from "./CountBadge.js";
@@ -109,10 +109,11 @@ function rowTitle(request: PendingApproval): string {
   return request.kind === "question" ? request.questions?.[0]?.question.trim() || request.title : request.title;
 }
 
-/** The row's trailing time, short: "now", "45s", "3m", "2h", "1d". */
-function shortRelativeTime(at: number): string {
-  const long = relativeTime(at);
-  return long === "just now" ? "now" : long.replace(/ ago$/, "");
+/** The row's trailing time, short: "now", "45s", "3m", "2h", "1d", kept current, with the long one as
+ * its title. */
+function RowTime({ at }: { at: number }) {
+  const long = useRelativeTime(at);
+  return <span className="row-trail" title={long}>{long === "just now" ? "now" : long.replace(/ ago$/, "")}</span>;
 }
 
 function useDelayedFlag(active: boolean, delayMs: number): boolean {
@@ -461,9 +462,7 @@ export function SessionRequestPanel({
                       <span className="row-body">
                         <span className="row-line">
                           <span className="row-title">{rowTitle(item.request)}</span>
-                          <span className="row-trail" title={relativeTime(item.createdAt)}>
-                            {shortRelativeTime(item.createdAt)}
-                          </span>
+                          <RowTime at={item.createdAt} />
                         </span>
                         <span className="row-sub">{requestTypeLabel(item.request)} in {item.sessionTitle}</span>
                       </span>

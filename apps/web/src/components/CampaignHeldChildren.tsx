@@ -1,11 +1,11 @@
 import { Fragment, type MouseEvent } from "react";
 import type { OrchestratorCampaignProjection, SessionHoldView } from "@wollipog/protocol";
-import { relativeTime, titleCaseLabel } from "../format.js";
+import { titleCaseLabel } from "../format.js";
 import { viewPath } from "../navigation.js";
-import { useSessionChanges } from "../store.js";
 import { CountBadge } from "./CountBadge.js";
 import { HeldIcon } from "./Icons.js";
 import { Notice } from "./Notice.js";
+import { RelativeTime } from "./RelativeTime.js";
 
 export type CampaignHeldChild = NonNullable<OrchestratorCampaignProjection["heldChildren"]>[number];
 
@@ -32,15 +32,12 @@ function RecoveryText({ text }: { text: string }) {
  * with answer or approve controls.
  */
 export function CampaignHeldChildren({
-  sessionId,
   heldChildren,
   blocked,
   childTitle,
   recoveryAction = (_sessionId, hold) => hold.recoveryAction,
   onOpenChild,
 }: {
-  /** The Orchestrator's session: each hold's age moves on as it changes (`useSessionChanges`). */
-  sessionId?: string;
   heldChildren: readonly CampaignHeldChild[];
   /** `children.blocked` from the same projection; it also counts failed and stopped children. */
   blocked: number;
@@ -49,7 +46,6 @@ export function CampaignHeldChildren({
   recoveryAction?: (sessionId: string, hold: SessionHoldView) => string;
   onOpenChild: (sessionId: string) => void;
 }) {
-  useSessionChanges(sessionId);
   if (heldChildren.length === 0) return null;
   const held = heldChildren.length;
   const open = (event: MouseEvent<HTMLAnchorElement>, sessionId: string) => {
@@ -93,7 +89,7 @@ export function CampaignHeldChildren({
                 <dl key={hold.holdId} className="facts" data-hold-kind={hold.kind}>
                   <div>
                     <dt>Hold</dt>
-                    <dd>{holdKindLabel(hold.kind)} · {relativeTime(hold.since)}</dd>
+                    <dd>{holdKindLabel(hold.kind)} · <RelativeTime at={hold.since} /></dd>
                   </div>
                   <div>
                     <dt>Reason</dt>
@@ -110,7 +106,7 @@ export function CampaignHeldChildren({
                         <ul className="held-child-resumes">
                           {hold.heldResumes.map((resume) => (
                             <li key={resume.occurrenceId}>
-                              <code>{resume.occurrenceId}</code> · {relativeTime(resume.since)}
+                              <code>{resume.occurrenceId}</code> · <RelativeTime at={resume.since} />
                             </li>
                           ))}
                         </ul>

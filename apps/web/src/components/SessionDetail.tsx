@@ -6676,7 +6676,6 @@ function SessionDetailLoaded({
               )}
               {heldChildren.length > 0 && (
                 <CampaignHeldChildren
-                  sessionId={sessionId}
                   heldChildren={heldChildren}
                   blocked={session.orchestratorCampaign?.children?.blocked ?? heldChildren.length}
                   childTitle={heldChildTitle}
