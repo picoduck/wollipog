@@ -2049,6 +2049,38 @@ value is not in the DOM.
 - Replaces `.personal-identifier`, `.personal-identifier-value`, `.personal-identifier-mask`,
   `.personal-identifier-toggle` and `.personal-identifier-field-head`.
 
+### 11.9 Artifact Preview
+
+One anatomy for a workflow artifact, in the Browser tool and in Run detail (#2855,
+`components/ArtifactPreview.tsx`): a header, a meta line and the body.
+
+- **Header.** `.art-bar`, a 48px `.toolbar` (§4.4): in the Browser, **Back to Artifacts** (an
+  `.icon-btn` with `ChevronLeft`, the tool's only back control), then the title in `--type-section`,
+  left-aligned and truncating, **Enlarge** (`Maximize2`) for an image or HTML preview once shown, and
+  **Download**. The Browser places it in the panel's toolbar slot (§4.9), so it stays put while the
+  meta line and the body scroll. Run detail opens the same preview in a `Modal` of size `lg` (a sheet
+  on phones, §7.5), whose title is the artifact's name, with Enlarge before Close and Download and
+  **Done** in the footer.
+- **Meta line.** `.art-meta` (§11.3): the kind (`labelFor`), the size (`formatBytes`), who saved it
+  by name ("Claude", "You", a member's name or Wollipog; never a session or user id) and, once the
+  bytes match their checksum, `ShieldCheck` **Verified**. The MIME type and the hash are not shown.
+- **Download.** A `.btn` menu (§9.1): **Download Original File**, whose description is the one
+  warning ("Not redacted. It may contain secrets or personal data."), and **Copy Checksum**, which
+  copies the full SHA-256. No paragraph under the meta line repeats the warning.
+- **Bodies.** Markdown with the shared renderer, without a leading H1 that repeats the title; text
+  and JSON in a `.code-well` at `--font-mono` 12/20 with **Wrap Lines** (JSON in the diff's
+  `diff-syntax-*` token classes); HTML in a well captioned "Sandboxed: scripts, forms and links are
+  turned off." (`sandbox=""`, no scripts, forms or links); an image on a checkerboard well; video as a
+  player. **Enlarge** opens an image or HTML in a full dialog (a full-height sheet on phones) the way
+  the Evidence Viewer shows media (§7), with **Done**; closing returns focus to Enlarge.
+- **States** (§12). Loading is a skeleton under "Loading and checking the preview…". Bytes that fail
+  their checksum show a danger notice, **Couldn't Verify This Artifact**, with **Retry** and the
+  reason behind Show Details; a load that fails otherwise reads **Couldn't Load This Preview**. A type
+  with no safe preview is the `State` **No Preview for This Type** with **Download Original File**.
+- **Rows.** An artifact list is two-line rows (§5.2) in one surface: the kind's icon on a 32px tile,
+  the title, the kind (and in Run detail who saved it) and the time, the size trailing, and a list
+  foot with Show More for the next page. No ids or hashes.
+
 ---
 
 ## 12. Empty, Loading, Error and Offline States

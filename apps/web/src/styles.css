@@ -5182,7 +5182,7 @@ textarea {
 
 /* Browser and authenticated artifact previews. Both iframe surfaces are sandboxed in markup; the
    application chrome remains outside the untrusted browsing context. */
-.browser-artifact-detail,
+.art-view,
 .artifact-preview {
   min-width: 0;
   display: flex;
@@ -5222,23 +5222,18 @@ textarea {
 .browser-web-view { position: relative; }
 .browser-web-view > .notice { margin: var(--space-3) var(--space-4); }
 .browser-web-frame,
-.artifact-preview-frame {
+.art-frame {
   width: 100%;
-  flex: 1;
+  border: 0;
   /* Fixed white on purpose: this frames a page or a published artifact, which carries its own
      theme. Tinting it with ours would show through the page's own background. */
   background: #fff;
 }
 .browser-web-frame {
+  flex: 1;
   min-height: 0;
-  border: 0;
 }
 .browser-web-frame[hidden] { display: none; }
-.artifact-preview-frame {
-  min-height: 420px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-}
 /* Until the page fires `load`: a 2px accent bar sweeping along the frame's top edge. */
 .browser-load-bar {
   position: absolute;
@@ -5265,20 +5260,12 @@ textarea {
 @media (prefers-reduced-motion: reduce) {
   .browser-load-bar::before { width: 100%; animation: none; }
 }
-.browser-artifact-head,
-.artifact-preview-meta {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
-}
-.browser-artifact-head > strong,
-.artifact-preview-meta > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.browser-artifact-list { margin: 0; padding: 0; list-style: none; }
-/* A two-line artifact row (§5.2): the kind on a 32px tile, the title over the kind and the time, and
-   the size trailing on one line however narrow the row gets. */
-.browser-artifact-kind {
+.browser-artifact-list,
+.run-artifact-list { margin: 0; padding: 0; list-style: none; }
+/* A two-line artifact row (§5.2), in the Browser and in Run detail: the kind on a 32px tile, the
+   title over the kind (and who saved it, in Run detail) and the time, and the size trailing on one
+   line however narrow the row gets. */
+.art-kind {
   display: inline-flex;
   flex: none;
   align-items: center;
@@ -5289,39 +5276,131 @@ textarea {
   background: var(--bg-elev-2);
   color: var(--text-dim);
 }
-.browser-artifact-meta {
+.art-row-meta {
   display: flex;
   gap: var(--space-3);
 }
-.browser-artifact-meta > span {
+.art-row-meta > span {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.browser-artifact-meta > time { flex: none; }
-.browser-artifact-size {
+.art-row-meta > time { flex: none; }
+.art-size {
   flex: none;
   max-width: none;
 }
-.artifact-preview-meta { color: var(--text-dim); font-size: 11px; }
-.artifact-preview-image { display: block; max-width: 100%; max-height: 70vh; margin: 0 auto; object-fit: contain; }
-.artifact-preview-video { display: block; width: 100%; max-height: 70vh; margin: 0 auto; background: var(--bg); }
+/* The preview (#2855): one 48px header (§4.4) with the title from its leading edge, a plain meta line
+   (§11.3), then the body. In the Browser the header is the toolbar slot's one row. */
+.rpanel-toolbar:has(> .art-bar) { padding-block: 0; }
+.art-bar { height: var(--bar-h); }
+.art-bar > :not(.art-title) { flex: none; }
+.art-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font: var(--type-section);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.art-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  margin: 0;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.art-verified {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+.skeleton.art-skeleton {
+  min-height: 0;
+  padding: 0;
+}
+.art-skeleton-label {
+  margin: 0;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.art-failure-detail {
+  margin: 0;
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* Media and HTML sit in a well of their own: an image on a checkerboard, so a transparent capture
+   still shows its edges, and HTML over the caption that says what its frame turns off. */
+.art-well {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+}
+.art-checker {
+  display: grid;
+  place-items: center;
+  padding: var(--space-3);
+  background:
+    conic-gradient(var(--bg-elev-2) 0 25%, var(--bg) 0 50%, var(--bg-elev-2) 0 75%, var(--bg) 0) 0 0 / var(--space-4) var(--space-4);
+}
+.art-image { display: block; max-width: 100%; max-height: 70vh; object-fit: contain; }
+.art-video {
+  display: block;
+  width: 100%;
+  max-height: 70vh;
+  border-radius: var(--radius-md);
+  background: var(--bg);
+}
+.art-frame { display: block; height: min(420px, 60vh); }
+.art-caption {
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--border);
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+/* Text and JSON (§11.7): 12/20 mono, wrapped until Wrap Lines turns it off, when the well scrolls
+   sideways instead. */
+.art-code > pre {
+  max-height: 70vh;
+  overflow: auto;
+  font: 400 var(--text-sm)/20px var(--font-mono);
+}
+.art-code:not(.is-wrapped) > pre {
+  white-space: pre;
+  overflow-wrap: normal;
+}
+.art-code > .icon-btn { flex: none; }
+.art-markdown { overflow-wrap: anywhere; }
+.art-inline-actions { justify-content: flex-end; }
+/* Enlarge: the media fills a full dialog's stage, the way the Evidence Viewer shows it (#2207). */
+.art-enlarged .modal-body { gap: var(--space-3); }
+.art-stage {
+  position: relative;
+  display: grid;
+  flex: 1 1 auto;
+  place-items: center;
+  min-height: 160px;
+  border-radius: var(--radius-md);
+  background: var(--bg);
+}
+.art-stage-media {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
 .tl-artifact { min-width: 0; max-width: 680px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); }
 .tl-artifact-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin-bottom: 8px; }
 .tl-artifact-head strong { min-width: 0; overflow-wrap: anywhere; }
 .tl-artifact-head span { color: var(--text-dim); font-size: var(--text-sm); }
-.artifact-preview-text {
-  max-height: 70vh;
-  margin: 0;
-  padding: 10px;
-  overflow: auto;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg);
-}
-.artifact-preview-markdown { overflow-wrap: anywhere; }
 
 /* Provider-neutral auxiliary conversation. The boundary disclosure stays above the independently
    polled transcript; only the explicit insert action can cross back into the primary composer. */
@@ -5370,7 +5449,6 @@ textarea {
 .sidechat-shortcut { text-align: right; }
 
 @media (max-width: 600px) {
-  .artifact-preview-frame { min-height: 55vh; }
   .sidechat-composer { flex-wrap: wrap; }
   .sidechat-composer textarea { flex-basis: 100%; min-height: 88px; }
 }
@@ -10415,62 +10493,19 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 /* -------------------------------- Runs ---------------------------------- */
 /* Runs and pods are lists of two-line rows in one Surface (§5.3), not a card grid. */
 .runs-list { overflow: hidden; }
+/* The run's artifacts (#2855): an unboxed section (§4.5) of full-width rows in one surface. */
 .run-artifacts {
   flex: 0 0 auto;
-  margin-top: 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg-elev);
-  padding: 10px;
+  margin-top: var(--space-4);
 }
 .run-artifacts-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 12px;
-  font-weight: 600;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-3);
+  font: var(--type-section);
 }
-.run-artifact-list {
-  display: flex;
-  gap: 8px;
-  margin-top: 8px;
-  overflow-x: auto;
-}
-.run-artifact-card {
-  flex: 0 0 210px;
-  min-width: 0;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg-elev-2);
-  color: var(--text-dim);
-  text-align: left;
-  cursor: pointer;
-}
-.run-artifact-card:hover { border-color: var(--border-strong); }
-.run-artifact-card span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; }
-.run-artifact-card .run-artifact-name { color: var(--text); font-size: 12px; font-weight: 600; margin-bottom: 3px; }
-.run-artifact-preview {
-  margin-top: 10px;
-  border-top: 1px solid var(--border);
-  padding-top: 8px;
-  max-height: 360px;
-  overflow: auto;
-}
-.run-artifact-preview pre {
-  margin: 8px 0 0;
-  padding: 10px;
-  border-radius: var(--radius-sm);
-  background: var(--bg);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  font-size: 11px;
-}
-.run-artifact-preview img { display: block; max-width: 100%; max-height: 300px; margin: 8px auto 0; }
-@media (max-width: 640px) {
-  .run-artifact-preview .run-artifacts-head { align-items: flex-start; flex-wrap: wrap; }
-}
+.run-artifact-list { overflow: hidden; }
 .compare-grid {
   flex: 1;
   min-height: 0;

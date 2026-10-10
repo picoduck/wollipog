@@ -52,19 +52,38 @@ export async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+/** The bytes that arrived are not the artifact's: its length, type or SHA-256 differ from the record.
+ * A preview names this failure apart from a load that never arrived (#2855). */
+export class ArtifactVerificationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ArtifactVerificationError";
+  }
+}
+
 /** Validate the exact authenticated response before any bytes reach a renderer. */
 export async function verifyArtifactPreviewBlob(artifact: WorkflowArtifactView, blob: Blob): Promise<ArrayBuffer> {
   if (!Number.isSafeInteger(artifact.sizeBytes) || artifact.sizeBytes < 0 || blob.size !== artifact.sizeBytes) {
-    throw new Error("Artifact preview length does not match its immutable metadata.");
+    throw new ArtifactVerificationError("Artifact preview length does not match its immutable metadata.");
   }
   if (mediaType(blob.type) !== mediaType(artifact.mimeType)) {
-    throw new Error("Artifact preview MIME type does not match its immutable metadata.");
+    throw new ArtifactVerificationError("Artifact preview MIME type does not match its immutable metadata.");
   }
   const bytes = await blob.arrayBuffer();
   if ((await sha256Hex(bytes)) !== artifact.sha256.toLowerCase()) {
-    throw new Error("Artifact preview digest does not match its immutable metadata.");
+    throw new ArtifactVerificationError("Artifact preview digest does not match its immutable metadata.");
   }
   return bytes;
+}
+
+/**
+ * A markdown report without its leading H1 when that heading only repeats the artifact's title,
+ * which the preview's header already shows (#2855). Any other first heading stays.
+ */
+export function markdownWithoutTitle(text: string, title: string): string {
+  const match = /^(?:[ \t]*\r?\n)*[ \t]{0,3}#[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*(?:\r?\n|$)/.exec(text);
+  if (!match || match[1]!.trim() !== title.trim()) return text;
+  return text.slice(match[0].length).replace(/^(?:[ \t]*\r?\n)+/, "");
 }
 
 function escapeAttribute(value: string): string {

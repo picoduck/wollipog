@@ -89,7 +89,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `CopyIcon` | Lucide | `Copy` | Generic copy action. |
 | `CheckIcon` | Lucide | `Check` | Generic success state; a completed transcript step. |
 | `SelectLinesIcon` | Lucide | `TextSelection` | Review's Select Lines toggle, which turns line selection on in the diff (#2849). |
-| `WrapLinesIcon` | Lucide | `WrapText` | The Wrap Lines toggle in a markdown code block's header. |
+| `WrapLinesIcon` | Lucide | `WrapText` | The Wrap Lines toggle in a markdown code block's header and in an artifact preview's code well (#2855). |
 | `WarningIcon` | Lucide | `TriangleAlert` | Generic warning state. |
 | `InfoIcon` | Lucide | `Info` | Generic information state; the info and neutral tone icon on toasts and notices; the session bar's Pinned Summary toggle, which opens the session's details column. |
 | `SuccessIcon` | Lucide | `CircleCheck` | The success tone icon on toasts and notices; a completed plan step; an allowed or answered Decision Record; the UI evidence digest caption. |
@@ -110,7 +110,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `EyeOffIcon` | Lucide | `EyeOff` | Hide a revealed personal identifier. |
 | `PanelRightIcon` | Lucide | `PanelRight` | Right panel placement; Preview Right, the Sessions preview beside the list (#2219). |
 | `PanelBottomIcon` | Lucide | `PanelBottom` | Preview Below, the Sessions preview under the list (#2219). |
-| `Maximize2Icon` | Lucide | `Maximize2` | Expand Panel: the side panel fills the session's content area (#2845). |
+| `Maximize2Icon` | Lucide | `Maximize2` | Show something larger: Expand Panel, where the side panel fills the session's content area (#2845), and an artifact preview's Enlarge, which opens an image or HTML preview in a full dialog (#2855). |
 | `Minimize2Icon` | Lucide | `Minimize2` | Restore Panel: an expanded side panel returns beside the chat (#2845). |
 | `PanelLeftOpenIcon` | Lucide | `PanelLeftOpen` | Expand Navigation: show names in the desktop rail. |
 | `PanelLeftCloseIcon` | Lucide | `PanelLeftClose` | Collapse Navigation: return the desktop rail to icons. |
@@ -143,7 +143,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `ZedEditorIcon` | Custom Exception | `Simple Icons 16.29.0: Zed Industries` | Canonical monochrome product mark; Lucide excludes vendor logos. |
 | `ShieldIcon` | Lucide | `Shield` | Generic approval status, intentionally filled; the Request Card's Permission kind. |
 | `ShieldAlertIcon` | Lucide | `ShieldAlert` | A permission mode that skips approval checks: the composer bar's shield and that mode's permission menu row, amber on the icon only. |
-| `ShieldCheckIcon` | Lucide | `ShieldCheck` | An Orchestrator's fixed permission mode in the composer bar. |
+| `ShieldCheckIcon` | Lucide | `ShieldCheck` | An Orchestrator's fixed permission mode in the composer bar, and Verified on an artifact preview's meta line once its bytes match their checksum (#2855). |
 | `PlanIcon` | Lucide | `ListTodo` | A plan: the composer bar's Plan toggle and a transcript plan card's head; `ListChecks` already means the background job list. |
 | `ArrowUpIcon` | Lucide | `ArrowUp` | Generic upward action. |
 | `ArrowDownIcon` | Lucide | `ArrowDown` | Generic downward action; Jump to Question on a pending question's transcript marker, down to the request dock. |

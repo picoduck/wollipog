@@ -1,1 +1,0 @@
-|.run-artifact-card|padding|10px

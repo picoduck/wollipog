@@ -1,7 +1,7 @@
 import { fireDomEvent } from "./test-dom-events.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { beforeEach, mock, test } from "node:test";
+import { beforeEach, describe, mock, test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
@@ -170,11 +170,11 @@ test("artifact rows name their kind with acronyms intact and keep the size on on
   await withPanel(async () => ({ artifacts: [html, verdict] }), async (container) => {
     const rows = Array.from(container.querySelectorAll(".browser-artifact-list .row"));
     assert.ok(rows.every((row) => row.classList.contains("row") && row.classList.contains("row-2")), "two-line rows (§5.2)");
-    assert.ok(rows.every((row) => row.querySelector(".browser-artifact-kind svg")), "each row leads with its kind's icon");
-    const meta = rows.map((row) => row.querySelector(".browser-artifact-meta > span")?.textContent);
+    assert.ok(rows.every((row) => row.querySelector(".art-kind svg")), "each row leads with its kind's icon");
+    const meta = rows.map((row) => row.querySelector(".art-row-meta > span")?.textContent);
     assert.deepEqual(meta, ["HTML preview", "Verdict (JSON)"]);
-    assert.ok(rows[0]!.querySelector(".browser-artifact-meta > time"), "the time follows the kind");
-    assert.equal(rows[0]!.querySelector(".browser-artifact-size")?.textContent, "1.7 KB");
+    assert.ok(rows[0]!.querySelector(".art-row-meta > time"), "the time follows the kind");
+    assert.equal(rows[0]!.querySelector(".art-size")?.textContent, "1.7 KB");
     assert.doesNotMatch(container.textContent ?? "", /Html Preview/);
     assertNoDomNode(container.querySelector(".browser-artifacts > p"), "the intro paragraph is gone");
   });
@@ -360,6 +360,54 @@ test("a page that never fires load within 8 seconds shows Page Blocked with Open
       assert.equal((container.querySelector(".browser-web-frame") as HTMLIFrameElement).hidden, false);
     } finally {
       mock.timers.reset();
+    }
+  });
+});
+
+describe("an open artifact in the Browser (#2855)", () => {
+  test("its 48px header is the toolbar slot's row, with one back control and the title from the leading edge", async () => {
+    const log = artifact("first", "first body");
+    const priorExport = api.artifactExport;
+    api.artifactExport = async () => new Blob(["first body"], { type: "text/plain" });
+    try {
+      await withPanel(async () => ({ artifacts: [log] }), async (container) => {
+        await act(async () => { (container.querySelector(".browser-artifact-list .row") as HTMLButtonElement).click(); });
+        await waitForPreviewToSettle(container);
+        const bar = container.querySelector(".rpanel-toolbar > .toolbar.art-bar");
+        assert.ok(bar, "the header sits in the toolbar slot, above the one scroller");
+        assert.equal(bar.querySelector(".art-title")?.textContent, "first.log");
+        const backs = [...container.querySelectorAll("button")].filter((button) =>
+          /^Back/u.test(button.getAttribute("aria-label") ?? button.textContent ?? ""));
+        assert.deepEqual(backs.map((button) => button.getAttribute("aria-label")), ["Back to Artifacts"], "exactly one back control");
+        assert.ok(bar.firstElementChild === backs[0], "Back leads the header");
+        assertNoDomNode(container.querySelector(".browser-artifact-head"), "the old head is gone");
+        assert.doesNotMatch(container.textContent ?? "", /‹/u);
+        assert.match(container.querySelector(".rpanel-scroll .art-meta")?.textContent ?? "", /Test log/u, "the meta line scrolls with the body");
+      });
+    } finally {
+      api.artifactExport = priorExport;
+    }
+  });
+
+  test("opening an artifact focuses Back to Artifacts, and Back returns focus to the row it was opened from", async () => {
+    const first = artifact("first", "first body");
+    const second = artifact("second", "second body");
+    const priorExport = api.artifactExport;
+    api.artifactExport = async (id: string) => new Blob([id === "first" ? "first body" : "second body"], { type: "text/plain" });
+    try {
+      await withPanel(async () => ({ artifacts: [first, second] }), async (container) => {
+        const rows = () => [...container.querySelectorAll<HTMLButtonElement>(".browser-artifact-list .row")];
+        await act(async () => { rows()[1]!.click(); });
+        await waitForPreviewToSettle(container);
+        const back = buttonNamed(container, "Back to Artifacts")!;
+        // Booleans, not nodes: a failed comparison of two happy-dom elements inspects their graphs.
+        assert.ok(domWindow.document.activeElement === back, "focus lands on Back as the row goes away");
+        await act(async () => back.click());
+        assert.equal(rows().length, 2);
+        assert.ok(domWindow.document.activeElement === rows()[1], "focus returns to the second row");
+      });
+    } finally {
+      api.artifactExport = priorExport;
     }
   });
 });

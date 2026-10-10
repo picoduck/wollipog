@@ -7,7 +7,7 @@ import { Window } from "happy-dom";
 import type { WorkflowArtifactView } from "@wollipog/protocol";
 import { api } from "../api.js";
 import { DEVICE_TOKEN_CHANGED_EVENT } from "../device-token.js";
-import { ArtifactPreview } from "./ArtifactPreview.js";
+import { ArtifactInlinePreview } from "./ArtifactPreview.js";
 import { TranscriptImageCacheProvider } from "./TranscriptImageCache.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 
@@ -36,6 +36,10 @@ function artifact(id: string, bytes: Uint8Array): WorkflowArtifactView {
     createdAt: 1,
   };
 }
+
+const buttonNamed = (scope: Element, name: string) =>
+  [...scope.querySelectorAll<HTMLButtonElement>("button")]
+    .find((button) => (button.getAttribute("aria-label") ?? button.textContent?.trim()) === name) ?? null;
 
 async function waitForPreview(predicate: () => boolean, description: string): Promise<void> {
   const deadline = Date.now() + 5_000;
@@ -81,8 +85,8 @@ test("artifact preview fences stale loads and revokes its selected image URL on 
   const container = happyContainer as unknown as HTMLDivElement;
   const root = createRoot(container);
   try {
-    await act(async () => { root.render(<ArtifactPreview artifact={first} />); });
-    await act(async () => { root.render(<ArtifactPreview artifact={artifact("second", secondBytes)} />); });
+    await act(async () => { root.render(<ArtifactInlinePreview artifact={first} />); });
+    await act(async () => { root.render(<ArtifactInlinePreview artifact={artifact("second", secondBytes)} />); });
     await act(async () => { resolveSecond(new Blob([secondBytes], { type: "image/png" })); });
     await waitForPreview(() => !!container.querySelector("img")?.getAttribute("src"), "the selected image");
     assert.equal(container.querySelector("img")?.getAttribute("src"), "blob:preview-1");
@@ -120,12 +124,12 @@ test("verified video artifacts render a private inline player and release their 
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
   try {
-    await act(async () => root.render(<ArtifactPreview artifact={item} />));
+    await act(async () => root.render(<ArtifactInlinePreview artifact={item} />));
     await waitForPreview(
-      () => !!container.querySelector("video.artifact-preview-video")?.getAttribute("src"),
+      () => !!container.querySelector("video.art-video")?.getAttribute("src"),
       "the verified video player",
     );
-    const video = container.querySelector("video.artifact-preview-video");
+    const video = container.querySelector("video.art-video");
     assert.equal(video?.getAttribute("src"), "blob:private-video");
     assert.equal(video?.hasAttribute("controls"), true);
     assert.equal(video?.hasAttribute("playsinline"), true);
@@ -166,7 +170,7 @@ test("transcript screenshot remount reuses verified bytes until credentials or s
     await act(async () => root.render(
       <React.StrictMode>
         <TranscriptImageCacheProvider key={session}>
-          {item && <ArtifactPreview artifact={item} />}
+          {item && <ArtifactInlinePreview artifact={item} />}
         </TranscriptImageCacheProvider>
       </React.StrictMode>,
     ));
@@ -236,13 +240,17 @@ test("a mismatched transcript image is never cached and can load on a later moun
   const root = createRoot(container);
   const render = async (show: boolean) => {
     await act(async () => root.render(
-      <TranscriptImageCacheProvider>{show && <ArtifactPreview artifact={item} />}</TranscriptImageCacheProvider>,
+      <TranscriptImageCacheProvider>{show && <ArtifactInlinePreview artifact={item} />}</TranscriptImageCacheProvider>,
     ));
   };
   try {
     await render(true);
     await waitForPreview(() => !!container.querySelector('[role="alert"]'), "the digest mismatch error");
-    assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /digest does not match/);
+    const alert = container.querySelector('[role="alert"]')!;
+    assert.match(alert.textContent ?? "", /Couldn't Verify This Artifact/u);
+    assert.doesNotMatch(alert.textContent ?? "", /digest does not match/u, "the raw reason waits behind Show Details");
+    await act(async () => buttonNamed(alert, "Show Details")!.click());
+    assert.match(alert.textContent ?? "", /digest does not match/u);
     assertNoDomNode(container.querySelector("img"));
     assert.equal(created, 0);
     await render(false);

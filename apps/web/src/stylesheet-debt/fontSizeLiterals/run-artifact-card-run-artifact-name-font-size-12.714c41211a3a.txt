@@ -1,1 +1,0 @@
-|.run-artifact-card .run-artifact-name|font-size|12

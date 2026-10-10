@@ -73,6 +73,7 @@ import "../styles.css";
 import { staticPinnedSummary } from "../components/pinned-summary-state.js";
 import { DIFF_SECTIONS_STATUS_FILES, diffSectionsDiff } from "./diff-sections-fixture.js";
 import { checkoutFindings, inMemoryReviewFindings } from "./review-findings-fixture.js";
+import type { WorkflowArtifactView } from "@wollipog/protocol";
 
 const FIXTURE_QUERY = new URLSearchParams(window.location.search);
 const SCENARIO = FIXTURE_QUERY.get("scenario");
@@ -1152,6 +1153,70 @@ const activeRun: RunView = {
 };
 
 /**
+ * `?runArtifacts=1`: the run's artifacts (#2855), saved by the Alpha session's agent and by
+ * Wollipog, with real bytes that match their checksums, two pages of them. The Browser tool of any
+ * session lists the same ones. Off by default, so the other cases see the run and sessions they
+ * always have.
+ */
+const RUN_ARTIFACTS = FIXTURE_QUERY.get("runArtifacts") === "1";
+const runArtifactText = new TextEncoder();
+
+function runArtifactScreenshot(): Promise<Uint8Array> {
+  const canvas = document.createElement("canvas");
+  canvas.width = 1200;
+  canvas.height = 760;
+  const context = canvas.getContext("2d")!;
+  context.fillStyle = "#f6f8fa";
+  context.fillRect(40, 40, 1120, 680);
+  context.fillStyle = "#0b5cad";
+  context.fillRect(40, 40, 1120, 56);
+  context.fillStyle = "#ffffff";
+  context.font = "600 24px system-ui, sans-serif";
+  context.fillText("Checkout — Order Summary", 68, 76);
+  context.fillStyle = "#d0d7de";
+  for (let row = 0; row < 5; row += 1) context.fillRect(68, 140 + row * 96, 1064, 72);
+  return new Promise((resolve) => canvas.toBlob((blob) => {
+    void blob!.arrayBuffer().then((buffer) => resolve(new Uint8Array(buffer)));
+  }, "image/png"));
+}
+
+const RUN_ARTIFACT_SOURCES: ReadonlyArray<{
+  id: string; kind: WorkflowArtifactView["kind"]; name: string; mimeType: string; ageMinutes: number;
+  author: WorkflowArtifactView["createdBy"]; body: () => Promise<Uint8Array>;
+}> = [
+  { id: "run-art-report", kind: "review_report", name: "Final QA report", mimeType: "text/markdown", ageMinutes: 6,
+    author: { kind: "agent", id: "session-alpha" },
+    body: async () => runArtifactText.encode("# Final QA report\n\n## Summary\n\nAll 214 checks passed on the release candidate.\n\n- Checkout: passed\n- Settings: passed\n- Sign-in: passed after one retry\n") },
+  { id: "run-art-shot", kind: "screenshot", name: "Checkout at 1440px.png", mimeType: "image/png", ageMinutes: 9,
+    author: { kind: "agent", id: "session-alpha" }, body: runArtifactScreenshot },
+  { id: "run-art-log", kind: "test_log", name: "e2e shard 3 of 5.log", mimeType: "text/plain", ageMinutes: 14,
+    author: { kind: "agent", id: "session-alpha" },
+    body: async () => runArtifactText.encode(Array.from({ length: 60 }, (_, index) => `12:04:${String(index).padStart(2, "0")} ✔ checkout.spec.ts › case ${index + 1} (${(index % 9) + 3}ms)`).join("\n")) },
+  { id: "run-art-html", kind: "html_preview", name: "Order summary preview", mimeType: "text/html", ageMinutes: 20,
+    author: { kind: "agent", id: "session-alpha" },
+    body: async () => runArtifactText.encode("<!doctype html><style>body{font:14px system-ui;margin:24px}h1{font-size:20px}</style><h1>Order Summary</h1><p>3 items · $42.00</p>") },
+  { id: "run-art-verdict", kind: "verdict", name: "Gate verdict", mimeType: "application/json", ageMinutes: 31,
+    author: { kind: "system", id: "control-plane" },
+    body: async () => runArtifactText.encode(JSON.stringify({ verdict: "pass", gate: "qa", blocking: 0, retried: ["sign-in"] })) },
+];
+
+let runArtifactsLoaded: Promise<Array<{ view: WorkflowArtifactView; bytes: Uint8Array }>> | null = null;
+function runArtifacts(): Promise<Array<{ view: WorkflowArtifactView; bytes: Uint8Array }>> {
+  runArtifactsLoaded ??= Promise.all(RUN_ARTIFACT_SOURCES.map(async (source) => {
+    const bytes = await source.body();
+    const digest = await crypto.subtle.digest("SHA-256", bytes as BufferSource);
+    const sha256 = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+    const view: WorkflowArtifactView = {
+      artifactId: source.id, runId: activeRun.id, kind: source.kind, name: source.name, mimeType: source.mimeType,
+      encoding: source.kind === "screenshot" ? "base64" : source.kind === "verdict" ? "json" : "utf8",
+      sizeBytes: bytes.byteLength, sha256, createdBy: source.author, createdAt: Date.now() - source.ageMinutes * 60_000,
+    };
+    return { view, bytes };
+  }));
+  return runArtifactsLoaded;
+}
+
+/**
  * The row-columns scenario's snooze: two days ahead at 2:30 PM here, saved from a browser in another
  * zone, so its row must still read in this one (#2218).
  */
@@ -1987,7 +2052,11 @@ const client = {
     memberships: [],
     teams: structuredClone(identityTeams),
   }),
-  artifactExport: async () => {
+  artifactExport: async (artifactId: string) => {
+    const runArtifact = artifactId.startsWith("run-art-")
+      ? (await runArtifacts()).find((candidate) => candidate.view.artifactId === artifactId)
+      : undefined;
+    if (runArtifact) return new Blob([runArtifact.bytes as BlobPart], { type: runArtifact.view.mimeType });
     const encoded = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
     const binary = atob(encoded);
     const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
@@ -2038,7 +2107,16 @@ const client = {
       status: "available" as const,
     },
   }),
-  runWorkflowArtifacts: async () => ({ artifacts: [], nextCursor: undefined }),
+  runWorkflowArtifacts: async (_runId: string, cursor?: string) => {
+    if (!RUN_ARTIFACTS) return { artifacts: [], nextCursor: undefined };
+    const views = (await runArtifacts()).map((candidate) => candidate.view);
+    return cursor ? { artifacts: views.slice(4) } : { artifacts: views.slice(0, 4), nextCursor: "run-artifacts-2" };
+  },
+  ...(RUN_ARTIFACTS ? {
+    sessionWorkflowArtifacts: async (sessionId: string) => ({
+      artifacts: (await runArtifacts()).map((candidate) => ({ ...candidate.view, sessionId })),
+    }),
+  } : {}),
   createSession: async (request: CreateSessionRequest) => {
     lastCreateSessionRequest = structuredClone(request);
     const created = session(
