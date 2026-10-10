@@ -115,6 +115,8 @@ async function select(page: Page, index: number) {
 }
 
 test("ten nine-session production cycles release detached previews and keep DOM/listeners stable after GC", async ({ page }, info) => {
+  // Keep retry captures separate: a later passing attempt must not overwrite a failed series.
+  const attemptEvidenceDir = evidenceDir && (info.retry === 0 ? evidenceDir : join(evidenceDir, `retry-${info.retry}`));
   const cycles = Number(process.env.SESSION_RETENTION_CYCLES || 10);
   if (!Number.isInteger(cycles) || cycles < 10 || cycles > 100) throw new Error("SESSION_RETENTION_CYCLES must be from 10 through 100");
   info.setTimeout(120_000 + cycles * 5_000);
@@ -135,9 +137,9 @@ test("ten nine-session production cycles release detached previews and keep DOM/
   };
   await navigateCycle();
   await navigateCycle();
-  if (evidenceDir) {
-    mkdirSync(evidenceDir, { recursive: true });
-    writeFileSync(join(evidenceDir, "early.heapsnapshot"), await snapshot(cdp));
+  if (attemptEvidenceDir) {
+    mkdirSync(attemptEvidenceDir, { recursive: true });
+    writeFileSync(join(attemptEvidenceDir, "early.heapsnapshot"), await snapshot(cdp));
   }
   for (let cycle = 0; cycle <= cycles; cycle++) {
     if (cycle > 0) await navigateCycle();
@@ -156,17 +158,21 @@ test("ten nine-session production cycles release detached previews and keep DOM/
     { cwd: referenceRoot, encoding: "utf8" }).stdout.trim() || "source-archive";
   const gitStatus = spawnSync("git", ["status", "--porcelain"], { cwd: referenceRoot, encoding: "utf8" });
   const sourceDirty = gitStatus.status === 0 ? Boolean(gitStatus.stdout.trim()) : null;
-  const report = { sourceRevision, sourceDirty, assetSha256,
+  const report = { sourceRevision, sourceDirty, assetSha256, retry: info.retry,
+    browserVersion: page.context().browser()?.version() ?? "unknown",
     engineMode: info.project.use.launchOptions?.args?.includes("--js-flags=--jitless") ? "jitless" : "default",
     sessions: RETENTION_SESSION_COUNT, warmupCycles: 2, measuredCycles: cycles,
     samples, ...retainers, heapTrendBytesPerCycle: (samples.at(-1)!.heapBytes - samples[0]!.heapBytes) / cycles };
+  // CI does not currently upload this test's attachment. Emit only synthetic primitive metadata
+  // and counters before assertions so an initial failure stays inspectable after a passing retry.
+  console.info("session-retention-measurements", JSON.stringify({ ...report, retainerPath: undefined }));
   await info.attach("session-retention.json", { body: JSON.stringify(report, null, 2), contentType: "application/json" });
   // Preserve before assertions, including when the reference build intentionally fails.
-  if (evidenceDir) {
-    mkdirSync(evidenceDir, { recursive: true });
-    writeFileSync(join(evidenceDir, "measurements.json"), JSON.stringify(report, null, 2));
-    writeFileSync(join(evidenceDir, "final.heapsnapshot"), raw);
-    await page.screenshot({ path: join(evidenceDir, "desktop.png") });
+  if (attemptEvidenceDir) {
+    mkdirSync(attemptEvidenceDir, { recursive: true });
+    writeFileSync(join(attemptEvidenceDir, "measurements.json"), JSON.stringify(report, null, 2));
+    writeFileSync(join(attemptEvidenceDir, "final.heapsnapshot"), raw);
+    await page.screenshot({ path: join(attemptEvidenceDir, "desktop.png") });
   }
   expect(retainers.detachedPreviewRoots, JSON.stringify(retainers.retainerPath)).toBe(0);
   expect(Math.max(...samples.map(sample => sample.detachedWeakRoots))).toBe(0);

@@ -40,6 +40,40 @@ ResizeObserver afterward, using the latest reporter and ignoring zero-width hidd
 Session selectors, streaming selectors, hydration, cancellation, current-turn opening, paging,
 focus and shortcut behavior are unchanged.
 
+### Removed Loading Children
+
+The first current merge-group validation (`138b216bb7140b9ca411ac7b226a0d84417f6ca1`,
+run `38085980527`, shard 5 job `114312443608`) found a node spread of 23, above the unchanged
+limit of 20. Its strong and weak detached-preview assertions passed; the listener assertion was
+not reached in that attempt. The automatic retry passed, but `failOnFlakyTests` correctly made
+the job fail. The run listed zero uploaded artifacts, so its original per-cycle measurements and
+retry attachment cannot be recovered from that listing. The exact 23-node breakdown is unknown.
+
+An unchanged local reproduction of that pinned group passed with 821–838 nodes, zero preview
+roots and 344 listeners. Its early/final forced-GC snapshots expose a separate bounded owner:
+the live `.detail-scroll` viewport's ResizeObserver callback closes over `useFollowTail`'s
+`observed` Set, which still contains a detached transcript-loading skeleton. The early graph has
+18 detached skeleton nodes; the final graph loses those and gains one attached text node, matching
+the 17-node endpoint difference. The Set only added direct children and did not release removed
+ones. This proves the local owner, without inferring the unavailable CI series from it.
+
+The additional fix reconciles those observations when children change: it unobserves and deletes
+removed direct children, retains viewport/current-child observation, and clears the Set on cleanup.
+The same group bundle with only that hook overlaid passes ten cycles at 820–821 nodes, zero roots
+and 344 listeners. Both early and final snapshots have no detached skeleton. The before bundle
+fingerprint is `be1d839bbee8748dcb991e1e7652ba0956f77d76de6e0e4a48854f142238188c`; the overlay is
+`dc1409ccbeb6bce8d916857c14f67c419c64e38b847f3c058ef599e8186a6b6b`. The actual group's parent
+`771dedaaa706f03013c33915a4293455f903dcb9` independently reproduces the original width-state
+owner, two retained previews and listeners increasing from 353 to 362.
+
+The observer lifecycle test fails on the old hook and verifies removed-child release, replacement
+content/viewport observation, session replacement and StrictMode cleanup. Follow/resize/scroll
+behavior and current-turn opening are preserved. Thresholds, retries, timeouts, ordinary CI
+admission and flaky-test enforcement are unchanged. Future attempts emit synthetic primitive
+source/engine/browser/retry metadata and counters before assertions; retry captures use separate
+directories so a passing attempt cannot replace the failed series. The original CI failure and all
+earlier measurements remain historical evidence.
+
 ## Measurements
 
 Counts are Chromium `Memory.getDOMCounters`, including native DOM nodes and listeners after GC.
@@ -153,7 +187,8 @@ reader frames; it is test instrumentation, not a product delay. Two warm-up cycl
 measurement. Playwright tracing is disabled because its DOM snapshots/observers introduce an
 additional owner.
 
-`measurements.json` records source revision/dirty state, engine mode, asset fingerprint, every sample,
+`measurements.json` records source revision/dirty state, engine mode, browser version, retry index,
+asset fingerprint, every sample,
 heap trend and a shortest strong GC-root path when detached previews exist. `early.heapsnapshot`
 and `final.heapsnapshot` keep the raw before/after graphs when an evidence directory is configured,
 and `desktop.png` shows the synthetic surface. The heap analyzer uses only

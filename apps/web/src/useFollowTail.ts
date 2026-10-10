@@ -642,6 +642,13 @@ export function useFollowTail({
     // window and a layout-driven scroll event cannot be misclassified as reader intent.
     resizeObserver.observe(element);
     const observeChildren = () => {
+      // Loading placeholders and replaced timelines must leave both the observer and its
+      // callback's Set when they leave this reader, rather than surviving until session unmount.
+      for (const child of observed) {
+        if (child.parentElement === element) continue;
+        resizeObserver.unobserve(child);
+        observed.delete(child);
+      }
       for (const child of element.children) {
         if (observed.has(child)) continue;
         observed.add(child);
@@ -677,6 +684,7 @@ export function useFollowTail({
       element.removeEventListener(VIRTUAL_ROW_RESIZE_EVENT, onRowResize);
       element.removeEventListener("scroll", onNestedScroll, true);
       resizeObserver.disconnect();
+      observed.clear();
     };
   }, [cancelScheduledScrollIntent, observeViewportGeometry, scrollRef, scheduleFollow, scrollToBottom, sessionId]);
 
