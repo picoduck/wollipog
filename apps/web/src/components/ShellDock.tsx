@@ -291,7 +291,14 @@ export function ShellDock({
   }, [shellOutput, shells, sessionId, removeShellOutput]);
 
   // Another tab's terminal counts its own matches when it mounts; the last tab's count is not its.
-  useEffect(() => setSearchResults(null), [active]);
+  // With no tab left there is nothing to search, so search closes.
+  useEffect(() => {
+    setSearchResults(null);
+    if (active === null) {
+      setSearchOpen(false);
+      setSearchTerm("");
+    }
+  }, [active]);
 
   const activeShell = shells?.find((s) => s.shellId === active) ?? null;
   const hookGovernanceActive = sessionHasHookGovernance(session?.agentCapabilities);
