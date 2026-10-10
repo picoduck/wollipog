@@ -54,7 +54,10 @@ import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { outstandingSessionResult } from "../session-follow-up.js";
 import { SkillsUnavailableNotice, skillsUnavailableSentence, useSessionSkillsUnavailable, useSkillsNoticeDismissal } from "./SkillsUnavailableNotice.js";
-import { isPartialHistory, isRebuiltEventsArray, useStoreActions, useStoreSelector, useStoreSelectorUnlessQuiet } from "../store.js";
+import {
+  isPartialHistory, isRebuiltEventsArray, sessionEqualIgnoringStreaming, sessionsEqualIgnoringStreaming, useStoreActions,
+  useStoreSelector, useStoreSelectorUnlessQuiet, useStoreValueSource,
+} from "../store.js";
 import { useShowAgentLogs } from "../agent-logs.js";
 import { agentLogOnly } from "../work-steps.js";
 import { shortenPath, titleCaseLabel } from "../format.js";
@@ -718,7 +721,11 @@ export function SessionDetail(props: SessionDetailProps) {
   const api = useApi();
   const { sessionId } = props;
   const { dispatch, loadSession, navigate } = useStoreActions();
-  const session = useStoreSelector((s) => s.sessions.get(sessionId));
+  // A paced upsert that moves only streaming fields (live usage, activity time, the message count
+  // and the preview) keeps the version this view rendered, so it renders neither the view nor its
+  // children four times a second while an agent streams (#2872). The parts that show one of those
+  // fields read it through `useLiveSession`.
+  const session = useStoreSelector((s) => s.sessions.get(sessionId), sessionEqualIgnoringStreaming);
   const conn = useStoreSelector((s) => s.conn);
   const snapshotRevision = useStoreSelector((s) => s.snapshotRevision);
   const snapshotLoaded = useStoreSelector((s) => s.snapshotLoaded);
@@ -1008,12 +1015,20 @@ const ProfiledEventTimeline = memo(function ProfiledEventTimeline({ liveSessionI
   );
 });
 
-/** The history notice, counting the loaded events itself: a chunk that only lengthens the reply
- * does not render the session view around it (#2763). */
+/** The history notice, counting the loaded events and the session's messages itself: a chunk that
+ * only lengthens the reply (#2763), and a paced upsert that only moves the count (#2872), do not
+ * render the session view around it. */
 function LiveTranscriptHistoryNotice({ sessionId, ...props }:
-  Omit<ComponentProps<typeof TranscriptHistoryNotice>, "loaded"> & { sessionId: string }) {
+  Omit<ComponentProps<typeof TranscriptHistoryNotice>, "loaded" | "total"> & { sessionId: string }) {
   const loaded = useStoreSelector((state) => state.events.get(sessionId)?.length ?? 0);
-  return <TranscriptHistoryNotice {...props} loaded={loaded} />;
+  const messageCount = useStoreSelector((state) => state.sessions.get(sessionId)?.messageCount ?? 0);
+  return <TranscriptHistoryNotice {...props} loaded={loaded} total={messageCount > 0 ? messageCount : undefined} />;
+}
+
+/** The opening skeleton, saying how many messages are coming as the count moves (#2872). */
+function LiveTranscriptSkeleton({ sessionId }: { sessionId: string }) {
+  const messageCount = useStoreSelector((state) => state.sessions.get(sessionId)?.messageCount ?? 0);
+  return <TranscriptSkeleton sentence={transcriptLoadingSentence(messageCount)} />;
 }
 
 /** Heartbeats within one busy period of one history: the same for everything but the transcript. */
@@ -1157,7 +1172,8 @@ function SessionDetailLoaded({
   });
   const runner = useStoreSelector((s) => s.runners.get(session.runnerId));
   const showAgentLogs = useShowAgentLogs();
-  const allSessions = useStoreSelector((s) => s.sessions);
+  // Which session first used each project's worktree reads no streaming field (#2872).
+  const allSessions = useStoreSelector((s) => s.sessions, sessionsEqualIgnoringStreaming);
   const allRunners = useStoreSelector((s) => s.runners);
   const worktreeSetupConfigSupported = useStoreSelector((s) => s.worktreeSetupConfigSupported);
   const setupDismissals = useStoreSelector((s) => s.worktreeSetupNoticeDismissals);
@@ -2613,13 +2629,6 @@ function SessionDetailLoaded({
       storeQueuedPromptEditRecovery],
   );
 
-  // Mark the session seen while it is open so the inbox unread badge stays current.
-  useEffect(() => {
-    if (mode !== "expanded") return;
-    const ts = session?.lastEventAt ?? Date.now();
-    saveSeen(markSeen(loadSeen(instanceScope), sessionId, ts), instanceScope);
-  }, [instanceScope, mode, sessionId, session?.lastEventAt]);
-
   // A newly opened conversation can already exist in the REST API while the UI socket is
   // connecting or its stream acknowledgement is missing. Read one bounded opening window and
   // refresh the creation-time row independently; neither requires live stream admission.
@@ -3288,12 +3297,15 @@ function SessionDetailLoaded({
   // Governance outcomes are transcript context, not a persistent header: the decisions whose
   // request has no transcript row of its own are spliced in at their chronological position, and
   // the whole list stays reviewable in the side panel (a full-screen drawer on phones).
-  const governanceAudit = useGovernanceAudit(
-    sessionId,
-    `${session.updatedAt}:${session.pendingApproval?.requestId ?? ""}`,
-    mode === "expanded",
-    evs?.[0]?.ts,
-  );
+  // It refreshes whenever the session's `updatedAt` or request moves, as the session renders. A
+  // policy that decides a tool call records its outcome without changing anything else, so the paced
+  // upserts that move `updatedAt` while an agent streams refresh it too, without rendering this view
+  // (#2872).
+  const governanceRevision = useStoreValueSource((s) => {
+    const live = s.sessions.get(sessionId);
+    return `${live?.updatedAt ?? ""}:${live?.pendingApproval?.requestId ?? ""}`;
+  });
+  const governanceAudit = useGovernanceAudit(sessionId, "", mode === "expanded", evs?.[0]?.ts, governanceRevision);
   const governanceDecisions = governanceAudit.decisions;
   const timelineItems = useGovernanceTimeline(
     items,
@@ -3353,7 +3365,8 @@ function SessionDetailLoaded({
     descriptor.availability === "live" &&
     ["starting", "running", "waiting"].includes(descriptor.lifecycle)),
   [items, runnerOnline, session.status]);
-  const rosterSessions = useStoreSelector((state) => state.sessions);
+  // Only the count of current workers is read here, and a worker's state reads no streaming field (#2872).
+  const rosterSessions = useStoreSelector((state) => state.sessions, sessionsEqualIgnoringStreaming);
   const rosterRuns = useStoreSelector((state) => state.runs);
   const rosterRunners = useStoreSelector((state) => state.runners);
   const activeWorkerCount = useMemo(() => workerRoster(session, activeSubagents,
@@ -6600,6 +6613,7 @@ function SessionDetailLoaded({
     <div className={`session-detail ${mode}`} data-session-surface-id={session.id}>
       {/* Reports each render of this view itself, never one of the transcript alone (#2763). */}
       <Profiler id={SESSION_DETAIL_PROBE} onRender={reportRenderProbe} />
+      {mode === "expanded" && <MarkSessionSeen sessionId={sessionId} instanceScope={instanceScope} />}
       {mode === "expanded" ? (
         <>
         <SessionHeader
@@ -6780,7 +6794,6 @@ function SessionDetailLoaded({
                   sessionId={sessionId}
                   kind={transcript.notice}
                   error={transcript.error}
-                  total={session.messageCount > 0 ? session.messageCount : undefined}
                   machine={runnerDisp.name || undefined}
                   machineOffline={runner?.status === "offline"}
                   canRetry={conn === "online" && !transcript.busy}
@@ -6879,7 +6892,7 @@ function SessionDetailLoaded({
                 ready={openingHistoryFillSettled}
               />
               {transcript.body === "skeleton" ? (
-                <TranscriptSkeleton sentence={transcriptLoadingSentence(session.messageCount)} />
+                <LiveTranscriptSkeleton sessionId={sessionId} />
               ) : transcript.body === "unavailable" ? (
                 // A failed load is the history notice above, alone (#2172); only a disconnected or
                 // unpaired device with nothing cached still needs a state here.
@@ -7738,6 +7751,20 @@ function useProjectButtonReturnFocus(triggerRef: RefObject<HTMLButtonElement | n
   return useMemo(() => ({
     get current() { return projectButtonHandoffTarget(triggerRef.current); },
   }), [triggerRef]);
+}
+
+/**
+ * Marks the open session seen as its activity time moves, so the inbox unread badge stays current.
+ * Every streamed event moves that time, so this reads it itself rather than rendering the session
+ * view for it (#2872).
+ */
+function MarkSessionSeen({ sessionId, instanceScope }: { sessionId: string; instanceScope: string }) {
+  const lastEventAt = useStoreSelector((s) => s.sessions.get(sessionId)?.lastEventAt);
+  useEffect(() => {
+    const ts = lastEventAt ?? Date.now();
+    saveSeen(markSeen(loadSeen(instanceScope), sessionId, ts), instanceScope);
+  }, [instanceScope, sessionId, lastEventAt]);
+  return null;
 }
 
 /** Assigns durable Project organization without changing the session's execution Location. */

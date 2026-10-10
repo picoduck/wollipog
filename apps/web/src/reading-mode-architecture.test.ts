@@ -15,7 +15,13 @@ test("Inbox and expanded sessions share one stable route subtree", () => {
 
 test("the session surface key follows session identity, never display mode", () => {
   assert.doesNotMatch(inbox, /SessionPreview/);
-  assert.match(inbox, /<SessionDetail[\s\S]*?key=\{surfaceSessionId\}[\s\S]*?mode=\{expanded \? "expanded" : "preview"\}/);
+  assert.match(inbox, /const InboxSessionDetail = memo\(SessionDetail\);/);
+  assert.match(inbox, /const surfaceProps: SessionDetailProps = \{[\s\S]*?mode: expanded \? "expanded" : "preview",/);
+  assert.match(inbox, /<InboxSessionDetail key=\{surfaceSessionId\} \{\.\.\.surfaceProps\} \/>/);
+  // The session's effects clean up with these registrations, so they reach it as they are.
+  const wrapped = inbox.match(/useStableCallbacks<Partial<SessionDetailProps>>\(\{([\s\S]*?)\n  \}\);/);
+  assert.ok(wrapped, "the list's own closures are made stable");
+  assert.doesNotMatch(wrapped[1]!, /onPreviewNavigationReady|onPreviewForkReady|onComposerFocusConsumed/);
   assert.doesNotMatch(inbox, /key=\{[^}\n]*(expanded|mode)/,
     "compact and expanded modes must retain the same React component identity");
 });

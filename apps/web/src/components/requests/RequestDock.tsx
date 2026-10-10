@@ -8,7 +8,7 @@ import React, {
   type RefObject,
 } from "react";
 import { sessionAttentionStatus, type AgentQuestion, type PendingApproval, type SessionView } from "@wollipog/protocol";
-import { relativeTime } from "../../format.js";
+import { RelativeTime } from "../RelativeTime.js";
 import type { FollowTailState } from "../../useFollowTail.js";
 import { ChevronRightIcon, ChevronUpIcon } from "../Icons.js";
 import { SessionQuestionBanner } from "../SessionApproval.js";
@@ -338,7 +338,7 @@ export function RequestDock({
                       <RequestKindIcon request={request} />
                       <span className="request-dock-row-title">{request.title}</span>
                       {owner && <span className="request-dock-row-owner">{owner}</span>}
-                      {time ? <span className="request-dock-row-time">{relativeTime(time)}</span> : null}
+                      {time ? <span className="request-dock-row-time"><RelativeTime at={time} /></span> : null}
                     </button>
                   </li>
                 );

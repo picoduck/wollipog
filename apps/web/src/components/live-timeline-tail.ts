@@ -1,6 +1,6 @@
 import { useMemo, useRef } from "react";
 import type { SessionEvent } from "@wollipog/protocol";
-import { useStoreSelector } from "../store.js";
+import { isRebuiltEventsArray, useStoreSelector } from "../store.js";
 import {
   continueStreamingText,
   publishTimelineSnapshotDelta,
@@ -37,6 +37,9 @@ export function onlyContinuesTrailingText(
   next: readonly SessionEvent[] | undefined,
 ): boolean {
   if (!previous || !next || next.length <= previous.length || previous.length === 0) return false;
+  // A merge (a replay, a history load) can replace any earlier event while keeping the ends: the
+  // session view derives again from it, as it always has (#2872).
+  if (isRebuiltEventsArray(next as SessionEvent[])) return false;
   const last = previous[previous.length - 1]!;
   // The store appends by copying the array, so an unchanged prefix keeps its event objects.
   if (next[0] !== previous[0] || next[previous.length - 1] !== last) return false;
@@ -66,27 +69,62 @@ function sameItem(previous: TimelineItem | undefined, next: TimelineItem): boole
   return keys.length === Object.keys(right).length && keys.every((key) => left[key] === right[key]);
 }
 
-/** `items` with the chunks `live` adds to `derivedFrom` folded onto the streaming item they continue,
- * or null when that item is not among them. */
+/** `items`, derived from `derivedFrom`, with the chunks of `live` folded onto the streaming item at `index`. */
+interface TrailingFold {
+  items: TimelineItem[];
+  derivedFrom: readonly SessionEvent[];
+  live: readonly SessionEvent[];
+  index: number;
+  folded: TimelineItem[];
+}
+
+/** Whether `next` holds `previous`'s own events from `from` on. */
+function sameEvents(previous: readonly SessionEvent[], next: readonly SessionEvent[], from: number): boolean {
+  if (next.length < previous.length) return false;
+  for (let index = from; index < previous.length; index += 1) if (next[index] !== previous[index]) return false;
+  return true;
+}
+
+function foldOnto(base: TrailingFold, from: number, live: readonly SessionEvent[]): TrailingFold {
+  let item = base.folded[base.index] as Extract<TimelineItem, { kind: "agent_message" | "agent_thought" }>;
+  for (let next = from; next < live.length; next += 1) {
+    const event = live[next]!;
+    item = continueStreamingText(item, event.seq, (event.payload as AgentTextPayload).text, event.ts);
+  }
+  const folded = base.folded.slice();
+  folded[base.index] = item;
+  return { ...base, live, folded };
+}
+
+/**
+ * `items` with the chunks `live` adds to `derivedFrom` folded onto the streaming item they continue,
+ * or null when they do not only continue it or that item is not among them. The session view renders
+ * for none of those chunks, nor for the paced upserts that count them (#2872), so a long reply can
+ * stream entirely between two of its renders: a fold that only extends the previous one adds just the
+ * new chunks, so each chunk is folded once.
+ */
 function foldTrailingText(
   items: TimelineItem[],
-  derivedFrom: readonly SessionEvent[],
-  live: readonly SessionEvent[],
-): TimelineItem[] | null {
+  derivedFrom: readonly SessionEvent[] | undefined,
+  live: readonly SessionEvent[] | undefined,
+  prior: TrailingFold | null,
+): TrailingFold | null {
+  if (!derivedFrom || !live || live === derivedFrom) return null;
+  // `onlyContinuesTrailingText` is transitive, so derivedFrom → prior.live → live continues as a whole,
+  // provided every chunk the previous fold read is still there: a replayed event can replace one in
+  // place, keeping the others.
+  if (prior && prior.items === items && prior.derivedFrom === derivedFrom &&
+      sameEvents(prior.live, live, derivedFrom.length) && onlyContinuesTrailingText(prior.live, live)) {
+    return foldOnto(prior, prior.live.length, live);
+  }
+  if (!onlyContinuesTrailingText(derivedFrom, live)) return null;
   const last = derivedFrom[derivedFrom.length - 1]!;
   for (let index = items.length - 1; index >= 0; index -= 1) {
     const candidate = items[index]!;
     if ((candidate.kind !== "agent_message" && candidate.kind !== "agent_thought") ||
         candidate.kind !== last.payload.kind || candidate.sourceEndId !== last.seq ||
         candidate.parentToolUseId || !timelineItemIsStreaming(candidate)) continue;
-    let item = candidate;
-    for (let next = derivedFrom.length; next < live.length; next += 1) {
-      const event = live[next]!;
-      item = continueStreamingText(item, event.seq, (event.payload as AgentTextPayload).text, event.ts);
-    }
-    const folded = items.slice();
-    folded[index] = item;
-    return folded;
+    return foldOnto({ items, derivedFrom, live: derivedFrom, index, folded: items }, derivedFrom.length, live);
   }
   return null;
 }
@@ -103,11 +141,12 @@ export function useLiveTimelineTail(
 ): TimelineItem[] {
   const live = useStoreSelector((state) => state.events.get(sessionId));
   const previousRef = useRef<TimelineItem[] | null>(null);
+  const foldRef = useRef<TrailingFold | null>(null);
   return useMemo(() => {
     const previous = previousRef.current;
-    const folded = live !== derivedFrom && onlyContinuesTrailingText(derivedFrom, live)
-      ? foldTrailingText(items, derivedFrom!, live!)
-      : null;
+    const fold = foldTrailingText(items, derivedFrom, live, foldRef.current);
+    foldRef.current = fold;
+    const folded = fold?.folded ?? null;
     // Without chunks to add, the session view's items pass through, unless the transcript last
     // showed its own generation: the projector then needs a delta against that one.
     if (!folded && (!previous || previous === items || timelineSnapshotDelta(items)?.previous === previous)) {

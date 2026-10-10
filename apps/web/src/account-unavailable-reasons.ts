@@ -16,6 +16,16 @@ export function subscriptionResetLabel(timestamp: number, now = Date.now()): str
   return `Resets in ${days} days`;
 }
 
+/**
+ * How long until `subscriptionResetLabel(timestamp, now)` can next read differently: it rounds the
+ * time left up to whole minutes, hours or days, so it changes only as that time crosses a whole
+ * minute. Null once the reset has passed.
+ */
+export function subscriptionResetChangesIn(timestamp: number, now = Date.now()): number | null {
+  const difference = timestamp - now;
+  return difference > 0 ? ((difference - 1) % 60_000) + 1 : null;
+}
+
 function exhaustedReason(window: SubscriptionUsageBucket | undefined, now: number): string {
   if (!window) return "A usage window is used up.";
   // A reset time that has passed says nothing about when the account is usable again: the next

@@ -3,6 +3,8 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useInsertionEffect,
+  useMemo,
   useRef,
   useSyncExternalStore,
   type Dispatch,
@@ -485,6 +487,15 @@ function sameSessionExceptStreaming(a: SessionView, b: SessionView): boolean {
     if (JSON.stringify(left[key]) !== JSON.stringify(right[key])) return false;
   }
   return true;
+}
+
+/**
+ * Whether two versions of one session differ only in streaming fields (#2872). The session view
+ * selects its session with it, so a paced upsert renders only the parts that read those fields
+ * through `useLiveSession`.
+ */
+export function sessionEqualIgnoringStreaming(a: SessionView | undefined, b: SessionView | undefined): boolean {
+  return a === b || (a !== undefined && b !== undefined && sameSessionExceptStreaming(a, b));
 }
 
 /**
@@ -2920,6 +2931,45 @@ export function useOptionalStoreSelector<T>(
     return next;
   };
   return useSyncExternalStore(store?.subscribe ?? (() => () => {}), getSnapshot, getSnapshot);
+}
+
+/**
+ * The store's current version of `session`, for a part of the session view that shows a streaming
+ * field: live usage, cost, activity time or the message count (#2872). The view itself keeps the
+ * version it last rendered while only those fields move, so it does not render four times a second
+ * while an agent streams. Falls back to `session` where no store is mounted or it holds no such session.
+ */
+export function useLiveSession<T extends Pick<SessionView, "id">>(session: T): T {
+  // `T` is a view of a `SessionView` (the whole one, or a Pick of it), which the stored one satisfies.
+  return (useOptionalStoreSelector((s) => s.sessions.get(session.id)) as T | undefined) ?? session;
+}
+
+/**
+ * Renders the caller whenever its session changes, streaming fields included, as the whole session
+ * view used to (#2872): for a part that reads the clock as it renders, such as an age, and so moved
+ * on with every paced upsert. Does nothing where no store is mounted.
+ */
+export function useSessionChanges(sessionId: string | undefined): void {
+  useOptionalStoreSelector((s) => sessionId === undefined ? undefined : s.sessions.get(sessionId));
+}
+
+/** A store value read and watched without rendering. */
+export interface StoreValueSource<T> {
+  read(): T;
+  subscribe(onChange: () => void): () => void;
+}
+
+/**
+ * `selector`'s value as a source an effect can read and watch, for work that follows a change
+ * without showing it, such as a refetch (#2872). The component does not render for it. `selector`
+ * is read when the source is, so it may use values the component renders with: the one of the latest
+ * committed render, taken before any effect runs.
+ */
+export function useStoreValueSource<T>(selector: (s: State) => T): StoreValueSource<T> {
+  const store = useStoreHandle();
+  const selectorRef = useRef(selector);
+  useInsertionEffect(() => { selectorRef.current = selector; });
+  return useMemo(() => ({ read: () => selectorRef.current(store.getState()), subscribe: store.subscribe }), [store]);
 }
 
 /** Back-compat full-state subscription: re-renders on EVERY store change. Fine for transient

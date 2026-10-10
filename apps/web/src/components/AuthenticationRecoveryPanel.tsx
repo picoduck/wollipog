@@ -8,9 +8,9 @@ import {
   type SessionView,
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
-import { relativeTime } from "../format.js";
 import { AccountIdentifier } from "./AccountIdentifier.js";
 import { ProviderLoginCard } from "./ProviderLoginCard.js";
+import { RelativeTime } from "./RelativeTime.js";
 import { BusyButton } from "./ui/BusyButton.js";
 
 type Loadable<T> =
@@ -266,10 +266,10 @@ function lastChecked(
   supported: boolean,
   runnerOnline: boolean,
   identity: Loadable<ProviderAuthenticationCurrentIdentity> | null,
-): string {
+): ReactNode {
   if (!supported || !runnerOnline || identity?.state === "failed") return "Not checked";
   if (!identity || identity.state === "loading") return "Checking…";
-  return relativeTime(identity.value.observedAt);
+  return <RelativeTime at={identity.value.observedAt} />;
 }
 
 function SignedInNow({

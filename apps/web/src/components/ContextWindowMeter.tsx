@@ -4,6 +4,7 @@ import { compactionNote, computeContextFill, type ContextFillTone } from "../con
 import type { ContextWindowCapacity } from "../context-window-capacity.js";
 import { contextWindowDiscrepancy, formatContextWindow } from "../context-window-options.js";
 import { formatTokens } from "../format.js";
+import { useLiveSession } from "../store.js";
 import { useAnchoredPopover } from "./anchored-popover.js";
 import { ComposerButton } from "./ComposerControls.js";
 
@@ -53,11 +54,13 @@ export function contextToneClass(tone: ContextFillTone): string {
  * window differs from what the selected model advertises, the popover says so instead of
  * silently metering against the wrong size.
  */
-export function ContextWindowMeter({ session, resolution, placement }: {
+export function ContextWindowMeter({ session: rendered, resolution, placement }: {
   session: SessionView;
   resolution: ContextWindowCapacity;
   placement?: "bar";
 }) {
+  // Usage moves with every streamed event; the session view does not render for that (#2872).
+  const session = useLiveSession(rendered);
   const contextWindow = resolution.capacity;
   const fill = computeContextFill({
     tokensIn: session.tokensIn,

@@ -3,6 +3,7 @@ import type { SessionUsageResponse, SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { formatCost, formatTokens } from "../format.js";
 import { costProvenanceNote, estimatedCostSourceUrl, sessionCostLabel, sessionUsageTotals } from "../session-cost.js";
+import { useLiveSession } from "../store.js";
 import { useAnchoredPopover } from "./anchored-popover.js";
 import { ComposerButton } from "./ComposerControls.js";
 import { InfoIcon } from "./Icons.js";
@@ -175,7 +176,9 @@ export function SessionUsageBreakdown({ session }: { session: SessionView }) {
  *
  * Renders nothing for a session that has processed nothing.
  */
-export function SessionUsageControl({ session, placement }: { session: SessionView; placement?: "bar" }) {
+export function SessionUsageControl({ session: rendered, placement }: { session: SessionView; placement?: "bar" }) {
+  // Usage and cost move with every streamed event; the session view does not render for that (#2872).
+  const session = useLiveSession(rendered);
   const popover = useAnchoredPopover<HTMLSpanElement, HTMLButtonElement>({ width: 280, height: 340 });
   const panelId = useId();
   const detail = useSessionUsageDetail(session, popover.open);

@@ -562,3 +562,57 @@ test("frozen anchors are dropped when the event history is replaced", async () =
   await act(async () => { root.unmount(); });
   container.remove();
 });
+
+test("a live revision refreshes without rendering, and a refresh that finds nothing new renders nothing (#2872)", async () => {
+  let calls = 0;
+  let entries: GovernanceAuditEntry[] = [entry];
+  const client = {
+    governanceAudit: async () => {
+      calls += 1;
+      return { entries, hasMore: false };
+    },
+  } as unknown as ApiClient;
+  let revision = "updated-1";
+  const listeners = new Set<() => void>();
+  const liveRevision = {
+    read: () => revision,
+    subscribe(onChange: () => void) {
+      listeners.add(onChange);
+      return () => { listeners.delete(onChange); };
+    },
+  };
+  const settle = async (change?: () => void) => {
+    await act(async () => {
+      change?.();
+      for (let index = 0; index < 4; index += 1) await new Promise((resolve) => setImmediate(resolve));
+    });
+  };
+  let renders = 0;
+  let latest: GovernanceAuditState | undefined;
+  function Probe() {
+    renders += 1;
+    latest = useGovernanceAudit("session-1", "", true, undefined, liveRevision);
+    return null;
+  }
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await settle(() => root.render(<ApiProvider client={client}><Probe /></ApiProvider>));
+  assert.equal(calls, 1);
+  const loaded = renders;
+
+  await settle(() => { revision = "updated-2"; listeners.forEach((listener) => listener()); });
+  assert.equal(calls, 2, "a moved live revision refreshes");
+  assert.equal(renders, loaded, "and finding nothing new renders nothing");
+
+  await settle(() => listeners.forEach((listener) => listener()));
+  assert.equal(calls, 2, "a change that leaves the revision where it was does not refresh");
+
+  entries = [entry, { ...entry, auditId: "later", requestId: "hook-2", timestamp: 400 }];
+  await settle(() => { revision = "updated-3"; listeners.forEach((listener) => listener()); });
+  assert.equal(calls, 3);
+  assert.deepEqual(latest?.decisions.map((decision) => decision.auditId), ["h", "later"], "a new decision is shown");
+  await act(async () => { root.unmount(); });
+  assert.equal(listeners.size, 0, "unmounting stops watching");
+  container.remove();
+});

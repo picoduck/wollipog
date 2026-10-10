@@ -6,12 +6,15 @@ import {
   type SessionProviderAccountUnavailable,
   type SessionView,
 } from "@wollipog/protocol";
-import { accountUnavailableReason, derivedAccountUnavailableReason } from "../account-unavailable-reasons.js";
+import {
+  accountUnavailableReason, derivedAccountUnavailableReason, subscriptionResetChangesIn,
+} from "../account-unavailable-reasons.js";
 import { useApi } from "../api-context.js";
 import { isPersonalIdentifier } from "../personal-identifiers.js";
 import { Modal } from "./common.js";
 import { AccountRows, AccountsHead, type AccountRowAccount, type CurrentAccountRow } from "./AccountChoice.js";
 import { Notice } from "./Notice.js";
+import { useRerenderIn } from "./RelativeTime.js";
 import { useAccountIdentifierReveal } from "./AccountIdentifier.js";
 import { State } from "./State.js";
 import { BusyButton } from "./ui/BusyButton.js";
@@ -156,6 +159,13 @@ export function SwitchAccountDialog({
   const currentOption = options?.find((account) => account.id === currentId);
   const offered = new Set(options?.map((account) => account.id) ?? []);
   const now = Date.now();
+  // An unavailable account's reason counts down to its window's reset (#2872).
+  useRerenderIn((unavailableAccounts ?? []).reduce<number | null>((soonest, account) => {
+    const changesIn = account.exhaustedWindow?.resetsAt === undefined
+      ? null
+      : subscriptionResetChangesIn(account.exhaustedWindow.resetsAt, now);
+    return changesIn === null ? soonest : Math.min(soonest ?? changesIn, changesIn);
+  }, null));
   const unavailableRows: AccountRowAccount[] = unavailableAccounts
     ? unavailableAccounts
       .filter((account) => account.id !== currentId && !offered.has(account.id))

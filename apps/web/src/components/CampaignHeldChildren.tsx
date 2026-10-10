@@ -1,10 +1,11 @@
 import { Fragment, type MouseEvent } from "react";
 import type { OrchestratorCampaignProjection, SessionHoldView } from "@wollipog/protocol";
-import { relativeTime, titleCaseLabel } from "../format.js";
+import { titleCaseLabel } from "../format.js";
 import { viewPath } from "../navigation.js";
 import { CountBadge } from "./CountBadge.js";
 import { HeldIcon } from "./Icons.js";
 import { Notice } from "./Notice.js";
+import { RelativeTime } from "./RelativeTime.js";
 
 export type CampaignHeldChild = NonNullable<OrchestratorCampaignProjection["heldChildren"]>[number];
 
@@ -88,7 +89,7 @@ export function CampaignHeldChildren({
                 <dl key={hold.holdId} className="facts" data-hold-kind={hold.kind}>
                   <div>
                     <dt>Hold</dt>
-                    <dd>{holdKindLabel(hold.kind)} · {relativeTime(hold.since)}</dd>
+                    <dd>{holdKindLabel(hold.kind)} · <RelativeTime at={hold.since} /></dd>
                   </div>
                   <div>
                     <dt>Reason</dt>
@@ -105,7 +106,7 @@ export function CampaignHeldChildren({
                         <ul className="held-child-resumes">
                           {hold.heldResumes.map((resume) => (
                             <li key={resume.occurrenceId}>
-                              <code>{resume.occurrenceId}</code> · {relativeTime(resume.since)}
+                              <code>{resume.occurrenceId}</code> · <RelativeTime at={resume.since} />
                             </li>
                           ))}
                         </ul>

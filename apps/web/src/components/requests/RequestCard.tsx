@@ -11,7 +11,8 @@ import React, {
 import type { GovernancePolicy, PendingApproval, PermissionOption, SessionView } from "@wollipog/protocol";
 import { useApi } from "../../api-context.js";
 import type { ApiClient } from "../../api.js";
-import { relativeTime, titleCaseLabel } from "../../format.js";
+import { titleCaseLabel } from "../../format.js";
+import { RelativeTime } from "../RelativeTime.js";
 import { runnerDisplay } from "../../runners.js";
 import { useOptionalNavigate, useOptionalStoreSelector } from "../../store.js";
 import { sessionCommandRefusal } from "../../session-command-permissions.js";
@@ -599,7 +600,7 @@ export function RequestCardHead({ kind, owner, time, trailing }: {
       {(owner || time) && (
         <span className="request-card-meta">
           {owner && <span>{owner}</span>}
-          {time ? <span>{relativeTime(time)}</span> : null}
+          {time ? <span><RelativeTime at={time} /></span> : null}
         </span>
       )}
       {trailing && <span className="request-card-trailing">{trailing}</span>}

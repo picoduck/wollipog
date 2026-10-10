@@ -6,7 +6,7 @@ import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { formatDuration, formatRecordedRelativeTime, titleCaseLabel } from "../format.js";
 import { deriveSubagentLifecycle, IncrementalSubagentProjector, type SubagentDescriptor } from "../subagents.js";
-import { useStoreActions, useStoreSelector } from "../store.js";
+import { useLiveSession, useStoreActions, useStoreSelector } from "../store.js";
 import { useTimelineClock } from "../timeline-clock.js";
 import { isCurrentWorker, workerRoster, type WorkerMemberMetadata } from "../worker-roster.js";
 import { statusMeta } from "../status-meta.js";
@@ -315,7 +315,10 @@ type Props = ComponentProps<typeof SubagentsPanel> & Pick<ComponentProps<typeof 
 /** One roster retains each transport's own detail and response boundary. */
 export function AgentsPanel(props: Props) {
   const api = useApi();
-  const { session, items, runnerOnline, requestedId } = props;
+  const { items, runnerOnline, requestedId } = props;
+  // The registry refreshes as the session's message count and activity move, which the session view
+  // does not render for (#2872).
+  const session = useLiveSession(props.session);
   const sessions = useStoreSelector((state) => state.sessions);
   const runs = useStoreSelector((state) => state.runs);
   const runners = useStoreSelector((state) => state.runners);

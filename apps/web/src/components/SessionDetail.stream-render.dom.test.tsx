@@ -11,6 +11,7 @@ import type { ViewNavigation } from "../navigation.js";
 import { animationFramePublishScheduler, setDefaultPublishScheduler, StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
+import { loadSeen } from "../sessions-seen.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
 import { SessionDetail } from "./SessionDetail.js";
 import { observeRenderProbe, SESSION_DETAIL_PROBE, TIMELINE_ROW_PROBE } from "./render-probe.js";
@@ -203,6 +204,12 @@ async function mount() {
     container,
     push,
     append,
+    /** Several frames received before one animation frame publishes them together. */
+    async pushTogether(messages: ControlPlaneToUi[]) {
+      await act(async () => { for (const message of messages) socket.push(message); });
+      await frame();
+    },
+    lastSeq: () => seq,
     async unmount() {
       await act(async () => root.unmount());
       container.remove();
@@ -257,13 +264,32 @@ test("a chunk that only lengthens the reply renders the transcript, not the sess
     const replyRow = `${TIMELINE_ROW_PROBE}:${history.length + 1}`;
     assert.ok((transcriptRows.get(replyRow) ?? 0) >= words.length - 1, "the reply's row rendered for each of them");
 
-    // A paced upsert renders the session view, which then derives the chunks itself: nothing doubles.
+    // A paced upsert that only moves the streamed counters renders no more of the session view
+    // (#2872); what reads them reads them live, like the seen marker for the inbox's unread badge. It
+    // was first marked at the time it opened, with no activity yet, so the new activity comes later.
+    const activityAt = Date.now() + 60_000;
     await view.push({
       type: "session_upsert",
-      session: sessionView(view.fixture.id, { messageCount: history.length + words.length, preview: "derived" }),
+      session: sessionView(view.fixture.id, {
+        messageCount: history.length + words.length, preview: "derived", lastEventAt: activityAt, updatedAt: activityAt,
+      }),
     });
-    assert.ok(sessionViewRenders > afterFirst, "the upsert renders the session view");
+    assert.equal(sessionViewRenders, afterFirst, "a streaming-only upsert does not render the session view");
+    assert.equal(loadSeen()[view.fixture.id], activityAt, "the open session is marked seen at its new activity time");
     assert.equal(text().split(reply).length, 2, "the reply appears exactly once");
+
+    // A change to anything else renders it, and it then derives the chunks itself: nothing doubles.
+    await view.push({ type: "session_upsert", session: sessionView(view.fixture.id, { title: "Renamed Fixture" }) });
+    assert.ok(sessionViewRenders > afterFirst, "a title change renders the session view");
+    assert.equal(text().split(reply).length, 2, "the reply still appears exactly once");
+
+    // Chunks after that render fold onto the item it derived, each once.
+    const afterRename = sessionViewRenders;
+    const more = "and keeps folding after the view rendered".split(" ");
+    for (const word of more) await view.append({ kind: "agent_message", text: `${word} ` });
+    const whole = `${reply} ${more.join(" ")}`;
+    assert.equal(text().split(whole).length, 2, "the whole reply appears exactly once");
+    assert.equal(sessionViewRenders, afterRename, "and the later chunks rendered no session view");
 
     // A tool call is a new item: the session view renders, and the reply stays whole before it.
     const before = sessionViewRenders;
@@ -274,6 +300,48 @@ test("a chunk that only lengthens the reply renders the transcript, not the sess
     assert.equal(text().split(reply).length, 2, "the first reply still appears exactly once");
   } finally {
     stops.forEach((stop) => stop());
+    await view.unmount();
+  }
+});
+
+test("a replayed chunk that replaces one already folded shows its own text (#2872)", async () => {
+  const view = await mount();
+  try {
+    for (const word of ["Alpha", "Bravo", "Charlie"]) await view.append({ kind: "agent_message", text: `${word} ` });
+    const text = () => view.container.textContent ?? "";
+    assert.ok(text().includes("Alpha Bravo Charlie"));
+    const bravo = view.lastSeq() - 1;
+    const next = view.lastSeq() + 1;
+    // A replay rewrites Bravo's event in place while a new chunk arrives, both in one published frame.
+    await view.pushTogether([
+      { type: "session_event", event: { id: 9_000 + bravo, sessionId: view.fixture.id, seq: bravo, ts: bravo, payload: { kind: "agent_message", text: "Xray " } } },
+      { type: "session_event", event: { id: next, sessionId: view.fixture.id, seq: next, ts: next, payload: { kind: "agent_message", text: "Delta " } } },
+    ]);
+    assert.ok(text().includes("Alpha Xray Charlie Delta"), `the replaced chunk's text is shown: ${text()}`);
+    assert.ok(!text().includes("Bravo"));
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a replay that rewrites an event the view already derived renders the view (#2872)", async () => {
+  const view = await mount();
+  try {
+    for (const word of ["Alpha", "Bravo"]) await view.append({ kind: "agent_message", text: `${word} ` });
+    const text = () => view.container.textContent ?? "";
+    assert.ok(text().includes("in sessions.ts"));
+    const charlie = view.lastSeq() + 1;
+    // A chunk, then a replay of an earlier reply with corrected text, then a paced upsert, all in
+    // one published frame: the array keeps both ends, but the store marks it as a merge.
+    await view.pushTogether([
+      { type: "session_event", event: { id: charlie, sessionId: view.fixture.id, seq: charlie, ts: charlie, payload: { kind: "agent_message", text: "Charlie " } } },
+      { type: "session_event", event: { id: 9_005, sessionId: view.fixture.id, seq: 5, ts: 5, payload: { kind: "agent_message", text: "The control plane, in the hub." } } },
+      { type: "session_upsert", session: sessionView(view.fixture.id, { messageCount: 12, preview: "Charlie" }) },
+    ]);
+    assert.ok(text().includes("The control plane, in the hub."), `the corrected reply is shown: ${text()}`);
+    assert.ok(!text().includes("in sessions.ts"));
+    assert.ok(text().includes("Alpha Bravo Charlie"));
+  } finally {
     await view.unmount();
   }
 });

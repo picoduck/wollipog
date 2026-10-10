@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { GovernanceAuditEntry } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
+import type { StoreValueSource } from "../store.js";
 import {
   decisionHistory,
   GOVERNANCE_AUDIT_LIMIT,
@@ -62,6 +63,51 @@ function mergeAuditEntries(
   return merged;
 }
 
+/** `previous` with the newest page applied, or `previous` itself when that changes nothing. */
+function newestPage(
+  previous: AuditPageState,
+  sessionId: string,
+  response: { entries: GovernanceAuditEntry[]; nextBefore?: string; hasMore: boolean },
+): AuditPageState {
+  if (previous.sessionId !== sessionId) {
+    return {
+      sessionId,
+      entries: response.entries,
+      nextBefore: response.nextBefore,
+      hasMore: response.hasMore,
+      loadedOlder: false,
+      loadingOlder: false,
+      autoLoadBlocked: false,
+    };
+  }
+  const retainedPagesStillJoin = previous.loadedOlder &&
+    auditPagesOverlap(previous.entries, response.entries);
+  if (previous.loadedOlder && !retainedPagesStillJoin) {
+    return {
+      sessionId,
+      entries: response.entries,
+      nextBefore: response.nextBefore,
+      hasMore: response.hasMore,
+      loadedOlder: false,
+      loadingOlder: false,
+      autoLoadBlocked: false,
+    };
+  }
+  const entries = retainedPagesStillJoin
+    ? mergeAuditEntries(previous.entries, response.entries)
+    : response.entries;
+  const next = {
+    ...previous,
+    entries: sameGovernanceSnapshot(previous.entries, entries) ? previous.entries : entries,
+    autoLoadBlocked: false,
+    ...(!previous.loadedOlder
+      ? { nextBefore: response.nextBefore, hasMore: response.hasMore }
+      : {}),
+  };
+  return next.entries === previous.entries && !previous.autoLoadBlocked &&
+    next.nextBefore === previous.nextBefore && next.hasMore === previous.hasMore ? previous : next;
+}
+
 function auditPagesOverlap(
   retained: readonly GovernanceAuditEntry[],
   newest: readonly GovernanceAuditEntry[],
@@ -75,6 +121,9 @@ export function useGovernanceAudit(
   revision: string,
   enabled: boolean,
   oldestTranscriptAt?: number,
+  /** A revision that moves without rendering the caller, such as the session's activity while an
+   * agent streams (#2872): each change refreshes, as a change to `revision` does. */
+  liveRevision?: StoreValueSource<string>,
 ): GovernanceAuditState {
   const api = useApi();
   const [page, setPage] = useState<AuditPageState>({
@@ -88,6 +137,8 @@ export function useGovernanceAudit(
   const pageRef = useRef(page);
   pageRef.current = page;
   const [failedSessionId, setFailedSessionId] = useState<string | null>(null);
+  const failedRef = useRef(failedSessionId);
+  failedRef.current = failedSessionId;
   const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
@@ -98,57 +149,38 @@ export function useGovernanceAudit(
       return;
     }
     let active = true;
-    void api.governanceAudit(sessionId, GOVERNANCE_AUDIT_LIMIT)
-      .then((response) => {
-        if (active) {
-          setFailedSessionId(null);
-          setPage((previous) => {
-            if (previous.sessionId !== sessionId) {
-              return {
-                sessionId,
-                entries: response.entries,
-                nextBefore: response.nextBefore,
-                hasMore: response.hasMore,
-                loadedOlder: false,
-                loadingOlder: false,
-                autoLoadBlocked: false,
-              };
-            }
-            const retainedPagesStillJoin = previous.loadedOlder &&
-              auditPagesOverlap(previous.entries, response.entries);
-            if (previous.loadedOlder && !retainedPagesStillJoin) {
-              return {
-                sessionId,
-                entries: response.entries,
-                nextBefore: response.nextBefore,
-                hasMore: response.hasMore,
-                loadedOlder: false,
-                loadingOlder: false,
-                autoLoadBlocked: false,
-              };
-            }
-            const entries = retainedPagesStillJoin
-              ? mergeAuditEntries(previous.entries, response.entries)
-              : response.entries;
-            return {
-              ...previous,
-              entries: sameGovernanceSnapshot(previous.entries, entries) ? previous.entries : entries,
-              autoLoadBlocked: false,
-              ...(!previous.loadedOlder
-                ? { nextBefore: response.nextBefore, hasMore: response.hasMore }
-                : {}),
-            };
-          });
-        }
-      })
-      .catch(() => {
-        // Only a first load fails visibly: a refresh that fails keeps the decisions already shown.
-        if (active && pageRef.current.sessionId !== sessionId) setFailedSessionId(sessionId);
-      });
+    // Each load supersedes the one before it, as a re-run of this effect does.
+    let latest: object | null = null;
+    const load = () => {
+      const current = {};
+      latest = current;
+      const applies = () => active && latest === current;
+      void api.governanceAudit(sessionId, GOVERNANCE_AUDIT_LIMIT)
+        .then((response) => {
+          if (!applies()) return;
+          if (failedRef.current !== null) setFailedSessionId(null);
+          // A refresh that finds nothing new changes nothing, so the caller does not render (#2872).
+          if (newestPage(pageRef.current, sessionId, response) === pageRef.current) return;
+          setPage((previous) => newestPage(previous, sessionId, response));
+        })
+        .catch(() => {
+          // Only a first load fails visibly: a refresh that fails keeps the decisions already shown.
+          if (applies() && pageRef.current.sessionId !== sessionId) setFailedSessionId(sessionId);
+        });
+    };
+    load();
+    let seen = liveRevision?.read();
+    const unsubscribe = liveRevision?.subscribe(() => {
+      const next = liveRevision.read();
+      if (next === seen) return;
+      seen = next;
+      load();
+    });
     return () => {
       active = false;
+      unsubscribe?.();
     };
-  }, [api, attempt, enabled, revision, sessionId]);
+  }, [api, attempt, enabled, liveRevision, revision, sessionId]);
 
   const retry = useCallback(() => {
     setFailedSessionId(null);
