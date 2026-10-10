@@ -297,3 +297,33 @@ test("Attach Selected in an expanded Review restores the panel so its chip shows
   await expect(page.locator(".composer-input")).toBeVisible();
   await expect(page.locator(".composer").getByText("app.ts", { exact: false }).first()).toBeVisible();
 });
+
+test("Reply from the Sessions list restores an expanded panel so the composer it focuses shows (#2845)", async ({ page }) => {
+  await openSession(page, 1440);
+  await openTool(page, "Review");
+  await headButton(page, "Expand Panel").click();
+  await expectExpanded(page, "expanded");
+  await page.getByRole("button", { name: "Back to Sessions" }).click();
+  await page.getByRole("row", { name: /Alpha Session/ }).click();
+  await page.keyboard.press("r");
+  await expect(page.locator(".composer-input")).toBeFocused();
+  await expect(panel(page)).toHaveAttribute("data-presentation", "docked");
+  await expect(page.locator(".composer-input")).toBeVisible();
+});
+
+test("an attention route restores an expanded panel and focuses the request on the dock (#2845)", async ({ page }) => {
+  const opaque = (value: string) => Buffer.from(value, "utf16le").toString("base64url");
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.addInitScript(() => {
+    localStorage.setItem("wollipog.rightpanel.open", "1");
+    localStorage.setItem("wollipog.rightpanel.mode", "launcher");
+    localStorage.setItem("wollipog.rightpanel.expanded", "1");
+  });
+  const path = `/sessions/~${opaque("s-approval")}/attention/~${opaque("primary-3")}?epoch=7`;
+  await page.goto(`/sessions-board-e2e.html?full-shell=1&path=${encodeURIComponent(path)}`);
+  const heading = page.locator(".request-dock .request-card").getByRole("heading");
+  await expect(heading).toHaveText("Primary Request");
+  await expect(heading).toBeFocused();
+  await expect(panel(page)).toHaveAttribute("data-presentation", "docked");
+  expect(await page.evaluate(() => localStorage.getItem("wollipog.rightpanel.expanded"))).toBe("0");
+});

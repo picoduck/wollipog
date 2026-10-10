@@ -433,11 +433,16 @@ export function Shell() {
   // InboxView's `expand`, which rebuilds `handleSelect`, which gives every mounted InboxRow unequal
   // props — so a session upsert anywhere re-renders every visible row despite the memo. Making the
   // callbacks stable in InboxList and InboxView was necessary and not sufficient.
+  const isMobile = useIsMobile();
+  const rightPanelOpen = rightPanel.open;
+  const setRightPanelExpanded = rightPanel.setExpanded;
   const expandSession = useCallback((sessionId: string, focusComposer = false) => {
     setComposerFocusSessionId(focusComposer ? sessionId : null);
+    // Reply lands in the composer, which an open expanded side panel hides (#2845). A closed panel
+    // keeps its Expanded preference for its next open.
+    if (focusComposer && rightPanelOpen && !isMobile) setRightPanelExpanded(false);
     navigate({ name: "session", id: sessionId });
-  }, [navigate]);
-  const isMobile = useIsMobile();
+  }, [isMobile, navigate, rightPanelOpen, setRightPanelExpanded]);
   // The Pinned Summary: docked beside the reader, a drawer, or a phone sheet (#2147). Only one
   // overlay is open at a time, and the right panel is an overlay only on a phone, so there opening
   // either closes the other.

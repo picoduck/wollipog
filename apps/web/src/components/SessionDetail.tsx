@@ -1508,9 +1508,12 @@ function SessionDetailLoaded({
   const preparedAttentionRef = useRef<string | null>(null);
   const closeRequestOverlay = useCallback(() => {
     const panel = rightPanelRef.current;
+    if (!panel.open) return;
     // Requests also overlays the transcript in the compact desktop tier (#2206).
-    if (panel.open && (isMobileRef.current || panel.mode === "subagents" ||
-        (isCompactRef.current && panel.mode === "requests"))) panel.close();
+    if (isMobileRef.current || panel.mode === "subagents" ||
+        (isCompactRef.current && panel.mode === "requests")) panel.close();
+    // An expanded panel fills the chat column's place (#2845): it restores, keeping its tool.
+    else if (panel.expanded) panel.setExpanded(false);
   }, []);
   const attentionRequest = attentionTarget && attentionTarget.eventEpoch === (session.eventEpoch ?? 0)
     ? attentionTarget.requestId === undefined ? prioritizedRequests[0]

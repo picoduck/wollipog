@@ -907,8 +907,9 @@ Requests, Decision History, and Terminal once #2868 moves it) opens in one frame
   survives switching tools and sessions, a reload, and closing the panel, so the next open is
   expanded again. While expanded, the reader's keys are off, F6 lands on the tool switcher, and focus
   left in the chat column moves there. An action whose result shows in the chat column restores the
-  panel first: the Pinned Summary toggle, Attach to Prompt, Side Chat's Insert, Show in Transcript
-  and the session bar's attention control.
+  panel first: the Pinned Summary toggle, Attach to Prompt, Side Chat's Insert, Show in Transcript,
+  Reply from the Sessions list, and an attention link or the session bar's attention control that
+  opens a request on the dock.
 - **Keyboard.** The Side Panel chord (Ctrl/⌘+\\) toggles the panel and reopens the last tool, with
   focus on the switcher, so the arrow keys reach every other tool.
   Escape closes it from any tool while focus is inside, once nothing above takes Escape (§16.2): a
