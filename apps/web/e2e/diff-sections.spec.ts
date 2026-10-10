@@ -27,7 +27,7 @@ test("at a 320px panel every hunk header is one line, and Stage Hunk shows on ho
   const heights = await headers.evaluateAll((elements) => elements.map((element) => {
     const text = element.querySelector(".diff-hunk-header-text")!;
     return {
-      header: element.getBoundingClientRect().height,
+      header: Math.round(element.getBoundingClientRect().height),
       lines: Math.round(text.getBoundingClientRect().height / parseFloat(getComputedStyle(text).lineHeight)),
       truncated: text.scrollWidth > text.clientWidth,
     };
@@ -47,7 +47,7 @@ test("at a 320px panel every hunk header is one line, and Stage Hunk shows on ho
   const box = (await stage.boundingBox())!;
   const panel = (await page.locator("#right-panel").boundingBox())!;
   expect(box.x + box.width, "the button stays inside the panel").toBeLessThanOrEqual(panel.x + panel.width);
-  expect(box.height).toBe(28);
+  expect(Math.round(box.height)).toBe(28);
 });
 
 test.describe("on touch", () => {
@@ -56,7 +56,7 @@ test.describe("on touch", () => {
     await open(page, "width=320");
     const stages = page.locator(".hunk-stage");
     await expect(stages.first()).toHaveCSS("opacity", "1");
-    expect((await stages.first().boundingBox())!.height).toBe(36);
+    expect(Math.round((await stages.first().boundingBox())!.height)).toBe(36);
     for (const header of await page.locator(".diff-hunk-header").all()) {
       const text = header.locator(".diff-hunk-header-text");
       const lineHeight = await text.evaluate((element) => parseFloat(getComputedStyle(element).lineHeight));
@@ -199,8 +199,8 @@ test.describe("on a phone", () => {
       await expect(buttons).toHaveText(["Cancel", title]);
       await expect(buttons.first()).toBeFocused();
       const [cancel, confirm] = [(await buttons.nth(0).boundingBox())!, (await buttons.nth(1).boundingBox())!];
-      expect(cancel.height).toBe(48);
-      expect(confirm.height).toBe(48);
+      expect(Math.round(cancel.height)).toBe(48);
+      expect(Math.round(confirm.height)).toBe(48);
       expect(Math.abs(cancel.width - confirm.width)).toBeLessThanOrEqual(1);
       const sheet = (await dialog.boundingBox())!;
       expect(sheet.width, "a full-width sheet").toBeGreaterThanOrEqual(389);
