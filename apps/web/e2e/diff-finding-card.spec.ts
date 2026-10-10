@@ -182,8 +182,37 @@ test("a resolved finding is one quiet line that opens, and Reopen restores the o
   for (const card of await page.locator(".dfinding").all()) await expect(card).not.toContainText("usr_");
 });
 
+/** Severity and Required share a row: the same offsetTop, inside the card, with 44px touch targets. */
+async function expectOneOptionsRow(card: Locator) {
+  const measured = await card.evaluate((element) => {
+    const group = element.querySelector<HTMLElement>('[role="radiogroup"]')!;
+    const required = element.querySelector<HTMLElement>(".review-required-toggle")!;
+    const right = element.getBoundingClientRect().right;
+    return {
+      tops: [group.offsetTop, required.offsetTop],
+      inside: required.getBoundingClientRect().right <= right,
+      radios: [...group.querySelectorAll<HTMLElement>('[role="radio"]')].map((radio) => {
+        const rect = radio.getBoundingClientRect();
+        // The coarse-pointer hit area extends 4px above and below each option (`::after`).
+        return { width: Math.round(rect.width), height: Math.round(rect.height) + 8 };
+      }),
+    };
+  });
+  expect(measured.tops[0], "Severity and Required share one row").toBe(measured.tops[1]);
+  expect(measured.inside).toBe(true);
+  for (const radio of measured.radios) {
+    expect(radio.width).toBeGreaterThanOrEqual(44);
+    expect(radio.height).toBeGreaterThanOrEqual(44);
+  }
+}
+
 test.describe("on a phone with a coarse pointer", () => {
   test.use({ hasTouch: true, isMobile: true });
+
+  test("in a 360px panel Severity and Required still share a row with 44px targets", async ({ page }) => {
+    await open(page, "width=360");
+    await expectOneOptionsRow(await openEditor(page));
+  });
 
   test("with the textarea focused and the keyboard open, Add Finding is above it and no composer is rendered", async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
@@ -204,6 +233,7 @@ test.describe("on a phone with a coarse pointer", () => {
     await add.tap();
     const card = panel.locator(".dedit");
     await expect(card.locator("textarea")).toBeFocused();
+    await expectOneOptionsRow(card);
     // Where the keyboard covers the layout viewport, the sheet ends at its top edge (#2843).
     await page.evaluate(() => document.documentElement.style.setProperty("--keyboard-inset", "300px"));
     const keyboardTop = 844 - 300;

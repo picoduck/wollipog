@@ -15324,6 +15324,13 @@ button.review-finding-location {
 @container rp (max-width: 480px) {
   .dedit,
   .dfinding { margin-left: var(--space-3); }
+  /* Severity and Required keep one row down to a 360px panel, a phone included, in the widest UI
+     fallback font CI renders (DejaVu Sans): the options take their content widths with 4px sides,
+     as Review's Scope does when short of room (§10.2), and keep their own minimum, so a touch
+     target stays 44px. */
+  .dedit .seg { grid-auto-columns: auto; }
+  .dedit .seg.sm .seg-option { padding-inline: var(--space-1); }
+  .dedit-options { column-gap: var(--space-2); }
 }
 /* A narrow panel has room for one line-number column (#2848): the new number, or the old one on a
    deletion. */
