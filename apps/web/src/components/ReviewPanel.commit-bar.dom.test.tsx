@@ -6,6 +6,7 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type {
   GitActionRequest,
+  GitChecksSummary,
   GitDiffFile,
   GitDiffInfo,
   GitDiffScope,
@@ -171,7 +172,7 @@ interface Options {
   session: SessionView;
   status: GitStatusInfo | null;
   runnerOnline: boolean;
-  forgeFacts: { pr: GitPrSummary | null; checks: null } | null;
+  forgeFacts: { pr: GitPrSummary | null; checks: GitChecksSummary | null } | null;
 }
 
 async function mountReview(initial: Partial<Options> = {}): Promise<Harness> {
@@ -659,7 +660,8 @@ test("a request opened after a session switch still releases the drafts it consu
 
 test("a newly opened request is followed even while the forge still reports an older, closed one", async () => {
   const closed: GitPrSummary = { ...openPr, number: 42, state: "CLOSED", title: "An older attempt" };
-  const harness = await mountReview({ forgeFacts: { pr: closed, checks: null } });
+  const oldChecks: GitChecksSummary = { failing: 1, pending: 0, passing: 3, failingNames: ["old-pr-build"], url: "https://github.com/acme/shop/pull/42/checks" };
+  const harness = await mountReview({ forgeFacts: { pr: closed, checks: oldChecks } });
   try {
     assert.deepEqual(actionRow(harness.container).slice(0, 1), ["Open Pull Request…"], "a closed request is not pushed to");
     await click(only(bar(harness.container), "Open Pull Request…"));
@@ -669,11 +671,34 @@ test("a newly opened request is followed even while the forge still reports an o
     const row = () => harness.container.querySelector('.review-summary [role="group"][aria-label="Pull Request"]');
     assert.equal(row()?.querySelector("a")?.getAttribute("href"), "https://github.com/acme/shop/pull/99");
     assert.deepEqual(actionRow(harness.container).slice(0, 1), ["Push to Pull Request"]);
+    assert.doesNotMatch(row()?.textContent ?? "", /fail/i, "the older request's failing checks are not the new one's");
+    assert.equal(named(harness.container, "Ask Agent to Fix").length, 0, "nor is their Fix action offered");
 
     // The forge catches up with the new request; its own row takes over.
     const reported: GitPrSummary = { ...openPr, number: 99, url: "https://github.com/acme/shop/pull/99", title: "Reported by the forge" };
     await harness.render({ forgeFacts: { pr: reported, checks: null } });
     assert.match(row()?.textContent ?? "", /Reported by the forge/);
+  } finally {
+    await harness.unmount();
+  }
+});
+
+/* Cross-model review round 2 (#2893) */
+
+test("pushing to an open request releases the commit message it committed with, and only that", async () => {
+  const harness = await mountReview({ forgeFacts: { pr: openPr, checks: null } });
+  try {
+    const input = () => bar(harness.container).querySelector("input")!;
+    await typeInto(input(), "fix: totals use quantity");
+    harness.reply({ pr: { url: openPr.url, branch: "agent/commit-bar", pushed: true, createdWithGh: true, created: true, provider: "github", kind: "pull_request" } });
+    await click(only(bar(harness.container), "Push to Pull Request"));
+    assert.equal((harness.sent[0] as { message?: string }).message, "fix: totals use quantity");
+    assert.equal(input().value, "fix: totals use quantity", "the message stays on screen for the next commit");
+
+    // A remount reads what scratch kept: the consumed message is gone, as after a commit.
+    await harness.render({ session: { ...baseSession, id: "session-other" } });
+    await harness.render({ session: baseSession });
+    assert.equal(input().value, "Speed Up Checkout", "the consumed message is not restored");
   } finally {
     await harness.unmount();
   }

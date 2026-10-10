@@ -779,14 +779,16 @@ export function ReviewPanel({
     const startedFor = session.id;
     const current = () => sessionIdRef.current === startedFor;
     const title = mode === "push" ? summaryPr?.title || prTitle : prTitle;
-    const submitted = mode === "open"
-      ? captureSubmitted(panelScratch, {
+    // The commit message goes with both: `open_pr` commits any pending changes with it. Pushing to an
+    // open request sends none of the dialog's fields, so they stay the reviewer's drafts.
+    const submitted = captureSubmitted(panelScratch, mode === "open"
+      ? {
           [COMMIT_MESSAGE_KEY]: commitMsg,
           [REQUEST_TITLE_KEY]: prTitle,
           [REQUEST_BODY_KEY]: prBody,
           [BRANCH_KEY]: branch,
-        })
-      : null;
+        }
+      : { [COMMIT_MESSAGE_KEY]: commitMsg });
     try {
       // Pass the visible commit message so the one-click flow's auto-commit of any
       // pending changes uses it (not the PR title).
@@ -798,7 +800,7 @@ export function ReviewPanel({
       // forge tooling is unavailable carries neither title nor description, so the reviewer still
       // needs both to paste into the page it opens. The drafts are released even after a session
       // switch: the captured scope and revisions keep that from touching anything newer.
-      if (submitted && (pr?.created ?? pr?.createdWithGh)) releaseSubmitted(submitted);
+      if (pr?.created ?? pr?.createdWithGh) releaseSubmitted(submitted);
       if (pr && current()) {
         const link = requestLink(pr, linkProvider);
         if (pr.created ?? pr.createdWithGh) {
@@ -1066,7 +1068,8 @@ export function ReviewPanel({
               status={status}
               stats={shownDiff?.stats ?? null}
               pr={summaryPr}
-              checks={forgeFacts?.checks ?? null}
+              // The forge's checks belong to the forge's request, never to one this panel just opened.
+              checks={summaryPr === forgeFacts?.pr ? forgeFacts?.checks ?? null : null}
               canPrompt={canPrompt}
             />
             <div className="git-diff-section" role="group" aria-label="Changes">
